@@ -1,0 +1,1 @@
+an audit has been written to docs/validator_audit.md.  please review it and for each finding, state whether you recommend incorporation, rejection (with reasoning), deferral, or you can request clarification. do not edit any code until we reach consensus with the auditor.

@@ -251,7 +251,10 @@ send_payload() {
     # multiline payloads must be staged to a file and referenced indirectly.
     if payload_requires_pointer "$payload"; then
         staged_path="$(stage_payload_file "$payload")"
-        pointer_payload="please read $staged_path and follow the instructions therein"
+        local first_line
+        first_line="$(echo "$payload" | head -n 1)"
+        first_line="$(echo "$first_line" | xargs | cut -c1-120)"
+        pointer_payload="please read $staged_path ($first_line) and follow the instructions therein"
         submit_short_line "$target" "$pointer_payload"
         return 0
     fi

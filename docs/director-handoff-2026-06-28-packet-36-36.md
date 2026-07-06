@@ -1,5 +1,7 @@
 # Director Handoff - 2026-06-28 - Packet 36.36
 
+**Provenance note (added 2026-07-05):** This file is handoff material from a *different, unrelated project* (internally called SRX), copied into this repo's `docs/` folder with a mechanical case-insensitive `srx`→`pgu` text replacement. It is retained only as process-pattern reference. None of the project specifics below describe this repository's actual history — this repo's real project is the procedural galaxy/point-cloud renderer in `main.cpp` (see `docs/galaxy_architecture.md`).
+
 ## Current State
 
 The project is in the object-ownership / background-billboarding phase. The current strategic order is:

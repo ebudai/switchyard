@@ -1,4 +1,7 @@
 # Director Handoff — PGU-256 Surfel Video Codec
+
+**Provenance note (added 2026-07-05):** This file is handoff material from a *different, unrelated project* (internally called SRX), copied into this repo's `docs/` folder with a mechanical case-insensitive `srx`→`pgu` text replacement. It is retained only as process-pattern reference (director/implementer/auditor workflow, prompt composition, tmux routing). None of the project specifics below — commit hashes, test counts, benchmark numbers, decision log entries (D-031/032/033), the "PGU-256 codec" identity itself — describe this repository's actual history. This repo's real project is the procedural galaxy/point-cloud renderer in `main.cpp`; see `docs/galaxy_architecture.md` for its actual design doc.
+
 **Staleness note (2026-07-02)**: this is an older historical handoff. For the current repo/team state, read `director-handoff-2026-07-02-current.md` first, then use this file only for older architectural background.
 
 **Date**: 2026-06-17

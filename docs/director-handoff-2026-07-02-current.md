@@ -1,5 +1,7 @@
 # Director Handoff — PGU Current State
 
+**Provenance note (added 2026-07-05):** This file is handoff material from a *different, unrelated project* (internally called SRX), copied into this repo's `docs/` folder with a mechanical case-insensitive `srx`→`pgu` text replacement. It is retained only as process-pattern reference. None of the project specifics below describe this repository's actual history — this repo's real project is the procedural galaxy/point-cloud renderer in `main.cpp` (see `docs/galaxy_architecture.md`).
+
 **Date**: 2026-07-02  
 **Repo**: `/home/budai/Projects/PGU`  
 **Primary concern**: current director context is slow; start a fresh director soon.

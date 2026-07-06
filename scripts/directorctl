@@ -253,7 +253,7 @@ send_payload() {
         staged_path="$(stage_payload_file "$payload")"
         local first_line
         first_line="$(echo "$payload" | head -n 1)"
-        first_line="$(echo "$first_line" | xargs | cut -c1-120)"
+        first_line="$(echo "$first_line" | sed -E 's/[[:space:]]+/ /g;s/^[[:space:]]+//;s/[[:space:]]+$//' | cut -c1-120)"
         pointer_payload="please read $staged_path ($first_line) and follow the instructions therein"
         submit_short_line "$target" "$pointer_payload"
         return 0

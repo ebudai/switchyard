@@ -1,71 +1,85 @@
-# Validator Audit Report — main.cpp Modularization Split
+# Validator Audit Report — App Class Decomposition Refactor
 
 **Methodology:** Adversarial-Collaborative Audit
-**Branch Reviewed:** `modularize/split-main-cpp` (worktree: `/home/budai/Projects/pgu-modularize-audit`)
-**Status:** Clean (All checklist items verified, zero behavior changes, build/dependency rules behave correctly)
+**Branch Reviewed:** `decompose/app-class` (worktree: `/home/budai/Projects/pgu-decompose-audit`)
+**Status:** Clean (All checklist items verified, behavior-preserving deviations confirmed safe, no defects introduced)
+
+---
+
+## Verification of Behavior-Preserving Deviations
+
+### 1. RenderFrame Reorder Safety
+- **Analysis:** In `App::RenderFrame`, `galaxy_.RegenerateIfDirty()` and `galaxy_.BuildCut()` run prior to the GPU render pass `renderer_.RenderFrame()`. 
+  - `RegenerateIfDirty()` and `BuildCut()` operate purely on the CPU, and do not access the GPU depth buffer or the configured swapchain surface.
+  - The framebuffer size they query (`renderer_.FramebufferWidth()` and `renderer_.FramebufferHeight()`) is updated by the GLFW resize callback (`Renderer::OnFramebufferResize`), which executes during `glfwPollEvents()` at the start of the frame loop, before `App::RenderFrame()` runs.
+  - The actual GPU surface reconfigure `ConfigureSurface()` happens conditionally on `framebufferResized_` at the start of `Renderer::RenderFrame()`, prior to `UpdateCameraUniforms()` and the draw encoder.
+- **Conclusion:** Reordering is completely inert. The CPU-side data generation reads already-current dimensions, and the GPU surface is configured before any draw commands execute.
+
+### 2. Title-Update Call-Count Collapse
+- **Analysis:** `UpdateWindowTitle()` is a pure formatting function with no side effects beyond modifying the GLFW window title.
+- **Conclusion:** Because the function is idempotent, calling it once per frame (after either a render mode toggle or a tuning parameter change occurs) produces a final title string identical to the one produced by the multiple calls in the monolithic implementation.
+
+### 3. Shutdown Order Integrity
+- **Analysis:** The shutdown sequence executes:
+  1. `panel_.Shutdown()` — tears down the ImGui context and backend.
+  2. `renderer_.Shutdown()` — releases all WGPU resources and sets handles to `nullptr`.
+  3. `glfwDestroyWindow(window_)` and `glfwTerminate()`.
+- **Conclusion:** ImGui is torn down while the WGPU device and queue it references are still alive. This matches the original monolithic shutdown sequence exactly, avoiding any use-after-free or WGPU validation errors.
+
+---
+
+## Architectural Rules Compliance
+
+### 4. `GalaxySystem` WebGPU Agnosticism
+- **Finding:** `GalaxySystem` is completely decoupled from the WebGPU API.
+- **Evidence:**
+  - `galaxy_system.h` and its transitive dependencies (`galaxy_model.h`, `hash_util.h`, `vec_math.h`, and `gpu_types.h`) do not include `<webgpu/*>` or reference `wgpu::` types.
+  - CPU-side traversal output buffers are stored as standard `std::vector`s of plain C++ structs.
+
+### 5. No App Back-References
+- **Finding:** Sub-objects have no dependencies or references back to the `App` orchestrator.
+- **Evidence:**
+  - A search of all sub-object headers for `App&` or `App*` yields zero matches. All cross-component variables are passed strictly as parameters at call time. The only borrowed handle is `Renderer`'s non-owning `GLFWwindow*` reference.
 
 ---
 
 ## Findings & Evidence for Checklist Items
 
-### 1. Symbol Body Correspondence Verification
-- **Finding:** Every extracted C++ symbol is character-for-character identical to the version in `origin/main:main.cpp`.
+### 6. Bit-for-Bit Telemetry Verification
+- **Finding:** The decomposed implementation produces telemetry outputs that are byte-identical to the baseline Gaussian branch.
 - **Evidence:**
-  - `vec_math.h` successfully houses the vector/matrix math primitives (`Vec3`, `Vec3d`, `Mat4`, operators, `Cross`, `Dot`, `Normalize`, `Multiply`, `Perspective`, `LookAt`) without structural or logical deviation.
-  - `hash_util.h` includes `SpreadBits21`, `Morton3D`, `MixHash64`, and `random01` exactly as defined in the pre-split source.
-  - `gpu_types.h` carries the GPU interface data structs (`CameraUniforms`, `QuadVertex`, `PointPosition`, `PointStaticAttributes`, `RenderMode`, `RenderTuning`).
-  - `galaxy_model.h` encapsulates `Galaxy`, `StarSample`, `Covariance3`, `SurfelNode`, `IsotropicCovariance`, `LargestEigenvalue3x3`, `RotateCovariance` (previously a static member of `App`, now a free `inline` function), `ClampColor`, and `GenerateStar` with zero modifications to their math blocks.
-
-### 2. Shader Byte-Identity Verification
-- **Finding:** The extracted WGSL shaders are byte-identical to their original `R"(...)"` string literals.
-- **Evidence:**
-  - `shaders/hardware_point.wgsl` and `shaders/splat.wgsl` match the pre-split strings character-for-character.
-  - The CMake embedding script (`cmake/embed_shaders.cmake`) generates a C++ raw string literal template containing a leading newline, reproducing the exact byte-wise sequence from the inline `R"(...)"` literals in `main.cpp`.
-
-### 3. Preservation of layout `static_assert`s
-- **Finding:** GPU layout static asserts are preserved in the headers.
-- **Evidence:**
-  - Located in [gpu_types.h:L30](file:///home/budai/Projects/pgu-modularize-audit/gpu_types.h#L30) (`CameraUniforms` size 144) and [gpu_types.h:L53-54](file:///home/budai/Projects/pgu-modularize-audit/gpu_types.h#L53-L54) (`PointPosition` size 12 and `PointStaticAttributes` size 36).
-
-### 4. Linkage Change Assessment
-- **Finding:** The linkage transition from file-scope internal (anonymous namespace) to global `inline` header declarations is correct and safe.
-- **Evidence:**
-  - `CMakeLists.txt` compiles `main.cpp` as the single executable translation unit. No name collisions are possible, and internal link symbols are not shared across separate TU compilations.
-
-### 5. Name Grep Verification
-- **Finding:** There are no spelling errors, typos, or accidental partial renames.
-- **Evidence:**
-  - Confirmed by clean compilation under `-Wall -Wextra -Wpedantic`.
-
-### 6. Behavioral Reproduction
-- **Finding:** Modularized application exhibits bit-for-bit identical hierarchy and rendering statistics compared to the pre-split branch.
-- **Evidence:**
-  - Running the binary yields the following startup logs:
+  - Running the binary prints:
     ```
     [hierarchy] leaves=60000 nodes=80002 levels: 60000 15000 3750 938 235 59 15 4 1
     [hierarchy] brightness root=90292.8 sum(leaves)=90292.8 sum(root.children)=90292.8 rel.err(root vs leaves)=6.09495e-08
     [hierarchy] root cov diag=(7.28709, 5.13432, 0.0918704) effRadius=8.13004 largestEig=7.34417
     ```
-  - These values are identical to the Gaussian branch pre-split stats.
+  - Default view window title: `60000 gen / 8289 surfels`.
 
----
+### 7. Sanity Check of Ambiguous Boundary Decisions
+- **Finding:** The three engineering trade-offs made are sound and correct:
+  - Consolidating framebuffer size query/callback paths to `Renderer` keeps size states unified.
+  - Duplicating the simple one-line helper `Fail` avoids cluttering the header landscape with tiny utility headers.
+  - Per-call parameter passing maximizes decoupling.
 
-## Other Review Items
+### 8. File Scope Compliance
+- **Finding:** Scope boundaries were respected.
+- **Evidence:** Only `main.cpp`, `camera_controller.h`, `galaxy_system.h`, `renderer.h`, `tuning_panel.h`, `gpu_types.h`, and `docs/implementer-report.md` were touched.
 
-### 7. File Scope Compliance
-- **Finding:** The files touched match expectations: `CMakeLists.txt`, `cmake/embed_shaders.cmake`, `docs/implementer-report.md`, `galaxy_model.h`, `gpu_types.h`, `hash_util.h`, `main.cpp`, `shaders/hardware_point.wgsl`, `shaders/splat.wgsl`, `vec_math.h`.
-- **Evidence:** Verified via `git diff --name-status origin/main HEAD`.
+### 9. Build and Warnings Verification
+- **Finding:** Compilation is clean with zero warnings under `-Wall -Wextra -Wpedantic`.
 
-### 8. Header Hygiene
-- **Finding:** `#pragma once` guards are present on all four headers. Include maps are clean, minimal, and free of circular dependencies.
-
-### 9. Build & Dependency Tracking Verification
-- **Finding:** CMake dependency tracking works correctly for the custom command shader embedding.
+### 10. Incremental Commit Structure
+- **Finding:** The refactor was committed in a clear, incremental sequence.
 - **Evidence:**
-  - Verified that running `touch shaders/splat.wgsl` triggers `Embedding WGSL shaders -> shaders_generated.h` and recompiles `main.cpp.o` on the next build.
+  - `9de8599` Extract CameraController
+  - `dd9728d` Extract GalaxySystem
+  - `dd6d1aa` Extract TuningPanel
+  - `6ee19ee` Extract Renderer
+  - `369fa59` Add report
 
 ---
 
 ## Open Questions
 
-- *None.* The refactor is clean, safe, and maintains complete parity with the original single-file implementation.
+- *None.* The decomposition achieves a clean separation of concerns without introducing regressions.

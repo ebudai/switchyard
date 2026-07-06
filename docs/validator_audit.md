@@ -1,108 +1,71 @@
-# Validator Audit Report — Part 2 Gaussian Refinement
+# Validator Audit Report — main.cpp Modularization Split
 
 **Methodology:** Adversarial-Collaborative Audit
-**Branch Reviewed:** `part2-gaussian/covariance-lod` (worktree: `/home/budai/Projects/pgu-gaussian-audit`)
-**Status:** Clean (All checklist items verified, math checked, no defects found)
-
----
-
-## Math Verification: EWA Projection and `clip.w` Offset Pass-Through
-
-### 1. Verification of the Projection Jacobian
-- **Analysis:** Perspective projection maps view-space positions $(t_x, t_y, t_z)$ to NDC coordinates:
-  $$x_{ndc} = -f_{aspect} \frac{t_x}{t_z}, \quad y_{ndc} = -f \frac{t_y}{t_z}$$
-  Taking the partial derivatives with respect to the view-space coordinates (with $t_z < 0$):
-  - $\frac{\partial x_{ndc}}{\partial t_x} = -\frac{f_{aspect}}{t_z}$ (in code: `j00 = -projFOverAspect_ * invTz;` — Matches)
-  - $\frac{\partial x_{ndc}}{\partial t_z} = \frac{f_{aspect} t_x}{t_z^2}$ (in code: `j02 = projFOverAspect_ * tx * invTz * invTz;` — Matches)
-  - $\frac{\partial y_{ndc}}{\partial t_y} = -\frac{f}{t_z}$ (in code: `j11 = -projF_ * invTz;` — Matches)
-  - $\frac{\partial y_{ndc}}{\partial t_z} = \frac{f t_y}{t_z^2}$ (in code: `j12 = projF_ * ty * invTz * invTz;` — Matches)
-  - All cross-terms ($\frac{\partial x_{ndc}}{\partial t_y}$ and $\frac{\partial y_{ndc}}{\partial t_x}$) are 0.
-- **Conclusion:** The Jacobian matrix construction in `EmitSurfel` matches the standard 3D perspective projection derivatives exactly.
-
-### 2. Matrix Multiplication $\Sigma_{2D} = J \cdot \Sigma_{view} \cdot J^T$
-- **Analysis:** By expanding the matrix multiplication for symmetric $\Sigma_{view}$:
-  - $\Sigma_{2D, 00} = J_{00}^2 \Sigma_{xx} + 2 J_{00} J_{02} \Sigma_{xz} + J_{02}^2 \Sigma_{zz}$
-    - Code: `m0x * j00 + m0z * j02` $\equiv (j_{00} \Sigma_{xx} + j_{02} \Sigma_{xz}) j_{00} + (j_{00} \Sigma_{xz} + j_{02} \Sigma_{zz}) j_{02}$ (Matches)
-  - $\Sigma_{2D, 01} = J_{00} J_{11} \Sigma_{xy} + J_{00} J_{12} \Sigma_{yz} + J_{02} J_{11} \Sigma_{xz} + J_{02} J_{12} \Sigma_{zz}$
-    - Code: `m0y * j11 + m0z * j12` $\equiv (j_{00} \Sigma_{xy} + j_{02} \Sigma_{yz}) j_{11} + (j_{00} \Sigma_{xz} + j_{02} \Sigma_{zz}) j_{12}$ (Matches)
-  - $\Sigma_{2D, 11} = J_{11}^2 \Sigma_{yy} + 2 J_{11} J_{12} \Sigma_{yz} + J_{12}^2 \Sigma_{zz}$
-    - Code: `m1y * j11 + m1z * j12` $\equiv (j_{11} \Sigma_{yy} + j_{12} \Sigma_{yz}) j_{11} + (j_{11} \Sigma_{yz} + j_{12} \Sigma_{zz}) j_{12}$ (Matches)
-- **Conclusion:** The 2D covariance computation matches the mathematical EWA projection formula.
-
-### 3. Hand-Traced Distance Scaling Check
-- **Analysis:** Assuming an isotropic local covariance $\Sigma = \sigma^2 I$ centered at $t_x = t_y = 0$, the projected covariance becomes diagonal:
-  $$\Sigma_{2D} = \begin{pmatrix}
-  (f_{aspect} / t_z)^2 \sigma^2 & 0 \\
-  0 & (f / t_z)^2 \sigma^2
-  \end{pmatrix}$$
-  The eigenvalues are $e_1 = (f_{aspect} / t_z)^2 \sigma^2$ and $e_2 = (f / t_z)^2 \sigma^2$.
-  The half-extents scale with $\sqrt{e_1} \propto 1/|t_z|$ and $\sqrt{e_2} \propto 1/|t_z|$.
-  When depth $t_z$ doubles, the major/minor axes halving properties hold.
-- **Conclusion:** Screen space size exhibits the correct distance-based scaling.
-
-### 4. Shader Pass-Through Validation
-- **Analysis:** The vertex shader computes:
-  $$\vec{x}_{clip} = \vec{x}_{center\_clip} + \vec{offset} \cdot clip.w$$
-  When dividing by `clip.w` ($w$) to compute NDC:
-  $$\vec{x}_{ndc} = \frac{\vec{x}_{clip}}{w} = \vec{x}_{center\_ndc} + \vec{offset}$$
-  Since the $\vec{offset}$ (major/minor axis vectors) was already computed in NDC units on the CPU, multiplying by `clip.w` in the vertex shader is correct and mathematically cancels the automatic GPU perspective divide.
-- **Conclusion:** Unlike the original Part 1 bug (where the offset had no distance dependence), the offset here is dynamically derived from the perspective projection Jacobian. The `clip.w` multiplication is mathematically correct and does **not** reintroduce the bug.
+**Branch Reviewed:** `modularize/split-main-cpp` (worktree: `/home/budai/Projects/pgu-modularize-audit`)
+**Status:** Clean (All checklist items verified, zero behavior changes, build/dependency rules behave correctly)
 
 ---
 
 ## Findings & Evidence for Checklist Items
 
-### 5. Mixture-of-Gaussians Combination
-- **Finding:** The bottom-up covariance moment-matching merge formula is correct.
+### 1. Symbol Body Correspondence Verification
+- **Finding:** Every extracted C++ symbol is character-for-character identical to the version in `origin/main:main.cpp`.
 - **Evidence:**
-  - In `BuildHierarchy`, the parent covariance is updated using a loop over its children at [main.cpp:L1168-1173](file:///home/budai/Projects/pgu-gaussian-audit/main.cpp#L1168-1173).
-  - The implementation: `cov.xx += w * (n.cov.xx + d.x * d.x)` computes the sum of the child covariance plus the translation term $\vec{d}\vec{d}^T$ weighted by $w_i = b_i / b_{parent}$, matching the moment matching mixture rule perfectly.
+  - `vec_math.h` successfully houses the vector/matrix math primitives (`Vec3`, `Vec3d`, `Mat4`, operators, `Cross`, `Dot`, `Normalize`, `Multiply`, `Perspective`, `LookAt`) without structural or logical deviation.
+  - `hash_util.h` includes `SpreadBits21`, `Morton3D`, `MixHash64`, and `random01` exactly as defined in the pre-split source.
+  - `gpu_types.h` carries the GPU interface data structs (`CameraUniforms`, `QuadVertex`, `PointPosition`, `PointStaticAttributes`, `RenderMode`, `RenderTuning`).
+  - `galaxy_model.h` encapsulates `Galaxy`, `StarSample`, `Covariance3`, `SurfelNode`, `IsotropicCovariance`, `LargestEigenvalue3x3`, `RotateCovariance` (previously a static member of `App`, now a free `inline` function), `ClampColor`, and `GenerateStar` with zero modifications to their math blocks.
 
-### 6. Amplitude Derivation
-- **Finding:** The peak amplitude is derived correctly.
+### 2. Shader Byte-Identity Verification
+- **Finding:** The extracted WGSL shaders are byte-identical to their original `R"(...)"` string literals.
 - **Evidence:**
-  - Peak amplitude uses the closed-form eigenvalues $e_1, e_2$ to compute $\sqrt{\text{det} \, \Sigma_{2D}}$: `sqrtDet = std::sqrt(e1 * e2)`. This correctly determines the determinant of the 2D covariance.
-  - The amplitude calculation uses `amplitude = kSplatAmplitudeScale * node.brightness / (2.0f * 3.14159265f * sqrtDet)`, matching the analytical 2D Gaussian integral formula $\text{amplitude} = \frac{\text{brightness}}{2\pi \sqrt{\text{det} \, \Sigma_{2D}}}$.
+  - `shaders/hardware_point.wgsl` and `shaders/splat.wgsl` match the pre-split strings character-for-character.
+  - The CMake embedding script (`cmake/embed_shaders.cmake`) generates a C++ raw string literal template containing a leading newline, reproducing the exact byte-wise sequence from the inline `R"(...)"` literals in `main.cpp`.
 
-### 7. Energy Conservation and Disk Flatness Verification
-- **Finding:** Luminous flux and physical flatness are conserved and emerge correctly from the tree.
+### 3. Preservation of layout `static_assert`s
+- **Finding:** GPU layout static asserts are preserved in the headers.
 - **Evidence:**
-  - Building and running the application outputs:
+  - Located in [gpu_types.h:L30](file:///home/budai/Projects/pgu-modularize-audit/gpu_types.h#L30) (`CameraUniforms` size 144) and [gpu_types.h:L53-54](file:///home/budai/Projects/pgu-modularize-audit/gpu_types.h#L53-L54) (`PointPosition` size 12 and `PointStaticAttributes` size 36).
+
+### 4. Linkage Change Assessment
+- **Finding:** The linkage transition from file-scope internal (anonymous namespace) to global `inline` header declarations is correct and safe.
+- **Evidence:**
+  - `CMakeLists.txt` compiles `main.cpp` as the single executable translation unit. No name collisions are possible, and internal link symbols are not shared across separate TU compilations.
+
+### 5. Name Grep Verification
+- **Finding:** There are no spelling errors, typos, or accidental partial renames.
+- **Evidence:**
+  - Confirmed by clean compilation under `-Wall -Wextra -Wpedantic`.
+
+### 6. Behavioral Reproduction
+- **Finding:** Modularized application exhibits bit-for-bit identical hierarchy and rendering statistics compared to the pre-split branch.
+- **Evidence:**
+  - Running the binary yields the following startup logs:
     ```
     [hierarchy] leaves=60000 nodes=80002 levels: 60000 15000 3750 938 235 59 15 4 1
     [hierarchy] brightness root=90292.8 sum(leaves)=90292.8 sum(root.children)=90292.8 rel.err(root vs leaves)=6.09495e-08
     [hierarchy] root cov diag=(7.28709, 5.13432, 0.0918704) effRadius=8.13004 largestEig=7.34417
     ```
-  - The relative error is $\approx 6.1 \times 10^{-8}$ (conveys double/float precision consistency).
-  - The root covariance diagonal ($7.29, 5.13, 0.092$) shows that the Z-variance is 1.2% of the X-variance, reflecting the flatness of the disk structure without orientation heuristics.
+  - These values are identical to the Gaussian branch pre-split stats.
 
-### 8. Leaf Isotropy
-- **Finding:** Level 0 nodes are initialized as isotropic Gaussians.
-- **Evidence:**
-  - In `BuildHierarchy`, leaf nodes use `IsotropicCovariance(s.radius)` which initializes the covariance as a diagonal matrix with diagonal values $\sigma^2 = s.radius^2$ and off-diagonals as 0.
+---
 
-### 9. Cut-Selection size metric
-- **Finding:** Projected size uses `node.effRadius` derived from the true largest eigenvalue, cached at build time.
-- **Evidence:**
-  - `effRadius` is precalculated during `BuildHierarchy` using `3.0f * std::sqrt(LargestEigenvalue3x3(cov))` and stored in `SurfelNode`. Traversal in `SelectCut` reads this cached value directly.
+## Other Review Items
 
-### 10. Verification of Dead Knobs
-- **Finding:** The controls `pointRadiusMultiplier` and `blendStrength` have no effect in the Gaussian shader.
-- **Evidence:**
-  - The splat shader `kSplatShader` has no references to `camera.point_radius_multiplier` or `camera.blend_strength`, though they remain in the CameraUniforms struct definition to maintain layout compatibility.
+### 7. File Scope Compliance
+- **Finding:** The files touched match expectations: `CMakeLists.txt`, `cmake/embed_shaders.cmake`, `docs/implementer-report.md`, `galaxy_model.h`, `gpu_types.h`, `hash_util.h`, `main.cpp`, `shaders/hardware_point.wgsl`, `shaders/splat.wgsl`, `vec_math.h`.
+- **Evidence:** Verified via `git diff --name-status origin/main HEAD`.
 
-### 11. File Scope Compliance
-- **Finding:** Only `main.cpp` and `docs/implementer-report.md` were touched.
-- **Evidence:**
-  - Confirmed via `git diff --name-only origin/main HEAD`.
+### 8. Header Hygiene
+- **Finding:** `#pragma once` guards are present on all four headers. Include maps are clean, minimal, and free of circular dependencies.
 
-### 12. Build Validation
-- **Finding:** Compilation is clean with zero warnings under `-Wall -Wextra -Wpedantic`.
+### 9. Build & Dependency Tracking Verification
+- **Finding:** CMake dependency tracking works correctly for the custom command shader embedding.
 - **Evidence:**
-  - Verified by fresh compilation.
+  - Verified that running `touch shaders/splat.wgsl` triggers `Embedding WGSL shaders -> shaders_generated.h` and recompiles `main.cpp.o` on the next build.
 
 ---
 
 ## Open Questions
 
-- *None.* The implementation is mathematically robust, clean, and resolves the hierarchical splat representation exactly as intended.
+- *None.* The refactor is clean, safe, and maintains complete parity with the original single-file implementation.

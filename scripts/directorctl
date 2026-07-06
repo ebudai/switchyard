@@ -1,0 +1,411 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly DEFAULT_DIRECTOR_TARGET="pgu-director:0.0"
+readonly KNOWN_SESSIONS=(pgu-director pgu-main pgu-audit pgu-ui pgu-research pgu-ops)
+readonly PASTE_THRESHOLD=200
+readonly DEFAULT_CAPTURE_LINES=20
+readonly SUBMIT_VERIFY_ATTEMPTS=2
+readonly SUBMIT_VERIFY_BACKOFF_MS=250
+readonly STAGED_PAYLOAD_RETENTION_MINUTES=60
+
+validate_enter_delay() {
+    local val="${PGU_DIRECTORCTL_ENTER_DELAY:-0.6}"
+    if ! [[ "$val" =~ ^[0-9]*\.?[0-9]+$ ]]; then
+        echo "error: PGU_DIRECTORCTL_ENTER_DELAY='$val' is not a valid non-negative number" >&2
+        echo "Expected a numeric value like 0, 0.6, or 1.5" >&2
+        exit 1
+    fi
+    printf '%s' "$val"
+}
+
+decimal_seconds_to_milliseconds() {
+    local val="$1"
+    local whole frac
+    whole="${val%%.*}"
+    frac="${val#*.}"
+    if [ "$frac" = "$val" ]; then
+        frac=""
+    fi
+    if [ -z "$whole" ]; then
+        whole=0
+    fi
+    frac="${frac}000"
+    frac="${frac:0:3}"
+    printf '%d' $((10#$whole * 1000 + 10#$frac))
+}
+
+milliseconds_to_sleep_seconds() {
+    local ms="$1"
+    printf '%d.%03d' $((ms / 1000)) $((ms % 1000))
+}
+
+sleep_milliseconds() {
+    local ms="$1"
+    sleep "$(milliseconds_to_sleep_seconds "$ms")"
+}
+
+compute_settle_delay_ms() {
+    local payload_length="$1"
+    local base_delay
+    local base_ms
+    local extra_ms=0
+    base_delay="$(validate_enter_delay)"
+    base_ms="$(decimal_seconds_to_milliseconds "$base_delay")"
+
+    if [ "$payload_length" -gt "$PASTE_THRESHOLD" ]; then
+        extra_ms=$((((payload_length + 499) / 500) * 150))
+    fi
+
+    printf '%d' $((base_ms + extra_ms))
+}
+
+capture_raw_pane() {
+    local target="$1"
+    tmux capture-pane -p -J -t "$target"
+}
+
+submission_appears_complete() {
+    local before_capture="$1"
+    local after_capture="$2"
+
+    if [ "$after_capture" != "$before_capture" ]; then
+        return 0
+    fi
+
+    if [[ "$after_capture" == *"Working"* ]] || [[ "$after_capture" == *"esc to interrupt"* ]]; then
+        return 0
+    fi
+
+    return 1
+}
+
+verify_submission() {
+    local target="$1"
+    local before_capture="$2"
+    local attempt
+    local backoff_ms="$SUBMIT_VERIFY_BACKOFF_MS"
+    local after_capture
+
+    for ((attempt = 1; attempt <= SUBMIT_VERIFY_ATTEMPTS; attempt++)); do
+        sleep_milliseconds "$backoff_ms"
+        after_capture="$(capture_raw_pane "$target")"
+        if submission_appears_complete "$before_capture" "$after_capture"; then
+            return 0
+        fi
+        if [ "$attempt" -lt "$SUBMIT_VERIFY_ATTEMPTS" ]; then
+            tmux send-keys -t "$target" Enter
+        fi
+    done
+
+    echo "warning: $target did not show a submission transition after $SUBMIT_VERIFY_ATTEMPTS Enter attempts" >&2
+    return 1
+}
+
+payload_requires_pointer() {
+    local payload="$1"
+    [ "${#payload}" -gt "$PASTE_THRESHOLD" ] || [[ "$payload" == *$'\n'* ]]
+}
+
+reap_stale_payload_files() {
+    local tmpdir="${TMPDIR:-/tmp}"
+    if [ ! -d "$tmpdir" ]; then
+        return 0
+    fi
+
+    # Pointer messages tell the recipient to read the staged file later, so
+    # keep fresh files and only reap stale ones before creating a new payload.
+    find "$tmpdir" -maxdepth 1 -type f -name 'directorctl_payload.*.txt' \
+        -mmin +"$STAGED_PAYLOAD_RETENTION_MINUTES" -delete 2>/dev/null || true
+}
+
+stage_payload_file() {
+    local payload="$1"
+    local tmpdir="${TMPDIR:-/tmp}"
+    local staged_path
+    reap_stale_payload_files
+    staged_path="$(mktemp "$tmpdir/directorctl_payload.XXXXXX.txt")"
+    chmod 600 "$staged_path"
+    printf '%s' "$payload" > "$staged_path"
+    printf '%s' "$staged_path"
+}
+
+submit_short_line() {
+    local target="$1"
+    local payload="$2"
+    local settle_delay_ms
+    local before_capture
+
+    settle_delay_ms="$(compute_settle_delay_ms "${#payload}")"
+    tmux send-keys -t "$target" -l "$payload"
+    sleep_milliseconds "$settle_delay_ms"
+    before_capture="$(capture_raw_pane "$target")"
+    tmux send-keys -t "$target" Enter
+    verify_submission "$target" "$before_capture"
+}
+
+usage() {
+    cat <<'EOF'
+directorctl - tmux send helper for PGU director workflow
+
+Usage:
+  directorctl send <tmux-target> <message...>
+  directorctl send-file <tmux-target> <path>
+  directorctl callback <message...>
+  directorctl capture <tmux-target> [lines]
+  directorctl clear <tmux-target>
+  directorctl status
+  directorctl --help
+
+Commands:
+  send         Send a one-line message to a tmux target and submit it.
+  send-file    Send the contents of a file to a tmux target and submit it.
+  callback     Send a message to the director (pgu-director:0.0) and submit it.
+  capture      Print the last non-empty lines from a tmux target pane.
+  clear        Send Ctrl-C to a tmux target to clear a stuck composer.
+  status       Print whether the expected tmux sessions exist.
+
+All send/callback commands send payload and Enter separately, wait for the
+composer to settle, then verify that Enter actually submitted:
+  tmux send-keys -t <target> -l <payload>
+  sleep $PGU_DIRECTORCTL_ENTER_DELAY   (default: 0.6, scales up for large payloads)
+  tmux send-keys -t <target> Enter
+
+For payloads longer than 200 characters or containing newlines, directorctl
+does NOT paste into the codex composer. It stages the payload in a temp file
+and sends a short one-line pointer instead:
+  please read /tmp/directorctl_payload.XXXXXX.txt and follow the instructions therein
+
+Environment:
+  PGU_DIRECTORCTL_ENTER_DELAY     Seconds to sleep between payload and
+                                  the first Enter (default: 0.6). Must be a
+                                  non-negative number (e.g. 0, 0.6, 1.5).
+                                  Large payloads add extra settle time.
+  PGU_DIRECTORCTL_EXTRA_SESSIONS  Whitespace-separated list of additional
+                                  tmux session names to include in status.
+                                  Duplicates of built-in sessions are ignored.
+
+Examples:
+  directorctl callback 'backlog complete: packet 36.55'
+  directorctl send pgu-audit:0.0 'please audit packet 36.55'
+  directorctl send-file pgu-main:0.0 docs/implementation_plan.md
+  directorctl status
+  PGU_DIRECTORCTL_EXTRA_SESSIONS='pgu-watchdog' directorctl status
+EOF
+}
+
+is_director_typing() {
+    local target="$1"
+    # Only director target has the interactive composer prompt
+    if [ "$target" != "$DEFAULT_DIRECTOR_TARGET" ]; then
+        return 1
+    fi
+    
+    local capture
+    if ! capture="$(capture_raw_pane "$target" 2>/dev/null)" || [ -z "$capture" ]; then
+        # Capture failed or empty. Prioritize delivery over splice prevention.
+        return 1
+    fi
+    
+    # Inline python using our safe-biased composer check
+    python3 -c '
+import sys, re
+pane_text = sys.stdin.read()
+if not pane_text:
+    sys.exit(1) # Empty stdin -> treat as not typing for delivery reliability
+lines = pane_text.splitlines()
+horizontal_indices = [
+    idx for idx, line in enumerate(lines)
+    if len(line.strip()) >= 40 and all(c == "─" for c in line.strip())
+]
+if len(horizontal_indices) >= 2:
+    composer_content = "\n".join(lines[horizontal_indices[-2] + 1 : horizontal_indices[-1]])
+    cleaned = re.sub(r"^[❯\u276f\s\>\-\*]+", "", composer_content, flags=re.MULTILINE)
+    sys.exit(0 if len(cleaned.strip()) > 0 else 1)
+sys.exit(0) # Unsure (markers missing) -> play it safe (busy)
+' <<< "$capture"
+}
+
+send_payload() {
+    local target="$1"
+    local payload="$2"
+    local staged_path
+    local pointer_payload
+
+    # Guard against active typing in the director pane (up to 6 attempts / 30 seconds).
+    # All director-bound sends (callback, send, send-file) intentionally wait to prevent
+    # splicing commands into the director's active input composer.
+    local attempt=1
+    local max_attempts=6
+    while is_director_typing "$target"; do
+        if [ "$attempt" -ge "$max_attempts" ]; then
+            echo "watchdog/directorctl: gave up waiting for clear composer after $((max_attempts * 5))s; submitting anyway" >&2
+            break
+        fi
+        echo "watchdog/directorctl: director is typing (attempt $attempt/$max_attempts). Waiting 5 seconds to retry..." >&2
+        sleep 5
+        attempt=$((attempt + 1))
+    done
+
+    # Codex panes do not submit bracketed paste on Enter/C-m. Large or
+    # multiline payloads must be staged to a file and referenced indirectly.
+    if payload_requires_pointer "$payload"; then
+        staged_path="$(stage_payload_file "$payload")"
+        pointer_payload="please read $staged_path and follow the instructions therein"
+        submit_short_line "$target" "$pointer_payload"
+        return 0
+    fi
+
+    submit_short_line "$target" "$payload"
+}
+
+
+cmd_send() {
+    if [ $# -lt 2 ]; then
+        echo "error: send requires <tmux-target> <message...>" >&2
+        echo "usage: directorctl send <tmux-target> <message...>" >&2
+        exit 1
+    fi
+    local target="$1"
+    shift
+    local message="$*"
+    send_payload "$target" "$message"
+}
+
+cmd_send_file() {
+    if [ $# -ne 2 ]; then
+        echo "error: send-file requires <tmux-target> <path>" >&2
+        echo "usage: directorctl send-file <tmux-target> <path>" >&2
+        exit 1
+    fi
+    local target="$1"
+    local path="$2"
+    if [ ! -f "$path" ]; then
+        echo "error: file not found: $path" >&2
+        exit 1
+    fi
+    local content
+    content="$(cat "$path")"
+    if [ -z "$content" ]; then
+        echo "error: file is empty: $path" >&2
+        exit 1
+    fi
+    send_payload "$target" "$content"
+}
+
+cmd_callback() {
+    if [ $# -lt 1 ]; then
+        echo "error: callback requires <message...>" >&2
+        echo "usage: directorctl callback <message...>" >&2
+        exit 1
+    fi
+    local message="$*"
+    send_payload "$DEFAULT_DIRECTOR_TARGET" "$message"
+}
+
+cmd_capture() {
+    if [ $# -lt 1 ] || [ $# -gt 2 ]; then
+        echo "error: capture requires <tmux-target> [lines]" >&2
+        echo "usage: directorctl capture <tmux-target> [lines]" >&2
+        exit 1
+    fi
+    local target="$1"
+    local lines="${2:-$DEFAULT_CAPTURE_LINES}"
+    if ! [[ "$lines" =~ ^[0-9]+$ ]]; then
+        echo "error: capture lines must be a non-negative integer" >&2
+        exit 1
+    fi
+
+    local capture
+    local -a non_empty_lines=()
+    local line
+    local start=0
+    capture="$(capture_raw_pane "$target")"
+    while IFS= read -r line; do
+        if [[ -n "${line//[[:space:]]/}" ]]; then
+            non_empty_lines+=("$line")
+        fi
+    done <<< "$capture"
+
+    if [ "${#non_empty_lines[@]}" -gt "$lines" ]; then
+        start=$((${#non_empty_lines[@]} - lines))
+    fi
+    for ((; start < ${#non_empty_lines[@]}; start++)); do
+        printf '%s\n' "${non_empty_lines[start]}"
+    done
+}
+
+cmd_clear() {
+    if [ $# -ne 1 ]; then
+        echo "error: clear requires <tmux-target>" >&2
+        echo "usage: directorctl clear <tmux-target>" >&2
+        exit 1
+    fi
+    tmux send-keys -t "$1" C-c
+}
+
+cmd_status() {
+    local -A seen=()
+    local all_sessions=("${KNOWN_SESSIONS[@]}")
+    for extra in ${PGU_DIRECTORCTL_EXTRA_SESSIONS:-}; do
+        all_sessions+=("$extra")
+    done
+
+    local found=0
+    local missing=0
+    for session in "${all_sessions[@]}"; do
+        if [[ -n "${seen[$session]+x}" ]]; then
+            continue
+        fi
+        seen[$session]=1
+        if tmux has-session -t "$session" 2>/dev/null; then
+            echo "  $session: active"
+            found=$((found + 1))
+        else
+            echo "  $session: not found"
+            missing=$((missing + 1))
+        fi
+    done
+    echo ""
+    echo "$found active, $missing not found"
+}
+
+if [ $# -eq 0 ]; then
+    usage
+    exit 1
+fi
+
+case "$1" in
+    send)
+        shift
+        cmd_send "$@"
+        ;;
+    send-file)
+        shift
+        cmd_send_file "$@"
+        ;;
+    callback)
+        shift
+        cmd_callback "$@"
+        ;;
+    capture)
+        shift
+        cmd_capture "$@"
+        ;;
+    clear)
+        shift
+        cmd_clear "$@"
+        ;;
+    status)
+        cmd_status
+        ;;
+    --help|-h|help)
+        usage
+        exit 0
+        ;;
+    *)
+        echo "error: unknown command: $1" >&2
+        echo "run 'directorctl --help' for usage" >&2
+        exit 1
+        ;;
+esac

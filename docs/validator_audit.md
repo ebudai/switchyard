@@ -1,122 +1,62 @@
-# Validator Audit Report — Aspect-Ratio Guard
+# Validator Audit Report — Resize Splat Corruption (Present-Path Shear)
 
 **Methodology:** Adversarial-Collaborative Audit
-**Branch Reviewed:** `fix/aspect-ratio-guard` (worktree: `/home/budai/Projects/pgu`)
-**Status:** Clean (All checklist items verified, regression test committed and verified)
+**Branch Reviewed:** `fix/resize-splat-corruption` (worktree: `/home/budai/Projects/pgu`)
+**Status:** Clean (All checklist items verified, regression test verified and passed on fix branch, failed on pre-fix main branch, zero build warnings)
 
 ---
 
 ## Findings & Evidence for Checklist Items
 
-### 1. Independent Re-derivation of the Diagnosis
-- **Finding:** The diagnosis of the aspect-ratio streaking bug is correct.
-- **Evidence:**
-  - In the baseline `UpdateEwaProjectionState` (in `galaxy_system.h`), the aspect ratio computation was guarded only against `framebufferHeight <= 0`. If `framebufferHeight > 0` but `framebufferWidth == 0` (which transiently occurs during a resize), `aspect = 0.0f`.
-  - The EWA projection computes `projFOverAspect_ = projF_ / aspect`, causing a division by zero and setting `projFOverAspect_` to positive infinity (`inf`).
-  - In `EmitSurfel`, the Jacobian terms `j00 = -projFOverAspect_ * invTz` and `j02 = projFOverAspect_ * tx * invTz * invTz` scale directly with `projFOverAspect_`.
-  - When `projFOverAspect_` becomes infinite, the 2x2 screen-space covariance matrix elements ($a$, $b$, $c$) become infinite or NaN, making the larger eigenvalue $e_1$ infinite.
-  - The major axis half-extent `half1 = 3.0f * std::sqrt(e1)` then becomes infinite, scaling `axis1` and `axis2` to infinity and causing the massive streaking across the window.
-  - In `renderer.h`'s `UpdateCameraUniforms`, the function returns early if the width/height are non-positive. However, a small-but-positive width (e.g. 1px) still creates an extreme finite aspect ratio that distorts the perspective projection matrix on the GPU, while the CPU-side EWA path (which lacked an early-return) still computes an extremely skewed or infinite aspect.
+### 1. Sanity-Check the Mechanism Claim
+* **Analysis:** The diagnosis of a virtio-gpu / Mesa virgl present-path row-pitch alignment mismatch is mathematically sound and internally consistent.
+* **Evidence:**
+  * **Arithmetic Verification:** The swapchain textures use the `BGRA8` format (4 bytes per pixel). With a 256-byte linear row pitch constraint (standard for Virtio-GPU Venus/Mesa host-guest interfaces), the alignment boundary is:
+    $$\frac{256 \text{ bytes}}{4 \text{ bytes/pixel}} = 64 \text{ pixels}$$
+  * **Shear Physics:** When the presented window width $W$ is not a multiple of 64, the guest-side texture is allocated with a pitch of $W_{\text{aligned}} = \lceil W / 64 \rceil \times 64$ pixels. However, the host scanout reads each row at the unpadded width $W$. This results in a cumulative shift of $W_{\text{aligned}} - W$ pixels per row, producing a diagonal shear/streaking effect.
+  * **Data Consistency:** The implementer's instrumentation (checking camera basis, uniform buffers, and projection parameters) confirmed that CPU-side state remains 100% correct in the corrupted state. The surface texture size also matches the framebuffer size. This rules out application-level bugs and points directly to the virtualized present path.
 
-### 2. Verify the Fix's Clamp Bounds Match Exactly
-- **Finding:** The clamp bounds match exactly between both files.
-- **Evidence:**
-  - In `galaxy_system.h` (line 419):
-    `const float aspect = std::clamp(rawAspect, 1.0f / 8.0f, 8.0f);`
-  - In `renderer.h` (line 339):
-    `const float aspect = std::clamp(static_cast<float>(framebufferWidth_) / static_cast<float>(framebufferHeight_), 1.0f / 8.0f, 8.0f);`
-  - Keeping these bounds identical guarantees that the CPU-side EWA screen axes and the GPU-side view-projection matrix agree on the aspect ratio under all circumstances.
+### 2. Verify the Fix Mechanism in `main.cpp`
+* **Analysis:** The snapping logic in `FramebufferSizeCallback` is correct, safe, and robust.
+* **Evidence:**
+  * **Recursion & Liveness:** When an unaligned width is snapped via `glfwSetWindowSize(window, alignedWidth, height)`, it re-triggers the callback (either synchronously or on the next event loop tick). Since `alignedWidth` is already a multiple of 64, the second pass computes `alignedWidth == width`, bypassing the snap condition. This ensures it recurses at most once, with zero risk of an infinite loop.
+  * **Cold Start Safety:** The constant `kInitialWidth` is `1280`, which is divisible by 64 ($1280 / 64 = 20$). Thus, the initial window begins aligned, and no callback or resizing is required during cold start.
+  * **Zero/Negative Prevention:** The logic uses `std::max(64, (width/64)*64)` inside an `if (width > 0)` check. Any positive width will result in an aligned width of at least `64`, preventing zero or negative values.
 
-### 3. Normal-Case Equivalence
-- **Finding:** The clamp is a true no-op for any standard window size.
-- **Evidence:**
-  - The aspect ratio bounds `[1/8, 8]` cover typical window sizes (e.g. 800x600 aspect is `1.333`, 1920x1080 aspect is `1.778`, which are both well within `[0.125, 8.0]`).
-  - Both baseline and fixed versions produce byte-identical surfel axis attributes for standard cases:
-    - **800x600:** Baseline max axis = `0.198615`, Fixed max axis = `0.198615` (identical).
-    - **1920x1080:** Baseline max axis = `0.198468`, Fixed max axis = `0.198468` (identical).
+### 3. Verify `glfwSetWindowSize`'s Re-entrancy Assumption
+* **Analysis:** In the GLFW X11 backend (`third_party/glfw/src/x11_window.c`), calling `glfwSetWindowSize` invokes `XResizeWindow` and `XFlush` asynchronously. The new size event (`ConfigureNotify`) is processed during event polling (`glfwPollEvents`), triggering the callback asynchronously.
+* **Safety & Correctness:** 
+  * The fix remains fully correct under this asynchronous flow. On the unaligned pass, the callback requests the aligned size and early-returns without notifying the renderer swapchain.
+  * During the subsequent event loop tick, the aligned size event is processed, triggering `FramebufferSizeCallback` with the aligned size, which then propagates to the renderer. Thus, the renderer is never exposed to the unaligned/sheared state.
 
-### 4. Sanity Check the Bound Choice
-- **Finding:** The choice of `[1/8, 8]` is highly reasonable.
-- **Evidence:**
-  - It admits all realistic window shapes (e.g. 32:9 super-ultrawide displays have aspect `3.56`, portrait windows have aspect `0.43` or `0.375`).
-  - It prevents zero, negative, or infinite values for `aspect`, keeping the aspect ratio bounded inside $(0, \infty)$.
-  - Under the tightest clamp limit (`aspect = 1/8`), the maximum axis magnitude is safely bounded to `~1.56` NDC units, which prevents runaway streaking.
+### 4. Reproduce the Regression Test
+* **Status:** Verified and PASSED.
+* **Evidence:**
+  * **Baseline (Pre-fix `origin/main`):** **FAIL** (exit code 1)
+    * `requested_w=1400 presented_w=1400 shear_ratio=2.077 -> SHEARED`
+    * `requested_w=1000 presented_w=1000 shear_ratio=2.392 -> SHEARED`
+    * `requested_w=1300 presented_w=1300 shear_ratio=2.928 -> SHEARED`
+  * **Fixed (`fix/resize-splat-corruption`):** **PASS** (exit code 0)
+    * `requested_w=1400 presented_w=1344 shear_ratio=0.924 -> ok`
+    * `requested_w=1000 presented_w=960  shear_ratio=0.901 -> ok`
+    * `requested_w=1300 presented_w=1280 shear_ratio=0.921 -> ok`
+  * The regression test is highly robust, successfully reproducing and detecting the shear via ImageMagick Sobel edge analysis on unaligned widths, and confirming clean renders on aligned widths.
 
-### 5. Scope and Rules Verification
-- **Finding:** Only `galaxy_system.h`, `renderer.h`, and `docs/implementer-report.md` were modified by the implementer.
-- **Evidence:** Verified via `git diff --name-only origin/main HEAD`.
-- **Finding:** `galaxy_system.h` remains WebGPU-agnostic.
-- **Evidence:** No `<webgpu/*>` includes or backend-specific dependencies were added to `galaxy_system.h`.
+### 5. File Scope & Untouched Check
+* **File Scope:** Verified via `git diff --name-only origin/main HEAD`. The modified files are limited to:
+  * [main.cpp](file:///home/budai/Projects/pgu/main.cpp) (snapping implementation)
+  * [tests/resize_present_shear_test.sh](file:///home/budai/Projects/pgu/tests/resize_present_shear_test.sh) (regression test)
+  * [docs/implementer-report.md](file:///home/budai/Projects/pgu/docs/implementer-report.md) (documentation)
+  * `scripts/director_watchdog.py` (an unrelated, already-committed file on `main` that this branch predates).
+* **Untouched Files:** Verified via `git diff origin/main HEAD -- renderer.h galaxy_system.h`. The output was empty, confirming that all temporary instrumentation in these files was fully reverted.
 
 ### 6. Build Status
-- **Finding:** Clean rebuild completed successfully with zero warnings/errors under `-Wall -Wextra -Wpedantic`.
+* **Rebuild Command:** `rm -rf build && cmake -S . -B build && cmake --build build -j$(nproc)`
+* **Result:** Clean compilation with zero compiler warnings or errors.
 
 ---
 
-## Regression Test Results
+## Residual Risks & Recommendations
 
-We created, verified, and committed a dedicated regression test: [tests/aspect_ratio_clamp_test.cpp](file:///home/budai/Projects/pgu/tests/aspect_ratio_clamp_test.cpp).
-
-### 1. Verification Against Baseline Code (Pre-fix)
-- **Status:** **FAILED** (exit code 1)
-- **Test Output:**
-  ```
-  Test Case: 800x600 (Normal)
-    Surfels: 3323
-    Max Axis Magnitude: 0.198615
-    Has Non-Finite: NO
-    Status: SANE
-
-  Test Case: 1920x1080 (Normal)
-    Surfels: 3323
-    Max Axis Magnitude: 0.198468
-    Has Non-Finite: NO
-    Status: SANE
-
-  Test Case: 1x800 (Pathologically Narrow)
-    Surfels: 3323
-    Max Axis Magnitude: 155.958
-    Has Non-Finite: NO
-    Status: CORRUPT
-
-  Test Case: 0x800 (Zero Width)
-    Surfels: 3323
-    Max Axis Magnitude: inf
-    Has Non-Finite: YES
-    Status: CORRUPT
-
-  Overall result: CORRUPT (regression detected/fix missing)
-  ```
-- **Conclusion:** The test successfully catches the bug under pathologically narrow/zero-width viewports on the baseline code.
-
-### 2. Verification Against Fixed Code (Post-fix)
-- **Status:** **PASSED** (exit code 0)
-- **Test Output:**
-  ```
-  Test Case: 800x600 (Normal)
-    Surfels: 3323
-    Max Axis Magnitude: 0.198615
-    Has Non-Finite: NO
-    Status: SANE
-
-  Test Case: 1920x1080 (Normal)
-    Surfels: 3323
-    Max Axis Magnitude: 0.198468
-    Has Non-Finite: NO
-    Status: SANE
-
-  Test Case: 1x800 (Pathologically Narrow)
-    Surfels: 3323
-    Max Axis Magnitude: 1.5596
-    Has Non-Finite: NO
-    Status: SANE
-
-  Test Case: 0x800 (Zero Width)
-    Surfels: 3323
-    Max Axis Magnitude: 1.5596
-    Has Non-Finite: NO
-    Status: SANE
-
-  Overall result: SANE (all tests passed)
-  ```
-- **Conclusion:** The aspect-ratio guard successfully clamps pathological cases to a safe bound of `~1.56` max axis magnitude while keeping standard cases perfectly identical.
+1. **HiDPI/Fractional Scaling:** Deriving the window size coordinates directly from the framebuffer pixel coordinates assumes a content scale factor of $1.0$ (standard X11 setup). If fractional scaling is introduced, the snapped width in pixels must be converted to window coordinates using `glfwGetWindowContentScale` to prevent incorrect window dimensioning.
+2. **Backend/Driver Dependency:** Since this is a workaround for a Virtio-GPU/Mesa Venus present bug, the snap behavior is technically redundant on bare-metal systems or bug-free drivers. However, the performance/UX cost of snapping the width in 64px increments is negligible and provides general driver-level safety.

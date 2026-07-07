@@ -42,9 +42,9 @@ docker run -d --name pgu-team \
   pgu-team:latest
 ```
 
-Brings up five standing tmux sessions inside the container, each running a
+Brings up six standing tmux sessions inside the container, each running a
 `claude` instance: `pgu-director`, `pgu-main`, `pgu-ui`, `pgu-audit`,
-`pgu-ops`. (`pgu-watchdog` is not one of these — `scripts/director_watchdog.py`
+`pgu-ops`, `pgu-research`. (`pgu-watchdog` is not one of these — `scripts/director_watchdog.py`
 is a plain mechanical script, not a Claude role. Ops normally starts it via
 `scripts/startwatchdog.fish`, which creates its own `pgu-watchdog` tmux
 session as its first action.)

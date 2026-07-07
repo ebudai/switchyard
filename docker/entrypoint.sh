@@ -19,7 +19,7 @@ ROLES_FILE="$REPO_DIR/docker/roles.json"
 # watchdog is NOT a Claude role -- scripts/director_watchdog.py is a plain
 # mechanical script, no model to configure. ops starts it (scripts/startwatchdog.fish),
 # which creates its own pgu-watchdog tmux session -- don't pre-create one here.
-ROLES="director main ui audit ops"
+ROLES="director main ui audit ops research"
 
 new_pane() {
     local session="$1"

@@ -15,6 +15,9 @@
     },
     "ops": {
       "model": "claude-sonnet-5"
+    },
+    "research": {
+      "model": "claude-sonnet-5"
     }
   }
 }

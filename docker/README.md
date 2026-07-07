@@ -42,6 +42,21 @@ docker run -d --name pgu-team \
   pgu-team:latest
 ```
 
+### Codex CLI auth doesn't persist across rebuilds
+
+The image also ships OpenAI's `codex` CLI (see Dockerfile) as a manual
+alternative implementer Eric runs by hand in whichever pane he wants — it's
+not wired into `roles.json`/`entrypoint.sh` and isn't launched automatically.
+Codex keeps its config and auth under `~/.codex` (`CODEX_HOME`, confirmed via
+`codex doctor`), which is **not** one of the bind-mounted paths above. That
+means `codex login` has to be redone after every container rebuild/recreate.
+If that gets annoying, add a fourth bind mount the same way `.claude` is
+handled:
+
+```fish
+  -v ~/.codex:/home/eric/.codex \
+```
+
 Brings up six standing tmux sessions inside the container, each running a
 `claude` instance: `pgu-director`, `pgu-main`, `pgu-ui`, `pgu-audit`,
 `pgu-ops`, `pgu-research`. (`pgu-watchdog` is not one of these — `scripts/director_watchdog.py`

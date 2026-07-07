@@ -206,3 +206,23 @@ Fresh `cmake -S . -B build-native` + full `cmake --build build-native -j$(nproc)
 ## 8. Verdict
 
 **Not clean — one real, actionable finding (§4), everything else checks out.** Resize/bind-group handling (§1–2) is correctly wired end-to-end and should not regress the earlier hard-won drag-resize fix. The bloom/tonemap math (§3) is standard and sane by hand-inspection. The WGSL/Dawn texture and bind group setup (§5) is correct, with one low-priority efficiency nit (foregone bilinear-tap optimization; the stated "portability" rationale for going unfilterable doesn't hold up, but the choice itself is harmless). §4 is the one item I'd actually block on before Phase 3 builds reference-image comparisons on top of `--screenshot-out`: capturing post-ImGui will poison any pixel-diff against a clean reference image. Recommend: merge the bloom pipeline itself, but route a small follow-up to make `--screenshot-out` capture pre-ImGui (or suppress ImGui for that specific captured frame) before Phase 3 depends on it. Live visual confirmation of the bloom output and the screenshot ordering is still outstanding, blocked on display tooling not yet being present in this container.
+
+---
+
+# Validator Audit Report — Screenshot-Pre-ImGui Fix (Lightweight)
+
+**Methodology:** Quick confirmation pass (director pre-diffed and pre-built; scope explicitly small/mechanical)
+**Branch reviewed:** `fix/screenshot-pre-imgui`, commit `fcc285e` "Capture screenshots before ImGui overlay" (`renderer.h` only), reviewed in an isolated worktree at `/home/eric/Projects/pgu-ssfix-audit` (detached at `origin/fix/screenshot-pre-imgui`, shared checkout untouched), addressing §4 of the bloom-pipeline audit above.
+**Status:** **Clean.**
+
+**Diff scope confirmed:** `git show fcc285e` touches only `renderer.h`, 6 lines added / 6 removed — a pure relocation of the existing `screenshotReadback`/`PrepareScreenshotReadback` block, no logic changes, no other files touched. Matches the director's description exactly.
+
+**1. Ordering, verified by reading the merged `RenderFrame()`:** star pass → `RunPostProcessPasses(encoder, backbufferView)` (writes the final tonemapped scene into the swapchain texture) → `PrepareScreenshotReadback(surfaceTexture.texture, ...)` (now here, encoding `CopyTextureToBuffer` into the same encoder) → ImGui scissor-guard + conditional ImGui pass (`LoadOp::Load`, draws on top) → `encoder.Finish()` / `queue_.Submit()` → `surface_.Present()`. This satisfies both properties at once: the copy is still encoded and submitted strictly before `Present()` (the earlier swapchain-ownership fix stays intact — nothing moved relative to `Present()`, only relative to the ImGui pass), and it now runs after the tonemap write but before the ImGui draw, so it captures the correct texture: final tonemapped scene, clean of UI overlay. Also confirmed the copy command sits validly between two render passes (tonemap pass already `End()`ed, ImGui pass not yet begun) — no overlapping-render-pass hazard from interleaving a copy there.
+
+**2. No broken dependency on ImGui-relative ordering:** the moved block only populates the local `std::optional<ScreenshotReadback> screenshotReadback` — no other side effects. The consuming code (`if (screenshotReadback.has_value()) { WriteScreenshotPng(...); pendingScreenshotPath_.reset(); result.screenshotWritten = true; }`) is unchanged and unmoved, still runs after `Present()` succeeds, and only branches on *whether* a copy was queued this frame, not *when* in the encoder it was recorded — so it's agnostic to the reorder. `exitAfterPendingScreenshot_` (in `main.cpp`, untouched by this diff) keys off `result.screenshotWritten` exactly as before. No logic depends on capture-relative-to-ImGui ordering that could have broken.
+
+**3. Build:** fresh `cmake -S . -B build-native` + full `cmake --build build-native -j$(nproc)` in this isolated worktree — clean, zero warnings/errors.
+
+**Not verified live** — same standing caveat as every prior audit in this environment: `DISPLAY`/`WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR` are all empty and `xdotool`/`kwin_wayland` aren't installed here. Static/code review only; a real `--screenshot-out` run (confirming the resulting PNG has no ImGui panel/FPS text baked in) is still the outstanding acceptance step once display tooling exists.
+
+**Verdict: clean, no further changes needed.** This closes bloom-audit finding §4.

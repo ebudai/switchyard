@@ -232,17 +232,12 @@ send_payload() {
     local staged_path
     local pointer_payload
 
-    # Guard against active typing in the director pane (up to 6 attempts / 30 seconds).
-    # All director-bound sends (callback, send, send-file) intentionally wait to prevent
-    # splicing commands into the director's active input composer.
+    # Guard against active typing in the director pane. All director-bound sends
+    # (callback, send, send-file) wait until the composer is clear so they do
+    # not splice into active human input.
     local attempt=1
-    local max_attempts=6
     while is_director_typing "$target"; do
-        if [ "$attempt" -ge "$max_attempts" ]; then
-            echo "watchdog/directorctl: gave up waiting for clear composer after $((max_attempts * 5))s; submitting anyway" >&2
-            break
-        fi
-        echo "watchdog/directorctl: director is typing (attempt $attempt/$max_attempts). Waiting 5 seconds to retry..." >&2
+        echo "watchdog/directorctl: director is typing (attempt $attempt). Waiting 5 seconds to retry..." >&2
         sleep 5
         attempt=$((attempt + 1))
     done

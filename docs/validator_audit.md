@@ -135,3 +135,74 @@ Touched both changed files and ran `cmake --build build-native`: clean, zero war
 ### 4.5 Verdict
 
 **Needs one more narrow look, not a full round.** 1.1 (the serious one) and 1.3 are fixed and hold up under the same line-by-line scrutiny as the original audit — 1.1's actual runtime behavior is still unverified for lack of a display in this container, same caveat as before. 1.2 is substantially fixed; the `glfwWaitEvents()`-has-no-timeout gap in the minimized path is a minor, non-blocking follow-up rather than a reason to reject this fix. Recommend merging, with a live `--screenshot-out` run (real PNG inspection) once display tooling is available, and optionally a follow-up swapping `glfwWaitEvents()` for a timeout-bounded wait in the minimized branch.
+
+---
+
+# Validator Audit Report — Phase 2 Bloom/HDR/Tonemapping Pipeline
+
+**Methodology:** Adversarial-Collaborative Audit, static/code review (overnight autonomous work — director acting on this without waiting for the user)
+**Branch reviewed:** `feature/bloom-hdr-tonemap`, commit `8a9f6dc` "Add HDR bloom and tonemapping pipeline" (`renderer.h`, `shaders/postprocess.wgsl`, `CMakeLists.txt`, `cmake/embed_shaders.cmake`), reviewed in an isolated worktree at `/home/eric/Projects/pgu-bloom-audit` (detached at `origin/feature/bloom-hdr-tonemap`, shared checkout untouched)
+**Status:** **Clean on correctness, one real design mismatch found (item 4) that should be fixed before Phase 3 depends on this.** No resize/staleness bugs, no shader-math red flags, no build issues.
+
+---
+
+## 1. Resize correctness — verified correct
+
+`CreatePostProcessTextures()` (allocates `hdrSceneTexture_`, `brightPassTexture_`, `blurTempTexture_`, `bloomTexture_` at the current `framebufferWidth_`/`framebufferHeight_`) is called from `ConfigureSurface()`, right after `CreateDepthTexture()` — the exact same choke point the depth buffer already relied on pre-bloom. Traced every path that can reach `ConfigureSurface()`:
+
+* `RenderFrame()`'s `if (framebufferResized_) { surface_.Unconfigure(); ConfigureSurface(); }` — this is what the earlier deferred/settle-then-fallback drag-resize fix ultimately drives (`main.cpp`'s `ReconcileFramebufferSize`/`FramebufferSizeCallback` are unchanged by this branch — no `main.cpp` diff at all — they still just flip `framebufferResized_`, and `RenderFrame()` still reconfigures on that flag before doing anything else this frame).
+* The `Outdated`/`Lost` `GetCurrentTexture` status branch — same `Unconfigure()`/`ConfigureSurface()` pair.
+
+Both paths are checked at the very top of `RenderFrame()`, before the star pass or `RunPostProcessPasses()` touch any texture view — so a resize always fully completes (new textures + rebuilt bind groups, see §2) before that frame's postprocess passes are recorded. No stale-sized intermediate texture can get baked into a frame. Also checked the minimized case (`framebufferWidth_/Height_ <= 0`): `CreatePostProcessTextures()` early-returns exactly like `CreateDepthTexture()` already did, and `RenderFrame()` itself bails before reaching any of this — consistent, not a new gap.
+
+## 2. Bind group staleness — verified correct
+
+`CreatePostProcessBindGroups()` is called unconditionally at the end of **both** `CreatePostProcessTextures()` and `CreatePostProcessPipelines()`, guarded by an early-return if either the layouts or the texture views don't exist yet:
+
+```cpp
+if (singleTextureBindGroupLayout_ == nullptr || finalCompositeBindGroupLayout_ == nullptr ||
+    hdrSceneView_ == nullptr || brightPassView_ == nullptr ||
+    blurTempView_ == nullptr || bloomTextureView_ == nullptr) {
+    return;
+}
+```
+
+At startup, `InitDevice()` (calls `ConfigureSurface()` first) runs before `CreateRenderPipelines()` (calls `CreatePostProcessPipelines()` last) — confirmed via `main.cpp:276-280`. So the first `CreatePostProcessBindGroups()` call (from `ConfigureSurface`) bails early (no layouts yet), and the second (from `CreatePostProcessPipelines`) succeeds once both prerequisites exist. On every subsequent resize, only `ConfigureSurface()`/`CreatePostProcessTextures()` runs again — but the layouts already exist from startup and never change, so the guard passes and all four bind groups (`brightExtractBindGroup_`, `blurHorizontalBindGroup_`, `blurVerticalBindGroup_`, `tonemapBindGroup_`) get unconditionally rebuilt against the **new** texture views every time. No stale bind group pointing at a destroyed texture is possible — WebGPU's own ref-counting also means even the brief overlap (old bind group still referencing the old texture object at the moment the new texture is created) is safe, since a `BindGroup` holds its own reference to the resources it binds, independent of the app's own `wgpu::Texture` member being reassigned.
+
+## 3. HDR/tonemap math — checked against standard references, no red flags
+
+* **ACES filmic curve** (`aces_filmic` in `postprocess.wgsl`): constants `a=2.51, b=0.03, c=2.43, d=0.59, e=0.14` are exactly Krzysztof Narkowicz's well-known 2015 ACES approximation — a standard, correct reference implementation, not an ad hoc curve.
+* **Bright-pass soft-knee threshold** (`fs_bright_extract`): `threshold=1.0`, `knee=0.35`. Worked through the curve by hand at several luminance values (0.9, 1.0, 1.35, 2.0) — it's monotonic, has no discontinuity at the knee boundaries, ramps in smoothly starting at `threshold - knee` and asymptotically approaches full pass-through as luminance grows, i.e. behaves exactly like the standard "soft threshold" popularized by Jorge Jiménez/Unity's bloom (this is a valid reparameterization of that same idea, not a novel/untested formula). Values aren't wildly off — a 1.0 threshold against non-tonemapped HDR scene colors and a 0.35 knee is a normal, conservative starting point.
+* **Composite** (`fs_tonemap`): `bloom_strength = 0.45`, `hdr = scene + bloom * bloom_strength`, then ACES — standard add-back-then-tonemap bloom compositing, correct order (tonemap happens after combining, not before).
+
+No live rendering was possible (see §6), so this is math/formula-level verification only, not a visual confirmation that the bloom "looks right."
+
+## 4. Screenshot interaction — real issue: captures post-ImGui, likely wrong for Phase 3
+
+Traced the full command-recording order in `RenderFrame()`: star pass → `RunPostProcessPasses()` (bright-extract → blur H → blur V → tonemap, writing the final tonemapped image into the swapchain `backbufferView`) → conditional ImGui pass (`LoadOp::Load` on `backbufferView`, draws the tuning panel/FPS overlay on top) → `PrepareScreenshotReadback(surfaceTexture.texture, ...)`. The screenshot copy is recorded **after** the ImGui pass, so `--screenshot-out`/F12 capture the frame **with the ImGui tuning panel and FPS counter baked in** — unchanged from the pre-bloom behavior, just now sitting on top of the tonemapped bloom output instead of the raw un-tonemapped swapchain draw.
+
+**This is very likely wrong for Phase 3's reference-image comparison use case.** Automated pixel-diffing against reference images needs a deterministic, UI-free frame:
+* The FPS counter changes every frame — guarantees a diff against any fixed reference image regardless of whether the actual rendering is correct.
+* The tuning panel occupies real screen area and can visually overlap the content (stars/bloom) that Phase 3 actually wants to verify.
+* Font/AA rendering of ImGui text can vary subtly across systems, adding noise unrelated to the rendering bug being tested.
+
+Recommend: for `--screenshot-out` (the automated/CI path), skip the ImGui render pass entirely for the captured frame (or capture from a texture copy of `backbufferView` taken right after the tonemap pass, before ImGui draws) — giving Phase 3 a clean, deterministic scene-only image. F12 (interactive, manual use) can reasonably keep including the UI overlay, since a human taking a screenshot generally wants "what I'm looking at, panel included." This wasn't a regression introduced by this branch (the ordering choice predates bloom) but bloom is what makes it acutely relevant now, since Phase 3 is the reason `--screenshot-out` exists at all.
+
+## 5. WGSL/Dawn correctness
+
+* **Texture usage flags:** all four HDR intermediates (`hdrSceneTexture_`, `brightPassTexture_`, `blurTempTexture_`, `bloomTexture_`) get `RenderAttachment | TextureBinding` via the shared `CreateHdrTexture()` helper — exactly what each needs (rendered into by one pass, sampled by the next), nothing over- or under-provisioned. No `CopySrc`/`CopyDst`/`StorageBinding` requested anywhere they aren't needed.
+* **Bind group layouts:** both `singleTextureBindGroupLayout_` and `finalCompositeBindGroupLayout_` declare `TextureSampleType::UnfilterableFloat`, matching a shader that never declares a `sampler` and only ever calls `textureLoad` — internally consistent, and this is the *correct*, in fact *required*, sample type for a texture-only (no sampler) binding of this shape. No validation mismatch.
+* **On the "unfilterable textureLoad for RGBA16Float portability" rationale specifically:** the stated reasoning is shakier than the implementation choice itself. Per the WebGPU format table, `rgba16float` is filterable in core (no `float32-filterable`-style feature gate needed) — only the 32-bit float formats require that. So portability wasn't actually at risk either way. That said, going `UnfilterableFloat`+`textureLoad` **does not hurt this particular blur's quality**: the 5-tap kernel does exact discrete texel fetches at integer offsets regardless of whether the bound sample type is filterable, so every tap lands exactly where the math intends. What it *does* forgo is a possible efficiency win — the classic trick of using a linear-filtered `textureSample` to combine two adjacent taps into one interpolated fetch, roughly halving the sample count for equivalent-looking output. Given this is a full-resolution (non-downsampled), two-pass separable blur running every presented frame, that's a real perf headroom left on the table, not a correctness problem. Worth a follow-up if frame time on this path ever becomes a concern; not blocking.
+* **Pass/pipeline structure:** each of the 4 fullscreen passes (bright-extract, blur×2, tonemap) is correctly `Begin`'d and `End`'d sequentially on the same encoder before the next starts (no overlapping-render-pass validation risk); none declare a depth-stencil attachment or vertex buffers, matching `vs_fullscreen`'s builtin-only, buffer-free 3-vertex trick; `colorTarget.blend` is left null (full overwrite) on all of them, consistent with every pass being a full-viewport replace.
+
+## 6. Live verification: still not possible in this container
+
+Checked explicitly, as instructed: `$DISPLAY`, `$WAYLAND_DISPLAY`, `$XDG_RUNTIME_DIR` are all empty; `/tmp/.X11-unix` has no socket; `/run/user/*/wayland-*` doesn't exist; `xdotool`, `wmctrl`, `kwin_wayland`, `Xwayland` are all absent from `PATH`. The `5058d21` headless-tooling image rebuild has not reached this container/worktree. Ran the built binary directly to confirm: it fails immediately and cleanly at GLFW init (`GLFW Error (65550): Failed to detect any supported platform`), same as every prior audit in this environment — no bloom-specific regression in that failure path, but this means **none of §3's shader math or §4's screenshot-ordering conclusion has been visually confirmed** — both are from reading the code and shader math by hand, not from a rendered frame. A real `--screenshot-out` run and PNG inspection (bloom glow visible and not blown out/invisible, no shear, ImGui panel present/absent as expected) remains the strongest outstanding verification step once display tooling is available.
+
+## 7. Build
+
+Fresh `cmake -S . -B build-native` + full `cmake --build build-native -j$(nproc)` in this isolated worktree: clean, zero warnings or errors, all targets (`glfw`, `pgu`) built successfully. `./pgu --help` still works correctly.
+
+## 8. Verdict
+
+**Not clean — one real, actionable finding (§4), everything else checks out.** Resize/bind-group handling (§1–2) is correctly wired end-to-end and should not regress the earlier hard-won drag-resize fix. The bloom/tonemap math (§3) is standard and sane by hand-inspection. The WGSL/Dawn texture and bind group setup (§5) is correct, with one low-priority efficiency nit (foregone bilinear-tap optimization; the stated "portability" rationale for going unfilterable doesn't hold up, but the choice itself is harmless). §4 is the one item I'd actually block on before Phase 3 builds reference-image comparisons on top of `--screenshot-out`: capturing post-ImGui will poison any pixel-diff against a clean reference image. Recommend: merge the bloom pipeline itself, but route a small follow-up to make `--screenshot-out` capture pre-ImGui (or suppress ImGui for that specific captured frame) before Phase 3 depends on it. Live visual confirmation of the bloom output and the screenshot ordering is still outstanding, blocked on display tooling not yet being present in this container.

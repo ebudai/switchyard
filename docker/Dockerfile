@@ -9,7 +9,7 @@ RUN pacman -Syu --noconfirm && \
         base-devel cmake ninja clang git tmux fish python openssh jq \
         libx11 libxrandr libxinerama libxcursor libxi libxkbcommon \
         wayland wayland-protocols \
-        vulkan-icd-loader vulkan-headers mesa \
+        vulkan-icd-loader vulkan-headers mesa vulkan-swrast \
         kwin xorg-xwayland xdotool wmctrl imagemagick \
     && pacman -Scc --noconfirm
 

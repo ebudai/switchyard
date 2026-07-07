@@ -24,14 +24,15 @@ docker build -t pgu-team:latest --build-arg USER_UID=(id -u) --build-arg USER_GI
 
 ## Run
 
-Only two things are bind-mounted in: the bare git repos (so `origin` resolves
-identically inside the container) and `~/.claude`/`~/.claude.json`/
+Only a few things are bind-mounted in: the bare git repos (so `origin`
+resolves identically inside the container), `~/.claude`/`~/.claude.json`/
 `~/.gitconfig` (so memory, session transcripts, auth, and git identity carry
-over). Everything else — the working copy, build artifacts — is cloned fresh
-inside the container's own filesystem at startup and never touches the bare
-host. That's the actual isolation boundary: bypass-permissions mode can do
-whatever it wants inside the container, but has no path to anything on the
-host except the git object store and Claude's own config.
+over), and OpenAI Codex CLI's config/auth (see below). Everything else — the
+working copy, build artifacts — is cloned fresh inside the container's own
+filesystem at startup and never touches the bare host. That's the actual
+isolation boundary: bypass-permissions mode can do whatever it wants inside
+the container, but has no path to anything on the host except the git object
+store, Claude's own config, and Codex's own config.
 
 ```fish
 docker run -d --name pgu-team \
@@ -39,23 +40,22 @@ docker run -d --name pgu-team \
   -v ~/.claude:/home/eric/.claude \
   -v ~/.claude.json:/home/eric/.claude.json \
   -v ~/.gitconfig:/home/eric/.gitconfig:ro \
+  -v /ai_models/codex-home/.codex:/home/eric/.codex \
   pgu-team:latest
 ```
 
-### Codex CLI auth doesn't persist across rebuilds
+### Codex CLI auth persistence
 
 The image also ships OpenAI's `codex` CLI (see Dockerfile) as a manual
 alternative implementer Eric runs by hand in whichever pane he wants — it's
 not wired into `roles.json`/`entrypoint.sh` and isn't launched automatically.
 Codex keeps its config and auth under `~/.codex` (`CODEX_HOME`, confirmed via
-`codex doctor`), which is **not** one of the bind-mounted paths above. That
-means `codex login` has to be redone after every container rebuild/recreate.
-If that gets annoying, add a fourth bind mount the same way `.claude` is
-handled:
-
-```fish
-  -v ~/.codex:/home/eric/.codex \
-```
+`codex doctor`), so the run command above bind-mounts it by default, the same
+way `.claude` is handled, and `codex login` carries over across container
+rebuilds/recreates. The mount source is `/ai_models/codex-home/.codex`
+rather than `~/.codex` because on the host `~/.codex` is itself a symlink to
+that path (it lives on Eric's Optane drive) — using the real target avoids
+any ambiguity in how Docker resolves a symlinked bind-mount source.
 
 Brings up six standing tmux sessions inside the container, each running a
 `claude` instance: `pgu-director`, `pgu-main`, `pgu-ui`, `pgu-audit`,

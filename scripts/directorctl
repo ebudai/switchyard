@@ -216,7 +216,7 @@ if not pane_text:
 lines = pane_text.splitlines()
 horizontal_indices = [
     idx for idx, line in enumerate(lines)
-    if len(line.strip()) >= 40 and all(c == "─" for c in line.strip())
+    if line.count("─") >= 40
 ]
 if len(horizontal_indices) >= 2:
     composer_content = "\n".join(lines[horizontal_indices[-2] + 1 : horizontal_indices[-1]])

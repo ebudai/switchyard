@@ -449,3 +449,57 @@ The shared main working directory (`/home/eric/Projects/pgu`) is currently check
 ## 7. Verdict
 
 **Clean, no second latent attachment mismatch.** Both changes are correct and match the pass shapes they bind to; exhaustively traced every pipeline/pass pair in the renderer (scene, dust, nebula, all four postprocess passes, ImGui) and confirmed all are now consistent, with the two that were fixed being the only two that were ever wrong. Nebula's depth removal is safe on two independent grounds (the pass never bound depth at all, and the additive blend is order-independent regardless). ImGui's depth removal is correct given its pass genuinely has no depth attachment, with no other call site depending on the old behavior. Build is clean. Fix is minimal and targeted, modulo one harmless dead accessor left behind. **Can't confirm:** whether this actually eliminates the reported runtime Dawn validation crash — no display/GPU driver in this container to run the app and observe. Recommend merging to `main` on the strength of the static trace (this is unambiguously a real bug being fixed, and the "does it actually stop crashing" question is best answered by whoever next runs it with a real GPU, ideally as the very first thing checked after the next image rebuild). Also flagging the shared-checkout branch state (§6) separately from this fix's own correctness.
+
+---
+
+# Validator Audit Report — kMaxCutSurfels 16384→65536 + bloom re-tune
+
+**Methodology:** Focused static audit on the one part of a tuning change with real correctness stakes (a fixed-capacity constant bump), plus a lower-risk shader-literal sanity check. Reviewed in an isolated worktree at `/home/eric/Projects/pgu-sharp-audit` (detached HEAD — as with the previous audit, the branch was already checked out directly in the shared main working directory rather than a worktree; see the standing note in the prior report).
+**Branch reviewed:** `tune/fidelity-sharpness`, commit `8a9c5a2` "Tune galaxy sharpness". Diff confirmed exactly 2 files via `git diff origin/main...8a9c5a2 --stat`: `gpu_types.h` (+1/-1), `shaders/postprocess.wgsl` (+3/-3) — matches the director's description exactly, nothing else snuck in.
+**Status:** **Clean.**
+
+## 1. Every use of `kMaxCutSurfels` — all scale off the constant, no hardcoded 16384, no uint16 landmine
+
+`grep -rn "kMaxCutSurfels"` across the whole tree finds exactly these consumers, all of which read the constant rather than a copied literal:
+
+* `gpu_types.h:17` — the definition itself, now `65536`.
+* `galaxy_system.h:31-32` — `pointPositions_.resize(kMaxCutSurfels)` / `pointStaticAttributes_.resize(kMaxCutSurfels)` in the `GalaxySystem` constructor: the two CPU-side per-frame cut vectors, sized directly off the constant.
+* `galaxy_system.h:740-741` — `SelectCut`'s fixed-capacity guard: `if (cutSurfelCount_ >= kMaxCutSurfels) return;` before any write. Traced `EmitSurfel` (galaxy_system.h:908-922): it writes to `pointPositions_[out]`/`pointStaticAttributes_[out]` where `out = cutSurfelCount_` *before* incrementing — so the guard in `SelectCut` is the only thing standing between this write and an out-of-bounds index, and it correctly gates on the same constant the vectors were sized to. No separate/duplicated bound anywhere.
+* `renderer.h:154,159` — `positionBufferDescriptor.size`/`staticBufferDescriptor.size`, the two GPU vertex buffers, also sized directly off the constant (`static_cast<uint64_t>(kMaxCutSurfels) * sizeof(...)`).
+
+Every consumer traces back to the one constant — raising it in `gpu_types.h` keeps all four allocation sites (2 CPU vectors, 2 GPU buffers) and the one guard consistent by construction; there's no fifth place to miss.
+
+**Hardcoded-16384 check:** `grep -rn "16384"` across the project source (excluding `third_party/`) returns **zero hits** — the only `16384` matches anywhere in the tree are inside `third_party/glfw`, `third_party/imgui`'s vendored `stb`/`nuklear` code, completely unrelated constants (a zlib hash table size, Vulkan flag bit values, TrueType font unit scaling). Nothing project-side hardcodes the old cap.
+
+**uint16 check — this was the specific landmine to check for, and it's absent:** `grep -rn "uint16_t\|uint16\b\|u16\b"` across every project header/source/shader/test file returns **zero hits**. Every surfel-related count and index in the codebase — `cutSurfelCount_`, `dustSurfelCount_`, `nebulaSurfelCount_`, the `CutSurfelCount()`/etc. accessors, `SurfelNode::childStart`/`childCount`, every loop index touching the hierarchy or the cut arrays — is `uint32_t` (confirmed by reading the full declaration list in `galaxy_system.h` and `gpu_types.h`, not just grepping the word "count"). `65536` fits `uint32_t` with vast headroom (max ~4.29 billion); there's no off-by-one-at-a-power-of-two risk here because nothing narrower than 32 bits is in the surfel-count path at all.
+
+**No workgroup/dispatch assumption:** grepped for `Dispatch`/`workgroup`/`@compute`/`ComputePipeline` across the whole project tree — zero hits outside `third_party`. This renderer has no compute shaders; the LOD cut is built entirely CPU-side (`SelectCut`, confirmed WebGPU-agnostic per its own header comment) and uploaded as a plain instanced vertex-buffer draw (`pass.Draw(6, cutSurfelCount)` in `renderer.h`'s `RenderFrame`). There is no dispatch grid or workgroup size anywhere that could have been silently tuned for the old 16384 cap.
+
+## 2. Memory/perf sanity — trivial at 4x
+
+`sizeof(PointPosition) == 12` and `sizeof(PointStaticAttributes) == 36` (both `static_assert`-enforced in `gpu_types.h`, so these can't silently drift from the GPU layout). At the new cap:
+* GPU position buffer: `65536 × 12 = 786,432` bytes (768 KiB).
+* GPU static-attribute buffer: `65536 × 36 = 2,359,296` bytes (2.25 MiB).
+* Matching CPU-side vectors: same two sizes again (~3 MiB total CPU + ~3 MiB GPU).
+
+Combined, well under 6 MiB total for both cap-driven allocations doubled across CPU/GPU — four orders of magnitude below any default WebGPU/Dawn buffer-size limit (defaults are in the hundreds-of-MB range; no `requiredLimits` are requested anywhere in `InitDevice` that could clamp this lower). This is not a meaningful allocation by any GPU's standards. Perf-wise, the director's own telemetry (21,792 surfels actually drawn at the test view) is well under even the *old* 16,384 cap's neighborhood at 1.3x — the 65536 ceiling is headroom, not something the renderer will realistically saturate at typical view distances; cost scales with surfels actually emitted (tree-cut traversal cost is bounded by rendered surfels per the class's own doc comment), not the cap.
+
+## 3. Bloom shader literals — confirmed to be the only change, and numerically sane
+
+`git diff origin/main...8a9c5a2 -- shaders/postprocess.wgsl` touches exactly three numeric literals, nothing structural: `fs_bright_extract`'s `threshold` (1.0→1.5) and `knee` (0.35→0.2), and `fs_tonemap`'s `bloom_strength` (0.45→0.22). Traced both functions in full:
+* `fs_bright_extract`: `soft = clamp((luminance - threshold + knee) / (2.0 * knee), 0.0, 1.0)` — `knee = 0.2` is still strictly positive, so `2.0 * knee = 0.4` in the denominator is safe, no div-by-zero. `contribution = max(luminance - threshold, 0.0) + soft*soft*knee` and `scale = contribution / max(luminance, 1.0e-4)` — the `1.0e-4` floor on the luminance divisor is untouched by this diff and still guards that division independently of the threshold/knee values.
+* `fs_tonemap`: `bloom_strength` is a plain multiplicative scale (`scene + bloom * bloom_strength`) with no division at all — there's no way a smaller positive value here introduces a div-by-zero or numerical instability; it just scales bloom contribution down, consistent with the stated "less haze" intent.
+
+No other lines in the shader changed — confirmed via the stat above (+3/-3, matching exactly the three literal edits, no stray whitespace/logic touched).
+
+## 4. Build — clean
+
+Fresh `cmake -S . -B build` + `cmake --build build -j32` in the isolated worktree: **exit 0**, no warnings surfaced, all targets linked successfully.
+
+## 5. Scope/minimality
+
+Diff is exactly the two described numeric changes across two files — no restructuring, no touched tests (grepped `tests/` for `kMaxCutSurfels`/`16384`/`65536`: no test depends on or asserts against this constant, so none needed updating and none are at risk of now-stale expectations).
+
+## 6. Verdict
+
+**Clean.** The `kMaxCutSurfels` bump is the only part of this change with real correctness stakes, and it checks out completely: every one of its four allocation sites plus the one bounds-check guard scale off the single constant, there is no hardcoded `16384` anywhere in project source, and — the specific landmine the director flagged — **there is no `uint16_t`/narrower-than-32-bit surfel index or count anywhere in the codebase**, so `65536` (which does exceed `uint16_t`'s range by one) has nothing to overflow into. No compute dispatch/workgroup sizing exists at all in this renderer, so that class of assumption doesn't apply here. Memory impact is trivial (~3 MiB CPU + ~3 MiB GPU total, four orders of magnitude under any realistic limit). The bloom shader edits are confirmed to be exactly the three stated literals, all numerically safe (no new div-by-zero, knee/threshold both still positive). Build is clean. Recommend merging to `main`.

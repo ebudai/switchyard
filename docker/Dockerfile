@@ -6,7 +6,7 @@ FROM archlinux:latest
 
 RUN pacman -Syu --noconfirm && \
     pacman -S --noconfirm --needed \
-        base-devel cmake ninja clang git tmux fish python openssh \
+        base-devel cmake ninja clang git tmux fish python openssh jq \
         libx11 libxrandr libxinerama libxcursor libxi libxkbcommon \
         wayland wayland-protocols \
         vulkan-icd-loader vulkan-headers mesa \

@@ -35,11 +35,12 @@ docker run -d --name pgu-team \
   pgu-team:latest
 ```
 
-Brings up six standing tmux sessions inside the container:
-`pgu-director` (resumes `DIRECTOR_SESSION_ID`, defaulting to the session ID
-baked into `entrypoint.sh` — override with `-e DIRECTOR_SESSION_ID=<id>` for
-a fresh director), plus fresh `pgu-main`/`pgu-ui`/`pgu-audit`/`pgu-ops`/
-`pgu-watchdog`.
+Brings up five standing tmux sessions inside the container, each running a
+`claude` instance: `pgu-director`, `pgu-main`, `pgu-ui`, `pgu-audit`,
+`pgu-ops`. (`pgu-watchdog` is not one of these — `scripts/director_watchdog.py`
+is a plain mechanical script, not a Claude role. Ops normally starts it via
+`scripts/startwatchdog.fish`, which creates its own `pgu-watchdog` tmux
+session as its first action.)
 
 Each freshly-launched `claude` instance stops at a one-time bypass-permissions
 consent screen on first use in the container — confirm it once per session:
@@ -53,4 +54,51 @@ docker exec pgu-team tmux send-keys -t <session>:0.0 Enter
 
 ```fish
 docker exec pgu-team bash -c "cd ~/Projects/pgu && scripts/directorctl status"
+```
+
+## Per-role model config (`roles.json`)
+
+`entrypoint.sh` no longer hardcodes one model for every role. It reads
+`docker/roles.json` (part of the repo — the container's fresh clone already
+has it, no extra bind mount needed) and launches each role's `claude` with
+that role's own `--model`:
+
+```json
+{
+  "roles": {
+    "director":  { "model": "claude-opus-4-8",   "resume_session_id": "<uuid>" },
+    "main":      { "model": "claude-sonnet-5" },
+    "ui":        { "model": "claude-sonnet-5" },
+    "audit":     { "model": "claude-sonnet-5" },
+    "ops":       { "model": "claude-sonnet-5" }
+  }
+}
+```
+
+`watchdog` deliberately has no entry — it isn't a Claude role, see above.
+
+Rationale for the defaults: director gets the strongest model (Opus 4.8) —
+it's the one doing planning/orchestration. Main/UI/audit/ops get Sonnet 5 —
+plenty capable for implementation and review at lower cost. Edit
+`docker/roles.json` and commit — the next container start (or a fresh
+`docker exec ... entrypoint`) picks up the change, no script edits required.
+
+`resume_session_id` is optional per-role (only `director` uses it today). To
+override the director's resume target for one run without editing the file,
+`-e DIRECTOR_SESSION_ID=<uuid>` still works (set it to an empty string to
+force a fresh director instead of resuming).
+
+## Viewing all sessions (host side)
+
+The nested-tmux "dashboard" approach (one outer tmux window tiling six
+attached inner sessions) doesn't work reliably — mouse focus and the
+`Ctrl-b` prefix collide between the outer session and every inner one.
+Instead, `scripts/open-team-windows.sh` opens six separate host terminal
+windows (Konsole), each running one plain
+`docker exec -it pgu-team tmux attach -t pgu-<role>` — no nesting, so mouse
+clicks and prefix keys behave normally in whichever window has focus. Tile
+them yourself (KWin quick-tile / drag-to-edge), same as the old VM setup:
+
+```fish
+scripts/open-team-windows.sh
 ```

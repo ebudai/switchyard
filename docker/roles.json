@@ -1,0 +1,20 @@
+{
+  "roles": {
+    "director": {
+      "model": "claude-opus-4-8",
+      "resume_session_id": "916d2445-6e1c-45d3-a04d-9b9299f7d0f7"
+    },
+    "main": {
+      "model": "claude-sonnet-5"
+    },
+    "ui": {
+      "model": "claude-sonnet-5"
+    },
+    "audit": {
+      "model": "claude-sonnet-5"
+    },
+    "ops": {
+      "model": "claude-sonnet-5"
+    }
+  }
+}

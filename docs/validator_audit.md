@@ -398,3 +398,54 @@ Not applicable and not available (checked anyway for consistency with prior audi
 ## 7. Verdict
 
 **Clean.** This is a genuine, careful, behavior-preserving extraction — verified by direct line-by-line comparison against the pre-refactor code, not by pattern-matching or trusting the commit message. The one non-literal adaptation (the `CreateTextures` guard-before-assign reordering) was traced through and confirmed to have no observable effect. No ODR issues, no double ownership, no lifetime risk — the two new classes compose cleanly into `Renderer`, one by value with matching lifetime, one fully stateless with no lifetime to worry about at all. Build verified clean myself. The aspect-ratio test passes but was never actually exposed to this change. Line count confirmed under the watchdog limit. Nothing here needs a screenshot to be called done — this one really is fully clean, not "clean pending a visual check" like the last three.
+
+---
+
+# Validator Audit Report — Color-only pass pipeline attachment fix
+
+**Methodology:** Static, exhaustive pipeline↔pass attachment trace. No GPU driver available in this container, so this is compile-time/logic verification only — I say explicitly below what I can't confirm.
+**Branch reviewed:** `fix/postprocess-depth-attachment`, commit `94256b9` "Fix color-only pass pipeline attachments" (1 commit ahead of `main`/`7a3dfe0`), reviewed in an isolated worktree at `/home/eric/Projects/pgu-attach-audit` (detached HEAD — the branch itself was already checked out in the shared main working directory, see §6). Diff: `main.cpp` +1/-1, `renderer.h` +8/-5, `tuning_panel.h` +2/-3.
+**Status:** **Clean.**
+
+## 1. Every render pipeline vs. its render pass — traced exhaustively
+
+Went through every `BeginRenderPass`/pipeline pair in `RenderFrame()` (renderer.h) and `RunPasses()` (renderer_postprocess.h):
+
+| Pass | Color format(s) | Depth attachment? | Pipeline used | Pipeline's declared depthStencil | Match? |
+|---|---|---|---|---|---|
+| Star (scene) pass, L557-593 | `RGBA16Float` (`postProcess_.HdrSceneView()`) | Yes, `depthView_` (`Depth24Plus`) | `hardwarePointPipeline_` or `splatAdditivePipeline_`/`splatAlphaPipeline_` | `Depth24Plus` (`hardwareDepthStencil`/`splatDepthStencil`) | ✅ |
+| Dust pass, L595-613 | `RGBA16Float` | No | `dustExtinctionPipeline_` | none (`pipelineDescriptor.depthStencil` never set, L419-429) | ✅ (pre-existing, untouched by this diff) |
+| Nebula pass, L615-633 | `RGBA16Float` | No | `nebulaAdditivePipeline_` | none, **as of this fix** (`createSplatPipeline(&additiveBlend, nullptr)`) | ✅ now — was ❌ before (pipeline declared `Depth24Plus`, pass bound no depth texture — this was the crash) |
+| Bright-extract / blur-H / blur-V, renderer_postprocess.h L76-78 | `RGBA16Float` each | No | `brightExtractPipeline_`/`blurHorizontalPipeline_`/`blurVerticalPipeline_` | none (`CreateFullscreenPipeline` never sets `depthStencil`) | ✅ (untouched by this diff) |
+| Tonemap (composite), L79 | `surfaceFormat_` (matches `backbufferView`) | No | `tonemapPipeline_` | none | ✅ (untouched) |
+| ImGui pass, L664-676 | `surfaceFormat_` (`backbufferView`) | No (`imguiPassDescriptor` has no `depthStencilAttachment`) | ImGui WGPU backend's internal pipeline, built from `RenderTargetFormat`/`DepthStencilFormat` passed to `InitImGui` | `RenderTargetFormat = SurfaceFormat()`, `DepthStencilFormat = Undefined`, **as of this fix** | ✅ now — was ❌ before (`DepthStencilFormat` was `renderer_.DepthFormat()` = `Depth24Plus`, but the ImGui pass never bound a depth texture) |
+
+All six color-format matches were already correct before this fix (color target formats were never the issue). `sampleCount` is `1` everywhere — every texture descriptor (`depthDescriptor`, `CreateHdrTexture`, the surface config) and every pipeline's `multisampleState` hard-codes `count = 1`; no MSAA path exists anywhere in this codebase, so there's no sample-count mismatch to check for.
+
+**Confirmed: no second latent mismatch.** The two pairs the fix touched (nebula pipeline↔pass, ImGui pipeline↔pass) are the only two that were ever wrong — every other pipeline/pass pair was already consistent, including the four postprocess passes and the dust pass, none of which this commit touches.
+
+## 2. Nebula depth removal — safe, and the pass never had depth to begin with
+
+Checked whether nebula was ever meaningfully depth-tested against stars before this fix, since removing a depth test silently changing draw order/occlusion would be a real regression. It wasn't, for a stronger reason than "nebula is additive so order doesn't matter": **the nebula render *pass* (`nebulaPassDescriptor`, L621-623) has never bound a depth attachment at all, before or after this commit** — that code is untouched by this diff. Only the *pipeline's* declared `depthStencil` state changed (from `&splatDepthStencil` to `nullptr`). Since Dawn's validation requires a pipeline's depth/stencil declaration to match the bound pass, the pre-fix combination (pipeline says "I have a Depth24Plus attachment", pass says "no depth attachment bound") would have failed pass creation/draw validation immediately — meaning nebula never successfully depth-tested against anything at runtime in the pre-fix code; it just crashed. There is no prior "nebula occluded correctly behind stars via depth test" behavior being removed here, because that behavior never worked in the first place. The fix is purely bringing the pipeline's declaration in line with a pass shape that was already fixed.
+
+Separately, even had the pass carried a depth attachment, `additiveBlend` (`srcFactor=One, dstFactor=One, Add` on both channels) is genuinely commutative/associative, and `splatDepthStencil` — when it *is* used, e.g. for `splatAdditivePipeline_`/`splatAlphaPipeline_` in the star pass — sets `depthWriteEnabled = false`, so even the surviving depth-tested splat pipelines only *read* depth (test against the hardware-point pipeline's writes), never write it themselves. So the "was nebula relying on being depth-tested against stars" question has a firm no on two independent grounds: the pass never bound depth, and the additive math wouldn't have depended on draw order even if it had.
+
+## 3. ImGui depth removal — confirmed correct, no other consumer
+
+`imguiPassDescriptor` (renderer.h L669-671) sets only `colorAttachmentCount = 1`/`colorAttachments = &imguiColorAttachment` — no `depthStencilAttachment` field is populated (it's default/null on `wgpu::RenderPassDescriptor`). So `WGPUTextureFormat_Undefined` is the only correct value for `initInfo.DepthStencilFormat` in `InitImGui`; the pre-fix `renderer_.DepthFormat()` (`Depth24Plus`) was simply wrong for a pass that has never included a depth buffer. Grepped for other `InitImGui`/`DepthFormat()` call sites (`select:Grep` over `*.cpp`/`*.h`): `InitImGui` has exactly one call site (`main.cpp:282`, updated correctly to drop the now-removed parameter), and `DepthFormat()` — the `Renderer` accessor that used to feed it — has no remaining callers at all; it's now dead code (harmless, but worth a follow-up cleanup, not a correctness issue and not something I'd block this fix on).
+
+## 4. Build — clean
+
+Fresh `cmake -S . -B build` + `cmake --build build -j32` in the isolated worktree: configures and links with **exit 0**, no warnings surfaced in the build log. This confirms the fix is at minimum syntactically/type correct; it does **not** confirm the fix resolves the reported Dawn validation crash at runtime — no GPU driver in this container (checked: no `DISPLAY`/`WAYLAND_DISPLAY`, no Xwayland), so the actual "does the app now run past frame 1 instead of crashing" behavior is unverified and needs a real display environment.
+
+## 5. Minimality — confirmed targeted, one pre-existing loose end noted
+
+The diff is exactly the two described changes: `createSplatPipeline`'s lambda gained a second parameter used only to give `nebulaAdditivePipeline_` a `nullptr` depth state (the other two call sites pass `&splatDepthStencil`, unchanged in effect), and `InitImGui`/its one call site dropped the depth-format parameter in favor of a hard-coded `Undefined`. No renaming, no reflow of unrelated lines, no touched files beyond the three needed. The one loose end is the now-dead `Renderer::DepthFormat()` accessor (§3) — leftover from the old plumbing, not cleaned up in this commit. Doesn't affect correctness and I wouldn't hold up the merge for it, but flagging so it doesn't get forgotten.
+
+## 6. Process note (not a fix-correctness issue)
+
+The shared main working directory (`/home/eric/Projects/pgu`) is currently checked out **on `fix/postprocess-depth-attachment` itself**, not `main` — someone worked directly in the shared checkout instead of a worktree. I created my isolated worktree via `git worktree add` as instructed regardless (it came up as a detached `HEAD` at `94256b9` since the branch was already checked out elsewhere), so this audit itself is unaffected, but the shared checkout being off `main` is worth the director's attention independent of this fix's merge.
+
+## 7. Verdict
+
+**Clean, no second latent attachment mismatch.** Both changes are correct and match the pass shapes they bind to; exhaustively traced every pipeline/pass pair in the renderer (scene, dust, nebula, all four postprocess passes, ImGui) and confirmed all are now consistent, with the two that were fixed being the only two that were ever wrong. Nebula's depth removal is safe on two independent grounds (the pass never bound depth at all, and the additive blend is order-independent regardless). ImGui's depth removal is correct given its pass genuinely has no depth attachment, with no other call site depending on the old behavior. Build is clean. Fix is minimal and targeted, modulo one harmless dead accessor left behind. **Can't confirm:** whether this actually eliminates the reported runtime Dawn validation crash — no display/GPU driver in this container to run the app and observe. Recommend merging to `main` on the strength of the static trace (this is unambiguously a real bug being fixed, and the "does it actually stop crashing" question is best answered by whoever next runs it with a real GPU, ideally as the very first thing checked after the next image rebuild). Also flagging the shared-checkout branch state (§6) separately from this fix's own correctness.

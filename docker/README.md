@@ -7,11 +7,18 @@ bare host. See `Dockerfile`/`entrypoint.sh` for the mechanics.
 ## Build
 
 The Claude Code binary itself isn't committed (240MB, changes on every
-update) — copy your local install into the build context first:
+update) — copy your local install into the build context first. **Don't just
+`cp (which claude) ...`** — on a typical install, `which claude` resolves to
+a small wrapper script (`/usr/bin/claude`, `exec`s the real binary from
+`/opt/claude-code/bin/claude`), not the real ~250MB executable. Copying the
+wrapper into the image places it at the exact path it execs to, so it execs
+itself forever (100% CPU, zero output, no useful error — this bit us once,
+2026-07-07). Copy the real binary instead:
 
 ```fish
 mkdir -p docker/claude-bin
-cp (which claude) docker/claude-bin/claude
+cp /opt/claude-code/bin/claude docker/claude-bin/claude
+file docker/claude-bin/claude  # sanity check: must say "ELF 64-bit ... executable", not "shell script"
 docker build -t pgu-team:latest --build-arg USER_UID=(id -u) --build-arg USER_GID=(id -g) docker/
 ```
 

@@ -10,6 +10,7 @@ RUN pacman -Syu --noconfirm && \
         libx11 libxrandr libxinerama libxcursor libxi libxkbcommon \
         wayland wayland-protocols \
         vulkan-icd-loader vulkan-headers mesa \
+        kwin xorg-xwayland xdotool wmctrl imagemagick \
     && pacman -Scc --noconfirm
 
 ARG USER_UID=1000

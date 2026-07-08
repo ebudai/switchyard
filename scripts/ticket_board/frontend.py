@@ -29,7 +29,7 @@ HTML = """<!doctype html>
     .layout {
       min-height: 100vh;
       display: grid;
-      grid-template-columns: 320px minmax(0, 1fr) 360px;
+      grid-template-columns: 300px minmax(0, 1fr);
     }
     aside, .detail {
       background: var(--panel);
@@ -37,7 +37,11 @@ HTML = """<!doctype html>
       overflow: auto;
     }
     aside { border-right: 1px solid var(--border); }
-    .detail { border-left: 1px solid var(--border); }
+    .detail {
+      grid-column: 1 / -1;
+      min-height: 0;
+      border-top: 1px solid var(--border);
+    }
     .shell {
       min-width: 0;
       display: grid;
@@ -47,6 +51,7 @@ HTML = """<!doctype html>
       padding: 16px 18px;
       border-bottom: 1px solid var(--border);
       display: flex;
+      flex-wrap: wrap;
       justify-content: space-between;
       gap: 16px;
       align-items: start;
@@ -57,7 +62,11 @@ HTML = """<!doctype html>
     }
     .topbar h1, .panel-head h2, .detail-head h2 { margin: 0; font-size: 18px; }
     .subtle, .meta, .hint { color: var(--muted); font-size: 13px; line-height: 1.45; }
-    .paths { text-align: right; max-width: 440px; }
+    .paths {
+      text-align: right;
+      max-width: min(100%, 34rem);
+      margin-left: auto;
+    }
     .panel-head, .detail-head {
       padding: 16px 18px;
       border-bottom: 1px solid var(--border);
@@ -117,9 +126,9 @@ HTML = """<!doctype html>
       padding: 18px;
     }
     .board {
-      min-width: 1220px;
+      min-width: 1100px;
       display: grid;
-      grid-template-columns: repeat(5, minmax(230px, 1fr));
+      grid-template-columns: repeat(5, minmax(205px, 1fr));
       gap: 16px;
       align-items: start;
     }
@@ -218,10 +227,14 @@ HTML = """<!doctype html>
       line-height: 1.5;
     }
     .error-box { border-color: rgba(253,164,175,0.35); color: #fecdd3; }
-    .detail-box { display: grid; gap: 12px; }
+    .detail-box {
+      display: grid;
+      gap: 12px;
+      width: min(100%, 76ch);
+    }
     .detail-grid {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 10px;
     }
     .field-label { font-size: 12px; color: var(--muted); text-transform: uppercase; }
@@ -247,9 +260,34 @@ HTML = """<!doctype html>
       border-left: 2px solid var(--border);
       padding-left: 10px;
     }
-    @media (max-width: 1500px) {
-      .layout { grid-template-columns: 300px minmax(0, 1fr); }
-      .detail { grid-column: 1 / -1; min-height: 0; border-left: 0; border-top: 1px solid var(--border); }
+    @media (min-width: 1800px) {
+      .layout { grid-template-columns: 300px minmax(0, 1fr) minmax(420px, 32rem); }
+      .detail {
+        grid-column: auto;
+        min-height: 100vh;
+        border-top: 0;
+        border-left: 1px solid var(--border);
+      }
+      .board {
+        min-width: 1080px;
+        grid-template-columns: repeat(5, minmax(200px, 1fr));
+      }
+    }
+    @media (max-width: 1200px) {
+      .detail-grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 980px) {
+      .board { min-width: 980px; }
+    }
+    @media (max-width: 900px) {
+      .board {
+        min-width: 0;
+        grid-template-columns: 1fr;
+      }
+      .paths {
+        text-align: left;
+        margin-left: 0;
+      }
     }
     @media (max-width: 980px) {
       .layout { grid-template-columns: 1fr; }

@@ -11,7 +11,8 @@ from typing import Any
 
 STORE_DIR_DEFAULT = Path("~/.claude/pgu-tickets").expanduser()
 FRAME_DIR_DEFAULT = Path("/tmp/pgu-frames")
-ASSIGNEES = ("unassigned", "main", "ui", "perf", "ops", "audit")
+ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit")
+LEGACY_ASSIGNEE_ALIASES = {"ui": "app"}
 STATES = ("open", "in_progress", "audit", "eric_review", "done")
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
@@ -229,6 +230,7 @@ class TicketBoardApp:
         return state
 
     def _validate_assignee(self, assignee: str) -> str:
+        assignee = LEGACY_ASSIGNEE_ALIASES.get(assignee, assignee)
         if assignee not in ASSIGNEES:
             raise ValueError(f"invalid assignee: {assignee}")
         return assignee

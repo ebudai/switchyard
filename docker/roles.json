@@ -7,7 +7,7 @@
     "main": {
       "model": "claude-sonnet-5"
     },
-    "ui": {
+    "app": {
       "model": "claude-sonnet-5"
     },
     "audit": {

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly DEFAULT_DIRECTOR_TARGET="pgu-director:0.0"
-readonly KNOWN_SESSIONS=(pgu-director pgu-main pgu-audit pgu-ui pgu-research pgu-ops)
+readonly KNOWN_SESSIONS=(pgu-director pgu-main pgu-audit pgu-app pgu-research pgu-ops)
 readonly PASTE_THRESHOLD=200
 readonly DEFAULT_CAPTURE_LINES=20
 readonly SUBMIT_VERIFY_ATTEMPTS=2

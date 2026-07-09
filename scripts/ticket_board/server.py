@@ -3,16 +3,83 @@
 from __future__ import annotations
 
 import json
+import logging
 import mimetypes
 import queue
+import subprocess
 import threading
 import time
 import urllib.parse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Callable
 
 from .app import TicketBoardApp
 from .frontend import HTML
+
+LOGGER = logging.getLogger(__name__)
+DIRECTOR_TARGET = "pgu-director:0.0"
+DIRECTOR_NOTIFICATION_BATCH_WINDOW_SECONDS = 0.35
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def send_director_message(payload: str, target: str = DIRECTOR_TARGET) -> None:
+    subprocess.run(
+        [str(REPO_ROOT / "scripts" / "directorctl"), "send", target, payload],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+class DirectorNotifier:
+    def __init__(
+        self,
+        *,
+        sender: Callable[[str], None] | None = None,
+        batch_window_seconds: float = DIRECTOR_NOTIFICATION_BATCH_WINDOW_SECONDS,
+    ) -> None:
+        self.sender = sender or send_director_message
+        self.batch_window_seconds = batch_window_seconds
+        self._lock = threading.Lock()
+        self._pending_created: list[tuple[str, str]] = []
+        self._timer: threading.Timer | None = None
+
+    def notify_ticket_created(self, ticket: dict[str, object]) -> None:
+        ticket_id = str(ticket.get("id", "")).strip()
+        title = str(ticket.get("title", "")).strip()
+        if not ticket_id or not title:
+            return
+        with self._lock:
+            self._pending_created.append((ticket_id, title))
+            if self._timer is None:
+                self._timer = threading.Timer(self.batch_window_seconds, self._flush_created)
+                self._timer.daemon = True
+                self._timer.start()
+
+    def close(self) -> None:
+        with self._lock:
+            timer = self._timer
+        if timer is not None:
+            timer.join(timeout=self.batch_window_seconds + 0.5)
+        self._flush_created()
+
+    def _flush_created(self) -> None:
+        with self._lock:
+            pending = self._pending_created
+            self._pending_created = []
+            self._timer = None
+        if not pending:
+            return
+        if len(pending) == 1:
+            payload = f"New ticket for you: {pending[0][0]} -- {pending[0][1]}"
+        else:
+            payload = "New tickets for you: " + "; ".join(f"{ticket_id} -- {title}" for ticket_id, title in pending)
+        try:
+            self.sender(payload)
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Failed to send director ticket notification")
 
 
 class TicketBoardEventHub:
@@ -82,6 +149,10 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
     @property
     def events(self) -> TicketBoardEventHub:
         return self.server.events  # type: ignore[attr-defined]
+
+    @property
+    def director_notifier(self) -> DirectorNotifier:
+        return self.server.director_notifier  # type: ignore[attr-defined]
 
     def send_json(self, payload: dict[str, object], status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload).encode("utf-8")
@@ -178,6 +249,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                     blocked_by=payload.get("blocked_by"),
                 )
                 self.events.notify_change(self.app.store_signature())
+                self.director_notifier.notify_ticket_created(created)
                 self.send_json({"ticket": created}, HTTPStatus.CREATED)
                 return
             if parsed.path.startswith("/api/tickets/"):
@@ -196,11 +268,18 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
 
 
 class TicketBoardServer(ThreadingHTTPServer):
-    def __init__(self, address: tuple[str, int], app: TicketBoardApp) -> None:
+    def __init__(
+        self,
+        address: tuple[str, int],
+        app: TicketBoardApp,
+        director_notifier: DirectorNotifier | None = None,
+    ) -> None:
         self.app = app
         self.events = TicketBoardEventHub(app)
+        self.director_notifier = director_notifier or DirectorNotifier()
         super().__init__(address, TicketBoardHandler)
 
     def server_close(self) -> None:
         self.events.close()
+        self.director_notifier.close()
         super().server_close()

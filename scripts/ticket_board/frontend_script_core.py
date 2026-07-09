@@ -738,7 +738,43 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       return rootTicketForBoard(ticket).id === ticket.id;
     }
 
+    function doneTicketsForBoard() {
+      return state.tickets
+        .filter((ticket) => ticket.state === 'done')
+        .sort(compareTicketsOldestFirst);
+    }
+
+    function doneRootTicketsForBoard() {
+      const seen = new Set();
+      const roots = [];
+      doneTicketsForBoard().forEach((ticket) => {
+        const root = rootTicketForBoard(ticket);
+        if (seen.has(root.id)) {
+          return;
+        }
+        seen.add(root.id);
+        roots.push(root);
+      });
+      return roots.sort(compareTicketsOldestFirst);
+    }
+
+    function columnTicketCount(columnKey) {
+      if (columnKey === 'done') {
+        return doneTicketsForBoard().length;
+      }
+      return state.tickets
+        .filter((ticket) => (
+          ticket.state === columnKey
+          && (columnKey !== 'eric_review' || ticket.needs_eric_signoff)
+          && isTopLevelBoardTicket(ticket)
+        ))
+        .length;
+    }
+
     function columnTickets(columnKey) {
+      if (columnKey === 'done') {
+        return doneRootTicketsForBoard();
+      }
       return state.tickets
         .filter((ticket) => (
           ticket.state === columnKey
@@ -753,7 +789,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     }
 
     function renderDoneToggle() {
-      const doneCount = columnTickets('done').length;
+      const doneCount = columnTicketCount('done');
       showDoneInput.checked = state.showDone;
       showDoneCountEl.textContent = `(${doneCount})`;
     }
@@ -764,10 +800,11 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         const columnEl = document.createElement('section');
         columnEl.className = 'column';
         const tickets = columnTickets(column.key);
+        const ticketCount = columnTicketCount(column.key);
         columnEl.innerHTML = `
           <div class="column-head">
             <div class="column-title">${column.label}</div>
-            <div class="count">${tickets.length}</div>
+            <div class="count">${ticketCount}</div>
           </div>
         `;
         const body = document.createElement('div');
@@ -788,6 +825,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
 
     function renderCard(ticket) {
       const childTickets = childTicketsForBoard(ticket);
+      const doneChildren = childTickets.filter((child) => child.state === 'done');
       const card = document.createElement('article');
       card.className = 'card';
       if (manualBlockedSummary(ticket)) {
@@ -847,6 +885,12 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       }
       if (ticket.needs_eric_signoff) {
         badges.appendChild(badge(`eric ${ticket.eric_signoff ? '✓' : '✗'}`, ticket.eric_signoff));
+      }
+      if (doneChildren.length) {
+        badges.appendChild(badge(
+          doneChildren.length === 1 ? 'done child 1' : `done children ${doneChildren.length}`,
+          true,
+        ));
       }
 
       const controls = document.createElement('div');

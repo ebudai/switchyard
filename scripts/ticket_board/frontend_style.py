@@ -370,10 +370,12 @@ STYLE = """    :root {
       place-items: stretch;
       background: rgba(4, 6, 10, 0.72);
       padding: 18px;
+      overflow: auto;
     }
     .detail-modal {
       width: min(100%, 1280px);
       height: min(100vh - 36px, 100%);
+      max-height: min(100vh - 36px, 100%);
       margin: 0 auto;
       display: grid;
       grid-template-rows: auto minmax(0, 1fr);
@@ -382,6 +384,7 @@ STYLE = """    :root {
       background: linear-gradient(180deg, rgba(23, 26, 32, 0.98), rgba(15, 17, 21, 0.98));
       box-shadow: 0 30px 90px rgba(0, 0, 0, 0.42);
       overflow: hidden;
+      min-height: 0;
     }
     .detail-modal-head {
       display: flex;
@@ -394,7 +397,11 @@ STYLE = """    :root {
     }
     .detail-modal-body {
       overflow: auto;
+      min-height: 0;
+      overscroll-behavior: contain;
+      -webkit-overflow-scrolling: touch;
       padding: 22px;
+      padding-bottom: calc(22px + env(safe-area-inset-bottom, 0px));
     }
     .detail-content {
       width: min(100%, 1080px);
@@ -612,14 +619,20 @@ STYLE = """    :root {
       .detail-modal {
         width: 100%;
         height: 100vh;
+        max-height: 100vh;
         border-radius: 0;
         border-left: 0;
         border-right: 0;
       }
-      .detail-modal-head,
+      .detail-modal-head {
+        padding-top: calc(16px + env(safe-area-inset-top, 0px));
+        padding-left: calc(16px + env(safe-area-inset-left, 0px));
+        padding-right: calc(16px + env(safe-area-inset-right, 0px));
+      }
       .detail-modal-body {
-        padding-left: 16px;
-        padding-right: 16px;
+        padding-left: calc(16px + env(safe-area-inset-left, 0px));
+        padding-right: calc(16px + env(safe-area-inset-right, 0px));
+        padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
       }
     }
     @media (max-width: 900px) {
@@ -637,5 +650,22 @@ STYLE = """    :root {
       aside { min-height: 0; border-right: 0; border-left: 0; }
       aside { border-bottom: 1px solid var(--border); }
       .topbar { position: static; }
+    }
+    @supports (height: 100dvh) {
+      body,
+      .layout,
+      aside {
+        min-height: 100dvh;
+      }
+      .detail-modal {
+        height: min(100dvh - 36px, 100%);
+        max-height: min(100dvh - 36px, 100%);
+      }
+      @media (max-width: 980px) {
+        .detail-modal {
+          height: 100dvh;
+          max-height: 100dvh;
+        }
+      }
     }
 """

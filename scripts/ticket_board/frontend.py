@@ -725,6 +725,21 @@ HTML = """<!doctype html>
       bodyText.textContent = ticket.body || '(no body)';
       body.appendChild(bodyText);
 
+      const implementation = document.createElement('div');
+      implementation.innerHTML = '<div class="field-label">Implementation</div>';
+      const implementationInput = document.createElement('textarea');
+      implementationInput.value = ticket.implementation || '';
+      implementationInput.placeholder = 'Director-authored implementation package/spec for the implementer at in_progress.';
+      const implementationActions = document.createElement('div');
+      implementationActions.className = 'inline-actions';
+      const saveImplementationButton = document.createElement('button');
+      saveImplementationButton.textContent = 'Save Implementation';
+      saveImplementationButton.addEventListener('click', async () => {
+        await updateTicket(ticket.id, { implementation: implementationInput.value });
+      });
+      implementationActions.appendChild(saveImplementationButton);
+      implementation.append(implementationInput, implementationActions);
+
       const auditPrompt = document.createElement('div');
       auditPrompt.innerHTML = '<div class="field-label">Audit Prompt</div>';
       const auditPromptInput = document.createElement('textarea');
@@ -740,7 +755,7 @@ HTML = """<!doctype html>
       auditPromptActions.appendChild(saveAuditPromptButton);
       auditPrompt.append(auditPromptInput, auditPromptActions);
 
-      box.append(meta, controls, toggles, body, auditPrompt);
+      box.append(meta, controls, toggles, body, implementation, auditPrompt);
 
       if (ticket.screenshot) {
         const imageWrap = document.createElement('div');

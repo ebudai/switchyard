@@ -142,6 +142,7 @@ class TicketBoardApp:
                     "screenshot_available": screenshot_path is not None,
                     "assignee": assignee,
                     "state": "open",
+                    "implementation": "",
                     "audit_prompt": "",
                     "audit_signoff": False,
                     "needs_eric_signoff": bool(needs_eric_signoff),
@@ -173,6 +174,8 @@ class TicketBoardApp:
                 current_path=current.get("screenshot"),
             )
             current["screenshot_available"] = current["screenshot"] is not None
+        if "implementation" in patch:
+            current["implementation"] = self._require_plain_string(patch["implementation"], "implementation")
         if "audit_prompt" in patch:
             current["audit_prompt"] = self._require_plain_string(patch["audit_prompt"], "audit_prompt")
         if "needs_eric_signoff" in patch:
@@ -227,6 +230,7 @@ class TicketBoardApp:
             "screenshot_available": screenshot_available,
             "assignee": self._validate_assignee(str(payload.get("assignee", "unassigned"))),
             "state": self._validate_state(str(payload.get("state", "open"))),
+            "implementation": self._require_plain_string(payload.get("implementation", ""), "implementation"),
             "audit_prompt": self._require_plain_string(payload.get("audit_prompt", ""), "audit_prompt"),
             "audit_signoff": bool(payload.get("audit_signoff", False)),
             "needs_eric_signoff": bool(payload.get("needs_eric_signoff", False)),

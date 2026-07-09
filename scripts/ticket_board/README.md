@@ -32,6 +32,7 @@ Ticket schema:
   "screenshot": "/tmp/pgu-frames/frame_0.png",
   "assignee": "main",
   "state": "open",
+  "implementation": "",
   "audit_prompt": "",
   "audit_signoff": false,
   "needs_eric_signoff": true,
@@ -56,6 +57,7 @@ Allowed values:
 Notes:
 
 - `eric_review` is reserved for tickets with `needs_eric_signoff: true`
+- `implementation` is the director-authored implementation package/spec for the implementer during `in_progress`
 - `audit_prompt` is the director-authored handoff text for the audit phase
 - Screenshots referenced by tickets may live in either `/tmp/pgu-frames` or `/home/agent/.claude/pgu-tickets-assets`
 - The frame picker reads `/tmp/pgu-frames` as a transient inbox; once attached to a ticket, the image is copied into `/home/agent/.claude/pgu-tickets-assets`

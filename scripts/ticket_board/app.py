@@ -122,6 +122,7 @@ class TicketBoardApp:
         title: str,
         body: str,
         screenshot: str | None,
+        screenshots: list[str] | None = None,
         assignee: str,
         needs_eric_signoff: bool,
         blocked_by: list[str] | None = None,
@@ -130,6 +131,7 @@ class TicketBoardApp:
             title=title,
             body=body,
             screenshot=screenshot,
+            screenshots=screenshots,
             assignee=assignee,
             state="open",
             blocked_by=blocked_by,
@@ -147,6 +149,7 @@ class TicketBoardApp:
         title: str,
         body: str,
         screenshot: str | None,
+        screenshots: list[str] | None,
         assignee: str,
         state: str,
         blocked_by: list[str] | None,
@@ -171,15 +174,16 @@ class TicketBoardApp:
         normalized_comments = self._validate_comments(comments)
         with handle:
             try:
-                screenshot_path = self._materialize_attachment(screenshot, ticket_id)
+                screenshot_paths = self._materialize_attachments(
+                    screenshots if screenshots is not None else screenshot,
+                    ticket_id,
+                )
                 created_ts = self._require_text(created, "created") if created is not None else iso_now()
                 updated_ts = self._require_text(updated, "updated") if updated is not None else created_ts
                 ticket: dict[str, Any] = {
                     "id": ticket_id,
                     "title": title,
                     "body": body.strip(),
-                    "screenshot": screenshot_path,
-                    "screenshot_available": screenshot_path is not None,
                     "assignee": assignee,
                     "state": state,
                     "blocked_by": blocked_by,
@@ -192,6 +196,7 @@ class TicketBoardApp:
                     "updated": updated_ts,
                     "comments": normalized_comments,
                 }
+                self._set_screenshot_fields(ticket, self._build_screenshot_entries(screenshot_paths))
                 self._normalize_signoff_state(ticket)
                 json.dump(self._serialize_ticket(ticket), handle, indent=2, sort_keys=True)
                 handle.write("\n")
@@ -211,13 +216,13 @@ class TicketBoardApp:
             current["assignee"] = self._validate_assignee(str(patch["assignee"]))
         if "blocked_by" in patch:
             current["blocked_by"] = self._validate_blocked_by(patch["blocked_by"], ticket_id)
-        if "screenshot" in patch:
-            current["screenshot"] = self._materialize_attachment(
-                patch["screenshot"],
+        if "screenshots" in patch or "screenshot" in patch:
+            screenshot_paths = self._materialize_attachments(
+                patch["screenshots"] if "screenshots" in patch else patch["screenshot"],
                 ticket_id,
-                current_path=current.get("screenshot"),
+                current_paths=current.get("screenshots", []),
             )
-            current["screenshot_available"] = current["screenshot"] is not None
+            self._set_screenshot_fields(current, self._build_screenshot_entries(screenshot_paths))
         if "implementation" in patch:
             current["implementation"] = self._require_plain_string(patch["implementation"], "implementation")
         if "audit_prompt" in patch:
@@ -267,13 +272,11 @@ class TicketBoardApp:
         ticket_id = str(payload.get("id", path.stem))
         if not ticket_id.startswith("PGU-"):
             raise ValueError("id must look like PGU-N")
-        screenshot_path, screenshot_available = self._validate_stored_screenshot(payload.get("screenshot"))
+        screenshot_entries = self._validate_stored_screenshots(payload.get("screenshots"), payload.get("screenshot"))
         ticket = {
             "id": ticket_id,
             "title": self._require_text(payload.get("title"), "title"),
             "body": self._require_body(payload.get("body")),
-            "screenshot": screenshot_path,
-            "screenshot_available": screenshot_available,
             "assignee": self._validate_assignee(str(payload.get("assignee", "unassigned"))),
             "state": self._validate_state(str(payload.get("state", "open"))),
             "blocked_by": self._validate_blocked_by(payload.get("blocked_by", []), ticket_id),
@@ -286,6 +289,7 @@ class TicketBoardApp:
             "updated": self._require_text(payload.get("updated"), "updated"),
             "comments": self._validate_comments(payload.get("comments", [])),
         }
+        self._set_screenshot_fields(ticket, screenshot_entries)
         self._normalize_signoff_state(ticket)
         return ticket
 
@@ -336,27 +340,65 @@ class TicketBoardApp:
     def _path_in_allowed_image_dirs(self, path: Path) -> bool:
         return self.frame_dir in path.parents or self.asset_dir in path.parents
 
-    def _validate_stored_screenshot(self, raw: Any) -> tuple[str | None, bool]:
-        if raw in (None, "", "null"):
-            return None, False
-        if not isinstance(raw, str):
-            raise ValueError("screenshot must be a path string or null")
-        path = Path(raw).expanduser().resolve()
-        if not self._path_in_allowed_image_dirs(path):
-            raise ValueError(f"screenshot path escapes allowed asset roots: {path}")
-        if path.suffix.lower() not in IMAGE_EXTENSIONS:
-            raise ValueError(f"unsupported image type: {path.name}")
-        return str(path), path.is_file()
+    def _validate_stored_screenshots(self, raw_screenshots: Any, raw_screenshot: Any) -> list[dict[str, Any]]:
+        raw_items: list[Any] = []
+        if raw_screenshots not in (None, "", "null"):
+            if not isinstance(raw_screenshots, list):
+                raise ValueError("screenshots must be a list of paths")
+            raw_items.extend(raw_screenshots)
+        elif raw_screenshot not in (None, "", "null"):
+            raw_items.append(raw_screenshot)
 
-    def _materialize_attachment(self, raw: Any, ticket_id: str, current_path: str | None = None) -> str | None:
+        entries: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in raw_items:
+            if not isinstance(item, str):
+                raise ValueError("screenshot entries must be path strings")
+            normalized = self._normalize_image_path(item)
+            if normalized in seen:
+                continue
+            path = Path(normalized)
+            if not self._path_in_allowed_image_dirs(path):
+                raise ValueError(f"screenshot path escapes allowed asset roots: {path}")
+            if path.suffix.lower() not in IMAGE_EXTENSIONS:
+                raise ValueError(f"unsupported image type: {path.name}")
+            entries.append({"path": normalized, "available": path.is_file()})
+            seen.add(normalized)
+        return entries
+
+    def _materialize_attachments(self, raw: Any, ticket_id: str, current_paths: list[str] | None = None) -> list[str]:
         if raw in (None, "", "null"):
-            return None
-        if not isinstance(raw, str):
-            raise ValueError("screenshot must be a path string or null")
+            return []
+
+        if isinstance(raw, str):
+            raw_items = [raw]
+        elif isinstance(raw, list):
+            raw_items = raw
+        else:
+            raise ValueError("screenshots must be a path string, list of paths, or null")
+
+        normalized_current = {
+            self._normalize_image_path(path): path
+            for path in (current_paths or [])
+            if isinstance(path, str) and path
+        }
+        screenshot_paths: list[str] = []
+        seen: set[str] = set()
+        for item in raw_items:
+            if not isinstance(item, str):
+                raise ValueError("screenshot entries must be path strings")
+            normalized = self._normalize_image_path(item)
+            if normalized in seen:
+                continue
+            if normalized in normalized_current:
+                screenshot_paths.append(normalized_current[normalized])
+            else:
+                screenshot_paths.append(self._copy_attachment(normalized, ticket_id))
+            seen.add(normalized)
+        return screenshot_paths
+
+    def _copy_attachment(self, raw: str, ticket_id: str) -> str:
         source = self.resolve_image(raw)
-        normalized = str(source)
-        if current_path and normalized == current_path:
-            return current_path
         destination = self.asset_dir / f"{ticket_id}-{time.time_ns()}.png"
         with Image.open(source) as image:
             image.load()
@@ -366,8 +408,28 @@ class TicketBoardApp:
             source.unlink(missing_ok=True)
         return str(destination.resolve())
 
+    def _build_screenshot_entries(self, paths: list[str]) -> list[dict[str, Any]]:
+        return [{"path": path, "available": Path(path).is_file()} for path in paths]
+
+    def _set_screenshot_fields(self, ticket: dict[str, Any], entries: list[dict[str, Any]]) -> None:
+        ticket["screenshots"] = [entry["path"] for entry in entries]
+        ticket["screenshots_info"] = entries
+        if entries:
+            ticket["screenshot"] = entries[0]["path"]
+            ticket["screenshot_available"] = entries[0]["available"]
+        else:
+            ticket["screenshot"] = None
+            ticket["screenshot_available"] = False
+
+    def _normalize_image_path(self, raw: str) -> str:
+        return str(Path(raw).expanduser().resolve())
+
     def _serialize_ticket(self, ticket: dict[str, Any]) -> dict[str, Any]:
-        return {key: value for key, value in ticket.items() if key != "screenshot_available"}
+        return {
+            key: value
+            for key, value in ticket.items()
+            if key not in {"screenshot_available", "screenshots_info"}
+        }
 
     def _ticket_number(self, stem: str) -> int:
         try:

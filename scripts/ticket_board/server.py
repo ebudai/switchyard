@@ -172,6 +172,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                     title=str(payload.get("title", "")),
                     body=str(payload.get("body", "")),
                     screenshot=payload.get("screenshot"),
+                    screenshots=payload.get("screenshots"),
                     assignee=str(payload.get("assignee", "unassigned")),
                     needs_eric_signoff=bool(payload.get("needs_eric_signoff", False)),
                     blocked_by=payload.get("blocked_by"),

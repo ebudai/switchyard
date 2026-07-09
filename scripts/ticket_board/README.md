@@ -42,7 +42,11 @@ Ticket schema:
   "id": "PGU-1",
   "title": "short title",
   "body": "details and notes",
-  "screenshot": "/tmp/pgu-frames/frame_0.png",
+  "screenshot": "/home/agent/.claude/pgu-tickets-assets/PGU-1-1234567890.png",
+  "screenshots": [
+    "/home/agent/.claude/pgu-tickets-assets/PGU-1-1234567890.png",
+    "/home/agent/.claude/pgu-tickets-assets/PGU-1-1234567891.png"
+  ],
   "assignee": "main",
   "state": "open",
   "blocked_by": ["PGU-23", "PGU-25"],
@@ -74,8 +78,10 @@ Notes:
 - `blocked_by` is a list of ticket IDs the ticket is waiting on; unresolved blockers are any entries whose referenced ticket is not yet `done`
 - `implementation` is the director-authored implementation package/spec for the implementer during `in_progress`
 - `audit_prompt` is the director-authored handoff text for the audit phase
+- `screenshots` is the canonical attachment list; `screenshot` is retained as the first attachment for back-compat with older tools and tickets
 - Screenshots referenced by tickets may live in either `/tmp/pgu-frames` or `/home/agent/.claude/pgu-tickets-assets`
-- The frame picker reads `/tmp/pgu-frames` as a transient inbox; once attached to a ticket, the image is copied into `/home/agent/.claude/pgu-tickets-assets`
+- The frame picker reads `/tmp/pgu-frames` as a transient inbox; once attached to a ticket, each selected image is copied into `/home/agent/.claude/pgu-tickets-assets`
 - Clipboard-pasted screenshots are normalized to PNG and staged under `/home/agent/.claude/pgu-tickets-assets` before ticket attachment
+- The detail view renders attachments as a gallery; hover an image to remove it from the ticket
 - For new shell-created tickets, prefer `scripts/directorctl ticket-create` over hand-writing `PGU-N.json`; it uses the same atomic filename reservation as the web app create path, so concurrent creators cannot collide on the same ticket ID
 - Human shell editing is fine; if a JSON file is invalid, the UI shows a read error banner

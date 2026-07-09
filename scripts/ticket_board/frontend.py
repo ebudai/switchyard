@@ -139,18 +139,65 @@ HTML = """<!doctype html>
       background: rgba(255,255,255,0.03);
     }
     .preview-card[hidden] { display: none; }
-    .preview-thumb {
+    .attachment-gallery {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 10px;
+    }
+    .attachment-card {
+      position: relative;
+      display: grid;
+      gap: 8px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px;
+      background: rgba(255,255,255,0.03);
+      overflow: hidden;
+    }
+    .attachment-thumb,
+    .attachment-missing {
       width: 100%;
-      max-height: 180px;
-      object-fit: contain;
+      aspect-ratio: 4 / 3;
       border-radius: 6px;
       border: 1px solid var(--border);
       background: #0b0d11;
     }
-    .preview-meta {
+    .attachment-thumb {
+      object-fit: contain;
+    }
+    .attachment-missing {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 10px;
+      color: var(--muted);
+      font-size: 12px;
+      text-align: center;
+      line-height: 1.4;
+    }
+    .attachment-meta {
       font-size: 12px;
       color: var(--muted);
       overflow-wrap: anywhere;
+    }
+    .attachment-remove {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border-radius: 999px;
+      background: rgba(15, 17, 21, 0.9);
+      border-color: rgba(255,255,255,0.2);
+      display: grid;
+      place-items: center;
+      opacity: 0;
+      transition: opacity 120ms ease;
+    }
+    .attachment-card:hover .attachment-remove,
+    .attachment-card:focus-within .attachment-remove {
+      opacity: 1;
     }
     .inline-actions {
       display: flex;
@@ -278,15 +325,6 @@ HTML = """<!doctype html>
       font-size: 12px;
       line-height: 1.4;
     }
-    .missing-image-box {
-      border: 1px dashed var(--border);
-      border-radius: 8px;
-      padding: 14px;
-      background: rgba(255,255,255,0.02);
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.45;
-    }
     .empty {
       padding: 14px;
       border: 1px dashed var(--border);
@@ -345,14 +383,6 @@ HTML = """<!doctype html>
       overflow-wrap: anywhere;
       font-size: 14px;
       line-height: 1.5;
-    }
-    .detail-image {
-      width: 100%;
-      max-height: 360px;
-      object-fit: contain;
-      border-radius: 8px;
-      border: 1px solid var(--border);
-      background: #0b0d11;
     }
     .comment-list {
       display: grid;
@@ -420,13 +450,15 @@ HTML = """<!doctype html>
           <select id="assigneeInput"></select>
         </label>
         <label>
-          Screenshot
+          Available Frame
           <select id="screenshotInput"></select>
         </label>
+        <div class="inline-actions">
+          <button id="addCreateAttachmentBtn" class="small" type="button">Add Attachment</button>
+        </div>
         <div class="paste-hint">Paste an image from the clipboard here to upload and attach it.</div>
         <div id="createPreview" class="preview-card" hidden>
-          <img id="createPreviewImage" class="preview-thumb" alt="Pasted screenshot preview">
-          <div id="createPreviewMeta" class="preview-meta"></div>
+          <div id="createPreviewGallery" class="attachment-gallery"></div>
         </div>
         <label class="check">
           <input id="needsEricInput" type="checkbox">
@@ -488,15 +520,15 @@ HTML = """<!doctype html>
       eventReconnectTimer: null,
       loadInFlight: null,
       loadQueued: false,
-      pendingCreateScreenshot: null,
+      pendingCreateScreenshots: [],
     };
 
     const boardEl = document.getElementById('board');
     const assigneeInput = document.getElementById('assigneeInput');
     const screenshotInput = document.getElementById('screenshotInput');
+    const addCreateAttachmentBtn = document.getElementById('addCreateAttachmentBtn');
     const createPreviewEl = document.getElementById('createPreview');
-    const createPreviewImageEl = document.getElementById('createPreviewImage');
-    const createPreviewMetaEl = document.getElementById('createPreviewMeta');
+    const createPreviewGalleryEl = document.getElementById('createPreviewGallery');
     const titleInput = document.getElementById('titleInput');
     const bodyInput = document.getElementById('bodyInput');
     const needsEricInput = document.getElementById('needsEricInput');
@@ -594,6 +626,27 @@ HTML = """<!doctype html>
       return `/api/image/${encodeURIComponent(path)}`;
     }
 
+    function ticketScreenshotEntries(ticket) {
+      if (ticket.screenshots_info && ticket.screenshots_info.length) {
+        return ticket.screenshots_info;
+      }
+      if (ticket.screenshots && ticket.screenshots.length) {
+        return ticket.screenshots.map((path) => ({ path, available: true }));
+      }
+      if (ticket.screenshot) {
+        return [{ path: ticket.screenshot, available: !!ticket.screenshot_available }];
+      }
+      return [];
+    }
+
+    function ticketScreenshotPaths(ticket) {
+      return ticketScreenshotEntries(ticket).map((entry) => entry.path);
+    }
+
+    function uniquePaths(paths) {
+      return Array.from(new Set((paths || []).filter((path) => !!path)));
+    }
+
     function ensureScreenshotOption(path, label = null) {
       if (!path) {
         return;
@@ -604,22 +657,83 @@ HTML = """<!doctype html>
       }
     }
 
+    function screenshotLabelFor(path) {
+      const shot = state.screenshots.find((item) => item.path === path);
+      return shot ? `${shot.name} - ${shot.modified}` : path.split('/').pop();
+    }
+
+    function screenshotEntriesForPaths(paths) {
+      return uniquePaths(paths).map((path) => {
+        const ticketEntry = state.tickets
+          .flatMap((ticket) => ticketScreenshotEntries(ticket))
+          .find((entry) => entry.path === path);
+        return {
+          path,
+          available: ticketEntry ? ticketEntry.available : true,
+          label: screenshotLabelFor(path),
+        };
+      });
+    }
+
+    function renderAttachmentGallery(container, entries, removeLabel, onRemove) {
+      container.innerHTML = '';
+      entries.forEach((entry) => {
+        const card = document.createElement('div');
+        card.className = 'attachment-card';
+        if (onRemove) {
+          const removeButton = document.createElement('button');
+          removeButton.type = 'button';
+          removeButton.className = 'attachment-remove';
+          removeButton.textContent = '×';
+          removeButton.title = removeLabel;
+          removeButton.addEventListener('click', async (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            await onRemove(entry.path);
+          });
+          card.appendChild(removeButton);
+        }
+        if (entry.available) {
+          const image = document.createElement('img');
+          image.className = 'attachment-thumb';
+          image.src = previewUrlFor(entry.path);
+          image.alt = entry.path;
+          card.appendChild(image);
+        } else {
+          const missing = document.createElement('div');
+          missing.className = 'attachment-missing';
+          missing.textContent = 'image unavailable';
+          card.appendChild(missing);
+        }
+        const meta = document.createElement('div');
+        meta.className = 'attachment-meta';
+        meta.textContent = entry.label;
+        card.appendChild(meta);
+        container.appendChild(card);
+      });
+    }
+
     function renderCreatePreview() {
-      const path = state.pendingCreateScreenshot || screenshotInput.value;
-      if (!path) {
+      if (!state.pendingCreateScreenshots.length) {
         createPreviewEl.hidden = true;
-        createPreviewImageEl.removeAttribute('src');
-        createPreviewMetaEl.textContent = '';
+        createPreviewGalleryEl.innerHTML = '';
         return;
       }
       createPreviewEl.hidden = false;
-      createPreviewImageEl.src = previewUrlFor(path);
-      createPreviewMetaEl.textContent = path;
+      renderAttachmentGallery(
+        createPreviewGalleryEl,
+        screenshotEntriesForPaths(state.pendingCreateScreenshots),
+        'Remove attachment',
+        async (path) => {
+          state.pendingCreateScreenshots = state.pendingCreateScreenshots.filter((item) => item !== path);
+          renderCreatePreview();
+        },
+      );
     }
 
     function populateCreateForm() {
       const assigneeValue = assigneeInput.value;
-      const screenshotValue = state.pendingCreateScreenshot || screenshotInput.value;
+      const screenshotValue = screenshotInput.value;
       assigneeInput.innerHTML = '';
       state.assignees.forEach((assignee) => buildOption(assigneeInput, assignee, assignee));
       if (assigneeValue && Array.from(assigneeInput.options).some((option) => option.value === assigneeValue)) {
@@ -628,6 +742,7 @@ HTML = """<!doctype html>
       screenshotInput.innerHTML = '';
       buildOption(screenshotInput, '', '(none)');
       state.screenshots.forEach((shot) => buildOption(screenshotInput, shot.path, `${shot.name} - ${shot.modified}`));
+      state.pendingCreateScreenshots.forEach((path) => ensureScreenshotOption(path));
       if (screenshotValue) {
         ensureScreenshotOption(screenshotValue);
         screenshotInput.value = screenshotValue;
@@ -747,7 +862,7 @@ HTML = """<!doctype html>
       controls.appendChild(stateSelect);
 
       card.append(top, tags, badges);
-      if (ticket.screenshot && !ticket.screenshot_available) {
+      if (ticketScreenshotEntries(ticket).some((entry) => !entry.available)) {
         const missing = document.createElement('div');
         missing.className = 'soft-note';
         missing.textContent = 'image unavailable';
@@ -818,22 +933,34 @@ HTML = """<!doctype html>
       assigneeLabel.appendChild(assigneeSelect);
 
       const screenshotLabel = document.createElement('label');
-      screenshotLabel.innerHTML = '<span class="field-label">Attached Frame</span>';
+      screenshotLabel.innerHTML = '<span class="field-label">Available Frame</span>';
       const screenshotSelect = document.createElement('select');
       buildOption(screenshotSelect, '', '(none)');
       state.screenshots.forEach((shot) => buildOption(screenshotSelect, shot.path, `${shot.name} - ${shot.modified}`));
-      if (ticket.screenshot && !Array.from(screenshotSelect.options).some((option) => option.value === ticket.screenshot)) {
-        buildOption(
-          screenshotSelect,
-          ticket.screenshot,
-          ticket.screenshot_available ? ticket.screenshot.split('/').pop() : `${ticket.screenshot.split('/').pop()} - unavailable`,
-        );
-      }
-      screenshotSelect.value = ticket.screenshot || '';
-      screenshotSelect.addEventListener('change', async () => {
-        await updateTicket(ticket.id, { screenshot: screenshotSelect.value || null });
+      ticketScreenshotEntries(ticket).forEach((entry) => {
+        if (!Array.from(screenshotSelect.options).some((option) => option.value === entry.path)) {
+          buildOption(
+            screenshotSelect,
+            entry.path,
+            entry.available ? entry.path.split('/').pop() : `${entry.path.split('/').pop()} - unavailable`,
+          );
+        }
       });
-      screenshotLabel.appendChild(screenshotSelect);
+      const screenshotActions = document.createElement('div');
+      screenshotActions.className = 'inline-actions';
+      const addAttachmentButton = document.createElement('button');
+      addAttachmentButton.type = 'button';
+      addAttachmentButton.textContent = 'Add Attachment';
+      addAttachmentButton.addEventListener('click', async () => {
+        if (!screenshotSelect.value) {
+          return;
+        }
+        await updateTicket(ticket.id, {
+          screenshots: uniquePaths([...ticketScreenshotPaths(ticket), screenshotSelect.value]),
+        });
+      });
+      screenshotActions.appendChild(addAttachmentButton);
+      screenshotLabel.append(screenshotSelect, screenshotActions);
 
       controls.append(assigneeLabel, screenshotLabel);
 
@@ -924,21 +1051,21 @@ HTML = """<!doctype html>
 
       box.append(meta, controls, toggles, body, blockedBy, implementation, auditPrompt);
 
-      if (ticket.screenshot) {
+      if (ticketScreenshotEntries(ticket).length) {
         const imageWrap = document.createElement('div');
-        imageWrap.innerHTML = '<div class="field-label">Attached Frame</div>';
-        if (ticket.screenshot_available) {
-          const image = document.createElement('img');
-          image.className = 'detail-image';
-          image.src = `/api/image/${encodeURIComponent(ticket.screenshot)}`;
-          image.alt = ticket.screenshot;
-          imageWrap.appendChild(image);
-        } else {
-          const missing = document.createElement('div');
-          missing.className = 'missing-image-box';
-          missing.textContent = 'image unavailable';
-          imageWrap.appendChild(missing);
-        }
+        imageWrap.innerHTML = '<div class="field-label">Attachments</div>';
+        const entries = ticketScreenshotEntries(ticket).map((entry) => ({
+          ...entry,
+          label: screenshotLabelFor(entry.path),
+        }));
+        const gallery = document.createElement('div');
+        gallery.className = 'attachment-gallery';
+        renderAttachmentGallery(gallery, entries, 'Remove attachment', async (path) => {
+          await updateTicket(ticket.id, {
+            screenshots: ticketScreenshotPaths(ticket).filter((item) => item !== path),
+          });
+        });
+        imageWrap.appendChild(gallery);
         box.appendChild(imageWrap);
       }
 
@@ -1015,24 +1142,26 @@ HTML = """<!doctype html>
     }
 
     async function attachPastedImage(image, context) {
-      const label = context === 'detail' ? 'Replacing ticket screenshot…' : 'Uploading pasted screenshot…';
+      const label = context === 'detail' ? 'Attaching pasted screenshot…' : 'Uploading pasted screenshot…';
       setCreateStatus(label);
       const uploaded = await uploadImageBlob(image);
       await requestBoardReload();
       if (context === 'detail') {
         const ticket = selectedTicket();
         if (!ticket) {
-          throw new Error('no ticket selected for screenshot replace');
+          throw new Error('no ticket selected for screenshot attach');
         }
-        await updateTicket(ticket.id, { screenshot: uploaded.path });
-        setCreateStatus(`Attached pasted screenshot to ${ticket.id}.`);
+        await updateTicket(ticket.id, {
+          screenshots: uniquePaths([...ticketScreenshotPaths(ticket), uploaded.path]),
+        });
+        setCreateStatus(`Attached pasted image to ${ticket.id}.`);
         return;
       }
-      state.pendingCreateScreenshot = uploaded.path;
+      state.pendingCreateScreenshots = uniquePaths([...state.pendingCreateScreenshots, uploaded.path]);
       ensureScreenshotOption(uploaded.path, `${uploaded.name} - ${uploaded.modified}`);
       screenshotInput.value = uploaded.path;
       renderCreatePreview();
-      setCreateStatus('Pasted screenshot attached to the new ticket.');
+      setCreateStatus('Pasted image attached to the new ticket.');
     }
 
     function toggleControl(labelText, checked, onChange) {
@@ -1114,7 +1243,8 @@ HTML = """<!doctype html>
         title: titleInput.value,
         body: bodyInput.value,
         assignee: assigneeInput.value,
-        screenshot: screenshotInput.value || null,
+        screenshot: state.pendingCreateScreenshots[0] || null,
+        screenshots: state.pendingCreateScreenshots,
         needs_eric_signoff: needsEricInput.checked,
       };
       const response = await fetch('/api/tickets', {
@@ -1129,7 +1259,7 @@ HTML = """<!doctype html>
       titleInput.value = '';
       bodyInput.value = '';
       needsEricInput.checked = false;
-      state.pendingCreateScreenshot = null;
+      state.pendingCreateScreenshots = [];
       screenshotInput.value = '';
       renderCreatePreview();
       state.selectedId = result.ticket.id;
@@ -1188,8 +1318,11 @@ HTML = """<!doctype html>
       }
     });
 
-    screenshotInput.addEventListener('change', () => {
-      state.pendingCreateScreenshot = screenshotInput.value || null;
+    addCreateAttachmentBtn.addEventListener('click', () => {
+      if (!screenshotInput.value) {
+        return;
+      }
+      state.pendingCreateScreenshots = uniquePaths([...state.pendingCreateScreenshots, screenshotInput.value]);
       renderCreatePreview();
     });
 

@@ -154,6 +154,9 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
     def director_notifier(self) -> DirectorNotifier:
         return self.server.director_notifier  # type: ignore[attr-defined]
 
+    def send_no_cache_headers(self) -> None:
+        self.send_header("Cache-Control", "no-cache")
+
     def send_json(self, payload: dict[str, object], status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
@@ -176,6 +179,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             body = HTML.encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_no_cache_headers()
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -208,7 +212,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         try:
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-            self.send_header("Cache-Control", "no-cache")
+            self.send_no_cache_headers()
             self.send_header("Connection", "keep-alive")
             self.send_header("X-Accel-Buffering", "no")
             self.end_headers()

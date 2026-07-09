@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import tempfile
 import time
 from io import BytesIO
@@ -16,6 +17,7 @@ from PIL import Image
 STORE_DIR_DEFAULT = Path("~/.claude/pgu-tickets").expanduser()
 ASSET_DIR_DEFAULT = Path("~/.claude/pgu-tickets-assets").expanduser()
 FRAME_DIR_DEFAULT = Path("/tmp/pgu-frames")
+REPO_ROOT_DEFAULT = Path(__file__).resolve().parents[2]
 ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "agent", "director", "research")
 LEGACY_ASSIGNEE_ALIASES = {"ui": "app"}
 STATES = ("open", "in_progress", "director_review", "audit", "eric_review", "done")
@@ -36,10 +38,12 @@ class TicketBoardApp:
         store_dir: Path = STORE_DIR_DEFAULT,
         frame_dir: Path = FRAME_DIR_DEFAULT,
         asset_dir: Path = ASSET_DIR_DEFAULT,
+        repo_root: Path = REPO_ROOT_DEFAULT,
     ) -> None:
         self.store_dir = store_dir.expanduser().resolve()
         self.frame_dir = frame_dir.resolve()
         self.asset_dir = asset_dir.expanduser().resolve()
+        self.repo_root = repo_root.resolve()
         self.store_dir.mkdir(parents=True, exist_ok=True)
         self.asset_dir.mkdir(parents=True, exist_ok=True)
 
@@ -141,6 +145,8 @@ class TicketBoardApp:
             needs_eric_signoff=needs_eric_signoff,
             eric_signoff=False,
             comments=[],
+            commit_hash="",
+            commit_exempt=False,
         )
 
     def create_ticket_record(
@@ -159,12 +165,12 @@ class TicketBoardApp:
         needs_eric_signoff: bool,
         eric_signoff: bool,
         comments: list[dict[str, Any]],
+        commit_hash: str = "",
+        commit_exempt: bool = False,
         created: str | None = None,
         updated: str | None = None,
     ) -> dict[str, Any]:
-        title = title.strip()
-        if not title:
-            raise ValueError("title must not be empty")
+        title = self._require_text(title, "title").strip()
         assignee = self._validate_assignee(assignee)
         state = self._validate_state(state)
         ticket_id, handle = self._reserve_ticket_file()
@@ -192,12 +198,17 @@ class TicketBoardApp:
                     "audit_signoff": bool(audit_signoff),
                     "needs_eric_signoff": bool(needs_eric_signoff),
                     "eric_signoff": bool(eric_signoff),
+                    "commit_hash": self._validate_commit_hash(commit_hash),
+                    "commit_exempt": bool(commit_exempt),
                     "created": created_ts,
                     "updated": updated_ts,
                     "comments": normalized_comments,
                 }
                 self._set_screenshot_fields(ticket, self._build_screenshot_entries(screenshot_paths))
                 self._normalize_signoff_state(ticket)
+                self._enforce_workflow_rules(ticket)
+                if ticket["state"] == "done":
+                    self._enforce_done_requirements(ticket)
                 json.dump(self._serialize_ticket(ticket), handle, indent=2, sort_keys=True)
                 handle.write("\n")
             except Exception:
@@ -210,8 +221,11 @@ class TicketBoardApp:
         if not path.is_file():
             raise FileNotFoundError(f"ticket not found: {ticket_id}")
         current = self._validate_ticket(json.loads(path.read_text(encoding="utf-8")), path)
+        previous_state = current["state"]
         if "state" in patch:
             current["state"] = self._validate_state(str(patch["state"]))
+        if "title" in patch:
+            current["title"] = self._require_text(patch["title"], "title").strip()
         if "assignee" in patch:
             current["assignee"] = self._validate_assignee(str(patch["assignee"]))
         if "blocked_by" in patch:
@@ -233,6 +247,10 @@ class TicketBoardApp:
             current["audit_signoff"] = bool(patch["audit_signoff"])
         if "eric_signoff" in patch:
             current["eric_signoff"] = bool(patch["eric_signoff"])
+        if "commit_hash" in patch:
+            current["commit_hash"] = self._validate_commit_hash(patch["commit_hash"])
+        if "commit_exempt" in patch:
+            current["commit_exempt"] = bool(patch["commit_exempt"])
         if "comment" in patch:
             comment = patch["comment"]
             who = str(comment.get("who", "")).strip()
@@ -241,6 +259,9 @@ class TicketBoardApp:
                 raise ValueError("comment requires non-empty who and text")
             current["comments"].append({"who": who, "text": text, "ts": iso_now()})
         self._normalize_signoff_state(current)
+        self._enforce_workflow_rules(current)
+        if current["state"] == "done" and previous_state != "done":
+            self._enforce_done_requirements(current)
         current["updated"] = iso_now()
         self._atomic_write(path, self._serialize_ticket(current))
         return current
@@ -285,12 +306,15 @@ class TicketBoardApp:
             "audit_signoff": bool(payload.get("audit_signoff", False)),
             "needs_eric_signoff": bool(payload.get("needs_eric_signoff", False)),
             "eric_signoff": bool(payload.get("eric_signoff", False)),
+            "commit_hash": self._validate_commit_hash(payload.get("commit_hash", "")),
+            "commit_exempt": bool(payload.get("commit_exempt", False)),
             "created": self._require_text(payload.get("created"), "created"),
             "updated": self._require_text(payload.get("updated"), "updated"),
             "comments": self._validate_comments(payload.get("comments", [])),
         }
         self._set_screenshot_fields(ticket, screenshot_entries)
         self._normalize_signoff_state(ticket)
+        self._enforce_workflow_rules(ticket)
         return ticket
 
     def _validate_comments(self, raw: Any) -> list[dict[str, str]]:
@@ -336,6 +360,34 @@ class TicketBoardApp:
             ticket["eric_signoff"] = False
             if ticket["state"] == "eric_review":
                 ticket["state"] = "audit"
+
+    def _enforce_workflow_rules(self, ticket: dict[str, Any]) -> None:
+        if ticket["state"] == "eric_review" and not ticket["audit_signoff"]:
+            raise ValueError("audit_signoff must be true before a ticket can enter eric_review")
+
+    def _enforce_done_requirements(self, ticket: dict[str, Any]) -> None:
+        if ticket.get("commit_exempt"):
+            return
+        if not ticket.get("commit_hash"):
+            raise ValueError("commit_hash is required before a ticket can enter done")
+
+    def _validate_commit_hash(self, raw: Any) -> str:
+        if raw in (None, ""):
+            return ""
+        if not isinstance(raw, str):
+            raise ValueError("commit_hash must be a string")
+        value = raw.strip()
+        if not value:
+            return ""
+        proc = subprocess.run(
+            ["git", "-C", str(self.repo_root), "rev-parse", "--verify", "--quiet", f"{value}^{{commit}}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0 or not proc.stdout.strip():
+            raise ValueError(f"unknown commit_hash: {value}")
+        return proc.stdout.strip()
 
     def _path_in_allowed_image_dirs(self, path: Path) -> bool:
         return self.frame_dir in path.parents or self.asset_dir in path.parents

@@ -53,6 +53,8 @@ Ticket schema:
   "implementation": "",
   "audit_prompt": "",
   "audit_signoff": false,
+  "commit_hash": "0123456789abcdef0123456789abcdef01234567",
+  "commit_exempt": false,
   "needs_eric_signoff": true,
   "eric_signoff": false,
   "created": "2026-07-08T12:34:56+00:00",
@@ -78,10 +80,13 @@ Notes:
 - `blocked_by` is a list of ticket IDs the ticket is waiting on; unresolved blockers are any entries whose referenced ticket is not yet `done`
 - `implementation` is the director-authored implementation package/spec for the implementer during `in_progress`
 - `audit_prompt` is the director-authored handoff text for the audit phase
+- `commit_hash` stores the verified git commit associated with the ticket when it moves to `done`
+- `commit_exempt` is an explicit override for non-code/process tickets that should be allowed into `done` without a commit
 - `screenshots` is the canonical attachment list; `screenshot` is retained as the first attachment for back-compat with older tools and tickets
 - Screenshots referenced by tickets may live in either `/tmp/pgu-frames` or `/home/agent/.claude/pgu-tickets-assets`
 - The frame picker reads `/tmp/pgu-frames` as a transient inbox; once attached to a ticket, each selected image is copied into `/home/agent/.claude/pgu-tickets-assets`
 - Clipboard-pasted screenshots are normalized to PNG and staged under `/home/agent/.claude/pgu-tickets-assets` before ticket attachment
 - The detail view renders attachments as a gallery; hover an image to remove it from the ticket
+- New transitions into `done` require either a verified `commit_hash` or `commit_exempt: true`
 - For new shell-created tickets, prefer `scripts/directorctl ticket-create` over hand-writing `PGU-N.json`; it uses the same atomic filename reservation as the web app create path, so concurrent creators cannot collide on the same ticket ID
 - Human shell editing is fine; if a JSON file is invalid, the UI shows a read error banner

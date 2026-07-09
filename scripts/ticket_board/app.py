@@ -16,7 +16,7 @@ from PIL import Image
 STORE_DIR_DEFAULT = Path("~/.claude/pgu-tickets").expanduser()
 ASSET_DIR_DEFAULT = Path("~/.claude/pgu-tickets-assets").expanduser()
 FRAME_DIR_DEFAULT = Path("/tmp/pgu-frames")
-ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit")
+ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "agent")
 LEGACY_ASSIGNEE_ALIASES = {"ui": "app"}
 STATES = ("open", "in_progress", "director_review", "audit", "eric_review", "done")
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}

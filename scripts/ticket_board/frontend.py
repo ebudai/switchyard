@@ -58,6 +58,17 @@ HTML = """<!doctype html>
       top: 0;
       z-index: 3;
     }
+    .topbar-main {
+      display: grid;
+      gap: 10px;
+      min-width: 0;
+    }
+    .topbar-controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }
     .topbar h1, .panel-head h2, .detail-modal-head h2 { margin: 0; font-size: 18px; }
     .subtle, .meta, .hint { color: var(--muted); font-size: 13px; line-height: 1.45; }
     .paths {
@@ -118,6 +129,14 @@ HTML = """<!doctype html>
       height: 16px;
       margin: 0;
       accent-color: var(--accent);
+    }
+    .check.compact {
+      font-size: 12px;
+      color: var(--muted);
+      padding: 6px 10px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: rgba(255,255,255,0.03);
     }
     .paste-hint {
       border: 1px dashed var(--border);
@@ -627,9 +646,15 @@ HTML = """<!doctype html>
 
     <section class="shell">
       <div class="topbar">
-        <div>
+        <div class="topbar-main">
           <h1>PGU Ticket Board</h1>
-          <div class="subtle">States: open -> in_progress -> director_review -> audit -> eric_review -> done</div>
+          <div class="subtle">States: open -> in_progress -> director_review -> audit -> eric_review -> done. Done is hidden by default.</div>
+          <div class="topbar-controls">
+            <label class="check compact">
+              <input id="showDoneInput" type="checkbox">
+              <span>Show Done <span id="showDoneCount">(0)</span></span>
+            </label>
+          </div>
         </div>
         <div class="paths meta">
           <div><strong>Store</strong>: <span id="storePath">(loading)</span></div>
@@ -679,6 +704,7 @@ HTML = """<!doctype html>
       assignees: [],
       selectedId: null,
       detailOpen: false,
+      showDone: false,
       detailDraft: null,
       eventSource: null,
       eventReconnectTimer: null,
@@ -696,6 +722,8 @@ HTML = """<!doctype html>
     const titleInput = document.getElementById('titleInput');
     const bodyInput = document.getElementById('bodyInput');
     const needsEricInput = document.getElementById('needsEricInput');
+    const showDoneInput = document.getElementById('showDoneInput');
+    const showDoneCountEl = document.getElementById('showDoneCount');
     const createBtn = document.getElementById('createBtn');
     const createStatus = document.getElementById('createStatus');
     const storePathEl = document.getElementById('storePath');
@@ -1227,9 +1255,19 @@ HTML = """<!doctype html>
         .sort(compareTicketsOldestFirst);
     }
 
+    function visibleColumns() {
+      return state.showDone ? COLUMNS : COLUMNS.filter((column) => column.key !== 'done');
+    }
+
+    function renderDoneToggle() {
+      const doneCount = columnTickets('done').length;
+      showDoneInput.checked = state.showDone;
+      showDoneCountEl.textContent = `(${doneCount})`;
+    }
+
     function renderBoard() {
       boardEl.innerHTML = '';
-      COLUMNS.forEach((column) => {
+      visibleColumns().forEach((column) => {
         const columnEl = document.createElement('section');
         columnEl.className = 'column';
         const tickets = columnTickets(column.key);
@@ -1860,6 +1898,7 @@ HTML = """<!doctype html>
       refreshLineEl.textContent = formatWhen(payload.refreshed_at);
       populateCreateForm();
       renderErrors();
+      renderDoneToggle();
       renderBoard();
       renderDetail();
     }
@@ -1989,6 +2028,12 @@ HTML = """<!doctype html>
       }
       state.pendingCreateScreenshots = uniquePaths([...state.pendingCreateScreenshots, screenshotInput.value]);
       renderCreatePreview();
+    });
+
+    showDoneInput.addEventListener('change', () => {
+      state.showDone = showDoneInput.checked;
+      renderDoneToggle();
+      renderBoard();
     });
 
     detailCloseBtn.addEventListener('click', () => {

@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly SERVICE_NAME="pgu-ticket-board.service"
+readonly SOURCE_REPO="${SOURCE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+readonly BOARD_ROOT="${BOARD_ROOT:-/home/agent/pgu-ticketboard-live}"
+readonly BOARD_RELEASES_DIR="$BOARD_ROOT/releases"
+readonly BOARD_CURRENT_LINK="$BOARD_ROOT/current"
+readonly BOARD_SCRIPT="${BOARD_SCRIPT:-$BOARD_CURRENT_LINK/scripts/ticket-board.py}"
+readonly BOARD_HOST="${BOARD_HOST:-127.0.0.1}"
+readonly BOARD_PORT="${BOARD_PORT:-8770}"
+readonly LOG_PATH="${LOG_PATH:-/tmp/pgu-ticket-board.log}"
+readonly UNIT_DIR="${UNIT_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}"
+readonly UNIT_PATH="$UNIT_DIR/$SERVICE_NAME"
+readonly DEPLOY_REF="${DEPLOY_REF:-origin/main}"
+
+usage() {
+    cat <<EOF
+Usage: scripts/ticket-board-service.sh <install|deploy|deploy-restart|render-unit|start|stop|restart|status|logs>
+
+Manage the PGU ticket board as an agent user systemd service.
+
+Commands:
+  install         Export $DEPLOY_REF into $BOARD_ROOT/current, write the unit, enable and start it
+  deploy          Refresh $BOARD_ROOT/current from $DEPLOY_REF without restarting the service
+  deploy-restart  Refresh $BOARD_ROOT/current from $DEPLOY_REF and restart the service
+  render-unit     Print the systemd unit contents to stdout
+  start|stop|restart|status
+                  Pass through to systemctl --user for $SERVICE_NAME
+  logs            Tail $LOG_PATH
+EOF
+}
+
+die() {
+    printf '[ticket-board-service] ERROR: %s\n' "$*" >&2
+    exit 1
+}
+
+log() {
+    printf '[ticket-board-service] %s\n' "$*" >&2
+}
+
+runtime_dir() {
+    printf '/run/user/%s\n' "$(id -u)"
+}
+
+ensure_user_manager() {
+    local user runtime
+    user="$(id -un)"
+    runtime="$(runtime_dir)"
+    loginctl enable-linger "$user" >/dev/null 2>&1 || true
+    for _ in $(seq 1 50); do
+        [[ -d "$runtime" && -S "$runtime/bus" ]] && return 0
+        sleep 0.1
+    done
+    die "systemd user bus unavailable at $runtime/bus"
+}
+
+systemctl_user() {
+    local runtime
+    runtime="$(runtime_dir)"
+    XDG_RUNTIME_DIR="$runtime" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus" \
+        systemctl --user "$@"
+}
+
+ensure_source_repo() {
+    git -C "$SOURCE_REPO" rev-parse --show-toplevel >/dev/null 2>&1 || die "missing source repo: $SOURCE_REPO"
+}
+
+maybe_fetch_origin() {
+    if git -C "$SOURCE_REPO" remote get-url origin >/dev/null 2>&1; then
+        git -C "$SOURCE_REPO" fetch origin >/dev/null 2>&1
+    fi
+}
+
+deploy_export() {
+    local resolved_ref release_dir tmp_dir
+    ensure_source_repo
+    maybe_fetch_origin
+    resolved_ref="$(git -C "$SOURCE_REPO" rev-parse "$DEPLOY_REF")" || die "failed to resolve $DEPLOY_REF in $SOURCE_REPO"
+    mkdir -p "$BOARD_RELEASES_DIR"
+    release_dir="$BOARD_RELEASES_DIR/$resolved_ref"
+    if [[ ! -d "$release_dir" ]]; then
+        tmp_dir="$BOARD_RELEASES_DIR/.tmp-$resolved_ref.$$"
+        rm -rf "$tmp_dir"
+        mkdir -p "$tmp_dir"
+        git -C "$SOURCE_REPO" archive "$resolved_ref" | tar -x -C "$tmp_dir"
+        mv "$tmp_dir" "$release_dir"
+    fi
+    ln -sfn "$release_dir" "$BOARD_CURRENT_LINK"
+    printf '%s\n' "$resolved_ref"
+}
+
+render_unit() {
+    cat <<EOF
+[Unit]
+Description=PGU Ticket Board
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=$BOARD_CURRENT_LINK
+ExecStart=/usr/bin/python3 $BOARD_SCRIPT --host $BOARD_HOST --port $BOARD_PORT
+Restart=on-failure
+RestartSec=2
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=append:$LOG_PATH
+StandardError=append:$LOG_PATH
+
+[Install]
+WantedBy=default.target
+EOF
+}
+
+write_unit() {
+    mkdir -p "$UNIT_DIR"
+    render_unit >"$UNIT_PATH"
+}
+
+install_service() {
+    deploy_export >/dev/null
+    [[ -f "$BOARD_SCRIPT" ]] || die "missing board script after deploy: $BOARD_SCRIPT"
+    ensure_user_manager
+    write_unit
+    systemctl_user daemon-reload
+    systemctl_user enable --now "$SERVICE_NAME"
+    log "installed + started $SERVICE_NAME"
+}
+
+deploy_restart_service() {
+    local deployed_sha
+    deployed_sha="$(deploy_export)"
+    ensure_user_manager
+    write_unit
+    systemctl_user daemon-reload
+    systemctl_user restart "$SERVICE_NAME"
+    log "deployed $deployed_sha from $DEPLOY_REF and restarted $SERVICE_NAME"
+}
+
+show_logs() {
+    touch "$LOG_PATH"
+    tail -n 80 -f "$LOG_PATH"
+}
+
+main() {
+    (($# == 1)) || {
+        usage >&2
+        exit 1
+    }
+
+    case "$1" in
+        install)
+            install_service
+            ;;
+        deploy)
+            deploy_export
+            ;;
+        deploy-restart)
+            deploy_restart_service
+            ;;
+        render-unit)
+            render_unit
+            ;;
+        start|stop|restart|status)
+            ensure_user_manager
+            systemctl_user "$1" "$SERVICE_NAME"
+            ;;
+        logs)
+            show_logs
+            ;;
+        -h|--help)
+            usage
+            ;;
+        *)
+            die "unknown command: $1"
+            ;;
+    esac
+}
+
+main "$@"

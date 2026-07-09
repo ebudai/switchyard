@@ -48,7 +48,7 @@ Ticket schema:
     "/home/agent/.claude/pgu-tickets-assets/PGU-1-1234567891.png"
   ],
   "assignee": "main",
-  "state": "open",
+  "state": "analysis",
   "blocked_by": ["PGU-23", "PGU-25"],
   "implementation": "",
   "audit_prompt": "",
@@ -72,7 +72,7 @@ Ticket schema:
 Allowed values:
 
 - `assignee`: `main`, `app`, `perf`, `ops`, `audit`, `agent`, `director`, `unassigned`
-- `state`: `open`, `in_progress`, `director_review`, `audit`, `eric_review`, `done`
+- `state`: `analysis`, `in_progress`, `director_review`, `audit`, `eric_review`, `done`
 
 Notes:
 

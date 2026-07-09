@@ -13,9 +13,11 @@ DEFAULT_JOURNAL_PATH = "/tmp/pgu-ticket-notification-journal.jsonl"
 DIRECTOR_TARGET = "pgu-director:0.0"
 AUDIT_TARGET = "pgu-audit:0.0"
 TICKET_ID_RE = re.compile(r"(PGU-\d+)")
+LEGACY_STATE_ALIASES = {"open": "analysis"}
 
 
 def ticket_pair_key(ticket_id: str, state: str) -> str:
+    state = LEGACY_STATE_ALIASES.get(state, state)
     return f"{ticket_id}|{state}"
 
 
@@ -34,7 +36,7 @@ def notification_pairs_for_message(target: str, payload: str) -> list[str]:
 
     if target == DIRECTOR_TARGET:
         if normalized.startswith("New ticket for you: ") or normalized.startswith("New tickets for you: "):
-            return [ticket_pair_key(ticket_id, "open") for ticket_id in ticket_ids]
+            return [ticket_pair_key(ticket_id, "analysis") for ticket_id in ticket_ids]
         if normalized.endswith("ready for your review"):
             return [ticket_pair_key(ticket_id, "director_review") for ticket_id in ticket_ids]
         return []

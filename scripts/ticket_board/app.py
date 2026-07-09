@@ -21,7 +21,8 @@ REPO_ROOT_DEFAULT = Path(__file__).resolve().parents[2]
 COMMIT_GIT_DIR_DEFAULT = Path("/data/git/pgu.git")
 ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "agent", "director", "research")
 LEGACY_ASSIGNEE_ALIASES = {"ui": "app"}
-STATES = ("open", "in_progress", "director_review", "audit", "eric_review", "done")
+LEGACY_STATE_ALIASES = {"open": "analysis"}
+STATES = ("analysis", "in_progress", "director_review", "audit", "eric_review", "done")
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
 
@@ -78,6 +79,8 @@ class TicketBoardApp:
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
                 ticket = self._validate_ticket(payload, path)
+                if self._payload_needs_state_migration(payload):
+                    self._atomic_write(path, self._serialize_ticket(ticket))
                 tickets.append(ticket)
             except Exception as exc:  # noqa: BLE001
                 errors.append({"file": path.name, "error": str(exc)})
@@ -141,7 +144,7 @@ class TicketBoardApp:
             screenshot=screenshot,
             screenshots=screenshots,
             assignee=assignee,
-            state="open",
+            state="analysis",
             blocked_by=blocked_by,
             implementation="",
             audit_prompt="",
@@ -313,7 +316,7 @@ class TicketBoardApp:
             "title": self._require_text(payload.get("title"), "title"),
             "body": self._require_body(payload.get("body")),
             "assignee": self._validate_assignee(str(payload.get("assignee", "unassigned"))),
-            "state": self._validate_state(str(payload.get("state", "open"))),
+            "state": self._validate_state(str(payload.get("state", "analysis"))),
             "blocked_by": self._validate_blocked_by(payload.get("blocked_by", []), ticket_id),
             "blocked_reason": self._require_plain_string(payload.get("blocked_reason", ""), "blocked_reason"),
             "implementation": self._require_plain_string(payload.get("implementation", ""), "implementation"),
@@ -385,7 +388,7 @@ class TicketBoardApp:
             raise ValueError("audit_signoff must be true before a ticket can enter eric_review")
 
     def _enforce_transition_rules(self, previous_state: str, ticket: dict[str, Any]) -> None:
-        if previous_state == "open" and ticket["state"] == "in_progress":
+        if previous_state == "analysis" and ticket["state"] == "in_progress":
             if ticket["assignee"] == "unassigned":
                 raise ValueError("assignee must not be unassigned before a ticket can enter in_progress")
             if not ticket["implementation"].strip():
@@ -528,9 +531,14 @@ class TicketBoardApp:
             raise ValueError(f"invalid ticket id stem: {stem}") from exc
 
     def _validate_state(self, state: str) -> str:
+        state = LEGACY_STATE_ALIASES.get(state, state)
         if state not in STATES:
             raise ValueError(f"invalid state: {state}")
         return state
+
+    def _payload_needs_state_migration(self, payload: dict[str, Any]) -> bool:
+        raw_state = payload.get("state")
+        return isinstance(raw_state, str) and raw_state == "open"
 
     def _validate_assignee(self, assignee: str) -> str:
         assignee = LEGACY_ASSIGNEE_ALIASES.get(assignee, assignee)

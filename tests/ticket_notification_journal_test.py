@@ -29,8 +29,8 @@ def main() -> int:
 
     assert_equal(
         journal.notification_pairs_for_message("pgu-director:0.0", "New ticket for you: PGU-81 -- Tailscale"),
-        ["PGU-81|open"],
-        "director open notification should map to open pair",
+        ["PGU-81|analysis"],
+        "director analysis notification should map to analysis pair",
     )
     assert_equal(
         journal.notification_pairs_for_message("pgu-app:0.0", "PGU-81 -- Tailscale kicked back to you"),
@@ -66,7 +66,7 @@ def main() -> int:
         assert_equal(wrote, False, "store-error message should not be journaled as a ticket/state pair")
         assert_equal(
             journal.load_notification_pairs(str(journal_path)),
-            {"PGU-81|open"},
+            {"PGU-81|analysis"},
             "loader should return only mapped ticket/state pairs",
         )
 

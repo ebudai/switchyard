@@ -2,7 +2,7 @@
 
 SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     const COLUMNS = [
-      { key: 'open', label: 'Open' },
+      { key: 'analysis', label: 'Analysis' },
       { key: 'in_progress', label: 'In Progress' },
       { key: 'director_review', label: 'Director Review' },
       { key: 'audit', label: 'Audit' },
@@ -64,7 +64,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     }
 
     function defaultAdvanceState(ticket) {
-      if (ticket.state === 'open') {
+      if (ticket.state === 'analysis') {
         return 'in_progress';
       }
       if (ticket.state === 'in_progress') {
@@ -84,7 +84,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       if (!nextState) {
         return 'No default advance from this state.';
       }
-      if (ticket.state === 'open') {
+      if (ticket.state === 'analysis') {
         if (ticket.assignee === 'unassigned') {
           return 'Assign the ticket before advancing to in progress.';
         }

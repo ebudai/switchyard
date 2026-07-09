@@ -198,6 +198,7 @@ class TicketBoardApp:
                 }
                 self._set_screenshot_fields(ticket, self._build_screenshot_entries(screenshot_paths))
                 self._normalize_signoff_state(ticket)
+                self._enforce_workflow_rules(ticket)
                 json.dump(self._serialize_ticket(ticket), handle, indent=2, sort_keys=True)
                 handle.write("\n")
             except Exception:
@@ -241,6 +242,7 @@ class TicketBoardApp:
                 raise ValueError("comment requires non-empty who and text")
             current["comments"].append({"who": who, "text": text, "ts": iso_now()})
         self._normalize_signoff_state(current)
+        self._enforce_workflow_rules(current)
         current["updated"] = iso_now()
         self._atomic_write(path, self._serialize_ticket(current))
         return current
@@ -291,6 +293,7 @@ class TicketBoardApp:
         }
         self._set_screenshot_fields(ticket, screenshot_entries)
         self._normalize_signoff_state(ticket)
+        self._enforce_workflow_rules(ticket)
         return ticket
 
     def _validate_comments(self, raw: Any) -> list[dict[str, str]]:
@@ -336,6 +339,10 @@ class TicketBoardApp:
             ticket["eric_signoff"] = False
             if ticket["state"] == "eric_review":
                 ticket["state"] = "audit"
+
+    def _enforce_workflow_rules(self, ticket: dict[str, Any]) -> None:
+        if ticket["state"] == "eric_review" and not ticket["audit_signoff"]:
+            raise ValueError("audit_signoff must be true before a ticket can enter eric_review")
 
     def _path_in_allowed_image_dirs(self, path: Path) -> bool:
         return self.frame_dir in path.parents or self.asset_dir in path.parents

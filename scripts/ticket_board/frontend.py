@@ -941,7 +941,12 @@ HTML = """<!doctype html>
       stateSelect.addEventListener('click', (event) => event.stopPropagation());
       stateSelect.addEventListener('change', async (event) => {
         const nextState = event.target.value;
-        await updateTicket(ticket.id, { state: nextState });
+        try {
+          await updateTicket(ticket.id, { state: nextState });
+        } catch (error) {
+          setCreateStatus(error.message, true);
+          await requestBoardReload();
+        }
       });
       controls.appendChild(stateSelect);
 

@@ -72,7 +72,7 @@ Ticket schema:
 Allowed values:
 
 - `assignee`: `main`, `app`, `perf`, `ops`, `audit`, `agent`, `director`, `unassigned`
-- `state`: `analysis`, `ready`, `in_progress`, `director_review`, `audit`, `eric_review`, `done`
+- `state`: `analysis`, `ready`, `in_progress`, `audit`, `eric_review`, `director_review`, `done`
 
 Notes:
 
@@ -80,7 +80,7 @@ Notes:
 - `blocked_by` is a list of ticket IDs the ticket is waiting on; unresolved blockers are any entries whose referenced ticket is not yet `done`
 - `implementation` is the director-authored implementation package/spec that must be present before a ticket can enter `ready` or `in_progress`
 - `ready` means specced, assigned, and queued for the assignee; `in_progress` means actively being worked
-- `audit_prompt` is the director-authored handoff text for the audit phase
+- `audit_prompt` is retained for reference text but is optional in the default workflow
 - `commit_hash` stores the verified git commit associated with the ticket when it moves to `done`; it must be on `main`
 - `commit_exempt` is an explicit override for non-code/process tickets that should be allowed into `done` without a commit
 - `screenshots` is the canonical attachment list; `screenshot` is retained as the first attachment for back-compat with older tools and tickets
@@ -90,6 +90,7 @@ Notes:
 - The detail view renders attachments as a gallery; hover an image to remove it from the ticket
 - New transitions into `done` require either a verified `commit_hash` or `commit_exempt: true`
 - `analysis -> in_progress` is not a valid default path; tickets move `analysis -> ready -> in_progress`
+- The default review path is `in_progress -> audit -> eric_review -> director_review -> done`, or `in_progress -> audit -> director_review -> done` when Eric sign-off is not required
 - Only one ticket per assignee may be in `in_progress` at a time; `ready` is the per-role queue
 - For new shell-created tickets, prefer `scripts/directorctl ticket-create` over hand-writing `PGU-N.json`; it uses the same atomic filename reservation as the web app create path, so concurrent creators cannot collide on the same ticket ID
 - Human shell editing is fine; if a JSON file is invalid, the UI shows a read error banner

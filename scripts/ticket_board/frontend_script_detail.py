@@ -338,15 +338,15 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       );
 
       const auditPrompt = document.createElement('div');
-      auditPrompt.innerHTML = '<div class="field-label">Audit Prompt</div>';
+      auditPrompt.innerHTML = '<div class="field-label">Audit Notes</div>';
       const auditPromptInput = document.createElement('textarea');
       auditPromptInput.value = ticket.audit_prompt || '';
-      auditPromptInput.placeholder = 'Director-authored prompt for audit when the ticket enters audit.';
+      auditPromptInput.placeholder = 'Optional notes for audit or review context.';
       bindDetailDraftField(draftFields, auditPromptInput, 'auditPrompt', auditPromptInput.value);
       const auditPromptActions = document.createElement('div');
       auditPromptActions.className = 'inline-actions';
       const saveAuditPromptButton = document.createElement('button');
-      saveAuditPromptButton.textContent = 'Save Audit Prompt';
+      saveAuditPromptButton.textContent = 'Save Audit Notes';
       saveAuditPromptButton.addEventListener('click', async () => {
         await updateTicket(ticket.id, { audit_prompt: auditPromptInput.value });
       });
@@ -354,7 +354,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       auditPrompt.append(
         auditPromptInput,
         auditPromptActions,
-        linkedPreview('Rendered Preview', ticket.audit_prompt, '(no audit prompt yet)'),
+        linkedPreview('Rendered Preview', ticket.audit_prompt, '(no audit notes yet)'),
       );
 
       const commitInfo = document.createElement('div');

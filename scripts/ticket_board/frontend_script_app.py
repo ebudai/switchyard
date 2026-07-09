@@ -135,8 +135,6 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       state.pendingCreateScreenshots = [];
       screenshotInput.value = '';
       renderCreatePreview();
-      state.selectedId = result.ticket.id;
-      state.detailOpen = true;
       setCreateStatus(`Created ${result.ticket.id}.`);
       await requestBoardReload();
     }

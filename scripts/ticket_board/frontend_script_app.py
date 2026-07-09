@@ -201,13 +201,26 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       setCreateStatus(`Signed off ✓ ${ticketId} is now waiting for director completion.`);
     }
 
-    createBtn.addEventListener('click', async () => {
+    async function handleCreateSubmit() {
       try {
         await createTicket();
       } catch (error) {
         setCreateStatus(error.message, true);
       }
-    });
+    }
+
+    function submitCreateOnEnter(event) {
+      if (event.key !== 'Enter' || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) {
+        return;
+      }
+      event.preventDefault();
+      void handleCreateSubmit();
+    }
+
+    createBtn.addEventListener('click', handleCreateSubmit);
+    titleInput.addEventListener('keydown', submitCreateOnEnter);
+    assigneeInput.addEventListener('keydown', submitCreateOnEnter);
+    screenshotInput.addEventListener('keydown', submitCreateOnEnter);
 
     addCreateAttachmentBtn.addEventListener('click', () => {
       if (!screenshotInput.value) {

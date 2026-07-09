@@ -455,7 +455,7 @@ class TicketBoardApp:
             raise ValueError("analysis tickets must move through ready before entering in_progress")
         if previous_state in {"open", "analysis"} and ticket["state"] == "ready":
             self._enforce_ready_requirements(ticket)
-        if ticket["state"] == "in_progress":
+        if previous_state != "in_progress" and ticket["state"] == "in_progress":
             self._enforce_in_progress_requirements(ticket, previous_state=previous_state)
         if previous_state == "director_review" and ticket["state"] == "audit" and not ticket["audit_prompt"].strip():
             raise ValueError("audit_prompt must be non-empty before a ticket can enter audit")

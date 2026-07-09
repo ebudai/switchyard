@@ -121,6 +121,37 @@ HTML = """<!doctype html>
       margin: 0;
       accent-color: var(--accent);
     }
+    .paste-hint {
+      border: 1px dashed var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+      background: rgba(255,255,255,0.02);
+    }
+    .preview-card {
+      display: grid;
+      gap: 8px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px;
+      background: rgba(255,255,255,0.03);
+    }
+    .preview-card[hidden] { display: none; }
+    .preview-thumb {
+      width: 100%;
+      max-height: 180px;
+      object-fit: contain;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: #0b0d11;
+    }
+    .preview-meta {
+      font-size: 12px;
+      color: var(--muted);
+      overflow-wrap: anywhere;
+    }
     .board-scroll {
       overflow: auto;
       padding: 18px;
@@ -210,6 +241,20 @@ HTML = """<!doctype html>
     .tag { color: var(--text); }
     .badge.ok { color: var(--ok); border-color: rgba(134,239,172,0.35); }
     .badge.bad { color: var(--bad); border-color: rgba(253,164,175,0.35); }
+    .soft-note {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+    .missing-image-box {
+      border: 1px dashed var(--border);
+      border-radius: 8px;
+      padding: 14px;
+      background: rgba(255,255,255,0.02);
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
     .empty {
       padding: 14px;
       border: 1px dashed var(--border);
@@ -321,6 +366,11 @@ HTML = """<!doctype html>
           Screenshot
           <select id="screenshotInput"></select>
         </label>
+        <div class="paste-hint">Paste an image from the clipboard here to upload and attach it.</div>
+        <div id="createPreview" class="preview-card" hidden>
+          <img id="createPreviewImage" class="preview-thumb" alt="Pasted screenshot preview">
+          <div id="createPreviewMeta" class="preview-meta"></div>
+        </div>
         <label class="check">
           <input id="needsEricInput" type="checkbox">
           Needs Eric signoff
@@ -376,12 +426,19 @@ HTML = """<!doctype html>
       errors: [],
       assignees: [],
       selectedId: null,
-      refreshTimer: null,
+      eventSource: null,
+      eventReconnectTimer: null,
+      loadInFlight: null,
+      loadQueued: false,
+      pendingCreateScreenshot: null,
     };
 
     const boardEl = document.getElementById('board');
     const assigneeInput = document.getElementById('assigneeInput');
     const screenshotInput = document.getElementById('screenshotInput');
+    const createPreviewEl = document.getElementById('createPreview');
+    const createPreviewImageEl = document.getElementById('createPreviewImage');
+    const createPreviewMetaEl = document.getElementById('createPreviewMeta');
     const titleInput = document.getElementById('titleInput');
     const bodyInput = document.getElementById('bodyInput');
     const needsEricInput = document.getElementById('needsEricInput');
@@ -415,12 +472,49 @@ HTML = """<!doctype html>
       select.appendChild(option);
     }
 
+    function previewUrlFor(path) {
+      return `/api/image/${encodeURIComponent(path)}`;
+    }
+
+    function ensureScreenshotOption(path, label = null) {
+      if (!path) {
+        return;
+      }
+      const exists = Array.from(screenshotInput.options).some((option) => option.value === path);
+      if (!exists) {
+        buildOption(screenshotInput, path, label || path.split('/').pop());
+      }
+    }
+
+    function renderCreatePreview() {
+      const path = state.pendingCreateScreenshot || screenshotInput.value;
+      if (!path) {
+        createPreviewEl.hidden = true;
+        createPreviewImageEl.removeAttribute('src');
+        createPreviewMetaEl.textContent = '';
+        return;
+      }
+      createPreviewEl.hidden = false;
+      createPreviewImageEl.src = previewUrlFor(path);
+      createPreviewMetaEl.textContent = path;
+    }
+
     function populateCreateForm() {
+      const assigneeValue = assigneeInput.value;
+      const screenshotValue = state.pendingCreateScreenshot || screenshotInput.value;
       assigneeInput.innerHTML = '';
       state.assignees.forEach((assignee) => buildOption(assigneeInput, assignee, assignee));
+      if (assigneeValue && Array.from(assigneeInput.options).some((option) => option.value === assigneeValue)) {
+        assigneeInput.value = assigneeValue;
+      }
       screenshotInput.innerHTML = '';
       buildOption(screenshotInput, '', '(none)');
       state.screenshots.forEach((shot) => buildOption(screenshotInput, shot.path, `${shot.name} - ${shot.modified}`));
+      if (screenshotValue) {
+        ensureScreenshotOption(screenshotValue);
+        screenshotInput.value = screenshotValue;
+      }
+      renderCreatePreview();
     }
 
     function badge(text, isOk) {
@@ -521,7 +615,14 @@ HTML = """<!doctype html>
       });
       controls.appendChild(stateSelect);
 
-      card.append(top, tags, badges, controls);
+      card.append(top, tags, badges);
+      if (ticket.screenshot && !ticket.screenshot_available) {
+        const missing = document.createElement('div');
+        missing.className = 'soft-note';
+        missing.textContent = 'image unavailable';
+        card.appendChild(missing);
+      }
+      card.appendChild(controls);
       return card;
     }
 
@@ -558,6 +659,13 @@ HTML = """<!doctype html>
       const screenshotSelect = document.createElement('select');
       buildOption(screenshotSelect, '', '(none)');
       state.screenshots.forEach((shot) => buildOption(screenshotSelect, shot.path, `${shot.name} - ${shot.modified}`));
+      if (ticket.screenshot && !Array.from(screenshotSelect.options).some((option) => option.value === ticket.screenshot)) {
+        buildOption(
+          screenshotSelect,
+          ticket.screenshot,
+          ticket.screenshot_available ? ticket.screenshot.split('/').pop() : `${ticket.screenshot.split('/').pop()} - unavailable`,
+        );
+      }
       screenshotSelect.value = ticket.screenshot || '';
       screenshotSelect.addEventListener('change', async () => {
         await updateTicket(ticket.id, { screenshot: screenshotSelect.value || null });
@@ -602,11 +710,18 @@ HTML = """<!doctype html>
       if (ticket.screenshot) {
         const imageWrap = document.createElement('div');
         imageWrap.innerHTML = '<div class="field-label">Attached Frame</div>';
-        const image = document.createElement('img');
-        image.className = 'detail-image';
-        image.src = `/api/image/${encodeURIComponent(ticket.screenshot)}`;
-        image.alt = ticket.screenshot;
-        imageWrap.appendChild(image);
+        if (ticket.screenshot_available) {
+          const image = document.createElement('img');
+          image.className = 'detail-image';
+          image.src = `/api/image/${encodeURIComponent(ticket.screenshot)}`;
+          image.alt = ticket.screenshot;
+          imageWrap.appendChild(image);
+        } else {
+          const missing = document.createElement('div');
+          missing.className = 'missing-image-box';
+          missing.textContent = 'image unavailable';
+          imageWrap.appendChild(missing);
+        }
         box.appendChild(imageWrap);
       }
 
@@ -640,6 +755,40 @@ HTML = """<!doctype html>
       box.appendChild(comments);
 
       detailContentEl.appendChild(box);
+    }
+
+    async function uploadImageBlob(blob) {
+      const response = await fetch('/api/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': blob.type || 'image/png' },
+        body: blob,
+      });
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+      const payload = await response.json();
+      return payload.image;
+    }
+
+    async function attachPastedImage(image, context) {
+      const label = context === 'detail' ? 'Replacing ticket screenshot…' : 'Uploading pasted screenshot…';
+      setCreateStatus(label);
+      const uploaded = await uploadImageBlob(image);
+      await requestBoardReload();
+      if (context === 'detail') {
+        const ticket = selectedTicket();
+        if (!ticket) {
+          throw new Error('no ticket selected for screenshot replace');
+        }
+        await updateTicket(ticket.id, { screenshot: uploaded.path });
+        setCreateStatus(`Attached pasted screenshot to ${ticket.id}.`);
+        return;
+      }
+      state.pendingCreateScreenshot = uploaded.path;
+      ensureScreenshotOption(uploaded.path, `${uploaded.name} - ${uploaded.modified}`);
+      screenshotInput.value = uploaded.path;
+      renderCreatePreview();
+      setCreateStatus('Pasted screenshot attached to the new ticket.');
     }
 
     function toggleControl(labelText, checked, onChange) {
@@ -680,6 +829,25 @@ HTML = """<!doctype html>
       renderDetail();
     }
 
+    async function requestBoardReload() {
+      if (state.loadInFlight) {
+        state.loadQueued = true;
+        return state.loadInFlight;
+      }
+      state.loadInFlight = (async () => {
+        try {
+          await loadBoard();
+        } finally {
+          state.loadInFlight = null;
+          if (state.loadQueued) {
+            state.loadQueued = false;
+            void requestBoardReload();
+          }
+        }
+      })();
+      return state.loadInFlight;
+    }
+
     function renderErrors() {
       if (!state.errors.length) {
         errorBoxEl.hidden = true;
@@ -717,10 +885,12 @@ HTML = """<!doctype html>
       titleInput.value = '';
       bodyInput.value = '';
       needsEricInput.checked = false;
+      state.pendingCreateScreenshot = null;
       screenshotInput.value = '';
+      renderCreatePreview();
       state.selectedId = result.ticket.id;
       setCreateStatus(`Created ${result.ticket.id}.`);
-      await loadBoard();
+      await requestBoardReload();
     }
 
     async function updateTicket(ticketId, patch) {
@@ -732,7 +902,7 @@ HTML = """<!doctype html>
       if (!response.ok) {
         throw new Error(await response.text());
       }
-      await loadBoard();
+      await requestBoardReload();
     }
 
     createBtn.addEventListener('click', async () => {
@@ -743,21 +913,80 @@ HTML = """<!doctype html>
       }
     });
 
+    screenshotInput.addEventListener('change', () => {
+      state.pendingCreateScreenshot = screenshotInput.value || null;
+      renderCreatePreview();
+    });
+
+    document.addEventListener('paste', async (event) => {
+      const items = Array.from(event.clipboardData?.items || []);
+      const imageItem = items.find((item) => item.type.startsWith('image/'));
+      if (!imageItem) {
+        return;
+      }
+      const blob = imageItem.getAsFile();
+      if (!blob) {
+        return;
+      }
+      event.preventDefault();
+      try {
+        const activeElement = document.activeElement;
+        const useDetail = !!(activeElement && detailContentEl.contains(activeElement) && selectedTicket());
+        await attachPastedImage(blob, useDetail ? 'detail' : 'create');
+      } catch (error) {
+        setCreateStatus(error.message, true);
+      }
+    });
+
+    function connectEvents() {
+      if (!window.EventSource) {
+        setCreateStatus('EventSource unavailable; live updates disabled.', true);
+        return;
+      }
+      if (state.eventReconnectTimer) {
+        window.clearTimeout(state.eventReconnectTimer);
+        state.eventReconnectTimer = null;
+      }
+      if (state.eventSource) {
+        state.eventSource.close();
+      }
+      const eventSource = new EventSource('/events');
+      state.eventSource = eventSource;
+      eventSource.addEventListener('board', () => {
+        void requestBoardReload();
+      });
+      eventSource.onerror = () => {
+        if (state.eventSource !== eventSource) {
+          return;
+        }
+        eventSource.close();
+        state.eventSource = null;
+        state.eventReconnectTimer = window.setTimeout(() => {
+          state.eventReconnectTimer = null;
+          connectEvents();
+        }, 1500);
+      };
+    }
+
     async function boot() {
       try {
-        await loadBoard();
+        await requestBoardReload();
         setCreateStatus('Ready.');
       } catch (error) {
         setCreateStatus(error.message, true);
       }
-      state.refreshTimer = window.setInterval(async () => {
-        try {
-          await loadBoard();
-        } catch (error) {
-          setCreateStatus(error.message, true);
-        }
-      }, 4000);
+      connectEvents();
     }
+
+    window.addEventListener('beforeunload', () => {
+      if (state.eventReconnectTimer) {
+        window.clearTimeout(state.eventReconnectTimer);
+      }
+      if (state.eventSource) {
+        state.eventSource.close();
+        state.eventSource = null;
+      }
+    });
 
     boot();
   </script>

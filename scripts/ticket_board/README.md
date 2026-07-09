@@ -11,6 +11,7 @@ python3 scripts/ticket-board.py --host 127.0.0.1 --port 8770
 Defaults:
 
 - Store path: `/home/agent/.claude/pgu-tickets`
+- Persistent asset path: `/home/agent/.claude/pgu-tickets-assets`
 - Screenshot directory: `/tmp/pgu-frames`
 - Local URL: `http://127.0.0.1:8770/`
 
@@ -18,6 +19,7 @@ Store contract:
 
 - One JSON file per ticket in the store directory, named `PGU-N.json`
 - The web app re-reads disk on every request; there is no in-memory ticket cache
+- Browser clients subscribe to `GET /events` (SSE) and re-fetch the board on ticket-store changes
 - Director-side shell edits are expected and supported
 
 Ticket schema:
@@ -53,5 +55,7 @@ Allowed values:
 Notes:
 
 - `eric_review` is reserved for tickets with `needs_eric_signoff: true`
-- Screenshots must point inside `/tmp/pgu-frames`
+- Screenshots referenced by tickets may live in either `/tmp/pgu-frames` or `/home/agent/.claude/pgu-tickets-assets`
+- The frame picker reads `/tmp/pgu-frames` as a transient inbox; once attached to a ticket, the image is copied into `/home/agent/.claude/pgu-tickets-assets`
+- Clipboard-pasted screenshots are normalized to PNG and staged under `/home/agent/.claude/pgu-tickets-assets` before ticket attachment
 - Human shell editing is fine; if a JSON file is invalid, the UI shows a read error banner

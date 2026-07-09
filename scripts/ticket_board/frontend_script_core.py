@@ -90,8 +90,12 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       if (ticket.assignee === 'unassigned') {
         return null;
       }
+      const ticketRootId = rootTicketForBoard(ticket).id;
       return state.tickets.find((item) =>
-        item.id !== ticket.id && item.state === 'in_progress' && item.assignee === ticket.assignee,
+        item.id !== ticket.id
+          && item.state === 'in_progress'
+          && item.assignee === ticket.assignee
+          && rootTicketForBoard(item).id !== ticketRootId,
       ) || null;
     }
 

@@ -132,12 +132,6 @@ SCRIPT_DETAIL = """    function selectedTicket() {
           }
         });
         workflowActions.appendChild(advanceButton);
-        if (blockedReason) {
-          const advanceNote = document.createElement('div');
-          advanceNote.className = 'soft-note';
-          advanceNote.textContent = blockedReason;
-          workflowActions.appendChild(advanceNote);
-        }
       }
 
       const assigneeLabel = document.createElement('label');

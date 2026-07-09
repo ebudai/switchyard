@@ -11,8 +11,9 @@ from urllib import request
 
 
 DEFAULT_BOARD_URL = "http://127.0.0.1:8770/api/tickets"
-DEFAULT_DEDUPE_DIR = "/tmp/pgu-file-size-ticket-dedupe"
+DEFAULT_STATE_DIR = "/data/git/pgu.git/hooks/file-size-ticket-state"
 DEFAULT_LINE_LIMIT = 1250
+DEFAULT_EMIT_CAP = 8
 SOURCE_EXTENSIONS = {".cpp", ".cu", ".fish", ".h", ".hpp", ".py", ".sh"}
 SKIP_PREFIXES = ("external/", "third_party/")
 ZERO_OID = "0" * 40
@@ -26,8 +27,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--oldrev", required=True, help="Old object id from the update hook.")
     parser.add_argument("--newrev", required=True, help="New object id from the update hook.")
     parser.add_argument("--board-url", default=DEFAULT_BOARD_URL, help=f"Ticket board POST endpoint (default: {DEFAULT_BOARD_URL}).")
-    parser.add_argument("--dedupe-dir", default=DEFAULT_DEDUPE_DIR, help=f"Directory holding file+size dedupe markers (default: {DEFAULT_DEDUPE_DIR}).")
+    parser.add_argument("--state-dir", default=DEFAULT_STATE_DIR, help=f"Directory holding persistent per-file markers (default: {DEFAULT_STATE_DIR}).")
     parser.add_argument("--line-limit", type=int, default=DEFAULT_LINE_LIMIT, help=f"Soft line limit (default: {DEFAULT_LINE_LIMIT}).")
+    parser.add_argument("--emit-cap", type=int, default=DEFAULT_EMIT_CAP, help=f"Maximum tickets to create per push (default: {DEFAULT_EMIT_CAP}).")
     return parser.parse_args(argv)
 
 
@@ -44,8 +46,10 @@ def git_output(git_dir: Path, *args: str) -> str:
 def iter_new_commits(git_dir: Path, oldrev: str, newrev: str) -> list[str]:
     if newrev == ZERO_OID:
         return []
-    rev_range = newrev if oldrev == ZERO_OID else f"{oldrev}..{newrev}"
-    output = git_output(git_dir, "rev-list", "--reverse", rev_range)
+    if oldrev == ZERO_OID:
+        output = git_output(git_dir, "rev-list", "--reverse", newrev, "--not", "--all")
+    else:
+        output = git_output(git_dir, "rev-list", "--reverse", f"{oldrev}..{newrev}")
     return [line.strip() for line in output.splitlines() if line.strip()]
 
 
@@ -56,7 +60,7 @@ def first_parent(git_dir: Path, commit: str) -> str:
     return output[1]
 
 
-def changed_paths(git_dir: Path, parent: str, commit: str) -> list[str]:
+def changed_paths_for_commit(git_dir: Path, parent: str, commit: str) -> list[str]:
     output = git_output(
         git_dir,
         "diff-tree",
@@ -89,20 +93,18 @@ def line_count_for_blob(git_dir: Path, treeish: str, path: str) -> int | None:
     return sum(1 for _ in proc.stdout.splitlines())
 
 
-def dedupe_key(path: str, line_count: int) -> str:
+def dedupe_key(path: str) -> str:
     digest = hashlib.sha256()
     digest.update(path.encode("utf-8", errors="replace"))
-    digest.update(b"\n")
-    digest.update(str(line_count).encode("ascii"))
     return digest.hexdigest()
 
 
-def should_emit_ticket(dedupe_dir: Path, path: str, line_count: int) -> bool:
-    dedupe_dir.mkdir(parents=True, exist_ok=True)
-    marker = dedupe_dir / dedupe_key(path, line_count)
+def should_emit_ticket(state_dir: Path, path: str) -> bool:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    marker = state_dir / dedupe_key(path)
     if marker.exists():
         return False
-    marker.write_text(f"{path}\n{line_count}\n", encoding="utf-8")
+    marker.write_text(f"{path}\n", encoding="utf-8")
     return True
 
 
@@ -148,51 +150,61 @@ def create_ticket(board_url: str, payload: dict[str, object]) -> str:
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     git_dir = Path(args.git_dir).resolve()
-    dedupe_dir = Path(args.dedupe_dir)
+    state_dir = Path(args.state_dir)
+    if args.emit_cap <= 0:
+        print("[file-size-hook] emit cap must be positive", file=sys.stderr)
+        return 1
 
     try:
         commits = iter_new_commits(git_dir, args.oldrev, args.newrev)
     except subprocess.CalledProcessError as exc:
-        print(f"[file-size-hook] failed to enumerate commits: {exc}", file=sys.stderr)
+        print(f"[file-size-hook] failed to enumerate new commits: {exc}", file=sys.stderr)
         return 1
 
-    emitted: set[tuple[str, int]] = set()
+    changed_path_set: set[str] = set()
     for commit in commits:
         parent = first_parent(git_dir, commit)
-        for path in changed_paths(git_dir, parent, commit):
-            if not should_check_path(path):
-                continue
-            current_lines = line_count_for_blob(git_dir, commit, path)
-            if current_lines is None or current_lines <= args.line_limit:
-                continue
-            previous_lines = line_count_for_blob(git_dir, parent, path) or 0
-            if current_lines <= previous_lines:
-                continue
-            key = (path, current_lines)
-            if key in emitted:
-                continue
-            if not should_emit_ticket(dedupe_dir, path, current_lines):
-                continue
-            payload = build_ticket_payload(
-                path=path,
-                line_count=current_lines,
-                line_limit=args.line_limit,
-                commit=commit,
-                refname=args.ref,
-            )
-            try:
-                ticket_id = create_ticket(args.board_url, payload)
-            except Exception as exc:  # noqa: BLE001
-                print(
-                    f"[file-size-hook] failed to create ticket for {path} ({current_lines} lines): {exc}",
-                    file=sys.stderr,
-                )
-                continue
-            emitted.add(key)
+        changed_path_set.update(changed_paths_for_commit(git_dir, parent, commit))
+
+    oversized_paths: list[tuple[str, int]] = []
+    for path in sorted(changed_path_set):
+        if not should_check_path(path):
+            continue
+        current_lines = line_count_for_blob(git_dir, args.newrev, path)
+        if current_lines is None or current_lines <= args.line_limit:
+            continue
+        oversized_paths.append((path, current_lines))
+
+    emitted = 0
+    for path, current_lines in oversized_paths:
+        if emitted >= args.emit_cap:
             print(
-                f"[file-size-hook] created {ticket_id} for {path} ({current_lines} lines) on {args.ref}",
+                f"[file-size-hook] emit cap {args.emit_cap} reached on {args.ref}; suppressing additional oversized files",
                 file=sys.stderr,
             )
+            break
+        if not should_emit_ticket(state_dir, path):
+            continue
+        payload = build_ticket_payload(
+            path=path,
+            line_count=current_lines,
+            line_limit=args.line_limit,
+            commit=args.newrev,
+            refname=args.ref,
+        )
+        try:
+            ticket_id = create_ticket(args.board_url, payload)
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[file-size-hook] failed to create ticket for {path} ({current_lines} lines): {exc}",
+                file=sys.stderr,
+            )
+            continue
+        emitted += 1
+        print(
+            f"[file-size-hook] created {ticket_id} for {path} ({current_lines} lines) on {args.ref}",
+            file=sys.stderr,
+        )
     return 0
 
 

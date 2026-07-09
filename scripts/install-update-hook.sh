@@ -8,8 +8,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${PGU_UPDATE_HOOK_REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 SERVER_HOOKS_DIR="${PGU_UPDATE_HOOK_SERVER_HOOKS_DIR:-/data/git/pgu.git/hooks}"
 BOARD_URL="${PGU_FILE_SIZE_BOARD_URL:-http://127.0.0.1:8770/api/tickets}"
-FILE_SIZE_DEDUPE_DIR="${PGU_FILE_SIZE_HOOK_DEDUPE_DIR:-/tmp/pgu-file-size-ticket-dedupe}"
+FILE_SIZE_STATE_DIR="${PGU_FILE_SIZE_HOOK_STATE_DIR:-$SERVER_HOOKS_DIR/file-size-ticket-state}"
 FILE_SIZE_LIMIT="${PGU_FILE_SIZE_LINE_LIMIT:-1250}"
+FILE_SIZE_EMIT_CAP="${PGU_FILE_SIZE_HOOK_EMIT_CAP:-8}"
 SERVER_SIZE_HOOK="$SERVER_HOOKS_DIR/pgu-file-size-ticket.py"
 SERVER_UPDATE_HOOK="$SERVER_HOOKS_DIR/update"
 
@@ -19,8 +20,8 @@ Usage: scripts/install-update-hook.sh
 
 Installs the bare-repo update hook that:
   - rejects direct pushes to refs/heads/main unless director override is set
-  - auto-creates one ticket per unique file+line-count when a pushed commit
-    introduces or grows a tracked source file past the soft line limit
+  - auto-creates at most one persistent ticket per oversized source file,
+    evaluating only the changed files at the pushed tip revision
 
 Director override:
   $ALLOW_ENV_NAME=$ALLOW_ENV_VALUE git push origin HEAD:main
@@ -42,8 +43,9 @@ set -euo pipefail
 readonly ALLOW_ENV_NAME="$ALLOW_ENV_NAME"
 readonly ALLOW_ENV_VALUE="$ALLOW_ENV_VALUE"
 readonly BOARD_URL="$BOARD_URL"
-readonly FILE_SIZE_DEDUPE_DIR="$FILE_SIZE_DEDUPE_DIR"
+readonly FILE_SIZE_STATE_DIR="$FILE_SIZE_STATE_DIR"
 readonly FILE_SIZE_LIMIT="$FILE_SIZE_LIMIT"
+readonly FILE_SIZE_EMIT_CAP="$FILE_SIZE_EMIT_CAP"
 readonly SIZE_HOOK="$SERVER_SIZE_HOOK"
 
 refname="\${1:-}"
@@ -67,8 +69,9 @@ if [[ -x "\$SIZE_HOOK" && "\$newrev" != "000000000000000000000000000000000000000
         --oldrev "\$oldrev" \
         --newrev "\$newrev" \
         --board-url "\$BOARD_URL" \
-        --dedupe-dir "\$FILE_SIZE_DEDUPE_DIR" \
+        --state-dir "\$FILE_SIZE_STATE_DIR" \
         --line-limit "\$FILE_SIZE_LIMIT" \
+        --emit-cap "\$FILE_SIZE_EMIT_CAP" \
         || true
 fi
 

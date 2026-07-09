@@ -18,6 +18,7 @@ def main() -> int:
     assert "function buildTicketReference(ticketId)" in HTML
     assert "openDetail(normalizedId);" in HTML
     assert "function appendLinkedTicketText(container, text)" in HTML
+    assert r"const lines = source.split(/\r?\n/);" in HTML
     assert "function linkedPreview(label, text, emptyText = '(none)')" in HTML
     assert "function linkedTicketRow(ticketIds)" in HTML
     assert "body.appendChild(linkedTextBlock(ticket.body, '(no body)'));" in HTML
@@ -26,6 +27,10 @@ def main() -> int:
     assert "blockedByLinksLabel.textContent = 'Linked Tickets';" in HTML
     assert "appendLinkedTicketText(text, comment.text);" in HTML
     assert "reference.disabled = true;" in HTML
+    start = HTML.index("const lines = source.split(")
+    segment = HTML[start:start + 40]
+    assert "\r" not in segment
+    assert [hex(ord(ch)) for ch in segment[27:35]] == ["0x2f", "0x5c", "0x72", "0x3f", "0x5c", "0x6e", "0x2f", "0x29"]
     print("ticket_reference_links_test: ok")
     return 0
 

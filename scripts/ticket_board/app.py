@@ -148,6 +148,7 @@ class TicketBoardApp:
             assignee=assignee,
             state="analysis",
             blocked_by=blocked_by,
+            parent_id="",
             implementation="",
             audit_prompt="",
             audit_signoff=False,
@@ -175,6 +176,7 @@ class TicketBoardApp:
         needs_eric_signoff: bool,
         eric_signoff: bool,
         comments: list[dict[str, Any]],
+        parent_id: str = "",
         blocked_reason: str = "",
         commit_hash: str = "",
         commit_exempt: bool = False,
@@ -186,6 +188,7 @@ class TicketBoardApp:
         state = self._validate_state(state)
         ticket_id, handle = self._reserve_ticket_file()
         blocked_by = self._validate_blocked_by(blocked_by or [], ticket_id)
+        parent_id = self._validate_parent_id(parent_id, ticket_id)
         implementation = self._require_plain_string(implementation, "implementation")
         audit_prompt = self._require_plain_string(audit_prompt, "audit_prompt")
         blocked_reason = self._require_plain_string(blocked_reason, "blocked_reason")
@@ -206,6 +209,7 @@ class TicketBoardApp:
                     "assignee": assignee,
                     "state": state,
                     "blocked_by": blocked_by,
+                    "parent_id": parent_id,
                     "blocked_reason": blocked_reason,
                     "implementation": implementation,
                     "audit_prompt": audit_prompt,
@@ -245,6 +249,8 @@ class TicketBoardApp:
             current["assignee"] = self._validate_assignee(str(patch["assignee"]))
         if "blocked_by" in patch:
             current["blocked_by"] = self._validate_blocked_by(patch["blocked_by"], ticket_id)
+        if "parent_id" in patch:
+            current["parent_id"] = self._validate_parent_id(patch["parent_id"], ticket_id)
         if "blocked_reason" in patch:
             current["blocked_reason"] = self._require_plain_string(patch["blocked_reason"], "blocked_reason")
         if "screenshots" in patch or "screenshot" in patch:
@@ -378,6 +384,7 @@ class TicketBoardApp:
             "assignee": self._validate_assignee(str(payload.get("assignee", "unassigned"))),
             "state": self._validate_state(str(payload.get("state", "analysis"))),
             "blocked_by": self._validate_blocked_by(payload.get("blocked_by", []), ticket_id),
+            "parent_id": self._validate_parent_id(payload.get("parent_id", ""), ticket_id),
             "blocked_reason": self._require_plain_string(payload.get("blocked_reason", ""), "blocked_reason"),
             "implementation": self._require_plain_string(payload.get("implementation", ""), "implementation"),
             "audit_prompt": self._require_plain_string(payload.get("audit_prompt", ""), "audit_prompt"),
@@ -430,6 +437,50 @@ class TicketBoardApp:
             if blocker_id not in blocked_by:
                 blocked_by.append(blocker_id)
         return blocked_by
+
+    def _validate_parent_id(self, raw: Any, ticket_id: str) -> str:
+        if raw in (None, "", "null"):
+            return ""
+        if not isinstance(raw, str):
+            raise ValueError("parent_id must be a ticket ID string")
+        parent_id = raw.strip().upper()
+        if not parent_id:
+            return ""
+        if not parent_id.startswith("PGU-") or not parent_id[4:].isdigit():
+            raise ValueError(f"invalid parent_id ticket id: {raw}")
+        if parent_id == ticket_id:
+            raise ValueError("ticket cannot parent_id itself")
+        parent_path = self.store_dir / f"{parent_id}.json"
+        if not parent_path.is_file():
+            raise ValueError(f"parent_id ticket not found: {parent_id}")
+        self._assert_parent_link_acyclic(ticket_id, parent_id)
+        return parent_id
+
+    def _assert_parent_link_acyclic(self, ticket_id: str, parent_id: str) -> None:
+        seen = {ticket_id}
+        current_parent_id = parent_id
+        while current_parent_id:
+            if current_parent_id in seen:
+                raise ValueError(f"parent_id would create a cycle through {current_parent_id}")
+            seen.add(current_parent_id)
+            current_path = self.store_dir / f"{current_parent_id}.json"
+            if not current_path.is_file():
+                return
+            try:
+                payload = json.loads(current_path.read_text(encoding="utf-8"))
+            except Exception:
+                return
+            raw_next = payload.get("parent_id", "")
+            if raw_next in (None, "", "null"):
+                return
+            if not isinstance(raw_next, str):
+                raise ValueError(f"parent ticket {current_parent_id} has invalid parent_id")
+            next_parent_id = raw_next.strip().upper()
+            if not next_parent_id:
+                return
+            if not next_parent_id.startswith("PGU-") or not next_parent_id[4:].isdigit():
+                raise ValueError(f"parent ticket {current_parent_id} has invalid parent_id {raw_next!r}")
+            current_parent_id = next_parent_id
 
     def _normalize_signoff_state(self, ticket: dict[str, Any]) -> None:
         if ticket["state"] == "eric_review":

@@ -13,7 +13,7 @@ Shared shell-side ticket creation:
 ```bash
 scripts/directorctl ticket-create \
   --assignee app \
-  --state ready \
+  --state in_progress \
   --blocked-by "PGU-23, PGU-25" \
   --title "Board: add director as assignee" \
   --body "Allow director-owned action tickets in the assignee enum." \
@@ -50,6 +50,7 @@ Ticket schema:
   "assignee": "main",
   "state": "analysis",
   "blocked_by": ["PGU-23", "PGU-25"],
+  "parent_id": "PGU-9",
   "implementation": "",
   "audit_prompt": "",
   "audit_signoff": false,
@@ -72,14 +73,14 @@ Ticket schema:
 Allowed values:
 
 - `assignee`: `main`, `app`, `perf`, `ops`, `audit`, `agent`, `director`, `unassigned`
-- `state`: `analysis`, `ready`, `in_progress`, `director_review`, `audit`, `eric_review`, `done`
+- `state`: `analysis`, `in_progress`, `director_review`, `audit`, `eric_review`, `done`
 
 Notes:
 
 - `eric_review` is reserved for tickets with `needs_eric_signoff: true`
 - `blocked_by` is a list of ticket IDs the ticket is waiting on; unresolved blockers are any entries whose referenced ticket is not yet `done`
-- `implementation` is the director-authored implementation package/spec that must be present before a ticket can enter `ready` or `in_progress`
-- `ready` means specced, assigned, and queued for the assignee; `in_progress` means actively being worked
+- `parent_id` is an explicit board-grouping link set by the director; child tickets collapse under the parent card instead of rendering as top-level cards
+- `implementation` is the director-authored implementation package/spec for the implementer during `in_progress`
 - `audit_prompt` is the director-authored handoff text for the audit phase
 - `commit_hash` stores the verified git commit associated with the ticket when it moves to `done`; it must be on `main`
 - `commit_exempt` is an explicit override for non-code/process tickets that should be allowed into `done` without a commit
@@ -89,7 +90,5 @@ Notes:
 - Clipboard-pasted screenshots are normalized to PNG and staged under `/home/agent/.claude/pgu-tickets-assets` before ticket attachment
 - The detail view renders attachments as a gallery; hover an image to remove it from the ticket
 - New transitions into `done` require either a verified `commit_hash` or `commit_exempt: true`
-- `analysis -> in_progress` is not a valid default path; tickets move `analysis -> ready -> in_progress`
-- Only one ticket per assignee may be in `in_progress` at a time; `ready` is the per-role queue
 - For new shell-created tickets, prefer `scripts/directorctl ticket-create` over hand-writing `PGU-N.json`; it uses the same atomic filename reservation as the web app create path, so concurrent creators cannot collide on the same ticket ID
 - Human shell editing is fine; if a JSON file is invalid, the UI shows a read error banner

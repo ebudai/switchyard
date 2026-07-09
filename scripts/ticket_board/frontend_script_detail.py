@@ -160,6 +160,41 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       });
       assigneeLabel.appendChild(assigneeSelect);
 
+      const parentLinkField = document.createElement('div');
+      parentLinkField.innerHTML = '<div class="field-label">Parent Ticket</div>';
+      const parentLinkInput = document.createElement('input');
+      parentLinkInput.type = 'text';
+      parentLinkInput.value = ticket.parent_id || '';
+      parentLinkInput.placeholder = 'PGU-123';
+      bindDetailDraftField(draftFields, parentLinkInput, 'parentId', parentLinkInput.value);
+      const parentLinkActions = document.createElement('div');
+      parentLinkActions.className = 'inline-actions';
+      const saveParentLinkButton = document.createElement('button');
+      saveParentLinkButton.textContent = 'Save Parent Link';
+      saveParentLinkButton.addEventListener('click', async () => {
+        await updateTicket(ticket.id, { parent_id: parentLinkInput.value.trim().toUpperCase() });
+      });
+      parentLinkActions.appendChild(saveParentLinkButton);
+      if (ticket.parent_id) {
+        const clearParentLinkButton = document.createElement('button');
+        clearParentLinkButton.textContent = 'Clear Parent Link';
+        clearParentLinkButton.addEventListener('click', async () => {
+          parentLinkInput.value = '';
+          await updateTicket(ticket.id, { parent_id: '' });
+        });
+        parentLinkActions.appendChild(clearParentLinkButton);
+      }
+      parentLinkField.append(parentLinkInput, parentLinkActions);
+      if (ticket.parent_id) {
+        const parentPreview = document.createElement('div');
+        parentPreview.className = 'field-preview';
+        const parentPreviewLabel = document.createElement('div');
+        parentPreviewLabel.className = 'field-preview-label';
+        parentPreviewLabel.textContent = 'Current Parent';
+        parentPreview.append(parentPreviewLabel, linkedTicketRow([ticket.parent_id]));
+        parentLinkField.appendChild(parentPreview);
+      }
+
       const screenshotLabel = document.createElement('label');
       screenshotLabel.innerHTML = '<span class="field-label">Available Frame</span>';
       const screenshotSelect = document.createElement('select');
@@ -190,7 +225,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       screenshotActions.appendChild(addAttachmentButton);
       screenshotLabel.append(screenshotSelect, screenshotActions);
 
-      controls.append(assigneeLabel, screenshotLabel);
+      controls.append(assigneeLabel, parentLinkField, screenshotLabel);
 
       const toggles = document.createElement('div');
       toggles.className = 'tag-row';
@@ -262,6 +297,27 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         metaLine3.appendChild(document.createTextNode('Blocked By: '));
         metaLine3.appendChild(linkedTicketRow(ticket.blocked_by || []));
         meta.appendChild(metaLine3);
+      }
+
+      const linkedTickets = document.createElement('div');
+      linkedTickets.innerHTML = '<div class="field-label">Linked Tickets</div>';
+      if (ticket.parent_id) {
+        const parentRow = document.createElement('div');
+        parentRow.className = 'field-preview';
+        const parentLabel = document.createElement('div');
+        parentLabel.className = 'field-preview-label';
+        parentLabel.textContent = 'Parent';
+        parentRow.append(parentLabel, linkedTicketRow([ticket.parent_id]));
+        linkedTickets.appendChild(parentRow);
+      }
+      const childTickets = childTicketsForBoard(ticket);
+      if (childTickets.length) {
+        linkedTickets.appendChild(buildChildTicketList(childTickets));
+      } else if (!ticket.parent_id) {
+        const linkedEmpty = document.createElement('div');
+        linkedEmpty.className = 'soft-note';
+        linkedEmpty.textContent = 'No linked children.';
+        linkedTickets.appendChild(linkedEmpty);
       }
 
       const body = document.createElement('div');
@@ -389,6 +445,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         workflowActions,
         controls,
         toggles,
+        linkedTickets,
         blockedReason,
         body,
         blockedBy,

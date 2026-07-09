@@ -27,22 +27,25 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       bindDetailDraftField(draftFields, commentText, 'commentText', '');
 
       if (ticketIsEricReview(ticket)) {
+        const signoffRecorded = !!ticket.eric_signoff;
         const ericBanner = document.createElement('div');
-        ericBanner.className = 'eric-banner';
+        ericBanner.className = signoffRecorded ? 'eric-banner eric-banner-confirmed' : 'eric-banner';
         const ericBannerSubtitle = document.createElement('div');
         ericBannerSubtitle.className = 'eric-banner-subtitle';
-        ericBannerSubtitle.textContent = 'Awaiting Eric sign-off';
+        ericBannerSubtitle.textContent = signoffRecorded ? 'Signed Off ✓' : 'Awaiting Eric sign-off';
         const ericBannerTitle = document.createElement('div');
         ericBannerTitle.className = 'eric-banner-title';
         ericBannerTitle.textContent = ticket.title;
         const ericBannerNote = document.createElement('div');
         ericBannerNote.className = 'eric-banner-note';
-        ericBannerNote.textContent = ericReviewCheckText(ticket);
+        ericBannerNote.textContent = signoffRecorded
+          ? 'Eric sign-off recorded. Waiting for director completion.'
+          : ericReviewCheckText(ticket);
         const ericSummary = document.createElement('div');
         ericSummary.className = 'eric-summary';
         const ericSummaryHead = document.createElement('div');
         ericSummaryHead.className = 'eric-summary-head';
-        ericSummaryHead.textContent = 'Check Before Sign-off';
+        ericSummaryHead.textContent = signoffRecorded ? 'Signed-off Review Snapshot' : 'Check Before Sign-off';
         const ericSummaryStatuses = document.createElement('div');
         ericSummaryStatuses.className = 'eric-summary-statuses';
         ericReviewStatusItems(ticket).forEach((item) => {
@@ -83,21 +86,34 @@ SCRIPT_DETAIL = """    function selectedTicket() {
           ericSummarySections.appendChild(sectionEl);
         });
         ericSummary.append(ericSummaryHead, ericSummaryStatuses, ericSummarySections);
+        if (signoffRecorded) {
+          const confirmation = document.createElement('div');
+          confirmation.className = 'eric-signoff-confirmation';
+          confirmation.textContent = 'Signed off ✓ Waiting for director completion.';
+          ericSummary.appendChild(confirmation);
+        }
         const ericBannerActions = document.createElement('div');
         ericBannerActions.className = 'inline-actions';
-        const ericBannerSignoffButton = document.createElement('button');
-        ericBannerSignoffButton.className = 'primary';
-        ericBannerSignoffButton.type = 'button';
-        ericBannerSignoffButton.textContent = 'Sign Off';
-        ericBannerSignoffButton.addEventListener('click', async () => {
-          try {
-            await submitEricSignoff(ticket.id, commentWho.value, commentText.value);
-          } catch (error) {
-            setCreateStatus(error.message, true);
-            await requestBoardReload();
-          }
-        });
-        ericBannerActions.appendChild(ericBannerSignoffButton);
+        if (signoffRecorded) {
+          const signedOffState = document.createElement('div');
+          signedOffState.className = 'signoff-state-chip';
+          signedOffState.textContent = 'Signed Off ✓';
+          ericBannerActions.appendChild(signedOffState);
+        } else {
+          const ericBannerSignoffButton = document.createElement('button');
+          ericBannerSignoffButton.className = 'primary';
+          ericBannerSignoffButton.type = 'button';
+          ericBannerSignoffButton.textContent = 'Sign Off';
+          ericBannerSignoffButton.addEventListener('click', async () => {
+            try {
+              await submitEricSignoff(ticket.id, commentWho.value, commentText.value);
+            } catch (error) {
+              setCreateStatus(error.message, true);
+              await requestBoardReload();
+            }
+          });
+          ericBannerActions.appendChild(ericBannerSignoffButton);
+        }
         ericBanner.append(ericBannerSubtitle, ericBannerTitle, ericBannerNote, ericSummary, ericBannerActions);
         box.appendChild(ericBanner);
       }

@@ -280,6 +280,10 @@ STYLE = """    :root {
       border-color: rgba(253, 164, 175, 0.32);
       box-shadow: 0 0 0 1px rgba(253, 164, 175, 0.12) inset;
     }
+    .card-signed-off {
+      border-color: rgba(134, 239, 172, 0.4);
+      box-shadow: 0 0 0 1px rgba(134, 239, 172, 0.15) inset;
+    }
     .card.selected {
       border-color: rgba(125, 211, 252, 0.55);
       box-shadow: 0 0 0 1px rgba(125, 211, 252, 0.3) inset;
@@ -316,6 +320,28 @@ STYLE = """    :root {
       color: var(--text);
       font-weight: 600;
       overflow-wrap: anywhere;
+    }
+    .card-signoff-state {
+      display: inline-flex;
+      width: fit-content;
+      max-width: 100%;
+      margin-top: 6px;
+      padding: 5px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      font-size: 12px;
+      line-height: 1.2;
+      font-weight: 700;
+    }
+    .card-signoff-state.pending {
+      color: var(--warn);
+      border-color: rgba(252, 211, 77, 0.35);
+      background: rgba(252, 211, 77, 0.08);
+    }
+    .card-signoff-state.signed {
+      color: var(--ok);
+      border-color: rgba(134, 239, 172, 0.4);
+      background: rgba(134, 239, 172, 0.1);
     }
     .tag-row, .badge-row, .control-row {
       display: flex;
@@ -428,6 +454,10 @@ STYLE = """    :root {
       display: grid;
       gap: 10px;
     }
+    .eric-banner-confirmed {
+      border-color: rgba(134, 239, 172, 0.42);
+      background: linear-gradient(180deg, rgba(134, 239, 172, 0.18), rgba(134, 239, 172, 0.08));
+    }
     .eric-banner-subtitle {
       font-size: 13px;
       font-weight: 700;
@@ -498,6 +528,25 @@ STYLE = """    :root {
       line-height: 1.5;
       color: var(--text);
       white-space: pre-wrap;
+    }
+    .eric-signoff-confirmation,
+    .signoff-state-chip {
+      display: inline-flex;
+      width: fit-content;
+      max-width: 100%;
+      padding: 8px 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(134, 239, 172, 0.4);
+      background: rgba(134, 239, 172, 0.12);
+      color: var(--ok);
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1.35;
+    }
+    .eric-signoff-confirmation {
+      width: 100%;
+      justify-content: center;
+      text-align: center;
     }
     .alert-stack {
       display: grid;

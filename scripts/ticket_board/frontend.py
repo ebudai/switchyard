@@ -516,6 +516,7 @@ HTML = """<!doctype html>
       errors: [],
       assignees: [],
       selectedId: null,
+      detailDraft: null,
       eventSource: null,
       eventReconnectTimer: null,
       loadInFlight: null,
@@ -553,6 +554,71 @@ HTML = """<!doctype html>
 
     function stateLabel(key) {
       return COLUMNS.find((column) => column.key === key)?.label || key;
+    }
+
+    function clearDetailDraft(ticketId = null) {
+      if (!ticketId || state.detailDraft?.ticketId === ticketId) {
+        state.detailDraft = null;
+      }
+    }
+
+    function rememberDetailDraft() {
+      const ticket = selectedTicket();
+      if (!ticket) {
+        clearDetailDraft();
+        return;
+      }
+      const fields = {};
+      let activeKey = null;
+      detailContentEl.querySelectorAll('[data-draft-key]').forEach((element) => {
+        const key = element.dataset.draftKey;
+        if (!key) {
+          return;
+        }
+        const value = element.value ?? '';
+        const serverValue = element.dataset.serverValue ?? '';
+        const isFocused = element === document.activeElement;
+        const isDirty = value !== serverValue;
+        if (!isDirty && !isFocused) {
+          return;
+        }
+        const entry = { value };
+        if (typeof element.selectionStart === 'number' && typeof element.selectionEnd === 'number') {
+          entry.selectionStart = element.selectionStart;
+          entry.selectionEnd = element.selectionEnd;
+        }
+        fields[key] = entry;
+        if (isFocused) {
+          activeKey = key;
+        }
+      });
+      state.detailDraft = Object.keys(fields).length ? { ticketId: ticket.id, fields, activeKey } : null;
+    }
+
+    function bindDetailDraftField(fields, element, key, serverValue) {
+      element.dataset.draftKey = key;
+      element.dataset.serverValue = serverValue ?? '';
+      fields.set(key, element);
+    }
+
+    function restoreDetailDraft(ticketId, fields) {
+      const draft = state.detailDraft;
+      if (!draft || draft.ticketId !== ticketId) {
+        return;
+      }
+      Object.entries(draft.fields).forEach(([key, entry]) => {
+        const element = fields.get(key);
+        if (!element) {
+          return;
+        }
+        element.value = entry.value;
+        if (draft.activeKey === key) {
+          element.focus();
+          if (typeof entry.selectionStart === 'number' && typeof entry.selectionEnd === 'number') {
+            element.setSelectionRange(entry.selectionStart, entry.selectionEnd);
+          }
+        }
+      });
     }
 
     function ticketAllowsKickback(ticket) {
@@ -811,6 +877,9 @@ HTML = """<!doctype html>
         card.classList.add('selected');
       }
       card.addEventListener('click', () => {
+        if (state.selectedId !== ticket.id) {
+          clearDetailDraft();
+        }
         state.selectedId = ticket.id;
         renderBoard();
         renderDetail();
@@ -902,12 +971,15 @@ HTML = """<!doctype html>
 
       const box = document.createElement('div');
       box.className = 'detail-box';
+      const draftFields = new Map();
       const commentWho = document.createElement('input');
       commentWho.type = 'text';
       commentWho.placeholder = 'who';
       commentWho.value = ticketIsEricReview(ticket) ? 'eric' : 'director';
+      bindDetailDraftField(draftFields, commentWho, 'commentWho', commentWho.value);
       const commentText = document.createElement('textarea');
       commentText.placeholder = 'Add a comment or bounce-back note';
+      bindDetailDraftField(draftFields, commentText, 'commentText', '');
 
       if (ticketIsEricReview(ticket)) {
         const ericBanner = document.createElement('div');
@@ -1021,6 +1093,7 @@ HTML = """<!doctype html>
       blockedByInput.type = 'text';
       blockedByInput.value = formatBlockedByList(ticket.blocked_by);
       blockedByInput.placeholder = 'PGU-23, PGU-25';
+      bindDetailDraftField(draftFields, blockedByInput, 'blockedBy', blockedByInput.value);
       const blockedByActions = document.createElement('div');
       blockedByActions.className = 'inline-actions';
       const saveBlockedByButton = document.createElement('button');
@@ -1039,6 +1112,7 @@ HTML = """<!doctype html>
       const implementationInput = document.createElement('textarea');
       implementationInput.value = ticket.implementation || '';
       implementationInput.placeholder = 'Director-authored implementation package/spec for the implementer at in_progress.';
+      bindDetailDraftField(draftFields, implementationInput, 'implementation', implementationInput.value);
       const implementationActions = document.createElement('div');
       implementationActions.className = 'inline-actions';
       const saveImplementationButton = document.createElement('button');
@@ -1054,6 +1128,7 @@ HTML = """<!doctype html>
       const auditPromptInput = document.createElement('textarea');
       auditPromptInput.value = ticket.audit_prompt || '';
       auditPromptInput.placeholder = 'Director-authored prompt for audit when the ticket enters audit.';
+      bindDetailDraftField(draftFields, auditPromptInput, 'auditPrompt', auditPromptInput.value);
       const auditPromptActions = document.createElement('div');
       auditPromptActions.className = 'inline-actions';
       const saveAuditPromptButton = document.createElement('button');
@@ -1141,6 +1216,7 @@ HTML = """<!doctype html>
       box.appendChild(comments);
 
       detailContentEl.appendChild(box);
+      restoreDetailDraft(ticket.id, draftFields);
     }
 
     async function uploadImageBlob(blob) {
@@ -1193,6 +1269,7 @@ HTML = """<!doctype html>
     }
 
     async function loadBoard() {
+      rememberDetailDraft();
       const response = await fetch('/api/board', { cache: 'no-store' });
       if (!response.ok) {
         throw new Error(await response.text());
@@ -1206,6 +1283,7 @@ HTML = """<!doctype html>
         state.selectedId = state.tickets[0].id;
       }
       if (state.selectedId && !state.tickets.some((ticket) => ticket.id === state.selectedId)) {
+        clearDetailDraft();
         state.selectedId = state.tickets[0]?.id || null;
       }
       storePathEl.textContent = payload.store_path;
@@ -1309,6 +1387,7 @@ HTML = """<!doctype html>
       if (nextState) {
         patch.state = nextState;
       }
+      clearDetailDraft(ticketId);
       await updateTicket(ticketId, patch);
     }
 
@@ -1322,6 +1401,7 @@ HTML = """<!doctype html>
           text: trimmedText,
         };
       }
+      clearDetailDraft(ticketId);
       await updateTicket(ticketId, patch);
     }
 

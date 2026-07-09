@@ -23,6 +23,8 @@ ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "agent", "dire
 LEGACY_ASSIGNEE_ALIASES = {"ui": "app"}
 LEGACY_STATE_ALIASES = {"open": "analysis"}
 STATES = ("analysis", "in_progress", "director_review", "audit", "eric_review", "done")
+REOPEN_RESET_TARGET_STATES = {"open", "analysis", "in_progress"}
+REVIEWED_STATES = {"director_review", "audit", "eric_review"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
 
@@ -445,7 +447,10 @@ class TicketBoardApp:
             raise ValueError("audit_signoff must be true before a ticket can enter eric_review")
 
     def _enforce_transition_rules(self, previous_state: str, ticket: dict[str, Any]) -> None:
-        if previous_state == "analysis" and ticket["state"] == "in_progress":
+        if previous_state in REVIEWED_STATES and ticket["state"] in REOPEN_RESET_TARGET_STATES:
+            ticket["audit_signoff"] = False
+            ticket["commit_hash"] = ""
+        if previous_state in {"open", "analysis"} and ticket["state"] == "in_progress":
             if ticket["assignee"] == "unassigned":
                 raise ValueError("assignee must not be unassigned before a ticket can enter in_progress")
             if not ticket["implementation"].strip():
@@ -460,6 +465,8 @@ class TicketBoardApp:
             return
         if not ticket.get("commit_hash"):
             raise ValueError("commit_hash is required before a ticket can enter done")
+        if not self._commit_is_on_main(ticket["commit_hash"]):
+            raise ValueError(f"commit_hash {ticket['commit_hash']} is not on main - merge the branch first")
 
     def _validate_commit_hash(self, raw: Any) -> str:
         if raw in (None, ""):
@@ -486,6 +493,15 @@ class TicketBoardApp:
         if resolved.returncode != 0 or not resolved.stdout.strip():
             raise ValueError(f"unknown commit_hash: {value}")
         return resolved.stdout.strip()
+
+    def _commit_is_on_main(self, commit_hash: str) -> bool:
+        proc = subprocess.run(
+            ["git", f"--git-dir={self.commit_git_dir}", "merge-base", "--is-ancestor", commit_hash, "refs/heads/main"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return proc.returncode == 0
 
     def _path_in_allowed_image_dirs(self, path: Path) -> bool:
         return self.frame_dir in path.parents or self.asset_dir in path.parents

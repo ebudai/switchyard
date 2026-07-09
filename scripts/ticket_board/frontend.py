@@ -514,6 +514,22 @@ HTML = """<!doctype html>
       return ticket.state === 'eric_review';
     }
 
+    function firstNonEmptyLine(text) {
+      if (!text) {
+        return '';
+      }
+      return text
+        .split(/\\r?\\n/)
+        .map((line) => line.trim())
+        .find((line) => line.length > 0) || '';
+    }
+
+    function ericReviewCheckText(ticket) {
+      return firstNonEmptyLine(ticket.implementation)
+        || firstNonEmptyLine(ticket.body)
+        || 'Review this ticket, then sign off when it looks right.';
+    }
+
     function buildOption(select, value, label) {
       const option = document.createElement('option');
       option.value = value;
@@ -708,7 +724,7 @@ HTML = """<!doctype html>
         ericBannerTitle.textContent = ticket.title;
         const ericBannerNote = document.createElement('div');
         ericBannerNote.className = 'eric-banner-note';
-        ericBannerNote.textContent = ticket.body || 'Review this ticket, then sign off when it looks right.';
+        ericBannerNote.textContent = ericReviewCheckText(ticket);
         const ericBannerActions = document.createElement('div');
         ericBannerActions.className = 'inline-actions';
         const ericBannerSignoffButton = document.createElement('button');

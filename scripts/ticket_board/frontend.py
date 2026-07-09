@@ -1072,6 +1072,22 @@ HTML = """<!doctype html>
 
       const meta = document.createElement('div');
       meta.className = 'meta';
+      const titleField = document.createElement('div');
+      titleField.innerHTML = '<div class="field-label">Title</div>';
+      const titleEditInput = document.createElement('input');
+      titleEditInput.type = 'text';
+      titleEditInput.value = ticket.title;
+      titleEditInput.placeholder = 'Short issue title';
+      bindDetailDraftField(draftFields, titleEditInput, 'title', titleEditInput.value);
+      const titleActions = document.createElement('div');
+      titleActions.className = 'inline-actions';
+      const saveTitleButton = document.createElement('button');
+      saveTitleButton.textContent = 'Save Title';
+      saveTitleButton.addEventListener('click', async () => {
+        await updateTicket(ticket.id, { title: titleEditInput.value });
+      });
+      titleActions.appendChild(saveTitleButton);
+      titleField.append(titleEditInput, titleActions);
       const metaLine1 = document.createElement('div');
       const strong = document.createElement('strong');
       strong.textContent = ticket.id;
@@ -1170,7 +1186,7 @@ HTML = """<!doctype html>
         : 'A verified git commit is required before moving this ticket to done.';
       commitInfo.append(commitOverride, commitNote);
 
-      box.append(meta, controls, toggles, body, blockedBy, implementation, auditPrompt, commitInfo);
+      box.append(titleField, meta, controls, toggles, body, blockedBy, implementation, auditPrompt, commitInfo);
 
       if (ticketScreenshotEntries(ticket).length) {
         const imageWrap = document.createElement('div');

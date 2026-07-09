@@ -170,9 +170,7 @@ class TicketBoardApp:
         created: str | None = None,
         updated: str | None = None,
     ) -> dict[str, Any]:
-        title = title.strip()
-        if not title:
-            raise ValueError("title must not be empty")
+        title = self._require_text(title, "title").strip()
         assignee = self._validate_assignee(assignee)
         state = self._validate_state(state)
         ticket_id, handle = self._reserve_ticket_file()
@@ -226,6 +224,8 @@ class TicketBoardApp:
         previous_state = current["state"]
         if "state" in patch:
             current["state"] = self._validate_state(str(patch["state"]))
+        if "title" in patch:
+            current["title"] = self._require_text(patch["title"], "title").strip()
         if "assignee" in patch:
             current["assignee"] = self._validate_assignee(str(patch["assignee"]))
         if "blocked_by" in patch:

@@ -1,0 +1,803 @@
+"""Core board frontend JavaScript helpers and board rendering."""
+
+SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
+    const COLUMNS = [
+      { key: 'open', label: 'Open' },
+      { key: 'in_progress', label: 'In Progress' },
+      { key: 'director_review', label: 'Director Review' },
+      { key: 'audit', label: 'Audit' },
+      { key: 'eric_review', label: 'Eric Review' },
+      { key: 'done', label: 'Done' },
+    ];
+
+    const state = {
+      tickets: [],
+      screenshots: [],
+      errors: [],
+      assignees: [],
+      selectedId: null,
+      detailOpen: false,
+      showDone: false,
+      detailDraft: null,
+      eventSource: null,
+      eventReconnectTimer: null,
+      loadInFlight: null,
+      loadQueued: false,
+      pendingCreateScreenshots: [],
+    };
+
+    const boardEl = document.getElementById('board');
+    const assigneeInput = document.getElementById('assigneeInput');
+    const screenshotInput = document.getElementById('screenshotInput');
+    const addCreateAttachmentBtn = document.getElementById('addCreateAttachmentBtn');
+    const createPreviewEl = document.getElementById('createPreview');
+    const createPreviewGalleryEl = document.getElementById('createPreviewGallery');
+    const titleInput = document.getElementById('titleInput');
+    const bodyInput = document.getElementById('bodyInput');
+    const needsEricInput = document.getElementById('needsEricInput');
+    const showDoneInput = document.getElementById('showDoneInput');
+    const showDoneCountEl = document.getElementById('showDoneCount');
+    const createBtn = document.getElementById('createBtn');
+    const createStatus = document.getElementById('createStatus');
+    const storePathEl = document.getElementById('storePath');
+    const framePathEl = document.getElementById('framePath');
+    const refreshLineEl = document.getElementById('refreshLine');
+    const errorBoxEl = document.getElementById('errorBox');
+    const detailOverlayEl = document.getElementById('detailOverlay');
+    const detailModalTitleEl = document.getElementById('detailModalTitle');
+    const detailCloseBtn = document.getElementById('detailCloseBtn');
+    const detailContentEl = document.getElementById('detailContent');
+
+    function formatWhen(raw) {
+      const date = new Date(raw);
+      return Number.isNaN(date.getTime()) ? raw : date.toLocaleString();
+    }
+
+    function setCreateStatus(text, isError = false) {
+      createStatus.textContent = text;
+      createStatus.style.borderColor = isError ? 'rgba(253,164,175,0.35)' : 'var(--border)';
+      createStatus.style.color = isError ? '#fecdd3' : 'var(--text)';
+    }
+
+    function stateLabel(key) {
+      return COLUMNS.find((column) => column.key === key)?.label || key;
+    }
+
+    function defaultAdvanceState(ticket) {
+      if (ticket.state === 'open') {
+        return 'in_progress';
+      }
+      if (ticket.state === 'in_progress') {
+        return 'director_review';
+      }
+      if (ticket.state === 'director_review') {
+        return 'audit';
+      }
+      if (ticket.state === 'audit') {
+        return ticket.needs_eric_signoff ? 'eric_review' : 'done';
+      }
+      return null;
+    }
+
+    function advanceBlockedReason(ticket) {
+      const nextState = defaultAdvanceState(ticket);
+      if (!nextState) {
+        return 'No default advance from this state.';
+      }
+      if (ticket.state === 'open') {
+        if (ticket.assignee === 'unassigned') {
+          return 'Assign the ticket before advancing to in progress.';
+        }
+        if (!(ticket.implementation || '').trim()) {
+          return 'Save implementation before advancing to in progress.';
+        }
+      }
+      if (ticket.state === 'director_review' && !(ticket.audit_prompt || '').trim()) {
+        return 'Save audit prompt before advancing to audit.';
+      }
+      if (ticket.state === 'audit' && !ticket.audit_signoff) {
+        return ticket.needs_eric_signoff
+          ? 'Set audit signoff before advancing to Eric review.'
+          : 'Set audit signoff before advancing to done.';
+      }
+      if (nextState === 'done' && !ticket.commit_exempt && !(ticket.commit_hash || '').trim()) {
+        return 'Save a verified commit hash or enable no-commit override before advancing to done.';
+      }
+      return '';
+    }
+
+    function ticketBlockedReason(ticket) {
+      return (ticket.blocked_reason || '').trim();
+    }
+
+    function manualBlockedSummary(ticket) {
+      const reason = ticketBlockedReason(ticket);
+      const unresolved = unresolvedBlockedBy(ticket);
+      if (reason && unresolved.length) {
+        return `${reason} (blocked by ${formatBlockedByList(unresolved)})`;
+      }
+      if (reason) {
+        return reason;
+      }
+      if (unresolved.length) {
+        return `Blocked by ${formatBlockedByList(unresolved)}. Add a blocked reason.`;
+      }
+      return '';
+    }
+
+    function guardBlockedSummary(ticket) {
+      const reason = advanceBlockedReason(ticket);
+      return defaultAdvanceState(ticket) ? reason : '';
+    }
+
+    function cardAlert(kind, title, text) {
+      const alert = document.createElement('div');
+      alert.className = `alert card-alert card-alert-${kind}`;
+      const strong = document.createElement('strong');
+      strong.textContent = title;
+      const body = document.createElement('div');
+      body.textContent = text;
+      alert.append(strong, body);
+      return alert;
+    }
+
+    function alertStackForTicket(ticket) {
+      const alerts = [];
+      const blockedSummary = manualBlockedSummary(ticket);
+      if (blockedSummary) {
+        alerts.push({ kind: 'blocked', title: 'Blocked', text: blockedSummary });
+      }
+      const guardSummary = guardBlockedSummary(ticket);
+      if (guardSummary) {
+        alerts.push({ kind: 'guard', title: 'Advance Blocked', text: guardSummary });
+      }
+      return alerts;
+    }
+
+    function renderAlertStack(ticket, { detail = false } = {}) {
+      const alerts = alertStackForTicket(ticket);
+      if (!alerts.length) {
+        return null;
+      }
+      const stack = document.createElement('div');
+      stack.className = 'alert-stack';
+      alerts.forEach((item) => {
+        const alert = detail
+          ? document.createElement('div')
+          : cardAlert(item.kind, item.title, item.text);
+        if (detail) {
+          alert.className = `alert alert-${item.kind}`;
+          const strong = document.createElement('strong');
+          strong.textContent = item.title;
+          const body = document.createElement('div');
+          body.textContent = item.text;
+          alert.append(strong, body);
+        }
+        stack.appendChild(alert);
+      });
+      return stack;
+    }
+
+    async function advanceTicket(ticketId) {
+      const ticket = state.tickets.find((item) => item.id === ticketId);
+      if (!ticket) {
+        throw new Error(`ticket not found: ${ticketId}`);
+      }
+      const nextState = defaultAdvanceState(ticket);
+      if (!nextState) {
+        throw new Error('no default advance from this state');
+      }
+      const blockedReason = advanceBlockedReason(ticket);
+      if (blockedReason) {
+        throw new Error(blockedReason);
+      }
+      await updateTicket(ticketId, { state: nextState });
+    }
+
+    function clearDetailDraft(ticketId = null) {
+      if (!ticketId || state.detailDraft?.ticketId === ticketId) {
+        state.detailDraft = null;
+      }
+    }
+
+    function syncDetailOverlay() {
+      const ticket = selectedTicket();
+      const isOpen = !!(state.detailOpen && ticket);
+      detailOverlayEl.hidden = !isOpen;
+      document.body.classList.toggle('detail-open', isOpen);
+      detailModalTitleEl.textContent = ticket ? `${ticket.id} - ${ticket.title}` : 'Select a ticket';
+    }
+
+    function openDetail(ticketId) {
+      if (state.selectedId !== ticketId) {
+        clearDetailDraft();
+      }
+      state.selectedId = ticketId;
+      state.detailOpen = true;
+      renderBoard();
+      renderDetail();
+    }
+
+    function closeDetail() {
+      const ticketId = state.selectedId;
+      clearDetailDraft(ticketId);
+      state.selectedId = null;
+      state.detailOpen = false;
+      renderBoard();
+      renderDetail();
+    }
+
+    function rememberDetailDraft() {
+      if (!state.detailOpen) {
+        return;
+      }
+      const ticket = selectedTicket();
+      if (!ticket) {
+        clearDetailDraft();
+        return;
+      }
+      const fields = {};
+      let activeKey = null;
+      detailContentEl.querySelectorAll('[data-draft-key]').forEach((element) => {
+        const key = element.dataset.draftKey;
+        if (!key) {
+          return;
+        }
+        const value = element.value ?? '';
+        const serverValue = element.dataset.serverValue ?? '';
+        const isFocused = element === document.activeElement;
+        const isDirty = value !== serverValue;
+        if (!isDirty && !isFocused) {
+          return;
+        }
+        const entry = { value };
+        if (typeof element.selectionStart === 'number' && typeof element.selectionEnd === 'number') {
+          entry.selectionStart = element.selectionStart;
+          entry.selectionEnd = element.selectionEnd;
+        }
+        fields[key] = entry;
+        if (isFocused) {
+          activeKey = key;
+        }
+      });
+      state.detailDraft = Object.keys(fields).length ? { ticketId: ticket.id, fields, activeKey } : null;
+    }
+
+    function bindDetailDraftField(fields, element, key, serverValue) {
+      element.dataset.draftKey = key;
+      element.dataset.serverValue = serverValue ?? '';
+      fields.set(key, element);
+    }
+
+    function restoreDetailDraft(ticketId, fields) {
+      const draft = state.detailDraft;
+      if (!draft || draft.ticketId !== ticketId) {
+        return;
+      }
+      Object.entries(draft.fields).forEach(([key, entry]) => {
+        const element = fields.get(key);
+        if (!element) {
+          return;
+        }
+        element.value = entry.value;
+        if (draft.activeKey === key) {
+          element.focus();
+          if (typeof entry.selectionStart === 'number' && typeof entry.selectionEnd === 'number') {
+            element.setSelectionRange(entry.selectionStart, entry.selectionEnd);
+          }
+        }
+      });
+    }
+
+    function ticketAllowsKickback(ticket) {
+      return ['director_review', 'audit', 'eric_review'].includes(ticket.state);
+    }
+
+    function ticketIsEricReview(ticket) {
+      return ticket.state === 'eric_review';
+    }
+
+    function firstNonEmptyLine(text) {
+      if (!text) {
+        return '';
+      }
+      return text
+        .split(/\\r?\\n/)
+        .map((line) => line.trim())
+        .find((line) => line.length > 0) || '';
+    }
+
+    function ericReviewCheckText(ticket) {
+      return firstNonEmptyLine(ticket.implementation)
+        || firstNonEmptyLine(ticket.body)
+        || 'Review this ticket, then sign off when it looks right.';
+    }
+
+    function checklistItemsFromText(text) {
+      if (!text) {
+        return [];
+      }
+      return text
+        .split(/\\r?\\n/)
+        .map((line) => {
+          const match = line.match(/^\\s*[-*]\\s+\\[(?: |x|X)\\]\\s+(.+)$/);
+          return match ? match[1].trim() : '';
+        })
+        .filter((item) => item.length > 0);
+    }
+
+    function summarizeTextBlock(text, maxLines = 3) {
+      if (!text) {
+        return '';
+      }
+      const lines = text
+        .split(/\\r?\\n/)
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0 && !/^[-*]\\s+\\[(?: |x|X)\\]\\s+/.test(line));
+      return lines.slice(0, maxLines).join('\\n');
+    }
+
+    function ericReviewSummarySections(ticket) {
+      const fields = [
+        ['Implementation', ticket.implementation],
+        ['Body', ticket.body],
+        ['Audit Prompt', ticket.audit_prompt],
+      ];
+      return fields
+        .map(([label, text]) => {
+          const checklist = checklistItemsFromText(text);
+          if (checklist.length) {
+            return { label, checklist };
+          }
+          const summary = summarizeTextBlock(text);
+          if (summary) {
+            return { label, summary };
+          }
+          return null;
+        })
+        .filter((section) => !!section);
+    }
+
+    function ericReviewStatusItems(ticket) {
+      return [
+        { label: 'Audit sign-off', ok: !!ticket.audit_signoff },
+        { label: 'Needs Eric sign-off', ok: !!ticket.needs_eric_signoff },
+        {
+          label: 'Commit evidence',
+          ok: !!ticket.commit_exempt || !!(ticket.commit_hash || '').trim(),
+          okText: ticket.commit_exempt ? 'exempt' : 'ready',
+          missingText: 'missing',
+        },
+      ];
+    }
+
+    function parseBlockedByInput(value) {
+      return Array.from(new Set(
+        value
+          .split(/[^A-Za-z0-9-]+/)
+          .map((item) => item.trim().toUpperCase())
+          .filter((item) => item.length > 0),
+      ));
+    }
+
+    function formatBlockedByList(blockedBy) {
+      return (blockedBy || []).join(', ');
+    }
+
+    function blockerTicket(id) {
+      return state.tickets.find((ticket) => ticket.id === id) || null;
+    }
+
+    function unresolvedBlockedBy(ticket) {
+      return (ticket.blocked_by || []).filter((id) => {
+        const blocker = blockerTicket(id);
+        return !blocker || blocker.state !== 'done';
+      });
+    }
+
+    function blockedBySummary(ticket) {
+      const blockedBy = ticket.blocked_by || [];
+      if (!blockedBy.length) {
+        return 'No ticket blockers recorded.';
+      }
+      const unresolved = unresolvedBlockedBy(ticket);
+      if (!unresolved.length) {
+        return `Resolved blockers: ${formatBlockedByList(blockedBy)}`;
+      }
+      return `Unresolved blockers: ${formatBlockedByList(unresolved)}`;
+    }
+
+    function buildOption(select, value, label) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = label;
+      select.appendChild(option);
+    }
+
+    function previewUrlFor(path) {
+      return `/api/image/${encodeURIComponent(path)}`;
+    }
+
+    function ticketScreenshotEntries(ticket) {
+      if (ticket.screenshots_info && ticket.screenshots_info.length) {
+        return ticket.screenshots_info;
+      }
+      if (ticket.screenshots && ticket.screenshots.length) {
+        return ticket.screenshots.map((path) => ({ path, available: true }));
+      }
+      if (ticket.screenshot) {
+        return [{ path: ticket.screenshot, available: !!ticket.screenshot_available }];
+      }
+      return [];
+    }
+
+    function ticketScreenshotPaths(ticket) {
+      return ticketScreenshotEntries(ticket).map((entry) => entry.path);
+    }
+
+    function uniquePaths(paths) {
+      return Array.from(new Set((paths || []).filter((path) => !!path)));
+    }
+
+    function ensureScreenshotOption(path, label = null) {
+      if (!path) {
+        return;
+      }
+      const exists = Array.from(screenshotInput.options).some((option) => option.value === path);
+      if (!exists) {
+        buildOption(screenshotInput, path, label || path.split('/').pop());
+      }
+    }
+
+    function screenshotLabelFor(path) {
+      const shot = state.screenshots.find((item) => item.path === path);
+      return shot ? `${shot.name} - ${shot.modified}` : path.split('/').pop();
+    }
+
+    function screenshotEntriesForPaths(paths) {
+      return uniquePaths(paths).map((path) => {
+        const ticketEntry = state.tickets
+          .flatMap((ticket) => ticketScreenshotEntries(ticket))
+          .find((entry) => entry.path === path);
+        return {
+          path,
+          available: ticketEntry ? ticketEntry.available : true,
+          label: screenshotLabelFor(path),
+        };
+      });
+    }
+
+    function renderAttachmentGallery(container, entries, removeLabel, onRemove) {
+      container.innerHTML = '';
+      entries.forEach((entry) => {
+        const card = document.createElement('div');
+        card.className = 'attachment-card';
+        if (onRemove) {
+          const removeButton = document.createElement('button');
+          removeButton.type = 'button';
+          removeButton.className = 'attachment-remove';
+          removeButton.textContent = '×';
+          removeButton.title = removeLabel;
+          removeButton.addEventListener('click', async (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            await onRemove(entry.path);
+          });
+          card.appendChild(removeButton);
+        }
+        if (entry.available) {
+          const image = document.createElement('img');
+          image.className = 'attachment-thumb';
+          image.src = previewUrlFor(entry.path);
+          image.alt = entry.path;
+          card.appendChild(image);
+        } else {
+          const missing = document.createElement('div');
+          missing.className = 'attachment-missing';
+          missing.textContent = 'image unavailable';
+          card.appendChild(missing);
+        }
+        const meta = document.createElement('div');
+        meta.className = 'attachment-meta';
+        meta.textContent = entry.label;
+        card.appendChild(meta);
+        container.appendChild(card);
+      });
+    }
+
+    function renderCreatePreview() {
+      if (!state.pendingCreateScreenshots.length) {
+        createPreviewEl.hidden = true;
+        createPreviewGalleryEl.innerHTML = '';
+        return;
+      }
+      createPreviewEl.hidden = false;
+      renderAttachmentGallery(
+        createPreviewGalleryEl,
+        screenshotEntriesForPaths(state.pendingCreateScreenshots),
+        'Remove attachment',
+        async (path) => {
+          state.pendingCreateScreenshots = state.pendingCreateScreenshots.filter((item) => item !== path);
+          renderCreatePreview();
+        },
+      );
+    }
+
+    function populateCreateForm() {
+      const assigneeValue = assigneeInput.value;
+      const screenshotValue = screenshotInput.value;
+      assigneeInput.innerHTML = '';
+      state.assignees.forEach((assignee) => buildOption(assigneeInput, assignee, assignee));
+      if (assigneeValue && Array.from(assigneeInput.options).some((option) => option.value === assigneeValue)) {
+        assigneeInput.value = assigneeValue;
+      }
+      screenshotInput.innerHTML = '';
+      buildOption(screenshotInput, '', '(none)');
+      state.screenshots.forEach((shot) => buildOption(screenshotInput, shot.path, `${shot.name} - ${shot.modified}`));
+      state.pendingCreateScreenshots.forEach((path) => ensureScreenshotOption(path));
+      if (screenshotValue) {
+        ensureScreenshotOption(screenshotValue);
+        screenshotInput.value = screenshotValue;
+      }
+      renderCreatePreview();
+    }
+
+    function badge(text, isOk) {
+      const span = document.createElement('span');
+      span.className = `badge ${isOk ? 'ok' : 'bad'}`;
+      span.textContent = text;
+      return span;
+    }
+
+    function ticketById(ticketId) {
+      const normalizedId = String(ticketId || '').toUpperCase();
+      return state.tickets.find((ticket) => ticket.id === normalizedId) || null;
+    }
+
+    function buildTicketReference(ticketId) {
+      const normalizedId = String(ticketId || '').toUpperCase();
+      const reference = document.createElement('button');
+      reference.type = 'button';
+      reference.className = 'ticket-ref';
+      reference.textContent = normalizedId;
+      if (ticketById(normalizedId)) {
+        reference.addEventListener('click', (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          openDetail(normalizedId);
+        });
+      } else {
+        reference.disabled = true;
+        reference.classList.add('ticket-ref-missing');
+        reference.title = 'Ticket not found in the current board snapshot.';
+      }
+      return reference;
+    }
+
+    function appendLinkedTicketText(container, text) {
+      const source = text || '';
+      const lines = source.split(/\\r?\\n/);
+      lines.forEach((line, lineIndex) => {
+        let cursor = 0;
+        TICKET_REF_PATTERN.lastIndex = 0;
+        let match = TICKET_REF_PATTERN.exec(line);
+        while (match) {
+          if (match.index > cursor) {
+            container.appendChild(document.createTextNode(line.slice(cursor, match.index)));
+          }
+          container.appendChild(buildTicketReference(match[1]));
+          cursor = match.index + match[1].length;
+          match = TICKET_REF_PATTERN.exec(line);
+        }
+        if (cursor < line.length) {
+          container.appendChild(document.createTextNode(line.slice(cursor)));
+        }
+        if (lineIndex < lines.length - 1) {
+          container.appendChild(document.createElement('br'));
+        }
+      });
+    }
+
+    function linkedTextBlock(text, emptyText = '(none)') {
+      const block = document.createElement('div');
+      block.className = 'body-text linked-text';
+      appendLinkedTicketText(block, text && text.length ? text : emptyText);
+      return block;
+    }
+
+    function linkedPreview(label, text, emptyText = '(none)') {
+      const preview = document.createElement('div');
+      preview.className = 'field-preview';
+      const previewLabel = document.createElement('div');
+      previewLabel.className = 'field-preview-label';
+      previewLabel.textContent = label;
+      preview.append(previewLabel, linkedTextBlock(text, emptyText));
+      return preview;
+    }
+
+    function linkedTicketRow(ticketIds) {
+      const row = document.createElement('div');
+      row.className = 'ticket-ref-row';
+      if (!ticketIds.length) {
+        const empty = document.createElement('div');
+        empty.className = 'soft-note';
+        empty.textContent = 'No linked tickets.';
+        row.appendChild(empty);
+        return row;
+      }
+      ticketIds.forEach((ticketId) => {
+        row.appendChild(buildTicketReference(ticketId));
+      });
+      return row;
+    }
+
+    function ticketNumber(ticketId) {
+      const match = /^PGU-(\\d+)$/.exec(ticketId || '');
+      return match ? Number.parseInt(match[1], 10) : Number.MAX_SAFE_INTEGER;
+    }
+
+    function compareTicketsOldestFirst(left, right) {
+      const createdCompare = (left.created || '').localeCompare(right.created || '');
+      if (createdCompare !== 0) {
+        return createdCompare;
+      }
+      return ticketNumber(left.id) - ticketNumber(right.id);
+    }
+
+    function columnTickets(columnKey) {
+      return state.tickets
+        .filter((ticket) => ticket.state === columnKey && (columnKey !== 'eric_review' || ticket.needs_eric_signoff))
+        .sort(compareTicketsOldestFirst);
+    }
+
+    function visibleColumns() {
+      return state.showDone ? COLUMNS : COLUMNS.filter((column) => column.key !== 'done');
+    }
+
+    function renderDoneToggle() {
+      const doneCount = columnTickets('done').length;
+      showDoneInput.checked = state.showDone;
+      showDoneCountEl.textContent = `(${doneCount})`;
+    }
+
+    function renderBoard() {
+      boardEl.innerHTML = '';
+      visibleColumns().forEach((column) => {
+        const columnEl = document.createElement('section');
+        columnEl.className = 'column';
+        const tickets = columnTickets(column.key);
+        columnEl.innerHTML = `
+          <div class="column-head">
+            <div class="column-title">${column.label}</div>
+            <div class="count">${tickets.length}</div>
+          </div>
+        `;
+        const body = document.createElement('div');
+        body.className = 'column-body';
+        if (!tickets.length) {
+          const empty = document.createElement('div');
+          empty.className = 'empty';
+          empty.textContent = column.key === 'eric_review'
+            ? 'Only tickets flagged for Eric signoff appear here.'
+            : 'No tickets in this state.';
+          body.appendChild(empty);
+        }
+        tickets.forEach((ticket) => body.appendChild(renderCard(ticket)));
+        columnEl.appendChild(body);
+        boardEl.appendChild(columnEl);
+      });
+    }
+
+    function renderCard(ticket) {
+      const card = document.createElement('article');
+      card.className = 'card';
+      if (manualBlockedSummary(ticket)) {
+        card.classList.add('card-blocked');
+      }
+      if (ticket.id === state.selectedId) {
+        card.classList.add('selected');
+      }
+      card.addEventListener('click', () => openDetail(ticket.id));
+
+      const top = document.createElement('div');
+      top.className = 'card-top';
+      const titleWrap = document.createElement('div');
+      const idEl = document.createElement('div');
+      idEl.className = 'card-id';
+      idEl.textContent = ticket.id;
+      const titleEl = document.createElement('div');
+      titleEl.className = 'card-title';
+      titleEl.textContent = ticket.title;
+      const assigneeLine = document.createElement('div');
+      assigneeLine.className = 'card-assignee';
+      const assigneeLabel = document.createElement('span');
+      assigneeLabel.className = 'card-assignee-label';
+      assigneeLabel.textContent = 'assignee';
+      const assigneeValue = document.createElement('span');
+      assigneeValue.className = 'card-assignee-value';
+      assigneeValue.textContent = ticket.assignee;
+      assigneeLine.append(assigneeLabel, assigneeValue);
+      titleWrap.append(idEl, titleEl, assigneeLine);
+      top.appendChild(titleWrap);
+
+      const tags = document.createElement('div');
+      tags.className = 'tag-row';
+      const stateTag = document.createElement('span');
+      stateTag.className = 'tag';
+      stateTag.textContent = stateLabel(ticket.state);
+      tags.append(stateTag);
+
+      const badges = document.createElement('div');
+      badges.className = 'badge-row';
+      badges.appendChild(badge(`audit ${ticket.audit_signoff ? '✓' : '✗'}`, ticket.audit_signoff));
+      const unresolvedBlockers = unresolvedBlockedBy(ticket);
+      if (unresolvedBlockers.length) {
+        badges.appendChild(badge(
+          unresolvedBlockers.length === 1 ? `blocked ${unresolvedBlockers[0]}` : `blocked ${unresolvedBlockers.length}`,
+          false,
+        ));
+      }
+      if (ticket.needs_eric_signoff) {
+        badges.appendChild(badge(`eric ${ticket.eric_signoff ? '✓' : '✗'}`, ticket.eric_signoff));
+      }
+
+      const controls = document.createElement('div');
+      controls.className = 'control-row';
+      const nextState = defaultAdvanceState(ticket);
+      if (nextState) {
+        const advanceButton = document.createElement('button');
+        advanceButton.className = 'small primary';
+        advanceButton.type = 'button';
+        advanceButton.textContent = `Advance -> ${stateLabel(nextState)}`;
+        const blockedReason = advanceBlockedReason(ticket);
+        if (blockedReason) {
+          advanceButton.disabled = true;
+          advanceButton.title = blockedReason;
+        }
+        advanceButton.addEventListener('click', async (event) => {
+          event.stopPropagation();
+          try {
+            await advanceTicket(ticket.id);
+          } catch (error) {
+            setCreateStatus(error.message, true);
+            await requestBoardReload();
+          }
+        });
+        controls.appendChild(advanceButton);
+      }
+      const stateSelect = document.createElement('select');
+      stateSelect.className = 'small';
+      COLUMNS.forEach((column) => {
+        const option = document.createElement('option');
+        option.value = column.key;
+        option.textContent = column.label;
+        stateSelect.appendChild(option);
+      });
+      stateSelect.value = ticket.state;
+      stateSelect.addEventListener('click', (event) => event.stopPropagation());
+      stateSelect.addEventListener('change', async (event) => {
+        const nextState = event.target.value;
+        try {
+          await updateTicket(ticket.id, { state: nextState });
+        } catch (error) {
+          setCreateStatus(error.message, true);
+          await requestBoardReload();
+        }
+      });
+      controls.appendChild(stateSelect);
+
+      card.append(top, tags, badges);
+      const alerts = renderAlertStack(ticket);
+      if (alerts) {
+        card.appendChild(alerts);
+      }
+      if (ticketScreenshotEntries(ticket).some((entry) => !entry.available)) {
+        const missing = document.createElement('div');
+        missing.className = 'soft-note';
+        missing.textContent = 'image unavailable';
+        card.appendChild(missing);
+      }
+      card.appendChild(controls);
+      return card;
+    }
+"""

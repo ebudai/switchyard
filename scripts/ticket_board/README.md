@@ -80,7 +80,7 @@ Notes:
 - `blocked_by` is a list of ticket IDs the ticket is waiting on; unresolved blockers are any entries whose referenced ticket is not yet `done`
 - `implementation` is the director-authored implementation package/spec for the implementer during `in_progress`
 - `audit_prompt` is the director-authored handoff text for the audit phase
-- `commit_hash` stores the verified git commit associated with the ticket when it moves to `done`
+- `commit_hash` stores the verified git commit associated with the ticket when it moves to `done`; it must be on `main`
 - `commit_exempt` is an explicit override for non-code/process tickets that should be allowed into `done` without a commit
 - `screenshots` is the canonical attachment list; `screenshot` is retained as the first attachment for back-compat with older tools and tickets
 - Screenshots referenced by tickets may live in either `/tmp/pgu-frames` or `/home/agent/.claude/pgu-tickets-assets`

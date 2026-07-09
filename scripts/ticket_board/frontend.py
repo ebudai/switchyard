@@ -757,8 +757,23 @@ HTML = """<!doctype html>
       return span;
     }
 
+    function ticketNumber(ticketId) {
+      const match = /^PGU-(\\d+)$/.exec(ticketId || '');
+      return match ? Number.parseInt(match[1], 10) : Number.MAX_SAFE_INTEGER;
+    }
+
+    function compareTicketsOldestFirst(left, right) {
+      const createdCompare = (left.created || '').localeCompare(right.created || '');
+      if (createdCompare !== 0) {
+        return createdCompare;
+      }
+      return ticketNumber(left.id) - ticketNumber(right.id);
+    }
+
     function columnTickets(columnKey) {
-      return state.tickets.filter((ticket) => ticket.state === columnKey && (columnKey !== 'eric_review' || ticket.needs_eric_signoff));
+      return state.tickets
+        .filter((ticket) => ticket.state === columnKey && (columnKey !== 'eric_review' || ticket.needs_eric_signoff))
+        .sort(compareTicketsOldestFirst);
     }
 
     function renderBoard() {

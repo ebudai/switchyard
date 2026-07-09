@@ -18,7 +18,8 @@ def main() -> int:
     assert "function unresolvedBlockedBy(ticket)" in HTML
     assert "Blocked By" in HTML
     assert "blockedByInput.placeholder = 'PGU-23, PGU-25';" in HTML
-    assert "await updateTicket(ticket.id, { blocked_by: parseBlockedByInput(blockedByInput.value) });" in HTML
+    assert "blocked_by: parseBlockedByInput(blockedByInput.value)," in HTML
+    assert "blocked_reason: blockedReasonInput.value," in HTML
     assert "blocked_by" in HTML
     print("blocked_by_frontend_test: ok")
     return 0

@@ -247,6 +247,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                     assignee=str(payload.get("assignee", "unassigned")),
                     needs_eric_signoff=bool(payload.get("needs_eric_signoff", False)),
                     blocked_by=payload.get("blocked_by"),
+                    blocked_reason=str(payload.get("blocked_reason", "")),
                 )
                 self.events.notify_change(self.app.store_signature())
                 self.director_notifier.notify_ticket_created(created)

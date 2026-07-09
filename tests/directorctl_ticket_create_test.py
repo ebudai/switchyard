@@ -29,6 +29,8 @@ def run_create(index: int, store: Path, frames: Path, queue: Queue[dict[str, str
         "in_progress",
         "--blocked-by",
         "PGU-23, PGU-25",
+        "--blocked-reason",
+        "Waiting on PGU-23 and PGU-25.",
         "--title",
         f"cli collision test {index}",
         "--body",
@@ -66,6 +68,8 @@ def main() -> int:
                 "in_progress",
                 "--blocked-by",
                 "PGU-23 PGU-25",
+                "--blocked-reason",
+                "Waiting on PGU-23 and PGU-25.",
                 "--title",
                 "single create",
                 "--body",
@@ -90,6 +94,7 @@ def main() -> int:
         assert ticket["comments"][0]["text"] == "speced + routed"
         assert ticket["comments"][0]["ts"] == ticket["created"]
         assert ticket["blocked_by"] == ["PGU-23", "PGU-25"]
+        assert ticket["blocked_reason"] == "Waiting on PGU-23 and PGU-25."
         assert ticket["implementation"] == "ship the helper"
 
         loaded = json.loads((store / f"{ticket['id']}.json").read_text(encoding="utf-8"))

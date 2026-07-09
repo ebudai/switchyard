@@ -130,6 +130,7 @@ class TicketBoardApp:
         assignee: str,
         needs_eric_signoff: bool,
         blocked_by: list[str] | None = None,
+        blocked_reason: str = "",
     ) -> dict[str, Any]:
         return self.create_ticket_record(
             title=title,
@@ -145,6 +146,7 @@ class TicketBoardApp:
             needs_eric_signoff=needs_eric_signoff,
             eric_signoff=False,
             comments=[],
+            blocked_reason=blocked_reason,
             commit_hash="",
             commit_exempt=False,
         )
@@ -165,6 +167,7 @@ class TicketBoardApp:
         needs_eric_signoff: bool,
         eric_signoff: bool,
         comments: list[dict[str, Any]],
+        blocked_reason: str = "",
         commit_hash: str = "",
         commit_exempt: bool = False,
         created: str | None = None,
@@ -177,7 +180,9 @@ class TicketBoardApp:
         blocked_by = self._validate_blocked_by(blocked_by or [], ticket_id)
         implementation = self._require_plain_string(implementation, "implementation")
         audit_prompt = self._require_plain_string(audit_prompt, "audit_prompt")
+        blocked_reason = self._require_plain_string(blocked_reason, "blocked_reason")
         normalized_comments = self._validate_comments(comments)
+        self._enforce_blocked_reason_rule(blocked_by, blocked_reason)
         with handle:
             try:
                 screenshot_paths = self._materialize_attachments(
@@ -193,6 +198,7 @@ class TicketBoardApp:
                     "assignee": assignee,
                     "state": state,
                     "blocked_by": blocked_by,
+                    "blocked_reason": blocked_reason,
                     "implementation": implementation,
                     "audit_prompt": audit_prompt,
                     "audit_signoff": bool(audit_signoff),
@@ -230,6 +236,8 @@ class TicketBoardApp:
             current["assignee"] = self._validate_assignee(str(patch["assignee"]))
         if "blocked_by" in patch:
             current["blocked_by"] = self._validate_blocked_by(patch["blocked_by"], ticket_id)
+        if "blocked_reason" in patch:
+            current["blocked_reason"] = self._require_plain_string(patch["blocked_reason"], "blocked_reason")
         if "screenshots" in patch or "screenshot" in patch:
             screenshot_paths = self._materialize_attachments(
                 patch["screenshots"] if "screenshots" in patch else patch["screenshot"],
@@ -258,6 +266,8 @@ class TicketBoardApp:
             if not who or not text:
                 raise ValueError("comment requires non-empty who and text")
             current["comments"].append({"who": who, "text": text, "ts": iso_now()})
+        if "blocked_by" in patch or "blocked_reason" in patch:
+            self._enforce_blocked_reason_rule(current["blocked_by"], current["blocked_reason"])
         self._normalize_signoff_state(current)
         self._enforce_transition_rules(previous_state, current)
         self._enforce_workflow_rules(current)
@@ -302,6 +312,7 @@ class TicketBoardApp:
             "assignee": self._validate_assignee(str(payload.get("assignee", "unassigned"))),
             "state": self._validate_state(str(payload.get("state", "open"))),
             "blocked_by": self._validate_blocked_by(payload.get("blocked_by", []), ticket_id),
+            "blocked_reason": self._require_plain_string(payload.get("blocked_reason", ""), "blocked_reason"),
             "implementation": self._require_plain_string(payload.get("implementation", ""), "implementation"),
             "audit_prompt": self._require_plain_string(payload.get("audit_prompt", ""), "audit_prompt"),
             "audit_signoff": bool(payload.get("audit_signoff", False)),
@@ -361,6 +372,10 @@ class TicketBoardApp:
             ticket["eric_signoff"] = False
             if ticket["state"] == "eric_review":
                 ticket["state"] = "audit"
+
+    def _enforce_blocked_reason_rule(self, blocked_by: list[str], blocked_reason: str) -> None:
+        if blocked_by and not blocked_reason.strip():
+            raise ValueError("blocked_reason must be non-empty when blocked_by is set")
 
     def _enforce_workflow_rules(self, ticket: dict[str, Any]) -> None:
         if ticket["state"] == "eric_review" and not ticket["audit_signoff"]:

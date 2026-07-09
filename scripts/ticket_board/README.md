@@ -8,6 +8,18 @@ Launch:
 python3 scripts/ticket-board.py --host 127.0.0.1 --port 8770
 ```
 
+Shared shell-side ticket creation:
+
+```bash
+scripts/directorctl ticket-create \
+  --assignee app \
+  --state in_progress \
+  --title "Board: add director as assignee" \
+  --body "Allow director-owned action tickets in the assignee enum." \
+  --comment-who director \
+  --comment-text "Speced + routed to app."
+```
+
 Defaults:
 
 - Store path: `/home/agent/.claude/pgu-tickets`
@@ -62,4 +74,5 @@ Notes:
 - Screenshots referenced by tickets may live in either `/tmp/pgu-frames` or `/home/agent/.claude/pgu-tickets-assets`
 - The frame picker reads `/tmp/pgu-frames` as a transient inbox; once attached to a ticket, the image is copied into `/home/agent/.claude/pgu-tickets-assets`
 - Clipboard-pasted screenshots are normalized to PNG and staged under `/home/agent/.claude/pgu-tickets-assets` before ticket attachment
+- For new shell-created tickets, prefer `scripts/directorctl ticket-create` over hand-writing `PGU-N.json`; it uses the same atomic filename reservation as the web app create path, so concurrent creators cannot collide on the same ticket ID
 - Human shell editing is fine; if a JSON file is invalid, the UI shows a read error banner

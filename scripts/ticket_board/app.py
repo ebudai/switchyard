@@ -125,15 +125,51 @@ class TicketBoardApp:
         assignee: str,
         needs_eric_signoff: bool,
     ) -> dict[str, Any]:
+        return self.create_ticket_record(
+            title=title,
+            body=body,
+            screenshot=screenshot,
+            assignee=assignee,
+            state="open",
+            implementation="",
+            audit_prompt="",
+            audit_signoff=False,
+            needs_eric_signoff=needs_eric_signoff,
+            eric_signoff=False,
+            comments=[],
+        )
+
+    def create_ticket_record(
+        self,
+        *,
+        title: str,
+        body: str,
+        screenshot: str | None,
+        assignee: str,
+        state: str,
+        implementation: str,
+        audit_prompt: str,
+        audit_signoff: bool,
+        needs_eric_signoff: bool,
+        eric_signoff: bool,
+        comments: list[dict[str, Any]],
+        created: str | None = None,
+        updated: str | None = None,
+    ) -> dict[str, Any]:
         title = title.strip()
         if not title:
             raise ValueError("title must not be empty")
-        self._validate_assignee(assignee)
+        assignee = self._validate_assignee(assignee)
+        state = self._validate_state(state)
+        implementation = self._require_plain_string(implementation, "implementation")
+        audit_prompt = self._require_plain_string(audit_prompt, "audit_prompt")
+        normalized_comments = self._validate_comments(comments)
         ticket_id, handle = self._reserve_ticket_file()
         with handle:
             try:
                 screenshot_path = self._materialize_attachment(screenshot, ticket_id)
-                now = iso_now()
+                created_ts = self._require_text(created, "created") if created is not None else iso_now()
+                updated_ts = self._require_text(updated, "updated") if updated is not None else created_ts
                 ticket: dict[str, Any] = {
                     "id": ticket_id,
                     "title": title,
@@ -141,16 +177,17 @@ class TicketBoardApp:
                     "screenshot": screenshot_path,
                     "screenshot_available": screenshot_path is not None,
                     "assignee": assignee,
-                    "state": "open",
-                    "implementation": "",
-                    "audit_prompt": "",
-                    "audit_signoff": False,
+                    "state": state,
+                    "implementation": implementation,
+                    "audit_prompt": audit_prompt,
+                    "audit_signoff": bool(audit_signoff),
                     "needs_eric_signoff": bool(needs_eric_signoff),
-                    "eric_signoff": False,
-                    "created": now,
-                    "updated": now,
-                    "comments": [],
+                    "eric_signoff": bool(eric_signoff),
+                    "created": created_ts,
+                    "updated": updated_ts,
+                    "comments": normalized_comments,
                 }
+                self._normalize_signoff_state(ticket)
                 json.dump(self._serialize_ticket(ticket), handle, indent=2, sort_keys=True)
                 handle.write("\n")
             except Exception:

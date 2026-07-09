@@ -151,6 +151,7 @@ directorctl - tmux send helper for PGU director workflow
 Usage:
   directorctl send <tmux-target> <message...>
   directorctl send-file <tmux-target> <path>
+  directorctl ticket-create [options]
   directorctl callback <message...>
   directorctl capture <tmux-target> [lines]
   directorctl clear <tmux-target>
@@ -160,6 +161,8 @@ Usage:
 Commands:
   send         Send a one-line message to a tmux target and submit it.
   send-file    Send the contents of a file to a tmux target and submit it.
+  ticket-create
+               Atomically create a PGU-N.json ticket in the ticket store.
   callback     Send a message to the director (pgu-director:0.0) and submit it.
   capture      Print the last non-empty lines from a tmux target pane.
   clear        Send Ctrl-C to a tmux target to clear a stuck composer.
@@ -189,6 +192,7 @@ Examples:
   directorctl callback 'backlog complete: packet 36.55'
   directorctl send pgu-audit:0.0 'please audit packet 36.55'
   directorctl send-file pgu-main:0.0 docs/implementation_plan.md
+  directorctl ticket-create --assignee app --title 'Fix board assignee enum' --body 'Allow director as assignee' --comment-who director --comment-text 'Speced + routed to app.'
   directorctl status
   PGU_DIRECTORCTL_EXTRA_SESSIONS='pgu-watchdog' directorctl status
 EOF
@@ -301,6 +305,163 @@ cmd_callback() {
     send_payload "$DEFAULT_DIRECTOR_TARGET" "$message"
 }
 
+cmd_ticket_create() {
+    local store=""
+    local frames=""
+    local title=""
+    local body=""
+    local assignee="unassigned"
+    local state="open"
+    local screenshot=""
+    local implementation=""
+    local audit_prompt=""
+    local comment_who=""
+    local comment_text=""
+    local needs_eric_signoff=0
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --store)
+                store="${2:-}"
+                shift 2
+                ;;
+            --frames)
+                frames="${2:-}"
+                shift 2
+                ;;
+            --title)
+                title="${2:-}"
+                shift 2
+                ;;
+            --body)
+                body="${2:-}"
+                shift 2
+                ;;
+            --assignee)
+                assignee="${2:-}"
+                shift 2
+                ;;
+            --state)
+                state="${2:-}"
+                shift 2
+                ;;
+            --screenshot)
+                screenshot="${2:-}"
+                shift 2
+                ;;
+            --implementation)
+                implementation="${2:-}"
+                shift 2
+                ;;
+            --audit-prompt)
+                audit_prompt="${2:-}"
+                shift 2
+                ;;
+            --comment-who)
+                comment_who="${2:-}"
+                shift 2
+                ;;
+            --comment-text)
+                comment_text="${2:-}"
+                shift 2
+                ;;
+            --needs-eric-signoff)
+                needs_eric_signoff=1
+                shift
+                ;;
+            --help|-h)
+                cat <<'EOF'
+usage: directorctl ticket-create --title <title> --body <body> [options]
+
+options:
+  --store <dir>            Ticket store directory (default: ~/.claude/pgu-tickets)
+  --frames <dir>           Screenshot directory for validation (default: /tmp/pgu-frames)
+  --title <title>          Required ticket title
+  --body <body>            Required ticket body
+  --assignee <role>        Ticket assignee (default: unassigned)
+  --state <state>          Initial state (default: open)
+  --screenshot <path>      Optional attached screenshot path
+  --implementation <text>  Initial implementation field
+  --audit-prompt <text>    Initial audit_prompt field
+  --comment-who <who>      Initial comment author (requires --comment-text)
+  --comment-text <text>    Initial comment text (requires --comment-who)
+  --needs-eric-signoff     Set needs_eric_signoff=true
+EOF
+                return 0
+                ;;
+            *)
+                echo "error: unknown ticket-create option: $1" >&2
+                echo "usage: directorctl ticket-create --title <title> --body <body> [options]" >&2
+                return 1
+                ;;
+        esac
+    done
+
+    if [ -z "$title" ] || [ -z "$body" ]; then
+        echo "error: ticket-create requires --title and --body" >&2
+        echo "usage: directorctl ticket-create --title <title> --body <body> [options]" >&2
+        return 1
+    fi
+
+    if { [ -n "$comment_who" ] && [ -z "$comment_text" ]; } || { [ -z "$comment_who" ] && [ -n "$comment_text" ]; }; then
+        echo "error: --comment-who and --comment-text must be provided together" >&2
+        return 1
+    fi
+
+    local repo_root
+    repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+    python3 - "$repo_root" "$store" "$frames" "$title" "$body" "$assignee" "$state" "$screenshot" "$implementation" "$audit_prompt" "$comment_who" "$comment_text" "$needs_eric_signoff" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+repo_root = Path(sys.argv[1])
+store_raw = sys.argv[2]
+frames_raw = sys.argv[3]
+title = sys.argv[4]
+body = sys.argv[5]
+assignee = sys.argv[6]
+state = sys.argv[7]
+screenshot = sys.argv[8] or None
+implementation = sys.argv[9]
+audit_prompt = sys.argv[10]
+comment_who = sys.argv[11]
+comment_text = sys.argv[12]
+needs_eric_signoff = sys.argv[13] == "1"
+
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
+
+from scripts.ticket_board.app import FRAME_DIR_DEFAULT, STORE_DIR_DEFAULT, TicketBoardApp, iso_now
+
+store = Path(store_raw).expanduser() if store_raw else STORE_DIR_DEFAULT
+frames = Path(frames_raw).expanduser() if frames_raw else FRAME_DIR_DEFAULT
+app = TicketBoardApp(store, frames)
+created = iso_now()
+comments = []
+if comment_who or comment_text:
+    comments.append({"who": comment_who, "text": comment_text, "ts": created})
+
+ticket = app.create_ticket_record(
+    title=title,
+    body=body,
+    screenshot=screenshot,
+    assignee=assignee,
+    state=state,
+    implementation=implementation,
+    audit_prompt=audit_prompt,
+    audit_signoff=False,
+    needs_eric_signoff=needs_eric_signoff,
+    eric_signoff=False,
+    comments=comments,
+    created=created,
+    updated=created,
+)
+print(json.dumps(ticket))
+PY
+}
+
 cmd_capture() {
     if [ $# -lt 1 ] || [ $# -gt 2 ]; then
         echo "error: capture requires <tmux-target> [lines]" >&2
@@ -385,6 +546,10 @@ case "$1" in
     callback)
         shift
         cmd_callback "$@"
+        ;;
+    ticket-create)
+        shift
+        cmd_ticket_create "$@"
         ;;
     capture)
         shift

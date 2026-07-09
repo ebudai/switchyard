@@ -1,6 +1,7 @@
 /.idea/
 /build/
 /build-native/
+/build-release/
 /cmake-build-debug/
 /imgui.ini
 /galaxy_presets.txt

@@ -84,6 +84,8 @@ def main() -> int:
         ticket = json.loads(single.stdout)
         assert ticket["assignee"] == "director"
         assert ticket["state"] == "in_progress"
+        assert ticket["screenshots"] == []
+        assert ticket["screenshot"] is None
         assert ticket["comments"][0]["who"] == "director"
         assert ticket["comments"][0]["text"] == "speced + routed"
         assert ticket["comments"][0]["ts"] == ticket["created"]

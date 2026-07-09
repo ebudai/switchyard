@@ -462,6 +462,7 @@ ticket = app.create_ticket_record(
     title=title,
     body=body,
     screenshot=screenshot,
+    screenshots=[],
     assignee=assignee,
     state=state,
     blocked_by=blocked_by,

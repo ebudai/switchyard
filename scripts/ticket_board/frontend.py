@@ -31,16 +31,14 @@ HTML = """<!doctype html>
       display: grid;
       grid-template-columns: 300px minmax(0, 1fr);
     }
-    aside, .detail {
+    aside {
       background: var(--panel);
       min-height: 100vh;
       overflow: auto;
+      border-right: 1px solid var(--border);
     }
-    aside { border-right: 1px solid var(--border); }
-    .detail {
-      grid-column: 1 / -1;
-      min-height: 0;
-      border-top: 1px solid var(--border);
+    body.detail-open {
+      overflow: hidden;
     }
     .shell {
       min-width: 0;
@@ -60,14 +58,14 @@ HTML = """<!doctype html>
       top: 0;
       z-index: 3;
     }
-    .topbar h1, .panel-head h2, .detail-head h2 { margin: 0; font-size: 18px; }
+    .topbar h1, .panel-head h2, .detail-modal-head h2 { margin: 0; font-size: 18px; }
     .subtle, .meta, .hint { color: var(--muted); font-size: 13px; line-height: 1.45; }
     .paths {
       text-align: right;
       max-width: min(100%, 34rem);
       margin-left: auto;
     }
-    .panel-head, .detail-head {
+    .panel-head {
       padding: 16px 18px;
       border-bottom: 1px solid var(--border);
       position: sticky;
@@ -75,7 +73,7 @@ HTML = """<!doctype html>
       background: rgba(23, 26, 32, 0.96);
       z-index: 2;
     }
-    .panel-body, .detail-body {
+    .panel-body {
       padding: 16px 18px;
       display: grid;
       gap: 14px;
@@ -266,6 +264,10 @@ HTML = """<!doctype html>
       gap: 10px;
       cursor: pointer;
     }
+    .card-blocked {
+      border-color: rgba(253, 164, 175, 0.32);
+      box-shadow: 0 0 0 1px rgba(253, 164, 175, 0.12) inset;
+    }
     .card.selected {
       border-color: rgba(125, 211, 252, 0.55);
       box-shadow: 0 0 0 1px rgba(125, 211, 252, 0.3) inset;
@@ -344,8 +346,60 @@ HTML = """<!doctype html>
     .error-box { border-color: rgba(253,164,175,0.35); color: #fecdd3; }
     .detail-box {
       display: grid;
-      gap: 12px;
-      width: min(100%, 76ch);
+      gap: 14px;
+      width: 100%;
+    }
+    .detail-overlay[hidden] { display: none; }
+    .detail-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 20;
+      display: grid;
+      place-items: stretch;
+      background: rgba(4, 6, 10, 0.72);
+      padding: 18px;
+    }
+    .detail-modal {
+      width: min(100%, 1280px);
+      height: min(100vh - 36px, 100%);
+      margin: 0 auto;
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: linear-gradient(180deg, rgba(23, 26, 32, 0.98), rgba(15, 17, 21, 0.98));
+      box-shadow: 0 30px 90px rgba(0, 0, 0, 0.42);
+      overflow: hidden;
+    }
+    .detail-modal-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: start;
+      padding: 18px 22px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(15, 17, 21, 0.96);
+    }
+    .detail-modal-body {
+      overflow: auto;
+      padding: 22px;
+    }
+    .detail-content {
+      width: min(100%, 1080px);
+      margin: 0 auto;
+      display: grid;
+      gap: 14px;
+    }
+    .detail-close {
+      width: 40px;
+      height: 40px;
+      min-width: 40px;
+      padding: 0;
+      border-radius: 999px;
+      font-size: 24px;
+      line-height: 1;
+      display: grid;
+      place-items: center;
     }
     .eric-banner {
       border: 1px solid rgba(125, 211, 252, 0.5);
@@ -372,6 +426,102 @@ HTML = """<!doctype html>
       line-height: 1.45;
       color: var(--text);
     }
+    .eric-summary {
+      display: grid;
+      gap: 10px;
+      padding: 12px;
+      border-radius: 8px;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(15, 17, 21, 0.26);
+    }
+    .eric-summary-head {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--accent);
+      text-transform: uppercase;
+    }
+    .eric-summary-statuses,
+    .eric-summary-sections {
+      display: grid;
+      gap: 8px;
+    }
+    .eric-summary-status {
+      display: flex;
+      gap: 8px;
+      align-items: baseline;
+      font-size: 13px;
+      line-height: 1.4;
+    }
+    .eric-summary-status strong {
+      color: var(--text);
+    }
+    .eric-summary-status-ok { color: var(--ok); }
+    .eric-summary-status-missing { color: var(--warn); }
+    .eric-summary-section {
+      display: grid;
+      gap: 4px;
+    }
+    .eric-summary-label {
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+    }
+    .eric-summary-list {
+      margin: 0;
+      padding-left: 18px;
+      display: grid;
+      gap: 4px;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .eric-summary-text {
+      font-size: 13px;
+      line-height: 1.5;
+      color: var(--text);
+      white-space: pre-wrap;
+    }
+    .alert-stack {
+      display: grid;
+      gap: 10px;
+    }
+    .alert {
+      display: grid;
+      gap: 6px;
+      padding: 12px 14px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.03);
+    }
+    .card-alert {
+      padding: 10px 12px;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .alert strong {
+      font-size: 12px;
+      text-transform: uppercase;
+    }
+    .alert-blocked,
+    .card-alert-blocked {
+      border-color: rgba(253, 164, 175, 0.42);
+      background: rgba(127, 29, 29, 0.24);
+    }
+    .alert-blocked strong,
+    .card-alert-blocked strong {
+      color: #fecdd3;
+    }
+    .alert-guard,
+    .card-alert-guard {
+      border-color: rgba(252, 211, 77, 0.42);
+      background: rgba(120, 53, 15, 0.2);
+    }
+    .alert-guard strong,
+    .card-alert-guard strong {
+      color: #fde68a;
+    }
+    .compact-textarea {
+      min-height: 88px;
+    }
     .detail-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -382,34 +532,40 @@ HTML = """<!doctype html>
       white-space: pre-wrap;
       overflow-wrap: anywhere;
       font-size: 14px;
-      line-height: 1.5;
+      line-height: 1.65;
+      max-width: 84ch;
     }
     .comment-list {
       display: grid;
       gap: 8px;
+      max-width: 90ch;
     }
     .comment {
       border-left: 2px solid var(--border);
-      padding-left: 10px;
-    }
-    @media (min-width: 1800px) {
-      .layout { grid-template-columns: 300px minmax(0, 1fr) minmax(420px, 32rem); }
-      .detail {
-        grid-column: auto;
-        min-height: 100vh;
-        border-top: 0;
-        border-left: 1px solid var(--border);
-      }
-      .board {
-        min-width: 1260px;
-        grid-template-columns: repeat(6, minmax(200px, 1fr));
-      }
+      padding: 10px 0 10px 12px;
+      background: rgba(255,255,255,0.02);
+      border-radius: 0 8px 8px 0;
     }
     @media (max-width: 1200px) {
       .detail-grid { grid-template-columns: 1fr; }
     }
     @media (max-width: 980px) {
       .board { min-width: 980px; }
+      .detail-overlay {
+        padding: 0;
+      }
+      .detail-modal {
+        width: 100%;
+        height: 100vh;
+        border-radius: 0;
+        border-left: 0;
+        border-right: 0;
+      }
+      .detail-modal-head,
+      .detail-modal-body {
+        padding-left: 16px;
+        padding-right: 16px;
+      }
     }
     @media (max-width: 900px) {
       .board {
@@ -423,7 +579,7 @@ HTML = """<!doctype html>
     }
     @media (max-width: 980px) {
       .layout { grid-template-columns: 1fr; }
-      aside, .detail { min-height: 0; border-right: 0; border-left: 0; }
+      aside { min-height: 0; border-right: 0; border-left: 0; }
       aside { border-bottom: 1px solid var(--border); }
       .topbar { position: static; }
     }
@@ -487,13 +643,19 @@ HTML = """<!doctype html>
       </div>
     </section>
 
-    <section class="detail">
-      <div class="detail-head">
-        <h2>Ticket Detail</h2>
-        <div class="subtle">Click a card to inspect the full body and attached frame.</div>
+  </div>
+
+  <div id="detailOverlay" class="detail-overlay" hidden>
+    <section class="detail-modal" role="dialog" aria-modal="true" aria-labelledby="detailModalTitle">
+      <div class="detail-modal-head">
+        <div>
+          <div class="subtle">Ticket Detail</div>
+          <h2 id="detailModalTitle">Select a ticket</h2>
+        </div>
+        <button id="detailCloseBtn" class="detail-close" type="button" aria-label="Close ticket detail">×</button>
       </div>
-      <div class="detail-body">
-        <div id="detailContent" class="detail-box">
+      <div class="detail-modal-body">
+        <div id="detailContent" class="detail-content">
           <div class="meta">No ticket selected.</div>
         </div>
       </div>
@@ -516,6 +678,7 @@ HTML = """<!doctype html>
       errors: [],
       assignees: [],
       selectedId: null,
+      detailOpen: false,
       detailDraft: null,
       eventSource: null,
       eventReconnectTimer: null,
@@ -539,6 +702,9 @@ HTML = """<!doctype html>
     const framePathEl = document.getElementById('framePath');
     const refreshLineEl = document.getElementById('refreshLine');
     const errorBoxEl = document.getElementById('errorBox');
+    const detailOverlayEl = document.getElementById('detailOverlay');
+    const detailModalTitleEl = document.getElementById('detailModalTitle');
+    const detailCloseBtn = document.getElementById('detailCloseBtn');
     const detailContentEl = document.getElementById('detailContent');
 
     function formatWhen(raw) {
@@ -599,6 +765,78 @@ HTML = """<!doctype html>
       return '';
     }
 
+    function ticketBlockedReason(ticket) {
+      return (ticket.blocked_reason || '').trim();
+    }
+
+    function manualBlockedSummary(ticket) {
+      const reason = ticketBlockedReason(ticket);
+      const unresolved = unresolvedBlockedBy(ticket);
+      if (reason && unresolved.length) {
+        return `${reason} (blocked by ${formatBlockedByList(unresolved)})`;
+      }
+      if (reason) {
+        return reason;
+      }
+      if (unresolved.length) {
+        return `Blocked by ${formatBlockedByList(unresolved)}. Add a blocked reason.`;
+      }
+      return '';
+    }
+
+    function guardBlockedSummary(ticket) {
+      const reason = advanceBlockedReason(ticket);
+      return defaultAdvanceState(ticket) ? reason : '';
+    }
+
+    function cardAlert(kind, title, text) {
+      const alert = document.createElement('div');
+      alert.className = `alert card-alert card-alert-${kind}`;
+      const strong = document.createElement('strong');
+      strong.textContent = title;
+      const body = document.createElement('div');
+      body.textContent = text;
+      alert.append(strong, body);
+      return alert;
+    }
+
+    function alertStackForTicket(ticket) {
+      const alerts = [];
+      const blockedSummary = manualBlockedSummary(ticket);
+      if (blockedSummary) {
+        alerts.push({ kind: 'blocked', title: 'Blocked', text: blockedSummary });
+      }
+      const guardSummary = guardBlockedSummary(ticket);
+      if (guardSummary) {
+        alerts.push({ kind: 'guard', title: 'Advance Blocked', text: guardSummary });
+      }
+      return alerts;
+    }
+
+    function renderAlertStack(ticket, { detail = false } = {}) {
+      const alerts = alertStackForTicket(ticket);
+      if (!alerts.length) {
+        return null;
+      }
+      const stack = document.createElement('div');
+      stack.className = 'alert-stack';
+      alerts.forEach((item) => {
+        const alert = detail
+          ? document.createElement('div')
+          : cardAlert(item.kind, item.title, item.text);
+        if (detail) {
+          alert.className = `alert alert-${item.kind}`;
+          const strong = document.createElement('strong');
+          strong.textContent = item.title;
+          const body = document.createElement('div');
+          body.textContent = item.text;
+          alert.append(strong, body);
+        }
+        stack.appendChild(alert);
+      });
+      return stack;
+    }
+
     async function advanceTicket(ticketId) {
       const ticket = state.tickets.find((item) => item.id === ticketId);
       if (!ticket) {
@@ -621,7 +859,37 @@ HTML = """<!doctype html>
       }
     }
 
+    function syncDetailOverlay() {
+      const ticket = selectedTicket();
+      const isOpen = !!(state.detailOpen && ticket);
+      detailOverlayEl.hidden = !isOpen;
+      document.body.classList.toggle('detail-open', isOpen);
+      detailModalTitleEl.textContent = ticket ? `${ticket.id} - ${ticket.title}` : 'Select a ticket';
+    }
+
+    function openDetail(ticketId) {
+      if (state.selectedId !== ticketId) {
+        clearDetailDraft();
+      }
+      state.selectedId = ticketId;
+      state.detailOpen = true;
+      renderBoard();
+      renderDetail();
+    }
+
+    function closeDetail() {
+      const ticketId = state.selectedId;
+      clearDetailDraft(ticketId);
+      state.selectedId = null;
+      state.detailOpen = false;
+      renderBoard();
+      renderDetail();
+    }
+
     function rememberDetailDraft() {
+      if (!state.detailOpen) {
+        return;
+      }
       const ticket = selectedTicket();
       if (!ticket) {
         clearDetailDraft();
@@ -702,6 +970,64 @@ HTML = """<!doctype html>
       return firstNonEmptyLine(ticket.implementation)
         || firstNonEmptyLine(ticket.body)
         || 'Review this ticket, then sign off when it looks right.';
+    }
+
+    function checklistItemsFromText(text) {
+      if (!text) {
+        return [];
+      }
+      return text
+        .split(/\\r?\\n/)
+        .map((line) => {
+          const match = line.match(/^\\s*[-*]\\s+\\[(?: |x|X)\\]\\s+(.+)$/);
+          return match ? match[1].trim() : '';
+        })
+        .filter((item) => item.length > 0);
+    }
+
+    function summarizeTextBlock(text, maxLines = 3) {
+      if (!text) {
+        return '';
+      }
+      const lines = text
+        .split(/\\r?\\n/)
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0 && !/^[-*]\\s+\\[(?: |x|X)\\]\\s+/.test(line));
+      return lines.slice(0, maxLines).join('\\n');
+    }
+
+    function ericReviewSummarySections(ticket) {
+      const fields = [
+        ['Implementation', ticket.implementation],
+        ['Body', ticket.body],
+        ['Audit Prompt', ticket.audit_prompt],
+      ];
+      return fields
+        .map(([label, text]) => {
+          const checklist = checklistItemsFromText(text);
+          if (checklist.length) {
+            return { label, checklist };
+          }
+          const summary = summarizeTextBlock(text);
+          if (summary) {
+            return { label, summary };
+          }
+          return null;
+        })
+        .filter((section) => !!section);
+    }
+
+    function ericReviewStatusItems(ticket) {
+      return [
+        { label: 'Audit sign-off', ok: !!ticket.audit_signoff },
+        { label: 'Needs Eric sign-off', ok: !!ticket.needs_eric_signoff },
+        {
+          label: 'Commit evidence',
+          ok: !!ticket.commit_exempt || !!(ticket.commit_hash || '').trim(),
+          okText: ticket.commit_exempt ? 'exempt' : 'ready',
+          missingText: 'missing',
+        },
+      ];
     }
 
     function parseBlockedByInput(value) {
@@ -932,17 +1258,13 @@ HTML = """<!doctype html>
     function renderCard(ticket) {
       const card = document.createElement('article');
       card.className = 'card';
+      if (manualBlockedSummary(ticket)) {
+        card.classList.add('card-blocked');
+      }
       if (ticket.id === state.selectedId) {
         card.classList.add('selected');
       }
-      card.addEventListener('click', () => {
-        if (state.selectedId !== ticket.id) {
-          clearDetailDraft();
-        }
-        state.selectedId = ticket.id;
-        renderBoard();
-        renderDetail();
-      });
+      card.addEventListener('click', () => openDetail(ticket.id));
 
       const top = document.createElement('div');
       top.className = 'card-top';
@@ -1032,6 +1354,10 @@ HTML = """<!doctype html>
       controls.appendChild(stateSelect);
 
       card.append(top, tags, badges);
+      const alerts = renderAlertStack(ticket);
+      if (alerts) {
+        card.appendChild(alerts);
+      }
       if (ticketScreenshotEntries(ticket).some((entry) => !entry.available)) {
         const missing = document.createElement('div');
         missing.className = 'soft-note';
@@ -1048,8 +1374,9 @@ HTML = """<!doctype html>
 
     function renderDetail() {
       const ticket = selectedTicket();
-      if (!ticket) {
+      if (!state.detailOpen || !ticket) {
         detailContentEl.innerHTML = '<div class="meta">No ticket selected.</div>';
+        syncDetailOverlay();
         return;
       }
 
@@ -1079,6 +1406,51 @@ HTML = """<!doctype html>
         const ericBannerNote = document.createElement('div');
         ericBannerNote.className = 'eric-banner-note';
         ericBannerNote.textContent = ericReviewCheckText(ticket);
+        const ericSummary = document.createElement('div');
+        ericSummary.className = 'eric-summary';
+        const ericSummaryHead = document.createElement('div');
+        ericSummaryHead.className = 'eric-summary-head';
+        ericSummaryHead.textContent = 'Check Before Sign-off';
+        const ericSummaryStatuses = document.createElement('div');
+        ericSummaryStatuses.className = 'eric-summary-statuses';
+        ericReviewStatusItems(ticket).forEach((item) => {
+          const row = document.createElement('div');
+          row.className = 'eric-summary-status';
+          const strong = document.createElement('strong');
+          strong.textContent = item.label;
+          const value = document.createElement('span');
+          value.className = item.ok ? 'eric-summary-status-ok' : 'eric-summary-status-missing';
+          value.textContent = item.ok ? (item.okText || 'ready') : (item.missingText || 'missing');
+          row.append(strong, value);
+          ericSummaryStatuses.appendChild(row);
+        });
+        const ericSummarySections = document.createElement('div');
+        ericSummarySections.className = 'eric-summary-sections';
+        ericReviewSummarySections(ticket).forEach((section) => {
+          const sectionEl = document.createElement('div');
+          sectionEl.className = 'eric-summary-section';
+          const label = document.createElement('div');
+          label.className = 'eric-summary-label';
+          label.textContent = section.label;
+          sectionEl.appendChild(label);
+          if (section.checklist) {
+            const list = document.createElement('ul');
+            list.className = 'eric-summary-list';
+            section.checklist.forEach((item) => {
+              const entry = document.createElement('li');
+              entry.textContent = item;
+              list.appendChild(entry);
+            });
+            sectionEl.appendChild(list);
+          } else if (section.summary) {
+            const text = document.createElement('div');
+            text.className = 'eric-summary-text';
+            text.textContent = section.summary;
+            sectionEl.appendChild(text);
+          }
+          ericSummarySections.appendChild(sectionEl);
+        });
+        ericSummary.append(ericSummaryHead, ericSummaryStatuses, ericSummarySections);
         const ericBannerActions = document.createElement('div');
         ericBannerActions.className = 'inline-actions';
         const ericBannerSignoffButton = document.createElement('button');
@@ -1088,8 +1460,13 @@ HTML = """<!doctype html>
           await submitEricSignoff(ticket.id, commentWho.value, commentText.value);
         });
         ericBannerActions.appendChild(ericBannerSignoffButton);
-        ericBanner.append(ericBannerSubtitle, ericBannerTitle, ericBannerNote, ericBannerActions);
+        ericBanner.append(ericBannerSubtitle, ericBannerTitle, ericBannerNote, ericSummary, ericBannerActions);
         box.appendChild(ericBanner);
+      }
+
+      const detailAlerts = renderAlertStack(ticket, { detail: true });
+      if (detailAlerts) {
+        box.appendChild(detailAlerts);
       }
 
       const controls = document.createElement('div');
@@ -1231,13 +1608,36 @@ HTML = """<!doctype html>
       const saveBlockedByButton = document.createElement('button');
       saveBlockedByButton.textContent = 'Save Blockers';
       saveBlockedByButton.addEventListener('click', async () => {
-        await updateTicket(ticket.id, { blocked_by: parseBlockedByInput(blockedByInput.value) });
+        await updateTicket(ticket.id, {
+          blocked_by: parseBlockedByInput(blockedByInput.value),
+          blocked_reason: blockedReasonInput.value,
+        });
       });
       blockedByActions.appendChild(saveBlockedByButton);
       const blockedByNote = document.createElement('div');
       blockedByNote.className = 'soft-note';
       blockedByNote.textContent = blockedBySummary(ticket);
       blockedBy.append(blockedByInput, blockedByActions, blockedByNote);
+
+      const blockedReason = document.createElement('div');
+      blockedReason.innerHTML = '<div class="field-label">Blocked Reason</div>';
+      const blockedReasonInput = document.createElement('textarea');
+      blockedReasonInput.className = 'compact-textarea';
+      blockedReasonInput.value = ticket.blocked_reason || '';
+      blockedReasonInput.placeholder = 'Why this ticket is blocked right now.';
+      bindDetailDraftField(draftFields, blockedReasonInput, 'blockedReason', blockedReasonInput.value);
+      const blockedReasonActions = document.createElement('div');
+      blockedReasonActions.className = 'inline-actions';
+      const saveBlockedReasonButton = document.createElement('button');
+      saveBlockedReasonButton.textContent = 'Save Blocked Reason';
+      saveBlockedReasonButton.addEventListener('click', async () => {
+        await updateTicket(ticket.id, { blocked_reason: blockedReasonInput.value });
+      });
+      blockedReasonActions.appendChild(saveBlockedReasonButton);
+      const blockedReasonNote = document.createElement('div');
+      blockedReasonNote.className = 'soft-note';
+      blockedReasonNote.textContent = 'Required when blocked-by dependencies are set. Also use this for non-dependency stalls.';
+      blockedReason.append(blockedReasonInput, blockedReasonActions, blockedReasonNote);
 
       const implementation = document.createElement('div');
       implementation.innerHTML = '<div class="field-label">Implementation</div>';
@@ -1297,7 +1697,19 @@ HTML = """<!doctype html>
         : 'A verified git commit is required before moving this ticket to done.';
       commitInfo.append(commitOverride, commitNote);
 
-      box.append(titleField, meta, workflowActions, controls, toggles, body, blockedBy, implementation, auditPrompt, commitInfo);
+      box.append(
+        titleField,
+        meta,
+        workflowActions,
+        controls,
+        toggles,
+        blockedReason,
+        body,
+        blockedBy,
+        implementation,
+        auditPrompt,
+        commitInfo,
+      );
 
       if (ticketScreenshotEntries(ticket).length) {
         const imageWrap = document.createElement('div');
@@ -1375,6 +1787,7 @@ HTML = """<!doctype html>
 
       detailContentEl.appendChild(box);
       restoreDetailDraft(ticket.id, draftFields);
+      syncDetailOverlay();
     }
 
     async function uploadImageBlob(blob) {
@@ -1437,12 +1850,10 @@ HTML = """<!doctype html>
       state.screenshots = payload.screenshots;
       state.errors = payload.errors;
       state.assignees = payload.assignees;
-      if (!state.selectedId && state.tickets.length) {
-        state.selectedId = state.tickets[0].id;
-      }
       if (state.selectedId && !state.tickets.some((ticket) => ticket.id === state.selectedId)) {
         clearDetailDraft();
-        state.selectedId = state.tickets[0]?.id || null;
+        state.selectedId = null;
+        state.detailOpen = false;
       }
       storePathEl.textContent = payload.store_path;
       framePathEl.textContent = payload.frame_dir;
@@ -1514,6 +1925,7 @@ HTML = """<!doctype html>
       screenshotInput.value = '';
       renderCreatePreview();
       state.selectedId = result.ticket.id;
+      state.detailOpen = true;
       setCreateStatus(`Created ${result.ticket.id}.`);
       await requestBoardReload();
     }
@@ -1577,6 +1989,22 @@ HTML = """<!doctype html>
       }
       state.pendingCreateScreenshots = uniquePaths([...state.pendingCreateScreenshots, screenshotInput.value]);
       renderCreatePreview();
+    });
+
+    detailCloseBtn.addEventListener('click', () => {
+      closeDetail();
+    });
+
+    detailOverlayEl.addEventListener('click', (event) => {
+      if (event.target === detailOverlayEl) {
+        closeDetail();
+      }
+    });
+
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && state.detailOpen) {
+        closeDetail();
+      }
     });
 
     document.addEventListener('paste', async (event) => {

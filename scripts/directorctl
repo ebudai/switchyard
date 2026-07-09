@@ -314,6 +314,7 @@ cmd_ticket_create() {
     local state="open"
     local screenshot=""
     local blocked_by=""
+    local blocked_reason=""
     local implementation=""
     local audit_prompt=""
     local comment_who=""
@@ -354,6 +355,10 @@ cmd_ticket_create() {
                 blocked_by="${2:-}"
                 shift 2
                 ;;
+            --blocked-reason)
+                blocked_reason="${2:-}"
+                shift 2
+                ;;
             --implementation)
                 implementation="${2:-}"
                 shift 2
@@ -387,6 +392,7 @@ options:
   --state <state>          Initial state (default: open)
   --screenshot <path>      Optional attached screenshot path
   --blocked-by <ids>       Comma/space-separated blocker ticket IDs
+  --blocked-reason <text>  Reason the ticket is blocked
   --implementation <text>  Initial implementation field
   --audit-prompt <text>    Initial audit_prompt field
   --comment-who <who>      Initial comment author (requires --comment-text)
@@ -417,7 +423,7 @@ EOF
     local repo_root
     repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-    python3 - "$repo_root" "$store" "$frames" "$title" "$body" "$assignee" "$state" "$screenshot" "$blocked_by" "$implementation" "$audit_prompt" "$comment_who" "$comment_text" "$needs_eric_signoff" <<'PY'
+    python3 - "$repo_root" "$store" "$frames" "$title" "$body" "$assignee" "$state" "$screenshot" "$blocked_by" "$blocked_reason" "$implementation" "$audit_prompt" "$comment_who" "$comment_text" "$needs_eric_signoff" <<'PY'
 import json
 import re
 import sys
@@ -432,11 +438,12 @@ assignee = sys.argv[6]
 state = sys.argv[7]
 screenshot = sys.argv[8] or None
 blocked_by_raw = sys.argv[9]
-implementation = sys.argv[10]
-audit_prompt = sys.argv[11]
-comment_who = sys.argv[12]
-comment_text = sys.argv[13]
-needs_eric_signoff = sys.argv[14] == "1"
+blocked_reason = sys.argv[10]
+implementation = sys.argv[11]
+audit_prompt = sys.argv[12]
+comment_who = sys.argv[13]
+comment_text = sys.argv[14]
+needs_eric_signoff = sys.argv[15] == "1"
 
 if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
@@ -466,6 +473,7 @@ ticket = app.create_ticket_record(
     assignee=assignee,
     state=state,
     blocked_by=blocked_by,
+    blocked_reason=blocked_reason,
     implementation=implementation,
     audit_prompt=audit_prompt,
     audit_signoff=False,

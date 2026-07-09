@@ -151,6 +151,22 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       await requestBoardReload();
     }
 
+    async function mergeTicket(sourceTicketId, targetTicketId) {
+      const response = await fetch(`/api/tickets/${sourceTicketId}/merge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target_id: targetTicketId, actor: 'director' }),
+      });
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+      const result = await response.json();
+      clearDetailDraft(sourceTicketId);
+      state.selectedId = result.target.id;
+      await requestBoardReload();
+      setCreateStatus(`Merged ${sourceTicketId} into ${targetTicketId}.`);
+    }
+
     async function submitComment(ticketId, who, text, nextState = null) {
       const trimmedWho = who.trim();
       const trimmedText = text.trim();

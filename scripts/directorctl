@@ -4,6 +4,7 @@ set -euo pipefail
 readonly DEFAULT_DIRECTOR_TARGET="pgu-director:0.0"
 readonly KNOWN_SESSIONS=(pgu-director pgu-main pgu-audit pgu-app pgu-research pgu-ops)
 readonly PASTE_THRESHOLD=200
+readonly DIRECTOR_SHORT_PAYLOAD_MAX=200
 readonly DEFAULT_CAPTURE_LINES=20
 readonly SUBMIT_VERIFY_ATTEMPTS=2
 readonly SUBMIT_VERIFY_BACKOFF_MS=250
@@ -105,6 +106,20 @@ verify_submission() {
 payload_requires_pointer() {
     local payload="$1"
     [ "${#payload}" -gt "$PASTE_THRESHOLD" ] || [[ "$payload" == *$'\n'* ]]
+}
+
+normalize_director_payload() {
+    local payload="$1"
+    payload="$(printf '%s' "$payload" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g; s/^[[:space:]]+//; s/[[:space:]]+$//')"
+    if [ "${#payload}" -le "$DIRECTOR_SHORT_PAYLOAD_MAX" ]; then
+        printf '%s' "$payload"
+        return 0
+    fi
+    if [ "$DIRECTOR_SHORT_PAYLOAD_MAX" -le 3 ]; then
+        printf '%s' "${payload:0:DIRECTOR_SHORT_PAYLOAD_MAX}"
+        return 0
+    fi
+    printf '%s...' "${payload:0:$((DIRECTOR_SHORT_PAYLOAD_MAX - 3))}"
 }
 
 reap_stale_payload_files() {
@@ -245,6 +260,10 @@ send_payload() {
         sleep 5
         attempt=$((attempt + 1))
     done
+
+    if [ "$target" = "$DEFAULT_DIRECTOR_TARGET" ]; then
+        payload="$(normalize_director_payload "$payload")"
+    fi
 
     # Codex panes do not submit bracketed paste on Enter/C-m. Large or
     # multiline payloads must be staged to a file and referenced indirectly.

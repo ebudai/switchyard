@@ -1144,7 +1144,33 @@ HTML = """<!doctype html>
       auditPromptActions.appendChild(saveAuditPromptButton);
       auditPrompt.append(auditPromptInput, auditPromptActions);
 
-      box.append(meta, controls, toggles, body, blockedBy, implementation, auditPrompt);
+      const commitInfo = document.createElement('div');
+      commitInfo.innerHTML = '<div class="field-label">Commit Hash</div>';
+      const commitHashInput = document.createElement('input');
+      commitHashInput.type = 'text';
+      commitHashInput.value = ticket.commit_hash || '';
+      commitHashInput.placeholder = 'Required before done unless exempt';
+      bindDetailDraftField(draftFields, commitHashInput, 'commitHash', commitHashInput.value);
+      const commitActions = document.createElement('div');
+      commitActions.className = 'inline-actions';
+      const saveCommitButton = document.createElement('button');
+      saveCommitButton.textContent = 'Save Commit';
+      saveCommitButton.addEventListener('click', async () => {
+        await updateTicket(ticket.id, { commit_hash: commitHashInput.value });
+      });
+      commitActions.appendChild(saveCommitButton);
+      commitInfo.append(commitHashInput, commitActions);
+      const commitOverride = toggleControl('No commit required', ticket.commit_exempt, async (checked) => {
+        await updateTicket(ticket.id, { commit_exempt: checked });
+      });
+      const commitNote = document.createElement('div');
+      commitNote.className = 'soft-note';
+      commitNote.textContent = ticket.commit_exempt
+        ? 'Done-state commit check is bypassed for this ticket.'
+        : 'A verified git commit is required before moving this ticket to done.';
+      commitInfo.append(commitOverride, commitNote);
+
+      box.append(meta, controls, toggles, body, blockedBy, implementation, auditPrompt, commitInfo);
 
       if (ticketScreenshotEntries(ticket).length) {
         const imageWrap = document.createElement('div');

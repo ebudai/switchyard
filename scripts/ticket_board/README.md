@@ -51,7 +51,7 @@ Ticket schema:
 
 Allowed values:
 
-- `assignee`: `main`, `app`, `perf`, `ops`, `audit`, `agent`, `unassigned`
+- `assignee`: `main`, `app`, `perf`, `ops`, `audit`, `agent`, `director`, `unassigned`
 - `state`: `open`, `in_progress`, `director_review`, `audit`, `eric_review`, `done`
 
 Notes:

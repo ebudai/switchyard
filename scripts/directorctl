@@ -9,6 +9,7 @@ readonly DEFAULT_CAPTURE_LINES=20
 readonly SUBMIT_VERIFY_ATTEMPTS=2
 readonly SUBMIT_VERIFY_BACKOFF_MS=250
 readonly STAGED_PAYLOAD_RETENTION_MINUTES=60
+readonly DEFAULT_TICKET_NOTIFICATION_JOURNAL="/tmp/pgu-ticket-notification-journal.jsonl"
 
 validate_enter_delay() {
     local val="${PGU_DIRECTORCTL_ENTER_DELAY:-0.6}"
@@ -159,6 +160,19 @@ submit_short_line() {
     verify_submission "$target" "$before_capture"
 }
 
+record_ticket_notification() {
+    local target="$1"
+    local payload="$2"
+    local journal_path="${PGU_DIRECTORCTL_TICKET_NOTIFICATION_JOURNAL:-$DEFAULT_TICKET_NOTIFICATION_JOURNAL}"
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    python3 "$script_dir/ticket_notification_journal.py" \
+        --journal "$journal_path" \
+        record \
+        --target "$target" \
+        --payload "$payload" >/dev/null 2>&1 || true
+}
+
 usage() {
     cat <<'EOF'
 directorctl - tmux send helper for PGU director workflow
@@ -278,6 +292,7 @@ send_payload() {
     fi
 
     submit_short_line "$target" "$payload"
+    record_ticket_notification "$target" "$payload"
 }
 
 

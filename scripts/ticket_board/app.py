@@ -34,6 +34,7 @@ LEGAL_STATE_TRANSITIONS = {
     "done": {"analysis"},
     "cancelled": {"analysis"},
 }
+ACTIVE_STATES = tuple(state for state in STATES if state not in TERMINAL_STATES)
 REOPEN_RESET_TARGET_STATES = {"open", "analysis", "ready", "in_progress"}
 REVIEWED_STATES = {"director_review", "audit", "eric_review"}
 RESET_REVIEW_ARTIFACT_SOURCE_STATES = REVIEWED_STATES | TERMINAL_STATES
@@ -244,11 +245,15 @@ class TicketBoardApp:
                 if ticket["state"] == "done":
                     self._enforce_done_requirements(ticket)
                 if ticket["state"] == "cancelled":
+<<<<<<< HEAD
                     self._enforce_cancel_requirements(
                         previous_state=None,
                         ticket=ticket,
                         has_reason_comment=bool(normalized_comments),
                     )
+=======
+                    self._enforce_cancel_requirements(previous_state=None, ticket=ticket, has_reason_comment=bool(normalized_comments))
+>>>>>>> 88cc6a7 (PGU-158 add cancelled ticket state)
                 json.dump(self._serialize_ticket(ticket), handle, indent=2, sort_keys=True)
                 handle.write("\n")
             except Exception:
@@ -635,7 +640,7 @@ class TicketBoardApp:
         ticket: dict[str, Any],
         has_reason_comment: bool,
     ) -> None:
-        if previous_state in TERMINAL_STATES:
+        if previous_state is not None and previous_state not in ACTIVE_STATES:
             raise ValueError("only active tickets can be cancelled")
         if not has_reason_comment:
             raise ValueError("cancelling a ticket requires a non-empty comment explaining why")

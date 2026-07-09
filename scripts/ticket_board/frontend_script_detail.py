@@ -149,6 +149,21 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         });
         workflowActions.appendChild(advanceButton);
       }
+      if (ticket.state !== 'done' && ticket.state !== 'cancelled') {
+        const cancelButton = document.createElement('button');
+        cancelButton.type = 'button';
+        cancelButton.textContent = 'Cancel Ticket';
+        cancelButton.title = 'Requires a cancellation reason in the comment box below.';
+        cancelButton.addEventListener('click', async () => {
+          try {
+            await cancelTicket(ticket.id, commentWho.value, commentText.value);
+          } catch (error) {
+            setCreateStatus(error.message, true);
+            await requestBoardReload();
+          }
+        });
+        workflowActions.appendChild(cancelButton);
+      }
 
       const assigneeLabel = document.createElement('label');
       assigneeLabel.innerHTML = '<span class="field-label">Assignee</span>';

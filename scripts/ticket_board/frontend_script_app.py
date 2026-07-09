@@ -173,7 +173,7 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
     }
 
     async function submitEricSignoff(ticketId, who, text) {
-      const patch = { eric_signoff: true, state: 'done' };
+      const patch = { eric_signoff: true };
       const trimmedWho = who.trim();
       const trimmedText = text.trim();
       if (trimmedWho && trimmedText) {
@@ -184,6 +184,7 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       }
       clearDetailDraft(ticketId);
       await updateTicket(ticketId, patch);
+      setCreateStatus(`Recorded Eric sign-off for ${ticketId}.`);
     }
 
     createBtn.addEventListener('click', async () => {

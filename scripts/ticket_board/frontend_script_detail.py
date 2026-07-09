@@ -87,9 +87,15 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         ericBannerActions.className = 'inline-actions';
         const ericBannerSignoffButton = document.createElement('button');
         ericBannerSignoffButton.className = 'primary';
-        ericBannerSignoffButton.textContent = 'Sign Off -> Done';
+        ericBannerSignoffButton.type = 'button';
+        ericBannerSignoffButton.textContent = 'Sign Off';
         ericBannerSignoffButton.addEventListener('click', async () => {
-          await submitEricSignoff(ticket.id, commentWho.value, commentText.value);
+          try {
+            await submitEricSignoff(ticket.id, commentWho.value, commentText.value);
+          } catch (error) {
+            setCreateStatus(error.message, true);
+            await requestBoardReload();
+          }
         });
         ericBannerActions.appendChild(ericBannerSignoffButton);
         ericBanner.append(ericBannerSubtitle, ericBannerTitle, ericBannerNote, ericSummary, ericBannerActions);

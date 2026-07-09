@@ -152,14 +152,29 @@ HTML = """<!doctype html>
       color: var(--muted);
       overflow-wrap: anywhere;
     }
+    .inline-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .inline-actions button {
+      width: auto;
+      min-width: 0;
+    }
+    .comment-composer {
+      display: grid;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
     .board-scroll {
       overflow: auto;
       padding: 18px;
     }
     .board {
-      min-width: 1100px;
+      min-width: 1320px;
       display: grid;
-      grid-template-columns: repeat(5, minmax(205px, 1fr));
+      grid-template-columns: repeat(6, minmax(205px, 1fr));
       gap: 16px;
       align-items: start;
     }
@@ -314,8 +329,8 @@ HTML = """<!doctype html>
         border-left: 1px solid var(--border);
       }
       .board {
-        min-width: 1080px;
-        grid-template-columns: repeat(5, minmax(200px, 1fr));
+        min-width: 1260px;
+        grid-template-columns: repeat(6, minmax(200px, 1fr));
       }
     }
     @media (max-width: 1200px) {
@@ -384,7 +399,7 @@ HTML = """<!doctype html>
       <div class="topbar">
         <div>
           <h1>PGU Ticket Board</h1>
-          <div class="subtle">States: open -> in_progress -> audit -> eric_review -> done</div>
+          <div class="subtle">States: open -> in_progress -> director_review -> audit -> eric_review -> done</div>
         </div>
         <div class="paths meta">
           <div><strong>Store</strong>: <span id="storePath">(loading)</span></div>
@@ -415,6 +430,7 @@ HTML = """<!doctype html>
     const COLUMNS = [
       { key: 'open', label: 'Open' },
       { key: 'in_progress', label: 'In Progress' },
+      { key: 'director_review', label: 'Director Review' },
       { key: 'audit', label: 'Audit' },
       { key: 'eric_review', label: 'Eric Review' },
       { key: 'done', label: 'Done' },
@@ -463,6 +479,10 @@ HTML = """<!doctype html>
 
     function stateLabel(key) {
       return COLUMNS.find((column) => column.key === key)?.label || key;
+    }
+
+    function ticketAllowsKickback(ticket) {
+      return ['director_review', 'audit', 'eric_review'].includes(ticket.state);
     }
 
     function buildOption(select, value, label) {
@@ -705,7 +725,22 @@ HTML = """<!doctype html>
       bodyText.textContent = ticket.body || '(no body)';
       body.appendChild(bodyText);
 
-      box.append(meta, controls, toggles, body);
+      const auditPrompt = document.createElement('div');
+      auditPrompt.innerHTML = '<div class="field-label">Audit Prompt</div>';
+      const auditPromptInput = document.createElement('textarea');
+      auditPromptInput.value = ticket.audit_prompt || '';
+      auditPromptInput.placeholder = 'Director-authored prompt for audit when the ticket enters audit.';
+      const auditPromptActions = document.createElement('div');
+      auditPromptActions.className = 'inline-actions';
+      const saveAuditPromptButton = document.createElement('button');
+      saveAuditPromptButton.textContent = 'Save Audit Prompt';
+      saveAuditPromptButton.addEventListener('click', async () => {
+        await updateTicket(ticket.id, { audit_prompt: auditPromptInput.value });
+      });
+      auditPromptActions.appendChild(saveAuditPromptButton);
+      auditPrompt.append(auditPromptInput, auditPromptActions);
+
+      box.append(meta, controls, toggles, body, auditPrompt);
 
       if (ticket.screenshot) {
         const imageWrap = document.createElement('div');
@@ -727,6 +762,32 @@ HTML = """<!doctype html>
 
       const comments = document.createElement('div');
       comments.innerHTML = '<div class="field-label">Comments</div>';
+      const commentComposer = document.createElement('div');
+      commentComposer.className = 'comment-composer';
+      const commentWho = document.createElement('input');
+      commentWho.type = 'text';
+      commentWho.placeholder = 'who';
+      commentWho.value = 'director';
+      const commentText = document.createElement('textarea');
+      commentText.placeholder = 'Add a comment or bounce-back note';
+      const commentActions = document.createElement('div');
+      commentActions.className = 'inline-actions';
+      const addCommentButton = document.createElement('button');
+      addCommentButton.textContent = 'Add Comment';
+      addCommentButton.addEventListener('click', async () => {
+        await submitComment(ticket.id, commentWho.value, commentText.value);
+      });
+      commentActions.appendChild(addCommentButton);
+      if (ticketAllowsKickback(ticket)) {
+        const kickbackButton = document.createElement('button');
+        kickbackButton.textContent = 'Comment + Move to In Progress';
+        kickbackButton.addEventListener('click', async () => {
+          await submitComment(ticket.id, commentWho.value, commentText.value, 'in_progress');
+        });
+        commentActions.appendChild(kickbackButton);
+      }
+      commentComposer.append(commentWho, commentText, commentActions);
+      comments.appendChild(commentComposer);
       if (ticket.comments.length) {
         const list = document.createElement('div');
         list.className = 'comment-list';
@@ -903,6 +964,24 @@ HTML = """<!doctype html>
         throw new Error(await response.text());
       }
       await requestBoardReload();
+    }
+
+    async function submitComment(ticketId, who, text, nextState = null) {
+      const trimmedWho = who.trim();
+      const trimmedText = text.trim();
+      if (!trimmedWho || !trimmedText) {
+        throw new Error('comment requires both who and text');
+      }
+      const patch = {
+        comment: {
+          who: trimmedWho,
+          text: trimmedText,
+        },
+      };
+      if (nextState) {
+        patch.state = nextState;
+      }
+      await updateTicket(ticketId, patch);
     }
 
     createBtn.addEventListener('click', async () => {

@@ -18,7 +18,7 @@ ASSET_DIR_DEFAULT = Path("~/.claude/pgu-tickets-assets").expanduser()
 FRAME_DIR_DEFAULT = Path("/tmp/pgu-frames")
 ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit")
 LEGACY_ASSIGNEE_ALIASES = {"ui": "app"}
-STATES = ("open", "in_progress", "audit", "eric_review", "done")
+STATES = ("open", "in_progress", "director_review", "audit", "eric_review", "done")
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
 
@@ -142,6 +142,7 @@ class TicketBoardApp:
                     "screenshot_available": screenshot_path is not None,
                     "assignee": assignee,
                     "state": "open",
+                    "audit_prompt": "",
                     "audit_signoff": False,
                     "needs_eric_signoff": bool(needs_eric_signoff),
                     "eric_signoff": False,
@@ -172,6 +173,8 @@ class TicketBoardApp:
                 current_path=current.get("screenshot"),
             )
             current["screenshot_available"] = current["screenshot"] is not None
+        if "audit_prompt" in patch:
+            current["audit_prompt"] = self._require_plain_string(patch["audit_prompt"], "audit_prompt")
         if "needs_eric_signoff" in patch:
             current["needs_eric_signoff"] = bool(patch["needs_eric_signoff"])
         if "audit_signoff" in patch:
@@ -224,6 +227,7 @@ class TicketBoardApp:
             "screenshot_available": screenshot_available,
             "assignee": self._validate_assignee(str(payload.get("assignee", "unassigned"))),
             "state": self._validate_state(str(payload.get("state", "open"))),
+            "audit_prompt": self._require_plain_string(payload.get("audit_prompt", ""), "audit_prompt"),
             "audit_signoff": bool(payload.get("audit_signoff", False)),
             "needs_eric_signoff": bool(payload.get("needs_eric_signoff", False)),
             "eric_signoff": bool(payload.get("eric_signoff", False)),
@@ -321,4 +325,11 @@ class TicketBoardApp:
             return ""
         if not isinstance(raw, str):
             raise ValueError("body must be a string")
+        return raw
+
+    def _require_plain_string(self, raw: Any, field: str) -> str:
+        if raw is None:
+            return ""
+        if not isinstance(raw, str):
+            raise ValueError(f"{field} must be a string")
         return raw

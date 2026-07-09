@@ -485,6 +485,10 @@ HTML = """<!doctype html>
       return ['director_review', 'audit', 'eric_review'].includes(ticket.state);
     }
 
+    function ticketIsEricReview(ticket) {
+      return ticket.state === 'eric_review';
+    }
+
     function buildOption(select, value, label) {
       const option = document.createElement('option');
       option.value = value;
@@ -782,7 +786,7 @@ HTML = """<!doctype html>
       const commentWho = document.createElement('input');
       commentWho.type = 'text';
       commentWho.placeholder = 'who';
-      commentWho.value = 'director';
+      commentWho.value = ticketIsEricReview(ticket) ? 'eric' : 'director';
       const commentText = document.createElement('textarea');
       commentText.placeholder = 'Add a comment or bounce-back note';
       const commentActions = document.createElement('div');
@@ -793,7 +797,27 @@ HTML = """<!doctype html>
         await submitComment(ticket.id, commentWho.value, commentText.value);
       });
       commentActions.appendChild(addCommentButton);
-      if (ticketAllowsKickback(ticket)) {
+      if (ticketIsEricReview(ticket)) {
+        const signoffButton = document.createElement('button');
+        signoffButton.textContent = 'Sign Off -> Done';
+        signoffButton.addEventListener('click', async () => {
+          const patch = { eric_signoff: true, state: 'done' };
+          const trimmedWho = commentWho.value.trim();
+          const trimmedText = commentText.value.trim();
+          if (trimmedWho && trimmedText) {
+            patch.comment = { who: trimmedWho, text: trimmedText };
+          }
+          await updateTicket(ticket.id, patch);
+        });
+        commentActions.appendChild(signoffButton);
+
+        const kickbackButton = document.createElement('button');
+        kickbackButton.textContent = 'Kick Back -> In Progress';
+        kickbackButton.addEventListener('click', async () => {
+          await submitComment(ticket.id, commentWho.value, commentText.value, 'in_progress');
+        });
+        commentActions.appendChild(kickbackButton);
+      } else if (ticketAllowsKickback(ticket)) {
         const kickbackButton = document.createElement('button');
         kickbackButton.textContent = 'Comment + Move to In Progress';
         kickbackButton.addEventListener('click', async () => {

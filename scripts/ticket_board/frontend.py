@@ -239,6 +239,23 @@ HTML = """<!doctype html>
       line-height: 1.35;
       overflow-wrap: anywhere;
     }
+    .card-assignee {
+      display: flex;
+      gap: 6px;
+      align-items: baseline;
+      font-size: 12px;
+      line-height: 1.3;
+      color: var(--muted);
+    }
+    .card-assignee-label {
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .card-assignee-value {
+      color: var(--text);
+      font-weight: 600;
+      overflow-wrap: anywhere;
+    }
     .tag-row, .badge-row, .control-row {
       display: flex;
       flex-wrap: wrap;
@@ -642,18 +659,24 @@ HTML = """<!doctype html>
       const titleEl = document.createElement('div');
       titleEl.className = 'card-title';
       titleEl.textContent = ticket.title;
-      titleWrap.append(idEl, titleEl);
+      const assigneeLine = document.createElement('div');
+      assigneeLine.className = 'card-assignee';
+      const assigneeLabel = document.createElement('span');
+      assigneeLabel.className = 'card-assignee-label';
+      assigneeLabel.textContent = 'assignee';
+      const assigneeValue = document.createElement('span');
+      assigneeValue.className = 'card-assignee-value';
+      assigneeValue.textContent = ticket.assignee;
+      assigneeLine.append(assigneeLabel, assigneeValue);
+      titleWrap.append(idEl, titleEl, assigneeLine);
       top.appendChild(titleWrap);
 
       const tags = document.createElement('div');
       tags.className = 'tag-row';
-      const assignee = document.createElement('span');
-      assignee.className = 'tag';
-      assignee.textContent = ticket.assignee;
       const stateTag = document.createElement('span');
       stateTag.className = 'tag';
       stateTag.textContent = stateLabel(ticket.state);
-      tags.append(assignee, stateTag);
+      tags.append(stateTag);
 
       const badges = document.createElement('div');
       badges.className = 'badge-row';

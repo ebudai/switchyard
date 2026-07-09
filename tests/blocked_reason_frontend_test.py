@@ -15,11 +15,10 @@ from scripts.ticket_board.frontend import HTML
 
 def main() -> int:
     assert "function manualBlockedSummary(ticket)" in HTML
-    assert "function guardBlockedSummary(ticket)" in HTML
     assert "function renderAlertStack(ticket, { detail = false } = {})" in HTML
     assert "Blocked Reason" in HTML
     assert "Save Blocked Reason" in HTML
-    assert "Advance Blocked" in HTML
+    assert "Advance Blocked" not in HTML
     assert "card.classList.add('card-blocked');" in HTML
     assert "blocked_reason: blockedReasonInput.value" in HTML
     assert "Required when blocked-by dependencies are set. Also use this for non-dependency stalls." in HTML

@@ -125,11 +125,6 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       return '';
     }
 
-    function guardBlockedSummary(ticket) {
-      const reason = advanceBlockedReason(ticket);
-      return defaultAdvanceState(ticket) ? reason : '';
-    }
-
     function cardAlert(kind, title, text) {
       const alert = document.createElement('div');
       alert.className = `alert card-alert card-alert-${kind}`;
@@ -146,10 +141,6 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       const blockedSummary = manualBlockedSummary(ticket);
       if (blockedSummary) {
         alerts.push({ kind: 'blocked', title: 'Blocked', text: blockedSummary });
-      }
-      const guardSummary = guardBlockedSummary(ticket);
-      if (guardSummary) {
-        alerts.push({ kind: 'guard', title: 'Advance Blocked', text: guardSummary });
       }
       return alerts;
     }

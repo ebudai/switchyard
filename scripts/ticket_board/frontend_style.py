@@ -529,15 +529,6 @@ STYLE = """    :root {
     .card-alert-blocked strong {
       color: #fecdd3;
     }
-    .alert-guard,
-    .card-alert-guard {
-      border-color: rgba(252, 211, 77, 0.42);
-      background: rgba(120, 53, 15, 0.2);
-    }
-    .alert-guard strong,
-    .card-alert-guard strong {
-      color: #fde68a;
-    }
     .compact-textarea {
       min-height: 88px;
     }

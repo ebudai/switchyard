@@ -451,6 +451,8 @@ class TicketBoardApp:
         if previous_state in REVIEWED_STATES and ticket["state"] in REOPEN_RESET_TARGET_STATES:
             ticket["audit_signoff"] = False
             ticket["commit_hash"] = ""
+        if previous_state == "audit" and ticket["state"] == "analysis":
+            ticket["assignee"] = "unassigned"
         if previous_state == "analysis" and ticket["state"] == "in_progress":
             raise ValueError("analysis tickets must move through ready before entering in_progress")
         if previous_state in {"open", "analysis"} and ticket["state"] == "ready":

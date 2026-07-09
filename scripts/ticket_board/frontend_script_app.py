@@ -182,7 +182,7 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       }
       clearDetailDraft(ticketId);
       await updateTicket(ticketId, patch);
-      setCreateStatus(`Recorded Eric sign-off for ${ticketId}.`);
+      setCreateStatus(`Signed off ✓ ${ticketId} is now waiting for director completion.`);
     }
 
     createBtn.addEventListener('click', async () => {

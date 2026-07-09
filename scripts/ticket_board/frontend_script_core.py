@@ -125,6 +125,12 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       return '';
     }
 
+    function ericSignoffSummary(ticket) {
+      if (ticket.state !== 'eric_review' || !ticket.needs_eric_signoff || !ticket.eric_signoff) {
+        return '';
+      }
+      return 'Eric signed off. Waiting for director completion.';
+    }
     function cardAlert(kind, title, text) {
       const alert = document.createElement('div');
       alert.className = `alert card-alert card-alert-${kind}`;
@@ -138,6 +144,10 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
 
     function alertStackForTicket(ticket) {
       const alerts = [];
+      const signoffSummary = ericSignoffSummary(ticket);
+      if (signoffSummary) {
+        alerts.push({ kind: 'ok', title: 'Signed Off', text: signoffSummary });
+      }
       const blockedSummary = manualBlockedSummary(ticket);
       if (blockedSummary) {
         alerts.push({ kind: 'blocked', title: 'Blocked', text: blockedSummary });
@@ -685,6 +695,9 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       if (manualBlockedSummary(ticket)) {
         card.classList.add('card-blocked');
       }
+      if (ericSignoffSummary(ticket)) {
+        card.classList.add('card-signed-off');
+      }
       if (ticket.id === state.selectedId) {
         card.classList.add('selected');
       }
@@ -709,6 +722,12 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       assigneeValue.textContent = ticket.assignee;
       assigneeLine.append(assigneeLabel, assigneeValue);
       titleWrap.append(idEl, titleEl, assigneeLine);
+      if (ticket.needs_eric_signoff && ticket.state === 'eric_review') {
+        const signoffState = document.createElement('div');
+        signoffState.className = `card-signoff-state ${ticket.eric_signoff ? 'signed' : 'pending'}`;
+        signoffState.textContent = ticket.eric_signoff ? 'Signed Off ✓' : 'Awaiting Sign-off';
+        titleWrap.appendChild(signoffState);
+      }
       top.appendChild(titleWrap);
 
       const tags = document.createElement('div');

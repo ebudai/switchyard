@@ -575,6 +575,50 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       return reference;
     }
 
+    function buildChildTicketList(children, { compact = false } = {}) {
+      const wrap = document.createElement('div');
+      wrap.className = compact ? 'child-ticket-list child-ticket-list-compact' : 'child-ticket-list';
+
+      const head = document.createElement('div');
+      head.className = 'child-ticket-head';
+      head.textContent = children.length === 1 ? '1 linked child' : `${children.length} linked children`;
+      wrap.appendChild(head);
+
+      const list = document.createElement('div');
+      list.className = 'child-ticket-items';
+      children.forEach((child) => {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'child-ticket-item';
+        if (state.selectedId === child.id) {
+          row.classList.add('selected');
+        }
+        row.addEventListener('click', (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          openDetail(child.id);
+        });
+
+        const text = document.createElement('div');
+        text.className = 'child-ticket-text';
+        const id = document.createElement('div');
+        id.className = 'child-ticket-id';
+        id.textContent = child.id;
+        const title = document.createElement('div');
+        title.className = 'child-ticket-title';
+        title.textContent = child.title;
+        text.append(id, title);
+
+        const stateChip = document.createElement('span');
+        stateChip.className = 'tag child-ticket-state';
+        stateChip.textContent = stateLabel(child.state);
+        row.append(text, stateChip);
+        list.appendChild(row);
+      });
+      wrap.appendChild(list);
+      return wrap;
+    }
+
     function appendLinkedTicketText(container, text) {
       const source = text || '';
       const lines = source.split(/\\r?\\n/);
@@ -645,9 +689,62 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       return ticketNumber(left.id) - ticketNumber(right.id);
     }
 
+    function normalizedParentId(ticket) {
+      return String(ticket?.parent_id || '').trim().toUpperCase();
+    }
+
+    function parentTicketFor(ticket) {
+      const parentId = normalizedParentId(ticket);
+      return parentId ? ticketById(parentId) : null;
+    }
+
+    function rootTicketForBoard(ticket) {
+      let current = ticket;
+      const seen = new Set([ticket.id]);
+      while (true) {
+        const parent = parentTicketFor(current);
+        if (!parent || seen.has(parent.id)) {
+          return current;
+        }
+        seen.add(parent.id);
+        current = parent;
+      }
+    }
+
+    function directChildTickets(ticket) {
+      return state.tickets
+        .filter((candidate) => normalizedParentId(candidate) === ticket.id)
+        .sort(compareTicketsOldestFirst);
+    }
+
+    function childTicketsForBoard(ticket) {
+      const seen = new Set();
+      const collected = [];
+      const visit = (parent) => {
+        directChildTickets(parent).forEach((child) => {
+          if (seen.has(child.id)) {
+            return;
+          }
+          seen.add(child.id);
+          collected.push(child);
+          visit(child);
+        });
+      };
+      visit(ticket);
+      return collected;
+    }
+
+    function isTopLevelBoardTicket(ticket) {
+      return rootTicketForBoard(ticket).id === ticket.id;
+    }
+
     function columnTickets(columnKey) {
       return state.tickets
-        .filter((ticket) => ticket.state === columnKey && (columnKey !== 'eric_review' || ticket.needs_eric_signoff))
+        .filter((ticket) => (
+          ticket.state === columnKey
+          && (columnKey !== 'eric_review' || ticket.needs_eric_signoff)
+          && isTopLevelBoardTicket(ticket)
+        ))
         .sort(compareTicketsOldestFirst);
     }
 
@@ -690,6 +787,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     }
 
     function renderCard(ticket) {
+      const childTickets = childTicketsForBoard(ticket);
       const card = document.createElement('article');
       card.className = 'card';
       if (manualBlockedSummary(ticket)) {
@@ -698,7 +796,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       if (ericSignoffSummary(ticket)) {
         card.classList.add('card-signed-off');
       }
-      if (ticket.id === state.selectedId) {
+      if (ticket.id === state.selectedId || childTickets.some((child) => child.id === state.selectedId)) {
         card.classList.add('selected');
       }
       card.addEventListener('click', () => openDetail(ticket.id));
@@ -800,6 +898,9 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       const alerts = renderAlertStack(ticket);
       if (alerts) {
         card.appendChild(alerts);
+      }
+      if (childTickets.length) {
+        card.appendChild(buildChildTicketList(childTickets, { compact: true }));
       }
       if (ticketScreenshotEntries(ticket).some((entry) => !entry.available)) {
         const missing = document.createElement('div');

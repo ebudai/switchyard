@@ -50,6 +50,7 @@ Ticket schema:
   "assignee": "main",
   "state": "analysis",
   "blocked_by": ["PGU-23", "PGU-25"],
+  "parent_id": "PGU-9",
   "implementation": "",
   "audit_prompt": "",
   "audit_signoff": false,
@@ -78,6 +79,7 @@ Notes:
 
 - `eric_review` is reserved for tickets with `needs_eric_signoff: true`
 - `blocked_by` is a list of ticket IDs the ticket is waiting on; unresolved blockers are any entries whose referenced ticket is not yet `done`
+- `parent_id` is an explicit board-grouping link set by the director; child tickets collapse under the parent card instead of rendering as top-level cards
 - `implementation` is the director-authored implementation package/spec for the implementer during `in_progress`
 - `audit_prompt` is the director-authored handoff text for the audit phase
 - `commit_hash` stores the verified git commit associated with the ticket when it moves to `done`; it must be on `main`

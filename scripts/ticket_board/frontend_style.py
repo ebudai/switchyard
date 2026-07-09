@@ -365,6 +365,59 @@ STYLE = """    :root {
       font-size: 12px;
       line-height: 1.4;
     }
+    .child-ticket-list {
+      display: grid;
+      gap: 8px;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: rgba(255,255,255,0.03);
+    }
+    .child-ticket-list-compact {
+      padding: 8px 10px;
+    }
+    .child-ticket-head {
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+    }
+    .child-ticket-items {
+      display: grid;
+      gap: 8px;
+    }
+    .child-ticket-item {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      text-align: left;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.03);
+    }
+    .child-ticket-item.selected {
+      border-color: rgba(125, 211, 252, 0.55);
+      box-shadow: 0 0 0 1px rgba(125, 211, 252, 0.3) inset;
+    }
+    .child-ticket-text {
+      min-width: 0;
+      display: grid;
+      gap: 2px;
+    }
+    .child-ticket-id {
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .child-ticket-title {
+      font-size: 13px;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+    .child-ticket-state {
+      white-space: nowrap;
+    }
     .empty {
       padding: 14px;
       border: 1px dashed var(--border);

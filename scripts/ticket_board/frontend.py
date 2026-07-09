@@ -556,6 +556,65 @@ HTML = """<!doctype html>
       return COLUMNS.find((column) => column.key === key)?.label || key;
     }
 
+    function defaultAdvanceState(ticket) {
+      if (ticket.state === 'open') {
+        return 'in_progress';
+      }
+      if (ticket.state === 'in_progress') {
+        return 'director_review';
+      }
+      if (ticket.state === 'director_review') {
+        return 'audit';
+      }
+      if (ticket.state === 'audit') {
+        return ticket.needs_eric_signoff ? 'eric_review' : 'done';
+      }
+      return null;
+    }
+
+    function advanceBlockedReason(ticket) {
+      const nextState = defaultAdvanceState(ticket);
+      if (!nextState) {
+        return 'No default advance from this state.';
+      }
+      if (ticket.state === 'open') {
+        if (ticket.assignee === 'unassigned') {
+          return 'Assign the ticket before advancing to in progress.';
+        }
+        if (!(ticket.implementation || '').trim()) {
+          return 'Save implementation before advancing to in progress.';
+        }
+      }
+      if (ticket.state === 'director_review' && !(ticket.audit_prompt || '').trim()) {
+        return 'Save audit prompt before advancing to audit.';
+      }
+      if (ticket.state === 'audit' && !ticket.audit_signoff) {
+        return ticket.needs_eric_signoff
+          ? 'Set audit signoff before advancing to Eric review.'
+          : 'Set audit signoff before advancing to done.';
+      }
+      if (nextState === 'done' && !ticket.commit_exempt && !(ticket.commit_hash || '').trim()) {
+        return 'Save a verified commit hash or enable no-commit override before advancing to done.';
+      }
+      return '';
+    }
+
+    async function advanceTicket(ticketId) {
+      const ticket = state.tickets.find((item) => item.id === ticketId);
+      if (!ticket) {
+        throw new Error(`ticket not found: ${ticketId}`);
+      }
+      const nextState = defaultAdvanceState(ticket);
+      if (!nextState) {
+        throw new Error('no default advance from this state');
+      }
+      const blockedReason = advanceBlockedReason(ticket);
+      if (blockedReason) {
+        throw new Error(blockedReason);
+      }
+      await updateTicket(ticketId, { state: nextState });
+    }
+
     function clearDetailDraft(ticketId = null) {
       if (!ticketId || state.detailDraft?.ticketId === ticketId) {
         state.detailDraft = null;
@@ -929,6 +988,28 @@ HTML = """<!doctype html>
 
       const controls = document.createElement('div');
       controls.className = 'control-row';
+      const nextState = defaultAdvanceState(ticket);
+      if (nextState) {
+        const advanceButton = document.createElement('button');
+        advanceButton.className = 'small primary';
+        advanceButton.type = 'button';
+        advanceButton.textContent = `Advance -> ${stateLabel(nextState)}`;
+        const blockedReason = advanceBlockedReason(ticket);
+        if (blockedReason) {
+          advanceButton.disabled = true;
+          advanceButton.title = blockedReason;
+        }
+        advanceButton.addEventListener('click', async (event) => {
+          event.stopPropagation();
+          try {
+            await advanceTicket(ticket.id);
+          } catch (error) {
+            setCreateStatus(error.message, true);
+            await requestBoardReload();
+          }
+        });
+        controls.appendChild(advanceButton);
+      }
       const stateSelect = document.createElement('select');
       stateSelect.className = 'small';
       COLUMNS.forEach((column) => {
@@ -1013,6 +1094,36 @@ HTML = """<!doctype html>
 
       const controls = document.createElement('div');
       controls.className = 'detail-grid';
+
+      const workflowActions = document.createElement('div');
+      workflowActions.className = 'inline-actions';
+      const detailAdvanceState = defaultAdvanceState(ticket);
+      if (detailAdvanceState) {
+        const advanceButton = document.createElement('button');
+        advanceButton.className = 'primary';
+        advanceButton.type = 'button';
+        advanceButton.textContent = `Advance -> ${stateLabel(detailAdvanceState)}`;
+        const blockedReason = advanceBlockedReason(ticket);
+        if (blockedReason) {
+          advanceButton.disabled = true;
+          advanceButton.title = blockedReason;
+        }
+        advanceButton.addEventListener('click', async () => {
+          try {
+            await advanceTicket(ticket.id);
+          } catch (error) {
+            setCreateStatus(error.message, true);
+            await requestBoardReload();
+          }
+        });
+        workflowActions.appendChild(advanceButton);
+        if (blockedReason) {
+          const advanceNote = document.createElement('div');
+          advanceNote.className = 'soft-note';
+          advanceNote.textContent = blockedReason;
+          workflowActions.appendChild(advanceNote);
+        }
+      }
 
       const assigneeLabel = document.createElement('label');
       assigneeLabel.innerHTML = '<span class="field-label">Assignee</span>';
@@ -1186,7 +1297,7 @@ HTML = """<!doctype html>
         : 'A verified git commit is required before moving this ticket to done.';
       commitInfo.append(commitOverride, commitNote);
 
-      box.append(titleField, meta, controls, toggles, body, blockedBy, implementation, auditPrompt, commitInfo);
+      box.append(titleField, meta, workflowActions, controls, toggles, body, blockedBy, implementation, auditPrompt, commitInfo);
 
       if (ticketScreenshotEntries(ticket).length) {
         const imageWrap = document.createElement('div');

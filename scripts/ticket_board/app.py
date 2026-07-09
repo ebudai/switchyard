@@ -259,6 +259,7 @@ class TicketBoardApp:
                 raise ValueError("comment requires non-empty who and text")
             current["comments"].append({"who": who, "text": text, "ts": iso_now()})
         self._normalize_signoff_state(current)
+        self._enforce_transition_rules(previous_state, current)
         self._enforce_workflow_rules(current)
         if current["state"] == "done" and previous_state != "done":
             self._enforce_done_requirements(current)
@@ -364,6 +365,17 @@ class TicketBoardApp:
     def _enforce_workflow_rules(self, ticket: dict[str, Any]) -> None:
         if ticket["state"] == "eric_review" and not ticket["audit_signoff"]:
             raise ValueError("audit_signoff must be true before a ticket can enter eric_review")
+
+    def _enforce_transition_rules(self, previous_state: str, ticket: dict[str, Any]) -> None:
+        if previous_state == "open" and ticket["state"] == "in_progress":
+            if ticket["assignee"] == "unassigned":
+                raise ValueError("assignee must not be unassigned before a ticket can enter in_progress")
+            if not ticket["implementation"].strip():
+                raise ValueError("implementation must be non-empty before a ticket can enter in_progress")
+        if previous_state == "director_review" and ticket["state"] == "audit" and not ticket["audit_prompt"].strip():
+            raise ValueError("audit_prompt must be non-empty before a ticket can enter audit")
+        if previous_state == "audit" and ticket["state"] in {"eric_review", "done"} and not ticket["audit_signoff"]:
+            raise ValueError("audit_signoff must be true before a ticket can leave audit")
 
     def _enforce_done_requirements(self, ticket: dict[str, Any]) -> None:
         if ticket.get("commit_exempt"):

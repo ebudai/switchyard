@@ -43,7 +43,6 @@ MARKUP = """  <div class="layout">
       <div class="topbar">
         <div class="topbar-main">
           <h1>PGU Ticket Board</h1>
-          <div class="subtle">States: analysis -> in_progress -> director_review -> audit -> eric_review -> done. Done is hidden by default.</div>
           <div class="topbar-controls">
             <label class="check compact">
               <input id="showDoneInput" type="checkbox">

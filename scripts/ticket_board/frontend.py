@@ -547,12 +547,55 @@ HTML = """<!doctype html>
       gap: 10px;
     }
     .field-label { font-size: 12px; color: var(--muted); text-transform: uppercase; }
+    .field-preview {
+      display: grid;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .field-preview-label {
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+    }
     .body-text {
       white-space: pre-wrap;
       overflow-wrap: anywhere;
       font-size: 14px;
       line-height: 1.65;
       max-width: 84ch;
+    }
+    .ticket-ref-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .ticket-ref {
+      width: auto;
+      min-width: 0;
+      padding: 3px 9px;
+      border-radius: 999px;
+      font-size: 12px;
+      line-height: 1.3;
+      color: var(--accent);
+      border-color: rgba(125, 211, 252, 0.4);
+      background: rgba(125, 211, 252, 0.12);
+      display: inline-flex;
+      align-items: center;
+      vertical-align: baseline;
+    }
+    .ticket-ref:hover {
+      background: rgba(125, 211, 252, 0.2);
+    }
+    .ticket-ref-missing,
+    .ticket-ref:disabled {
+      color: var(--muted);
+      border-color: rgba(255,255,255,0.12);
+      background: rgba(255,255,255,0.04);
+      cursor: default;
+    }
+    .linked-text {
+      display: block;
     }
     .comment-list {
       display: grid;
@@ -688,6 +731,7 @@ HTML = """<!doctype html>
   </div>
 
   <script>
+    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     const COLUMNS = [
       { key: 'open', label: 'Open' },
       { key: 'in_progress', label: 'In Progress' },
@@ -1236,6 +1280,88 @@ HTML = """<!doctype html>
       return span;
     }
 
+    function ticketById(ticketId) {
+      const normalizedId = String(ticketId || '').toUpperCase();
+      return state.tickets.find((ticket) => ticket.id === normalizedId) || null;
+    }
+
+    function buildTicketReference(ticketId) {
+      const normalizedId = String(ticketId || '').toUpperCase();
+      const reference = document.createElement('button');
+      reference.type = 'button';
+      reference.className = 'ticket-ref';
+      reference.textContent = normalizedId;
+      if (ticketById(normalizedId)) {
+        reference.addEventListener('click', (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          openDetail(normalizedId);
+        });
+      } else {
+        reference.disabled = true;
+        reference.classList.add('ticket-ref-missing');
+        reference.title = 'Ticket not found in the current board snapshot.';
+      }
+      return reference;
+    }
+
+    function appendLinkedTicketText(container, text) {
+      const source = text || '';
+      const lines = source.split(/\r?\n/);
+      lines.forEach((line, lineIndex) => {
+        let cursor = 0;
+        TICKET_REF_PATTERN.lastIndex = 0;
+        let match = TICKET_REF_PATTERN.exec(line);
+        while (match) {
+          if (match.index > cursor) {
+            container.appendChild(document.createTextNode(line.slice(cursor, match.index)));
+          }
+          container.appendChild(buildTicketReference(match[1]));
+          cursor = match.index + match[1].length;
+          match = TICKET_REF_PATTERN.exec(line);
+        }
+        if (cursor < line.length) {
+          container.appendChild(document.createTextNode(line.slice(cursor)));
+        }
+        if (lineIndex < lines.length - 1) {
+          container.appendChild(document.createElement('br'));
+        }
+      });
+    }
+
+    function linkedTextBlock(text, emptyText = '(none)') {
+      const block = document.createElement('div');
+      block.className = 'body-text linked-text';
+      appendLinkedTicketText(block, text && text.length ? text : emptyText);
+      return block;
+    }
+
+    function linkedPreview(label, text, emptyText = '(none)') {
+      const preview = document.createElement('div');
+      preview.className = 'field-preview';
+      const previewLabel = document.createElement('div');
+      previewLabel.className = 'field-preview-label';
+      previewLabel.textContent = label;
+      preview.append(previewLabel, linkedTextBlock(text, emptyText));
+      return preview;
+    }
+
+    function linkedTicketRow(ticketIds) {
+      const row = document.createElement('div');
+      row.className = 'ticket-ref-row';
+      if (!ticketIds.length) {
+        const empty = document.createElement('div');
+        empty.className = 'soft-note';
+        empty.textContent = 'No linked tickets.';
+        row.appendChild(empty);
+        return row;
+      }
+      ticketIds.forEach((ticketId) => {
+        row.appendChild(buildTicketReference(ticketId));
+      });
+      return row;
+    }
+
     function ticketNumber(ticketId) {
       const match = /^PGU-(\\d+)$/.exec(ticketId || '');
       return match ? Number.parseInt(match[1], 10) : Number.MAX_SAFE_INTEGER;
@@ -1622,17 +1748,15 @@ HTML = """<!doctype html>
       metaLine2.textContent = `State: ${stateLabel(ticket.state)} | Created: ${formatWhen(ticket.created)} | Updated: ${formatWhen(ticket.updated)}`;
       meta.append(metaLine1, metaLine2);
       if ((ticket.blocked_by || []).length) {
-        const metaLine3 = document.createElement('div');
-        metaLine3.textContent = `Blocked By: ${formatBlockedByList(ticket.blocked_by)}`;
-        meta.appendChild(metaLine3);
+      const metaLine3 = document.createElement('div');
+      metaLine3.appendChild(document.createTextNode('Blocked By: '));
+      metaLine3.appendChild(linkedTicketRow(ticket.blocked_by || []));
+      meta.appendChild(metaLine3);
       }
 
       const body = document.createElement('div');
       body.innerHTML = '<div class="field-label">Body</div>';
-      const bodyText = document.createElement('div');
-      bodyText.className = 'body-text';
-      bodyText.textContent = ticket.body || '(no body)';
-      body.appendChild(bodyText);
+      body.appendChild(linkedTextBlock(ticket.body, '(no body)'));
 
       const blockedBy = document.createElement('div');
       blockedBy.innerHTML = '<div class="field-label">Blocked By</div>';
@@ -1655,7 +1779,13 @@ HTML = """<!doctype html>
       const blockedByNote = document.createElement('div');
       blockedByNote.className = 'soft-note';
       blockedByNote.textContent = blockedBySummary(ticket);
-      blockedBy.append(blockedByInput, blockedByActions, blockedByNote);
+      const blockedByLinks = document.createElement('div');
+      blockedByLinks.className = 'field-preview';
+      const blockedByLinksLabel = document.createElement('div');
+      blockedByLinksLabel.className = 'field-preview-label';
+      blockedByLinksLabel.textContent = 'Linked Tickets';
+      blockedByLinks.append(blockedByLinksLabel, linkedTicketRow(ticket.blocked_by || []));
+      blockedBy.append(blockedByInput, blockedByActions, blockedByNote, blockedByLinks);
 
       const blockedReason = document.createElement('div');
       blockedReason.innerHTML = '<div class="field-label">Blocked Reason</div>';
@@ -1691,7 +1821,11 @@ HTML = """<!doctype html>
         await updateTicket(ticket.id, { implementation: implementationInput.value });
       });
       implementationActions.appendChild(saveImplementationButton);
-      implementation.append(implementationInput, implementationActions);
+      implementation.append(
+        implementationInput,
+        implementationActions,
+        linkedPreview('Rendered Preview', ticket.implementation, '(no implementation yet)'),
+      );
 
       const auditPrompt = document.createElement('div');
       auditPrompt.innerHTML = '<div class="field-label">Audit Prompt</div>';
@@ -1707,7 +1841,11 @@ HTML = """<!doctype html>
         await updateTicket(ticket.id, { audit_prompt: auditPromptInput.value });
       });
       auditPromptActions.appendChild(saveAuditPromptButton);
-      auditPrompt.append(auditPromptInput, auditPromptActions);
+      auditPrompt.append(
+        auditPromptInput,
+        auditPromptActions,
+        linkedPreview('Rendered Preview', ticket.audit_prompt, '(no audit prompt yet)'),
+      );
 
       const commitInfo = document.createElement('div');
       commitInfo.innerHTML = '<div class="field-label">Commit Hash</div>';
@@ -1810,7 +1948,8 @@ HTML = """<!doctype html>
           ts.textContent = ` ${formatWhen(comment.ts)}`;
           header.append(who, ts);
           const text = document.createElement('div');
-          text.textContent = comment.text;
+          text.className = 'body-text linked-text';
+          appendLinkedTicketText(text, comment.text);
           item.append(header, text);
           list.appendChild(item);
         });

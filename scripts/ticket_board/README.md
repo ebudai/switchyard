@@ -14,6 +14,7 @@ Shared shell-side ticket creation:
 scripts/directorctl ticket-create \
   --assignee app \
   --state in_progress \
+  --blocked-by "PGU-23, PGU-25" \
   --title "Board: add director as assignee" \
   --body "Allow director-owned action tickets in the assignee enum." \
   --comment-who director \
@@ -44,6 +45,7 @@ Ticket schema:
   "screenshot": "/tmp/pgu-frames/frame_0.png",
   "assignee": "main",
   "state": "open",
+  "blocked_by": ["PGU-23", "PGU-25"],
   "implementation": "",
   "audit_prompt": "",
   "audit_signoff": false,
@@ -69,6 +71,7 @@ Allowed values:
 Notes:
 
 - `eric_review` is reserved for tickets with `needs_eric_signoff: true`
+- `blocked_by` is a list of ticket IDs the ticket is waiting on; unresolved blockers are any entries whose referenced ticket is not yet `done`
 - `implementation` is the director-authored implementation package/spec for the implementer during `in_progress`
 - `audit_prompt` is the director-authored handoff text for the audit phase
 - Screenshots referenced by tickets may live in either `/tmp/pgu-frames` or `/home/agent/.claude/pgu-tickets-assets`

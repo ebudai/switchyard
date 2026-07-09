@@ -547,6 +547,42 @@ HTML = """<!doctype html>
         || 'Review this ticket, then sign off when it looks right.';
     }
 
+    function parseBlockedByInput(value) {
+      return Array.from(new Set(
+        value
+          .split(/[^A-Za-z0-9-]+/)
+          .map((item) => item.trim().toUpperCase())
+          .filter((item) => item.length > 0),
+      ));
+    }
+
+    function formatBlockedByList(blockedBy) {
+      return (blockedBy || []).join(', ');
+    }
+
+    function blockerTicket(id) {
+      return state.tickets.find((ticket) => ticket.id === id) || null;
+    }
+
+    function unresolvedBlockedBy(ticket) {
+      return (ticket.blocked_by || []).filter((id) => {
+        const blocker = blockerTicket(id);
+        return !blocker || blocker.state !== 'done';
+      });
+    }
+
+    function blockedBySummary(ticket) {
+      const blockedBy = ticket.blocked_by || [];
+      if (!blockedBy.length) {
+        return 'No ticket blockers recorded.';
+      }
+      const unresolved = unresolvedBlockedBy(ticket);
+      if (!unresolved.length) {
+        return `Resolved blockers: ${formatBlockedByList(blockedBy)}`;
+      }
+      return `Unresolved blockers: ${formatBlockedByList(unresolved)}`;
+    }
+
     function buildOption(select, value, label) {
       const option = document.createElement('option');
       option.value = value;
@@ -681,6 +717,13 @@ HTML = """<!doctype html>
       const badges = document.createElement('div');
       badges.className = 'badge-row';
       badges.appendChild(badge(`audit ${ticket.audit_signoff ? '✓' : '✗'}`, ticket.audit_signoff));
+      const unresolvedBlockers = unresolvedBlockedBy(ticket);
+      if (unresolvedBlockers.length) {
+        badges.appendChild(badge(
+          unresolvedBlockers.length === 1 ? `blocked ${unresolvedBlockers[0]}` : `blocked ${unresolvedBlockers.length}`,
+          false,
+        ));
+      }
       if (ticket.needs_eric_signoff) {
         badges.appendChild(badge(`eric ${ticket.eric_signoff ? '✓' : '✗'}`, ticket.eric_signoff));
       }
@@ -817,6 +860,11 @@ HTML = """<!doctype html>
       const metaLine2 = document.createElement('div');
       metaLine2.textContent = `State: ${stateLabel(ticket.state)} | Created: ${formatWhen(ticket.created)} | Updated: ${formatWhen(ticket.updated)}`;
       meta.append(metaLine1, metaLine2);
+      if ((ticket.blocked_by || []).length) {
+        const metaLine3 = document.createElement('div');
+        metaLine3.textContent = `Blocked By: ${formatBlockedByList(ticket.blocked_by)}`;
+        meta.appendChild(metaLine3);
+      }
 
       const body = document.createElement('div');
       body.innerHTML = '<div class="field-label">Body</div>';
@@ -824,6 +872,25 @@ HTML = """<!doctype html>
       bodyText.className = 'body-text';
       bodyText.textContent = ticket.body || '(no body)';
       body.appendChild(bodyText);
+
+      const blockedBy = document.createElement('div');
+      blockedBy.innerHTML = '<div class="field-label">Blocked By</div>';
+      const blockedByInput = document.createElement('input');
+      blockedByInput.type = 'text';
+      blockedByInput.value = formatBlockedByList(ticket.blocked_by);
+      blockedByInput.placeholder = 'PGU-23, PGU-25';
+      const blockedByActions = document.createElement('div');
+      blockedByActions.className = 'inline-actions';
+      const saveBlockedByButton = document.createElement('button');
+      saveBlockedByButton.textContent = 'Save Blockers';
+      saveBlockedByButton.addEventListener('click', async () => {
+        await updateTicket(ticket.id, { blocked_by: parseBlockedByInput(blockedByInput.value) });
+      });
+      blockedByActions.appendChild(saveBlockedByButton);
+      const blockedByNote = document.createElement('div');
+      blockedByNote.className = 'soft-note';
+      blockedByNote.textContent = blockedBySummary(ticket);
+      blockedBy.append(blockedByInput, blockedByActions, blockedByNote);
 
       const implementation = document.createElement('div');
       implementation.innerHTML = '<div class="field-label">Implementation</div>';
@@ -855,7 +922,7 @@ HTML = """<!doctype html>
       auditPromptActions.appendChild(saveAuditPromptButton);
       auditPrompt.append(auditPromptInput, auditPromptActions);
 
-      box.append(meta, controls, toggles, body, implementation, auditPrompt);
+      box.append(meta, controls, toggles, body, blockedBy, implementation, auditPrompt);
 
       if (ticket.screenshot) {
         const imageWrap = document.createElement('div');

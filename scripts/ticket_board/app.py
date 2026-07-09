@@ -124,6 +124,7 @@ class TicketBoardApp:
         screenshot: str | None,
         assignee: str,
         needs_eric_signoff: bool,
+        blocked_by: list[str] | None = None,
     ) -> dict[str, Any]:
         return self.create_ticket_record(
             title=title,
@@ -131,6 +132,7 @@ class TicketBoardApp:
             screenshot=screenshot,
             assignee=assignee,
             state="open",
+            blocked_by=blocked_by,
             implementation="",
             audit_prompt="",
             audit_signoff=False,
@@ -147,6 +149,7 @@ class TicketBoardApp:
         screenshot: str | None,
         assignee: str,
         state: str,
+        blocked_by: list[str] | None,
         implementation: str,
         audit_prompt: str,
         audit_signoff: bool,
@@ -161,10 +164,11 @@ class TicketBoardApp:
             raise ValueError("title must not be empty")
         assignee = self._validate_assignee(assignee)
         state = self._validate_state(state)
+        ticket_id, handle = self._reserve_ticket_file()
+        blocked_by = self._validate_blocked_by(blocked_by or [], ticket_id)
         implementation = self._require_plain_string(implementation, "implementation")
         audit_prompt = self._require_plain_string(audit_prompt, "audit_prompt")
         normalized_comments = self._validate_comments(comments)
-        ticket_id, handle = self._reserve_ticket_file()
         with handle:
             try:
                 screenshot_path = self._materialize_attachment(screenshot, ticket_id)
@@ -178,6 +182,7 @@ class TicketBoardApp:
                     "screenshot_available": screenshot_path is not None,
                     "assignee": assignee,
                     "state": state,
+                    "blocked_by": blocked_by,
                     "implementation": implementation,
                     "audit_prompt": audit_prompt,
                     "audit_signoff": bool(audit_signoff),
@@ -204,6 +209,8 @@ class TicketBoardApp:
             current["state"] = self._validate_state(str(patch["state"]))
         if "assignee" in patch:
             current["assignee"] = self._validate_assignee(str(patch["assignee"]))
+        if "blocked_by" in patch:
+            current["blocked_by"] = self._validate_blocked_by(patch["blocked_by"], ticket_id)
         if "screenshot" in patch:
             current["screenshot"] = self._materialize_attachment(
                 patch["screenshot"],
@@ -269,6 +276,7 @@ class TicketBoardApp:
             "screenshot_available": screenshot_available,
             "assignee": self._validate_assignee(str(payload.get("assignee", "unassigned"))),
             "state": self._validate_state(str(payload.get("state", "open"))),
+            "blocked_by": self._validate_blocked_by(payload.get("blocked_by", []), ticket_id),
             "implementation": self._require_plain_string(payload.get("implementation", ""), "implementation"),
             "audit_prompt": self._require_plain_string(payload.get("audit_prompt", ""), "audit_prompt"),
             "audit_signoff": bool(payload.get("audit_signoff", False)),
@@ -296,6 +304,26 @@ class TicketBoardApp:
                 }
             )
         return comments
+
+    def _validate_blocked_by(self, raw: Any, ticket_id: str) -> list[str]:
+        if raw in (None, "", "null"):
+            return []
+        if not isinstance(raw, list):
+            raise ValueError("blocked_by must be a list of ticket IDs")
+        blocked_by: list[str] = []
+        for item in raw:
+            if not isinstance(item, str):
+                raise ValueError("blocked_by entries must be strings")
+            blocker_id = item.strip().upper()
+            if not blocker_id:
+                raise ValueError("blocked_by entries must not be empty")
+            if not blocker_id.startswith("PGU-") or not blocker_id[4:].isdigit():
+                raise ValueError(f"invalid blocked_by ticket id: {item}")
+            if blocker_id == ticket_id:
+                raise ValueError("ticket cannot be blocked_by itself")
+            if blocker_id not in blocked_by:
+                blocked_by.append(blocker_id)
+        return blocked_by
 
     def _normalize_signoff_state(self, ticket: dict[str, Any]) -> None:
         if ticket["state"] == "eric_review":

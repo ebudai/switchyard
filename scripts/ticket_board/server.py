@@ -174,6 +174,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                     screenshot=payload.get("screenshot"),
                     assignee=str(payload.get("assignee", "unassigned")),
                     needs_eric_signoff=bool(payload.get("needs_eric_signoff", False)),
+                    blocked_by=payload.get("blocked_by"),
                 )
                 self.events.notify_change(self.app.store_signature())
                 self.send_json({"ticket": created}, HTTPStatus.CREATED)

@@ -283,6 +283,63 @@ class TicketBoardApp:
         self._atomic_write(path, self._serialize_ticket(current))
         return current
 
+    def merge_tickets(self, source_ticket_id: str, target_ticket_id: str, *, actor: str) -> dict[str, dict[str, Any]]:
+        actor_normalized = str(actor).strip().lower()
+        if actor_normalized != "director":
+            raise ValueError("ticket merge requires actor=director")
+
+        source_id = str(source_ticket_id).strip().upper()
+        target_id = str(target_ticket_id).strip().upper()
+        if not source_id or not target_id:
+            raise ValueError("merge requires both source and target ticket IDs")
+        if source_id == target_id:
+            raise ValueError("cannot merge a ticket into itself")
+
+        source_path = self.store_dir / f"{source_id}.json"
+        target_path = self.store_dir / f"{target_id}.json"
+        if not source_path.is_file():
+            raise FileNotFoundError(f"ticket not found: {source_id}")
+        if not target_path.is_file():
+            raise FileNotFoundError(f"ticket not found: {target_id}")
+
+        source = self._validate_ticket(json.loads(source_path.read_text(encoding="utf-8")), source_path)
+        target = self._validate_ticket(json.loads(target_path.read_text(encoding="utf-8")), target_path)
+
+        now = iso_now()
+        target["comments"].extend(
+            {
+                "who": comment["who"],
+                "text": f"[merged from {source_id}] {comment['text']}",
+                "ts": comment["ts"],
+            }
+            for comment in source["comments"]
+        )
+        target["comments"].append(
+            {
+                "who": "director",
+                "text": f"Merged in {source_id}: {source['title']}",
+                "ts": now,
+            }
+        )
+        target["screenshots"] = self._unique_paths([*target.get("screenshots", []), *source.get("screenshots", [])])
+        self._set_screenshot_fields(target, self._build_screenshot_entries(target["screenshots"]))
+        target["updated"] = now
+
+        source["state"] = "done"
+        source["commit_exempt"] = True
+        source["comments"].append(
+            {
+                "who": "director",
+                "text": f"Merged into {target_id}",
+                "ts": now,
+            }
+        )
+        source["updated"] = now
+
+        self._atomic_write(target_path, self._serialize_ticket(target))
+        self._atomic_write(source_path, self._serialize_ticket(source))
+        return {"source": source, "target": target}
+
     def _reserve_ticket_file(self) -> tuple[str, Any]:
         existing = [self._ticket_number(path.stem) for path in self.store_dir.glob("PGU-*.json")]
         next_number = max(existing, default=0) + 1
@@ -503,6 +560,16 @@ class TicketBoardApp:
 
     def _build_screenshot_entries(self, paths: list[str]) -> list[dict[str, Any]]:
         return [{"path": path, "available": Path(path).is_file()} for path in paths]
+
+    def _unique_paths(self, paths: list[str]) -> list[str]:
+        unique: list[str] = []
+        seen: set[str] = set()
+        for path in paths:
+            if not path or path in seen:
+                continue
+            unique.append(path)
+            seen.add(path)
+        return unique
 
     def _set_screenshot_fields(self, ticket: dict[str, Any], entries: list[dict[str, Any]]) -> None:
         ticket["screenshots"] = [entry["path"] for entry in entries]

@@ -257,6 +257,16 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 self.director_notifier.notify_ticket_created(created)
                 self.send_json({"ticket": created}, HTTPStatus.CREATED)
                 return
+            if parsed.path.startswith("/api/tickets/") and parsed.path.endswith("/merge"):
+                source_ticket_id = parsed.path.removeprefix("/api/tickets/").removesuffix("/merge").rstrip("/")
+                merged = self.app.merge_tickets(
+                    source_ticket_id,
+                    str(payload.get("target_id", "")),
+                    actor=str(payload.get("actor", "")),
+                )
+                self.events.notify_change(self.app.store_signature())
+                self.send_json(merged)
+                return
             if parsed.path.startswith("/api/tickets/"):
                 ticket_id = parsed.path.removeprefix("/api/tickets/")
                 updated = self.app.update_ticket(ticket_id, payload)

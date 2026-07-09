@@ -223,6 +223,32 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         await updateTicket(ticket.id, { title: titleEditInput.value });
       });
       titleActions.appendChild(saveTitleButton);
+      const mergeTargetInput = document.createElement('input');
+      mergeTargetInput.type = 'text';
+      mergeTargetInput.placeholder = 'PGU-123';
+      mergeTargetInput.setAttribute('aria-label', 'Merge target ticket');
+      bindDetailDraftField(draftFields, mergeTargetInput, 'mergeTarget', '');
+      const mergeButton = document.createElement('button');
+      mergeButton.textContent = 'Merge Into…';
+      mergeButton.addEventListener('click', async () => {
+        try {
+          const targetId = mergeTargetInput.value.trim().toUpperCase();
+          if (!targetId) {
+            throw new Error('merge requires a target ticket ID');
+          }
+          const confirmed = window.confirm(
+            `Merge ${ticket.id} into ${targetId}? ${ticket.id}'s comments/attachments move to ${targetId} and ${ticket.id} is closed as merged.`,
+          );
+          if (!confirmed) {
+            return;
+          }
+          await mergeTicket(ticket.id, targetId);
+        } catch (error) {
+          setCreateStatus(error.message, true);
+          await requestBoardReload();
+        }
+      });
+      titleActions.append(mergeTargetInput, mergeButton);
       titleField.append(titleEditInput, titleActions);
       const metaLine1 = document.createElement('div');
       const strong = document.createElement('strong');

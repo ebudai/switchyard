@@ -292,6 +292,31 @@ HTML = """<!doctype html>
       gap: 12px;
       width: min(100%, 76ch);
     }
+    .eric-banner {
+      border: 1px solid rgba(125, 211, 252, 0.5);
+      border-radius: 8px;
+      padding: 14px;
+      background: linear-gradient(180deg, rgba(125, 211, 252, 0.18), rgba(125, 211, 252, 0.08));
+      display: grid;
+      gap: 10px;
+    }
+    .eric-banner-subtitle {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--accent);
+      text-transform: uppercase;
+    }
+    .eric-banner-title {
+      font-size: 18px;
+      font-weight: 700;
+      color: #d8f3ff;
+      line-height: 1.3;
+    }
+    .eric-banner-note {
+      font-size: 14px;
+      line-height: 1.45;
+      color: var(--text);
+    }
     .detail-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -665,6 +690,38 @@ HTML = """<!doctype html>
 
       const box = document.createElement('div');
       box.className = 'detail-box';
+      const commentWho = document.createElement('input');
+      commentWho.type = 'text';
+      commentWho.placeholder = 'who';
+      commentWho.value = ticketIsEricReview(ticket) ? 'eric' : 'director';
+      const commentText = document.createElement('textarea');
+      commentText.placeholder = 'Add a comment or bounce-back note';
+
+      if (ticketIsEricReview(ticket)) {
+        const ericBanner = document.createElement('div');
+        ericBanner.className = 'eric-banner';
+        const ericBannerSubtitle = document.createElement('div');
+        ericBannerSubtitle.className = 'eric-banner-subtitle';
+        ericBannerSubtitle.textContent = 'Awaiting Eric sign-off';
+        const ericBannerTitle = document.createElement('div');
+        ericBannerTitle.className = 'eric-banner-title';
+        ericBannerTitle.textContent = ticket.title;
+        const ericBannerNote = document.createElement('div');
+        ericBannerNote.className = 'eric-banner-note';
+        ericBannerNote.textContent = ticket.body || 'Review this ticket, then sign off when it looks right.';
+        const ericBannerActions = document.createElement('div');
+        ericBannerActions.className = 'inline-actions';
+        const ericBannerSignoffButton = document.createElement('button');
+        ericBannerSignoffButton.className = 'primary';
+        ericBannerSignoffButton.textContent = 'Sign Off -> Done';
+        ericBannerSignoffButton.addEventListener('click', async () => {
+          await submitEricSignoff(ticket.id, commentWho.value, commentText.value);
+        });
+        ericBannerActions.appendChild(ericBannerSignoffButton);
+        ericBanner.append(ericBannerSubtitle, ericBannerTitle, ericBannerNote, ericBannerActions);
+        box.appendChild(ericBanner);
+      }
+
       const controls = document.createElement('div');
       controls.className = 'detail-grid';
 
@@ -783,12 +840,6 @@ HTML = """<!doctype html>
       comments.innerHTML = '<div class="field-label">Comments</div>';
       const commentComposer = document.createElement('div');
       commentComposer.className = 'comment-composer';
-      const commentWho = document.createElement('input');
-      commentWho.type = 'text';
-      commentWho.placeholder = 'who';
-      commentWho.value = ticketIsEricReview(ticket) ? 'eric' : 'director';
-      const commentText = document.createElement('textarea');
-      commentText.placeholder = 'Add a comment or bounce-back note';
       const commentActions = document.createElement('div');
       commentActions.className = 'inline-actions';
       const addCommentButton = document.createElement('button');
@@ -798,19 +849,6 @@ HTML = """<!doctype html>
       });
       commentActions.appendChild(addCommentButton);
       if (ticketIsEricReview(ticket)) {
-        const signoffButton = document.createElement('button');
-        signoffButton.textContent = 'Sign Off -> Done';
-        signoffButton.addEventListener('click', async () => {
-          const patch = { eric_signoff: true, state: 'done' };
-          const trimmedWho = commentWho.value.trim();
-          const trimmedText = commentText.value.trim();
-          if (trimmedWho && trimmedText) {
-            patch.comment = { who: trimmedWho, text: trimmedText };
-          }
-          await updateTicket(ticket.id, patch);
-        });
-        commentActions.appendChild(signoffButton);
-
         const kickbackButton = document.createElement('button');
         kickbackButton.textContent = 'Kick Back -> In Progress';
         kickbackButton.addEventListener('click', async () => {
@@ -1019,6 +1057,19 @@ HTML = """<!doctype html>
       };
       if (nextState) {
         patch.state = nextState;
+      }
+      await updateTicket(ticketId, patch);
+    }
+
+    async function submitEricSignoff(ticketId, who, text) {
+      const patch = { eric_signoff: true, state: 'done' };
+      const trimmedWho = who.trim();
+      const trimmedText = text.trim();
+      if (trimmedWho && trimmedText) {
+        patch.comment = {
+          who: trimmedWho,
+          text: trimmedText,
+        };
       }
       await updateTicket(ticketId, patch);
     }

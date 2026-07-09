@@ -345,7 +345,7 @@ cmd_ticket_create() {
     local title=""
     local body=""
     local assignee="unassigned"
-    local state="open"
+    local state="analysis"
     local screenshot=""
     local blocked_by=""
     local blocked_reason=""
@@ -423,7 +423,7 @@ options:
   --title <title>          Required ticket title
   --body <body>            Required ticket body
   --assignee <role>        Ticket assignee (default: unassigned)
-  --state <state>          Initial state (default: open)
+  --state <state>          Initial state (default: analysis)
   --screenshot <path>      Optional attached screenshot path
   --blocked-by <ids>       Comma/space-separated blocker ticket IDs
   --blocked-reason <text>  Reason the ticket is blocked

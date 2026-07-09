@@ -48,6 +48,14 @@ def main() -> int:
         "audit notification should map to audit pair",
     )
     assert_equal(
+        journal.notification_pairs_for_message(
+            "pgu-director:0.0",
+            "PGU-81 -- Tailscale Eric signed off; ready for director completion",
+        ),
+        ["PGU-81|eric_review"],
+        "signed-off Eric review notification should map to eric_review pair",
+    )
+    assert_equal(
         journal.notification_pairs_for_message("pgu-director:0.0", "For Eric: 2 tickets ready for your review: PGU-81,82"),
         [],
         "Eric review digest should not claim ticket/state pairs",

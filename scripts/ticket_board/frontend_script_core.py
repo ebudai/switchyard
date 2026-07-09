@@ -5,9 +5,9 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       { key: 'analysis', label: 'Analysis' },
       { key: 'ready', label: 'Ready' },
       { key: 'in_progress', label: 'In Progress' },
-      { key: 'director_review', label: 'Director Review' },
       { key: 'audit', label: 'Audit' },
       { key: 'eric_review', label: 'Eric Review' },
+      { key: 'director_review', label: 'Director Review' },
       { key: 'done', label: 'Done' },
     ];
 
@@ -72,13 +72,16 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         return 'in_progress';
       }
       if (ticket.state === 'in_progress') {
-        return 'director_review';
-      }
-      if (ticket.state === 'director_review') {
         return 'audit';
       }
       if (ticket.state === 'audit') {
-        return ticket.needs_eric_signoff ? 'eric_review' : 'done';
+        return ticket.needs_eric_signoff ? 'eric_review' : 'director_review';
+      }
+      if (ticket.state === 'eric_review') {
+        return 'director_review';
+      }
+      if (ticket.state === 'director_review') {
+        return 'done';
       }
       return null;
     }
@@ -117,13 +120,13 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
           return `${ticket.assignee} already has an in-progress ticket ${conflict.id}; finish or move it first.`;
         }
       }
-      if (ticket.state === 'director_review' && !(ticket.audit_prompt || '').trim()) {
-        return 'Save audit prompt before advancing to audit.';
-      }
       if (ticket.state === 'audit' && !ticket.audit_signoff) {
         return ticket.needs_eric_signoff
           ? 'Set audit signoff before advancing to Eric review.'
-          : 'Set audit signoff before advancing to done.';
+          : 'Set audit signoff before advancing to Director Review.';
+      }
+      if (ticket.state === 'eric_review' && ticket.needs_eric_signoff && !ticket.eric_signoff) {
+        return 'Record Eric signoff before advancing to Director Review.';
       }
       if (nextState === 'done' && !ticket.commit_exempt && !(ticket.commit_hash || '').trim()) {
         return 'Save a verified commit hash or enable no-commit override before advancing to done.';

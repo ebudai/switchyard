@@ -22,7 +22,7 @@ COMMIT_GIT_DIR_DEFAULT = Path("/data/git/pgu.git")
 ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "agent", "director", "research")
 LEGACY_ASSIGNEE_ALIASES = {"ui": "app"}
 LEGACY_STATE_ALIASES = {"open": "analysis"}
-STATES = ("analysis", "ready", "in_progress", "director_review", "audit", "eric_review", "done")
+STATES = ("analysis", "ready", "in_progress", "audit", "eric_review", "director_review", "done")
 REOPEN_RESET_TARGET_STATES = {"open", "analysis", "ready", "in_progress"}
 REVIEWED_STATES = {"director_review", "audit", "eric_review"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
@@ -497,6 +497,8 @@ class TicketBoardApp:
     def _enforce_workflow_rules(self, ticket: dict[str, Any]) -> None:
         if ticket["state"] == "eric_review" and not ticket["audit_signoff"]:
             raise ValueError("audit_signoff must be true before a ticket can enter eric_review")
+        if ticket["state"] == "director_review" and ticket["needs_eric_signoff"] and not ticket["eric_signoff"]:
+            raise ValueError("eric_signoff must be true before a ticket can enter director_review")
 
     def _enforce_transition_rules(self, previous_state: str, ticket: dict[str, Any]) -> None:
         if previous_state in REVIEWED_STATES and ticket["state"] in REOPEN_RESET_TARGET_STATES:
@@ -508,10 +510,12 @@ class TicketBoardApp:
             self._enforce_ready_requirements(ticket)
         if previous_state != "in_progress" and ticket["state"] == "in_progress":
             self._enforce_in_progress_requirements(ticket, previous_state=previous_state)
-        if previous_state == "director_review" and ticket["state"] == "audit" and not ticket["audit_prompt"].strip():
-            raise ValueError("audit_prompt must be non-empty before a ticket can enter audit")
-        if previous_state == "audit" and ticket["state"] in {"eric_review", "done"} and not ticket["audit_signoff"]:
+        if previous_state == "audit" and ticket["state"] in {"eric_review", "director_review", "done"} and not ticket["audit_signoff"]:
             raise ValueError("audit_signoff must be true before a ticket can leave audit")
+        if previous_state == "eric_review" and ticket["state"] == "director_review" and not ticket["eric_signoff"]:
+            raise ValueError("eric_signoff must be true before a ticket can leave eric_review")
+        if ticket["state"] == "done" and previous_state not in {"done", "director_review"}:
+            raise ValueError("tickets can only enter done from director_review")
 
     def _enforce_done_requirements(self, ticket: dict[str, Any]) -> None:
         if ticket.get("commit_exempt"):

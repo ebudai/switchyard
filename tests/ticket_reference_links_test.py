@@ -23,7 +23,7 @@ def main() -> int:
     assert "function linkedTicketRow(ticketIds)" in HTML
     assert "body.appendChild(linkedTextBlock(ticket.body, '(no body)'));" in HTML
     assert "linkedPreview('Rendered Preview', ticket.implementation, '(no implementation yet)')" in HTML
-    assert "linkedPreview('Rendered Preview', ticket.audit_prompt, '(no audit prompt yet)')" in HTML
+    assert "linkedPreview('Rendered Preview', ticket.audit_prompt, '(no audit notes yet)')" in HTML
     assert "blockedByLinksLabel.textContent = 'Linked Tickets';" in HTML
     assert "appendLinkedTicketText(text, comment.text);" in HTML
     assert "reference.disabled = true;" in HTML

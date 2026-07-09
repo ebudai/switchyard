@@ -15,7 +15,11 @@ from scripts.ticket_board.frontend import HTML
 
 def main() -> int:
     assert "function defaultAdvanceState(ticket)" in HTML
-    assert "return ticket.needs_eric_signoff ? 'eric_review' : 'done';" in HTML
+    assert "return ticket.needs_eric_signoff ? 'eric_review' : 'director_review';" in HTML
+    assert "if (ticket.state === 'eric_review') {" in HTML
+    assert "return 'director_review';" in HTML
+    assert "if (ticket.state === 'director_review') {" in HTML
+    assert "return 'done';" in HTML
     assert "function advanceBlockedReason(ticket)" in HTML
     assert "return 'ready';" in HTML
     assert "Assign the ticket before advancing to ready." in HTML
@@ -23,9 +27,10 @@ def main() -> int:
     assert "Assign the ticket before advancing to in progress." in HTML
     assert "Save implementation before advancing to in progress." in HTML
     assert "already has an in-progress ticket" in HTML
-    assert "Save audit prompt before advancing to audit." in HTML
+    assert "Save audit prompt before advancing to audit." not in HTML
     assert "Set audit signoff before advancing to Eric review." in HTML
-    assert "Set audit signoff before advancing to done." in HTML
+    assert "Set audit signoff before advancing to Director Review." in HTML
+    assert "Record Eric signoff before advancing to Director Review." in HTML
     assert "Save a verified commit hash or enable no-commit override before advancing to done." in HTML
     assert "Advance -> ${stateLabel(detailAdvanceState)}" in HTML
     assert "await advanceTicket(ticket.id);" in HTML

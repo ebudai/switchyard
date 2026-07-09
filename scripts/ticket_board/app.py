@@ -203,6 +203,8 @@ class TicketBoardApp:
             ticket_id = f"PGU-{next_number}"
             path = self.store_dir / f"{ticket_id}.json"
             try:
+                # Reserve the next ticket filename atomically so concurrent creators
+                # cannot claim the same PGU-N and overwrite each other.
                 fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
             except FileExistsError:
                 next_number += 1

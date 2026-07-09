@@ -18,6 +18,7 @@ STORE_DIR_DEFAULT = Path("~/.claude/pgu-tickets").expanduser()
 ASSET_DIR_DEFAULT = Path("~/.claude/pgu-tickets-assets").expanduser()
 FRAME_DIR_DEFAULT = Path("/tmp/pgu-frames")
 REPO_ROOT_DEFAULT = Path(__file__).resolve().parents[2]
+COMMIT_GIT_DIR_DEFAULT = Path("/data/git/pgu.git")
 ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "agent", "director", "research")
 LEGACY_ASSIGNEE_ALIASES = {"ui": "app"}
 STATES = ("open", "in_progress", "director_review", "audit", "eric_review", "done")
@@ -39,11 +40,13 @@ class TicketBoardApp:
         frame_dir: Path = FRAME_DIR_DEFAULT,
         asset_dir: Path = ASSET_DIR_DEFAULT,
         repo_root: Path = REPO_ROOT_DEFAULT,
+        commit_git_dir: Path = COMMIT_GIT_DIR_DEFAULT,
     ) -> None:
         self.store_dir = store_dir.expanduser().resolve()
         self.frame_dir = frame_dir.resolve()
         self.asset_dir = asset_dir.expanduser().resolve()
         self.repo_root = repo_root.resolve()
+        self.commit_git_dir = commit_git_dir.resolve()
         self.store_dir.mkdir(parents=True, exist_ok=True)
         self.asset_dir.mkdir(parents=True, exist_ok=True)
 
@@ -407,14 +410,22 @@ class TicketBoardApp:
         if not value:
             return ""
         proc = subprocess.run(
-            ["git", "-C", str(self.repo_root), "rev-parse", "--verify", "--quiet", f"{value}^{{commit}}"],
+            ["git", f"--git-dir={self.commit_git_dir}", "cat-file", "-e", f"{value}^{{commit}}"],
             capture_output=True,
             text=True,
             check=False,
         )
-        if proc.returncode != 0 or not proc.stdout.strip():
+        if proc.returncode != 0:
             raise ValueError(f"unknown commit_hash: {value}")
-        return proc.stdout.strip()
+        resolved = subprocess.run(
+            ["git", f"--git-dir={self.commit_git_dir}", "rev-parse", "--verify", f"{value}^{{commit}}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if resolved.returncode != 0 or not resolved.stdout.strip():
+            raise ValueError(f"unknown commit_hash: {value}")
+        return resolved.stdout.strip()
 
     def _path_in_allowed_image_dirs(self, path: Path) -> bool:
         return self.frame_dir in path.parents or self.asset_dir in path.parents

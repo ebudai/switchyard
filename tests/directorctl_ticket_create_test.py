@@ -26,7 +26,7 @@ def run_create(index: int, store: Path, frames: Path, queue: Queue[dict[str, str
         "--assignee",
         "app",
         "--state",
-        "in_progress",
+        "ready",
         "--blocked-by",
         "PGU-23, PGU-25",
         "--blocked-reason",
@@ -65,7 +65,7 @@ def main() -> int:
                 "--assignee",
                 "director",
                 "--state",
-                "in_progress",
+                "ready",
                 "--blocked-by",
                 "PGU-23 PGU-25",
                 "--blocked-reason",
@@ -87,7 +87,7 @@ def main() -> int:
         )
         ticket = json.loads(single.stdout)
         assert ticket["assignee"] == "director"
-        assert ticket["state"] == "in_progress"
+        assert ticket["state"] == "ready"
         assert ticket["screenshots"] == []
         assert ticket["screenshot"] is None
         assert ticket["comments"][0]["who"] == "director"
@@ -98,7 +98,7 @@ def main() -> int:
         assert ticket["implementation"] == "ship the helper"
 
         loaded = json.loads((store / f"{ticket['id']}.json").read_text(encoding="utf-8"))
-        assert loaded["state"] == "in_progress"
+        assert loaded["state"] == "ready"
         assert loaded["comments"][0]["ts"] == loaded["created"]
 
         queue: Queue[dict[str, str]] = Queue()

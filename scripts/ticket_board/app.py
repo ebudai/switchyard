@@ -22,8 +22,8 @@ COMMIT_GIT_DIR_DEFAULT = Path("/data/git/pgu.git")
 ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "agent", "director", "research")
 LEGACY_ASSIGNEE_ALIASES = {"ui": "app"}
 LEGACY_STATE_ALIASES = {"open": "analysis"}
-STATES = ("analysis", "in_progress", "director_review", "audit", "eric_review", "done")
-REOPEN_RESET_TARGET_STATES = {"open", "analysis", "in_progress"}
+STATES = ("analysis", "ready", "in_progress", "director_review", "audit", "eric_review", "done")
+REOPEN_RESET_TARGET_STATES = {"open", "analysis", "ready", "in_progress"}
 REVIEWED_STATES = {"director_review", "audit", "eric_review"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
@@ -221,6 +221,7 @@ class TicketBoardApp:
                 self._set_screenshot_fields(ticket, self._build_screenshot_entries(screenshot_paths))
                 self._normalize_signoff_state(ticket)
                 self._enforce_workflow_rules(ticket)
+                self._enforce_initial_state_rules(ticket)
                 if ticket["state"] == "done":
                     self._enforce_done_requirements(ticket)
                 json.dump(self._serialize_ticket(ticket), handle, indent=2, sort_keys=True)
@@ -450,11 +451,12 @@ class TicketBoardApp:
         if previous_state in REVIEWED_STATES and ticket["state"] in REOPEN_RESET_TARGET_STATES:
             ticket["audit_signoff"] = False
             ticket["commit_hash"] = ""
-        if previous_state in {"open", "analysis"} and ticket["state"] == "in_progress":
-            if ticket["assignee"] == "unassigned":
-                raise ValueError("assignee must not be unassigned before a ticket can enter in_progress")
-            if not ticket["implementation"].strip():
-                raise ValueError("implementation must be non-empty before a ticket can enter in_progress")
+        if previous_state == "analysis" and ticket["state"] == "in_progress":
+            raise ValueError("analysis tickets must move through ready before entering in_progress")
+        if previous_state in {"open", "analysis"} and ticket["state"] == "ready":
+            self._enforce_ready_requirements(ticket)
+        if ticket["state"] == "in_progress":
+            self._enforce_in_progress_requirements(ticket, previous_state=previous_state)
         if previous_state == "director_review" and ticket["state"] == "audit" and not ticket["audit_prompt"].strip():
             raise ValueError("audit_prompt must be non-empty before a ticket can enter audit")
         if previous_state == "audit" and ticket["state"] in {"eric_review", "done"} and not ticket["audit_signoff"]:
@@ -502,6 +504,51 @@ class TicketBoardApp:
             check=False,
         )
         return proc.returncode == 0
+
+    def _enforce_initial_state_rules(self, ticket: dict[str, Any]) -> None:
+        if ticket["state"] == "ready":
+            self._enforce_ready_requirements(ticket)
+        elif ticket["state"] == "in_progress":
+            self._enforce_in_progress_requirements(ticket, previous_state=None)
+
+    def _enforce_ready_requirements(self, ticket: dict[str, Any]) -> None:
+        if ticket["assignee"] == "unassigned":
+            raise ValueError("assignee must not be unassigned before a ticket can enter ready")
+        if not ticket["implementation"].strip():
+            raise ValueError("implementation must be non-empty before a ticket can enter ready")
+
+    def _enforce_in_progress_requirements(self, ticket: dict[str, Any], *, previous_state: str | None) -> None:
+        if previous_state == "analysis":
+            raise ValueError("analysis tickets must move through ready before entering in_progress")
+        if ticket["assignee"] == "unassigned":
+            raise ValueError("assignee must not be unassigned before a ticket can enter in_progress")
+        if not ticket["implementation"].strip():
+            raise ValueError("implementation must be non-empty before a ticket can enter in_progress")
+        conflicting_ticket_id = self._find_other_in_progress_ticket(ticket["assignee"], exclude_ticket_id=ticket["id"])
+        if conflicting_ticket_id is not None:
+            raise ValueError(
+                f"{ticket['assignee']} already has an in-progress ticket {conflicting_ticket_id}; finish or move it first"
+            )
+
+    def _find_other_in_progress_ticket(self, assignee: str, *, exclude_ticket_id: str) -> str | None:
+        if assignee == "unassigned":
+            return None
+        for path in sorted(self.store_dir.glob("PGU-*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            ticket_id = str(payload.get("id", path.stem))
+            if ticket_id == exclude_ticket_id:
+                continue
+            try:
+                state = self._validate_state(str(payload.get("state", "analysis")))
+                ticket_assignee = self._validate_assignee(str(payload.get("assignee", "unassigned")))
+            except ValueError:
+                continue
+            if state == "in_progress" and ticket_assignee == assignee:
+                return ticket_id
+        return None
 
     def _path_in_allowed_image_dirs(self, path: Path) -> bool:
         return self.frame_dir in path.parents or self.asset_dir in path.parents

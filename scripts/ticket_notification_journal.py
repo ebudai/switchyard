@@ -44,6 +44,9 @@ def notification_pairs_for_message(target: str, payload: str) -> list[str]:
     if target == AUDIT_TARGET and normalized.endswith("ready for audit"):
         return [ticket_pair_key(ticket_id, "audit") for ticket_id in ticket_ids]
 
+    if normalized.startswith("Ready ticket for you: "):
+        return [ticket_pair_key(ticket_id, "ready") for ticket_id in ticket_ids]
+
     if normalized.startswith("New ticket for you: ") or normalized.endswith("kicked back to you"):
         return [ticket_pair_key(ticket_id, "in_progress") for ticket_id in ticket_ids]
 

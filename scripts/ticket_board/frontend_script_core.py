@@ -3,6 +3,7 @@
 SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     const COLUMNS = [
       { key: 'analysis', label: 'Analysis' },
+      { key: 'ready', label: 'Ready' },
       { key: 'in_progress', label: 'In Progress' },
       { key: 'director_review', label: 'Director Review' },
       { key: 'audit', label: 'Audit' },
@@ -65,6 +66,9 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
 
     function defaultAdvanceState(ticket) {
       if (ticket.state === 'analysis') {
+        return 'ready';
+      }
+      if (ticket.state === 'ready') {
         return 'in_progress';
       }
       if (ticket.state === 'in_progress') {
@@ -79,6 +83,15 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       return null;
     }
 
+    function inProgressConflictTicket(ticket) {
+      if (ticket.assignee === 'unassigned') {
+        return null;
+      }
+      return state.tickets.find((item) =>
+        item.id !== ticket.id && item.state === 'in_progress' && item.assignee === ticket.assignee,
+      ) || null;
+    }
+
     function advanceBlockedReason(ticket) {
       const nextState = defaultAdvanceState(ticket);
       if (!nextState) {
@@ -86,10 +99,22 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       }
       if (ticket.state === 'analysis') {
         if (ticket.assignee === 'unassigned') {
+          return 'Assign the ticket before advancing to ready.';
+        }
+        if (!(ticket.implementation || '').trim()) {
+          return 'Save implementation before advancing to ready.';
+        }
+      }
+      if (ticket.state === 'ready') {
+        if (ticket.assignee === 'unassigned') {
           return 'Assign the ticket before advancing to in progress.';
         }
         if (!(ticket.implementation || '').trim()) {
           return 'Save implementation before advancing to in progress.';
+        }
+        const conflict = inProgressConflictTicket(ticket);
+        if (conflict) {
+          return `${ticket.assignee} already has an in-progress ticket ${conflict.id}; finish or move it first.`;
         }
       }
       if (ticket.state === 'director_review' && !(ticket.audit_prompt || '').trim()) {

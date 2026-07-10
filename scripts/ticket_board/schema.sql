@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS ticket_board.tickets (
     body text NOT NULL DEFAULT '',
     state text NOT NULL
         CHECK (state IN (
+            'backlog',
             'analysis',
             'ready',
             'in_progress',

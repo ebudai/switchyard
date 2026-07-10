@@ -2,6 +2,7 @@
 
 SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     const COLUMNS = [
+      { key: 'backlog', label: 'Backlog' },
       { key: 'analysis', label: 'Analysis' },
       { key: 'ready', label: 'Ready' },
       { key: 'in_progress', label: 'In Progress' },
@@ -100,6 +101,9 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     }
 
     function defaultAdvanceState(ticket) {
+      if (ticket.state === 'backlog') {
+        return 'ready';
+      }
       if (ticket.state === 'analysis') {
         return 'ready';
       }
@@ -139,7 +143,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       if (!nextState) {
         return 'No default advance from this state.';
       }
-      if (ticket.state === 'analysis') {
+      if (ticket.state === 'backlog' || ticket.state === 'analysis') {
         if (ticket.assignee === 'unassigned') {
           return 'Assign the ticket before advancing to ready.';
         }

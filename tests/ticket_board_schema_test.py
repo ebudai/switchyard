@@ -37,6 +37,7 @@ EXPECTED_JSON_FIELDS = {
 
 EXPECTED_COMMENT_FIELDS = {"who", "ts", "text"}
 EXPECTED_STATES = {
+    "backlog",
     "analysis",
     "ready",
     "in_progress",

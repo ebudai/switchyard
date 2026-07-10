@@ -2,40 +2,55 @@
 
 MARKUP = """  <div class="layout">
     <aside>
-      <div class="panel-head">
-        <h2>New Ticket</h2>
-        <div class="subtle">Local JSON board on localhost. Director can edit the same ticket files from the shell.</div>
-      </div>
-      <div class="panel-body">
-        <label>
-          Title
-          <input id="titleInput" type="text" maxlength="200" placeholder="Short issue title">
-        </label>
-        <label>
-          Body
-          <textarea id="bodyInput" placeholder="Details, repro steps, notes"></textarea>
-        </label>
-        <label>
-          Assignee
-          <select id="assigneeInput"></select>
-        </label>
-        <label>
-          Available Frame
-          <select id="screenshotInput"></select>
-        </label>
-        <div class="inline-actions">
-          <button id="addCreateAttachmentBtn" class="small" type="button">Add Attachment</button>
+      <button
+        id="createSectionToggle"
+        class="mobile-section-toggle-panel"
+        type="button"
+        aria-expanded="false"
+        aria-controls="createSectionContent"
+      >
+        <span class="mobile-section-title-wrap">
+          <span class="mobile-section-title">New Ticket</span>
+          <span id="createSectionCount" class="mobile-section-count" hidden></span>
+        </span>
+        <span class="mobile-section-chevron" aria-hidden="true">▾</span>
+      </button>
+      <div id="createSectionContent" class="mobile-section-content">
+        <div class="panel-head">
+          <h2>New Ticket</h2>
+          <div class="subtle">Local JSON board on localhost. Director can edit the same ticket files from the shell.</div>
         </div>
-        <div class="paste-hint">Paste an image from the clipboard here to upload and attach it.</div>
-        <div id="createPreview" class="preview-card" hidden>
-          <div id="createPreviewGallery" class="attachment-gallery"></div>
+        <div class="panel-body">
+          <label>
+            Title
+            <input id="titleInput" type="text" maxlength="200" placeholder="Short issue title">
+          </label>
+          <label>
+            Body
+            <textarea id="bodyInput" placeholder="Details, repro steps, notes"></textarea>
+          </label>
+          <label>
+            Assignee
+            <select id="assigneeInput"></select>
+          </label>
+          <label>
+            Available Frame
+            <select id="screenshotInput"></select>
+          </label>
+          <div class="inline-actions">
+            <button id="addCreateAttachmentBtn" class="small" type="button">Add Attachment</button>
+          </div>
+          <div class="paste-hint">Paste an image from the clipboard here to upload and attach it.</div>
+          <div id="createPreview" class="preview-card" hidden>
+            <div id="createPreviewGallery" class="attachment-gallery"></div>
+          </div>
+          <label class="check">
+            <input id="needsEricInput" type="checkbox">
+            Needs Eric signoff
+          </label>
+          <button id="createBtn" class="primary">Create Ticket</button>
+          <div id="createStatus" class="status">Ready.</div>
         </div>
-        <label class="check">
-          <input id="needsEricInput" type="checkbox">
-          Needs Eric signoff
-        </label>
-        <button id="createBtn" class="primary">Create Ticket</button>
-        <div id="createStatus" class="status">Ready.</div>
       </div>
     </aside>
 

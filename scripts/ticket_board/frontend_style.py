@@ -219,6 +219,13 @@ STYLE = """    :root {
       width: auto;
       min-width: 0;
     }
+    .mobile-section-toggle-panel {
+      display: none;
+    }
+    .mobile-section-content[hidden],
+    .column-body[hidden] {
+      display: none;
+    }
     .comment-composer {
       display: grid;
       gap: 10px;
@@ -250,6 +257,28 @@ STYLE = """    :root {
       justify-content: space-between;
       gap: 8px;
       align-items: center;
+      width: 100%;
+      text-align: left;
+      appearance: none;
+    }
+    .mobile-section-title-wrap {
+      min-width: 0;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: baseline;
+    }
+    .mobile-section-title {
+      min-width: 0;
+    }
+    .mobile-section-count {
+      display: none;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.3;
+    }
+    .mobile-section-chevron {
+      display: none;
     }
     .column-title { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0; }
     .count {
@@ -732,6 +761,51 @@ STYLE = """    :root {
       .board {
         min-width: 0;
         grid-template-columns: 1fr;
+      }
+      .mobile-section-toggle-panel {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        align-items: center;
+        border-radius: 0;
+        border-left: 0;
+        border-right: 0;
+        border-top: 0;
+        background: rgba(255,255,255,0.02);
+        text-align: left;
+      }
+      .mobile-section-count {
+        display: inline;
+      }
+      .mobile-section-chevron {
+        display: inline-block;
+        flex: 0 0 auto;
+        color: var(--muted);
+        transition: transform 120ms ease;
+      }
+      .mobile-section-toggle-panel[aria-expanded="false"] .mobile-section-chevron,
+      .column-head[aria-expanded="false"] .mobile-section-chevron {
+        transform: rotate(-90deg);
+      }
+      .column {
+        min-height: 0;
+        grid-template-rows: auto auto;
+      }
+      .column-head {
+        border: 0;
+        border-bottom: 1px solid var(--border);
+        border-radius: 0;
+        background: transparent;
+        cursor: pointer;
+      }
+      .count {
+        display: none;
+      }
+      .panel-head {
+        position: static;
+      }
+      .panel-head h2 {
+        display: none;
       }
       .paths {
         text-align: left;

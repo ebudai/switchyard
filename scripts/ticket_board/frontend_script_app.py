@@ -69,6 +69,7 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       framePathEl.textContent = payload.frame_dir;
       refreshLineEl.textContent = formatWhen(payload.refreshed_at);
       populateCreateForm();
+      renderCreateSection();
       renderErrors();
       renderDoneToggle();
       renderBoard();
@@ -231,6 +232,10 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       renderCreatePreview();
     });
 
+    createSectionToggleEl.addEventListener('click', () => {
+      toggleSection('new_ticket');
+    });
+
     showDoneInput.addEventListener('change', () => {
       state.showDone = showDoneInput.checked;
       renderDoneToggle();
@@ -252,6 +257,16 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
         closeDetail();
       }
     });
+
+    const handleMobileSectionMediaChange = () => {
+      renderCreateSection();
+      renderBoard();
+    };
+    if (typeof mobileSectionMedia.addEventListener === 'function') {
+      mobileSectionMedia.addEventListener('change', handleMobileSectionMediaChange);
+    } else if (typeof mobileSectionMedia.addListener === 'function') {
+      mobileSectionMedia.addListener(handleMobileSectionMediaChange);
+    }
 
     document.addEventListener('paste', async (event) => {
       const items = Array.from(event.clipboardData?.items || []);

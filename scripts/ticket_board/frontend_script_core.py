@@ -25,8 +25,10 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       loadInFlight: null,
       loadQueued: false,
       pendingCreateScreenshots: [],
+      mobileSectionOpen: {},
     };
 
+    const mobileSectionMedia = window.matchMedia('(max-width: 900px)');
     const boardEl = document.getElementById('board');
     const assigneeInput = document.getElementById('assigneeInput');
     const screenshotInput = document.getElementById('screenshotInput');
@@ -40,6 +42,9 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     const showDoneCountEl = document.getElementById('showDoneCount');
     const createBtn = document.getElementById('createBtn');
     const createStatus = document.getElementById('createStatus');
+    const createSectionToggleEl = document.getElementById('createSectionToggle');
+    const createSectionCountEl = document.getElementById('createSectionCount');
+    const createSectionContentEl = document.getElementById('createSectionContent');
     const storePathEl = document.getElementById('storePath');
     const framePathEl = document.getElementById('framePath');
     const refreshLineEl = document.getElementById('refreshLine');
@@ -62,6 +67,32 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
 
     function stateLabel(key) {
       return COLUMNS.find((column) => column.key === key)?.label || key;
+    }
+
+    function mobileSectionsEnabled() {
+      return mobileSectionMedia.matches;
+    }
+
+    function sectionIsOpen(key) {
+      if (!mobileSectionsEnabled()) {
+        return true;
+      }
+      if (!(key in state.mobileSectionOpen)) {
+        state.mobileSectionOpen[key] = false;
+      }
+      return state.mobileSectionOpen[key];
+    }
+
+    function toggleSection(key) {
+      if (!mobileSectionsEnabled()) {
+        return;
+      }
+      state.mobileSectionOpen[key] = !sectionIsOpen(key);
+      if (key === 'new_ticket') {
+        renderCreateSection();
+        return;
+      }
+      renderBoard();
     }
 
     function defaultAdvanceState(ticket) {
@@ -826,6 +857,19 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       showDoneCountEl.textContent = `(${doneCount})`;
     }
 
+    function renderCreateSection() {
+      if (!createSectionToggleEl || !createSectionContentEl) {
+        return;
+      }
+      const isOpen = sectionIsOpen('new_ticket');
+      createSectionToggleEl.setAttribute('aria-expanded', String(isOpen));
+      createSectionContentEl.hidden = !isOpen;
+      if (createSectionCountEl) {
+        createSectionCountEl.hidden = true;
+        createSectionCountEl.textContent = '';
+      }
+    }
+
     function renderBoard() {
       boardEl.innerHTML = '';
       visibleColumns().forEach((column) => {
@@ -833,14 +877,42 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         columnEl.className = 'column';
         const tickets = columnTickets(column.key);
         const ticketCount = columnTicketCount(column.key);
-        columnEl.innerHTML = `
-          <div class="column-head">
-            <div class="column-title">${column.label}</div>
-            <div class="count">${ticketCount}</div>
-          </div>
-        `;
+        const sectionKey = `column:${column.key}`;
+        const isOpen = sectionIsOpen(sectionKey);
+        const head = document.createElement(mobileSectionsEnabled() ? 'button' : 'div');
+        head.className = 'column-head';
+        if (mobileSectionsEnabled()) {
+          head.type = 'button';
+          head.setAttribute('aria-expanded', String(isOpen));
+          head.addEventListener('click', () => {
+            toggleSection(sectionKey);
+          });
+        }
+        const titleWrap = document.createElement('div');
+        titleWrap.className = 'mobile-section-title-wrap';
+        const title = document.createElement('div');
+        title.className = 'column-title mobile-section-title';
+        title.textContent = column.label;
+        titleWrap.appendChild(title);
+        if (ticketCount) {
+          const inlineCount = document.createElement('span');
+          inlineCount.className = 'mobile-section-count';
+          inlineCount.textContent = `(${ticketCount})`;
+          titleWrap.appendChild(inlineCount);
+        }
+        const count = document.createElement('div');
+        count.className = 'count';
+        count.textContent = ticketCount;
+        count.hidden = ticketCount === 0;
+        const chevron = document.createElement('span');
+        chevron.className = 'mobile-section-chevron';
+        chevron.setAttribute('aria-hidden', 'true');
+        chevron.textContent = '▾';
+        head.append(titleWrap, count, chevron);
+        columnEl.appendChild(head);
         const body = document.createElement('div');
         body.className = 'column-body';
+        body.hidden = !isOpen;
         if (!tickets.length) {
           const empty = document.createElement('div');
           empty.className = 'empty';

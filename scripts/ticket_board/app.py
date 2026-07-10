@@ -510,20 +510,6 @@ class TicketBoardApp:
         conn.autocommit = False
         return conn
 
-    def _pg_jsonb(self, payload: dict[str, Any]) -> Any:
-        _, _, Jsonb = self._pg_imports()
-        return Jsonb(payload)
-
-    def _pg_parse_ts(self, raw: str) -> datetime | None:
-        value = raw.strip()
-        if not value:
-            return None
-        normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
-        try:
-            return datetime.fromisoformat(normalized)
-        except ValueError:
-            return None
-
     def _pg_store_signature(self) -> tuple[tuple[object, ...], ...]:
         with self._pg_connect() as conn:
             rows = conn.execute(
@@ -551,9 +537,8 @@ ORDER BY t.ticket_number;
             for row in rows
         )
 
-    def _pg_select_ticket_rows(self, conn: Any, ticket_id: str | None = None, *, for_update: bool = False) -> list[dict[str, Any]]:
+    def _pg_select_ticket_rows(self, conn: Any, ticket_id: str | None = None) -> list[dict[str, Any]]:
         where = "WHERE t.id = %s" if ticket_id is not None else ""
-        lock = "FOR UPDATE OF t" if for_update else ""
         params = (ticket_id,) if ticket_id is not None else ()
         return conn.execute(
             f"""
@@ -595,7 +580,7 @@ SELECT
 FROM ticket_board.tickets t
 {where}
 ORDER BY t.ticket_number
-{lock};
+;
 """,
             params,
         ).fetchall()
@@ -610,11 +595,11 @@ ORDER BY t.ticket_number
         )
         return tickets
 
-    def _pg_get_ticket(self, ticket_id: str, conn: Any | None = None, *, for_update: bool = False) -> dict[str, Any]:
+    def _pg_get_ticket(self, ticket_id: str, conn: Any | None = None) -> dict[str, Any]:
         if conn is None:
             with self._pg_connect() as own_conn:
-                return self._pg_get_ticket(ticket_id, own_conn, for_update=for_update)
-        rows = self._pg_select_ticket_rows(conn, ticket_id=ticket_id, for_update=for_update)
+                return self._pg_get_ticket(ticket_id, own_conn)
+        rows = self._pg_select_ticket_rows(conn, ticket_id=ticket_id)
         if not rows:
             raise FileNotFoundError(f"ticket not found: {ticket_id}")
         return self._pg_row_to_ticket(rows[0])
@@ -647,11 +632,6 @@ ORDER BY t.ticket_number
         self._set_screenshot_fields(ticket, self._build_screenshot_entries(list(screenshots)))
         return ticket
 
-    def _pg_next_ticket_id(self, conn: Any) -> str:
-        conn.execute("LOCK TABLE ticket_board.tickets IN EXCLUSIVE MODE;")
-        row = conn.execute("SELECT COALESCE(max(ticket_number), 0) + 1 AS next_number FROM ticket_board.tickets;").fetchone()
-        return f"PGU-{int(row['next_number'])}"
-
     def _pg_create_ticket_record(
         self,
         *,
@@ -678,246 +658,140 @@ ORDER BY t.ticket_number
         title = self._require_text(title, "title").strip()
         assignee = self._validate_assignee(assignee)
         state = self._validate_state(state)
+        if screenshot not in (None, "", "null") or screenshots not in (None, [], ""):
+            raise ValueError("postgres function API does not support attachment writes yet")
+        if any(value is not None for value in (created, updated)):
+            raise ValueError("postgres function API does not support caller-supplied timestamps")
+        implementation = self._require_plain_string(implementation, "implementation")
+        audit_prompt = self._require_plain_string(audit_prompt, "audit_prompt")
+        if implementation.strip():
+            raise ValueError("postgres function API does not support implementation writes yet")
+        if audit_prompt.strip():
+            raise ValueError("postgres function API does not support audit_prompt writes yet")
+        if audit_signoff or needs_eric_signoff or eric_signoff:
+            raise ValueError("postgres function API does not support initial signoff fields yet")
+        if commit_hash or commit_exempt:
+            raise ValueError("postgres function API does not support initial commit fields yet")
+        normalized_comments = self._validate_comments(comments)
+        blocked_by = self._validate_blocked_by(blocked_by or [], "PGU-0")
+        blocked_reason = self._require_plain_string(blocked_reason, "blocked_reason")
+        self._enforce_blocked_reason_rule(blocked_by, blocked_reason)
+
         with self._pg_connect() as conn:
             with conn.transaction():
-                ticket_id = self._pg_next_ticket_id(conn)
-                blocked_by = self._validate_blocked_by(blocked_by or [], ticket_id)
-                parent_id = self._pg_validate_parent_id(conn, parent_id, ticket_id)
-                implementation = self._require_plain_string(implementation, "implementation")
-                audit_prompt = self._require_plain_string(audit_prompt, "audit_prompt")
-                blocked_reason = self._require_plain_string(blocked_reason, "blocked_reason")
-                normalized_comments = self._validate_comments(comments)
-                self._enforce_blocked_reason_rule(blocked_by, blocked_reason)
-                screenshot_paths = self._materialize_attachments(
-                    screenshots if screenshots is not None else screenshot,
-                    ticket_id,
-                )
-                created_ts = self._require_text(created, "created") if created is not None else iso_now()
-                updated_ts = self._require_text(updated, "updated") if updated is not None else created_ts
-                ticket = {
-                    "id": ticket_id,
-                    "title": title,
-                    "body": body.strip(),
-                    "assignee": assignee,
-                    "state": state,
-                    "blocked_by": blocked_by,
-                    "parent_id": parent_id,
-                    "blocked_reason": blocked_reason,
-                    "implementation": implementation,
-                    "audit_prompt": audit_prompt,
-                    "audit_signoff": bool(audit_signoff),
-                    "needs_eric_signoff": bool(needs_eric_signoff),
-                    "eric_signoff": bool(eric_signoff),
-                    "commit_hash": str(commit_hash or "").strip(),
-                    "commit_exempt": bool(commit_exempt),
-                    "created": created_ts,
-                    "updated": updated_ts,
-                    "comments": normalized_comments,
-                }
-                self._set_screenshot_fields(ticket, self._build_screenshot_entries(screenshot_paths))
-                self._normalize_signoff_state(ticket)
-                self._enforce_workflow_rules(ticket)
-                self._pg_enforce_initial_state_rules(conn, ticket)
-                if ticket["state"] == "done":
-                    self._enforce_done_requirements(ticket)
-                if ticket["state"] == "cancelled":
-                    self._enforce_cancel_requirements(
-                        previous_state=None,
-                        ticket=ticket,
-                        has_reason_comment=bool(normalized_comments),
+                parent_id = "" if parent_id in (None, "", "null") else str(parent_id).strip().upper()
+                if parent_id:
+                    ticket_id = self._pg_call_scalar(
+                        conn,
+                        "SELECT ticket_board.file_bug(%s, %s, %s) AS id;",
+                        (title, body.strip(), parent_id),
                     )
-                self._pg_insert_ticket(conn, ticket)
+                else:
+                    ticket_id = self._pg_call_scalar(
+                        conn,
+                        "SELECT ticket_board.create_ticket(%s, %s) AS id;",
+                        (title, body.strip()),
+                    )
+                if assignee != "unassigned" or state != "analysis":
+                    self._pg_call(conn, "SELECT ticket_board.route(%s, %s, %s);", (ticket_id, state, assignee))
+                if blocked_by:
+                    self._pg_call(conn, "SELECT ticket_board.set_blockers(%s, %s, %s);", (ticket_id, blocked_by, blocked_reason))
+                for comment in normalized_comments:
+                    self._pg_call(conn, "SELECT ticket_board.add_comment(%s, %s);", (ticket_id, comment["text"]))
                 return self._pg_get_ticket(ticket_id, conn)
-
-    def _pg_insert_ticket(self, conn: Any, ticket: dict[str, Any]) -> None:
-        conn.execute(
-            """
-INSERT INTO ticket_board.tickets (
-    id, title, body, state, assignee, parent_id, blocked_reason, implementation,
-    audit_prompt, audit_signoff, needs_eric_signoff, eric_signoff, commit_hash,
-    commit_exempt, screenshot, created_text, updated_text, created_at, updated_at,
-    source_json, source_file_name
-) VALUES (
-    %(id)s, %(title)s, %(body)s, %(state)s, %(assignee)s, %(parent_id)s, %(blocked_reason)s,
-    %(implementation)s, %(audit_prompt)s, %(audit_signoff)s, %(needs_eric_signoff)s,
-    %(eric_signoff)s, %(commit_hash)s, %(commit_exempt)s, %(screenshot)s, %(created)s,
-    %(updated)s, %(created_at)s, %(updated_at)s, %(source_json)s, %(source_file_name)s
-);
-""",
-            {
-                **ticket,
-                "screenshot": ticket.get("screenshot"),
-                "created_at": self._pg_parse_ts(ticket["created"]),
-                "updated_at": self._pg_parse_ts(ticket["updated"]),
-                "source_json": self._pg_jsonb(self._serialize_ticket(ticket)),
-                "source_file_name": f"{ticket['id']}.json",
-            },
-        )
-        self._pg_replace_blockers(conn, ticket["id"], ticket["blocked_by"])
-        self._pg_replace_attachments(conn, ticket["id"], ticket["screenshots"])
-        self._pg_replace_comments(conn, ticket["id"], ticket["comments"])
 
     def _pg_update_ticket(self, ticket_id: str, patch: dict[str, Any]) -> dict[str, Any]:
         ticket_id = str(ticket_id).strip().upper()
         with self._pg_connect() as conn:
             with conn.transaction():
-                current = self._pg_get_ticket(ticket_id, conn, for_update=True)
-                if "state" in patch:
-                    current["state"] = self._validate_state(str(patch["state"]))
-                if "title" in patch:
-                    current["title"] = self._require_text(patch["title"], "title").strip()
-                if "assignee" in patch:
-                    current["assignee"] = self._validate_assignee(str(patch["assignee"]))
-                if "blocked_by" in patch:
-                    current["blocked_by"] = self._validate_blocked_by(patch["blocked_by"], ticket_id)
-                if "parent_id" in patch:
-                    current["parent_id"] = self._pg_validate_parent_id(conn, patch["parent_id"], ticket_id)
-                if "blocked_reason" in patch:
-                    current["blocked_reason"] = self._require_plain_string(patch["blocked_reason"], "blocked_reason")
-                if "screenshots" in patch or "screenshot" in patch:
-                    screenshot_paths = self._materialize_attachments(
-                        patch["screenshots"] if "screenshots" in patch else patch["screenshot"],
-                        ticket_id,
-                        current_paths=current.get("screenshots", []),
+                current = self._pg_get_ticket(ticket_id, conn)
+                self._pg_reject_unsupported_patch_fields(patch)
+                if "blocked_by" in patch or "blocked_reason" in patch:
+                    blocked_by = self._validate_blocked_by(patch.get("blocked_by", current["blocked_by"]), ticket_id)
+                    blocked_reason = self._require_plain_string(
+                        patch.get("blocked_reason", current["blocked_reason"]),
+                        "blocked_reason",
                     )
-                    self._set_screenshot_fields(current, self._build_screenshot_entries(screenshot_paths))
-                if "implementation" in patch:
-                    current["implementation"] = self._require_plain_string(patch["implementation"], "implementation")
-                if "audit_prompt" in patch:
-                    current["audit_prompt"] = self._require_plain_string(patch["audit_prompt"], "audit_prompt")
-                if "needs_eric_signoff" in patch:
-                    current["needs_eric_signoff"] = bool(patch["needs_eric_signoff"])
-                if "audit_signoff" in patch:
-                    current["audit_signoff"] = bool(patch["audit_signoff"])
-                if "eric_signoff" in patch:
-                    current["eric_signoff"] = bool(patch["eric_signoff"])
-                if "commit_hash" in patch:
-                    current["commit_hash"] = str(patch["commit_hash"] or "").strip()
-                if "commit_exempt" in patch:
-                    current["commit_exempt"] = bool(patch["commit_exempt"])
+                    self._enforce_blocked_reason_rule(blocked_by, blocked_reason)
+                    self._pg_call(conn, "SELECT ticket_board.set_blockers(%s, %s, %s);", (ticket_id, blocked_by, blocked_reason))
+
+                comment_text = ""
                 if "comment" in patch:
                     comment = patch["comment"]
                     who = str(comment.get("who", "")).strip()
-                    text = str(comment.get("text", "")).strip()
-                    if not who or not text:
+                    comment_text = str(comment.get("text", "")).strip()
+                    if not who or not comment_text:
                         raise ValueError("comment requires non-empty who and text")
-                    new_comment = {"who": who, "text": text, "ts": iso_now()}
-                    self._pg_append_comment(conn, ticket_id, new_comment)
-                    current["comments"].append(new_comment)
-                if "blocked_by" in patch or "blocked_reason" in patch:
-                    self._enforce_blocked_reason_rule(current["blocked_by"], current["blocked_reason"])
-                if "blocked_by" in patch:
-                    self._pg_replace_blockers(conn, ticket_id, current["blocked_by"])
-                if "screenshots" in patch or "screenshot" in patch:
-                    self._pg_replace_attachments(conn, ticket_id, current["screenshots"])
 
-                current["updated"] = iso_now()
-                conn.execute(
-                    """
-UPDATE ticket_board.tickets
-SET
-    title = %(title)s,
-    body = %(body)s,
-    state = %(state)s,
-    assignee = %(assignee)s,
-    parent_id = %(parent_id)s,
-    blocked_reason = %(blocked_reason)s,
-    implementation = %(implementation)s,
-    audit_prompt = %(audit_prompt)s,
-    audit_signoff = %(audit_signoff)s,
-    needs_eric_signoff = %(needs_eric_signoff)s,
-    eric_signoff = %(eric_signoff)s,
-    commit_hash = %(commit_hash)s,
-    commit_exempt = %(commit_exempt)s,
-    screenshot = %(screenshot)s,
-    updated_text = %(updated)s,
-    updated_at = %(updated_at)s,
-    row_updated_at = now(),
-    source_json = %(source_json)s
-WHERE id = %(id)s;
-""",
-                    {
-                        **current,
-                        "screenshot": current.get("screenshot"),
-                        "updated_at": self._pg_parse_ts(current["updated"]),
-                        "source_json": self._pg_jsonb(self._serialize_ticket(current)),
-                    },
-                )
-                final = self._pg_get_ticket(ticket_id, conn)
-                self._pg_refresh_source_json(conn, final)
-                return final
+                state = self._validate_state(str(patch["state"])) if "state" in patch else current["state"]
+                assignee = self._validate_assignee(str(patch["assignee"])) if "assignee" in patch else current["assignee"]
+                commit_hash = str(patch.get("commit_hash", current.get("commit_hash", "")) or "").strip()
+                if "commit_hash" in patch and state not in {"audit", "done"}:
+                    raise ValueError("postgres function API only accepts commit_hash when submitting to audit or marking done")
 
-    def _pg_replace_blockers(self, conn: Any, ticket_id: str, blockers: list[str]) -> None:
-        conn.execute("DELETE FROM ticket_board.ticket_blockers WHERE ticket_id = %s;", (ticket_id,))
-        for position, blocker_ticket_id in enumerate(blockers):
-            conn.execute(
-                """
-INSERT INTO ticket_board.ticket_blockers (ticket_id, blocker_ticket_id, position)
-VALUES (%s, %s, %s);
-""",
-                (ticket_id, blocker_ticket_id, position),
-            )
+                if "audit_signoff" in patch:
+                    if not bool(patch["audit_signoff"]):
+                        raise ValueError("postgres function API only supports setting audit_signoff true")
+                    self._pg_call(conn, "SELECT ticket_board.audit_sign_off(%s);", (ticket_id,))
+                if "eric_signoff" in patch:
+                    if not bool(patch["eric_signoff"]):
+                        raise ValueError("postgres function API only supports setting eric_signoff true")
+                    self._pg_call(conn, "SELECT ticket_board.eric_sign_off(%s);", (ticket_id,))
 
-    def _pg_replace_attachments(self, conn: Any, ticket_id: str, paths: list[str]) -> None:
-        conn.execute("DELETE FROM ticket_board.ticket_attachments WHERE ticket_id = %s;", (ticket_id,))
-        for position, path in enumerate(paths):
-            conn.execute(
-                """
-INSERT INTO ticket_board.ticket_attachments (ticket_id, position, path, is_primary, source_field)
-VALUES (%s, %s, %s, %s, %s);
-""",
-                (ticket_id, position, path, position == 0, "screenshots"),
-            )
+                if "state" in patch:
+                    if state == "in_progress":
+                        self._pg_call(conn, "SELECT ticket_board.start_work(%s);", (ticket_id,))
+                    elif state == "audit":
+                        self._pg_call(conn, "SELECT ticket_board.submit_to_audit(%s, %s);", (ticket_id, commit_hash))
+                    elif state == "done":
+                        self._pg_call(conn, "SELECT ticket_board.mark_done(%s, %s);", (ticket_id, commit_hash))
+                    elif state == "backlog":
+                        self._pg_call(conn, "SELECT ticket_board.defer(%s);", (ticket_id,))
+                    elif state == "cancelled":
+                        if not comment_text:
+                            raise ValueError("cancelling a ticket requires a non-empty comment explaining why")
+                        self._pg_call(conn, "SELECT ticket_board.cancel(%s, %s);", (ticket_id, comment_text))
+                        comment_text = ""
+                    elif state == "analysis" and comment_text and current["state"] == "audit":
+                        self._pg_call(conn, "SELECT ticket_board.audit_kick_back(%s, %s);", (ticket_id, comment_text))
+                        comment_text = ""
+                    elif state == "analysis" and comment_text and current["state"] in {"eric_review", "director_review", "done"}:
+                        self._pg_call(conn, "SELECT ticket_board.eric_reopen(%s, %s);", (ticket_id, comment_text))
+                        comment_text = ""
+                    else:
+                        self._pg_call(conn, "SELECT ticket_board.route(%s, %s, %s);", (ticket_id, state, assignee))
+                elif "assignee" in patch:
+                    self._pg_call(conn, "SELECT ticket_board.route(%s, %s, %s);", (ticket_id, current["state"], assignee))
 
-    def _pg_replace_comments(self, conn: Any, ticket_id: str, comments: list[dict[str, str]]) -> None:
-        conn.execute("DELETE FROM ticket_board.ticket_comments WHERE ticket_id = %s;", (ticket_id,))
-        for position, comment in enumerate(comments):
-            conn.execute(
-                """
-INSERT INTO ticket_board.ticket_comments (ticket_id, position, who, ts_text, ts, text, source_json)
-VALUES (%s, %s, %s, %s, %s, %s, %s);
-""",
-                (
-                    ticket_id,
-                    position,
-                    comment["who"],
-                    comment["ts"],
-                    self._pg_parse_ts(comment["ts"]),
-                    comment["text"],
-                    self._pg_jsonb(comment),
-                ),
-            )
+                if comment_text:
+                    self._pg_call(conn, "SELECT ticket_board.add_comment(%s, %s);", (ticket_id, comment_text))
+                return self._pg_get_ticket(ticket_id, conn)
 
-    def _pg_append_comment(self, conn: Any, ticket_id: str, comment: dict[str, str]) -> None:
-        row = conn.execute(
-            "SELECT COALESCE(max(position), -1) + 1 AS next_position FROM ticket_board.ticket_comments WHERE ticket_id = %s;",
-            (ticket_id,),
-        ).fetchone()
-        conn.execute(
-            """
-INSERT INTO ticket_board.ticket_comments (ticket_id, position, who, ts_text, ts, text, source_json)
-VALUES (%s, %s, %s, %s, %s, %s, %s);
-""",
-            (
-                ticket_id,
-                int(row["next_position"]),
-                comment["who"],
-                comment["ts"],
-                self._pg_parse_ts(comment["ts"]),
-                comment["text"],
-                self._pg_jsonb(comment),
-            ),
-        )
+    def _pg_call(self, conn: Any, sql: str, params: tuple[Any, ...]) -> None:
+        conn.execute(sql, params)
 
-    def _pg_refresh_source_json(self, conn: Any, ticket: dict[str, Any]) -> None:
-        conn.execute(
-            """
-UPDATE ticket_board.tickets
-SET source_json = %s, row_updated_at = now()
-WHERE id = %s;
-""",
-            (self._pg_jsonb(self._serialize_ticket(ticket)), ticket["id"]),
-        )
+    def _pg_call_scalar(self, conn: Any, sql: str, params: tuple[Any, ...]) -> str:
+        row = conn.execute(sql, params).fetchone()
+        if row is None:
+            raise ValueError("postgres function returned no row")
+        value = next(iter(row.values()))
+        return str(value)
+
+    def _pg_reject_unsupported_patch_fields(self, patch: dict[str, Any]) -> None:
+        unsupported = {
+            "title",
+            "parent_id",
+            "screenshots",
+            "screenshot",
+            "implementation",
+            "audit_prompt",
+            "needs_eric_signoff",
+            "commit_exempt",
+        }
+        present = sorted(field for field in unsupported if field in patch)
+        if present:
+            joined = ", ".join(present)
+            raise ValueError(f"postgres function API does not support direct updates for: {joined}")
 
     def _pg_validate_parent_id(self, conn: Any, raw: Any, ticket_id: str) -> str:
         if raw in (None, "", "null"):

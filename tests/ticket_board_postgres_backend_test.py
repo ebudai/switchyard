@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Regression test: TicketBoardApp can read/write tickets through PostgreSQL."""
+"""Regression test: TicketBoardApp writes through the PostgreSQL function API."""
 
 from __future__ import annotations
 
+import json
 import socket
 import subprocess
 import sys
@@ -23,6 +24,8 @@ from scripts.ticket_board.app import TicketBoardApp
 
 
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
+RBAC_PATH = ROOT / "scripts" / "ticket_board" / "rbac.sql"
+PANE_ROLES = ["director", "eric", "ops", "app", "audit", "perf", "research", "main"]
 
 
 def run(args: list[str], *, input_text: str | None = None, capture: bool = True) -> subprocess.CompletedProcess[str]:
@@ -44,9 +47,13 @@ def free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def psql(conninfo: str, sql: str) -> None:
+def conninfo(socket_dir: Path, port: int, dbname: str, user: str = "postgres") -> str:
+    return f"host={socket_dir} port={port} dbname={dbname} user={user}"
+
+
+def psql(conn: str, sql: str) -> str:
     proc = subprocess.run(
-        ["psql", "-X", "-v", "ON_ERROR_STOP=1", conninfo],
+        ["psql", "-X", "-v", "ON_ERROR_STOP=1", "-tA", conn],
         input=sql,
         text=True,
         capture_output=True,
@@ -54,6 +61,79 @@ def psql(conninfo: str, sql: str) -> None:
     )
     if proc.returncode != 0:
         raise AssertionError(proc.stderr or proc.stdout)
+    return proc.stdout.strip()
+
+
+def psql_error(conn: str, sql: str) -> str:
+    proc = subprocess.run(
+        ["psql", "-X", "-v", "ON_ERROR_STOP=1", "-tA", conn],
+        input=sql,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode == 0:
+        raise AssertionError(f"SQL unexpectedly succeeded: {sql}")
+    return proc.stderr + proc.stdout
+
+
+def create_roles(conn: str) -> None:
+    psql(conn, "\n".join(f"CREATE ROLE {role} LOGIN;" for role in PANE_ROLES))
+
+
+def ticket_source(ticket_id: str, title: str, state: str, assignee: str) -> str:
+    payload = {
+        "id": ticket_id,
+        "title": title,
+        "body": "",
+        "state": state,
+        "assignee": assignee,
+        "comments": [],
+        "created": "2026-07-10T00:00:00+00:00",
+        "updated": "2026-07-10T00:00:00+00:00",
+    }
+    return json.dumps(payload, sort_keys=True).replace("'", "''")
+
+
+def insert_ticket(
+    conn: str,
+    ticket_id: str,
+    *,
+    title: str,
+    state: str,
+    assignee: str,
+    implementation: str = "Implemented.",
+    audit_signoff: bool = False,
+    needs_eric_signoff: bool = False,
+    eric_signoff: bool = False,
+    commit_hash: str = "",
+) -> None:
+    psql(
+        conn,
+        f"""
+INSERT INTO ticket_board.tickets (
+    id, title, body, state, assignee, implementation,
+    audit_signoff, needs_eric_signoff, eric_signoff, commit_hash,
+    created_text, updated_text, source_json
+) VALUES (
+    '{ticket_id}', '{title}', '', '{state}', '{assignee}', '{implementation}',
+    {str(audit_signoff).lower()}, {str(needs_eric_signoff).lower()},
+    {str(eric_signoff).lower()}, '{commit_hash}',
+    '2026-07-10T00:00:00+00:00', '2026-07-10T00:00:00+00:00',
+    '{ticket_source(ticket_id, title, state, assignee)}'::jsonb
+);
+""",
+    )
+
+
+def make_app(root: Path, socket_dir: Path, port: int, dbname: str, role: str) -> TicketBoardApp:
+    return TicketBoardApp(
+        root / f"json-unused-{role}",
+        root / "frames",
+        root / "assets",
+        store_backend="postgres",
+        database_url=conninfo(socket_dir, port, dbname, role),
+    )
 
 
 def main() -> int:
@@ -68,43 +148,64 @@ def main() -> int:
         assets.mkdir()
         port = free_port()
         dbname = "pgu_backend_test"
-        conninfo = f"host={socket_dir} port={port} dbname={dbname}"
+        admin_conn = conninfo(socket_dir, port, dbname)
 
-        run(["initdb", "-D", str(data_dir), "-A", "trust", "--no-locale"])
+        run(["initdb", "-D", str(data_dir), "-A", "trust", "--no-locale", "--username=postgres"])
         try:
             run(["pg_ctl", "-D", str(data_dir), "-o", f"-k {socket_dir} -p {port} -h ''", "-w", "start"], capture=False)
-            run(["createdb", "-h", str(socket_dir), "-p", str(port), dbname])
-            psql(conninfo, SCHEMA_PATH.read_text(encoding="utf-8"))
+            run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
+            psql(admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
+            create_roles(admin_conn)
+            psql(admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
 
-            app = TicketBoardApp(root / "json-unused", frames, assets, store_backend="postgres", database_url=conninfo)
-            before_signature = app.store_signature()
-            created = app.create_ticket(
+            eric_app = make_app(root, socket_dir, port, dbname, "eric")
+            director_app = make_app(root, socket_dir, port, dbname, "director")
+            ops_app = make_app(root, socket_dir, port, dbname, "ops")
+            audit_app = make_app(root, socket_dir, port, dbname, "audit")
+
+            before_signature = eric_app.store_signature()
+            created = eric_app.create_ticket(
                 title="Postgres create",
                 body="Created through TicketBoardApp.",
                 screenshot=None,
-                assignee="ops",
+                assignee="unassigned",
                 needs_eric_signoff=False,
             )
             assert created["id"] == "PGU-1", created
-            assert app.verify_created_ticket_persisted(created, before_signature) != before_signature
-            assert not (root / "json-unused").exists(), "postgres backend should not create the JSON store directory"
-
-            ready = app.update_ticket(
-                "PGU-1",
-                {
-                    "implementation": "Use the database backend.",
-                    "state": "ready",
-                },
+            assert eric_app.verify_created_ticket_persisted(created, before_signature) != before_signature
+            assert not (root / "json-unused-eric").exists(), "postgres backend should not create a JSON store directory"
+            assert "permission denied" in psql_error(
+                conninfo(socket_dir, port, dbname, "eric"),
+                "UPDATE ticket_board.tickets SET title = title WHERE id = 'PGU-1';",
             )
-            assert ready["state"] == "ready", ready
-            in_progress = app.update_ticket("PGU-1", {"state": "in_progress"})
-            assert in_progress["state"] == "in_progress", in_progress
 
-            blocked = app.create_ticket(
+            filed = ops_app.create_ticket_record(
+                title="Filed from implementation",
+                body="Linked to source.",
+                screenshot=None,
+                screenshots=None,
+                assignee="unassigned",
+                state="analysis",
+                blocked_by=[],
+                implementation="",
+                audit_prompt="",
+                audit_signoff=False,
+                needs_eric_signoff=False,
+                eric_signoff=False,
+                comments=[],
+                parent_id="PGU-1",
+            )
+            assert filed["parent_id"] == "PGU-1", filed
+            assert "source_ticket_id ticket not found" in psql_error(
+                conninfo(socket_dir, port, dbname, "ops"),
+                "SELECT ticket_board.file_bug('missing', 'body', 'PGU-99999');",
+            )
+
+            blocked = director_app.create_ticket(
                 title="Blocked child",
                 body="Needs PGU-1 first.",
                 screenshot=None,
-                assignee="ops",
+                assignee="unassigned",
                 needs_eric_signoff=False,
                 blocked_by=["PGU-1"],
                 blocked_reason="Waiting for PGU-1.",
@@ -112,7 +213,8 @@ def main() -> int:
             assert blocked["blocked_by"] == ["PGU-1"], blocked
             assert blocked["blocked_reason"] == "Waiting for PGU-1.", blocked
 
-            cancelled = app.update_ticket(
+            director_app.update_ticket(blocked["id"], {"comment": {"who": "director", "text": "Tracking note."}})
+            cancelled = director_app.update_ticket(
                 blocked["id"],
                 {
                     "state": "cancelled",
@@ -122,30 +224,71 @@ def main() -> int:
             assert cancelled["state"] == "cancelled", cancelled
             assert cancelled["comments"][-1]["text"] == "Covered by PGU-1.", cancelled
 
-            audit = app.create_ticket_record(
-                title="Audit auto-advance",
-                body="",
-                screenshot=None,
-                screenshots=None,
-                assignee="audit",
-                state="audit",
-                blocked_by=[],
-                implementation="Implemented.",
-                audit_prompt="Check the backend.",
-                audit_signoff=False,
-                needs_eric_signoff=False,
-                eric_signoff=False,
-                comments=[],
-            )
-            advanced = app.update_ticket(audit["id"], {"audit_signoff": True})
-            assert advanced["state"] == "director_review", advanced
-            assert advanced["assignee"] == "director", advanced
+            insert_ticket(admin_conn, "PGU-100", title="Ops ready", state="ready", assignee="ops")
+            in_progress = ops_app.update_ticket("PGU-100", {"state": "in_progress"})
+            assert in_progress["state"] == "in_progress", in_progress
+            submitted = ops_app.update_ticket("PGU-100", {"state": "audit", "commit_hash": "abcdef1"})
+            assert submitted["state"] == "audit", submitted
+            assert submitted["commit_hash"] == "abcdef1", submitted
+            try:
+                ops_app.update_ticket("PGU-100", {"implementation": "raw field edit should fail"})
+            except ValueError as exc:
+                assert "postgres function API does not support direct updates" in str(exc)
+            else:
+                raise AssertionError("implementation patch should not be accepted by the function API backend")
 
-            tickets, errors = app.list_tickets()
+            audit_ready = audit_app.update_ticket("PGU-100", {"audit_signoff": True})
+            assert audit_ready["state"] == "director_review", audit_ready
+            done = director_app.update_ticket("PGU-100", {"state": "done", "commit_hash": "abcdef1"})
+            assert done["state"] == "done", done
+
+            insert_ticket(admin_conn, "PGU-200", title="Audit kickback", state="audit", assignee="audit")
+            kicked = audit_app.update_ticket(
+                "PGU-200",
+                {"state": "analysis", "comment": {"who": "audit", "text": "Needs another pass."}},
+            )
+            assert kicked["state"] == "analysis", kicked
+            assert kicked["comments"][-1]["text"] == "Needs another pass.", kicked
+
+            insert_ticket(
+                admin_conn,
+                "PGU-300",
+                title="Eric review",
+                state="eric_review",
+                assignee="director",
+                audit_signoff=True,
+                needs_eric_signoff=True,
+            )
+            eric_signed = eric_app.update_ticket("PGU-300", {"eric_signoff": True})
+            assert eric_signed["state"] == "director_review", eric_signed
+            assert eric_signed["eric_signoff"] is True, eric_signed
+
+            insert_ticket(
+                admin_conn,
+                "PGU-301",
+                title="Eric reopen",
+                state="eric_review",
+                assignee="director",
+                audit_signoff=True,
+                needs_eric_signoff=True,
+            )
+            eric_reopened = eric_app.update_ticket(
+                "PGU-301",
+                {"state": "analysis", "comment": {"who": "eric", "text": "Needs design revision."}},
+            )
+            assert eric_reopened["state"] == "analysis", eric_reopened
+            assert eric_reopened["comments"][-1]["text"] == "Needs design revision.", eric_reopened
+
+            deferred = director_app.update_ticket("PGU-1", {"state": "backlog"})
+            assert deferred["state"] == "backlog", deferred
+
+            tickets, errors = director_app.list_tickets()
             assert errors == [], errors
-            assert {ticket["id"] for ticket in tickets} == {"PGU-1", "PGU-2", "PGU-3"}, tickets
+            assert {"PGU-1", "PGU-2", "PGU-3", "PGU-100", "PGU-200", "PGU-300", "PGU-301"}.issubset(
+                {ticket["id"] for ticket in tickets}
+            ), tickets
         finally:
-            subprocess.run(["pg_ctl", "-D", str(data_dir), "-w", "stop"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 
     print("ticket_board_postgres_backend_test: ok")
     return 0

@@ -249,6 +249,7 @@ BEGIN
             FROM ticket_board.ticket_comments
             WHERE ticket_id = NEW.id
               AND btrim(text) <> ''
+              AND xmin = pg_current_xact_id()::xid
         ) THEN
             RAISE EXCEPTION 'cancelling a ticket requires a non-empty comment explaining why';
         END IF;

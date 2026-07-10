@@ -156,8 +156,29 @@ def main() -> int:
                 "UPDATE ticket_board.tickets SET state = 'cancelled' WHERE id = 'PGU-1';",
                 "cancelling a ticket requires a non-empty comment explaining why",
             )
-            insert_comment(conninfo, "PGU-1", "Cancelled with a reason.")
-            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'cancelled' WHERE id = 'PGU-1';")
+            insert_comment(conninfo, "PGU-1", "Old unrelated routing comment.")
+            assert_error(
+                conninfo,
+                "UPDATE ticket_board.tickets SET state = 'cancelled' WHERE id = 'PGU-1';",
+                "cancelling a ticket requires a non-empty comment explaining why",
+            )
+            psql(
+                conninfo,
+                """
+BEGIN;
+INSERT INTO ticket_board.ticket_comments (ticket_id, position, who, ts_text, text, source_json)
+VALUES (
+    'PGU-1',
+    COALESCE((SELECT max(position) + 1 FROM ticket_board.ticket_comments WHERE ticket_id = 'PGU-1'), 0),
+    'director',
+    '2026-07-10T00:20:00+00:00',
+    'Cancelled with a fresh reason.',
+    '{"text": "Cancelled with a fresh reason.", "ts": "2026-07-10T00:20:00+00:00", "who": "director"}'::jsonb
+);
+UPDATE ticket_board.tickets SET state = 'cancelled' WHERE id = 'PGU-1';
+COMMIT;
+""",
+            )
             psql(conninfo, "UPDATE ticket_board.tickets SET state = 'analysis' WHERE id = 'PGU-1';")
 
             assert_error(

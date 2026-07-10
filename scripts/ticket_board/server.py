@@ -17,7 +17,10 @@ from typing import Callable
 
 from .app import TicketBoardApp
 from .frontend import HTML
-from ..ticket_store_io import _ticket_number
+try:
+    from ticket_store_io import _ticket_number
+except ModuleNotFoundError:
+    from scripts.ticket_store_io import _ticket_number
 
 LOGGER = logging.getLogger(__name__)
 DIRECTOR_TARGET = "pgu-director:0.0"

@@ -22,9 +22,21 @@ COMMIT_GIT_DIR_DEFAULT = Path("/data/git/pgu.git")
 ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "agent", "director", "research")
 LEGACY_ASSIGNEE_ALIASES = {"ui": "app"}
 LEGACY_STATE_ALIASES = {"open": "analysis"}
-STATES = ("analysis", "ready", "in_progress", "audit", "eric_review", "director_review", "done")
+STATES = ("analysis", "ready", "in_progress", "audit", "eric_review", "director_review", "done", "cancelled")
+TERMINAL_STATES = {"done", "cancelled"}
+LEGAL_STATE_TRANSITIONS = {
+    "analysis": {"ready", "cancelled"},
+    "ready": {"in_progress", "analysis", "cancelled"},
+    "in_progress": {"audit", "ready", "analysis", "cancelled"},
+    "audit": {"eric_review", "director_review", "analysis", "cancelled"},
+    "eric_review": {"director_review", "analysis", "cancelled"},
+    "director_review": {"done", "analysis", "cancelled"},
+    "done": {"analysis"},
+    "cancelled": {"analysis"},
+}
 REOPEN_RESET_TARGET_STATES = {"open", "analysis", "ready", "in_progress"}
 REVIEWED_STATES = {"director_review", "audit", "eric_review"}
+RESET_REVIEW_ARTIFACT_SOURCE_STATES = REVIEWED_STATES | TERMINAL_STATES
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
 
@@ -507,9 +519,11 @@ class TicketBoardApp:
             raise ValueError("eric_signoff must be true before a ticket can enter director_review")
 
     def _enforce_transition_rules(self, previous_state: str, ticket: dict[str, Any]) -> None:
-        if previous_state in REVIEWED_STATES and ticket["state"] in REOPEN_RESET_TARGET_STATES:
+        if previous_state in RESET_REVIEW_ARTIFACT_SOURCE_STATES and ticket["state"] in REOPEN_RESET_TARGET_STATES:
             ticket["audit_signoff"] = False
             ticket["commit_hash"] = ""
+        if previous_state != ticket["state"]:
+            self._enforce_legal_state_transition(previous_state, ticket["state"])
         if previous_state == "audit" and ticket["state"] == "analysis":
             ticket["assignee"] = "unassigned"
         if previous_state == "analysis" and ticket["state"] == "in_progress":
@@ -530,6 +544,13 @@ class TicketBoardApp:
             raise ValueError("eric_signoff must be true before a ticket can leave eric_review")
         if ticket["state"] == "done" and previous_state not in {"done", "director_review"}:
             raise ValueError("tickets can only enter done from director_review")
+
+    def _enforce_legal_state_transition(self, previous_state: str, next_state: str) -> None:
+        previous_state = LEGACY_STATE_ALIASES.get(previous_state, previous_state)
+        next_state = LEGACY_STATE_ALIASES.get(next_state, next_state)
+        allowed_next_states = LEGAL_STATE_TRANSITIONS.get(previous_state, set())
+        if next_state not in allowed_next_states:
+            raise ValueError(f"illegal state transition: {previous_state} -> {next_state}")
 
     def _enforce_done_requirements(self, ticket: dict[str, Any]) -> None:
         if ticket.get("commit_exempt"):

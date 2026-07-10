@@ -489,6 +489,9 @@ class TicketBoardApp:
             ticket["eric_signoff"] = False
             if ticket["state"] == "eric_review":
                 ticket["state"] = "audit"
+        if ticket["state"] == "eric_review" and ticket["eric_signoff"]:
+            ticket["state"] = "director_review"
+            ticket["assignee"] = "director"
         if ticket["state"] == "audit" and ticket["audit_signoff"]:
             ticket["state"] = "eric_review" if ticket["needs_eric_signoff"] else "director_review"
             ticket["assignee"] = "director"

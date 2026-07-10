@@ -562,7 +562,12 @@ class TicketBoardApp:
             raise ValueError("tickets requiring Eric signoff must pass through eric_review before entering director_review")
         if previous_state == "audit" and ticket["state"] in {"eric_review", "director_review", "done"} and not ticket["audit_signoff"]:
             raise ValueError("audit_signoff must be true before a ticket can leave audit")
-        if previous_state == "eric_review" and ticket["state"] == "director_review" and not ticket["eric_signoff"]:
+        if (
+            previous_state == "eric_review"
+            and ticket["state"] == "director_review"
+            and ticket["needs_eric_signoff"]
+            and not ticket["eric_signoff"]
+        ):
             raise ValueError("eric_signoff must be true before a ticket can leave eric_review")
         if ticket["state"] == "done" and previous_state not in {"done", "director_review"}:
             raise ValueError("tickets can only enter done from director_review")

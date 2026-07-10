@@ -98,7 +98,10 @@ class TicketBoardApp:
                 tickets.append(ticket)
             except Exception as exc:  # noqa: BLE001
                 errors.append({"file": path.name, "error": str(exc)})
-        tickets.sort(key=lambda ticket: (ticket["state"] != "done", ticket["updated"], ticket["id"]), reverse=True)
+        tickets.sort(
+            key=lambda ticket: (ticket["state"] not in TERMINAL_STATES, ticket["updated"], ticket["id"]),
+            reverse=True,
+        )
         return tickets, errors
 
     def list_screenshots(self) -> list[dict[str, str]]:
@@ -240,6 +243,12 @@ class TicketBoardApp:
                 self._enforce_initial_state_rules(ticket)
                 if ticket["state"] == "done":
                     self._enforce_done_requirements(ticket)
+                if ticket["state"] == "cancelled":
+                    self._enforce_cancel_requirements(
+                        previous_state=None,
+                        ticket=ticket,
+                        has_reason_comment=bool(normalized_comments),
+                    )
                 json.dump(self._serialize_ticket(ticket), handle, indent=2, sort_keys=True)
                 handle.write("\n")
             except Exception:
@@ -253,6 +262,7 @@ class TicketBoardApp:
             raise FileNotFoundError(f"ticket not found: {ticket_id}")
         current = self._validate_ticket(json.loads(path.read_text(encoding="utf-8")), path)
         previous_state = current["state"]
+        has_reason_comment = False
         if "state" in patch:
             current["state"] = self._validate_state(str(patch["state"]))
         if "title" in patch:
@@ -293,10 +303,11 @@ class TicketBoardApp:
             if not who or not text:
                 raise ValueError("comment requires non-empty who and text")
             current["comments"].append({"who": who, "text": text, "ts": iso_now()})
+            has_reason_comment = True
         if "blocked_by" in patch or "blocked_reason" in patch:
             self._enforce_blocked_reason_rule(current["blocked_by"], current["blocked_reason"])
         self._normalize_signoff_state(current)
-        self._enforce_transition_rules(previous_state, current)
+        self._enforce_transition_rules(previous_state, current, has_reason_comment=has_reason_comment)
         self._enforce_workflow_rules(current)
         if current["state"] == "done" and previous_state != "done":
             self._enforce_done_requirements(current)
@@ -495,12 +506,11 @@ class TicketBoardApp:
             current_parent_id = next_parent_id
 
     def _normalize_signoff_state(self, ticket: dict[str, Any]) -> None:
-        if ticket["state"] == "eric_review":
-            ticket["needs_eric_signoff"] = True
+        if ticket["state"] == "eric_review" and not ticket["needs_eric_signoff"]:
+            ticket["state"] = "audit"
+            ticket["audit_signoff"] = False
         if not ticket["needs_eric_signoff"]:
             ticket["eric_signoff"] = False
-            if ticket["state"] == "eric_review":
-                ticket["state"] = "audit"
         if ticket["state"] == "eric_review" and ticket["eric_signoff"]:
             ticket["state"] = "director_review"
             ticket["assignee"] = "director"
@@ -518,7 +528,13 @@ class TicketBoardApp:
         if ticket["state"] == "director_review" and ticket["needs_eric_signoff"] and not ticket["eric_signoff"]:
             raise ValueError("eric_signoff must be true before a ticket can enter director_review")
 
-    def _enforce_transition_rules(self, previous_state: str, ticket: dict[str, Any]) -> None:
+    def _enforce_transition_rules(
+        self,
+        previous_state: str,
+        ticket: dict[str, Any],
+        *,
+        has_reason_comment: bool = False,
+    ) -> None:
         if previous_state in RESET_REVIEW_ARTIFACT_SOURCE_STATES and ticket["state"] in REOPEN_RESET_TARGET_STATES:
             ticket["audit_signoff"] = False
             ticket["commit_hash"] = ""
@@ -526,6 +542,12 @@ class TicketBoardApp:
             self._enforce_legal_state_transition(previous_state, ticket["state"])
         if previous_state == "audit" and ticket["state"] == "analysis":
             ticket["assignee"] = "unassigned"
+        if previous_state != "cancelled" and ticket["state"] == "cancelled":
+            self._enforce_cancel_requirements(
+                previous_state=previous_state,
+                ticket=ticket,
+                has_reason_comment=has_reason_comment,
+            )
         if previous_state == "analysis" and ticket["state"] == "in_progress":
             raise ValueError("analysis tickets must move through ready before entering in_progress")
         if previous_state in {"open", "analysis"} and ticket["state"] == "ready":
@@ -600,6 +622,18 @@ class TicketBoardApp:
             self._enforce_ready_requirements(ticket)
         elif ticket["state"] == "in_progress":
             self._enforce_in_progress_requirements(ticket, previous_state=None)
+
+    def _enforce_cancel_requirements(
+        self,
+        *,
+        previous_state: str | None,
+        ticket: dict[str, Any],
+        has_reason_comment: bool,
+    ) -> None:
+        if previous_state in TERMINAL_STATES:
+            raise ValueError("only active tickets can be cancelled")
+        if not has_reason_comment:
+            raise ValueError("cancelling a ticket requires a non-empty comment explaining why")
 
     def _enforce_ready_requirements(self, ticket: dict[str, Any]) -> None:
         if ticket["assignee"] == "unassigned":

@@ -16,8 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from scripts.ticket_board import app as ticket_board_app
 from scripts.ticket_board.app import TicketBoardApp
-from scripts.ticket_board import server as ticket_board_server
 from scripts.ticket_board.server import DirectorNotifier, TicketBoardServer
 
 
@@ -179,13 +179,13 @@ def test_http_create_verification_uses_module_ticket_number() -> None:
         write_ticket(store / "PGU-9.json", "PGU-9", "Existing ticket")
 
         calls: list[str] = []
-        original_ticket_number = ticket_board_server._ticket_number
+        original_ticket_number = ticket_board_app._ticket_number
 
         def recording_ticket_number(ticket_id: str) -> int:
             calls.append(ticket_id)
             return original_ticket_number(ticket_id)
 
-        ticket_board_server._ticket_number = recording_ticket_number
+        ticket_board_app._ticket_number = recording_ticket_number
         notifier = FakeNotifier()
         server = TicketBoardServer(("127.0.0.1", 0), TicketBoardApp(store, frames, assets), director_notifier=notifier)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -214,7 +214,7 @@ def test_http_create_verification_uses_module_ticket_number() -> None:
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
-            ticket_board_server._ticket_number = original_ticket_number
+            ticket_board_app._ticket_number = original_ticket_number
 
 
 def test_server_create_does_not_notify_when_ticket_is_not_persisted() -> None:

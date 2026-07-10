@@ -37,6 +37,8 @@ def notification_pairs_for_message(target: str, payload: str) -> list[str]:
     if target == DIRECTOR_TARGET:
         if normalized.startswith("New ticket for you: ") or normalized.startswith("New tickets for you: "):
             return [ticket_pair_key(ticket_id, "analysis") for ticket_id in ticket_ids]
+        if normalized.endswith("kicked back to you"):
+            return [ticket_pair_key(ticket_id, "analysis") for ticket_id in ticket_ids]
         if normalized.endswith("ready for your review"):
             return [ticket_pair_key(ticket_id, "director_review") for ticket_id in ticket_ids]
         if "Eric signed off; ready for director completion" in normalized:

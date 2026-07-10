@@ -33,6 +33,11 @@ def main() -> int:
         "director analysis notification should map to analysis pair",
     )
     assert_equal(
+        journal.notification_pairs_for_message("pgu-director:0.0", "PGU-81 -- Tailscale kicked back to you"),
+        ["PGU-81|analysis"],
+        "director kickback notification should map back to analysis",
+    )
+    assert_equal(
         journal.notification_pairs_for_message("pgu-app:0.0", "PGU-81 -- Tailscale kicked back to you"),
         ["PGU-81|in_progress"],
         "kickback should map to assignee in_progress pair",

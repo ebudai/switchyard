@@ -2,6 +2,11 @@
 
 The ticket board runs as an `agent` user `systemd` service on `127.0.0.1:8770`.
 
+Prep artifacts for the future supervised cutover to a dedicated `boardsvc`
+system service with PostgreSQL peer auth live in
+`docs/ticket-board-boardsvc-peer-auth-runbook.md`. That package is review-only
+until Eric runs the privileged cutover steps.
+
 The live service does **not** run from a mutable git checkout anymore. It runs
 from a controlled export root:
 

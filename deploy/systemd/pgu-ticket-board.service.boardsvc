@@ -1,0 +1,26 @@
+[Unit]
+Description=PGU Ticket Board
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=boardsvc
+WorkingDirectory=/home/agent/pgu-ticketboard-live/current
+ExecStart=/usr/bin/python3 /home/agent/pgu-ticketboard-live/current/scripts/ticket-board.py --host 127.0.0.1 --port 8770
+Restart=on-failure
+RestartSec=2
+Environment=PYTHONUNBUFFERED=1
+Environment=PGHOST=/var/run/postgresql
+Environment=PGDATABASE=pgu
+Environment=PGUSER=ticket_board_service
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/tmp
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

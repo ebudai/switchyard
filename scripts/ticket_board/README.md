@@ -95,4 +95,5 @@ Notes:
 - The default review path is `in_progress -> audit -> eric_review -> director_review -> done`, or `in_progress -> audit -> director_review -> done` when Eric sign-off is not required
 - Only one unlinked ticket per assignee may be in `in_progress` at a time; linked tickets in the same `parent_id` cluster count as one unit of work, and `ready` is the per-role queue
 - For new shell-created tickets, prefer `scripts/directorctl ticket-create` over hand-writing `PGU-N.json`; it uses the same atomic filename reservation as the web app create path, so concurrent creators cannot collide on the same ticket ID
+- For direct JSON edits/writes, use `scripts.ticket_store_io.atomic_write_json(...)` or an equivalent temp-file plus `os.replace(...)` flow; the watchdog now watches the store with inotify, so partial in-place writes are treated as malformed until they are replaced by a complete file
 - Human shell editing is fine; if a JSON file is invalid, the UI shows a read error banner

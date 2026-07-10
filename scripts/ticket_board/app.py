@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import tempfile
 import time
 from io import BytesIO
 from datetime import datetime, timezone
@@ -13,6 +12,11 @@ from pathlib import Path
 from typing import Any
 
 from PIL import Image
+
+try:
+    from ticket_store_io import atomic_write_json, reserve_next_ticket_id
+except ModuleNotFoundError:  # pragma: no cover - package import path
+    from scripts.ticket_store_io import atomic_write_json, reserve_next_ticket_id
 
 STORE_DIR_DEFAULT = Path("~/.claude/pgu-tickets").expanduser()
 ASSET_DIR_DEFAULT = Path("~/.claude/pgu-tickets-assets").expanduser()
@@ -202,59 +206,53 @@ class TicketBoardApp:
         title = self._require_text(title, "title").strip()
         assignee = self._validate_assignee(assignee)
         state = self._validate_state(state)
-        ticket_id, handle = self._reserve_ticket_file()
-        blocked_by = self._validate_blocked_by(blocked_by or [], ticket_id)
-        parent_id = self._validate_parent_id(parent_id, ticket_id)
-        implementation = self._require_plain_string(implementation, "implementation")
-        audit_prompt = self._require_plain_string(audit_prompt, "audit_prompt")
-        blocked_reason = self._require_plain_string(blocked_reason, "blocked_reason")
-        normalized_comments = self._validate_comments(comments)
-        self._enforce_blocked_reason_rule(blocked_by, blocked_reason)
-        with handle:
-            try:
-                screenshot_paths = self._materialize_attachments(
-                    screenshots if screenshots is not None else screenshot,
-                    ticket_id,
+        with reserve_next_ticket_id(self.store_dir) as ticket_id:
+            blocked_by = self._validate_blocked_by(blocked_by or [], ticket_id)
+            parent_id = self._validate_parent_id(parent_id, ticket_id)
+            implementation = self._require_plain_string(implementation, "implementation")
+            audit_prompt = self._require_plain_string(audit_prompt, "audit_prompt")
+            blocked_reason = self._require_plain_string(blocked_reason, "blocked_reason")
+            normalized_comments = self._validate_comments(comments)
+            self._enforce_blocked_reason_rule(blocked_by, blocked_reason)
+            screenshot_paths = self._materialize_attachments(
+                screenshots if screenshots is not None else screenshot,
+                ticket_id,
+            )
+            created_ts = self._require_text(created, "created") if created is not None else iso_now()
+            updated_ts = self._require_text(updated, "updated") if updated is not None else created_ts
+            ticket = {
+                "id": ticket_id,
+                "title": title,
+                "body": body.strip(),
+                "assignee": assignee,
+                "state": state,
+                "blocked_by": blocked_by,
+                "parent_id": parent_id,
+                "blocked_reason": blocked_reason,
+                "implementation": implementation,
+                "audit_prompt": audit_prompt,
+                "audit_signoff": bool(audit_signoff),
+                "needs_eric_signoff": bool(needs_eric_signoff),
+                "eric_signoff": bool(eric_signoff),
+                "commit_hash": self._validate_commit_hash(commit_hash),
+                "commit_exempt": bool(commit_exempt),
+                "created": created_ts,
+                "updated": updated_ts,
+                "comments": normalized_comments,
+            }
+            self._set_screenshot_fields(ticket, self._build_screenshot_entries(screenshot_paths))
+            self._normalize_signoff_state(ticket)
+            self._enforce_workflow_rules(ticket)
+            self._enforce_initial_state_rules(ticket)
+            if ticket["state"] == "done":
+                self._enforce_done_requirements(ticket)
+            if ticket["state"] == "cancelled":
+                self._enforce_cancel_requirements(
+                    previous_state=None,
+                    ticket=ticket,
+                    has_reason_comment=bool(normalized_comments),
                 )
-                created_ts = self._require_text(created, "created") if created is not None else iso_now()
-                updated_ts = self._require_text(updated, "updated") if updated is not None else created_ts
-                ticket: dict[str, Any] = {
-                    "id": ticket_id,
-                    "title": title,
-                    "body": body.strip(),
-                    "assignee": assignee,
-                    "state": state,
-                    "blocked_by": blocked_by,
-                    "parent_id": parent_id,
-                    "blocked_reason": blocked_reason,
-                    "implementation": implementation,
-                    "audit_prompt": audit_prompt,
-                    "audit_signoff": bool(audit_signoff),
-                    "needs_eric_signoff": bool(needs_eric_signoff),
-                    "eric_signoff": bool(eric_signoff),
-                    "commit_hash": self._validate_commit_hash(commit_hash),
-                    "commit_exempt": bool(commit_exempt),
-                    "created": created_ts,
-                    "updated": updated_ts,
-                    "comments": normalized_comments,
-                }
-                self._set_screenshot_fields(ticket, self._build_screenshot_entries(screenshot_paths))
-                self._normalize_signoff_state(ticket)
-                self._enforce_workflow_rules(ticket)
-                self._enforce_initial_state_rules(ticket)
-                if ticket["state"] == "done":
-                    self._enforce_done_requirements(ticket)
-                if ticket["state"] == "cancelled":
-                    self._enforce_cancel_requirements(
-                        previous_state=None,
-                        ticket=ticket,
-                        has_reason_comment=bool(normalized_comments),
-                    )
-                json.dump(self._serialize_ticket(ticket), handle, indent=2, sort_keys=True)
-                handle.write("\n")
-            except Exception:
-                (self.store_dir / f"{ticket_id}.json").unlink(missing_ok=True)
-                raise
+            self._atomic_write(self.store_dir / f"{ticket_id}.json", self._serialize_ticket(ticket))
         return ticket
 
     def update_ticket(self, ticket_id: str, patch: dict[str, Any]) -> dict[str, Any]:
@@ -373,28 +371,8 @@ class TicketBoardApp:
         self._atomic_write(source_path, self._serialize_ticket(source))
         return {"source": source, "target": target}
 
-    def _reserve_ticket_file(self) -> tuple[str, Any]:
-        existing = [self._ticket_number(path.stem) for path in self.store_dir.glob("PGU-*.json")]
-        next_number = max(existing, default=0) + 1
-        while True:
-            ticket_id = f"PGU-{next_number}"
-            path = self.store_dir / f"{ticket_id}.json"
-            try:
-                # Reserve the next ticket filename atomically so concurrent creators
-                # cannot claim the same PGU-N and overwrite each other.
-                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-            except FileExistsError:
-                next_number += 1
-                continue
-            else:
-                return ticket_id, os.fdopen(fd, "w", encoding="utf-8")
-
     def _atomic_write(self, path: Path, payload: dict[str, Any]) -> None:
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
-            json.dump(payload, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-            temp_path = Path(handle.name)
-        temp_path.replace(path)
+        atomic_write_json(path, payload)
 
     def _validate_ticket(self, payload: dict[str, Any], path: Path) -> dict[str, Any]:
         ticket_id = str(payload.get("id", path.stem))
@@ -823,12 +801,6 @@ class TicketBoardApp:
             for key, value in ticket.items()
             if key not in {"screenshot_available", "screenshots_info"}
         }
-
-    def _ticket_number(self, stem: str) -> int:
-        try:
-            return int(stem.split("-", 1)[1])
-        except Exception as exc:  # noqa: BLE001
-            raise ValueError(f"invalid ticket id stem: {stem}") from exc
 
     def _validate_state(self, state: str) -> str:
         state = LEGACY_STATE_ALIASES.get(state, state)

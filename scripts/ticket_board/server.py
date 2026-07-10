@@ -17,6 +17,7 @@ from typing import Callable
 
 from .app import TicketBoardApp
 from .frontend import HTML
+from ..ticket_store_io import _ticket_number
 
 LOGGER = logging.getLogger(__name__)
 DIRECTOR_TARGET = "pgu-director:0.0"
@@ -185,8 +186,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             raise ValueError("created ticket missing id/title")
 
         before_names = {name for name, _, _ in before_signature}
-        before_max = max((self.app._ticket_number(Path(name).stem) for name in before_names), default=0)
-        created_number = self.app._ticket_number(ticket_id)
+        before_max = max((_ticket_number(Path(name).stem) for name in before_names), default=0)
+        created_number = _ticket_number(ticket_id)
         if created_number <= before_max:
             raise ValueError(f"create returned non-new ticket id: {ticket_id}")
         if f"{ticket_id}.json" in before_names:

@@ -199,7 +199,7 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       }
       clearDetailDraft(ticketId);
       await updateTicket(ticketId, patch);
-      setCreateStatus(`Signed off ✓ ${ticketId} is now waiting for director completion.`);
+      setCreateStatus(`Signed off ✓ ${ticketId} moved to Director Review.`);
     }
 
     async function handleCreateSubmit() {

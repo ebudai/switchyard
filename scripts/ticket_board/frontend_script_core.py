@@ -189,10 +189,16 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     }
 
     function ericSignoffSummary(ticket) {
-      if (ticket.state !== 'eric_review' || !ticket.needs_eric_signoff || !ticket.eric_signoff) {
+      if (!ticket.needs_eric_signoff || !ticket.eric_signoff) {
         return '';
       }
-      return 'Eric signed off. Waiting for director completion.';
+      if (ticket.state === 'eric_review') {
+        return 'Eric signed off. Waiting for Director Review.';
+      }
+      if (ticket.state === 'director_review') {
+        return 'Eric signed off. In Director Review.';
+      }
+      return '';
     }
     function cardAlert(kind, title, text) {
       const alert = document.createElement('div');

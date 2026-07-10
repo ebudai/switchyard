@@ -144,7 +144,13 @@ main() {
     log "reinstalling demo bundle into $DEMO_TARGET_DIR"
     (
         cd "$DEMO_SOURCE_ROOT"
+<<<<<<< HEAD
         SOURCE_BUILD_DIR="$DEMO_BUILD_DIR" "$installer" "$DEMO_TARGET_DIR"
+=======
+        INSTALL_STAGE3B_DEMO_REF="$NEWREV" \
+        SOURCE_BUILD_DIR="$DEMO_BUILD_DIR" \
+        "$installer" "$DEMO_TARGET_DIR"
+>>>>>>> origin/feature/pgu-157-demo-source-sync
     )
 
     local install_commit=""

@@ -26,20 +26,21 @@ COMMIT_GIT_DIR_DEFAULT = Path("/data/git/pgu.git")
 ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "agent", "director", "research")
 LEGACY_ASSIGNEE_ALIASES = {"ui": "app"}
 LEGACY_STATE_ALIASES = {"open": "analysis"}
-STATES = ("analysis", "ready", "in_progress", "audit", "eric_review", "director_review", "done", "cancelled")
+STATES = ("backlog", "analysis", "ready", "in_progress", "audit", "eric_review", "director_review", "done", "cancelled")
 TERMINAL_STATES = {"done", "cancelled"}
 LEGAL_STATE_TRANSITIONS = {
-    "analysis": {"ready", "cancelled"},
-    "ready": {"in_progress", "analysis", "cancelled"},
-    "in_progress": {"audit", "ready", "analysis", "cancelled"},
-    "audit": {"eric_review", "director_review", "analysis", "cancelled"},
-    "eric_review": {"director_review", "audit", "analysis", "cancelled"},
-    "director_review": {"done", "analysis", "cancelled"},
-    "done": {"analysis"},
-    "cancelled": {"analysis"},
+    "backlog": {"analysis", "ready"},
+    "analysis": {"ready", "backlog", "cancelled"},
+    "ready": {"in_progress", "analysis", "backlog", "cancelled"},
+    "in_progress": {"audit", "ready", "analysis", "backlog", "cancelled"},
+    "audit": {"eric_review", "director_review", "analysis", "backlog", "cancelled"},
+    "eric_review": {"director_review", "audit", "analysis", "backlog", "cancelled"},
+    "director_review": {"done", "analysis", "backlog", "cancelled"},
+    "done": {"analysis", "backlog"},
+    "cancelled": {"analysis", "backlog"},
 }
 ACTIVE_STATES = tuple(state for state in STATES if state not in TERMINAL_STATES)
-REOPEN_RESET_TARGET_STATES = {"open", "analysis", "ready", "in_progress"}
+REOPEN_RESET_TARGET_STATES = {"open", "backlog", "analysis", "ready", "in_progress"}
 REVIEWED_STATES = {"director_review", "audit", "eric_review"}
 RESET_REVIEW_ARTIFACT_SOURCE_STATES = REVIEWED_STATES | TERMINAL_STATES
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
@@ -529,7 +530,7 @@ class TicketBoardApp:
             )
         if previous_state == "analysis" and ticket["state"] == "in_progress":
             raise ValueError("analysis tickets must move through ready before entering in_progress")
-        if previous_state in {"open", "analysis"} and ticket["state"] == "ready":
+        if previous_state in {"open", "backlog", "analysis"} and ticket["state"] == "ready":
             self._enforce_ready_requirements(ticket)
         if previous_state != "in_progress" and ticket["state"] == "in_progress":
             self._enforce_in_progress_requirements(ticket, previous_state=previous_state)

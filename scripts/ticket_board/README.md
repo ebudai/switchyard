@@ -72,11 +72,12 @@ Ticket schema:
 Allowed values:
 
 - `assignee`: `main`, `app`, `perf`, `ops`, `audit`, `agent`, `director`, `unassigned`
-- `state`: `analysis`, `ready`, `in_progress`, `audit`, `eric_review`, `director_review`, `done`, `cancelled`
+- `state`: `backlog`, `analysis`, `ready`, `in_progress`, `audit`, `eric_review`, `director_review`, `done`, `cancelled`
 
 Notes:
 
 - `eric_review` is reserved for tickets with `needs_eric_signoff: true`
+- `backlog` is for deferred or parked tickets; `analysis` is for active triage/spec work before a ticket is revived into `ready`
 - `blocked_by` is a list of ticket IDs the ticket is waiting on; unresolved blockers are any entries whose referenced ticket is not yet `done`
 - `implementation` is the director-authored implementation package/spec that must be present before a ticket can enter `ready` or `in_progress`
 - `ready` means specced, assigned, and queued for the assignee; `in_progress` means actively being worked
@@ -92,6 +93,7 @@ Notes:
 - The detail view renders attachments as a gallery; hover an image to remove it from the ticket
 - New transitions into `done` require either a verified `commit_hash` or `commit_exempt: true`
 - `analysis -> in_progress` is not a valid default path; tickets move `analysis -> ready -> in_progress`
+- Any state can move to `backlog` to defer work; backlog tickets can be revived to `analysis` or `ready`
 - The default review path is `in_progress -> audit -> eric_review -> director_review -> done`, or `in_progress -> audit -> director_review -> done` when Eric sign-off is not required
 - Only one unlinked ticket per assignee may be in `in_progress` at a time; linked tickets in the same `parent_id` cluster count as one unit of work, and `ready` is the per-role queue
 - For new shell-created tickets, prefer `scripts/directorctl ticket-create` over hand-writing `PGU-N.json`; it uses the same atomic filename reservation as the web app create path, so concurrent creators cannot collide on the same ticket ID

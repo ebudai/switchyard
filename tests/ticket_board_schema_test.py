@@ -59,6 +59,23 @@ EXPECTED_ASSIGNEES = {
     "director",
     "research",
 }
+EXPECTED_FUNCTION_API = {
+    "ticket_board.create_ticket",
+    "ticket_board.file_bug",
+    "ticket_board.route",
+    "ticket_board.start_work",
+    "ticket_board.submit_to_audit",
+    "ticket_board.audit_sign_off",
+    "ticket_board.audit_kick_back",
+    "ticket_board.eric_sign_off",
+    "ticket_board.eric_reopen",
+    "ticket_board.mark_done",
+    "ticket_board.defer",
+    "ticket_board.cancel",
+    "ticket_board.set_manually_controlled",
+    "ticket_board.set_blockers",
+    "ticket_board.add_comment",
+}
 
 FIELD_TO_SCHEMA_TOKENS = {
     "assignee": ["assignee"],
@@ -151,6 +168,8 @@ def main() -> int:
     assert "create or replace function ticket_board.notify_ticket_state_transition" in executable_schema_lower
     assert "pg_notify" in executable_schema_lower, "PGU-191 must notify on state transitions"
     assert "manually_controlled" in executable_schema_lower, "PGU-191 triggers must honor manual control"
+    for function_name in EXPECTED_FUNCTION_API:
+        assert f"create or replace function {function_name}" in executable_schema_lower
 
     print("ticket_board_schema_test: ok")
     return 0

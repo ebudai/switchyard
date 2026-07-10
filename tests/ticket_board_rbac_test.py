@@ -13,8 +13,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
 RBAC_PATH = ROOT / "scripts" / "ticket_board" / "rbac.sql"
-EXPECTED_ROLES = ["director", "ops", "app", "audit", "perf", "research", "main", "ticket_board_service"]
+EXPECTED_ROLES = ["director", "ops", "app", "audit", "perf", "research", "main", "agent", "ticket_board_service"]
 WORKER_ROLES = ["ops", "app", "audit", "perf", "research", "main", "ticket_board_service"]
+ROLE_SQL_ARRAY = "ARRAY['director','ops','app','audit','perf','research','main','agent','ticket_board_service']"
 
 
 def run(args: list[str], *, capture: bool = True, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -40,6 +41,19 @@ def psql(conninfo: str, sql: str) -> str:
     return run(["psql", "-X", "-v", "ON_ERROR_STOP=1", "-tA", conninfo], input_text=sql).stdout.strip()
 
 
+def psql_error(conninfo: str, sql: str) -> str:
+    proc = subprocess.run(
+        ["psql", "-X", "-v", "ON_ERROR_STOP=1", "-tA", conninfo],
+        input=sql,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode == 0:
+        raise AssertionError(f"SQL unexpectedly succeeded: {sql}")
+    return proc.stderr + proc.stdout
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="ticket-board-rbac.") as tmpdir:
         root = Path(tmpdir)
@@ -61,10 +75,10 @@ def main() -> int:
             role_rows = json.loads(
                 psql(
                     conninfo,
-                    """
+                    f"""
 SELECT jsonb_object_agg(rolname, jsonb_build_object('can_login', rolcanlogin, 'password_is_null', rolpassword IS NULL))::text
 FROM pg_authid
-WHERE rolname = ANY(ARRAY['director','ops','app','audit','perf','research','main','ticket_board_service']);
+WHERE rolname = ANY({ROLE_SQL_ARRAY});
 """,
                 )
             )
@@ -75,9 +89,9 @@ WHERE rolname = ANY(ARRAY['director','ops','app','audit','perf','research','main
             schema_usage = json.loads(
                 psql(
                     conninfo,
-                    """
+                    f"""
 SELECT jsonb_object_agg(role_name, has_schema_privilege(role_name, 'ticket_board', 'USAGE'))::text
-FROM unnest(ARRAY['director','ops','app','audit','perf','research','main','ticket_board_service']) AS role_name;
+FROM unnest({ROLE_SQL_ARRAY}) AS role_name;
 """,
                 )
             )
@@ -86,9 +100,9 @@ FROM unnest(ARRAY['director','ops','app','audit','perf','research','main','ticke
             select_privileges = json.loads(
                 psql(
                     conninfo,
-                    """
+                    f"""
 SELECT jsonb_object_agg(role_name, has_table_privilege(role_name, 'ticket_board.tickets', 'SELECT'))::text
-FROM unnest(ARRAY['director','ops','app','audit','perf','research','main','ticket_board_service']) AS role_name;
+FROM unnest({ROLE_SQL_ARRAY}) AS role_name;
 """,
                 )
             )
@@ -97,15 +111,29 @@ FROM unnest(ARRAY['director','ops','app','audit','perf','research','main','ticke
             manual_update = json.loads(
                 psql(
                     conninfo,
-                    """
+                    f"""
 SELECT jsonb_object_agg(role_name, has_column_privilege(role_name, 'ticket_board.tickets', 'manually_controlled', 'UPDATE'))::text
-FROM unnest(ARRAY['director','ops','app','audit','perf','research','main','ticket_board_service']) AS role_name;
+FROM unnest({ROLE_SQL_ARRAY}) AS role_name;
 """,
                 )
             )
             assert manual_update["director"] is True, manual_update
             for role in WORKER_ROLES:
                 assert manual_update[role] is False, (role, manual_update)
+            manual_update_grantees = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_agg(grantee ORDER BY grantee)::text
+FROM information_schema.column_privileges
+WHERE table_schema = 'ticket_board'
+  AND table_name = 'tickets'
+  AND column_name = 'manually_controlled'
+  AND privilege_type = 'UPDATE';
+""",
+                )
+            )
+            assert manual_update_grantees == ["director"], manual_update_grantees
 
             worker_columns = json.loads(
                 psql(
@@ -115,8 +143,12 @@ SELECT jsonb_build_object(
   'app_state', has_column_privilege('app', 'ticket_board.tickets', 'state', 'UPDATE'),
   'app_audit_signoff', has_column_privilege('app', 'ticket_board.tickets', 'audit_signoff', 'UPDATE'),
   'audit_audit_signoff', has_column_privilege('audit', 'ticket_board.tickets', 'audit_signoff', 'UPDATE'),
+  'audit_assignee', has_column_privilege('audit', 'ticket_board.tickets', 'assignee', 'UPDATE'),
+  'audit_needs_eric_signoff', has_column_privilege('audit', 'ticket_board.tickets', 'needs_eric_signoff', 'UPDATE'),
+  'audit_blocked_reason', has_column_privilege('audit', 'ticket_board.tickets', 'blocked_reason', 'UPDATE'),
   'service_state', has_column_privilege('ticket_board_service', 'ticket_board.tickets', 'state', 'UPDATE'),
   'service_manual', has_column_privilege('ticket_board_service', 'ticket_board.tickets', 'manually_controlled', 'UPDATE'),
+  'agent_state', has_column_privilege('agent', 'ticket_board.tickets', 'state', 'UPDATE'),
   'app_comment_insert', has_table_privilege('app', 'ticket_board.ticket_comments', 'INSERT')
 )::text;
 """,
@@ -126,10 +158,100 @@ SELECT jsonb_build_object(
                 "app_state": True,
                 "app_audit_signoff": False,
                 "audit_audit_signoff": True,
+                "audit_assignee": True,
+                "audit_needs_eric_signoff": True,
+                "audit_blocked_reason": True,
                 "service_state": True,
                 "service_manual": False,
+                "agent_state": True,
                 "app_comment_insert": True,
             }, worker_columns
+
+            psql(
+                conninfo,
+                """
+INSERT INTO ticket_board.tickets (
+    id, title, body, state, assignee, created_text, updated_text, source_json
+) VALUES (
+    'PGU-1', 'RBAC fixture', '', 'audit', 'audit',
+    '2026-07-10T00:00:00+00:00',
+    '2026-07-10T00:00:00+00:00',
+    '{"id":"PGU-1","title":"RBAC fixture","body":"","state":"audit","assignee":"audit","comments":[],"created":"2026-07-10T00:00:00+00:00","updated":"2026-07-10T00:00:00+00:00"}'::jsonb
+);
+""",
+            )
+            psql(
+                conninfo,
+                """
+SET ROLE audit;
+UPDATE ticket_board.tickets
+SET assignee = 'ops',
+    needs_eric_signoff = true,
+    blocked_reason = 'Waiting on director merge.'
+WHERE id = 'PGU-1';
+RESET ROLE;
+""",
+            )
+            audit_column_update = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'assignee', assignee,
+    'needs_eric_signoff', needs_eric_signoff,
+    'blocked_reason', blocked_reason
+)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-1';
+""",
+                )
+            )
+            assert audit_column_update == {
+                "assignee": "ops",
+                "needs_eric_signoff": True,
+                "blocked_reason": "Waiting on director merge.",
+            }, audit_column_update
+            psql(
+                conninfo,
+                """
+SET ROLE audit;
+UPDATE ticket_board.tickets SET state = 'analysis' WHERE id = 'PGU-1';
+RESET ROLE;
+""",
+            )
+            audit_update = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'assignee', assignee,
+    'needs_eric_signoff', needs_eric_signoff,
+    'blocked_reason', blocked_reason,
+    'state', state
+)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-1';
+""",
+                )
+            )
+            assert audit_update["state"] == "analysis", audit_update
+            assert audit_update["assignee"] in {"ops", "unassigned"}, audit_update
+            assert audit_update["needs_eric_signoff"] is True, audit_update
+            assert audit_update["blocked_reason"] == "Waiting on director merge.", audit_update
+            assert "permission denied" in psql_error(
+                conninfo,
+                """
+SET ROLE audit;
+UPDATE ticket_board.tickets SET manually_controlled = true WHERE id = 'PGU-1';
+""",
+            )
+            assert "permission denied" in psql_error(
+                conninfo,
+                """
+SET ROLE app;
+UPDATE ticket_board.tickets SET audit_signoff = true WHERE id = 'PGU-1';
+""",
+            )
         finally:
             subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], check=False)
 

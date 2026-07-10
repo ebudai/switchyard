@@ -18,31 +18,32 @@ BEGIN
         'perf',
         'research',
         'main',
+        'agent',
         'ticket_board_service'
     ] LOOP
         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
             EXECUTE format('CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION', role_name);
         ELSE
-            EXECUTE format('ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION', role_name);
+            EXECUTE format('ALTER ROLE %I LOGIN', role_name);
         END IF;
     END LOOP;
 END;
 $$;
 
 REVOKE ALL ON SCHEMA ticket_board FROM PUBLIC;
-GRANT USAGE ON SCHEMA ticket_board TO director, ops, app, audit, perf, research, main, ticket_board_service;
+GRANT USAGE ON SCHEMA ticket_board TO director, ops, app, audit, perf, research, main, agent, ticket_board_service;
 
 REVOKE ALL ON ALL TABLES IN SCHEMA ticket_board FROM PUBLIC;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA ticket_board FROM PUBLIC;
 
-REVOKE ALL ON ticket_board.tickets FROM director, ops, app, audit, perf, research, main, ticket_board_service;
-REVOKE ALL ON ticket_board.ticket_blockers FROM director, ops, app, audit, perf, research, main, ticket_board_service;
-REVOKE ALL ON ticket_board.ticket_comments FROM director, ops, app, audit, perf, research, main, ticket_board_service;
-REVOKE ALL ON ticket_board.ticket_attachments FROM director, ops, app, audit, perf, research, main, ticket_board_service;
-REVOKE ALL ON ticket_board.schema_migrations FROM director, ops, app, audit, perf, research, main, ticket_board_service;
-REVOKE ALL ON SEQUENCE ticket_board.ticket_comments_id_seq FROM director, ops, app, audit, perf, research, main, ticket_board_service;
+REVOKE ALL ON ticket_board.tickets FROM director, ops, app, audit, perf, research, main, agent, ticket_board_service;
+REVOKE ALL ON ticket_board.ticket_blockers FROM director, ops, app, audit, perf, research, main, agent, ticket_board_service;
+REVOKE ALL ON ticket_board.ticket_comments FROM director, ops, app, audit, perf, research, main, agent, ticket_board_service;
+REVOKE ALL ON ticket_board.ticket_attachments FROM director, ops, app, audit, perf, research, main, agent, ticket_board_service;
+REVOKE ALL ON ticket_board.schema_migrations FROM director, ops, app, audit, perf, research, main, agent, ticket_board_service;
+REVOKE ALL ON SEQUENCE ticket_board.ticket_comments_id_seq FROM director, ops, app, audit, perf, research, main, agent, ticket_board_service;
 
-GRANT SELECT ON ALL TABLES IN SCHEMA ticket_board TO director, ops, app, audit, perf, research, main, ticket_board_service;
+GRANT SELECT ON ALL TABLES IN SCHEMA ticket_board TO director, ops, app, audit, perf, research, main, agent, ticket_board_service;
 
 GRANT INSERT (
     id,
@@ -107,12 +108,15 @@ GRANT UPDATE (
     updated_at,
     source_json,
     row_updated_at
-) ON ticket_board.tickets TO ops, app, perf, research, main;
+) ON ticket_board.tickets TO ops, app, perf, research, main, agent;
 
 GRANT UPDATE (
     state,
+    assignee,
+    blocked_reason,
     audit_prompt,
     audit_signoff,
+    needs_eric_signoff,
     commit_hash,
     commit_exempt,
     updated_text,
@@ -124,9 +128,9 @@ GRANT UPDATE (
 GRANT INSERT, UPDATE, DELETE ON ticket_board.ticket_blockers TO director, ticket_board_service;
 GRANT INSERT, UPDATE, DELETE ON ticket_board.ticket_attachments TO director, ticket_board_service;
 GRANT INSERT, UPDATE, DELETE ON ticket_board.ticket_comments TO director, ticket_board_service;
-GRANT INSERT ON ticket_board.ticket_comments TO ops, app, audit, perf, research, main;
-GRANT USAGE, SELECT ON SEQUENCE ticket_board.ticket_comments_id_seq TO director, ops, app, audit, perf, research, main, ticket_board_service;
+GRANT INSERT ON ticket_board.ticket_comments TO ops, app, audit, perf, research, main, agent;
+GRANT USAGE, SELECT ON SEQUENCE ticket_board.ticket_comments_id_seq TO director, ops, app, audit, perf, research, main, agent, ticket_board_service;
 
-GRANT SELECT ON ticket_board.schema_migrations TO director, ops, app, audit, perf, research, main, ticket_board_service;
+GRANT SELECT ON ticket_board.schema_migrations TO director, ops, app, audit, perf, research, main, agent, ticket_board_service;
 
 COMMIT;

@@ -71,7 +71,7 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       populateCreateForm();
       renderCreateSection();
       renderErrors();
-      renderDoneToggle();
+      renderStateVisibilityToggles();
       renderBoard();
       renderDetail();
     }
@@ -238,7 +238,13 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
 
     showDoneInput.addEventListener('change', () => {
       state.showDone = showDoneInput.checked;
-      renderDoneToggle();
+      renderStateVisibilityToggles();
+      renderBoard();
+    });
+
+    showCancelledInput.addEventListener('change', () => {
+      state.showCancelled = showCancelledInput.checked;
+      renderStateVisibilityToggles();
       renderBoard();
     });
 

@@ -63,6 +63,10 @@ MARKUP = """  <div class="layout">
               <input id="showDoneInput" type="checkbox">
               <span>Show Done <span id="showDoneCount">(0)</span></span>
             </label>
+            <label class="check compact">
+              <input id="showCancelledInput" type="checkbox">
+              <span>Show Cancelled <span id="showCancelledCount">(0)</span></span>
+            </label>
           </div>
         </div>
         <div class="paths meta">

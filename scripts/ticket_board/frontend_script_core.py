@@ -9,6 +9,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       { key: 'eric_review', label: 'Eric Review' },
       { key: 'director_review', label: 'Director Review' },
       { key: 'done', label: 'Done' },
+      { key: 'cancelled', label: 'Cancelled' },
     ];
 
     const state = {
@@ -19,6 +20,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       selectedId: null,
       detailOpen: false,
       showDone: false,
+      showCancelled: false,
       detailDraft: null,
       eventSource: null,
       eventReconnectTimer: null,
@@ -40,6 +42,8 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     const needsEricInput = document.getElementById('needsEricInput');
     const showDoneInput = document.getElementById('showDoneInput');
     const showDoneCountEl = document.getElementById('showDoneCount');
+    const showCancelledInput = document.getElementById('showCancelledInput');
+    const showCancelledCountEl = document.getElementById('showCancelledCount');
     const createBtn = document.getElementById('createBtn');
     const createStatus = document.getElementById('createStatus');
     const createSectionToggleEl = document.getElementById('createSectionToggle');
@@ -262,6 +266,23 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         throw new Error(blockedReason);
       }
       await updateTicket(ticketId, { state: nextState });
+    }
+
+    async function cancelTicket(ticketId, who, text) {
+      const trimmedWho = who.trim();
+      const trimmedText = text.trim();
+      if (!trimmedWho || !trimmedText) {
+        throw new Error('cancellation requires a non-empty reason');
+      }
+      clearDetailDraft(ticketId);
+      await updateTicket(ticketId, {
+        state: 'cancelled',
+        comment: {
+          who: trimmedWho,
+          text: trimmedText,
+        },
+      });
+      setCreateStatus(`Cancelled ${ticketId}.`);
     }
 
     function clearDetailDraft(ticketId = null) {
@@ -854,13 +875,24 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     }
 
     function visibleColumns() {
-      return state.showDone ? COLUMNS : COLUMNS.filter((column) => column.key !== 'done');
+      return COLUMNS.filter((column) => {
+        if (column.key === 'done' && !state.showDone) {
+          return false;
+        }
+        if (column.key === 'cancelled' && !state.showCancelled) {
+          return false;
+        }
+        return true;
+      });
     }
 
-    function renderDoneToggle() {
+    function renderStateVisibilityToggles() {
       const doneCount = columnTicketCount('done');
+      const cancelledCount = columnTicketCount('cancelled');
       showDoneInput.checked = state.showDone;
       showDoneCountEl.textContent = `(${doneCount})`;
+      showCancelledInput.checked = state.showCancelled;
+      showCancelledCountEl.textContent = `(${cancelledCount})`;
     }
 
     function renderCreateSection() {

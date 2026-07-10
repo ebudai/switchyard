@@ -14,13 +14,13 @@ from scripts.ticket_board.frontend import HTML
 
 
 def main() -> int:
-    assert "Done is hidden by default." in HTML
     assert "id=\"showDoneInput\"" in HTML
     assert "id=\"showDoneCount\"" in HTML
     assert "showDone: false," in HTML
     assert "function visibleColumns()" in HTML
-    assert "return state.showDone ? COLUMNS : COLUMNS.filter((column) => column.key !== 'done');" in HTML
-    assert "function renderDoneToggle()" in HTML
+    assert "if (column.key === 'done' && !state.showDone) {" in HTML
+    assert "function renderStateVisibilityToggles()" in HTML
+    assert "const doneCount = columnTicketCount('done');" in HTML
     assert "visibleColumns().forEach((column) => {" in HTML
     assert "showDoneInput.addEventListener('change', () => {" in HTML
     print("done_column_hidden_default_test: ok")

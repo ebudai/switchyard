@@ -15,12 +15,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
 
-from .app import TicketBoardApp
+from .app import TicketBoardApp, _ticket_number
 from .frontend import HTML
-try:
-    from ticket_store_io import _ticket_number
-except ModuleNotFoundError:
-    from scripts.ticket_store_io import _ticket_number
 
 LOGGER = logging.getLogger(__name__)
 DIRECTOR_TARGET = "pgu-director:0.0"
@@ -109,7 +105,7 @@ class TicketBoardEventHub:
         with self._lock:
             self._listeners.discard(listener)
 
-    def notify_change(self, signature: tuple[tuple[str, int, int], ...] | None = None) -> int:
+    def notify_change(self, signature: tuple[tuple[object, ...], ...] | None = None) -> int:
         with self._lock:
             if signature is not None:
                 self._signature = signature
@@ -180,38 +176,9 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
     def verify_created_ticket_persisted(
         self,
         created: dict[str, object],
-        before_signature: tuple[tuple[str, int, int], ...],
-    ) -> tuple[tuple[str, int, int], ...]:
-        ticket_id = str(created.get("id", "")).strip()
-        title = str(created.get("title", "")).strip()
-        body = str(created.get("body", ""))
-        if not ticket_id or not title:
-            raise ValueError("created ticket missing id/title")
-
-        before_names = {name for name, _, _ in before_signature}
-        before_max = max((_ticket_number(Path(name).stem) for name in before_names), default=0)
-        created_number = _ticket_number(ticket_id)
-        if created_number <= before_max:
-            raise ValueError(f"create returned non-new ticket id: {ticket_id}")
-        if f"{ticket_id}.json" in before_names:
-            raise ValueError(f"create collided with existing ticket id: {ticket_id}")
-
-        persisted_path = self.app.store_dir / f"{ticket_id}.json"
-        if not persisted_path.is_file():
-            raise ValueError(f"created ticket was not persisted: {ticket_id}")
-        persisted = json.loads(persisted_path.read_text(encoding="utf-8"))
-        persisted_id = str(persisted.get("id", persisted_path.stem)).strip()
-        if persisted_id != ticket_id:
-            raise ValueError(f"created ticket id mismatch on disk: {persisted_id} != {ticket_id}")
-        if str(persisted.get("title", "")).strip() != title:
-            raise ValueError(f"created ticket title mismatch on disk: {ticket_id}")
-        if str(persisted.get("body", "")) != body:
-            raise ValueError(f"created ticket body mismatch on disk: {ticket_id}")
-
-        after_signature = self.app.store_signature()
-        if after_signature == before_signature:
-            raise ValueError(f"ticket create did not change the store: {ticket_id}")
-        return after_signature
+        before_signature: tuple[tuple[object, ...], ...],
+    ) -> tuple[tuple[object, ...], ...]:
+        return self.app.verify_created_ticket_persisted(created, before_signature)
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)

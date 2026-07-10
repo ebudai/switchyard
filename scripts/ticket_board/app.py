@@ -504,7 +504,11 @@ class TicketBoardApp:
 
     def _pg_connect(self) -> Any:
         psycopg, dict_row, _ = self._pg_imports()
-        return psycopg.connect(self.database_url or "", row_factory=dict_row)
+        conn = psycopg.connect(self.database_url or "", row_factory=dict_row)
+        conn.autocommit = True
+        conn.execute("SET client_encoding TO 'UTF8';")
+        conn.autocommit = False
+        return conn
 
     def _pg_jsonb(self, payload: dict[str, Any]) -> Any:
         _, _, Jsonb = self._pg_imports()

@@ -107,4 +107,4 @@ PostgreSQL migration foundation:
 - `scripts/ticket_board/rbac.sql` creates the login roles for each board pane/service role without setting passwords and grants minimal table/column permissions; only `director` can update `tickets.manually_controlled`
 - `scripts/ticket_board/import_json_to_postgres.py --database "$DATABASE_URL" --apply-schema` imports the JSON store into that schema, is safe to rerun, and verifies DB parity against the source JSON after import
 - `tickets.manually_controlled` defaults to `false`; PGU-191 transition/notification triggers must no-op when it is `true` so the director can hand-manipulate exceptional tickets
-- Transition enforcement and notification triggers are intentionally not part of this schema; those are later migration steps
+- The PGU-191 trigger layer enforces non-timed workflow gates and emits `pg_notify('ticket_board_state_transition', ...)` on state transitions; timed nudges and sweeps remain in the watchdog until cutover

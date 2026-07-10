@@ -1,7 +1,8 @@
 -- PGU ticket-board PostgreSQL schema.
 --
--- PGU-189 scope: schema only. Do not add triggers here. The import script and
--- trigger-based transition enforcement / pg_notify routing are separate tickets.
+-- PGU-191 adds the parallel-run trigger layer for non-timed workflow
+-- enforcement and state-transition notifications. Timed nudges and sweeps stay
+-- in the watchdog until a later cutover.
 --
 -- Design goals:
 --   * Lossless import of the existing JSON ticket files.
@@ -154,6 +155,215 @@ CREATE TABLE IF NOT EXISTS ticket_board.ticket_attachments (
 
 CREATE INDEX IF NOT EXISTS ticket_attachments_path_idx
     ON ticket_board.ticket_attachments (path);
+
+CREATE OR REPLACE FUNCTION ticket_board.ticket_cluster_root_id(
+    p_ticket_id text,
+    p_parent_id text
+)
+RETURNS text
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    current_root text := p_ticket_id;
+    current_parent text := coalesce(nullif(p_parent_id, ''), '');
+    next_parent text;
+    seen text[] := ARRAY[p_ticket_id];
+BEGIN
+    WHILE current_parent <> '' LOOP
+        IF current_parent = ANY(seen) THEN
+            RETURN current_parent;
+        END IF;
+        seen := seen || current_parent;
+        current_root := current_parent;
+
+        SELECT parent_id
+        INTO next_parent
+        FROM ticket_board.tickets
+        WHERE id = current_parent;
+
+        current_parent := coalesce(nullif(next_parent, ''), '');
+    END LOOP;
+
+    RETURN current_root;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.enforce_ticket_workflow_update()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    current_root text;
+    conflicting_ticket_id text;
+BEGIN
+    IF coalesce(OLD.manually_controlled, false) OR coalesce(NEW.manually_controlled, false) THEN
+        RETURN NEW;
+    END IF;
+
+    IF NEW.state = 'eric_review' AND NOT NEW.needs_eric_signoff THEN
+        NEW.state := 'audit';
+        NEW.audit_signoff := false;
+    END IF;
+    IF NOT NEW.needs_eric_signoff THEN
+        NEW.eric_signoff := false;
+    END IF;
+    IF NEW.state = 'eric_review' AND NEW.eric_signoff THEN
+        NEW.state := 'director_review';
+        NEW.assignee := 'director';
+    END IF;
+    IF NEW.state = 'audit' AND NEW.audit_signoff THEN
+        NEW.state := CASE WHEN NEW.needs_eric_signoff THEN 'eric_review' ELSE 'director_review' END;
+        NEW.assignee := 'director';
+    END IF;
+
+    IF OLD.state IS DISTINCT FROM NEW.state THEN
+        IF NOT (
+            (OLD.state = 'backlog' AND NEW.state IN ('analysis', 'ready')) OR
+            (OLD.state = 'analysis' AND NEW.state IN ('ready', 'backlog', 'cancelled')) OR
+            (OLD.state = 'ready' AND NEW.state IN ('in_progress', 'analysis', 'backlog', 'cancelled')) OR
+            (OLD.state = 'in_progress' AND NEW.state IN ('audit', 'ready', 'analysis', 'backlog', 'cancelled')) OR
+            (OLD.state = 'audit' AND NEW.state IN ('eric_review', 'director_review', 'analysis', 'backlog', 'cancelled')) OR
+            (OLD.state = 'eric_review' AND NEW.state IN ('director_review', 'audit', 'analysis', 'backlog', 'cancelled')) OR
+            (OLD.state = 'director_review' AND NEW.state IN ('done', 'analysis', 'backlog', 'cancelled')) OR
+            (OLD.state = 'done' AND NEW.state IN ('analysis', 'backlog')) OR
+            (OLD.state = 'cancelled' AND NEW.state IN ('analysis', 'backlog'))
+        ) THEN
+            RAISE EXCEPTION 'illegal state transition: % -> %', OLD.state, NEW.state;
+        END IF;
+    END IF;
+
+    IF OLD.state IN ('audit', 'eric_review', 'director_review', 'done', 'cancelled')
+       AND NEW.state IN ('backlog', 'analysis', 'ready', 'in_progress') THEN
+        NEW.audit_signoff := false;
+        NEW.commit_hash := '';
+    END IF;
+
+    IF OLD.state = 'audit' AND NEW.state = 'analysis' THEN
+        NEW.assignee := 'unassigned';
+    END IF;
+
+    IF OLD.state NOT IN ('done', 'cancelled') AND NEW.state = 'cancelled' THEN
+        IF NOT EXISTS (
+            SELECT 1
+            FROM ticket_board.ticket_comments
+            WHERE ticket_id = NEW.id
+              AND btrim(text) <> ''
+              AND xmin = pg_current_xact_id()::xid
+        ) THEN
+            RAISE EXCEPTION 'cancelling a ticket requires a non-empty comment explaining why';
+        END IF;
+    ELSIF OLD.state IN ('done', 'cancelled') AND NEW.state = 'cancelled' AND OLD.state IS DISTINCT FROM NEW.state THEN
+        RAISE EXCEPTION 'only active tickets can be cancelled';
+    END IF;
+
+    IF OLD.state IN ('backlog', 'analysis') AND NEW.state = 'ready' THEN
+        IF NEW.assignee = 'unassigned' THEN
+            RAISE EXCEPTION 'assignee must not be unassigned before a ticket can enter ready';
+        END IF;
+        IF btrim(NEW.implementation) = '' THEN
+            RAISE EXCEPTION 'implementation must be non-empty before a ticket can enter ready';
+        END IF;
+    END IF;
+
+    IF OLD.state <> 'in_progress' AND NEW.state = 'in_progress' THEN
+        IF OLD.state = 'analysis' THEN
+            RAISE EXCEPTION 'analysis tickets must move through ready before entering in_progress';
+        END IF;
+        IF NEW.assignee = 'unassigned' THEN
+            RAISE EXCEPTION 'assignee must not be unassigned before a ticket can enter in_progress';
+        END IF;
+        IF btrim(NEW.implementation) = '' THEN
+            RAISE EXCEPTION 'implementation must be non-empty before a ticket can enter in_progress';
+        END IF;
+
+        current_root := ticket_board.ticket_cluster_root_id(NEW.id, NEW.parent_id);
+        SELECT other.id
+        INTO conflicting_ticket_id
+        FROM ticket_board.tickets AS other
+        WHERE other.id <> NEW.id
+          AND other.state = 'in_progress'
+          AND other.assignee = NEW.assignee
+          AND ticket_board.ticket_cluster_root_id(other.id, other.parent_id) <> current_root
+        ORDER BY other.ticket_number
+        LIMIT 1;
+
+        IF conflicting_ticket_id IS NOT NULL THEN
+            RAISE EXCEPTION '% already has an in-progress ticket %; finish or move it first',
+                NEW.assignee,
+                conflicting_ticket_id;
+        END IF;
+    END IF;
+
+    IF OLD.state <> 'director_review' AND NEW.state = 'director_review' AND NOT NEW.audit_signoff THEN
+        RAISE EXCEPTION 'audit_signoff must be true before a ticket can enter director_review';
+    END IF;
+    IF OLD.state NOT IN ('audit', 'eric_review', 'director_review') AND NEW.state = 'director_review' THEN
+        RAISE EXCEPTION 'tickets must pass through audit before entering director_review';
+    END IF;
+    IF OLD.state = 'audit' AND NEW.state = 'director_review' AND NEW.needs_eric_signoff THEN
+        RAISE EXCEPTION 'tickets requiring Eric signoff must pass through eric_review before entering director_review';
+    END IF;
+    IF OLD.state = 'audit' AND NEW.state IN ('eric_review', 'director_review', 'done') AND NOT NEW.audit_signoff THEN
+        RAISE EXCEPTION 'audit_signoff must be true before a ticket can leave audit';
+    END IF;
+    IF OLD.state = 'eric_review'
+       AND NEW.state = 'director_review'
+       AND NEW.needs_eric_signoff
+       AND NOT NEW.eric_signoff THEN
+        RAISE EXCEPTION 'eric_signoff must be true before a ticket can leave eric_review';
+    END IF;
+    IF NEW.state = 'done' AND OLD.state NOT IN ('done', 'director_review') THEN
+        RAISE EXCEPTION 'tickets can only enter done from director_review';
+    END IF;
+    IF OLD.state <> 'done' AND NEW.state = 'done' AND NOT NEW.commit_exempt AND btrim(NEW.commit_hash) = '' THEN
+        RAISE EXCEPTION 'commit_hash is required before a ticket can enter done';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.notify_ticket_state_transition()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF coalesce(OLD.manually_controlled, false) OR coalesce(NEW.manually_controlled, false) THEN
+        RETURN NULL;
+    END IF;
+
+    IF OLD.state IS DISTINCT FROM NEW.state THEN
+        PERFORM pg_notify(
+            'ticket_board_state_transition',
+            jsonb_build_object(
+                'id', NEW.id,
+                'title', NEW.title,
+                'old_state', OLD.state,
+                'new_state', NEW.state,
+                'assignee', NEW.assignee,
+                'updated_at', NEW.updated_at,
+                'ticket_number', NEW.ticket_number
+            )::text
+        );
+    END IF;
+
+    RETURN NULL;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tickets_enforce_workflow_update ON ticket_board.tickets;
+CREATE TRIGGER tickets_enforce_workflow_update
+BEFORE UPDATE ON ticket_board.tickets
+FOR EACH ROW
+EXECUTE FUNCTION ticket_board.enforce_ticket_workflow_update();
+
+DROP TRIGGER IF EXISTS tickets_notify_state_transition ON ticket_board.tickets;
+CREATE TRIGGER tickets_notify_state_transition
+AFTER UPDATE ON ticket_board.tickets
+FOR EACH ROW
+WHEN (OLD.state IS DISTINCT FROM NEW.state)
+EXECUTE FUNCTION ticket_board.notify_ticket_state_transition();
 
 INSERT INTO ticket_board.schema_migrations (version, description)
 VALUES (1, 'initial ticket-board schema for JSON ticket import')

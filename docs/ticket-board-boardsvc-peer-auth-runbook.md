@@ -5,6 +5,14 @@ cutover. The goal is to run `pgu-ticket-board.service` as a dedicated `boardsvc`
 OS user and let PostgreSQL peer-auth that process to the `ticket_board_service`
 DB role without any board password on disk.
 
+This package targets the post-cutover DB-backed board. It intentionally does not
+grant `boardsvc` access to `/home/agent/.claude/pgu-tickets`; live tickets should
+come from PostgreSQL through the `ticket_board_service` role. Attachment files
+are still prepared as filesystem-backed under
+`/home/agent/.claude/pgu-tickets-assets`; if Eric decides attachments move into
+Postgres or another store during cutover, remove the `--assets` unit argument and
+skip the `ASSET_ROOT` ACL grant before installing.
+
 ## Artifacts
 
 - `scripts/ticket-board-boardsvc-setup.sh`: root-only setup helper. It prints
@@ -23,18 +31,18 @@ production uses a different database.
 # 1. Create the dedicated non-login service user.
 id -u boardsvc >/dev/null 2>&1 || sudo useradd -r -M -d /nonexistent -s /usr/sbin/nologin boardsvc
 
-# 2. Add local peer auth for boardsvc -> ticket_board_service and reload Postgres.
+# 2. Add local peer auth, reload Postgres, and grant deploy/assets/frames ACLs.
 sudo PG_DATABASE=pgu scripts/ticket-board-boardsvc-setup.sh --apply
 
-# 3. Install the proposed system unit and start the board under boardsvc.
+# 3. Install the reviewed system unit and start the board under boardsvc.
 sudo install -m 0644 deploy/systemd/pgu-ticket-board.service.boardsvc /etc/systemd/system/pgu-ticket-board.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now pgu-ticket-board.service
 ```
 
-The setup helper also applies ACLs so `boardsvc` can traverse `/home/agent` and
-read/execute `/home/agent/pgu-ticketboard-live` while preserving the existing
-`agent` ownership model for deploy exports.
+Before installing the unit, verify the deployed code is the DB-backed board. This
+prep package deliberately does not make the JSON store readable or writable by
+`boardsvc`.
 
 ## What The Setup Does
 
@@ -50,13 +58,20 @@ local   pgu   ticket_board_service   peer map=pgu_ticket_board_service
 pgu_ticket_board_service   boardsvc   ticket_board_service
 ```
 
-The deploy-tree step uses ACLs:
+The deploy/assets/frames step uses ACLs:
 
 ```bash
 sudo setfacl -m u:boardsvc:--x /home/agent
 sudo setfacl -R -m u:boardsvc:rx /home/agent/pgu-ticketboard-live
 find /home/agent/pgu-ticketboard-live -type d -exec sudo setfacl -m d:u:boardsvc:rx {} +
+sudo mkdir -p /home/agent/.claude/pgu-tickets-assets /tmp/pgu-frames
+sudo setfacl -R -m u:boardsvc:rwx /home/agent/.claude/pgu-tickets-assets /tmp/pgu-frames
+find /home/agent/.claude/pgu-tickets-assets /tmp/pgu-frames -type d \
+  -exec sudo setfacl -m d:u:boardsvc:rwx {} +
 ```
+
+Do not add an ACL for `/home/agent/.claude/pgu-tickets` unless the supervised
+cutover explicitly abandons the DB-backed ticket-store plan.
 
 ## Verify
 
@@ -75,13 +90,32 @@ sudo -u boardsvc env PGHOST=/var/run/postgresql PGDATABASE=pgu PGUSER=ticket_boa
 # expected: ticket_board_service
 ```
 
+Capture the expected real ticket count from Postgres before the restart:
+
+```bash
+EXPECTED_TICKETS="$(sudo -u boardsvc env PGHOST=/var/run/postgresql PGDATABASE=pgu PGUSER=ticket_board_service \
+  psql -Atqc "select count(*) from ticket_board.tickets;")"
+test "$EXPECTED_TICKETS" -gt 0
+```
+
 Confirm the board is running under the dedicated user:
 
 ```bash
 systemctl status pgu-ticket-board.service
 systemctl show pgu-ticket-board.service -p User -p FragmentPath
 pgrep -a -u boardsvc -f 'scripts/ticket-board.py'
-curl -fsS http://127.0.0.1:8770/api/snapshot >/dev/null
+curl -fsS http://127.0.0.1:8770/api/board >/dev/null
+BOARD_TICKETS="$(curl -fsS http://127.0.0.1:8770/api/board | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["tickets"]))')"
+test "$BOARD_TICKETS" = "$EXPECTED_TICKETS"
+```
+
+Confirm the board reports explicit non-HOME runtime paths:
+
+```bash
+curl -fsS http://127.0.0.1:8770/api/board | python3 -c 'import json,sys
+data=json.load(sys.stdin)
+assert data["frame_dir"] == "/tmp/pgu-frames", data["frame_dir"]
+assert data["asset_dir"] == "/home/agent/.claude/pgu-tickets-assets", data["asset_dir"]'
 ```
 
 Confirm there is no password-bearing board credential in `agent`-readable space:
@@ -116,4 +150,5 @@ Remove the deploy ACLs if the system service will not be retried:
 ```bash
 sudo setfacl -x u:boardsvc /home/agent
 sudo setfacl -R -x u:boardsvc -x d:u:boardsvc /home/agent/pgu-ticketboard-live
+sudo setfacl -R -x u:boardsvc -x d:u:boardsvc /home/agent/.claude/pgu-tickets-assets /tmp/pgu-frames
 ```

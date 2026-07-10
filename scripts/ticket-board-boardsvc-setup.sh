@@ -10,6 +10,8 @@ SERVICE_ROLE="${SERVICE_ROLE:-ticket_board_service}"
 PG_DATABASE="${PG_DATABASE:-pgu}"
 PG_IDENT_MAP="${PG_IDENT_MAP:-pgu_ticket_board_service}"
 BOARD_ROOT="${BOARD_ROOT:-/home/agent/pgu-ticketboard-live}"
+ASSET_ROOT="${ASSET_ROOT:-/home/agent/.claude/pgu-tickets-assets}"
+FRAME_ROOT="${FRAME_ROOT:-/tmp/pgu-frames}"
 
 usage() {
     cat <<EOF
@@ -18,17 +20,18 @@ Usage:
   sudo PG_DATABASE=<db> $0 --apply
 
 Creates the $SERVICE_USER OS user, appends peer-auth pg_hba/pg_ident rules for
-$SERVICE_ROLE, reloads PostgreSQL, and grants $SERVICE_USER read/execute access
-to $BOARD_ROOT using ACLs. Defaults are shown by --print-root-commands.
+$SERVICE_ROLE, reloads PostgreSQL, and grants $SERVICE_USER access to the
+deploy, asset, and frame directories using ACLs. Defaults are shown by
+--print-root-commands.
 EOF
 }
 
 print_root_commands() {
     cat <<EOF
 # 1. Create $SERVICE_USER, add peer auth for $SERVICE_ROLE, reload PostgreSQL,
-#    and grant deploy-tree ACL access.
-sudo PG_DATABASE=$PG_DATABASE PG_IDENT_MAP=$PG_IDENT_MAP \\
-  SERVICE_USER=$SERVICE_USER SERVICE_ROLE=$SERVICE_ROLE \\
+#    and grant deploy/assets/frames ACL access.
+sudo PG_DATABASE=$PG_DATABASE PG_IDENT_MAP=$PG_IDENT_MAP BOARD_ROOT=$BOARD_ROOT \\
+  ASSET_ROOT=$ASSET_ROOT FRAME_ROOT=$FRAME_ROOT SERVICE_USER=$SERVICE_USER SERVICE_ROLE=$SERVICE_ROLE \\
   scripts/ticket-board-boardsvc-setup.sh --apply
 
 # 2. Install the proposed system unit after reviewing/editing PGDATABASE.
@@ -58,6 +61,19 @@ postgres_setting() {
     runuser -u postgres -- psql -Atqc "SHOW $setting"
 }
 
+grant_read_exec_acl() {
+    local path="$1"
+    setfacl -R -m "u:$SERVICE_USER:rx" "$path"
+    find "$path" -type d -exec setfacl -m "d:u:$SERVICE_USER:rx" {} +
+}
+
+grant_write_acl() {
+    local path="$1"
+    mkdir -p "$path"
+    setfacl -R -m "u:$SERVICE_USER:rwx" "$path"
+    find "$path" -type d -exec setfacl -m "d:u:$SERVICE_USER:rwx" {} +
+}
+
 apply_setup() {
     require_root
 
@@ -82,10 +98,12 @@ apply_setup() {
         exit 1
     fi
     setfacl -m "u:$SERVICE_USER:--x" /home/agent
-    setfacl -R -m "u:$SERVICE_USER:rx" "$BOARD_ROOT"
-    find "$BOARD_ROOT" -type d -exec setfacl -m "d:u:$SERVICE_USER:rx" {} +
+    grant_read_exec_acl "$BOARD_ROOT"
+    grant_write_acl "$ASSET_ROOT"
+    grant_write_acl "$FRAME_ROOT"
 
-    printf 'boardsvc peer-auth setup staged for DB %s and deploy root %s\n' "$PG_DATABASE" "$BOARD_ROOT"
+    printf 'boardsvc peer-auth setup staged for DB %s, deploy root %s, assets %s, frames %s\n' \
+        "$PG_DATABASE" "$BOARD_ROOT" "$ASSET_ROOT" "$FRAME_ROOT"
 }
 
 main() {

@@ -145,8 +145,12 @@ def main() -> int:
         schema_lower,
     ), "manually_controlled must be a default-false trigger escape hatch"
     assert "{7,40}" in schema, "commit_hash check must allow historical short hashes"
-    assert "create trigger" not in executable_schema_lower, "PGU-189 must not add triggers"
-    assert "pg_notify" not in executable_schema_lower, "PGU-189 must not add notification logic"
+    assert "create trigger tickets_enforce_workflow_update" in executable_schema_lower
+    assert "create trigger tickets_notify_state_transition" in executable_schema_lower
+    assert "create or replace function ticket_board.enforce_ticket_workflow_update" in executable_schema_lower
+    assert "create or replace function ticket_board.notify_ticket_state_transition" in executable_schema_lower
+    assert "pg_notify" in executable_schema_lower, "PGU-191 must notify on state transitions"
+    assert "manually_controlled" in executable_schema_lower, "PGU-191 triggers must honor manual control"
 
     print("ticket_board_schema_test: ok")
     return 0

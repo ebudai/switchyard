@@ -173,6 +173,42 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def verify_created_ticket_persisted(
+        self,
+        created: dict[str, object],
+        before_signature: tuple[tuple[str, int, int], ...],
+    ) -> tuple[tuple[str, int, int], ...]:
+        ticket_id = str(created.get("id", "")).strip()
+        title = str(created.get("title", "")).strip()
+        body = str(created.get("body", ""))
+        if not ticket_id or not title:
+            raise ValueError("created ticket missing id/title")
+
+        before_names = {name for name, _, _ in before_signature}
+        before_max = max((self.app._ticket_number(Path(name).stem) for name in before_names), default=0)
+        created_number = self.app._ticket_number(ticket_id)
+        if created_number <= before_max:
+            raise ValueError(f"create returned non-new ticket id: {ticket_id}")
+        if f"{ticket_id}.json" in before_names:
+            raise ValueError(f"create collided with existing ticket id: {ticket_id}")
+
+        persisted_path = self.app.store_dir / f"{ticket_id}.json"
+        if not persisted_path.is_file():
+            raise ValueError(f"created ticket was not persisted: {ticket_id}")
+        persisted = json.loads(persisted_path.read_text(encoding="utf-8"))
+        persisted_id = str(persisted.get("id", persisted_path.stem)).strip()
+        if persisted_id != ticket_id:
+            raise ValueError(f"created ticket id mismatch on disk: {persisted_id} != {ticket_id}")
+        if str(persisted.get("title", "")).strip() != title:
+            raise ValueError(f"created ticket title mismatch on disk: {ticket_id}")
+        if str(persisted.get("body", "")) != body:
+            raise ValueError(f"created ticket body mismatch on disk: {ticket_id}")
+
+        after_signature = self.app.store_signature()
+        if after_signature == before_signature:
+            raise ValueError(f"ticket create did not change the store: {ticket_id}")
+        return after_signature
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/":
@@ -243,6 +279,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 return
             payload = json.loads(self.rfile.read(length) or b"{}")
             if parsed.path == "/api/tickets":
+                before_signature = self.app.store_signature()
                 created = self.app.create_ticket(
                     title=str(payload.get("title", "")),
                     body=str(payload.get("body", "")),
@@ -253,7 +290,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                     blocked_by=payload.get("blocked_by"),
                     blocked_reason=str(payload.get("blocked_reason", "")),
                 )
-                self.events.notify_change(self.app.store_signature())
+                after_signature = self.verify_created_ticket_persisted(created, before_signature)
+                self.events.notify_change(after_signature)
                 self.director_notifier.notify_ticket_created(created)
                 self.send_json({"ticket": created}, HTTPStatus.CREATED)
                 return

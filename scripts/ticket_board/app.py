@@ -512,6 +512,12 @@ class TicketBoardApp:
             self._enforce_ready_requirements(ticket)
         if previous_state != "in_progress" and ticket["state"] == "in_progress":
             self._enforce_in_progress_requirements(ticket, previous_state=previous_state)
+        if previous_state != "director_review" and ticket["state"] == "director_review" and not ticket["audit_signoff"]:
+            raise ValueError("audit_signoff must be true before a ticket can enter director_review")
+        if previous_state not in {"audit", "eric_review", "director_review"} and ticket["state"] == "director_review":
+            raise ValueError("tickets must pass through audit before entering director_review")
+        if previous_state == "audit" and ticket["state"] == "director_review" and ticket["needs_eric_signoff"]:
+            raise ValueError("tickets requiring Eric signoff must pass through eric_review before entering director_review")
         if previous_state == "audit" and ticket["state"] in {"eric_review", "director_review", "done"} and not ticket["audit_signoff"]:
             raise ValueError("audit_signoff must be true before a ticket can leave audit")
         if previous_state == "eric_review" and ticket["state"] == "director_review" and not ticket["eric_signoff"]:

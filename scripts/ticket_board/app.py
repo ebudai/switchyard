@@ -29,7 +29,7 @@ LEGAL_STATE_TRANSITIONS = {
     "ready": {"in_progress", "analysis", "cancelled"},
     "in_progress": {"audit", "ready", "analysis", "cancelled"},
     "audit": {"eric_review", "director_review", "analysis", "cancelled"},
-    "eric_review": {"director_review", "analysis", "cancelled"},
+    "eric_review": {"director_review", "audit", "analysis", "cancelled"},
     "director_review": {"done", "analysis", "cancelled"},
     "done": {"analysis"},
     "cancelled": {"analysis"},
@@ -245,15 +245,11 @@ class TicketBoardApp:
                 if ticket["state"] == "done":
                     self._enforce_done_requirements(ticket)
                 if ticket["state"] == "cancelled":
-<<<<<<< HEAD
                     self._enforce_cancel_requirements(
                         previous_state=None,
                         ticket=ticket,
                         has_reason_comment=bool(normalized_comments),
                     )
-=======
-                    self._enforce_cancel_requirements(previous_state=None, ticket=ticket, has_reason_comment=bool(normalized_comments))
->>>>>>> 88cc6a7 (PGU-158 add cancelled ticket state)
                 json.dump(self._serialize_ticket(ticket), handle, indent=2, sort_keys=True)
                 handle.write("\n")
             except Exception:

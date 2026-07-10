@@ -489,6 +489,9 @@ class TicketBoardApp:
             ticket["eric_signoff"] = False
             if ticket["state"] == "eric_review":
                 ticket["state"] = "audit"
+        if ticket["state"] == "audit" and ticket["audit_signoff"]:
+            ticket["state"] = "eric_review" if ticket["needs_eric_signoff"] else "director_review"
+            ticket["assignee"] = "director"
 
     def _enforce_blocked_reason_rule(self, blocked_by: list[str], blocked_reason: str) -> None:
         if blocked_by and not blocked_reason.strip():

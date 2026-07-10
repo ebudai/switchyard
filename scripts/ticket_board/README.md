@@ -97,3 +97,9 @@ Notes:
 - For new shell-created tickets, prefer `scripts/directorctl ticket-create` over hand-writing `PGU-N.json`; it uses the same atomic filename reservation as the web app create path, so concurrent creators cannot collide on the same ticket ID
 - For direct JSON edits/writes, use `scripts.ticket_store_io.atomic_write_json(...)` or an equivalent temp-file plus `os.replace(...)` flow; the watchdog now watches the store with inotify, so partial in-place writes are treated as malformed until they are replaced by a complete file
 - Human shell editing is fine; if a JSON file is invalid, the UI shows a read error banner
+
+PostgreSQL migration foundation:
+
+- `scripts/ticket_board/schema.sql` is the additive PGU-189 schema for a future database-backed board
+- The schema is a lossless import target for the current JSON store: normalized ticket, blocker, comment, and attachment tables plus `tickets.source_json` to preserve exact imported JSON
+- Transition enforcement and notification triggers are intentionally not part of this schema; those are later migration steps

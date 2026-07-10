@@ -829,6 +829,9 @@ STYLE = """    :root {
         max-height: min(100dvh - 36px, 100%);
       }
       @media (max-width: 980px) {
+        aside {
+          min-height: 0;
+        }
         .detail-modal {
           height: 100dvh;
           max-height: 100dvh;

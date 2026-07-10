@@ -38,7 +38,13 @@ require_cmd() {
 }
 
 git_bare() {
-    git --git-dir="$GIT_DIR" "$@"
+    env -u GIT_DIR -u GIT_WORK_TREE git --git-dir="$GIT_DIR" "$@"
+}
+
+git_worktree() {
+    local worktree="$1"
+    shift
+    env -u GIT_DIR -u GIT_WORK_TREE git -C "$worktree" "$@"
 }
 
 parse_args() {
@@ -74,7 +80,7 @@ parse_args() {
 ensure_demo_checkout() {
     if [[ -e "$DEMO_SOURCE_ROOT/.git" ]]; then
         log "updating demo source checkout at $DEMO_SOURCE_ROOT -> $NEWREV"
-        git -C "$DEMO_SOURCE_ROOT" reset --hard "$NEWREV" >/dev/null
+        git_worktree "$DEMO_SOURCE_ROOT" reset --hard "$NEWREV" >/dev/null
         return
     fi
     log "creating demo source checkout at $DEMO_SOURCE_ROOT -> $NEWREV"
@@ -144,6 +150,7 @@ main() {
     log "reinstalling demo bundle into $DEMO_TARGET_DIR"
     (
         cd "$DEMO_SOURCE_ROOT"
+        env -u GIT_DIR -u GIT_WORK_TREE \
         INSTALL_STAGE3B_DEMO_REF="$NEWREV" \
         SOURCE_BUILD_DIR="$DEMO_BUILD_DIR" \
         "$installer" "$DEMO_TARGET_DIR"

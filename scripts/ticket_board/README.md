@@ -96,3 +96,9 @@ Notes:
 - Only one unlinked ticket per assignee may be in `in_progress` at a time; linked tickets in the same `parent_id` cluster count as one unit of work, and `ready` is the per-role queue
 - For new shell-created tickets, prefer `scripts/directorctl ticket-create` over hand-writing `PGU-N.json`; it uses the same atomic filename reservation as the web app create path, so concurrent creators cannot collide on the same ticket ID
 - Human shell editing is fine; if a JSON file is invalid, the UI shows a read error banner
+
+PostgreSQL migration foundation:
+
+- `scripts/ticket_board/schema.sql` is the additive PGU-189 schema for a future database-backed board
+- The schema is a lossless import target for the current JSON store: normalized ticket, blocker, comment, and attachment tables plus `tickets.source_json` to preserve exact imported JSON
+- Transition enforcement and notification triggers are intentionally not part of this schema; those are later migration steps

@@ -20,6 +20,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       assignees: [],
       selectedId: null,
       detailOpen: false,
+      showDeferred: false,
       showDone: false,
       showCancelled: false,
       detailDraft: null,
@@ -41,6 +42,8 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     const titleInput = document.getElementById('titleInput');
     const bodyInput = document.getElementById('bodyInput');
     const needsEricInput = document.getElementById('needsEricInput');
+    const showDeferredInput = document.getElementById('showDeferredInput');
+    const showDeferredCountEl = document.getElementById('showDeferredCount');
     const showDoneInput = document.getElementById('showDoneInput');
     const showDoneCountEl = document.getElementById('showDoneCount');
     const showCancelledInput = document.getElementById('showCancelledInput');
@@ -880,6 +883,9 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
 
     function visibleColumns() {
       return COLUMNS.filter((column) => {
+        if (column.key === 'backlog' && !state.showDeferred) {
+          return false;
+        }
         if (column.key === 'done' && !state.showDone) {
           return false;
         }
@@ -891,8 +897,11 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     }
 
     function renderStateVisibilityToggles() {
+      const deferredCount = columnTicketCount('backlog');
       const doneCount = columnTicketCount('done');
       const cancelledCount = columnTicketCount('cancelled');
+      showDeferredInput.checked = state.showDeferred;
+      showDeferredCountEl.textContent = `(${deferredCount})`;
       showDoneInput.checked = state.showDone;
       showDoneCountEl.textContent = `(${doneCount})`;
       showCancelledInput.checked = state.showCancelled;

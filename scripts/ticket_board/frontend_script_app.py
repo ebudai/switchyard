@@ -236,6 +236,12 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       toggleSection('new_ticket');
     });
 
+    showDeferredInput.addEventListener('change', () => {
+      state.showDeferred = showDeferredInput.checked;
+      renderStateVisibilityToggles();
+      renderBoard();
+    });
+
     showDoneInput.addEventListener('change', () => {
       state.showDone = showDoneInput.checked;
       renderStateVisibilityToggles();

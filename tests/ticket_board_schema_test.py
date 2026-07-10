@@ -26,6 +26,7 @@ EXPECTED_JSON_FIELDS = {
     "eric_signoff",
     "id",
     "implementation",
+    "manually_controlled",
     "needs_eric_signoff",
     "parent_id",
     "screenshot",
@@ -73,6 +74,7 @@ FIELD_TO_SCHEMA_TOKENS = {
     "eric_signoff": ["eric_signoff"],
     "id": ["id", "ticket_number"],
     "implementation": ["implementation"],
+    "manually_controlled": ["manually_controlled"],
     "needs_eric_signoff": ["needs_eric_signoff"],
     "parent_id": ["parent_id"],
     "screenshot": ["screenshot", "ticket_attachments"],
@@ -138,6 +140,10 @@ def main() -> int:
     assert_contains_all(schema, EXPECTED_ASSIGNEES | live_assignees, "assignee constraint")
 
     assert re.search(r"commit_hash\s+text\s+not null", schema_lower), "commit_hash column should be text"
+    assert re.search(
+        r"manually_controlled\s+boolean\s+not null\s+default\s+false",
+        schema_lower,
+    ), "manually_controlled must be a default-false trigger escape hatch"
     assert "{7,40}" in schema, "commit_hash check must allow historical short hashes"
     assert "create trigger" not in executable_schema_lower, "PGU-189 must not add triggers"
     assert "pg_notify" not in executable_schema_lower, "PGU-189 must not add notification logic"

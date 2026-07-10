@@ -105,4 +105,5 @@ PostgreSQL migration foundation:
 - `scripts/ticket_board/schema.sql` is the additive PGU-189 schema for a future database-backed board
 - The schema is a lossless import target for the current JSON store: normalized ticket, blocker, comment, and attachment tables plus `tickets.source_json` to preserve exact imported JSON
 - `scripts/ticket_board/import_json_to_postgres.py --database "$DATABASE_URL" --apply-schema` imports the JSON store into that schema, is safe to rerun, and verifies DB parity against the source JSON after import
+- `tickets.manually_controlled` defaults to `false`; PGU-191 transition/notification triggers must no-op when it is `true` so the director can hand-manipulate exceptional tickets
 - Transition enforcement and notification triggers are intentionally not part of this schema; those are later migration steps

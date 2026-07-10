@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS ticket_board.tickets (
     audit_signoff boolean NOT NULL DEFAULT false,
     needs_eric_signoff boolean NOT NULL DEFAULT false,
     eric_signoff boolean NOT NULL DEFAULT false,
+    manually_controlled boolean NOT NULL DEFAULT false,
 
     -- Historical tickets include both full 40-char hashes and short hashes.
     commit_hash text NOT NULL DEFAULT ''

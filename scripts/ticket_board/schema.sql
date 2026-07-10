@@ -201,6 +201,22 @@ BEGIN
         RETURN NEW;
     END IF;
 
+    IF NEW.state = 'eric_review' AND NOT NEW.needs_eric_signoff THEN
+        NEW.state := 'audit';
+        NEW.audit_signoff := false;
+    END IF;
+    IF NOT NEW.needs_eric_signoff THEN
+        NEW.eric_signoff := false;
+    END IF;
+    IF NEW.state = 'eric_review' AND NEW.eric_signoff THEN
+        NEW.state := 'director_review';
+        NEW.assignee := 'director';
+    END IF;
+    IF NEW.state = 'audit' AND NEW.audit_signoff THEN
+        NEW.state := CASE WHEN NEW.needs_eric_signoff THEN 'eric_review' ELSE 'director_review' END;
+        NEW.assignee := 'director';
+    END IF;
+
     IF OLD.state IS DISTINCT FROM NEW.state THEN
         IF NOT (
             (OLD.state = 'backlog' AND NEW.state IN ('analysis', 'ready')) OR
@@ -217,8 +233,25 @@ BEGIN
         END IF;
     END IF;
 
+    IF OLD.state IN ('audit', 'eric_review', 'director_review', 'done', 'cancelled')
+       AND NEW.state IN ('backlog', 'analysis', 'ready', 'in_progress') THEN
+        NEW.audit_signoff := false;
+        NEW.commit_hash := '';
+    END IF;
+
+    IF OLD.state = 'audit' AND NEW.state = 'analysis' THEN
+        NEW.assignee := 'unassigned';
+    END IF;
+
     IF OLD.state NOT IN ('done', 'cancelled') AND NEW.state = 'cancelled' THEN
-        RETURN NEW;
+        IF NOT EXISTS (
+            SELECT 1
+            FROM ticket_board.ticket_comments
+            WHERE ticket_id = NEW.id
+              AND btrim(text) <> ''
+        ) THEN
+            RAISE EXCEPTION 'cancelling a ticket requires a non-empty comment explaining why';
+        END IF;
     ELSIF OLD.state IN ('done', 'cancelled') AND NEW.state = 'cancelled' AND OLD.state IS DISTINCT FROM NEW.state THEN
         RAISE EXCEPTION 'only active tickets can be cancelled';
     END IF;
@@ -326,7 +359,7 @@ EXECUTE FUNCTION ticket_board.enforce_ticket_workflow_update();
 
 DROP TRIGGER IF EXISTS tickets_notify_state_transition ON ticket_board.tickets;
 CREATE TRIGGER tickets_notify_state_transition
-AFTER UPDATE OF state ON ticket_board.tickets
+AFTER UPDATE ON ticket_board.tickets
 FOR EACH ROW
 WHEN (OLD.state IS DISTINCT FROM NEW.state)
 EXECUTE FUNCTION ticket_board.notify_ticket_state_transition();

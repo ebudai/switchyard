@@ -103,6 +103,31 @@ INSERT INTO ticket_board.tickets (
     )
 
 
+def insert_comment(conninfo: str, ticket_id: str, text: str = "Reason recorded.") -> None:
+    source = json.dumps(
+        {
+            "who": "director",
+            "text": text,
+            "ts": "2026-07-10T00:10:00+00:00",
+        },
+        sort_keys=True,
+    ).replace("'", "''")
+    psql(
+        conninfo,
+        f"""
+INSERT INTO ticket_board.ticket_comments (ticket_id, position, who, ts_text, text, source_json)
+VALUES (
+    '{ticket_id}',
+    COALESCE((SELECT max(position) + 1 FROM ticket_board.ticket_comments WHERE ticket_id = '{ticket_id}'), 0),
+    'director',
+    '2026-07-10T00:10:00+00:00',
+    '{text}',
+    '{source}'::jsonb
+);
+""",
+    )
+
+
 def assert_error(conninfo: str, sql: str, expected: str) -> None:
     proc = psql(conninfo, sql, expect_ok=False)
     combined = proc.stderr + proc.stdout
@@ -126,6 +151,15 @@ def main() -> int:
             psql(conninfo, SCHEMA_PATH.read_text(encoding="utf-8"))
 
             insert_ticket(conninfo, "PGU-1", title="Workflow", assignee="app")
+            assert_error(
+                conninfo,
+                "UPDATE ticket_board.tickets SET state = 'cancelled' WHERE id = 'PGU-1';",
+                "cancelling a ticket requires a non-empty comment explaining why",
+            )
+            insert_comment(conninfo, "PGU-1", "Cancelled with a reason.")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'cancelled' WHERE id = 'PGU-1';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'analysis' WHERE id = 'PGU-1';")
+
             assert_error(
                 conninfo,
                 "UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-1';",
@@ -173,6 +207,108 @@ def main() -> int:
                 "commit_hash is required",
             )
             psql(conninfo, "UPDATE ticket_board.tickets SET commit_exempt = true, state = 'done' WHERE id = 'PGU-4';")
+            psql(
+                conninfo,
+                "UPDATE ticket_board.tickets SET audit_signoff = true, commit_hash = 'abc1234', commit_exempt = false WHERE id = 'PGU-4';",
+            )
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'analysis' WHERE id = 'PGU-4';")
+            reopened = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object('state', state, 'audit_signoff', audit_signoff, 'commit_hash', commit_hash)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-4';
+""",
+                ).stdout
+            )
+            assert reopened == {"state": "analysis", "audit_signoff": False, "commit_hash": ""}, reopened
+
+            insert_ticket(conninfo, "PGU-6", title="Kickback", assignee="audit", state="audit", implementation="done")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'analysis' WHERE id = 'PGU-6';")
+            kickback_assignee = psql(conninfo, "SELECT assignee FROM ticket_board.tickets WHERE id = 'PGU-6';").stdout.strip()
+            assert kickback_assignee == "unassigned"
+
+            insert_ticket(conninfo, "PGU-7", title="Auto director", assignee="audit", state="audit", implementation="done")
+            psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true WHERE id = 'PGU-7';")
+            auto_director = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object('state', state, 'assignee', assignee, 'audit_signoff', audit_signoff)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-7';
+""",
+                ).stdout
+            )
+            assert auto_director == {"state": "director_review", "assignee": "director", "audit_signoff": True}, auto_director
+
+            insert_ticket(
+                conninfo,
+                "PGU-8",
+                title="Auto Eric",
+                assignee="audit",
+                state="audit",
+                implementation="done",
+                needs_eric_signoff=True,
+            )
+            psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true WHERE id = 'PGU-8';")
+            auto_eric = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object('state', state, 'assignee', assignee, 'audit_signoff', audit_signoff)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-8';
+""",
+                ).stdout
+            )
+            assert auto_eric == {"state": "eric_review", "assignee": "director", "audit_signoff": True}, auto_eric
+            psql(conninfo, "UPDATE ticket_board.tickets SET eric_signoff = true WHERE id = 'PGU-8';")
+            eric_done = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object('state', state, 'assignee', assignee, 'eric_signoff', eric_signoff)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-8';
+""",
+                ).stdout
+            )
+            assert eric_done == {"state": "director_review", "assignee": "director", "eric_signoff": True}, eric_done
+
+            insert_ticket(
+                conninfo,
+                "PGU-9",
+                title="Reaudit",
+                assignee="director",
+                state="eric_review",
+                implementation="done",
+                audit_signoff=True,
+                needs_eric_signoff=True,
+            )
+            psql(conninfo, "UPDATE ticket_board.tickets SET needs_eric_signoff = false WHERE id = 'PGU-9';")
+            reaudit = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'state', state,
+    'audit_signoff', audit_signoff,
+    'needs_eric_signoff', needs_eric_signoff,
+    'eric_signoff', eric_signoff
+)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-9';
+""",
+                ).stdout
+            )
+            assert reaudit == {
+                "state": "audit",
+                "audit_signoff": False,
+                "needs_eric_signoff": False,
+                "eric_signoff": False,
+            }, reaudit
 
             insert_ticket(
                 conninfo,

@@ -13,9 +13,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
 RBAC_PATH = ROOT / "scripts" / "ticket_board" / "rbac.sql"
-EXPECTED_ROLES = ["director", "ops", "app", "audit", "perf", "research", "main", "agent", "ticket_board_service"]
-WORKER_ROLES = ["ops", "app", "audit", "perf", "research", "main", "ticket_board_service"]
-ROLE_SQL_ARRAY = "ARRAY['director','ops','app','audit','perf','research','main','agent','ticket_board_service']"
+PANE_ROLES = ["director", "ops", "app", "audit", "perf", "research", "main"]
+EXPECTED_ROLES = PANE_ROLES + ["ticket_board_service"]
+NON_DIRECTOR_ROLES = ["ops", "app", "audit", "perf", "research", "main", "ticket_board_service"]
+ROLE_SQL_ARRAY = "ARRAY['director','ops','app','audit','perf','research','main','ticket_board_service']"
 
 
 def run(args: list[str], *, capture: bool = True, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -54,6 +55,14 @@ def psql_error(conninfo: str, sql: str) -> str:
     return proc.stderr + proc.stdout
 
 
+def create_pane_roles(conninfo: str) -> None:
+    role_sql = "\n".join(
+        f"CREATE ROLE {role} LOGIN PASSWORD '{role}_preexisting_password';"
+        for role in PANE_ROLES
+    )
+    psql(conninfo, role_sql)
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="ticket-board-rbac.") as tmpdir:
         root = Path(tmpdir)
@@ -62,15 +71,24 @@ def main() -> int:
         socket_dir.mkdir()
         port = free_port()
         dbname = "pgu_rbac_test"
-        conninfo = f"host={socket_dir} port={port} dbname={dbname}"
+        conninfo = f"host={socket_dir} port={port} dbname={dbname} user=postgres"
 
-        run(["initdb", "-D", str(data_dir), "-A", "trust", "--no-locale"])
+        run(["initdb", "-D", str(data_dir), "-A", "trust", "--no-locale", "--username=postgres"])
         try:
             run(["pg_ctl", "-D", str(data_dir), "-o", f"-k {socket_dir} -p {port} -h ''", "-w", "start"], capture=False)
-            run(["createdb", "-h", str(socket_dir), "-p", str(port), dbname])
+            run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
             psql(conninfo, SCHEMA_PATH.read_text(encoding="utf-8"))
+            missing_role_error = psql_error(conninfo, RBAC_PATH.read_text(encoding="utf-8"))
+            assert 'role "director" does not exist' in missing_role_error, missing_role_error
+            service_after_failed_rbac = psql(conninfo, "SELECT to_regrole('ticket_board_service') IS NULL;")
+            assert service_after_failed_rbac == "t", service_after_failed_rbac
+
+            create_pane_roles(conninfo)
             psql(conninfo, RBAC_PATH.read_text(encoding="utf-8"))
             psql(conninfo, RBAC_PATH.read_text(encoding="utf-8"))
+
+            agent_role = psql(conninfo, "SELECT to_regrole('agent') IS NULL;")
+            assert agent_role == "t", agent_role
 
             role_rows = json.loads(
                 psql(
@@ -83,8 +101,9 @@ WHERE rolname = ANY({ROLE_SQL_ARRAY});
                 )
             )
             assert sorted(role_rows) == sorted(EXPECTED_ROLES), role_rows
-            for role in EXPECTED_ROLES:
-                assert role_rows[role] == {"can_login": True, "password_is_null": True}, (role, role_rows[role])
+            for role in PANE_ROLES:
+                assert role_rows[role] == {"can_login": True, "password_is_null": False}, (role, role_rows[role])
+            assert role_rows["ticket_board_service"] == {"can_login": True, "password_is_null": True}, role_rows
 
             schema_usage = json.loads(
                 psql(
@@ -118,7 +137,7 @@ FROM unnest({ROLE_SQL_ARRAY}) AS role_name;
                 )
             )
             assert manual_update["director"] is True, manual_update
-            for role in WORKER_ROLES:
+            for role in NON_DIRECTOR_ROLES:
                 assert manual_update[role] is False, (role, manual_update)
             manual_update_grantees = json.loads(
                 psql(
@@ -129,7 +148,8 @@ FROM information_schema.column_privileges
 WHERE table_schema = 'ticket_board'
   AND table_name = 'tickets'
   AND column_name = 'manually_controlled'
-  AND privilege_type = 'UPDATE';
+  AND privilege_type = 'UPDATE'
+  AND grantee <> current_user;
 """,
                 )
             )
@@ -148,7 +168,6 @@ SELECT jsonb_build_object(
   'audit_blocked_reason', has_column_privilege('audit', 'ticket_board.tickets', 'blocked_reason', 'UPDATE'),
   'service_state', has_column_privilege('ticket_board_service', 'ticket_board.tickets', 'state', 'UPDATE'),
   'service_manual', has_column_privilege('ticket_board_service', 'ticket_board.tickets', 'manually_controlled', 'UPDATE'),
-  'agent_state', has_column_privilege('agent', 'ticket_board.tickets', 'state', 'UPDATE'),
   'app_comment_insert', has_table_privilege('app', 'ticket_board.ticket_comments', 'INSERT')
 )::text;
 """,
@@ -163,7 +182,6 @@ SELECT jsonb_build_object(
                 "audit_blocked_reason": True,
                 "service_state": True,
                 "service_manual": False,
-                "agent_state": True,
                 "app_comment_insert": True,
             }, worker_columns
 

@@ -584,15 +584,18 @@ class TicketBoardApp:
             raise ValueError("assignee must not be unassigned before a ticket can enter in_progress")
         if not ticket["implementation"].strip():
             raise ValueError("implementation must be non-empty before a ticket can enter in_progress")
-        conflicting_ticket_id = self._find_other_in_progress_ticket(ticket["assignee"], exclude_ticket_id=ticket["id"])
+        conflicting_ticket_id = self._find_other_in_progress_ticket(ticket)
         if conflicting_ticket_id is not None:
             raise ValueError(
                 f"{ticket['assignee']} already has an in-progress ticket {conflicting_ticket_id}; finish or move it first"
             )
 
-    def _find_other_in_progress_ticket(self, assignee: str, *, exclude_ticket_id: str) -> str | None:
+    def _find_other_in_progress_ticket(self, ticket: dict[str, Any]) -> str | None:
+        assignee = ticket["assignee"]
+        exclude_ticket_id = ticket["id"]
         if assignee == "unassigned":
             return None
+        current_root_id = self._ticket_cluster_root_id(ticket_id=exclude_ticket_id, parent_id=ticket.get("parent_id", ""))
         for path in sorted(self.store_dir.glob("PGU-*.json")):
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
@@ -606,9 +609,46 @@ class TicketBoardApp:
                 ticket_assignee = self._validate_assignee(str(payload.get("assignee", "unassigned")))
             except ValueError:
                 continue
+            if state != "in_progress" or ticket_assignee != assignee:
+                continue
+            other_root_id = self._ticket_cluster_root_id(
+                ticket_id=ticket_id,
+                parent_id=payload.get("parent_id", ""),
+            )
+            if other_root_id == current_root_id:
+                continue
             if state == "in_progress" and ticket_assignee == assignee:
                 return ticket_id
         return None
+
+    def _ticket_cluster_root_id(self, *, ticket_id: str, parent_id: Any) -> str:
+        current_root_id = ticket_id
+        if not isinstance(parent_id, str):
+            return current_root_id
+        current_parent_id = parent_id.strip().upper()
+        seen = {ticket_id}
+        while current_parent_id:
+            if current_parent_id in seen:
+                break
+            seen.add(current_parent_id)
+            current_root_id = current_parent_id
+            current_path = self.store_dir / f"{current_parent_id}.json"
+            if not current_path.is_file():
+                break
+            try:
+                payload = json.loads(current_path.read_text(encoding="utf-8"))
+            except Exception:
+                break
+            raw_next_parent = payload.get("parent_id", "")
+            if not isinstance(raw_next_parent, str):
+                break
+            next_parent_id = raw_next_parent.strip().upper()
+            if not next_parent_id:
+                break
+            if not next_parent_id.startswith("PGU-") or not next_parent_id[4:].isdigit():
+                break
+            current_parent_id = next_parent_id
+        return current_root_id
 
     def _path_in_allowed_image_dirs(self, path: Path) -> bool:
         return self.frame_dir in path.parents or self.asset_dir in path.parents

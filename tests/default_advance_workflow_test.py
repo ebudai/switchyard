@@ -27,6 +27,7 @@ def main() -> int:
     assert "Assign the ticket before advancing to in progress." in HTML
     assert "Save implementation before advancing to in progress." in HTML
     assert "already has an in-progress ticket" in HTML
+    assert "rootTicketForBoard(item).id !== ticketRootId" in HTML
     assert "Save audit prompt before advancing to audit." not in HTML
     assert "Set audit signoff before advancing to Eric review." in HTML
     assert "Set audit signoff before advancing to Director Review." in HTML

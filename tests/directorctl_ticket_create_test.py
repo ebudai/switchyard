@@ -68,7 +68,7 @@ def main() -> int:
         store.mkdir()
         frames.mkdir()
         assets.mkdir()
-        server = TicketBoardServer(("127.0.0.1", 0), TicketBoardApp(store, frames, assets), director_notifier=QuietNotifier())
+        server = TicketBoardServer(("127.0.0.1", 0), TicketBoardApp(store, frames, assets, store_backend="json", allow_json_store=True), director_notifier=QuietNotifier())
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         board_url = f"http://127.0.0.1:{server.server_port}"

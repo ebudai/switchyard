@@ -95,7 +95,7 @@ def test_server_create_notifies_director() -> None:
         assets.mkdir()
 
         notifier = FakeNotifier()
-        server = TicketBoardServer(("127.0.0.1", 0), TicketBoardApp(store, frames, assets), director_notifier=notifier)
+        server = TicketBoardServer(("127.0.0.1", 0), TicketBoardApp(store, frames, assets, store_backend="json", allow_json_store=True), director_notifier=notifier)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
@@ -136,7 +136,7 @@ def test_server_create_uses_new_high_water_mark_and_persists() -> None:
         write_ticket(store / "PGU-174.json", "PGU-174", "Latest existing")
 
         notifier = FakeNotifier()
-        server = TicketBoardServer(("127.0.0.1", 0), TicketBoardApp(store, frames, assets), director_notifier=notifier)
+        server = TicketBoardServer(("127.0.0.1", 0), TicketBoardApp(store, frames, assets, store_backend="json", allow_json_store=True), director_notifier=notifier)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
@@ -187,7 +187,7 @@ def test_http_create_verification_uses_module_ticket_number() -> None:
 
         ticket_board_app._ticket_number = recording_ticket_number
         notifier = FakeNotifier()
-        server = TicketBoardServer(("127.0.0.1", 0), TicketBoardApp(store, frames, assets), director_notifier=notifier)
+        server = TicketBoardServer(("127.0.0.1", 0), TicketBoardApp(store, frames, assets, store_backend="json", allow_json_store=True), director_notifier=notifier)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
@@ -229,7 +229,11 @@ def test_server_create_does_not_notify_when_ticket_is_not_persisted() -> None:
         write_ticket(store / "PGU-1.json", "PGU-1", "Existing ticket")
 
         notifier = FakeNotifier()
-        server = TicketBoardServer(("127.0.0.1", 0), NonPersistingCreateApp(store, frames, assets), director_notifier=notifier)
+        server = TicketBoardServer(
+            ("127.0.0.1", 0),
+            NonPersistingCreateApp(store, frames, assets, store_backend="json", allow_json_store=True),
+            director_notifier=notifier,
+        )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:

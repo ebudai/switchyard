@@ -7,7 +7,15 @@ import threading
 import webbrowser
 from pathlib import Path
 
-from .app import ASSET_DIR_DEFAULT, FRAME_DIR_DEFAULT, POSTGRES_DSN_DEFAULT, STORE_BACKEND_DEFAULT, STORE_DIR_DEFAULT, TicketBoardApp
+from .app import (
+    ALLOW_JSON_STORE_ENV,
+    ASSET_DIR_DEFAULT,
+    FRAME_DIR_DEFAULT,
+    POSTGRES_DSN_DEFAULT,
+    STORE_BACKEND_DEFAULT,
+    STORE_DIR_DEFAULT,
+    TicketBoardApp,
+)
 from .server import CallerRegistry, DirectorNotifier, TicketBoardEventHub, TicketBoardServer, TicketBoardUnixServer
 
 
@@ -24,6 +32,11 @@ def parse_args() -> argparse.Namespace:
         "--database",
         default=POSTGRES_DSN_DEFAULT,
         help="Postgres connection string for --store-backend postgres. Default: TICKET_BOARD_DATABASE_URL or DATABASE_URL.",
+    )
+    parser.add_argument(
+        "--allow-json-store",
+        action="store_true",
+        help=f"Allow the retired JSON backend for local migration/debug work. Default: disabled unless {ALLOW_JSON_STORE_ENV}=1.",
     )
     parser.add_argument("--frames", default=str(FRAME_DIR_DEFAULT), help=f"Screenshot directory. Default: {FRAME_DIR_DEFAULT}")
     parser.add_argument("--assets", default=str(ASSET_DIR_DEFAULT), help=f"Uploaded attachment directory. Default: {ASSET_DIR_DEFAULT}")
@@ -45,6 +58,7 @@ def run_server(args: argparse.Namespace) -> int:
         Path(args.assets),
         store_backend=args.store_backend,
         database_url=args.database,
+        allow_json_store=args.allow_json_store,
     )
     event_hub = TicketBoardEventHub(app)
     director_notifier = DirectorNotifier()

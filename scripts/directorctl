@@ -224,7 +224,7 @@ Examples:
   directorctl send-file pgu-main:0.0 docs/implementation_plan.md
   directorctl ticket-create --assignee app --title 'Fix board assignee enum' --body 'Allow director as assignee' --comment-who director --comment-text 'Speced + routed to app.'
   directorctl status
-  PGU_DIRECTORCTL_EXTRA_SESSIONS='pgu-watchdog' directorctl status
+  PGU_DIRECTORCTL_EXTRA_SESSIONS='pgu-notify' directorctl status
 EOF
 }
 

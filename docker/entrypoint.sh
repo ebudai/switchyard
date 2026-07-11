@@ -16,9 +16,8 @@ git checkout main --quiet
 git merge --ff-only origin/main --quiet || true
 
 ROLES_FILE="$REPO_DIR/docker/roles.json"
-# watchdog is NOT a Claude role -- scripts/director_watchdog.py is a plain
-# mechanical script, no model to configure. ops starts it (scripts/startwatchdog.fish),
-# which creates its own pgu-watchdog tmux session -- don't pre-create one here.
+# Ticket notifications are delivered by the ticket-board notify-listener
+# service, not by a Claude role or a tmux watchdog session.
 ROLES="director main app audit ops research"
 
 new_pane() {

@@ -59,10 +59,8 @@ any ambiguity in how Docker resolves a symlinked bind-mount source.
 
 Brings up six standing tmux sessions inside the container, each running a
 `claude` instance: `pgu-director`, `pgu-main`, `pgu-ui`, `pgu-audit`,
-`pgu-ops`, `pgu-research`. (`pgu-watchdog` is not one of these — `scripts/director_watchdog.py`
-is a plain mechanical script, not a Claude role. Ops normally starts it via
-`scripts/startwatchdog.fish`, which creates its own `pgu-watchdog` tmux
-session as its first action.)
+`pgu-ops`, `pgu-research`. Ticket notifications are delivered by the
+ticket-board notify-listener service; there is no `pgu-watchdog` tmux session.
 
 Each freshly-launched `claude` instance stops at a one-time bypass-permissions
 consent screen on first use in the container — confirm it once per session:
@@ -97,7 +95,8 @@ that role's own `--model`:
 }
 ```
 
-`watchdog` deliberately has no entry — it isn't a Claude role, see above.
+Notification delivery deliberately has no role entry -- it runs as a service,
+not as a Claude pane.
 
 Rationale for the defaults: director gets the strongest model (Opus 4.8) —
 it's the one doing planning/orchestration. Main/UI/audit/ops get Sonnet 5 —

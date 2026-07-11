@@ -343,17 +343,6 @@ WHERE id = 'PGU-9';
             manual_state = psql(conninfo, "SELECT state FROM ticket_board.tickets WHERE id = 'PGU-5';").stdout.strip()
             assert manual_state == "done"
 
-            trigger_count = psql(
-                conninfo,
-                """
-SELECT count(*)
-FROM pg_trigger
-WHERE tgname IN ('tickets_enforce_workflow_update', 'tickets_notify_state_transition')
-  AND NOT tgisinternal;
-""",
-            ).stdout.strip()
-            assert trigger_count == "2"
-
             notify_function = psql(
                 conninfo,
                 """
@@ -362,6 +351,63 @@ SELECT pg_get_functiondef('ticket_board.notify_ticket_state_transition()'::regpr
 """,
             ).stdout.strip()
             assert notify_function == "t"
+
+            insert_ticket(conninfo, "PGU-20", title="Durable notify", state="analysis", assignee="ops", implementation="ready")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'ready' WHERE id = 'PGU-20';")
+            pending = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_agg(payload ORDER BY ticket_id)::text
+FROM ticket_board.pending_transition_notifications()
+WHERE ticket_id = 'PGU-20';
+""",
+                ).stdout
+            )
+            assert pending[0]["id"] == "PGU-20", pending
+            assert pending[0]["old_state"] == "analysis", pending
+            assert pending[0]["new_state"] == "ready", pending
+            assert pending[0]["assignee"] == "ops", pending
+            psql(conninfo, "SELECT ticket_board.mark_transition_notified('PGU-20');")
+            pending_after_mark = psql(
+                conninfo,
+                "SELECT count(*) FROM ticket_board.pending_transition_notifications() WHERE ticket_id = 'PGU-20';",
+            ).stdout.strip()
+            assert pending_after_mark == "0"
+
+            nudges = psql(
+                conninfo,
+                "SELECT ticket_board.notify_due_nudges(clock_timestamp() + interval '10 minutes', interval '5 minutes', 3);",
+            ).stdout.strip()
+            assert int(nudges) >= 1, nudges
+            nudge_state = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object('last_nudged', last_nudged_at IS NOT NULL, 'nudge_count', nudge_count)::text
+FROM ticket_board.ticket_notification_state
+WHERE ticket_id = 'PGU-20';
+""",
+                ).stdout
+            )
+            assert nudge_state == {"last_nudged": True, "nudge_count": 1}, nudge_state
+
+            trigger_count = psql(
+                conninfo,
+                """
+SELECT count(*)
+FROM pg_trigger
+WHERE tgname IN (
+    'tickets_enforce_workflow_update',
+    'tickets_notify_state_transition',
+    'tickets_notification_state_insert',
+    'tickets_notification_state_update',
+    'ticket_comments_notification_activity'
+)
+  AND NOT tgisinternal;
+""",
+            ).stdout.strip()
+            assert trigger_count == "5"
         finally:
             subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], check=False)
 

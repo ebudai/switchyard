@@ -7,10 +7,7 @@
 set -euo pipefail
 
 readonly CONTAINER="pgu-team"
-# watchdog isn't launched by entrypoint.sh (it's ops's job to start it via
-# scripts/startwatchdog.fish) -- its window may show "session not found"
-# until ops has done that; just re-run this script or attach manually after.
-readonly ROLES=(director main app audit ops research watchdog)
+readonly ROLES=(director main app audit ops research)
 
 if ! command -v konsole >/dev/null 2>&1; then
     echo "error: konsole not found on this host -- this script only knows how to launch konsole windows" >&2

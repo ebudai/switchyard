@@ -37,6 +37,10 @@ WRITE_FUNCTIONS = [
     "ticket_board.edit_fields(text,jsonb)",
     "ticket_board.merge(text,text)",
 ]
+LISTENER_FUNCTIONS = [
+    "ticket_board.pending_transition_notifications()",
+    "ticket_board.mark_transition_notified(text)",
+]
 
 
 def run(args: list[str], *, capture: bool = True, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -156,6 +160,18 @@ FROM unnest({ROLE_SQL_ARRAY}) AS role_name;
         )
         for role in EXPECTED_ROLES:
             assert rows[role] == (role == "ticket_board_service"), (signature, role, rows)
+    for signature in LISTENER_FUNCTIONS:
+        rows = json.loads(
+            psql(
+                conn,
+                f"""
+SELECT jsonb_object_agg(role_name, has_function_privilege(role_name, {sql_string(signature)}, 'EXECUTE'))::text
+FROM unnest({ROLE_SQL_ARRAY}) AS role_name;
+""",
+            )
+        )
+        for role in EXPECTED_ROLES:
+            assert rows[role] == (role == "ticket_board_listener"), (signature, role, rows)
 
 
 def assert_direct_dml_denied(conn: str, role_conn: dict[str, str]) -> None:

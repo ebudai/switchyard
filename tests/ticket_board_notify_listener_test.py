@@ -24,15 +24,25 @@ class FakeNotify:
     payload: str
 
 
+class FakeResult:
+    def __init__(self, rows: list[tuple[str, str]]) -> None:
+        self.rows = rows
+
+    def fetchall(self) -> list[tuple[str, str]]:
+        return self.rows
+
+
 class FakeConnection:
     def __init__(
         self,
         notifications: list[str] | None = None,
         *,
+        pending_rows: list[tuple[str, str]] | None = None,
         fail_on_notifies: bool = False,
         executed: list[Any] | None = None,
     ) -> None:
         self.notifications = notifications or []
+        self.pending_rows = pending_rows or []
         self.fail_on_notifies = fail_on_notifies
         self.executed = executed if executed is not None else []
         self.closed = False
@@ -43,8 +53,11 @@ class FakeConnection:
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
         self.closed = True
 
-    def execute(self, statement: Any) -> None:
-        self.executed.append(statement)
+    def execute(self, statement: Any, params: object | None = None) -> FakeResult:
+        self.executed.append((statement, params))
+        if isinstance(statement, str) and "pending_transition_notifications" in statement:
+            return FakeResult(self.pending_rows)
+        return FakeResult([])
 
     def notifies(self, *, timeout: float | None = None) -> list[FakeNotify]:
         if self.fail_on_notifies:
@@ -91,6 +104,7 @@ def test_simulated_pg_notify_delivers_to_assignee_pane() -> None:
     assert delivered == 1
     assert sent == [("pgu-ops:0.0", "Ready ticket for you: PGU-213 -- Restore notifications")]
     assert executed, "listener must issue LISTEN before consuming notifications"
+    assert any("mark_transition_notified" in str(statement) for statement, _params in executed)
     assert conn.closed is True
 
 
@@ -135,7 +149,52 @@ def test_reconnect_relistens_after_connection_drop() -> None:
     listener.run_forever(max_connections=2, max_notifications=1)
 
     assert sent == [("pgu-app:0.0", "Ready ticket for you: PGU-215 -- Reconnect")]
-    assert len(executed) == 2, "listener must re-issue LISTEN after reconnecting"
+    assert sum("LISTEN" in str(statement) for statement, _params in executed) == 2, "listener must re-issue LISTEN after reconnecting"
+
+
+def test_reconcile_delivers_missed_transition_and_marks_notified() -> None:
+    sent: list[tuple[str, str]] = []
+    executed: list[Any] = []
+    payload = transition_payload("PGU-207", title="Durable", old_state="", new_state="ready", assignee="ops")
+    conn = FakeConnection(pending_rows=[("PGU-207", payload)], executed=executed)
+    listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=lambda target, message: sent.append((target, message)),
+        connector=lambda *args, **kwargs: conn,
+        poll_seconds=0,
+    )
+
+    delivered = listener.listen_once(max_notifications=1)
+
+    assert delivered == 1
+    assert sent == [("pgu-ops:0.0", "Ready ticket for you: PGU-207 -- Durable")]
+    assert any("pending_transition_notifications" in str(statement) for statement, _params in executed)
+    assert any("mark_transition_notified" in str(statement) for statement, _params in executed)
+
+
+def test_nudge_is_suppressed_when_pane_is_working() -> None:
+    sent: list[tuple[str, str]] = []
+    listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=lambda target, message: sent.append((target, message)),
+        activity_gate=lambda _target: True,
+    )
+    payload = json.dumps(
+        {
+            "kind": "nudge",
+            "id": "PGU-207",
+            "title": "Durable",
+            "state": "ready",
+            "assignee": "ops",
+            "target_role": "ops",
+            "message": "NUDGE Ready ticket for you: PGU-207 -- Durable",
+        }
+    )
+
+    delivered = listener.deliver_payload(payload)
+
+    assert delivered is False
+    assert sent == []
 
 
 def test_default_sender_delegates_to_directorctl_send() -> None:
@@ -161,6 +220,8 @@ def main() -> int:
     test_simulated_pg_notify_delivers_to_assignee_pane()
     test_eric_review_is_not_delivered()
     test_reconnect_relistens_after_connection_drop()
+    test_reconcile_delivers_missed_transition_and_marks_notified()
+    test_nudge_is_suppressed_when_pane_is_working()
     test_default_sender_delegates_to_directorctl_send()
     print("ticket_board_notify_listener_test: ok")
     return 0

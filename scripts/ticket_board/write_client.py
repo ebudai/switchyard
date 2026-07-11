@@ -71,6 +71,10 @@ def _default_socket_path(board_url: str, environ: Mapping[str, str] = os.environ
     return None
 
 
+def _has_explicit_socket_path(socket_path: str | None, environ: Mapping[str, str] = os.environ) -> bool:
+    return bool(socket_path or environ.get("PGU_TICKET_BOARD_SOCKET", "").strip())
+
+
 def _caller_role_from_tmux_session(environ: Mapping[str, str] = os.environ) -> str | None:
     pane_id = environ.get("TMUX_PANE", "").strip()
     if not pane_id:
@@ -125,7 +129,11 @@ class TicketBoardWriteClient:
             raise ValueError("caller_role must be non-empty")
         socket_path = self.effective_socket_path
         if socket_path:
-            return self._post_unix(path, payload, role, socket_path)
+            try:
+                return self._post_unix(path, payload, role, socket_path)
+            except OSError:
+                if _has_explicit_socket_path(self.socket_path):
+                    raise
         body = json.dumps(payload).encode("utf-8")
         req = request.Request(
             f"{self.api_url}{path}",

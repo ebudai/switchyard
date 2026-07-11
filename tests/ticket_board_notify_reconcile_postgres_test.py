@@ -154,6 +154,172 @@ FOR UPDATE
                 "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-207';",
             )
             assert after == "0", after
+
+            psql(
+                admin_conninfo,
+                f"""
+DELETE FROM ticket_board.ticket_notification_queue;
+INSERT INTO ticket_board.tickets (
+    id, title, body, state, assignee, implementation, created_text, updated_text, source_json
+) VALUES (
+    'PGU-226', 'Stale cancelled nudge', '', 'ready', 'ops', 'Ready.',
+    '2026-07-11T00:00:00+00:00', '2026-07-11T00:00:00+00:00',
+    '{ticket_source("PGU-226", "Stale cancelled nudge", "ready", "ops")}'::jsonb
+);
+SELECT ticket_board.enqueue_notification(
+    'PGU-226',
+    'nudge',
+    'ops',
+    'Ready ticket for you: PGU-226 -- Stale cancelled nudge',
+    jsonb_build_object(
+        'kind', 'nudge',
+        'id', 'PGU-226',
+        'title', 'Stale cancelled nudge',
+        'state', 'ready',
+        'assignee', 'ops',
+        'target_role', 'ops',
+        'message', 'Ready ticket for you: PGU-226 -- Stale cancelled nudge'
+    ),
+    'test-stale-cancelled'
+);
+BEGIN;
+INSERT INTO ticket_board.ticket_comments (ticket_id, position, who, ts_text, text, source_json)
+VALUES (
+    'PGU-226',
+    0,
+    'director',
+    '2026-07-11T00:10:00+00:00',
+    'Cancelled before stale nudge delivery.',
+    '{{"who":"director","ts":"2026-07-11T00:10:00+00:00","text":"Cancelled before stale nudge delivery."}}'::jsonb
+);
+UPDATE ticket_board.tickets SET state = 'cancelled' WHERE id = 'PGU-226';
+COMMIT;
+""",
+            )
+            sent.clear()
+            cancelled_drop = TicketBoardNotifyListener(
+                conninfo=listener_conninfo,
+                sender=lambda target, message: sent.append((target, message)),
+                activity_gate=lambda _target: False,
+                poll_seconds=0,
+            ).listen_once(max_notifications=1)
+            assert cancelled_drop == 0, cancelled_drop
+            assert sent == []
+            cancelled_queue = psql(
+                listener_conninfo,
+                "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-226';",
+            )
+            assert cancelled_queue == "0", cancelled_queue
+
+            psql(
+                admin_conninfo,
+                f"""
+INSERT INTO ticket_board.tickets (
+    id, title, body, state, assignee, implementation, created_text, updated_text, source_json
+) VALUES (
+    'PGU-227', 'Stale picked-up nudge', '', 'ready', 'ops', 'Ready.',
+    '2026-07-11T00:00:00+00:00', '2026-07-11T00:00:00+00:00',
+    '{ticket_source("PGU-227", "Stale picked-up nudge", "ready", "ops")}'::jsonb
+);
+SELECT ticket_board.enqueue_notification(
+    'PGU-227',
+    'nudge',
+    'ops',
+    'Ready ticket for you: PGU-227 -- Stale picked-up nudge',
+    jsonb_build_object(
+        'kind', 'nudge',
+        'id', 'PGU-227',
+        'title', 'Stale picked-up nudge',
+        'state', 'ready',
+        'assignee', 'ops',
+        'target_role', 'ops',
+        'message', 'Ready ticket for you: PGU-227 -- Stale picked-up nudge'
+    ),
+    'test-stale-picked-up'
+);
+UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-227';
+DELETE FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-227' AND kind = 'transition';
+""",
+            )
+            sent.clear()
+            picked_up_drop = TicketBoardNotifyListener(
+                conninfo=listener_conninfo,
+                sender=lambda target, message: sent.append((target, message)),
+                activity_gate=lambda _target: False,
+                poll_seconds=0,
+            ).listen_once(max_notifications=1)
+            assert picked_up_drop == 0, picked_up_drop
+            assert sent == []
+            picked_up_queue = psql(
+                listener_conninfo,
+                "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-227';",
+            )
+            assert picked_up_queue == "0", picked_up_queue
+
+            psql(
+                admin_conninfo,
+                f"""
+DELETE FROM ticket_board.ticket_notification_queue;
+INSERT INTO ticket_board.tickets (
+    id, title, body, state, assignee, implementation, created_text, updated_text, source_json
+) VALUES (
+    'PGU-228', 'Still stuck escalation', '', 'ready', 'ops', 'Ready.',
+    '2026-07-11T00:00:00+00:00', '2026-07-11T00:00:00+00:00',
+    '{ticket_source("PGU-228", "Still stuck escalation", "ready", "ops")}'::jsonb
+);
+UPDATE ticket_board.ticket_notification_state
+SET last_nudged_at = clock_timestamp() + interval '1 hour'
+WHERE ticket_id <> 'PGU-228';
+UPDATE ticket_board.ticket_notification_state
+SET last_activity_at = clock_timestamp() - interval '1 hour',
+    last_nudged_at = clock_timestamp() - interval '10 minutes',
+    nudge_count = 3
+WHERE ticket_id = 'PGU-228';
+SELECT ticket_board.notify_due_nudges(clock_timestamp(), interval '5 minutes', 3);
+""",
+            )
+            escalation_row = json.loads(
+                psql(
+                    listener_conninfo,
+                    """
+SELECT jsonb_build_object(
+    'kind', kind,
+    'target_role', target_role,
+    'message', message,
+    'payload_kind', payload->>'kind'
+)::text
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-228';
+""",
+                )
+            )
+            assert escalation_row == {
+                "kind": "escalation",
+                "target_role": "director",
+                "message": "PRIORITY PGU-228 -- Still stuck escalation appears stuck for ops; check/reassign",
+                "payload_kind": "escalation",
+            }, escalation_row
+
+            sent.clear()
+            escalation_delivered = TicketBoardNotifyListener(
+                conninfo=listener_conninfo,
+                sender=lambda target, message: sent.append((target, message)),
+                activity_gate=lambda _target: False,
+                poll_seconds=0,
+            ).listen_once(max_notifications=1)
+            assert escalation_delivered == 1, escalation_delivered
+            assert sent == [
+                (
+                    "pgu-director:0.0",
+                    "PRIORITY PGU-228 -- Still stuck escalation appears stuck for ops; check/reassign",
+                )
+            ]
+            escalation_queue = psql(
+                listener_conninfo,
+                "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-228';",
+            )
+            assert escalation_queue == "0", escalation_queue
         finally:
             subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], check=False)
 

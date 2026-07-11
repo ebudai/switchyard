@@ -51,6 +51,8 @@ STATE_RANK = {
     "done": 7,
     "cancelled": 8,
 }
+TERMINAL_STATES = {"done", "cancelled"}
+NUDGE_ELIGIBLE_STATES = {"ready", "in_progress", "audit", "director_review", "analysis", "backlog"}
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_DIRECTORCTL = str(Path(__file__).resolve().parents[1] / "directorctl")
@@ -338,6 +340,89 @@ FROM ticket_board.claim_notification()
             (notification_id, f"{delay_seconds} seconds", error[:500]),
         )
 
+    def _current_ticket_state(self, conn: Any, ticket_id: str) -> tuple[str, str, bool, bool] | None:
+        result = conn.execute(
+            """
+SELECT state,
+       assignee,
+       manually_controlled,
+       coalesce((to_jsonb(t)->>'parked')::boolean, false) AS parked
+FROM ticket_board.tickets t
+WHERE id = %s
+""",
+            (ticket_id,),
+        )
+        row = result.fetchone()
+        if row is None:
+            return None
+        if isinstance(row, dict):
+            return (
+                self._decode_text(row["state"]),
+                self._decode_text(row["assignee"]),
+                bool(row["manually_controlled"]),
+                bool(row["parked"]),
+            )
+        return self._decode_text(row[0]), self._decode_text(row[1]), bool(row[2]), bool(row[3])
+
+    def _current_target_role(self, kind: str, state: str, assignee: str) -> str | None:
+        if kind == "transition":
+            if state == "analysis":
+                return "director"
+            if state in {"ready", "in_progress"}:
+                return assignee if assignee != "unassigned" else None
+            if state == "audit":
+                return "audit"
+            if state == "director_review":
+                return "director"
+            return None
+        if kind == "escalation":
+            return "director"
+        if state in {"ready", "in_progress"}:
+            return assignee if assignee != "unassigned" else None
+        if state in {"audit", "director_review", "analysis", "backlog"}:
+            return "director" if state in {"analysis", "backlog", "director_review"} else "audit"
+        return None
+
+    def _notification_is_current(self, conn: Any, ticket_id: str, target_role: str, payload: str) -> bool:
+        current = self._current_ticket_state(conn, ticket_id)
+        if current is None:
+            return False
+        current_state, current_assignee, manually_controlled, parked = current
+        if current_state in TERMINAL_STATES:
+            return False
+
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            return True
+        if not isinstance(parsed, dict):
+            return True
+
+        payload_ticket_id = str(parsed.get("id", ticket_id)).strip().upper()
+        if payload_ticket_id and payload_ticket_id != ticket_id:
+            return False
+
+        expected_state = str(parsed.get("state") or parsed.get("new_state") or "").strip()
+        if expected_state and current_state != expected_state:
+            return False
+
+        expected_assignee = str(parsed.get("assignee") or "").strip().lower()
+        if expected_assignee and current_assignee != expected_assignee:
+            return False
+
+        kind = str(parsed.get("kind") or "").strip().lower()
+        if kind == "escalation":
+            return (
+                target_role == "director"
+                and current_state in NUDGE_ELIGIBLE_STATES
+                and current_assignee != "unassigned"
+                and not manually_controlled
+                and not parked
+            )
+
+        current_target_role = self._current_target_role(kind, current_state, current_assignee)
+        return current_target_role is None or current_target_role == target_role
+
     def process_due_notifications(self, conn: Any, *, max_notifications: int | None = None) -> int:
         delivered = 0
         while not self.stop_event.is_set():
@@ -352,6 +437,10 @@ FROM ticket_board.claim_notification()
                 break
             if target is None:
                 self.logger.warning("Acking notification %s with unknown target role %s", notification_id, target_role)
+                self._ack_notification(conn, notification_id)
+                continue
+            if not self._notification_is_current(conn, ticket_id, target_role, payload):
+                self.logger.info("Dropping stale notification %s for %s: %s", notification_id, ticket_id, payload)
                 self._ack_notification(conn, notification_id)
                 continue
             if self.activity_gate(target):

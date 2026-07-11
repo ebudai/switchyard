@@ -42,17 +42,35 @@ class FakeConnection:
         self,
         queue_rows: list[tuple[int, str, str, str, str, int]] | None = None,
         *,
+        ticket_rows: dict[str, tuple[str, str] | tuple[str, str, bool, bool]] | None = None,
         notifications: list[str] | None = None,
         fail_on_notifies: bool = False,
         executed: list[Any] | None = None,
     ) -> None:
         self.queue_rows = queue_rows or []
+        self.ticket_rows = ticket_rows if ticket_rows is not None else self._ticket_rows_for_queue(self.queue_rows)
         self.notifications = notifications or []
         self.fail_on_notifies = fail_on_notifies
         self.executed = executed if executed is not None else []
         self.acked: list[int] = []
         self.requeued: list[tuple[int, tuple[Any, ...] | None]] = []
         self.closed = False
+
+    def _ticket_rows_for_queue(self, queue_rows: list[tuple[int, str, str, str, str, int]]) -> dict[str, tuple[str, str, bool, bool]]:
+        rows: dict[str, tuple[str, str, bool, bool]] = {}
+        for _notification_id, ticket_id, target_role, _message, payload, _attempts in queue_rows:
+            try:
+                parsed = json.loads(payload)
+            except json.JSONDecodeError:
+                parsed = {}
+            state = str(parsed.get("state") or parsed.get("new_state") or "").strip()
+            assignee = str(parsed.get("assignee") or "").strip()
+            if not state:
+                state = "audit" if target_role == "audit" else "director_review" if target_role == "director" else "ready"
+            if not assignee:
+                assignee = "director" if target_role == "director" else target_role
+            rows[ticket_id] = (state, assignee, False, False)
+        return rows
 
     def __enter__(self) -> FakeConnection:
         return self
@@ -70,6 +88,12 @@ class FakeConnection:
             if not self.queue_rows:
                 return FakeResult([])
             return FakeResult([self.queue_rows.pop(0)])
+        if "FROM ticket_board.tickets" in statement_text:
+            assert params is not None
+            row = self.ticket_rows.get(str(params[0]))
+            if row is not None and len(row) == 2:
+                row = (row[0], row[1], False, False)
+            return FakeResult([] if row is None else [row])
         if "ack_notification" in statement_text:
             assert params is not None
             self.acked.append(int(params[0]))
@@ -90,12 +114,20 @@ def queue_row(
     notification_id: int,
     ticket_id: str,
     *,
+    kind: str = "transition",
+    state: str | None = None,
+    assignee: str | None = None,
     target_role: str = "ops",
     message: str | None = None,
     attempts: int = 1,
 ) -> tuple[int, str, str, str, str, int]:
     message = message or f"Ready ticket for you: {ticket_id} -- Queue"
-    payload = json.dumps({"kind": "transition", "id": ticket_id, "target_role": target_role, "message": message})
+    payload_fields = {"kind": kind, "id": ticket_id, "target_role": target_role, "message": message}
+    if state is not None:
+        payload_fields["state" if kind != "transition" else "new_state"] = state
+    if assignee is not None:
+        payload_fields["assignee"] = assignee
+    payload = json.dumps(payload_fields)
     return (notification_id, ticket_id, target_role, message, payload, attempts)
 
 
@@ -247,6 +279,95 @@ def test_busy_pane_requeues_then_idle_pane_delivers_once() -> None:
     assert idle_delivered == 1
     assert sent == [("pgu-ops:0.0", "Ready ticket for you: PGU-223 -- Queue")]
     assert idle_conn.acked == [20]
+
+
+def test_stale_ready_nudge_for_cancelled_ticket_is_acked_not_delivered() -> None:
+    sent: list[tuple[str, str]] = []
+    conn = FakeConnection(
+        [
+            queue_row(
+                22,
+                "PGU-226",
+                kind="nudge",
+                state="ready",
+                assignee="ops",
+                target_role="ops",
+                attempts=2,
+            )
+        ],
+        ticket_rows={"PGU-226": ("cancelled", "ops")},
+    )
+    listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=lambda target, message: sent.append((target, message)),
+        activity_gate=lambda _target: False,
+        connector=lambda *args, **kwargs: conn,
+        poll_seconds=0,
+    )
+
+    assert listener.listen_once(max_notifications=1) == 0
+    assert sent == []
+    assert conn.acked == [22]
+    assert conn.requeued == []
+
+
+def test_stale_ready_nudge_for_picked_up_ticket_is_acked_not_delivered() -> None:
+    sent: list[tuple[str, str]] = []
+    conn = FakeConnection(
+        [
+            queue_row(
+                23,
+                "PGU-226",
+                kind="nudge",
+                state="ready",
+                assignee="ops",
+                target_role="ops",
+                attempts=2,
+            )
+        ],
+        ticket_rows={"PGU-226": ("in_progress", "ops")},
+    )
+    listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=lambda target, message: sent.append((target, message)),
+        activity_gate=lambda _target: False,
+        connector=lambda *args, **kwargs: conn,
+        poll_seconds=0,
+    )
+
+    assert listener.listen_once(max_notifications=1) == 0
+    assert sent == []
+    assert conn.acked == [23]
+    assert conn.requeued == []
+
+
+def test_escalation_for_still_stuck_ready_ticket_delivers_to_director() -> None:
+    sent: list[tuple[str, str]] = []
+    conn = FakeConnection(
+        [
+            queue_row(
+                24,
+                "PGU-226",
+                kind="escalation",
+                target_role="director",
+                message="PRIORITY PGU-226 -- Queue appears stuck for ops; check/reassign",
+                attempts=1,
+            )
+        ],
+        ticket_rows={"PGU-226": ("ready", "ops", False, False)},
+    )
+    listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=lambda target, message: sent.append((target, message)),
+        activity_gate=lambda _target: False,
+        connector=lambda *args, **kwargs: conn,
+        poll_seconds=0,
+    )
+
+    assert listener.listen_once(max_notifications=1) == 1
+    assert sent == [("pgu-director:0.0", "PRIORITY PGU-226 -- Queue appears stuck for ops; check/reassign")]
+    assert conn.acked == [24]
+    assert conn.requeued == []
 
 
 def test_director_composer_busy_requeues_then_idle_delivers_once() -> None:
@@ -418,6 +539,9 @@ def main() -> int:
     test_reconnect_relistens_after_connection_drop()
     test_send_timeout_requeues_and_does_not_block_next_pane()
     test_busy_pane_requeues_then_idle_pane_delivers_once()
+    test_stale_ready_nudge_for_cancelled_ticket_is_acked_not_delivered()
+    test_stale_ready_nudge_for_picked_up_ticket_is_acked_not_delivered()
+    test_escalation_for_still_stuck_ready_ticket_delivers_to_director()
     test_director_composer_busy_requeues_then_idle_delivers_once()
     test_director_gate_treats_composer_content_as_busy_only_for_director()
     test_director_gate_defers_recently_changed_idle_capture_then_delivers_when_stable()

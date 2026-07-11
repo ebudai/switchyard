@@ -177,6 +177,31 @@ CREATE INDEX IF NOT EXISTS ticket_notification_state_due_idx
         last_nudged_at
     );
 
+CREATE TABLE IF NOT EXISTS ticket_board.ticket_notification_queue (
+    id bigserial PRIMARY KEY,
+    ticket_id text NOT NULL REFERENCES ticket_board.tickets(id) ON DELETE CASCADE,
+    kind text NOT NULL CHECK (kind IN ('transition', 'nudge', 'escalation')),
+    target_role text NOT NULL
+        CHECK (target_role IN ('director', 'main', 'app', 'perf', 'ops', 'audit', 'research')),
+    message text NOT NULL CHECK (btrim(message) <> ''),
+    payload jsonb NOT NULL,
+    dedupe_key text NOT NULL UNIQUE,
+    attempts integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    next_attempt_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    claimed_at timestamptz,
+    last_error text,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE INDEX IF NOT EXISTS ticket_notification_queue_due_idx
+    ON ticket_board.ticket_notification_queue (next_attempt_at, id)
+    WHERE claimed_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS ticket_notification_queue_claimed_idx
+    ON ticket_board.ticket_notification_queue (claimed_at, next_attempt_at, id)
+    WHERE claimed_at IS NOT NULL;
+
 CREATE OR REPLACE FUNCTION ticket_board.ticket_cluster_root_id(
     p_ticket_id text,
     p_parent_id text
@@ -349,24 +374,43 @@ CREATE OR REPLACE FUNCTION ticket_board.notify_ticket_state_transition()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
+DECLARE
+    target_role text;
+    message text;
 BEGIN
     IF coalesce(OLD.manually_controlled, false) OR coalesce(NEW.manually_controlled, false) THEN
         RETURN NULL;
     END IF;
 
     IF OLD.state IS DISTINCT FROM NEW.state THEN
-        PERFORM pg_notify(
-            'ticket_board_state_transition',
-            jsonb_build_object(
-                'id', NEW.id,
-                'title', NEW.title,
-                'old_state', OLD.state,
-                'new_state', NEW.state,
-                'assignee', NEW.assignee,
-                'updated_at', NEW.updated_at,
-                'ticket_number', NEW.ticket_number
-            )::text
-        );
+        target_role := ticket_board.transition_target_role(NEW.state, NEW.assignee);
+        message := ticket_board.transition_message(NEW.id, NEW.title, OLD.state, NEW.state);
+        IF target_role IS NOT NULL AND message IS NOT NULL THEN
+            PERFORM ticket_board.enqueue_notification(
+                NEW.id,
+                'transition',
+                target_role,
+                message,
+                jsonb_build_object(
+                    'kind', 'transition',
+                    'id', NEW.id,
+                    'title', NEW.title,
+                    'old_state', OLD.state,
+                    'new_state', NEW.state,
+                    'assignee', NEW.assignee,
+                    'updated_at', NEW.updated_at,
+                    'ticket_number', NEW.ticket_number,
+                    'target_role', target_role,
+                    'message', message
+                ),
+                'transition:' || NEW.id || ':' || OLD.state || ':' || NEW.state || ':' || pg_current_xact_id()::text
+            );
+        ELSE
+            PERFORM pg_notify(
+                'ticket_board_state_transition',
+                jsonb_build_object('kind', 'wake', 'id', NEW.id, 'new_state', NEW.state)::text
+            );
+        END IF;
     END IF;
 
     RETURN NULL;
@@ -503,6 +547,194 @@ BEGIN
             USING ERRCODE = '42501';
     END IF;
     RETURN actor;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.transition_target_role(p_state text, p_assignee text)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT CASE
+        WHEN p_state = 'analysis' THEN 'director'
+        WHEN p_state IN ('ready', 'in_progress') THEN NULLIF(p_assignee, 'unassigned')
+        WHEN p_state = 'audit' THEN 'audit'
+        WHEN p_state = 'director_review' THEN 'director'
+        ELSE NULL
+    END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.state_rank(p_state text)
+RETURNS integer
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT CASE p_state
+        WHEN 'backlog' THEN 0
+        WHEN 'analysis' THEN 1
+        WHEN 'ready' THEN 2
+        WHEN 'in_progress' THEN 3
+        WHEN 'audit' THEN 4
+        WHEN 'eric_review' THEN 5
+        WHEN 'director_review' THEN 6
+        WHEN 'done' THEN 7
+        WHEN 'cancelled' THEN 8
+        ELSE NULL
+    END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.transition_message(
+    p_ticket_id text,
+    p_title text,
+    p_old_state text,
+    p_new_state text
+)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT CASE
+        WHEN ticket_board.state_rank(p_old_state) IS NOT NULL
+             AND ticket_board.state_rank(p_new_state) IS NOT NULL
+             AND ticket_board.state_rank(p_new_state) < ticket_board.state_rank(p_old_state)
+            THEN p_ticket_id || CASE WHEN p_title <> '' THEN ' -- ' || p_title ELSE '' END || ' kicked back to you'
+        WHEN p_new_state = 'analysis'
+            THEN 'New ticket for you: ' || p_ticket_id || CASE WHEN p_title <> '' THEN ' -- ' || p_title ELSE '' END
+        WHEN p_new_state = 'ready'
+            THEN 'Ready ticket for you: ' || p_ticket_id || CASE WHEN p_title <> '' THEN ' -- ' || p_title ELSE '' END
+        WHEN p_new_state = 'in_progress'
+            THEN 'New ticket for you: ' || p_ticket_id || CASE WHEN p_title <> '' THEN ' -- ' || p_title ELSE '' END
+        WHEN p_new_state = 'audit'
+            THEN p_ticket_id || CASE WHEN p_title <> '' THEN ' -- ' || p_title ELSE '' END || ' ready for audit'
+        WHEN p_new_state = 'director_review'
+            THEN p_ticket_id || CASE WHEN p_title <> '' THEN ' -- ' || p_title ELSE '' END || ' ready for your review'
+        ELSE NULL
+    END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.enqueue_notification(
+    p_ticket_id text,
+    p_kind text,
+    p_target_role text,
+    p_message text,
+    p_payload jsonb,
+    p_dedupe_key text,
+    p_next_attempt_at timestamptz DEFAULT clock_timestamp()
+)
+RETURNS bigint
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    notification_id bigint;
+BEGIN
+    IF p_target_role IS NULL OR p_message IS NULL OR btrim(p_message) = '' THEN
+        RETURN NULL;
+    END IF;
+
+    INSERT INTO ticket_board.ticket_notification_queue (
+        ticket_id,
+        kind,
+        target_role,
+        message,
+        payload,
+        dedupe_key,
+        next_attempt_at
+    ) VALUES (
+        p_ticket_id,
+        p_kind,
+        p_target_role,
+        p_message,
+        p_payload,
+        p_dedupe_key,
+        p_next_attempt_at
+    )
+    ON CONFLICT (dedupe_key) DO UPDATE
+    SET payload = EXCLUDED.payload,
+        target_role = EXCLUDED.target_role,
+        message = EXCLUDED.message,
+        updated_at = clock_timestamp()
+    RETURNING id INTO notification_id;
+
+    PERFORM pg_notify(
+        'ticket_board_state_transition',
+        jsonb_build_object('kind', 'wake', 'notification_id', notification_id)::text
+    );
+    RETURN notification_id;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.claim_notification(
+    p_now timestamptz DEFAULT clock_timestamp(),
+    p_claim_timeout interval DEFAULT interval '2 minutes'
+)
+RETURNS TABLE(notification_id bigint, ticket_id text, target_role text, message text, payload jsonb, attempts integer)
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+BEGIN
+    PERFORM ticket_board.require_ticket_board_listener('claim_notification');
+    RETURN QUERY
+    WITH candidate AS (
+        SELECT q.id
+        FROM ticket_board.ticket_notification_queue q
+        WHERE q.next_attempt_at <= p_now
+          AND (q.claimed_at IS NULL OR q.claimed_at <= p_now - p_claim_timeout)
+        ORDER BY q.next_attempt_at, q.id
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED
+    ),
+    claimed AS (
+        UPDATE ticket_board.ticket_notification_queue q
+        SET claimed_at = p_now,
+            attempts = q.attempts + 1,
+            updated_at = p_now
+        FROM candidate
+        WHERE q.id = candidate.id
+        RETURNING q.id, q.ticket_id, q.target_role, q.message, q.payload, q.attempts
+    )
+    SELECT claimed.id, claimed.ticket_id, claimed.target_role, claimed.message, claimed.payload, claimed.attempts
+    FROM claimed;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.ack_notification(p_notification_id bigint)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+BEGIN
+    PERFORM ticket_board.require_ticket_board_listener('ack_notification');
+    DELETE FROM ticket_board.ticket_notification_queue
+    WHERE id = p_notification_id;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.requeue_notification(
+    p_notification_id bigint,
+    p_delay interval DEFAULT interval '30 seconds',
+    p_error text DEFAULT NULL
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+BEGIN
+    PERFORM ticket_board.require_ticket_board_listener('requeue_notification');
+    UPDATE ticket_board.ticket_notification_queue
+    SET claimed_at = NULL,
+        next_attempt_at = clock_timestamp() + p_delay,
+        last_error = p_error,
+        updated_at = clock_timestamp()
+    WHERE id = p_notification_id;
 END;
 $$;
 
@@ -669,7 +901,14 @@ BEGIN
             );
         END IF;
 
-        PERFORM pg_notify('ticket_board_state_transition', payload::text);
+        PERFORM ticket_board.enqueue_notification(
+            candidate.id,
+            (payload ->> 'kind'),
+            target_role,
+            (payload ->> 'message'),
+            payload,
+            'nudge:' || candidate.id || ':' || target_role || ':' || p_now::text
+        );
         UPDATE ticket_board.ticket_notification_state
         SET last_nudged_at = p_now,
             nudge_count = CASE

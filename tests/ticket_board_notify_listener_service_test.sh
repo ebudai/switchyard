@@ -54,9 +54,9 @@ grep -q '^Restart=always$' "$UNIT_DIR/service.unit" || {
     echo "FAIL: listener unit should always restart after drops/crashes" >&2
     exit 1
 }
-grep -q '^RuntimeMaxSec=900$' "$UNIT_DIR/service.unit" || {
-    echo "FAIL: listener unit should periodically recycle as a wedge backstop" >&2
+if grep -q '^RuntimeMaxSec=' "$UNIT_DIR/service.unit"; then
+    echo "FAIL: queue listener should not rely on RuntimeMaxSec recycle" >&2
     exit 1
-}
+fi
 
 echo "ticket_board_notify_listener_service_test: ok"

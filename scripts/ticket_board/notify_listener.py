@@ -9,7 +9,6 @@ import os
 import subprocess
 import sys
 import threading
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -21,12 +20,13 @@ CHANNEL = "ticket_board_state_transition"
 DEFAULT_DATABASE_URL = os.environ.get("TICKET_BOARD_NOTIFY_DATABASE_URL") or os.environ.get("DATABASE_URL", "")
 DEFAULT_RECONNECT_SECONDS = 2.0
 DEFAULT_POLL_SECONDS = 5.0
-DEFAULT_WATCHDOG_SECONDS = 30.0
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 10
 DEFAULT_KEEPALIVES_IDLE_SECONDS = 30
 DEFAULT_KEEPALIVES_INTERVAL_SECONDS = 10
 DEFAULT_KEEPALIVES_COUNT = 3
 DEFAULT_DIRECTORCTL_SEND_TIMEOUT_SECONDS = 10.0
+DEFAULT_REQUEUE_BASE_SECONDS = 5.0
+DEFAULT_REQUEUE_MAX_SECONDS = 60.0
 ROLE_TO_TARGET = {
     "director": "pgu-director:0.0",
     "main": "pgu-main:0.0",
@@ -174,7 +174,8 @@ class TicketBoardNotifyListener:
         connector: Callable[..., Any] = psycopg.connect,
         reconnect_seconds: float = DEFAULT_RECONNECT_SECONDS,
         poll_seconds: float = DEFAULT_POLL_SECONDS,
-        watchdog_seconds: float = DEFAULT_WATCHDOG_SECONDS,
+        requeue_base_seconds: float = DEFAULT_REQUEUE_BASE_SECONDS,
+        requeue_max_seconds: float = DEFAULT_REQUEUE_MAX_SECONDS,
         stop_event: threading.Event | None = None,
         logger: logging.Logger = LOGGER,
     ) -> None:
@@ -185,7 +186,8 @@ class TicketBoardNotifyListener:
         self.connector = connector
         self.reconnect_seconds = reconnect_seconds
         self.poll_seconds = poll_seconds
-        self.watchdog_seconds = watchdog_seconds
+        self.requeue_base_seconds = requeue_base_seconds
+        self.requeue_max_seconds = requeue_max_seconds
         self.stop_event = stop_event or threading.Event()
         self.logger = logger
         self.delivered_count = 0
@@ -200,18 +202,9 @@ class TicketBoardNotifyListener:
             "keepalives_count": DEFAULT_KEEPALIVES_COUNT,
         }
 
-    def _force_close_connection(self, conn: Any) -> None:
-        pgconn = getattr(conn, "pgconn", None)
-        if pgconn is not None:
-            try:
-                pgconn.finish()
-                return
-            except Exception:  # noqa: BLE001
-                self.logger.debug("failed to force-close notify listener pgconn", exc_info=True)
-        try:
-            conn.close()
-        except Exception:  # noqa: BLE001
-            self.logger.debug("failed to close wedged notify listener connection", exc_info=True)
+    def _backoff_seconds(self, attempts: int) -> float:
+        exponent = max(attempts - 1, 0)
+        return min(self.requeue_max_seconds, self.requeue_base_seconds * (2**exponent))
 
     def deliver_payload(self, payload: str) -> bool:
         transition = parse_transition_payload(payload)
@@ -220,8 +213,8 @@ class TicketBoardNotifyListener:
         if not target or not message:
             self.logger.debug("Skipping transition notification: %s", payload)
             return False
-        if message.startswith("NUDGE") and self.activity_gate(target):
-            self.logger.info("Suppressed NUDGE for active pane %s", target)
+        if self.activity_gate(target):
+            self.logger.info("Deferred notification for active pane %s", target)
             return False
         self.sender(target, message)
         self.delivered_count += 1
@@ -229,89 +222,89 @@ class TicketBoardNotifyListener:
         return True
 
     def reconcile_pending_notifications(self, conn: Any, *, max_notifications: int | None = None) -> int:
+        return self.process_due_notifications(conn, max_notifications=max_notifications)
+
+    def _claim_notification(self, conn: Any) -> tuple[int, str, str, str, str, int] | None:
+        result = conn.execute(
+            """
+SELECT notification_id, ticket_id, target_role, message, payload::text, attempts
+FROM ticket_board.claim_notification()
+"""
+        )
+        row = result.fetchone()
+        if row is None:
+            return None
+        notification_id, ticket_id, target_role, message, payload, attempts = row
+        return (
+            int(notification_id),
+            self._decode_text(ticket_id),
+            self._decode_text(target_role),
+            self._decode_text(message),
+            self._decode_text(payload),
+            int(attempts),
+        )
+
+    def _decode_text(self, value: Any) -> str:
+        if isinstance(value, bytes):
+            return value.decode("utf-8")
+        return str(value)
+
+    def _ack_notification(self, conn: Any, notification_id: int) -> None:
+        conn.execute("SELECT ticket_board.ack_notification(%s::bigint)", (notification_id,))
+
+    def _requeue_notification(self, conn: Any, notification_id: int, attempts: int, error: str) -> None:
+        delay_seconds = self._backoff_seconds(attempts)
+        conn.execute(
+            "SELECT ticket_board.requeue_notification(%s::bigint, %s::interval, %s::text)",
+            (notification_id, f"{delay_seconds} seconds", error[:500]),
+        )
+
+    def process_due_notifications(self, conn: Any, *, max_notifications: int | None = None) -> int:
         delivered = 0
-        rows = conn.execute("SELECT ticket_id, payload::text FROM ticket_board.pending_transition_notifications()").fetchall()
-        for ticket_id, payload in rows:
-            ticket_id_text = ticket_id.decode("utf-8") if isinstance(ticket_id, bytes) else str(ticket_id)
-            if self.stop_event.is_set():
-                break
+        while not self.stop_event.is_set():
             if max_notifications is not None and self.delivered_count >= max_notifications:
                 break
+            row = self._claim_notification(conn)
+            if row is None:
+                break
+            notification_id, ticket_id, target_role, message, payload, attempts = row
+            target = ROLE_TO_TARGET.get(target_role)
+            if self.stop_event.is_set():
+                break
+            if target is None:
+                self.logger.warning("Acking notification %s with unknown target role %s", notification_id, target_role)
+                self._ack_notification(conn, notification_id)
+                continue
+            if self.activity_gate(target):
+                self.logger.info("Pane %s is active; requeueing notification %s for %s", target, notification_id, ticket_id)
+                self._requeue_notification(conn, notification_id, attempts, "pane busy")
+                continue
             try:
-                if self.deliver_payload(payload):
-                    conn.execute("SELECT ticket_board.mark_transition_notified(%s::text)", (ticket_id_text,))
-                    delivered += 1
-            except ValueError as exc:
-                self.logger.warning("Skipping malformed reconciled ticket notification payload: %s", exc)
+                self.sender(target, message)
             except (subprocess.SubprocessError, OSError) as exc:
-                self.logger.warning("Failed to deliver reconciled ticket notification through directorctl: %s", exc)
+                self.logger.warning("Failed to deliver queued ticket notification through directorctl: %s", exc)
+                self._requeue_notification(conn, notification_id, attempts, str(exc))
+                continue
+            self._ack_notification(conn, notification_id)
+            self.delivered_count += 1
+            delivered += 1
+            self.logger.info("Delivered queued notification %s for %s to %s: %s", notification_id, ticket_id, target, payload)
         return delivered
 
     def listen_once(self, *, max_notifications: int | None = None) -> int:
         delivered_before = self.delivered_count
         with self.connector(self.conninfo, **self._connector_kwargs()) as conn:
-            progress_lock = threading.Lock()
-            last_progress = time.monotonic()
-            watchdog_stop = threading.Event()
-            watchdog_triggered = threading.Event()
-
-            def mark_progress() -> None:
-                nonlocal last_progress
-                with progress_lock:
-                    last_progress = time.monotonic()
-
-            def watch_connection_progress() -> None:
-                if self.watchdog_seconds <= 0:
-                    return
-                sleep_seconds = max(min(self.poll_seconds, 1.0), 0.05)
-                while not watchdog_stop.wait(sleep_seconds):
-                    with progress_lock:
-                        idle_seconds = time.monotonic() - last_progress
-                    if idle_seconds <= self.watchdog_seconds:
-                        continue
-                    watchdog_triggered.set()
-                    self.logger.warning(
-                        "ticket notify listener poll made no progress for %.1fs; forcing reconnect",
-                        idle_seconds,
-                    )
-                    self._force_close_connection(conn)
-                    return
-
-            watchdog_thread = threading.Thread(
-                target=watch_connection_progress,
-                name="ticket-board-notify-listener-watchdog",
-                daemon=True,
-            )
-            watchdog_thread.start()
             conn.execute(sql.SQL("LISTEN {}").format(sql.Identifier(self.channel)))
             self.logger.info("LISTEN %s established", self.channel)
-            mark_progress()
-            self.reconcile_pending_notifications(conn, max_notifications=max_notifications)
-            mark_progress()
-            try:
-                while not self.stop_event.is_set():
-                    for notify in conn.notifies(timeout=self.poll_seconds):
-                        mark_progress()
-                        try:
-                            delivered = self.deliver_payload(notify.payload)
-                            transition = parse_transition_payload(notify.payload)
-                            if delivered and transition.kind == "transition" and transition.ticket_id:
-                                conn.execute("SELECT ticket_board.mark_transition_notified(%s::text)", (transition.ticket_id,))
-                        except ValueError as exc:
-                            self.logger.warning("Skipping malformed ticket notification payload: %s", exc)
-                        except (subprocess.SubprocessError, OSError) as exc:
-                            self.logger.warning("Failed to deliver ticket notification through directorctl: %s", exc)
-                        if max_notifications is not None and self.delivered_count >= max_notifications:
-                            self.stop_event.set()
-                            break
-                    mark_progress()
-                    if watchdog_triggered.is_set():
-                        raise psycopg.OperationalError("notify listener poll watchdog forced reconnect")
-                    if max_notifications is not None and self.delivered_count >= max_notifications:
-                        break
-            finally:
-                watchdog_stop.set()
-                watchdog_thread.join(timeout=1.0)
+            while not self.stop_event.is_set():
+                delivered = self.process_due_notifications(conn, max_notifications=max_notifications)
+                if max_notifications is not None and self.delivered_count >= max_notifications:
+                    break
+                if not delivered and max_notifications is not None and self.poll_seconds <= 0:
+                    break
+                notifications = conn.notifies(timeout=self.poll_seconds)
+                if not notifications and max_notifications is not None and self.poll_seconds <= 0:
+                    break
         return self.delivered_count - delivered_before
 
     def run_forever(
@@ -344,7 +337,6 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--directorctl", default=DEFAULT_DIRECTORCTL, help=f"directorctl path (default: {DEFAULT_DIRECTORCTL})")
     parser.add_argument("--reconnect-seconds", type=float, default=DEFAULT_RECONNECT_SECONDS)
     parser.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS)
-    parser.add_argument("--watchdog-seconds", type=float, default=DEFAULT_WATCHDOG_SECONDS, help="Force a reconnect if the poll loop makes no progress for this many seconds; <=0 disables it.")
     parser.add_argument("--verbose", action="store_true")
     return parser
 
@@ -362,7 +354,6 @@ def main(argv: list[str] | None = None) -> int:
         activity_gate=PaneActivityGate(args.directorctl).is_working,
         reconnect_seconds=args.reconnect_seconds,
         poll_seconds=args.poll_seconds,
-        watchdog_seconds=args.watchdog_seconds,
     )
     listener.run_forever()
     return 0

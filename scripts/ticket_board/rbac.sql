@@ -31,8 +31,10 @@ REVOKE ALL ON ticket_board.tickets FROM director, eric, ops, app, audit, perf, r
 REVOKE ALL ON ticket_board.ticket_blockers FROM director, eric, ops, app, audit, perf, research, main, ticket_board_service, ticket_board_listener;
 REVOKE ALL ON ticket_board.ticket_comments FROM director, eric, ops, app, audit, perf, research, main, ticket_board_service, ticket_board_listener;
 REVOKE ALL ON ticket_board.ticket_attachments FROM director, eric, ops, app, audit, perf, research, main, ticket_board_service, ticket_board_listener;
+REVOKE ALL ON ticket_board.ticket_notification_queue FROM director, eric, ops, app, audit, perf, research, main, ticket_board_service, ticket_board_listener;
 REVOKE ALL ON ticket_board.schema_migrations FROM director, eric, ops, app, audit, perf, research, main, ticket_board_service, ticket_board_listener;
 REVOKE ALL ON SEQUENCE ticket_board.ticket_comments_id_seq FROM director, eric, ops, app, audit, perf, research, main, ticket_board_service, ticket_board_listener;
+REVOKE ALL ON SEQUENCE ticket_board.ticket_notification_queue_id_seq FROM director, eric, ops, app, audit, perf, research, main, ticket_board_service, ticket_board_listener;
 REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA ticket_board FROM director, eric, ops, app, audit, perf, research, main, ticket_board_service, ticket_board_listener;
 
 GRANT SELECT ON ALL TABLES IN SCHEMA ticket_board TO director, eric, ops, app, audit, perf, research, main, ticket_board_service, ticket_board_listener;
@@ -56,7 +58,8 @@ GRANT EXECUTE ON FUNCTION ticket_board.add_comment(text, text) TO ticket_board_s
 GRANT EXECUTE ON FUNCTION ticket_board.edit_fields(text, jsonb) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.merge(text, text) TO ticket_board_service;
 
-GRANT EXECUTE ON FUNCTION ticket_board.pending_transition_notifications() TO ticket_board_listener;
-GRANT EXECUTE ON FUNCTION ticket_board.mark_transition_notified(text) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.claim_notification(timestamptz, interval) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.ack_notification(bigint) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.requeue_notification(bigint, interval, text) TO ticket_board_listener;
 
 COMMIT;

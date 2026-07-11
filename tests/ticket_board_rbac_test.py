@@ -38,12 +38,16 @@ WRITE_FUNCTIONS = [
     "ticket_board.merge(text,text)",
 ]
 LISTENER_FUNCTIONS = [
-    "ticket_board.pending_transition_notifications()",
-    "ticket_board.mark_transition_notified(text)",
+    "ticket_board.claim_notification(timestamp with time zone,interval)",
+    "ticket_board.ack_notification(bigint)",
+    "ticket_board.requeue_notification(bigint,interval,text)",
 ]
 PRIVATE_LISTENER_FUNCTIONS = [
     "ticket_board.require_ticket_board_listener(text)",
     "ticket_board.transition_notification_payload(text,text,text,text)",
+    "ticket_board.pending_transition_notifications()",
+    "ticket_board.mark_transition_notified(text)",
+    "ticket_board.enqueue_notification(text,text,text,text,jsonb,text,timestamp with time zone)",
 ]
 
 
@@ -202,7 +206,11 @@ SELECT jsonb_build_object(
     'tickets_delete', has_table_privilege({sql_string(role)}, 'ticket_board.tickets', 'DELETE'),
     'comments_insert', has_table_privilege({sql_string(role)}, 'ticket_board.ticket_comments', 'INSERT'),
     'blockers_insert', has_table_privilege({sql_string(role)}, 'ticket_board.ticket_blockers', 'INSERT'),
-    'comments_sequence', has_sequence_privilege({sql_string(role)}, 'ticket_board.ticket_comments_id_seq', 'USAGE')
+    'queue_insert', has_table_privilege({sql_string(role)}, 'ticket_board.ticket_notification_queue', 'INSERT'),
+    'queue_update', has_table_privilege({sql_string(role)}, 'ticket_board.ticket_notification_queue', 'UPDATE'),
+    'queue_delete', has_table_privilege({sql_string(role)}, 'ticket_board.ticket_notification_queue', 'DELETE'),
+    'comments_sequence', has_sequence_privilege({sql_string(role)}, 'ticket_board.ticket_comments_id_seq', 'USAGE'),
+    'queue_sequence', has_sequence_privilege({sql_string(role)}, 'ticket_board.ticket_notification_queue_id_seq', 'USAGE')
 )::text;
 """,
             )
@@ -213,7 +221,11 @@ SELECT jsonb_build_object(
             "tickets_delete": False,
             "comments_insert": False,
             "blockers_insert": False,
+            "queue_insert": False,
+            "queue_update": False,
+            "queue_delete": False,
             "comments_sequence": False,
+            "queue_sequence": False,
         }, (role, privileges)
 
         assert_permission_denied(
@@ -240,6 +252,13 @@ VALUES (
             """
 INSERT INTO ticket_board.ticket_comments (ticket_id, position, who, ts_text, text, source_json)
 VALUES ('PGU-1', 0, 'x', '2026-07-10T00:00:00+00:00', 'x', '{"who":"x","ts":"2026-07-10T00:00:00+00:00","text":"x"}');
+""",
+        )
+        assert_permission_denied(
+            role_conn[role],
+            """
+INSERT INTO ticket_board.ticket_notification_queue (ticket_id, kind, target_role, message, payload, dedupe_key)
+VALUES ('PGU-1', 'transition', 'ops', 'x', '{"kind":"transition"}', 'direct-dml');
 """,
         )
 
@@ -457,37 +476,47 @@ def assert_structural_rules_still_apply(admin_conn: str, service_conn: str) -> N
 
 
 def assert_listener_can_execute_reconcile_functions(admin_conn: str, listener_conn: str, service_conn: str) -> None:
-    insert_ticket(admin_conn, "PGU-950", title="Listener pending", state="analysis", assignee="ops", implementation="Ready.")
+    psql(admin_conn, "DELETE FROM ticket_board.ticket_notification_queue;")
+    insert_ticket(admin_conn, "PGU-950", title="Listener queue", state="analysis", assignee="ops", implementation="Ready.")
     psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'ready' WHERE id = 'PGU-950';")
 
-    pending = json.loads(
+    claimed = json.loads(
         psql(
             listener_conn,
             """
-SELECT jsonb_agg(payload ORDER BY ticket_id)::text
-FROM ticket_board.pending_transition_notifications()
-WHERE ticket_id = 'PGU-950';
+SELECT row_to_json(claimed)::text
+FROM ticket_board.claim_notification() AS claimed;
 """,
         )
     )
-    assert len(pending) == 1, pending
-    assert pending[0]["kind"] == "transition", pending
-    assert pending[0]["id"] == "PGU-950", pending
-    assert pending[0]["title"] == "Listener pending", pending
-    assert pending[0]["old_state"] == "analysis", pending
-    assert pending[0]["new_state"] == "ready", pending
-    assert pending[0]["assignee"] == "ops", pending
-    assert pending[0]["ticket_number"] == 950, pending
+    assert claimed["ticket_id"] == "PGU-950", claimed
+    assert claimed["target_role"] == "ops", claimed
+    assert claimed["message"] == "Ready ticket for you: PGU-950 -- Listener queue", claimed
+    assert claimed["attempts"] == 1, claimed
 
-    psql(listener_conn, "SELECT ticket_board.mark_transition_notified('PGU-950');")
+    psql(listener_conn, f"SELECT ticket_board.requeue_notification({claimed['notification_id']}, interval '0 seconds', 'busy');")
+    claimed_again = json.loads(
+        psql(
+            listener_conn,
+            """
+SELECT row_to_json(claimed)::text
+FROM ticket_board.claim_notification() AS claimed;
+""",
+        )
+    )
+    assert claimed_again["notification_id"] == claimed["notification_id"], claimed_again
+    assert claimed_again["attempts"] == 2, claimed_again
+
+    psql(listener_conn, f"SELECT ticket_board.ack_notification({claimed_again['notification_id']});")
     after = psql(
         listener_conn,
-        "SELECT count(*) FROM ticket_board.pending_transition_notifications() WHERE ticket_id = 'PGU-950';",
+        "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-950';",
     )
     assert after == "0", after
 
-    assert_permission_denied(service_conn, "SELECT ticket_board.pending_transition_notifications();")
-    assert_permission_denied(service_conn, "SELECT ticket_board.mark_transition_notified('PGU-950');")
+    assert_permission_denied(service_conn, "SELECT * FROM ticket_board.claim_notification();")
+    assert_permission_denied(service_conn, f"SELECT ticket_board.ack_notification({claimed_again['notification_id']});")
+    assert_permission_denied(service_conn, f"SELECT ticket_board.requeue_notification({claimed_again['notification_id']}, interval '1 second', 'x');")
 
 
 def main() -> int:

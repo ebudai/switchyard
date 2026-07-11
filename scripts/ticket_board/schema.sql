@@ -1012,6 +1012,8 @@ DECLARE
     delivered_count integer := 0;
     target_role text;
     payload jsonb;
+    analysis_message text;
+    analysis_payload jsonb;
 BEGIN
     FOR candidate IN
         SELECT DISTINCT ON (candidates.target_role)
@@ -1138,6 +1140,37 @@ BEGIN
                 ELSE candidate.dedupe_key
             END
         );
+        IF (payload ->> 'kind') = 'nudge' AND target_role <> 'director' THEN
+            analysis_message := 'NUDGE-ANALYSIS: '
+                || candidate.id
+                || ' (target='
+                || target_role
+                || ', state='
+                || candidate.state
+                || ', '
+                || floor(extract(epoch FROM p_now - candidate.entered_current_state_at))::integer
+                || 's since transition, prior_nudges='
+                || candidate.nudge_count
+                || ')';
+            analysis_payload := jsonb_build_object(
+                'kind', 'nudge_analysis',
+                'id', candidate.id,
+                'title', candidate.title,
+                'state', candidate.state,
+                'assignee', candidate.assignee,
+                'target_role', 'director',
+                'original_target_role', target_role,
+                'message', analysis_message
+            );
+            PERFORM ticket_board.enqueue_notification(
+                candidate.id,
+                'nudge',
+                'director',
+                analysis_message,
+                analysis_payload,
+                'nudge-analysis:' || candidate.id || ':' || target_role
+            );
+        END IF;
         UPDATE ticket_board.ticket_notification_state
         SET last_nudged_at = p_now,
             nudge_count = CASE

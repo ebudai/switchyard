@@ -6,14 +6,59 @@
 // ticket_board_service, which is true for every HTTP request alike. So the
 // per-operation "who" check lives entirely here, same as it does in Python.
 import { CALLER_ROLE_HEADER } from "./constants.ts";
-import { CALLER_ROLES, type CallerRole, isCallerRole } from "./types.ts";
+import { CALLER_ROLES, type Assignee, type CallerRole, isCallerRole } from "./types.ts";
 
-export type Operation = "create_ticket" | "route";
+// The full write-action surface from server.py's OPERATION_ALLOWED_ROLES.
+// `Record<Operation, ...>` below is the exhaustiveness device: TS refuses to
+// compile if an Operation is added here without a matching entry in the
+// roles map (auth.ts) or the dispatch table (server.ts) -- the same
+// guarantee legalNextStates() gives the state machine in types.ts.
+export type Operation =
+  | "create_ticket"
+  | "file_bug"
+  | "route"
+  | "start_work"
+  | "submit_to_audit"
+  | "audit_sign_off"
+  | "audit_kick_back"
+  | "eric_sign_off"
+  | "eric_reopen"
+  | "mark_done"
+  | "defer"
+  | "cancel"
+  | "set_manually_controlled"
+  | "set_blockers"
+  | "add_comment"
+  | "edit_fields"
+  | "merge";
+
+const IMPLEMENTER_ROLES = ["main", "app", "ops", "perf", "research"] as const satisfies readonly CallerRole[];
 
 const OPERATION_ALLOWED_ROLES: Record<Operation, readonly CallerRole[]> = {
   create_ticket: ["director", "eric"],
+  file_bug: IMPLEMENTER_ROLES,
   route: ["director"],
+  start_work: IMPLEMENTER_ROLES,
+  submit_to_audit: IMPLEMENTER_ROLES,
+  audit_sign_off: ["audit"],
+  audit_kick_back: ["audit"],
+  eric_sign_off: ["eric"],
+  eric_reopen: ["eric"],
+  mark_done: ["director"],
+  defer: ["director"],
+  cancel: ["director"],
+  set_manually_controlled: ["director"],
+  set_blockers: ["director"],
+  add_comment: CALLER_ROLES,
+  edit_fields: CALLER_ROLES,
+  merge: ["director"],
 };
+
+// server.py's require_operation_allowed also gates start_work/submit_to_audit
+// on the CALLER being the ticket's current assignee, on top of the role
+// check above -- an implementer role alone isn't enough; it must be *your*
+// ticket.
+const ASSIGNEE_GATED_OPERATIONS = new Set<Operation>(["start_work", "submit_to_audit"]);
 
 export class AuthError extends Error {
   constructor(message: string, readonly status: 400 | 403) {
@@ -37,6 +82,22 @@ export function requireOperationAllowed(operation: Operation, caller: CallerRole
   const allowed = OPERATION_ALLOWED_ROLES[operation];
   if (!allowed.includes(caller)) {
     throw new AuthError(`${caller} cannot call ${operation}`, 403);
+  }
+}
+
+const ALL_OPERATIONS = Object.keys(OPERATION_ALLOWED_ROLES) as Operation[];
+
+export function isOperation(value: string): value is Operation {
+  return (ALL_OPERATIONS as string[]).includes(value);
+}
+
+export function requiresAssigneeMatch(operation: Operation): boolean {
+  return ASSIGNEE_GATED_OPERATIONS.has(operation);
+}
+
+export function requireAssigneeMatch(operation: Operation, caller: CallerRole, ticketAssignee: Assignee): void {
+  if (ticketAssignee.trim().toLowerCase() !== caller) {
+    throw new AuthError(`${caller} cannot call ${operation} for ticket assigned to ${ticketAssignee}`, 403);
   }
 }
 

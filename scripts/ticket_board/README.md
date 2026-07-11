@@ -39,9 +39,17 @@ Pane write API:
   and `add_comment`.
 - Python and shell tooling should use `scripts.ticket_board.write_client` or
   `scripts/ticket-board-write` instead of editing `PGU-N.json` directly. The
-  client defaults to caller role `director`; pass an explicit caller role for
-  operation-owned actions such as implementer start/submit, audit sign-off, or
-  Eric sign-off.
+  client resolves its default caller role from `PGU_TICKET_BOARD_CALLER_ROLE`,
+  then from the current `pgu-*` tmux session name, and finally falls back to
+  `director`. The standing Codex pane launcher exports this variable for each
+  role, so `pgu-main`, `pgu-app`, and `pgu-ops` write as `main`, `app`, and
+  `ops` by default. Pass `--caller-role` only when deliberately acting as a
+  different board role.
+- The main/app/ops panes should use their own role for allowed pane operations,
+  for example `scripts/ticket-board-write start-work PGU-123`,
+  `scripts/ticket-board-write submit-to-audit PGU-123 --commit-hash <sha>`,
+  `scripts/ticket-board-write file-bug --source-ticket-id PGU-123 ...`, and
+  `scripts/ticket-board-write add-comment PGU-123 --text ...`.
 
 Defaults:
 

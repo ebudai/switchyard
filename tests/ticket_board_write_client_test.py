@@ -145,7 +145,7 @@ def assert_action_requests(requests: list[tuple[str, str | None]]) -> None:
 
 
 def exercise_client(base_url: str, store: Path, commit_hash: str) -> None:
-    client = TicketBoardWriteClient(base_url)
+    client = TicketBoardWriteClient(base_url, "director")
     created = client.create_ticket(
         title="Client create",
         body="Created through the write client.",

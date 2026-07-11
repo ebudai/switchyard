@@ -5,14 +5,25 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Mapping
 from urllib import error as urllib_error
 from urllib import parse, request
 
 CALLER_ROLE_HEADER = "X-PGU-Caller-Role"
 DEFAULT_BOARD_URL = os.environ.get("PGU_TICKET_BOARD_URL", "http://127.0.0.1:8770")
+DEFAULT_CALLER_ROLE = "director"
+PANE_SESSION_CALLER_ROLES = {
+    "pgu-director": "director",
+    "pgu-main": "main",
+    "pgu-app": "app",
+    "pgu-ops": "ops",
+    "pgu-audit": "audit",
+    "pgu-perf": "perf",
+    "pgu-research": "research",
+}
 
 
 class TicketBoardWriteError(RuntimeError):
@@ -28,10 +39,36 @@ def _normalize_api_url(board_url: str) -> str:
     return f"{normalized}/api/tickets"
 
 
+def _caller_role_from_tmux_session(environ: Mapping[str, str] = os.environ) -> str | None:
+    pane_id = environ.get("TMUX_PANE", "").strip()
+    if not pane_id:
+        return None
+    try:
+        proc = subprocess.run(
+            ["tmux", "display-message", "-p", "-t", pane_id, "#{session_name}"],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=0.5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return PANE_SESSION_CALLER_ROLES.get(proc.stdout.strip())
+
+
+def default_caller_role(environ: Mapping[str, str] = os.environ) -> str:
+    explicit = environ.get("PGU_TICKET_BOARD_CALLER_ROLE", "").strip().lower()
+    if explicit:
+        return explicit
+    return _caller_role_from_tmux_session(environ) or DEFAULT_CALLER_ROLE
+
+
 @dataclass(frozen=True)
 class TicketBoardWriteClient:
     board_url: str = DEFAULT_BOARD_URL
-    caller_role: str = "director"
+    caller_role: str = field(default_factory=default_caller_role)
     timeout: float = 10.0
 
     @property
@@ -199,9 +236,18 @@ def _ticket_from_response(response: dict[str, Any]) -> dict[str, Any]:
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    caller_default = default_caller_role()
     parser = argparse.ArgumentParser(description="Write tickets through the board action API.")
     parser.add_argument("--board-url", default=DEFAULT_BOARD_URL, help=f"Board root or /api/tickets URL (default: {DEFAULT_BOARD_URL})")
-    parser.add_argument("--caller-role", default="director", help="Value for X-PGU-Caller-Role (default: director)")
+    parser.add_argument(
+        "--caller-role",
+        default=caller_default,
+        help=(
+            "Value for X-PGU-Caller-Role "
+            f"(default: PGU_TICKET_BOARD_CALLER_ROLE, current pgu-* tmux session, else {DEFAULT_CALLER_ROLE}; "
+            f"currently {caller_default})"
+        ),
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     create = subparsers.add_parser("create-ticket")

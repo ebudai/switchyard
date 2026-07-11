@@ -444,6 +444,15 @@ def exercise_write_api(base_url: str, commit_hash: str) -> None:
     )
     assert blockers["ticket"]["blocked_by"] == ["PGU-110"], blockers  # type: ignore[index]
     assert blockers["ticket"]["blocked_reason"] == "Waiting on blocker.", blockers  # type: ignore[index]
+    blocked_reason_forbidden = post_json(
+        base_url,
+        "/api/tickets/PGU-111/actions/edit_fields",
+        {"blocked_reason": ""},
+        caller="main",
+        expect=400,
+    )
+    assert "edit_fields cannot update: blocked_reason" in str(blocked_reason_forbidden), blocked_reason_forbidden
+    assert get_ticket(base_url, "PGU-111")["blocked_reason"] == "Waiting on blocker."
     comment = post_json(base_url, "/api/tickets/PGU-112/actions/add_comment", {"text": "Pane note."}, caller="app")
     assert comment["ticket"]["comments"][-1]["who"] == "app", comment  # type: ignore[index]
     assert get_ticket(base_url, "PGU-112")["comments"][-1]["text"] == "Pane note."
@@ -451,6 +460,8 @@ def exercise_write_api(base_url: str, commit_hash: str) -> None:
     assert edited["ticket"]["title"] == "Edited through action", edited  # type: ignore[index]
     invalid_edit = post_json(base_url, "/api/tickets/PGU-112/actions/edit_fields", {"state": "done"}, caller="app", expect=400)
     assert "edit_fields cannot update: state" in str(invalid_edit), invalid_edit
+    merge_forbidden = post_json(base_url, "/api/tickets/PGU-113/actions/merge", {"target_id": "PGU-114"}, caller="app", expect=403)
+    assert "app cannot call merge" in str(merge_forbidden), merge_forbidden
     merged = post_json(base_url, "/api/tickets/PGU-113/actions/merge", {"target_id": "PGU-114"}, caller="director")
     assert merged["target"]["id"] == "PGU-114", merged  # type: ignore[index]
     merged_source = get_ticket(base_url, "PGU-113")

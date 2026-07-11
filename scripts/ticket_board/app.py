@@ -830,7 +830,6 @@ ORDER BY t.ticket_number
             "audit_prompt",
             "needs_eric_signoff",
             "commit_exempt",
-            "blocked_reason",
             "commit_hash",
         }
         if patch.get("audit_signoff") is False:
@@ -841,10 +840,9 @@ ORDER BY t.ticket_number
             editable.add("eric_signoff")
         if "state" in patch:
             editable = set(editable)
-            editable.difference_update({"commit_hash", "blocked_reason"})
+            editable.discard("commit_hash")
         if "blocked_by" in patch:
             editable = set(editable)
-            editable.discard("blocked_reason")
         return {field: patch[field] for field in editable if field in patch}
 
     def _pg_validate_parent_id(self, conn: Any, raw: Any, ticket_id: str) -> str:

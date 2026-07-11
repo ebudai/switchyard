@@ -1151,7 +1151,6 @@ BEGIN
         'needs_eric_signoff',
         'commit_exempt',
         'commit_hash',
-        'blocked_reason',
         'audit_signoff',
         'eric_signoff'
     )
@@ -1203,7 +1202,6 @@ BEGIN
     UPDATE ticket_board.tickets
     SET title = CASE WHEN patch ? 'title' THEN btrim(patch->>'title') ELSE title END,
         parent_id = CASE WHEN patch ? 'parent_id' THEN upper(btrim(coalesce(patch->>'parent_id', ''))) ELSE parent_id END,
-        blocked_reason = CASE WHEN patch ? 'blocked_reason' THEN coalesce(patch->>'blocked_reason', '') ELSE blocked_reason END,
         implementation = CASE WHEN patch ? 'implementation' THEN coalesce(patch->>'implementation', '') ELSE implementation END,
         audit_prompt = CASE WHEN patch ? 'audit_prompt' THEN coalesce(patch->>'audit_prompt', '') ELSE audit_prompt END,
         needs_eric_signoff = CASE WHEN patch ? 'needs_eric_signoff' THEN (patch->>'needs_eric_signoff')::boolean ELSE needs_eric_signoff END,

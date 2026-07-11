@@ -54,7 +54,6 @@ EDIT_FIELD_NAMES = {
     "needs_eric_signoff",
     "commit_exempt",
     "commit_hash",
-    "blocked_reason",
     "audit_signoff",
     "eric_signoff",
 }

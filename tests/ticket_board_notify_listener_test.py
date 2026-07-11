@@ -71,8 +71,9 @@ class FakeConnection:
         if self.fail_on_notifies:
             raise psycopg.OperationalError("simulated connection drop")
         if self.block_on_notifies:
-            self.close_event.wait(timeout=5.0)
-            raise psycopg.OperationalError("simulated wedged connection closed")
+            if self.close_event.wait(timeout=1.0):
+                raise psycopg.OperationalError("simulated wedged connection closed")
+            raise AssertionError("watchdog never force-closed the wedged connection")
         queued = [FakeNotify(payload) for payload in self.notifications]
         self.notifications = []
         return queued
@@ -188,6 +189,7 @@ def test_poll_watchdog_force_closes_wedged_connection_and_reconnects() -> None:
     listener.run_forever(max_connections=2, max_notifications=1)
 
     assert wedged.closed is True
+    assert wedged.close_event.is_set()
     assert sent == [("pgu-ops:0.0", "Ready ticket for you: PGU-219 -- Wedge recovery")]
     assert sum("LISTEN" in str(statement) for statement, _params in executed) == 2, "watchdog reconnect must re-issue LISTEN"
 

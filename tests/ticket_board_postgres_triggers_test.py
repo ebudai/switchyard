@@ -757,6 +757,16 @@ WHERE ticket_id = 'PGU-20';
                 "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-20' AND kind = 'nudge';",
             ).stdout.strip()
             assert nudge_queue == "1", nudge_queue
+            deduped_nudges = psql(
+                conninfo,
+                "SELECT ticket_board.notify_due_nudges(clock_timestamp() + interval '20 minutes', interval '5 minutes', 3);",
+            ).stdout.strip()
+            assert int(deduped_nudges) >= 1, deduped_nudges
+            deduped_queue = psql(
+                conninfo,
+                "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-20' AND kind = 'nudge';",
+            ).stdout.strip()
+            assert deduped_queue == "1", deduped_queue
             inspection_nudge = json.loads(
                 psql(
                     conninfo,
@@ -777,9 +787,73 @@ LIMIT 1;
             psql(
                 conninfo,
                 """
+INSERT INTO ticket_board.tickets (
+    id, title, body, state, assignee, implementation, created_text, updated_text, source_json
+) VALUES (
+    'PGU-253', 'Fresh ready nudge guard', '', 'analysis', 'ops', 'Ready.',
+    '2026-07-11T00:00:00+00:00', '2026-07-11T00:00:00+00:00',
+    jsonb_build_object(
+        'id', 'PGU-253',
+        'title', 'Fresh ready nudge guard',
+        'body', '',
+        'state', 'analysis',
+        'assignee', 'ops',
+        'comments', '[]'::jsonb,
+        'created', '2026-07-11T00:00:00+00:00',
+        'updated', '2026-07-11T00:00:00+00:00'
+    )
+);
+UPDATE ticket_board.tickets SET state = 'ready' WHERE id = 'PGU-253';
+SELECT ticket_board.notify_due_nudges(clock_timestamp() + interval '1 minute', interval '5 minutes', 3);
+""",
+            )
+            fresh_ready_nudge = psql(
+                conninfo,
+                "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-253' AND kind = 'nudge';",
+            ).stdout.strip()
+            assert fresh_ready_nudge == "0", fresh_ready_nudge
+            psql(
+                conninfo,
+                """
+INSERT INTO ticket_board.tickets (
+    id, title, body, state, assignee, implementation, created_text, updated_text, source_json
+) VALUES (
+    'PGU-254', 'In-progress nudge guard', '', 'analysis', 'research', 'Ready.',
+    '2026-07-11T00:00:00+00:00', '2026-07-11T00:00:00+00:00',
+    jsonb_build_object(
+        'id', 'PGU-254',
+        'title', 'In-progress nudge guard',
+        'body', '',
+        'state', 'analysis',
+        'assignee', 'research',
+        'comments', '[]'::jsonb,
+        'created', '2026-07-11T00:00:00+00:00',
+        'updated', '2026-07-11T00:00:00+00:00'
+    )
+);
+UPDATE ticket_board.tickets SET state = 'ready' WHERE id = 'PGU-254';
+UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-254';
+UPDATE ticket_board.ticket_notification_state
+SET entered_current_state_at = clock_timestamp() - interval '1 hour',
+    last_activity_at = clock_timestamp() - interval '1 hour',
+    last_nudged_at = clock_timestamp() - interval '10 minutes',
+    nudge_count = 3
+WHERE ticket_id = 'PGU-254';
+SELECT ticket_board.notify_due_nudges(clock_timestamp(), interval '5 minutes', 3);
+""",
+            )
+            in_progress_nudges = psql(
+                conninfo,
+                "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-254' AND kind IN ('nudge', 'escalation');",
+            ).stdout.strip()
+            assert in_progress_nudges == "0", in_progress_nudges
+            psql(
+                conninfo,
+                """
 DELETE FROM ticket_board.ticket_notification_queue;
 UPDATE ticket_board.ticket_notification_state
 SET last_activity_at = clock_timestamp() - interval '20 minutes',
+    entered_current_state_at = clock_timestamp() - interval '20 minutes',
     last_nudged_at = clock_timestamp() - interval '10 minutes',
     nudge_count = 3
 WHERE ticket_id = 'PGU-21';

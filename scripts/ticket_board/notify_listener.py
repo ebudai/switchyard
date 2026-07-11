@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 import psycopg
@@ -41,6 +42,7 @@ STATE_RANK = {
 }
 
 LOGGER = logging.getLogger(__name__)
+DEFAULT_DIRECTORCTL = str(Path(__file__).resolve().parents[1] / "directorctl")
 
 
 @dataclass(frozen=True)
@@ -102,13 +104,12 @@ def message_for_transition(transition: Transition) -> str | None:
     return None
 
 
-class TmuxSender:
-    def __init__(self, tmux_bin: str = "tmux") -> None:
-        self.tmux_bin = tmux_bin
+class DirectorctlSender:
+    def __init__(self, directorctl_bin: str = DEFAULT_DIRECTORCTL) -> None:
+        self.directorctl_bin = directorctl_bin
 
     def __call__(self, target: str, message: str) -> None:
-        subprocess.run([self.tmux_bin, "send-keys", "-t", target, "-l", message], check=True)
-        subprocess.run([self.tmux_bin, "send-keys", "-t", target, "Enter"], check=True)
+        subprocess.run([self.directorctl_bin, "send", target, message], check=True)
 
 
 class TicketBoardNotifyListener:
@@ -126,7 +127,7 @@ class TicketBoardNotifyListener:
     ) -> None:
         self.conninfo = conninfo
         self.channel = channel
-        self.sender = sender or TmuxSender()
+        self.sender = sender or DirectorctlSender()
         self.connector = connector
         self.reconnect_seconds = reconnect_seconds
         self.poll_seconds = poll_seconds
@@ -157,8 +158,8 @@ class TicketBoardNotifyListener:
                         self.deliver_payload(notify.payload)
                     except ValueError as exc:
                         self.logger.warning("Skipping malformed ticket notification payload: %s", exc)
-                    except subprocess.CalledProcessError as exc:
-                        self.logger.warning("Failed to deliver ticket notification to tmux: %s", exc)
+                    except (subprocess.CalledProcessError, OSError) as exc:
+                        self.logger.warning("Failed to deliver ticket notification through directorctl: %s", exc)
                     if max_notifications is not None and self.delivered_count >= max_notifications:
                         self.stop_event.set()
                         break
@@ -193,7 +194,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Deliver ticket-board pg_notify state transitions to tmux panes.")
     parser.add_argument("--database", default=database_url_from_environment(), help="PostgreSQL connection string. Defaults to TICKET_BOARD_NOTIFY_DATABASE_URL or DATABASE_URL, otherwise libpq environment.")
     parser.add_argument("--channel", default=CHANNEL, help=f"LISTEN channel (default: {CHANNEL})")
-    parser.add_argument("--tmux", default="tmux", help="tmux binary (default: tmux)")
+    parser.add_argument("--directorctl", default=DEFAULT_DIRECTORCTL, help=f"directorctl path (default: {DEFAULT_DIRECTORCTL})")
     parser.add_argument("--reconnect-seconds", type=float, default=DEFAULT_RECONNECT_SECONDS)
     parser.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS)
     parser.add_argument("--verbose", action="store_true")
@@ -209,7 +210,7 @@ def main(argv: list[str] | None = None) -> int:
     listener = TicketBoardNotifyListener(
         conninfo=args.database,
         channel=args.channel,
-        sender=TmuxSender(args.tmux),
+        sender=DirectorctlSender(args.directorctl),
         reconnect_seconds=args.reconnect_seconds,
         poll_seconds=args.poll_seconds,
     )

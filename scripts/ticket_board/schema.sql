@@ -405,6 +405,27 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION ticket_board.current_app_actor()
+RETURNS text
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    actor text;
+BEGIN
+    actor := nullif(current_setting('ticket_board.caller_role', true), '');
+    IF actor IS NULL THEN
+        RETURN ticket_board.current_actor_role();
+    END IF;
+    IF actor NOT IN ('director', 'eric', 'main', 'app', 'ops', 'audit', 'perf', 'research') THEN
+        RAISE EXCEPTION 'invalid ticket_board.caller_role: %', actor;
+    END IF;
+    RETURN actor;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION ticket_board.utc_text(p_ts timestamptz)
 RETURNS text
 LANGUAGE sql
@@ -842,9 +863,11 @@ SET search_path = ticket_board, pg_temp
 AS $$
 DECLARE
     actor text;
+    comment_actor text;
 BEGIN
     actor := ticket_board.require_actor(ARRAY['audit'], 'audit_kick_back');
-    PERFORM ticket_board.append_ticket_comment(id, actor, reason);
+    comment_actor := ticket_board.current_app_actor();
+    PERFORM ticket_board.append_ticket_comment(id, comment_actor, reason);
     UPDATE ticket_board.tickets
     SET state = 'analysis',
         assignee = 'unassigned'
@@ -891,9 +914,11 @@ SET search_path = ticket_board, pg_temp
 AS $$
 DECLARE
     actor text;
+    comment_actor text;
 BEGIN
     actor := ticket_board.require_actor(ARRAY['eric'], 'eric_reopen');
-    PERFORM ticket_board.append_ticket_comment(id, actor, reason);
+    comment_actor := ticket_board.current_app_actor();
+    PERFORM ticket_board.append_ticket_comment(id, comment_actor, reason);
     UPDATE ticket_board.tickets
     SET state = 'analysis'
     WHERE tickets.id = eric_reopen.id
@@ -967,9 +992,11 @@ SET search_path = ticket_board, pg_temp
 AS $$
 DECLARE
     actor text;
+    comment_actor text;
 BEGIN
     actor := ticket_board.require_actor(ARRAY['director'], 'cancel');
-    PERFORM ticket_board.append_ticket_comment(id, actor, reason);
+    comment_actor := ticket_board.current_app_actor();
+    PERFORM ticket_board.append_ticket_comment(id, comment_actor, reason);
     UPDATE ticket_board.tickets
     SET state = 'cancelled'
     WHERE tickets.id = cancel.id;
@@ -1076,9 +1103,11 @@ SET search_path = ticket_board, pg_temp
 AS $$
 DECLARE
     actor text;
+    comment_actor text;
 BEGIN
     actor := ticket_board.require_actor(ARRAY['director', 'eric', 'main', 'app', 'ops', 'audit', 'perf', 'research'], 'add_comment');
-    PERFORM ticket_board.append_ticket_comment(id, actor, text);
+    comment_actor := ticket_board.current_app_actor();
+    PERFORM ticket_board.append_ticket_comment(id, comment_actor, text);
     PERFORM ticket_board.touch_ticket(id);
 END;
 $$;

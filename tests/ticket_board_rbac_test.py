@@ -14,9 +14,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
 RBAC_PATH = ROOT / "scripts" / "ticket_board" / "rbac.sql"
 
-PANE_ROLES = ["director", "eric", "ops", "app", "audit", "perf", "research", "main"]
+PANE_ROLES = ["director", "eric", "ops", "app", "audit", "inspector", "perf", "research", "main"]
 EXPECTED_ROLES = PANE_ROLES + ["ticket_board_service", "ticket_board_listener"]
-ROLE_SQL_ARRAY = "ARRAY['director','eric','ops','app','audit','perf','research','main','ticket_board_service','ticket_board_listener']"
+ROLE_SQL_ARRAY = "ARRAY['director','eric','ops','app','audit','inspector','perf','research','main','ticket_board_service','ticket_board_listener']"
 
 WRITE_FUNCTIONS = [
     "ticket_board.create_ticket(text,text)",
@@ -26,6 +26,8 @@ WRITE_FUNCTIONS = [
     "ticket_board.submit_to_audit(text,text)",
     "ticket_board.audit_sign_off(text)",
     "ticket_board.audit_kick_back(text,text)",
+    "ticket_board.inspector_sign_off(text)",
+    "ticket_board.inspector_kick_back(text,text)",
     "ticket_board.eric_sign_off(text)",
     "ticket_board.eric_reopen(text,text)",
     "ticket_board.mark_done(text,text)",

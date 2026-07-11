@@ -25,16 +25,28 @@ REPO_ROOT_DEFAULT = Path(__file__).resolve().parents[2]
 COMMIT_GIT_DIR_DEFAULT = Path("/data/git/pgu.git")
 STORE_BACKEND_DEFAULT = os.environ.get("TICKET_BOARD_STORE_BACKEND", "json")
 POSTGRES_DSN_DEFAULT = os.environ.get("TICKET_BOARD_DATABASE_URL") or os.environ.get("DATABASE_URL", "")
-ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "agent", "director", "research")
+ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "inspector", "agent", "director", "research")
 LEGACY_ASSIGNEE_ALIASES = {"ui": "app"}
 LEGACY_STATE_ALIASES = {"open": "analysis"}
-STATES = ("backlog", "analysis", "ready", "in_progress", "audit", "eric_review", "director_review", "done", "cancelled")
+STATES = (
+    "backlog",
+    "analysis",
+    "ready",
+    "in_progress",
+    "inspection",
+    "audit",
+    "eric_review",
+    "director_review",
+    "done",
+    "cancelled",
+)
 TERMINAL_STATES = {"done", "cancelled"}
 LEGAL_STATE_TRANSITIONS = {
     "backlog": {"analysis", "ready", "cancelled"},
     "analysis": {"ready", "backlog", "cancelled"},
     "ready": {"in_progress", "analysis", "backlog", "cancelled"},
-    "in_progress": {"audit", "ready", "analysis", "backlog", "cancelled"},
+    "in_progress": {"inspection", "audit", "ready", "analysis", "backlog", "cancelled"},
+    "inspection": {"audit", "in_progress", "backlog", "cancelled"},
     "audit": {"eric_review", "director_review", "analysis", "backlog", "cancelled"},
     "eric_review": {"director_review", "audit", "analysis", "backlog", "cancelled"},
     "director_review": {"done", "ready", "analysis", "backlog", "cancelled"},
@@ -43,7 +55,7 @@ LEGAL_STATE_TRANSITIONS = {
 }
 ACTIVE_STATES = tuple(state for state in STATES if state not in TERMINAL_STATES)
 REOPEN_RESET_TARGET_STATES = {"open", "backlog", "analysis", "ready", "in_progress"}
-REVIEWED_STATES = {"director_review", "audit", "eric_review"}
+REVIEWED_STATES = {"director_review", "audit", "inspection", "eric_review"}
 RESET_REVIEW_ARTIFACT_SOURCE_STATES = REVIEWED_STATES | TERMINAL_STATES
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
@@ -174,8 +186,10 @@ class TicketBoardApp:
         screenshots: list[str] | None = None,
         assignee: str,
         needs_eric_signoff: bool,
+        needs_inspection: bool = False,
         blocked_by: list[str] | None = None,
         blocked_reason: str = "",
+        caller_role: str | None = None,
     ) -> dict[str, Any]:
         return self.create_ticket_record(
             title=title,
@@ -189,12 +203,15 @@ class TicketBoardApp:
             implementation="",
             audit_prompt="",
             audit_signoff=False,
+            needs_inspection=needs_inspection,
+            inspector_signoff=False,
             needs_eric_signoff=needs_eric_signoff,
             eric_signoff=False,
             comments=[],
             blocked_reason=blocked_reason,
             commit_hash="",
             commit_exempt=False,
+            caller_role=caller_role,
         )
 
     def create_ticket_record(
@@ -210,6 +227,8 @@ class TicketBoardApp:
         implementation: str,
         audit_prompt: str,
         audit_signoff: bool,
+        needs_inspection: bool = False,
+        inspector_signoff: bool = False,
         needs_eric_signoff: bool,
         eric_signoff: bool,
         comments: list[dict[str, Any]],
@@ -219,6 +238,7 @@ class TicketBoardApp:
         commit_exempt: bool = False,
         created: str | None = None,
         updated: str | None = None,
+        caller_role: str | None = None,
     ) -> dict[str, Any]:
         if self.store_backend == "postgres":
             return self._pg_create_ticket_record(
@@ -232,6 +252,8 @@ class TicketBoardApp:
                 implementation=implementation,
                 audit_prompt=audit_prompt,
                 audit_signoff=audit_signoff,
+                needs_inspection=needs_inspection,
+                inspector_signoff=inspector_signoff,
                 needs_eric_signoff=needs_eric_signoff,
                 eric_signoff=eric_signoff,
                 comments=comments,
@@ -241,6 +263,7 @@ class TicketBoardApp:
                 commit_exempt=commit_exempt,
                 created=created,
                 updated=updated,
+                caller_role=caller_role,
             )
 
         title = self._require_text(title, "title").strip()
@@ -272,6 +295,8 @@ class TicketBoardApp:
                 "implementation": implementation,
                 "audit_prompt": audit_prompt,
                 "audit_signoff": bool(audit_signoff),
+                "needs_inspection": bool(needs_inspection),
+                "inspector_signoff": bool(inspector_signoff),
                 "needs_eric_signoff": bool(needs_eric_signoff),
                 "eric_signoff": bool(eric_signoff),
                 "manually_controlled": False,
@@ -296,9 +321,9 @@ class TicketBoardApp:
             self._atomic_write(self.store_dir / f"{ticket_id}.json", self._serialize_ticket(ticket))
         return ticket
 
-    def update_ticket(self, ticket_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+    def update_ticket(self, ticket_id: str, patch: dict[str, Any], *, caller_role: str | None = None) -> dict[str, Any]:
         if self.store_backend == "postgres":
-            return self._pg_update_ticket(ticket_id, patch)
+            return self._pg_update_ticket(ticket_id, patch, caller_role=caller_role)
 
         path = self.store_dir / f"{ticket_id}.json"
         if not path.is_file():
@@ -331,8 +356,12 @@ class TicketBoardApp:
             current["audit_prompt"] = self._require_plain_string(patch["audit_prompt"], "audit_prompt")
         if "needs_eric_signoff" in patch:
             current["needs_eric_signoff"] = bool(patch["needs_eric_signoff"])
+        if "needs_inspection" in patch:
+            current["needs_inspection"] = bool(patch["needs_inspection"])
         if "audit_signoff" in patch:
             current["audit_signoff"] = bool(patch["audit_signoff"])
+        if "inspector_signoff" in patch:
+            current["inspector_signoff"] = bool(patch["inspector_signoff"])
         if "eric_signoff" in patch:
             current["eric_signoff"] = bool(patch["eric_signoff"])
         if "manually_controlled" in patch:
@@ -351,6 +380,8 @@ class TicketBoardApp:
             has_reason_comment = True
         if "blocked_by" in patch or "blocked_reason" in patch:
             self._enforce_blocked_reason_rule(current["blocked_by"], current["blocked_reason"])
+        if previous_state == "inspection" and current["state"] == "audit" and not current["inspector_signoff"]:
+            raise ValueError("inspector_signoff must be true before a ticket can enter audit from inspection")
         self._normalize_signoff_state(current)
         self._enforce_transition_rules(previous_state, current, has_reason_comment=has_reason_comment)
         self._enforce_workflow_rules(current)
@@ -579,6 +610,8 @@ SELECT
     t.implementation,
     t.audit_prompt,
     t.audit_signoff,
+    t.needs_inspection,
+    t.inspector_signoff,
     t.needs_eric_signoff,
     t.eric_signoff,
     t.manually_controlled,
@@ -648,6 +681,8 @@ ORDER BY t.ticket_number
             "implementation": self._require_plain_string(row["implementation"], "implementation"),
             "audit_prompt": self._require_plain_string(row["audit_prompt"], "audit_prompt"),
             "audit_signoff": bool(row["audit_signoff"]),
+            "needs_inspection": bool(row["needs_inspection"]),
+            "inspector_signoff": bool(row["inspector_signoff"]),
             "needs_eric_signoff": bool(row["needs_eric_signoff"]),
             "eric_signoff": bool(row["eric_signoff"]),
             "manually_controlled": bool(row["manually_controlled"]),
@@ -673,6 +708,8 @@ ORDER BY t.ticket_number
         implementation: str,
         audit_prompt: str,
         audit_signoff: bool,
+        needs_inspection: bool = False,
+        inspector_signoff: bool = False,
         needs_eric_signoff: bool,
         eric_signoff: bool,
         comments: list[dict[str, Any]],
@@ -682,21 +719,20 @@ ORDER BY t.ticket_number
         commit_exempt: bool = False,
         created: str | None = None,
         updated: str | None = None,
+        caller_role: str | None = None,
     ) -> dict[str, Any]:
         title = self._require_text(title, "title").strip()
         assignee = self._validate_assignee(assignee)
         state = self._validate_state(state)
         if screenshot not in (None, "", "null") or screenshots not in (None, [], ""):
             raise ValueError("postgres function API does not support attachment writes yet")
-        if any(value is not None for value in (created, updated)):
-            raise ValueError("postgres function API does not support caller-supplied timestamps")
         implementation = self._require_plain_string(implementation, "implementation")
         audit_prompt = self._require_plain_string(audit_prompt, "audit_prompt")
         if implementation.strip():
             raise ValueError("postgres function API does not support implementation writes yet")
         if audit_prompt.strip():
             raise ValueError("postgres function API does not support audit_prompt writes yet")
-        if audit_signoff or needs_eric_signoff or eric_signoff:
+        if audit_signoff or inspector_signoff or needs_eric_signoff or eric_signoff:
             raise ValueError("postgres function API does not support initial signoff fields yet")
         if commit_hash or commit_exempt:
             raise ValueError("postgres function API does not support initial commit fields yet")
@@ -707,6 +743,8 @@ ORDER BY t.ticket_number
 
         with self._pg_connect() as conn:
             with conn.transaction():
+                if caller_role:
+                    self._pg_set_caller_role(conn, caller_role)
                 parent_id = "" if parent_id in (None, "", "null") else str(parent_id).strip().upper()
                 if parent_id:
                     ticket_id = self._pg_call_scalar(
@@ -720,6 +758,8 @@ ORDER BY t.ticket_number
                         "SELECT ticket_board.create_ticket(%s, %s) AS id;",
                         (title, body.strip()),
                     )
+                if needs_inspection:
+                    self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps({"needs_inspection": True})))
                 if assignee != "unassigned" or state != "analysis":
                     self._pg_call(conn, "SELECT ticket_board.route(%s, %s, %s);", (ticket_id, state, assignee))
                 if blocked_by:
@@ -729,10 +769,12 @@ ORDER BY t.ticket_number
                     self._pg_call(conn, "SELECT ticket_board.add_comment(%s, %s);", (ticket_id, comment["text"]))
                 return self._pg_get_ticket(ticket_id, conn)
 
-    def _pg_update_ticket(self, ticket_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+    def _pg_update_ticket(self, ticket_id: str, patch: dict[str, Any], *, caller_role: str | None = None) -> dict[str, Any]:
         ticket_id = str(ticket_id).strip().upper()
         with self._pg_connect() as conn:
             with conn.transaction():
+                if caller_role:
+                    self._pg_set_caller_role(conn, caller_role)
                 current = self._pg_get_ticket(ticket_id, conn)
                 edit_fields = self._pg_edit_field_patch(patch)
                 patch = {key: value for key, value in patch.items() if key not in edit_fields}
@@ -773,13 +815,24 @@ ORDER BY t.ticket_number
                     if not bool(patch["audit_signoff"]):
                         raise ValueError("postgres function API only supports setting audit_signoff true")
                     self._pg_call(conn, "SELECT ticket_board.audit_sign_off(%s);", (ticket_id,))
+                inspector_signoff_handled = False
+                if "inspector_signoff" in patch:
+                    if not bool(patch["inspector_signoff"]):
+                        raise ValueError("postgres function API only supports setting inspector_signoff true")
+                    self._pg_call(conn, "SELECT ticket_board.inspector_sign_off(%s);", (ticket_id,))
+                    inspector_signoff_handled = True
                 if "eric_signoff" in patch:
                     if not bool(patch["eric_signoff"]):
                         raise ValueError("postgres function API only supports setting eric_signoff true")
                     self._pg_call(conn, "SELECT ticket_board.eric_sign_off(%s);", (ticket_id,))
 
                 if "state" in patch:
-                    if state == "in_progress":
+                    if inspector_signoff_handled and state == "audit":
+                        pass
+                    elif state == "in_progress" and comment_text and current["state"] == "inspection":
+                        self._pg_call(conn, "SELECT ticket_board.inspector_kick_back(%s, %s);", (ticket_id, comment_text))
+                        comment_text = ""
+                    elif state == "in_progress":
                         self._pg_call(conn, "SELECT ticket_board.start_work(%s);", (ticket_id,))
                     elif state == "audit":
                         self._pg_call(conn, "SELECT ticket_board.submit_to_audit(%s, %s);", (ticket_id, commit_hash))
@@ -828,10 +881,14 @@ ORDER BY t.ticket_number
             "screenshot",
             "implementation",
             "audit_prompt",
+            "needs_inspection",
             "needs_eric_signoff",
             "commit_exempt",
             "commit_hash",
         }
+        if patch.get("inspector_signoff") is False:
+            editable = set(editable)
+            editable.add("inspector_signoff")
         if patch.get("audit_signoff") is False:
             editable = set(editable)
             editable.add("audit_signoff")
@@ -958,6 +1015,8 @@ ORDER BY ticket_number;
             "implementation": self._require_plain_string(payload.get("implementation", ""), "implementation"),
             "audit_prompt": self._require_plain_string(payload.get("audit_prompt", ""), "audit_prompt"),
             "audit_signoff": bool(payload.get("audit_signoff", False)),
+            "needs_inspection": bool(payload.get("needs_inspection", False)),
+            "inspector_signoff": bool(payload.get("inspector_signoff", False)),
             "needs_eric_signoff": bool(payload.get("needs_eric_signoff", False)),
             "eric_signoff": bool(payload.get("eric_signoff", False)),
             "manually_controlled": bool(payload.get("manually_controlled", False)),
@@ -1053,6 +1112,11 @@ ORDER BY ticket_number;
             current_parent_id = next_parent_id
 
     def _normalize_signoff_state(self, ticket: dict[str, Any]) -> None:
+        if not ticket["needs_inspection"]:
+            ticket["inspector_signoff"] = False
+        if ticket["state"] == "audit" and ticket["needs_inspection"] and not ticket["inspector_signoff"]:
+            ticket["state"] = "inspection"
+            ticket["inspector_signoff"] = False
         if ticket["state"] == "eric_review" and not ticket["needs_eric_signoff"]:
             ticket["state"] = "audit"
             ticket["audit_signoff"] = False
@@ -1070,6 +1134,8 @@ ORDER BY ticket_number;
             raise ValueError("blocked_reason must be non-empty when blocked_by is set")
 
     def _enforce_workflow_rules(self, ticket: dict[str, Any]) -> None:
+        if ticket["state"] == "inspection" and not ticket["needs_inspection"]:
+            raise ValueError("needs_inspection must be true before a ticket can enter inspection")
         if ticket["state"] == "eric_review" and not ticket["audit_signoff"]:
             raise ValueError("audit_signoff must be true before a ticket can enter eric_review")
         if ticket["state"] == "director_review" and ticket["needs_eric_signoff"] and not ticket["eric_signoff"]:
@@ -1083,6 +1149,7 @@ ORDER BY ticket_number;
         has_reason_comment: bool = False,
     ) -> None:
         if previous_state in RESET_REVIEW_ARTIFACT_SOURCE_STATES and ticket["state"] in REOPEN_RESET_TARGET_STATES:
+            ticket["inspector_signoff"] = False
             ticket["audit_signoff"] = False
             ticket["commit_hash"] = ""
         if previous_state != ticket["state"]:
@@ -1097,6 +1164,10 @@ ORDER BY ticket_number;
             )
         if previous_state == "analysis" and ticket["state"] == "in_progress":
             raise ValueError("analysis tickets must move through ready before entering in_progress")
+        if previous_state == "inspection" and ticket["state"] == "in_progress" and not has_reason_comment:
+            raise ValueError("inspector kickback requires a non-empty recommendations comment")
+        if previous_state == "inspection" and ticket["state"] == "audit" and not ticket["inspector_signoff"]:
+            raise ValueError("inspector_signoff must be true before a ticket can enter audit from inspection")
         if previous_state != "ready" and ticket["state"] == "ready":
             self._enforce_ready_requirements(ticket)
         if previous_state != "in_progress" and ticket["state"] == "in_progress":

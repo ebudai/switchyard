@@ -32,6 +32,13 @@ DEFAULT_REQUEUE_MAX_SECONDS = 60.0
 DEFAULT_MAX_DEFER_SECONDS = 90.0
 DEFAULT_DIRECTOR_RECENT_ACTIVITY_SECONDS = 10.0
 DEFAULT_DIRECTOR_STABLE_IDLE_SECONDS = 0.25
+DIRECTOR_COMPOSER_PLACEHOLDERS = {
+    "press up to edit queued messages",
+    "press enter to send",
+    "type a message",
+    "ask codex",
+    "message codex",
+}
 ROLE_TO_TARGET = {
     "director": "pgu-director:0.0",
     "main": "pgu-main:0.0",
@@ -195,16 +202,35 @@ class PaneActivityGate:
     def _has_working_indicator(self, text: str) -> bool:
         return "Working" in text or "esc to interrupt" in text
 
-    def _director_composer_has_content(self, text: str) -> bool:
-        if not text:
-            return False
+    def _has_live_working_indicator(self, text: str) -> bool:
+        lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+        horizontal_indices = [idx for idx, line in enumerate(lines) if line.count("─") >= 40]
+        if horizontal_indices:
+            live_lines = lines[horizontal_indices[-1] + 1 :]
+        else:
+            live_lines = lines[-5:]
+        return self._has_working_indicator("\n".join(live_lines[-5:]))
+
+    def _normalized_director_composer_lines(self, text: str) -> list[str]:
         lines = text.splitlines()
         horizontal_indices = [idx for idx, line in enumerate(lines) if line.count("─") >= 40]
         if len(horizontal_indices) < 2:
-            return True
-        composer_content = "\n".join(lines[horizontal_indices[-2] + 1 : horizontal_indices[-1]])
-        cleaned = re.sub(r"^[❯\u276f\s>\-*]+", "", composer_content, flags=re.MULTILINE)
-        return bool(cleaned.strip())
+            return ["<unknown>"]
+        composer_lines = lines[horizontal_indices[-2] + 1 : horizontal_indices[-1]]
+        normalized: list[str] = []
+        for line in composer_lines:
+            cleaned = re.sub(r"^[❯\u276f\s>\-*]+", "", line).strip()
+            if cleaned:
+                normalized.append(cleaned)
+        return normalized
+
+    def _director_composer_has_content(self, text: str) -> bool:
+        if not text:
+            return False
+        normalized = self._normalized_director_composer_lines(text)
+        if not normalized:
+            return False
+        return any(line.strip().lower() not in DIRECTOR_COMPOSER_PLACEHOLDERS for line in normalized)
 
     def _mark_recent_activity(self, target: str, text: str, now: float) -> bool:
         previous = self._last_capture_by_target.get(target)
@@ -224,7 +250,7 @@ class PaneActivityGate:
         if text is None:
             return False
         if target != ROLE_TO_TARGET["director"]:
-            return self._has_working_indicator(text)
+            return self._has_live_working_indicator(text)
         return self._director_composer_has_content(text)
 
     def is_working(self, target: str) -> bool:

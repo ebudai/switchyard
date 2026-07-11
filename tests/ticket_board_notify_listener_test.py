@@ -528,7 +528,7 @@ Working
     assert gate.is_busy("pgu-director:0.0") is True
     clock[0] += 11.0
     assert gate.is_busy("pgu-director:0.0") is True
-    assert gate.is_busy("pgu-ops:0.0") is True
+    assert gate.is_busy("pgu-ops:0.0") is False
 
     empty_composer_capture = f"""
 Working
@@ -549,7 +549,28 @@ Working
     )
 
     assert empty_gate.is_busy("pgu-director:0.0") is False
-    assert empty_gate.is_busy("pgu-ops:0.0") is True
+    assert empty_gate.is_busy("pgu-ops:0.0") is False
+
+
+def test_director_gate_ignores_queued_message_placeholder() -> None:
+    horizontal = "─" * 48
+    placeholder_capture = f"""
+assistant output
+{horizontal}
+❯ Press up to edit queued messages
+{horizontal}
+""".strip()
+
+    def capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=placeholder_capture)
+
+    gate = PaneActivityGate(
+        "/tmp/directorctl",
+        stable_idle_seconds=0,
+        capture_runner=capture_runner,
+    )
+
+    assert gate.is_busy("pgu-director:0.0") is False
 
 
 def test_director_gate_empty_composer_delivers_even_when_capture_changes() -> None:
@@ -586,6 +607,52 @@ Working.
     assert gate.is_busy("pgu-director:0.0") is False
     clock[0] += 4.0
     assert gate.is_busy("pgu-director:0.0") is False
+
+
+def test_non_director_gate_ignores_stale_working_scrollback() -> None:
+    horizontal = "─" * 48
+    idle_with_stale_working_capture = f"""
+• Working (4m 12s • esc to interrupt)
+Finished older task output
+{horizontal}
+• Explored
+  └ Read notify_listener.py
+›
+  gpt-5.5 high · ~/Projects/pgu
+""".strip()
+
+    def capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=idle_with_stale_working_capture)
+
+    gate = PaneActivityGate(
+        "/tmp/directorctl",
+        stable_idle_seconds=0,
+        capture_runner=capture_runner,
+    )
+
+    assert gate.is_busy("pgu-ops:0.0") is False
+
+
+def test_non_director_gate_uses_live_working_status_line() -> None:
+    horizontal = "─" * 48
+    live_working_capture = f"""
+Older completed output
+{horizontal}
+• Working (11m 21s • esc to interrupt)
+› Implement {{feature}}
+  gpt-5.5 high · ~/Projects/pgu
+""".strip()
+
+    def capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=live_working_capture)
+
+    gate = PaneActivityGate(
+        "/tmp/directorctl",
+        stable_idle_seconds=0,
+        capture_runner=capture_runner,
+    )
+
+    assert gate.is_busy("pgu-ops:0.0") is True
 
 
 def test_acked_notification_does_not_repeat_across_restart() -> None:
@@ -644,7 +711,10 @@ def main() -> int:
     test_escalation_for_still_stuck_ready_ticket_delivers_to_director()
     test_director_composer_busy_requeues_then_idle_delivers_once()
     test_director_gate_treats_composer_content_as_busy_only_for_director()
+    test_director_gate_ignores_queued_message_placeholder()
     test_director_gate_empty_composer_delivers_even_when_capture_changes()
+    test_non_director_gate_ignores_stale_working_scrollback()
+    test_non_director_gate_uses_live_working_status_line()
     test_acked_notification_does_not_repeat_across_restart()
     test_default_sender_delegates_to_directorctl_send()
     print("ticket_board_notify_listener_test: ok")

@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -20,6 +21,11 @@ CHANNEL = "ticket_board_state_transition"
 DEFAULT_DATABASE_URL = os.environ.get("TICKET_BOARD_NOTIFY_DATABASE_URL") or os.environ.get("DATABASE_URL", "")
 DEFAULT_RECONNECT_SECONDS = 2.0
 DEFAULT_POLL_SECONDS = 5.0
+DEFAULT_WATCHDOG_SECONDS = 30.0
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 10
+DEFAULT_KEEPALIVES_IDLE_SECONDS = 30
+DEFAULT_KEEPALIVES_INTERVAL_SECONDS = 10
+DEFAULT_KEEPALIVES_COUNT = 3
 ROLE_TO_TARGET = {
     "director": "pgu-director:0.0",
     "main": "pgu-main:0.0",
@@ -152,6 +158,7 @@ class TicketBoardNotifyListener:
         connector: Callable[..., Any] = psycopg.connect,
         reconnect_seconds: float = DEFAULT_RECONNECT_SECONDS,
         poll_seconds: float = DEFAULT_POLL_SECONDS,
+        watchdog_seconds: float = DEFAULT_WATCHDOG_SECONDS,
         stop_event: threading.Event | None = None,
         logger: logging.Logger = LOGGER,
     ) -> None:
@@ -162,9 +169,33 @@ class TicketBoardNotifyListener:
         self.connector = connector
         self.reconnect_seconds = reconnect_seconds
         self.poll_seconds = poll_seconds
+        self.watchdog_seconds = watchdog_seconds
         self.stop_event = stop_event or threading.Event()
         self.logger = logger
         self.delivered_count = 0
+
+    def _connector_kwargs(self) -> dict[str, int | bool]:
+        return {
+            "autocommit": True,
+            "connect_timeout": DEFAULT_CONNECT_TIMEOUT_SECONDS,
+            "keepalives": 1,
+            "keepalives_idle": DEFAULT_KEEPALIVES_IDLE_SECONDS,
+            "keepalives_interval": DEFAULT_KEEPALIVES_INTERVAL_SECONDS,
+            "keepalives_count": DEFAULT_KEEPALIVES_COUNT,
+        }
+
+    def _force_close_connection(self, conn: Any) -> None:
+        pgconn = getattr(conn, "pgconn", None)
+        if pgconn is not None:
+            try:
+                pgconn.finish()
+                return
+            except Exception:  # noqa: BLE001
+                self.logger.debug("failed to force-close notify listener pgconn", exc_info=True)
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            self.logger.debug("failed to close wedged notify listener connection", exc_info=True)
 
     def deliver_payload(self, payload: str) -> bool:
         transition = parse_transition_payload(payload)
@@ -202,26 +233,69 @@ class TicketBoardNotifyListener:
 
     def listen_once(self, *, max_notifications: int | None = None) -> int:
         delivered_before = self.delivered_count
-        with self.connector(self.conninfo, autocommit=True) as conn:
+        with self.connector(self.conninfo, **self._connector_kwargs()) as conn:
+            progress_lock = threading.Lock()
+            last_progress = time.monotonic()
+            watchdog_stop = threading.Event()
+            watchdog_triggered = threading.Event()
+
+            def mark_progress() -> None:
+                nonlocal last_progress
+                with progress_lock:
+                    last_progress = time.monotonic()
+
+            def watch_connection_progress() -> None:
+                if self.watchdog_seconds <= 0:
+                    return
+                sleep_seconds = max(min(self.poll_seconds, 1.0), 0.05)
+                while not watchdog_stop.wait(sleep_seconds):
+                    with progress_lock:
+                        idle_seconds = time.monotonic() - last_progress
+                    if idle_seconds <= self.watchdog_seconds:
+                        continue
+                    watchdog_triggered.set()
+                    self.logger.warning(
+                        "ticket notify listener poll made no progress for %.1fs; forcing reconnect",
+                        idle_seconds,
+                    )
+                    self._force_close_connection(conn)
+                    return
+
+            watchdog_thread = threading.Thread(
+                target=watch_connection_progress,
+                name="ticket-board-notify-listener-watchdog",
+                daemon=True,
+            )
+            watchdog_thread.start()
             conn.execute(sql.SQL("LISTEN {}").format(sql.Identifier(self.channel)))
             self.logger.info("LISTEN %s established", self.channel)
+            mark_progress()
             self.reconcile_pending_notifications(conn, max_notifications=max_notifications)
-            while not self.stop_event.is_set():
-                for notify in conn.notifies(timeout=self.poll_seconds):
-                    try:
-                        delivered = self.deliver_payload(notify.payload)
-                        transition = parse_transition_payload(notify.payload)
-                        if delivered and transition.kind == "transition" and transition.ticket_id:
-                            conn.execute("SELECT ticket_board.mark_transition_notified(%s::text)", (transition.ticket_id,))
-                    except ValueError as exc:
-                        self.logger.warning("Skipping malformed ticket notification payload: %s", exc)
-                    except (subprocess.CalledProcessError, OSError) as exc:
-                        self.logger.warning("Failed to deliver ticket notification through directorctl: %s", exc)
+            mark_progress()
+            try:
+                while not self.stop_event.is_set():
+                    for notify in conn.notifies(timeout=self.poll_seconds):
+                        mark_progress()
+                        try:
+                            delivered = self.deliver_payload(notify.payload)
+                            transition = parse_transition_payload(notify.payload)
+                            if delivered and transition.kind == "transition" and transition.ticket_id:
+                                conn.execute("SELECT ticket_board.mark_transition_notified(%s::text)", (transition.ticket_id,))
+                        except ValueError as exc:
+                            self.logger.warning("Skipping malformed ticket notification payload: %s", exc)
+                        except (subprocess.CalledProcessError, OSError) as exc:
+                            self.logger.warning("Failed to deliver ticket notification through directorctl: %s", exc)
+                        if max_notifications is not None and self.delivered_count >= max_notifications:
+                            self.stop_event.set()
+                            break
+                    mark_progress()
+                    if watchdog_triggered.is_set():
+                        raise psycopg.OperationalError("notify listener poll watchdog forced reconnect")
                     if max_notifications is not None and self.delivered_count >= max_notifications:
-                        self.stop_event.set()
                         break
-                if max_notifications is not None and self.delivered_count >= max_notifications:
-                    break
+            finally:
+                watchdog_stop.set()
+                watchdog_thread.join(timeout=1.0)
         return self.delivered_count - delivered_before
 
     def run_forever(
@@ -254,6 +328,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--directorctl", default=DEFAULT_DIRECTORCTL, help=f"directorctl path (default: {DEFAULT_DIRECTORCTL})")
     parser.add_argument("--reconnect-seconds", type=float, default=DEFAULT_RECONNECT_SECONDS)
     parser.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS)
+    parser.add_argument("--watchdog-seconds", type=float, default=DEFAULT_WATCHDOG_SECONDS, help="Force a reconnect if the poll loop makes no progress for this many seconds; <=0 disables it.")
     parser.add_argument("--verbose", action="store_true")
     return parser
 
@@ -271,6 +346,7 @@ def main(argv: list[str] | None = None) -> int:
         activity_gate=PaneActivityGate(args.directorctl).is_working,
         reconnect_seconds=args.reconnect_seconds,
         poll_seconds=args.poll_seconds,
+        watchdog_seconds=args.watchdog_seconds,
     )
     listener.run_forever()
     return 0

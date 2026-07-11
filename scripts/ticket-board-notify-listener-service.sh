@@ -102,6 +102,7 @@ WorkingDirectory=$BOARD_CURRENT_LINK
 ExecStart=/usr/bin/python3 $LISTENER_SCRIPT
 Restart=always
 RestartSec=2
+RuntimeMaxSec=900
 Environment=PYTHONUNBUFFERED=1
 Environment=PGHOST=/var/run/postgresql
 Environment=PGDATABASE=pgu

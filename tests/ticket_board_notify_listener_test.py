@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.ticket_board.notify_listener import TicketBoardNotifyListener
+from scripts.ticket_board.notify_listener import DirectorctlSender, TicketBoardNotifyListener
 
 
 @dataclass(frozen=True)
@@ -137,10 +138,30 @@ def test_reconnect_relistens_after_connection_drop() -> None:
     assert len(executed) == 2, "listener must re-issue LISTEN after reconnecting"
 
 
+def test_default_sender_delegates_to_directorctl_send() -> None:
+    calls: list[tuple[list[str], bool]] = []
+    original_run = subprocess.run
+
+    def fake_run(args: list[str], *, check: bool = False, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append((args, check))
+        return subprocess.CompletedProcess(args, 0)
+
+    try:
+        subprocess.run = fake_run  # type: ignore[assignment]
+        DirectorctlSender("/tmp/directorctl")("pgu-ops:0.0", "Ready ticket for you: PGU-215 -- Submit")
+    finally:
+        subprocess.run = original_run  # type: ignore[assignment]
+
+    assert calls == [
+        (["/tmp/directorctl", "send", "pgu-ops:0.0", "Ready ticket for you: PGU-215 -- Submit"], True)
+    ]
+
+
 def main() -> int:
     test_simulated_pg_notify_delivers_to_assignee_pane()
     test_eric_review_is_not_delivered()
     test_reconnect_relistens_after_connection_drop()
+    test_default_sender_delegates_to_directorctl_send()
     print("ticket_board_notify_listener_test: ok")
     return 0
 

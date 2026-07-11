@@ -46,7 +46,7 @@ for role in $ROLES; do
         resume_id="$DIRECTOR_SESSION_ID"
     fi
 
-    cmd="claude --model $model --dangerously-skip-permissions"
+    cmd="PGU_TICKET_BOARD_CALLER_ROLE=$role claude --model $model --dangerously-skip-permissions"
     if [ -n "$resume_id" ]; then
         cmd="$cmd --resume $resume_id"
     fi

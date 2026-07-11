@@ -20,16 +20,24 @@ export function dbConfigFromEnv(): DbConfig {
   };
 }
 
-export function connect(config: DbConfig = dbConfigFromEnv()) {
+export function connect(config: DbConfig = dbConfigFromEnv(), max = 5) {
   return postgres({
     host: config.host,
     database: config.database,
     username: config.username,
-    max: 5,
+    max,
     // The service role connects over a trusted peer-auth Unix socket
     // (scripts/ticket_board/schema.sql's `require_actor` gates writes to
     // exactly this role) -- no TLS/password negotiation applies here.
   });
+}
+
+// A single dedicated connection for src/events.ts's backstop poll loop --
+// deliberately NOT drawn from the request-handling pool (see events.ts).
+// It's still a plain one-shot query connection, not a Postgres LISTEN
+// session; see events.ts for why polling was chosen over LISTEN/NOTIFY.
+export function connectForEventPolling(config: DbConfig = dbConfigFromEnv()) {
+  return connect(config, 1);
 }
 
 export type Sql = ReturnType<typeof connect>;

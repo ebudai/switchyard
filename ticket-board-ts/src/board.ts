@@ -5,6 +5,7 @@
 import type { Sql } from "./db.ts";
 import { listTickets } from "./ticket_store.ts";
 import { ALL_ASSIGNEES, STATES } from "./ticket_store.ts";
+import { formatLocalTimestamp, isoNow } from "./time.ts";
 
 const FRAME_DIR_DEFAULT = "/tmp/pgu-frames";
 const STORE_DIR_DEFAULT = `${Deno.env.get("HOME") ?? ""}/.claude/pgu-tickets`;
@@ -32,7 +33,7 @@ async function listScreenshots(frameDir: string): Promise<ScreenshotEntry[]> {
   return entries.map(({ path, name, mtime }) => ({
     path,
     name,
-    modified: new Date(mtime).toISOString(),
+    modified: formatLocalTimestamp(new Date(mtime)),
   }));
 }
 
@@ -54,6 +55,6 @@ export async function boardSnapshot(sql: Sql) {
     store_path: STORE_DIR_DEFAULT,
     frame_dir: FRAME_DIR_DEFAULT,
     asset_dir: ASSET_DIR_DEFAULT,
-    refreshed_at: new Date().toISOString(),
+    refreshed_at: isoNow(),
   };
 }

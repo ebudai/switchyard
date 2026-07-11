@@ -5,6 +5,7 @@
 // PORT-NOTES.md for the one intentional response-shape divergence: merge).
 import type { Sql } from "./db.ts";
 import { boardSnapshot } from "./board.ts";
+import { EventHub, eventStream } from "./events.ts";
 import {
   addComment,
   auditKickBack,
@@ -16,6 +17,7 @@ import {
   ericReopen,
   ericSignOff,
   fileBug,
+  getStoreSignature,
   getTicket,
   markDone,
   mergeTickets,
@@ -75,16 +77,18 @@ async function readJson(req: Request): Promise<unknown> {
   return text ? JSON.parse(text) : {};
 }
 
-async function handleCreateTicket(sql: Sql, body: unknown): Promise<Response> {
+async function handleCreateTicket(sql: Sql, hub: EventHub, body: unknown): Promise<Response> {
   const payload = CreateTicketBodySchema.parse(body);
   const created = await createTicket(sql, payload);
+  hub.notifyChange(await getStoreSignature(sql));
   return jsonResponse({ ticket: created }, 201);
 }
 
-async function handleFileBug(sql: Sql, body: unknown): Promise<Response> {
+async function handleFileBug(sql: Sql, hub: EventHub, body: unknown): Promise<Response> {
   const payload = FileBugBodySchema.parse(body);
   const sourceTicketId = payload.source_ticket_id ?? payload.parent_id ?? "";
   const created = await fileBug(sql, { ...payload, source_ticket_id: sourceTicketId });
+  hub.notifyChange(await getStoreSignature(sql));
   return jsonResponse({ ticket: created }, 201);
 }
 
@@ -147,12 +151,13 @@ const TICKET_OPERATION_HANDLERS: Record<TicketOperation, TicketOpHandler> = {
   },
   merge: (sql, ticketId, _caller, body) => {
     const payload = MergeBodySchema.parse(body);
-    return mergeTickets(sql, ticketId, payload.target_id);
+    return mergeTickets(sql, ticketId, payload.target_id.trim().toUpperCase());
   },
 };
 
 async function handleTicketAction(
   sql: Sql,
+  hub: EventHub,
   req: Request,
   operation: string,
   ticketId: string | null,
@@ -169,14 +174,15 @@ async function handleTicketAction(
 
   const body = await readJson(req);
 
-  if (operation === "create_ticket") return await handleCreateTicket(sql, body);
-  if (operation === "file_bug") return await handleFileBug(sql, body);
+  if (operation === "create_ticket") return await handleCreateTicket(sql, hub, body);
+  if (operation === "file_bug") return await handleFileBug(sql, hub, body);
 
   if (ticketId === null) {
     throw new Error(`${operation} requires a ticket id`);
   }
   const handler = TICKET_OPERATION_HANDLERS[operation];
   const result = await handler(sql, ticketId, caller, body);
+  hub.notifyChange(await getStoreSignature(sql));
   if (operation === "merge") return jsonResponse(result);
   return jsonResponse({ ticket: result });
 }
@@ -184,24 +190,37 @@ async function handleTicketAction(
 const NO_ID_ACTION_RE = /^\/api\/tickets\/actions\/([^/]+)\/?$/;
 const TICKET_ACTION_RE = /^\/api\/tickets\/([^/]+)\/actions\/([^/]+)\/?$/;
 
-export function createHandler(sql: Sql): (req: Request) => Promise<Response> {
+export function createHandler(sql: Sql, hub: EventHub): (req: Request) => Promise<Response> {
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     try {
       if (req.method === "GET" && url.pathname === "/api/board") {
         return jsonResponse(await boardSnapshot(sql));
       }
+      if (req.method === "GET" && url.pathname === "/events") {
+        return new Response(eventStream(hub, req.signal), {
+          headers: {
+            "content-type": "text/event-stream; charset=utf-8",
+            "cache-control": "no-cache",
+            "connection": "keep-alive",
+            "x-accel-buffering": "no",
+          },
+        });
+      }
       if (req.method === "POST") {
         const noIdMatch = url.pathname.match(NO_ID_ACTION_RE);
         if (noIdMatch) {
           const operation = decodeURIComponent(noIdMatch[1]!);
-          return await handleTicketAction(sql, req, operation, null);
+          return await handleTicketAction(sql, hub, req, operation, null);
         }
         const ticketMatch = url.pathname.match(TICKET_ACTION_RE);
         if (ticketMatch) {
-          const ticketId = decodeURIComponent(ticketMatch[1]!);
+          // app.py normalizes ticket ids (.strip().upper()) inside every
+          // method (route_ticket, get_ticket, merge_tickets, ...); done
+          // once here at the single HTTP entry point for the same effect.
+          const ticketId = decodeURIComponent(ticketMatch[1]!).trim().toUpperCase();
           const operation = decodeURIComponent(ticketMatch[2]!);
-          return await handleTicketAction(sql, req, operation, ticketId);
+          return await handleTicketAction(sql, hub, req, operation, ticketId);
         }
       }
       return textResponse("Not found", 404);

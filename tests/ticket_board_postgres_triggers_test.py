@@ -733,11 +733,14 @@ SET last_nudged_at = clock_timestamp() + interval '1 hour'
 WHERE ticket_id NOT IN ('PGU-20', 'PGU-21');
 """,
             )
-            nudges = psql(
+            nudge_proc = psql(
                 conninfo,
                 "SELECT ticket_board.notify_due_nudges(clock_timestamp() + interval '10 minutes', interval '5 minutes', 3);",
-            ).stdout.strip()
+            )
+            nudges = nudge_proc.stdout.strip()
             assert int(nudges) >= 1, nudges
+            assert "WARNING:  primary notification path was late/undelivered for PGU-20 targeting ops (" in nudge_proc.stderr
+            assert "s since transition)" in nudge_proc.stderr
             nudge_state = json.loads(
                 psql(
                     conninfo,

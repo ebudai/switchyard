@@ -77,6 +77,7 @@ def insert_ticket(
     commit_hash: str = "",
     commit_exempt: bool = False,
     manually_controlled: bool = False,
+    parked: bool = False,
 ) -> None:
     bools = {
         "audit_signoff": "true" if audit_signoff else "false",
@@ -84,6 +85,7 @@ def insert_ticket(
         "eric_signoff": "true" if eric_signoff else "false",
         "commit_exempt": "true" if commit_exempt else "false",
         "manually_controlled": "true" if manually_controlled else "false",
+        "parked": "true" if parked else "false",
     }
     source = ticket_source(ticket_id, title, state, assignee)
     psql(
@@ -92,11 +94,11 @@ def insert_ticket(
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, parent_id, implementation,
     audit_signoff, needs_eric_signoff, eric_signoff, commit_hash,
-    commit_exempt, manually_controlled, created_text, updated_text, source_json
+    commit_exempt, manually_controlled, parked, created_text, updated_text, source_json
 ) VALUES (
     '{ticket_id}', '{title}', '', '{state}', '{assignee}', '{parent_id}', '{implementation}',
     {bools['audit_signoff']}, {bools['needs_eric_signoff']}, {bools['eric_signoff']}, '{commit_hash}',
-    {bools['commit_exempt']}, {bools['manually_controlled']}, '2026-07-10T00:00:00+00:00',
+    {bools['commit_exempt']}, {bools['manually_controlled']}, {bools['parked']}, '2026-07-10T00:00:00+00:00',
     '2026-07-10T00:00:00+00:00', '{source}'::jsonb
 );
 """,
@@ -504,6 +506,15 @@ WHERE id = 'PGU-54';
                 state="backlog",
                 implementation="Parked but assigned.",
             )
+            insert_ticket(
+                conninfo,
+                "PGU-56",
+                title="Explicitly deferred backlog",
+                assignee="ops",
+                state="backlog",
+                implementation="Intentionally parked.",
+                parked=True,
+            )
 
             insert_ticket(
                 conninfo,
@@ -604,12 +615,12 @@ WHERE ticket_id = 'PGU-20';
                 """
 UPDATE ticket_board.ticket_notification_state
 SET last_nudged_at = clock_timestamp() + interval '1 hour'
-WHERE ticket_id NOT IN ('PGU-52', 'PGU-53', 'PGU-55');
+WHERE ticket_id NOT IN ('PGU-52', 'PGU-53', 'PGU-55', 'PGU-56');
 
 UPDATE ticket_board.ticket_notification_state
 SET last_nudged_at = NULL,
     entered_current_state_at = clock_timestamp() - interval '10 minutes'
-WHERE ticket_id IN ('PGU-52', 'PGU-53', 'PGU-55');
+WHERE ticket_id IN ('PGU-52', 'PGU-53', 'PGU-55', 'PGU-56');
 """,
             )
             stale_now = "clock_timestamp()"
@@ -666,6 +677,28 @@ WHERE t.id = 'PGU-55';
                 ).stdout
             )
             assert backlog_nudge == {"state": "backlog", "last_nudged": True, "nudge_count": 1}, backlog_nudge
+            parked_backlog_nudge = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'state', state,
+    'parked', parked,
+    'last_nudged', ns.last_nudged_at IS NOT NULL,
+    'nudge_count', ns.nudge_count
+)::text
+FROM ticket_board.tickets t
+JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
+WHERE t.id = 'PGU-56';
+""",
+                ).stdout
+            )
+            assert parked_backlog_nudge == {
+                "state": "backlog",
+                "parked": True,
+                "last_nudged": False,
+                "nudge_count": 0,
+            }, parked_backlog_nudge
 
             trigger_count = psql(
                 conninfo,

@@ -131,6 +131,7 @@ def insert_ticket(
     commit_hash: str = "",
     commit_exempt: bool = False,
     manually_controlled: bool = False,
+    parked: bool = False,
 ) -> None:
     psql(
         conn,
@@ -138,12 +139,12 @@ def insert_ticket(
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation, audit_signoff,
     needs_eric_signoff, eric_signoff, commit_hash, commit_exempt,
-    manually_controlled, created_text, updated_text, source_json
+    manually_controlled, parked, created_text, updated_text, source_json
 ) VALUES (
     {sql_string(ticket_id)}, {sql_string(title)}, '', {sql_string(state)}, {sql_string(assignee)},
     {sql_string(implementation)}, {str(audit_signoff).lower()}, {str(needs_eric_signoff).lower()},
     {str(eric_signoff).lower()}, {sql_string(commit_hash)}, {str(commit_exempt).lower()},
-    {str(manually_controlled).lower()}, '2026-07-10T00:00:00+00:00',
+    {str(manually_controlled).lower()}, {str(parked).lower()}, '2026-07-10T00:00:00+00:00',
     '2026-07-10T00:00:00+00:00', '{ticket_source(ticket_id, title, state, assignee)}'::jsonb
 );
 """,
@@ -392,7 +393,29 @@ FROM ticket_board.tickets WHERE id = 'PGU-700';
 
     insert_ticket(admin_conn, "PGU-701", title="Defer", state="analysis")
     psql(service_conn, "SELECT ticket_board.defer('PGU-701');")
-    assert psql(admin_conn, "SELECT state FROM ticket_board.tickets WHERE id = 'PGU-701';") == "backlog"
+    deferred = json.loads(
+        psql(
+            admin_conn,
+            """
+SELECT jsonb_build_object('state', state, 'parked', parked, 'manually_controlled', manually_controlled)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-701';
+""",
+        )
+    )
+    assert deferred == {"state": "backlog", "parked": True, "manually_controlled": False}, deferred
+    psql(service_conn, "SELECT ticket_board.route('PGU-701', 'analysis', 'ops');")
+    undeferred = json.loads(
+        psql(
+            admin_conn,
+            """
+SELECT jsonb_build_object('state', state, 'assignee', assignee, 'parked', parked, 'manually_controlled', manually_controlled)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-701';
+""",
+        )
+    )
+    assert undeferred == {"state": "analysis", "assignee": "ops", "parked": False, "manually_controlled": False}, undeferred
 
     insert_ticket(admin_conn, "PGU-702", title="Cancel", state="analysis")
     psql(service_conn, "SELECT ticket_board.cancel('PGU-702', 'Cancelled by app policy.');")
@@ -473,6 +496,93 @@ def assert_structural_rules_still_apply(admin_conn: str, service_conn: str) -> N
         service_conn,
         "SELECT ticket_board.set_blockers('PGU-903', ARRAY['PGU-100'], '');",
     )
+
+
+def assert_deferred_cancel_resurrect_clears_park_and_notifies(admin_conn: str, service_conn: str) -> None:
+    insert_ticket(
+        admin_conn,
+        "PGU-930",
+        title="Deferred lifecycle",
+        state="ready",
+        assignee="ops",
+        implementation="Do the thing.",
+    )
+    psql(admin_conn, "DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-930';")
+
+    psql(service_conn, "SELECT ticket_board.defer('PGU-930');")
+    deferred = json.loads(
+        psql(
+            admin_conn,
+            """
+SELECT jsonb_build_object(
+    'state', state,
+    'parked', parked,
+    'manually_controlled', manually_controlled
+)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-930';
+""",
+        )
+    )
+    assert deferred == {"state": "backlog", "parked": True, "manually_controlled": False}, deferred
+
+    psql(service_conn, "SELECT ticket_board.cancel('PGU-930', 'No longer needed.');")
+    cancelled = json.loads(
+        psql(
+            admin_conn,
+            """
+SELECT jsonb_build_object(
+    'state', state,
+    'parked', parked,
+    'manually_controlled', manually_controlled
+)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-930';
+""",
+        )
+    )
+    assert cancelled == {"state": "cancelled", "parked": False, "manually_controlled": False}, cancelled
+
+    psql(admin_conn, "DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-930';")
+    psql(service_conn, "SELECT ticket_board.route('PGU-930', 'analysis', 'ops');")
+    resurrected = json.loads(
+        psql(
+            admin_conn,
+            """
+SELECT jsonb_build_object(
+    'state', state,
+    'assignee', assignee,
+    'parked', parked,
+    'manually_controlled', manually_controlled,
+    'can_auto_advance', ticket_board.ticket_can_auto_advance_analysis(
+        'analysis',
+        assignee,
+        implementation,
+        manually_controlled,
+        id
+    ),
+    'ready_notifications', (
+        SELECT count(*)::int
+        FROM ticket_board.ticket_notification_queue q
+        WHERE q.ticket_id = t.id
+          AND q.kind = 'transition'
+          AND q.target_role = 'ops'
+          AND q.payload->>'new_state' = 'ready'
+    )
+)::text
+FROM ticket_board.tickets t
+WHERE id = 'PGU-930';
+""",
+        )
+    )
+    assert resurrected == {
+        "state": "ready",
+        "assignee": "ops",
+        "parked": False,
+        "manually_controlled": False,
+        "can_auto_advance": True,
+        "ready_notifications": 1,
+    }, resurrected
 
 
 def assert_listener_can_execute_reconcile_functions(admin_conn: str, listener_conn: str, service_conn: str) -> None:
@@ -596,6 +706,7 @@ FROM unnest({ROLE_SQL_ARRAY}) AS role_name;
             listener_conn = role_conn["ticket_board_listener"]
             assert_service_can_execute_every_write_function(admin_conn, service_conn)
             assert_structural_rules_still_apply(admin_conn, service_conn)
+            assert_deferred_cancel_resurrect_clears_park_and_notifies(admin_conn, service_conn)
             assert_listener_can_execute_reconcile_functions(admin_conn, listener_conn, service_conn)
         finally:
             subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], check=False)

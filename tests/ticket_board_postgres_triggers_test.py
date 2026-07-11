@@ -152,6 +152,10 @@ def main() -> int:
             psql(conninfo, "CREATE ROLE ticket_board_listener LOGIN;")
             psql(conninfo, SCHEMA_PATH.read_text(encoding="utf-8"))
             psql(conninfo, "GRANT USAGE ON SCHEMA ticket_board TO ticket_board_listener;")
+            psql(conninfo, "GRANT SELECT ON ALL TABLES IN SCHEMA ticket_board TO ticket_board_listener;")
+            psql(conninfo, "GRANT EXECUTE ON FUNCTION ticket_board.claim_notification(timestamptz, interval) TO ticket_board_listener;")
+            psql(conninfo, "GRANT EXECUTE ON FUNCTION ticket_board.ack_notification(bigint) TO ticket_board_listener;")
+            psql(conninfo, "GRANT EXECUTE ON FUNCTION ticket_board.requeue_notification(bigint, interval, text) TO ticket_board_listener;")
 
             insert_ticket(conninfo, "PGU-1", title="Workflow", assignee="app")
             assert_error(
@@ -416,28 +420,48 @@ SELECT pg_get_functiondef('ticket_board.notify_ticket_state_transition()'::regpr
             ).stdout.strip()
             assert notify_function == "t"
 
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
             insert_ticket(conninfo, "PGU-20", title="Durable notify", state="analysis", assignee="ops", implementation="ready")
             psql(conninfo, "UPDATE ticket_board.tickets SET state = 'ready' WHERE id = 'PGU-20';")
-            pending = json.loads(
+            queued = json.loads(
                 psql(
-                    listener_conninfo,
+                    conninfo,
                     """
-SELECT jsonb_agg(payload ORDER BY ticket_id)::text
-FROM ticket_board.pending_transition_notifications()
+SELECT jsonb_agg(jsonb_build_object(
+    'id', ticket_id,
+    'kind', kind,
+    'target_role', target_role,
+    'message', message,
+    'payload', payload
+) ORDER BY id)::text
+FROM ticket_board.ticket_notification_queue
 WHERE ticket_id = 'PGU-20';
 """,
                 ).stdout
             )
-            assert pending[0]["id"] == "PGU-20", pending
-            assert pending[0]["old_state"] == "analysis", pending
-            assert pending[0]["new_state"] == "ready", pending
-            assert pending[0]["assignee"] == "ops", pending
-            psql(listener_conninfo, "SELECT ticket_board.mark_transition_notified('PGU-20');")
-            pending_after_mark = psql(
+            assert queued[0]["id"] == "PGU-20", queued
+            assert queued[0]["kind"] == "transition", queued
+            assert queued[0]["target_role"] == "ops", queued
+            assert queued[0]["message"] == "Ready ticket for you: PGU-20 -- Durable notify", queued
+            assert queued[0]["payload"]["old_state"] == "analysis", queued
+            assert queued[0]["payload"]["new_state"] == "ready", queued
+            claimed = json.loads(
+                psql(
+                    listener_conninfo,
+                    """
+SELECT row_to_json(claimed)::text
+FROM ticket_board.claim_notification() AS claimed;
+""",
+                ).stdout
+            )
+            assert claimed["ticket_id"] == "PGU-20", claimed
+            assert claimed["target_role"] == "ops", claimed
+            psql(listener_conninfo, f"SELECT ticket_board.ack_notification({claimed['notification_id']});")
+            pending_after_ack = psql(
                 listener_conninfo,
-                "SELECT count(*) FROM ticket_board.pending_transition_notifications() WHERE ticket_id = 'PGU-20';",
+                "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-20';",
             ).stdout.strip()
-            assert pending_after_mark == "0"
+            assert pending_after_ack == "0"
 
             nudges = psql(
                 conninfo,
@@ -455,6 +479,11 @@ WHERE ticket_id = 'PGU-20';
                 ).stdout
             )
             assert nudge_state == {"last_nudged": True, "nudge_count": 1}, nudge_state
+            nudge_queue = psql(
+                conninfo,
+                "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-20' AND kind = 'nudge';",
+            ).stdout.strip()
+            assert nudge_queue == "1", nudge_queue
 
             trigger_count = psql(
                 conninfo,

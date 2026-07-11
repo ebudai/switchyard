@@ -10,6 +10,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import psycopg
+
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
 RBAC_PATH = ROOT / "scripts" / "ticket_board" / "rbac.sql"
@@ -105,6 +107,14 @@ def main() -> int:
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation, created_text, updated_text, source_json
 ) VALUES (
+    'PGU-206', 'Locked head', '', 'analysis', 'ops', 'Ready.',
+    '2026-07-11T00:00:00+00:00', '2026-07-11T00:00:00+00:00',
+    '{ticket_source("PGU-206", "Locked head", "analysis", "ops")}'::jsonb
+);
+UPDATE ticket_board.tickets SET state = 'ready' WHERE id = 'PGU-206';
+INSERT INTO ticket_board.tickets (
+    id, title, body, state, assignee, implementation, created_text, updated_text, source_json
+) VALUES (
     'PGU-207', 'Durable reconcile', '', 'analysis', 'ops', 'Ready.',
     '2026-07-11T00:00:00+00:00', '2026-07-11T00:00:00+00:00',
     '{ticket_source("PGU-207", "Durable reconcile", "analysis", "ops")}'::jsonb
@@ -114,23 +124,34 @@ UPDATE ticket_board.tickets SET state = 'ready' WHERE id = 'PGU-207';
             )
             before = psql(
                 listener_conninfo,
-                "SELECT count(*) FROM ticket_board.pending_transition_notifications() WHERE ticket_id = 'PGU-207';",
+                "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-207';",
             )
             assert before == "1", before
 
             sent: list[tuple[str, str]] = []
-            listener = TicketBoardNotifyListener(
-                conninfo=listener_conninfo,
-                sender=lambda target, message: sent.append((target, message)),
-                poll_seconds=0,
-            )
-            delivered = listener.listen_once(max_notifications=1)
+            with psycopg.connect(admin_conninfo, autocommit=False) as lock_conn:
+                lock_conn.execute(
+                    """
+SELECT id
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-206'
+FOR UPDATE
+"""
+                )
+                listener = TicketBoardNotifyListener(
+                    conninfo=listener_conninfo,
+                    sender=lambda target, message: sent.append((target, message)),
+                    activity_gate=lambda _target: False,
+                    poll_seconds=0,
+                )
+                delivered = listener.listen_once(max_notifications=1)
+                lock_conn.rollback()
 
             assert delivered == 1
             assert sent == [("pgu-ops:0.0", "Ready ticket for you: PGU-207 -- Durable reconcile")]
             after = psql(
                 listener_conninfo,
-                "SELECT count(*) FROM ticket_board.pending_transition_notifications() WHERE ticket_id = 'PGU-207';",
+                "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-207';",
             )
             assert after == "0", after
         finally:

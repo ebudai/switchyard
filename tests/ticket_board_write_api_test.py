@@ -306,6 +306,14 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
     seed_ticket("PGU-112", title="Comment", state="analysis")
     seed_ticket("PGU-113", title="Merge source", state="analysis")
     seed_ticket("PGU-114", title="Merge target", state="analysis")
+    seed_ticket(
+        "PGU-115",
+        title="Director kickback to ready",
+        state="director_review",
+        assignee="director",
+        implementation="Done.",
+        audit_signoff=True,
+    )
 
 
 def exercise_write_api(base_url: str, commit_hash: str) -> None:
@@ -390,6 +398,14 @@ def exercise_write_api(base_url: str, commit_hash: str) -> None:
     routed = post_json(base_url, "/api/tickets/PGU-100/actions/route", {"state": "backlog", "assignee": "ops"}, caller="director")
     assert routed["ticket"]["state"] == "backlog", routed  # type: ignore[index]
     assert routed["ticket"]["assignee"] == "ops", routed  # type: ignore[index]
+    director_ready = post_json(
+        base_url,
+        "/api/tickets/PGU-115/actions/route",
+        {"state": "ready", "assignee": "ops"},
+        caller="director",
+    )
+    assert director_ready["ticket"]["state"] == "ready", director_ready  # type: ignore[index]
+    assert director_ready["ticket"]["assignee"] == "ops", director_ready  # type: ignore[index]
 
     wrong_assignee = post_json(base_url, "/api/tickets/PGU-101/actions/start_work", {}, caller="app", expect=403)
     assert "app cannot call start_work for ticket assigned to ops" in str(wrong_assignee), wrong_assignee

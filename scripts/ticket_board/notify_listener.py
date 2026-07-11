@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
-import re
 import subprocess
 import sys
 import threading
@@ -32,14 +32,8 @@ DEFAULT_REQUEUE_BASE_SECONDS = 5.0
 DEFAULT_REQUEUE_MAX_SECONDS = 60.0
 DEFAULT_MAX_DEFER_SECONDS = 90.0
 DEFAULT_DIRECTOR_RECENT_ACTIVITY_SECONDS = 10.0
-DEFAULT_DIRECTOR_STABLE_IDLE_SECONDS = 0.25
-DIRECTOR_COMPOSER_PLACEHOLDERS = {
-    "press up to edit queued messages",
-    "press enter to send",
-    "type a message",
-    "ask codex",
-    "message codex",
-}
+DEFAULT_DIRECTOR_STABLE_IDLE_SECONDS = 0.0
+AGENT_STATUS_REGION_LINES = 8
 ROLE_TO_TARGET = {
     "director": "pgu-director:0.0",
     "main": "pgu-main:0.0",
@@ -184,7 +178,7 @@ class PaneActivityGate:
         self.capture_runner = capture_runner
         self.monotonic = monotonic
         self.sleeper = sleeper
-        self._last_capture_by_target: dict[str, str] = {}
+        self._last_region_digest_by_target: dict[str, str] = {}
         self._last_changed_at_by_target: dict[str, float] = {}
 
     def _capture(self, target: str) -> str | None:
@@ -200,59 +194,58 @@ class PaneActivityGate:
             return None
         return proc.stdout
 
-    def _has_working_indicator(self, text: str) -> bool:
-        return "Working" in text or "esc to interrupt" in text
+    def _activity_region(self, target: str, text: str) -> str:
+        if target == ROLE_TO_TARGET["director"]:
+            return self._director_composer_region(text)
+        return self._agent_status_region(text)
 
-    def _has_live_working_indicator(self, text: str) -> bool:
-        lines = [line.rstrip() for line in text.splitlines() if line.strip()]
-        horizontal_indices = [idx for idx, line in enumerate(lines) if line.count("─") >= 40]
-        if horizontal_indices:
-            live_lines = lines[horizontal_indices[-1] + 1 :]
-        else:
-            live_lines = lines[-5:]
-        return self._has_working_indicator("\n".join(live_lines[-5:]))
+    def _agent_status_region(self, text: str) -> str:
+        lines = text.splitlines()
+        return "\n".join(lines[-AGENT_STATUS_REGION_LINES:])
 
-    def _normalized_director_composer_lines(self, text: str) -> list[str]:
+    def _director_composer_region(self, text: str) -> str:
+        if not text:
+            return ""
         lines = text.splitlines()
         horizontal_indices = [idx for idx, line in enumerate(lines) if line.count("─") >= 40]
         if len(horizontal_indices) < 2:
-            return ["<unknown>"]
-        composer_lines = lines[horizontal_indices[-2] + 1 : horizontal_indices[-1]]
-        normalized: list[str] = []
-        for line in composer_lines:
-            cleaned = re.sub(r"^[❯\u276f\s>\-*]+", "", line).strip()
-            if cleaned:
-                normalized.append(cleaned)
-        return normalized
+            return "\n".join(lines[-AGENT_STATUS_REGION_LINES:])
+        return "\n".join(lines[horizontal_indices[-2] + 1 : horizontal_indices[-1]])
 
-    def _director_composer_has_content(self, text: str) -> bool:
-        if not text:
-            return False
-        normalized = self._normalized_director_composer_lines(text)
-        if not normalized:
-            return False
-        return any(line.strip().lower() not in DIRECTOR_COMPOSER_PLACEHOLDERS for line in normalized)
+    def _activity_digest(self, target: str, text: str) -> str:
+        region = self._activity_region(target, text)
+        return hashlib.sha256(region.encode("utf-8")).hexdigest()
 
-    def _mark_recent_activity(self, target: str, text: str, now: float) -> bool:
-        previous = self._last_capture_by_target.get(target)
+    def _mark_recent_activity(self, target: str, digest: str, now: float) -> bool:
+        previous = self._last_region_digest_by_target.get(target)
+        self._last_region_digest_by_target[target] = digest
         if previous is None:
-            self._last_capture_by_target[target] = text
             self._last_changed_at_by_target[target] = now
             return True
-        if previous != text:
-            self._last_capture_by_target[target] = text
+        if previous != digest:
             self._last_changed_at_by_target[target] = now
             return True
-        changed_at = self._last_changed_at_by_target.get(target)
-        return changed_at is not None and now - changed_at < self.recent_activity_seconds
+        return False
 
     def is_busy(self, target: str) -> bool:
         text = self._capture(target)
         if text is None:
             return False
-        if target != ROLE_TO_TARGET["director"]:
-            return self._has_live_working_indicator(text)
-        return self._director_composer_has_content(text)
+        first_digest = self._activity_digest(target, text)
+        if self.stable_idle_seconds > 0:
+            self.sleeper(self.stable_idle_seconds)
+            second_text = self._capture(target)
+            if second_text is None:
+                return False
+            second_digest = self._activity_digest(target, second_text)
+            now = self.monotonic()
+            if first_digest != second_digest:
+                self._last_region_digest_by_target[target] = second_digest
+                self._last_changed_at_by_target[target] = now
+                return True
+            self._last_region_digest_by_target[target] = second_digest
+            return False
+        return self._mark_recent_activity(target, first_digest, self.monotonic())
 
     def is_working(self, target: str) -> bool:
         return self.is_busy(target)

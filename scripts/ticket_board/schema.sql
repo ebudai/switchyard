@@ -926,6 +926,7 @@ BEGIN
             candidates.assignee,
             candidates.ticket_number,
             candidates.last_activity_at,
+            candidates.entered_current_state_at,
             candidates.last_nudged_at,
             candidates.nudge_count,
             candidates.target_role
@@ -937,6 +938,7 @@ BEGIN
                 t.assignee,
                 t.ticket_number,
                 ns.last_activity_at,
+                ns.entered_current_state_at,
                 ns.last_nudged_at,
                 ns.nudge_count,
                 ticket_board.nudge_target_role(t.state, t.assignee) AS target_role,
@@ -963,6 +965,7 @@ BEGIN
                 t.assignee,
                 t.ticket_number,
                 ns.last_activity_at,
+                ns.entered_current_state_at,
                 ns.last_nudged_at,
                 ns.nudge_count,
                 'director' AS target_role,
@@ -1019,6 +1022,10 @@ BEGIN
                 'target_role', target_role,
                 'message', ticket_board.nudge_message(candidate.id, candidate.title, candidate.state, candidate.assignee)
             );
+            RAISE WARNING 'primary notification path was late/undelivered for % targeting % (%s since transition)',
+                candidate.id,
+                target_role,
+                floor(extract(epoch FROM p_now - candidate.entered_current_state_at))::integer || 's';
         END IF;
 
         PERFORM ticket_board.enqueue_notification(

@@ -218,27 +218,7 @@ class PaneActivityGate:
             return False
         if target != ROLE_TO_TARGET["director"]:
             return self._has_working_indicator(text)
-        if self._has_working_indicator(text) or self._director_composer_has_content(text):
-            self._mark_recent_activity(target, text, self.monotonic())
-            return True
-        now = self.monotonic()
-        # The director pane is shared by a human and an agent. Status text can
-        # flicker between tool calls, so require a recently unchanged pane
-        # before injecting a notification into the composer.
-        if self._mark_recent_activity(target, text, now):
-            return True
-        if self.stable_idle_seconds > 0:
-            self.sleeper(self.stable_idle_seconds)
-            second_text = self._capture(target)
-            if second_text is None:
-                return False
-            if self._has_working_indicator(second_text) or self._director_composer_has_content(second_text):
-                self._mark_recent_activity(target, second_text, self.monotonic())
-                return True
-            if second_text != text:
-                self._mark_recent_activity(target, second_text, self.monotonic())
-                return True
-        return False
+        return self._director_composer_has_content(text)
 
     def is_working(self, target: str) -> bool:
         return self.is_busy(target)

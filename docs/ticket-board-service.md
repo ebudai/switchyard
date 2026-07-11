@@ -111,8 +111,10 @@ scripts/ticket-board-service.sh start
 scripts/ticket-board-service.sh logs
 ```
 
-## Watchdog interaction
+## Notification Delivery
 
-`scripts/startwatchdog.fish` launches the watchdog with
-`--ticket-board-external`. The watchdog reports board health, but `systemd --user`
-owns the process lifecycle.
+The old polling `director_watchdog.py` is retired. Ticket notification delivery
+is split between PostgreSQL trigger/cron state and the
+`pgu-ticket-board-notify-listener.service` user service. The listener handles
+real-time `LISTEN` delivery, replay reconciliation after reconnect, and
+NUDGE-message gating against live pane activity.

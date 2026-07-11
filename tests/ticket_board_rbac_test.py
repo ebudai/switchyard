@@ -37,6 +37,14 @@ WRITE_FUNCTIONS = [
     "ticket_board.edit_fields(text,jsonb)",
     "ticket_board.merge(text,text)",
 ]
+LISTENER_FUNCTIONS = [
+    "ticket_board.pending_transition_notifications()",
+    "ticket_board.mark_transition_notified(text)",
+]
+PRIVATE_LISTENER_FUNCTIONS = [
+    "ticket_board.require_ticket_board_listener(text)",
+    "ticket_board.transition_notification_payload(text,text,text,text)",
+]
 
 
 def run(args: list[str], *, capture: bool = True, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -156,6 +164,30 @@ FROM unnest({ROLE_SQL_ARRAY}) AS role_name;
         )
         for role in EXPECTED_ROLES:
             assert rows[role] == (role == "ticket_board_service"), (signature, role, rows)
+    for signature in LISTENER_FUNCTIONS:
+        rows = json.loads(
+            psql(
+                conn,
+                f"""
+SELECT jsonb_object_agg(role_name, has_function_privilege(role_name, {sql_string(signature)}, 'EXECUTE'))::text
+FROM unnest({ROLE_SQL_ARRAY}) AS role_name;
+""",
+            )
+        )
+        for role in EXPECTED_ROLES:
+            assert rows[role] == (role == "ticket_board_listener"), (signature, role, rows)
+    for signature in PRIVATE_LISTENER_FUNCTIONS:
+        rows = json.loads(
+            psql(
+                conn,
+                f"""
+SELECT jsonb_object_agg(role_name, has_function_privilege(role_name, {sql_string(signature)}, 'EXECUTE'))::text
+FROM unnest({ROLE_SQL_ARRAY}) AS role_name;
+""",
+            )
+        )
+        for role in EXPECTED_ROLES:
+            assert rows[role] is False, (signature, role, rows)
 
 
 def assert_direct_dml_denied(conn: str, role_conn: dict[str, str]) -> None:
@@ -424,6 +456,40 @@ def assert_structural_rules_still_apply(admin_conn: str, service_conn: str) -> N
     )
 
 
+def assert_listener_can_execute_reconcile_functions(admin_conn: str, listener_conn: str, service_conn: str) -> None:
+    insert_ticket(admin_conn, "PGU-950", title="Listener pending", state="analysis", assignee="ops", implementation="Ready.")
+    psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'ready' WHERE id = 'PGU-950';")
+
+    pending = json.loads(
+        psql(
+            listener_conn,
+            """
+SELECT jsonb_agg(payload ORDER BY ticket_id)::text
+FROM ticket_board.pending_transition_notifications()
+WHERE ticket_id = 'PGU-950';
+""",
+        )
+    )
+    assert len(pending) == 1, pending
+    assert pending[0]["kind"] == "transition", pending
+    assert pending[0]["id"] == "PGU-950", pending
+    assert pending[0]["title"] == "Listener pending", pending
+    assert pending[0]["old_state"] == "analysis", pending
+    assert pending[0]["new_state"] == "ready", pending
+    assert pending[0]["assignee"] == "ops", pending
+    assert pending[0]["ticket_number"] == 950, pending
+
+    psql(listener_conn, "SELECT ticket_board.mark_transition_notified('PGU-950');")
+    after = psql(
+        listener_conn,
+        "SELECT count(*) FROM ticket_board.pending_transition_notifications() WHERE ticket_id = 'PGU-950';",
+    )
+    assert after == "0", after
+
+    assert_permission_denied(service_conn, "SELECT ticket_board.pending_transition_notifications();")
+    assert_permission_denied(service_conn, "SELECT ticket_board.mark_transition_notified('PGU-950');")
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="ticket-board-rbac.") as tmpdir:
         root = Path(tmpdir)
@@ -498,8 +564,10 @@ FROM unnest({ROLE_SQL_ARRAY}) AS role_name;
                 assert_permission_denied(role_conn[role], "SELECT ticket_board.create_ticket('Nope', 'Body');")
 
             service_conn = role_conn["ticket_board_service"]
+            listener_conn = role_conn["ticket_board_listener"]
             assert_service_can_execute_every_write_function(admin_conn, service_conn)
             assert_structural_rules_still_apply(admin_conn, service_conn)
+            assert_listener_can_execute_reconcile_functions(admin_conn, listener_conn, service_conn)
         finally:
             subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], check=False)
 

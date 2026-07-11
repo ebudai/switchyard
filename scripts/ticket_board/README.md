@@ -135,7 +135,7 @@ Notes:
 - The default review path is `in_progress -> audit -> eric_review -> director_review -> done`, or `in_progress -> audit -> director_review -> done` when Eric sign-off is not required
 - Only one unlinked ticket per assignee may be in `in_progress` at a time; linked tickets in the same `parent_id` cluster count as one unit of work, and `ready` is the per-role queue
 - For new shell-created tickets, prefer `scripts/directorctl ticket-create` over hand-writing `PGU-N.json`; it writes through the board action API, so the same client works against the current JSON store and the future database-backed board
-- For direct JSON edits/writes, use `scripts.ticket_store_io.atomic_write_json(...)` or an equivalent temp-file plus `os.replace(...)` flow; the watchdog now watches the store with inotify, so partial in-place writes are treated as malformed until they are replaced by a complete file
+- For direct JSON edits/writes, use `scripts.ticket_store_io.atomic_write_json(...)` or an equivalent temp-file plus `os.replace(...)` flow.
 - Human shell editing is fine; if a JSON file is invalid, the UI shows a read error banner
 
 PostgreSQL migration foundation:
@@ -152,4 +152,4 @@ PostgreSQL migration foundation:
 - `scripts/ticket_board/rbac.sql` creates the login roles for each board pane/service role without setting passwords and grants minimal table/column permissions; only `director` can update `tickets.manually_controlled`
 - `scripts/ticket_board/import_json_to_postgres.py --database "$DATABASE_URL" --apply-schema` imports the JSON store into that schema, is safe to rerun, and verifies DB parity against the source JSON after import
 - `tickets.manually_controlled` defaults to `false`; PGU-191 transition/notification triggers must no-op when it is `true` so the director can hand-manipulate exceptional tickets
-- The PGU-191 trigger layer enforces non-timed workflow gates and emits `pg_notify('ticket_board_state_transition', ...)` on state transitions; timed nudges and sweeps remain in the watchdog until cutover
+- The PGU-207 trigger layer enforces workflow gates, maintains `ticket_notification_state`, emits `pg_notify('ticket_board_state_transition', ...)` on state transitions, and exposes `notify_due_nudges()` for the 5-minute pg_cron reminder cadence. The notify listener reconciles missed transition notifications on reconnect so listener downtime does not drop ready/audit/review nudges.

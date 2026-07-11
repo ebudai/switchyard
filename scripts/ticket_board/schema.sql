@@ -1,8 +1,8 @@
 -- PGU ticket-board PostgreSQL schema.
 --
--- PGU-191 adds the parallel-run trigger layer for non-timed workflow
--- enforcement and state-transition notifications. Timed nudges and sweeps stay
--- in the watchdog until a later cutover.
+-- PGU-207 replaces the polling director watchdog's ticket notification duties
+-- with trigger-maintained durable state, transition notifications, and a
+-- pg_cron-compatible nudge function consumed by the tiny LISTEN sender.
 --
 -- Design goals:
 --   * Lossless import of the existing JSON ticket files.
@@ -155,6 +155,27 @@ CREATE TABLE IF NOT EXISTS ticket_board.ticket_attachments (
 
 CREATE INDEX IF NOT EXISTS ticket_attachments_path_idx
     ON ticket_board.ticket_attachments (path);
+
+CREATE TABLE IF NOT EXISTS ticket_board.ticket_notification_state (
+    ticket_id text PRIMARY KEY REFERENCES ticket_board.tickets(id) ON DELETE CASCADE,
+    current_state text NOT NULL,
+    current_assignee text NOT NULL,
+    previous_state text,
+    entered_current_state_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    last_activity_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    last_transition_notified_at timestamptz,
+    last_nudged_at timestamptz,
+    nudge_count integer NOT NULL DEFAULT 0 CHECK (nudge_count >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS ticket_notification_state_due_idx
+    ON ticket_board.ticket_notification_state (
+        current_state,
+        current_assignee,
+        entered_current_state_at,
+        last_transition_notified_at,
+        last_nudged_at
+    );
 
 CREATE OR REPLACE FUNCTION ticket_board.ticket_cluster_root_id(
     p_ticket_id text,
@@ -352,6 +373,347 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION ticket_board.upsert_ticket_notification_state()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    activity_at timestamptz := coalesce(NEW.updated_at, NEW.row_updated_at, clock_timestamp());
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        INSERT INTO ticket_board.ticket_notification_state (
+            ticket_id,
+            current_state,
+            current_assignee,
+            previous_state,
+            entered_current_state_at,
+            last_activity_at,
+            last_transition_notified_at
+        ) VALUES (
+            NEW.id,
+            NEW.state,
+            NEW.assignee,
+            NULL,
+            activity_at,
+            activity_at,
+            activity_at
+        )
+        ON CONFLICT (ticket_id) DO UPDATE
+        SET current_state = EXCLUDED.current_state,
+            current_assignee = EXCLUDED.current_assignee,
+            previous_state = EXCLUDED.previous_state,
+            entered_current_state_at = EXCLUDED.entered_current_state_at,
+            last_activity_at = EXCLUDED.last_activity_at,
+            last_transition_notified_at = EXCLUDED.last_transition_notified_at,
+            last_nudged_at = NULL,
+            nudge_count = 0;
+        RETURN NULL;
+    END IF;
+
+    INSERT INTO ticket_board.ticket_notification_state (
+        ticket_id,
+        current_state,
+        current_assignee,
+        previous_state,
+        entered_current_state_at,
+        last_activity_at,
+        last_transition_notified_at,
+        last_nudged_at,
+        nudge_count
+    ) VALUES (
+        NEW.id,
+        NEW.state,
+        NEW.assignee,
+        CASE
+            WHEN OLD.state IS DISTINCT FROM NEW.state THEN OLD.state
+            ELSE NULL
+        END,
+        CASE
+            WHEN OLD.state IS DISTINCT FROM NEW.state THEN activity_at
+            ELSE activity_at
+        END,
+        activity_at,
+        NULL,
+        NULL,
+        0
+    )
+    ON CONFLICT (ticket_id) DO UPDATE
+    SET current_state = EXCLUDED.current_state,
+        current_assignee = EXCLUDED.current_assignee,
+        previous_state = CASE
+            WHEN OLD.state IS DISTINCT FROM NEW.state THEN OLD.state
+            ELSE ticket_board.ticket_notification_state.previous_state
+        END,
+        entered_current_state_at = CASE
+            WHEN OLD.state IS DISTINCT FROM NEW.state THEN EXCLUDED.entered_current_state_at
+            ELSE ticket_board.ticket_notification_state.entered_current_state_at
+        END,
+        last_activity_at = EXCLUDED.last_activity_at,
+        last_transition_notified_at = CASE
+            WHEN OLD.state IS DISTINCT FROM NEW.state THEN NULL
+            ELSE ticket_board.ticket_notification_state.last_transition_notified_at
+        END,
+        last_nudged_at = CASE
+            WHEN OLD.state IS DISTINCT FROM NEW.state THEN NULL
+            ELSE ticket_board.ticket_notification_state.last_nudged_at
+        END,
+        nudge_count = CASE
+            WHEN OLD.state IS DISTINCT FROM NEW.state THEN 0
+            ELSE ticket_board.ticket_notification_state.nudge_count
+        END;
+
+    RETURN NULL;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.touch_ticket_notification_activity()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    activity_at timestamptz := coalesce(NEW.ts, clock_timestamp());
+BEGIN
+    UPDATE ticket_board.ticket_notification_state
+    SET last_activity_at = activity_at,
+        nudge_count = 0
+    WHERE ticket_id = NEW.ticket_id;
+    RETURN NULL;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.require_ticket_board_listener(p_action text)
+RETURNS text
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    role_setting text;
+    actor text;
+BEGIN
+    role_setting := nullif(current_setting('role', true), '');
+    IF role_setting IS NULL OR role_setting = 'none' THEN
+        actor := session_user;
+    ELSE
+        actor := role_setting;
+    END IF;
+    IF actor <> 'ticket_board_listener' THEN
+        RAISE EXCEPTION 'role % cannot call %; ticket_board_listener is the only notification reconciler', actor, p_action
+            USING ERRCODE = '42501';
+    END IF;
+    RETURN actor;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.transition_notification_payload(
+    p_ticket_id text,
+    p_old_state text,
+    p_new_state text,
+    p_assignee text
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    payload jsonb;
+BEGIN
+    PERFORM ticket_board.require_ticket_board_listener('transition_notification_payload');
+    SELECT jsonb_build_object(
+        'kind', 'transition',
+        'id', t.id,
+        'title', t.title,
+        'old_state', p_old_state,
+        'new_state', p_new_state,
+        'assignee', p_assignee,
+        'updated_at', t.updated_at,
+        'ticket_number', t.ticket_number
+    )
+    INTO payload
+    FROM ticket_board.tickets t
+    WHERE t.id = p_ticket_id;
+    RETURN payload;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.pending_transition_notifications()
+RETURNS TABLE(ticket_id text, payload jsonb)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+BEGIN
+    PERFORM ticket_board.require_ticket_board_listener('pending_transition_notifications');
+    RETURN QUERY
+    SELECT
+        t.id,
+        ticket_board.transition_notification_payload(t.id, ns.previous_state, t.state, t.assignee)
+    FROM ticket_board.tickets t
+    JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
+    WHERE t.state IN ('analysis', 'ready', 'in_progress', 'audit', 'director_review')
+      AND NOT t.manually_controlled
+      AND (ns.last_transition_notified_at IS NULL OR ns.last_transition_notified_at < ns.entered_current_state_at)
+    ORDER BY ns.entered_current_state_at, t.ticket_number;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.mark_transition_notified(p_ticket_id text)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+BEGIN
+    PERFORM ticket_board.require_ticket_board_listener('mark_transition_notified');
+    UPDATE ticket_board.ticket_notification_state
+    SET last_transition_notified_at = clock_timestamp()
+    WHERE ticket_id = p_ticket_id;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.nudge_target_role(p_state text, p_assignee text)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT CASE
+        WHEN p_state IN ('ready', 'in_progress') THEN NULLIF(p_assignee, 'unassigned')
+        WHEN p_state = 'audit' THEN 'audit'
+        WHEN p_state = 'director_review' THEN 'director'
+        ELSE NULL
+    END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.nudge_message(p_ticket_id text, p_title text, p_state text, p_assignee text)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT CASE
+        WHEN p_state = 'ready' THEN 'NUDGE Ready ticket for you: ' || p_ticket_id || ' -- ' || p_title
+        WHEN p_state = 'in_progress' THEN 'NUDGE ' || p_ticket_id || ' -- ' || p_title || ' is still in progress'
+        WHEN p_state = 'audit' THEN 'NUDGE ' || p_ticket_id || ' -- ' || p_title || ' ready for audit'
+        WHEN p_state = 'director_review' THEN 'NUDGE ' || p_ticket_id || ' -- ' || p_title || ' ready for your review'
+        ELSE NULL
+    END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.notify_due_nudges(
+    p_now timestamptz DEFAULT clock_timestamp(),
+    p_cadence interval DEFAULT interval '5 minutes',
+    p_escalate_after integer DEFAULT 3
+)
+RETURNS integer
+LANGUAGE plpgsql
+VOLATILE
+AS $$
+DECLARE
+    candidate record;
+    delivered_count integer := 0;
+    target_role text;
+    payload jsonb;
+BEGIN
+    FOR candidate IN
+        SELECT DISTINCT ON (ticket_board.nudge_target_role(t.state, t.assignee))
+            t.id,
+            t.title,
+            t.state,
+            t.assignee,
+            t.ticket_number,
+            ns.last_activity_at,
+            ns.last_nudged_at,
+            ns.nudge_count,
+            ticket_board.nudge_target_role(t.state, t.assignee) AS target_role
+        FROM ticket_board.tickets t
+        JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
+        WHERE t.state IN ('ready', 'in_progress', 'audit', 'director_review')
+          AND NOT t.manually_controlled
+          AND ticket_board.nudge_target_role(t.state, t.assignee) IS NOT NULL
+          AND (ns.last_nudged_at IS NULL OR ns.last_nudged_at <= p_now - p_cadence)
+        ORDER BY ticket_board.nudge_target_role(t.state, t.assignee),
+            CASE t.state
+                WHEN 'in_progress' THEN 1
+                WHEN 'ready' THEN 2
+                WHEN 'audit' THEN 3
+                WHEN 'director_review' THEN 4
+                ELSE 5
+            END,
+            t.ticket_number
+    LOOP
+        target_role := candidate.target_role;
+        IF candidate.nudge_count >= p_escalate_after
+           AND candidate.last_nudged_at IS NOT NULL
+           AND candidate.last_activity_at <= candidate.last_nudged_at THEN
+            target_role := 'director';
+            payload := jsonb_build_object(
+                'kind', 'escalation',
+                'id', candidate.id,
+                'title', candidate.title,
+                'target_role', target_role,
+                'message', 'PRIORITY ' || candidate.id || ' -- ' || candidate.title || ' appears stuck for ' || candidate.assignee || '; check/reassign'
+            );
+        ELSE
+            payload := jsonb_build_object(
+                'kind', 'nudge',
+                'id', candidate.id,
+                'title', candidate.title,
+                'state', candidate.state,
+                'assignee', candidate.assignee,
+                'target_role', target_role,
+                'message', ticket_board.nudge_message(candidate.id, candidate.title, candidate.state, candidate.assignee)
+            );
+        END IF;
+
+        PERFORM pg_notify('ticket_board_state_transition', payload::text);
+        UPDATE ticket_board.ticket_notification_state
+        SET last_nudged_at = p_now,
+            nudge_count = CASE
+                WHEN candidate.last_activity_at > coalesce(candidate.last_nudged_at, '-infinity'::timestamptz) THEN 1
+                ELSE nudge_count + 1
+            END
+        WHERE ticket_id = candidate.id;
+        delivered_count := delivered_count + 1;
+    END LOOP;
+
+    RETURN delivered_count;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.install_nudge_cron()
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'pg_cron') THEN
+        BEGIN
+            CREATE EXTENSION IF NOT EXISTS pg_cron;
+        EXCEPTION WHEN OTHERS THEN
+            RAISE NOTICE 'pg_cron extension for ticket_board_due_nudges not installed: %', SQLERRM;
+            RETURN;
+        END;
+        BEGIN
+            PERFORM cron.unschedule('ticket_board_due_nudges');
+        EXCEPTION WHEN OTHERS THEN
+            NULL;
+        END;
+        BEGIN
+            PERFORM cron.schedule(
+                'ticket_board_due_nudges',
+                '*/5 * * * *',
+                $cron$SELECT ticket_board.notify_due_nudges();$cron$
+            );
+        EXCEPTION WHEN OTHERS THEN
+            RAISE NOTICE 'pg_cron schedule for ticket_board_due_nudges not installed: %', SQLERRM;
+        END;
+    END IF;
+END;
+$$;
+
 DROP TRIGGER IF EXISTS tickets_enforce_workflow_update ON ticket_board.tickets;
 CREATE TRIGGER tickets_enforce_workflow_update
 BEFORE UPDATE ON ticket_board.tickets
@@ -364,6 +726,46 @@ AFTER UPDATE ON ticket_board.tickets
 FOR EACH ROW
 WHEN (OLD.state IS DISTINCT FROM NEW.state)
 EXECUTE FUNCTION ticket_board.notify_ticket_state_transition();
+
+DROP TRIGGER IF EXISTS tickets_notification_state_insert ON ticket_board.tickets;
+CREATE TRIGGER tickets_notification_state_insert
+AFTER INSERT ON ticket_board.tickets
+FOR EACH ROW
+EXECUTE FUNCTION ticket_board.upsert_ticket_notification_state();
+
+DROP TRIGGER IF EXISTS tickets_notification_state_update ON ticket_board.tickets;
+CREATE TRIGGER tickets_notification_state_update
+AFTER UPDATE ON ticket_board.tickets
+FOR EACH ROW
+EXECUTE FUNCTION ticket_board.upsert_ticket_notification_state();
+
+DROP TRIGGER IF EXISTS ticket_comments_notification_activity ON ticket_board.ticket_comments;
+CREATE TRIGGER ticket_comments_notification_activity
+AFTER INSERT ON ticket_board.ticket_comments
+FOR EACH ROW
+EXECUTE FUNCTION ticket_board.touch_ticket_notification_activity();
+
+INSERT INTO ticket_board.ticket_notification_state (
+    ticket_id,
+    current_state,
+    current_assignee,
+    previous_state,
+    entered_current_state_at,
+    last_activity_at,
+    last_transition_notified_at
+)
+SELECT
+    id,
+    state,
+    assignee,
+    NULL,
+    coalesce(updated_at, row_updated_at, clock_timestamp()),
+    coalesce(updated_at, row_updated_at, clock_timestamp()),
+    coalesce(updated_at, row_updated_at, clock_timestamp())
+FROM ticket_board.tickets
+ON CONFLICT (ticket_id) DO NOTHING;
+
+SELECT ticket_board.install_nudge_cron();
 
 CREATE OR REPLACE FUNCTION ticket_board.current_actor_role()
 RETURNS text

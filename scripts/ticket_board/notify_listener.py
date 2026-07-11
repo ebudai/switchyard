@@ -52,6 +52,9 @@ class Transition:
     old_state: str
     new_state: str
     assignee: str
+    message: str = ""
+    target_role: str = ""
+    kind: str = "transition"
 
 
 def parse_transition_payload(payload: str) -> Transition:
@@ -64,10 +67,15 @@ def parse_transition_payload(payload: str) -> Transition:
         old_state=str(parsed.get("old_state", "")).strip(),
         new_state=str(parsed.get("new_state", "")).strip(),
         assignee=str(parsed.get("assignee", "")).strip().lower(),
+        message=str(parsed.get("message", "")).strip(),
+        target_role=str(parsed.get("target_role", "")).strip().lower(),
+        kind=str(parsed.get("kind", "transition")).strip().lower() or "transition",
     )
 
 
 def target_for_transition(transition: Transition) -> str | None:
+    if transition.target_role:
+        return ROLE_TO_TARGET.get(transition.target_role)
     if transition.new_state == "analysis":
         return ROLE_TO_TARGET["director"]
     if transition.new_state in {"ready", "in_progress"}:
@@ -86,6 +94,8 @@ def message_for_transition(transition: Transition) -> str | None:
         return None
     if not transition.ticket_id:
         raise ValueError("notification payload missing ticket id")
+    if transition.message:
+        return transition.message
     title_suffix = f" -- {transition.title}" if transition.title else ""
     old_rank = STATE_RANK.get(transition.old_state)
     new_rank = STATE_RANK.get(transition.new_state)
@@ -112,6 +122,25 @@ class DirectorctlSender:
         subprocess.run([self.directorctl_bin, "send", target, message], check=True)
 
 
+class PaneActivityGate:
+    def __init__(self, directorctl_bin: str = DEFAULT_DIRECTORCTL) -> None:
+        self.directorctl_bin = directorctl_bin
+
+    def is_working(self, target: str) -> bool:
+        try:
+            proc = subprocess.run(
+                [self.directorctl_bin, "capture", target, "40"],
+                check=True,
+                text=True,
+                capture_output=True,
+                timeout=2.0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        text = proc.stdout
+        return "Working" in text or "esc to interrupt" in text
+
+
 class TicketBoardNotifyListener:
     def __init__(
         self,
@@ -119,6 +148,7 @@ class TicketBoardNotifyListener:
         conninfo: str,
         channel: str = CHANNEL,
         sender: Callable[[str, str], None] | None = None,
+        activity_gate: Callable[[str], bool] | None = None,
         connector: Callable[..., Any] = psycopg.connect,
         reconnect_seconds: float = DEFAULT_RECONNECT_SECONDS,
         poll_seconds: float = DEFAULT_POLL_SECONDS,
@@ -128,6 +158,7 @@ class TicketBoardNotifyListener:
         self.conninfo = conninfo
         self.channel = channel
         self.sender = sender or DirectorctlSender()
+        self.activity_gate = activity_gate or PaneActivityGate().is_working
         self.connector = connector
         self.reconnect_seconds = reconnect_seconds
         self.poll_seconds = poll_seconds
@@ -142,20 +173,46 @@ class TicketBoardNotifyListener:
         if not target or not message:
             self.logger.debug("Skipping transition notification: %s", payload)
             return False
+        if message.startswith("NUDGE") and self.activity_gate(target):
+            self.logger.info("Suppressed NUDGE for active pane %s", target)
+            return False
         self.sender(target, message)
         self.delivered_count += 1
         self.logger.info("Delivered %s transition to %s", transition.ticket_id, target)
         return True
+
+    def reconcile_pending_notifications(self, conn: Any, *, max_notifications: int | None = None) -> int:
+        delivered = 0
+        rows = conn.execute("SELECT ticket_id, payload::text FROM ticket_board.pending_transition_notifications()").fetchall()
+        for ticket_id, payload in rows:
+            ticket_id_text = ticket_id.decode("utf-8") if isinstance(ticket_id, bytes) else str(ticket_id)
+            if self.stop_event.is_set():
+                break
+            if max_notifications is not None and self.delivered_count >= max_notifications:
+                break
+            try:
+                if self.deliver_payload(payload):
+                    conn.execute("SELECT ticket_board.mark_transition_notified(%s::text)", (ticket_id_text,))
+                    delivered += 1
+            except ValueError as exc:
+                self.logger.warning("Skipping malformed reconciled ticket notification payload: %s", exc)
+            except (subprocess.CalledProcessError, OSError) as exc:
+                self.logger.warning("Failed to deliver reconciled ticket notification through directorctl: %s", exc)
+        return delivered
 
     def listen_once(self, *, max_notifications: int | None = None) -> int:
         delivered_before = self.delivered_count
         with self.connector(self.conninfo, autocommit=True) as conn:
             conn.execute(sql.SQL("LISTEN {}").format(sql.Identifier(self.channel)))
             self.logger.info("LISTEN %s established", self.channel)
+            self.reconcile_pending_notifications(conn, max_notifications=max_notifications)
             while not self.stop_event.is_set():
                 for notify in conn.notifies(timeout=self.poll_seconds):
                     try:
-                        self.deliver_payload(notify.payload)
+                        delivered = self.deliver_payload(notify.payload)
+                        transition = parse_transition_payload(notify.payload)
+                        if delivered and transition.kind == "transition" and transition.ticket_id:
+                            conn.execute("SELECT ticket_board.mark_transition_notified(%s::text)", (transition.ticket_id,))
                     except ValueError as exc:
                         self.logger.warning("Skipping malformed ticket notification payload: %s", exc)
                     except (subprocess.CalledProcessError, OSError) as exc:
@@ -211,6 +268,7 @@ def main(argv: list[str] | None = None) -> int:
         conninfo=args.database,
         channel=args.channel,
         sender=DirectorctlSender(args.directorctl),
+        activity_gate=PaneActivityGate(args.directorctl).is_working,
         reconnect_seconds=args.reconnect_seconds,
         poll_seconds=args.poll_seconds,
     )

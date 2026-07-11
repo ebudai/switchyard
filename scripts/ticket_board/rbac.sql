@@ -56,4 +56,7 @@ GRANT EXECUTE ON FUNCTION ticket_board.add_comment(text, text) TO ticket_board_s
 GRANT EXECUTE ON FUNCTION ticket_board.edit_fields(text, jsonb) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.merge(text, text) TO ticket_board_service;
 
+GRANT EXECUTE ON FUNCTION ticket_board.pending_transition_notifications() TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.mark_transition_notified(text) TO ticket_board_listener;
+
 COMMIT;

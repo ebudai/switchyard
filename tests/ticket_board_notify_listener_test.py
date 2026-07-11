@@ -539,73 +539,47 @@ def test_director_composer_busy_requeues_then_idle_delivers_once() -> None:
     assert idle_conn.requeued == []
 
 
+def test_gate_async_cold_start_defaults_busy_then_static_region_idles() -> None:
+    capture = "old scrollback\nWorking (999s)\nPress up to edit queued messages\nesc to interrupt\n❯"
+
+    def capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=capture)
+
+    def sleeper(seconds: float) -> None:
+        raise AssertionError("default async gate path must not sleep")
+
+    gate = PaneActivityGate("/tmp/directorctl", capture_runner=capture_runner, sleeper=sleeper)
+
+    assert gate.is_busy("pgu-ops:0.0") is True
+    assert gate.is_busy("pgu-ops:0.0") is False
+
+
 def test_director_gate_treats_composer_content_as_busy_only_for_director() -> None:
     horizontal = "─" * 48
-    composer_busy_capture = f"""
-Working
+    composer_typing_captures = iter(
+        [
+            f"""
+Working (1s)
+{horizontal}
+❯ half typed
+{horizontal}
+""".strip(),
+            f"""
+Working (2s)
 {horizontal}
 ❯ half typed message
 {horizontal}
-""".strip()
-    clock = [100.0]
+""".strip(),
+        ]
+    )
 
     def capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(args, 0, stdout=composer_busy_capture)
+        return subprocess.CompletedProcess(args, 0, stdout=next(composer_typing_captures))
 
-    gate = PaneActivityGate(
-        "/tmp/directorctl",
-        recent_activity_seconds=10.0,
-        stable_idle_seconds=0,
-        capture_runner=capture_runner,
-        monotonic=lambda: clock[0],
-    )
+    gate = PaneActivityGate("/tmp/directorctl", capture_runner=capture_runner)
 
     assert gate.is_busy("pgu-director:0.0") is True
-    clock[0] += 11.0
     assert gate.is_busy("pgu-director:0.0") is True
-    assert gate.is_busy("pgu-ops:0.0") is False
-
-    empty_composer_capture = f"""
-Working
-{horizontal}
-❯
-{horizontal}
-""".strip()
-
-    def empty_capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(args, 0, stdout=empty_composer_capture)
-
-    empty_gate = PaneActivityGate(
-        "/tmp/directorctl",
-        recent_activity_seconds=10.0,
-        stable_idle_seconds=0,
-        capture_runner=empty_capture_runner,
-        monotonic=lambda: clock[0],
-    )
-
-    assert empty_gate.is_busy("pgu-director:0.0") is False
-    assert empty_gate.is_busy("pgu-ops:0.0") is False
-
-
-def test_director_gate_ignores_queued_message_placeholder() -> None:
-    horizontal = "─" * 48
-    placeholder_capture = f"""
-assistant output
-{horizontal}
-❯ Press up to edit queued messages
-{horizontal}
-""".strip()
-
-    def capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(args, 0, stdout=placeholder_capture)
-
-    gate = PaneActivityGate(
-        "/tmp/directorctl",
-        stable_idle_seconds=0,
-        capture_runner=capture_runner,
-    )
-
-    assert gate.is_busy("pgu-director:0.0") is False
 
 
 def test_director_gate_empty_composer_delivers_even_when_capture_changes() -> None:
@@ -626,68 +600,59 @@ Working.
 """.strip(),
         ]
     )
-    clock = [100.0]
 
     def capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(args, 0, stdout=next(captures))
 
-    gate = PaneActivityGate(
-        "/tmp/directorctl",
-        recent_activity_seconds=3.0,
-        stable_idle_seconds=0,
-        capture_runner=capture_runner,
-        monotonic=lambda: clock[0],
-    )
+    gate = PaneActivityGate("/tmp/directorctl", capture_runner=capture_runner)
 
-    assert gate.is_busy("pgu-director:0.0") is False
-    clock[0] += 4.0
+    assert gate.is_busy("pgu-director:0.0") is True
     assert gate.is_busy("pgu-director:0.0") is False
 
 
-def test_non_director_gate_ignores_stale_working_scrollback() -> None:
-    horizontal = "─" * 48
-    idle_with_stale_working_capture = f"""
-• Working (4m 12s • esc to interrupt)
-Finished older task output
-{horizontal}
-• Explored
-  └ Read notify_listener.py
-›
-  gpt-5.5 high · ~/Projects/pgu
-""".strip()
-
-    def capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(args, 0, stdout=idle_with_stale_working_capture)
-
-    gate = PaneActivityGate(
-        "/tmp/directorctl",
-        stable_idle_seconds=0,
-        capture_runner=capture_runner,
+def test_agent_gate_hashes_status_region_without_keyword_matching() -> None:
+    captures = iter(
+        [
+            "task output\nstatus tick 1\nplain footer",
+            "task output\nstatus tick 2\nplain footer",
+        ]
     )
 
-    assert gate.is_busy("pgu-ops:0.0") is False
-
-
-def test_non_director_gate_uses_live_working_status_line() -> None:
-    horizontal = "─" * 48
-    live_working_capture = f"""
-Older completed output
-{horizontal}
-• Working (11m 21s • esc to interrupt)
-› Implement {{feature}}
-  gpt-5.5 high · ~/Projects/pgu
-""".strip()
-
     def capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(args, 0, stdout=live_working_capture)
+        return subprocess.CompletedProcess(args, 0, stdout=next(captures))
 
-    gate = PaneActivityGate(
-        "/tmp/directorctl",
-        stable_idle_seconds=0,
-        capture_runner=capture_runner,
-    )
+    gate = PaneActivityGate("/tmp/directorctl", capture_runner=capture_runner)
 
     assert gate.is_busy("pgu-ops:0.0") is True
+    assert gate.is_busy("pgu-ops:0.0") is True
+
+
+def test_director_gate_ignores_status_region_changes() -> None:
+    horizontal = "─" * 48
+    captures = iter(
+        [
+            f"""
+static status text
+{horizontal}
+❯
+{horizontal}
+""".strip(),
+            f"""
+changed status text
+{horizontal}
+❯
+{horizontal}
+""".strip(),
+        ]
+    )
+
+    def capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=next(captures))
+
+    gate = PaneActivityGate("/tmp/directorctl", capture_runner=capture_runner)
+
+    assert gate.is_busy("pgu-director:0.0") is True
+    assert gate.is_busy("pgu-director:0.0") is False
 
 
 def test_acked_notification_does_not_repeat_across_restart() -> None:
@@ -746,11 +711,11 @@ def main() -> int:
     test_stale_ready_nudge_for_picked_up_ticket_is_acked_not_delivered()
     test_escalation_for_still_stuck_ready_ticket_delivers_to_director()
     test_director_composer_busy_requeues_then_idle_delivers_once()
+    test_gate_async_cold_start_defaults_busy_then_static_region_idles()
     test_director_gate_treats_composer_content_as_busy_only_for_director()
-    test_director_gate_ignores_queued_message_placeholder()
     test_director_gate_empty_composer_delivers_even_when_capture_changes()
-    test_non_director_gate_ignores_stale_working_scrollback()
-    test_non_director_gate_uses_live_working_status_line()
+    test_agent_gate_hashes_status_region_without_keyword_matching()
+    test_director_gate_ignores_status_region_changes()
     test_acked_notification_does_not_repeat_across_restart()
     test_default_sender_delegates_to_directorctl_send()
     print("ticket_board_notify_listener_test: ok")

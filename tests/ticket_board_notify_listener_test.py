@@ -329,6 +329,39 @@ def test_busy_pane_requeues_then_idle_pane_delivers_once() -> None:
     assert idle_conn.acked == [20]
 
 
+def test_busy_pane_force_delivers_after_max_defer_cap() -> None:
+    sent: list[tuple[str, str]] = []
+    clock = [100.0]
+    first_conn = FakeConnection([queue_row(25, "PGU-252", attempts=1)])
+    second_conn = FakeConnection([queue_row(25, "PGU-252", attempts=2)])
+    connections = [first_conn, second_conn]
+
+    def connector(*args: Any, **kwargs: Any) -> FakeConnection:
+        return connections.pop(0)
+
+    listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=lambda target, message: sent.append((target, message)),
+        activity_gate=lambda _target: True,
+        connector=connector,
+        poll_seconds=0,
+        max_defer_seconds=60.0,
+        monotonic=lambda: clock[0],
+    )
+
+    assert listener.listen_once(max_notifications=1) == 0
+    assert sent == []
+    assert [item[0] for item in first_conn.requeued] == [25]
+    assert first_conn.acked == []
+
+    clock[0] += 61.0
+
+    assert listener.listen_once(max_notifications=1) == 1
+    assert sent == [("pgu-ops:0.0", "Ready ticket for you: PGU-252 -- Queue")]
+    assert second_conn.acked == [25]
+    assert second_conn.requeued == []
+
+
 def test_stale_ready_nudge_for_cancelled_ticket_is_acked_not_delivered() -> None:
     sent: list[tuple[str, str]] = []
     conn = FakeConnection(
@@ -605,6 +638,7 @@ def main() -> int:
     test_reconnect_relistens_after_connection_drop()
     test_send_timeout_requeues_and_does_not_block_next_pane()
     test_busy_pane_requeues_then_idle_pane_delivers_once()
+    test_busy_pane_force_delivers_after_max_defer_cap()
     test_stale_ready_nudge_for_cancelled_ticket_is_acked_not_delivered()
     test_stale_ready_nudge_for_picked_up_ticket_is_acked_not_delivered()
     test_escalation_for_still_stuck_ready_ticket_delivers_to_director()

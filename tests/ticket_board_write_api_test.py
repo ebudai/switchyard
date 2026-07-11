@@ -304,6 +304,8 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
     seed_ticket("PGU-110", title="Blocker", state="analysis")
     seed_ticket("PGU-111", title="Blocked target", state="analysis")
     seed_ticket("PGU-112", title="Comment", state="analysis")
+    seed_ticket("PGU-113", title="Merge source", state="analysis")
+    seed_ticket("PGU-114", title="Merge target", state="analysis")
 
 
 def exercise_write_api(base_url: str, commit_hash: str) -> None:
@@ -325,37 +327,45 @@ def exercise_write_api(base_url: str, commit_hash: str) -> None:
         expect=403,
     )
     assert "eric cannot call cancel" in str(eric_director_only), eric_director_only
+    legacy_create = post_json(
+        base_url,
+        "/api/tickets",
+        {"title": "Bare create should be gone", "body": ""},
+        caller="director",
+        expect=404,
+    )
+    assert "Not found" in str(legacy_create), legacy_create
     legacy_missing = post_json(
         base_url,
         "/api/tickets/PGU-108",
         {"state": "cancelled", "comment": {"who": "director", "text": "No caller."}},
-        expect=400,
+        expect=404,
     )
-    assert "missing X-PGU-Caller-Role" in str(legacy_missing), legacy_missing
+    assert "Not found" in str(legacy_missing), legacy_missing
     legacy_forbidden = post_json(
         base_url,
         "/api/tickets/PGU-106",
         {"state": "done", "commit_hash": commit_hash},
         caller="ops",
-        expect=403,
+        expect=404,
     )
-    assert "ops cannot call mark_done" in str(legacy_forbidden), legacy_forbidden
+    assert "Not found" in str(legacy_forbidden), legacy_forbidden
     legacy_eric_director_only = post_json(
         base_url,
         "/api/tickets/PGU-109",
         {"manually_controlled": True},
         caller="eric",
-        expect=403,
+        expect=404,
     )
-    assert "eric cannot call set_manually_controlled" in str(legacy_eric_director_only), legacy_eric_director_only
-    legacy_comment = post_json(
+    assert "Not found" in str(legacy_eric_director_only), legacy_eric_director_only
+    legacy_merge = post_json(
         base_url,
-        "/api/tickets/PGU-112",
-        {"comment": {"who": "director", "text": "Legacy route note."}},
-        caller="eric",
+        "/api/tickets/PGU-113/merge",
+        {"target_id": "PGU-114", "actor": "director"},
+        caller="director",
+        expect=404,
     )
-    assert legacy_comment["ticket"]["comments"][-1]["who"] == "eric", legacy_comment  # type: ignore[index]
-    assert legacy_comment["ticket"]["comments"][-1]["text"] == "Legacy route note.", legacy_comment  # type: ignore[index]
+    assert "Not found" in str(legacy_merge), legacy_merge
 
     created_payload = post_json(
         base_url,
@@ -434,9 +444,29 @@ def exercise_write_api(base_url: str, commit_hash: str) -> None:
     )
     assert blockers["ticket"]["blocked_by"] == ["PGU-110"], blockers  # type: ignore[index]
     assert blockers["ticket"]["blocked_reason"] == "Waiting on blocker.", blockers  # type: ignore[index]
+    blocked_reason_forbidden = post_json(
+        base_url,
+        "/api/tickets/PGU-111/actions/edit_fields",
+        {"blocked_reason": ""},
+        caller="main",
+        expect=400,
+    )
+    assert "edit_fields cannot update: blocked_reason" in str(blocked_reason_forbidden), blocked_reason_forbidden
+    assert get_ticket(base_url, "PGU-111")["blocked_reason"] == "Waiting on blocker."
     comment = post_json(base_url, "/api/tickets/PGU-112/actions/add_comment", {"text": "Pane note."}, caller="app")
     assert comment["ticket"]["comments"][-1]["who"] == "app", comment  # type: ignore[index]
     assert get_ticket(base_url, "PGU-112")["comments"][-1]["text"] == "Pane note."
+    edited = post_json(base_url, "/api/tickets/PGU-112/actions/edit_fields", {"title": "Edited through action"}, caller="app")
+    assert edited["ticket"]["title"] == "Edited through action", edited  # type: ignore[index]
+    invalid_edit = post_json(base_url, "/api/tickets/PGU-112/actions/edit_fields", {"state": "done"}, caller="app", expect=400)
+    assert "edit_fields cannot update: state" in str(invalid_edit), invalid_edit
+    merge_forbidden = post_json(base_url, "/api/tickets/PGU-113/actions/merge", {"target_id": "PGU-114"}, caller="app", expect=403)
+    assert "app cannot call merge" in str(merge_forbidden), merge_forbidden
+    merged = post_json(base_url, "/api/tickets/PGU-113/actions/merge", {"target_id": "PGU-114"}, caller="director")
+    assert merged["target"]["id"] == "PGU-114", merged  # type: ignore[index]
+    merged_source = get_ticket(base_url, "PGU-113")
+    assert merged_source["state"] == "done", merged_source
+    assert merged_source["commit_exempt"] is True, merged_source
 
 
 def exercise_json_backend(commit_hash: str) -> None:

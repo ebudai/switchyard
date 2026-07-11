@@ -373,7 +373,19 @@ class TicketBoardApp:
 
     def merge_tickets(self, source_ticket_id: str, target_ticket_id: str, *, actor: str) -> dict[str, dict[str, Any]]:
         if self.store_backend == "postgres":
-            raise ValueError("ticket merge is not available on the postgres backend yet")
+            actor_normalized = str(actor).strip().lower()
+            if actor_normalized != "director":
+                raise ValueError("ticket merge requires actor=director")
+            source_id = str(source_ticket_id).strip().upper()
+            target_id = str(target_ticket_id).strip().upper()
+            with self._pg_connect() as conn:
+                with conn.transaction():
+                    self._pg_set_caller_role(conn, actor_normalized)
+                    self._pg_call(conn, "SELECT ticket_board.merge(%s, %s);", (source_id, target_id))
+                    return {
+                        "source": self._pg_get_ticket(source_id, conn),
+                        "target": self._pg_get_ticket(target_id, conn),
+                    }
 
         actor_normalized = str(actor).strip().lower()
         if actor_normalized != "director":
@@ -722,7 +734,10 @@ ORDER BY t.ticket_number
         with self._pg_connect() as conn:
             with conn.transaction():
                 current = self._pg_get_ticket(ticket_id, conn)
-                self._pg_reject_unsupported_patch_fields(patch)
+                edit_fields = self._pg_edit_field_patch(patch)
+                patch = {key: value for key, value in patch.items() if key not in edit_fields}
+                if edit_fields:
+                    self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps(edit_fields)))
                 if "manually_controlled" in patch:
                     self._pg_call(
                         conn,
@@ -805,8 +820,8 @@ ORDER BY t.ticket_number
         value = next(iter(row.values()))
         return str(value)
 
-    def _pg_reject_unsupported_patch_fields(self, patch: dict[str, Any]) -> None:
-        unsupported = {
+    def _pg_edit_field_patch(self, patch: dict[str, Any]) -> dict[str, Any]:
+        editable = {
             "title",
             "parent_id",
             "screenshots",
@@ -815,11 +830,20 @@ ORDER BY t.ticket_number
             "audit_prompt",
             "needs_eric_signoff",
             "commit_exempt",
+            "commit_hash",
         }
-        present = sorted(field for field in unsupported if field in patch)
-        if present:
-            joined = ", ".join(present)
-            raise ValueError(f"postgres function API does not support direct updates for: {joined}")
+        if patch.get("audit_signoff") is False:
+            editable = set(editable)
+            editable.add("audit_signoff")
+        if patch.get("eric_signoff") is False:
+            editable = set(editable)
+            editable.add("eric_signoff")
+        if "state" in patch:
+            editable = set(editable)
+            editable.discard("commit_hash")
+        if "blocked_by" in patch:
+            editable = set(editable)
+        return {field: patch[field] for field in editable if field in patch}
 
     def _pg_validate_parent_id(self, conn: Any, raw: Any, ticket_id: str) -> str:
         if raw in (None, "", "null"):

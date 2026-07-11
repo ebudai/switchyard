@@ -17,7 +17,8 @@ def main() -> int:
     assert "Title" in HTML
     assert "Save Title" in HTML
     assert "bindDetailDraftField(draftFields, titleEditInput, 'title', titleEditInput.value);" in HTML
-    assert "await updateTicket(ticket.id, { title: titleEditInput.value });" in HTML
+    assert "await updateTicket(ticket.id, { title: titleEditInput.value }, detailCallerRole());" in HTML
+    assert "await updateTicketAction(ticketId, 'edit_fields', editable, normalizedCaller);" in HTML
     print("title_edit_frontend_test: ok")
     return 0
 

@@ -310,19 +310,36 @@ assistant output
 ❯ half typed message
 {horizontal}
 """.strip()
+    clock = [100.0]
 
     def capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(args, 0, stdout=composer_busy_capture)
 
     gate = PaneActivityGate(
         "/tmp/directorctl",
-        recent_activity_seconds=0,
+        recent_activity_seconds=10.0,
         stable_idle_seconds=0,
         capture_runner=capture_runner,
+        monotonic=lambda: clock[0],
     )
 
     assert gate.is_busy("pgu-director:0.0") is True
+    clock[0] += 11.0
+    assert gate.is_busy("pgu-director:0.0") is True
     assert gate.is_busy("pgu-ops:0.0") is False
+
+    gate_without_composer_check = PaneActivityGate(
+        "/tmp/directorctl",
+        recent_activity_seconds=10.0,
+        stable_idle_seconds=0,
+        capture_runner=capture_runner,
+        monotonic=lambda: clock[0],
+    )
+    gate_without_composer_check._director_composer_has_content = lambda _text: False  # type: ignore[method-assign]
+
+    assert gate_without_composer_check.is_busy("pgu-director:0.0") is True
+    clock[0] += 11.0
+    assert gate_without_composer_check.is_busy("pgu-director:0.0") is False
 
 
 def test_director_gate_defers_recently_changed_idle_capture_then_delivers_when_stable() -> None:

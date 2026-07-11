@@ -55,6 +55,32 @@ The service runs:
 - command: `python3 /home/agent/pgu-ticketboard-live/current/scripts/ticket-board.py --host 127.0.0.1 --port 8770`
 - logs: `/tmp/pgu-ticket-board.log`
 
+## PostgreSQL notification listener
+
+The post-cutover notification shim runs as a separate `agent` user systemd
+service. It uses PostgreSQL `LISTEN ticket_board_state_transition`, maps each
+state-transition payload to the appropriate `pgu-<role>:0.0` tmux pane, and
+does not deliver `eric_review` transitions.
+
+```bash
+scripts/ticket-board-notify-listener-service.sh install
+```
+
+The listener service runs:
+
+- working directory: `/home/agent/pgu-ticketboard-live/current`
+- command: `python3 /home/agent/pgu-ticketboard-live/current/scripts/ticket-board-notify-listener`
+- logs: `/tmp/pgu-ticket-board-notify-listener.log`
+- default DB role: `ticket_board_listener`
+- optional env file: `~/.config/pgu/ticket-board-notify-listener.env`
+
+`scripts/ticket_board/rbac.sql` creates `ticket_board_listener` as a login role
+with read-only table access and no write-function grants. Eric still needs to
+provision its password or equivalent local auth before starting the service. As
+an interim deployment escape hatch, the env file can set
+`TICKET_BOARD_NOTIFY_DATABASE_URL` to any read-only-capable board connection
+string.
+
 ## Controlled deploy / restart
 
 When the director wants merged board changes live, use:

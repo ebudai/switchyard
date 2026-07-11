@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
+import socket
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Mapping
 from urllib import error as urllib_error
 from urllib import parse, request
 
 CALLER_ROLE_HEADER = "X-PGU-Caller-Role"
 DEFAULT_BOARD_URL = os.environ.get("PGU_TICKET_BOARD_URL", "http://127.0.0.1:8770")
+DEFAULT_BOARD_SOCKET = os.environ.get("PGU_TICKET_BOARD_SOCKET", "/tmp/pgu-ticket-board.sock")
 DEFAULT_CALLER_ROLE = "director"
 PANE_SESSION_CALLER_ROLES = {
     "pgu-director": "director",
@@ -30,6 +34,18 @@ class TicketBoardWriteError(RuntimeError):
     """Raised when the board rejects a write request."""
 
 
+class UnixHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, socket_path: str, timeout: float) -> None:
+        super().__init__("localhost", timeout=timeout)
+        self.socket_path = socket_path
+
+    def connect(self) -> None:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(self.timeout)
+        sock.connect(self.socket_path)
+        self.sock = sock
+
+
 def _normalize_api_url(board_url: str) -> str:
     normalized = board_url.rstrip("/")
     if normalized.endswith("/api/tickets"):
@@ -37,6 +53,22 @@ def _normalize_api_url(board_url: str) -> str:
     if normalized.endswith("/api"):
         return f"{normalized}/tickets"
     return f"{normalized}/api/tickets"
+
+
+def _normalize_api_path(board_url: str) -> str:
+    parsed = parse.urlparse(_normalize_api_url(board_url))
+    return parsed.path or "/api/tickets"
+
+
+def _default_socket_path(board_url: str, environ: Mapping[str, str] = os.environ) -> str | None:
+    explicit = environ.get("PGU_TICKET_BOARD_SOCKET", "").strip()
+    if explicit:
+        return explicit
+    if board_url != DEFAULT_BOARD_URL:
+        return None
+    if Path(DEFAULT_BOARD_SOCKET).exists():
+        return DEFAULT_BOARD_SOCKET
+    return None
 
 
 def _caller_role_from_tmux_session(environ: Mapping[str, str] = os.environ) -> str | None:
@@ -70,18 +102,30 @@ class TicketBoardWriteClient:
     board_url: str = DEFAULT_BOARD_URL
     caller_role: str = field(default_factory=default_caller_role)
     timeout: float = 10.0
+    socket_path: str | None = None
 
     @property
     def api_url(self) -> str:
         return _normalize_api_url(self.board_url)
 
+    @property
+    def api_path(self) -> str:
+        return _normalize_api_path(self.board_url)
+
+    @property
+    def effective_socket_path(self) -> str | None:
+        return self.socket_path or _default_socket_path(self.board_url)
+
     def for_caller(self, caller_role: str) -> "TicketBoardWriteClient":
-        return TicketBoardWriteClient(self.board_url, caller_role, self.timeout)
+        return TicketBoardWriteClient(self.board_url, caller_role, self.timeout, self.socket_path)
 
     def _post(self, path: str, payload: dict[str, Any], *, caller_role: str | None = None) -> dict[str, Any]:
         role = (caller_role or self.caller_role).strip().lower()
         if not role:
             raise ValueError("caller_role must be non-empty")
+        socket_path = self.effective_socket_path
+        if socket_path:
+            return self._post_unix(path, payload, role, socket_path)
         body = json.dumps(payload).encode("utf-8")
         req = request.Request(
             f"{self.api_url}{path}",
@@ -95,6 +139,48 @@ class TicketBoardWriteClient:
         except urllib_error.HTTPError as exc:
             response_body = exc.read().decode("utf-8", errors="replace")
             raise TicketBoardWriteError(response_body or f"HTTP {exc.code}") from exc
+        parsed = json.loads(response_body)
+        if not isinstance(parsed, dict):
+            raise TicketBoardWriteError("ticket board response was not an object")
+        return parsed
+
+    def _post_unix(self, path: str, payload: dict[str, Any], role: str, socket_path: str) -> dict[str, Any]:
+        body = json.dumps(payload).encode("utf-8")
+        conn = UnixHTTPConnection(socket_path, self.timeout)
+        try:
+            self._request_unix_json(conn, "/api/register-caller", {"role": role}, expected_status=200)
+            return self._request_unix_json(
+                conn,
+                f"{self.api_path}{path}",
+                payload,
+                expected_status=None,
+                caller_role_header=role,
+                body=body,
+            )
+        finally:
+            conn.close()
+
+    def _request_unix_json(
+        self,
+        conn: UnixHTTPConnection,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        expected_status: int | None,
+        caller_role_header: str | None = None,
+        body: bytes | None = None,
+    ) -> dict[str, Any]:
+        request_body = body if body is not None else json.dumps(payload).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        if caller_role_header is not None:
+            headers[CALLER_ROLE_HEADER] = caller_role_header
+        conn.request("POST", path, body=request_body, headers=headers)
+        response = conn.getresponse()
+        response_body = response.read().decode("utf-8", errors="replace")
+        if expected_status is not None and response.status != expected_status:
+            raise TicketBoardWriteError(response_body or f"HTTP {response.status}")
+        if expected_status is None and response.status >= 400:
+            raise TicketBoardWriteError(response_body or f"HTTP {response.status}")
         parsed = json.loads(response_body)
         if not isinstance(parsed, dict):
             raise TicketBoardWriteError("ticket board response was not an object")
@@ -240,6 +326,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Write tickets through the board action API.")
     parser.add_argument("--board-url", default=DEFAULT_BOARD_URL, help=f"Board root or /api/tickets URL (default: {DEFAULT_BOARD_URL})")
     parser.add_argument(
+        "--socket",
+        dest="socket_path",
+        default=None,
+        help=(
+            "Unix-domain board socket for local pane writes. Defaults to PGU_TICKET_BOARD_SOCKET, "
+            f"or {DEFAULT_BOARD_SOCKET} when it exists and --board-url is the default."
+        ),
+    )
+    parser.add_argument(
         "--caller-role",
         default=caller_default,
         help=(
@@ -308,7 +403,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
-    client = TicketBoardWriteClient(args.board_url, args.caller_role)
+    client = TicketBoardWriteClient(args.board_url, args.caller_role, socket_path=args.socket_path)
     command = args.command.replace("-", "_")
     if command == "create_ticket":
         response = client.create_ticket(

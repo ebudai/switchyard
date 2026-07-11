@@ -5,11 +5,16 @@ from __future__ import annotations
 import json
 import logging
 import mimetypes
+import os
 import queue
+import socket
+import socketserver
+import struct
 import subprocess
 import threading
 import time
 import urllib.parse
+from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -23,6 +28,7 @@ DIRECTOR_TARGET = "pgu-director:0.0"
 DIRECTOR_NOTIFICATION_BATCH_WINDOW_SECONDS = 0.35
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CALLER_ROLE_HEADER = "X-PGU-Caller-Role"
+SO_PEERCRED_FORMAT = "3i"
 IMPLEMENTER_ROLES = {"main", "app", "ops", "perf", "research"}
 CALLER_ROLES = IMPLEMENTER_ROLES | {"director", "eric", "audit"}
 OPERATION_ALLOWED_ROLES = {
@@ -57,6 +63,129 @@ EDIT_FIELD_NAMES = {
     "audit_signoff",
     "eric_signoff",
 }
+
+
+@dataclass(frozen=True)
+class PeerCredentials:
+    pid: int
+    uid: int
+    gid: int
+
+
+@dataclass
+class CallerRegistration:
+    role: str
+    uid: int
+    gid: int
+    connection_count: int = 0
+
+
+class CallerRegistry:
+    def __init__(self, *, pid_alive: Callable[[int], bool] | None = None) -> None:
+        self._pid_alive = pid_alive or self._default_pid_alive
+        self._lock = threading.Lock()
+        self._by_pid: dict[int, CallerRegistration] = {}
+        self._role_to_pid: dict[str, int] = {}
+
+    @staticmethod
+    def _default_pid_alive(pid: int) -> bool:
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    def register(self, credentials: PeerCredentials, role: str) -> None:
+        normalized_role = role.strip().lower()
+        if normalized_role not in CALLER_ROLES - {"eric"}:
+            raise ValueError(f"invalid local caller role: {role}")
+        with self._lock:
+            self._drop_stale_locked()
+            existing_pid = self._role_to_pid.get(normalized_role)
+            if existing_pid is not None and existing_pid != credentials.pid:
+                LOGGER.warning(
+                    "Rejected caller registration for role %s from pid=%s uid=%s gid=%s; already held by live pid=%s",
+                    normalized_role,
+                    credentials.pid,
+                    credentials.uid,
+                    credentials.gid,
+                    existing_pid,
+                )
+                raise PermissionError(f"role {normalized_role} is already registered by live pid {existing_pid}")
+            existing = self._by_pid.get(credentials.pid)
+            if existing is not None and existing.role != normalized_role:
+                LOGGER.warning(
+                    "Rejected caller registration for pid=%s as %s; pid already registered as %s",
+                    credentials.pid,
+                    normalized_role,
+                    existing.role,
+                )
+                raise PermissionError(f"pid {credentials.pid} is already registered as {existing.role}")
+            if existing is None:
+                self._by_pid[credentials.pid] = CallerRegistration(
+                    role=normalized_role,
+                    uid=credentials.uid,
+                    gid=credentials.gid,
+                    connection_count=1,
+                )
+                self._role_to_pid[normalized_role] = credentials.pid
+            else:
+                existing.connection_count += 1
+            LOGGER.info(
+                "Registered local caller role %s for pid=%s uid=%s gid=%s",
+                normalized_role,
+                credentials.pid,
+                credentials.uid,
+                credentials.gid,
+            )
+
+    def release(self, pid: int) -> None:
+        with self._lock:
+            registration = self._by_pid.get(pid)
+            if registration is None:
+                return
+            registration.connection_count -= 1
+            if registration.connection_count > 0:
+                return
+            self._by_pid.pop(pid, None)
+            if self._role_to_pid.get(registration.role) == pid:
+                self._role_to_pid.pop(registration.role, None)
+            LOGGER.info("Released local caller role %s for pid=%s", registration.role, pid)
+
+    def role_for_pid(self, pid: int) -> str:
+        with self._lock:
+            registration = self._by_pid.get(pid)
+            if registration is None:
+                raise ValueError(f"pid {pid} has not registered a caller role")
+            if not self._pid_alive(pid):
+                self._release_locked(pid)
+                raise ValueError(f"pid {pid} registration is stale")
+            return registration.role
+
+    def pid_for_role(self, role: str) -> int | None:
+        with self._lock:
+            self._drop_stale_locked()
+            return self._role_to_pid.get(role)
+
+    def _release_locked(self, pid: int) -> None:
+        registration = self._by_pid.pop(pid, None)
+        if registration is not None and self._role_to_pid.get(registration.role) == pid:
+            self._role_to_pid.pop(registration.role, None)
+
+    def _drop_stale_locked(self) -> None:
+        for pid in list(self._by_pid):
+            if not self._pid_alive(pid):
+                self._release_locked(pid)
+
+
+def peer_credentials(connection: socket.socket) -> PeerCredentials:
+    raw = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize(SO_PEERCRED_FORMAT))
+    pid, uid, gid = struct.unpack(SO_PEERCRED_FORMAT, raw)
+    return PeerCredentials(pid=pid, uid=uid, gid=gid)
 
 
 def send_director_message(payload: str, target: str = DIRECTOR_TARGET) -> None:
@@ -173,6 +302,21 @@ class TicketBoardEventHub:
 
 class TicketBoardHandler(BaseHTTPRequestHandler):
     server_version = "PGUTicketBoard/0.1"
+    protocol_version = "HTTP/1.1"
+
+    def setup(self) -> None:
+        super().setup()
+        self._local_peer_credentials: PeerCredentials | None = None
+        self._registered_local_pid: int | None = None
+        if self.caller_registry is not None:
+            self._local_peer_credentials = peer_credentials(self.connection)  # type: ignore[arg-type]
+
+    def finish(self) -> None:
+        try:
+            super().finish()
+        finally:
+            if self._registered_local_pid is not None and self.caller_registry is not None:
+                self.caller_registry.release(self._registered_local_pid)
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A003
         return
@@ -188,6 +332,10 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
     @property
     def director_notifier(self) -> DirectorNotifier:
         return self.server.director_notifier  # type: ignore[attr-defined]
+
+    @property
+    def caller_registry(self) -> CallerRegistry | None:
+        return getattr(self.server, "caller_registry", None)
 
     def send_no_cache_headers(self) -> None:
         self.send_header("Cache-Control", "no-cache")
@@ -216,6 +364,10 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         return self.app.verify_created_ticket_persisted(created, before_signature)
 
     def caller_role(self) -> str:
+        if self.caller_registry is not None:
+            if self._local_peer_credentials is None:
+                raise ValueError("local socket request missing peer credentials")
+            return self.caller_registry.role_for_pid(self._local_peer_credentials.pid)
         raw = self.headers.get(CALLER_ROLE_HEADER, "")
         role = raw.strip().lower()
         if not role:
@@ -223,6 +375,20 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         if role not in CALLER_ROLES:
             raise ValueError(f"invalid caller role: {raw}")
         return role
+
+    def handle_register_caller(self, payload: dict[str, object]) -> None:
+        if self.caller_registry is None or self._local_peer_credentials is None:
+            raise ValueError("caller registration is only available on the local Unix socket")
+        role = str(payload.get("role", "")).strip().lower()
+        if self._registered_local_pid is not None:
+            current_role = self.caller_registry.role_for_pid(self._registered_local_pid)
+            if role != current_role:
+                raise PermissionError(f"connection is already registered as {current_role}")
+            self.send_json({"role": current_role, "pid": self._registered_local_pid})
+            return
+        self.caller_registry.register(self._local_peer_credentials, role)
+        self._registered_local_pid = self._local_peer_credentials.pid
+        self.send_json({"role": role, "pid": self._local_peer_credentials.pid})
 
     def require_operation_allowed(self, operation: str, caller_role: str, ticket_id: str | None = None) -> None:
         allowed = OPERATION_ALLOWED_ROLES.get(operation)
@@ -481,6 +647,9 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 self.send_json({"image": uploaded}, HTTPStatus.CREATED)
                 return
             payload = json.loads(self.rfile.read(length) or b"{}")
+            if parsed.path == "/api/register-caller":
+                self.handle_register_caller(payload)
+                return
             if parsed.path.startswith("/api/tickets/actions/"):
                 operation = urllib.parse.unquote(parsed.path.removeprefix("/api/tickets/actions/").strip("/"))
                 self.handle_ticket_action(operation, payload)
@@ -510,13 +679,56 @@ class TicketBoardServer(ThreadingHTTPServer):
         address: tuple[str, int],
         app: TicketBoardApp,
         director_notifier: DirectorNotifier | None = None,
+        events: TicketBoardEventHub | None = None,
+        caller_registry: CallerRegistry | None = None,
     ) -> None:
         self.app = app
-        self.events = TicketBoardEventHub(app)
+        self.events = events or TicketBoardEventHub(app)
+        self._owns_events = events is None
         self.director_notifier = director_notifier or DirectorNotifier()
+        self._owns_director_notifier = director_notifier is None
+        self.caller_registry = caller_registry
         super().__init__(address, TicketBoardHandler)
 
     def server_close(self) -> None:
-        self.events.close()
-        self.director_notifier.close()
+        if self._owns_events:
+            self.events.close()
+        if self._owns_director_notifier:
+            self.director_notifier.close()
         super().server_close()
+
+
+class ThreadingUnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+class TicketBoardUnixServer(ThreadingUnixHTTPServer):
+    def __init__(
+        self,
+        socket_path: Path,
+        app: TicketBoardApp,
+        *,
+        events: TicketBoardEventHub,
+        director_notifier: DirectorNotifier,
+        caller_registry: CallerRegistry | None = None,
+    ) -> None:
+        self.socket_path = socket_path
+        self.app = app
+        self.events = events
+        self.director_notifier = director_notifier
+        self.caller_registry = caller_registry or CallerRegistry()
+        socket_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            socket_path.unlink()
+        except FileNotFoundError:
+            pass
+        super().__init__(str(socket_path), TicketBoardHandler)
+        socket_path.chmod(0o600)
+
+    def server_close(self) -> None:
+        super().server_close()
+        try:
+            self.socket_path.unlink()
+        except FileNotFoundError:
+            pass

@@ -131,10 +131,8 @@ INSERT INTO ticket_board.tickets (
 
 def make_app(root: Path, socket_dir: Path, port: int, dbname: str, role: str) -> TicketBoardApp:
     return TicketBoardApp(
-        root / f"json-unused-{role}",
         root / "frames",
         root / "assets",
-        store_backend="postgres",
         database_url=conninfo(socket_dir, port, dbname, role),
     )
 

@@ -17,7 +17,9 @@ def main() -> int:
     assert "Merge Into…" in HTML
     assert "Merge target ticket" in HTML
     assert "window.confirm(" in HTML
-    assert "body: JSON.stringify({ target_id: targetTicketId, actor: 'director' })" in HTML
+    assert "`/api/tickets/${encodeURIComponent(sourceTicketId)}/actions/merge`" in HTML
+    assert "{ target_id: targetTicketId }" in HTML
+    assert "'director'," in HTML
     assert "Merged ${sourceTicketId} into ${targetTicketId}." in HTML
     print("ticket_merge_frontend_test: ok")
     return 0

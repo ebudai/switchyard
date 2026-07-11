@@ -3,14 +3,12 @@
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
-LIVE_STORE = Path("/home/agent/.claude/pgu-tickets")
 
 EXPECTED_JSON_FIELDS = {
     "assignee",
@@ -112,28 +110,6 @@ FIELD_TO_SCHEMA_TOKENS = {
 }
 
 
-def load_live_field_sets() -> tuple[set[str], set[str], set[str], set[str]]:
-    ticket_fields: set[str] = set()
-    comment_fields: set[str] = set()
-    states: set[str] = set()
-    assignees: set[str] = set()
-    if not LIVE_STORE.is_dir():
-        return EXPECTED_JSON_FIELDS, EXPECTED_COMMENT_FIELDS, set(), set()
-
-    for path in LIVE_STORE.glob("PGU-*.json"):
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        ticket_fields.update(payload)
-        if isinstance(payload.get("comments"), list):
-            for comment in payload["comments"]:
-                if isinstance(comment, dict):
-                    comment_fields.update(comment)
-        if isinstance(payload.get("state"), str):
-            states.add(payload["state"])
-        if isinstance(payload.get("assignee"), str):
-            assignees.add(payload["assignee"])
-    return ticket_fields, comment_fields, states, assignees
-
-
 def assert_contains_all(schema: str, values: set[str], label: str) -> None:
     missing = sorted(value for value in values if value not in schema)
     assert not missing, f"{label} missing from schema: {missing}"
@@ -145,17 +121,11 @@ def main() -> int:
     executable_schema_lower = "\n".join(
         line for line in schema_lower.splitlines() if not line.lstrip().startswith("--")
     )
-    live_fields, live_comment_fields, live_states, live_assignees = load_live_field_sets()
-
-    unknown_fields = live_fields - EXPECTED_JSON_FIELDS
-    assert not unknown_fields, f"live ticket store has fields not modeled by this test: {sorted(unknown_fields)}"
-
-    for field in sorted(live_fields):
+    for field in sorted(EXPECTED_JSON_FIELDS):
         tokens = FIELD_TO_SCHEMA_TOKENS[field]
         assert_contains_all(schema, set(tokens), f"field {field!r}")
 
-    for field in sorted(live_comment_fields):
-        assert field in EXPECTED_COMMENT_FIELDS, f"unexpected live comment field: {field}"
+    for field in sorted(EXPECTED_COMMENT_FIELDS):
         assert field in schema, f"comment field {field!r} missing from schema"
 
     assert "source_json jsonb not null" in schema_lower, "tickets.source_json is required for lossless import"
@@ -163,8 +133,8 @@ def main() -> int:
     assert "create table if not exists ticket_board.ticket_comments" in schema_lower
     assert "create table if not exists ticket_board.ticket_attachments" in schema_lower
 
-    assert_contains_all(schema, EXPECTED_STATES | live_states, "state constraint")
-    assert_contains_all(schema, EXPECTED_ASSIGNEES | live_assignees, "assignee constraint")
+    assert_contains_all(schema, EXPECTED_STATES, "state constraint")
+    assert_contains_all(schema, EXPECTED_ASSIGNEES, "assignee constraint")
 
     assert re.search(r"commit_hash\s+text\s+not null", schema_lower), "commit_hash column should be text"
     assert re.search(

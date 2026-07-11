@@ -11,14 +11,14 @@ import sys
 import tempfile
 import threading
 import time
-from pathlib import Path
 from typing import Callable
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.ticket_board.app import TicketBoardApp
+from scripts.ticket_board.app import ASSIGNEES, STATES, iso_now
 from scripts.ticket_board.server import (
     CALLER_ROLE_HEADER,
     CallerRegistry,
@@ -47,16 +47,15 @@ class RecordingLogHandler(logging.Handler):
         self.messages.append(record.getMessage())
 
 
-def seed_ticket(
-    store: Path,
+def ticket_payload(
     ticket_id: str,
     *,
     title: str,
     state: str = "analysis",
     assignee: str = "unassigned",
     implementation: str = "",
-) -> None:
-    payload = {
+) -> dict[str, object]:
+    return {
         "id": ticket_id,
         "title": title,
         "body": "",
@@ -77,12 +76,45 @@ def seed_ticket(
         "updated": "2026-07-11T00:00:00+00:00",
         "comments": [],
         "screenshots": [],
+        "screenshots_info": [],
+        "screenshot": None,
+        "screenshot_available": False,
     }
-    (store / f"{ticket_id}.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
-def load_ticket(store: Path, ticket_id: str) -> dict[str, object]:
-    return json.loads((store / f"{ticket_id}.json").read_text(encoding="utf-8"))
+class MemoryBoardApp:
+    store_backend = "postgres"
+
+    def __init__(self, tickets: list[dict[str, object]], frames: Path, assets: Path) -> None:
+        self.tickets = {str(ticket["id"]): ticket for ticket in tickets}
+        self.frame_dir = frames.resolve()
+        self.asset_dir = assets.resolve()
+
+    def store_signature(self) -> tuple[tuple[str, str], ...]:
+        return tuple(sorted((ticket_id, str(ticket["updated"])) for ticket_id, ticket in self.tickets.items()))
+
+    def snapshot(self) -> dict[str, object]:
+        return {
+            "tickets": list(self.tickets.values()),
+            "errors": [],
+            "states": list(STATES),
+            "assignees": list(ASSIGNEES),
+            "screenshots": [],
+            "store_backend": self.store_backend,
+            "store_path": "postgres",
+            "frame_dir": str(self.frame_dir),
+            "asset_dir": str(self.asset_dir),
+            "refreshed_at": iso_now(),
+        }
+
+    def get_ticket(self, ticket_id: str) -> dict[str, object]:
+        return self.tickets[ticket_id]
+
+    def update_ticket(self, ticket_id: str, patch: dict[str, object], *, caller_role: str | None = None) -> dict[str, object]:
+        ticket = self.tickets[ticket_id]
+        ticket.update(patch)
+        ticket["updated"] = iso_now()
+        return ticket
 
 
 def wait_until(predicate: Callable[[], bool], *, timeout: float = 2.0) -> None:
@@ -145,17 +177,19 @@ def assert_registry_rejects_duplicate_live_role_and_releases_stale_pid() -> None
 def assert_unix_socket_write_derives_role_and_releases_registration() -> None:
     with tempfile.TemporaryDirectory(prefix="ticket-board-pid.") as tmpdir:
         root = Path(tmpdir)
-        store = root / "store"
         frames = root / "frames"
         assets = root / "assets"
         socket_path = root / "board.sock"
-        store.mkdir()
         frames.mkdir()
         assets.mkdir()
-        seed_ticket(store, "PGU-300", title="Start through socket", state="ready", assignee="ops", implementation="Ready.")
-        seed_ticket(store, "PGU-301", title="Header mismatch", state="analysis")
-
-        app = TicketBoardApp(store, frames, assets, store_backend="json", allow_json_store=True)
+        app = MemoryBoardApp(
+            [
+                ticket_payload("PGU-300", title="Start through socket", state="ready", assignee="ops", implementation="Ready."),
+                ticket_payload("PGU-301", title="Header mismatch", state="analysis"),
+            ],
+            frames,
+            assets,
+        )
         events = TicketBoardEventHub(app)
         registry = CallerRegistry()
         server = TicketBoardUnixServer(socket_path, app, events=events, director_notifier=QuietNotifier(), caller_registry=registry)
@@ -167,7 +201,7 @@ def assert_unix_socket_write_derives_role_and_releases_registration() -> None:
             client = TicketBoardWriteClient(socket_path=str(socket_path), caller_role="ops")
             started = client.start_work("PGU-300")["ticket"]
             assert started["state"] == "in_progress", started
-            assert load_ticket(store, "PGU-300")["state"] == "in_progress"
+            assert app.tickets["PGU-300"]["state"] == "in_progress"
 
             wait_until(lambda: registry.pid_for_role("ops") is None)
 

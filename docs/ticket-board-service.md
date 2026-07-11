@@ -30,10 +30,9 @@ What this does:
 - writes `~/.config/systemd/user/pgu-ticket-board.service`
 - enables and starts `pgu-ticket-board.service`
 
-Runtime dependency for the Postgres store backend:
+Runtime dependency:
 
-- psycopg 3 is required by `scripts.ticket_board.app` when
-  `TICKET_BOARD_STORE_BACKEND=postgres`
+- psycopg 3 is required by `scripts.ticket_board.app`
 - on Arch/CachyOS, install it for the system Python with:
 
 ```bash

@@ -305,26 +305,15 @@ dead code on `origin/main` (empty ticket dir in prod; see below).
 
 ## What the port surfaced
 
-1. **Exhaustive `switch` is a strictly stronger guarantee than Python's
-   `LEGAL_STATE_TRANSITIONS` dict, and the codebase currently has the state
-   machine encoded THREE times, not two.** The real enforcement is
-   `enforce_ticket_workflow_update()` in `schema.sql` (the trigger). Python's
-   `app.py` has its own `LEGAL_STATE_TRANSITIONS` dict + `_enforce_legal_state_transition`,
-   but that path is **only reachable from the JSON-backend `update_ticket()`
-   method** — dead code now that the JSON store is retired in prod (confirmed:
-   `store_backend` is `"postgres"` on the live board, JSON ticket dir is
-   empty). `route_ticket()` (the postgres path) skips it entirely and lets
-   the DB trigger be the sole authority. In TS, `legalNextStates()` is a
-   `switch` over the literal union with a `default: assertNever(state)` —
-   if a 10th state is ever added to `TICKET_STATES` without a matching
-   `case`, **this fails to compile**. Python's `dict.get(state, set())`
-   would instead silently return an empty transition set for the new state,
-   surfacing only at runtime as a generic "illegal state transition" error
-   with no indication the dict itself was the thing that was stale. Concrete
-   recommendation: once JSON is confirmed fully retired, delete
-   `LEGAL_STATE_TRANSITIONS`/`_enforce_legal_state_transition`/
-   `_enforce_workflow_rules` and friends from `app.py` — they're unreachable
-   and a second Python-side mirror TS now makes redundant twice over.
+1. **Exhaustive `switch` is a strictly stronger guarantee than the former
+   Python lookup-object mirror of the workflow graph.** The real enforcement
+   is `enforce_ticket_workflow_update()` in `schema.sql` (the trigger). In
+   TS, `legalNextStates()` is a `switch` over the literal union with a
+   `default: assertNever(state)` — if a 10th state is ever added to
+   `TICKET_STATES` without a matching `case`, **this fails to compile**. A
+   lookup object could instead silently return an empty transition set for the
+   new state, surfacing only at runtime as a generic illegal-transition error
+   with no indication the lookup itself was stale.
 
 2. **`ticket_board.require_actor(p_allowed_roles, p_action)`'s first
    parameter is dead.** Every `SECURITY DEFINER` function (`create_ticket`,
@@ -362,23 +351,15 @@ dead code on `origin/main` (empty ticket dir in prod; see below).
 4. **Runtime backend confusion, resolved but worth recording.** Mid-port I
    read `scripts/ticket_board/*` from the *shared* checkout at
    `/home/agent/Projects/pgu`, which was stale (pre-migration, JSON-only) —
-   `origin/main` had already moved to the dual-backend `app.py`. Compounding
-   that, a stale line in `/tmp/pgu-ticket-board.log` from a pre-restart
-   process instance read `backend: json`, which looked like corroborating
-   evidence. The live `/api/board` response's own `store_backend` field
-   (`"postgres"`) and the running process's actual `ps` cmdline
-   (`--store-backend postgres`) were the ground truth. Two real findings
-   here, independent of the port itself:
+   `origin/main` had already moved to the database-backed `app.py`.
+   Compounding that, a stale line in `/tmp/pgu-ticket-board.log` from a
+   pre-restart process instance read `backend: json`, which looked like
+   corroborating evidence. The live `/api/board` response's own
+   `store_backend` field (`"postgres"`) and the running process's actual
+   command line were the ground truth. One real finding here, independent of
+   the port itself:
    - Always read source from your own worktree off `origin/main`, never the
      shared checkout — it can be behind by an arbitrary number of commits.
-   - **Operational gap**: `~/.config/systemd/user/pgu-ticket-board.service`'s
-     `ExecStart` has no `--store-backend` flag — the live process is
-     currently `postgres` only because someone started it manually/out of
-     band with extra flags the unit file doesn't have. A crash under
-     `Restart=on-failure` would restart via the *unit file's* command line
-     and silently fall back to the JSON backend default. Worth a ticket to
-     get `--store-backend postgres --frames ... --assets ...` into the unit
-     file itself.
 
 ## Known M1 simplifications (not bugs, just out of bounded scope)
 

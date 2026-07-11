@@ -5,123 +5,82 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import threading
-from http.server import ThreadingHTTPServer
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.ticket_board.app import TicketBoardApp
 from scripts.ticket_board import write_client as write_client_module
-from scripts.ticket_board.server import CALLER_ROLE_HEADER, TicketBoardEventHub, TicketBoardHandler
+from scripts.ticket_board.server import CALLER_ROLE_HEADER
 from scripts.ticket_board.write_client import TicketBoardWriteClient
 
 
-class QuietNotifier:
-    def notify_ticket_created(self, ticket: dict[str, object]) -> None:
+class RecordingHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, format: str, *args: object) -> None:
         return
 
-    def close(self) -> None:
-        return
-
-
-class RecordingHandler(TicketBoardHandler):
     def do_POST(self) -> None:  # noqa: N802
-        self.server.requests.append((self.path, self.headers.get(CALLER_ROLE_HEADER)))  # type: ignore[attr-defined]
-        super().do_POST()
+        length = int(self.headers.get("Content-Length", "0"))
+        payload = json.loads(self.rfile.read(length) or b"{}")
+        caller = self.headers.get(CALLER_ROLE_HEADER)
+        self.server.requests.append((self.path, caller))  # type: ignore[attr-defined]
+        ticket_id = "PGU-NEW"
+        operation = self.path.rsplit("/", 1)[-1]
+        if self.path.startswith("/api/tickets/PGU-") and "/actions/" in self.path:
+            ticket_id = self.path.removeprefix("/api/tickets/").split("/actions/", 1)[0]
+        ticket = {
+            "id": ticket_id,
+            "title": payload.get("title", "fixture"),
+            "state": payload.get("state", "analysis"),
+            "assignee": payload.get("assignee", caller or "director"),
+            "blocked_by": payload.get("blocked_by", []),
+            "blocked_reason": payload.get("blocked_reason", ""),
+            "comments": [],
+            "manually_controlled": bool(payload.get("manually_controlled", False)),
+            "commit_hash": payload.get("commit_hash", ""),
+        }
+        if operation == "start_work":
+            ticket["state"] = "in_progress"
+        elif operation == "submit_to_audit":
+            ticket["state"] = "audit"
+        elif operation == "audit_sign_off":
+            ticket["state"] = "director_review"
+        elif operation == "audit_kick_back":
+            ticket["state"] = "analysis"
+        elif operation == "eric_sign_off":
+            ticket["state"] = "director_review"
+        elif operation == "eric_reopen":
+            ticket["state"] = "analysis"
+        elif operation == "mark_done":
+            ticket["state"] = "done"
+        elif operation == "defer":
+            ticket["state"] = "backlog"
+        elif operation == "cancel":
+            ticket["state"] = "cancelled"
+        elif operation == "add_comment":
+            ticket["comments"] = [{"who": caller, "text": payload.get("text", "")}]
+        elif operation == "file_bug":
+            ticket["parent_id"] = payload.get("source_ticket_id", "")
+        body = json.dumps({"ticket": ticket}).encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
 
-class RecordingTicketBoardServer(ThreadingHTTPServer):
-    def __init__(self, address: tuple[str, int], app: TicketBoardApp) -> None:
-        self.app = app
-        self.events = TicketBoardEventHub(app)
-        self.director_notifier = QuietNotifier()
+class RecordingServer(ThreadingHTTPServer):
+    def __init__(self) -> None:
         self.requests: list[tuple[str, str | None]] = []
-        super().__init__(address, RecordingHandler)
-
-    def server_close(self) -> None:
-        self.events.close()
-        self.director_notifier.close()
-        super().server_close()
-
-
-def main_commit() -> str:
-    return subprocess.run(
-        ["git", "--git-dir=/data/git/pgu.git", "rev-parse", "refs/heads/main"],
-        check=True,
-        text=True,
-        capture_output=True,
-    ).stdout.strip()
-
-
-def seed_ticket(
-    store: Path,
-    ticket_id: str,
-    *,
-    title: str,
-    state: str = "analysis",
-    assignee: str = "unassigned",
-    implementation: str = "",
-    audit_signoff: bool = False,
-    needs_eric_signoff: bool = False,
-    eric_signoff: bool = False,
-) -> None:
-    payload = {
-        "id": ticket_id,
-        "title": title,
-        "body": "",
-        "state": state,
-        "assignee": assignee,
-        "blocked_by": [],
-        "parent_id": "",
-        "blocked_reason": "",
-        "implementation": implementation,
-        "audit_prompt": "",
-        "audit_signoff": audit_signoff,
-        "needs_eric_signoff": needs_eric_signoff,
-        "eric_signoff": eric_signoff,
-        "manually_controlled": False,
-        "commit_hash": "",
-        "commit_exempt": False,
-        "created": "2026-07-11T00:00:00+00:00",
-        "updated": "2026-07-11T00:00:00+00:00",
-        "comments": [],
-        "screenshots": [],
-    }
-    (store / f"{ticket_id}.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-
-
-def load_ticket(store: Path, ticket_id: str) -> dict[str, object]:
-    return json.loads((store / f"{ticket_id}.json").read_text(encoding="utf-8"))
-
-
-def seed_fixtures(store: Path) -> None:
-    seed_ticket(store, "PGU-100", title="Route")
-    seed_ticket(store, "PGU-101", title="Start submit", state="ready", assignee="ops", implementation="Ready.")
-    seed_ticket(store, "PGU-102", title="Audit signoff", state="audit", assignee="audit", implementation="Done.")
-    seed_ticket(store, "PGU-103", title="Audit kickback", state="audit", assignee="audit", implementation="Done.")
-    seed_ticket(
-        store,
-        "PGU-104",
-        title="Eric signoff",
-        state="eric_review",
-        implementation="Done.",
-        audit_signoff=True,
-        needs_eric_signoff=True,
-    )
-    seed_ticket(store, "PGU-105", title="Eric reopen", state="director_review", implementation="Done.")
-    seed_ticket(store, "PGU-106", title="Done", state="director_review", implementation="Done.")
-    seed_ticket(store, "PGU-107", title="Defer")
-    seed_ticket(store, "PGU-108", title="Cancel")
-    seed_ticket(store, "PGU-109", title="Manual")
-    seed_ticket(store, "PGU-110", title="Blocker")
-    seed_ticket(store, "PGU-111", title="Blocked target")
-    seed_ticket(store, "PGU-112", title="Comment")
+        super().__init__(("127.0.0.1", 0), RecordingHandler)
 
 
 def assert_action_requests(requests: list[tuple[str, str | None]]) -> None:
@@ -146,28 +105,10 @@ def assert_action_requests(requests: list[tuple[str, str | None]]) -> None:
     assert ("/api/tickets/PGU-112/actions/add_comment", "director") in requests
 
 
-def exercise_client(base_url: str, store: Path, commit_hash: str) -> None:
+def exercise_client(base_url: str, commit_hash: str) -> None:
     client = TicketBoardWriteClient(base_url, "director")
-    created = client.create_ticket(
-        title="Client create",
-        body="Created through the write client.",
-        assignee="director",
-        state="ready",
-        implementation="Ready from client.",
-        comment_text="Created by director client.",
-    )["ticket"]
-    created_id = str(created["id"])
-    assert load_ticket(store, created_id)["state"] == "ready"
-    assert load_ticket(store, created_id)["comments"][0]["who"] == "director"  # type: ignore[index]
-
-    filed = client.file_bug(
-        title="Client file bug",
-        body="Bug filed through the write client.",
-        source_ticket_id=created_id,
-        caller_role="ops",
-    )["ticket"]
-    assert load_ticket(store, str(filed["id"]))["parent_id"] == created_id
-
+    assert client.create_ticket(title="Client create", body="Created.", assignee="director")["ticket"]["id"] == "PGU-NEW"
+    assert client.file_bug(title="Bug", body="Body", source_ticket_id="PGU-NEW", caller_role="ops")["ticket"]["parent_id"] == "PGU-NEW"
     assert client.route("PGU-100", state="backlog", assignee="ops")["ticket"]["state"] == "backlog"
     assert client.start_work("PGU-101", caller_role="ops")["ticket"]["state"] == "in_progress"
     assert client.submit_to_audit("PGU-101", commit_hash=commit_hash, caller_role="ops")["ticket"]["state"] == "audit"
@@ -179,16 +120,13 @@ def exercise_client(base_url: str, store: Path, commit_hash: str) -> None:
     assert client.defer("PGU-107")["ticket"]["state"] == "backlog"
     assert client.cancel("PGU-108", reason="No longer needed.")["ticket"]["state"] == "cancelled"
     assert client.set_manually_controlled("PGU-109", True)["ticket"]["manually_controlled"] is True
-    blockers = client.set_blockers("PGU-111", blocked_by=["PGU-110"], blocked_reason="Waiting on blocker.")["ticket"]
-    assert blockers["blocked_by"] == ["PGU-110"]
-    assert client.add_comment("PGU-112", text="Director note.")["ticket"]["comments"][-1]["who"] == "director"  # type: ignore[index]
+    assert client.set_blockers("PGU-111", blocked_by=["PGU-110"], blocked_reason="Waiting.")["ticket"]["blocked_by"] == ["PGU-110"]
+    assert client.add_comment("PGU-112", text="Director note.")["ticket"]["comments"][-1]["who"] == "director"
 
 
-def assert_auto_socket_connect_failure_falls_back_to_tcp(base_url: str, store: Path, socket_path: Path) -> None:
-    seed_ticket(store, "PGU-120", title="Fallback start", state="ready", assignee="ops", implementation="Ready.")
+def assert_auto_socket_connect_failure_falls_back_to_tcp(base_url: str, socket_path: Path) -> None:
     socket_path.touch()
     socket_path.chmod(0)
-
     old_default_url = write_client_module.DEFAULT_BOARD_URL
     old_default_socket = write_client_module.DEFAULT_BOARD_SOCKET
     old_env_socket = os.environ.pop("PGU_TICKET_BOARD_SOCKET", None)
@@ -197,7 +135,6 @@ def assert_auto_socket_connect_failure_falls_back_to_tcp(base_url: str, store: P
         write_client_module.DEFAULT_BOARD_SOCKET = str(socket_path)
         client = TicketBoardWriteClient(base_url, "ops")
         assert client.start_work("PGU-120")["ticket"]["state"] == "in_progress"
-
         explicit_client = TicketBoardWriteClient(base_url, "ops", socket_path=str(socket_path))
         try:
             explicit_client.start_work("PGU-120")
@@ -210,30 +147,19 @@ def assert_auto_socket_connect_failure_falls_back_to_tcp(base_url: str, store: P
         write_client_module.DEFAULT_BOARD_SOCKET = old_default_socket
         if old_env_socket is not None:
             os.environ["PGU_TICKET_BOARD_SOCKET"] = old_env_socket
-        try:
-            socket_path.unlink()
-        except FileNotFoundError:
-            pass
+        socket_path.unlink(missing_ok=True)
 
 
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="ticket-board-write-client.") as tmpdir:
         root = Path(tmpdir)
-        store = root / "store"
-        frames = root / "frames"
-        assets = root / "assets"
-        blocked_socket = root / "blocked.sock"
-        store.mkdir()
-        frames.mkdir()
-        assets.mkdir()
-        seed_fixtures(store)
-        server = RecordingTicketBoardServer(("127.0.0.1", 0), TicketBoardApp(store, frames, assets, store_backend="json", allow_json_store=True))
+        server = RecordingServer()
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
             base_url = f"http://127.0.0.1:{server.server_port}"
-            exercise_client(base_url, store, main_commit())
-            assert_auto_socket_connect_failure_falls_back_to_tcp(base_url, store, blocked_socket)
+            exercise_client(base_url, "abcdef1")
+            assert_auto_socket_connect_failure_falls_back_to_tcp(base_url, root / "blocked.sock")
             assert_action_requests(server.requests)
             assert ("/api/tickets/PGU-120/actions/start_work", "ops") in server.requests
         finally:

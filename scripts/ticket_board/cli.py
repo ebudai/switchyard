@@ -8,12 +8,9 @@ import webbrowser
 from pathlib import Path
 
 from .app import (
-    ALLOW_JSON_STORE_ENV,
     ASSET_DIR_DEFAULT,
     FRAME_DIR_DEFAULT,
     POSTGRES_DSN_DEFAULT,
-    STORE_BACKEND_DEFAULT,
-    STORE_DIR_DEFAULT,
     TicketBoardApp,
 )
 from .server import CallerRegistry, DirectorNotifier, TicketBoardEventHub, TicketBoardServer, TicketBoardUnixServer
@@ -21,22 +18,10 @@ from .server import CallerRegistry, DirectorNotifier, TicketBoardEventHub, Ticke
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Serve a lightweight local "Jira but easier" ticket board for PGU.')
-    parser.add_argument("--store", default=str(STORE_DIR_DEFAULT), help=f"Ticket JSON directory. Default: {STORE_DIR_DEFAULT}")
-    parser.add_argument(
-        "--store-backend",
-        choices=("json", "postgres"),
-        default=STORE_BACKEND_DEFAULT,
-        help=f"Ticket storage backend. Default: {STORE_BACKEND_DEFAULT}",
-    )
     parser.add_argument(
         "--database",
         default=POSTGRES_DSN_DEFAULT,
-        help="Postgres connection string for --store-backend postgres. Default: TICKET_BOARD_DATABASE_URL or DATABASE_URL.",
-    )
-    parser.add_argument(
-        "--allow-json-store",
-        action="store_true",
-        help=f"Allow the retired JSON backend for local migration/debug work. Default: disabled unless {ALLOW_JSON_STORE_ENV}=1.",
+        help="Postgres connection string. Default: TICKET_BOARD_DATABASE_URL or DATABASE_URL.",
     )
     parser.add_argument("--frames", default=str(FRAME_DIR_DEFAULT), help=f"Screenshot directory. Default: {FRAME_DIR_DEFAULT}")
     parser.add_argument("--assets", default=str(ASSET_DIR_DEFAULT), help=f"Uploaded attachment directory. Default: {ASSET_DIR_DEFAULT}")
@@ -53,12 +38,9 @@ def parse_args() -> argparse.Namespace:
 
 def run_server(args: argparse.Namespace) -> int:
     app = TicketBoardApp(
-        Path(args.store),
-        Path(args.frames),
-        Path(args.assets),
-        store_backend=args.store_backend,
+        frame_dir=Path(args.frames),
+        asset_dir=Path(args.assets),
         database_url=args.database,
-        allow_json_store=args.allow_json_store,
     )
     event_hub = TicketBoardEventHub(app)
     director_notifier = DirectorNotifier()
@@ -84,8 +66,6 @@ def run_server(args: argparse.Namespace) -> int:
     host, port = server.server_address[:2]
     url = f"http://{host}:{port}/"
     print(f"[ticket-board] backend: {app.store_backend}")
-    if app.store_backend == "json":
-        print(f"[ticket-board] store: {app.store_dir}")
     print(f"[ticket-board] frames: {app.frame_dir}")
     print(f"[ticket-board] assets: {app.asset_dir}")
     print(f"[ticket-board] listening on {url}")

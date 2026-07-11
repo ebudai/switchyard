@@ -63,3 +63,58 @@ export const RouteBodySchema = z.object({
   new_state: z.string().optional(),
   assignee: z.string().optional().default(""),
 });
+
+// POST /api/tickets/actions/file_bug -- same create_ticket_record() shape as
+// create_ticket, but state is always "analysis" and parent_id comes from
+// source_ticket_id (falling back to parent_id, per server.py).
+export const FileBugBodySchema = z.object({
+  title: z.string(),
+  body: z.string().optional().default(""),
+  source_ticket_id: z.string().optional(),
+  parent_id: z.string().optional(),
+  assignee: AssigneeSchema.optional().default("unassigned"),
+  needs_eric_signoff: z.boolean().optional().default(false),
+  blocked_by: z.array(z.string()).optional().default([]),
+  blocked_reason: z.string().optional().default(""),
+});
+
+// submit_to_audit / mark_done both take a commit_hash; DB functions are the
+// sole validators of hex-commit format (see schema.sql).
+export const CommitHashBodySchema = z.object({
+  commit_hash: z.string().optional().default(""),
+});
+
+// audit_kick_back / eric_reopen / cancel: server.py accepts either "reason"
+// or the legacy "text" key for the mandatory explanatory comment.
+export const ReasonBodySchema = z.object({
+  reason: z.string().optional(),
+  text: z.string().optional(),
+});
+
+export const SetManuallyControlledBodySchema = z.object({
+  manually_controlled: z.boolean().optional(),
+  value: z.boolean().optional().default(false),
+});
+
+// set_blockers: server.py accepts "blocked_by" or legacy "ids", and
+// "blocked_reason" or legacy "reason". Ticket-ID format/self-reference is
+// validated by the DB's set_blockers() CHECK-backed logic, not here.
+export const SetBlockersBodySchema = z.object({
+  blocked_by: z.array(z.string()).optional(),
+  ids: z.array(z.string()).optional().default([]),
+  blocked_reason: z.string().optional(),
+  reason: z.string().optional().default(""),
+});
+
+export const AddCommentBodySchema = z.object({
+  text: z.string().optional().default(""),
+});
+
+// edit_fields: field-name allowlisting happens outside this schema (to
+// reproduce server.py's "list every invalid field" error, not just the
+// first), everything else about content validation is the DB's job.
+export const EditFieldsBodySchema = z.record(z.string(), z.unknown());
+
+export const MergeBodySchema = z.object({
+  target_id: z.string(),
+});

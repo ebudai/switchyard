@@ -33,3 +33,9 @@ export function connect(config: DbConfig = dbConfigFromEnv()) {
 }
 
 export type Sql = ReturnType<typeof connect>;
+
+// postgres.js's transaction callback hands back a `TransactionSql`, a
+// sibling type to `Sql` (both extend `ISql`) rather than a subtype of it --
+// so helpers that run inside `sql.begin(async (tx) => ...)` and also get
+// called with the top-level `sql` need this wider type, not `Sql` itself.
+export type SqlLike = postgres.ISql<{}>;

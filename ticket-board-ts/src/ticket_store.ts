@@ -4,8 +4,8 @@
 // ticket_board.* -- direct table DML is REVOKEd from ticket_board_service,
 // so there is no "just UPDATE the row" escape hatch even if we wanted one.
 
-import type { Sql } from "./db.ts";
-import { ASSIGNEES, TICKET_STATES, type Assignee, type Ticket, type TicketState } from "./types.ts";
+import type { Sql, SqlLike } from "./db.ts";
+import { ASSIGNEES, TICKET_STATES, type Assignee, type CallerRole, type Ticket, type TicketState } from "./types.ts";
 import { TicketRowSchema, type TicketRow } from "./schemas.ts";
 
 const TICKET_ROW_QUERY = `
@@ -89,7 +89,7 @@ async function rowToTicket(raw: TicketRow): Promise<Ticket> {
   };
 }
 
-export async function listTickets(sql: Sql): Promise<Ticket[]> {
+export async function listTickets(sql: SqlLike): Promise<Ticket[]> {
   const rows = await sql.unsafe(`${TICKET_ROW_QUERY}\nORDER BY t.ticket_number;`);
   const tickets = await Promise.all(rows.map((row) => rowToTicket(TicketRowSchema.parse(row))));
   tickets.sort((a, b) => {
@@ -102,7 +102,7 @@ export async function listTickets(sql: Sql): Promise<Ticket[]> {
   return tickets;
 }
 
-export async function getTicket(sql: Sql, ticketId: string): Promise<Ticket> {
+export async function getTicket(sql: SqlLike, ticketId: string): Promise<Ticket> {
   const rows = await sql.unsafe(`${TICKET_ROW_QUERY}\nWHERE t.id = $1;`, [ticketId]);
   if (rows.length === 0) {
     throw new NotFoundError(`ticket not found: ${ticketId}`);
@@ -127,27 +127,29 @@ function requireNonEmpty(value: string, field: string): string {
   return trimmed;
 }
 
-export async function createTicket(sql: Sql, input: CreateTicketInput): Promise<Ticket> {
-  requireNonEmpty(input.title, "title");
+// Shared by create_ticket and file_bug: both insert via a single-purpose DB
+// function, then optionally route() and set_blockers() in the same
+// transaction -- the only difference between the two ops is which "insert"
+// function creates the row and what its extra arguments are.
+async function createTicketVia(
+  sql: Sql,
+  insert: (tx: SqlLike) => Promise<string>,
+  input: Pick<CreateTicketInput, "assignee" | "needs_eric_signoff" | "blocked_by" | "blocked_reason">,
+): Promise<Ticket> {
   if (input.blocked_by.length > 0 && !input.blocked_reason.trim()) {
     throw new Error("blocked_reason must be non-empty when blocked_by is set");
   }
   // Ported behavior, not a new restriction: app.py's _pg_create_ticket_record
-  // explicitly raises on needs_eric_signoff=true because the underlying
-  // ticket_board.create_ticket() DB function only takes (title, body) --
-  // there's nowhere to put the flag on initial create. Matching that here
-  // (rather than silently dropping the field) is exactly the kind of gap
-  // that's easy to lose in a port; see PORT-NOTES.md.
+  // explicitly raises on needs_eric_signoff=true because the underlying DB
+  // insert functions (create_ticket/file_bug) have nowhere to put the flag
+  // on initial insert. Matching that here (rather than silently dropping
+  // the field) is exactly the kind of gap that's easy to lose in a port;
+  // see PORT-NOTES.md.
   if (input.needs_eric_signoff) {
     throw new Error("postgres function API does not support initial signoff fields yet");
   }
   return await sql.begin(async (tx) => {
-    const [row] = await tx.unsafe(
-      "SELECT ticket_board.create_ticket($1, $2) AS id;",
-      [input.title, input.body],
-    );
-    if (!row) throw new Error("create_ticket returned no row");
-    const ticketId = String(row.id);
+    const ticketId = await insert(tx);
     if (input.assignee !== "unassigned") {
       await tx.unsafe(
         "SELECT ticket_board.route($1, $2, $3);",
@@ -160,8 +162,38 @@ export async function createTicket(sql: Sql, input: CreateTicketInput): Promise<
         [ticketId, input.blocked_by, input.blocked_reason],
       );
     }
-    return await getTicket(tx as unknown as Sql, ticketId);
+    return await getTicket(tx, ticketId);
   });
+}
+
+async function insertReturningId(tx: SqlLike, sql: string, params: string[]): Promise<string> {
+  const [row] = await tx.unsafe(sql, params);
+  if (!row) throw new Error("insert returned no row");
+  return String(row.id);
+}
+
+export async function createTicket(sql: Sql, input: CreateTicketInput): Promise<Ticket> {
+  requireNonEmpty(input.title, "title");
+  return await createTicketVia(
+    sql,
+    (tx) => insertReturningId(tx, "SELECT ticket_board.create_ticket($1, $2) AS id;", [input.title, input.body]),
+    input,
+  );
+}
+
+export interface FileBugInput extends CreateTicketInput {
+  source_ticket_id: string;
+}
+
+export async function fileBug(sql: Sql, input: FileBugInput): Promise<Ticket> {
+  requireNonEmpty(input.title, "title");
+  const sourceId = requireNonEmpty(input.source_ticket_id, "source_ticket_id").toUpperCase();
+  return await createTicketVia(
+    sql,
+    (tx) =>
+      insertReturningId(tx, "SELECT ticket_board.file_bug($1, $2, $3) AS id;", [input.title, input.body, sourceId]),
+    input,
+  );
 }
 
 export async function routeTicket(
@@ -172,7 +204,191 @@ export async function routeTicket(
 ): Promise<Ticket> {
   return await sql.begin(async (tx) => {
     await tx.unsafe("SELECT ticket_board.route($1, $2, $3);", [ticketId, state, assignee]);
-    return await getTicket(tx as unknown as Sql, ticketId);
+    return await getTicket(tx, ticketId);
+  });
+}
+
+// set_config(..., true) scopes the setting to the current transaction
+// (is_local=true), matching app.py's _pg_set_caller_role. Only needed
+// before calling DB functions whose body reads current_app_actor() to
+// attribute an appended comment (audit_kick_back, eric_reopen, cancel,
+// add_comment) -- everything else ignores it.
+async function setCallerRole(tx: SqlLike, callerRole: CallerRole): Promise<void> {
+  await tx.unsafe("SELECT set_config('ticket_board.caller_role', $1, true);", [callerRole]);
+}
+
+function requireComment(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) throw new Error("comment requires non-empty who and text");
+  return trimmed;
+}
+
+export async function startWork(sql: Sql, ticketId: string): Promise<Ticket> {
+  return await sql.begin(async (tx) => {
+    await tx.unsafe("SELECT ticket_board.start_work($1);", [ticketId]);
+    return await getTicket(tx, ticketId);
+  });
+}
+
+export async function submitToAudit(sql: Sql, ticketId: string, commitHash: string): Promise<Ticket> {
+  return await sql.begin(async (tx) => {
+    await tx.unsafe("SELECT ticket_board.submit_to_audit($1, $2);", [ticketId, commitHash]);
+    return await getTicket(tx, ticketId);
+  });
+}
+
+export async function auditSignOff(sql: Sql, ticketId: string): Promise<Ticket> {
+  return await sql.begin(async (tx) => {
+    await tx.unsafe("SELECT ticket_board.audit_sign_off($1);", [ticketId]);
+    return await getTicket(tx, ticketId);
+  });
+}
+
+export async function auditKickBack(
+  sql: Sql,
+  ticketId: string,
+  callerRole: CallerRole,
+  reason: string,
+): Promise<Ticket> {
+  const comment = requireComment(reason);
+  return await sql.begin(async (tx) => {
+    await setCallerRole(tx, callerRole);
+    await tx.unsafe("SELECT ticket_board.audit_kick_back($1, $2);", [ticketId, comment]);
+    return await getTicket(tx, ticketId);
+  });
+}
+
+export async function ericSignOff(sql: Sql, ticketId: string): Promise<Ticket> {
+  return await sql.begin(async (tx) => {
+    await tx.unsafe("SELECT ticket_board.eric_sign_off($1);", [ticketId]);
+    return await getTicket(tx, ticketId);
+  });
+}
+
+export async function ericReopen(sql: Sql, ticketId: string, callerRole: CallerRole, reason: string): Promise<Ticket> {
+  const comment = requireComment(reason);
+  return await sql.begin(async (tx) => {
+    await setCallerRole(tx, callerRole);
+    await tx.unsafe("SELECT ticket_board.eric_reopen($1, $2);", [ticketId, comment]);
+    return await getTicket(tx, ticketId);
+  });
+}
+
+export async function markDone(sql: Sql, ticketId: string, commitHash: string): Promise<Ticket> {
+  return await sql.begin(async (tx) => {
+    await tx.unsafe("SELECT ticket_board.mark_done($1, $2);", [ticketId, commitHash]);
+    return await getTicket(tx, ticketId);
+  });
+}
+
+export async function deferTicket(sql: Sql, ticketId: string): Promise<Ticket> {
+  return await sql.begin(async (tx) => {
+    await tx.unsafe("SELECT ticket_board.defer($1);", [ticketId]);
+    return await getTicket(tx, ticketId);
+  });
+}
+
+export async function cancelTicket(sql: Sql, ticketId: string, callerRole: CallerRole, reason: string): Promise<Ticket> {
+  const comment = requireComment(reason);
+  return await sql.begin(async (tx) => {
+    await setCallerRole(tx, callerRole);
+    await tx.unsafe("SELECT ticket_board.cancel($1, $2);", [ticketId, comment]);
+    return await getTicket(tx, ticketId);
+  });
+}
+
+export async function setManuallyControlled(sql: Sql, ticketId: string, manuallyControlled: boolean): Promise<Ticket> {
+  return await sql.begin(async (tx) => {
+    await tx.unsafe("SELECT ticket_board.set_manually_controlled($1, $2);", [ticketId, manuallyControlled]);
+    return await getTicket(tx, ticketId);
+  });
+}
+
+export async function setBlockers(
+  sql: Sql,
+  ticketId: string,
+  blockedBy: string[],
+  blockedReason: string,
+): Promise<Ticket> {
+  if (blockedBy.length > 0 && !blockedReason.trim()) {
+    throw new Error("blocked_reason must be non-empty when blockers are set");
+  }
+  return await sql.begin(async (tx) => {
+    await tx.unsafe("SELECT ticket_board.set_blockers($1, $2, $3);", [ticketId, blockedBy, blockedReason]);
+    return await getTicket(tx, ticketId);
+  });
+}
+
+export async function addComment(sql: Sql, ticketId: string, callerRole: CallerRole, text: string): Promise<Ticket> {
+  const comment = requireComment(text);
+  return await sql.begin(async (tx) => {
+    await setCallerRole(tx, callerRole);
+    await tx.unsafe("SELECT ticket_board.add_comment($1, $2);", [ticketId, comment]);
+    return await getTicket(tx, ticketId);
+  });
+}
+
+// Field-name allowlist mirrors server.py's EDIT_FIELD_NAMES; edit_fields()
+// in schema.sql enforces the same set again (single-field error message),
+// but server.py reports *every* invalid field at once, so that's
+// reproduced here rather than left to the DB.
+const EDIT_FIELD_NAMES = new Set([
+  "title",
+  "parent_id",
+  "screenshots",
+  "screenshot",
+  "implementation",
+  "audit_prompt",
+  "needs_eric_signoff",
+  "commit_exempt",
+  "commit_hash",
+  "audit_signoff",
+  "eric_signoff",
+]);
+
+export async function editFields(sql: Sql, ticketId: string, patch: Record<string, unknown>): Promise<Ticket> {
+  const invalidFields = Object.keys(patch).filter((key) => !EDIT_FIELD_NAMES.has(key)).sort();
+  if (invalidFields.length > 0) {
+    throw new Error(`edit_fields cannot update: ${invalidFields.join(", ")}`);
+  }
+  if (patch.audit_signoff === true) {
+    throw new Error("audit_signoff=true requires audit_sign_off");
+  }
+  if (patch.eric_signoff === true) {
+    throw new Error("eric_signoff=true requires eric_sign_off");
+  }
+  return await sql.begin(async (tx) => {
+    // Pass `patch` as a plain object, NOT JSON.stringify(patch): postgres.js
+    // auto-serializes JS objects to jsonb correctly, but in a multi-param
+    // .unsafe() call, a pre-stringified JSON string gets double-encoded
+    // (the resulting jsonb value is a *string* scalar, not an object) --
+    // see PORT-NOTES.md.
+    // postgres.js's .d.ts types `.unsafe()` params against a generic that
+    // resolves to `never` for jsonb objects here; the cast is a type-level
+    // workaround for that gap, not a runtime-validation gap -- `patch` was
+    // already allowlist-validated above.
+    await tx.unsafe("SELECT ticket_board.edit_fields($1, $2::jsonb);", [ticketId, patch] as unknown as string[]);
+    return await getTicket(tx, ticketId);
+  });
+}
+
+export interface MergeResult {
+  source: Ticket;
+  target: Ticket;
+}
+
+export async function mergeTickets(sql: Sql, sourceId: string, targetId: string): Promise<MergeResult> {
+  if (!sourceId || !targetId) {
+    throw new Error("merge requires both source and target ticket IDs");
+  }
+  if (sourceId === targetId) {
+    throw new Error("cannot merge a ticket into itself");
+  }
+  return await sql.begin(async (tx) => {
+    await tx.unsafe("SELECT ticket_board.merge($1, $2);", [sourceId, targetId]);
+    const source = await getTicket(tx, sourceId);
+    const target = await getTicket(tx, targetId);
+    return { source, target };
   });
 }
 

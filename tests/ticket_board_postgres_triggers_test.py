@@ -188,6 +188,32 @@ COMMIT;
             )
             psql(conninfo, "UPDATE ticket_board.tickets SET state = 'analysis' WHERE id = 'PGU-1';")
 
+            insert_ticket(conninfo, "PGU-10", title="Backlog cancel", assignee="ops", state="backlog")
+            psql(
+                conninfo,
+                """
+BEGIN;
+INSERT INTO ticket_board.ticket_comments (ticket_id, position, who, ts_text, text, source_json)
+VALUES (
+    'PGU-10',
+    0,
+    'director',
+    '2026-07-10T00:25:00+00:00',
+    'Cancelled directly from backlog.',
+    '{"text": "Cancelled directly from backlog.", "ts": "2026-07-10T00:25:00+00:00", "who": "director"}'::jsonb
+);
+UPDATE ticket_board.tickets SET state = 'cancelled' WHERE id = 'PGU-10';
+COMMIT;
+""",
+            )
+            backlog_cancelled = psql(conninfo, "SELECT state FROM ticket_board.tickets WHERE id = 'PGU-10';").stdout.strip()
+            assert backlog_cancelled == "cancelled", backlog_cancelled
+
+            insert_ticket(conninfo, "PGU-11", title="Backlog ready", assignee="ops", state="backlog", implementation="Ready.")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'ready' WHERE id = 'PGU-11';")
+            backlog_ready = psql(conninfo, "SELECT state FROM ticket_board.tickets WHERE id = 'PGU-11';").stdout.strip()
+            assert backlog_ready == "ready", backlog_ready
+
             assert_error(
                 conninfo,
                 "UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-1';",
@@ -543,6 +569,14 @@ FROM ticket_board.claim_notification() AS claimed;
             ).stdout.strip()
             assert pending_after_ack == "0"
 
+            psql(
+                conninfo,
+                """
+UPDATE ticket_board.ticket_notification_state
+SET last_nudged_at = clock_timestamp() + interval '1 hour'
+WHERE ticket_id <> 'PGU-20';
+""",
+            )
             nudges = psql(
                 conninfo,
                 "SELECT ticket_board.notify_due_nudges(clock_timestamp() + interval '10 minutes', interval '5 minutes', 3);",

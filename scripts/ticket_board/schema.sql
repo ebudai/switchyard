@@ -265,7 +265,7 @@ BEGIN
 
     IF OLD.state IS DISTINCT FROM NEW.state THEN
         IF NOT (
-            (OLD.state = 'backlog' AND NEW.state IN ('analysis', 'ready')) OR
+            (OLD.state = 'backlog' AND NEW.state IN ('analysis', 'ready', 'cancelled')) OR
             (OLD.state = 'analysis' AND NEW.state IN ('ready', 'backlog', 'cancelled')) OR
             (OLD.state = 'ready' AND NEW.state IN ('in_progress', 'analysis', 'backlog', 'cancelled')) OR
             (OLD.state = 'in_progress' AND NEW.state IN ('audit', 'ready', 'analysis', 'backlog', 'cancelled')) OR

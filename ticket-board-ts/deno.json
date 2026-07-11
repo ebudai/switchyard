@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "exactOptionalPropertyTypes": false
+  },
+  "tasks": {
+    "start": "deno run --allow-net --allow-env --allow-read src/main.ts",
+    "check": "deno check src/main.ts"
+  },
+  "imports": {
+    "postgres": "npm:postgres@3",
+    "zod": "npm:zod@3"
+  }
+}

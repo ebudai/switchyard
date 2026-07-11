@@ -20,6 +20,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       assignees: [],
       selectedId: null,
       detailOpen: false,
+      showDeferred: false,
       showDone: false,
       showCancelled: false,
       detailDraft: null,
@@ -41,6 +42,8 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     const titleInput = document.getElementById('titleInput');
     const bodyInput = document.getElementById('bodyInput');
     const needsEricInput = document.getElementById('needsEricInput');
+    const showDeferredInput = document.getElementById('showDeferredInput');
+    const showDeferredCountEl = document.getElementById('showDeferredCount');
     const showDoneInput = document.getElementById('showDoneInput');
     const showDoneCountEl = document.getElementById('showDoneCount');
     const showCancelledInput = document.getElementById('showCancelledInput');
@@ -123,6 +126,12 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         return 'done';
       }
       return null;
+    }
+
+    function stateTransitionCallerRole(ticket) {
+      return ticket.state === 'ready' || ticket.state === 'in_progress'
+        ? ticket.assignee
+        : 'director';
     }
 
     function inProgressConflictTicket(ticket) {
@@ -269,7 +278,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       if (blockedReason) {
         throw new Error(blockedReason);
       }
-      await updateTicket(ticketId, { state: nextState });
+      await updateTicket(ticketId, { state: nextState }, stateTransitionCallerRole(ticket));
     }
 
     async function cancelTicket(ticketId, who, text) {
@@ -285,7 +294,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
           who: trimmedWho,
           text: trimmedText,
         },
-      });
+      }, trimmedWho);
       setCreateStatus(`Cancelled ${ticketId}.`);
     }
 
@@ -880,6 +889,9 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
 
     function visibleColumns() {
       return COLUMNS.filter((column) => {
+        if (column.key === 'backlog' && !state.showDeferred) {
+          return false;
+        }
         if (column.key === 'done' && !state.showDone) {
           return false;
         }
@@ -891,8 +903,11 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     }
 
     function renderStateVisibilityToggles() {
+      const deferredCount = columnTicketCount('backlog');
       const doneCount = columnTicketCount('done');
       const cancelledCount = columnTicketCount('cancelled');
+      showDeferredInput.checked = state.showDeferred;
+      showDeferredCountEl.textContent = `(${deferredCount})`;
       showDoneInput.checked = state.showDone;
       showDoneCountEl.textContent = `(${doneCount})`;
       showCancelledInput.checked = state.showCancelled;
@@ -1076,7 +1091,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       stateSelect.addEventListener('change', async (event) => {
         const nextState = event.target.value;
         try {
-          await updateTicket(ticket.id, { state: nextState });
+          await updateTicket(ticket.id, { state: nextState }, stateTransitionCallerRole(ticket));
         } catch (error) {
           setCreateStatus(error.message, true);
           await requestBoardReload();

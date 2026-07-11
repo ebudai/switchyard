@@ -60,6 +60,10 @@ MARKUP = """  <div class="layout">
           <h1>PGU Ticket Board</h1>
           <div class="topbar-controls">
             <label class="check compact">
+              <input id="showDeferredInput" type="checkbox">
+              <span>Show Deferred <span id="showDeferredCount">(0)</span></span>
+            </label>
+            <label class="check compact">
               <input id="showDoneInput" type="checkbox">
               <span>Show Done <span id="showDoneCount">(0)</span></span>
             </label>

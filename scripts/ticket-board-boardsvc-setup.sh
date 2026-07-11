@@ -97,7 +97,11 @@ apply_setup() {
         printf 'ERROR: setfacl is required; install the acl package or apply equivalent ownership manually.\n' >&2
         exit 1
     fi
+    local asset_parent
+    asset_parent="$(dirname "$ASSET_ROOT")"
+    mkdir -p "$asset_parent"
     setfacl -m "u:$SERVICE_USER:--x" /home/agent
+    setfacl -m "u:$SERVICE_USER:--x" "$asset_parent"
     grant_read_exec_acl "$BOARD_ROOT"
     grant_write_acl "$ASSET_ROOT"
     grant_write_acl "$FRAME_ROOT"

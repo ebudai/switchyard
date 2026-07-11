@@ -19,12 +19,16 @@ def assert_true(condition: bool, message: str) -> None:
 
 class TicketHandler(BaseHTTPRequestHandler):
     requests: list[dict] = []
+    paths: list[str] = []
+    caller_roles: list[str | None] = []
     next_ticket_number = 9000
 
     def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", "0"))
         payload = json.loads(self.rfile.read(length).decode("utf-8"))
         self.__class__.requests.append(payload)
+        self.__class__.paths.append(self.path)
+        self.__class__.caller_roles.append(self.headers.get("X-PGU-Caller-Role"))
         ticket_id = f"PGU-{self.__class__.next_ticket_number}"
         self.__class__.next_ticket_number += 1
         body = json.dumps({"ticket": {"id": ticket_id}}).encode("utf-8")
@@ -73,6 +77,8 @@ def main() -> int:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     TicketHandler.requests = []
+    TicketHandler.paths = []
+    TicketHandler.caller_roles = []
     board_url = f"http://127.0.0.1:{server.server_port}/api/tickets"
 
     try:
@@ -84,6 +90,8 @@ def main() -> int:
             first = run_reporter(board_url, str(tmp_path / "dedupe"), str(log_path), 1)
             assert_true(first.returncode == 0, f"first reporter run failed: {first.stderr}")
             assert_true(len(TicketHandler.requests) == 1, "first crash should create one ticket")
+            assert_true(TicketHandler.paths == ["/api/tickets/actions/create_ticket"], "reporter should use create_ticket action route")
+            assert_true(TicketHandler.caller_roles == ["director"], "reporter should send director caller role")
             first_payload = TicketHandler.requests[0]
             assert_true(first_payload["title"] == "crash on startup: exit 1", "title should encode exit status")
             assert_true(first_payload["assignee"] == "unassigned", "crash tickets should be unassigned")

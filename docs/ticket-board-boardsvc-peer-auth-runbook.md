@@ -5,13 +5,12 @@ cutover. The goal is to run `pgu-ticket-board.service` as a dedicated `boardsvc`
 OS user and let PostgreSQL peer-auth that process to the `ticket_board_service`
 DB role without any board password on disk.
 
-This package targets the post-cutover DB-backed board. It intentionally does not
-grant `boardsvc` access to `/home/agent/.claude/pgu-tickets`; live tickets should
-come from PostgreSQL through the `ticket_board_service` role. Attachment files
-are still prepared as filesystem-backed under
-`/home/agent/.claude/pgu-tickets-assets`; if Eric decides attachments move into
-Postgres or another store during cutover, remove the `--assets` unit argument and
-skip the `ASSET_ROOT` ACL grant before installing.
+This package targets the PGU-198/PGU-209 single-writer board: the service runs as
+OS user `boardsvc`, peer-authenticates to PostgreSQL as `ticket_board_service`,
+and reads/writes tickets through the database. It intentionally does not grant
+`boardsvc` access to `/home/agent/.claude/pgu-tickets`; live tickets come from
+PostgreSQL. Attachment files and captured frames remain filesystem-backed under
+`/home/agent/.claude/pgu-tickets-assets` and `/tmp/pgu-frames`.
 
 ## Artifacts
 
@@ -40,9 +39,10 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now pgu-ticket-board.service
 ```
 
-Before installing the unit, verify the deployed code is the DB-backed board. This
-prep package deliberately does not make the JSON store readable or writable by
-`boardsvc`.
+Before installing the unit, verify the deployed code includes the Postgres board
+backend and `scripts/ticket-board.py --help` shows `--store-backend`,
+`--database`, and `--assets`. This prep package deliberately does not make the
+JSON store readable or writable by `boardsvc`.
 
 ## What The Setup Does
 
@@ -62,6 +62,7 @@ The deploy/assets/frames step uses ACLs:
 
 ```bash
 sudo setfacl -m u:boardsvc:--x /home/agent
+sudo setfacl -m u:boardsvc:--x /home/agent/.claude
 sudo setfacl -R -m u:boardsvc:rx /home/agent/pgu-ticketboard-live
 find /home/agent/pgu-ticketboard-live -type d -exec sudo setfacl -m d:u:boardsvc:rx {} +
 sudo mkdir -p /home/agent/.claude/pgu-tickets-assets /tmp/pgu-frames
@@ -105,6 +106,9 @@ systemctl status pgu-ticket-board.service
 systemctl show pgu-ticket-board.service -p User -p FragmentPath
 pgrep -a -u boardsvc -f 'scripts/ticket-board.py'
 curl -fsS http://127.0.0.1:8770/api/board >/dev/null
+curl -fsS http://127.0.0.1:8770/api/board | python3 -c 'import json,sys
+data=json.load(sys.stdin)
+assert data["store_backend"] == "postgres", data["store_backend"]'
 BOARD_TICKETS="$(curl -fsS http://127.0.0.1:8770/api/board | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["tickets"]))')"
 test "$BOARD_TICKETS" = "$EXPECTED_TICKETS"
 ```

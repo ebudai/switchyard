@@ -30,6 +30,25 @@ What this does:
 - writes `~/.config/systemd/user/pgu-ticket-board.service`
 - enables and starts `pgu-ticket-board.service`
 
+Runtime dependency for the Postgres store backend:
+
+- psycopg 3 is required by `scripts.ticket_board.app` when
+  `TICKET_BOARD_STORE_BACKEND=postgres`
+- on Arch/CachyOS, install it for the system Python with:
+
+```bash
+sudo pacman -S python-psycopg
+```
+
+The system Python is PEP-668 externally managed, so avoid plain
+`pip install --user psycopg`. For isolated verification runs, create a venv
+with system packages visible, for example:
+
+```bash
+python3 -m venv --system-site-packages /tmp/pgu-ticket-board-venv
+/tmp/pgu-ticket-board-venv/bin/python tests/ticket_board_postgres_backend_test.py
+```
+
 The service runs:
 
 - working directory: `/home/agent/pgu-ticketboard-live/current`

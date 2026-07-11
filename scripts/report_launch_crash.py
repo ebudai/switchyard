@@ -3,15 +3,17 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import os
 import sys
 import time
 from pathlib import Path
-from urllib import request
 
+try:
+    from ticket_board.write_client import TicketBoardWriteClient
+except ModuleNotFoundError:  # pragma: no cover - package import path
+    from scripts.ticket_board.write_client import TicketBoardWriteClient
 
-DEFAULT_BOARD_URL = "http://127.0.0.1:8770/api/tickets"
+DEFAULT_BOARD_URL = "http://127.0.0.1:8770"
 DEFAULT_DEDUPE_DIR = "/tmp/pgu-launch-crash-dedupe"
 DEFAULT_DEDUPE_SECONDS = 300
 DEFAULT_LOG_LINE_COUNT = 50
@@ -91,16 +93,13 @@ def build_ticket_payload(args: argparse.Namespace, reason: str, log_tail: str) -
 
 
 def create_ticket(board_url: str, payload: dict[str, object]) -> str:
-    body = json.dumps(payload).encode("utf-8")
-    req = request.Request(
-        board_url,
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+    parsed = TicketBoardWriteClient(board_url, "director").create_ticket(
+        title=str(payload["title"]),
+        body=str(payload["body"]),
+        assignee=str(payload.get("assignee", "unassigned")),
+        needs_eric_signoff=bool(payload.get("needs_eric_signoff", False)),
+        screenshot=payload.get("screenshot"),  # type: ignore[arg-type]
     )
-    with request.urlopen(req, timeout=10) as response:
-        response_body = response.read().decode("utf-8", errors="replace")
-    parsed = json.loads(response_body)
     ticket = parsed.get("ticket")
     if not isinstance(ticket, dict) or not isinstance(ticket.get("id"), str):
         raise RuntimeError("ticket board response did not include ticket.id")

@@ -10,6 +10,7 @@ readonly SUBMIT_VERIFY_ATTEMPTS=2
 readonly SUBMIT_VERIFY_BACKOFF_MS=250
 readonly STAGED_PAYLOAD_RETENTION_MINUTES=60
 readonly DEFAULT_TICKET_NOTIFICATION_JOURNAL="/tmp/pgu-ticket-notification-journal.jsonl"
+readonly DEFAULT_TICKET_BOARD_URL="http://127.0.0.1:8770"
 
 validate_enter_delay() {
     local val="${PGU_DIRECTORCTL_ENTER_DELAY:-0.6}"
@@ -191,7 +192,7 @@ Commands:
   send         Send a one-line message to a tmux target and submit it.
   send-file    Send the contents of a file to a tmux target and submit it.
   ticket-create
-               Atomically create a PGU-N.json ticket in the ticket store.
+               Create a ticket through the board HTTP action API.
   callback     Send a message to the director (pgu-director:0.0) and submit it.
   capture      Print the last non-empty lines from a tmux target pane.
   clear        Send Ctrl-C to a tmux target to clear a stuck composer.
@@ -342,6 +343,7 @@ cmd_callback() {
 cmd_ticket_create() {
     local store=""
     local frames=""
+    local board_url="$DEFAULT_TICKET_BOARD_URL"
     local title=""
     local body=""
     local assignee="unassigned"
@@ -363,6 +365,10 @@ cmd_ticket_create() {
                 ;;
             --frames)
                 frames="${2:-}"
+                shift 2
+                ;;
+            --board-url)
+                board_url="${2:-}"
                 shift 2
                 ;;
             --title)
@@ -418,8 +424,9 @@ cmd_ticket_create() {
 usage: directorctl ticket-create --title <title> --body <body> [options]
 
 options:
-  --store <dir>            Ticket store directory (default: ~/.claude/pgu-tickets)
-  --frames <dir>           Screenshot directory for validation (default: /tmp/pgu-frames)
+  --store <dir>            Deprecated compatibility option; writes go through the board API
+  --frames <dir>           Deprecated compatibility option; writes go through the board API
+  --board-url <url>        Ticket board root or /api/tickets URL (default: http://127.0.0.1:8770)
   --title <title>          Required ticket title
   --body <body>            Required ticket body
   --assignee <role>        Ticket assignee (default: unassigned)
@@ -457,7 +464,7 @@ EOF
     local repo_root
     repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-    python3 - "$repo_root" "$store" "$frames" "$title" "$body" "$assignee" "$state" "$screenshot" "$blocked_by" "$blocked_reason" "$implementation" "$audit_prompt" "$comment_who" "$comment_text" "$needs_eric_signoff" <<'PY'
+    python3 - "$repo_root" "$store" "$frames" "$board_url" "$title" "$body" "$assignee" "$state" "$screenshot" "$blocked_by" "$blocked_reason" "$implementation" "$audit_prompt" "$comment_who" "$comment_text" "$needs_eric_signoff" <<'PY'
 import json
 import re
 import sys
@@ -466,31 +473,28 @@ from pathlib import Path
 repo_root = Path(sys.argv[1])
 store_raw = sys.argv[2]
 frames_raw = sys.argv[3]
-title = sys.argv[4]
-body = sys.argv[5]
-assignee = sys.argv[6]
-state = sys.argv[7]
-screenshot = sys.argv[8] or None
-blocked_by_raw = sys.argv[9]
-blocked_reason = sys.argv[10]
-implementation = sys.argv[11]
-audit_prompt = sys.argv[12]
-comment_who = sys.argv[13]
-comment_text = sys.argv[14]
-needs_eric_signoff = sys.argv[15] == "1"
+board_url = sys.argv[4]
+title = sys.argv[5]
+body = sys.argv[6]
+assignee = sys.argv[7]
+state = sys.argv[8]
+screenshot = sys.argv[9] or None
+blocked_by_raw = sys.argv[10]
+blocked_reason = sys.argv[11]
+implementation = sys.argv[12]
+audit_prompt = sys.argv[13]
+comment_who = sys.argv[14]
+comment_text = sys.argv[15]
+needs_eric_signoff = sys.argv[16] == "1"
 
 if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
-from scripts.ticket_board.app import FRAME_DIR_DEFAULT, STORE_DIR_DEFAULT, TicketBoardApp, iso_now
+from scripts.ticket_board.write_client import TicketBoardWriteClient
 
-store = Path(store_raw).expanduser() if store_raw else STORE_DIR_DEFAULT
-frames = Path(frames_raw).expanduser() if frames_raw else FRAME_DIR_DEFAULT
-app = TicketBoardApp(store, frames)
-created = iso_now()
-comments = []
-if comment_who or comment_text:
-    comments.append({"who": comment_who, "text": comment_text, "ts": created})
+del store_raw, frames_raw
+if comment_who and comment_who.strip().lower() != "director":
+    raise SystemExit("error: directorctl ticket-create writes as caller role director; --comment-who must be director")
 blocked_by = []
 if blocked_by_raw:
     blocked_by = list(dict.fromkeys(
@@ -499,24 +503,19 @@ if blocked_by_raw:
         if item.strip()
     ))
 
-ticket = app.create_ticket_record(
+ticket = TicketBoardWriteClient(board_url, "director").create_ticket(
     title=title,
     body=body,
     screenshot=screenshot,
-    screenshots=[],
     assignee=assignee,
     state=state,
     blocked_by=blocked_by,
     blocked_reason=blocked_reason,
     implementation=implementation,
     audit_prompt=audit_prompt,
-    audit_signoff=False,
     needs_eric_signoff=needs_eric_signoff,
-    eric_signoff=False,
-    comments=comments,
-    created=created,
-    updated=created,
-)
+    comment_text=comment_text,
+)["ticket"]
 print(json.dumps(ticket))
 PY
 }

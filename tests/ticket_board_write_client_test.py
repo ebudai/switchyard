@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.ticket_board.app import TicketBoardApp
+from scripts.ticket_board import write_client as write_client_module
 from scripts.ticket_board.server import CALLER_ROLE_HEADER, TicketBoardEventHub, TicketBoardHandler
 from scripts.ticket_board.write_client import TicketBoardWriteClient
 
@@ -182,12 +184,45 @@ def exercise_client(base_url: str, store: Path, commit_hash: str) -> None:
     assert client.add_comment("PGU-112", text="Director note.")["ticket"]["comments"][-1]["who"] == "director"  # type: ignore[index]
 
 
+def assert_auto_socket_connect_failure_falls_back_to_tcp(base_url: str, store: Path, socket_path: Path) -> None:
+    seed_ticket(store, "PGU-120", title="Fallback start", state="ready", assignee="ops", implementation="Ready.")
+    socket_path.touch()
+    socket_path.chmod(0)
+
+    old_default_url = write_client_module.DEFAULT_BOARD_URL
+    old_default_socket = write_client_module.DEFAULT_BOARD_SOCKET
+    old_env_socket = os.environ.pop("PGU_TICKET_BOARD_SOCKET", None)
+    try:
+        write_client_module.DEFAULT_BOARD_URL = base_url
+        write_client_module.DEFAULT_BOARD_SOCKET = str(socket_path)
+        client = TicketBoardWriteClient(base_url, "ops")
+        assert client.start_work("PGU-120")["ticket"]["state"] == "in_progress"
+
+        explicit_client = TicketBoardWriteClient(base_url, "ops", socket_path=str(socket_path))
+        try:
+            explicit_client.start_work("PGU-120")
+        except OSError:
+            pass
+        else:
+            raise AssertionError("explicit socket connection failure should not fall back to TCP")
+    finally:
+        write_client_module.DEFAULT_BOARD_URL = old_default_url
+        write_client_module.DEFAULT_BOARD_SOCKET = old_default_socket
+        if old_env_socket is not None:
+            os.environ["PGU_TICKET_BOARD_SOCKET"] = old_env_socket
+        try:
+            socket_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="ticket-board-write-client.") as tmpdir:
         root = Path(tmpdir)
         store = root / "store"
         frames = root / "frames"
         assets = root / "assets"
+        blocked_socket = root / "blocked.sock"
         store.mkdir()
         frames.mkdir()
         assets.mkdir()
@@ -196,8 +231,11 @@ def main() -> int:
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            exercise_client(f"http://127.0.0.1:{server.server_port}", store, main_commit())
+            base_url = f"http://127.0.0.1:{server.server_port}"
+            exercise_client(base_url, store, main_commit())
+            assert_auto_socket_connect_failure_falls_back_to_tcp(base_url, store, blocked_socket)
             assert_action_requests(server.requests)
+            assert ("/api/tickets/PGU-120/actions/start_work", "ops") in server.requests
         finally:
             server.shutdown()
             server.server_close()

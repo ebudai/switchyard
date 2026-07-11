@@ -29,6 +29,7 @@ DIRECTOR_NOTIFICATION_BATCH_WINDOW_SECONDS = 0.35
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CALLER_ROLE_HEADER = "X-PGU-Caller-Role"
 SO_PEERCRED_FORMAT = "3i"
+PANE_SOCKET_MODE = 0o666
 IMPLEMENTER_ROLES = {"main", "app", "ops", "perf", "research"}
 CALLER_ROLES = IMPLEMENTER_ROLES | {"director", "eric", "audit"}
 OPERATION_ALLOWED_ROLES = {
@@ -724,7 +725,7 @@ class TicketBoardUnixServer(ThreadingUnixHTTPServer):
         except FileNotFoundError:
             pass
         super().__init__(str(socket_path), TicketBoardHandler)
-        socket_path.chmod(0o600)
+        socket_path.chmod(PANE_SOCKET_MODE)
 
     def server_close(self) -> None:
         super().server_close()

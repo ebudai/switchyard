@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import stat
 import sys
 import tempfile
 import threading
@@ -21,6 +22,7 @@ from scripts.ticket_board.app import TicketBoardApp
 from scripts.ticket_board.server import (
     CALLER_ROLE_HEADER,
     CallerRegistry,
+    PANE_SOCKET_MODE,
     PeerCredentials,
     TicketBoardEventHub,
     TicketBoardUnixServer,
@@ -157,6 +159,8 @@ def assert_unix_socket_write_derives_role_and_releases_registration() -> None:
         events = TicketBoardEventHub(app)
         registry = CallerRegistry()
         server = TicketBoardUnixServer(socket_path, app, events=events, director_notifier=QuietNotifier(), caller_registry=registry)
+        socket_mode = stat.S_IMODE(socket_path.stat().st_mode)
+        assert socket_mode == PANE_SOCKET_MODE == 0o666, oct(socket_mode)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:

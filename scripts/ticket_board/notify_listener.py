@@ -6,9 +6,11 @@ import argparse
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -27,6 +29,8 @@ DEFAULT_KEEPALIVES_COUNT = 3
 DEFAULT_DIRECTORCTL_SEND_TIMEOUT_SECONDS = 10.0
 DEFAULT_REQUEUE_BASE_SECONDS = 5.0
 DEFAULT_REQUEUE_MAX_SECONDS = 60.0
+DEFAULT_DIRECTOR_RECENT_ACTIVITY_SECONDS = 10.0
+DEFAULT_DIRECTOR_STABLE_IDLE_SECONDS = 0.25
 ROLE_TO_TARGET = {
     "director": "pgu-director:0.0",
     "main": "pgu-main:0.0",
@@ -145,22 +149,97 @@ class DirectorctlSender:
 
 
 class PaneActivityGate:
-    def __init__(self, directorctl_bin: str = DEFAULT_DIRECTORCTL) -> None:
+    def __init__(
+        self,
+        directorctl_bin: str = DEFAULT_DIRECTORCTL,
+        *,
+        recent_activity_seconds: float = DEFAULT_DIRECTOR_RECENT_ACTIVITY_SECONDS,
+        stable_idle_seconds: float = DEFAULT_DIRECTOR_STABLE_IDLE_SECONDS,
+        capture_lines: int = 80,
+        capture_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleeper: Callable[[float], None] = time.sleep,
+    ) -> None:
         self.directorctl_bin = directorctl_bin
+        self.recent_activity_seconds = recent_activity_seconds
+        self.stable_idle_seconds = stable_idle_seconds
+        self.capture_lines = capture_lines
+        self.capture_runner = capture_runner
+        self.monotonic = monotonic
+        self.sleeper = sleeper
+        self._last_capture_by_target: dict[str, str] = {}
+        self._last_changed_at_by_target: dict[str, float] = {}
 
-    def is_working(self, target: str) -> bool:
+    def _capture(self, target: str) -> str | None:
         try:
-            proc = subprocess.run(
-                [self.directorctl_bin, "capture", target, "40"],
+            proc = self.capture_runner(
+                [self.directorctl_bin, "capture", target, str(self.capture_lines)],
                 check=True,
                 text=True,
                 capture_output=True,
                 timeout=2.0,
             )
         except (OSError, subprocess.SubprocessError):
-            return False
-        text = proc.stdout
+            return None
+        return proc.stdout
+
+    def _has_working_indicator(self, text: str) -> bool:
         return "Working" in text or "esc to interrupt" in text
+
+    def _director_composer_has_content(self, text: str) -> bool:
+        if not text:
+            return False
+        lines = text.splitlines()
+        horizontal_indices = [idx for idx, line in enumerate(lines) if line.count("─") >= 40]
+        if len(horizontal_indices) < 2:
+            return True
+        composer_content = "\n".join(lines[horizontal_indices[-2] + 1 : horizontal_indices[-1]])
+        cleaned = re.sub(r"^[❯\u276f\s>\-*]+", "", composer_content, flags=re.MULTILINE)
+        return bool(cleaned.strip())
+
+    def _mark_recent_activity(self, target: str, text: str, now: float) -> bool:
+        previous = self._last_capture_by_target.get(target)
+        if previous is None:
+            self._last_capture_by_target[target] = text
+            self._last_changed_at_by_target[target] = now
+            return True
+        if previous != text:
+            self._last_capture_by_target[target] = text
+            self._last_changed_at_by_target[target] = now
+            return True
+        changed_at = self._last_changed_at_by_target.get(target)
+        return changed_at is not None and now - changed_at < self.recent_activity_seconds
+
+    def is_busy(self, target: str) -> bool:
+        text = self._capture(target)
+        if text is None:
+            return False
+        if target != ROLE_TO_TARGET["director"]:
+            return self._has_working_indicator(text)
+        if self._has_working_indicator(text) or self._director_composer_has_content(text):
+            self._mark_recent_activity(target, text, self.monotonic())
+            return True
+        now = self.monotonic()
+        # The director pane is shared by a human and an agent. Status text can
+        # flicker between tool calls, so require a recently unchanged pane
+        # before injecting a notification into the composer.
+        if self._mark_recent_activity(target, text, now):
+            return True
+        if self.stable_idle_seconds > 0:
+            self.sleeper(self.stable_idle_seconds)
+            second_text = self._capture(target)
+            if second_text is None:
+                return False
+            if self._has_working_indicator(second_text) or self._director_composer_has_content(second_text):
+                self._mark_recent_activity(target, second_text, self.monotonic())
+                return True
+            if second_text != text:
+                self._mark_recent_activity(target, second_text, self.monotonic())
+                return True
+        return False
+
+    def is_working(self, target: str) -> bool:
+        return self.is_busy(target)
 
 
 class TicketBoardNotifyListener:

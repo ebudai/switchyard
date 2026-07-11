@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression test: TicketBoardApp writes through the PostgreSQL function API."""
+"""Regression test: TicketBoardApp writes through the PostgreSQL single-writer function API."""
 
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ from scripts.ticket_board.app import TicketBoardApp
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
 RBAC_PATH = ROOT / "scripts" / "ticket_board" / "rbac.sql"
 PANE_ROLES = ["director", "eric", "ops", "app", "audit", "perf", "research", "main"]
+SERVICE_ROLE = "ticket_board_service"
 
 
 def run(args: list[str], *, input_text: str | None = None, capture: bool = True) -> subprocess.CompletedProcess[str]:
@@ -158,13 +159,11 @@ def main() -> int:
             create_roles(admin_conn)
             psql(admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
 
-            eric_app = make_app(root, socket_dir, port, dbname, "eric")
-            director_app = make_app(root, socket_dir, port, dbname, "director")
-            ops_app = make_app(root, socket_dir, port, dbname, "ops")
-            audit_app = make_app(root, socket_dir, port, dbname, "audit")
+            service_app = make_app(root, socket_dir, port, dbname, SERVICE_ROLE)
+            service_conn = conninfo(socket_dir, port, dbname, SERVICE_ROLE)
 
-            before_signature = eric_app.store_signature()
-            created = eric_app.create_ticket(
+            before_signature = service_app.store_signature()
+            created = service_app.create_ticket(
                 title="Postgres create",
                 body="Created through TicketBoardApp.",
                 screenshot=None,
@@ -172,14 +171,14 @@ def main() -> int:
                 needs_eric_signoff=False,
             )
             assert created["id"] == "PGU-1", created
-            assert eric_app.verify_created_ticket_persisted(created, before_signature) != before_signature
-            assert not (root / "json-unused-eric").exists(), "postgres backend should not create a JSON store directory"
+            assert service_app.verify_created_ticket_persisted(created, before_signature) != before_signature
+            assert not (root / f"json-unused-{SERVICE_ROLE}").exists(), "postgres backend should not create a JSON store directory"
             assert "permission denied" in psql_error(
-                conninfo(socket_dir, port, dbname, "eric"),
+                service_conn,
                 "UPDATE ticket_board.tickets SET title = title WHERE id = 'PGU-1';",
             )
 
-            filed = ops_app.create_ticket_record(
+            filed = service_app.create_ticket_record(
                 title="Filed from implementation",
                 body="Linked to source.",
                 screenshot=None,
@@ -197,11 +196,11 @@ def main() -> int:
             )
             assert filed["parent_id"] == "PGU-1", filed
             assert "source_ticket_id ticket not found" in psql_error(
-                conninfo(socket_dir, port, dbname, "ops"),
+                service_conn,
                 "SELECT ticket_board.file_bug('missing', 'body', 'PGU-99999');",
             )
 
-            blocked = director_app.create_ticket(
+            blocked = service_app.create_ticket(
                 title="Blocked child",
                 body="Needs PGU-1 first.",
                 screenshot=None,
@@ -213,8 +212,8 @@ def main() -> int:
             assert blocked["blocked_by"] == ["PGU-1"], blocked
             assert blocked["blocked_reason"] == "Waiting for PGU-1.", blocked
 
-            director_app.update_ticket(blocked["id"], {"comment": {"who": "director", "text": "Tracking note."}})
-            cancelled = director_app.update_ticket(
+            service_app.update_ticket(blocked["id"], {"comment": {"who": "director", "text": "Tracking note."}})
+            cancelled = service_app.update_ticket(
                 blocked["id"],
                 {
                     "state": "cancelled",
@@ -225,25 +224,25 @@ def main() -> int:
             assert cancelled["comments"][-1]["text"] == "Covered by PGU-1.", cancelled
 
             insert_ticket(admin_conn, "PGU-100", title="Ops ready", state="ready", assignee="ops")
-            in_progress = ops_app.update_ticket("PGU-100", {"state": "in_progress"})
+            in_progress = service_app.update_ticket("PGU-100", {"state": "in_progress"})
             assert in_progress["state"] == "in_progress", in_progress
-            submitted = ops_app.update_ticket("PGU-100", {"state": "audit", "commit_hash": "abcdef1"})
+            submitted = service_app.update_ticket("PGU-100", {"state": "audit", "commit_hash": "abcdef1"})
             assert submitted["state"] == "audit", submitted
             assert submitted["commit_hash"] == "abcdef1", submitted
             try:
-                ops_app.update_ticket("PGU-100", {"implementation": "raw field edit should fail"})
+                service_app.update_ticket("PGU-100", {"implementation": "raw field edit should fail"})
             except ValueError as exc:
                 assert "postgres function API does not support direct updates" in str(exc)
             else:
                 raise AssertionError("implementation patch should not be accepted by the function API backend")
 
-            audit_ready = audit_app.update_ticket("PGU-100", {"audit_signoff": True})
+            audit_ready = service_app.update_ticket("PGU-100", {"audit_signoff": True})
             assert audit_ready["state"] == "director_review", audit_ready
-            done = director_app.update_ticket("PGU-100", {"state": "done", "commit_hash": "abcdef1"})
+            done = service_app.update_ticket("PGU-100", {"state": "done", "commit_hash": "abcdef1"})
             assert done["state"] == "done", done
 
             insert_ticket(admin_conn, "PGU-200", title="Audit kickback", state="audit", assignee="audit")
-            kicked = audit_app.update_ticket(
+            kicked = service_app.update_ticket(
                 "PGU-200",
                 {"state": "analysis", "comment": {"who": "audit", "text": "Needs another pass."}},
             )
@@ -259,7 +258,7 @@ def main() -> int:
                 audit_signoff=True,
                 needs_eric_signoff=True,
             )
-            eric_signed = eric_app.update_ticket("PGU-300", {"eric_signoff": True})
+            eric_signed = service_app.update_ticket("PGU-300", {"eric_signoff": True})
             assert eric_signed["state"] == "director_review", eric_signed
             assert eric_signed["eric_signoff"] is True, eric_signed
 
@@ -272,17 +271,17 @@ def main() -> int:
                 audit_signoff=True,
                 needs_eric_signoff=True,
             )
-            eric_reopened = eric_app.update_ticket(
+            eric_reopened = service_app.update_ticket(
                 "PGU-301",
                 {"state": "analysis", "comment": {"who": "eric", "text": "Needs design revision."}},
             )
             assert eric_reopened["state"] == "analysis", eric_reopened
             assert eric_reopened["comments"][-1]["text"] == "Needs design revision.", eric_reopened
 
-            deferred = director_app.update_ticket("PGU-1", {"state": "backlog"})
+            deferred = service_app.update_ticket("PGU-1", {"state": "backlog"})
             assert deferred["state"] == "backlog", deferred
 
-            tickets, errors = director_app.list_tickets()
+            tickets, errors = service_app.list_tickets()
             assert errors == [], errors
             assert {"PGU-1", "PGU-2", "PGU-3", "PGU-100", "PGU-200", "PGU-300", "PGU-301"}.issubset(
                 {ticket["id"] for ticket in tickets}

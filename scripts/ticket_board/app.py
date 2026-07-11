@@ -23,7 +23,12 @@ ASSET_DIR_DEFAULT = Path("~/.claude/pgu-tickets-assets").expanduser()
 FRAME_DIR_DEFAULT = Path("/tmp/pgu-frames")
 REPO_ROOT_DEFAULT = Path(__file__).resolve().parents[2]
 COMMIT_GIT_DIR_DEFAULT = Path("/data/git/pgu.git")
-STORE_BACKEND_DEFAULT = os.environ.get("TICKET_BOARD_STORE_BACKEND", "json")
+STORE_BACKEND_DEFAULT = os.environ.get("TICKET_BOARD_STORE_BACKEND", "postgres")
+ALLOW_JSON_STORE_ENV = "TICKET_BOARD_ALLOW_JSON_STORE"
+JSON_STORE_RETIRED_ERROR = (
+    "the json ticket store backend is retired; use --store-backend postgres, "
+    f"or explicitly opt in with --allow-json-store or {ALLOW_JSON_STORE_ENV}=1 for local migration/debug work"
+)
 POSTGRES_DSN_DEFAULT = os.environ.get("TICKET_BOARD_DATABASE_URL") or os.environ.get("DATABASE_URL", "")
 ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "agent", "director", "research")
 LEGACY_ASSIGNEE_ALIASES = {"ui": "app"}
@@ -46,6 +51,7 @@ REOPEN_RESET_TARGET_STATES = {"open", "backlog", "analysis", "ready", "in_progre
 REVIEWED_STATES = {"director_review", "audit", "eric_review"}
 RESET_REVIEW_ARTIFACT_SOURCE_STATES = REVIEWED_STATES | TERMINAL_STATES
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
 def iso_now() -> str:
@@ -54,6 +60,10 @@ def iso_now() -> str:
 
 def format_timestamp(path: Path) -> str:
     return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def allow_json_store_from_environment() -> bool:
+    return os.environ.get(ALLOW_JSON_STORE_ENV, "").strip().lower() in TRUTHY_ENV_VALUES
 
 
 class TicketBoardApp:
@@ -66,6 +76,7 @@ class TicketBoardApp:
         commit_git_dir: Path = COMMIT_GIT_DIR_DEFAULT,
         store_backend: str = STORE_BACKEND_DEFAULT,
         database_url: str = POSTGRES_DSN_DEFAULT,
+        allow_json_store: bool = False,
     ) -> None:
         self.store_dir = store_dir.expanduser().resolve()
         self.frame_dir = frame_dir.resolve()
@@ -73,6 +84,8 @@ class TicketBoardApp:
         self.repo_root = repo_root.resolve()
         self.commit_git_dir = commit_git_dir.resolve()
         self.store_backend = self._validate_store_backend(store_backend)
+        if self.store_backend == "json" and not (allow_json_store or allow_json_store_from_environment()):
+            raise RuntimeError(JSON_STORE_RETIRED_ERROR)
         self.database_url = database_url
         if self.store_backend == "json":
             self.store_dir.mkdir(parents=True, exist_ok=True)
@@ -512,7 +525,7 @@ class TicketBoardApp:
         atomic_write_json(path, payload)
 
     def _validate_store_backend(self, raw: str) -> str:
-        backend = str(raw or "json").strip().lower()
+        backend = str(raw or "postgres").strip().lower()
         if backend not in {"json", "postgres"}:
             raise ValueError(f"invalid ticket store backend: {raw}")
         return backend

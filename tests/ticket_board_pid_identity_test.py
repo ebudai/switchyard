@@ -155,7 +155,7 @@ def assert_unix_socket_write_derives_role_and_releases_registration() -> None:
         seed_ticket(store, "PGU-300", title="Start through socket", state="ready", assignee="ops", implementation="Ready.")
         seed_ticket(store, "PGU-301", title="Header mismatch", state="analysis")
 
-        app = TicketBoardApp(store, frames, assets)
+        app = TicketBoardApp(store, frames, assets, store_backend="json", allow_json_store=True)
         events = TicketBoardEventHub(app)
         registry = CallerRegistry()
         server = TicketBoardUnixServer(socket_path, app, events=events, director_notifier=QuietNotifier(), caller_registry=registry)

@@ -142,7 +142,7 @@ def main() -> int:
         child_done_2["audit_signoff"] = True
         write_ticket(store / "PGU-5.json", child_done_2)
 
-        app = TicketBoardApp(store, frames, assets)
+        app = TicketBoardApp(store, frames, assets, store_backend="json", allow_json_store=True)
         server = TicketBoardServer(("127.0.0.1", 0), app, director_notifier=QuietNotifier())
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()

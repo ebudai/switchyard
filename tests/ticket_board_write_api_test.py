@@ -504,7 +504,7 @@ def exercise_json_backend(commit_hash: str) -> None:
         frames.mkdir()
         assets.mkdir()
         seed_fixtures(lambda ticket_id, **kwargs: seed_json_ticket(store, ticket_id, **kwargs), commit_hash)
-        app = TicketBoardApp(store, frames, assets)
+        app = TicketBoardApp(store, frames, assets, store_backend="json", allow_json_store=True)
         server = TicketBoardServer(("127.0.0.1", 0), app, director_notifier=QuietNotifier())
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()

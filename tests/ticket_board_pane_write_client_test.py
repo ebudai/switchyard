@@ -167,7 +167,7 @@ def main() -> int:
         seed_ticket(store, "PGU-2100", title="Main ready", state="ready", assignee="main", implementation="Ready.")
         seed_ticket(store, "PGU-2101", title="App bug source")
         seed_ticket(store, "PGU-2102", title="Ops comment target")
-        server = RecordingTicketBoardServer(("127.0.0.1", 0), TicketBoardApp(store, frames, assets))
+        server = RecordingTicketBoardServer(("127.0.0.1", 0), TicketBoardApp(store, frames, assets, store_backend="json", allow_json_store=True))
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:

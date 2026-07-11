@@ -227,7 +227,7 @@ def main() -> int:
         frames.mkdir()
         assets.mkdir()
         seed_fixtures(store)
-        server = RecordingTicketBoardServer(("127.0.0.1", 0), TicketBoardApp(store, frames, assets))
+        server = RecordingTicketBoardServer(("127.0.0.1", 0), TicketBoardApp(store, frames, assets, store_backend="json", allow_json_store=True))
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:

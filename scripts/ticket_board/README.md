@@ -12,6 +12,7 @@ Shared shell-side ticket creation:
 
 ```bash
 scripts/directorctl ticket-create \
+  --board-url http://127.0.0.1:8770 \
   --assignee app \
   --state ready \
   --blocked-by "PGU-23, PGU-25" \
@@ -36,6 +37,11 @@ Pane write API:
   `audit_sign_off`, `audit_kick_back`, `eric_sign_off`, `eric_reopen`,
   `mark_done`, `defer`, `cancel`, `set_manually_controlled`, `set_blockers`,
   and `add_comment`.
+- Python and shell tooling should use `scripts.ticket_board.write_client` or
+  `scripts/ticket-board-write` instead of editing `PGU-N.json` directly. The
+  client defaults to caller role `director`; pass an explicit caller role for
+  operation-owned actions such as implementer start/submit, audit sign-off, or
+  Eric sign-off.
 
 Defaults:
 
@@ -112,7 +118,7 @@ Notes:
 - Any state can move to `backlog` to defer work; backlog tickets can be revived to `analysis` or `ready`
 - The default review path is `in_progress -> audit -> eric_review -> director_review -> done`, or `in_progress -> audit -> director_review -> done` when Eric sign-off is not required
 - Only one unlinked ticket per assignee may be in `in_progress` at a time; linked tickets in the same `parent_id` cluster count as one unit of work, and `ready` is the per-role queue
-- For new shell-created tickets, prefer `scripts/directorctl ticket-create` over hand-writing `PGU-N.json`; it uses the same atomic filename reservation as the web app create path, so concurrent creators cannot collide on the same ticket ID
+- For new shell-created tickets, prefer `scripts/directorctl ticket-create` over hand-writing `PGU-N.json`; it writes through the board action API, so the same client works against the current JSON store and the future database-backed board
 - For direct JSON edits/writes, use `scripts.ticket_store_io.atomic_write_json(...)` or an equivalent temp-file plus `os.replace(...)` flow; the watchdog now watches the store with inotify, so partial in-place writes are treated as malformed until they are replaced by a complete file
 - Human shell editing is fine; if a JSON file is invalid, the UI shows a read error banner
 

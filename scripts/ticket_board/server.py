@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
 
-from .app import TicketBoardApp, _ticket_number
+from .app import TicketBoardApp, _ticket_number, iso_now
 from .frontend import HTML
 
 LOGGER = logging.getLogger(__name__)
@@ -221,16 +221,68 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             if str(ticket.get("assignee", "")).strip().lower() != caller_role:
                 raise PermissionError(f"{caller_role} cannot call {operation} for ticket assigned to {ticket.get('assignee')}")
 
-    def create_ticket_from_payload(self, payload: dict[str, object]) -> dict[str, object]:
-        return self.app.create_ticket(
+    def create_ticket_from_payload(self, payload: dict[str, object], caller_role: str | None = None) -> dict[str, object]:
+        state = str(payload.get("state", "analysis")).strip() or "analysis"
+        implementation = str(payload.get("implementation", ""))
+        audit_prompt = str(payload.get("audit_prompt", ""))
+        parent_id = str(payload.get("parent_id", "")).strip().upper()
+        commit_hash = str(payload.get("commit_hash", ""))
+        commit_exempt = bool(payload.get("commit_exempt", False))
+        comment_text = str(payload.get("comment_text", "")).strip()
+        if not comment_text and isinstance(payload.get("comment"), dict):
+            comment = payload["comment"]  # type: ignore[assignment]
+            comment_text = str(comment.get("text", "")).strip()  # type: ignore[union-attr]
+        advanced_create = any(
+            (
+                state != "analysis",
+                implementation,
+                audit_prompt,
+                parent_id,
+                commit_hash,
+                commit_exempt,
+                comment_text,
+                bool(payload.get("audit_signoff", False)),
+                bool(payload.get("eric_signoff", False)),
+            )
+        )
+        if advanced_create and caller_role is None:
+            raise ValueError("advanced create fields require /api/tickets/actions/create_ticket")
+        if not advanced_create:
+            return self.app.create_ticket(
+                title=str(payload.get("title", "")),
+                body=str(payload.get("body", "")),
+                screenshot=payload.get("screenshot"),  # type: ignore[arg-type]
+                screenshots=payload.get("screenshots"),  # type: ignore[arg-type]
+                assignee=str(payload.get("assignee", "unassigned")),
+                needs_eric_signoff=bool(payload.get("needs_eric_signoff", False)),
+                blocked_by=payload.get("blocked_by"),  # type: ignore[arg-type]
+                blocked_reason=str(payload.get("blocked_reason", "")),
+            )
+
+        created = iso_now()
+        comments = []
+        if comment_text:
+            comments.append({"who": caller_role, "text": comment_text, "ts": created})
+        return self.app.create_ticket_record(
             title=str(payload.get("title", "")),
             body=str(payload.get("body", "")),
             screenshot=payload.get("screenshot"),  # type: ignore[arg-type]
             screenshots=payload.get("screenshots"),  # type: ignore[arg-type]
             assignee=str(payload.get("assignee", "unassigned")),
-            needs_eric_signoff=bool(payload.get("needs_eric_signoff", False)),
+            state=state,
             blocked_by=payload.get("blocked_by"),  # type: ignore[arg-type]
+            parent_id=parent_id,
+            implementation=implementation,
+            audit_prompt=audit_prompt,
+            audit_signoff=bool(payload.get("audit_signoff", False)),
+            needs_eric_signoff=bool(payload.get("needs_eric_signoff", False)),
+            eric_signoff=bool(payload.get("eric_signoff", False)),
+            comments=comments,
             blocked_reason=str(payload.get("blocked_reason", "")),
+            commit_hash=commit_hash,
+            commit_exempt=commit_exempt,
+            created=created,
+            updated=created,
         )
 
     def send_ticket_created(self, created: dict[str, object], before_signature: tuple[tuple[object, ...], ...]) -> None:
@@ -245,7 +297,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
 
         if operation == "create_ticket":
             before_signature = self.app.store_signature()
-            created = self.create_ticket_from_payload(payload)
+            created = self.create_ticket_from_payload(payload, caller)
             self.send_ticket_created(created, before_signature)
             return
 

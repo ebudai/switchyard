@@ -246,7 +246,7 @@ BEGIN
             (OLD.state = 'in_progress' AND NEW.state IN ('audit', 'ready', 'analysis', 'backlog', 'cancelled')) OR
             (OLD.state = 'audit' AND NEW.state IN ('eric_review', 'director_review', 'analysis', 'backlog', 'cancelled')) OR
             (OLD.state = 'eric_review' AND NEW.state IN ('director_review', 'audit', 'analysis', 'backlog', 'cancelled')) OR
-            (OLD.state = 'director_review' AND NEW.state IN ('done', 'analysis', 'backlog', 'cancelled')) OR
+            (OLD.state = 'director_review' AND NEW.state IN ('done', 'ready', 'analysis', 'backlog', 'cancelled')) OR
             (OLD.state = 'done' AND NEW.state IN ('analysis', 'backlog')) OR
             (OLD.state = 'cancelled' AND NEW.state IN ('analysis', 'backlog'))
         ) THEN
@@ -278,7 +278,7 @@ BEGIN
         RAISE EXCEPTION 'only active tickets can be cancelled';
     END IF;
 
-    IF OLD.state IN ('backlog', 'analysis') AND NEW.state = 'ready' THEN
+    IF OLD.state <> 'ready' AND NEW.state = 'ready' THEN
         IF NEW.assignee = 'unassigned' THEN
             RAISE EXCEPTION 'assignee must not be unassigned before a ticket can enter ready';
         END IF;

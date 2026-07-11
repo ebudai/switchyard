@@ -248,6 +248,67 @@ WHERE id = 'PGU-4';
             )
             assert reopened == {"state": "analysis", "audit_signoff": False, "commit_hash": ""}, reopened
 
+            insert_ticket(
+                conninfo,
+                "PGU-40",
+                title="Director kickback to ready",
+                assignee="director",
+                state="director_review",
+                implementation="done",
+                audit_signoff=True,
+            )
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'ready', assignee = 'ops' WHERE id = 'PGU-40';")
+            director_ready = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'state', state,
+    'assignee', assignee,
+    'audit_signoff', audit_signoff,
+    'commit_hash', commit_hash
+)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-40';
+""",
+                ).stdout
+            )
+            assert director_ready == {
+                "state": "ready",
+                "assignee": "ops",
+                "audit_signoff": False,
+                "commit_hash": "",
+            }, director_ready
+
+            insert_ticket(
+                conninfo,
+                "PGU-41",
+                title="Director kickback missing assignee",
+                assignee="director",
+                state="director_review",
+                implementation="done",
+                audit_signoff=True,
+            )
+            assert_error(
+                conninfo,
+                "UPDATE ticket_board.tickets SET state = 'ready', assignee = 'unassigned' WHERE id = 'PGU-41';",
+                "assignee must not be unassigned",
+            )
+            insert_ticket(
+                conninfo,
+                "PGU-42",
+                title="Director kickback missing implementation",
+                assignee="director",
+                state="director_review",
+                implementation="done",
+                audit_signoff=True,
+            )
+            assert_error(
+                conninfo,
+                "UPDATE ticket_board.tickets SET state = 'ready', assignee = 'ops', implementation = '' WHERE id = 'PGU-42';",
+                "implementation must be non-empty",
+            )
+
             insert_ticket(conninfo, "PGU-6", title="Kickback", assignee="audit", state="audit", implementation="done")
             psql(conninfo, "UPDATE ticket_board.tickets SET state = 'analysis' WHERE id = 'PGU-6';")
             kickback_assignee = psql(conninfo, "SELECT assignee FROM ticket_board.tickets WHERE id = 'PGU-6';").stdout.strip()

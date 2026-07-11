@@ -37,7 +37,7 @@ LEGAL_STATE_TRANSITIONS = {
     "in_progress": {"audit", "ready", "analysis", "backlog", "cancelled"},
     "audit": {"eric_review", "director_review", "analysis", "backlog", "cancelled"},
     "eric_review": {"director_review", "audit", "analysis", "backlog", "cancelled"},
-    "director_review": {"done", "analysis", "backlog", "cancelled"},
+    "director_review": {"done", "ready", "analysis", "backlog", "cancelled"},
     "done": {"analysis", "backlog"},
     "cancelled": {"analysis", "backlog"},
 }
@@ -1097,7 +1097,7 @@ ORDER BY ticket_number;
             )
         if previous_state == "analysis" and ticket["state"] == "in_progress":
             raise ValueError("analysis tickets must move through ready before entering in_progress")
-        if previous_state in {"open", "backlog", "analysis"} and ticket["state"] == "ready":
+        if previous_state != "ready" and ticket["state"] == "ready":
             self._enforce_ready_requirements(ticket)
         if previous_state != "in_progress" and ticket["state"] == "in_progress":
             self._enforce_in_progress_requirements(ticket, previous_state=previous_state)

@@ -8,7 +8,6 @@ import { ALL_ASSIGNEES, STATES } from "./ticket_store.ts";
 import { formatLocalTimestamp, isoNow } from "./time.ts";
 
 const FRAME_DIR_DEFAULT = "/tmp/pgu-frames";
-const STORE_DIR_DEFAULT = `${Deno.env.get("HOME") ?? ""}/.claude/pgu-tickets`;
 const ASSET_DIR_DEFAULT = `${Deno.env.get("HOME") ?? ""}/.claude/pgu-tickets-assets`;
 
 interface ScreenshotEntry {
@@ -52,7 +51,7 @@ export async function boardSnapshot(sql: Sql) {
     assignees: [...ALL_ASSIGNEES],
     screenshots: await listScreenshots(FRAME_DIR_DEFAULT),
     store_backend: "postgres",
-    store_path: STORE_DIR_DEFAULT,
+    store_path: "postgres",
     frame_dir: FRAME_DIR_DEFAULT,
     asset_dir: ASSET_DIR_DEFAULT,
     refreshed_at: isoNow(),

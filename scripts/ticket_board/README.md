@@ -134,14 +134,13 @@ Notes:
 - Any state can move to `backlog` to defer work; backlog tickets can be revived to `analysis` or `ready`
 - The default review path is `in_progress -> audit -> eric_review -> director_review -> done`, or `in_progress -> audit -> director_review -> done` when Eric sign-off is not required
 - Only one unlinked ticket per assignee may be in `in_progress` at a time; linked tickets in the same `parent_id` cluster count as one unit of work, and `ready` is the per-role queue
-- For new shell-created tickets, prefer `scripts/directorctl ticket-create` over hand-writing `PGU-N.json`; it writes through the board action API, so the same client works against the current JSON store and the future database-backed board
-- For direct JSON edits/writes, use `scripts.ticket_store_io.atomic_write_json(...)` or an equivalent temp-file plus `os.replace(...)` flow.
-- Human shell editing is fine; if a JSON file is invalid, the UI shows a read error banner
+- For new shell-created tickets, use `scripts/directorctl ticket-create`; it writes through the board action API.
+- Do not hand-write `PGU-N.json` files. The retired JSON store is not a board backend.
 
-PostgreSQL migration foundation:
+PostgreSQL board backend:
 
-- `scripts/ticket_board/schema.sql` is the additive PGU-189 schema for a future database-backed board
-- The schema is a lossless import target for the current JSON store: normalized ticket, blocker, comment, and attachment tables plus `tickets.source_json` to preserve exact imported JSON
+- `scripts/ticket_board/schema.sql` is the live board schema.
+- Tickets are stored in normalized ticket, blocker, comment, and attachment tables.
 - The PostgreSQL backend requires psycopg 3 at runtime and for
   `tests/ticket_board_postgres_backend_test.py`. On Arch/CachyOS install it
   with `sudo pacman -S python-psycopg`; for isolated test runs, use a venv
@@ -150,6 +149,5 @@ PostgreSQL migration foundation:
   `scripts/ticket_board/requirements.txt` records the equivalent pip
   dependency for non-system Python environments.
 - `scripts/ticket_board/rbac.sql` creates the login roles for each board pane/service role without setting passwords and grants minimal table/column permissions; only `director` can update `tickets.manually_controlled`
-- `scripts/ticket_board/import_json_to_postgres.py --database "$DATABASE_URL" --apply-schema` imports the JSON store into that schema, is safe to rerun, and verifies DB parity against the source JSON after import
 - `tickets.manually_controlled` defaults to `false`; PGU-191 transition/notification triggers must no-op when it is `true` so the director can hand-manipulate exceptional tickets
 - The PGU-207 trigger layer enforces workflow gates, maintains `ticket_notification_state`, emits `pg_notify('ticket_board_state_transition', ...)` on state transitions, and exposes `notify_due_nudges()` for the 5-minute pg_cron reminder cadence. The notify listener reconciles missed transition notifications on reconnect so listener downtime does not drop ready/audit/review nudges.

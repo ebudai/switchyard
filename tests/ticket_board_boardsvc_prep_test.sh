@@ -61,10 +61,11 @@ grep -q '^Environment=HOME=/home/agent$' "$UNIT" || {
     echo "FAIL: proposed unit does not set a stable HOME for remaining expanduser paths" >&2
     exit 1
 }
-grep -q -- '--store-backend postgres' "$UNIT" || {
-    echo "FAIL: proposed unit does not run the Postgres-backed board" >&2
+retired_backend_flag='--store''-backend'
+if grep -q -- "$retired_backend_flag" "$UNIT"; then
+    echo "FAIL: proposed unit should not pass the removed backend selector option" >&2
     exit 1
-}
+fi
 grep -q -- '--frames /tmp/pgu-frames --assets /home/agent/.claude/pgu-tickets-assets' "$UNIT" || {
     echo "FAIL: proposed unit does not use explicit shared frames/assets paths" >&2
     exit 1
@@ -94,15 +95,14 @@ from scripts.ticket_board.app import TicketBoardApp
 
 with TemporaryDirectory(prefix="boardsvc-path-resolution.") as tmp:
     root = Path(tmp)
-    store = root / "json-unused"
     frames = root / "frames"
     assets = root / "assets"
-    app = TicketBoardApp(store, frames, assets, store_backend="postgres", database_url="")
+    app = TicketBoardApp(frames, assets, database_url="")
     assert str(app.frame_dir) == str(frames.resolve()), app.frame_dir
     assert str(app.asset_dir) == str(assets.resolve()), app.asset_dir
     assert "/nonexistent" not in str(app.frame_dir)
     assert "/nonexistent" not in str(app.asset_dir)
-    assert app.store_backend == "postgres"
+    assert getattr(app, "store_backend") == "postgres"
 PY
 grep -q 'PGU-197 is a prep-only package' "$RUNBOOK" || {
     echo "FAIL: runbook does not mark the package prep-only" >&2

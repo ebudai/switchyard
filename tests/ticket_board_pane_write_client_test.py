@@ -9,91 +9,62 @@ import subprocess
 import sys
 import tempfile
 import threading
-from http.server import ThreadingHTTPServer
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.ticket_board.app import TicketBoardApp
-from scripts.ticket_board.server import CALLER_ROLE_HEADER, TicketBoardEventHub, TicketBoardHandler
+from scripts.ticket_board.server import CALLER_ROLE_HEADER
 from scripts.ticket_board.write_client import TicketBoardWriteClient, default_caller_role
 
 
-class QuietNotifier:
-    def notify_ticket_created(self, ticket: dict[str, object]) -> None:
+class RecordingHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, format: str, *args: object) -> None:
         return
 
-    def close(self) -> None:
-        return
-
-
-class RecordingHandler(TicketBoardHandler):
     def do_POST(self) -> None:  # noqa: N802
-        self.server.requests.append((self.path, self.headers.get(CALLER_ROLE_HEADER)))  # type: ignore[attr-defined]
-        super().do_POST()
+        length = int(self.headers.get("Content-Length", "0"))
+        payload = json.loads(self.rfile.read(length) or b"{}")
+        caller = self.headers.get(CALLER_ROLE_HEADER)
+        self.server.requests.append((self.path, caller))  # type: ignore[attr-defined]
+        ticket_id = "PGU-NEW"
+        operation = self.path.rsplit("/", 1)[-1]
+        if self.path.startswith("/api/tickets/PGU-") and "/actions/" in self.path:
+            ticket_id = self.path.removeprefix("/api/tickets/").split("/actions/", 1)[0]
+        ticket = {
+            "id": ticket_id,
+            "title": payload.get("title", "fixture"),
+            "state": "analysis",
+            "assignee": caller or "unassigned",
+            "parent_id": payload.get("source_ticket_id", ""),
+            "commit_hash": payload.get("commit_hash", ""),
+            "comments": [],
+        }
+        if operation == "start_work":
+            ticket["state"] = "in_progress"
+        elif operation == "submit_to_audit":
+            ticket["state"] = "audit"
+        elif operation == "file_bug":
+            ticket["state"] = "analysis"
+        elif operation == "add_comment":
+            ticket["comments"] = [{"who": caller, "text": payload.get("text", "")}]
+        body = json.dumps({"ticket": ticket}).encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
 
-class RecordingTicketBoardServer(ThreadingHTTPServer):
-    def __init__(self, address: tuple[str, int], app: TicketBoardApp) -> None:
-        self.app = app
-        self.events = TicketBoardEventHub(app)
-        self.director_notifier = QuietNotifier()
+class RecordingServer(ThreadingHTTPServer):
+    def __init__(self) -> None:
         self.requests: list[tuple[str, str | None]] = []
-        super().__init__(address, RecordingHandler)
-
-    def server_close(self) -> None:
-        self.events.close()
-        self.director_notifier.close()
-        super().server_close()
-
-
-def main_commit() -> str:
-    return subprocess.run(
-        ["git", "--git-dir=/data/git/pgu.git", "rev-parse", "refs/heads/main"],
-        check=True,
-        text=True,
-        capture_output=True,
-    ).stdout.strip()
-
-
-def seed_ticket(
-    store: Path,
-    ticket_id: str,
-    *,
-    title: str,
-    state: str = "analysis",
-    assignee: str = "unassigned",
-    implementation: str = "",
-) -> None:
-    payload = {
-        "id": ticket_id,
-        "title": title,
-        "body": "",
-        "state": state,
-        "assignee": assignee,
-        "blocked_by": [],
-        "parent_id": "",
-        "blocked_reason": "",
-        "implementation": implementation,
-        "audit_prompt": "",
-        "audit_signoff": False,
-        "needs_eric_signoff": False,
-        "eric_signoff": False,
-        "manually_controlled": False,
-        "commit_hash": "",
-        "commit_exempt": False,
-        "created": "2026-07-11T00:00:00+00:00",
-        "updated": "2026-07-11T00:00:00+00:00",
-        "comments": [],
-        "screenshots": [],
-    }
-    (store / f"{ticket_id}.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-
-
-def load_ticket(store: Path, ticket_id: str) -> dict[str, object]:
-    return json.loads((store / f"{ticket_id}.json").read_text(encoding="utf-8"))
+        super().__init__(("127.0.0.1", 0), RecordingHandler)
 
 
 def run_cli(base_url: str, caller_role: str, *args: str) -> dict[str, object]:
@@ -114,7 +85,7 @@ def run_cli(base_url: str, caller_role: str, *args: str) -> dict[str, object]:
     return parsed
 
 
-def exercise_pane_cli(base_url: str, store: Path, commit_hash: str) -> None:
+def exercise_pane_cli(base_url: str, commit_hash: str) -> None:
     assert default_caller_role({"PGU_TICKET_BOARD_CALLER_ROLE": " app "}) == "app"
     assert TicketBoardWriteClient(base_url, "director").for_caller("ops").caller_role == "ops"
 
@@ -137,12 +108,10 @@ def exercise_pane_cli(base_url: str, store: Path, commit_hash: str) -> None:
         "--assignee",
         "app",
     )
-    filed_id = str(filed["id"])
-    assert load_ticket(store, filed_id)["parent_id"] == "PGU-2101"
+    assert filed["parent_id"] == "PGU-2101"
 
     commented = run_cli(base_url, "ops", "add-comment", "PGU-2102", "--text", "Ops pane note.")
-    assert commented["comments"][-1]["who"] == "ops", commented  # type: ignore[index]
-    assert load_ticket(store, "PGU-2102")["comments"][-1]["text"] == "Ops pane note."  # type: ignore[index]
+    assert commented["comments"][-1]["who"] == "ops", commented
 
 
 def assert_pane_requests(requests: list[tuple[str, str | None]]) -> None:
@@ -156,22 +125,12 @@ def assert_pane_requests(requests: list[tuple[str, str | None]]) -> None:
 
 
 def main() -> int:
-    with tempfile.TemporaryDirectory(prefix="ticket-board-pane-write-client.") as tmpdir:
-        root = Path(tmpdir)
-        store = root / "store"
-        frames = root / "frames"
-        assets = root / "assets"
-        store.mkdir()
-        frames.mkdir()
-        assets.mkdir()
-        seed_ticket(store, "PGU-2100", title="Main ready", state="ready", assignee="main", implementation="Ready.")
-        seed_ticket(store, "PGU-2101", title="App bug source")
-        seed_ticket(store, "PGU-2102", title="Ops comment target")
-        server = RecordingTicketBoardServer(("127.0.0.1", 0), TicketBoardApp(store, frames, assets, store_backend="json", allow_json_store=True))
+    with tempfile.TemporaryDirectory(prefix="ticket-board-pane-write-client."):
+        server = RecordingServer()
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            exercise_pane_cli(f"http://127.0.0.1:{server.server_port}", store, main_commit())
+            exercise_pane_cli(f"http://127.0.0.1:{server.server_port}", "abcdef1")
             assert_pane_requests(server.requests)
         finally:
             server.shutdown()

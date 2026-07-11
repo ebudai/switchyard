@@ -13,22 +13,10 @@ from typing import Any
 
 from PIL import Image
 
-try:
-    from ticket_store_io import _ticket_number, atomic_write_json, reserve_next_ticket_id
-except ModuleNotFoundError:  # pragma: no cover - package import path
-    from scripts.ticket_store_io import _ticket_number, atomic_write_json, reserve_next_ticket_id
-
-STORE_DIR_DEFAULT = Path("~/.claude/pgu-tickets").expanduser()
 ASSET_DIR_DEFAULT = Path("~/.claude/pgu-tickets-assets").expanduser()
 FRAME_DIR_DEFAULT = Path("/tmp/pgu-frames")
 REPO_ROOT_DEFAULT = Path(__file__).resolve().parents[2]
 COMMIT_GIT_DIR_DEFAULT = Path("/data/git/pgu.git")
-STORE_BACKEND_DEFAULT = os.environ.get("TICKET_BOARD_STORE_BACKEND", "postgres")
-ALLOW_JSON_STORE_ENV = "TICKET_BOARD_ALLOW_JSON_STORE"
-JSON_STORE_RETIRED_ERROR = (
-    "the json ticket store backend is retired; use --store-backend postgres, "
-    f"or explicitly opt in with --allow-json-store or {ALLOW_JSON_STORE_ENV}=1 for local migration/debug work"
-)
 POSTGRES_DSN_DEFAULT = os.environ.get("TICKET_BOARD_DATABASE_URL") or os.environ.get("DATABASE_URL", "")
 ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "inspector", "agent", "director", "research")
 LEGACY_ASSIGNEE_ALIASES = {"ui": "app"}
@@ -46,24 +34,7 @@ STATES = (
     "cancelled",
 )
 TERMINAL_STATES = {"done", "cancelled"}
-LEGAL_STATE_TRANSITIONS = {
-    "backlog": {"analysis", "ready", "cancelled"},
-    "analysis": {"ready", "backlog", "cancelled"},
-    "ready": {"in_progress", "analysis", "backlog", "cancelled"},
-    "in_progress": {"inspection", "audit", "ready", "analysis", "backlog", "cancelled"},
-    "inspection": {"audit", "ready", "backlog", "cancelled"},
-    "audit": {"eric_review", "director_review", "analysis", "backlog", "cancelled"},
-    "eric_review": {"director_review", "audit", "analysis", "backlog", "cancelled"},
-    "director_review": {"done", "ready", "analysis", "backlog", "cancelled"},
-    "done": {"analysis", "backlog"},
-    "cancelled": {"analysis", "backlog"},
-}
-ACTIVE_STATES = tuple(state for state in STATES if state not in TERMINAL_STATES)
-REOPEN_RESET_TARGET_STATES = {"open", "backlog", "analysis", "ready", "in_progress"}
-REVIEWED_STATES = {"director_review", "audit", "inspection", "eric_review"}
-RESET_REVIEW_ARTIFACT_SOURCE_STATES = REVIEWED_STATES | TERMINAL_STATES
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
-TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
 def iso_now() -> str:
@@ -74,33 +45,28 @@ def format_timestamp(path: Path) -> str:
     return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def allow_json_store_from_environment() -> bool:
-    return os.environ.get(ALLOW_JSON_STORE_ENV, "").strip().lower() in TRUTHY_ENV_VALUES
+def ticket_number(ticket_id: str) -> int:
+    value = str(ticket_id).strip().upper()
+    if not value.startswith("PGU-") or not value[4:].isdigit():
+        return 0
+    return int(value[4:])
 
 
 class TicketBoardApp:
     def __init__(
         self,
-        store_dir: Path = STORE_DIR_DEFAULT,
         frame_dir: Path = FRAME_DIR_DEFAULT,
         asset_dir: Path = ASSET_DIR_DEFAULT,
         repo_root: Path = REPO_ROOT_DEFAULT,
         commit_git_dir: Path = COMMIT_GIT_DIR_DEFAULT,
-        store_backend: str = STORE_BACKEND_DEFAULT,
         database_url: str = POSTGRES_DSN_DEFAULT,
-        allow_json_store: bool = False,
     ) -> None:
-        self.store_dir = store_dir.expanduser().resolve()
         self.frame_dir = frame_dir.resolve()
         self.asset_dir = asset_dir.expanduser().resolve()
         self.repo_root = repo_root.resolve()
         self.commit_git_dir = commit_git_dir.resolve()
-        self.store_backend = self._validate_store_backend(store_backend)
-        if self.store_backend == "json" and not (allow_json_store or allow_json_store_from_environment()):
-            raise RuntimeError(JSON_STORE_RETIRED_ERROR)
+        self.store_backend = "postgres"
         self.database_url = database_url
-        if self.store_backend == "json":
-            self.store_dir.mkdir(parents=True, exist_ok=True)
         self.asset_dir.mkdir(parents=True, exist_ok=True)
 
     def snapshot(self) -> dict[str, object]:
@@ -112,44 +78,20 @@ class TicketBoardApp:
             "assignees": list(ASSIGNEES),
             "screenshots": self.list_screenshots(),
             "store_backend": self.store_backend,
-            "store_path": str(self.store_dir),
+            "store_path": "postgres",
             "frame_dir": str(self.frame_dir),
             "asset_dir": str(self.asset_dir),
             "refreshed_at": iso_now(),
         }
 
     def store_signature(self) -> tuple[tuple[object, ...], ...]:
-        if self.store_backend == "postgres":
-            return self._pg_store_signature()
-        signature: list[tuple[str, int, int]] = []
-        for path in sorted(self.store_dir.glob("PGU-*.json")):
-            stat = path.stat()
-            signature.append((path.name, stat.st_mtime_ns, stat.st_size))
-        return tuple(signature)
+        return self._pg_store_signature()
 
     def list_tickets(self) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
-        if self.store_backend == "postgres":
-            try:
-                return self._pg_list_tickets(), []
-            except Exception as exc:  # noqa: BLE001
-                return [], [{"file": "postgres", "error": str(exc)}]
-
-        tickets: list[dict[str, Any]] = []
-        errors: list[dict[str, str]] = []
-        for path in sorted(self.store_dir.glob("PGU-*.json")):
-            try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-                ticket = self._validate_ticket(payload, path)
-                if self._payload_needs_state_migration(payload):
-                    self._atomic_write(path, self._serialize_ticket(ticket))
-                tickets.append(ticket)
-            except Exception as exc:  # noqa: BLE001
-                errors.append({"file": path.name, "error": str(exc)})
-        tickets.sort(
-            key=lambda ticket: (ticket["state"] not in TERMINAL_STATES, ticket["updated"], ticket["id"]),
-            reverse=True,
-        )
-        return tickets, errors
+        try:
+            return self._pg_list_tickets(), []
+        except Exception as exc:  # noqa: BLE001
+            return [], [{"file": "postgres", "error": str(exc)}]
 
     def list_screenshots(self) -> list[dict[str, str]]:
         if not self.frame_dir.is_dir():
@@ -253,250 +195,63 @@ class TicketBoardApp:
         updated: str | None = None,
         caller_role: str | None = None,
     ) -> dict[str, Any]:
-        if self.store_backend == "postgres":
-            return self._pg_create_ticket_record(
-                title=title,
-                body=body,
-                screenshot=screenshot,
-                screenshots=screenshots,
-                assignee=assignee,
-                state=state,
-                blocked_by=blocked_by,
-                implementation=implementation,
-                audit_prompt=audit_prompt,
-                audit_signoff=audit_signoff,
-                needs_inspection=needs_inspection,
-                inspector_signoff=inspector_signoff,
-                needs_eric_signoff=needs_eric_signoff,
-                eric_signoff=eric_signoff,
-                comments=comments,
-                parent_id=parent_id,
-                blocked_reason=blocked_reason,
-                commit_hash=commit_hash,
-                commit_exempt=commit_exempt,
-                created=created,
-                updated=updated,
-                caller_role=caller_role,
-            )
-
-        title = self._require_text(title, "title").strip()
-        assignee = self._validate_assignee(assignee)
-        state = self._validate_state(state)
-        with reserve_next_ticket_id(self.store_dir) as ticket_id:
-            blocked_by = self._validate_blocked_by(blocked_by or [], ticket_id)
-            parent_id = self._validate_parent_id(parent_id, ticket_id)
-            implementation = self._require_plain_string(implementation, "implementation")
-            audit_prompt = self._require_plain_string(audit_prompt, "audit_prompt")
-            blocked_reason = self._require_plain_string(blocked_reason, "blocked_reason")
-            normalized_comments = self._validate_comments(comments)
-            self._enforce_blocked_reason_rule(blocked_by, blocked_reason)
-            screenshot_paths = self._materialize_attachments(
-                screenshots if screenshots is not None else screenshot,
-                ticket_id,
-            )
-            created_ts = self._require_text(created, "created") if created is not None else iso_now()
-            updated_ts = self._require_text(updated, "updated") if updated is not None else created_ts
-            ticket = {
-                "id": ticket_id,
-                "title": title,
-                "body": body.strip(),
-                "assignee": assignee,
-                "state": state,
-                "blocked_by": blocked_by,
-                "parent_id": parent_id,
-                "blocked_reason": blocked_reason,
-                "implementation": implementation,
-                "audit_prompt": audit_prompt,
-                "audit_signoff": bool(audit_signoff),
-                "needs_inspection": bool(needs_inspection),
-                "inspector_signoff": bool(inspector_signoff),
-                "needs_eric_signoff": bool(needs_eric_signoff),
-                "eric_signoff": bool(eric_signoff),
-                "manually_controlled": False,
-                "commit_hash": self._validate_commit_hash(commit_hash),
-                "commit_exempt": bool(commit_exempt),
-                "created": created_ts,
-                "updated": updated_ts,
-                "comments": normalized_comments,
-            }
-            self._set_screenshot_fields(ticket, self._build_screenshot_entries(screenshot_paths))
-            self._normalize_signoff_state(ticket)
-            self._enforce_workflow_rules(ticket)
-            self._enforce_initial_state_rules(ticket)
-            if ticket["state"] == "done":
-                self._enforce_done_requirements(ticket)
-            if ticket["state"] == "cancelled":
-                self._enforce_cancel_requirements(
-                    previous_state=None,
-                    ticket=ticket,
-                    has_reason_comment=bool(normalized_comments),
-                )
-            self._atomic_write(self.store_dir / f"{ticket_id}.json", self._serialize_ticket(ticket))
-        return ticket
+        return self._pg_create_ticket_record(
+            title=title,
+            body=body,
+            screenshot=screenshot,
+            screenshots=screenshots,
+            assignee=assignee,
+            state=state,
+            blocked_by=blocked_by,
+            implementation=implementation,
+            audit_prompt=audit_prompt,
+            audit_signoff=audit_signoff,
+            needs_inspection=needs_inspection,
+            inspector_signoff=inspector_signoff,
+            needs_eric_signoff=needs_eric_signoff,
+            eric_signoff=eric_signoff,
+            comments=comments,
+            parent_id=parent_id,
+            blocked_reason=blocked_reason,
+            commit_hash=commit_hash,
+            commit_exempt=commit_exempt,
+            created=created,
+            updated=updated,
+            caller_role=caller_role,
+        )
 
     def update_ticket(self, ticket_id: str, patch: dict[str, Any], *, caller_role: str | None = None) -> dict[str, Any]:
-        if self.store_backend == "postgres":
-            return self._pg_update_ticket(ticket_id, patch, caller_role=caller_role)
-
-        path = self.store_dir / f"{ticket_id}.json"
-        if not path.is_file():
-            raise FileNotFoundError(f"ticket not found: {ticket_id}")
-        current = self._validate_ticket(json.loads(path.read_text(encoding="utf-8")), path)
-        previous_state = current["state"]
-        has_reason_comment = False
-        if "state" in patch:
-            current["state"] = self._validate_state(str(patch["state"]))
-        if "title" in patch:
-            current["title"] = self._require_text(patch["title"], "title").strip()
-        if "assignee" in patch:
-            current["assignee"] = self._validate_assignee(str(patch["assignee"]))
-        if "blocked_by" in patch:
-            current["blocked_by"] = self._validate_blocked_by(patch["blocked_by"], ticket_id)
-        if "parent_id" in patch:
-            current["parent_id"] = self._validate_parent_id(patch["parent_id"], ticket_id)
-        if "blocked_reason" in patch:
-            current["blocked_reason"] = self._require_plain_string(patch["blocked_reason"], "blocked_reason")
-        if "screenshots" in patch or "screenshot" in patch:
-            screenshot_paths = self._materialize_attachments(
-                patch["screenshots"] if "screenshots" in patch else patch["screenshot"],
-                ticket_id,
-                current_paths=current.get("screenshots", []),
-            )
-            self._set_screenshot_fields(current, self._build_screenshot_entries(screenshot_paths))
-        if "implementation" in patch:
-            current["implementation"] = self._require_plain_string(patch["implementation"], "implementation")
-        if "audit_prompt" in patch:
-            current["audit_prompt"] = self._require_plain_string(patch["audit_prompt"], "audit_prompt")
-        if "needs_eric_signoff" in patch:
-            current["needs_eric_signoff"] = bool(patch["needs_eric_signoff"])
-        if "needs_inspection" in patch:
-            current["needs_inspection"] = bool(patch["needs_inspection"])
-        if "audit_signoff" in patch:
-            current["audit_signoff"] = bool(patch["audit_signoff"])
-        if "inspector_signoff" in patch:
-            current["inspector_signoff"] = bool(patch["inspector_signoff"])
-        if "eric_signoff" in patch:
-            current["eric_signoff"] = bool(patch["eric_signoff"])
-        if "manually_controlled" in patch:
-            current["manually_controlled"] = bool(patch["manually_controlled"])
-        if "commit_hash" in patch:
-            current["commit_hash"] = self._validate_commit_hash(patch["commit_hash"])
-        if "commit_exempt" in patch:
-            current["commit_exempt"] = bool(patch["commit_exempt"])
-        if "comment" in patch:
-            comment = patch["comment"]
-            who = str(comment.get("who", "")).strip()
-            text = str(comment.get("text", "")).strip()
-            if not who or not text:
-                raise ValueError("comment requires non-empty who and text")
-            current["comments"].append({"who": who, "text": text, "ts": iso_now()})
-            has_reason_comment = True
-        if "blocked_by" in patch or "blocked_reason" in patch:
-            self._enforce_blocked_reason_rule(current["blocked_by"], current["blocked_reason"])
-        if previous_state == "inspection" and current["state"] == "audit" and not current["inspector_signoff"]:
-            raise ValueError("inspector_signoff must be true before a ticket can enter audit from inspection")
-        self._normalize_signoff_state(current)
-        self._enforce_transition_rules(previous_state, current, has_reason_comment=has_reason_comment)
-        self._enforce_workflow_rules(current)
-        if current["state"] == "done" and previous_state != "done":
-            self._enforce_done_requirements(current)
-        current["updated"] = iso_now()
-        self._atomic_write(path, self._serialize_ticket(current))
-        return current
+        return self._pg_update_ticket(ticket_id, patch, caller_role=caller_role)
 
     def route_ticket(self, ticket_id: str, state: str, assignee: str) -> dict[str, Any]:
         ticket_id = str(ticket_id).strip().upper()
         state = self._validate_state(str(state))
         assignee = self._validate_assignee(str(assignee))
-        if self.store_backend != "postgres":
-            return self.update_ticket(ticket_id, {"state": state, "assignee": assignee})
         with self._pg_connect() as conn:
             with conn.transaction():
                 self._pg_call(conn, "SELECT ticket_board.route(%s, %s, %s);", (ticket_id, state, assignee))
                 return self._pg_get_ticket(ticket_id, conn)
 
     def merge_tickets(self, source_ticket_id: str, target_ticket_id: str, *, actor: str) -> dict[str, dict[str, Any]]:
-        if self.store_backend == "postgres":
-            actor_normalized = str(actor).strip().lower()
-            if actor_normalized != "director":
-                raise ValueError("ticket merge requires actor=director")
-            source_id = str(source_ticket_id).strip().upper()
-            target_id = str(target_ticket_id).strip().upper()
-            with self._pg_connect() as conn:
-                with conn.transaction():
-                    self._pg_set_caller_role(conn, actor_normalized)
-                    self._pg_call(conn, "SELECT ticket_board.merge(%s, %s);", (source_id, target_id))
-                    return {
-                        "source": self._pg_get_ticket(source_id, conn),
-                        "target": self._pg_get_ticket(target_id, conn),
-                    }
-
         actor_normalized = str(actor).strip().lower()
         if actor_normalized != "director":
             raise ValueError("ticket merge requires actor=director")
-
         source_id = str(source_ticket_id).strip().upper()
         target_id = str(target_ticket_id).strip().upper()
-        if not source_id or not target_id:
-            raise ValueError("merge requires both source and target ticket IDs")
-        if source_id == target_id:
-            raise ValueError("cannot merge a ticket into itself")
-
-        source_path = self.store_dir / f"{source_id}.json"
-        target_path = self.store_dir / f"{target_id}.json"
-        if not source_path.is_file():
-            raise FileNotFoundError(f"ticket not found: {source_id}")
-        if not target_path.is_file():
-            raise FileNotFoundError(f"ticket not found: {target_id}")
-
-        source = self._validate_ticket(json.loads(source_path.read_text(encoding="utf-8")), source_path)
-        target = self._validate_ticket(json.loads(target_path.read_text(encoding="utf-8")), target_path)
-
-        now = iso_now()
-        target["comments"].extend(
-            {
-                "who": comment["who"],
-                "text": f"[merged from {source_id}] {comment['text']}",
-                "ts": comment["ts"],
-            }
-            for comment in source["comments"]
-        )
-        target["comments"].append(
-            {
-                "who": "director",
-                "text": f"Merged in {source_id}: {source['title']}",
-                "ts": now,
-            }
-        )
-        target["screenshots"] = self._unique_paths([*target.get("screenshots", []), *source.get("screenshots", [])])
-        self._set_screenshot_fields(target, self._build_screenshot_entries(target["screenshots"]))
-        target["updated"] = now
-
-        source["state"] = "done"
-        source["commit_exempt"] = True
-        source["comments"].append(
-            {
-                "who": "director",
-                "text": f"Merged into {target_id}",
-                "ts": now,
-            }
-        )
-        source["updated"] = now
-
-        self._atomic_write(target_path, self._serialize_ticket(target))
-        self._atomic_write(source_path, self._serialize_ticket(source))
-        return {"source": source, "target": target}
+        with self._pg_connect() as conn:
+            with conn.transaction():
+                self._pg_set_caller_role(conn, actor_normalized)
+                self._pg_call(conn, "SELECT ticket_board.merge(%s, %s);", (source_id, target_id))
+                return {
+                    "source": self._pg_get_ticket(source_id, conn),
+                    "target": self._pg_get_ticket(target_id, conn),
+                }
 
     def get_ticket(self, ticket_id: str) -> dict[str, Any]:
         ticket_id = str(ticket_id).strip().upper()
         if not ticket_id:
             raise FileNotFoundError("ticket not found")
-        if self.store_backend == "postgres":
-            return self._pg_get_ticket(ticket_id)
-        path = self.store_dir / f"{ticket_id}.json"
-        if not path.is_file():
-            raise FileNotFoundError(f"ticket not found: {ticket_id}")
-        return self._validate_ticket(json.loads(path.read_text(encoding="utf-8")), path)
+        return self._pg_get_ticket(ticket_id)
 
     def verify_created_ticket_persisted(
         self,
@@ -509,57 +264,22 @@ class TicketBoardApp:
         if not ticket_id or not title:
             raise ValueError("created ticket missing id/title")
 
-        if self.store_backend == "postgres":
-            before_ids = {str(row[0]) for row in before_signature if row}
-            before_max = max((_ticket_number(ticket_id) for ticket_id in before_ids), default=0)
-            created_number = _ticket_number(ticket_id)
-            if created_number <= before_max:
-                raise ValueError(f"create returned non-new ticket id: {ticket_id}")
-            if ticket_id in before_ids:
-                raise ValueError(f"create collided with existing ticket id: {ticket_id}")
-            persisted = self.get_ticket(ticket_id)
-            if str(persisted.get("title", "")).strip() != title:
-                raise ValueError(f"created ticket title mismatch in postgres: {ticket_id}")
-            if str(persisted.get("body", "")) != body:
-                raise ValueError(f"created ticket body mismatch in postgres: {ticket_id}")
-            after_signature = self.store_signature()
-            if after_signature == before_signature:
-                raise ValueError(f"ticket create did not change the store: {ticket_id}")
-            return after_signature
-
-        before_names = {str(name) for name, *_ in before_signature}
-        before_max = max((_ticket_number(Path(name).stem) for name in before_names), default=0)
-        created_number = _ticket_number(ticket_id)
+        before_ids = {str(row[0]) for row in before_signature if row}
+        before_max = max((ticket_number(ticket_id) for ticket_id in before_ids), default=0)
+        created_number = ticket_number(ticket_id)
         if created_number <= before_max:
             raise ValueError(f"create returned non-new ticket id: {ticket_id}")
-        if f"{ticket_id}.json" in before_names:
+        if ticket_id in before_ids:
             raise ValueError(f"create collided with existing ticket id: {ticket_id}")
-
-        persisted_path = self.store_dir / f"{ticket_id}.json"
-        if not persisted_path.is_file():
-            raise ValueError(f"created ticket was not persisted: {ticket_id}")
-        persisted = json.loads(persisted_path.read_text(encoding="utf-8"))
-        persisted_id = str(persisted.get("id", persisted_path.stem)).strip()
-        if persisted_id != ticket_id:
-            raise ValueError(f"created ticket id mismatch on disk: {persisted_id} != {ticket_id}")
+        persisted = self.get_ticket(ticket_id)
         if str(persisted.get("title", "")).strip() != title:
-            raise ValueError(f"created ticket title mismatch on disk: {ticket_id}")
+            raise ValueError(f"created ticket title mismatch in postgres: {ticket_id}")
         if str(persisted.get("body", "")) != body:
-            raise ValueError(f"created ticket body mismatch on disk: {ticket_id}")
-
+            raise ValueError(f"created ticket body mismatch in postgres: {ticket_id}")
         after_signature = self.store_signature()
         if after_signature == before_signature:
             raise ValueError(f"ticket create did not change the store: {ticket_id}")
         return after_signature
-
-    def _atomic_write(self, path: Path, payload: dict[str, Any]) -> None:
-        atomic_write_json(path, payload)
-
-    def _validate_store_backend(self, raw: str) -> str:
-        backend = str(raw or "postgres").strip().lower()
-        if backend not in {"json", "postgres"}:
-            raise ValueError(f"invalid ticket store backend: {raw}")
-        return backend
 
     def _pg_imports(self) -> tuple[Any, Any, Any]:
         try:
@@ -915,135 +635,6 @@ ORDER BY t.ticket_number
             editable = set(editable)
         return {field: patch[field] for field in editable if field in patch}
 
-    def _pg_validate_parent_id(self, conn: Any, raw: Any, ticket_id: str) -> str:
-        if raw in (None, "", "null"):
-            return ""
-        if not isinstance(raw, str):
-            raise ValueError("parent_id must be a ticket ID string")
-        parent_id = raw.strip().upper()
-        if not parent_id:
-            return ""
-        if not parent_id.startswith("PGU-") or not parent_id[4:].isdigit():
-            raise ValueError(f"invalid parent_id ticket id: {raw}")
-        if parent_id == ticket_id:
-            raise ValueError("ticket cannot parent_id itself")
-
-        seen = {ticket_id}
-        current_parent_id = parent_id
-        while current_parent_id:
-            if current_parent_id in seen:
-                raise ValueError(f"parent_id would create a cycle through {current_parent_id}")
-            seen.add(current_parent_id)
-            row = conn.execute(
-                "SELECT parent_id FROM ticket_board.tickets WHERE id = %s;",
-                (current_parent_id,),
-            ).fetchone()
-            if row is None:
-                if current_parent_id == parent_id:
-                    raise ValueError(f"parent_id ticket not found: {parent_id}")
-                return parent_id
-            current_parent_id = str(row["parent_id"] or "").strip().upper()
-        return parent_id
-
-    def _pg_enforce_initial_state_rules(self, conn: Any, ticket: dict[str, Any]) -> None:
-        if ticket["state"] == "ready":
-            self._enforce_ready_requirements(ticket)
-        elif ticket["state"] == "in_progress":
-            self._pg_enforce_in_progress_requirements(conn, ticket, previous_state=None)
-
-    def _pg_enforce_in_progress_requirements(
-        self,
-        conn: Any,
-        ticket: dict[str, Any],
-        *,
-        previous_state: str | None,
-    ) -> None:
-        if previous_state == "analysis":
-            raise ValueError("analysis tickets must move through ready before entering in_progress")
-        if ticket["assignee"] == "unassigned":
-            raise ValueError("assignee must not be unassigned before a ticket can enter in_progress")
-        if not ticket["implementation"].strip():
-            raise ValueError("implementation must be non-empty before a ticket can enter in_progress")
-        conflicting_ticket_id = self._pg_find_other_in_progress_ticket(conn, ticket)
-        if conflicting_ticket_id is not None:
-            raise ValueError(
-                f"{ticket['assignee']} already has an in-progress ticket {conflicting_ticket_id}; finish or move it first"
-            )
-
-    def _pg_find_other_in_progress_ticket(self, conn: Any, ticket: dict[str, Any]) -> str | None:
-        assignee = ticket["assignee"]
-        if assignee == "unassigned":
-            return None
-        current_root_id = self._pg_ticket_cluster_root_id(
-            conn,
-            ticket_id=ticket["id"],
-            parent_id=ticket.get("parent_id", ""),
-        )
-        rows = conn.execute(
-            """
-SELECT id, parent_id
-FROM ticket_board.tickets
-WHERE id <> %s AND state = 'in_progress' AND assignee = %s
-ORDER BY ticket_number;
-""",
-            (ticket["id"], assignee),
-        ).fetchall()
-        for row in rows:
-            other_root_id = self._pg_ticket_cluster_root_id(conn, ticket_id=row["id"], parent_id=row["parent_id"])
-            if other_root_id != current_root_id:
-                return str(row["id"])
-        return None
-
-    def _pg_ticket_cluster_root_id(self, conn: Any, *, ticket_id: str, parent_id: Any) -> str:
-        current_root_id = ticket_id
-        if not isinstance(parent_id, str):
-            return current_root_id
-        current_parent_id = parent_id.strip().upper()
-        seen = {ticket_id}
-        while current_parent_id:
-            if current_parent_id in seen:
-                break
-            seen.add(current_parent_id)
-            current_root_id = current_parent_id
-            row = conn.execute("SELECT parent_id FROM ticket_board.tickets WHERE id = %s;", (current_parent_id,)).fetchone()
-            if row is None:
-                break
-            current_parent_id = str(row["parent_id"] or "").strip().upper()
-        return current_root_id
-
-    def _validate_ticket(self, payload: dict[str, Any], path: Path) -> dict[str, Any]:
-        ticket_id = str(payload.get("id", path.stem))
-        if not ticket_id.startswith("PGU-"):
-            raise ValueError("id must look like PGU-N")
-        screenshot_entries = self._validate_stored_screenshots(payload.get("screenshots"), payload.get("screenshot"))
-        ticket = {
-            "id": ticket_id,
-            "title": self._require_text(payload.get("title"), "title"),
-            "body": self._require_body(payload.get("body")),
-            "assignee": self._validate_assignee(str(payload.get("assignee", "unassigned"))),
-            "state": self._validate_state(str(payload.get("state", "analysis"))),
-            "blocked_by": self._validate_blocked_by(payload.get("blocked_by", []), ticket_id),
-            "parent_id": self._validate_parent_id(payload.get("parent_id", ""), ticket_id),
-            "blocked_reason": self._require_plain_string(payload.get("blocked_reason", ""), "blocked_reason"),
-            "implementation": self._require_plain_string(payload.get("implementation", ""), "implementation"),
-            "audit_prompt": self._require_plain_string(payload.get("audit_prompt", ""), "audit_prompt"),
-            "audit_signoff": bool(payload.get("audit_signoff", False)),
-            "needs_inspection": bool(payload.get("needs_inspection", False)),
-            "inspector_signoff": bool(payload.get("inspector_signoff", False)),
-            "needs_eric_signoff": bool(payload.get("needs_eric_signoff", False)),
-            "eric_signoff": bool(payload.get("eric_signoff", False)),
-            "manually_controlled": bool(payload.get("manually_controlled", False)),
-            "commit_hash": self._validate_commit_hash(payload.get("commit_hash", "")),
-            "commit_exempt": bool(payload.get("commit_exempt", False)),
-            "created": self._require_text(payload.get("created"), "created"),
-            "updated": self._require_text(payload.get("updated"), "updated"),
-            "comments": self._validate_comments(payload.get("comments", [])),
-        }
-        self._set_screenshot_fields(ticket, screenshot_entries)
-        self._normalize_signoff_state(ticket)
-        self._enforce_workflow_rules(ticket)
-        return ticket
-
     def _validate_comments(self, raw: Any) -> list[dict[str, str]]:
         if not isinstance(raw, list):
             raise ValueError("comments must be a list")
@@ -1080,143 +671,9 @@ ORDER BY ticket_number;
                 blocked_by.append(blocker_id)
         return blocked_by
 
-    def _validate_parent_id(self, raw: Any, ticket_id: str) -> str:
-        if raw in (None, "", "null"):
-            return ""
-        if not isinstance(raw, str):
-            raise ValueError("parent_id must be a ticket ID string")
-        parent_id = raw.strip().upper()
-        if not parent_id:
-            return ""
-        if not parent_id.startswith("PGU-") or not parent_id[4:].isdigit():
-            raise ValueError(f"invalid parent_id ticket id: {raw}")
-        if parent_id == ticket_id:
-            raise ValueError("ticket cannot parent_id itself")
-        parent_path = self.store_dir / f"{parent_id}.json"
-        if not parent_path.is_file():
-            raise ValueError(f"parent_id ticket not found: {parent_id}")
-        self._assert_parent_link_acyclic(ticket_id, parent_id)
-        return parent_id
-
-    def _assert_parent_link_acyclic(self, ticket_id: str, parent_id: str) -> None:
-        seen = {ticket_id}
-        current_parent_id = parent_id
-        while current_parent_id:
-            if current_parent_id in seen:
-                raise ValueError(f"parent_id would create a cycle through {current_parent_id}")
-            seen.add(current_parent_id)
-            current_path = self.store_dir / f"{current_parent_id}.json"
-            if not current_path.is_file():
-                return
-            try:
-                payload = json.loads(current_path.read_text(encoding="utf-8"))
-            except Exception:
-                return
-            raw_next = payload.get("parent_id", "")
-            if raw_next in (None, "", "null"):
-                return
-            if not isinstance(raw_next, str):
-                raise ValueError(f"parent ticket {current_parent_id} has invalid parent_id")
-            next_parent_id = raw_next.strip().upper()
-            if not next_parent_id:
-                return
-            if not next_parent_id.startswith("PGU-") or not next_parent_id[4:].isdigit():
-                raise ValueError(f"parent ticket {current_parent_id} has invalid parent_id {raw_next!r}")
-            current_parent_id = next_parent_id
-
-    def _normalize_signoff_state(self, ticket: dict[str, Any]) -> None:
-        if not ticket["needs_inspection"]:
-            ticket["inspector_signoff"] = False
-        if ticket["state"] == "audit" and ticket["needs_inspection"] and not ticket["inspector_signoff"]:
-            ticket["state"] = "inspection"
-            ticket["inspector_signoff"] = False
-        if ticket["state"] == "eric_review" and not ticket["needs_eric_signoff"]:
-            ticket["state"] = "audit"
-            ticket["audit_signoff"] = False
-        if not ticket["needs_eric_signoff"]:
-            ticket["eric_signoff"] = False
-        if ticket["state"] == "eric_review" and ticket["eric_signoff"]:
-            ticket["state"] = "director_review"
-            ticket["assignee"] = "director"
-        if ticket["state"] == "audit" and ticket["audit_signoff"]:
-            ticket["state"] = "eric_review" if ticket["needs_eric_signoff"] else "director_review"
-            ticket["assignee"] = "director"
-
     def _enforce_blocked_reason_rule(self, blocked_by: list[str], blocked_reason: str) -> None:
         if blocked_by and not blocked_reason.strip():
             raise ValueError("blocked_reason must be non-empty when blocked_by is set")
-
-    def _enforce_workflow_rules(self, ticket: dict[str, Any]) -> None:
-        if ticket["state"] == "inspection" and not ticket["needs_inspection"]:
-            raise ValueError("needs_inspection must be true before a ticket can enter inspection")
-        if ticket["state"] == "eric_review" and not ticket["audit_signoff"]:
-            raise ValueError("audit_signoff must be true before a ticket can enter eric_review")
-        if ticket["state"] == "director_review" and ticket["needs_eric_signoff"] and not ticket["eric_signoff"]:
-            raise ValueError("eric_signoff must be true before a ticket can enter director_review")
-
-    def _enforce_transition_rules(
-        self,
-        previous_state: str,
-        ticket: dict[str, Any],
-        *,
-        has_reason_comment: bool = False,
-    ) -> None:
-        if previous_state in RESET_REVIEW_ARTIFACT_SOURCE_STATES and ticket["state"] in REOPEN_RESET_TARGET_STATES:
-            ticket["inspector_signoff"] = False
-            ticket["audit_signoff"] = False
-            ticket["commit_hash"] = ""
-        if previous_state != ticket["state"]:
-            self._enforce_legal_state_transition(previous_state, ticket["state"])
-        if previous_state == "audit" and ticket["state"] == "analysis":
-            ticket["assignee"] = "unassigned"
-        if previous_state != "cancelled" and ticket["state"] == "cancelled":
-            self._enforce_cancel_requirements(
-                previous_state=previous_state,
-                ticket=ticket,
-                has_reason_comment=has_reason_comment,
-            )
-        if previous_state == "analysis" and ticket["state"] == "in_progress":
-            raise ValueError("analysis tickets must move through ready before entering in_progress")
-        if previous_state == "inspection" and ticket["state"] == "ready" and not has_reason_comment:
-            raise ValueError("inspector kickback requires a non-empty recommendations comment")
-        if previous_state == "inspection" and ticket["state"] == "audit" and not ticket["inspector_signoff"]:
-            raise ValueError("inspector_signoff must be true before a ticket can enter audit from inspection")
-        if previous_state != "ready" and ticket["state"] == "ready":
-            self._enforce_ready_requirements(ticket)
-        if previous_state != "in_progress" and ticket["state"] == "in_progress":
-            self._enforce_in_progress_requirements(ticket, previous_state=previous_state)
-        if previous_state != "director_review" and ticket["state"] == "director_review" and not ticket["audit_signoff"]:
-            raise ValueError("audit_signoff must be true before a ticket can enter director_review")
-        if previous_state not in {"audit", "eric_review", "director_review"} and ticket["state"] == "director_review":
-            raise ValueError("tickets must pass through audit before entering director_review")
-        if previous_state == "audit" and ticket["state"] == "director_review" and ticket["needs_eric_signoff"]:
-            raise ValueError("tickets requiring Eric signoff must pass through eric_review before entering director_review")
-        if previous_state == "audit" and ticket["state"] in {"eric_review", "director_review", "done"} and not ticket["audit_signoff"]:
-            raise ValueError("audit_signoff must be true before a ticket can leave audit")
-        if (
-            previous_state == "eric_review"
-            and ticket["state"] == "director_review"
-            and ticket["needs_eric_signoff"]
-            and not ticket["eric_signoff"]
-        ):
-            raise ValueError("eric_signoff must be true before a ticket can leave eric_review")
-        if ticket["state"] == "done" and previous_state not in {"done", "director_review"}:
-            raise ValueError("tickets can only enter done from director_review")
-
-    def _enforce_legal_state_transition(self, previous_state: str, next_state: str) -> None:
-        previous_state = LEGACY_STATE_ALIASES.get(previous_state, previous_state)
-        next_state = LEGACY_STATE_ALIASES.get(next_state, next_state)
-        allowed_next_states = LEGAL_STATE_TRANSITIONS.get(previous_state, set())
-        if next_state not in allowed_next_states:
-            raise ValueError(f"illegal state transition: {previous_state} -> {next_state}")
-
-    def _enforce_done_requirements(self, ticket: dict[str, Any]) -> None:
-        if ticket.get("commit_exempt"):
-            return
-        if not ticket.get("commit_hash"):
-            raise ValueError("commit_hash is required before a ticket can enter done")
-        if not self._commit_is_on_main(ticket["commit_hash"]):
-            raise ValueError(f"commit_hash {ticket['commit_hash']} is not on main - merge the branch first")
 
     def _validate_commit_hash(self, raw: Any) -> str:
         if raw in (None, ""):
@@ -1252,103 +709,6 @@ ORDER BY ticket_number;
             check=False,
         )
         return proc.returncode == 0
-
-    def _enforce_initial_state_rules(self, ticket: dict[str, Any]) -> None:
-        if ticket["state"] == "ready":
-            self._enforce_ready_requirements(ticket)
-        elif ticket["state"] == "in_progress":
-            self._enforce_in_progress_requirements(ticket, previous_state=None)
-
-    def _enforce_cancel_requirements(
-        self,
-        *,
-        previous_state: str | None,
-        ticket: dict[str, Any],
-        has_reason_comment: bool,
-    ) -> None:
-        if previous_state is not None and previous_state not in ACTIVE_STATES:
-            raise ValueError("only active tickets can be cancelled")
-        if not has_reason_comment:
-            raise ValueError("cancelling a ticket requires a non-empty comment explaining why")
-
-    def _enforce_ready_requirements(self, ticket: dict[str, Any]) -> None:
-        if ticket["assignee"] == "unassigned":
-            raise ValueError("assignee must not be unassigned before a ticket can enter ready")
-        if not ticket["implementation"].strip():
-            raise ValueError("implementation must be non-empty before a ticket can enter ready")
-
-    def _enforce_in_progress_requirements(self, ticket: dict[str, Any], *, previous_state: str | None) -> None:
-        if previous_state == "analysis":
-            raise ValueError("analysis tickets must move through ready before entering in_progress")
-        if ticket["assignee"] == "unassigned":
-            raise ValueError("assignee must not be unassigned before a ticket can enter in_progress")
-        if not ticket["implementation"].strip():
-            raise ValueError("implementation must be non-empty before a ticket can enter in_progress")
-        conflicting_ticket_id = self._find_other_in_progress_ticket(ticket)
-        if conflicting_ticket_id is not None:
-            raise ValueError(
-                f"{ticket['assignee']} already has an in-progress ticket {conflicting_ticket_id}; finish or move it first"
-            )
-
-    def _find_other_in_progress_ticket(self, ticket: dict[str, Any]) -> str | None:
-        assignee = ticket["assignee"]
-        exclude_ticket_id = ticket["id"]
-        if assignee == "unassigned":
-            return None
-        current_root_id = self._ticket_cluster_root_id(ticket_id=exclude_ticket_id, parent_id=ticket.get("parent_id", ""))
-        for path in sorted(self.store_dir.glob("PGU-*.json")):
-            try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            ticket_id = str(payload.get("id", path.stem))
-            if ticket_id == exclude_ticket_id:
-                continue
-            try:
-                state = self._validate_state(str(payload.get("state", "analysis")))
-                ticket_assignee = self._validate_assignee(str(payload.get("assignee", "unassigned")))
-            except ValueError:
-                continue
-            if state != "in_progress" or ticket_assignee != assignee:
-                continue
-            other_root_id = self._ticket_cluster_root_id(
-                ticket_id=ticket_id,
-                parent_id=payload.get("parent_id", ""),
-            )
-            if other_root_id == current_root_id:
-                continue
-            if state == "in_progress" and ticket_assignee == assignee:
-                return ticket_id
-        return None
-
-    def _ticket_cluster_root_id(self, *, ticket_id: str, parent_id: Any) -> str:
-        current_root_id = ticket_id
-        if not isinstance(parent_id, str):
-            return current_root_id
-        current_parent_id = parent_id.strip().upper()
-        seen = {ticket_id}
-        while current_parent_id:
-            if current_parent_id in seen:
-                break
-            seen.add(current_parent_id)
-            current_root_id = current_parent_id
-            current_path = self.store_dir / f"{current_parent_id}.json"
-            if not current_path.is_file():
-                break
-            try:
-                payload = json.loads(current_path.read_text(encoding="utf-8"))
-            except Exception:
-                break
-            raw_next_parent = payload.get("parent_id", "")
-            if not isinstance(raw_next_parent, str):
-                break
-            next_parent_id = raw_next_parent.strip().upper()
-            if not next_parent_id:
-                break
-            if not next_parent_id.startswith("PGU-") or not next_parent_id[4:].isdigit():
-                break
-            current_parent_id = next_parent_id
-        return current_root_id
 
     def _path_in_allowed_image_dirs(self, path: Path) -> bool:
         return self.frame_dir in path.parents or self.asset_dir in path.parents
@@ -1447,22 +807,11 @@ ORDER BY ticket_number;
     def _normalize_image_path(self, raw: str) -> str:
         return str(Path(raw).expanduser().resolve())
 
-    def _serialize_ticket(self, ticket: dict[str, Any]) -> dict[str, Any]:
-        return {
-            key: value
-            for key, value in ticket.items()
-            if key not in {"screenshot_available", "screenshots_info"}
-        }
-
     def _validate_state(self, state: str) -> str:
         state = LEGACY_STATE_ALIASES.get(state, state)
         if state not in STATES:
             raise ValueError(f"invalid state: {state}")
         return state
-
-    def _payload_needs_state_migration(self, payload: dict[str, Any]) -> bool:
-        raw_state = payload.get("state")
-        return isinstance(raw_state, str) and raw_state == "open"
 
     def _validate_assignee(self, assignee: str) -> str:
         assignee = LEGACY_ASSIGNEE_ALIASES.get(assignee, assignee)

@@ -8,29 +8,66 @@ import subprocess
 import sys
 import tempfile
 import threading
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from multiprocessing import Process, Queue
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-from scripts.ticket_board.app import TicketBoardApp
-from scripts.ticket_board.server import TicketBoardServer
-
 DIRECTORCTL = ROOT / "scripts" / "directorctl"
 WORKERS = 8
 
 
-class QuietNotifier:
-    def notify_ticket_created(self, ticket: dict[str, object]) -> None:
+class CreateHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, format: str, *args: object) -> None:
         return
 
-    def close(self) -> None:
-        return
+    def do_POST(self) -> None:  # noqa: N802
+        assert self.path == "/api/tickets/actions/create_ticket", self.path
+        length = int(self.headers.get("Content-Length", "0"))
+        payload = json.loads(self.rfile.read(length) or b"{}")
+        ticket_id = self.server.next_ticket_id()  # type: ignore[attr-defined]
+        ticket = {
+            "id": ticket_id,
+            "title": payload["title"],
+            "body": payload["body"],
+            "assignee": payload["assignee"],
+            "state": payload["state"],
+            "blocked_by": payload["blocked_by"],
+            "blocked_reason": payload["blocked_reason"],
+            "implementation": payload["implementation"],
+            "comments": [{"who": "director", "text": payload["comment_text"], "ts": "2026-07-11T00:00:00+00:00"}]
+            if payload.get("comment_text")
+            else [],
+            "screenshots": [],
+            "screenshot": None,
+        }
+        self.server.created.append(ticket)  # type: ignore[attr-defined]
+        body = json.dumps({"ticket": ticket}).encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
 
-def run_create(index: int, board_url: str, queue: Queue[dict[str, str]]) -> None:
+class CreateServer(ThreadingHTTPServer):
+    def __init__(self) -> None:
+        super().__init__(("127.0.0.1", 0), CreateHandler)
+        self._next_number = 1
+        self._lock = threading.Lock()
+        self.created: list[dict[str, object]] = []
+
+    def next_ticket_id(self) -> str:
+        with self._lock:
+            ticket_id = f"PGU-{self._next_number}"
+            self._next_number += 1
+            return ticket_id
+
+
+def run_create(index: int, board_url: str, queue: Queue[dict[str, object]]) -> None:
     cmd = [
         str(DIRECTORCTL),
         "ticket-create",
@@ -60,15 +97,8 @@ def run_create(index: int, board_url: str, queue: Queue[dict[str, str]]) -> None
 
 
 def main() -> int:
-    with tempfile.TemporaryDirectory(prefix="directorctl-ticket-create.") as tmpdir:
-        root = Path(tmpdir)
-        store = root / "store"
-        frames = root / "frames"
-        assets = root / "assets"
-        store.mkdir()
-        frames.mkdir()
-        assets.mkdir()
-        server = TicketBoardServer(("127.0.0.1", 0), TicketBoardApp(store, frames, assets, store_backend="json", allow_json_store=True), director_notifier=QuietNotifier())
+    with tempfile.TemporaryDirectory(prefix="directorctl-ticket-create."):
+        server = CreateServer()
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         board_url = f"http://127.0.0.1:{server.server_port}"
@@ -110,16 +140,11 @@ def main() -> int:
             assert ticket["screenshot"] is None
             assert ticket["comments"][0]["who"] == "director"
             assert ticket["comments"][0]["text"] == "speced + routed"
-            assert ticket["comments"][0]["ts"] == ticket["created"]
             assert ticket["blocked_by"] == ["PGU-23", "PGU-25"]
             assert ticket["blocked_reason"] == "Waiting on PGU-23 and PGU-25."
             assert ticket["implementation"] == "ship the helper"
 
-            loaded = json.loads((store / f"{ticket['id']}.json").read_text(encoding="utf-8"))
-            assert loaded["state"] == "ready"
-            assert loaded["comments"][0]["ts"] == loaded["created"]
-
-            queue: Queue[dict[str, str]] = Queue()
+            queue: Queue[dict[str, object]] = Queue()
             workers = [Process(target=run_create, args=(index, board_url, queue)) for index in range(WORKERS)]
             for worker in workers:
                 worker.start()
@@ -131,9 +156,6 @@ def main() -> int:
             ids = [item["id"] for item in created]
             assert len(ids) == WORKERS
             assert len(set(ids)) == WORKERS, ids
-
-            files = sorted(store.glob("PGU-*.json"))
-            assert len(files) == WORKERS + 1
         finally:
             server.shutdown()
             server.server_close()

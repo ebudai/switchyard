@@ -39,10 +39,10 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now pgu-ticket-board.service
 ```
 
-Before installing the unit, verify the deployed code includes the Postgres board
-backend and `scripts/ticket-board.py --help` shows `--store-backend`,
-`--database`, and `--assets`. This prep package deliberately does not make the
-JSON store readable or writable by `boardsvc`.
+Before installing the unit, verify the deployed code includes the Postgres-only
+board and `scripts/ticket-board.py --help` shows `--database` and `--assets`.
+This prep package deliberately does not make the retired JSON store readable or
+writable by `boardsvc`.
 
 ## What The Setup Does
 

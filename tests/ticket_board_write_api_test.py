@@ -623,28 +623,6 @@ def exercise_write_api(base_url: str, commit_hash: str) -> None:
     assert merged_source["commit_exempt"] is True, merged_source
 
 
-def exercise_json_backend(commit_hash: str) -> None:
-    with tempfile.TemporaryDirectory(prefix="ticket-board-write-api-json.") as tmpdir:
-        root = Path(tmpdir)
-        store = root / "store"
-        frames = root / "frames"
-        assets = root / "assets"
-        store.mkdir()
-        frames.mkdir()
-        assets.mkdir()
-        seed_fixtures(lambda ticket_id, **kwargs: seed_json_ticket(store, ticket_id, **kwargs), commit_hash)
-        app = TicketBoardApp(store, frames, assets, store_backend="json", allow_json_store=True)
-        server = TicketBoardServer(("127.0.0.1", 0), app, director_notifier=QuietNotifier())
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            exercise_write_api(f"http://127.0.0.1:{server.server_port}", commit_hash)
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join(timeout=2)
-
-
 def exercise_postgres_backend(commit_hash: str) -> None:
     with tempfile.TemporaryDirectory(prefix="ticket-board-write-api-postgres.") as tmpdir:
         root = Path(tmpdir)
@@ -667,10 +645,8 @@ def exercise_postgres_backend(commit_hash: str) -> None:
             psql(admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
             seed_fixtures(lambda ticket_id, **kwargs: seed_postgres_ticket(admin_conn, ticket_id, **kwargs), commit_hash)
             app = TicketBoardApp(
-                root / "json-unused",
                 frames,
                 assets,
-                store_backend="postgres",
                 database_url=conninfo(socket_dir, port, dbname, SERVICE_ROLE),
             )
             server = TicketBoardServer(("127.0.0.1", 0), app, director_notifier=QuietNotifier())
@@ -694,7 +670,6 @@ def exercise_postgres_backend(commit_hash: str) -> None:
 def main() -> int:
     commit_hash = main_commit()
     assert_frontend_update_calls_send_caller_role()
-    exercise_json_backend(commit_hash)
     exercise_postgres_backend(commit_hash)
     print("ticket_board_write_api_test: ok")
     return 0

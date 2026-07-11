@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 import sys
 import tempfile
 import threading
@@ -13,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.ticket_board.app import TicketBoardApp
+from scripts.ticket_board.app import ASSIGNEES, STATES, iso_now
 from scripts.ticket_board.server import DirectorNotifier, TicketBoardServer
 
 
@@ -35,8 +34,30 @@ class QuietNotifier(DirectorNotifier):
         super().__init__(sender=lambda payload: None, batch_window_seconds=0.01)
 
 
-def write_ticket(path: Path, payload: dict[str, object]) -> None:
-    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+class StaticBoardApp:
+    store_backend = "postgres"
+
+    def __init__(self, tickets: list[dict[str, object]], frames: Path, assets: Path) -> None:
+        self.tickets = tickets
+        self.frame_dir = frames.resolve()
+        self.asset_dir = assets.resolve()
+
+    def store_signature(self) -> tuple[tuple[str, str], ...]:
+        return tuple((str(ticket["id"]), str(ticket["updated"])) for ticket in self.tickets)
+
+    def snapshot(self) -> dict[str, object]:
+        return {
+            "tickets": self.tickets,
+            "errors": [],
+            "states": list(STATES),
+            "assignees": list(ASSIGNEES),
+            "screenshots": [],
+            "store_backend": self.store_backend,
+            "store_path": "postgres",
+            "frame_dir": str(self.frame_dir),
+            "asset_dir": str(self.asset_dir),
+            "refreshed_at": iso_now(),
+        }
 
 
 def ticket_payload(ticket_id: str, title: str, *, state: str, needs_eric_signoff: bool = False) -> dict[str, object]:
@@ -71,8 +92,11 @@ def run_browser_check(playwright: object, server_port: int) -> None:
 
         create_toggle = mobile.locator("#createSectionToggle")
         create_content = mobile.locator("#createSectionContent")
-        assert create_toggle.get_attribute("aria-expanded") == "false"
-        assert create_content.is_hidden()
+        mobile.wait_for_function(
+            "() => document.getElementById('createSectionContent')?.hidden === true"
+            " && document.getElementById('createSectionToggle')?.getAttribute('aria-expanded') === 'false'",
+            timeout=5000,
+        )
         create_toggle.click()
         assert create_toggle.get_attribute("aria-expanded") == "true"
         create_content.locator("#titleInput").wait_for(timeout=5000)
@@ -121,28 +145,28 @@ def main() -> int:
     sync_playwright = load_playwright()
     with tempfile.TemporaryDirectory(prefix="mobile-collapsible-sections.") as tmpdir:
         root = Path(tmpdir)
-        store = root / "store"
         frames = root / "frames"
         assets = root / "assets"
-        store.mkdir()
         frames.mkdir()
         assets.mkdir()
 
-        write_ticket(store / "PGU-1.json", ticket_payload("PGU-1", "Analysis task", state="analysis"))
-        write_ticket(store / "PGU-2.json", ticket_payload("PGU-2", "Ready task", state="ready"))
-        write_ticket(store / "PGU-3.json", ticket_payload("PGU-3", "Audit task", state="audit"))
+        tickets = [
+            ticket_payload("PGU-1", "Analysis task", state="analysis"),
+            ticket_payload("PGU-2", "Ready task", state="ready"),
+            ticket_payload("PGU-3", "Audit task", state="audit"),
+        ]
         child_done = ticket_payload("PGU-4", "Done child A", state="done")
         child_done["parent_id"] = "PGU-1"
         child_done["commit_exempt"] = True
         child_done["audit_signoff"] = True
-        write_ticket(store / "PGU-4.json", child_done)
+        tickets.append(child_done)
         child_done_2 = ticket_payload("PGU-5", "Done child B", state="done")
         child_done_2["parent_id"] = "PGU-1"
         child_done_2["commit_exempt"] = True
         child_done_2["audit_signoff"] = True
-        write_ticket(store / "PGU-5.json", child_done_2)
+        tickets.append(child_done_2)
 
-        app = TicketBoardApp(store, frames, assets, store_backend="json", allow_json_store=True)
+        app = StaticBoardApp(tickets, frames, assets)
         server = TicketBoardServer(("127.0.0.1", 0), app, director_notifier=QuietNotifier())
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()

@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 import sys
 import tempfile
 import threading
@@ -13,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.ticket_board.app import TicketBoardApp
+from scripts.ticket_board.app import ASSIGNEES, STATES, iso_now
 from scripts.ticket_board.server import DirectorNotifier, TicketBoardServer
 
 
@@ -35,8 +34,30 @@ class QuietNotifier(DirectorNotifier):
         super().__init__(sender=lambda payload: None, batch_window_seconds=0.01)
 
 
-def write_ticket(path: Path, payload: dict[str, object]) -> None:
-    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+class StaticBoardApp:
+    store_backend = "postgres"
+
+    def __init__(self, tickets: list[dict[str, object]], frames: Path, assets: Path) -> None:
+        self.tickets = tickets
+        self.frame_dir = frames.resolve()
+        self.asset_dir = assets.resolve()
+
+    def store_signature(self) -> tuple[tuple[str, str], ...]:
+        return tuple((str(ticket["id"]), str(ticket["updated"])) for ticket in self.tickets)
+
+    def snapshot(self) -> dict[str, object]:
+        return {
+            "tickets": self.tickets,
+            "errors": [],
+            "states": list(STATES),
+            "assignees": list(ASSIGNEES),
+            "screenshots": [],
+            "store_backend": self.store_backend,
+            "store_path": "postgres",
+            "frame_dir": str(self.frame_dir),
+            "asset_dir": str(self.asset_dir),
+            "refreshed_at": iso_now(),
+        }
 
 
 def ticket_payload(
@@ -102,17 +123,14 @@ def main() -> int:
     sync_playwright = load_playwright()
     with tempfile.TemporaryDirectory(prefix="linked-ticket-grouping.") as tmpdir:
         root = Path(tmpdir)
-        store = root / "store"
         frames = root / "frames"
         assets = root / "assets"
-        store.mkdir()
         frames.mkdir()
         assets.mkdir()
 
-        write_ticket(store / "PGU-1.json", ticket_payload("PGU-1", "Parent", state="analysis"))
-        write_ticket(store / "PGU-2.json", ticket_payload("PGU-2", "Active child", state="in_progress", parent_id="PGU-1"))
-        write_ticket(
-            store / "PGU-3.json",
+        tickets = [
+            ticket_payload("PGU-1", "Parent", state="analysis"),
+            ticket_payload("PGU-2", "Active child", state="in_progress", parent_id="PGU-1"),
             ticket_payload(
                 "PGU-3",
                 "Done child",
@@ -121,9 +139,9 @@ def main() -> int:
                 audit_signoff=True,
                 commit_exempt=True,
             ),
-        )
+        ]
 
-        app = TicketBoardApp(store, frames, assets, store_backend="json", allow_json_store=True)
+        app = StaticBoardApp(tickets, frames, assets)
         server = TicketBoardServer(("127.0.0.1", 0), app, director_notifier=QuietNotifier())
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()

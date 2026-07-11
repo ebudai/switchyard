@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
 
-from .app import TicketBoardApp, _ticket_number, iso_now
+from .app import TicketBoardApp, iso_now
 from .frontend import HTML
 
 LOGGER = logging.getLogger(__name__)

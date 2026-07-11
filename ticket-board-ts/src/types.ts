@@ -51,9 +51,9 @@ function assertNever(value: never): never {
 
 /**
  * The legal next-state set per current state. This is the TS mirror of
- * `enforce_ticket_workflow_update`'s adjacency checks (schema.sql) and of
- * Python's `LEGAL_STATE_TRANSITIONS` dict (app.py) -- see PORT-NOTES.md for
- * why a `switch` here is a strictly stronger guarantee than a dict literal.
+ * `enforce_ticket_workflow_update`'s adjacency checks (schema.sql). See
+ * PORT-NOTES.md for why a `switch` here is a strictly stronger guarantee
+ * than a lookup object.
  */
 export function legalNextStates(state: TicketState): readonly TicketState[] {
   switch (state) {

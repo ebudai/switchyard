@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -39,19 +40,26 @@ class FakeConnection:
         *,
         pending_rows: list[tuple[str, str]] | None = None,
         fail_on_notifies: bool = False,
+        block_on_notifies: bool = False,
         executed: list[Any] | None = None,
     ) -> None:
         self.notifications = notifications or []
         self.pending_rows = pending_rows or []
         self.fail_on_notifies = fail_on_notifies
+        self.block_on_notifies = block_on_notifies
         self.executed = executed if executed is not None else []
         self.closed = False
+        self.close_event = threading.Event()
 
     def __enter__(self) -> FakeConnection:
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.close()
+
+    def close(self) -> None:
         self.closed = True
+        self.close_event.set()
 
     def execute(self, statement: Any, params: object | None = None) -> FakeResult:
         self.executed.append((statement, params))
@@ -62,6 +70,10 @@ class FakeConnection:
     def notifies(self, *, timeout: float | None = None) -> list[FakeNotify]:
         if self.fail_on_notifies:
             raise psycopg.OperationalError("simulated connection drop")
+        if self.block_on_notifies:
+            if self.close_event.wait(timeout=1.0):
+                raise psycopg.OperationalError("simulated wedged connection closed")
+            raise AssertionError("watchdog never force-closed the wedged connection")
         queued = [FakeNotify(payload) for payload in self.notifications]
         self.notifications = []
         return queued
@@ -152,6 +164,73 @@ def test_reconnect_relistens_after_connection_drop() -> None:
     assert sum("LISTEN" in str(statement) for statement, _params in executed) == 2, "listener must re-issue LISTEN after reconnecting"
 
 
+def test_director_send_timeout_does_not_block_other_pane_delivery() -> None:
+    sent: list[tuple[str, str]] = []
+    executed: list[Any] = []
+    conn = FakeConnection(
+        [
+            transition_payload(
+                "PGU-220",
+                title="Director review",
+                old_state="audit",
+                new_state="director_review",
+                assignee="director",
+            ),
+            transition_payload("PGU-221", title="Ops work", old_state="analysis", new_state="ready", assignee="ops"),
+        ],
+        executed=executed,
+    )
+
+    def sender(target: str, message: str) -> None:
+        if target == "pgu-director:0.0":
+            raise subprocess.TimeoutExpired(["directorctl", "send"], timeout=10)
+        sent.append((target, message))
+
+    listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=sender,
+        connector=lambda *args, **kwargs: conn,
+        poll_seconds=0,
+    )
+
+    delivered = listener.listen_once(max_notifications=1)
+
+    assert delivered == 1
+    assert sent == [("pgu-ops:0.0", "Ready ticket for you: PGU-221 -- Ops work")]
+    mark_calls = [params for statement, params in executed if "mark_transition_notified" in str(statement)]
+    assert mark_calls == [("PGU-221",)], mark_calls
+
+
+def test_poll_watchdog_force_closes_wedged_connection_and_reconnects() -> None:
+    sent: list[tuple[str, str]] = []
+    executed: list[Any] = []
+    wedged = FakeConnection(block_on_notifies=True, executed=executed)
+    recovered = FakeConnection(
+        [transition_payload("PGU-219", title="Wedge recovery", old_state="analysis", new_state="ready", assignee="ops")],
+        executed=executed,
+    )
+    connections = [wedged, recovered]
+
+    def connector(*args: Any, **kwargs: Any) -> FakeConnection:
+        return connections.pop(0)
+
+    listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=lambda target, message: sent.append((target, message)),
+        connector=connector,
+        reconnect_seconds=0,
+        poll_seconds=0.01,
+        watchdog_seconds=0.05,
+    )
+
+    listener.run_forever(max_connections=2, max_notifications=1)
+
+    assert wedged.closed is True
+    assert wedged.close_event.is_set()
+    assert sent == [("pgu-ops:0.0", "Ready ticket for you: PGU-219 -- Wedge recovery")]
+    assert sum("LISTEN" in str(statement) for statement, _params in executed) == 2, "watchdog reconnect must re-issue LISTEN"
+
+
 def test_reconcile_delivers_missed_transition_and_marks_notified() -> None:
     sent: list[tuple[str, str]] = []
     executed: list[Any] = []
@@ -220,6 +299,8 @@ def main() -> int:
     test_simulated_pg_notify_delivers_to_assignee_pane()
     test_eric_review_is_not_delivered()
     test_reconnect_relistens_after_connection_drop()
+    test_director_send_timeout_does_not_block_other_pane_delivery()
+    test_poll_watchdog_force_closes_wedged_connection_and_reconnects()
     test_reconcile_delivers_missed_transition_and_marks_notified()
     test_nudge_is_suppressed_when_pane_is_working()
     test_default_sender_delegates_to_directorctl_send()

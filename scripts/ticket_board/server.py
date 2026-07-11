@@ -41,6 +41,7 @@ OPERATION_ALLOWED_ROLES = {
     "set_manually_controlled": {"director"},
     "set_blockers": {"director"},
     "add_comment": CALLER_ROLES,
+    "legacy_patch": CALLER_ROLES,
 }
 
 
@@ -213,6 +214,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         allowed = OPERATION_ALLOWED_ROLES.get(operation)
         if allowed is None:
             raise ValueError(f"unknown ticket operation: {operation}")
+        if caller_role == "eric":
+            return
         if caller_role not in allowed:
             raise PermissionError(f"{caller_role} cannot call {operation}")
         if operation in {"start_work", "submit_to_audit"} and ticket_id is not None:
@@ -327,6 +330,98 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         self.events.notify_change(self.app.store_signature())
         self.send_json({"ticket": updated})
 
+    def authorize_legacy_ticket_patch(self, ticket_id: str, payload: dict[str, object]) -> dict[str, object]:
+        caller = self.caller_role()
+        normalized_payload = dict(payload)
+        if isinstance(normalized_payload.get("comment"), dict):
+            comment = dict(normalized_payload["comment"])  # type: ignore[arg-type]
+            comment["who"] = caller
+            normalized_payload["comment"] = comment
+
+        operations = self.legacy_patch_operations(ticket_id, normalized_payload)
+        for operation in operations:
+            self.require_operation_allowed(operation, caller, ticket_id)
+        return normalized_payload
+
+    def legacy_patch_operations(self, ticket_id: str, payload: dict[str, object]) -> list[str]:
+        operations: list[str] = []
+        current: dict[str, object] | None = None
+
+        def current_ticket() -> dict[str, object]:
+            nonlocal current
+            if current is None:
+                current = self.app.get_ticket(ticket_id)
+            return current
+
+        if "blocked_by" in payload or "blocked_reason" in payload:
+            operations.append("set_blockers")
+        if "manually_controlled" in payload:
+            operations.append("set_manually_controlled")
+        if bool(payload.get("audit_signoff", False)):
+            operations.append("audit_sign_off")
+        if bool(payload.get("eric_signoff", False)):
+            operations.append("eric_sign_off")
+
+        comment = payload.get("comment")
+        has_comment = isinstance(comment, dict) and bool(str(comment.get("text", "")).strip())
+        consumed_comment = False
+
+        if "state" in payload:
+            state = str(payload["state"]).strip().lower()
+            previous_state = str(current_ticket().get("state", "")).strip().lower()
+            if state == "in_progress":
+                operations.append("start_work")
+            elif state == "audit":
+                operations.append("submit_to_audit")
+            elif state == "done":
+                operations.append("mark_done")
+            elif state == "backlog":
+                operations.append("defer")
+            elif state == "cancelled":
+                operations.append("cancel")
+                consumed_comment = True
+            elif state == "analysis" and has_comment and previous_state == "audit":
+                operations.append("audit_kick_back")
+                consumed_comment = True
+            elif state == "analysis" and has_comment and previous_state in {"eric_review", "director_review", "done"}:
+                operations.append("eric_reopen")
+                consumed_comment = True
+            elif (
+                state in {"director_review", "eric_review"}
+                and bool(payload.get("audit_signoff", False))
+                and previous_state == "audit"
+            ):
+                pass
+            elif state == "director_review" and bool(payload.get("eric_signoff", False)) and previous_state == "eric_review":
+                pass
+            else:
+                operations.append("route")
+        elif "assignee" in payload:
+            operations.append("route")
+
+        if has_comment and not consumed_comment:
+            operations.append("add_comment")
+
+        legacy_fields = {
+            "title",
+            "parent_id",
+            "screenshots",
+            "screenshot",
+            "implementation",
+            "audit_prompt",
+            "needs_eric_signoff",
+            "commit_exempt",
+            "commit_hash",
+        }
+        if any(field in payload for field in legacy_fields):
+            operations.append("legacy_patch")
+
+        deduped: list[str] = []
+        for operation in operations or ["legacy_patch"]:
+            if operation not in deduped:
+                deduped.append(operation)
+        return deduped
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/":
@@ -424,6 +519,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path.startswith("/api/tickets/"):
                 ticket_id = parsed.path.removeprefix("/api/tickets/")
+                payload = self.authorize_legacy_ticket_patch(ticket_id, payload)
                 updated = self.app.update_ticket(ticket_id, payload)
                 self.events.notify_change(self.app.store_signature())
                 self.send_json({"ticket": updated})

@@ -251,6 +251,29 @@ def exercise_write_api(base_url: str, commit_hash: str) -> None:
         expect=403,
     )
     assert "ops cannot call route" in str(forbidden), forbidden
+    legacy_missing = post_json(
+        base_url,
+        "/api/tickets/PGU-108",
+        {"state": "cancelled", "comment": {"who": "director", "text": "No caller."}},
+        expect=400,
+    )
+    assert "missing X-PGU-Caller-Role" in str(legacy_missing), legacy_missing
+    legacy_forbidden = post_json(
+        base_url,
+        "/api/tickets/PGU-106",
+        {"state": "done", "commit_hash": commit_hash},
+        caller="ops",
+        expect=403,
+    )
+    assert "ops cannot call mark_done" in str(legacy_forbidden), legacy_forbidden
+    legacy_comment = post_json(
+        base_url,
+        "/api/tickets/PGU-112",
+        {"comment": {"who": "director", "text": "Legacy route note."}},
+        caller="eric",
+    )
+    assert legacy_comment["ticket"]["comments"][-1]["who"] == "eric", legacy_comment  # type: ignore[index]
+    assert legacy_comment["ticket"]["comments"][-1]["text"] == "Legacy route note.", legacy_comment  # type: ignore[index]
 
     created_payload = post_json(
         base_url,

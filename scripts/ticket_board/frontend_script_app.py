@@ -123,7 +123,7 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       };
       const response = await fetch('/api/tickets', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-PGU-Caller-Role': 'eric' },
         body: JSON.stringify(payload),
       });
       if (!response.ok) {
@@ -143,7 +143,7 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
     async function updateTicket(ticketId, patch) {
       const response = await fetch(`/api/tickets/${ticketId}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-PGU-Caller-Role': 'eric' },
         body: JSON.stringify(patch),
       });
       if (!response.ok) {

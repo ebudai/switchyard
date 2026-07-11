@@ -32,7 +32,15 @@ Pane write API:
 - Each operation request must include `X-PGU-Caller-Role` with one of
   `director`, `eric`, `main`, `app`, `ops`, `audit`, `perf`, or `research`.
   The board trusts this localhost/tailnet caller identity for app-layer
-  permission checks and comment attribution.
+  permission checks and comment attribution on the TCP web/UI path.
+- Local pane tooling should write through the Unix-domain socket at
+  `/tmp/pgu-ticket-board.sock` when it exists. The write client registers the
+  auto-resolved pane role on `/api/register-caller`; the board derives the
+  caller role from the socket connection's OS-verified `SO_PEERCRED` PID and
+  ignores `X-PGU-Caller-Role` for socket writes.
+- The Unix-socket registration allows one live PID per pane role. Duplicate
+  live registrations are rejected and logged; the registration is released when
+  the socket connection closes, and stale dead-PID registrations are dropped.
 - Ticket-scoped operations are `route`, `start_work`, `submit_to_audit`,
   `audit_sign_off`, `audit_kick_back`, `eric_sign_off`, `eric_reopen`,
   `mark_done`, `defer`, `cancel`, `set_manually_controlled`, `set_blockers`,

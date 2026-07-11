@@ -46,5 +46,13 @@ grep -q "ExecStart=/usr/bin/python3 $DEPLOY_ROOT/current/scripts/ticket-board.py
     echo "FAIL: unit ExecStart did not point to deploy current script" >&2
     exit 1
 }
+grep -q -- "--unix-socket /tmp/pgu-ticket-board.sock" "$UNIT_DIR/service.unit" || {
+    echo "FAIL: unit did not expose the local pane Unix socket" >&2
+    exit 1
+}
+grep -q '^Environment=PGU_TICKET_BOARD_SOCKET=/tmp/pgu-ticket-board.sock$' "$UNIT_DIR/service.unit" || {
+    echo "FAIL: unit did not export PGU_TICKET_BOARD_SOCKET" >&2
+    exit 1
+}
 
 echo "ticket_board_service_deploy_test: ok"

@@ -274,6 +274,7 @@ SET last_nudged_at = clock_timestamp() + interval '1 hour'
 WHERE ticket_id <> 'PGU-228';
 UPDATE ticket_board.ticket_notification_state
 SET last_activity_at = clock_timestamp() - interval '1 hour',
+    entered_current_state_at = clock_timestamp() - interval '1 hour',
     last_nudged_at = clock_timestamp() - interval '10 minutes',
     nudge_count = 3
 WHERE ticket_id = 'PGU-228';

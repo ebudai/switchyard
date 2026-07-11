@@ -973,7 +973,7 @@ LANGUAGE sql
 IMMUTABLE
 AS $$
     SELECT CASE
-        WHEN p_state IN ('ready', 'in_progress') THEN NULLIF(p_assignee, 'unassigned')
+        WHEN p_state = 'ready' THEN NULLIF(p_assignee, 'unassigned')
         WHEN p_state = 'inspection' THEN 'inspector'
         WHEN p_state = 'audit' THEN 'audit'
         WHEN p_state = 'director_review' THEN 'director'
@@ -1024,6 +1024,7 @@ BEGIN
             candidates.entered_current_state_at,
             candidates.last_nudged_at,
             candidates.nudge_count,
+            candidates.dedupe_key,
             candidates.target_role
         FROM (
             SELECT
@@ -1036,9 +1037,9 @@ BEGIN
                 ns.entered_current_state_at,
                 ns.last_nudged_at,
                 ns.nudge_count,
+                'nudge:' || t.id || ':' || ticket_board.nudge_target_role(t.state, t.assignee) AS dedupe_key,
                 ticket_board.nudge_target_role(t.state, t.assignee) AS target_role,
                 CASE t.state
-                    WHEN 'in_progress' THEN 1
                     WHEN 'inspection' THEN 2
                     WHEN 'ready' THEN 3
                     WHEN 'audit' THEN 4
@@ -1047,9 +1048,10 @@ BEGIN
                 END AS priority
             FROM ticket_board.tickets t
             JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
-            WHERE t.state IN ('ready', 'in_progress', 'inspection', 'audit', 'director_review')
+            WHERE t.state IN ('ready', 'inspection', 'audit', 'director_review')
               AND NOT t.manually_controlled
               AND ticket_board.nudge_target_role(t.state, t.assignee) IS NOT NULL
+              AND ns.entered_current_state_at <= p_now - p_cadence
               AND (ns.last_nudged_at IS NULL OR ns.last_nudged_at <= p_now - p_cadence)
 
             UNION ALL
@@ -1064,6 +1066,7 @@ BEGIN
                 ns.entered_current_state_at,
                 ns.last_nudged_at,
                 ns.nudge_count,
+                'nudge:' || t.id || ':director' AS dedupe_key,
                 'director' AS target_role,
                 CASE t.state
                     WHEN 'analysis' THEN 0
@@ -1130,7 +1133,10 @@ BEGIN
             target_role,
             (payload ->> 'message'),
             payload,
-            'nudge:' || candidate.id || ':' || target_role || ':' || p_now::text
+            CASE
+                WHEN (payload ->> 'kind') = 'escalation' THEN 'escalation:' || candidate.id || ':' || target_role
+                ELSE candidate.dedupe_key
+            END
         );
         UPDATE ticket_board.ticket_notification_state
         SET last_nudged_at = p_now,

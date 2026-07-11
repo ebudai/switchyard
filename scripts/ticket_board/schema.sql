@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS ticket_board.tickets (
     needs_eric_signoff boolean NOT NULL DEFAULT false,
     eric_signoff boolean NOT NULL DEFAULT false,
     manually_controlled boolean NOT NULL DEFAULT false,
+    parked boolean NOT NULL DEFAULT false,
 
     -- Historical tickets include both full 40-char hashes and short hashes.
     commit_hash text NOT NULL DEFAULT ''
@@ -101,6 +102,9 @@ CREATE TABLE IF NOT EXISTS ticket_board.tickets (
     CHECK (source_json ? 'created'),
     CHECK (source_json ? 'updated')
 );
+
+ALTER TABLE ticket_board.tickets
+    ADD COLUMN IF NOT EXISTS parked boolean NOT NULL DEFAULT false;
 
 CREATE UNIQUE INDEX IF NOT EXISTS tickets_ticket_number_key
     ON ticket_board.tickets (ticket_number);
@@ -243,6 +247,10 @@ DECLARE
     current_root text;
     conflicting_ticket_id text;
 BEGIN
+    IF NEW.state <> 'backlog' OR OLD.state IN ('done', 'cancelled') THEN
+        NEW.parked := false;
+    END IF;
+
     IF coalesce(OLD.manually_controlled, false) OR coalesce(NEW.manually_controlled, false) THEN
         RETURN NEW;
     END IF;
@@ -976,7 +984,11 @@ BEGIN
                             t.id
                         )
                     )
-                    OR (t.state = 'backlog' AND t.assignee <> 'unassigned')
+                    OR (
+                        t.state = 'backlog'
+                        AND t.assignee <> 'unassigned'
+                        AND NOT t.parked
+                    )
                 )
               AND ns.entered_current_state_at <= p_now - p_cadence
               AND (ns.last_nudged_at IS NULL OR ns.last_nudged_at <= p_now - p_cadence)
@@ -1525,7 +1537,8 @@ BEGIN
 
     UPDATE ticket_board.tickets
     SET state = new_state,
-        assignee = route.assignee
+        assignee = route.assignee,
+        parked = false
     WHERE tickets.id = route.id;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'ticket not found: %', id;
@@ -1726,7 +1739,8 @@ DECLARE
 BEGIN
     actor := ticket_board.require_actor(ARRAY['director'], 'defer');
     UPDATE ticket_board.tickets
-    SET state = 'backlog'
+    SET state = 'backlog',
+        parked = true
     WHERE tickets.id = defer.id;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'ticket not found: %', id;
@@ -1753,7 +1767,8 @@ BEGIN
     comment_actor := ticket_board.current_app_actor();
     PERFORM ticket_board.append_ticket_comment(id, comment_actor, reason);
     UPDATE ticket_board.tickets
-    SET state = 'cancelled'
+    SET state = 'cancelled',
+        parked = false
     WHERE tickets.id = cancel.id;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'ticket not found: %', id;
@@ -2075,7 +2090,8 @@ BEGIN
     UPDATE ticket_board.tickets
     SET state = 'done',
         commit_exempt = true,
-        manually_controlled = source_ticket.manually_controlled
+        manually_controlled = source_ticket.manually_controlled,
+        parked = false
     WHERE id = source_id;
     PERFORM ticket_board.append_ticket_comment(source_id, 'director', 'Merged into ' || target_id);
     PERFORM ticket_board.touch_ticket(source_id);

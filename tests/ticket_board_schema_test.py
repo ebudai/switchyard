@@ -163,6 +163,11 @@ def main() -> int:
         r"manually_controlled\s+boolean\s+not null\s+default\s+false",
         schema_lower,
     ), "manually_controlled must be a default-false trigger escape hatch"
+    assert re.search(
+        r"parked\s+boolean\s+not null\s+default\s+false",
+        schema_lower,
+    ), "parked must be a default-false dedicated defer marker"
+    assert "add column if not exists parked boolean not null default false" in schema_lower
     assert "{7,40}" in schema, "commit_hash check must allow historical short hashes"
     assert "create trigger tickets_enforce_workflow_update" in executable_schema_lower
     assert "create trigger tickets_notify_state_transition" in executable_schema_lower

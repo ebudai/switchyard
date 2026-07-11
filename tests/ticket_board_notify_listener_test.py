@@ -164,6 +164,43 @@ def test_reconnect_relistens_after_connection_drop() -> None:
     assert sum("LISTEN" in str(statement) for statement, _params in executed) == 2, "listener must re-issue LISTEN after reconnecting"
 
 
+def test_director_send_timeout_does_not_block_other_pane_delivery() -> None:
+    sent: list[tuple[str, str]] = []
+    executed: list[Any] = []
+    conn = FakeConnection(
+        [
+            transition_payload(
+                "PGU-220",
+                title="Director review",
+                old_state="audit",
+                new_state="director_review",
+                assignee="director",
+            ),
+            transition_payload("PGU-221", title="Ops work", old_state="analysis", new_state="ready", assignee="ops"),
+        ],
+        executed=executed,
+    )
+
+    def sender(target: str, message: str) -> None:
+        if target == "pgu-director:0.0":
+            raise subprocess.TimeoutExpired(["directorctl", "send"], timeout=10)
+        sent.append((target, message))
+
+    listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=sender,
+        connector=lambda *args, **kwargs: conn,
+        poll_seconds=0,
+    )
+
+    delivered = listener.listen_once(max_notifications=1)
+
+    assert delivered == 1
+    assert sent == [("pgu-ops:0.0", "Ready ticket for you: PGU-221 -- Ops work")]
+    mark_calls = [params for statement, params in executed if "mark_transition_notified" in str(statement)]
+    assert mark_calls == [("PGU-221",)], mark_calls
+
+
 def test_poll_watchdog_force_closes_wedged_connection_and_reconnects() -> None:
     sent: list[tuple[str, str]] = []
     executed: list[Any] = []
@@ -262,6 +299,7 @@ def main() -> int:
     test_simulated_pg_notify_delivers_to_assignee_pane()
     test_eric_review_is_not_delivered()
     test_reconnect_relistens_after_connection_drop()
+    test_director_send_timeout_does_not_block_other_pane_delivery()
     test_poll_watchdog_force_closes_wedged_connection_and_reconnects()
     test_reconcile_delivers_missed_transition_and_marks_notified()
     test_nudge_is_suppressed_when_pane_is_working()

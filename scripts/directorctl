@@ -11,12 +11,26 @@ readonly SUBMIT_VERIFY_BACKOFF_MS=250
 readonly STAGED_PAYLOAD_RETENTION_MINUTES=60
 readonly DEFAULT_TICKET_NOTIFICATION_JOURNAL="/tmp/pgu-ticket-notification-journal.jsonl"
 readonly DEFAULT_TICKET_BOARD_URL="http://127.0.0.1:8770"
+readonly DIRECTOR_TYPING_RETRY_SECONDS=5
 
 validate_enter_delay() {
     local val="${PGU_DIRECTORCTL_ENTER_DELAY:-0.6}"
     if ! [[ "$val" =~ ^[0-9]*\.?[0-9]+$ ]]; then
         echo "error: PGU_DIRECTORCTL_ENTER_DELAY='$val' is not a valid non-negative number" >&2
         echo "Expected a numeric value like 0, 0.6, or 1.5" >&2
+        exit 1
+    fi
+    printf '%s' "$val"
+}
+
+director_typing_max_attempts() {
+    local val="${PGU_DIRECTORCTL_DIRECTOR_TYPING_MAX_ATTEMPTS:-}"
+    if [ -z "$val" ]; then
+        printf '%s' "-1"
+        return 0
+    fi
+    if ! [[ "$val" =~ ^[0-9]+$ ]]; then
+        echo "error: PGU_DIRECTORCTL_DIRECTOR_TYPING_MAX_ATTEMPTS='$val' is not a non-negative integer" >&2
         exit 1
     fi
     printf '%s' "$val"
@@ -214,6 +228,10 @@ Environment:
                                   the first Enter (default: 0.6). Must be a
                                   non-negative number (e.g. 0, 0.6, 1.5).
                                   Large payloads add extra settle time.
+  PGU_DIRECTORCTL_DIRECTOR_TYPING_MAX_ATTEMPTS
+                                  Maximum number of 5s waits for a busy
+                                  director composer before delivering anyway.
+                                  Unset means wait indefinitely.
   PGU_DIRECTORCTL_EXTRA_SESSIONS  Whitespace-separated list of additional
                                   tmux session names to include in status.
                                   Duplicates of built-in sessions are ignored.
@@ -266,13 +284,20 @@ send_payload() {
     local staged_path
     local pointer_payload
 
-    # Guard against active typing in the director pane. All director-bound sends
-    # (callback, send, send-file) wait until the composer is clear so they do
-    # not splice into active human input.
+    # Guard against active typing in the director pane. Ordinary director-bound
+    # sends wait until the composer is clear. Automation may bound this wait
+    # with PGU_DIRECTORCTL_DIRECTOR_TYPING_MAX_ATTEMPTS so one busy director
+    # composer cannot block unrelated notification delivery forever.
     local attempt=1
+    local max_attempts
+    max_attempts="$(director_typing_max_attempts)"
     while is_director_typing "$target"; do
+        if [ "$max_attempts" -ge 0 ] && [ "$attempt" -gt "$max_attempts" ]; then
+            echo "watchdog/directorctl: director is typing after $max_attempts attempts; delivering anyway" >&2
+            break
+        fi
         echo "watchdog/directorctl: director is typing (attempt $attempt). Waiting 5 seconds to retry..." >&2
-        sleep 5
+        sleep "$DIRECTOR_TYPING_RETRY_SECONDS"
         attempt=$((attempt + 1))
     done
 

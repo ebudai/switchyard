@@ -71,7 +71,12 @@ import subprocess
 original_run = subprocess.run
 
 def run_with_env(args, **kwargs):
-    kwargs.setdefault("env", env)
+    merged = dict(kwargs.pop("env", os.environ.copy()))
+    merged["PATH"] = env["PATH"]
+    merged["TMUX_LOG_PATH"] = env["TMUX_LOG_PATH"]
+    merged["TMUX_CAPTURE_COUNT_PATH"] = env["TMUX_CAPTURE_COUNT_PATH"]
+    merged["PGU_DIRECTORCTL_ENTER_DELAY"] = env["PGU_DIRECTORCTL_ENTER_DELAY"]
+    kwargs["env"] = merged
     return original_run(args, **kwargs)
 
 try:
@@ -96,6 +101,93 @@ if [ "$enter_sends" -ne 1 ]; then
 fi
 if [ "$(cat "$CAPTURE_COUNT")" -lt 2 ]; then
     echo "FAIL: directorctl did not verify submit transition" >&2
+    exit 1
+fi
+
+>"$TMUX_LOG"
+printf '0\n' >"$CAPTURE_COUNT"
+
+cat >"$TMPDIR_T/tmux" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+LOG_PATH="${TMUX_LOG_PATH:?}"
+COUNT_PATH="${TMUX_CAPTURE_COUNT_PATH:?}"
+cmd="${1:-}"
+shift || true
+case "$cmd" in
+  capture-pane)
+    count="$(cat "$COUNT_PATH")"
+    count=$((count + 1))
+    printf '%s\n' "$count" >"$COUNT_PATH"
+    if [ "$count" -lt 3 ]; then
+      cat <<'PANE'
+old output
+──────────────────────────────────────────────────────────────────────────────────────────── Director ──
+❯ human is typing a message
+────────────────────────────────────────────────────────────────────────────────────────────────────────
+PANE
+    else
+      cat <<'PANE'
+old output
+Working
+esc to interrupt
+PANE
+    fi
+    ;;
+  send-keys)
+    printf '%s\n' "$*" >>"$LOG_PATH"
+    ;;
+  *)
+    echo "unexpected tmux command: $cmd" >&2
+    exit 1
+    ;;
+esac
+EOF
+chmod +x "$TMPDIR_T/tmux"
+
+python3 - <<'PY' "$REPO_ROOT" "$TMPDIR_T" "$TMUX_LOG" "$CAPTURE_COUNT"
+import os
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+tmpdir = Path(sys.argv[2])
+tmux_log = Path(sys.argv[3])
+sys.path.insert(0, str(root))
+
+from scripts.ticket_board.notify_listener import DirectorctlSender
+
+payload = "PGU-219 -- Busy director bounded delivery"
+env = os.environ.copy()
+env["PATH"] = f"{tmpdir}:{env['PATH']}"
+env["TMUX_LOG_PATH"] = str(tmux_log)
+env["TMUX_CAPTURE_COUNT_PATH"] = sys.argv[4]
+env["PGU_DIRECTORCTL_ENTER_DELAY"] = "0"
+
+import subprocess
+
+original_run = subprocess.run
+
+def run_with_env(args, **kwargs):
+    merged = dict(kwargs.pop("env", os.environ.copy()))
+    merged["PATH"] = env["PATH"]
+    merged["TMUX_LOG_PATH"] = env["TMUX_LOG_PATH"]
+    merged["TMUX_CAPTURE_COUNT_PATH"] = env["TMUX_CAPTURE_COUNT_PATH"]
+    merged["PGU_DIRECTORCTL_ENTER_DELAY"] = env["PGU_DIRECTORCTL_ENTER_DELAY"]
+    kwargs["env"] = merged
+    return original_run(args, **kwargs)
+
+try:
+    subprocess.run = run_with_env
+    DirectorctlSender(str(root / "scripts" / "directorctl"))("pgu-director:0.0", payload)
+finally:
+    subprocess.run = original_run
+PY
+
+director_payload_sends="$(grep -c -- "-l PGU-219 -- Busy director bounded delivery" "$TMUX_LOG")"
+if [ "$director_payload_sends" -ne 1 ]; then
+    echo "FAIL: expected bounded director payload delivery despite busy composer" >&2
+    cat "$TMUX_LOG" >&2
     exit 1
 fi
 

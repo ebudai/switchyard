@@ -26,6 +26,7 @@ DEFAULT_CONNECT_TIMEOUT_SECONDS = 10
 DEFAULT_KEEPALIVES_IDLE_SECONDS = 30
 DEFAULT_KEEPALIVES_INTERVAL_SECONDS = 10
 DEFAULT_KEEPALIVES_COUNT = 3
+DEFAULT_DIRECTORCTL_SEND_TIMEOUT_SECONDS = 10.0
 ROLE_TO_TARGET = {
     "director": "pgu-director:0.0",
     "main": "pgu-main:0.0",
@@ -121,11 +122,26 @@ def message_for_transition(transition: Transition) -> str | None:
 
 
 class DirectorctlSender:
-    def __init__(self, directorctl_bin: str = DEFAULT_DIRECTORCTL) -> None:
+    def __init__(
+        self,
+        directorctl_bin: str = DEFAULT_DIRECTORCTL,
+        *,
+        timeout_seconds: float = DEFAULT_DIRECTORCTL_SEND_TIMEOUT_SECONDS,
+        director_typing_max_attempts: int = 0,
+    ) -> None:
         self.directorctl_bin = directorctl_bin
+        self.timeout_seconds = timeout_seconds
+        self.director_typing_max_attempts = director_typing_max_attempts
 
     def __call__(self, target: str, message: str) -> None:
-        subprocess.run([self.directorctl_bin, "send", target, message], check=True)
+        env = os.environ.copy()
+        env["PGU_DIRECTORCTL_DIRECTOR_TYPING_MAX_ATTEMPTS"] = str(self.director_typing_max_attempts)
+        subprocess.run(
+            [self.directorctl_bin, "send", target, message],
+            check=True,
+            timeout=self.timeout_seconds,
+            env=env,
+        )
 
 
 class PaneActivityGate:
@@ -227,7 +243,7 @@ class TicketBoardNotifyListener:
                     delivered += 1
             except ValueError as exc:
                 self.logger.warning("Skipping malformed reconciled ticket notification payload: %s", exc)
-            except (subprocess.CalledProcessError, OSError) as exc:
+            except (subprocess.SubprocessError, OSError) as exc:
                 self.logger.warning("Failed to deliver reconciled ticket notification through directorctl: %s", exc)
         return delivered
 
@@ -283,7 +299,7 @@ class TicketBoardNotifyListener:
                                 conn.execute("SELECT ticket_board.mark_transition_notified(%s::text)", (transition.ticket_id,))
                         except ValueError as exc:
                             self.logger.warning("Skipping malformed ticket notification payload: %s", exc)
-                        except (subprocess.CalledProcessError, OSError) as exc:
+                        except (subprocess.SubprocessError, OSError) as exc:
                             self.logger.warning("Failed to deliver ticket notification through directorctl: %s", exc)
                         if max_notifications is not None and self.delivered_count >= max_notifications:
                             self.stop_event.set()

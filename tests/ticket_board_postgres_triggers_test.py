@@ -250,7 +250,7 @@ WHERE id = 'PGU-4';
 """,
                 ).stdout
             )
-            assert reopened == {"state": "analysis", "audit_signoff": False, "commit_hash": ""}, reopened
+            assert reopened == {"state": "ready", "audit_signoff": False, "commit_hash": ""}, reopened
 
             insert_ticket(
                 conninfo,
@@ -401,6 +401,86 @@ WHERE id = 'PGU-9';
 
             insert_ticket(
                 conninfo,
+                "PGU-50",
+                title="Auto ready on insert",
+                assignee="ops",
+                state="analysis",
+                implementation="Ready.",
+            )
+            auto_ready_insert = psql(conninfo, "SELECT state FROM ticket_board.tickets WHERE id = 'PGU-50';").stdout.strip()
+            assert auto_ready_insert == "ready", auto_ready_insert
+
+            insert_ticket(
+                conninfo,
+                "PGU-51",
+                title="Half specced",
+                assignee="ops",
+                state="analysis",
+                implementation="",
+            )
+            half_specced = psql(conninfo, "SELECT state FROM ticket_board.tickets WHERE id = 'PGU-51';").stdout.strip()
+            assert half_specced == "analysis", half_specced
+            psql(conninfo, "UPDATE ticket_board.tickets SET implementation = 'Ready now.' WHERE id = 'PGU-51';")
+            auto_ready_update = psql(conninfo, "SELECT state FROM ticket_board.tickets WHERE id = 'PGU-51';").stdout.strip()
+            assert auto_ready_update == "ready", auto_ready_update
+
+            insert_ticket(
+                conninfo,
+                "PGU-52",
+                title="Manual analysis",
+                assignee="ops",
+                state="analysis",
+                implementation="Ready but held.",
+                manually_controlled=True,
+            )
+            manual_analysis = psql(conninfo, "SELECT state FROM ticket_board.tickets WHERE id = 'PGU-52';").stdout.strip()
+            assert manual_analysis == "analysis", manual_analysis
+
+            insert_ticket(
+                conninfo,
+                "PGU-53",
+                title="Unassigned analysis",
+                assignee="unassigned",
+                state="analysis",
+                implementation="Ready but unrouted.",
+            )
+            unassigned_analysis = psql(conninfo, "SELECT state FROM ticket_board.tickets WHERE id = 'PGU-53';").stdout.strip()
+            assert unassigned_analysis == "analysis", unassigned_analysis
+
+            insert_ticket(
+                conninfo,
+                "PGU-54",
+                title="Blocked analysis",
+                assignee="ops",
+                state="analysis",
+                implementation="Ready but blocked.",
+                manually_controlled=True,
+            )
+            insert_ticket(conninfo, "PGU-540", title="Open blocker", assignee="ops", state="analysis")
+            psql(
+                conninfo,
+                """
+INSERT INTO ticket_board.ticket_blockers (ticket_id, blocker_ticket_id, position)
+VALUES ('PGU-54', 'PGU-540', 0);
+UPDATE ticket_board.tickets
+SET manually_controlled = false
+WHERE id = 'PGU-54';
+""",
+            )
+            blocked_analysis = psql(conninfo, "SELECT state FROM ticket_board.tickets WHERE id = 'PGU-54';").stdout.strip()
+            assert blocked_analysis == "analysis", blocked_analysis
+
+            insert_ticket(
+                conninfo,
+                "PGU-55",
+                title="Assigned backlog",
+                assignee="ops",
+                state="backlog",
+                implementation="Parked but assigned.",
+            )
+
+            insert_ticket(
+                conninfo,
                 "PGU-5",
                 title="Manual",
                 assignee="unassigned",
@@ -485,6 +565,74 @@ WHERE ticket_id = 'PGU-20';
             ).stdout.strip()
             assert nudge_queue == "1", nudge_queue
 
+            psql(
+                conninfo,
+                """
+UPDATE ticket_board.ticket_notification_state
+SET last_nudged_at = clock_timestamp() + interval '1 hour'
+WHERE ticket_id NOT IN ('PGU-52', 'PGU-53', 'PGU-55');
+
+UPDATE ticket_board.ticket_notification_state
+SET last_nudged_at = NULL,
+    entered_current_state_at = clock_timestamp() - interval '10 minutes'
+WHERE ticket_id IN ('PGU-52', 'PGU-53', 'PGU-55');
+""",
+            )
+            stale_now = "clock_timestamp()"
+            stale_nudges = psql(
+                conninfo,
+                f"SELECT ticket_board.notify_due_nudges({stale_now}, interval '5 minutes', 3);",
+            ).stdout.strip()
+            assert int(stale_nudges) >= 1, stale_nudges
+            manual_nudge = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object('state', state, 'last_nudged', ns.last_nudged_at IS NOT NULL, 'nudge_count', ns.nudge_count)::text
+FROM ticket_board.tickets t
+JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
+WHERE t.id = 'PGU-52';
+""",
+                ).stdout
+            )
+            assert manual_nudge == {"state": "analysis", "last_nudged": True, "nudge_count": 1}, manual_nudge
+
+            stale_nudges_second = psql(
+                conninfo,
+                f"SELECT ticket_board.notify_due_nudges({stale_now}, interval '5 minutes', 3);",
+            ).stdout.strip()
+            assert int(stale_nudges_second) >= 1, stale_nudges_second
+            unassigned_nudge = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object('state', state, 'last_nudged', ns.last_nudged_at IS NOT NULL, 'nudge_count', ns.nudge_count)::text
+FROM ticket_board.tickets t
+JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
+WHERE t.id = 'PGU-53';
+""",
+                ).stdout
+            )
+            assert unassigned_nudge == {"state": "analysis", "last_nudged": True, "nudge_count": 1}, unassigned_nudge
+
+            stale_nudges_third = psql(
+                conninfo,
+                f"SELECT ticket_board.notify_due_nudges({stale_now}, interval '5 minutes', 3);",
+            ).stdout.strip()
+            assert int(stale_nudges_third) >= 1, stale_nudges_third
+            backlog_nudge = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object('state', state, 'last_nudged', ns.last_nudged_at IS NOT NULL, 'nudge_count', ns.nudge_count)::text
+FROM ticket_board.tickets t
+JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
+WHERE t.id = 'PGU-55';
+""",
+                ).stdout
+            )
+            assert backlog_nudge == {"state": "backlog", "last_nudged": True, "nudge_count": 1}, backlog_nudge
+
             trigger_count = psql(
                 conninfo,
                 """
@@ -495,12 +643,13 @@ WHERE tgname IN (
     'tickets_notify_state_transition',
     'tickets_notification_state_insert',
     'tickets_notification_state_update',
+    'tickets_zz_auto_advance_analysis',
     'ticket_comments_notification_activity'
 )
   AND NOT tgisinternal;
 """,
             ).stdout.strip()
-            assert trigger_count == "5"
+            assert trigger_count == "6"
         finally:
             subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], check=False)
 

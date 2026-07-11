@@ -7,7 +7,7 @@ import threading
 import webbrowser
 from pathlib import Path
 
-from .app import FRAME_DIR_DEFAULT, POSTGRES_DSN_DEFAULT, STORE_BACKEND_DEFAULT, STORE_DIR_DEFAULT, TicketBoardApp
+from .app import ASSET_DIR_DEFAULT, FRAME_DIR_DEFAULT, POSTGRES_DSN_DEFAULT, STORE_BACKEND_DEFAULT, STORE_DIR_DEFAULT, TicketBoardApp
 from .server import TicketBoardServer
 
 
@@ -26,6 +26,7 @@ def parse_args() -> argparse.Namespace:
         help="Postgres connection string for --store-backend postgres. Default: TICKET_BOARD_DATABASE_URL or DATABASE_URL.",
     )
     parser.add_argument("--frames", default=str(FRAME_DIR_DEFAULT), help=f"Screenshot directory. Default: {FRAME_DIR_DEFAULT}")
+    parser.add_argument("--assets", default=str(ASSET_DIR_DEFAULT), help=f"Uploaded attachment directory. Default: {ASSET_DIR_DEFAULT}")
     parser.add_argument("--host", default="127.0.0.1", help="Bind host. Default: 127.0.0.1")
     parser.add_argument("--port", type=int, default=8770, help="Bind port. Default: 8770")
     parser.add_argument("--open-browser", action="store_true", help="Open the board URL automatically.")
@@ -36,6 +37,7 @@ def run_server(args: argparse.Namespace) -> int:
     app = TicketBoardApp(
         Path(args.store),
         Path(args.frames),
+        Path(args.assets),
         store_backend=args.store_backend,
         database_url=args.database,
     )
@@ -46,6 +48,7 @@ def run_server(args: argparse.Namespace) -> int:
     if app.store_backend == "json":
         print(f"[ticket-board] store: {app.store_dir}")
     print(f"[ticket-board] frames: {app.frame_dir}")
+    print(f"[ticket-board] assets: {app.asset_dir}")
     print(f"[ticket-board] listening on {url}")
     print("[ticket-board] press Ctrl+C to stop")
     if args.open_browser:

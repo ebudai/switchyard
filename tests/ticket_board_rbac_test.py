@@ -348,7 +348,7 @@ FROM ticket_board.tickets t WHERE id = 'PGU-601';
 """,
         )
     )
-    assert eric_reopened == {"state": "analysis", "comment": "Needs another pass."}, eric_reopened
+    assert eric_reopened == {"state": "ready", "comment": "Needs another pass."}, eric_reopened
 
     insert_ticket(
         admin_conn,
@@ -437,7 +437,7 @@ def assert_structural_rules_still_apply(admin_conn: str, service_conn: str) -> N
         "SELECT ticket_board.cancel('PGU-900', '');",
     )
 
-    insert_ticket(admin_conn, "PGU-901", title="Illegal start", state="analysis", assignee="ops", implementation="Ready.")
+    insert_ticket(admin_conn, "PGU-901", title="Illegal start", state="analysis", assignee="ops")
     assert "illegal state transition: analysis -> in_progress" in psql_error(
         service_conn,
         "SELECT ticket_board.start_work('PGU-901');",

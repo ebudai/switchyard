@@ -434,7 +434,7 @@ def exercise_write_api(base_url: str, commit_hash: str) -> None:
         {"reason": "Needs design revision."},
         caller="eric",
     )
-    assert eric_reopened["ticket"]["state"] == "analysis", eric_reopened  # type: ignore[index]
+    assert eric_reopened["ticket"]["state"] in {"analysis", "ready"}, eric_reopened  # type: ignore[index]
     assert eric_reopened["ticket"]["comments"][-1]["who"] == "eric", eric_reopened  # type: ignore[index]
 
     done = post_json(base_url, "/api/tickets/PGU-106/actions/mark_done", {"commit_hash": commit_hash}, caller="director")

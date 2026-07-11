@@ -273,7 +273,7 @@ def main() -> int:
                 "PGU-301",
                 {"state": "analysis", "comment": {"who": "eric", "text": "Needs design revision."}},
             )
-            assert eric_reopened["state"] == "analysis", eric_reopened
+            assert eric_reopened["state"] == "ready", eric_reopened
             assert eric_reopened["comments"][-1]["text"] == "Needs design revision.", eric_reopened
 
             deferred = service_app.update_ticket("PGU-1", {"state": "backlog"})

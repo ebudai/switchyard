@@ -481,6 +481,64 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION ticket_board.ticket_has_unresolved_blockers(p_ticket_id text)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT EXISTS (
+        SELECT 1
+        FROM ticket_board.ticket_blockers b
+        LEFT JOIN ticket_board.tickets blocker ON blocker.id = b.blocker_ticket_id
+        WHERE b.ticket_id = p_ticket_id
+          AND coalesce(blocker.state NOT IN ('done', 'cancelled'), true)
+    );
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.ticket_can_auto_advance_analysis(
+    p_state text,
+    p_assignee text,
+    p_implementation text,
+    p_manually_controlled boolean,
+    p_ticket_id text
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT p_state = 'analysis'
+       AND p_assignee <> 'unassigned'
+       AND btrim(coalesce(p_implementation, '')) <> ''
+       AND NOT coalesce(p_manually_controlled, false)
+       AND NOT ticket_board.ticket_has_unresolved_blockers(p_ticket_id);
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.auto_advance_analysis_ticket()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF pg_trigger_depth() > 1 THEN
+        RETURN NULL;
+    END IF;
+
+    IF ticket_board.ticket_can_auto_advance_analysis(
+        NEW.state,
+        NEW.assignee,
+        NEW.implementation,
+        NEW.manually_controlled,
+        NEW.id
+    ) THEN
+        UPDATE ticket_board.tickets
+        SET state = 'ready'
+        WHERE id = NEW.id
+          AND state = 'analysis';
+    END IF;
+
+    RETURN NULL;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION ticket_board.require_ticket_board_listener(p_action text)
 RETURNS text
 LANGUAGE plpgsql
@@ -595,6 +653,8 @@ LANGUAGE sql
 IMMUTABLE
 AS $$
     SELECT CASE
+        WHEN p_state = 'analysis' THEN 'NUDGE ' || p_ticket_id || ' -- ' || p_title || ' needs director triage in analysis'
+        WHEN p_state = 'backlog' THEN 'NUDGE ' || p_ticket_id || ' -- ' || p_title || ' is assigned in backlog; triage or defer explicitly'
         WHEN p_state = 'ready' THEN 'NUDGE Ready ticket for you: ' || p_ticket_id || ' -- ' || p_title
         WHEN p_state = 'in_progress' THEN 'NUDGE ' || p_ticket_id || ' -- ' || p_title || ' is still in progress'
         WHEN p_state = 'audit' THEN 'NUDGE ' || p_ticket_id || ' -- ' || p_title || ' ready for audit'
@@ -619,31 +679,79 @@ DECLARE
     payload jsonb;
 BEGIN
     FOR candidate IN
-        SELECT DISTINCT ON (ticket_board.nudge_target_role(t.state, t.assignee))
-            t.id,
-            t.title,
-            t.state,
-            t.assignee,
-            t.ticket_number,
-            ns.last_activity_at,
-            ns.last_nudged_at,
-            ns.nudge_count,
-            ticket_board.nudge_target_role(t.state, t.assignee) AS target_role
-        FROM ticket_board.tickets t
-        JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
-        WHERE t.state IN ('ready', 'in_progress', 'audit', 'director_review')
-          AND NOT t.manually_controlled
-          AND ticket_board.nudge_target_role(t.state, t.assignee) IS NOT NULL
-          AND (ns.last_nudged_at IS NULL OR ns.last_nudged_at <= p_now - p_cadence)
-        ORDER BY ticket_board.nudge_target_role(t.state, t.assignee),
-            CASE t.state
-                WHEN 'in_progress' THEN 1
-                WHEN 'ready' THEN 2
-                WHEN 'audit' THEN 3
-                WHEN 'director_review' THEN 4
-                ELSE 5
-            END,
-            t.ticket_number
+        SELECT DISTINCT ON (candidates.target_role)
+            candidates.id,
+            candidates.title,
+            candidates.state,
+            candidates.assignee,
+            candidates.ticket_number,
+            candidates.last_activity_at,
+            candidates.last_nudged_at,
+            candidates.nudge_count,
+            candidates.target_role
+        FROM (
+            SELECT
+                t.id,
+                t.title,
+                t.state,
+                t.assignee,
+                t.ticket_number,
+                ns.last_activity_at,
+                ns.last_nudged_at,
+                ns.nudge_count,
+                ticket_board.nudge_target_role(t.state, t.assignee) AS target_role,
+                CASE t.state
+                    WHEN 'in_progress' THEN 1
+                    WHEN 'ready' THEN 2
+                    WHEN 'audit' THEN 3
+                    WHEN 'director_review' THEN 4
+                    ELSE 5
+                END AS priority
+            FROM ticket_board.tickets t
+            JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
+            WHERE t.state IN ('ready', 'in_progress', 'audit', 'director_review')
+              AND NOT t.manually_controlled
+              AND ticket_board.nudge_target_role(t.state, t.assignee) IS NOT NULL
+              AND (ns.last_nudged_at IS NULL OR ns.last_nudged_at <= p_now - p_cadence)
+
+            UNION ALL
+
+            SELECT
+                t.id,
+                t.title,
+                t.state,
+                t.assignee,
+                t.ticket_number,
+                ns.last_activity_at,
+                ns.last_nudged_at,
+                ns.nudge_count,
+                'director' AS target_role,
+                CASE t.state
+                    WHEN 'analysis' THEN 0
+                    WHEN 'backlog' THEN 6
+                    ELSE 7
+                END AS priority
+            FROM ticket_board.tickets t
+            JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
+            WHERE (
+                    (
+                        t.state = 'analysis'
+                        AND NOT ticket_board.ticket_can_auto_advance_analysis(
+                            t.state,
+                            t.assignee,
+                            t.implementation,
+                            t.manually_controlled,
+                            t.id
+                        )
+                    )
+                    OR (t.state = 'backlog' AND t.assignee <> 'unassigned')
+                )
+              AND ns.entered_current_state_at <= p_now - p_cadence
+              AND (ns.last_nudged_at IS NULL OR ns.last_nudged_at <= p_now - p_cadence)
+        ) AS candidates
+        ORDER BY candidates.target_role,
+            candidates.priority,
+            candidates.ticket_number
     LOOP
         target_role := candidate.target_role;
         IF candidate.nudge_count >= p_escalate_after
@@ -738,6 +846,12 @@ CREATE TRIGGER tickets_notification_state_update
 AFTER UPDATE ON ticket_board.tickets
 FOR EACH ROW
 EXECUTE FUNCTION ticket_board.upsert_ticket_notification_state();
+
+DROP TRIGGER IF EXISTS tickets_zz_auto_advance_analysis ON ticket_board.tickets;
+CREATE TRIGGER tickets_zz_auto_advance_analysis
+AFTER INSERT OR UPDATE ON ticket_board.tickets
+FOR EACH ROW
+EXECUTE FUNCTION ticket_board.auto_advance_analysis_ticket();
 
 DROP TRIGGER IF EXISTS ticket_comments_notification_activity ON ticket_board.ticket_comments;
 CREATE TRIGGER ticket_comments_notification_activity

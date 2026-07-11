@@ -104,6 +104,13 @@ PostgreSQL migration foundation:
 
 - `scripts/ticket_board/schema.sql` is the additive PGU-189 schema for a future database-backed board
 - The schema is a lossless import target for the current JSON store: normalized ticket, blocker, comment, and attachment tables plus `tickets.source_json` to preserve exact imported JSON
+- The PostgreSQL backend requires psycopg 3 at runtime and for
+  `tests/ticket_board_postgres_backend_test.py`. On Arch/CachyOS install it
+  with `sudo pacman -S python-psycopg`; for isolated test runs, use a venv
+  that can see that package, such as
+  `python3 -m venv --system-site-packages /tmp/pgu-ticket-board-venv`.
+  `scripts/ticket_board/requirements.txt` records the equivalent pip
+  dependency for non-system Python environments.
 - `scripts/ticket_board/rbac.sql` creates the login roles for each board pane/service role without setting passwords and grants minimal table/column permissions; only `director` can update `tickets.manually_controlled`
 - `scripts/ticket_board/import_json_to_postgres.py --database "$DATABASE_URL" --apply-schema` imports the JSON store into that schema, is safe to rerun, and verifies DB parity against the source JSON after import
 - `tickets.manually_controlled` defaults to `false`; PGU-191 transition/notification triggers must no-op when it is `true` so the director can hand-manipulate exceptional tickets

@@ -16,8 +16,10 @@ if str(ROOT) not in sys.path:
 try:
     import psycopg  # noqa: F401
 except ModuleNotFoundError:
-    print("ticket_board_postgres_backend_test: skipped (psycopg3 not installed)")
-    raise SystemExit(0)
+    raise SystemExit(
+        "ticket_board_postgres_backend_test: psycopg3 is required for the Postgres backend; "
+        "install Arch/CachyOS package python-psycopg, or run the test from a venv with psycopg installed"
+    )
 
 from scripts.ticket_board.app import TicketBoardApp
 

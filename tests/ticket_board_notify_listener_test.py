@@ -486,6 +486,42 @@ def test_escalation_for_still_stuck_ready_ticket_delivers_to_director() -> None:
     assert conn.requeued == []
 
 
+def test_nudge_analysis_copy_delivers_to_director() -> None:
+    sent: list[tuple[str, str]] = []
+    conn = FakeConnection(
+        [
+            queue_row(
+                25,
+                "PGU-256",
+                kind="nudge_analysis",
+                state="ready",
+                assignee="ops",
+                target_role="director",
+                message="NUDGE-ANALYSIS: PGU-256 (target=ops, state=ready, 600s since transition, prior_nudges=0)",
+                attempts=1,
+            )
+        ],
+        ticket_rows={"PGU-256": ("ready", "ops", False, False)},
+    )
+    listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=lambda target, message: sent.append((target, message)),
+        activity_gate=lambda _target: False,
+        connector=lambda *args, **kwargs: conn,
+        poll_seconds=0,
+    )
+
+    assert listener.listen_once(max_notifications=1) == 1
+    assert sent == [
+        (
+            "pgu-director:0.0",
+            "NUDGE-ANALYSIS: PGU-256 (target=ops, state=ready, 600s since transition, prior_nudges=0)",
+        )
+    ]
+    assert conn.acked == [25]
+    assert conn.requeued == []
+
+
 def test_director_composer_busy_requeues_then_idle_delivers_once() -> None:
     sent: list[tuple[str, str]] = []
     gate_states = iter([True, False])
@@ -710,6 +746,7 @@ def main() -> int:
     test_stale_ready_nudge_for_cancelled_ticket_is_acked_not_delivered()
     test_stale_ready_nudge_for_picked_up_ticket_is_acked_not_delivered()
     test_escalation_for_still_stuck_ready_ticket_delivers_to_director()
+    test_nudge_analysis_copy_delivers_to_director()
     test_director_composer_busy_requeues_then_idle_delivers_once()
     test_gate_async_cold_start_defaults_busy_then_static_region_idles()
     test_director_gate_treats_composer_content_as_busy_only_for_director()

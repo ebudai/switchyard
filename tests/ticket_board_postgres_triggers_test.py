@@ -765,28 +765,73 @@ WHERE ticket_id = 'PGU-20';
                 ).stdout
             )
             assert nudge_state == {"last_nudged": True, "nudge_count": 1}, nudge_state
-            nudge_queue = psql(
-                conninfo,
-                "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-20' AND kind = 'nudge';",
-            ).stdout.strip()
-            assert nudge_queue == "1", nudge_queue
+            nudge_queue = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_object_agg(target_role, count)::text
+FROM (
+    SELECT target_role, count(*) AS count
+    FROM ticket_board.ticket_notification_queue
+    WHERE ticket_id = 'PGU-20' AND kind = 'nudge'
+    GROUP BY target_role
+) q;
+""",
+                ).stdout
+            )
+            assert nudge_queue == {"director": 1, "ops": 1}, nudge_queue
+            director_analysis = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'kind', payload->>'kind',
+    'target_role', target_role,
+    'original_target_role', payload->>'original_target_role',
+    'message', message
+)::text
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-20' AND kind = 'nudge' AND target_role = 'director'
+ORDER BY id DESC
+LIMIT 1;
+""",
+                ).stdout
+            )
+            assert director_analysis["kind"] == "nudge_analysis", director_analysis
+            assert director_analysis["target_role"] == "director", director_analysis
+            assert director_analysis["original_target_role"] == "ops", director_analysis
+            assert director_analysis["message"].startswith(
+                "NUDGE-ANALYSIS: PGU-20 (target=ops, state=ready, "
+            ), director_analysis
+            assert "s since transition" in director_analysis["message"], director_analysis
+            assert "prior_nudges=0" in director_analysis["message"], director_analysis
             deduped_nudges = psql(
                 conninfo,
                 "SELECT ticket_board.notify_due_nudges(clock_timestamp() + interval '20 minutes', interval '5 minutes', 3);",
             ).stdout.strip()
             assert int(deduped_nudges) >= 1, deduped_nudges
-            deduped_queue = psql(
-                conninfo,
-                "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-20' AND kind = 'nudge';",
-            ).stdout.strip()
-            assert deduped_queue == "1", deduped_queue
+            deduped_queue = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_object_agg(target_role, count)::text
+FROM (
+    SELECT target_role, count(*) AS count
+    FROM ticket_board.ticket_notification_queue
+    WHERE ticket_id = 'PGU-20' AND kind = 'nudge'
+    GROUP BY target_role
+) q;
+""",
+                ).stdout
+            )
+            assert deduped_queue == {"director": 1, "ops": 1}, deduped_queue
             inspection_nudge = json.loads(
                 psql(
                     conninfo,
                     """
 SELECT jsonb_build_object('target_role', target_role, 'message', message, 'state', payload->>'state')::text
 FROM ticket_board.ticket_notification_queue
-WHERE ticket_id = 'PGU-21' AND kind = 'nudge'
+WHERE ticket_id = 'PGU-21' AND kind = 'nudge' AND target_role = 'inspector'
 ORDER BY id DESC
 LIMIT 1;
 """,
@@ -890,6 +935,11 @@ LIMIT 1;
                 "target_role": "director",
                 "message": "PRIORITY PGU-21 -- Inspection notify appears stuck for perf; check/reassign",
             }, inspection_escalation
+            escalation_nudge_copies = psql(
+                conninfo,
+                "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-21' AND kind = 'nudge' AND target_role = 'director';",
+            ).stdout.strip()
+            assert escalation_nudge_copies == "0", escalation_nudge_copies
 
             psql(
                 conninfo,

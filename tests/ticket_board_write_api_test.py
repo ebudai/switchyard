@@ -530,10 +530,20 @@ def exercise_write_api(base_url: str, commit_hash: str) -> None:
         {"recommendations": "Frame has visible banding."},
         caller="inspector",
     )
-    assert inspector_kicked["ticket"]["state"] == "in_progress", inspector_kicked  # type: ignore[index]
+    assert inspector_kicked["ticket"]["state"] == "ready", inspector_kicked  # type: ignore[index]
     assert inspector_kicked["ticket"]["inspector_signoff"] is False, inspector_kicked  # type: ignore[index]
     assert inspector_kicked["ticket"]["comments"][-1]["who"] == "inspector", inspector_kicked  # type: ignore[index]
     assert "Frame has visible banding." in inspector_kicked["ticket"]["comments"][-1]["text"], inspector_kicked  # type: ignore[index]
+    inspector_restarted = post_json(base_url, "/api/tickets/PGU-119/actions/start_work", {}, caller="ops")
+    assert inspector_restarted["ticket"]["state"] == "in_progress", inspector_restarted  # type: ignore[index]
+    inspector_resubmitted = post_json(
+        base_url,
+        "/api/tickets/PGU-119/actions/submit_to_audit",
+        {"commit_hash": commit_hash},
+        caller="ops",
+    )
+    assert inspector_resubmitted["ticket"]["state"] == "inspection", inspector_resubmitted  # type: ignore[index]
+    assert inspector_resubmitted["ticket"]["inspector_signoff"] is False, inspector_resubmitted  # type: ignore[index]
 
     audit_signed = post_json(base_url, "/api/tickets/PGU-102/actions/audit_sign_off", {}, caller="audit")
     assert audit_signed["ticket"]["state"] == "director_review", audit_signed  # type: ignore[index]

@@ -313,7 +313,7 @@ WHERE id = 'PGU-31';
             )
             assert_error(
                 conninfo,
-                "UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-32';",
+                "UPDATE ticket_board.tickets SET state = 'ready' WHERE id = 'PGU-32';",
                 "inspector kickback requires",
             )
             psql(
@@ -329,7 +329,7 @@ VALUES (
     'Frame has banding.',
     '{"who":"inspector","ts":"2026-07-10T00:10:00+00:00","text":"Frame has banding."}'::jsonb
 );
-UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-32';
+UPDATE ticket_board.tickets SET state = 'ready' WHERE id = 'PGU-32';
 COMMIT;
 """,
             )
@@ -343,14 +343,14 @@ WHERE id = 'PGU-32';
 """,
                 ).stdout
             )
-            assert inspect_kicked == {"state": "in_progress", "inspector_signoff": False, "audit_signoff": False}, inspect_kicked
+            assert inspect_kicked == {"state": "ready", "inspector_signoff": False, "audit_signoff": False}, inspect_kicked
             inspect_kick_notice = json.loads(
                 psql(
                     conninfo,
                     """
 SELECT jsonb_build_object('target_role', target_role, 'message', message, 'new_state', payload->>'new_state')::text
 FROM ticket_board.ticket_notification_queue
-WHERE ticket_id = 'PGU-32' AND payload->>'new_state' = 'in_progress'
+WHERE ticket_id = 'PGU-32' AND payload->>'new_state' = 'ready'
 ORDER BY id DESC
 LIMIT 1;
 """,
@@ -359,8 +359,21 @@ LIMIT 1;
             assert inspect_kick_notice == {
                 "target_role": "ops",
                 "message": "PGU-32 -- Inspection kickback kicked back to you: Frame has banding.",
-                "new_state": "in_progress",
+                "new_state": "ready",
             }, inspect_kick_notice
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-32';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = 'abcdef1' WHERE id = 'PGU-32';")
+            inspect_resubmitted = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object('state', state, 'inspector_signoff', inspector_signoff, 'commit_hash', commit_hash)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-32';
+""",
+                ).stdout
+            )
+            assert inspect_resubmitted == {"state": "inspection", "inspector_signoff": False, "commit_hash": "abcdef1"}, inspect_resubmitted
 
             insert_ticket(conninfo, "PGU-4", title="Review", assignee="audit", state="audit", implementation="done")
             assert_error(

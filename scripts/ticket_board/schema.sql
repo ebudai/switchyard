@@ -331,7 +331,7 @@ BEGIN
             (OLD.state = 'analysis' AND NEW.state IN ('ready', 'backlog', 'cancelled')) OR
             (OLD.state = 'ready' AND NEW.state IN ('in_progress', 'analysis', 'backlog', 'cancelled')) OR
             (OLD.state = 'in_progress' AND NEW.state IN ('inspection', 'audit', 'ready', 'analysis', 'backlog', 'cancelled')) OR
-            (OLD.state = 'inspection' AND NEW.state IN ('audit', 'in_progress', 'backlog', 'cancelled')) OR
+            (OLD.state = 'inspection' AND NEW.state IN ('audit', 'ready', 'backlog', 'cancelled')) OR
             (OLD.state = 'audit' AND NEW.state IN ('eric_review', 'director_review', 'analysis', 'backlog', 'cancelled')) OR
             (OLD.state = 'eric_review' AND NEW.state IN ('director_review', 'audit', 'analysis', 'backlog', 'cancelled')) OR
             (OLD.state = 'director_review' AND NEW.state IN ('done', 'ready', 'analysis', 'backlog', 'cancelled')) OR
@@ -349,7 +349,7 @@ BEGIN
         NEW.commit_hash := '';
     END IF;
 
-    IF OLD.state = 'inspection' AND NEW.state = 'in_progress' THEN
+    IF OLD.state = 'inspection' AND NEW.state = 'ready' THEN
         IF NOT EXISTS (
             SELECT 1
             FROM ticket_board.ticket_comments
@@ -469,7 +469,7 @@ BEGIN
     IF OLD.state IS DISTINCT FROM NEW.state THEN
         target_role := ticket_board.transition_target_role(NEW.state, NEW.assignee);
         message := ticket_board.transition_message(NEW.id, NEW.title, OLD.state, NEW.state);
-        IF OLD.state = 'inspection' AND NEW.state = 'in_progress' THEN
+        IF OLD.state = 'inspection' AND NEW.state = 'ready' THEN
             SELECT c.text
             INTO recommendation
             FROM ticket_board.ticket_comments AS c
@@ -1795,7 +1795,7 @@ BEGIN
     comment_actor := ticket_board.current_app_actor();
     PERFORM ticket_board.append_ticket_comment(id, comment_actor, recommendations);
     UPDATE ticket_board.tickets
-    SET state = 'in_progress',
+    SET state = 'ready',
         inspector_signoff = false
     WHERE tickets.id = inspector_kick_back.id
       AND tickets.state = 'inspection';

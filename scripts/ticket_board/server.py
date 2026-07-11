@@ -552,7 +552,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             patch = {"state": "audit", "inspector_signoff": True}
         elif operation == "inspector_kick_back":
             patch = {
-                "state": "in_progress",
+                "state": "ready",
                 "comment": {"who": caller, "text": str(payload.get("recommendations", payload.get("reason", payload.get("text", ""))))},
             }
         elif operation == "audit_sign_off":

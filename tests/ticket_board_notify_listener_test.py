@@ -7,6 +7,7 @@ import json
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -43,12 +44,18 @@ class FakeConnection:
         queue_rows: list[tuple[int, str, str, str, str, int]] | None = None,
         *,
         ticket_rows: dict[str, tuple[str, str] | tuple[str, str, bool, bool]] | None = None,
+        queue_created_at: dict[int, datetime] | None = None,
         notifications: list[str] | None = None,
         fail_on_notifies: bool = False,
         executed: list[Any] | None = None,
     ) -> None:
         self.queue_rows = queue_rows or []
         self.ticket_rows = ticket_rows if ticket_rows is not None else self._ticket_rows_for_queue(self.queue_rows)
+        self.queue_created_at = (
+            queue_created_at
+            if queue_created_at is not None
+            else {notification_id: datetime.now(timezone.utc) for notification_id, *_rest in self.queue_rows}
+        )
         self.notifications = notifications or []
         self.fail_on_notifies = fail_on_notifies
         self.executed = executed if executed is not None else []
@@ -94,6 +101,10 @@ class FakeConnection:
             if row is not None and len(row) == 2:
                 row = (row[0], row[1], False, False)
             return FakeResult([] if row is None else [row])
+        if "FROM ticket_board.ticket_notification_queue" in statement_text and "created_at" in statement_text:
+            assert params is not None
+            created_at = self.queue_created_at.get(int(params[0]))
+            return FakeResult([] if created_at is None else [(created_at,)])
         if "ack_notification" in statement_text:
             assert params is not None
             self.acked.append(int(params[0]))
@@ -329,6 +340,63 @@ def test_busy_pane_requeues_then_idle_pane_delivers_once() -> None:
     assert idle_conn.acked == [20]
 
 
+def test_busy_pane_force_delivers_after_max_defer_cap() -> None:
+    sent: list[tuple[str, str]] = []
+    now = datetime.now(timezone.utc)
+    first_conn = FakeConnection(
+        [queue_row(25, "PGU-252", attempts=1)],
+        queue_created_at={25: now},
+    )
+    second_conn = FakeConnection(
+        [queue_row(25, "PGU-252", attempts=2)],
+        queue_created_at={25: now - timedelta(seconds=61)},
+    )
+    connections = [first_conn, second_conn]
+
+    def connector(*args: Any, **kwargs: Any) -> FakeConnection:
+        return connections.pop(0)
+
+    listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=lambda target, message: sent.append((target, message)),
+        activity_gate=lambda _target: True,
+        connector=connector,
+        poll_seconds=0,
+        max_defer_seconds=60.0,
+    )
+
+    assert listener.listen_once(max_notifications=1) == 0
+    assert sent == []
+    assert [item[0] for item in first_conn.requeued] == [25]
+    assert first_conn.acked == []
+
+    assert listener.listen_once(max_notifications=1) == 1
+    assert sent == [("pgu-ops:0.0", "Ready ticket for you: PGU-252 -- Queue")]
+    assert second_conn.acked == [25]
+    assert second_conn.requeued == []
+
+
+def test_fresh_listener_force_delivers_after_restart_from_queue_created_at() -> None:
+    sent: list[tuple[str, str]] = []
+    conn = FakeConnection(
+        [queue_row(26, "PGU-252", attempts=2)],
+        queue_created_at={26: datetime.now(timezone.utc) - timedelta(seconds=61)},
+    )
+    listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=lambda target, message: sent.append((target, message)),
+        activity_gate=lambda _target: True,
+        connector=lambda *args, **kwargs: conn,
+        poll_seconds=0,
+        max_defer_seconds=60.0,
+    )
+
+    assert listener.listen_once(max_notifications=1) == 1
+    assert sent == [("pgu-ops:0.0", "Ready ticket for you: PGU-252 -- Queue")]
+    assert conn.acked == [26]
+    assert conn.requeued == []
+
+
 def test_stale_ready_nudge_for_cancelled_ticket_is_acked_not_delivered() -> None:
     sent: list[tuple[str, str]] = []
     conn = FakeConnection(
@@ -495,7 +563,7 @@ Working
     assert gate.is_busy("pgu-director:0.0") is True
     clock[0] += 11.0
     assert gate.is_busy("pgu-director:0.0") is True
-    assert gate.is_busy("pgu-ops:0.0") is True
+    assert gate.is_busy("pgu-ops:0.0") is False
 
     empty_composer_capture = f"""
 Working
@@ -516,7 +584,28 @@ Working
     )
 
     assert empty_gate.is_busy("pgu-director:0.0") is False
-    assert empty_gate.is_busy("pgu-ops:0.0") is True
+    assert empty_gate.is_busy("pgu-ops:0.0") is False
+
+
+def test_director_gate_ignores_queued_message_placeholder() -> None:
+    horizontal = "─" * 48
+    placeholder_capture = f"""
+assistant output
+{horizontal}
+❯ Press up to edit queued messages
+{horizontal}
+""".strip()
+
+    def capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=placeholder_capture)
+
+    gate = PaneActivityGate(
+        "/tmp/directorctl",
+        stable_idle_seconds=0,
+        capture_runner=capture_runner,
+    )
+
+    assert gate.is_busy("pgu-director:0.0") is False
 
 
 def test_director_gate_empty_composer_delivers_even_when_capture_changes() -> None:
@@ -553,6 +642,52 @@ Working.
     assert gate.is_busy("pgu-director:0.0") is False
     clock[0] += 4.0
     assert gate.is_busy("pgu-director:0.0") is False
+
+
+def test_non_director_gate_ignores_stale_working_scrollback() -> None:
+    horizontal = "─" * 48
+    idle_with_stale_working_capture = f"""
+• Working (4m 12s • esc to interrupt)
+Finished older task output
+{horizontal}
+• Explored
+  └ Read notify_listener.py
+›
+  gpt-5.5 high · ~/Projects/pgu
+""".strip()
+
+    def capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=idle_with_stale_working_capture)
+
+    gate = PaneActivityGate(
+        "/tmp/directorctl",
+        stable_idle_seconds=0,
+        capture_runner=capture_runner,
+    )
+
+    assert gate.is_busy("pgu-ops:0.0") is False
+
+
+def test_non_director_gate_uses_live_working_status_line() -> None:
+    horizontal = "─" * 48
+    live_working_capture = f"""
+Older completed output
+{horizontal}
+• Working (11m 21s • esc to interrupt)
+› Implement {{feature}}
+  gpt-5.5 high · ~/Projects/pgu
+""".strip()
+
+    def capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=live_working_capture)
+
+    gate = PaneActivityGate(
+        "/tmp/directorctl",
+        stable_idle_seconds=0,
+        capture_runner=capture_runner,
+    )
+
+    assert gate.is_busy("pgu-ops:0.0") is True
 
 
 def test_acked_notification_does_not_repeat_across_restart() -> None:
@@ -605,12 +740,17 @@ def main() -> int:
     test_reconnect_relistens_after_connection_drop()
     test_send_timeout_requeues_and_does_not_block_next_pane()
     test_busy_pane_requeues_then_idle_pane_delivers_once()
+    test_busy_pane_force_delivers_after_max_defer_cap()
+    test_fresh_listener_force_delivers_after_restart_from_queue_created_at()
     test_stale_ready_nudge_for_cancelled_ticket_is_acked_not_delivered()
     test_stale_ready_nudge_for_picked_up_ticket_is_acked_not_delivered()
     test_escalation_for_still_stuck_ready_ticket_delivers_to_director()
     test_director_composer_busy_requeues_then_idle_delivers_once()
     test_director_gate_treats_composer_content_as_busy_only_for_director()
+    test_director_gate_ignores_queued_message_placeholder()
     test_director_gate_empty_composer_delivers_even_when_capture_changes()
+    test_non_director_gate_ignores_stale_working_scrollback()
+    test_non_director_gate_uses_live_working_status_line()
     test_acked_notification_does_not_repeat_across_restart()
     test_default_sender_delegates_to_directorctl_send()
     print("ticket_board_notify_listener_test: ok")

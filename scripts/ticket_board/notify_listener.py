@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -29,8 +30,16 @@ DEFAULT_KEEPALIVES_COUNT = 3
 DEFAULT_DIRECTORCTL_SEND_TIMEOUT_SECONDS = 10.0
 DEFAULT_REQUEUE_BASE_SECONDS = 5.0
 DEFAULT_REQUEUE_MAX_SECONDS = 60.0
+DEFAULT_MAX_DEFER_SECONDS = 90.0
 DEFAULT_DIRECTOR_RECENT_ACTIVITY_SECONDS = 10.0
 DEFAULT_DIRECTOR_STABLE_IDLE_SECONDS = 0.25
+DIRECTOR_COMPOSER_PLACEHOLDERS = {
+    "press up to edit queued messages",
+    "press enter to send",
+    "type a message",
+    "ask codex",
+    "message codex",
+}
 ROLE_TO_TARGET = {
     "director": "pgu-director:0.0",
     "main": "pgu-main:0.0",
@@ -194,16 +203,35 @@ class PaneActivityGate:
     def _has_working_indicator(self, text: str) -> bool:
         return "Working" in text or "esc to interrupt" in text
 
-    def _director_composer_has_content(self, text: str) -> bool:
-        if not text:
-            return False
+    def _has_live_working_indicator(self, text: str) -> bool:
+        lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+        horizontal_indices = [idx for idx, line in enumerate(lines) if line.count("─") >= 40]
+        if horizontal_indices:
+            live_lines = lines[horizontal_indices[-1] + 1 :]
+        else:
+            live_lines = lines[-5:]
+        return self._has_working_indicator("\n".join(live_lines[-5:]))
+
+    def _normalized_director_composer_lines(self, text: str) -> list[str]:
         lines = text.splitlines()
         horizontal_indices = [idx for idx, line in enumerate(lines) if line.count("─") >= 40]
         if len(horizontal_indices) < 2:
-            return True
-        composer_content = "\n".join(lines[horizontal_indices[-2] + 1 : horizontal_indices[-1]])
-        cleaned = re.sub(r"^[❯\u276f\s>\-*]+", "", composer_content, flags=re.MULTILINE)
-        return bool(cleaned.strip())
+            return ["<unknown>"]
+        composer_lines = lines[horizontal_indices[-2] + 1 : horizontal_indices[-1]]
+        normalized: list[str] = []
+        for line in composer_lines:
+            cleaned = re.sub(r"^[❯\u276f\s>\-*]+", "", line).strip()
+            if cleaned:
+                normalized.append(cleaned)
+        return normalized
+
+    def _director_composer_has_content(self, text: str) -> bool:
+        if not text:
+            return False
+        normalized = self._normalized_director_composer_lines(text)
+        if not normalized:
+            return False
+        return any(line.strip().lower() not in DIRECTOR_COMPOSER_PLACEHOLDERS for line in normalized)
 
     def _mark_recent_activity(self, target: str, text: str, now: float) -> bool:
         previous = self._last_capture_by_target.get(target)
@@ -223,7 +251,7 @@ class PaneActivityGate:
         if text is None:
             return False
         if target != ROLE_TO_TARGET["director"]:
-            return self._has_working_indicator(text)
+            return self._has_live_working_indicator(text)
         return self._director_composer_has_content(text)
 
     def is_working(self, target: str) -> bool:
@@ -243,6 +271,7 @@ class TicketBoardNotifyListener:
         poll_seconds: float = DEFAULT_POLL_SECONDS,
         requeue_base_seconds: float = DEFAULT_REQUEUE_BASE_SECONDS,
         requeue_max_seconds: float = DEFAULT_REQUEUE_MAX_SECONDS,
+        max_defer_seconds: float = DEFAULT_MAX_DEFER_SECONDS,
         stop_event: threading.Event | None = None,
         logger: logging.Logger = LOGGER,
     ) -> None:
@@ -255,6 +284,7 @@ class TicketBoardNotifyListener:
         self.poll_seconds = poll_seconds
         self.requeue_base_seconds = requeue_base_seconds
         self.requeue_max_seconds = requeue_max_seconds
+        self.max_defer_seconds = max_defer_seconds
         self.stop_event = stop_event or threading.Event()
         self.logger = logger
         self.delivered_count = 0
@@ -325,6 +355,32 @@ FROM ticket_board.claim_notification()
             "SELECT ticket_board.requeue_notification(%s::bigint, %s::interval, %s::text)",
             (notification_id, f"{delay_seconds} seconds", error[:500]),
         )
+
+    def _notification_created_at(self, conn: Any, notification_id: int) -> datetime | None:
+        result = conn.execute(
+            """
+SELECT created_at
+FROM ticket_board.ticket_notification_queue
+WHERE id = %s
+""",
+            (notification_id,),
+        )
+        row = result.fetchone()
+        if row is None:
+            return None
+        created_at = row["created_at"] if isinstance(row, dict) else row[0]
+        if not isinstance(created_at, datetime):
+            return None
+        if created_at.tzinfo is None:
+            return created_at.replace(tzinfo=timezone.utc)
+        return created_at
+
+    def _defer_age_seconds(self, conn: Any, notification_id: int) -> float:
+        created_at = self._notification_created_at(conn, notification_id)
+        if created_at is None:
+            return 0.0
+        now = datetime.now(created_at.tzinfo or timezone.utc)
+        return max(0.0, (now - created_at).total_seconds())
 
     def _current_ticket_state(self, conn: Any, ticket_id: str) -> tuple[str, str, bool, bool] | None:
         result = conn.execute(
@@ -433,10 +489,20 @@ WHERE id = %s
                 self.logger.info("Dropping stale notification %s for %s: %s", notification_id, ticket_id, payload)
                 self._ack_notification(conn, notification_id)
                 continue
-            if self.activity_gate(target):
+            defer_age = self._defer_age_seconds(conn, notification_id)
+            pane_busy = self.activity_gate(target)
+            if pane_busy and defer_age < self.max_defer_seconds:
                 self.logger.info("Pane %s is active; requeueing notification %s for %s", target, notification_id, ticket_id)
                 self._requeue_notification(conn, notification_id, attempts, "pane busy")
                 continue
+            if pane_busy:
+                self.logger.warning(
+                    "Pane %s still active after %.1fs; force-delivering notification %s for %s",
+                    target,
+                    defer_age,
+                    notification_id,
+                    ticket_id,
+                )
             try:
                 self.sender(target, message)
             except (subprocess.SubprocessError, OSError) as exc:
@@ -495,6 +561,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--directorctl", default=DEFAULT_DIRECTORCTL, help=f"directorctl path (default: {DEFAULT_DIRECTORCTL})")
     parser.add_argument("--reconnect-seconds", type=float, default=DEFAULT_RECONNECT_SECONDS)
     parser.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS)
+    parser.add_argument("--max-defer-seconds", type=float, default=DEFAULT_MAX_DEFER_SECONDS)
     parser.add_argument("--verbose", action="store_true")
     return parser
 
@@ -512,6 +579,7 @@ def main(argv: list[str] | None = None) -> int:
         activity_gate=PaneActivityGate(args.directorctl).is_working,
         reconnect_seconds=args.reconnect_seconds,
         poll_seconds=args.poll_seconds,
+        max_defer_seconds=args.max_defer_seconds,
     )
     listener.run_forever()
     return 0

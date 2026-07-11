@@ -21,6 +21,22 @@ scripts/directorctl ticket-create \
   --comment-text "Speced + routed to app."
 ```
 
+Pane write API:
+
+- Pane callers should use the explicit operation routes rather than patching
+  ticket JSON directly:
+  - `POST /api/tickets/actions/create_ticket`
+  - `POST /api/tickets/actions/file_bug`
+  - `POST /api/tickets/<PGU-N>/actions/<operation>`
+- Each operation request must include `X-PGU-Caller-Role` with one of
+  `director`, `eric`, `main`, `app`, `ops`, `audit`, `perf`, or `research`.
+  The board trusts this localhost/tailnet caller identity for app-layer
+  permission checks and comment attribution.
+- Ticket-scoped operations are `route`, `start_work`, `submit_to_audit`,
+  `audit_sign_off`, `audit_kick_back`, `eric_sign_off`, `eric_reopen`,
+  `mark_done`, `defer`, `cancel`, `set_manually_controlled`, `set_blockers`,
+  and `add_comment`.
+
 Defaults:
 
 - Store path: `/home/agent/.claude/pgu-tickets`

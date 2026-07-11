@@ -274,6 +274,7 @@ class TicketBoardApp:
                 "audit_signoff": bool(audit_signoff),
                 "needs_eric_signoff": bool(needs_eric_signoff),
                 "eric_signoff": bool(eric_signoff),
+                "manually_controlled": False,
                 "commit_hash": self._validate_commit_hash(commit_hash),
                 "commit_exempt": bool(commit_exempt),
                 "created": created_ts,
@@ -334,6 +335,8 @@ class TicketBoardApp:
             current["audit_signoff"] = bool(patch["audit_signoff"])
         if "eric_signoff" in patch:
             current["eric_signoff"] = bool(patch["eric_signoff"])
+        if "manually_controlled" in patch:
+            current["manually_controlled"] = bool(patch["manually_controlled"])
         if "commit_hash" in patch:
             current["commit_hash"] = self._validate_commit_hash(patch["commit_hash"])
         if "commit_exempt" in patch:
@@ -356,6 +359,17 @@ class TicketBoardApp:
         current["updated"] = iso_now()
         self._atomic_write(path, self._serialize_ticket(current))
         return current
+
+    def route_ticket(self, ticket_id: str, state: str, assignee: str) -> dict[str, Any]:
+        ticket_id = str(ticket_id).strip().upper()
+        state = self._validate_state(str(state))
+        assignee = self._validate_assignee(str(assignee))
+        if self.store_backend != "postgres":
+            return self.update_ticket(ticket_id, {"state": state, "assignee": assignee})
+        with self._pg_connect() as conn:
+            with conn.transaction():
+                self._pg_call(conn, "SELECT ticket_board.route(%s, %s, %s);", (ticket_id, state, assignee))
+                return self._pg_get_ticket(ticket_id, conn)
 
     def merge_tickets(self, source_ticket_id: str, target_ticket_id: str, *, actor: str) -> dict[str, dict[str, Any]]:
         if self.store_backend == "postgres":
@@ -555,6 +569,7 @@ SELECT
     t.audit_signoff,
     t.needs_eric_signoff,
     t.eric_signoff,
+    t.manually_controlled,
     t.commit_hash,
     t.commit_exempt,
     t.created_text,
@@ -623,6 +638,7 @@ ORDER BY t.ticket_number
             "audit_signoff": bool(row["audit_signoff"]),
             "needs_eric_signoff": bool(row["needs_eric_signoff"]),
             "eric_signoff": bool(row["eric_signoff"]),
+            "manually_controlled": bool(row["manually_controlled"]),
             "commit_hash": str(row["commit_hash"] or ""),
             "commit_exempt": bool(row["commit_exempt"]),
             "created": self._require_text(row["created_text"], "created"),
@@ -697,6 +713,7 @@ ORDER BY t.ticket_number
                 if blocked_by:
                     self._pg_call(conn, "SELECT ticket_board.set_blockers(%s, %s, %s);", (ticket_id, blocked_by, blocked_reason))
                 for comment in normalized_comments:
+                    self._pg_set_caller_role(conn, comment["who"])
                     self._pg_call(conn, "SELECT ticket_board.add_comment(%s, %s);", (ticket_id, comment["text"]))
                 return self._pg_get_ticket(ticket_id, conn)
 
@@ -706,6 +723,12 @@ ORDER BY t.ticket_number
             with conn.transaction():
                 current = self._pg_get_ticket(ticket_id, conn)
                 self._pg_reject_unsupported_patch_fields(patch)
+                if "manually_controlled" in patch:
+                    self._pg_call(
+                        conn,
+                        "SELECT ticket_board.set_manually_controlled(%s, %s);",
+                        (ticket_id, bool(patch["manually_controlled"])),
+                    )
                 if "blocked_by" in patch or "blocked_reason" in patch:
                     blocked_by = self._validate_blocked_by(patch.get("blocked_by", current["blocked_by"]), ticket_id)
                     blocked_reason = self._require_plain_string(
@@ -716,12 +739,14 @@ ORDER BY t.ticket_number
                     self._pg_call(conn, "SELECT ticket_board.set_blockers(%s, %s, %s);", (ticket_id, blocked_by, blocked_reason))
 
                 comment_text = ""
+                comment_who = ""
                 if "comment" in patch:
                     comment = patch["comment"]
-                    who = str(comment.get("who", "")).strip()
+                    comment_who = str(comment.get("who", "")).strip()
                     comment_text = str(comment.get("text", "")).strip()
-                    if not who or not comment_text:
+                    if not comment_who or not comment_text:
                         raise ValueError("comment requires non-empty who and text")
+                    self._pg_set_caller_role(conn, comment_who)
 
                 state = self._validate_state(str(patch["state"])) if "state" in patch else current["state"]
                 assignee = self._validate_assignee(str(patch["assignee"])) if "assignee" in patch else current["assignee"]
@@ -769,6 +794,9 @@ ORDER BY t.ticket_number
 
     def _pg_call(self, conn: Any, sql: str, params: tuple[Any, ...]) -> None:
         conn.execute(sql, params)
+
+    def _pg_set_caller_role(self, conn: Any, caller_role: str) -> None:
+        conn.execute("SELECT set_config('ticket_board.caller_role', %s, true);", (caller_role,))
 
     def _pg_call_scalar(self, conn: Any, sql: str, params: tuple[Any, ...]) -> str:
         row = conn.execute(sql, params).fetchone()
@@ -908,6 +936,7 @@ ORDER BY ticket_number;
             "audit_signoff": bool(payload.get("audit_signoff", False)),
             "needs_eric_signoff": bool(payload.get("needs_eric_signoff", False)),
             "eric_signoff": bool(payload.get("eric_signoff", False)),
+            "manually_controlled": bool(payload.get("manually_controlled", False)),
             "commit_hash": self._validate_commit_hash(payload.get("commit_hash", "")),
             "commit_exempt": bool(payload.get("commit_exempt", False)),
             "created": self._require_text(payload.get("created"), "created"),

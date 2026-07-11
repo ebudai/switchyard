@@ -22,6 +22,26 @@ LOGGER = logging.getLogger(__name__)
 DIRECTOR_TARGET = "pgu-director:0.0"
 DIRECTOR_NOTIFICATION_BATCH_WINDOW_SECONDS = 0.35
 REPO_ROOT = Path(__file__).resolve().parents[2]
+CALLER_ROLE_HEADER = "X-PGU-Caller-Role"
+IMPLEMENTER_ROLES = {"main", "app", "ops", "perf", "research"}
+CALLER_ROLES = IMPLEMENTER_ROLES | {"director", "eric", "audit"}
+OPERATION_ALLOWED_ROLES = {
+    "create_ticket": {"director", "eric"},
+    "file_bug": IMPLEMENTER_ROLES,
+    "route": {"director"},
+    "start_work": IMPLEMENTER_ROLES,
+    "submit_to_audit": IMPLEMENTER_ROLES,
+    "audit_sign_off": {"audit"},
+    "audit_kick_back": {"audit"},
+    "eric_sign_off": {"eric"},
+    "eric_reopen": {"eric"},
+    "mark_done": {"director"},
+    "defer": {"director"},
+    "cancel": {"director"},
+    "set_manually_controlled": {"director"},
+    "set_blockers": {"director"},
+    "add_comment": CALLER_ROLES,
+}
 
 
 def send_director_message(payload: str, target: str = DIRECTOR_TARGET) -> None:
@@ -180,6 +200,133 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
     ) -> tuple[tuple[object, ...], ...]:
         return self.app.verify_created_ticket_persisted(created, before_signature)
 
+    def caller_role(self) -> str:
+        raw = self.headers.get(CALLER_ROLE_HEADER, "")
+        role = raw.strip().lower()
+        if not role:
+            raise ValueError(f"missing {CALLER_ROLE_HEADER}")
+        if role not in CALLER_ROLES:
+            raise ValueError(f"invalid caller role: {raw}")
+        return role
+
+    def require_operation_allowed(self, operation: str, caller_role: str, ticket_id: str | None = None) -> None:
+        allowed = OPERATION_ALLOWED_ROLES.get(operation)
+        if allowed is None:
+            raise ValueError(f"unknown ticket operation: {operation}")
+        if caller_role not in allowed:
+            raise PermissionError(f"{caller_role} cannot call {operation}")
+        if operation in {"start_work", "submit_to_audit"} and ticket_id is not None:
+            ticket = self.app.get_ticket(ticket_id)
+            if str(ticket.get("assignee", "")).strip().lower() != caller_role:
+                raise PermissionError(f"{caller_role} cannot call {operation} for ticket assigned to {ticket.get('assignee')}")
+
+    def create_ticket_from_payload(self, payload: dict[str, object]) -> dict[str, object]:
+        return self.app.create_ticket(
+            title=str(payload.get("title", "")),
+            body=str(payload.get("body", "")),
+            screenshot=payload.get("screenshot"),  # type: ignore[arg-type]
+            screenshots=payload.get("screenshots"),  # type: ignore[arg-type]
+            assignee=str(payload.get("assignee", "unassigned")),
+            needs_eric_signoff=bool(payload.get("needs_eric_signoff", False)),
+            blocked_by=payload.get("blocked_by"),  # type: ignore[arg-type]
+            blocked_reason=str(payload.get("blocked_reason", "")),
+        )
+
+    def send_ticket_created(self, created: dict[str, object], before_signature: tuple[tuple[object, ...], ...]) -> None:
+        after_signature = self.verify_created_ticket_persisted(created, before_signature)
+        self.events.notify_change(after_signature)
+        self.director_notifier.notify_ticket_created(created)
+        self.send_json({"ticket": created}, HTTPStatus.CREATED)
+
+    def handle_ticket_action(self, operation: str, payload: dict[str, object], ticket_id: str | None = None) -> None:
+        caller = self.caller_role()
+        self.require_operation_allowed(operation, caller, ticket_id)
+
+        if operation == "create_ticket":
+            before_signature = self.app.store_signature()
+            created = self.create_ticket_from_payload(payload)
+            self.send_ticket_created(created, before_signature)
+            return
+
+        if operation == "file_bug":
+            before_signature = self.app.store_signature()
+            source_ticket_id = str(payload.get("source_ticket_id", payload.get("parent_id", ""))).strip().upper()
+            created = self.app.create_ticket_record(
+                title=str(payload.get("title", "")),
+                body=str(payload.get("body", "")),
+                screenshot=payload.get("screenshot"),  # type: ignore[arg-type]
+                screenshots=payload.get("screenshots"),  # type: ignore[arg-type]
+                assignee=str(payload.get("assignee", "unassigned")),
+                state="analysis",
+                blocked_by=payload.get("blocked_by"),  # type: ignore[arg-type]
+                implementation="",
+                audit_prompt="",
+                audit_signoff=False,
+                needs_eric_signoff=bool(payload.get("needs_eric_signoff", False)),
+                eric_signoff=False,
+                comments=[],
+                parent_id=source_ticket_id,
+                blocked_reason=str(payload.get("blocked_reason", "")),
+            )
+            self.send_ticket_created(created, before_signature)
+            return
+
+        if ticket_id is None:
+            raise ValueError(f"{operation} requires a ticket id")
+
+        patch: dict[str, object]
+        if operation == "route":
+            updated = self.app.route_ticket(
+                ticket_id,
+                str(payload.get("state", payload.get("new_state", ""))),
+                str(payload.get("assignee", "")),
+            )
+            self.events.notify_change(self.app.store_signature())
+            self.send_json({"ticket": updated})
+            return
+        elif operation == "start_work":
+            patch = {"state": "in_progress"}
+        elif operation == "submit_to_audit":
+            patch = {"state": "audit", "commit_hash": str(payload.get("commit_hash", ""))}
+        elif operation == "audit_sign_off":
+            patch = {"audit_signoff": True}
+        elif operation == "audit_kick_back":
+            patch = {
+                "state": "analysis",
+                "comment": {"who": caller, "text": str(payload.get("reason", payload.get("text", "")))},
+            }
+        elif operation == "eric_sign_off":
+            patch = {"eric_signoff": True}
+        elif operation == "eric_reopen":
+            patch = {
+                "state": "analysis",
+                "comment": {"who": caller, "text": str(payload.get("reason", payload.get("text", "")))},
+            }
+        elif operation == "mark_done":
+            patch = {"state": "done", "commit_hash": str(payload.get("commit_hash", ""))}
+        elif operation == "defer":
+            patch = {"state": "backlog"}
+        elif operation == "cancel":
+            patch = {
+                "state": "cancelled",
+                "comment": {"who": caller, "text": str(payload.get("reason", payload.get("text", "")))},
+            }
+        elif operation == "set_manually_controlled":
+            patch = {"manually_controlled": bool(payload.get("manually_controlled", payload.get("value", False)))}
+        elif operation == "set_blockers":
+            patch = {
+                "blocked_by": payload.get("blocked_by", payload.get("ids", [])),
+                "blocked_reason": str(payload.get("blocked_reason", payload.get("reason", ""))),
+            }
+        elif operation == "add_comment":
+            patch = {"comment": {"who": caller, "text": str(payload.get("text", ""))}}
+        else:
+            raise ValueError(f"unknown ticket operation: {operation}")
+
+        updated = self.app.update_ticket(ticket_id, patch)
+        self.events.notify_change(self.app.store_signature())
+        self.send_json({"ticket": updated})
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/":
@@ -249,22 +396,14 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 self.send_json({"image": uploaded}, HTTPStatus.CREATED)
                 return
             payload = json.loads(self.rfile.read(length) or b"{}")
+            if parsed.path.startswith("/api/tickets/actions/"):
+                operation = urllib.parse.unquote(parsed.path.removeprefix("/api/tickets/actions/").strip("/"))
+                self.handle_ticket_action(operation, payload)
+                return
             if parsed.path == "/api/tickets":
                 before_signature = self.app.store_signature()
-                created = self.app.create_ticket(
-                    title=str(payload.get("title", "")),
-                    body=str(payload.get("body", "")),
-                    screenshot=payload.get("screenshot"),
-                    screenshots=payload.get("screenshots"),
-                    assignee=str(payload.get("assignee", "unassigned")),
-                    needs_eric_signoff=bool(payload.get("needs_eric_signoff", False)),
-                    blocked_by=payload.get("blocked_by"),
-                    blocked_reason=str(payload.get("blocked_reason", "")),
-                )
-                after_signature = self.verify_created_ticket_persisted(created, before_signature)
-                self.events.notify_change(after_signature)
-                self.director_notifier.notify_ticket_created(created)
-                self.send_json({"ticket": created}, HTTPStatus.CREATED)
+                created = self.create_ticket_from_payload(payload)
+                self.send_ticket_created(created, before_signature)
                 return
             if parsed.path.startswith("/api/tickets/") and parsed.path.endswith("/merge"):
                 source_ticket_id = parsed.path.removeprefix("/api/tickets/").removesuffix("/merge").rstrip("/")
@@ -276,6 +415,13 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 self.events.notify_change(self.app.store_signature())
                 self.send_json(merged)
                 return
+            if parsed.path.startswith("/api/tickets/") and "/actions/" in parsed.path:
+                rest = parsed.path.removeprefix("/api/tickets/")
+                raw_ticket_id, raw_operation = rest.split("/actions/", 1)
+                ticket_id = urllib.parse.unquote(raw_ticket_id.strip("/"))
+                operation = urllib.parse.unquote(raw_operation.strip("/"))
+                self.handle_ticket_action(operation, payload, ticket_id=ticket_id)
+                return
             if parsed.path.startswith("/api/tickets/"):
                 ticket_id = parsed.path.removeprefix("/api/tickets/")
                 updated = self.app.update_ticket(ticket_id, payload)
@@ -284,6 +430,9 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 return
         except FileNotFoundError as exc:
             self.send_text(str(exc), HTTPStatus.NOT_FOUND)
+            return
+        except PermissionError as exc:
+            self.send_text(str(exc), HTTPStatus.FORBIDDEN)
             return
         except Exception as exc:  # noqa: BLE001
             self.send_text(str(exc), HTTPStatus.BAD_REQUEST)

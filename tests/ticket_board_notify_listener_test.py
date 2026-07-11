@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.ticket_board.notify_listener import DirectorctlSender, TicketBoardNotifyListener
+from scripts.ticket_board.notify_listener import DirectorctlSender, PaneActivityGate, TicketBoardNotifyListener
 
 
 @dataclass(frozen=True)
@@ -249,6 +249,108 @@ def test_busy_pane_requeues_then_idle_pane_delivers_once() -> None:
     assert idle_conn.acked == [20]
 
 
+def test_director_composer_busy_requeues_then_idle_delivers_once() -> None:
+    sent: list[tuple[str, str]] = []
+    gate_states = iter([True, False])
+
+    busy_conn = FakeConnection(
+        [
+            queue_row(
+                21,
+                "PGU-231",
+                target_role="director",
+                message="PGU-231 -- Director review ready for your review",
+                attempts=1,
+            )
+        ]
+    )
+    busy_listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=lambda target, message: sent.append((target, message)),
+        activity_gate=lambda target: target == "pgu-director:0.0" and next(gate_states),
+        connector=lambda *args, **kwargs: busy_conn,
+        poll_seconds=0,
+    )
+
+    assert busy_listener.listen_once(max_notifications=1) == 0
+    assert sent == []
+    assert [item[0] for item in busy_conn.requeued] == [21]
+    assert busy_conn.acked == []
+
+    idle_conn = FakeConnection(
+        [
+            queue_row(
+                21,
+                "PGU-231",
+                target_role="director",
+                message="PGU-231 -- Director review ready for your review",
+                attempts=2,
+            )
+        ]
+    )
+    idle_listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=lambda target, message: sent.append((target, message)),
+        activity_gate=lambda target: target == "pgu-director:0.0" and next(gate_states),
+        connector=lambda *args, **kwargs: idle_conn,
+        poll_seconds=0,
+    )
+
+    assert idle_listener.listen_once(max_notifications=1) == 1
+    assert sent == [("pgu-director:0.0", "PGU-231 -- Director review ready for your review")]
+    assert idle_conn.acked == [21]
+    assert idle_conn.requeued == []
+
+
+def test_director_gate_treats_composer_content_as_busy_only_for_director() -> None:
+    horizontal = "─" * 48
+    composer_busy_capture = f"""
+assistant output
+{horizontal}
+❯ half typed message
+{horizontal}
+""".strip()
+
+    def capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=composer_busy_capture)
+
+    gate = PaneActivityGate(
+        "/tmp/directorctl",
+        recent_activity_seconds=0,
+        stable_idle_seconds=0,
+        capture_runner=capture_runner,
+    )
+
+    assert gate.is_busy("pgu-director:0.0") is True
+    assert gate.is_busy("pgu-ops:0.0") is False
+
+
+def test_director_gate_defers_recently_changed_idle_capture_then_delivers_when_stable() -> None:
+    horizontal = "─" * 48
+    idle_capture = f"""
+assistant output
+{horizontal}
+❯
+{horizontal}
+""".strip()
+    clock = [100.0]
+
+    def capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=idle_capture)
+
+    gate = PaneActivityGate(
+        "/tmp/directorctl",
+        recent_activity_seconds=3.0,
+        stable_idle_seconds=0,
+        capture_runner=capture_runner,
+        monotonic=lambda: clock[0],
+    )
+
+    assert gate.is_busy("pgu-director:0.0") is True
+    clock[0] += 4.0
+    assert gate.is_busy("pgu-director:0.0") is False
+
+
 def test_acked_notification_does_not_repeat_across_restart() -> None:
     sent: list[tuple[str, str]] = []
     first_conn = FakeConnection([queue_row(30, "PGU-223")])
@@ -299,6 +401,9 @@ def main() -> int:
     test_reconnect_relistens_after_connection_drop()
     test_send_timeout_requeues_and_does_not_block_next_pane()
     test_busy_pane_requeues_then_idle_pane_delivers_once()
+    test_director_composer_busy_requeues_then_idle_delivers_once()
+    test_director_gate_treats_composer_content_as_busy_only_for_director()
+    test_director_gate_defers_recently_changed_idle_capture_then_delivers_when_stable()
     test_acked_notification_does_not_repeat_across_restart()
     test_default_sender_delegates_to_directorctl_send()
     print("ticket_board_notify_listener_test: ok")

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression test: ticket-board PostgreSQL Model B function API grants."""
+"""Regression test: ticket-board PostgreSQL single-writer function API grants."""
 
 from __future__ import annotations
 
@@ -15,27 +15,26 @@ SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
 RBAC_PATH = ROOT / "scripts" / "ticket_board" / "rbac.sql"
 
 PANE_ROLES = ["director", "eric", "ops", "app", "audit", "perf", "research", "main"]
-IMPLEMENTERS = ["main", "app", "ops", "perf", "research"]
 EXPECTED_ROLES = PANE_ROLES + ["ticket_board_service"]
 ROLE_SQL_ARRAY = "ARRAY['director','eric','ops','app','audit','perf','research','main','ticket_board_service']"
 
-FUNCTION_GRANTS = {
-    "ticket_board.create_ticket(text,text)": {"director", "eric"},
-    "ticket_board.file_bug(text,text,text)": set(IMPLEMENTERS),
-    "ticket_board.route(text,text,text)": {"director"},
-    "ticket_board.start_work(text)": set(IMPLEMENTERS),
-    "ticket_board.submit_to_audit(text,text)": set(IMPLEMENTERS),
-    "ticket_board.audit_sign_off(text)": {"audit"},
-    "ticket_board.audit_kick_back(text,text)": {"audit"},
-    "ticket_board.eric_sign_off(text)": {"eric"},
-    "ticket_board.eric_reopen(text,text)": {"eric"},
-    "ticket_board.mark_done(text,text)": {"director"},
-    "ticket_board.defer(text)": {"director"},
-    "ticket_board.cancel(text,text)": {"director"},
-    "ticket_board.set_manually_controlled(text,boolean)": {"director"},
-    "ticket_board.set_blockers(text,text[],text)": {"director"},
-    "ticket_board.add_comment(text,text)": set(PANE_ROLES),
-}
+WRITE_FUNCTIONS = [
+    "ticket_board.create_ticket(text,text)",
+    "ticket_board.file_bug(text,text,text)",
+    "ticket_board.route(text,text,text)",
+    "ticket_board.start_work(text)",
+    "ticket_board.submit_to_audit(text,text)",
+    "ticket_board.audit_sign_off(text)",
+    "ticket_board.audit_kick_back(text,text)",
+    "ticket_board.eric_sign_off(text)",
+    "ticket_board.eric_reopen(text,text)",
+    "ticket_board.mark_done(text,text)",
+    "ticket_board.defer(text)",
+    "ticket_board.cancel(text,text)",
+    "ticket_board.set_manually_controlled(text,boolean)",
+    "ticket_board.set_blockers(text,text[],text)",
+    "ticket_board.add_comment(text,text)",
+]
 
 
 def run(args: list[str], *, capture: bool = True, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -117,6 +116,7 @@ def insert_ticket(
     eric_signoff: bool = False,
     commit_hash: str = "",
     commit_exempt: bool = False,
+    manually_controlled: bool = False,
 ) -> None:
     psql(
         conn,
@@ -124,13 +124,13 @@ def insert_ticket(
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation, audit_signoff,
     needs_eric_signoff, eric_signoff, commit_hash, commit_exempt,
-    created_text, updated_text, source_json
+    manually_controlled, created_text, updated_text, source_json
 ) VALUES (
     {sql_string(ticket_id)}, {sql_string(title)}, '', {sql_string(state)}, {sql_string(assignee)},
     {sql_string(implementation)}, {str(audit_signoff).lower()}, {str(needs_eric_signoff).lower()},
     {str(eric_signoff).lower()}, {sql_string(commit_hash)}, {str(commit_exempt).lower()},
-    '2026-07-10T00:00:00+00:00', '2026-07-10T00:00:00+00:00',
-    '{ticket_source(ticket_id, title, state, assignee)}'::jsonb
+    {str(manually_controlled).lower()}, '2026-07-10T00:00:00+00:00',
+    '2026-07-10T00:00:00+00:00', '{ticket_source(ticket_id, title, state, assignee)}'::jsonb
 );
 """,
     )
@@ -142,7 +142,7 @@ def assert_permission_denied(conn: str, sql: str) -> None:
 
 
 def assert_function_grants(conn: str) -> None:
-    for signature, allowed_roles in FUNCTION_GRANTS.items():
+    for signature in WRITE_FUNCTIONS:
         rows = json.loads(
             psql(
                 conn,
@@ -153,109 +153,94 @@ FROM unnest({ROLE_SQL_ARRAY}) AS role_name;
             )
         )
         for role in EXPECTED_ROLES:
-            assert rows[role] == (role in allowed_roles), (signature, role, rows)
+            assert rows[role] == (role == "ticket_board_service"), (signature, role, rows)
 
 
-def assert_direct_dml_denied(conn: str) -> None:
+def assert_direct_dml_denied(conn: str, role_conn: dict[str, str]) -> None:
     for role in EXPECTED_ROLES:
         privileges = json.loads(
             psql(
                 conn,
                 f"""
 SELECT jsonb_build_object(
-    'insert', has_table_privilege({sql_string(role)}, 'ticket_board.tickets', 'INSERT'),
-    'update', has_table_privilege({sql_string(role)}, 'ticket_board.tickets', 'UPDATE'),
-    'delete', has_table_privilege({sql_string(role)}, 'ticket_board.tickets', 'DELETE'),
-    'comment_insert', has_table_privilege({sql_string(role)}, 'ticket_board.ticket_comments', 'INSERT')
+    'tickets_insert', has_table_privilege({sql_string(role)}, 'ticket_board.tickets', 'INSERT'),
+    'tickets_update', has_table_privilege({sql_string(role)}, 'ticket_board.tickets', 'UPDATE'),
+    'tickets_delete', has_table_privilege({sql_string(role)}, 'ticket_board.tickets', 'DELETE'),
+    'comments_insert', has_table_privilege({sql_string(role)}, 'ticket_board.ticket_comments', 'INSERT'),
+    'blockers_insert', has_table_privilege({sql_string(role)}, 'ticket_board.ticket_blockers', 'INSERT'),
+    'comments_sequence', has_sequence_privilege({sql_string(role)}, 'ticket_board.ticket_comments_id_seq', 'USAGE')
 )::text;
 """,
             )
         )
         assert privileges == {
-            "insert": False,
-            "update": False,
-            "delete": False,
-            "comment_insert": False,
+            "tickets_insert": False,
+            "tickets_update": False,
+            "tickets_delete": False,
+            "comments_insert": False,
+            "blockers_insert": False,
+            "comments_sequence": False,
         }, (role, privileges)
 
         assert_permission_denied(
-            conn.replace("user=postgres", f"user={role}"),
+            role_conn[role],
+            """
+INSERT INTO ticket_board.tickets (id, title, body, state, assignee, created_text, updated_text, source_json)
+VALUES (
+    'PGU-999999', 'direct insert', '', 'analysis', 'unassigned',
+    '2026-07-10T00:00:00+00:00', '2026-07-10T00:00:00+00:00',
+    '{"id":"PGU-999999","title":"direct insert","body":"","state":"analysis","assignee":"unassigned","comments":[],"created":"2026-07-10T00:00:00+00:00","updated":"2026-07-10T00:00:00+00:00"}'
+);
+""",
+        )
+        assert_permission_denied(
+            role_conn[role],
             "UPDATE ticket_board.tickets SET title = title WHERE id = 'PGU-1';",
+        )
+        assert_permission_denied(
+            role_conn[role],
+            "DELETE FROM ticket_board.tickets WHERE id = 'PGU-1';",
+        )
+        assert_permission_denied(
+            role_conn[role],
+            """
+INSERT INTO ticket_board.ticket_comments (ticket_id, position, who, ts_text, text, source_json)
+VALUES ('PGU-1', 0, 'x', '2026-07-10T00:00:00+00:00', 'x', '{"who":"x","ts":"2026-07-10T00:00:00+00:00","text":"x"}');
+""",
         )
 
 
-def exercise_function_api(admin_conn: str, role_conn: dict[str, str]) -> None:
-    created_by_director = psql(role_conn["director"], "SELECT ticket_board.create_ticket('Director create', 'Body');")
-    created_by_eric = psql(role_conn["eric"], "SELECT ticket_board.create_ticket('Eric create', 'Body');")
-    assert created_by_director.startswith("PGU-"), created_by_director
-    assert created_by_eric.startswith("PGU-"), created_by_eric
-    assert_permission_denied(role_conn["ops"], "SELECT ticket_board.create_ticket('Nope', 'Body');")
+def assert_service_can_execute_every_write_function(admin_conn: str, service_conn: str) -> None:
+    created = psql(service_conn, "SELECT ticket_board.create_ticket('Service create', 'Body');")
+    assert created.startswith("PGU-"), created
 
     insert_ticket(admin_conn, "PGU-100", title="Source")
-    for role in IMPLEMENTERS:
-        filed = psql(role_conn[role], f"SELECT ticket_board.file_bug('{role} bug', 'Body', 'PGU-100');")
-        parent_id = psql(admin_conn, f"SELECT parent_id FROM ticket_board.tickets WHERE id = {sql_string(filed)};")
-        assert parent_id == "PGU-100", (role, filed, parent_id)
-    assert "source_ticket_id ticket not found" in psql_error(
-        role_conn["ops"],
-        "SELECT ticket_board.file_bug('Missing source', 'Body', 'PGU-99999');",
-    )
-    assert_permission_denied(role_conn["audit"], "SELECT ticket_board.file_bug('Nope', 'Body', 'PGU-100');")
+    filed = psql(service_conn, "SELECT ticket_board.file_bug('Service bug', 'Body', 'PGU-100');")
+    assert psql(admin_conn, f"SELECT parent_id FROM ticket_board.tickets WHERE id = {sql_string(filed)};") == "PGU-100"
 
     insert_ticket(admin_conn, "PGU-200", title="Route fixture", state="analysis")
-    psql(role_conn["director"], "SELECT ticket_board.route('PGU-200', 'backlog', 'ops');")
-    routed = json.loads(
+    psql(service_conn, "SELECT ticket_board.route('PGU-200', 'backlog', 'ops');")
+    assert psql(admin_conn, "SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = 'PGU-200';") == "backlog:ops"
+
+    insert_ticket(admin_conn, "PGU-300", title="Start fixture", state="ready", assignee="ops", implementation="Ready.")
+    psql(service_conn, "SELECT ticket_board.start_work('PGU-300');")
+    assert psql(admin_conn, "SELECT state FROM ticket_board.tickets WHERE id = 'PGU-300';") == "in_progress"
+
+    insert_ticket(admin_conn, "PGU-400", title="Submit fixture", state="in_progress", assignee="app", implementation="Done.")
+    psql(service_conn, "SELECT ticket_board.submit_to_audit('PGU-400', 'abcdef0');")
+    submitted = json.loads(
         psql(
             admin_conn,
             """
-SELECT jsonb_build_object('state', state, 'assignee', assignee)::text
-FROM ticket_board.tickets WHERE id = 'PGU-200';
+SELECT jsonb_build_object('state', state, 'commit_hash', commit_hash)::text
+FROM ticket_board.tickets WHERE id = 'PGU-400';
 """,
         )
     )
-    assert routed == {"state": "backlog", "assignee": "ops"}, routed
-    assert_permission_denied(role_conn["ops"], "SELECT ticket_board.route('PGU-200', 'analysis', 'ops');")
-
-    for role in IMPLEMENTERS:
-        ticket_id = f"PGU-{300 + IMPLEMENTERS.index(role)}"
-        insert_ticket(
-            admin_conn,
-            ticket_id,
-            title=f"{role} start",
-            state="ready",
-            assignee=role,
-            implementation="Ready.",
-        )
-        psql(role_conn[role], f"SELECT ticket_board.start_work('{ticket_id}');")
-        state = psql(admin_conn, f"SELECT state FROM ticket_board.tickets WHERE id = '{ticket_id}';")
-        assert state == "in_progress", (role, ticket_id, state)
-    assert_permission_denied(role_conn["audit"], "SELECT ticket_board.start_work('PGU-300');")
-
-    for role in IMPLEMENTERS:
-        ticket_id = f"PGU-{400 + IMPLEMENTERS.index(role)}"
-        insert_ticket(
-            admin_conn,
-            ticket_id,
-            title=f"{role} submit",
-            state="in_progress",
-            assignee=role,
-            implementation="In progress.",
-        )
-        psql(role_conn[role], f"SELECT ticket_board.submit_to_audit('{ticket_id}', 'abcdef{IMPLEMENTERS.index(role)}');")
-        submitted = json.loads(
-            psql(
-                admin_conn,
-                f"""
-SELECT jsonb_build_object('state', state, 'commit_hash', commit_hash)::text
-FROM ticket_board.tickets WHERE id = '{ticket_id}';
-""",
-            )
-        )
-        assert submitted == {"state": "audit", "commit_hash": f"abcdef{IMPLEMENTERS.index(role)}"}, submitted
-    assert_permission_denied(role_conn["director"], "SELECT ticket_board.submit_to_audit('PGU-400', 'abc1234');")
+    assert submitted == {"state": "audit", "commit_hash": "abcdef0"}, submitted
 
     insert_ticket(admin_conn, "PGU-500", title="Audit signoff", state="audit", assignee="audit", implementation="Done.")
-    psql(role_conn["audit"], "SELECT ticket_board.audit_sign_off('PGU-500');")
+    psql(service_conn, "SELECT ticket_board.audit_sign_off('PGU-500');")
     audit_signed = json.loads(
         psql(
             admin_conn,
@@ -266,10 +251,9 @@ FROM ticket_board.tickets WHERE id = 'PGU-500';
         )
     )
     assert audit_signed == {"state": "director_review", "assignee": "director", "audit_signoff": True}, audit_signed
-    assert_permission_denied(role_conn["ops"], "SELECT ticket_board.audit_sign_off('PGU-500');")
 
     insert_ticket(admin_conn, "PGU-501", title="Audit kickback", state="audit", assignee="audit", implementation="Done.")
-    psql(role_conn["audit"], "SELECT ticket_board.audit_kick_back('PGU-501', 'Needs changes.');")
+    psql(service_conn, "SELECT ticket_board.audit_kick_back('PGU-501', 'Needs changes.');")
     kickback = json.loads(
         psql(
             admin_conn,
@@ -284,7 +268,6 @@ FROM ticket_board.tickets t WHERE id = 'PGU-501';
         )
     )
     assert kickback == {"state": "analysis", "assignee": "unassigned", "comment": "Needs changes."}, kickback
-    assert_permission_denied(role_conn["director"], "SELECT ticket_board.audit_kick_back('PGU-501', 'Nope');")
 
     insert_ticket(
         admin_conn,
@@ -296,7 +279,7 @@ FROM ticket_board.tickets t WHERE id = 'PGU-501';
         audit_signoff=True,
         needs_eric_signoff=True,
     )
-    psql(role_conn["eric"], "SELECT ticket_board.eric_sign_off('PGU-600');")
+    psql(service_conn, "SELECT ticket_board.eric_sign_off('PGU-600');")
     eric_signed = json.loads(
         psql(
             admin_conn,
@@ -307,7 +290,6 @@ FROM ticket_board.tickets WHERE id = 'PGU-600';
         )
     )
     assert eric_signed == {"state": "director_review", "assignee": "director", "eric_signoff": True}, eric_signed
-    assert_permission_denied(role_conn["audit"], "SELECT ticket_board.eric_sign_off('PGU-600');")
 
     insert_ticket(
         admin_conn,
@@ -319,7 +301,7 @@ FROM ticket_board.tickets WHERE id = 'PGU-600';
         audit_signoff=True,
         needs_eric_signoff=True,
     )
-    psql(role_conn["eric"], "SELECT ticket_board.eric_reopen('PGU-601', 'Needs another pass.');")
+    psql(service_conn, "SELECT ticket_board.eric_reopen('PGU-601', 'Needs another pass.');")
     eric_reopened = json.loads(
         psql(
             admin_conn,
@@ -333,7 +315,6 @@ FROM ticket_board.tickets t WHERE id = 'PGU-601';
         )
     )
     assert eric_reopened == {"state": "analysis", "comment": "Needs another pass."}, eric_reopened
-    assert_permission_denied(role_conn["audit"], "SELECT ticket_board.eric_reopen('PGU-601', 'Nope');")
 
     insert_ticket(
         admin_conn,
@@ -344,7 +325,7 @@ FROM ticket_board.tickets t WHERE id = 'PGU-601';
         implementation="Done.",
         audit_signoff=True,
     )
-    psql(role_conn["director"], "SELECT ticket_board.mark_done('PGU-700', '123abcd');")
+    psql(service_conn, "SELECT ticket_board.mark_done('PGU-700', '123abcd');")
     done = json.loads(
         psql(
             admin_conn,
@@ -355,15 +336,13 @@ FROM ticket_board.tickets WHERE id = 'PGU-700';
         )
     )
     assert done == {"state": "done", "commit_hash": "123abcd"}, done
-    assert_permission_denied(role_conn["ops"], "SELECT ticket_board.mark_done('PGU-700', '123abcd');")
 
     insert_ticket(admin_conn, "PGU-701", title="Defer", state="analysis")
-    psql(role_conn["director"], "SELECT ticket_board.defer('PGU-701');")
+    psql(service_conn, "SELECT ticket_board.defer('PGU-701');")
     assert psql(admin_conn, "SELECT state FROM ticket_board.tickets WHERE id = 'PGU-701';") == "backlog"
-    assert_permission_denied(role_conn["ops"], "SELECT ticket_board.defer('PGU-701');")
 
     insert_ticket(admin_conn, "PGU-702", title="Cancel", state="analysis")
-    psql(role_conn["director"], "SELECT ticket_board.cancel('PGU-702', 'Cancelled by director.');")
+    psql(service_conn, "SELECT ticket_board.cancel('PGU-702', 'Cancelled by app policy.');")
     cancelled = json.loads(
         psql(
             admin_conn,
@@ -376,16 +355,14 @@ FROM ticket_board.tickets t WHERE id = 'PGU-702';
 """,
         )
     )
-    assert cancelled == {"state": "cancelled", "comment": "Cancelled by director."}, cancelled
-    assert_permission_denied(role_conn["audit"], "SELECT ticket_board.cancel('PGU-702', 'Nope');")
+    assert cancelled == {"state": "cancelled", "comment": "Cancelled by app policy."}, cancelled
 
     insert_ticket(admin_conn, "PGU-703", title="Manual", state="analysis")
-    psql(role_conn["director"], "SELECT ticket_board.set_manually_controlled('PGU-703', true);")
+    psql(service_conn, "SELECT ticket_board.set_manually_controlled('PGU-703', true);")
     assert psql(admin_conn, "SELECT manually_controlled FROM ticket_board.tickets WHERE id = 'PGU-703';") == "t"
-    assert_permission_denied(role_conn["ops"], "SELECT ticket_board.set_manually_controlled('PGU-703', false);")
 
     insert_ticket(admin_conn, "PGU-704", title="Blockers", state="analysis")
-    psql(role_conn["director"], "SELECT ticket_board.set_blockers('PGU-704', ARRAY['PGU-100'], 'Waiting on source.');")
+    psql(service_conn, "SELECT ticket_board.set_blockers('PGU-704', ARRAY['PGU-100'], 'Waiting on source.');")
     blockers = json.loads(
         psql(
             admin_conn,
@@ -399,14 +376,41 @@ FROM ticket_board.tickets t WHERE id = 'PGU-704';
         )
     )
     assert blockers == {"blocked_reason": "Waiting on source.", "blocked_by": ["PGU-100"]}, blockers
-    assert_permission_denied(role_conn["ops"], "SELECT ticket_board.set_blockers('PGU-704', ARRAY['PGU-100'], 'Nope');")
 
     insert_ticket(admin_conn, "PGU-800", title="Comments", state="analysis")
-    for role in PANE_ROLES:
-        psql(role_conn[role], f"SELECT ticket_board.add_comment('PGU-800', 'comment from {role}');")
-    comment_count = psql(admin_conn, "SELECT count(*) FROM ticket_board.ticket_comments WHERE ticket_id = 'PGU-800';")
-    assert comment_count == str(len(PANE_ROLES)), comment_count
-    assert_permission_denied(role_conn["ticket_board_service"], "SELECT ticket_board.add_comment('PGU-800', 'Nope');")
+    psql(service_conn, "SELECT ticket_board.add_comment('PGU-800', 'comment from service');")
+    assert psql(admin_conn, "SELECT text FROM ticket_board.ticket_comments WHERE ticket_id = 'PGU-800';") == "comment from service"
+
+
+def assert_structural_rules_still_apply(admin_conn: str, service_conn: str) -> None:
+    assert "source_ticket_id must look like PGU-N" in psql_error(
+        service_conn,
+        "SELECT ticket_board.file_bug('Bad source', 'Body', 'not-a-ticket');",
+    )
+
+    insert_ticket(admin_conn, "PGU-900", title="No cancel reason", state="analysis")
+    assert "comment text must be non-empty" in psql_error(
+        service_conn,
+        "SELECT ticket_board.cancel('PGU-900', '');",
+    )
+
+    insert_ticket(admin_conn, "PGU-901", title="Illegal start", state="analysis", assignee="ops", implementation="Ready.")
+    assert "illegal state transition: analysis -> in_progress" in psql_error(
+        service_conn,
+        "SELECT ticket_board.start_work('PGU-901');",
+    )
+
+    insert_ticket(admin_conn, "PGU-902", title="Bad route", state="analysis")
+    assert "invalid state" in psql_error(
+        service_conn,
+        "SELECT ticket_board.route('PGU-902', 'bogus', 'ops');",
+    )
+
+    insert_ticket(admin_conn, "PGU-903", title="Bad blockers", state="analysis")
+    assert "blocked_reason must be non-empty" in psql_error(
+        service_conn,
+        "SELECT ticket_board.set_blockers('PGU-903', ARRAY['PGU-100'], '');",
+    )
 
 
 def main() -> int:
@@ -475,8 +479,13 @@ FROM unnest({ROLE_SQL_ARRAY}) AS role_name;
 
             role_conn = {role: conninfo(socket_dir, port, dbname, role) for role in EXPECTED_ROLES}
             insert_ticket(admin_conn, "PGU-1", title="Direct DML fixture")
-            assert_direct_dml_denied(admin_conn)
-            exercise_function_api(admin_conn, role_conn)
+            assert_direct_dml_denied(admin_conn, role_conn)
+            for role in PANE_ROLES:
+                assert_permission_denied(role_conn[role], "SELECT ticket_board.create_ticket('Nope', 'Body');")
+
+            service_conn = role_conn["ticket_board_service"]
+            assert_service_can_execute_every_write_function(admin_conn, service_conn)
+            assert_structural_rules_still_apply(admin_conn, service_conn)
         finally:
             subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], check=False)
 

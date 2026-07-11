@@ -1,9 +1,11 @@
 -- PGU ticket-board PostgreSQL roles and grants.
 --
--- Model B write path: pane roles get read access plus EXECUTE on narrow
--- SECURITY DEFINER functions. Direct INSERT/UPDATE/DELETE on ticket_board
--- tables is revoked from every non-owner role; triggers remain the coarse
--- backstop for writes performed inside the functions.
+-- Single-writer write path: the board service role gets read access plus
+-- EXECUTE on narrow SECURITY DEFINER functions. Pane roles keep read access
+-- only; app-layer identity decides who may request each write. Direct
+-- INSERT/UPDATE/DELETE on ticket_board tables is revoked from every non-owner
+-- role; triggers remain the coarse backstop for writes performed inside the
+-- functions.
 
 BEGIN;
 
@@ -33,20 +35,20 @@ REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA ticket_board FROM director, eric, ops,
 GRANT SELECT ON ALL TABLES IN SCHEMA ticket_board TO director, eric, ops, app, audit, perf, research, main, ticket_board_service;
 GRANT SELECT ON ticket_board.schema_migrations TO director, eric, ops, app, audit, perf, research, main, ticket_board_service;
 
-GRANT EXECUTE ON FUNCTION ticket_board.create_ticket(text, text) TO director, eric;
-GRANT EXECUTE ON FUNCTION ticket_board.file_bug(text, text, text) TO main, app, ops, perf, research;
-GRANT EXECUTE ON FUNCTION ticket_board.route(text, text, text) TO director;
-GRANT EXECUTE ON FUNCTION ticket_board.start_work(text) TO main, app, ops, perf, research;
-GRANT EXECUTE ON FUNCTION ticket_board.submit_to_audit(text, text) TO main, app, ops, perf, research;
-GRANT EXECUTE ON FUNCTION ticket_board.audit_sign_off(text) TO audit;
-GRANT EXECUTE ON FUNCTION ticket_board.audit_kick_back(text, text) TO audit;
-GRANT EXECUTE ON FUNCTION ticket_board.eric_sign_off(text) TO eric;
-GRANT EXECUTE ON FUNCTION ticket_board.eric_reopen(text, text) TO eric;
-GRANT EXECUTE ON FUNCTION ticket_board.mark_done(text, text) TO director;
-GRANT EXECUTE ON FUNCTION ticket_board.defer(text) TO director;
-GRANT EXECUTE ON FUNCTION ticket_board.cancel(text, text) TO director;
-GRANT EXECUTE ON FUNCTION ticket_board.set_manually_controlled(text, boolean) TO director;
-GRANT EXECUTE ON FUNCTION ticket_board.set_blockers(text, text[], text) TO director;
-GRANT EXECUTE ON FUNCTION ticket_board.add_comment(text, text) TO director, eric, main, app, ops, audit, perf, research;
+GRANT EXECUTE ON FUNCTION ticket_board.create_ticket(text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.file_bug(text, text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.route(text, text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.start_work(text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.submit_to_audit(text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.audit_sign_off(text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.audit_kick_back(text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.eric_sign_off(text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.eric_reopen(text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.mark_done(text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.defer(text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.cancel(text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.set_manually_controlled(text, boolean) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.set_blockers(text, text[], text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.add_comment(text, text) TO ticket_board_service;
 
 COMMIT;

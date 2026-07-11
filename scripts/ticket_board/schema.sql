@@ -397,8 +397,8 @@ DECLARE
     actor text;
 BEGIN
     actor := ticket_board.current_actor_role();
-    IF NOT actor = ANY(p_allowed_roles) THEN
-        RAISE EXCEPTION 'role % cannot call %', actor, p_action
+    IF actor <> 'ticket_board_service' THEN
+        RAISE EXCEPTION 'role % cannot call %; ticket_board_service is the only database writer', actor, p_action
             USING ERRCODE = '42501';
     END IF;
     RETURN actor;
@@ -771,10 +771,9 @@ BEGIN
     actor := ticket_board.require_actor(ARRAY['main', 'app', 'ops', 'perf', 'research'], 'start_work');
     UPDATE ticket_board.tickets
     SET state = 'in_progress'
-    WHERE tickets.id = start_work.id
-      AND tickets.assignee = actor;
+    WHERE tickets.id = start_work.id;
     IF NOT FOUND THEN
-        RAISE EXCEPTION 'ticket not found for assigned role %: %', actor, id;
+        RAISE EXCEPTION 'ticket not found: %', id;
     END IF;
     PERFORM ticket_board.touch_ticket(id);
 END;
@@ -801,10 +800,9 @@ BEGIN
     UPDATE ticket_board.tickets
     SET state = 'audit',
         commit_hash = normalized_commit
-    WHERE tickets.id = submit_to_audit.id
-      AND tickets.assignee = actor;
+    WHERE tickets.id = submit_to_audit.id;
     IF NOT FOUND THEN
-        RAISE EXCEPTION 'ticket not found for assigned role %: %', actor, id;
+        RAISE EXCEPTION 'ticket not found: %', id;
     END IF;
     PERFORM ticket_board.touch_ticket(id);
 END;

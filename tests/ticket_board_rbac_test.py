@@ -15,8 +15,8 @@ SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
 RBAC_PATH = ROOT / "scripts" / "ticket_board" / "rbac.sql"
 
 PANE_ROLES = ["director", "eric", "ops", "app", "audit", "perf", "research", "main"]
-EXPECTED_ROLES = PANE_ROLES + ["ticket_board_service"]
-ROLE_SQL_ARRAY = "ARRAY['director','eric','ops','app','audit','perf','research','main','ticket_board_service']"
+EXPECTED_ROLES = PANE_ROLES + ["ticket_board_service", "ticket_board_listener"]
+ROLE_SQL_ARRAY = "ARRAY['director','eric','ops','app','audit','perf','research','main','ticket_board_service','ticket_board_listener']"
 
 WRITE_FUNCTIONS = [
     "ticket_board.create_ticket(text,text)",
@@ -444,6 +444,8 @@ def main() -> int:
             assert 'role "director" does not exist' in missing_role_error, missing_role_error
             service_after_failed_rbac = psql(admin_conn, "SELECT to_regrole('ticket_board_service') IS NULL;")
             assert service_after_failed_rbac == "t", service_after_failed_rbac
+            listener_after_failed_rbac = psql(admin_conn, "SELECT to_regrole('ticket_board_listener') IS NULL;")
+            assert listener_after_failed_rbac == "t", listener_after_failed_rbac
 
             create_pane_roles(admin_conn)
             psql(admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
@@ -463,6 +465,7 @@ WHERE rolname = ANY({ROLE_SQL_ARRAY});
             for role in PANE_ROLES:
                 assert role_rows[role] == {"can_login": True, "password_is_null": False}, (role, role_rows[role])
             assert role_rows["ticket_board_service"] == {"can_login": True, "password_is_null": True}, role_rows
+            assert role_rows["ticket_board_listener"] == {"can_login": True, "password_is_null": True}, role_rows
 
             schema_usage = json.loads(
                 psql(

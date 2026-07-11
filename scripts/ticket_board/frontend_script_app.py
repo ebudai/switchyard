@@ -247,7 +247,7 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
         } else if (nextState === 'cancelled') {
           await updateTicketAction(ticketId, 'cancel', { reason: actionReason(patch) }, normalizedCaller);
           consumedComment = true;
-        } else if (nextState === 'in_progress' && patch.comment && previousState === 'inspection') {
+        } else if (nextState === 'ready' && patch.comment && previousState === 'inspection') {
           await updateTicketAction(ticketId, 'inspector_kick_back', { recommendations: actionReason(patch) }, normalizedCaller);
           consumedComment = true;
         } else if (nextState === 'analysis' && patch.comment && previousState === 'audit') {

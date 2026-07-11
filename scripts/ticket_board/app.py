@@ -51,7 +51,7 @@ LEGAL_STATE_TRANSITIONS = {
     "analysis": {"ready", "backlog", "cancelled"},
     "ready": {"in_progress", "analysis", "backlog", "cancelled"},
     "in_progress": {"inspection", "audit", "ready", "analysis", "backlog", "cancelled"},
-    "inspection": {"audit", "in_progress", "backlog", "cancelled"},
+    "inspection": {"audit", "ready", "backlog", "cancelled"},
     "audit": {"eric_review", "director_review", "analysis", "backlog", "cancelled"},
     "eric_review": {"director_review", "audit", "analysis", "backlog", "cancelled"},
     "director_review": {"done", "ready", "analysis", "backlog", "cancelled"},
@@ -842,7 +842,7 @@ ORDER BY t.ticket_number
                 if "state" in patch:
                     if inspector_signoff_handled and state == "audit":
                         pass
-                    elif state == "in_progress" and comment_text and current["state"] == "inspection":
+                    elif state == "ready" and comment_text and current["state"] == "inspection":
                         self._pg_call(conn, "SELECT ticket_board.inspector_kick_back(%s, %s);", (ticket_id, comment_text))
                         comment_text = ""
                     elif state == "in_progress":
@@ -1177,7 +1177,7 @@ ORDER BY ticket_number;
             )
         if previous_state == "analysis" and ticket["state"] == "in_progress":
             raise ValueError("analysis tickets must move through ready before entering in_progress")
-        if previous_state == "inspection" and ticket["state"] == "in_progress" and not has_reason_comment:
+        if previous_state == "inspection" and ticket["state"] == "ready" and not has_reason_comment:
             raise ValueError("inspector kickback requires a non-empty recommendations comment")
         if previous_state == "inspection" and ticket["state"] == "audit" and not ticket["inspector_signoff"]:
             raise ValueError("inspector_signoff must be true before a ticket can enter audit from inspection")

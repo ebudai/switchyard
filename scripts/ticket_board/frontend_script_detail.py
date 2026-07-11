@@ -517,9 +517,9 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         commentActions.appendChild(kickbackButton);
       } else if (ticket.state === 'inspection') {
         const kickbackButton = document.createElement('button');
-        kickbackButton.textContent = 'Comment + Return to In Progress';
+        kickbackButton.textContent = 'Comment + Return to Ready';
         kickbackButton.addEventListener('click', async () => {
-          await submitComment(ticket.id, 'inspector', commentText.value, 'in_progress');
+          await submitComment(ticket.id, 'inspector', commentText.value, 'ready');
         });
         commentActions.appendChild(kickbackButton);
       } else if (ticket.state === 'audit') {

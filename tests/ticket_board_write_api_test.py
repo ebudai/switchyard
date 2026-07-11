@@ -33,6 +33,11 @@ SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
 RBAC_PATH = ROOT / "scripts" / "ticket_board" / "rbac.sql"
 PANE_ROLES = ["director", "eric", "ops", "app", "audit", "perf", "research", "main"]
 SERVICE_ROLE = "ticket_board_service"
+FRONTEND_SCRIPT_PATHS = [
+    ROOT / "scripts" / "ticket_board" / "frontend_script_app.py",
+    ROOT / "scripts" / "ticket_board" / "frontend_script_core.py",
+    ROOT / "scripts" / "ticket_board" / "frontend_script_detail.py",
+]
 
 
 class QuietNotifier:
@@ -198,6 +203,67 @@ def get_ticket(base_url: str, ticket_id: str) -> dict[str, object]:
         if ticket["id"] == ticket_id:
             return ticket
     raise AssertionError(f"{ticket_id} not found in board")
+
+
+def call_arguments(source: str, open_paren: int) -> list[str]:
+    args: list[str] = []
+    start = open_paren + 1
+    depth = 1
+    string_quote = ""
+    escape = False
+    index = start
+    while index < len(source):
+        char = source[index]
+        if string_quote:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == string_quote:
+                string_quote = ""
+        elif char in {"'", '"', "`"}:
+            string_quote = char
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+            if depth == 0:
+                arg = source[start:index].strip()
+                if arg:
+                    args.append(arg)
+                return args
+        elif char == "," and depth == 1:
+            args.append(source[start:index].strip())
+            start = index + 1
+        index += 1
+    raise AssertionError("unterminated updateTicket call")
+
+
+def frontend_update_ticket_calls() -> list[tuple[Path, int, list[str]]]:
+    calls: list[tuple[Path, int, list[str]]] = []
+    needle = "updateTicket("
+    for path in FRONTEND_SCRIPT_PATHS:
+        source = path.read_text(encoding="utf-8")
+        offset = 0
+        while True:
+            index = source.find(needle, offset)
+            if index == -1:
+                break
+            offset = index + len(needle)
+            if "function " in source[max(0, index - 32) : index]:
+                continue
+            line = source.count("\n", 0, index) + 1
+            calls.append((path, line, call_arguments(source, index + len("updateTicket"))))
+    return calls
+
+
+def assert_frontend_update_calls_send_caller_role() -> None:
+    missing = [
+        f"{path.relative_to(ROOT)}:{line} args={len(args)}"
+        for path, line, args in frontend_update_ticket_calls()
+        if len(args) < 3
+    ]
+    assert not missing, "frontend updateTicket calls missing caller role: " + ", ".join(missing)
 
 
 def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
@@ -443,6 +509,7 @@ def exercise_postgres_backend(commit_hash: str) -> None:
 
 def main() -> int:
     commit_hash = main_commit()
+    assert_frontend_update_calls_send_caller_role()
     exercise_json_backend(commit_hash)
     exercise_postgres_backend(commit_hash)
     print("ticket_board_write_api_test: ok")

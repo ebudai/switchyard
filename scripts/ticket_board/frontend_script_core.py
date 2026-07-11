@@ -128,6 +128,12 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       return null;
     }
 
+    function stateTransitionCallerRole(ticket) {
+      return ticket.state === 'ready' || ticket.state === 'in_progress'
+        ? ticket.assignee
+        : 'director';
+    }
+
     function inProgressConflictTicket(ticket) {
       if (ticket.assignee === 'unassigned') {
         return null;
@@ -272,10 +278,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       if (blockedReason) {
         throw new Error(blockedReason);
       }
-      const callerRole = ticket.state === 'ready' || ticket.state === 'in_progress'
-        ? ticket.assignee
-        : 'director';
-      await updateTicket(ticketId, { state: nextState }, callerRole);
+      await updateTicket(ticketId, { state: nextState }, stateTransitionCallerRole(ticket));
     }
 
     async function cancelTicket(ticketId, who, text) {
@@ -1088,7 +1091,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       stateSelect.addEventListener('change', async (event) => {
         const nextState = event.target.value;
         try {
-          await updateTicket(ticket.id, { state: nextState });
+          await updateTicket(ticket.id, { state: nextState }, stateTransitionCallerRole(ticket));
         } catch (error) {
           setCreateStatus(error.message, true);
           await requestBoardReload();

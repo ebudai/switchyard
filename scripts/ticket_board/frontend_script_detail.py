@@ -25,6 +25,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       const commentText = document.createElement('textarea');
       commentText.placeholder = 'Add a comment or bounce-back note';
       bindDetailDraftField(draftFields, commentText, 'commentText', '');
+      const detailCallerRole = () => commentWho.value;
 
       if (ticketIsEricReview(ticket)) {
         const signoffRecorded = !!ticket.eric_signoff;
@@ -187,7 +188,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       const saveParentLinkButton = document.createElement('button');
       saveParentLinkButton.textContent = 'Save Parent Link';
       saveParentLinkButton.addEventListener('click', async () => {
-        await updateTicket(ticket.id, { parent_id: parentLinkInput.value.trim().toUpperCase() });
+        await updateTicket(ticket.id, { parent_id: parentLinkInput.value.trim().toUpperCase() }, detailCallerRole());
       });
       parentLinkActions.appendChild(saveParentLinkButton);
       if (ticket.parent_id) {
@@ -195,7 +196,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         clearParentLinkButton.textContent = 'Clear Parent Link';
         clearParentLinkButton.addEventListener('click', async () => {
           parentLinkInput.value = '';
-          await updateTicket(ticket.id, { parent_id: '' });
+          await updateTicket(ticket.id, { parent_id: '' }, detailCallerRole());
         });
         parentLinkActions.appendChild(clearParentLinkButton);
       }
@@ -235,7 +236,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         }
         await updateTicket(ticket.id, {
           screenshots: uniquePaths([...ticketScreenshotPaths(ticket), screenshotSelect.value]),
-        });
+        }, detailCallerRole());
       });
       screenshotActions.appendChild(addAttachmentButton);
       screenshotLabel.append(screenshotSelect, screenshotActions);
@@ -245,7 +246,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       const toggles = document.createElement('div');
       toggles.className = 'tag-row';
       toggles.appendChild(toggleControl('Needs Eric signoff', ticket.needs_eric_signoff, async (checked) => {
-        await updateTicket(ticket.id, { needs_eric_signoff: checked });
+        await updateTicket(ticket.id, { needs_eric_signoff: checked }, detailCallerRole());
       }));
       toggles.appendChild(toggleControl('Audit signoff', ticket.audit_signoff, async (checked) => {
         await updateTicket(ticket.id, { audit_signoff: checked }, 'audit');
@@ -270,7 +271,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       const saveTitleButton = document.createElement('button');
       saveTitleButton.textContent = 'Save Title';
       saveTitleButton.addEventListener('click', async () => {
-        await updateTicket(ticket.id, { title: titleEditInput.value });
+        await updateTicket(ticket.id, { title: titleEditInput.value }, detailCallerRole());
       });
       titleActions.appendChild(saveTitleButton);
       const mergeTargetInput = document.createElement('input');
@@ -354,7 +355,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         await updateTicket(ticket.id, {
           blocked_by: parseBlockedByInput(blockedByInput.value),
           blocked_reason: blockedReasonInput.value,
-        }, 'director');
+        }, detailCallerRole());
       });
       blockedByActions.appendChild(saveBlockedByButton);
       const blockedByNote = document.createElement('div');
@@ -380,7 +381,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       const saveBlockedReasonButton = document.createElement('button');
       saveBlockedReasonButton.textContent = 'Save Blocked Reason';
       saveBlockedReasonButton.addEventListener('click', async () => {
-        await updateTicket(ticket.id, { blocked_reason: blockedReasonInput.value });
+        await updateTicket(ticket.id, { blocked_reason: blockedReasonInput.value }, detailCallerRole());
       });
       blockedReasonActions.appendChild(saveBlockedReasonButton);
       const blockedReasonNote = document.createElement('div');
@@ -399,7 +400,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       const saveImplementationButton = document.createElement('button');
       saveImplementationButton.textContent = 'Save Implementation';
       saveImplementationButton.addEventListener('click', async () => {
-        await updateTicket(ticket.id, { implementation: implementationInput.value });
+        await updateTicket(ticket.id, { implementation: implementationInput.value }, detailCallerRole());
       });
       implementationActions.appendChild(saveImplementationButton);
       implementation.append(
@@ -419,7 +420,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       const saveAuditPromptButton = document.createElement('button');
       saveAuditPromptButton.textContent = 'Save Audit Notes';
       saveAuditPromptButton.addEventListener('click', async () => {
-        await updateTicket(ticket.id, { audit_prompt: auditPromptInput.value });
+        await updateTicket(ticket.id, { audit_prompt: auditPromptInput.value }, detailCallerRole());
       });
       auditPromptActions.appendChild(saveAuditPromptButton);
       auditPrompt.append(
@@ -440,12 +441,12 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       const saveCommitButton = document.createElement('button');
       saveCommitButton.textContent = 'Save Commit';
       saveCommitButton.addEventListener('click', async () => {
-        await updateTicket(ticket.id, { commit_hash: commitHashInput.value });
+        await updateTicket(ticket.id, { commit_hash: commitHashInput.value }, detailCallerRole());
       });
       commitActions.appendChild(saveCommitButton);
       commitInfo.append(commitHashInput, commitActions);
       const commitOverride = toggleControl('No commit required', ticket.commit_exempt, async (checked) => {
-        await updateTicket(ticket.id, { commit_exempt: checked });
+        await updateTicket(ticket.id, { commit_exempt: checked }, detailCallerRole());
       });
       const commitNote = document.createElement('div');
       commitNote.className = 'soft-note';
@@ -481,7 +482,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         renderAttachmentGallery(gallery, entries, 'Remove attachment', async (path) => {
           await updateTicket(ticket.id, {
             screenshots: ticketScreenshotPaths(ticket).filter((item) => item !== path),
-          });
+          }, detailCallerRole());
         });
         imageWrap.appendChild(gallery);
         box.appendChild(imageWrap);

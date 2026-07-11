@@ -25,7 +25,7 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
         }
         await updateTicket(ticket.id, {
           screenshots: uniquePaths([...ticketScreenshotPaths(ticket), uploaded.path]),
-        });
+        }, 'director');
         setCreateStatus(`Attached pasted image to ${ticket.id}.`);
         return;
       }

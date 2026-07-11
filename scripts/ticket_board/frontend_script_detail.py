@@ -248,6 +248,14 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       toggles.appendChild(toggleControl('Needs Eric signoff', ticket.needs_eric_signoff, async (checked) => {
         await updateTicket(ticket.id, { needs_eric_signoff: checked }, detailCallerRole());
       }));
+      toggles.appendChild(toggleControl('Needs inspection', ticket.needs_inspection, async (checked) => {
+        await updateTicket(ticket.id, { needs_inspection: checked }, 'director');
+      }));
+      if (ticket.needs_inspection) {
+        toggles.appendChild(toggleControl('Inspector signoff', ticket.inspector_signoff, async (checked) => {
+          await updateTicket(ticket.id, { inspector_signoff: checked }, 'inspector');
+        }));
+      }
       toggles.appendChild(toggleControl('Audit signoff', ticket.audit_signoff, async (checked) => {
         await updateTicket(ticket.id, { audit_signoff: checked }, 'audit');
       }));
@@ -505,6 +513,13 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         kickbackButton.textContent = 'Kick Back -> In Progress';
         kickbackButton.addEventListener('click', async () => {
           await submitComment(ticket.id, commentWho.value, commentText.value, 'in_progress');
+        });
+        commentActions.appendChild(kickbackButton);
+      } else if (ticket.state === 'inspection') {
+        const kickbackButton = document.createElement('button');
+        kickbackButton.textContent = 'Comment + Return to In Progress';
+        kickbackButton.addEventListener('click', async () => {
+          await submitComment(ticket.id, 'inspector', commentText.value, 'in_progress');
         });
         commentActions.appendChild(kickbackButton);
       } else if (ticket.state === 'audit') {

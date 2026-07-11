@@ -39,20 +39,22 @@ ROLE_TO_TARGET = {
     "research": "pgu-research:0.0",
     "ops": "pgu-ops:0.0",
     "audit": "pgu-audit:0.0",
+    "inspector": "pgu-inspector:0.0",
 }
 STATE_RANK = {
     "backlog": 0,
     "analysis": 1,
     "ready": 2,
     "in_progress": 3,
-    "audit": 4,
-    "eric_review": 5,
-    "director_review": 6,
-    "done": 7,
-    "cancelled": 8,
+    "inspection": 4,
+    "audit": 5,
+    "eric_review": 6,
+    "director_review": 7,
+    "done": 8,
+    "cancelled": 9,
 }
 TERMINAL_STATES = {"done", "cancelled"}
-NUDGE_ELIGIBLE_STATES = {"ready", "in_progress", "audit", "director_review", "analysis", "backlog"}
+NUDGE_ELIGIBLE_STATES = {"ready", "in_progress", "inspection", "audit", "director_review", "analysis", "backlog"}
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_DIRECTORCTL = str(Path(__file__).resolve().parents[1] / "directorctl")
@@ -93,6 +95,8 @@ def target_for_transition(transition: Transition) -> str | None:
         return ROLE_TO_TARGET["director"]
     if transition.new_state in {"ready", "in_progress"}:
         return ROLE_TO_TARGET.get(transition.assignee)
+    if transition.new_state == "inspection":
+        return ROLE_TO_TARGET["inspector"]
     if transition.new_state == "audit":
         return ROLE_TO_TARGET["audit"]
     if transition.new_state == "eric_review":
@@ -120,6 +124,8 @@ def message_for_transition(transition: Transition) -> str | None:
         return f"Ready ticket for you: {transition.ticket_id}{title_suffix}"
     if transition.new_state == "in_progress":
         return f"New ticket for you: {transition.ticket_id}{title_suffix}"
+    if transition.new_state == "inspection":
+        return f"{transition.ticket_id}{title_suffix} ready for inspection"
     if transition.new_state == "audit":
         return f"{transition.ticket_id}{title_suffix} ready for audit"
     if transition.new_state == "director_review":
@@ -370,6 +376,8 @@ WHERE id = %s
                 return "director"
             if state in {"ready", "in_progress"}:
                 return assignee if assignee != "unassigned" else None
+            if state == "inspection":
+                return "inspector"
             if state == "audit":
                 return "audit"
             if state == "director_review":
@@ -379,6 +387,8 @@ WHERE id = %s
             return "director"
         if state in {"ready", "in_progress"}:
             return assignee if assignee != "unassigned" else None
+        if state == "inspection":
+            return "inspector"
         if state in {"audit", "director_review", "analysis", "backlog"}:
             return "director" if state in {"analysis", "backlog", "director_review"} else "audit"
         return None

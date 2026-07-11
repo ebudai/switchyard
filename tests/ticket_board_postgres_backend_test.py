@@ -27,7 +27,7 @@ from scripts.ticket_board.app import TicketBoardApp
 
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
 RBAC_PATH = ROOT / "scripts" / "ticket_board" / "rbac.sql"
-PANE_ROLES = ["director", "eric", "ops", "app", "audit", "perf", "research", "main"]
+PANE_ROLES = ["director", "eric", "ops", "app", "audit", "inspector", "perf", "research", "main"]
 SERVICE_ROLE = "ticket_board_service"
 
 

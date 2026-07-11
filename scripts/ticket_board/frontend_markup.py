@@ -48,6 +48,10 @@ MARKUP = """  <div class="layout">
             <input id="needsEricInput" type="checkbox">
             Needs Eric signoff
           </label>
+          <label class="check">
+            <input id="needsInspectionInput" type="checkbox">
+            Needs inspection
+          </label>
           <button id="createBtn" class="primary">Create Ticket</button>
           <div id="createStatus" class="status">Ready.</div>
         </div>

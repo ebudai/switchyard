@@ -120,11 +120,13 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
         screenshot: state.pendingCreateScreenshots[0] || null,
         screenshots: state.pendingCreateScreenshots,
         needs_eric_signoff: needsEricInput.checked,
+        needs_inspection: needsInspectionInput.checked,
       };
       const result = await postTicketAction('/api/tickets/actions/create_ticket', payload, 'director');
       titleInput.value = '';
       bodyInput.value = '';
       needsEricInput.checked = false;
+      needsInspectionInput.checked = false;
       state.pendingCreateScreenshots = [];
       screenshotInput.value = '';
       renderCreatePreview();
@@ -172,10 +174,12 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
         'screenshot',
         'implementation',
         'audit_prompt',
+        'needs_inspection',
         'needs_eric_signoff',
         'commit_exempt',
         'commit_hash',
         'audit_signoff',
+        'inspector_signoff',
         'eric_signoff',
       ]);
       const metadata = {};
@@ -209,7 +213,7 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
         const nextState = String(patch.state || '').trim().toLowerCase();
         if (nextState === 'in_progress') {
           await updateTicketAction(ticketId, 'start_work', {}, normalizedCaller);
-        } else if (nextState === 'audit') {
+        } else if (nextState === 'inspection') {
           await updateTicketAction(
             ticketId,
             'submit_to_audit',
@@ -217,6 +221,19 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
             normalizedCaller,
           );
           consumed.add('commit_hash');
+        } else if (nextState === 'audit') {
+          if (previousState === 'inspection') {
+            await updateTicketAction(ticketId, 'inspector_sign_off', {}, normalizedCaller);
+            consumed.add('inspector_signoff');
+          } else {
+            await updateTicketAction(
+              ticketId,
+              'submit_to_audit',
+              { commit_hash: patch.commit_hash || ticket?.commit_hash || '' },
+              normalizedCaller,
+            );
+            consumed.add('commit_hash');
+          }
         } else if (nextState === 'done') {
           await updateTicketAction(
             ticketId,
@@ -229,6 +246,9 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
           await updateTicketAction(ticketId, 'defer', {}, normalizedCaller);
         } else if (nextState === 'cancelled') {
           await updateTicketAction(ticketId, 'cancel', { reason: actionReason(patch) }, normalizedCaller);
+          consumedComment = true;
+        } else if (nextState === 'in_progress' && patch.comment && previousState === 'inspection') {
+          await updateTicketAction(ticketId, 'inspector_kick_back', { recommendations: actionReason(patch) }, normalizedCaller);
           consumedComment = true;
         } else if (nextState === 'analysis' && patch.comment && previousState === 'audit') {
           await updateTicketAction(ticketId, 'audit_kick_back', { reason: actionReason(patch) }, normalizedCaller);
@@ -288,6 +308,10 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       if (patch.audit_signoff === true && !consumed.has('audit_signoff')) {
         await updateTicketAction(ticketId, 'audit_sign_off', {}, normalizedCaller);
         consumed.add('audit_signoff');
+      }
+      if (patch.inspector_signoff === true && !consumed.has('inspector_signoff')) {
+        await updateTicketAction(ticketId, 'inspector_sign_off', {}, normalizedCaller);
+        consumed.add('inspector_signoff');
       }
       if (patch.eric_signoff === true && !consumed.has('eric_signoff')) {
         await updateTicketAction(ticketId, 'eric_sign_off', {}, normalizedCaller);

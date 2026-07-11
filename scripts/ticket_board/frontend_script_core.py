@@ -6,6 +6,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       { key: 'analysis', label: 'Analysis' },
       { key: 'ready', label: 'Ready' },
       { key: 'in_progress', label: 'In Progress' },
+      { key: 'inspection', label: 'Inspection' },
       { key: 'audit', label: 'Audit' },
       { key: 'eric_review', label: 'Eric Review' },
       { key: 'director_review', label: 'Director Review' },
@@ -42,6 +43,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     const titleInput = document.getElementById('titleInput');
     const bodyInput = document.getElementById('bodyInput');
     const needsEricInput = document.getElementById('needsEricInput');
+    const needsInspectionInput = document.getElementById('needsInspectionInput');
     const showDeferredInput = document.getElementById('showDeferredInput');
     const showDeferredCountEl = document.getElementById('showDeferredCount');
     const showDoneInput = document.getElementById('showDoneInput');
@@ -114,6 +116,9 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         return 'in_progress';
       }
       if (ticket.state === 'in_progress') {
+        return ticket.needs_inspection ? 'inspection' : 'audit';
+      }
+      if (ticket.state === 'inspection') {
         return 'audit';
       }
       if (ticket.state === 'audit') {
@@ -129,6 +134,9 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     }
 
     function stateTransitionCallerRole(ticket) {
+      if (ticket.state === 'inspection') {
+        return 'inspector';
+      }
       return ticket.state === 'ready' || ticket.state === 'in_progress'
         ? ticket.assignee
         : 'director';
@@ -171,6 +179,9 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         if (conflict) {
           return `${ticket.assignee} already has an in-progress ticket ${conflict.id}; finish or move it first.`;
         }
+      }
+      if (ticket.state === 'inspection' && !ticket.inspector_signoff) {
+        return 'Record inspector signoff before advancing to audit.';
       }
       if (ticket.state === 'audit' && !ticket.audit_signoff) {
         return ticket.needs_eric_signoff
@@ -465,6 +476,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     function ericReviewStatusItems(ticket) {
       return [
         { label: 'Audit sign-off', ok: !!ticket.audit_signoff },
+        { label: 'Inspector sign-off', ok: !ticket.needs_inspection || !!ticket.inspector_signoff },
         { label: 'Needs Eric sign-off', ok: !!ticket.needs_eric_signoff },
         {
           label: 'Commit evidence',

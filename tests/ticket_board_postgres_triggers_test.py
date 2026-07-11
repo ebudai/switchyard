@@ -72,6 +72,8 @@ def insert_ticket(
     implementation: str = "",
     parent_id: str = "",
     audit_signoff: bool = False,
+    needs_inspection: bool = False,
+    inspector_signoff: bool = False,
     needs_eric_signoff: bool = False,
     eric_signoff: bool = False,
     commit_hash: str = "",
@@ -81,6 +83,8 @@ def insert_ticket(
 ) -> None:
     bools = {
         "audit_signoff": "true" if audit_signoff else "false",
+        "needs_inspection": "true" if needs_inspection else "false",
+        "inspector_signoff": "true" if inspector_signoff else "false",
         "needs_eric_signoff": "true" if needs_eric_signoff else "false",
         "eric_signoff": "true" if eric_signoff else "false",
         "commit_exempt": "true" if commit_exempt else "false",
@@ -93,11 +97,11 @@ def insert_ticket(
         f"""
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, parent_id, implementation,
-    audit_signoff, needs_eric_signoff, eric_signoff, commit_hash,
+    audit_signoff, needs_inspection, inspector_signoff, needs_eric_signoff, eric_signoff, commit_hash,
     commit_exempt, manually_controlled, parked, created_text, updated_text, source_json
 ) VALUES (
     '{ticket_id}', '{title}', '', '{state}', '{assignee}', '{parent_id}', '{implementation}',
-    {bools['audit_signoff']}, {bools['needs_eric_signoff']}, {bools['eric_signoff']}, '{commit_hash}',
+    {bools['audit_signoff']}, {bools['needs_inspection']}, {bools['inspector_signoff']}, {bools['needs_eric_signoff']}, {bools['eric_signoff']}, '{commit_hash}',
     {bools['commit_exempt']}, {bools['manually_controlled']}, {bools['parked']}, '2026-07-10T00:00:00+00:00',
     '2026-07-10T00:00:00+00:00', '{source}'::jsonb
 );
@@ -246,6 +250,117 @@ COMMIT;
                 parent_id="PGU-1",
             )
             psql(conninfo, "UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-3';")
+
+            insert_ticket(
+                conninfo,
+                "PGU-30",
+                title="Inspection required",
+                assignee="ops",
+                state="ready",
+                implementation="rendered",
+                needs_inspection=True,
+            )
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-30';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = 'abcdef0' WHERE id = 'PGU-30';")
+            inspect_submit = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object('state', state, 'inspector_signoff', inspector_signoff, 'commit_hash', commit_hash)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-30';
+""",
+                ).stdout
+            )
+            assert inspect_submit == {"state": "inspection", "inspector_signoff": False, "commit_hash": "abcdef0"}, inspect_submit
+
+            insert_ticket(
+                conninfo,
+                "PGU-31",
+                title="Inspection gate",
+                assignee="ops",
+                state="inspection",
+                implementation="rendered",
+                needs_inspection=True,
+            )
+            assert_error(
+                conninfo,
+                "UPDATE ticket_board.tickets SET state = 'audit' WHERE id = 'PGU-31';",
+                "inspector_signoff must be true",
+            )
+            psql(conninfo, "UPDATE ticket_board.tickets SET inspector_signoff = true, state = 'audit' WHERE id = 'PGU-31';")
+            inspect_signed = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object('state', state, 'inspector_signoff', inspector_signoff)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-31';
+""",
+                ).stdout
+            )
+            assert inspect_signed == {"state": "audit", "inspector_signoff": True}, inspect_signed
+
+            insert_ticket(
+                conninfo,
+                "PGU-32",
+                title="Inspection kickback",
+                assignee="ops",
+                state="inspection",
+                implementation="rendered",
+                needs_inspection=True,
+                inspector_signoff=True,
+            )
+            assert_error(
+                conninfo,
+                "UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-32';",
+                "inspector kickback requires",
+            )
+            psql(
+                conninfo,
+                """
+BEGIN;
+INSERT INTO ticket_board.ticket_comments (ticket_id, position, who, ts_text, text, source_json)
+VALUES (
+    'PGU-32',
+    COALESCE((SELECT max(position) + 1 FROM ticket_board.ticket_comments WHERE ticket_id = 'PGU-32'), 0),
+    'inspector',
+    '2026-07-10T00:10:00+00:00',
+    'Frame has banding.',
+    '{"who":"inspector","ts":"2026-07-10T00:10:00+00:00","text":"Frame has banding."}'::jsonb
+);
+UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-32';
+COMMIT;
+""",
+            )
+            inspect_kicked = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object('state', state, 'inspector_signoff', inspector_signoff, 'audit_signoff', audit_signoff)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-32';
+""",
+                ).stdout
+            )
+            assert inspect_kicked == {"state": "in_progress", "inspector_signoff": False, "audit_signoff": False}, inspect_kicked
+            inspect_kick_notice = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object('target_role', target_role, 'message', message, 'new_state', payload->>'new_state')::text
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-32' AND payload->>'new_state' = 'in_progress'
+ORDER BY id DESC
+LIMIT 1;
+""",
+                ).stdout
+            )
+            assert inspect_kick_notice == {
+                "target_role": "ops",
+                "message": "PGU-32 -- Inspection kickback kicked back to you: Frame has banding.",
+                "new_state": "in_progress",
+            }, inspect_kick_notice
 
             insert_ticket(conninfo, "PGU-4", title="Review", assignee="audit", state="audit", implementation="done")
             assert_error(
@@ -580,12 +695,42 @@ FROM ticket_board.claim_notification() AS claimed;
             ).stdout.strip()
             assert pending_after_ack == "0"
 
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
+            insert_ticket(
+                conninfo,
+                "PGU-21",
+                title="Inspection notify",
+                state="ready",
+                assignee="perf",
+                implementation="rendered",
+                needs_inspection=True,
+            )
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-21';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = 'abcdef1' WHERE id = 'PGU-21';")
+            inspection_queue = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object('target_role', target_role, 'message', message, 'new_state', payload->>'new_state')::text
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-21' AND payload->>'new_state' = 'inspection'
+ORDER BY id DESC
+LIMIT 1;
+""",
+                ).stdout
+            )
+            assert inspection_queue == {
+                "target_role": "inspector",
+                "message": "PGU-21 -- Inspection notify ready for inspection",
+                "new_state": "inspection",
+            }, inspection_queue
+
             psql(
                 conninfo,
                 """
 UPDATE ticket_board.ticket_notification_state
 SET last_nudged_at = clock_timestamp() + interval '1 hour'
-WHERE ticket_id <> 'PGU-20';
+WHERE ticket_id NOT IN ('PGU-20', 'PGU-21');
 """,
             )
             nudges = psql(
@@ -609,6 +754,52 @@ WHERE ticket_id = 'PGU-20';
                 "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-20' AND kind = 'nudge';",
             ).stdout.strip()
             assert nudge_queue == "1", nudge_queue
+            inspection_nudge = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object('target_role', target_role, 'message', message, 'state', payload->>'state')::text
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-21' AND kind = 'nudge'
+ORDER BY id DESC
+LIMIT 1;
+""",
+                ).stdout
+            )
+            assert inspection_nudge == {
+                "target_role": "inspector",
+                "message": "NUDGE PGU-21 -- Inspection notify ready for inspection",
+                "state": "inspection",
+            }, inspection_nudge
+            psql(
+                conninfo,
+                """
+DELETE FROM ticket_board.ticket_notification_queue;
+UPDATE ticket_board.ticket_notification_state
+SET last_activity_at = clock_timestamp() - interval '20 minutes',
+    last_nudged_at = clock_timestamp() - interval '10 minutes',
+    nudge_count = 3
+WHERE ticket_id = 'PGU-21';
+SELECT ticket_board.notify_due_nudges(clock_timestamp(), interval '5 minutes', 3);
+""",
+            )
+            inspection_escalation = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object('kind', kind, 'target_role', target_role, 'message', message)::text
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-21'
+ORDER BY id DESC
+LIMIT 1;
+""",
+                ).stdout
+            )
+            assert inspection_escalation == {
+                "kind": "escalation",
+                "target_role": "director",
+                "message": "PRIORITY PGU-21 -- Inspection notify appears stuck for perf; check/reassign",
+            }, inspection_escalation
 
             psql(
                 conninfo,

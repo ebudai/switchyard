@@ -31,7 +31,7 @@ from scripts.ticket_board.server import CALLER_ROLE_HEADER, TicketBoardServer
 
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
 RBAC_PATH = ROOT / "scripts" / "ticket_board" / "rbac.sql"
-PANE_ROLES = ["director", "eric", "ops", "app", "audit", "perf", "research", "main"]
+PANE_ROLES = ["director", "eric", "ops", "app", "audit", "inspector", "perf", "research", "main"]
 SERVICE_ROLE = "ticket_board_service"
 FRONTEND_SCRIPT_PATHS = [
     ROOT / "scripts" / "ticket_board" / "frontend_script_app.py",
@@ -115,6 +115,8 @@ def seed_json_ticket(
     assignee: str = "unassigned",
     implementation: str = "",
     audit_signoff: bool = False,
+    needs_inspection: bool = False,
+    inspector_signoff: bool = False,
     needs_eric_signoff: bool = False,
     eric_signoff: bool = False,
     commit_hash: str = "",
@@ -131,6 +133,8 @@ def seed_json_ticket(
         "implementation": implementation,
         "audit_prompt": "",
         "audit_signoff": audit_signoff,
+        "needs_inspection": needs_inspection,
+        "inspector_signoff": inspector_signoff,
         "needs_eric_signoff": needs_eric_signoff,
         "eric_signoff": eric_signoff,
         "manually_controlled": False,
@@ -153,6 +157,8 @@ def seed_postgres_ticket(
     assignee: str = "unassigned",
     implementation: str = "",
     audit_signoff: bool = False,
+    needs_inspection: bool = False,
+    inspector_signoff: bool = False,
     needs_eric_signoff: bool = False,
     eric_signoff: bool = False,
     commit_hash: str = "",
@@ -162,11 +168,11 @@ def seed_postgres_ticket(
         f"""
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation,
-    audit_signoff, needs_eric_signoff, eric_signoff, commit_hash,
+    audit_signoff, needs_inspection, inspector_signoff, needs_eric_signoff, eric_signoff, commit_hash,
     created_text, updated_text, source_json
 ) VALUES (
     '{ticket_id}', '{title}', '', '{state}', '{assignee}', '{implementation}',
-    {str(audit_signoff).lower()}, {str(needs_eric_signoff).lower()},
+    {str(audit_signoff).lower()}, {str(needs_inspection).lower()}, {str(inspector_signoff).lower()}, {str(needs_eric_signoff).lower()},
     {str(eric_signoff).lower()}, '{commit_hash}',
     '2026-07-10T00:00:00+00:00', '2026-07-10T00:00:00+00:00',
     '{ticket_source(ticket_id, title, state, assignee)}'::jsonb
@@ -301,6 +307,31 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
     seed_ticket("PGU-107", title="Defer", state="analysis")
     seed_ticket("PGU-108", title="Cancel", state="analysis")
     seed_ticket("PGU-116", title="Backlog cancel", state="backlog", assignee="ops")
+    seed_ticket(
+        "PGU-117",
+        title="Needs inspection submit",
+        state="ready",
+        assignee="ops",
+        implementation="Render output attached.",
+        needs_inspection=True,
+    )
+    seed_ticket(
+        "PGU-118",
+        title="Inspection audit gate",
+        state="inspection",
+        assignee="ops",
+        implementation="Rendered.",
+        needs_inspection=True,
+    )
+    seed_ticket(
+        "PGU-119",
+        title="Inspection kickback",
+        state="inspection",
+        assignee="ops",
+        implementation="Rendered.",
+        needs_inspection=True,
+        inspector_signoff=True,
+    )
     seed_ticket("PGU-109", title="Manual", state="analysis")
     seed_ticket("PGU-110", title="Blocker", state="analysis")
     seed_ticket("PGU-111", title="Blocked target", state="analysis")
@@ -415,6 +446,94 @@ def exercise_write_api(base_url: str, commit_hash: str) -> None:
     submitted = post_json(base_url, "/api/tickets/PGU-101/actions/submit_to_audit", {"commit_hash": commit_hash}, caller="ops")
     assert submitted["ticket"]["state"] == "audit", submitted  # type: ignore[index]
     assert submitted["ticket"]["commit_hash"] == commit_hash, submitted  # type: ignore[index]
+
+    eric_inspection_create = post_json(
+        base_url,
+        "/api/tickets/actions/create_ticket",
+        {"title": "Eric cannot require inspection", "body": "", "needs_inspection": True},
+        caller="eric",
+        expect=403,
+    )
+    assert "needs_inspection can only be set by director" in str(eric_inspection_create), eric_inspection_create
+    director_inspection_create = post_json(
+        base_url,
+        "/api/tickets/actions/create_ticket",
+        {"title": "Director requires inspection", "body": "", "needs_inspection": True},
+        caller="director",
+        expect=201,
+    )
+    assert director_inspection_create["ticket"]["needs_inspection"] is True, director_inspection_create  # type: ignore[index]
+
+    inspector_field_forbidden = post_json(
+        base_url,
+        "/api/tickets/PGU-112/actions/edit_fields",
+        {"needs_inspection": True},
+        caller="app",
+        expect=403,
+    )
+    assert "needs_inspection can only be edited by director" in str(inspector_field_forbidden), inspector_field_forbidden
+    inspector_field_director = post_json(
+        base_url,
+        "/api/tickets/PGU-112/actions/edit_fields",
+        {"needs_inspection": True},
+        caller="director",
+    )
+    assert inspector_field_director["ticket"]["needs_inspection"] is True, inspector_field_director  # type: ignore[index]
+
+    inspect_started = post_json(base_url, "/api/tickets/PGU-117/actions/start_work", {}, caller="ops")
+    assert inspect_started["ticket"]["state"] == "in_progress", inspect_started  # type: ignore[index]
+    inspect_submitted = post_json(
+        base_url,
+        "/api/tickets/PGU-117/actions/submit_to_audit",
+        {"commit_hash": commit_hash},
+        caller="ops",
+    )
+    assert inspect_submitted["ticket"]["state"] == "inspection", inspect_submitted  # type: ignore[index]
+    assert inspect_submitted["ticket"]["inspector_signoff"] is False, inspect_submitted  # type: ignore[index]
+
+    inspector_cannot_audit = post_json(base_url, "/api/tickets/PGU-102/actions/audit_sign_off", {}, caller="inspector", expect=403)
+    assert "inspector cannot call audit_sign_off" in str(inspector_cannot_audit), inspector_cannot_audit
+    audit_cannot_inspect = post_json(base_url, "/api/tickets/PGU-117/actions/inspector_sign_off", {}, caller="audit", expect=403)
+    assert "audit cannot call inspector_sign_off" in str(audit_cannot_inspect), audit_cannot_inspect
+    main_cannot_inspect_kick = post_json(
+        base_url,
+        "/api/tickets/PGU-117/actions/inspector_kick_back",
+        {"recommendations": "No."},
+        caller="main",
+        expect=403,
+    )
+    assert "main cannot call inspector_kick_back" in str(main_cannot_inspect_kick), main_cannot_inspect_kick
+
+    inspection_skip = post_json(
+        base_url,
+        "/api/tickets/PGU-118/actions/route",
+        {"state": "audit", "assignee": "ops"},
+        caller="director",
+        expect=400,
+    )
+    assert "inspector_signoff must be true" in str(inspection_skip), inspection_skip
+    inspection_signed = post_json(base_url, "/api/tickets/PGU-117/actions/inspector_sign_off", {}, caller="inspector")
+    assert inspection_signed["ticket"]["state"] == "audit", inspection_signed  # type: ignore[index]
+    assert inspection_signed["ticket"]["inspector_signoff"] is True, inspection_signed  # type: ignore[index]
+
+    empty_inspector_kick = post_json(
+        base_url,
+        "/api/tickets/PGU-119/actions/inspector_kick_back",
+        {"recommendations": ""},
+        caller="inspector",
+        expect=400,
+    )
+    assert "non-empty" in str(empty_inspector_kick), empty_inspector_kick
+    inspector_kicked = post_json(
+        base_url,
+        "/api/tickets/PGU-119/actions/inspector_kick_back",
+        {"recommendations": "Frame has visible banding."},
+        caller="inspector",
+    )
+    assert inspector_kicked["ticket"]["state"] == "in_progress", inspector_kicked  # type: ignore[index]
+    assert inspector_kicked["ticket"]["inspector_signoff"] is False, inspector_kicked  # type: ignore[index]
+    assert inspector_kicked["ticket"]["comments"][-1]["who"] == "inspector", inspector_kicked  # type: ignore[index]
+    assert "Frame has visible banding." in inspector_kicked["ticket"]["comments"][-1]["text"], inspector_kicked  # type: ignore[index]
 
     audit_signed = post_json(base_url, "/api/tickets/PGU-102/actions/audit_sign_off", {}, caller="audit")
     assert audit_signed["ticket"]["state"] == "director_review", audit_signed  # type: ignore[index]

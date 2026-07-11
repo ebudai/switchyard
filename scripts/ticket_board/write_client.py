@@ -25,6 +25,7 @@ PANE_SESSION_CALLER_ROLES = {
     "pgu-app": "app",
     "pgu-ops": "ops",
     "pgu-audit": "audit",
+    "pgu-inspector": "inspector",
     "pgu-perf": "perf",
     "pgu-research": "research",
 }
@@ -219,6 +220,7 @@ class TicketBoardWriteClient:
         blocked_reason: str = "",
         implementation: str = "",
         audit_prompt: str = "",
+        needs_inspection: bool = False,
         needs_eric_signoff: bool = False,
         comment_text: str = "",
         caller_role: str | None = None,
@@ -234,6 +236,7 @@ class TicketBoardWriteClient:
             "blocked_reason": blocked_reason,
             "implementation": implementation,
             "audit_prompt": audit_prompt,
+            "needs_inspection": needs_inspection,
             "needs_eric_signoff": needs_eric_signoff,
         }
         if comment_text:
@@ -284,6 +287,12 @@ class TicketBoardWriteClient:
 
     def audit_kick_back(self, ticket_id: str, *, reason: str, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "audit_kick_back", {"reason": reason}, caller_role=caller_role)
+
+    def inspector_sign_off(self, ticket_id: str, *, caller_role: str | None = None) -> dict[str, Any]:
+        return self._ticket_action(ticket_id, "inspector_sign_off", caller_role=caller_role)
+
+    def inspector_kick_back(self, ticket_id: str, *, recommendations: str, caller_role: str | None = None) -> dict[str, Any]:
+        return self._ticket_action(ticket_id, "inspector_kick_back", {"recommendations": recommendations}, caller_role=caller_role)
 
     def eric_sign_off(self, ticket_id: str, *, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "eric_sign_off", caller_role=caller_role)
@@ -364,6 +373,7 @@ def _build_parser() -> argparse.ArgumentParser:
     create.add_argument("--implementation", default="")
     create.add_argument("--audit-prompt", default="")
     create.add_argument("--comment-text", default="")
+    create.add_argument("--needs-inspection", action="store_true")
     create.add_argument("--needs-eric-signoff", action="store_true")
 
     file_bug = subparsers.add_parser("file-bug")
@@ -377,7 +387,7 @@ def _build_parser() -> argparse.ArgumentParser:
     route.add_argument("--state", required=True)
     route.add_argument("--assignee", required=True)
 
-    for name in ("start-work", "audit-sign-off", "eric-sign-off", "defer"):
+    for name in ("start-work", "audit-sign-off", "inspector-sign-off", "eric-sign-off", "defer"):
         sub = subparsers.add_parser(name)
         sub.add_argument("ticket_id")
 
@@ -389,6 +399,10 @@ def _build_parser() -> argparse.ArgumentParser:
         sub = subparsers.add_parser(name)
         sub.add_argument("ticket_id")
         sub.add_argument("--reason", required=True)
+
+    inspector_kick = subparsers.add_parser("inspector-kick-back")
+    inspector_kick.add_argument("ticket_id")
+    inspector_kick.add_argument("--recommendations", required=True)
 
     done = subparsers.add_parser("mark-done")
     done.add_argument("ticket_id")
@@ -424,6 +438,7 @@ def main(argv: list[str] | None = None) -> int:
             blocked_reason=args.blocked_reason,
             implementation=args.implementation,
             audit_prompt=args.audit_prompt,
+            needs_inspection=args.needs_inspection,
             needs_eric_signoff=args.needs_eric_signoff,
             comment_text=args.comment_text,
         )
@@ -435,6 +450,8 @@ def main(argv: list[str] | None = None) -> int:
         response = client.submit_to_audit(args.ticket_id, commit_hash=args.commit_hash)
     elif command in {"audit_kick_back", "eric_reopen", "cancel"}:
         response = getattr(client, command)(args.ticket_id, reason=args.reason)
+    elif command == "inspector_kick_back":
+        response = client.inspector_kick_back(args.ticket_id, recommendations=args.recommendations)
     elif command == "mark_done":
         response = client.mark_done(args.ticket_id, commit_hash=args.commit_hash)
     elif command == "set_manually_controlled":

@@ -31,13 +31,15 @@ CALLER_ROLE_HEADER = "X-PGU-Caller-Role"
 SO_PEERCRED_FORMAT = "3i"
 PANE_SOCKET_MODE = 0o666
 IMPLEMENTER_ROLES = {"main", "app", "ops", "perf", "research"}
-CALLER_ROLES = IMPLEMENTER_ROLES | {"director", "eric", "audit"}
+CALLER_ROLES = IMPLEMENTER_ROLES | {"director", "eric", "audit", "inspector"}
 OPERATION_ALLOWED_ROLES = {
     "create_ticket": {"director", "eric"},
     "file_bug": IMPLEMENTER_ROLES,
     "route": {"director"},
     "start_work": IMPLEMENTER_ROLES,
     "submit_to_audit": IMPLEMENTER_ROLES,
+    "inspector_sign_off": {"inspector"},
+    "inspector_kick_back": {"inspector"},
     "audit_sign_off": {"audit"},
     "audit_kick_back": {"audit"},
     "eric_sign_off": {"eric"},
@@ -58,10 +60,12 @@ EDIT_FIELD_NAMES = {
     "screenshot",
     "implementation",
     "audit_prompt",
+    "needs_inspection",
     "needs_eric_signoff",
     "commit_exempt",
     "commit_hash",
     "audit_signoff",
+    "inspector_signoff",
     "eric_signoff",
 }
 
@@ -423,11 +427,15 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 commit_exempt,
                 comment_text,
                 bool(payload.get("audit_signoff", False)),
+                bool(payload.get("inspector_signoff", False)),
+                bool(payload.get("needs_inspection", False)),
                 bool(payload.get("eric_signoff", False)),
             )
         )
         if advanced_create and caller_role is None:
             raise ValueError("advanced create fields require /api/tickets/actions/create_ticket")
+        if bool(payload.get("needs_inspection", False)) and caller_role != "director":
+            raise PermissionError("needs_inspection can only be set by director")
         if not advanced_create:
             return self.app.create_ticket(
                 title=str(payload.get("title", "")),
@@ -436,8 +444,10 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 screenshots=payload.get("screenshots"),  # type: ignore[arg-type]
                 assignee=str(payload.get("assignee", "unassigned")),
                 needs_eric_signoff=bool(payload.get("needs_eric_signoff", False)),
+                needs_inspection=bool(payload.get("needs_inspection", False)),
                 blocked_by=payload.get("blocked_by"),  # type: ignore[arg-type]
                 blocked_reason=str(payload.get("blocked_reason", "")),
+                caller_role=caller_role,
             )
 
         created = iso_now()
@@ -456,12 +466,15 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             implementation=implementation,
             audit_prompt=audit_prompt,
             audit_signoff=bool(payload.get("audit_signoff", False)),
+            needs_inspection=bool(payload.get("needs_inspection", False)),
+            inspector_signoff=bool(payload.get("inspector_signoff", False)),
             needs_eric_signoff=bool(payload.get("needs_eric_signoff", False)),
             eric_signoff=bool(payload.get("eric_signoff", False)),
             comments=comments,
             blocked_reason=str(payload.get("blocked_reason", "")),
             commit_hash=commit_hash,
             commit_exempt=commit_exempt,
+            caller_role=caller_role,
             created=created,
             updated=created,
         )
@@ -483,6 +496,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             return
 
         if operation == "file_bug":
+            if bool(payload.get("needs_inspection", False)) and caller != "director":
+                raise PermissionError("needs_inspection can only be set by director")
             before_signature = self.app.store_signature()
             source_ticket_id = str(payload.get("source_ticket_id", payload.get("parent_id", ""))).strip().upper()
             created = self.app.create_ticket_record(
@@ -496,6 +511,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 implementation="",
                 audit_prompt="",
                 audit_signoff=False,
+                needs_inspection=bool(payload.get("needs_inspection", False)),
+                inspector_signoff=False,
                 needs_eric_signoff=bool(payload.get("needs_eric_signoff", False)),
                 eric_signoff=False,
                 comments=[],
@@ -531,6 +548,13 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             patch = {"state": "in_progress"}
         elif operation == "submit_to_audit":
             patch = {"state": "audit", "commit_hash": str(payload.get("commit_hash", ""))}
+        elif operation == "inspector_sign_off":
+            patch = {"state": "audit", "inspector_signoff": True}
+        elif operation == "inspector_kick_back":
+            patch = {
+                "state": "in_progress",
+                "comment": {"who": caller, "text": str(payload.get("recommendations", payload.get("reason", payload.get("text", ""))))},
+            }
         elif operation == "audit_sign_off":
             patch = {"audit_signoff": True}
         elif operation == "audit_kick_back":
@@ -569,13 +593,17 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 raise ValueError(f"edit_fields cannot update: {', '.join(invalid_fields)}")
             if payload.get("audit_signoff") is True:
                 raise ValueError("audit_signoff=true requires audit_sign_off")
+            if payload.get("inspector_signoff") is True:
+                raise ValueError("inspector_signoff=true requires inspector_sign_off")
             if payload.get("eric_signoff") is True:
                 raise ValueError("eric_signoff=true requires eric_sign_off")
+            if "needs_inspection" in payload and caller != "director":
+                raise PermissionError("needs_inspection can only be edited by director")
             patch = dict(payload)
         else:
             raise ValueError(f"unknown ticket operation: {operation}")
 
-        updated = self.app.update_ticket(ticket_id, patch)
+        updated = self.app.update_ticket(ticket_id, patch, caller_role=caller)
         self.events.notify_change(self.app.store_signature())
         self.send_json({"ticket": updated})
 

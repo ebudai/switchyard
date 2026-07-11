@@ -191,6 +191,54 @@ def test_eric_review_is_not_delivered() -> None:
     assert listener.delivered_count == 0
 
 
+def test_inspection_transition_delivers_to_inspector() -> None:
+    sent: list[tuple[str, str]] = []
+    listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=lambda target, message: sent.append((target, message)),
+        activity_gate=lambda _target: False,
+    )
+
+    delivered = listener.deliver_payload(
+        transition_payload("PGU-248", old_state="in_progress", new_state="inspection", assignee="ops")
+    )
+
+    assert delivered is True
+    assert sent == [("pgu-inspector:0.0", "PGU-248 -- Ticket title ready for inspection")]
+
+
+def test_stale_inspection_queue_row_is_acked_without_delivery() -> None:
+    sent: list[tuple[str, str]] = []
+    payload = json.dumps(
+        {
+            "kind": "transition",
+            "id": "PGU-248",
+            "new_state": "inspection",
+            "assignee": "ops",
+            "target_role": "inspector",
+            "message": "PGU-248 -- Ticket title ready for inspection",
+        }
+    )
+    conn = FakeConnection(
+        [(30, "PGU-248", "inspector", "PGU-248 -- Ticket title ready for inspection", payload, 1)],
+        ticket_rows={"PGU-248": ("audit", "ops", False, False)},
+    )
+    listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=lambda target, message: sent.append((target, message)),
+        activity_gate=lambda _target: False,
+        connector=lambda *args, **kwargs: conn,
+        poll_seconds=0,
+    )
+
+    delivered = listener.listen_once(max_notifications=1)
+
+    assert delivered == 0
+    assert sent == []
+    assert conn.acked == [30]
+    assert conn.requeued == []
+
+
 def test_reconnect_relistens_after_connection_drop() -> None:
     sent: list[tuple[str, str]] = []
     executed: list[Any] = []

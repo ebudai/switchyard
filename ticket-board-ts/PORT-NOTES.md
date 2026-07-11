@@ -1,5 +1,143 @@
 # PORT-NOTES — TypeScript port of the ticket-board backend
 
+## Milestone 3 (real-time events + SO_PEERCRED evaluation)
+
+M3 scope per the brief: `GET /events` push, the SO_PEERCRED Unix-socket PID
+path (PGU-212), and porteraudit's M2 carryovers (`deno.json`'s stale task
+entrypoint, date/normalization parity gaps).
+
+### `GET /events` — what Python actually does, and what I built
+
+Despite "LISTEN-NOTIFY" being in the M3 brief's framing, **Python's `/events`
+is not Postgres LISTEN/NOTIFY at all.** `TicketBoardEventHub` is in-process
+pub/sub: every write handler calls `events.notify_change(store_signature())`
+immediately after its own write (so changes made through the Python server
+show up with ~0 latency), backstopped by a 1-second poll thread that
+re-fetches `store_signature()` to catch changes from *outside* the process
+(the JSON files being hand-edited, historically, or another writer). Each
+SSE connection gets its own maxsize-1 "latest version" slot — concurrent
+version bumps coalesce, which is safe because every event just tells the
+client to re-`GET /api/board` in full; there's no diff payload to miss.
+
+I considered a genuine Postgres LISTEN on the existing
+`ticket_board_state_transition` channel (schema.sql already `pg_notify`s on
+it via `notify_ticket_state_transition`) instead of polling — postgres.js's
+`sql.listen()` would have been the more idiomatic Deno-native choice. I
+didn't use it: that channel only fires on ticket **state** changes. `edit_fields`,
+`add_comment`, and `set_blockers` writes don't touch `state` and wouldn't
+notify anything, yet Python's board DOES pick those up (its signature
+includes comment/blocker/attachment *counts*, not just state). Matching
+that would mean adding broader `pg_notify` calls to the triggers, which is
+out of scope (schema/functions are read-only for this port). So `src/events.ts`
+reproduces Python's actual mechanism faithfully: immediate in-process notify
+after every write handler in `server.ts`, backstopped by a 1s poll — not
+because LISTEN/NOTIFY is unavailable, but because it's a narrower signal
+than what's actually being ported.
+
+**The "critical" constraint** (a persistent poll connection must not come
+from/exhaust the request-handling pool) is real regardless of polling vs.
+LISTEN: a 1-per-second query holding the pool's only slot(s) would starve
+concurrent HTTP requests. `src/db.ts` now exposes `connectForEventPolling()`
+— a separate `postgres()` client with `max: 1`, used *only* by `EventHub`'s
+backstop loop; `main.ts` wires it up distinctly from the request-serving
+`sql`. Verified live: created one scratch ticket while an `/events` curl
+connection was open — the version bump arrived within ~500ms (the immediate
+post-write notify), not after a 1s poll tick or the 15s keepalive window;
+confirmed the keepalive (`: keepalive\n\n`, exact byte match to Python's) at
+the 15s mark with no writes; confirmed clean disconnect handling via
+`req.signal`'s `abort` event (empirically verified with a standalone probe:
+`signal.aborted` stays `false` for the stream's full lifetime and only
+flips at the real client disconnect, despite Deno logging a "legacy abort
+behavior" deprecation notice — the *current* behavior is correct for a
+streaming response body; `--unstable-no-legacy-abort` is a future-proofing
+option worth revisiting if Deno changes the default before this ships for
+real).
+
+### SO_PEERCRED / PGU-212 Unix-socket peer auth — descoped, documented per director decision
+
+**Finding (this is the interesting engineering question, not a failure):**
+Deno 2's Unix-socket API (`Deno.listen({transport: "unix"})` /
+`Deno.UnixConn`) exposes **zero file-descriptor access** — no `.rid`, no
+internal handle, nothing, on stable or with `--unstable-net`. Confirmed
+empirically: `Object.keys(conn)` is `{}`, `conn.rid` is `undefined`, and the
+`Conn` prototype's only members are `read`/`write`/`close`/`closeWrite`/
+`readable`/`writable`/`ref`/`unref`/`remoteAddr`/`localAddr` — no path to a
+raw fd. `getsockopt(fd, SOL_SOCKET, SO_PEERCRED, ...)` (what `server.py`'s
+`peer_credentials()` calls, via Python's own socket object's fd) fundamentally
+needs that fd. There is no small shim for this in Deno's own networking
+stack.
+
+Options evaluated:
+- **(A) Full FFI raw-socket rewrite.** `Deno.dlopen("libc.so.6", ...)` does
+  work (verified: `socket()` returned a real fd via FFI) and could
+  implement the *entire* Unix-socket accept loop via raw libc calls
+  (`socket`/`bind`/`listen`/`accept`/`getsockopt`/`recv`/`send`), bypassing
+  `Deno.listen`/`Deno.serve` entirely. This gets true SO_PEERCRED parity but
+  means hand-rolling the whole connection lifecycle *and* an HTTP/1.1
+  parser by hand — a full alternate server implementation, not "a small FFI
+  shim." Real engineering cost for a path that, per the director, is
+  dormant even in production.
+- **(B) Native sidecar helper.** A tiny compiled helper (any language with
+  libc access) that accepts on the socket, reads `SO_PEERCRED` itself, and
+  hands the connection + credentials to the Deno process somehow (e.g. via
+  `SCM_RIGHTS` fd-passing over a second socket, or by having the sidecar
+  proxy bytes while attaching a header). Avoids FFI in the TS codebase but
+  introduces a second running process and an IPC protocol between it and
+  Deno — a real design in its own right, not evaluated further since (C)
+  is sufficient given the director's finding below.
+- **(C) Stay on TCP + `X-PGU-Caller-Role` header, no Unix socket in the TS
+  port.** What's implemented.
+
+**Director's call: (C), and it's not a compromise.** The live
+`pgu-ticket-board.service` unit doesn't pass `--unix-socket` — the Python
+board today serves TCP + header only; SO_PEERCRED is infrastructure that
+exists in `server.py` but is dormant in the actual running deployment. So
+(C) is full parity with what's *actually live*, not a reduced-scope
+fallback. (A)/(B) remain documented above as real options if PID-based
+local auth becomes an active requirement later (e.g. if `--unix-socket` is
+ever turned on in production).
+
+### Parity fixes (porteraudit carryovers from M2)
+
+- `deno.json`'s `start`/`check` tasks referenced `src/main.ts`; `main.ts`
+  has always lived at the project root (`ticket-board-ts/main.ts`). `deno
+  task check` failed outright (`Cannot find module`) — this was never
+  caught because M1/M2 testing always ran `deno run ... main.ts` directly,
+  never `deno task`. Fixed; added the `--allow-write=/var/run/postgresql`
+  flag to the `start` task too (needed for the Postgres Unix-socket
+  connection, previously only passed manually on the command line).
+- `refreshed_at` (board snapshot) and `screenshots[].modified` were both
+  using JS's `Date.toISOString()`, which matches neither of Python's two
+  *different* timestamp formats: `iso_now()` is UTC, second-precision,
+  `+00:00`-suffixed (`refreshed_at`); `format_timestamp()` converts to the
+  **server's local timezone** (`.astimezone()` with no argument) and uses a
+  totally different, non-ISO, space-separated layout with no offset
+  (`screenshots[].modified`). `toISOString()` is UTC-with-milliseconds-and-
+  `"Z"` — matches neither. New `src/time.ts` (`isoNow()`,
+  `formatLocalTimestamp()`) reproduces both exactly, including the
+  local-vs-UTC distinction, which is easy to lose sight of since both
+  fields look superficially like "just format a timestamp."
+- Ticket-id case normalization: `app.py` does `.strip().upper()` on ticket
+  ids inside nearly every method (`route_ticket`, `get_ticket`,
+  `merge_tickets`, ...), so a lowercase/mixed-case id in a request still
+  resolves. The TS port didn't normalize anywhere before M3 — a
+  `pgu-235`-style id would 400 with "ticket not found" instead of resolving
+  like Python does. Fixed at the single HTTP dispatch point in `server.ts`
+  (ticket id extracted from the URL) plus `merge`'s `target_id` (the one
+  other ticket-id-shaped field that arrives via a request body rather than
+  the URL path).
+
+### M3 test hygiene
+
+M2 testing left roughly a dozen new ticket ids on the live board (all
+ended `done`/`cancelled`, but still real churn on shared ticket-id space).
+For M3: exactly **one** scratch ticket was created (to observe `/events`
+push on a real write), cancelled immediately after. SO_PEERCRED verification
+required no ticket writes at all (pure Deno-API probing); the parity fixes
+were verified via `deno check` + direct `curl`/`psql` reads, not new tickets.
+
+---
+
 ## Milestone 2 (complete write-action API + caller-role authorization)
 
 M2 ports every remaining `POST /api/tickets/actions/<op>` and

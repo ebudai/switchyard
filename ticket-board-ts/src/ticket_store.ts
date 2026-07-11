@@ -89,6 +89,36 @@ async function rowToTicket(raw: TicketRow): Promise<Ticket> {
   };
 }
 
+// Mirrors app.py's _pg_store_signature(): a cheap per-ticket fingerprint
+// (not the full row) used purely to detect "something changed" for
+// /events polling -- comment/blocker/attachment *counts* catch additions
+// there without having to diff their full content.
+const STORE_SIGNATURE_QUERY = `
+SELECT
+    t.id,
+    t.row_updated_at::text AS row_updated_at,
+    t.updated_text,
+    (SELECT count(*)::int FROM ticket_board.ticket_blockers b WHERE b.ticket_id = t.id) AS blocker_count,
+    (SELECT count(*)::int FROM ticket_board.ticket_comments c WHERE c.ticket_id = t.id) AS comment_count,
+    (SELECT count(*)::int FROM ticket_board.ticket_attachments a WHERE a.ticket_id = t.id) AS attachment_count
+FROM ticket_board.tickets t
+ORDER BY t.ticket_number;
+`;
+
+export async function getStoreSignature(sql: SqlLike): Promise<string> {
+  const rows = await sql.unsafe(STORE_SIGNATURE_QUERY);
+  return JSON.stringify(
+    rows.map((row) => [
+      String(row.id),
+      String(row.row_updated_at),
+      String(row.updated_text),
+      Number(row.blocker_count),
+      Number(row.comment_count),
+      Number(row.attachment_count),
+    ]),
+  );
+}
+
 export async function listTickets(sql: SqlLike): Promise<Ticket[]> {
   const rows = await sql.unsafe(`${TICKET_ROW_QUERY}\nORDER BY t.ticket_number;`);
   const tickets = await Promise.all(rows.map((row) => rowToTicket(TicketRowSchema.parse(row))));

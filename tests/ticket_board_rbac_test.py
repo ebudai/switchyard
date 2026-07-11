@@ -34,6 +34,8 @@ WRITE_FUNCTIONS = [
     "ticket_board.set_manually_controlled(text,boolean)",
     "ticket_board.set_blockers(text,text[],text)",
     "ticket_board.add_comment(text,text)",
+    "ticket_board.edit_fields(text,jsonb)",
+    "ticket_board.merge(text,text)",
 ]
 
 
@@ -380,6 +382,15 @@ FROM ticket_board.tickets t WHERE id = 'PGU-704';
     insert_ticket(admin_conn, "PGU-800", title="Comments", state="analysis")
     psql(service_conn, "SELECT ticket_board.add_comment('PGU-800', 'comment from service');")
     assert psql(admin_conn, "SELECT text FROM ticket_board.ticket_comments WHERE ticket_id = 'PGU-800';") == "comment from service"
+
+    insert_ticket(admin_conn, "PGU-810", title="Editable", state="analysis")
+    psql(service_conn, "SELECT ticket_board.edit_fields('PGU-810', '{\"title\":\"Edited\"}'::jsonb);")
+    assert psql(admin_conn, "SELECT title FROM ticket_board.tickets WHERE id = 'PGU-810';") == "Edited"
+
+    insert_ticket(admin_conn, "PGU-820", title="Merge source", state="analysis")
+    insert_ticket(admin_conn, "PGU-821", title="Merge target", state="analysis")
+    psql(service_conn, "SELECT ticket_board.merge('PGU-820', 'PGU-821');")
+    assert psql(admin_conn, "SELECT state || ':' || commit_exempt::text FROM ticket_board.tickets WHERE id = 'PGU-820';") == "done:true"
 
 
 def assert_structural_rules_still_apply(admin_conn: str, service_conn: str) -> None:

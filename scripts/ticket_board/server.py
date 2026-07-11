@@ -41,7 +41,22 @@ OPERATION_ALLOWED_ROLES = {
     "set_manually_controlled": {"director"},
     "set_blockers": {"director"},
     "add_comment": CALLER_ROLES,
-    "legacy_patch": CALLER_ROLES,
+    "edit_fields": CALLER_ROLES,
+    "merge": {"director"},
+}
+EDIT_FIELD_NAMES = {
+    "title",
+    "parent_id",
+    "screenshots",
+    "screenshot",
+    "implementation",
+    "audit_prompt",
+    "needs_eric_signoff",
+    "commit_exempt",
+    "commit_hash",
+    "blocked_reason",
+    "audit_signoff",
+    "eric_signoff",
 }
 
 
@@ -337,6 +352,15 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             self.events.notify_change(self.app.store_signature())
             self.send_json({"ticket": updated})
             return
+        elif operation == "merge":
+            merged = self.app.merge_tickets(
+                ticket_id,
+                str(payload.get("target_id", "")),
+                actor=caller,
+            )
+            self.events.notify_change(self.app.store_signature())
+            self.send_json(merged)
+            return
         elif operation == "start_work":
             patch = {"state": "in_progress"}
         elif operation == "submit_to_audit":
@@ -373,104 +397,21 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             }
         elif operation == "add_comment":
             patch = {"comment": {"who": caller, "text": str(payload.get("text", ""))}}
+        elif operation == "edit_fields":
+            invalid_fields = sorted(set(payload) - EDIT_FIELD_NAMES)
+            if invalid_fields:
+                raise ValueError(f"edit_fields cannot update: {', '.join(invalid_fields)}")
+            if payload.get("audit_signoff") is True:
+                raise ValueError("audit_signoff=true requires audit_sign_off")
+            if payload.get("eric_signoff") is True:
+                raise ValueError("eric_signoff=true requires eric_sign_off")
+            patch = dict(payload)
         else:
             raise ValueError(f"unknown ticket operation: {operation}")
 
         updated = self.app.update_ticket(ticket_id, patch)
         self.events.notify_change(self.app.store_signature())
         self.send_json({"ticket": updated})
-
-    def authorize_legacy_ticket_patch(self, ticket_id: str, payload: dict[str, object]) -> dict[str, object]:
-        caller = self.caller_role()
-        normalized_payload = dict(payload)
-        if isinstance(normalized_payload.get("comment"), dict):
-            comment = dict(normalized_payload["comment"])  # type: ignore[arg-type]
-            comment["who"] = caller
-            normalized_payload["comment"] = comment
-
-        operations = self.legacy_patch_operations(ticket_id, normalized_payload)
-        for operation in operations:
-            self.require_operation_allowed(operation, caller, ticket_id)
-        return normalized_payload
-
-    def legacy_patch_operations(self, ticket_id: str, payload: dict[str, object]) -> list[str]:
-        operations: list[str] = []
-        current: dict[str, object] | None = None
-
-        def current_ticket() -> dict[str, object]:
-            nonlocal current
-            if current is None:
-                current = self.app.get_ticket(ticket_id)
-            return current
-
-        if "blocked_by" in payload or "blocked_reason" in payload:
-            operations.append("set_blockers")
-        if "manually_controlled" in payload:
-            operations.append("set_manually_controlled")
-        if bool(payload.get("audit_signoff", False)):
-            operations.append("audit_sign_off")
-        if bool(payload.get("eric_signoff", False)):
-            operations.append("eric_sign_off")
-
-        comment = payload.get("comment")
-        has_comment = isinstance(comment, dict) and bool(str(comment.get("text", "")).strip())
-        consumed_comment = False
-
-        if "state" in payload:
-            state = str(payload["state"]).strip().lower()
-            previous_state = str(current_ticket().get("state", "")).strip().lower()
-            if state == "in_progress":
-                operations.append("start_work")
-            elif state == "audit":
-                operations.append("submit_to_audit")
-            elif state == "done":
-                operations.append("mark_done")
-            elif state == "backlog":
-                operations.append("defer")
-            elif state == "cancelled":
-                operations.append("cancel")
-                consumed_comment = True
-            elif state == "analysis" and has_comment and previous_state == "audit":
-                operations.append("audit_kick_back")
-                consumed_comment = True
-            elif state == "analysis" and has_comment and previous_state in {"eric_review", "director_review", "done"}:
-                operations.append("eric_reopen")
-                consumed_comment = True
-            elif (
-                state in {"director_review", "eric_review"}
-                and bool(payload.get("audit_signoff", False))
-                and previous_state == "audit"
-            ):
-                pass
-            elif state == "director_review" and bool(payload.get("eric_signoff", False)) and previous_state == "eric_review":
-                pass
-            else:
-                operations.append("route")
-        elif "assignee" in payload:
-            operations.append("route")
-
-        if has_comment and not consumed_comment:
-            operations.append("add_comment")
-
-        legacy_fields = {
-            "title",
-            "parent_id",
-            "screenshots",
-            "screenshot",
-            "implementation",
-            "audit_prompt",
-            "needs_eric_signoff",
-            "commit_exempt",
-            "commit_hash",
-        }
-        if any(field in payload for field in legacy_fields):
-            operations.append("legacy_patch")
-
-        deduped: list[str] = []
-        for operation in operations or ["legacy_patch"]:
-            if operation not in deduped:
-                deduped.append(operation)
-        return deduped
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
@@ -545,34 +486,12 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 operation = urllib.parse.unquote(parsed.path.removeprefix("/api/tickets/actions/").strip("/"))
                 self.handle_ticket_action(operation, payload)
                 return
-            if parsed.path == "/api/tickets":
-                before_signature = self.app.store_signature()
-                created = self.create_ticket_from_payload(payload)
-                self.send_ticket_created(created, before_signature)
-                return
-            if parsed.path.startswith("/api/tickets/") and parsed.path.endswith("/merge"):
-                source_ticket_id = parsed.path.removeprefix("/api/tickets/").removesuffix("/merge").rstrip("/")
-                merged = self.app.merge_tickets(
-                    source_ticket_id,
-                    str(payload.get("target_id", "")),
-                    actor=str(payload.get("actor", "")),
-                )
-                self.events.notify_change(self.app.store_signature())
-                self.send_json(merged)
-                return
             if parsed.path.startswith("/api/tickets/") and "/actions/" in parsed.path:
                 rest = parsed.path.removeprefix("/api/tickets/")
                 raw_ticket_id, raw_operation = rest.split("/actions/", 1)
                 ticket_id = urllib.parse.unquote(raw_ticket_id.strip("/"))
                 operation = urllib.parse.unquote(raw_operation.strip("/"))
                 self.handle_ticket_action(operation, payload, ticket_id=ticket_id)
-                return
-            if parsed.path.startswith("/api/tickets/"):
-                ticket_id = parsed.path.removeprefix("/api/tickets/")
-                payload = self.authorize_legacy_ticket_patch(ticket_id, payload)
-                updated = self.app.update_ticket(ticket_id, payload)
-                self.events.notify_change(self.app.store_signature())
-                self.send_json({"ticket": updated})
                 return
         except FileNotFoundError as exc:
             self.send_text(str(exc), HTTPStatus.NOT_FOUND)

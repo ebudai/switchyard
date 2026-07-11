@@ -121,15 +121,7 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
         screenshots: state.pendingCreateScreenshots,
         needs_eric_signoff: needsEricInput.checked,
       };
-      const response = await fetch('/api/tickets', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      if (!response.ok) {
-        throw new Error(await response.text());
-      }
-      const result = await response.json();
+      const result = await postTicketAction('/api/tickets/actions/create_ticket', payload, 'director');
       titleInput.value = '';
       bodyInput.value = '';
       needsEricInput.checked = false;
@@ -149,28 +141,179 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       return headers;
     }
 
-    async function updateTicket(ticketId, patch, callerRole = null) {
-      const response = await fetch(`/api/tickets/${ticketId}`, {
+    async function postTicketAction(path, payload, callerRole) {
+      const response = await fetch(path, {
         method: 'POST',
         headers: ticketWriteHeaders(callerRole),
-        body: JSON.stringify(patch),
+        body: JSON.stringify(payload || {}),
       });
       if (!response.ok) {
         throw new Error(await response.text());
+      }
+      return response.json();
+    }
+
+    function ticketForWrite(ticketId) {
+      return state.tickets.find((ticket) => ticket.id === ticketId) || null;
+    }
+
+    function actionReason(patch) {
+      if (patch.comment && patch.comment.text) {
+        return patch.comment.text;
+      }
+      return patch.reason || patch.text || '';
+    }
+
+    function metadataPatch(patch) {
+      const allowed = new Set([
+        'title',
+        'parent_id',
+        'screenshots',
+        'screenshot',
+        'implementation',
+        'audit_prompt',
+        'needs_eric_signoff',
+        'commit_exempt',
+        'commit_hash',
+        'blocked_reason',
+        'audit_signoff',
+        'eric_signoff',
+      ]);
+      const metadata = {};
+      Object.entries(patch).forEach(([key, value]) => {
+        if (allowed.has(key)) {
+          metadata[key] = value;
+        }
+      });
+      return metadata;
+    }
+
+    async function updateTicketAction(ticketId, operation, payload, callerRole) {
+      return postTicketAction(
+        `/api/tickets/${encodeURIComponent(ticketId)}/actions/${encodeURIComponent(operation)}`,
+        payload,
+        callerRole,
+      );
+    }
+
+    async function updateTicket(ticketId, patch, callerRole = null) {
+      const normalizedCaller = callerRole ? callerRole.trim().toLowerCase() : '';
+      if (!normalizedCaller) {
+        throw new Error('ticket write requires a caller role');
+      }
+      const ticket = ticketForWrite(ticketId);
+      const previousState = ticket ? ticket.state : '';
+      const consumed = new Set();
+      let consumedComment = false;
+
+      if (Object.prototype.hasOwnProperty.call(patch, 'state')) {
+        const nextState = String(patch.state || '').trim().toLowerCase();
+        if (nextState === 'in_progress') {
+          await updateTicketAction(ticketId, 'start_work', {}, normalizedCaller);
+        } else if (nextState === 'audit') {
+          await updateTicketAction(
+            ticketId,
+            'submit_to_audit',
+            { commit_hash: patch.commit_hash || ticket?.commit_hash || '' },
+            normalizedCaller,
+          );
+          consumed.add('commit_hash');
+        } else if (nextState === 'done') {
+          await updateTicketAction(
+            ticketId,
+            'mark_done',
+            { commit_hash: patch.commit_hash || ticket?.commit_hash || '' },
+            normalizedCaller,
+          );
+          consumed.add('commit_hash');
+        } else if (nextState === 'backlog') {
+          await updateTicketAction(ticketId, 'defer', {}, normalizedCaller);
+        } else if (nextState === 'cancelled') {
+          await updateTicketAction(ticketId, 'cancel', { reason: actionReason(patch) }, normalizedCaller);
+          consumedComment = true;
+        } else if (nextState === 'analysis' && patch.comment && previousState === 'audit') {
+          await updateTicketAction(ticketId, 'audit_kick_back', { reason: actionReason(patch) }, normalizedCaller);
+          consumedComment = true;
+        } else if (
+          nextState === 'analysis' &&
+          patch.comment &&
+          ['eric_review', 'director_review', 'done'].includes(previousState)
+        ) {
+          await updateTicketAction(ticketId, 'eric_reopen', { reason: actionReason(patch) }, normalizedCaller);
+          consumedComment = true;
+        } else if (['director_review', 'eric_review'].includes(nextState) && previousState === 'audit') {
+          await updateTicketAction(ticketId, 'audit_sign_off', {}, normalizedCaller);
+          consumed.add('audit_signoff');
+        } else if (nextState === 'director_review' && previousState === 'eric_review') {
+          await updateTicketAction(ticketId, 'eric_sign_off', {}, normalizedCaller);
+          consumed.add('eric_signoff');
+        } else {
+          await updateTicketAction(
+            ticketId,
+            'route',
+            { state: nextState, assignee: patch.assignee || ticket?.assignee || '' },
+            normalizedCaller,
+          );
+          consumed.add('assignee');
+        }
+        consumed.add('state');
+      } else if (Object.prototype.hasOwnProperty.call(patch, 'assignee')) {
+        await updateTicketAction(
+          ticketId,
+          'route',
+          { state: ticket?.state || '', assignee: patch.assignee },
+          normalizedCaller,
+        );
+        consumed.add('assignee');
+      }
+
+      if (Object.prototype.hasOwnProperty.call(patch, 'blocked_by') || Object.prototype.hasOwnProperty.call(patch, 'blocked_reason')) {
+        await updateTicketAction(
+          ticketId,
+          'set_blockers',
+          {
+            blocked_by: patch.blocked_by || ticket?.blocked_by || [],
+            blocked_reason: Object.prototype.hasOwnProperty.call(patch, 'blocked_reason') ? patch.blocked_reason : ticket?.blocked_reason || '',
+          },
+          normalizedCaller,
+        );
+        consumed.add('blocked_by');
+        consumed.add('blocked_reason');
+      }
+
+      if (Object.prototype.hasOwnProperty.call(patch, 'manually_controlled')) {
+        await updateTicketAction(ticketId, 'set_manually_controlled', { manually_controlled: patch.manually_controlled }, normalizedCaller);
+        consumed.add('manually_controlled');
+      }
+
+      if (patch.audit_signoff === true && !consumed.has('audit_signoff')) {
+        await updateTicketAction(ticketId, 'audit_sign_off', {}, normalizedCaller);
+        consumed.add('audit_signoff');
+      }
+      if (patch.eric_signoff === true && !consumed.has('eric_signoff')) {
+        await updateTicketAction(ticketId, 'eric_sign_off', {}, normalizedCaller);
+        consumed.add('eric_signoff');
+      }
+
+      if (patch.comment && !consumedComment) {
+        await updateTicketAction(ticketId, 'add_comment', { text: patch.comment.text || '' }, normalizedCaller);
+        consumed.add('comment');
+      }
+
+      const editable = metadataPatch(patch);
+      consumed.forEach((key) => delete editable[key]);
+      if (Object.keys(editable).length) {
+        await updateTicketAction(ticketId, 'edit_fields', editable, normalizedCaller);
       }
       await requestBoardReload();
     }
 
     async function mergeTicket(sourceTicketId, targetTicketId) {
-      const response = await fetch(`/api/tickets/${sourceTicketId}/merge`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ target_id: targetTicketId, actor: 'director' }),
-      });
-      if (!response.ok) {
-        throw new Error(await response.text());
-      }
-      const result = await response.json();
+      const result = await postTicketAction(
+        `/api/tickets/${encodeURIComponent(sourceTicketId)}/actions/merge`,
+        { target_id: targetTicketId },
+        'director',
+      );
       clearDetailDraft(sourceTicketId);
       state.selectedId = result.target.id;
       await requestBoardReload();

@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
 
 from scripts.ticket_board import app as ticket_board_app
 from scripts.ticket_board.app import TicketBoardApp
-from scripts.ticket_board.server import DirectorNotifier, TicketBoardServer
+from scripts.ticket_board.server import CALLER_ROLE_HEADER, DirectorNotifier, TicketBoardServer
 
 
 class FakeNotifier:
@@ -108,9 +108,9 @@ def test_server_create_notifies_director() -> None:
                 }
             ).encode("utf-8")
             request = urllib.request.Request(
-                f"http://127.0.0.1:{server.server_port}/api/tickets",
+                f"http://127.0.0.1:{server.server_port}/api/tickets/actions/create_ticket",
                 data=body,
-                headers={"Content-Type": "application/json"},
+                headers={"Content-Type": "application/json", CALLER_ROLE_HEADER: "director"},
                 method="POST",
             )
             with urllib.request.urlopen(request, timeout=5) as response:
@@ -149,9 +149,9 @@ def test_server_create_uses_new_high_water_mark_and_persists() -> None:
                 }
             ).encode("utf-8")
             request = urllib.request.Request(
-                f"http://127.0.0.1:{server.server_port}/api/tickets",
+                f"http://127.0.0.1:{server.server_port}/api/tickets/actions/create_ticket",
                 data=body,
-                headers={"Content-Type": "application/json"},
+                headers={"Content-Type": "application/json", CALLER_ROLE_HEADER: "director"},
                 method="POST",
             )
             with urllib.request.urlopen(request, timeout=5) as response:
@@ -200,9 +200,9 @@ def test_http_create_verification_uses_module_ticket_number() -> None:
                 }
             ).encode("utf-8")
             request = urllib.request.Request(
-                f"http://127.0.0.1:{server.server_port}/api/tickets",
+                f"http://127.0.0.1:{server.server_port}/api/tickets/actions/create_ticket",
                 data=body,
-                headers={"Content-Type": "application/json"},
+                headers={"Content-Type": "application/json", CALLER_ROLE_HEADER: "director"},
                 method="POST",
             )
             with urllib.request.urlopen(request, timeout=5) as response:
@@ -242,9 +242,9 @@ def test_server_create_does_not_notify_when_ticket_is_not_persisted() -> None:
                 }
             ).encode("utf-8")
             request = urllib.request.Request(
-                f"http://127.0.0.1:{server.server_port}/api/tickets",
+                f"http://127.0.0.1:{server.server_port}/api/tickets/actions/create_ticket",
                 data=body,
-                headers={"Content-Type": "application/json"},
+                headers={"Content-Type": "application/json", CALLER_ROLE_HEADER: "director"},
                 method="POST",
             )
             try:

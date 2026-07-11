@@ -36,7 +36,7 @@ Pane write API:
 - Ticket-scoped operations are `route`, `start_work`, `submit_to_audit`,
   `audit_sign_off`, `audit_kick_back`, `eric_sign_off`, `eric_reopen`,
   `mark_done`, `defer`, `cancel`, `set_manually_controlled`, `set_blockers`,
-  and `add_comment`.
+  `add_comment`, `edit_fields`, and `merge`.
 - Python and shell tooling should use `scripts.ticket_board.write_client` or
   `scripts/ticket-board-write` instead of editing `PGU-N.json` directly. The
   client resolves its default caller role from `PGU_TICKET_BOARD_CALLER_ROLE`,

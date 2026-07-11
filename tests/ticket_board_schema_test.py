@@ -75,6 +75,8 @@ EXPECTED_FUNCTION_API = {
     "ticket_board.set_manually_controlled",
     "ticket_board.set_blockers",
     "ticket_board.add_comment",
+    "ticket_board.edit_fields",
+    "ticket_board.merge",
 }
 
 FIELD_TO_SCHEMA_TOKENS = {

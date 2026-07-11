@@ -231,12 +231,8 @@ def main() -> int:
             submitted = service_app.update_ticket("PGU-100", {"state": "audit", "commit_hash": "abcdef1"})
             assert submitted["state"] == "audit", submitted
             assert submitted["commit_hash"] == "abcdef1", submitted
-            try:
-                service_app.update_ticket("PGU-100", {"implementation": "raw field edit should fail"})
-            except ValueError as exc:
-                assert "postgres function API does not support direct updates" in str(exc)
-            else:
-                raise AssertionError("implementation patch should not be accepted by the function API backend")
+            edited = service_app.update_ticket("PGU-100", {"implementation": "Edited through function API."})
+            assert edited["implementation"] == "Edited through function API.", edited
 
             audit_ready = service_app.update_ticket("PGU-100", {"audit_signoff": True})
             assert audit_ready["state"] == "director_review", audit_ready

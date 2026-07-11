@@ -214,8 +214,6 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         allowed = OPERATION_ALLOWED_ROLES.get(operation)
         if allowed is None:
             raise ValueError(f"unknown ticket operation: {operation}")
-        if caller_role == "eric":
-            return
         if caller_role not in allowed:
             raise PermissionError(f"{caller_role} cannot call {operation}")
         if operation in {"start_work", "submit_to_audit"} and ticket_id is not None:

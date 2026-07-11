@@ -251,6 +251,14 @@ def exercise_write_api(base_url: str, commit_hash: str) -> None:
         expect=403,
     )
     assert "ops cannot call route" in str(forbidden), forbidden
+    eric_director_only = post_json(
+        base_url,
+        "/api/tickets/PGU-108/actions/cancel",
+        {"reason": "Eric should not cancel."},
+        caller="eric",
+        expect=403,
+    )
+    assert "eric cannot call cancel" in str(eric_director_only), eric_director_only
     legacy_missing = post_json(
         base_url,
         "/api/tickets/PGU-108",
@@ -266,6 +274,14 @@ def exercise_write_api(base_url: str, commit_hash: str) -> None:
         expect=403,
     )
     assert "ops cannot call mark_done" in str(legacy_forbidden), legacy_forbidden
+    legacy_eric_director_only = post_json(
+        base_url,
+        "/api/tickets/PGU-109",
+        {"manually_controlled": True},
+        caller="eric",
+        expect=403,
+    )
+    assert "eric cannot call set_manually_controlled" in str(legacy_eric_director_only), legacy_eric_director_only
     legacy_comment = post_json(
         base_url,
         "/api/tickets/PGU-112",

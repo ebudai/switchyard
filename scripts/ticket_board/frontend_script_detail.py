@@ -171,7 +171,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       state.assignees.forEach((assignee) => buildOption(assigneeSelect, assignee, assignee));
       assigneeSelect.value = ticket.assignee;
       assigneeSelect.addEventListener('change', async () => {
-        await updateTicket(ticket.id, { assignee: assigneeSelect.value });
+        await updateTicket(ticket.id, { assignee: assigneeSelect.value }, 'director');
       });
       assigneeLabel.appendChild(assigneeSelect);
 
@@ -248,11 +248,11 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         await updateTicket(ticket.id, { needs_eric_signoff: checked });
       }));
       toggles.appendChild(toggleControl('Audit signoff', ticket.audit_signoff, async (checked) => {
-        await updateTicket(ticket.id, { audit_signoff: checked });
+        await updateTicket(ticket.id, { audit_signoff: checked }, 'audit');
       }));
       if (ticket.needs_eric_signoff) {
         toggles.appendChild(toggleControl('Eric signoff', ticket.eric_signoff, async (checked) => {
-          await updateTicket(ticket.id, { eric_signoff: checked });
+          await updateTicket(ticket.id, { eric_signoff: checked }, 'eric');
         }));
       }
 
@@ -354,7 +354,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         await updateTicket(ticket.id, {
           blocked_by: parseBlockedByInput(blockedByInput.value),
           blocked_reason: blockedReasonInput.value,
-        });
+        }, 'director');
       });
       blockedByActions.appendChild(saveBlockedByButton);
       const blockedByNote = document.createElement('div');

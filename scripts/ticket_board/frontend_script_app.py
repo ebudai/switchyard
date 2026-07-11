@@ -123,7 +123,7 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       };
       const response = await fetch('/api/tickets', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-PGU-Caller-Role': 'eric' },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
       if (!response.ok) {
@@ -140,10 +140,19 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       await requestBoardReload();
     }
 
-    async function updateTicket(ticketId, patch) {
+    function ticketWriteHeaders(callerRole = null) {
+      const headers = { 'Content-Type': 'application/json' };
+      const normalizedCaller = callerRole ? callerRole.trim().toLowerCase() : '';
+      if (normalizedCaller) {
+        headers['X-PGU-Caller-Role'] = normalizedCaller;
+      }
+      return headers;
+    }
+
+    async function updateTicket(ticketId, patch, callerRole = null) {
       const response = await fetch(`/api/tickets/${ticketId}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-PGU-Caller-Role': 'eric' },
+        headers: ticketWriteHeaders(callerRole),
         body: JSON.stringify(patch),
       });
       if (!response.ok) {
@@ -184,7 +193,7 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
         patch.state = nextState;
       }
       clearDetailDraft(ticketId);
-      await updateTicket(ticketId, patch);
+      await updateTicket(ticketId, patch, trimmedWho);
     }
 
     async function submitEricSignoff(ticketId, who, text) {
@@ -198,7 +207,7 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
         };
       }
       clearDetailDraft(ticketId);
-      await updateTicket(ticketId, patch);
+      await updateTicket(ticketId, patch, trimmedWho);
       setCreateStatus(`Signed off ✓ ${ticketId} moved to Director Review.`);
     }
 

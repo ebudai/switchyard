@@ -272,7 +272,10 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       if (blockedReason) {
         throw new Error(blockedReason);
       }
-      await updateTicket(ticketId, { state: nextState });
+      const callerRole = ticket.state === 'ready' || ticket.state === 'in_progress'
+        ? ticket.assignee
+        : 'director';
+      await updateTicket(ticketId, { state: nextState }, callerRole);
     }
 
     async function cancelTicket(ticketId, who, text) {
@@ -288,7 +291,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
           who: trimmedWho,
           text: trimmedText,
         },
-      });
+      }, trimmedWho);
       setCreateStatus(`Cancelled ${ticketId}.`);
     }
 

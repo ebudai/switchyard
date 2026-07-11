@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -271,7 +272,6 @@ class TicketBoardNotifyListener:
         requeue_base_seconds: float = DEFAULT_REQUEUE_BASE_SECONDS,
         requeue_max_seconds: float = DEFAULT_REQUEUE_MAX_SECONDS,
         max_defer_seconds: float = DEFAULT_MAX_DEFER_SECONDS,
-        monotonic: Callable[[], float] = time.monotonic,
         stop_event: threading.Event | None = None,
         logger: logging.Logger = LOGGER,
     ) -> None:
@@ -285,11 +285,9 @@ class TicketBoardNotifyListener:
         self.requeue_base_seconds = requeue_base_seconds
         self.requeue_max_seconds = requeue_max_seconds
         self.max_defer_seconds = max_defer_seconds
-        self.monotonic = monotonic
         self.stop_event = stop_event or threading.Event()
         self.logger = logger
         self.delivered_count = 0
-        self._first_seen_by_notification_id: dict[int, float] = {}
 
     def _connector_kwargs(self) -> dict[str, int | bool]:
         return {
@@ -304,14 +302,6 @@ class TicketBoardNotifyListener:
     def _backoff_seconds(self, attempts: int) -> float:
         exponent = max(attempts - 1, 0)
         return min(self.requeue_max_seconds, self.requeue_base_seconds * (2**exponent))
-
-    def _defer_age_seconds(self, notification_id: int) -> float:
-        now = self.monotonic()
-        first_seen = self._first_seen_by_notification_id.setdefault(notification_id, now)
-        return now - first_seen
-
-    def _forget_notification(self, notification_id: int) -> None:
-        self._first_seen_by_notification_id.pop(notification_id, None)
 
     def deliver_payload(self, payload: str) -> bool:
         transition = parse_transition_payload(payload)
@@ -358,7 +348,6 @@ FROM ticket_board.claim_notification()
 
     def _ack_notification(self, conn: Any, notification_id: int) -> None:
         conn.execute("SELECT ticket_board.ack_notification(%s::bigint)", (notification_id,))
-        self._forget_notification(notification_id)
 
     def _requeue_notification(self, conn: Any, notification_id: int, attempts: int, error: str) -> None:
         delay_seconds = self._backoff_seconds(attempts)
@@ -366,6 +355,32 @@ FROM ticket_board.claim_notification()
             "SELECT ticket_board.requeue_notification(%s::bigint, %s::interval, %s::text)",
             (notification_id, f"{delay_seconds} seconds", error[:500]),
         )
+
+    def _notification_created_at(self, conn: Any, notification_id: int) -> datetime | None:
+        result = conn.execute(
+            """
+SELECT created_at
+FROM ticket_board.ticket_notification_queue
+WHERE id = %s
+""",
+            (notification_id,),
+        )
+        row = result.fetchone()
+        if row is None:
+            return None
+        created_at = row["created_at"] if isinstance(row, dict) else row[0]
+        if not isinstance(created_at, datetime):
+            return None
+        if created_at.tzinfo is None:
+            return created_at.replace(tzinfo=timezone.utc)
+        return created_at
+
+    def _defer_age_seconds(self, conn: Any, notification_id: int) -> float:
+        created_at = self._notification_created_at(conn, notification_id)
+        if created_at is None:
+            return 0.0
+        now = datetime.now(created_at.tzinfo or timezone.utc)
+        return max(0.0, (now - created_at).total_seconds())
 
     def _current_ticket_state(self, conn: Any, ticket_id: str) -> tuple[str, str, bool, bool] | None:
         result = conn.execute(
@@ -474,7 +489,7 @@ WHERE id = %s
                 self.logger.info("Dropping stale notification %s for %s: %s", notification_id, ticket_id, payload)
                 self._ack_notification(conn, notification_id)
                 continue
-            defer_age = self._defer_age_seconds(notification_id)
+            defer_age = self._defer_age_seconds(conn, notification_id)
             pane_busy = self.activity_gate(target)
             if pane_busy and defer_age < self.max_defer_seconds:
                 self.logger.info("Pane %s is active; requeueing notification %s for %s", target, notification_id, ticket_id)

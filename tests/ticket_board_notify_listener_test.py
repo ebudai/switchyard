@@ -7,6 +7,7 @@ import json
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -43,12 +44,18 @@ class FakeConnection:
         queue_rows: list[tuple[int, str, str, str, str, int]] | None = None,
         *,
         ticket_rows: dict[str, tuple[str, str] | tuple[str, str, bool, bool]] | None = None,
+        queue_created_at: dict[int, datetime] | None = None,
         notifications: list[str] | None = None,
         fail_on_notifies: bool = False,
         executed: list[Any] | None = None,
     ) -> None:
         self.queue_rows = queue_rows or []
         self.ticket_rows = ticket_rows if ticket_rows is not None else self._ticket_rows_for_queue(self.queue_rows)
+        self.queue_created_at = (
+            queue_created_at
+            if queue_created_at is not None
+            else {notification_id: datetime.now(timezone.utc) for notification_id, *_rest in self.queue_rows}
+        )
         self.notifications = notifications or []
         self.fail_on_notifies = fail_on_notifies
         self.executed = executed if executed is not None else []
@@ -94,6 +101,10 @@ class FakeConnection:
             if row is not None and len(row) == 2:
                 row = (row[0], row[1], False, False)
             return FakeResult([] if row is None else [row])
+        if "FROM ticket_board.ticket_notification_queue" in statement_text and "created_at" in statement_text:
+            assert params is not None
+            created_at = self.queue_created_at.get(int(params[0]))
+            return FakeResult([] if created_at is None else [(created_at,)])
         if "ack_notification" in statement_text:
             assert params is not None
             self.acked.append(int(params[0]))
@@ -331,9 +342,15 @@ def test_busy_pane_requeues_then_idle_pane_delivers_once() -> None:
 
 def test_busy_pane_force_delivers_after_max_defer_cap() -> None:
     sent: list[tuple[str, str]] = []
-    clock = [100.0]
-    first_conn = FakeConnection([queue_row(25, "PGU-252", attempts=1)])
-    second_conn = FakeConnection([queue_row(25, "PGU-252", attempts=2)])
+    now = datetime.now(timezone.utc)
+    first_conn = FakeConnection(
+        [queue_row(25, "PGU-252", attempts=1)],
+        queue_created_at={25: now},
+    )
+    second_conn = FakeConnection(
+        [queue_row(25, "PGU-252", attempts=2)],
+        queue_created_at={25: now - timedelta(seconds=61)},
+    )
     connections = [first_conn, second_conn]
 
     def connector(*args: Any, **kwargs: Any) -> FakeConnection:
@@ -346,7 +363,6 @@ def test_busy_pane_force_delivers_after_max_defer_cap() -> None:
         connector=connector,
         poll_seconds=0,
         max_defer_seconds=60.0,
-        monotonic=lambda: clock[0],
     )
 
     assert listener.listen_once(max_notifications=1) == 0
@@ -354,12 +370,31 @@ def test_busy_pane_force_delivers_after_max_defer_cap() -> None:
     assert [item[0] for item in first_conn.requeued] == [25]
     assert first_conn.acked == []
 
-    clock[0] += 61.0
-
     assert listener.listen_once(max_notifications=1) == 1
     assert sent == [("pgu-ops:0.0", "Ready ticket for you: PGU-252 -- Queue")]
     assert second_conn.acked == [25]
     assert second_conn.requeued == []
+
+
+def test_fresh_listener_force_delivers_after_restart_from_queue_created_at() -> None:
+    sent: list[tuple[str, str]] = []
+    conn = FakeConnection(
+        [queue_row(26, "PGU-252", attempts=2)],
+        queue_created_at={26: datetime.now(timezone.utc) - timedelta(seconds=61)},
+    )
+    listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=lambda target, message: sent.append((target, message)),
+        activity_gate=lambda _target: True,
+        connector=lambda *args, **kwargs: conn,
+        poll_seconds=0,
+        max_defer_seconds=60.0,
+    )
+
+    assert listener.listen_once(max_notifications=1) == 1
+    assert sent == [("pgu-ops:0.0", "Ready ticket for you: PGU-252 -- Queue")]
+    assert conn.acked == [26]
+    assert conn.requeued == []
 
 
 def test_stale_ready_nudge_for_cancelled_ticket_is_acked_not_delivered() -> None:
@@ -706,6 +741,7 @@ def main() -> int:
     test_send_timeout_requeues_and_does_not_block_next_pane()
     test_busy_pane_requeues_then_idle_pane_delivers_once()
     test_busy_pane_force_delivers_after_max_defer_cap()
+    test_fresh_listener_force_delivers_after_restart_from_queue_created_at()
     test_stale_ready_nudge_for_cancelled_ticket_is_acked_not_delivered()
     test_stale_ready_nudge_for_picked_up_ticket_is_acked_not_delivered()
     test_escalation_for_still_stuck_ready_ticket_delivers_to_director()

@@ -143,12 +143,15 @@ def main() -> int:
         port = free_port()
         dbname = "pgu_triggers_test"
         conninfo = f"host={socket_dir} port={port} dbname={dbname}"
+        listener_conninfo = f"host={socket_dir} port={port} dbname={dbname} user=ticket_board_listener"
 
         run(["initdb", "-D", str(data_dir), "-A", "trust", "--no-locale"])
         try:
             run(["pg_ctl", "-D", str(data_dir), "-o", f"-k {socket_dir} -p {port} -h ''", "-w", "start"], capture=False)
             run(["createdb", "-h", str(socket_dir), "-p", str(port), dbname])
+            psql(conninfo, "CREATE ROLE ticket_board_listener LOGIN;")
             psql(conninfo, SCHEMA_PATH.read_text(encoding="utf-8"))
+            psql(conninfo, "GRANT USAGE ON SCHEMA ticket_board TO ticket_board_listener;")
 
             insert_ticket(conninfo, "PGU-1", title="Workflow", assignee="app")
             assert_error(
@@ -356,7 +359,7 @@ SELECT pg_get_functiondef('ticket_board.notify_ticket_state_transition()'::regpr
             psql(conninfo, "UPDATE ticket_board.tickets SET state = 'ready' WHERE id = 'PGU-20';")
             pending = json.loads(
                 psql(
-                    conninfo,
+                    listener_conninfo,
                     """
 SELECT jsonb_agg(payload ORDER BY ticket_id)::text
 FROM ticket_board.pending_transition_notifications()
@@ -368,9 +371,9 @@ WHERE ticket_id = 'PGU-20';
             assert pending[0]["old_state"] == "analysis", pending
             assert pending[0]["new_state"] == "ready", pending
             assert pending[0]["assignee"] == "ops", pending
-            psql(conninfo, "SELECT ticket_board.mark_transition_notified('PGU-20');")
+            psql(listener_conninfo, "SELECT ticket_board.mark_transition_notified('PGU-20');")
             pending_after_mark = psql(
-                conninfo,
+                listener_conninfo,
                 "SELECT count(*) FROM ticket_board.pending_transition_notifications() WHERE ticket_id = 'PGU-20';",
             ).stdout.strip()
             assert pending_after_mark == "0"

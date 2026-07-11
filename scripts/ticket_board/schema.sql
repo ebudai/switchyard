@@ -481,6 +481,31 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION ticket_board.require_ticket_board_listener(p_action text)
+RETURNS text
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    role_setting text;
+    actor text;
+BEGIN
+    role_setting := nullif(current_setting('role', true), '');
+    IF role_setting IS NULL OR role_setting = 'none' THEN
+        actor := session_user;
+    ELSE
+        actor := role_setting;
+    END IF;
+    IF actor <> 'ticket_board_listener' THEN
+        RAISE EXCEPTION 'role % cannot call %; ticket_board_listener is the only notification reconciler', actor, p_action
+            USING ERRCODE = '42501';
+    END IF;
+    RETURN actor;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION ticket_board.transition_notification_payload(
     p_ticket_id text,
     p_old_state text,
@@ -488,9 +513,15 @@ CREATE OR REPLACE FUNCTION ticket_board.transition_notification_payload(
     p_assignee text
 )
 RETURNS jsonb
-LANGUAGE sql
+LANGUAGE plpgsql
 STABLE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
 AS $$
+DECLARE
+    payload jsonb;
+BEGIN
+    PERFORM ticket_board.require_ticket_board_listener('transition_notification_payload');
     SELECT jsonb_build_object(
         'kind', 'transition',
         'id', t.id,
@@ -501,15 +532,23 @@ AS $$
         'updated_at', t.updated_at,
         'ticket_number', t.ticket_number
     )
+    INTO payload
     FROM ticket_board.tickets t
     WHERE t.id = p_ticket_id;
+    RETURN payload;
+END;
 $$;
 
 CREATE OR REPLACE FUNCTION ticket_board.pending_transition_notifications()
 RETURNS TABLE(ticket_id text, payload jsonb)
-LANGUAGE sql
+LANGUAGE plpgsql
 STABLE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
 AS $$
+BEGIN
+    PERFORM ticket_board.require_ticket_board_listener('pending_transition_notifications');
+    RETURN QUERY
     SELECT
         t.id,
         ticket_board.transition_notification_payload(t.id, ns.previous_state, t.state, t.assignee)
@@ -519,16 +558,22 @@ AS $$
       AND NOT t.manually_controlled
       AND (ns.last_transition_notified_at IS NULL OR ns.last_transition_notified_at < ns.entered_current_state_at)
     ORDER BY ns.entered_current_state_at, t.ticket_number;
+END;
 $$;
 
 CREATE OR REPLACE FUNCTION ticket_board.mark_transition_notified(p_ticket_id text)
 RETURNS void
-LANGUAGE sql
+LANGUAGE plpgsql
 VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
 AS $$
+BEGIN
+    PERFORM ticket_board.require_ticket_board_listener('mark_transition_notified');
     UPDATE ticket_board.ticket_notification_state
     SET last_transition_notified_at = clock_timestamp()
     WHERE ticket_id = p_ticket_id;
+END;
 $$;
 
 CREATE OR REPLACE FUNCTION ticket_board.nudge_target_role(p_state text, p_assignee text)

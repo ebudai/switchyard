@@ -31,7 +31,7 @@ LEGACY_STATE_ALIASES = {"open": "analysis"}
 STATES = ("backlog", "analysis", "ready", "in_progress", "audit", "eric_review", "director_review", "done", "cancelled")
 TERMINAL_STATES = {"done", "cancelled"}
 LEGAL_STATE_TRANSITIONS = {
-    "backlog": {"analysis", "ready"},
+    "backlog": {"analysis", "ready", "cancelled"},
     "analysis": {"ready", "backlog", "cancelled"},
     "ready": {"in_progress", "analysis", "backlog", "cancelled"},
     "in_progress": {"audit", "ready", "analysis", "backlog", "cancelled"},

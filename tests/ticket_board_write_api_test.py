@@ -300,6 +300,7 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
     )
     seed_ticket("PGU-107", title="Defer", state="analysis")
     seed_ticket("PGU-108", title="Cancel", state="analysis")
+    seed_ticket("PGU-116", title="Backlog cancel", state="backlog", assignee="ops")
     seed_ticket("PGU-109", title="Manual", state="analysis")
     seed_ticket("PGU-110", title="Blocker", state="analysis")
     seed_ticket("PGU-111", title="Blocked target", state="analysis")
@@ -444,6 +445,14 @@ def exercise_write_api(base_url: str, commit_hash: str) -> None:
     cancelled = post_json(base_url, "/api/tickets/PGU-108/actions/cancel", {"reason": "No longer needed."}, caller="director")
     assert cancelled["ticket"]["state"] == "cancelled", cancelled  # type: ignore[index]
     assert cancelled["ticket"]["comments"][-1]["who"] == "director", cancelled  # type: ignore[index]
+    backlog_cancelled = post_json(
+        base_url,
+        "/api/tickets/PGU-116/actions/cancel",
+        {"reason": "No longer needed from backlog."},
+        caller="director",
+    )
+    assert backlog_cancelled["ticket"]["state"] == "cancelled", backlog_cancelled  # type: ignore[index]
+    assert backlog_cancelled["ticket"]["comments"][-1]["who"] == "director", backlog_cancelled  # type: ignore[index]
 
     manual = post_json(
         base_url,

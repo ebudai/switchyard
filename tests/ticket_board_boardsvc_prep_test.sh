@@ -62,14 +62,14 @@ grep -q '^Environment=HOME=/home/agent$' "$UNIT" || {
     echo "FAIL: proposed unit does not set a stable HOME for remaining expanduser paths" >&2
     exit 1
 }
-grep -q '^ExecStartPre=/bin/mkdir -p /tmp/pgu-frames$' "$UNIT" || {
-    echo "FAIL: proposed unit does not recreate the frame directory before start" >&2
+if grep -q '^ExecStartPre=/bin/mkdir -p /tmp/pgu-frames$' "$UNIT"; then
+    echo "FAIL: proposed sandboxed unit must not pretend ExecStartPre can create ReadWritePaths targets" >&2
     exit 1
-}
-grep -q '^ExecStartPre=/bin/chmod 1777 /tmp/pgu-frames$' "$UNIT" || {
-    echo "FAIL: proposed unit does not restore shared frame directory permissions before start" >&2
+fi
+if grep -q '^ExecStartPre=/bin/chmod 1777 /tmp/pgu-frames$' "$UNIT"; then
+    echo "FAIL: proposed sandboxed unit must not carry dead frame-directory chmod pre-start hooks" >&2
     exit 1
-}
+fi
 retired_backend_flag='--store''-backend'
 if grep -q -- "$retired_backend_flag" "$UNIT"; then
     echo "FAIL: proposed unit should not pass the removed backend selector option" >&2

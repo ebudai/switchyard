@@ -337,12 +337,13 @@ WITH notification_scope AS (
         scoped.state,
         scoped.ticket_number,
         CASE
+            WHEN scoped.state = 'in_progress' THEN NULLIF(scoped.assignee, 'unassigned')
             WHEN scoped.state IN ('analysis', 'director_review') THEN 'director'
             WHEN scoped.state = 'audit' THEN 'audit'
             ELSE NULL
         END AS owner_role
     FROM ticket_board.tickets scoped
-    WHERE scoped.state IN ('analysis', 'audit', 'director_review')
+    WHERE scoped.state IN ('analysis', 'in_progress', 'audit', 'director_review')
 ),
 notification_candidates AS (
     SELECT
@@ -350,6 +351,11 @@ notification_candidates AS (
         notification_scope.state,
         notification_scope.ticket_number,
         notification_scope.owner_role,
+        CASE
+            WHEN notification_scope.state = 'in_progress'
+                THEN notification_scope.state || ':' || notification_scope.owner_role
+            ELSE notification_scope.state
+        END AS active_work_partition,
         NULLIF(
             GREATEST(
                 COALESCE(ns.last_transition_notified_at, '-infinity'::timestamptz),
@@ -373,8 +379,9 @@ active_work AS (
         notification_candidates.owner_role,
         notification_candidates.active_work_notified_at,
         notification_candidates.active_work_notified_at IS NOT NULL
+            AND notification_candidates.owner_role IS NOT NULL
             AND row_number() OVER (
-                PARTITION BY notification_candidates.state
+                PARTITION BY notification_candidates.active_work_partition
                 ORDER BY notification_candidates.active_work_notified_at DESC NULLS LAST,
                     notification_candidates.ticket_number DESC
             ) = 1 AS active_work_highlight

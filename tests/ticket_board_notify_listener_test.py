@@ -696,6 +696,152 @@ def test_stable_last_lines_queue_notification_delivers_immediately() -> None:
     assert conn.requeued == []
 
 
+def test_director_empty_composer_ignores_ticking_work_timer_and_delivers() -> None:
+    horizontal = "─" * 48
+    captures = iter(
+        [
+            f"""
+Claude Code
+· Doodling… (46s · ↓ 28.3k tokens)
+{horizontal}
+❯
+{horizontal}
+""".strip(),
+            f"""
+Claude Code
+· Doodling… (48s · ↓ 28.4k tokens)
+{horizontal}
+❯
+{horizontal}
+""".strip(),
+        ]
+    )
+    sent: list[tuple[str, str]] = []
+
+    def capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=next(captures))
+
+    gate = PaneActivityGate("/tmp/directorctl", capture_runner=capture_runner)
+    assert gate.is_busy("pgu-director:0.0") is False
+
+    conn = FakeConnection(
+        [
+            queue_row(
+                34,
+                "PGU-290",
+                target_role="director",
+                message="PGU-290 -- Director notification",
+            )
+        ]
+    )
+    listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=lambda target, message: sent.append((target, message)),
+        activity_gate=gate.is_working,
+        connector=lambda *args, **kwargs: conn,
+        poll_seconds=0,
+    )
+
+    assert listener.listen_once(max_notifications=1) == 1
+    assert sent == [("pgu-director:0.0", "PGU-290 -- Director notification")]
+    assert conn.acked == [34]
+    assert conn.requeued == []
+    assert trace_events(conn) == ["listener_claim", "send", "listener_ack"]
+    assert conn.traces[1][5] == "idle"
+    assert conn.traces[1][6] == "director_composer_empty"
+
+
+def test_director_non_empty_composer_defers_without_backstop() -> None:
+    horizontal = "─" * 48
+    capture = f"""
+Claude Code
+· Doodling… (49s · ↓ 28.5k tokens)
+{horizontal}
+❯ typing a note
+{horizontal}
+""".strip()
+    sent: list[tuple[str, str]] = []
+
+    def capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=capture)
+
+    gate = PaneActivityGate("/tmp/directorctl", capture_runner=capture_runner)
+    conn = FakeConnection(
+        [
+            queue_row(
+                35,
+                "PGU-290",
+                target_role="director",
+                message="PGU-290 -- Director notification",
+                attempts=7,
+            )
+        ],
+        queue_created_at={35: datetime.now(timezone.utc) - timedelta(hours=1)},
+    )
+    listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=lambda target, message: sent.append((target, message)),
+        activity_gate=gate.is_working,
+        connector=lambda *args, **kwargs: conn,
+        poll_seconds=0,
+    )
+
+    assert listener.listen_once(max_notifications=1) == 0
+    assert sent == []
+    assert [item[0] for item in conn.requeued] == [35]
+    assert conn.acked == []
+    assert trace_events(conn) == ["listener_claim", "gate_defer"]
+    assert conn.traces[1][5] == "busy"
+    assert conn.traces[1][6] == "director_composer"
+    assert "max_defer_force_deliver" not in trace_events(conn)
+
+
+def test_director_batch_delivers_promptly_while_timer_ticks() -> None:
+    horizontal = "─" * 48
+    sent: list[tuple[str, str]] = []
+    tick = 50
+
+    def capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        nonlocal tick
+        tick += 1
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout=f"""
+Claude Code
+· Doodling… ({tick}s · ↓ {28.0 + (tick / 10):.1f}k tokens)
+{horizontal}
+❯
+{horizontal}
+""".strip(),
+        )
+
+    rows = [
+        queue_row(36, "PGU-2901", target_role="director", message="PGU-2901 -- Director notification"),
+        queue_row(37, "PGU-2902", target_role="director", message="PGU-2902 -- Director notification"),
+        queue_row(38, "PGU-2903", target_role="director", message="PGU-2903 -- Director notification"),
+    ]
+    expected_count = len(rows)
+    conn = FakeConnection(rows)
+    gate = PaneActivityGate("/tmp/directorctl", capture_runner=capture_runner)
+    listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=lambda target, message: sent.append((target, message)),
+        activity_gate=gate.is_working,
+        connector=lambda *args, **kwargs: conn,
+        poll_seconds=0,
+    )
+
+    started = time.perf_counter()
+    assert listener.listen_once(max_notifications=expected_count) == expected_count
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 1.0
+    assert len(sent) == expected_count
+    assert conn.acked == [36, 37, 38]
+    assert conn.requeued == []
+
+
 def test_changing_last_lines_requeue_queue_notification() -> None:
     sent: list[tuple[str, str]] = []
     captures = iter(
@@ -923,6 +1069,9 @@ def main() -> int:
     test_director_busy_requeues_then_idle_delivers_once()
     test_director_busy_never_force_delivers_old_notification_until_idle()
     test_stable_last_lines_queue_notification_delivers_immediately()
+    test_director_empty_composer_ignores_ticking_work_timer_and_delivers()
+    test_director_non_empty_composer_defers_without_backstop()
+    test_director_batch_delivers_promptly_while_timer_ticks()
     test_changing_last_lines_requeue_queue_notification()
     test_stable_last_lines_queue_notification_delivers_for_agent()
     test_director_typing_changing_last_lines_requeues_without_force_delivery()

@@ -30,8 +30,6 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
         return;
       }
       state.pendingCreateScreenshots = uniquePaths([...state.pendingCreateScreenshots, uploaded.path]);
-      ensureScreenshotOption(uploaded.path, `${uploaded.name} - ${uploaded.modified}`);
-      screenshotInput.value = uploaded.path;
       renderCreatePreview();
       setCreateStatus('Pasted image attached to the new ticket.');
     }
@@ -135,7 +133,6 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       needsEricInput.checked = false;
       needsInspectionInput.checked = false;
       state.pendingCreateScreenshots = [];
-      screenshotInput.value = '';
       renderCreatePreview();
       setCreateStatus(`Created ${result.ticket.id}.`);
       await requestBoardReload();
@@ -408,15 +405,6 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
     titleInput.addEventListener('keydown', submitCreateOnEnter);
     bodyInput.addEventListener('keydown', submitCreateOnEnter);
     assigneeInput.addEventListener('keydown', submitCreateOnEnter);
-    screenshotInput.addEventListener('keydown', submitCreateOnEnter);
-
-    addCreateAttachmentBtn.addEventListener('click', () => {
-      if (!screenshotInput.value) {
-        return;
-      }
-      state.pendingCreateScreenshots = uniquePaths([...state.pendingCreateScreenshots, screenshotInput.value]);
-      renderCreatePreview();
-    });
 
     createSectionToggleEl.addEventListener('click', () => {
       toggleSection('new_ticket');

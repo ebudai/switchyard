@@ -211,37 +211,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         parentLinkField.appendChild(parentPreview);
       }
 
-      const screenshotLabel = document.createElement('label');
-      screenshotLabel.innerHTML = '<span class="field-label">Available Frame</span>';
-      const screenshotSelect = document.createElement('select');
-      buildOption(screenshotSelect, '', '(none)');
-      state.screenshots.forEach((shot) => buildOption(screenshotSelect, shot.path, `${shot.name} - ${shot.modified}`));
-      ticketScreenshotEntries(ticket).forEach((entry) => {
-        if (!Array.from(screenshotSelect.options).some((option) => option.value === entry.path)) {
-          buildOption(
-            screenshotSelect,
-            entry.path,
-            entry.available ? entry.path.split('/').pop() : `${entry.path.split('/').pop()} - unavailable`,
-          );
-        }
-      });
-      const screenshotActions = document.createElement('div');
-      screenshotActions.className = 'inline-actions';
-      const addAttachmentButton = document.createElement('button');
-      addAttachmentButton.type = 'button';
-      addAttachmentButton.textContent = 'Add Attachment';
-      addAttachmentButton.addEventListener('click', async () => {
-        if (!screenshotSelect.value) {
-          return;
-        }
-        await updateTicket(ticket.id, {
-          screenshots: uniquePaths([...ticketScreenshotPaths(ticket), screenshotSelect.value]),
-        }, detailCallerRole());
-      });
-      screenshotActions.appendChild(addAttachmentButton);
-      screenshotLabel.append(screenshotSelect, screenshotActions);
-
-      controls.append(assigneeLabel, parentLinkField, screenshotLabel);
+      controls.append(assigneeLabel, parentLinkField);
 
       const toggles = document.createElement('div');
       toggles.className = 'tag-row';

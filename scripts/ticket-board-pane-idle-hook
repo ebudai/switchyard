@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+"""Write per-pane ticket notification idle/busy state from CLI hooks."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.ticket_board.notify_listener import DEFAULT_PANE_STATE_DIR, PaneHookStateStore
+
+
+def _target_from_tmux_pane(environ: dict[str, str]) -> str | None:
+    pane_id = environ.get("TMUX_PANE", "").strip()
+    if not pane_id:
+        return None
+    try:
+        proc = subprocess.run(
+            ["tmux", "display-message", "-p", "-t", pane_id, "#{session_name}:#{window_index}.#{pane_index}"],
+            check=True,
+            text=True,
+            capture_output=True,
+            timeout=1.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    target = proc.stdout.strip()
+    return target or None
+
+
+def _resolve_target(raw_target: str, environ: dict[str, str]) -> str:
+    if raw_target:
+        return raw_target
+    env_target = environ.get("PGU_PANE_TARGET", "").strip()
+    if env_target:
+        return env_target
+    tmux_target = _target_from_tmux_pane(environ)
+    if tmux_target:
+        return tmux_target
+    raise SystemExit("ticket-board-pane-idle-hook: missing --target, PGU_PANE_TARGET, and TMUX_PANE")
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Record a PGU pane idle/busy state for ticket notification delivery.")
+    parser.add_argument("state", choices=["idle", "busy", "blocked"], help="pane lifecycle state to record")
+    parser.add_argument("--target", default="", help="tmux target, for example pgu-ops:0.0")
+    parser.add_argument("--source", default="", help="hook source label stored for diagnostics")
+    parser.add_argument("--state-dir", default=str(DEFAULT_PANE_STATE_DIR), help=f"state directory (default: {DEFAULT_PANE_STATE_DIR})")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
+    target = _resolve_target(args.target.strip(), os.environ)
+    PaneHookStateStore(args.state_dir).write(target, args.state, source=args.source)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

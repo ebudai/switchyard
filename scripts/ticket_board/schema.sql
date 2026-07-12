@@ -1004,6 +1004,29 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION ticket_board.next_notification_attempt(
+    p_now timestamptz DEFAULT clock_timestamp(),
+    p_claim_timeout interval DEFAULT interval '2 minutes'
+)
+RETURNS timestamptz
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    next_attempt timestamptz;
+BEGIN
+    PERFORM ticket_board.require_ticket_board_listener('next_notification_attempt');
+    SELECT min(q.next_attempt_at)
+    INTO next_attempt
+    FROM ticket_board.ticket_notification_queue q
+    WHERE q.claimed_at IS NULL
+       OR q.claimed_at <= p_now - p_claim_timeout;
+    RETURN next_attempt;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION ticket_board.ack_notification(p_notification_id bigint)
 RETURNS void
 LANGUAGE plpgsql

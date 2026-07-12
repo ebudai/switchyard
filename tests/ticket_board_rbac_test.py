@@ -42,6 +42,7 @@ WRITE_FUNCTIONS = [
 ]
 LISTENER_FUNCTIONS = [
     "ticket_board.claim_notification(timestamp with time zone,interval)",
+    "ticket_board.next_notification_attempt(timestamp with time zone,interval)",
     "ticket_board.ack_notification(bigint)",
     "ticket_board.requeue_notification(bigint,interval,text)",
     "ticket_board.record_notification_trace(text,bigint,text,text,text,text,text,text,jsonb)",

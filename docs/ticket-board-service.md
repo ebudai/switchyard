@@ -124,3 +124,29 @@ is split between PostgreSQL trigger/cron state and the
 `pgu-ticket-board-notify-listener.service` user service. The listener handles
 real-time `LISTEN` delivery, replay reconciliation after reconnect, and
 NUDGE-message gating against live pane activity.
+
+The listener no longer screen-scrapes pane output. Each agent CLI must run
+`scripts/ticket-board-pane-idle-hook` from its lifecycle hooks so the listener
+can read a per-pane state file from
+`$PGU_TICKET_BOARD_PANE_STATE_DIR` (default:
+`/run/user/<agent-uid>/pgu-ticket-board/pane-state`). Missing hook state fails
+closed and defers delivery.
+
+Hook commands may pass `--target pgu-<role>:0.0`, set `PGU_PANE_TARGET`, or let
+the writer resolve the target from `TMUX_PANE`. The required state transitions
+are:
+
+- Claude Code: `Notification` with matcher `idle_prompt` writes `idle`;
+  `UserPromptSubmit` and `Stop` write `busy`.
+- Codex: `Stop` (or legacy `notify` event `agent-turn-complete`) writes
+  `idle`; `UserPromptSubmit` writes `busy`; permission prompts write `blocked`
+  if the hook surface exposes them.
+- Gemini: `AfterAgent` writes `idle`; `BeforeAgent` writes `busy`. Do not use
+  Gemini `Notification` for idle because it is alert/permission-oriented.
+
+The director pane also uses tmux `client_activity` as a no-clobber latch. When
+the hook state transitions to `idle`, the listener snapshots the director
+client's activity timestamp. If human input advances it before delivery, the
+notification is held through thinking pauses until the next `busy` -> `idle`
+hook cycle. An abandoned draft releases after the listener's
+`--director-composing-timeout-seconds` timeout.

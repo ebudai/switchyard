@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import logging
 import os
@@ -12,6 +11,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -30,8 +30,12 @@ DEFAULT_DIRECTORCTL_SEND_TIMEOUT_SECONDS = 10.0
 DEFAULT_REQUEUE_BASE_SECONDS = 5.0
 DEFAULT_REQUEUE_MAX_SECONDS = 60.0
 DEFAULT_BUSY_REQUEUE_SECONDS = 1.0
-DEFAULT_STABLE_IDLE_SECONDS = 3.0
-PANE_ACTIVITY_REGION_LINES = 8
+DEFAULT_DIRECTOR_COMPOSING_TIMEOUT_SECONDS = 15 * 60.0
+DEFAULT_PANE_STATE_DIR = (
+    Path(os.environ["PGU_TICKET_BOARD_PANE_STATE_DIR"]).expanduser()
+    if os.environ.get("PGU_TICKET_BOARD_PANE_STATE_DIR")
+    else Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-state")
+)
 ROLE_TO_TARGET = {
     "director": "pgu-director:0.0",
     "main": "pgu-main:0.0",
@@ -77,6 +81,14 @@ class ActivityTrace:
     busy: bool
     reason: str
     region_digest: str = ""
+
+
+@dataclass(frozen=True)
+class PaneHookState:
+    target: str
+    state: str
+    updated_at: float
+    source: str = ""
 
 
 def parse_transition_payload(payload: str) -> Transition:
@@ -161,24 +173,76 @@ class DirectorctlSender:
         )
 
 
+class PaneHookStateStore:
+    def __init__(self, state_dir: str | Path = DEFAULT_PANE_STATE_DIR) -> None:
+        self.state_dir = Path(state_dir).expanduser()
+
+    def _target_path(self, target: str) -> Path:
+        safe = "".join(ch if ch.isalnum() or ch in ".-" else "_" for ch in target)
+        return self.state_dir / f"{safe}.json"
+
+    def read(self, target: str) -> PaneHookState | None:
+        path = self._target_path(target)
+        try:
+            parsed = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        state = str(parsed.get("state") or "").strip().lower()
+        if state not in {"idle", "busy", "blocked"}:
+            return None
+        try:
+            updated_at = float(parsed.get("updated_at"))
+        except (TypeError, ValueError):
+            return None
+        return PaneHookState(
+            target=str(parsed.get("target") or target),
+            state=state,
+            updated_at=updated_at,
+            source=str(parsed.get("source") or ""),
+        )
+
+    def write(self, target: str, state: str, *, source: str = "", now: float | None = None) -> Path:
+        normalized_state = state.strip().lower()
+        if normalized_state not in {"idle", "busy", "blocked"}:
+            raise ValueError("pane hook state must be idle, busy, or blocked")
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "target": target,
+            "state": normalized_state,
+            "updated_at": time.time() if now is None else now,
+            "source": source,
+        }
+        path = self._target_path(target)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+        tmp.replace(path)
+        return path
+
+
 class PaneActivityGate:
     def __init__(
         self,
-        directorctl_bin: str = DEFAULT_DIRECTORCTL,
         *,
-        stable_idle_seconds: float = DEFAULT_STABLE_IDLE_SECONDS,
-        capture_lines: int = 80,
-        capture_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        state_store: PaneHookStateStore | None = None,
+        director_target: str = ROLE_TO_TARGET["director"],
+        client_activity_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        director_composing_timeout_seconds: float = DEFAULT_DIRECTOR_COMPOSING_TIMEOUT_SECONDS,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
-        self.directorctl_bin = directorctl_bin
-        self.stable_idle_seconds = stable_idle_seconds
-        self.capture_lines = capture_lines
-        self.capture_runner = capture_runner
+        self.state_store = state_store or PaneHookStateStore()
+        self.director_target = director_target
+        self.client_activity_runner = client_activity_runner
+        self.director_composing_timeout_seconds = director_composing_timeout_seconds
         self.monotonic = monotonic
-        self._last_region_digest_by_target: dict[str, str] = {}
-        self._last_changed_at_by_target: dict[str, float] = {}
         self._last_trace_by_target: dict[str, ActivityTrace] = {}
+        self._last_hook_state_by_target: dict[str, tuple[str, float]] = {}
+        self._director_idle_snapshot_activity: int | None = None
+        self._director_idle_snapshot_state_ts: float | None = None
+        self._director_composing_latched = False
+        self._director_composing_activity: int | None = None
+        self._director_composing_started_at: float | None = None
 
     def _record_trace(self, target: str, trace: ActivityTrace) -> bool:
         self._last_trace_by_target[target] = trace
@@ -187,10 +251,14 @@ class PaneActivityGate:
     def last_trace(self, target: str) -> ActivityTrace | None:
         return self._last_trace_by_target.get(target)
 
-    def _capture(self, target: str) -> str | None:
+    def _tmux_session_for_target(self, target: str) -> str:
+        return target.split(":", 1)[0]
+
+    def _director_client_activity(self, target: str) -> int | None:
+        session = self._tmux_session_for_target(target)
         try:
-            proc = self.capture_runner(
-                [self.directorctl_bin, "capture", target, str(self.capture_lines)],
+            proc = self.client_activity_runner(
+                ["tmux", "list-clients", "-t", session, "-F", "#{client_activity}"],
                 check=True,
                 text=True,
                 capture_output=True,
@@ -198,35 +266,78 @@ class PaneActivityGate:
             )
         except (OSError, subprocess.SubprocessError):
             return None
-        return proc.stdout
+        values: list[int] = []
+        for line in proc.stdout.splitlines():
+            try:
+                values.append(int(line.strip()))
+            except ValueError:
+                continue
+        return max(values) if values else None
 
-    def _activity_region(self, target: str, text: str) -> str:
-        return "\n".join(text.splitlines()[-PANE_ACTIVITY_REGION_LINES:])
+    def _reset_director_latch(self) -> None:
+        self._director_idle_snapshot_activity = None
+        self._director_idle_snapshot_state_ts = None
+        self._director_composing_latched = False
+        self._director_composing_activity = None
+        self._director_composing_started_at = None
 
-    def _activity_digest(self, target: str, text: str) -> str:
-        region = self._activity_region(target, text)
-        return hashlib.sha256(region.encode("utf-8")).hexdigest()
+    def _director_is_composing(self, target: str, state: PaneHookState) -> ActivityTrace | None:
+        current_activity = self._director_client_activity(target)
+        if current_activity is None:
+            return ActivityTrace(True, "client_activity_unavailable")
+        if self._director_idle_snapshot_state_ts != state.updated_at:
+            self._director_idle_snapshot_state_ts = state.updated_at
+            self._director_idle_snapshot_activity = current_activity
+            self._director_composing_latched = False
+            self._director_composing_activity = None
+            self._director_composing_started_at = None
+            return None
+        snapshot = self._director_idle_snapshot_activity
+        if snapshot is None:
+            self._director_idle_snapshot_activity = current_activity
+            return None
+        now = self.monotonic()
+        if not self._director_composing_latched and current_activity > snapshot:
+            self._director_composing_latched = True
+            self._director_composing_activity = current_activity
+            self._director_composing_started_at = now
+        if not self._director_composing_latched:
+            return None
+        latched_activity = self._director_composing_activity
+        started_at = self._director_composing_started_at if self._director_composing_started_at is not None else now
+        if (
+            latched_activity is not None
+            and current_activity == latched_activity
+            and now - started_at >= self.director_composing_timeout_seconds
+        ):
+            self._director_idle_snapshot_activity = current_activity
+            self._director_composing_latched = False
+            self._director_composing_activity = None
+            self._director_composing_started_at = None
+            return None
+        return ActivityTrace(True, "human_composing")
 
     def is_busy(self, target: str) -> bool:
-        text = self._capture(target)
-        if text is None:
-            return self._record_trace(target, ActivityTrace(False, "capture_failed"))
-        first_digest = self._activity_digest(target, text)
-        now = self.monotonic()
-        previous = self._last_region_digest_by_target.get(target)
-        self._last_region_digest_by_target[target] = first_digest
-        if previous is None:
-            self._last_changed_at_by_target[target] = now
-            if self.stable_idle_seconds <= 0:
-                return self._record_trace(target, ActivityTrace(False, "cold_start_idle", first_digest))
-            return self._record_trace(target, ActivityTrace(True, "region_unproven", first_digest))
-        if previous != first_digest:
-            self._last_changed_at_by_target[target] = now
-            return self._record_trace(target, ActivityTrace(True, "region_changed", first_digest))
-        stable_since = self._last_changed_at_by_target.get(target, now)
-        if self.stable_idle_seconds <= 0 or now - stable_since >= self.stable_idle_seconds:
-            return self._record_trace(target, ActivityTrace(False, "stable_idle", first_digest))
-        return self._record_trace(target, ActivityTrace(True, "region_settling", first_digest))
+        state = self.state_store.read(target)
+        if state is None:
+            if target == self.director_target:
+                self._reset_director_latch()
+            return self._record_trace(target, ActivityTrace(True, "no_hook_state"))
+        previous = self._last_hook_state_by_target.get(target)
+        current = (state.state, state.updated_at)
+        self._last_hook_state_by_target[target] = current
+        if state.state != "idle":
+            if target == self.director_target:
+                self._reset_director_latch()
+            reason = "hook_blocked" if state.state == "blocked" else "hook_busy"
+            return self._record_trace(target, ActivityTrace(True, reason))
+        if previous is not None and previous[0] != "idle" and target == self.director_target:
+            self._reset_director_latch()
+        if target == self.director_target:
+            composing_trace = self._director_is_composing(target, state)
+            if composing_trace is not None:
+                return self._record_trace(target, composing_trace)
+        return self._record_trace(target, ActivityTrace(False, "hook_idle"))
 
     def is_working(self, target: str) -> bool:
         return self.is_busy(target)
@@ -406,6 +517,33 @@ SELECT ticket_board.record_notification_trace(
             "SELECT ticket_board.requeue_notification(%s::bigint, %s::interval, %s::text)",
             (notification_id, f"{delay_seconds:g} seconds", error[:500]),
         )
+
+    def _next_notification_attempt_at(self, conn: Any) -> datetime | None:
+        try:
+            result = conn.execute("SELECT ticket_board.next_notification_attempt()")
+            row = result.fetchone()
+        except Exception as exc:
+            self.logger.warning("Failed to read next ticket notification attempt: %s", exc)
+            return None
+        if row is None:
+            return None
+        value = row[0] if not isinstance(row, dict) else next(iter(row.values()))
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value
+        return None
+
+    def _wait_timeout_seconds(self, conn: Any) -> float:
+        timeout = max(self.poll_seconds, 0.0)
+        next_attempt_at = self._next_notification_attempt_at(conn)
+        if next_attempt_at is None:
+            return timeout
+        if next_attempt_at.tzinfo is None:
+            next_attempt_at = next_attempt_at.replace(tzinfo=timezone.utc)
+        seconds_until_due = (next_attempt_at - datetime.now(timezone.utc)).total_seconds()
+        due_timeout = max(0.0, seconds_until_due)
+        return min(timeout, due_timeout) if timeout > 0 else due_timeout
 
     def _current_ticket_state(self, conn: Any, ticket_id: str) -> tuple[str, str, bool, bool] | None:
         result = conn.execute(
@@ -637,7 +775,7 @@ WHERE id = %s
         return delivered
 
     def _wait_for_notification(self, conn: Any) -> bool:
-        notifications = conn.notifies(timeout=self.poll_seconds, stop_after=1)
+        notifications = conn.notifies(timeout=self._wait_timeout_seconds(conn), stop_after=1)
         return next(iter(notifications), None) is not None
 
     def listen_once(self, *, max_notifications: int | None = None) -> int:
@@ -686,7 +824,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--directorctl", default=DEFAULT_DIRECTORCTL, help=f"directorctl path (default: {DEFAULT_DIRECTORCTL})")
     parser.add_argument("--reconnect-seconds", type=float, default=DEFAULT_RECONNECT_SECONDS)
     parser.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS)
-    parser.add_argument("--stable-idle-seconds", type=float, default=DEFAULT_STABLE_IDLE_SECONDS)
+    parser.add_argument("--pane-state-dir", default=str(DEFAULT_PANE_STATE_DIR), help=f"per-pane hook state directory (default: {DEFAULT_PANE_STATE_DIR})")
+    parser.add_argument("--director-composing-timeout-seconds", type=float, default=DEFAULT_DIRECTOR_COMPOSING_TIMEOUT_SECONDS)
     parser.add_argument("--verbose", action="store_true")
     return parser
 
@@ -701,7 +840,10 @@ def main(argv: list[str] | None = None) -> int:
         conninfo=args.database,
         channel=args.channel,
         sender=DirectorctlSender(args.directorctl),
-        activity_gate=PaneActivityGate(args.directorctl, stable_idle_seconds=args.stable_idle_seconds).is_working,
+        activity_gate=PaneActivityGate(
+            state_store=PaneHookStateStore(args.pane_state_dir),
+            director_composing_timeout_seconds=args.director_composing_timeout_seconds,
+        ).is_working,
         reconnect_seconds=args.reconnect_seconds,
         poll_seconds=args.poll_seconds,
     )

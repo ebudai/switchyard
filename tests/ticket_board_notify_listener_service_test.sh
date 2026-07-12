@@ -50,6 +50,10 @@ grep -q '^Environment=PGUSER=ticket_board_listener$' "$UNIT_DIR/service.unit" ||
     echo "FAIL: unit did not select ticket_board_listener by default" >&2
     exit 1
 }
+grep -q '^Environment=PGU_TICKET_BOARD_PANE_STATE_DIR=%t/pgu-ticket-board/pane-state$' "$UNIT_DIR/service.unit" || {
+    echo "FAIL: unit did not set the shared pane hook state directory" >&2
+    exit 1
+}
 grep -q '^Restart=always$' "$UNIT_DIR/service.unit" || {
     echo "FAIL: listener unit should always restart after drops/crashes" >&2
     exit 1

@@ -390,6 +390,10 @@ BEGIN
         NEW.state := 'inspection';
         NEW.inspector_signoff := false;
     END IF;
+    IF NEW.state = 'inspection' AND OLD.state IS DISTINCT FROM NEW.state THEN
+        NEW.audit_signoff := false;
+        NEW.inspector_signoff := false;
+    END IF;
     IF NEW.state = 'inspection' AND NOT NEW.needs_inspection THEN
         RAISE EXCEPTION 'needs_inspection must be true before a ticket can enter inspection';
     END IF;
@@ -409,7 +413,7 @@ BEGIN
             (OLD.state = 'in_progress' AND NEW.state IN ('inspection', 'audit', 'analysis', 'backlog', 'cancelled')) OR
             (OLD.state = 'inspection' AND NEW.state IN ('audit', 'in_progress', 'backlog', 'cancelled')) OR
             (OLD.state = 'audit' AND NEW.state IN ('eric_review', 'director_review', 'analysis', 'backlog', 'cancelled')) OR
-            (OLD.state = 'eric_review' AND NEW.state IN ('director_review', 'audit', 'analysis', 'backlog', 'cancelled')) OR
+            (OLD.state = 'eric_review' AND NEW.state IN ('inspection', 'director_review', 'audit', 'analysis', 'backlog', 'cancelled')) OR
             (OLD.state = 'director_review' AND NEW.state IN ('done', 'in_progress', 'analysis', 'backlog', 'cancelled')) OR
             (OLD.state = 'done' AND NEW.state IN ('analysis', 'backlog')) OR
             (OLD.state = 'cancelled' AND NEW.state IN ('analysis', 'backlog'))

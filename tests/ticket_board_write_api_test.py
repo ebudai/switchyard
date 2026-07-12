@@ -364,6 +364,28 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
         implementation="Needs commit.",
         audit_signoff=True,
     )
+    seed_ticket(
+        "PGU-124",
+        title="Eric review to inspection",
+        state="eric_review",
+        assignee="director",
+        implementation="Rendered.",
+        audit_signoff=True,
+        inspector_signoff=True,
+        needs_eric_signoff=True,
+        needs_inspection=True,
+        commit_hash=commit_hash,
+    )
+    seed_ticket(
+        "PGU-125",
+        title="Eric review inspection guard",
+        state="eric_review",
+        assignee="director",
+        implementation="Rendered.",
+        audit_signoff=True,
+        needs_eric_signoff=True,
+        needs_inspection=False,
+    )
     seed_ticket("PGU-109", title="Manual", state="analysis")
     seed_ticket("PGU-110", title="Blocker", state="analysis")
     seed_ticket("PGU-111", title="Blocked target", state="analysis")
@@ -554,6 +576,27 @@ def exercise_write_api(base_url: str, commit_hash: str) -> None:
         caller="director",
     )
     assert inspector_field_director["ticket"]["needs_inspection"] is True, inspector_field_director  # type: ignore[index]
+
+    eric_review_to_inspection = post_json(
+        base_url,
+        "/api/tickets/PGU-124/actions/route",
+        {"state": "inspection", "assignee": "inspector"},
+        caller="director",
+    )
+    assert eric_review_to_inspection["ticket"]["state"] == "inspection", eric_review_to_inspection  # type: ignore[index]
+    assert eric_review_to_inspection["ticket"]["assignee"] == "inspector", eric_review_to_inspection  # type: ignore[index]
+    assert eric_review_to_inspection["ticket"]["needs_inspection"] is True, eric_review_to_inspection  # type: ignore[index]
+    assert eric_review_to_inspection["ticket"]["audit_signoff"] is False, eric_review_to_inspection  # type: ignore[index]
+    assert eric_review_to_inspection["ticket"]["inspector_signoff"] is False, eric_review_to_inspection  # type: ignore[index]
+    assert eric_review_to_inspection["ticket"]["commit_hash"] == commit_hash, eric_review_to_inspection  # type: ignore[index]
+    eric_review_to_inspection_guard = post_json(
+        base_url,
+        "/api/tickets/PGU-125/actions/route",
+        {"state": "inspection", "assignee": "inspector"},
+        caller="director",
+        expect=400,
+    )
+    assert "needs_inspection must be true" in str(eric_review_to_inspection_guard), eric_review_to_inspection_guard
 
     inspect_started = post_json(base_url, "/api/tickets/PGU-117/actions/start_work", {}, caller="ops")
     assert inspect_started["ticket"]["state"] == "in_progress", inspect_started  # type: ignore[index]

@@ -504,8 +504,16 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION ticket_board.notify_ticket_state_transition()
-RETURNS trigger
+CREATE OR REPLACE FUNCTION ticket_board.enqueue_transition_notification(
+    p_ticket_id text,
+    p_title text,
+    p_old_state text,
+    p_new_state text,
+    p_assignee text,
+    p_updated_at timestamptz,
+    p_ticket_number integer
+)
+RETURNS void
 LANGUAGE plpgsql
 AS $$
 DECLARE
@@ -513,52 +521,105 @@ DECLARE
     message text;
     recommendation text;
 BEGIN
+    target_role := ticket_board.transition_target_role(p_new_state, p_assignee);
+    message := ticket_board.transition_message(p_ticket_id, p_title, p_old_state, p_new_state);
+    IF p_old_state = 'inspection' AND p_new_state = 'in_progress' THEN
+        SELECT c.text
+        INTO recommendation
+        FROM ticket_board.ticket_comments AS c
+        WHERE c.ticket_id = p_ticket_id
+          AND btrim(c.text) <> ''
+          AND c.xmin = pg_current_xact_id()::xid
+        ORDER BY c.position DESC
+        LIMIT 1;
+        IF recommendation IS NOT NULL THEN
+            message := message || ': ' || recommendation;
+        END IF;
+    END IF;
+    IF target_role IS NOT NULL AND message IS NOT NULL THEN
+        PERFORM ticket_board.enqueue_notification(
+            p_ticket_id,
+            'transition',
+            target_role,
+            message,
+            jsonb_build_object(
+                'kind', 'transition',
+                'id', p_ticket_id,
+                'title', p_title,
+                'old_state', p_old_state,
+                'new_state', p_new_state,
+                'assignee', p_assignee,
+                'updated_at', p_updated_at,
+                'ticket_number', p_ticket_number,
+                'target_role', target_role,
+                'message', message
+            ),
+            'transition:' || p_ticket_id || ':' || coalesce(p_old_state, 'insert') || ':' || p_new_state || ':' || pg_current_xact_id()::text
+        );
+    ELSE
+        PERFORM pg_notify(
+            'ticket_board_state_transition',
+            jsonb_build_object('kind', 'wake', 'id', p_ticket_id, 'new_state', p_new_state)::text
+        );
+    END IF;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.notify_ticket_state_transition()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
     IF coalesce(OLD.manually_controlled, false) OR coalesce(NEW.manually_controlled, false) THEN
         RETURN NULL;
     END IF;
 
     IF OLD.state IS DISTINCT FROM NEW.state THEN
-        target_role := ticket_board.transition_target_role(NEW.state, NEW.assignee);
-        message := ticket_board.transition_message(NEW.id, NEW.title, OLD.state, NEW.state);
-        IF OLD.state = 'inspection' AND NEW.state = 'in_progress' THEN
-            SELECT c.text
-            INTO recommendation
-            FROM ticket_board.ticket_comments AS c
-            WHERE c.ticket_id = NEW.id
-              AND btrim(c.text) <> ''
-              AND c.xmin = pg_current_xact_id()::xid
-            ORDER BY c.position DESC
-            LIMIT 1;
-            IF recommendation IS NOT NULL THEN
-                message := message || ': ' || recommendation;
-            END IF;
-        END IF;
-        IF target_role IS NOT NULL AND message IS NOT NULL THEN
-            PERFORM ticket_board.enqueue_notification(
-                NEW.id,
-                'transition',
-                target_role,
-                message,
-                jsonb_build_object(
-                    'kind', 'transition',
-                    'id', NEW.id,
-                    'title', NEW.title,
-                    'old_state', OLD.state,
-                    'new_state', NEW.state,
-                    'assignee', NEW.assignee,
-                    'updated_at', NEW.updated_at,
-                    'ticket_number', NEW.ticket_number,
-                    'target_role', target_role,
-                    'message', message
-                ),
-                'transition:' || NEW.id || ':' || OLD.state || ':' || NEW.state || ':' || pg_current_xact_id()::text
-            );
-        ELSE
-            PERFORM pg_notify(
-                'ticket_board_state_transition',
-                jsonb_build_object('kind', 'wake', 'id', NEW.id, 'new_state', NEW.state)::text
-            );
-        END IF;
+        PERFORM ticket_board.enqueue_transition_notification(
+            NEW.id,
+            NEW.title,
+            OLD.state,
+            NEW.state,
+            NEW.assignee,
+            NEW.updated_at,
+            NEW.ticket_number
+        );
+    END IF;
+
+    RETURN NULL;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.notify_ticket_insert_transition()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    current_state text;
+    current_assignee text;
+BEGIN
+    IF coalesce(NEW.manually_controlled, false) THEN
+        RETURN NULL;
+    END IF;
+
+    SELECT state, assignee
+    INTO current_state, current_assignee
+    FROM ticket_board.tickets
+    WHERE id = NEW.id;
+    IF current_state IS DISTINCT FROM NEW.state OR current_assignee IS DISTINCT FROM NEW.assignee THEN
+        RETURN NULL;
+    END IF;
+
+    IF ticket_board.transition_target_role(NEW.state, NEW.assignee) IS NOT NULL THEN
+        PERFORM ticket_board.enqueue_transition_notification(
+            NEW.id,
+            NEW.title,
+            NULL,
+            NEW.state,
+            NEW.assignee,
+            NEW.updated_at,
+            NEW.ticket_number
+        );
     END IF;
 
     RETURN NULL;
@@ -1415,6 +1476,12 @@ CREATE TRIGGER tickets_zz_auto_advance_analysis
 AFTER INSERT OR UPDATE ON ticket_board.tickets
 FOR EACH ROW
 EXECUTE FUNCTION ticket_board.auto_advance_analysis_ticket();
+
+DROP TRIGGER IF EXISTS tickets_zzz_notify_insert_transition ON ticket_board.tickets;
+CREATE TRIGGER tickets_zzz_notify_insert_transition
+AFTER INSERT ON ticket_board.tickets
+FOR EACH ROW
+EXECUTE FUNCTION ticket_board.notify_ticket_insert_transition();
 
 DROP TRIGGER IF EXISTS ticket_comments_notification_activity ON ticket_board.ticket_comments;
 CREATE TRIGGER ticket_comments_notification_activity

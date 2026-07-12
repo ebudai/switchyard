@@ -157,8 +157,11 @@ def main() -> int:
     assert "{7,40}" in schema, "commit_hash check must allow historical short hashes"
     assert "create trigger tickets_enforce_workflow_update" in executable_schema_lower
     assert "create trigger tickets_notify_state_transition" in executable_schema_lower
+    assert "create trigger tickets_zzz_notify_insert_transition" in executable_schema_lower
     assert "create or replace function ticket_board.enforce_ticket_workflow_update" in executable_schema_lower
+    assert "create or replace function ticket_board.enqueue_transition_notification" in executable_schema_lower
     assert "create or replace function ticket_board.notify_ticket_state_transition" in executable_schema_lower
+    assert "create or replace function ticket_board.notify_ticket_insert_transition" in executable_schema_lower
     assert "pg_notify" in executable_schema_lower, "PGU-191 must notify on state transitions"
     assert "manually_controlled" in executable_schema_lower, "PGU-191 triggers must honor manual control"
     for function_name in EXPECTED_FUNCTION_API:

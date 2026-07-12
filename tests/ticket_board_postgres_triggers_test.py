@@ -6,12 +6,18 @@ from __future__ import annotations
 import json
 import socket
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
+
+from scripts.ticket_board.notify_listener import TicketBoardNotifyListener
 
 
 def run(args: list[str], *, input_text: str | None = None, capture: bool = True) -> subprocess.CompletedProcess[str]:
@@ -856,14 +862,173 @@ WHERE id = 'PGU-54';
                 conninfo,
                 """
 SELECT pg_get_functiondef('ticket_board.notify_ticket_state_transition()'::regprocedure)
-  LIKE '%pg_notify%ticket_board_state_transition%';
+  LIKE '%enqueue_transition_notification%';
 """,
             ).stdout.strip()
             assert notify_function == "t"
+            notify_helper = psql(
+                conninfo,
+                """
+SELECT pg_get_functiondef('ticket_board.enqueue_transition_notification(text,text,text,text,text,timestamp with time zone,integer)'::regprocedure)
+  LIKE '%pg_notify%ticket_board_state_transition%';
+""",
+            ).stdout.strip()
+            assert notify_helper == "t"
 
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
-            insert_ticket(conninfo, "PGU-20", title="Durable notify", state="analysis", assignee="ops", implementation="ready")
-            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-20';")
+            insert_ticket(conninfo, "PGU-29701", title="Analysis insert notify", state="analysis", assignee="unassigned")
+            analysis_insert_queue = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_agg(jsonb_build_object(
+    'kind', kind,
+    'target_role', target_role,
+    'message', message,
+    'old_state', payload->>'old_state',
+    'new_state', payload->>'new_state',
+    'payload_kind', payload->>'kind'
+) ORDER BY id)::text
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-29701';
+""",
+                ).stdout
+            )
+            assert analysis_insert_queue == [
+                {
+                    "kind": "transition",
+                    "target_role": "director",
+                    "message": "New ticket for you: PGU-29701 -- Analysis insert notify",
+                    "old_state": None,
+                    "new_state": "analysis",
+                    "payload_kind": "transition",
+                }
+            ], analysis_insert_queue
+            listener_sent: list[tuple[str, str]] = []
+            listener = TicketBoardNotifyListener(
+                conninfo=listener_conninfo,
+                sender=lambda target, message: listener_sent.append((target, message)),
+                activity_gate=lambda _target: False,
+                poll_seconds=0,
+            )
+            assert listener.listen_once(max_notifications=1) == 1
+            assert listener_sent == [
+                ("pgu-director:0.0", "New ticket for you: PGU-29701 -- Analysis insert notify")
+            ], listener_sent
+            analysis_pending_after_listener = psql(
+                listener_conninfo,
+                "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-29701';",
+            ).stdout.strip()
+            assert analysis_pending_after_listener == "0"
+
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
+            insert_ticket(conninfo, "PGU-29702", title="Direct implementation insert", state="in_progress", assignee="ops")
+            direct_implementation_queue = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_agg(jsonb_build_object(
+    'target_role', target_role,
+    'message', message,
+    'old_state', payload->>'old_state',
+    'new_state', payload->>'new_state'
+) ORDER BY id)::text
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-29702';
+""",
+                ).stdout
+            )
+            assert direct_implementation_queue == [
+                {
+                    "target_role": "ops",
+                    "message": "New ticket for you: PGU-29702 -- Direct implementation insert",
+                    "old_state": None,
+                    "new_state": "in_progress",
+                }
+            ], direct_implementation_queue
+
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
+            insert_ticket(conninfo, "PGU-29703", title="Auto advance insert notify", state="analysis", assignee="ops", implementation="ready")
+            auto_advance_insert_queue = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_agg(jsonb_build_object(
+    'target_role', target_role,
+    'message', message,
+    'old_state', payload->>'old_state',
+    'new_state', payload->>'new_state'
+) ORDER BY id)::text
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-29703';
+""",
+                ).stdout
+            )
+            assert auto_advance_insert_queue == [
+                {
+                    "target_role": "ops",
+                    "message": "New ticket for you: PGU-29703 -- Auto advance insert notify",
+                    "old_state": "analysis",
+                    "new_state": "in_progress",
+                }
+            ], auto_advance_insert_queue
+            auto_advance_state = psql(conninfo, "SELECT state FROM ticket_board.tickets WHERE id = 'PGU-29703';").stdout.strip()
+            assert auto_advance_state == "in_progress", auto_advance_state
+
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
+            insert_ticket(
+                conninfo,
+                "PGU-29704",
+                title="Manual insert suppress",
+                state="analysis",
+                assignee="unassigned",
+                manually_controlled=True,
+            )
+            manual_insert_count = psql(
+                conninfo,
+                "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-29704';",
+            ).stdout.strip()
+            assert manual_insert_count == "0"
+
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
+            non_transition_ids = {
+                "backlog": "PGU-29705",
+                "eric_review": "PGU-29706",
+                "done": "PGU-29707",
+                "cancelled": "PGU-29708",
+            }
+            for state, ticket_id in non_transition_ids.items():
+                insert_ticket(
+                    conninfo,
+                    ticket_id,
+                    title=f"{state} insert suppress",
+                    state=state,
+                    assignee="ops",
+                )
+            non_transition_insert_count = psql(
+                conninfo,
+                """
+SELECT count(*)
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id IN ('PGU-29705', 'PGU-29706', 'PGU-29707', 'PGU-29708');
+""",
+            ).stdout.strip()
+            assert non_transition_insert_count == "0"
+            non_transition_targets = psql(
+                conninfo,
+                """
+SELECT count(*)
+FROM (VALUES ('backlog'), ('eric_review'), ('done'), ('cancelled')) AS states(state)
+WHERE ticket_board.transition_target_role(states.state, 'ops') IS NOT NULL;
+""",
+            ).stdout.strip()
+            assert non_transition_targets == "0"
+
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
+            insert_ticket(conninfo, "PGU-20", title="Durable notify", state="analysis", assignee="ops", implementation="")
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-20';")
+            psql(conninfo, "DELETE FROM ticket_board.notification_trace WHERE ticket_id = 'PGU-20';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET implementation = 'ready', state = 'in_progress' WHERE id = 'PGU-20';")
             queued = json.loads(
                 psql(
                     conninfo,
@@ -1636,12 +1801,13 @@ WHERE tgname IN (
     'tickets_notification_state_insert',
     'tickets_notification_state_update',
     'tickets_zz_auto_advance_analysis',
+    'tickets_zzz_notify_insert_transition',
     'ticket_comments_notification_activity'
 )
   AND NOT tgisinternal;
 """,
             ).stdout.strip()
-            assert trigger_count == "6"
+            assert trigger_count == "7"
         finally:
             subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], check=False)
 

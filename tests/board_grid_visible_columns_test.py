@@ -92,7 +92,7 @@ def run_browser_check(playwright: object, server_port: int) -> None:
     try:
         page = browser.new_page(viewport={"width": 1280, "height": 800})
         page.goto(f"http://127.0.0.1:{server_port}/", wait_until="domcontentloaded")
-        page.locator(".column-title", has_text="Ready").wait_for(timeout=5000)
+        page.locator(".column-title", has_text="Final Sign-Off").wait_for(timeout=5000)
 
         columns = page.locator(".column")
         assert columns.count() == 6
@@ -117,7 +117,7 @@ def run_browser_check(playwright: object, server_port: int) -> None:
         assert len(metrics["gridTemplateColumns"].split()) == 6
         tops = {column["top"] for column in metrics["columnRects"]}
         assert len(tops) == 1, metrics["columnRects"]
-        assert metrics["columnRects"][-1]["title"] == "Ready"
+        assert metrics["columnRects"][-1]["title"] == "Final Sign-Off"
 
         page.locator("#showDeferredInput").check()
         page.locator("#showDoneInput").check()

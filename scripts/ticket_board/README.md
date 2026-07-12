@@ -119,7 +119,7 @@ Notes:
 - `blocked_by` is a list of ticket IDs the ticket is waiting on; unresolved blockers are any entries whose referenced ticket is not yet `done`
 - `implementation` is the director-authored implementation package/spec that must be present before a ticket can enter Implementation (`in_progress`)
 - `in_progress` is displayed as Implementation and contains both queued and active implementation work; the highlighted card indicates the most recently notified ticket for that role
-- `director_review` is displayed as Ready and is the director's final gate before `done`
+- `director_review` is displayed as Final Sign-Off and is the director's final gate before `done`
 - `audit_prompt` is retained for reference text but is optional in the default workflow
 - `commit_hash` stores the verified git commit associated with the ticket when it moves to `done`; it must be on `main`
 - `commit_exempt` is an explicit override for non-code/process tickets that should be allowed into `done` without a commit

@@ -8,7 +8,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       { key: 'inspection', label: 'Inspection' },
       { key: 'audit', label: 'Audit' },
       { key: 'eric_review', label: 'Eric Review' },
-      { key: 'director_review', label: 'Ready' },
+      { key: 'director_review', label: 'Final Sign-Off' },
       { key: 'done', label: 'Done' },
       { key: 'cancelled', label: 'Cancelled' },
     ];
@@ -157,10 +157,10 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       if (ticket.state === 'audit' && !ticket.audit_signoff) {
         return ticket.needs_eric_signoff
           ? 'Set audit signoff before advancing to Eric review.'
-          : 'Set audit signoff before advancing to Ready.';
+          : 'Set audit signoff before advancing to Final Sign-Off.';
       }
       if (ticket.state === 'eric_review' && ticket.needs_eric_signoff && !ticket.eric_signoff) {
-        return 'Record Eric signoff before advancing to Ready.';
+        return 'Record Eric signoff before advancing to Final Sign-Off.';
       }
       if (nextState === 'done' && !ticket.commit_exempt && !(ticket.commit_hash || '').trim()) {
         return 'Save a verified commit hash or enable no-commit override before advancing to done.';
@@ -192,10 +192,10 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         return '';
       }
       if (ticket.state === 'eric_review') {
-        return 'Eric signed off. Waiting for Ready.';
+        return 'Eric signed off. Waiting for Final Sign-Off.';
       }
       if (ticket.state === 'director_review') {
-        return 'Eric signed off. In Ready.';
+        return 'Eric signed off. In Final Sign-Off.';
       }
       return '';
     }

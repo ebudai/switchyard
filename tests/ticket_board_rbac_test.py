@@ -24,6 +24,7 @@ WRITE_FUNCTIONS = [
     "ticket_board.route(text,text,text)",
     "ticket_board.start_work(text)",
     "ticket_board.submit_to_audit(text,text)",
+    "ticket_board.request_commit_exempt(text,text)",
     "ticket_board.audit_sign_off(text,text)",
     "ticket_board.audit_kick_back(text,text)",
     "ticket_board.inspector_sign_off(text)",
@@ -583,6 +584,50 @@ def assert_structural_rules_still_apply(admin_conn: str, service_conn: str) -> N
         service_conn,
         "SELECT ticket_board.submit_to_audit('PGU-910', '');",
     )
+    insert_ticket(admin_conn, "PGU-912", title="Request exempt wrong assignee", state="in_progress", assignee="ops", implementation="Done.")
+    assert "app cannot call request_commit_exempt for ticket assigned to ops" in psql_error(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'app', false);
+SELECT ticket_board.request_commit_exempt('PGU-912', 'No repo change.');
+""",
+    )
+    insert_ticket(admin_conn, "PGU-913", title="Request exempt empty reason", state="in_progress", assignee="ops", implementation="Done.")
+    assert "request_commit_exempt requires a non-empty reason" in psql_error(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'ops', false);
+SELECT ticket_board.request_commit_exempt('PGU-913', '   ');
+""",
+    )
+    insert_ticket(admin_conn, "PGU-914", title="Request exempt happy path", state="in_progress", assignee="ops", implementation="Done.")
+    psql(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'ops', false);
+SELECT ticket_board.request_commit_exempt('PGU-914', 'No repo change.');
+""",
+    )
+    requested = json.loads(
+        psql(
+            admin_conn,
+            """
+SELECT jsonb_build_object(
+    'state', t.state,
+    'assignee', t.assignee,
+    'commit_exempt', t.commit_exempt,
+    'comment', (SELECT text FROM ticket_board.ticket_comments WHERE ticket_id = t.id ORDER BY position DESC LIMIT 1)
+)::text
+FROM ticket_board.tickets t WHERE id = 'PGU-914';
+""",
+        )
+    )
+    assert requested == {
+        "state": "analysis",
+        "assignee": "unassigned",
+        "commit_exempt": False,
+        "comment": "Commit exemption requested: No repo change.",
+    }, requested
     insert_ticket(
         admin_conn,
         "PGU-911",

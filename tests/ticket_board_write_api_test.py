@@ -510,6 +510,33 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
         expect=400,
     )
     assert "commit_hash must be a 7-40 character hex commit" in str(non_exempt_empty_submit), non_exempt_empty_submit
+    wrong_assignee_exempt_request = post_json(
+        base_url,
+        "/api/tickets/PGU-121/actions/request_commit_exempt",
+        {"reason": "No repository change was needed."},
+        caller="app",
+        expect=403,
+    )
+    assert "app cannot call request_commit_exempt for ticket assigned to ops" in str(wrong_assignee_exempt_request), wrong_assignee_exempt_request
+    empty_exempt_request = post_json(
+        base_url,
+        "/api/tickets/PGU-121/actions/request_commit_exempt",
+        {"reason": "   "},
+        caller="ops",
+        expect=400,
+    )
+    assert "reason must be a non-empty string" in str(empty_exempt_request), empty_exempt_request
+    exempt_requested = post_json(
+        base_url,
+        "/api/tickets/PGU-121/actions/request_commit_exempt",
+        {"reason": "No repository change was needed."},
+        caller="ops",
+    )
+    assert exempt_requested["ticket"]["state"] == "analysis", exempt_requested  # type: ignore[index]
+    assert exempt_requested["ticket"]["assignee"] == "unassigned", exempt_requested  # type: ignore[index]
+    assert exempt_requested["ticket"]["commit_exempt"] is False, exempt_requested  # type: ignore[index]
+    assert exempt_requested["ticket"]["comments"][-1]["who"] == "ops", exempt_requested  # type: ignore[index]
+    assert "Commit exemption requested: No repository change was needed." == exempt_requested["ticket"]["comments"][-1]["text"], exempt_requested  # type: ignore[index]
     submit_exempt_forbidden = post_json(
         base_url,
         "/api/tickets/PGU-120/actions/edit_fields",

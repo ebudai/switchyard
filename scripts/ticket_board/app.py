@@ -660,6 +660,15 @@ ORDER BY t.ticket_number
                     self._pg_call(conn, "SELECT ticket_board.add_comment(%s, %s);", (ticket_id, comment_text))
                 return self._pg_get_ticket(ticket_id, conn)
 
+    def request_commit_exempt(self, ticket_id: str, reason: str, *, caller_role: str) -> dict[str, Any]:
+        ticket_id = str(ticket_id).strip().upper()
+        reason = self._require_text(reason, "reason").strip()
+        with self._pg_connect() as conn:
+            with conn.transaction():
+                self._pg_set_caller_role(conn, caller_role)
+                self._pg_call(conn, "SELECT ticket_board.request_commit_exempt(%s, %s);", (ticket_id, reason))
+                return self._pg_get_ticket(ticket_id, conn)
+
     def _pg_call(self, conn: Any, sql: str, params: tuple[Any, ...]) -> None:
         conn.execute(sql, params)
 

@@ -51,6 +51,10 @@ class RecordingHandler(BaseHTTPRequestHandler):
             ticket["state"] = "in_progress"
         elif operation == "submit_to_audit":
             ticket["state"] = "audit"
+        elif operation == "request_commit_exempt":
+            ticket["state"] = "analysis"
+            ticket["assignee"] = "unassigned"
+            ticket["comments"] = [{"who": caller, "text": f"Commit exemption requested: {payload.get('reason', '')}"}]
         elif operation == "audit_sign_off":
             ticket["state"] = "director_review"
             ticket["comments"] = [{"who": caller, "text": payload.get("text", "")}]
@@ -101,6 +105,7 @@ def assert_action_requests(requests: list[tuple[str, str | None, dict[str, objec
     assert ("/api/tickets/PGU-100/actions/route", "director") in pairs
     assert ("/api/tickets/PGU-101/actions/start_work", "ops") in pairs
     assert ("/api/tickets/PGU-101/actions/submit_to_audit", "ops") in pairs
+    assert ("/api/tickets/PGU-121/actions/request_commit_exempt", "ops") in pairs
     assert ("/api/tickets/PGU-102/actions/audit_sign_off", "audit") in pairs
     assert ("/api/tickets/PGU-103/actions/audit_kick_back", "audit") in pairs
     assert ("/api/tickets/PGU-104/actions/eric_sign_off", "eric") in pairs
@@ -121,6 +126,10 @@ def exercise_client(base_url: str, commit_hash: str) -> None:
     assert client.start_work("PGU-101", caller_role="ops")["ticket"]["state"] == "in_progress"
     assert client.submit_to_audit("PGU-101", commit_hash=commit_hash, caller_role="ops")["ticket"]["state"] == "audit"
     assert client.submit_to_audit("PGU-113", caller_role="ops")["ticket"]["commit_hash"] == ""
+    requested = client.request_commit_exempt("PGU-121", reason="No repo change for this ticket.", caller_role="ops")
+    assert requested["ticket"]["state"] == "analysis"
+    assert requested["ticket"]["assignee"] == "unassigned"
+    assert "No repo change" in requested["ticket"]["comments"][-1]["text"]
     audit_signed = client.audit_sign_off("PGU-102", text="Audit verified.", caller_role="audit")
     assert audit_signed["ticket"]["state"] == "director_review"
     assert audit_signed["ticket"]["comments"][-1]["text"] == "Audit verified."

@@ -16,11 +16,28 @@ from psycopg.rows import dict_row
 DEFAULT_DATABASE_URL = os.environ.get("TICKET_BOARD_DATABASE_URL") or os.environ.get("DATABASE_URL", "")
 
 
+def decode_text(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    return str(value)
+
+
+def normalize_value(value: Any) -> Any:
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    if isinstance(value, dict):
+        return {decode_text(key): normalize_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [normalize_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [normalize_value(item) for item in value]
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return value
+
+
 def row_to_dict(row: dict[str, Any]) -> dict[str, Any]:
-    return {
-        key: value.isoformat() if hasattr(value, "isoformat") else value
-        for key, value in row.items()
-    }
+    return {key: normalize_value(value) for key, value in row.items()}
 
 
 def dump_trace(args: argparse.Namespace) -> int:

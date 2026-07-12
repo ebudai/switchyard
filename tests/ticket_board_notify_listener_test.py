@@ -816,8 +816,7 @@ def test_stable_last_lines_queue_notification_delivers_immediately() -> None:
     assert conn.requeued == []
 
 
-def test_ticking_timer_pane_waits() -> None:
-    horizontal = "─" * 48
+def test_changing_arbitrary_region_waits() -> None:
     sent: list[tuple[str, str]] = []
     tick = [46]
 
@@ -826,13 +825,7 @@ def test_ticking_timer_pane_waits() -> None:
         return subprocess.CompletedProcess(
             args,
             0,
-            stdout=f"""
-Claude Code
-· Doodling… ({tick[0]}s · ↓ 28.3k tokens)
-{horizontal}
-❯
-{horizontal}
-""".strip(),
+            stdout=f"unchanged header\narbitrary changing line {tick[0]}\nunchanged footer",
         )
 
     gate = PaneActivityGate("/tmp/directorctl", stable_idle_seconds=1.0, capture_runner=capture_runner)
@@ -866,15 +859,8 @@ Claude Code
     assert conn.traces[1][6] in {"region_changed", "region_unproven", "region_settling"}
 
 
-def test_static_queued_message_placeholder_is_idle_and_delivers() -> None:
-    horizontal = "─" * 48
-    capture = f"""
-Claude Code
-· Doodling… (49s · ↓ 28.5k tokens)
-{horizontal}
-❯\xa0Press up to edit queued messages
-{horizontal}
-""".strip()
+def test_static_arbitrary_region_is_idle_and_delivers() -> None:
+    capture = "unchanged header\narbitrary stable line\nunchanged footer"
     sent: list[tuple[str, str]] = []
     now = [0.0]
 
@@ -919,25 +905,11 @@ Claude Code
     assert conn.traces[1][6] == "stable_idle"
 
 
-def test_human_typing_composer_defers_without_backstop() -> None:
-    horizontal = "─" * 48
+def test_changing_director_region_defers_without_backstop() -> None:
     captures = iter(
         [
-            f"""
-Claude Code
-· Doodling… (49s · ↓ 28.5k tokens)
-{horizontal}
-❯ typing a note
-{horizontal}
-""".strip()
-        ,
-            f"""
-Claude Code
-· Doodling… (49s · ↓ 28.5k tokens)
-{horizontal}
-❯ typing a note that changed
-{horizontal}
-""".strip(),
+            "stable header\narbitrary draft line one\nstable footer",
+            "stable header\narbitrary draft line two\nstable footer",
         ]
     )
     sent: list[tuple[str, str]] = []
@@ -1104,23 +1076,12 @@ def test_stable_last_lines_queue_notification_delivers_for_agent() -> None:
     assert conn.traces[1][6] == "stable_idle"
 
 
-def test_director_typing_changing_last_lines_requeues_without_force_delivery() -> None:
-    horizontal = "─" * 48
+def test_director_changing_last_lines_requeues_without_force_delivery() -> None:
     sent: list[tuple[str, str]] = []
     captures = iter(
         [
-            f"""
-static scrollback
-{horizontal}
-❯ half typed
-{horizontal}
-""".strip(),
-            f"""
-static scrollback
-{horizontal}
-❯ half typed message
-{horizontal}
-""".strip(),
+            "static scrollback\narbitrary changing content one\nstable footer",
+            "static scrollback\narbitrary changing content two\nstable footer",
         ]
     )
 
@@ -1264,13 +1225,13 @@ def main() -> int:
     test_director_busy_requeues_then_idle_delivers_once()
     test_director_busy_never_force_delivers_old_notification_until_idle()
     test_stable_last_lines_queue_notification_delivers_immediately()
-    test_ticking_timer_pane_waits()
-    test_static_queued_message_placeholder_is_idle_and_delivers()
-    test_human_typing_composer_defers_without_backstop()
+    test_changing_arbitrary_region_waits()
+    test_static_arbitrary_region_is_idle_and_delivers()
+    test_changing_director_region_defers_without_backstop()
     test_batch_idle_notifications_deliver_promptly_without_serial_sleep()
     test_changing_last_lines_requeue_queue_notification()
     test_stable_last_lines_queue_notification_delivers_for_agent()
-    test_director_typing_changing_last_lines_requeues_without_force_delivery()
+    test_director_changing_last_lines_requeues_without_force_delivery()
     test_default_stable_idle_window_uses_no_sleep_async_path()
     test_default_gate_delivers_batch_without_serial_sleep()
     test_acked_notification_does_not_repeat_across_restart()

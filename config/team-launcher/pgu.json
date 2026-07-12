@@ -6,7 +6,10 @@
       "cli": [
         "claude"
       ],
-      "model": "opus",
+      "live_commands": [
+        "claude"
+      ],
+      "model": "opus-4.8",
       "model_arg": "--model",
       "resume_flag": "--resume",
       "role": "director",
@@ -19,7 +22,14 @@
       "cli": [
         "codex"
       ],
-      "model": "gpt-5",
+      "extra_args": [
+        "--reasoning-effort",
+        "high"
+      ],
+      "live_commands": [
+        "codex"
+      ],
+      "model": "gpt-5.6-terra",
       "model_arg": "--model",
       "resume_flag": "--resume",
       "role": "main",
@@ -32,7 +42,14 @@
       "cli": [
         "codex"
       ],
-      "model": "gpt-5",
+      "extra_args": [
+        "--reasoning-effort",
+        "high"
+      ],
+      "live_commands": [
+        "codex"
+      ],
+      "model": "gpt-5.4",
       "model_arg": "--model",
       "resume_flag": "--resume",
       "role": "app",
@@ -43,22 +60,12 @@
     },
     {
       "cli": [
-        "codex"
+        "claude"
       ],
-      "model": "gpt-5",
-      "model_arg": "--model",
-      "resume_flag": "--resume",
-      "role": "perf",
-      "slot": 3,
-      "target": "pgu-perf:0.0",
-      "tmux_session": "pgu-perf",
-      "workdir": "/home/agent/Projects/pgu"
-    },
-    {
-      "cli": [
-        "codex"
+      "live_commands": [
+        "claude"
       ],
-      "model": "gpt-5",
+      "model": "sonnet-5",
       "model_arg": "--model",
       "resume_flag": "--resume",
       "role": "research",
@@ -71,7 +78,14 @@
       "cli": [
         "codex"
       ],
-      "model": "gpt-5",
+      "extra_args": [
+        "--reasoning-effort",
+        "high"
+      ],
+      "live_commands": [
+        "codex"
+      ],
+      "model": "gpt-5.5",
       "model_arg": "--model",
       "resume_flag": "--resume",
       "role": "ops",
@@ -82,9 +96,12 @@
     },
     {
       "cli": [
-        "codex"
+        "claude"
       ],
-      "model": "gpt-5",
+      "live_commands": [
+        "claude"
+      ],
+      "model": "sonnet-5",
       "model_arg": "--model",
       "resume_flag": "--resume",
       "role": "audit",
@@ -97,7 +114,10 @@
       "cli": [
         "gemini"
       ],
-      "model": "pro",
+      "live_commands": [
+        "gemini"
+      ],
+      "model": "3.5-flash",
       "model_arg": "--model",
       "resume_flag": "--resume",
       "role": "inspector",

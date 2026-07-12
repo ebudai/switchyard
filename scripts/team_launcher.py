@@ -27,7 +27,9 @@ class RoleConfig:
     cli: list[str]
     model: str
     model_arg: str
+    extra_args: list[str]
     resume_flag: str
+    live_commands: list[str]
     env: dict[str, str]
 
 
@@ -56,6 +58,14 @@ def _load_json(path: Path) -> dict[str, Any]:
     return parsed
 
 
+def _string_list(value: Any, *, field: str, role: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise SystemExit(f"role {role} {field} must be a JSON string list")
+    return list(value)
+
+
 def _role_from_json(project: str, raw: dict[str, Any]) -> RoleConfig:
     role = str(raw.get("role") or "").strip()
     if not role:
@@ -82,7 +92,9 @@ def _role_from_json(project: str, raw: dict[str, Any]) -> RoleConfig:
         cli=cli,
         model=str(raw.get("model") or "").strip(),
         model_arg=str(raw.get("model_arg") or "--model").strip(),
+        extra_args=_string_list(raw.get("extra_args"), field="extra_args", role=role),
         resume_flag=str(raw.get("resume_flag") or "--resume").strip(),
+        live_commands=_string_list(raw.get("live_commands"), field="live_commands", role=role),
         env={str(key): str(value) for key, value in env_raw.items()},
     )
 
@@ -138,6 +150,7 @@ def cli_command_for_role(role: RoleConfig, *, session_dir: Path, resume: bool = 
     command = list(role.cli)
     if role.model:
         command.extend([role.model_arg, role.model])
+    command.extend(role.extra_args)
     if resume:
         session_id = session_id_for_role(role, session_dir)
         if session_id:
@@ -163,11 +176,42 @@ def tmux_kill_session_args(role: RoleConfig) -> list[str]:
     return ["tmux", "kill-session", "-t", role.tmux_session]
 
 
+def tmux_current_command_args(role: RoleConfig) -> list[str]:
+    return ["tmux", "display-message", "-p", "-t", role.target, "#{pane_current_command}"]
+
+
+def _command_name(value: str) -> str:
+    return Path(value.strip()).name
+
+
+def expected_live_commands(role: RoleConfig) -> set[str]:
+    configured = role.live_commands or [_command_name(role.cli[0])]
+    return {_command_name(command) for command in configured if _command_name(command)}
+
+
+def live_command_matches_role(
+    role: RoleConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> bool:
+    proc = runner(
+        tmux_current_command_args(role),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    if proc.returncode != 0:
+        return False
+    actual = _command_name(str(proc.stdout).strip())
+    return actual in expected_live_commands(role)
+
+
 def run_role_pane(
     role: RoleConfig,
     *,
     mode: str,
     session_dir: Path,
+    force_reload: bool = False,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> int:
     exists = runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
@@ -178,6 +222,13 @@ def run_role_pane(
         return runner(tmux_attach_args(role)).returncode
     if mode == "reload":
         if exists:
+            if not force_reload and not live_command_matches_role(role, runner=runner):
+                print(
+                    f"refusing to reload {role.tmux_session}: live pane command does not match configured CLI; "
+                    "rerun with --force to override",
+                    file=sys.stderr,
+                )
+                return 1
             kill_proc = runner(tmux_kill_session_args(role))
             if kill_proc.returncode != 0:
                 return int(kill_proc.returncode)
@@ -206,7 +257,15 @@ def _layout_leaves(node: Any) -> list[dict[str, Any]]:
     return leaves
 
 
-def pane_command(project: str, role: RoleConfig, *, config_path: Path, mode: str, script_path: Path) -> str:
+def pane_command(
+    project: str,
+    role: RoleConfig,
+    *,
+    config_path: Path,
+    mode: str,
+    script_path: Path,
+    force_reload: bool = False,
+) -> str:
     args = [
         str(script_path),
         project,
@@ -216,6 +275,8 @@ def pane_command(project: str, role: RoleConfig, *, config_path: Path, mode: str
         "--config",
         str(config_path),
     ]
+    if mode == "reload" and force_reload:
+        args.append("--force")
     return _quote_command(args)
 
 
@@ -226,6 +287,7 @@ def materialize_layout(
     mode: str,
     script_path: Path,
     output_path: Path,
+    force_reload: bool = False,
 ) -> Path:
     layout = json.loads(config.layout.read_text(encoding="utf-8"))
     leaves = _layout_leaves(layout)
@@ -235,7 +297,14 @@ def materialize_layout(
         if role.slot < 0 or role.slot >= len(leaves):
             raise SystemExit(f"role {role.role} slot {role.slot} is outside layout leaf count {len(leaves)}")
         leaf = leaves[role.slot]
-        leaf["Command"] = pane_command(config.project, role, config_path=config_path, mode=mode, script_path=script_path)
+        leaf["Command"] = pane_command(
+            config.project,
+            role,
+            config_path=config_path,
+            mode=mode,
+            script_path=script_path,
+            force_reload=force_reload,
+        )
         leaf["WorkingDirectory"] = role.workdir
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(layout, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -251,13 +320,21 @@ def launch_project(
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     dry_run: bool = False,
     layout_output: Path | None = None,
+    force_reload: bool = False,
 ) -> int:
     if mode == "start":
         mode = "attach-or-start"
     if mode not in {"attach", "attach-or-start", "reload"}:
         raise SystemExit(f"unknown launch mode: {mode}")
     output_path = layout_output or Path(tempfile.gettempdir()) / f"{config.project}-team-layout.json"
-    materialize_layout(config, config_path=config_path, mode=mode, script_path=script_path, output_path=output_path)
+    materialize_layout(
+        config,
+        config_path=config_path,
+        mode=mode,
+        script_path=script_path,
+        output_path=output_path,
+        force_reload=force_reload,
+    )
     plan = {
         "project": config.project,
         "mode": mode,
@@ -268,7 +345,14 @@ def launch_project(
                 "slot": role.slot,
                 "tmux_session": role.tmux_session,
                 "target": role.target,
-                "command": pane_command(config.project, role, config_path=config_path, mode=mode, script_path=script_path),
+                "command": pane_command(
+                    config.project,
+                    role,
+                    config_path=config_path,
+                    mode=mode,
+                    script_path=script_path,
+                    force_reload=force_reload,
+                ),
             }
             for role in config.roles
         ],
@@ -285,19 +369,7 @@ def write_template(project: str, output: Path) -> int:
         "project": project,
         "layout": layout_name,
         "session_dir": str(DEFAULT_SESSION_DIR),
-        "roles": [
-            {
-                "role": "ops",
-                "slot": 0,
-                "tmux_session": f"{project}-ops",
-                "target": f"{project}-ops:0.0",
-                "workdir": str(Path.home() / "Projects" / project),
-                "cli": ["codex"],
-                "model": "gpt-5",
-                "model_arg": "--model",
-                "resume_flag": "--resume",
-            }
-        ],
+        "roles": [],
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -329,6 +401,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--script-path", type=Path, default=Path(__file__).resolve().with_name("team-launcher"))
     parser.add_argument("--dry-run", action="store_true", help="print launch plan without starting Konsole")
     parser.add_argument("--template-output", type=Path, help="bootstrap output path")
+    parser.add_argument("--force", action="store_true", help="allow reload to kill/relaunch even if live command validation fails")
     return parser
 
 
@@ -343,7 +416,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.pane_mode or not args.role:
             raise SystemExit("pane mode requires <start|attach|attach-or-start|reload> and <role>")
         role = _role_by_name(config, args.role)
-        return run_role_pane(role, mode=args.pane_mode, session_dir=config.session_dir)
+        return run_role_pane(role, mode=args.pane_mode, session_dir=config.session_dir, force_reload=args.force)
     return launch_project(
         config,
         config_path=config_path,
@@ -351,6 +424,7 @@ def main(argv: list[str] | None = None) -> int:
         script_path=args.script_path,
         dry_run=args.dry_run,
         layout_output=args.layout_output,
+        force_reload=args.force,
     )
 
 

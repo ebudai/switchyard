@@ -19,10 +19,17 @@ role session does not exist.
 `attach` only attaches to existing sessions and fails if a role session is
 missing.
 
-`reload` kills and recreates each role session, then starts the configured CLI
-with its recorded resume id when one exists. Resume ids are read from
-`/run/user/<uid>/pgu-ticket-board/pane-sessions/<target>.json` by default. The
-SessionStart hook installer writes those files.
+`reload` kills and recreates each configured role session, then starts the
+configured CLI with its recorded resume id when one exists. Resume ids are read
+from `/run/user/<uid>/pgu-ticket-board/pane-sessions/<target>.json` by default.
+The SessionStart hook installer writes those files.
+
+Reload is guarded because it is destructive. Before killing an existing tmux
+session, the launcher reads `#{pane_current_command}` for that role target and
+requires it to match the configured `live_commands` list, or the configured
+`cli` binary name when `live_commands` is omitted. A stale config fails safe and
+does not kill the pane. Use `--force` only when intentionally overriding that
+guard.
 
 Use `--dry-run` to render the Konsole layout and print the plan without opening
 Konsole:
@@ -50,8 +57,16 @@ Each role entry contains:
 - `workdir`: working directory for the tmux session.
 - `cli`: argv array for the CLI binary.
 - `model`, `model_arg`: optional model selector appended to `cli`.
+- `extra_args`: optional additional argv entries appended after the model.
 - `resume_flag`: flag used by that CLI for context resume.
+- `live_commands`: optional command names accepted as the live pane process
+  before destructive reload.
 - `env`: optional environment variables for the CLI process.
+
+Do not put guessed/default roles into a real project config. If a role is not
+currently active or its CLI/model assignment is unknown, omit it until the
+assignment is verified. The PGU config intentionally omits `perf` because that
+pane is not currently running.
 
 ## Bootstrap
 
@@ -61,5 +76,6 @@ Generate a starter config for another project:
 scripts/team-launcher porter bootstrap --template-output /tmp/porter.json
 ```
 
-The template is intentionally small; copy or adapt the PGU layout/config when
+The template intentionally contains no active roles. Add roles only after their
+live CLI/model assignments are known; copy or adapt the PGU layout/config when
 standing up a full multi-role team.

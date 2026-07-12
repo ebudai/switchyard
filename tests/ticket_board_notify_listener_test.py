@@ -7,6 +7,7 @@ import json
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -825,8 +826,42 @@ static scrollback
     assert "max_defer_force_deliver" not in trace_events(conn)
 
 
-def test_default_stable_idle_window_is_a_few_seconds() -> None:
-    assert 1.0 <= DEFAULT_STABLE_IDLE_SECONDS <= 5.0
+def test_default_stable_idle_window_uses_no_sleep_async_path() -> None:
+    assert DEFAULT_STABLE_IDLE_SECONDS == 0.0
+
+
+def test_default_gate_delivers_batch_without_serial_sleep() -> None:
+    sent: list[tuple[str, str]] = []
+    rows = [
+        queue_row(40, "PGU-340", target_role="ops"),
+        queue_row(41, "PGU-341", target_role="app"),
+        queue_row(42, "PGU-342", target_role="main"),
+        queue_row(43, "PGU-343", target_role="audit"),
+        queue_row(44, "PGU-344", target_role="inspector"),
+    ]
+    expected_count = len(rows)
+
+    def capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout="stable pane output\nstable prompt")
+
+    conn = FakeConnection(rows)
+    gate = PaneActivityGate("/tmp/directorctl", capture_runner=capture_runner)
+    listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=lambda target, message: sent.append((target, message)),
+        activity_gate=gate.is_working,
+        connector=lambda *args, **kwargs: conn,
+        poll_seconds=0,
+    )
+
+    started = time.perf_counter()
+    assert listener.listen_once(max_notifications=expected_count) == expected_count
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 1.0
+    assert len(sent) == expected_count
+    assert conn.acked == [40, 41, 42, 43, 44]
+    assert conn.requeued == []
 
 
 def test_acked_notification_does_not_repeat_across_restart() -> None:
@@ -891,7 +926,8 @@ def main() -> int:
     test_changing_last_lines_requeue_queue_notification()
     test_stable_last_lines_queue_notification_delivers_for_agent()
     test_director_typing_changing_last_lines_requeues_without_force_delivery()
-    test_default_stable_idle_window_is_a_few_seconds()
+    test_default_stable_idle_window_uses_no_sleep_async_path()
+    test_default_gate_delivers_batch_without_serial_sleep()
     test_acked_notification_does_not_repeat_across_restart()
     test_default_sender_delegates_to_directorctl_send()
     print("ticket_board_notify_listener_test: ok")

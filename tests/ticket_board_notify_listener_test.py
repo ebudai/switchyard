@@ -53,6 +53,7 @@ class FakeConnection:
         notifications: list[str] | None = None,
         fail_on_notifies: bool = False,
         executed: list[Any] | None = None,
+        idle_stall_result: int = 0,
     ) -> None:
         self.queue_rows = queue_rows or []
         self.ticket_rows = ticket_rows if ticket_rows is not None else self._ticket_rows_for_queue(self.queue_rows)
@@ -60,9 +61,11 @@ class FakeConnection:
         self.notifications = notifications or []
         self.fail_on_notifies = fail_on_notifies
         self.executed = executed if executed is not None else []
+        self.idle_stall_result = idle_stall_result
         self.acked: list[int] = []
         self.requeued: list[tuple[int, tuple[Any, ...] | None]] = []
         self.traces: list[tuple[Any, ...] | None] = []
+        self.idle_stall_calls: list[tuple[Any, ...] | None] = []
         self.notify_timeouts: list[float | None] = []
         self.closed = False
 
@@ -98,6 +101,9 @@ class FakeConnection:
             self.traces.append(params)
         if "next_notification_attempt" in statement_text:
             return FakeResult([(self.next_attempt_at,)])
+        if "notify_idle_stall_nudges" in statement_text:
+            self.idle_stall_calls.append(params)
+            return FakeResult([(self.idle_stall_result,)])
         if "claim_notification" in statement_text:
             if not self.queue_rows:
                 return FakeResult([])
@@ -240,6 +246,32 @@ def test_hook_state_writer_and_gate_idle_before_arrival_delivers_immediately() -
     assert conn.acked == [1]
     assert conn.traces[1][5] == "idle"
     assert conn.traces[1][6] == "hook_idle"
+
+
+def test_listener_enqueues_idle_stall_nudges_from_hook_state() -> None:
+    with TemporaryStateDir() as tmp_path:
+        store, gate = hook_gate(tmp_path)
+        store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
+        store.write("pgu-app:0.0", "busy", source="codex.PreToolUse", now=101.0)
+        conn = FakeConnection(idle_stall_result=1)
+        listener = TicketBoardNotifyListener(
+            conninfo="",
+            activity_gate=gate.is_working,
+            sender=lambda _target, _message: None,
+            idle_stall_grace_seconds=45,
+            idle_stall_nudge_cadence_seconds=300,
+            idle_stall_escalate_after=2,
+        )
+
+        assert listener.process_idle_stall_nudges(conn) == 1
+
+        assert len(conn.idle_stall_calls) == 1
+        params = conn.idle_stall_calls[0]
+        assert params is not None
+        idle_since = json.loads(str(params[0]))
+        assert set(idle_since) == {"ops"}
+        assert idle_since["ops"].startswith("1970-01-01T00:01:40")
+        assert params[1:] == ("45 seconds", "300 seconds", 2)
 
 
 def test_external_hook_writer_records_state_file() -> None:
@@ -613,6 +645,7 @@ class TemporaryStateDir:
 
 def main() -> int:
     test_hook_state_writer_and_gate_idle_before_arrival_delivers_immediately()
+    test_listener_enqueues_idle_stall_nudges_from_hook_state()
     test_external_hook_writer_records_state_file()
     test_missing_hook_state_fails_safe_and_does_not_clobber()
     test_hook_busy_requeues_with_fixed_interval()

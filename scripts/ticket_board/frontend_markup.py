@@ -33,13 +33,6 @@ MARKUP = """  <div class="layout">
             Assignee
             <select id="assigneeInput"></select>
           </label>
-          <label>
-            Available Frame
-            <select id="screenshotInput"></select>
-          </label>
-          <div class="inline-actions">
-            <button id="addCreateAttachmentBtn" class="small" type="button">Add Attachment</button>
-          </div>
           <div class="paste-hint">Paste an image from the clipboard here to upload and attach it.</div>
           <div id="createPreview" class="preview-card" hidden>
             <div id="createPreviewGallery" class="attachment-gallery"></div>

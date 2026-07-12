@@ -35,8 +35,6 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     const mobileSectionMedia = window.matchMedia('(max-width: 900px)');
     const boardEl = document.getElementById('board');
     const assigneeInput = document.getElementById('assigneeInput');
-    const screenshotInput = document.getElementById('screenshotInput');
-    const addCreateAttachmentBtn = document.getElementById('addCreateAttachmentBtn');
     const createPreviewEl = document.getElementById('createPreview');
     const createPreviewGalleryEl = document.getElementById('createPreviewGallery');
     const titleInput = document.getElementById('titleInput');
@@ -535,16 +533,6 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       return Array.from(new Set((paths || []).filter((path) => !!path)));
     }
 
-    function ensureScreenshotOption(path, label = null) {
-      if (!path) {
-        return;
-      }
-      const exists = Array.from(screenshotInput.options).some((option) => option.value === path);
-      if (!exists) {
-        buildOption(screenshotInput, path, label || path.split('/').pop());
-      }
-    }
-
     function screenshotLabelFor(path) {
       const shot = state.screenshots.find((item) => item.path === path);
       return shot ? `${shot.name} - ${shot.modified}` : path.split('/').pop();
@@ -621,19 +609,10 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
 
     function populateCreateForm() {
       const assigneeValue = assigneeInput.value;
-      const screenshotValue = screenshotInput.value;
       assigneeInput.innerHTML = '';
       state.assignees.forEach((assignee) => buildOption(assigneeInput, assignee, roleLabel(assignee)));
       if (assigneeValue && Array.from(assigneeInput.options).some((option) => option.value === assigneeValue)) {
         assigneeInput.value = assigneeValue;
-      }
-      screenshotInput.innerHTML = '';
-      buildOption(screenshotInput, '', '(none)');
-      state.screenshots.forEach((shot) => buildOption(screenshotInput, shot.path, `${shot.name} - ${shot.modified}`));
-      state.pendingCreateScreenshots.forEach((path) => ensureScreenshotOption(path));
-      if (screenshotValue) {
-        ensureScreenshotOption(screenshotValue);
-        screenshotInput.value = screenshotValue;
       }
       renderCreatePreview();
     }

@@ -22,7 +22,6 @@ def main() -> int:
     assert "titleInput.addEventListener('keydown', submitCreateOnEnter);" in SCRIPT_APP
     assert "bodyInput.addEventListener('keydown', submitCreateOnEnter);" not in SCRIPT_APP
     assert "assigneeInput.addEventListener('keydown', submitCreateOnEnter);" in SCRIPT_APP
-    assert "screenshotInput.addEventListener('keydown', submitCreateOnEnter);" in SCRIPT_APP
     print("create_ticket_enter_submit_test: ok")
     return 0
 

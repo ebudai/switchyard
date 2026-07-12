@@ -10,7 +10,6 @@
         "claude"
       ],
       "model": "opus-4.8",
-      "model_arg": "--model",
       "resume_flag": "--resume",
       "role": "director",
       "slot": 0,
@@ -23,15 +22,10 @@
       "cli": [
         "codex"
       ],
-      "extra_args": [
-        "--reasoning-effort",
-        "high"
-      ],
       "live_commands": [
         "codex"
       ],
       "model": "gpt-5.6-terra",
-      "model_arg": "--model",
       "resume_flag": "--resume",
       "role": "main",
       "slot": 1,
@@ -44,15 +38,10 @@
       "cli": [
         "codex"
       ],
-      "extra_args": [
-        "--reasoning-effort",
-        "high"
-      ],
       "live_commands": [
         "codex"
       ],
       "model": "gpt-5.4",
-      "model_arg": "--model",
       "resume_flag": "--resume",
       "role": "app",
       "slot": 2,
@@ -69,7 +58,6 @@
         "claude"
       ],
       "model": "sonnet-5",
-      "model_arg": "--model",
       "resume_flag": "--resume",
       "role": "research",
       "slot": 4,
@@ -82,15 +70,10 @@
       "cli": [
         "codex"
       ],
-      "extra_args": [
-        "--reasoning-effort",
-        "high"
-      ],
       "live_commands": [
         "codex"
       ],
       "model": "gpt-5.5",
-      "model_arg": "--model",
       "resume_flag": "--resume",
       "role": "ops",
       "slot": 5,
@@ -107,7 +90,6 @@
         "claude"
       ],
       "model": "sonnet-5",
-      "model_arg": "--model",
       "resume_flag": "--resume",
       "role": "audit",
       "slot": 6,
@@ -118,13 +100,12 @@
     },
     {
       "cli": [
-        "gemini"
+        "agy"
       ],
       "live_commands": [
-        "gemini"
+        "agy"
       ],
       "model": "3.5-flash",
-      "model_arg": "--model",
       "resume_flag": "--resume",
       "role": "inspector",
       "slot": 7,

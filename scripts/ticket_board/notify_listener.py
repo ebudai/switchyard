@@ -31,6 +31,9 @@ DEFAULT_REQUEUE_BASE_SECONDS = 5.0
 DEFAULT_REQUEUE_MAX_SECONDS = 60.0
 DEFAULT_BUSY_REQUEUE_SECONDS = 1.0
 DEFAULT_DIRECTOR_COMPOSING_TIMEOUT_SECONDS = 15 * 60.0
+DEFAULT_IDLE_STALL_GRACE_SECONDS = 45.0
+DEFAULT_IDLE_STALL_NUDGE_CADENCE_SECONDS = 5 * 60.0
+DEFAULT_IDLE_STALL_ESCALATE_AFTER = 2
 DEFAULT_PANE_STATE_DIR = (
     Path(os.environ["PGU_TICKET_BOARD_PANE_STATE_DIR"]).expanduser()
     if os.environ.get("PGU_TICKET_BOARD_PANE_STATE_DIR")
@@ -255,6 +258,21 @@ class PaneActivityGate:
         checked_targets = targets or sorted(set(ROLE_TO_TARGET.values()))
         return [target for target in checked_targets if self.state_store.read(target) is None]
 
+    def idle_since_by_role(self, roles: list[str] | None = None) -> dict[str, str]:
+        checked_roles = roles or sorted(ROLE_TO_TARGET)
+        idle_since: dict[str, str] = {}
+        for role in checked_roles:
+            target = ROLE_TO_TARGET.get(role)
+            if target is None:
+                continue
+            if self.is_busy(target):
+                continue
+            state = self.state_store.read(target)
+            if state is None or state.state != "idle":
+                continue
+            idle_since[role] = datetime.fromtimestamp(state.updated_at, timezone.utc).isoformat()
+        return idle_since
+
     def _tmux_session_for_target(self, target: str) -> str:
         return target.split(":", 1)[0]
 
@@ -368,6 +386,9 @@ class TicketBoardNotifyListener:
         requeue_base_seconds: float = DEFAULT_REQUEUE_BASE_SECONDS,
         requeue_max_seconds: float = DEFAULT_REQUEUE_MAX_SECONDS,
         busy_requeue_seconds: float = DEFAULT_BUSY_REQUEUE_SECONDS,
+        idle_stall_grace_seconds: float = DEFAULT_IDLE_STALL_GRACE_SECONDS,
+        idle_stall_nudge_cadence_seconds: float = DEFAULT_IDLE_STALL_NUDGE_CADENCE_SECONDS,
+        idle_stall_escalate_after: int = DEFAULT_IDLE_STALL_ESCALATE_AFTER,
         stop_event: threading.Event | None = None,
         logger: logging.Logger = LOGGER,
     ) -> None:
@@ -381,6 +402,9 @@ class TicketBoardNotifyListener:
         self.requeue_base_seconds = requeue_base_seconds
         self.requeue_max_seconds = requeue_max_seconds
         self.busy_requeue_seconds = busy_requeue_seconds
+        self.idle_stall_grace_seconds = idle_stall_grace_seconds
+        self.idle_stall_nudge_cadence_seconds = idle_stall_nudge_cadence_seconds
+        self.idle_stall_escalate_after = idle_stall_escalate_after
         self.stop_event = stop_event or threading.Event()
         self.logger = logger
         self.delivered_count = 0
@@ -556,6 +580,54 @@ SELECT ticket_board.record_notification_trace(
         due_timeout = max(0.0, seconds_until_due)
         return min(timeout, due_timeout) if timeout > 0 else due_timeout
 
+    def _idle_since_by_role(self) -> dict[str, str]:
+        gate_owner = getattr(self.activity_gate, "__self__", None)
+        idle_since_by_role = getattr(gate_owner, "idle_since_by_role", None)
+        if not callable(idle_since_by_role):
+            return {}
+        try:
+            return dict(idle_since_by_role())
+        except Exception as exc:
+            self.logger.warning("Failed to read pane idle hook state for stall nudges: %s", exc)
+            return {}
+
+    def process_idle_stall_nudges(self, conn: Any) -> int:
+        idle_since = self._idle_since_by_role()
+        if not idle_since:
+            return 0
+        try:
+            result = conn.execute(
+                """
+SELECT ticket_board.notify_idle_stall_nudges(
+    %s::jsonb,
+    clock_timestamp(),
+    %s::interval,
+    %s::interval,
+    %s::integer
+)
+""",
+                (
+                    json.dumps(idle_since, sort_keys=True),
+                    f"{self.idle_stall_grace_seconds:g} seconds",
+                    f"{self.idle_stall_nudge_cadence_seconds:g} seconds",
+                    self.idle_stall_escalate_after,
+                ),
+            )
+            row = result.fetchone()
+        except Exception as exc:
+            self.logger.warning("Failed to enqueue idle-stall nudges: %s", exc)
+            return 0
+        if row is None:
+            return 0
+        value = row[0] if not isinstance(row, dict) else next(iter(row.values()))
+        try:
+            enqueued = int(value)
+        except (TypeError, ValueError):
+            return 0
+        if enqueued:
+            self.logger.info("Enqueued %s idle-stall ticket nudges", enqueued)
+        return enqueued
+
     def _current_ticket_state(self, conn: Any, ticket_id: str) -> tuple[str, str, bool, bool] | None:
         result = conn.execute(
             """
@@ -594,8 +666,6 @@ WHERE id = %s
                 return "director"
             return None
         if kind == "escalation":
-            return "director"
-        if kind == "nudge_analysis":
             return "director"
         if state == "in_progress":
             return assignee if assignee != "unassigned" else None
@@ -810,6 +880,7 @@ WHERE id = %s
             self.logger.info("LISTEN %s established", self.channel)
             self._log_missing_hook_state()
             while not self.stop_event.is_set():
+                self.process_idle_stall_nudges(conn)
                 delivered = self.process_due_notifications(conn, max_notifications=max_notifications)
                 if max_notifications is not None and self.delivered_count >= max_notifications:
                     break

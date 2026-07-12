@@ -1229,7 +1229,7 @@ WHERE ticket_id NOT IN ('PGU-20', 'PGU-21');
             )
             nudges = nudge_proc.stdout.strip()
             assert int(nudges) >= 1, nudges
-            assert "WARNING:  primary notification path was late/undelivered for PGU-20 targeting ops (" in nudge_proc.stderr
+            assert "WARNING:  wedged-pane nudge backstop fired for PGU-20 targeting ops (" in nudge_proc.stderr
             assert "s since transition)" in nudge_proc.stderr
             nudge_state = json.loads(
                 psql(
@@ -1246,42 +1246,17 @@ WHERE ticket_id = 'PGU-20';
                 psql(
                     conninfo,
                     """
-SELECT jsonb_object_agg(target_role, count)::text
+SELECT jsonb_object_agg(kind || ':' || target_role, count)::text
 FROM (
-    SELECT target_role, count(*) AS count
+    SELECT payload->>'kind' AS kind, target_role, count(*) AS count
     FROM ticket_board.ticket_notification_queue
     WHERE ticket_id = 'PGU-20' AND kind = 'nudge'
-    GROUP BY target_role
+    GROUP BY payload->>'kind', target_role
 ) q;
 """,
                 ).stdout
             )
-            assert nudge_queue == {"director": 1, "ops": 1}, nudge_queue
-            director_analysis = json.loads(
-                psql(
-                    conninfo,
-                    """
-SELECT jsonb_build_object(
-    'kind', payload->>'kind',
-    'target_role', target_role,
-    'original_target_role', payload->>'original_target_role',
-    'message', message
-)::text
-FROM ticket_board.ticket_notification_queue
-WHERE ticket_id = 'PGU-20' AND kind = 'nudge' AND target_role = 'director'
-ORDER BY id DESC
-LIMIT 1;
-""",
-                ).stdout
-            )
-            assert director_analysis["kind"] == "nudge_analysis", director_analysis
-            assert director_analysis["target_role"] == "director", director_analysis
-            assert director_analysis["original_target_role"] == "ops", director_analysis
-            assert director_analysis["message"].startswith(
-                "NUDGE-ANALYSIS: PGU-20 (target=ops, state=in_progress, "
-            ), director_analysis
-            assert "s since transition" in director_analysis["message"], director_analysis
-            assert "prior_nudges=0" in director_analysis["message"], director_analysis
+            assert nudge_queue == {"nudge:ops": 1}, nudge_queue
             deduped_nudges = psql(
                 conninfo,
                 "SELECT ticket_board.notify_due_nudges(clock_timestamp() + interval '20 minutes', interval '5 minutes', 3);",
@@ -1291,17 +1266,17 @@ LIMIT 1;
                 psql(
                     conninfo,
                     """
-SELECT jsonb_object_agg(target_role, count)::text
+SELECT jsonb_object_agg(kind || ':' || target_role, count)::text
 FROM (
-    SELECT target_role, count(*) AS count
+    SELECT payload->>'kind' AS kind, target_role, count(*) AS count
     FROM ticket_board.ticket_notification_queue
     WHERE ticket_id = 'PGU-20' AND kind = 'nudge'
-    GROUP BY target_role
+    GROUP BY payload->>'kind', target_role
 ) q;
 """,
                 ).stdout
             )
-            assert deduped_queue == {"director": 1, "ops": 1}, deduped_queue
+            assert deduped_queue == {"nudge:ops": 1}, deduped_queue
             inspection_nudge = json.loads(
                 psql(
                     conninfo,
@@ -1452,7 +1427,7 @@ WHERE t.id = 'PGU-2851';
 """,
                 ).stdout
             )
-            assert cleared_implementation_nudge == {"queued": 2, "last_nudged": True, "nudge_count": 1}, cleared_implementation_nudge
+            assert cleared_implementation_nudge == {"queued": 1, "last_nudged": True, "nudge_count": 1}, cleared_implementation_nudge
             psql(
                 conninfo,
                 """
@@ -1649,9 +1624,191 @@ FROM (
             assert delivery_suppression == {
                 "PGU-2821": {"queued": 0, "last_nudged": False, "nudge_count": 0},
                 "PGU-2822": {"queued": 0, "last_nudged": False, "nudge_count": 0},
-                "PGU-2823": {"queued": 2, "last_nudged": True, "nudge_count": 1},
+                "PGU-2823": {"queued": 1, "last_nudged": True, "nudge_count": 1},
                 "PGU-2824": {"queued": 0, "last_nudged": False, "nudge_count": 0},
             }, delivery_suppression
+            psql(
+                conninfo,
+                """
+DELETE FROM ticket_board.ticket_notification_queue;
+INSERT INTO ticket_board.tickets (
+    id, title, body, state, assignee, implementation, created_text, updated_text, source_json
+) VALUES
+(
+    'PGU-3081', 'Idle implementation stall', '', 'in_progress', 'ops', 'Working.',
+    '2026-07-12T00:00:00+00:00', '2026-07-12T00:00:00+00:00',
+    jsonb_build_object('id', 'PGU-3081', 'title', 'Idle implementation stall', 'body', '', 'state', 'in_progress', 'assignee', 'ops', 'comments', '[]'::jsonb, 'created', '2026-07-12T00:00:00+00:00', 'updated', '2026-07-12T00:00:00+00:00')
+),
+(
+    'PGU-3082', 'Busy implementation is not nudged', '', 'in_progress', 'app', 'Working.',
+    '2026-07-12T00:00:00+00:00', '2026-07-12T00:00:00+00:00',
+    jsonb_build_object('id', 'PGU-3082', 'title', 'Busy implementation is not nudged', 'body', '', 'state', 'in_progress', 'assignee', 'app', 'comments', '[]'::jsonb, 'created', '2026-07-12T00:00:00+00:00', 'updated', '2026-07-12T00:00:00+00:00')
+),
+(
+    'PGU-3083', 'Fresh handoff is not nudged', '', 'in_progress', 'perf', 'Working.',
+    '2026-07-12T00:00:00+00:00', '2026-07-12T00:00:00+00:00',
+    jsonb_build_object('id', 'PGU-3083', 'title', 'Fresh handoff is not nudged', 'body', '', 'state', 'in_progress', 'assignee', 'perf', 'comments', '[]'::jsonb, 'created', '2026-07-12T00:00:00+00:00', 'updated', '2026-07-12T00:00:00+00:00')
+),
+(
+    'PGU-3084', 'Repeated inspection stall escalates', '', 'inspection', 'main', 'Working.',
+    '2026-07-12T00:00:00+00:00', '2026-07-12T00:00:00+00:00',
+    jsonb_build_object('id', 'PGU-3084', 'title', 'Repeated inspection stall escalates', 'body', '', 'state', 'inspection', 'assignee', 'main', 'comments', '[]'::jsonb, 'created', '2026-07-12T00:00:00+00:00', 'updated', '2026-07-12T00:00:00+00:00')
+),
+(
+    'PGU-3085', 'Held director review is not idle-nudged', '', 'director_review', 'director', 'Working.',
+    '2026-07-12T00:00:00+00:00', '2026-07-12T00:00:00+00:00',
+    jsonb_build_object('id', 'PGU-3085', 'title', 'Held director review is not idle-nudged', 'body', '', 'state', 'director_review', 'assignee', 'director', 'comments', '[]'::jsonb, 'created', '2026-07-12T00:00:00+00:00', 'updated', '2026-07-12T00:00:00+00:00')
+);
+UPDATE ticket_board.ticket_notification_state
+SET entered_current_state_at = clock_timestamp() - interval '10 minutes',
+    last_activity_at = clock_timestamp() - interval '10 minutes',
+    last_nudged_at = NULL,
+    nudge_count = 0
+WHERE ticket_id IN ('PGU-3081', 'PGU-3082', 'PGU-3084', 'PGU-3085');
+UPDATE ticket_board.ticket_notification_state
+SET entered_current_state_at = clock_timestamp() - interval '20 seconds',
+    last_activity_at = clock_timestamp() - interval '20 seconds',
+    last_nudged_at = NULL,
+    nudge_count = 0
+WHERE ticket_id = 'PGU-3083';
+UPDATE ticket_board.ticket_notification_state
+SET last_nudged_at = clock_timestamp() - interval '6 minutes',
+    nudge_count = 2
+WHERE ticket_id = 'PGU-3084';
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ticket_board_listener') THEN
+        CREATE ROLE ticket_board_listener;
+    END IF;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION ticket_board.notify_idle_stall_nudges(jsonb, timestamptz, interval, interval, integer) TO ticket_board_listener;
+SET ROLE ticket_board_listener;
+WITH params AS (
+    SELECT clock_timestamp() AS now_at
+)
+SELECT ticket_board.notify_idle_stall_nudges(
+    jsonb_build_object(
+        'ops', (now_at - interval '2 minutes')::text,
+        'perf', (now_at - interval '2 minutes')::text,
+        'inspector', (now_at - interval '2 minutes')::text,
+        'director', (now_at - interval '2 minutes')::text
+    ),
+    now_at,
+    interval '45 seconds',
+    interval '5 minutes',
+    2
+)
+FROM params;
+RESET ROLE;
+""",
+            )
+            idle_stall_nudges = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_object_agg(ticket_id, row_json ORDER BY ticket_id)::text
+FROM (
+    SELECT
+        t.id AS ticket_id,
+        jsonb_build_object(
+            'state', t.state,
+            'queued', (
+                SELECT jsonb_object_agg(kind || ':' || target_role, count ORDER BY kind || ':' || target_role)
+                FROM (
+                    SELECT kind, target_role, count(*)::int AS count
+                    FROM ticket_board.ticket_notification_queue q
+                    WHERE q.ticket_id = t.id
+                      AND q.kind IN ('nudge', 'escalation')
+                    GROUP BY kind, target_role
+                ) q_counts
+            ),
+            'last_nudged', ns.last_nudged_at IS NOT NULL,
+            'nudge_count', ns.nudge_count
+        ) AS row_json
+    FROM ticket_board.tickets t
+    JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
+    WHERE t.id IN ('PGU-3081', 'PGU-3082', 'PGU-3083', 'PGU-3084', 'PGU-3085')
+) s;
+""",
+                ).stdout
+            )
+            assert idle_stall_nudges == {
+                "PGU-3081": {
+                    "state": "in_progress",
+                    "queued": {"nudge:ops": 1},
+                    "last_nudged": True,
+                    "nudge_count": 1,
+                },
+                "PGU-3082": {
+                    "state": "in_progress",
+                    "queued": None,
+                    "last_nudged": False,
+                    "nudge_count": 0,
+                },
+                "PGU-3083": {
+                    "state": "in_progress",
+                    "queued": None,
+                    "last_nudged": False,
+                    "nudge_count": 0,
+                },
+                "PGU-3084": {
+                    "state": "inspection",
+                    "queued": {"escalation:director": 1},
+                    "last_nudged": True,
+                    "nudge_count": 3,
+                },
+                "PGU-3085": {
+                    "state": "director_review",
+                    "queued": None,
+                    "last_nudged": False,
+                    "nudge_count": 0,
+                },
+            }, idle_stall_nudges
+            psql(
+                conninfo,
+                """
+DELETE FROM ticket_board.ticket_notification_queue;
+UPDATE ticket_board.ticket_notification_state
+SET last_nudged_at = clock_timestamp() + interval '1 hour'
+WHERE ticket_id <> 'PGU-3082';
+UPDATE ticket_board.ticket_notification_state
+SET entered_current_state_at = clock_timestamp() - interval '1 hour',
+    last_activity_at = clock_timestamp() - interval '1 hour',
+    last_nudged_at = NULL,
+    nudge_count = 0
+WHERE ticket_id = 'PGU-3082';
+SELECT ticket_board.notify_due_nudges(clock_timestamp(), interval '5 minutes', 3);
+""",
+            )
+            wedged_backstop = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'state', t.state,
+    'queued', (
+        SELECT count(*)::int
+        FROM ticket_board.ticket_notification_queue q
+        WHERE q.ticket_id = t.id
+          AND q.kind = 'nudge'
+          AND q.target_role = 'app'
+    ),
+    'last_nudged', ns.last_nudged_at IS NOT NULL,
+    'nudge_count', ns.nudge_count
+)::text
+FROM ticket_board.tickets t
+JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
+WHERE t.id = 'PGU-3082';
+""",
+                ).stdout
+            )
+            assert wedged_backstop == {
+                "state": "in_progress",
+                "queued": 1,
+                "last_nudged": True,
+                "nudge_count": 1,
+            }, wedged_backstop
             psql(
                 conninfo,
                 """

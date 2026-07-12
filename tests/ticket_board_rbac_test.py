@@ -281,7 +281,7 @@ def assert_service_can_execute_every_write_function(admin_conn: str, service_con
     psql(service_conn, "SELECT ticket_board.route('PGU-200', 'backlog', 'ops');")
     assert psql(admin_conn, "SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = 'PGU-200';") == "backlog:ops"
 
-    insert_ticket(admin_conn, "PGU-300", title="Start fixture", state="ready", assignee="ops", implementation="Ready.")
+    insert_ticket(admin_conn, "PGU-300", title="Start fixture", state="analysis", assignee="ops", implementation="Ready.")
     psql(service_conn, "SELECT ticket_board.start_work('PGU-300');")
     assert psql(admin_conn, "SELECT state FROM ticket_board.tickets WHERE id = 'PGU-300';") == "in_progress"
 
@@ -373,7 +373,7 @@ FROM ticket_board.tickets t WHERE id = 'PGU-601';
 """,
         )
     )
-    assert eric_reopened == {"state": "ready", "comment": "Needs another pass."}, eric_reopened
+    assert eric_reopened == {"state": "in_progress", "comment": "Needs another pass."}, eric_reopened
 
     insert_ticket(
         admin_conn,
@@ -485,7 +485,7 @@ def assert_structural_rules_still_apply(admin_conn: str, service_conn: str) -> N
     )
 
     insert_ticket(admin_conn, "PGU-901", title="Illegal start", state="analysis", assignee="ops")
-    assert "illegal state transition: analysis -> in_progress" in psql_error(
+    assert "implementation must be non-empty" in psql_error(
         service_conn,
         "SELECT ticket_board.start_work('PGU-901');",
     )
@@ -508,7 +508,7 @@ def assert_deferred_cancel_resurrect_clears_park_and_notifies(admin_conn: str, s
         admin_conn,
         "PGU-930",
         title="Deferred lifecycle",
-        state="ready",
+        state="in_progress",
         assignee="ops",
         implementation="Do the thing.",
     )
@@ -566,13 +566,13 @@ SELECT jsonb_build_object(
         manually_controlled,
         id
     ),
-    'ready_notifications', (
+    'implementation_notifications', (
         SELECT count(*)::int
         FROM ticket_board.ticket_notification_queue q
         WHERE q.ticket_id = t.id
           AND q.kind = 'transition'
           AND q.target_role = 'ops'
-          AND q.payload->>'new_state' = 'ready'
+          AND q.payload->>'new_state' = 'in_progress'
     )
 )::text
 FROM ticket_board.tickets t
@@ -581,19 +581,19 @@ WHERE id = 'PGU-930';
         )
     )
     assert resurrected == {
-        "state": "ready",
+        "state": "in_progress",
         "assignee": "ops",
         "parked": False,
         "manually_controlled": False,
         "can_auto_advance": True,
-        "ready_notifications": 1,
+        "implementation_notifications": 1,
     }, resurrected
 
 
 def assert_listener_can_execute_reconcile_functions(admin_conn: str, listener_conn: str, service_conn: str) -> None:
     psql(admin_conn, "DELETE FROM ticket_board.ticket_notification_queue;")
     insert_ticket(admin_conn, "PGU-950", title="Listener queue", state="analysis", assignee="ops", implementation="Ready.")
-    psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'ready' WHERE id = 'PGU-950';")
+    psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-950';")
 
     claimed = json.loads(
         psql(
@@ -606,7 +606,7 @@ FROM ticket_board.claim_notification() AS claimed;
     )
     assert claimed["ticket_id"] == "PGU-950", claimed
     assert claimed["target_role"] == "ops", claimed
-    assert claimed["message"] == "Ready ticket for you: PGU-950 -- Listener queue", claimed
+    assert claimed["message"] == "New ticket for you: PGU-950 -- Listener queue", claimed
     assert claimed["attempts"] == 1, claimed
 
     psql(listener_conn, f"SELECT ticket_board.requeue_notification({claimed['notification_id']}, interval '0 seconds', 'busy');")

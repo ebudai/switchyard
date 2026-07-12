@@ -102,12 +102,12 @@ def run_browser_check(playwright: object, server_port: int) -> None:
         create_content.locator("#titleInput").wait_for(timeout=5000)
 
         analysis_head = mobile.locator(".column-head").filter(has=mobile.locator(".column-title", has_text="Analysis"))
-        ready_head = mobile.locator(".column-head").filter(has=mobile.locator(".column-title", has_text="Ready"))
+        implementation_head = mobile.locator(".column-head").filter(has=mobile.locator(".column-title", has_text="Implementation"))
         audit_head = mobile.locator(".column-head").filter(has=mobile.locator(".column-title", has_text="Audit"))
         eric_head = mobile.locator(".column-head").filter(has=mobile.locator(".column-title", has_text="Eric Review"))
 
         analysis_head.get_by_text("(1)", exact=True).wait_for(timeout=5000)
-        ready_head.get_by_text("(1)", exact=True).wait_for(timeout=5000)
+        implementation_head.get_by_text("(1)", exact=True).wait_for(timeout=5000)
         audit_head.get_by_text("(1)", exact=True).wait_for(timeout=5000)
         assert eric_head.locator(".mobile-section-count").count() == 0
 
@@ -152,7 +152,7 @@ def main() -> int:
 
         tickets = [
             ticket_payload("PGU-1", "Analysis task", state="analysis"),
-            ticket_payload("PGU-2", "Ready task", state="ready"),
+            ticket_payload("PGU-2", "Implementation task", state="in_progress"),
             ticket_payload("PGU-3", "Audit task", state="audit"),
         ]
         child_done = ticket_payload("PGU-4", "Done child A", state="done")

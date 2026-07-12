@@ -274,7 +274,7 @@ def assert_frontend_update_calls_send_caller_role() -> None:
 
 def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
     seed_ticket("PGU-100", title="Route", state="analysis")
-    seed_ticket("PGU-101", title="Start submit", state="ready", assignee="ops", implementation="Ready.")
+    seed_ticket("PGU-101", title="Start submit", state="analysis", assignee="ops", implementation="Ready.")
     seed_ticket("PGU-102", title="Audit signoff", state="audit", assignee="audit", implementation="Done.")
     seed_ticket("PGU-103", title="Audit kickback", state="audit", assignee="audit", implementation="Done.")
     seed_ticket(
@@ -310,7 +310,7 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
     seed_ticket(
         "PGU-117",
         title="Needs inspection submit",
-        state="ready",
+        state="analysis",
         assignee="ops",
         implementation="Render output attached.",
         needs_inspection=True,
@@ -340,7 +340,7 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
     seed_ticket("PGU-114", title="Merge target", state="analysis")
     seed_ticket(
         "PGU-115",
-        title="Director kickback to ready",
+        title="Director kickback to implementation",
         state="director_review",
         assignee="director",
         implementation="Done.",
@@ -430,14 +430,14 @@ def exercise_write_api(base_url: str, commit_hash: str) -> None:
     routed = post_json(base_url, "/api/tickets/PGU-100/actions/route", {"state": "backlog", "assignee": "ops"}, caller="director")
     assert routed["ticket"]["state"] == "backlog", routed  # type: ignore[index]
     assert routed["ticket"]["assignee"] == "ops", routed  # type: ignore[index]
-    director_ready = post_json(
+    director_implementation = post_json(
         base_url,
         "/api/tickets/PGU-115/actions/route",
-        {"state": "ready", "assignee": "ops"},
+        {"state": "in_progress", "assignee": "ops"},
         caller="director",
     )
-    assert director_ready["ticket"]["state"] == "ready", director_ready  # type: ignore[index]
-    assert director_ready["ticket"]["assignee"] == "ops", director_ready  # type: ignore[index]
+    assert director_implementation["ticket"]["state"] == "in_progress", director_implementation  # type: ignore[index]
+    assert director_implementation["ticket"]["assignee"] == "ops", director_implementation  # type: ignore[index]
 
     wrong_assignee = post_json(base_url, "/api/tickets/PGU-101/actions/start_work", {}, caller="app", expect=403)
     assert "app cannot call start_work for ticket assigned to ops" in str(wrong_assignee), wrong_assignee
@@ -530,7 +530,7 @@ def exercise_write_api(base_url: str, commit_hash: str) -> None:
         {"recommendations": "Frame has visible banding."},
         caller="inspector",
     )
-    assert inspector_kicked["ticket"]["state"] == "ready", inspector_kicked  # type: ignore[index]
+    assert inspector_kicked["ticket"]["state"] == "in_progress", inspector_kicked  # type: ignore[index]
     assert inspector_kicked["ticket"]["inspector_signoff"] is False, inspector_kicked  # type: ignore[index]
     assert inspector_kicked["ticket"]["comments"][-1]["who"] == "inspector", inspector_kicked  # type: ignore[index]
     assert "Frame has visible banding." in inspector_kicked["ticket"]["comments"][-1]["text"], inspector_kicked  # type: ignore[index]
@@ -564,7 +564,7 @@ def exercise_write_api(base_url: str, commit_hash: str) -> None:
         {"reason": "Needs design revision."},
         caller="eric",
     )
-    assert eric_reopened["ticket"]["state"] in {"analysis", "ready"}, eric_reopened  # type: ignore[index]
+    assert eric_reopened["ticket"]["state"] in {"analysis", "in_progress"}, eric_reopened  # type: ignore[index]
     assert eric_reopened["ticket"]["comments"][-1]["who"] == "eric", eric_reopened  # type: ignore[index]
 
     done = post_json(base_url, "/api/tickets/PGU-106/actions/mark_done", {"commit_hash": commit_hash}, caller="director")

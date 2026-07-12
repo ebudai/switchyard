@@ -44,8 +44,8 @@ def main() -> int:
     )
     assert_equal(
         journal.notification_pairs_for_message("pgu-app:0.0", "Ready ticket for you: PGU-81 -- Tailscale"),
-        ["PGU-81|ready"],
-        "ready notification should map to assignee ready pair",
+        ["PGU-81|in_progress"],
+        "legacy ready notification should map to assignee in_progress pair",
     )
     assert_equal(
         journal.notification_pairs_for_message("pgu-audit:0.0", "PGU-81 -- Tailscale ready for audit"),

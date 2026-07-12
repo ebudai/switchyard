@@ -24,7 +24,6 @@ LEGACY_STATE_ALIASES = {"open": "analysis"}
 STATES = (
     "backlog",
     "analysis",
-    "ready",
     "in_progress",
     "inspection",
     "audit",
@@ -625,7 +624,7 @@ ORDER BY t.ticket_number
                 if "state" in patch:
                     if inspector_signoff_handled and state == "audit":
                         pass
-                    elif state == "ready" and comment_text and current["state"] == "inspection":
+                    elif state == "in_progress" and comment_text and current["state"] == "inspection":
                         self._pg_call(conn, "SELECT ticket_board.inspector_kick_back(%s, %s);", (ticket_id, comment_text))
                         comment_text = ""
                     elif state == "in_progress":

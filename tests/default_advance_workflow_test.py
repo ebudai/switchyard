@@ -15,26 +15,28 @@ from scripts.ticket_board.frontend import HTML
 
 def main() -> int:
     assert "{ key: 'backlog', label: 'Backlog' }" in HTML
+    assert "{ key: 'ready', label: 'Ready' }" not in HTML
+    assert "{ key: 'in_progress', label: 'Implementation' }" in HTML
+    assert "{ key: 'director_review', label: 'Ready' }" in HTML
     assert "function defaultAdvanceState(ticket)" in HTML
     assert "if (ticket.state === 'backlog') {" in HTML
+    assert "return 'analysis';" in HTML
+    assert "if (ticket.state === 'analysis') {" in HTML
+    assert "return 'in_progress';" in HTML
     assert "return ticket.needs_eric_signoff ? 'eric_review' : 'director_review';" in HTML
     assert "if (ticket.state === 'eric_review') {" in HTML
     assert "return 'director_review';" in HTML
     assert "if (ticket.state === 'director_review') {" in HTML
     assert "return 'done';" in HTML
     assert "function advanceBlockedReason(ticket)" in HTML
-    assert "return 'ready';" in HTML
-    assert "ticket.state === 'backlog' || ticket.state === 'analysis'" in HTML
-    assert "Assign the ticket before advancing to ready." in HTML
-    assert "Save implementation before advancing to ready." in HTML
-    assert "Assign the ticket before advancing to in progress." in HTML
-    assert "Save implementation before advancing to in progress." in HTML
-    assert "already has an in-progress ticket" in HTML
-    assert "rootTicketForBoard(item).id !== ticketRootId" in HTML
+    assert "return 'ready';" not in HTML
+    assert "Assign the ticket before advancing to Implementation." in HTML
+    assert "Save implementation before advancing to Implementation." in HTML
+    assert "already has an in-progress ticket" not in HTML
     assert "Save audit prompt before advancing to audit." not in HTML
     assert "Set audit signoff before advancing to Eric review." in HTML
-    assert "Set audit signoff before advancing to Director Review." in HTML
-    assert "Record Eric signoff before advancing to Director Review." in HTML
+    assert "Set audit signoff before advancing to Ready." in HTML
+    assert "Record Eric signoff before advancing to Ready." in HTML
     assert "Save a verified commit hash or enable no-commit override before advancing to done." in HTML
     assert "Advance -> ${stateLabel(detailAdvanceState)}" in HTML
     assert "await advanceTicket(ticket.id);" in HTML

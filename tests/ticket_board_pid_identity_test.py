@@ -184,7 +184,7 @@ def assert_unix_socket_write_derives_role_and_releases_registration() -> None:
         assets.mkdir()
         app = MemoryBoardApp(
             [
-                ticket_payload("PGU-300", title="Start through socket", state="ready", assignee="ops", implementation="Ready."),
+                ticket_payload("PGU-300", title="Start through socket", state="in_progress", assignee="ops", implementation="Ready."),
                 ticket_payload("PGU-301", title="Header mismatch", state="analysis"),
             ],
             frames,

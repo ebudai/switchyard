@@ -223,7 +223,7 @@ def main() -> int:
             assert cancelled["state"] == "cancelled", cancelled
             assert cancelled["comments"][-1]["text"] == "Covered by PGU-1.", cancelled
 
-            insert_ticket(admin_conn, "PGU-100", title="Ops ready", state="ready", assignee="ops")
+            insert_ticket(admin_conn, "PGU-100", title="Ops implementation", state="analysis", assignee="ops")
             in_progress = service_app.update_ticket("PGU-100", {"state": "in_progress"})
             assert in_progress["state"] == "in_progress", in_progress
             submitted = service_app.update_ticket("PGU-100", {"state": "audit", "commit_hash": "abcdef1"})
@@ -271,7 +271,7 @@ def main() -> int:
                 "PGU-301",
                 {"state": "analysis", "comment": {"who": "eric", "text": "Needs design revision."}},
             )
-            assert eric_reopened["state"] == "ready", eric_reopened
+            assert eric_reopened["state"] == "in_progress", eric_reopened
             assert eric_reopened["comments"][-1]["text"] == "Needs design revision.", eric_reopened
 
             deferred = service_app.update_ticket("PGU-1", {"state": "backlog"})

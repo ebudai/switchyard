@@ -31,7 +31,6 @@ CREATE TABLE IF NOT EXISTS ticket_board.tickets (
         CHECK (state IN (
             'backlog',
             'analysis',
-            'ready',
             'in_progress',
             'inspection',
             'audit',
@@ -119,7 +118,6 @@ ALTER TABLE ticket_board.tickets
     ADD CONSTRAINT tickets_state_check CHECK (state IN (
         'backlog',
         'analysis',
-        'ready',
         'in_progress',
         'inspection',
         'audit',
@@ -288,8 +286,6 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    current_root text;
-    conflicting_ticket_id text;
 BEGIN
     IF NEW.state <> 'backlog' OR OLD.state IN ('done', 'cancelled') THEN
         NEW.parked := false;
@@ -327,14 +323,13 @@ BEGIN
 
     IF OLD.state IS DISTINCT FROM NEW.state THEN
         IF NOT (
-            (OLD.state = 'backlog' AND NEW.state IN ('analysis', 'ready', 'cancelled')) OR
-            (OLD.state = 'analysis' AND NEW.state IN ('ready', 'backlog', 'cancelled')) OR
-            (OLD.state = 'ready' AND NEW.state IN ('in_progress', 'analysis', 'backlog', 'cancelled')) OR
-            (OLD.state = 'in_progress' AND NEW.state IN ('inspection', 'audit', 'ready', 'analysis', 'backlog', 'cancelled')) OR
-            (OLD.state = 'inspection' AND NEW.state IN ('audit', 'ready', 'backlog', 'cancelled')) OR
+            (OLD.state = 'backlog' AND NEW.state IN ('analysis', 'cancelled')) OR
+            (OLD.state = 'analysis' AND NEW.state IN ('in_progress', 'backlog', 'cancelled')) OR
+            (OLD.state = 'in_progress' AND NEW.state IN ('inspection', 'audit', 'analysis', 'backlog', 'cancelled')) OR
+            (OLD.state = 'inspection' AND NEW.state IN ('audit', 'in_progress', 'backlog', 'cancelled')) OR
             (OLD.state = 'audit' AND NEW.state IN ('eric_review', 'director_review', 'analysis', 'backlog', 'cancelled')) OR
             (OLD.state = 'eric_review' AND NEW.state IN ('director_review', 'audit', 'analysis', 'backlog', 'cancelled')) OR
-            (OLD.state = 'director_review' AND NEW.state IN ('done', 'ready', 'analysis', 'backlog', 'cancelled')) OR
+            (OLD.state = 'director_review' AND NEW.state IN ('done', 'in_progress', 'analysis', 'backlog', 'cancelled')) OR
             (OLD.state = 'done' AND NEW.state IN ('analysis', 'backlog')) OR
             (OLD.state = 'cancelled' AND NEW.state IN ('analysis', 'backlog'))
         ) THEN
@@ -343,13 +338,13 @@ BEGIN
     END IF;
 
     IF OLD.state IN ('inspection', 'audit', 'eric_review', 'director_review', 'done', 'cancelled')
-       AND NEW.state IN ('backlog', 'analysis', 'ready', 'in_progress') THEN
+       AND NEW.state IN ('backlog', 'analysis', 'in_progress') THEN
         NEW.inspector_signoff := false;
         NEW.audit_signoff := false;
         NEW.commit_hash := '';
     END IF;
 
-    IF OLD.state = 'inspection' AND NEW.state = 'ready' THEN
+    IF OLD.state = 'inspection' AND NEW.state = 'in_progress' THEN
         IF NOT EXISTS (
             SELECT 1
             FROM ticket_board.ticket_comments
@@ -380,41 +375,12 @@ BEGIN
         RAISE EXCEPTION 'only active tickets can be cancelled';
     END IF;
 
-    IF OLD.state <> 'ready' AND NEW.state = 'ready' THEN
-        IF NEW.assignee = 'unassigned' THEN
-            RAISE EXCEPTION 'assignee must not be unassigned before a ticket can enter ready';
-        END IF;
-        IF btrim(NEW.implementation) = '' THEN
-            RAISE EXCEPTION 'implementation must be non-empty before a ticket can enter ready';
-        END IF;
-    END IF;
-
     IF OLD.state <> 'in_progress' AND NEW.state = 'in_progress' THEN
-        IF OLD.state = 'analysis' THEN
-            RAISE EXCEPTION 'analysis tickets must move through ready before entering in_progress';
-        END IF;
         IF NEW.assignee = 'unassigned' THEN
             RAISE EXCEPTION 'assignee must not be unassigned before a ticket can enter in_progress';
         END IF;
         IF btrim(NEW.implementation) = '' THEN
             RAISE EXCEPTION 'implementation must be non-empty before a ticket can enter in_progress';
-        END IF;
-
-        current_root := ticket_board.ticket_cluster_root_id(NEW.id, NEW.parent_id);
-        SELECT other.id
-        INTO conflicting_ticket_id
-        FROM ticket_board.tickets AS other
-        WHERE other.id <> NEW.id
-          AND other.state = 'in_progress'
-          AND other.assignee = NEW.assignee
-          AND ticket_board.ticket_cluster_root_id(other.id, other.parent_id) <> current_root
-        ORDER BY other.ticket_number
-        LIMIT 1;
-
-        IF conflicting_ticket_id IS NOT NULL THEN
-            RAISE EXCEPTION '% already has an in-progress ticket %; finish or move it first',
-                NEW.assignee,
-                conflicting_ticket_id;
         END IF;
     END IF;
 
@@ -469,7 +435,7 @@ BEGIN
     IF OLD.state IS DISTINCT FROM NEW.state THEN
         target_role := ticket_board.transition_target_role(NEW.state, NEW.assignee);
         message := ticket_board.transition_message(NEW.id, NEW.title, OLD.state, NEW.state);
-        IF OLD.state = 'inspection' AND NEW.state = 'ready' THEN
+        IF OLD.state = 'inspection' AND NEW.state = 'in_progress' THEN
             SELECT c.text
             INTO recommendation
             FROM ticket_board.ticket_comments AS c
@@ -671,7 +637,7 @@ BEGIN
         NEW.id
     ) THEN
         UPDATE ticket_board.tickets
-        SET state = 'ready'
+        SET state = 'in_progress'
         WHERE id = NEW.id
           AND state = 'analysis';
     END IF;
@@ -712,7 +678,7 @@ IMMUTABLE
 AS $$
     SELECT CASE
         WHEN p_state = 'analysis' THEN 'director'
-        WHEN p_state IN ('ready', 'in_progress') THEN NULLIF(p_assignee, 'unassigned')
+        WHEN p_state = 'in_progress' THEN NULLIF(p_assignee, 'unassigned')
         WHEN p_state = 'inspection' THEN 'inspector'
         WHEN p_state = 'audit' THEN 'audit'
         WHEN p_state = 'director_review' THEN 'director'
@@ -728,7 +694,6 @@ AS $$
     SELECT CASE p_state
         WHEN 'backlog' THEN 0
         WHEN 'analysis' THEN 1
-        WHEN 'ready' THEN 2
         WHEN 'in_progress' THEN 3
         WHEN 'inspection' THEN 4
         WHEN 'audit' THEN 5
@@ -757,8 +722,6 @@ AS $$
             THEN p_ticket_id || CASE WHEN p_title <> '' THEN ' -- ' || p_title ELSE '' END || ' kicked back to you'
         WHEN p_new_state = 'analysis'
             THEN 'New ticket for you: ' || p_ticket_id || CASE WHEN p_title <> '' THEN ' -- ' || p_title ELSE '' END
-        WHEN p_new_state = 'ready'
-            THEN 'Ready ticket for you: ' || p_ticket_id || CASE WHEN p_title <> '' THEN ' -- ' || p_title ELSE '' END
         WHEN p_new_state = 'in_progress'
             THEN 'New ticket for you: ' || p_ticket_id || CASE WHEN p_title <> '' THEN ' -- ' || p_title ELSE '' END
         WHEN p_new_state = 'inspection'
@@ -945,7 +908,7 @@ BEGIN
         ticket_board.transition_notification_payload(t.id, ns.previous_state, t.state, t.assignee)
     FROM ticket_board.tickets t
     JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
-    WHERE t.state IN ('analysis', 'ready', 'in_progress', 'inspection', 'audit', 'director_review')
+    WHERE t.state IN ('analysis', 'in_progress', 'inspection', 'audit', 'director_review')
       AND NOT t.manually_controlled
       AND (ns.last_transition_notified_at IS NULL OR ns.last_transition_notified_at < ns.entered_current_state_at)
     ORDER BY ns.entered_current_state_at, t.ticket_number;
@@ -973,7 +936,7 @@ LANGUAGE sql
 IMMUTABLE
 AS $$
     SELECT CASE
-        WHEN p_state = 'ready' THEN NULLIF(p_assignee, 'unassigned')
+        WHEN p_state = 'in_progress' THEN NULLIF(p_assignee, 'unassigned')
         WHEN p_state = 'inspection' THEN 'inspector'
         WHEN p_state = 'audit' THEN 'audit'
         WHEN p_state = 'director_review' THEN 'director'
@@ -989,7 +952,6 @@ AS $$
     SELECT CASE
         WHEN p_state = 'analysis' THEN 'NUDGE ' || p_ticket_id || ' -- ' || p_title || ' needs director triage in analysis'
         WHEN p_state = 'backlog' THEN 'NUDGE ' || p_ticket_id || ' -- ' || p_title || ' is assigned in backlog; triage or defer explicitly'
-        WHEN p_state = 'ready' THEN 'NUDGE Ready ticket for you: ' || p_ticket_id || ' -- ' || p_title
         WHEN p_state = 'in_progress' THEN 'NUDGE ' || p_ticket_id || ' -- ' || p_title || ' is still in progress'
         WHEN p_state = 'inspection' THEN 'NUDGE ' || p_ticket_id || ' -- ' || p_title || ' ready for inspection'
         WHEN p_state = 'audit' THEN 'NUDGE ' || p_ticket_id || ' -- ' || p_title || ' ready for audit'
@@ -1043,14 +1005,13 @@ BEGIN
                 ticket_board.nudge_target_role(t.state, t.assignee) AS target_role,
                 CASE t.state
                     WHEN 'inspection' THEN 2
-                    WHEN 'ready' THEN 3
                     WHEN 'audit' THEN 4
                     WHEN 'director_review' THEN 5
                     ELSE 5
                 END AS priority
             FROM ticket_board.tickets t
             JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
-            WHERE t.state IN ('ready', 'inspection', 'audit', 'director_review')
+            WHERE t.state IN ('in_progress', 'inspection', 'audit', 'director_review')
               AND NOT t.manually_controlled
               AND ticket_board.nudge_target_role(t.state, t.assignee) IS NOT NULL
               AND ns.entered_current_state_at <= p_now - p_cadence
@@ -1673,7 +1634,7 @@ DECLARE
     actor text;
 BEGIN
     actor := ticket_board.require_actor(ARRAY['director'], 'route');
-    IF new_state NOT IN ('backlog', 'analysis', 'ready', 'in_progress', 'inspection', 'audit', 'eric_review', 'director_review', 'done', 'cancelled') THEN
+    IF new_state NOT IN ('backlog', 'analysis', 'in_progress', 'inspection', 'audit', 'eric_review', 'director_review', 'done', 'cancelled') THEN
         RAISE EXCEPTION 'invalid state: %', new_state;
     END IF;
     IF assignee NOT IN ('unassigned', 'main', 'app', 'perf', 'ops', 'audit', 'inspector', 'agent', 'director', 'research') THEN
@@ -1835,7 +1796,7 @@ BEGIN
     comment_actor := ticket_board.current_app_actor();
     PERFORM ticket_board.append_ticket_comment(id, comment_actor, recommendations);
     UPDATE ticket_board.tickets
-    SET state = 'ready',
+    SET state = 'in_progress',
         inspector_signoff = false
     WHERE tickets.id = inspector_kick_back.id
       AND tickets.state = 'inspection';

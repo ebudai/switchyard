@@ -10,6 +10,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from PIL import Image
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -231,6 +233,19 @@ def main() -> int:
             assert submitted["commit_hash"] == "abcdef1", submitted
             edited = service_app.update_ticket("PGU-100", {"implementation": "Edited through function API."})
             assert edited["implementation"] == "Edited through function API.", edited
+
+            frame_attachment = frames / "frame-ref.png"
+            Image.new("RGB", (2, 2), (80, 120, 160)).save(frame_attachment)
+            attached = service_app.update_ticket("PGU-100", {"screenshots": [str(frame_attachment)]})
+            stored_path = Path(attached["screenshots"][0])
+            assert stored_path != frame_attachment.resolve(), attached
+            assert assets.resolve() in stored_path.parents, attached
+            assert attached["screenshots_info"][0]["available"] is True, attached
+            frame_attachment.unlink()
+            persisted_attachment = service_app.get_ticket("PGU-100")
+            assert persisted_attachment["screenshots"] == [str(stored_path)], persisted_attachment
+            assert persisted_attachment["screenshots_info"][0]["available"] is True, persisted_attachment
+            assert stored_path.is_file(), stored_path
 
             audit_ready = service_app.update_ticket("PGU-100", {"audit_signoff": True})
             assert audit_ready["state"] == "director_review", audit_ready

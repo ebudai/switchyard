@@ -13,6 +13,8 @@ import urllib.request
 from pathlib import Path
 from urllib.error import HTTPError
 
+from PIL import Image
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -402,7 +404,7 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
     )
 
 
-def exercise_write_api(base_url: str, commit_hash: str) -> None:
+def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets: Path) -> None:
     missing = post_json(base_url, "/api/tickets/actions/create_ticket", {"title": "No caller", "body": ""}, expect=400)
     assert "missing X-PGU-Caller-Role" in str(missing), missing
     forbidden = post_json(
@@ -759,6 +761,22 @@ def exercise_write_api(base_url: str, commit_hash: str) -> None:
     assert edited["ticket"]["title"] == "Edited through action", edited  # type: ignore[index]
     invalid_edit = post_json(base_url, "/api/tickets/PGU-112/actions/edit_fields", {"state": "done"}, caller="app", expect=400)
     assert "edit_fields cannot update: state" in str(invalid_edit), invalid_edit
+    frame_attachment = frames / "api-frame-ref.png"
+    Image.new("RGB", (2, 2), (40, 80, 120)).save(frame_attachment)
+    attachment_edit = post_json(
+        base_url,
+        "/api/tickets/PGU-112/actions/edit_fields",
+        {"screenshots": [str(frame_attachment)]},
+        caller="app",
+    )
+    stored_path = Path(attachment_edit["ticket"]["screenshots"][0])  # type: ignore[index]
+    assert stored_path != frame_attachment.resolve(), attachment_edit
+    assert assets.resolve() in stored_path.parents, attachment_edit
+    assert attachment_edit["ticket"]["screenshots_info"][0]["available"] is True, attachment_edit  # type: ignore[index]
+    frame_attachment.unlink()
+    persisted_attachment = get_ticket(base_url, "PGU-112")
+    assert persisted_attachment["screenshots"] == [str(stored_path)], persisted_attachment
+    assert persisted_attachment["screenshots_info"][0]["available"] is True, persisted_attachment
     merge_forbidden = post_json(base_url, "/api/tickets/PGU-113/actions/merge", {"target_id": "PGU-114"}, caller="app", expect=403)
     assert "app cannot call merge" in str(merge_forbidden), merge_forbidden
     merged = post_json(base_url, "/api/tickets/PGU-113/actions/merge", {"target_id": "PGU-114"}, caller="director")
@@ -798,7 +816,7 @@ def exercise_postgres_backend(commit_hash: str) -> None:
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:
-                exercise_write_api(f"http://127.0.0.1:{server.server_port}", commit_hash)
+                exercise_write_api(f"http://127.0.0.1:{server.server_port}", commit_hash, frames=frames, assets=assets)
             finally:
                 server.shutdown()
                 server.server_close()

@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -204,6 +205,53 @@ def test_non_session_start_hook_records_resume_session_when_payload_has_id() -> 
         assert session["payload"]["event"] == "UserPromptSubmit"
 
 
+def test_non_session_start_hook_with_existing_session_does_not_read_or_rewrite() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        home = Path(tmp) / "home"
+        state_dir = Path(tmp) / "state"
+        session_dir = Path(tmp) / "sessions"
+        bin_path = home / ".local" / "bin" / HOOK_NAME
+        subprocess.run([str(INSTALLER), "install", "--home", str(home), "--bin-path", str(bin_path)], check=True)
+        session_dir.mkdir(parents=True)
+        session_path = session_dir / "pgu-ops_0.0.json"
+        session_path.write_text(
+            json.dumps({"target": "pgu-ops:0.0", "session_id": "existing_session", "source": "codex.SessionStart"})
+            + "\n",
+            encoding="utf-8",
+        )
+
+        proc = subprocess.Popen(
+            [
+                str(bin_path),
+                "busy",
+                "--target",
+                "pgu-ops:0.0",
+                "--source",
+                "codex.UserPromptSubmit",
+                "--state-dir",
+                str(state_dir),
+                "--session-dir",
+                str(session_dir),
+                "--stdin-timeout",
+                "5",
+            ],
+            stdin=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            assert proc.wait(timeout=0.5) == 0
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=1)
+
+        state = json.loads((state_dir / "pgu-ops_0.0.json").read_text(encoding="utf-8"))
+        assert state["state"] == "busy"
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+        assert session["session_id"] == "existing_session"
+        assert session["source"] == "codex.SessionStart"
+
+
 def test_non_session_start_hook_without_session_id_only_writes_state() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
         home = Path(tmp) / "home"
@@ -241,6 +289,88 @@ def test_non_session_start_hook_without_session_id_only_writes_state() -> None:
         assert not (session_dir / "pgu-ops_0.0.json").exists()
 
 
+def test_state_write_is_not_blocked_by_hung_stdin_pipe() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        home = Path(tmp) / "home"
+        state_dir = Path(tmp) / "state"
+        session_dir = Path(tmp) / "sessions"
+        bin_path = home / ".local" / "bin" / HOOK_NAME
+        subprocess.run([str(INSTALLER), "install", "--home", str(home), "--bin-path", str(bin_path)], check=True)
+
+        proc = subprocess.Popen(
+            [
+                str(bin_path),
+                "idle",
+                "--target",
+                "pgu-ops:0.0",
+                "--source",
+                "codex.Stop",
+                "--state-dir",
+                str(state_dir),
+                "--session-dir",
+                str(session_dir),
+                "--stdin-timeout",
+                "2",
+            ],
+            stdin=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            state_path = state_dir / "pgu-ops_0.0.json"
+            for _ in range(20):
+                if state_path.exists():
+                    break
+                time.sleep(0.05)
+            assert state_path.exists()
+            assert proc.poll() is None
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=1)
+
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert state["state"] == "idle"
+        assert state["source"] == "codex.Stop"
+
+
+def test_hung_stdin_pipe_exits_after_bounded_read() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        home = Path(tmp) / "home"
+        state_dir = Path(tmp) / "state"
+        session_dir = Path(tmp) / "sessions"
+        bin_path = home / ".local" / "bin" / HOOK_NAME
+        subprocess.run([str(INSTALLER), "install", "--home", str(home), "--bin-path", str(bin_path)], check=True)
+
+        proc = subprocess.Popen(
+            [
+                str(bin_path),
+                "idle",
+                "--target",
+                "pgu-ops:0.0",
+                "--source",
+                "codex.Stop",
+                "--state-dir",
+                str(state_dir),
+                "--session-dir",
+                str(session_dir),
+                "--stdin-timeout",
+                "0.05",
+            ],
+            stdin=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            assert proc.wait(timeout=1) == 0
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=1)
+
+        state = json.loads((state_dir / "pgu-ops_0.0.json").read_text(encoding="utf-8"))
+        assert state["state"] == "idle"
+        assert not (session_dir / "pgu-ops_0.0.json").exists()
+
+
 def test_session_start_records_non_uuid_named_session_id() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
         home = Path(tmp) / "home"
@@ -271,6 +401,44 @@ def test_session_start_records_non_uuid_named_session_id() -> None:
 
         session = json.loads((session_dir / "pgu-ops_0.0.json").read_text(encoding="utf-8"))
         assert session["session_id"] == session_id
+
+
+def test_session_start_always_updates_existing_session_file() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        home = Path(tmp) / "home"
+        state_dir = Path(tmp) / "state"
+        session_dir = Path(tmp) / "sessions"
+        bin_path = home / ".local" / "bin" / HOOK_NAME
+        subprocess.run([str(INSTALLER), "install", "--home", str(home), "--bin-path", str(bin_path)], check=True)
+        session_dir.mkdir(parents=True)
+        session_path = session_dir / "pgu-ops_0.0.json"
+        session_path.write_text(
+            json.dumps({"target": "pgu-ops:0.0", "session_id": "old_session", "source": "codex.Stop"}) + "\n",
+            encoding="utf-8",
+        )
+
+        subprocess.run(
+            [
+                str(bin_path),
+                "idle",
+                "--target",
+                "pgu-ops:0.0",
+                "--source",
+                "codex.SessionStart",
+                "--state-dir",
+                str(state_dir),
+                "--session-dir",
+                str(session_dir),
+                "--record-session",
+            ],
+            input=json.dumps({"session_id": "new_session"}),
+            text=True,
+            check=True,
+        )
+
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+        assert session["session_id"] == "new_session"
+        assert session["source"] == "codex.SessionStart"
 
 
 def test_session_start_records_env_session_id_fallback() -> None:
@@ -312,8 +480,12 @@ def main() -> int:
     test_installed_hook_writes_state_and_verify_state_checks_all_panes()
     test_session_start_hook_seeds_idle_state_and_records_resume_session()
     test_non_session_start_hook_records_resume_session_when_payload_has_id()
+    test_non_session_start_hook_with_existing_session_does_not_read_or_rewrite()
     test_non_session_start_hook_without_session_id_only_writes_state()
+    test_state_write_is_not_blocked_by_hung_stdin_pipe()
+    test_hung_stdin_pipe_exits_after_bounded_read()
     test_session_start_records_non_uuid_named_session_id()
+    test_session_start_always_updates_existing_session_file()
     test_session_start_records_env_session_id_fallback()
     print("ticket_board_pane_hooks_install_test: ok")
     return 0

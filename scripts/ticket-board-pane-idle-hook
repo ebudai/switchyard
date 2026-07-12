@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import re
+import select
 import subprocess
 import sys
 import time
@@ -92,13 +93,35 @@ def _write_state(state_dir: str | Path, target: str, state: str, *, source: str 
     return path
 
 
-def _read_stdin_json() -> object:
+def _read_stdin_json(timeout: float = 0.1) -> object:
     if sys.stdin.isatty():
         return None
+    chunks: list[bytes] = []
+    deadline = time.monotonic() + max(0.0, timeout)
     try:
-        raw = sys.stdin.read()
-    except OSError:
+        fd = sys.stdin.fileno()
+    except (OSError, ValueError):
         return None
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            readable, _, _ = select.select([fd], [], [], remaining)
+        except (OSError, ValueError):
+            return None
+        if not readable:
+            break
+        try:
+            chunk = os.read(fd, 65536)
+        except BlockingIOError:
+            continue
+        except OSError:
+            return None
+        if not chunk:
+            break
+        chunks.append(chunk)
+    raw = b"".join(chunks).decode("utf-8", errors="replace")
     raw = raw.strip()
     if not raw:
         return None
@@ -183,9 +206,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--record-session",
         action="store_true",
-        help="compatibility no-op; hook payload session ids are recorded whenever present",
+        help="force session id recording even when the pane session file already exists",
     )
     parser.add_argument("--session-id", default="", help="explicit session id to record for pane resume launchers")
+    parser.add_argument("--stdin-timeout", type=float, default=0.1, help="seconds to wait for hook stdin payload")
     parser.add_argument(
         "--session-dir",
         default=str(DEFAULT_PANE_SESSION_DIR),
@@ -197,10 +221,12 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     target = _resolve_target(args.target.strip(), os.environ)
-    payload = _read_stdin_json()
     _write_state(args.state_dir, target, args.state, source=args.source)
-    session_id = _extract_session_id(payload, os.environ, args.session_id)
-    _write_session(args.session_dir, target, session_id, source=args.source, payload=payload)
+    session_path = _target_path(Path(args.session_dir).expanduser(), target)
+    if args.record_session or not session_path.exists():
+        payload = _read_stdin_json(timeout=args.stdin_timeout)
+        session_id = _extract_session_id(payload, os.environ, args.session_id)
+        _write_session(args.session_dir, target, session_id, source=args.source, payload=payload)
     return 0
 
 

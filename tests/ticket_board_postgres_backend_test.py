@@ -305,7 +305,7 @@ def main() -> int:
 UPDATE ticket_board.ticket_notification_state
 SET last_transition_notified_at = clock_timestamp(),
     last_nudged_at = NULL
-WHERE ticket_id IN ('PGU-401', 'PGU-403', 'PGU-405');
+WHERE ticket_id IN ('PGU-401', 'PGU-405');
 
 UPDATE ticket_board.ticket_notification_state
 SET last_transition_notified_at = clock_timestamp() + interval '1 hour',
@@ -313,8 +313,13 @@ SET last_transition_notified_at = clock_timestamp() + interval '1 hour',
 WHERE ticket_id = 'PGU-402';
 
 UPDATE ticket_board.ticket_notification_state
-SET last_transition_notified_at = clock_timestamp(),
+SET last_transition_notified_at = '2026-07-10T12:00:00+00:00'::timestamptz,
     last_nudged_at = NULL
+WHERE ticket_id = 'PGU-403';
+
+UPDATE ticket_board.ticket_notification_state
+SET last_transition_notified_at = '2026-07-10T10:00:00+00:00'::timestamptz,
+    last_nudged_at = '2026-07-10T10:30:00+00:00'::timestamptz
 WHERE ticket_id = 'PGU-404';
 
 INSERT INTO ticket_board.ticket_notification_queue (
@@ -326,7 +331,7 @@ INSERT INTO ticket_board.ticket_notification_queue (
     'PGU-404 -- Active audit ping ready for audit',
     jsonb_build_object('id', 'PGU-404', 'state', 'audit', 'target_role', 'audit'),
     'active-work-test:PGU-404:audit',
-    clock_timestamp() + interval '2 hours'
+    '2026-07-10T13:00:00+00:00'::timestamptz
 );
 
 UPDATE ticket_board.ticket_notification_state

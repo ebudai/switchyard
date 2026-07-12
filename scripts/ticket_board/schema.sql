@@ -511,7 +511,8 @@ CREATE OR REPLACE FUNCTION ticket_board.enqueue_transition_notification(
     p_new_state text,
     p_assignee text,
     p_updated_at timestamptz,
-    p_ticket_number integer
+    p_ticket_number integer,
+    p_message text
 )
 RETURNS void
 LANGUAGE plpgsql
@@ -519,23 +520,9 @@ AS $$
 DECLARE
     target_role text;
     message text;
-    recommendation text;
 BEGIN
     target_role := ticket_board.transition_target_role(p_new_state, p_assignee);
-    message := ticket_board.transition_message(p_ticket_id, p_title, p_old_state, p_new_state);
-    IF p_old_state = 'inspection' AND p_new_state = 'in_progress' THEN
-        SELECT c.text
-        INTO recommendation
-        FROM ticket_board.ticket_comments AS c
-        WHERE c.ticket_id = p_ticket_id
-          AND btrim(c.text) <> ''
-          AND c.xmin = pg_current_xact_id()::xid
-        ORDER BY c.position DESC
-        LIMIT 1;
-        IF recommendation IS NOT NULL THEN
-            message := message || ': ' || recommendation;
-        END IF;
-    END IF;
+    message := p_message;
     IF target_role IS NOT NULL AND message IS NOT NULL THEN
         PERFORM ticket_board.enqueue_notification(
             p_ticket_id,
@@ -569,12 +556,34 @@ CREATE OR REPLACE FUNCTION ticket_board.notify_ticket_state_transition()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
+DECLARE
+    current_state text;
+    current_assignee text;
+    message text;
+    recommendation text;
 BEGIN
-    IF coalesce(OLD.manually_controlled, false) OR coalesce(NEW.manually_controlled, false) THEN
-        RETURN NULL;
-    END IF;
+    IF TG_OP = 'UPDATE' THEN
+        IF coalesce(OLD.manually_controlled, false) OR coalesce(NEW.manually_controlled, false) THEN
+            RETURN NULL;
+        END IF;
+        IF OLD.state IS NOT DISTINCT FROM NEW.state THEN
+            RETURN NULL;
+        END IF;
+        message := ticket_board.transition_message(NEW.id, NEW.title, OLD.state, NEW.state);
+        IF OLD.state = 'inspection' AND NEW.state = 'in_progress' THEN
+            SELECT c.text
+            INTO recommendation
+            FROM ticket_board.ticket_comments AS c
+            WHERE c.ticket_id = NEW.id
+              AND btrim(c.text) <> ''
+              AND c.xmin = pg_current_xact_id()::xid
+            ORDER BY c.position DESC
+            LIMIT 1;
+            IF recommendation IS NOT NULL THEN
+                message := message || ': ' || recommendation;
+            END IF;
+        END IF;
 
-    IF OLD.state IS DISTINCT FROM NEW.state THEN
         PERFORM ticket_board.enqueue_transition_notification(
             NEW.id,
             NEW.title,
@@ -582,49 +591,44 @@ BEGIN
             NEW.state,
             NEW.assignee,
             NEW.updated_at,
-            NEW.ticket_number
+            NEW.ticket_number,
+            message
         );
-    END IF;
-
-    RETURN NULL;
-END;
-$$;
-
-CREATE OR REPLACE FUNCTION ticket_board.notify_ticket_insert_transition()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    current_state text;
-    current_assignee text;
-BEGIN
-    IF coalesce(NEW.manually_controlled, false) THEN
         RETURN NULL;
     END IF;
 
-    SELECT state, assignee
-    INTO current_state, current_assignee
-    FROM ticket_board.tickets
-    WHERE id = NEW.id;
-    IF current_state IS DISTINCT FROM NEW.state OR current_assignee IS DISTINCT FROM NEW.assignee THEN
+    IF TG_OP = 'INSERT' THEN
+        IF coalesce(NEW.manually_controlled, false) THEN
+            RETURN NULL;
+        END IF;
+
+        SELECT state, assignee
+        INTO current_state, current_assignee
+        FROM ticket_board.tickets
+        WHERE id = NEW.id;
+        IF current_state IS DISTINCT FROM NEW.state OR current_assignee IS DISTINCT FROM NEW.assignee THEN
+            RETURN NULL;
+        END IF;
+
+        IF ticket_board.transition_target_role(NEW.state, NEW.assignee) IS NOT NULL THEN
+            PERFORM ticket_board.enqueue_transition_notification(
+                NEW.id,
+                NEW.title,
+                NULL,
+                NEW.state,
+                NEW.assignee,
+                NEW.updated_at,
+                NEW.ticket_number,
+                ticket_board.transition_message(NEW.id, NEW.title, NULL, NEW.state)
+            );
+        END IF;
         RETURN NULL;
     END IF;
 
-    IF ticket_board.transition_target_role(NEW.state, NEW.assignee) IS NOT NULL THEN
-        PERFORM ticket_board.enqueue_transition_notification(
-            NEW.id,
-            NEW.title,
-            NULL,
-            NEW.state,
-            NEW.assignee,
-            NEW.updated_at,
-            NEW.ticket_number
-        );
-    END IF;
-
-    RETURN NULL;
+    RAISE EXCEPTION 'unsupported trigger operation for notify_ticket_state_transition: %', TG_OP;
 END;
 $$;
+DROP FUNCTION IF EXISTS ticket_board.notify_ticket_insert_transition();
 
 CREATE OR REPLACE FUNCTION ticket_board.upsert_ticket_notification_state()
 RETURNS trigger
@@ -1453,11 +1457,8 @@ FOR EACH ROW
 EXECUTE FUNCTION ticket_board.enforce_ticket_workflow_update();
 
 DROP TRIGGER IF EXISTS tickets_notify_state_transition ON ticket_board.tickets;
-CREATE TRIGGER tickets_notify_state_transition
-AFTER UPDATE ON ticket_board.tickets
-FOR EACH ROW
-WHEN (OLD.state IS DISTINCT FROM NEW.state)
-EXECUTE FUNCTION ticket_board.notify_ticket_state_transition();
+DROP TRIGGER IF EXISTS tickets_zzz_notify_insert_transition ON ticket_board.tickets;
+DROP TRIGGER IF EXISTS tickets_zzz_notify_transition ON ticket_board.tickets;
 
 DROP TRIGGER IF EXISTS tickets_notification_state_insert ON ticket_board.tickets;
 CREATE TRIGGER tickets_notification_state_insert
@@ -1477,11 +1478,10 @@ AFTER INSERT OR UPDATE ON ticket_board.tickets
 FOR EACH ROW
 EXECUTE FUNCTION ticket_board.auto_advance_analysis_ticket();
 
-DROP TRIGGER IF EXISTS tickets_zzz_notify_insert_transition ON ticket_board.tickets;
-CREATE TRIGGER tickets_zzz_notify_insert_transition
-AFTER INSERT ON ticket_board.tickets
+CREATE TRIGGER tickets_zzz_notify_transition
+AFTER INSERT OR UPDATE ON ticket_board.tickets
 FOR EACH ROW
-EXECUTE FUNCTION ticket_board.notify_ticket_insert_transition();
+EXECUTE FUNCTION ticket_board.notify_ticket_state_transition();
 
 DROP TRIGGER IF EXISTS ticket_comments_notification_activity ON ticket_board.ticket_comments;
 CREATE TRIGGER ticket_comments_notification_activity

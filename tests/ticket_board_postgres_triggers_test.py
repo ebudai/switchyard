@@ -866,10 +866,23 @@ SELECT pg_get_functiondef('ticket_board.notify_ticket_state_transition()'::regpr
 """,
             ).stdout.strip()
             assert notify_function == "t"
+            combined_notify_trigger = psql(
+                conninfo,
+                """
+SELECT count(*)
+FROM pg_trigger
+WHERE tgrelid = 'ticket_board.tickets'::regclass
+  AND tgname = 'tickets_zzz_notify_transition'
+  AND NOT tgisinternal
+  AND (tgtype & 4) = 4
+  AND (tgtype & 16) = 16;
+""",
+            ).stdout.strip()
+            assert combined_notify_trigger == "1"
             notify_helper = psql(
                 conninfo,
                 """
-SELECT pg_get_functiondef('ticket_board.enqueue_transition_notification(text,text,text,text,text,timestamp with time zone,integer)'::regprocedure)
+SELECT pg_get_functiondef('ticket_board.enqueue_transition_notification(text,text,text,text,text,timestamp with time zone,integer,text)'::regprocedure)
   LIKE '%pg_notify%ticket_board_state_transition%';
 """,
             ).stdout.strip()
@@ -1797,17 +1810,16 @@ SELECT count(*)
 FROM pg_trigger
 WHERE tgname IN (
     'tickets_enforce_workflow_update',
-    'tickets_notify_state_transition',
     'tickets_notification_state_insert',
     'tickets_notification_state_update',
     'tickets_zz_auto_advance_analysis',
-    'tickets_zzz_notify_insert_transition',
+    'tickets_zzz_notify_transition',
     'ticket_comments_notification_activity'
 )
   AND NOT tgisinternal;
 """,
             ).stdout.strip()
-            assert trigger_count == "7"
+            assert trigger_count == "6"
         finally:
             subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], check=False)
 

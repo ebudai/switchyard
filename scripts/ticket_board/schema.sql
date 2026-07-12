@@ -393,7 +393,6 @@ BEGIN
     IF NEW.state = 'inspection' AND OLD.state IS DISTINCT FROM NEW.state THEN
         NEW.audit_signoff := false;
         NEW.inspector_signoff := false;
-        NEW.commit_hash := '';
     END IF;
     IF NEW.state = 'inspection' AND NOT NEW.needs_inspection THEN
         RAISE EXCEPTION 'needs_inspection must be true before a ticket can enter inspection';

@@ -588,7 +588,7 @@ def exercise_write_api(base_url: str, commit_hash: str) -> None:
     assert eric_review_to_inspection["ticket"]["needs_inspection"] is True, eric_review_to_inspection  # type: ignore[index]
     assert eric_review_to_inspection["ticket"]["audit_signoff"] is False, eric_review_to_inspection  # type: ignore[index]
     assert eric_review_to_inspection["ticket"]["inspector_signoff"] is False, eric_review_to_inspection  # type: ignore[index]
-    assert eric_review_to_inspection["ticket"]["commit_hash"] == "", eric_review_to_inspection  # type: ignore[index]
+    assert eric_review_to_inspection["ticket"]["commit_hash"] == commit_hash, eric_review_to_inspection  # type: ignore[index]
     eric_review_to_inspection_guard = post_json(
         base_url,
         "/api/tickets/PGU-125/actions/route",

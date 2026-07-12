@@ -312,7 +312,7 @@ WHERE id = 'PGU-30';
 """,
                 ).stdout
             )
-            assert inspect_submit == {"state": "inspection", "inspector_signoff": False, "commit_hash": ""}, inspect_submit
+            assert inspect_submit == {"state": "inspection", "inspector_signoff": False, "commit_hash": "abcdef0"}, inspect_submit
 
             insert_ticket(
                 conninfo,
@@ -412,7 +412,7 @@ WHERE id = 'PGU-32';
 """,
                 ).stdout
             )
-            assert inspect_resubmitted == {"state": "inspection", "inspector_signoff": False, "commit_hash": ""}, inspect_resubmitted
+            assert inspect_resubmitted == {"state": "inspection", "inspector_signoff": False, "commit_hash": "abcdef1"}, inspect_resubmitted
 
             insert_ticket(conninfo, "PGU-4", title="Review", assignee="audit", state="audit", implementation="done")
             assert_error(
@@ -596,7 +596,7 @@ WHERE id = 'PGU-80';
                 "needs_inspection": True,
                 "audit_signoff": False,
                 "inspector_signoff": False,
-                "commit_hash": "",
+                "commit_hash": "abcdef8",
             }, eric_to_inspection
 
             insert_ticket(
@@ -634,7 +634,7 @@ WHERE id = 'PGU-84';
                 "state": "inspection",
                 "audit_signoff": False,
                 "inspector_signoff": False,
-                "commit_hash": "",
+                "commit_hash": "abcdef4",
             }, reinspect_entry
             service_call(conninfo, "inspector", "SELECT ticket_board.inspector_sign_off('PGU-84');")
             reinspect_signed = json.loads(
@@ -656,7 +656,7 @@ WHERE id = 'PGU-84';
                 "state": "audit",
                 "audit_signoff": False,
                 "inspector_signoff": True,
-                "commit_hash": "",
+                "commit_hash": "abcdef4",
             }, reinspect_signed
 
             insert_ticket(

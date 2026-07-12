@@ -356,22 +356,17 @@ notification_candidates AS (
                 THEN notification_scope.state || ':' || notification_scope.owner_role
             ELSE notification_scope.state
         END AS active_work_partition,
-        NULLIF(
-            GREATEST(
-                COALESCE(ns.last_transition_notified_at, '-infinity'::timestamptz),
-                COALESCE(ns.last_nudged_at, '-infinity'::timestamptz),
-                COALESCE(queue.last_queued_at, '-infinity'::timestamptz)
-            ),
-            '-infinity'::timestamptz
-        ) AS active_work_notified_at
+        sent.last_sent_at AS active_work_notified_at
     FROM notification_scope
-    LEFT JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = notification_scope.id
     LEFT JOIN LATERAL (
-        SELECT max(q.updated_at) AS last_queued_at
-        FROM ticket_board.ticket_notification_queue q
-        WHERE q.ticket_id = notification_scope.id
-          AND q.target_role = notification_scope.owner_role
-    ) queue ON true
+        SELECT max(trace.ts) AS last_sent_at
+        FROM ticket_board.notification_trace trace
+        WHERE trace.ticket_id = notification_scope.id
+          AND trace.target_role = notification_scope.owner_role
+          AND trace.kind = 'transition'
+          AND trace.event = 'send'
+          AND trace.ticket_state_at_event = notification_scope.state
+    ) sent ON true
 ),
 active_work AS (
     SELECT

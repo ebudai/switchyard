@@ -295,6 +295,13 @@ WHERE id = {sql_string(backlog_created)};
         )
     )
     assert backlog_row == {"state": "backlog", "assignee": "unassigned", "parked": True}, backlog_row
+    assert "invalid create state: in_progress; allowed: analysis, backlog" in psql_error(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'director', false);
+SELECT ticket_board.create_ticket('Bad direct create', 'Body', 'in_progress');
+""",
+    )
 
     insert_ticket(admin_conn, "PGU-100", title="Source")
     filed = psql(service_conn, "SELECT ticket_board.file_bug('Service bug', 'Body', 'PGU-100');")

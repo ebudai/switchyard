@@ -40,7 +40,6 @@ EXPECTED_COMMENT_FIELDS = {"who", "ts", "text"}
 EXPECTED_STATES = {
     "backlog",
     "analysis",
-    "ready",
     "in_progress",
     "inspection",
     "audit",
@@ -134,6 +133,7 @@ def main() -> int:
     assert "create table if not exists ticket_board.ticket_attachments" in schema_lower
 
     assert_contains_all(schema, EXPECTED_STATES, "state constraint")
+    assert "'ready'" not in schema, "removed ready state must not appear in schema.sql"
     assert_contains_all(schema, EXPECTED_ASSIGNEES, "assignee constraint")
 
     assert re.search(r"commit_hash\s+text\s+not null", schema_lower), "commit_hash column should be text"

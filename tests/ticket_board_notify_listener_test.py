@@ -73,7 +73,7 @@ class FakeConnection:
             state = str(parsed.get("state") or parsed.get("new_state") or "").strip()
             assignee = str(parsed.get("assignee") or "").strip()
             if not state:
-                state = "audit" if target_role == "audit" else "director_review" if target_role == "director" else "ready"
+                state = "audit" if target_role == "audit" else "director_review" if target_role == "director" else "in_progress"
             if not assignee:
                 assignee = "director" if target_role == "director" else target_role
             rows[ticket_id] = (state, assignee, False, False)
@@ -132,7 +132,7 @@ def queue_row(
     message: str | None = None,
     attempts: int = 1,
 ) -> tuple[int, str, str, str, str, int]:
-    message = message or f"Ready ticket for you: {ticket_id} -- Queue"
+    message = message or f"New ticket for you: {ticket_id} -- Queue"
     payload_fields = {"kind": kind, "id": ticket_id, "target_role": target_role, "message": message}
     if state is not None:
         payload_fields["state" if kind != "transition" else "new_state"] = state
@@ -147,7 +147,7 @@ def transition_payload(
     *,
     title: str = "Ticket title",
     old_state: str = "analysis",
-    new_state: str = "ready",
+    new_state: str = "in_progress",
     assignee: str = "ops",
 ) -> str:
     return json.dumps(
@@ -178,7 +178,7 @@ def test_claimed_queue_row_delivers_to_assignee_pane_and_acks() -> None:
     delivered = listener.listen_once(max_notifications=1)
 
     assert delivered == 1
-    assert sent == [("pgu-ops:0.0", "Ready ticket for you: PGU-223 -- Queue")]
+    assert sent == [("pgu-ops:0.0", "New ticket for you: PGU-223 -- Queue")]
     assert conn.acked == [1]
     assert conn.requeued == []
     assert any("LISTEN" in str(statement) for statement, _params in executed)
@@ -255,7 +255,7 @@ def test_reconnect_relistens_after_connection_drop() -> None:
     executed: list[Any] = []
     connections = [
         FakeConnection(fail_on_notifies=True, executed=executed),
-        FakeConnection([queue_row(2, "PGU-215", target_role="app", message="Ready ticket for you: PGU-215 -- Reconnect")], executed=executed),
+        FakeConnection([queue_row(2, "PGU-215", target_role="app", message="New ticket for you: PGU-215 -- Reconnect")], executed=executed),
     ]
 
     def connector(*args: Any, **kwargs: Any) -> FakeConnection:
@@ -272,7 +272,7 @@ def test_reconnect_relistens_after_connection_drop() -> None:
 
     listener.run_forever(max_connections=2, max_notifications=1)
 
-    assert sent == [("pgu-app:0.0", "Ready ticket for you: PGU-215 -- Reconnect")]
+    assert sent == [("pgu-app:0.0", "New ticket for you: PGU-215 -- Reconnect")]
     assert sum("LISTEN" in str(statement) for statement, _params in executed) == 2
 
 
@@ -281,7 +281,7 @@ def test_send_timeout_requeues_and_does_not_block_next_pane() -> None:
     conn = FakeConnection(
         [
             queue_row(10, "PGU-220", target_role="director", message="PGU-220 -- Director review ready for your review"),
-            queue_row(11, "PGU-221", target_role="ops", message="Ready ticket for you: PGU-221 -- Ops work"),
+            queue_row(11, "PGU-221", target_role="ops", message="New ticket for you: PGU-221 -- Ops work"),
         ]
     )
 
@@ -301,7 +301,7 @@ def test_send_timeout_requeues_and_does_not_block_next_pane() -> None:
     delivered = listener.listen_once(max_notifications=1)
 
     assert delivered == 1
-    assert sent == [("pgu-ops:0.0", "Ready ticket for you: PGU-221 -- Ops work")]
+    assert sent == [("pgu-ops:0.0", "New ticket for you: PGU-221 -- Ops work")]
     assert [item[0] for item in conn.requeued] == [10]
     assert conn.acked == [11]
 
@@ -336,7 +336,7 @@ def test_busy_pane_requeues_then_idle_pane_delivers_once() -> None:
     idle_delivered = idle_listener.listen_once(max_notifications=1)
 
     assert idle_delivered == 1
-    assert sent == [("pgu-ops:0.0", "Ready ticket for you: PGU-223 -- Queue")]
+    assert sent == [("pgu-ops:0.0", "New ticket for you: PGU-223 -- Queue")]
     assert idle_conn.acked == [20]
 
 
@@ -371,7 +371,7 @@ def test_busy_pane_force_delivers_after_max_defer_cap() -> None:
     assert first_conn.acked == []
 
     assert listener.listen_once(max_notifications=1) == 1
-    assert sent == [("pgu-ops:0.0", "Ready ticket for you: PGU-252 -- Queue")]
+    assert sent == [("pgu-ops:0.0", "New ticket for you: PGU-252 -- Queue")]
     assert second_conn.acked == [25]
     assert second_conn.requeued == []
 
@@ -392,12 +392,12 @@ def test_fresh_listener_force_delivers_after_restart_from_queue_created_at() -> 
     )
 
     assert listener.listen_once(max_notifications=1) == 1
-    assert sent == [("pgu-ops:0.0", "Ready ticket for you: PGU-252 -- Queue")]
+    assert sent == [("pgu-ops:0.0", "New ticket for you: PGU-252 -- Queue")]
     assert conn.acked == [26]
     assert conn.requeued == []
 
 
-def test_stale_ready_nudge_for_cancelled_ticket_is_acked_not_delivered() -> None:
+def test_stale_implementation_nudge_for_cancelled_ticket_is_acked_not_delivered() -> None:
     sent: list[tuple[str, str]] = []
     conn = FakeConnection(
         [
@@ -405,7 +405,7 @@ def test_stale_ready_nudge_for_cancelled_ticket_is_acked_not_delivered() -> None
                 22,
                 "PGU-226",
                 kind="nudge",
-                state="ready",
+                state="in_progress",
                 assignee="ops",
                 target_role="ops",
                 attempts=2,
@@ -427,7 +427,7 @@ def test_stale_ready_nudge_for_cancelled_ticket_is_acked_not_delivered() -> None
     assert conn.requeued == []
 
 
-def test_stale_ready_nudge_for_picked_up_ticket_is_acked_not_delivered() -> None:
+def test_stale_implementation_nudge_for_picked_up_ticket_is_acked_not_delivered() -> None:
     sent: list[tuple[str, str]] = []
     conn = FakeConnection(
         [
@@ -435,13 +435,13 @@ def test_stale_ready_nudge_for_picked_up_ticket_is_acked_not_delivered() -> None
                 23,
                 "PGU-226",
                 kind="nudge",
-                state="ready",
+                state="in_progress",
                 assignee="ops",
                 target_role="ops",
                 attempts=2,
             )
         ],
-        ticket_rows={"PGU-226": ("in_progress", "ops")},
+        ticket_rows={"PGU-226": ("audit", "ops")},
     )
     listener = TicketBoardNotifyListener(
         conninfo="dbname=test",
@@ -457,7 +457,7 @@ def test_stale_ready_nudge_for_picked_up_ticket_is_acked_not_delivered() -> None
     assert conn.requeued == []
 
 
-def test_escalation_for_still_stuck_ready_ticket_delivers_to_director() -> None:
+def test_escalation_for_still_stuck_implementation_ticket_delivers_to_director() -> None:
     sent: list[tuple[str, str]] = []
     conn = FakeConnection(
         [
@@ -470,7 +470,7 @@ def test_escalation_for_still_stuck_ready_ticket_delivers_to_director() -> None:
                 attempts=1,
             )
         ],
-        ticket_rows={"PGU-226": ("ready", "ops", False, False)},
+        ticket_rows={"PGU-226": ("in_progress", "ops", False, False)},
     )
     listener = TicketBoardNotifyListener(
         conninfo="dbname=test",
@@ -494,14 +494,14 @@ def test_nudge_analysis_copy_delivers_to_director() -> None:
                 25,
                 "PGU-256",
                 kind="nudge_analysis",
-                state="ready",
+                state="in_progress",
                 assignee="ops",
                 target_role="director",
-                message="NUDGE-ANALYSIS: PGU-256 (target=ops, state=ready, 600s since transition, prior_nudges=0)",
+                message="NUDGE-ANALYSIS: PGU-256 (target=ops, state=in_progress, 600s since transition, prior_nudges=0)",
                 attempts=1,
             )
         ],
-        ticket_rows={"PGU-256": ("ready", "ops", False, False)},
+        ticket_rows={"PGU-256": ("in_progress", "ops", False, False)},
     )
     listener = TicketBoardNotifyListener(
         conninfo="dbname=test",
@@ -515,7 +515,7 @@ def test_nudge_analysis_copy_delivers_to_director() -> None:
     assert sent == [
         (
             "pgu-director:0.0",
-            "NUDGE-ANALYSIS: PGU-256 (target=ops, state=ready, 600s since transition, prior_nudges=0)",
+            "NUDGE-ANALYSIS: PGU-256 (target=ops, state=in_progress, 600s since transition, prior_nudges=0)",
         )
     ]
     assert conn.acked == [25]
@@ -713,7 +713,7 @@ def test_acked_notification_does_not_repeat_across_restart() -> None:
         poll_seconds=0,
     )
     assert second_listener.listen_once(max_notifications=1) == 0
-    assert sent == [("pgu-ops:0.0", "Ready ticket for you: PGU-223 -- Queue")]
+    assert sent == [("pgu-ops:0.0", "New ticket for you: PGU-223 -- Queue")]
 
 
 def test_default_sender_delegates_to_directorctl_send() -> None:
@@ -726,12 +726,12 @@ def test_default_sender_delegates_to_directorctl_send() -> None:
 
     try:
         subprocess.run = fake_run  # type: ignore[assignment]
-        DirectorctlSender("/tmp/directorctl")("pgu-ops:0.0", "Ready ticket for you: PGU-215 -- Submit")
+        DirectorctlSender("/tmp/directorctl")("pgu-ops:0.0", "New ticket for you: PGU-215 -- Submit")
     finally:
         subprocess.run = original_run  # type: ignore[assignment]
 
     assert calls == [
-        (["/tmp/directorctl", "send", "pgu-ops:0.0", "Ready ticket for you: PGU-215 -- Submit"], True)
+        (["/tmp/directorctl", "send", "pgu-ops:0.0", "New ticket for you: PGU-215 -- Submit"], True)
     ]
 
 
@@ -743,9 +743,9 @@ def main() -> int:
     test_busy_pane_requeues_then_idle_pane_delivers_once()
     test_busy_pane_force_delivers_after_max_defer_cap()
     test_fresh_listener_force_delivers_after_restart_from_queue_created_at()
-    test_stale_ready_nudge_for_cancelled_ticket_is_acked_not_delivered()
-    test_stale_ready_nudge_for_picked_up_ticket_is_acked_not_delivered()
-    test_escalation_for_still_stuck_ready_ticket_delivers_to_director()
+    test_stale_implementation_nudge_for_cancelled_ticket_is_acked_not_delivered()
+    test_stale_implementation_nudge_for_picked_up_ticket_is_acked_not_delivered()
+    test_escalation_for_still_stuck_implementation_ticket_delivers_to_director()
     test_nudge_analysis_copy_delivers_to_director()
     test_director_composer_busy_requeues_then_idle_delivers_once()
     test_gate_async_cold_start_defaults_busy_then_static_region_idles()

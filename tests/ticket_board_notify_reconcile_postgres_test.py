@@ -112,7 +112,7 @@ INSERT INTO ticket_board.tickets (
     '2026-07-11T00:00:00+00:00', '2026-07-11T00:00:00+00:00',
     '{ticket_source("PGU-206", "Locked head", "analysis", "ops")}'::jsonb
 );
-UPDATE ticket_board.tickets SET state = 'ready' WHERE id = 'PGU-206';
+UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-206';
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation, created_text, updated_text, source_json
 ) VALUES (
@@ -120,7 +120,7 @@ INSERT INTO ticket_board.tickets (
     '2026-07-11T00:00:00+00:00', '2026-07-11T00:00:00+00:00',
     '{ticket_source("PGU-207", "Durable reconcile", "analysis", "ops")}'::jsonb
 );
-UPDATE ticket_board.tickets SET state = 'ready' WHERE id = 'PGU-207';
+UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-207';
 """,
             )
             before = psql(
@@ -149,7 +149,7 @@ FOR UPDATE
                 lock_conn.rollback()
 
             assert delivered == 1
-            assert sent == [("pgu-ops:0.0", "Ready ticket for you: PGU-207 -- Durable reconcile")]
+            assert sent == [("pgu-ops:0.0", "New ticket for you: PGU-207 -- Durable reconcile")]
             after = psql(
                 listener_conninfo,
                 "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-207';",
@@ -163,23 +163,23 @@ DELETE FROM ticket_board.ticket_notification_queue;
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation, created_text, updated_text, source_json
 ) VALUES (
-    'PGU-226', 'Stale cancelled nudge', '', 'ready', 'ops', 'Ready.',
+    'PGU-226', 'Stale cancelled nudge', '', 'in_progress', 'ops', 'Ready.',
     '2026-07-11T00:00:00+00:00', '2026-07-11T00:00:00+00:00',
-    '{ticket_source("PGU-226", "Stale cancelled nudge", "ready", "ops")}'::jsonb
+    '{ticket_source("PGU-226", "Stale cancelled nudge", "in_progress", "ops")}'::jsonb
 );
 SELECT ticket_board.enqueue_notification(
     'PGU-226',
     'nudge',
     'ops',
-    'Ready ticket for you: PGU-226 -- Stale cancelled nudge',
+    'New ticket for you: PGU-226 -- Stale cancelled nudge',
     jsonb_build_object(
         'kind', 'nudge',
         'id', 'PGU-226',
         'title', 'Stale cancelled nudge',
-        'state', 'ready',
+        'state', 'in_progress',
         'assignee', 'ops',
         'target_role', 'ops',
-        'message', 'Ready ticket for you: PGU-226 -- Stale cancelled nudge'
+        'message', 'New ticket for you: PGU-226 -- Stale cancelled nudge'
     ),
     'test-stale-cancelled'
 );
@@ -218,27 +218,27 @@ COMMIT;
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation, created_text, updated_text, source_json
 ) VALUES (
-    'PGU-227', 'Stale picked-up nudge', '', 'ready', 'ops', 'Ready.',
+    'PGU-227', 'Stale picked-up nudge', '', 'in_progress', 'ops', 'Ready.',
     '2026-07-11T00:00:00+00:00', '2026-07-11T00:00:00+00:00',
-    '{ticket_source("PGU-227", "Stale picked-up nudge", "ready", "ops")}'::jsonb
+    '{ticket_source("PGU-227", "Stale picked-up nudge", "in_progress", "ops")}'::jsonb
 );
 SELECT ticket_board.enqueue_notification(
     'PGU-227',
     'nudge',
     'ops',
-    'Ready ticket for you: PGU-227 -- Stale picked-up nudge',
+    'New ticket for you: PGU-227 -- Stale picked-up nudge',
     jsonb_build_object(
         'kind', 'nudge',
         'id', 'PGU-227',
         'title', 'Stale picked-up nudge',
-        'state', 'ready',
+        'state', 'in_progress',
         'assignee', 'ops',
         'target_role', 'ops',
-        'message', 'Ready ticket for you: PGU-227 -- Stale picked-up nudge'
+        'message', 'New ticket for you: PGU-227 -- Stale picked-up nudge'
     ),
     'test-stale-picked-up'
 );
-UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-227';
+UPDATE ticket_board.tickets SET state = 'audit', commit_hash = 'abcdef1' WHERE id = 'PGU-227';
 DELETE FROM ticket_board.ticket_notification_queue
 WHERE ticket_id = 'PGU-227' AND kind = 'transition';
 """,
@@ -265,9 +265,9 @@ DELETE FROM ticket_board.ticket_notification_queue;
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation, created_text, updated_text, source_json
 ) VALUES (
-    'PGU-228', 'Still stuck escalation', '', 'ready', 'ops', 'Ready.',
+    'PGU-228', 'Still stuck escalation', '', 'in_progress', 'ops', 'Ready.',
     '2026-07-11T00:00:00+00:00', '2026-07-11T00:00:00+00:00',
-    '{ticket_source("PGU-228", "Still stuck escalation", "ready", "ops")}'::jsonb
+    '{ticket_source("PGU-228", "Still stuck escalation", "in_progress", "ops")}'::jsonb
 );
 UPDATE ticket_board.ticket_notification_state
 SET last_nudged_at = clock_timestamp() + interval '1 hour'

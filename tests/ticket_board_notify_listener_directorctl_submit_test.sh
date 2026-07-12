@@ -25,7 +25,7 @@ case "$cmd" in
       cat <<'PANE'
 old output
 Codex
-> Ready ticket for you: PGU-215 -- Submit
+> New ticket for you: PGU-215 -- Submit
 PANE
     else
       cat <<'PANE'
@@ -59,7 +59,7 @@ sys.path.insert(0, str(root))
 
 from scripts.ticket_board.notify_listener import DirectorctlSender
 
-payload = "Ready ticket for you: PGU-215 -- Submit"
+payload = "New ticket for you: PGU-215 -- Submit"
 env = os.environ.copy()
 env["PATH"] = f"{tmpdir}:{env['PATH']}"
 env["TMUX_LOG_PATH"] = str(tmux_log)
@@ -86,7 +86,7 @@ finally:
     subprocess.run = original_run
 PY
 
-payload_sends="$(grep -c -- "-l Ready ticket for you: PGU-215 -- Submit" "$TMUX_LOG")"
+payload_sends="$(grep -c -- "-l New ticket for you: PGU-215 -- Submit" "$TMUX_LOG")"
 enter_sends="$(grep -c -- " Enter$" "$TMUX_LOG")"
 
 if [ "$payload_sends" -ne 1 ]; then

@@ -4,12 +4,11 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     const COLUMNS = [
       { key: 'backlog', label: 'Backlog' },
       { key: 'analysis', label: 'Analysis' },
-      { key: 'ready', label: 'Ready' },
-      { key: 'in_progress', label: 'In Progress' },
+      { key: 'in_progress', label: 'Implementation' },
       { key: 'inspection', label: 'Inspection' },
       { key: 'audit', label: 'Audit' },
       { key: 'eric_review', label: 'Eric Review' },
-      { key: 'director_review', label: 'Director Review' },
+      { key: 'director_review', label: 'Ready' },
       { key: 'done', label: 'Done' },
       { key: 'cancelled', label: 'Cancelled' },
     ];
@@ -107,12 +106,9 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
 
     function defaultAdvanceState(ticket) {
       if (ticket.state === 'backlog') {
-        return 'ready';
+        return 'analysis';
       }
       if (ticket.state === 'analysis') {
-        return 'ready';
-      }
-      if (ticket.state === 'ready') {
         return 'in_progress';
       }
       if (ticket.state === 'in_progress') {
@@ -137,22 +133,9 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       if (ticket.state === 'inspection') {
         return 'inspector';
       }
-      return ticket.state === 'ready' || ticket.state === 'in_progress'
+      return ticket.state === 'in_progress'
         ? ticket.assignee
         : 'director';
-    }
-
-    function inProgressConflictTicket(ticket) {
-      if (ticket.assignee === 'unassigned') {
-        return null;
-      }
-      const ticketRootId = rootTicketForBoard(ticket).id;
-      return state.tickets.find((item) =>
-        item.id !== ticket.id
-          && item.state === 'in_progress'
-          && item.assignee === ticket.assignee
-          && rootTicketForBoard(item).id !== ticketRootId,
-      ) || null;
     }
 
     function advanceBlockedReason(ticket) {
@@ -160,24 +143,12 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       if (!nextState) {
         return 'No default advance from this state.';
       }
-      if (ticket.state === 'backlog' || ticket.state === 'analysis') {
+      if (ticket.state === 'analysis') {
         if (ticket.assignee === 'unassigned') {
-          return 'Assign the ticket before advancing to ready.';
+          return 'Assign the ticket before advancing to Implementation.';
         }
         if (!(ticket.implementation || '').trim()) {
-          return 'Save implementation before advancing to ready.';
-        }
-      }
-      if (ticket.state === 'ready') {
-        if (ticket.assignee === 'unassigned') {
-          return 'Assign the ticket before advancing to in progress.';
-        }
-        if (!(ticket.implementation || '').trim()) {
-          return 'Save implementation before advancing to in progress.';
-        }
-        const conflict = inProgressConflictTicket(ticket);
-        if (conflict) {
-          return `${ticket.assignee} already has an in-progress ticket ${conflict.id}; finish or move it first.`;
+          return 'Save implementation before advancing to Implementation.';
         }
       }
       if (ticket.state === 'inspection' && !ticket.inspector_signoff) {
@@ -186,10 +157,10 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       if (ticket.state === 'audit' && !ticket.audit_signoff) {
         return ticket.needs_eric_signoff
           ? 'Set audit signoff before advancing to Eric review.'
-          : 'Set audit signoff before advancing to Director Review.';
+          : 'Set audit signoff before advancing to Ready.';
       }
       if (ticket.state === 'eric_review' && ticket.needs_eric_signoff && !ticket.eric_signoff) {
-        return 'Record Eric signoff before advancing to Director Review.';
+        return 'Record Eric signoff before advancing to Ready.';
       }
       if (nextState === 'done' && !ticket.commit_exempt && !(ticket.commit_hash || '').trim()) {
         return 'Save a verified commit hash or enable no-commit override before advancing to done.';
@@ -221,10 +192,10 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         return '';
       }
       if (ticket.state === 'eric_review') {
-        return 'Eric signed off. Waiting for Director Review.';
+        return 'Eric signed off. Waiting for Ready.';
       }
       if (ticket.state === 'director_review') {
-        return 'Eric signed off. In Director Review.';
+        return 'Eric signed off. In Ready.';
       }
       return '';
     }

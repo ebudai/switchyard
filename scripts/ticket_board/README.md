@@ -14,7 +14,7 @@ Shared shell-side ticket creation:
 scripts/directorctl ticket-create \
   --board-url http://127.0.0.1:8770 \
   --assignee app \
-  --state ready \
+  --state in_progress \
   --blocked-by "PGU-23, PGU-25" \
   --title "Board: add director as assignee" \
   --body "Allow director-owned action tickets in the assignee enum." \
@@ -110,15 +110,16 @@ Ticket schema:
 Allowed values:
 
 - `assignee`: `main`, `app`, `perf`, `ops`, `audit`, `agent`, `director`, `unassigned`
-- `state`: `backlog`, `analysis`, `ready`, `in_progress`, `audit`, `eric_review`, `director_review`, `done`, `cancelled`
+- `state`: `backlog`, `analysis`, `in_progress`, `inspection`, `audit`, `eric_review`, `director_review`, `done`, `cancelled`
 
 Notes:
 
 - `eric_review` is reserved for tickets with `needs_eric_signoff: true`
-- `backlog` is for deferred or parked tickets; `analysis` is for active triage/spec work before a ticket is revived into `ready`
+- `backlog` is for deferred or parked tickets; `analysis` is for active triage/spec work before a ticket is revived into Implementation (`in_progress`)
 - `blocked_by` is a list of ticket IDs the ticket is waiting on; unresolved blockers are any entries whose referenced ticket is not yet `done`
-- `implementation` is the director-authored implementation package/spec that must be present before a ticket can enter `ready` or `in_progress`
-- `ready` means specced, assigned, and queued for the assignee; `in_progress` means actively being worked
+- `implementation` is the director-authored implementation package/spec that must be present before a ticket can enter Implementation (`in_progress`)
+- `in_progress` is displayed as Implementation and contains both queued and active implementation work; the highlighted card indicates the most recently notified ticket for that role
+- `director_review` is displayed as Ready and is the director's final gate before `done`
 - `audit_prompt` is retained for reference text but is optional in the default workflow
 - `commit_hash` stores the verified git commit associated with the ticket when it moves to `done`; it must be on `main`
 - `commit_exempt` is an explicit override for non-code/process tickets that should be allowed into `done` without a commit
@@ -130,10 +131,10 @@ Notes:
 - Clipboard-pasted screenshots are normalized to PNG and staged under `/home/agent/.claude/pgu-tickets-assets` before ticket attachment
 - The detail view renders attachments as a gallery; hover an image to remove it from the ticket
 - New transitions into `done` require either a verified `commit_hash` or `commit_exempt: true`
-- `analysis -> in_progress` is not a valid default path; tickets move `analysis -> ready -> in_progress`
-- Any state can move to `backlog` to defer work; backlog tickets can be revived to `analysis` or `ready`
+- `analysis -> in_progress` is the default handoff from triage/spec to Implementation
+- Any state can move to `backlog` to defer work; backlog tickets can be revived to `analysis`
 - The default review path is `in_progress -> audit -> eric_review -> director_review -> done`, or `in_progress -> audit -> director_review -> done` when Eric sign-off is not required
-- Only one unlinked ticket per assignee may be in `in_progress` at a time; linked tickets in the same `parent_id` cluster count as one unit of work, and `ready` is the per-role queue
+- Multiple tickets per assignee may be in `in_progress`; the active one is inferred from notification delivery and highlighted in the board
 - For new shell-created tickets, use `scripts/directorctl ticket-create`; it writes through the board action API.
 - Do not hand-write `PGU-N.json` files. The retired JSON store is not a board backend.
 
@@ -150,4 +151,4 @@ PostgreSQL board backend:
   dependency for non-system Python environments.
 - `scripts/ticket_board/rbac.sql` creates the login roles for each board pane/service role without setting passwords and grants minimal table/column permissions; only `director` can update `tickets.manually_controlled`
 - `tickets.manually_controlled` defaults to `false`; PGU-191 transition/notification triggers must no-op when it is `true` so the director can hand-manipulate exceptional tickets
-- The PGU-207 trigger layer enforces workflow gates, maintains `ticket_notification_state`, emits `pg_notify('ticket_board_state_transition', ...)` on state transitions, and exposes `notify_due_nudges()` for the 5-minute pg_cron reminder cadence. The notify listener reconciles missed transition notifications on reconnect so listener downtime does not drop ready/audit/review nudges.
+- The PGU-207 trigger layer enforces workflow gates, maintains `ticket_notification_state`, emits `pg_notify('ticket_board_state_transition', ...)` on state transitions, and exposes `notify_due_nudges()` for the 5-minute pg_cron reminder cadence. The notify listener reconciles missed transition notifications on reconnect so listener downtime does not drop implementation/audit/review nudges.

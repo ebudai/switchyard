@@ -510,16 +510,16 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       commentActions.appendChild(addCommentButton);
       if (ticketIsEricReview(ticket)) {
         const kickbackButton = document.createElement('button');
-        kickbackButton.textContent = 'Kick Back -> In Progress';
+        kickbackButton.textContent = 'Kick Back -> Implementation';
         kickbackButton.addEventListener('click', async () => {
           await submitComment(ticket.id, commentWho.value, commentText.value, 'in_progress');
         });
         commentActions.appendChild(kickbackButton);
       } else if (ticket.state === 'inspection') {
         const kickbackButton = document.createElement('button');
-        kickbackButton.textContent = 'Comment + Return to Ready';
+        kickbackButton.textContent = 'Comment + Return to Implementation';
         kickbackButton.addEventListener('click', async () => {
-          await submitComment(ticket.id, 'inspector', commentText.value, 'ready');
+          await submitComment(ticket.id, 'inspector', commentText.value, 'in_progress');
         });
         commentActions.appendChild(kickbackButton);
       } else if (ticket.state === 'audit') {
@@ -531,7 +531,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         commentActions.appendChild(kickbackButton);
       } else if (ticketAllowsKickback(ticket)) {
         const kickbackButton = document.createElement('button');
-        kickbackButton.textContent = 'Comment + Move to In Progress';
+        kickbackButton.textContent = 'Comment + Move to Implementation';
         kickbackButton.addEventListener('click', async () => {
           await submitComment(ticket.id, commentWho.value, commentText.value, 'in_progress');
         });

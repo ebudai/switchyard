@@ -76,7 +76,7 @@ def run_create(index: int, board_url: str, queue: Queue[dict[str, object]]) -> N
         "--assignee",
         "app",
         "--state",
-        "ready",
+        "in_progress",
         "--blocked-by",
         "PGU-23, PGU-25",
         "--blocked-reason",
@@ -113,7 +113,7 @@ def main() -> int:
                     "--assignee",
                     "director",
                     "--state",
-                    "ready",
+                    "in_progress",
                     "--blocked-by",
                     "PGU-23 PGU-25",
                     "--blocked-reason",
@@ -135,7 +135,7 @@ def main() -> int:
             )
             ticket = json.loads(single.stdout)
             assert ticket["assignee"] == "director"
-            assert ticket["state"] == "ready"
+            assert ticket["state"] == "in_progress"
             assert ticket["screenshots"] == []
             assert ticket["screenshot"] is None
             assert ticket["comments"][0]["who"] == "director"

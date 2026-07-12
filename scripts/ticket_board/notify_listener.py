@@ -47,7 +47,6 @@ ROLE_TO_TARGET = {
 STATE_RANK = {
     "backlog": 0,
     "analysis": 1,
-    "ready": 2,
     "in_progress": 3,
     "inspection": 4,
     "audit": 5,
@@ -57,7 +56,7 @@ STATE_RANK = {
     "cancelled": 9,
 }
 TERMINAL_STATES = {"done", "cancelled"}
-NUDGE_ELIGIBLE_STATES = {"ready", "in_progress", "inspection", "audit", "director_review", "analysis", "backlog"}
+NUDGE_ELIGIBLE_STATES = {"in_progress", "inspection", "audit", "director_review", "analysis", "backlog"}
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_DIRECTORCTL = str(Path(__file__).resolve().parents[1] / "directorctl")
@@ -96,7 +95,7 @@ def target_for_transition(transition: Transition) -> str | None:
         return ROLE_TO_TARGET.get(transition.target_role)
     if transition.new_state == "analysis":
         return ROLE_TO_TARGET["director"]
-    if transition.new_state in {"ready", "in_progress"}:
+    if transition.new_state == "in_progress":
         return ROLE_TO_TARGET.get(transition.assignee)
     if transition.new_state == "inspection":
         return ROLE_TO_TARGET["inspector"]
@@ -123,8 +122,6 @@ def message_for_transition(transition: Transition) -> str | None:
         return f"{transition.ticket_id}{title_suffix} kicked back to you"
     if transition.new_state == "analysis":
         return f"New ticket for you: {transition.ticket_id}{title_suffix}"
-    if transition.new_state == "ready":
-        return f"Ready ticket for you: {transition.ticket_id}{title_suffix}"
     if transition.new_state == "in_progress":
         return f"New ticket for you: {transition.ticket_id}{title_suffix}"
     if transition.new_state == "inspection":
@@ -403,7 +400,7 @@ WHERE id = %s
         if kind == "transition":
             if state == "analysis":
                 return "director"
-            if state in {"ready", "in_progress"}:
+            if state == "in_progress":
                 return assignee if assignee != "unassigned" else None
             if state == "inspection":
                 return "inspector"
@@ -416,7 +413,7 @@ WHERE id = %s
             return "director"
         if kind == "nudge_analysis":
             return "director"
-        if state in {"ready", "in_progress"}:
+        if state == "in_progress":
             return assignee if assignee != "unassigned" else None
         if state == "inspection":
             return "inspector"

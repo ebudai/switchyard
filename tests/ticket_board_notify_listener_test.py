@@ -409,7 +409,7 @@ def test_busy_pane_force_delivers_after_max_defer_cap() -> None:
     )
     second_conn = FakeConnection(
         [queue_row(25, "PGU-252", attempts=2)],
-        queue_created_at={25: now - timedelta(seconds=61)},
+        queue_created_at={25: now - timedelta(seconds=DEFAULT_MAX_DEFER_SECONDS + 1)},
     )
     connections = [first_conn, second_conn]
 
@@ -422,7 +422,6 @@ def test_busy_pane_force_delivers_after_max_defer_cap() -> None:
         activity_gate=lambda _target: True,
         connector=connector,
         poll_seconds=0,
-        max_defer_seconds=60.0,
     )
 
     assert listener.listen_once(max_notifications=1) == 0
@@ -635,6 +634,102 @@ def test_director_composer_busy_requeues_then_idle_delivers_once() -> None:
     assert sent == [("pgu-director:0.0", "PGU-231 -- Director review ready for your review")]
     assert idle_conn.acked == [21]
     assert idle_conn.requeued == []
+
+
+def test_director_composer_busy_ignores_max_defer_until_idle() -> None:
+    sent: list[tuple[str, str]] = []
+    old_created_at = datetime.now(timezone.utc) - timedelta(seconds=DEFAULT_MAX_DEFER_SECONDS + 30)
+    busy_conn = FakeConnection(
+        [
+            queue_row(
+                22,
+                "PGU-283",
+                target_role="director",
+                message="PGU-283 -- Director notification",
+                attempts=4,
+            )
+        ],
+        queue_created_at={22: old_created_at},
+    )
+    busy_listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=lambda target, message: sent.append((target, message)),
+        activity_gate=lambda target: target == "pgu-director:0.0",
+        connector=lambda *args, **kwargs: busy_conn,
+        poll_seconds=0,
+    )
+
+    assert busy_listener.listen_once(max_notifications=1) == 0
+    assert sent == []
+    assert [item[0] for item in busy_conn.requeued] == [22]
+    assert busy_conn.acked == []
+    assert trace_events(busy_conn) == ["listener_claim", "gate_defer"]
+    assert json.loads(str(busy_conn.traces[1][8]))["max_defer_exempt"] is True
+
+    idle_conn = FakeConnection(
+        [
+            queue_row(
+                22,
+                "PGU-283",
+                target_role="director",
+                message="PGU-283 -- Director notification",
+                attempts=5,
+            )
+        ],
+        queue_created_at={22: old_created_at},
+    )
+    idle_listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=lambda target, message: sent.append((target, message)),
+        activity_gate=lambda _target: False,
+        connector=lambda *args, **kwargs: idle_conn,
+        poll_seconds=0,
+    )
+
+    assert idle_listener.listen_once(max_notifications=1) == 1
+    assert sent == [("pgu-director:0.0", "PGU-283 -- Director notification")]
+    assert idle_conn.acked == [22]
+    assert idle_conn.requeued == []
+    assert trace_events(idle_conn) == ["listener_claim", "send", "listener_ack"]
+
+
+def test_director_empty_composer_queue_notification_delivers_immediately() -> None:
+    horizontal = "─" * 48
+    capture = f"""
+Working.
+{horizontal}
+❯
+{horizontal}
+""".strip()
+    sent: list[tuple[str, str]] = []
+
+    def capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=capture)
+
+    gate = PaneActivityGate("/tmp/directorctl", capture_runner=capture_runner)
+    conn = FakeConnection(
+        [
+            queue_row(
+                23,
+                "PGU-283",
+                target_role="director",
+                message="PGU-283 -- Director notification",
+                attempts=1,
+            )
+        ]
+    )
+    listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=lambda target, message: sent.append((target, message)),
+        activity_gate=gate.is_busy,
+        connector=lambda *args, **kwargs: conn,
+        poll_seconds=0,
+    )
+
+    assert listener.listen_once(max_notifications=1) == 1
+    assert sent == [("pgu-director:0.0", "PGU-283 -- Director notification")]
+    assert conn.acked == [23]
+    assert conn.requeued == []
 
 
 def test_agent_gate_working_indicator_stays_busy() -> None:
@@ -881,6 +976,8 @@ def main() -> int:
     test_escalation_for_still_stuck_implementation_ticket_delivers_to_director()
     test_nudge_analysis_copy_delivers_to_director()
     test_director_composer_busy_requeues_then_idle_delivers_once()
+    test_director_composer_busy_ignores_max_defer_until_idle()
+    test_director_empty_composer_queue_notification_delivers_immediately()
     test_agent_gate_working_indicator_stays_busy()
     test_director_gate_treats_composer_content_as_busy_only_for_director()
     test_director_gate_empty_composer_delivers_even_when_capture_changes()

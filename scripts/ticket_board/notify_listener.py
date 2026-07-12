@@ -650,7 +650,8 @@ WHERE id = %s
             defer_age = self._defer_age_seconds(conn, notification_id)
             pane_busy = self.activity_gate(target)
             activity_trace = self._activity_trace(target, pane_busy)
-            if pane_busy and defer_age < self.max_defer_seconds:
+            director_composer_busy = target_role == "director" and pane_busy
+            if pane_busy and (director_composer_busy or defer_age < self.max_defer_seconds):
                 self.logger.info("Pane %s is active; requeueing notification %s for %s", target, notification_id, ticket_id)
                 self._trace_notification(
                     conn,
@@ -662,7 +663,12 @@ WHERE id = %s
                     pane_busy=True,
                     busy_reason=activity_trace.reason,
                     region_digest=activity_trace.region_digest,
-                    detail={"target": target, "defer_age_seconds": defer_age, "attempts": attempts},
+                    detail={
+                        "target": target,
+                        "defer_age_seconds": defer_age,
+                        "attempts": attempts,
+                        "max_defer_exempt": director_composer_busy,
+                    },
                 )
                 self._requeue_notification(conn, notification_id, attempts, "pane busy")
                 continue

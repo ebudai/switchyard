@@ -536,6 +536,84 @@ WHERE id = 'PGU-8';
 
             insert_ticket(
                 conninfo,
+                "PGU-80",
+                title="Eric review to inspection",
+                assignee="director",
+                state="eric_review",
+                implementation="visual pass",
+                audit_signoff=True,
+                needs_eric_signoff=True,
+                needs_inspection=True,
+            )
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'inspection' WHERE id = 'PGU-80';")
+            eric_to_inspection = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object('state', state, 'needs_inspection', needs_inspection, 'inspector_signoff', inspector_signoff)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-80';
+""",
+                ).stdout
+            )
+            assert eric_to_inspection == {
+                "state": "inspection",
+                "needs_inspection": True,
+                "inspector_signoff": False,
+            }, eric_to_inspection
+
+            insert_ticket(
+                conninfo,
+                "PGU-81",
+                title="Eric review inspection guard",
+                assignee="director",
+                state="eric_review",
+                implementation="visual pass",
+                audit_signoff=True,
+                needs_eric_signoff=True,
+                needs_inspection=False,
+            )
+            assert_error(
+                conninfo,
+                "UPDATE ticket_board.tickets SET state = 'inspection' WHERE id = 'PGU-81';",
+                "needs_inspection must be true",
+            )
+
+            insert_ticket(
+                conninfo,
+                "PGU-82",
+                title="Inspection reverse unchanged",
+                assignee="inspector",
+                state="inspection",
+                implementation="visual pass",
+                needs_inspection=True,
+                needs_eric_signoff=True,
+            )
+            assert_error(
+                conninfo,
+                "UPDATE ticket_board.tickets SET state = 'eric_review' WHERE id = 'PGU-82';",
+                "illegal state transition: inspection -> eric_review",
+            )
+
+            insert_ticket(
+                conninfo,
+                "PGU-83",
+                title="Eric review direct done unchanged",
+                assignee="director",
+                state="eric_review",
+                implementation="visual pass",
+                audit_signoff=True,
+                needs_eric_signoff=True,
+                eric_signoff=True,
+            )
+            assert_error(
+                conninfo,
+                "UPDATE ticket_board.tickets SET state = 'done', commit_exempt = true WHERE id = 'PGU-83';",
+                "illegal state transition: eric_review -> done",
+            )
+
+            insert_ticket(
+                conninfo,
                 "PGU-9",
                 title="Reaudit",
                 assignee="director",

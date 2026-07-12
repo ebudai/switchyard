@@ -4,16 +4,18 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-from scripts.ticket_board.notify_listener import DEFAULT_PANE_STATE_DIR, PaneHookStateStore
+DEFAULT_PANE_STATE_DIR = (
+    Path(os.environ["PGU_TICKET_BOARD_PANE_STATE_DIR"]).expanduser()
+    if os.environ.get("PGU_TICKET_BOARD_PANE_STATE_DIR")
+    else Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-state")
+)
 
 
 def _target_from_tmux_pane(environ: dict[str, str]) -> str | None:
@@ -46,6 +48,30 @@ def _resolve_target(raw_target: str, environ: dict[str, str]) -> str:
     raise SystemExit("ticket-board-pane-idle-hook: missing --target, PGU_PANE_TARGET, and TMUX_PANE")
 
 
+def _target_path(state_dir: Path, target: str) -> Path:
+    safe = "".join(ch if ch.isalnum() or ch in ".-" else "_" for ch in target)
+    return state_dir / f"{safe}.json"
+
+
+def _write_state(state_dir: str | Path, target: str, state: str, *, source: str = "") -> Path:
+    normalized_state = state.strip().lower()
+    if normalized_state not in {"idle", "busy", "blocked"}:
+        raise ValueError("pane hook state must be idle, busy, or blocked")
+    target_dir = Path(state_dir).expanduser()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "target": target,
+        "state": normalized_state,
+        "updated_at": time.time(),
+        "source": source,
+    }
+    path = _target_path(target_dir, target)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+    return path
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Record a PGU pane idle/busy state for ticket notification delivery.")
     parser.add_argument("state", choices=["idle", "busy", "blocked"], help="pane lifecycle state to record")
@@ -58,7 +84,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     target = _resolve_target(args.target.strip(), os.environ)
-    PaneHookStateStore(args.state_dir).write(target, args.state, source=args.source)
+    _write_state(args.state_dir, target, args.state, source=args.source)
     return 0
 
 

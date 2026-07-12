@@ -251,6 +251,10 @@ class PaneActivityGate:
     def last_trace(self, target: str) -> ActivityTrace | None:
         return self._last_trace_by_target.get(target)
 
+    def missing_hook_targets(self, targets: list[str] | None = None) -> list[str]:
+        checked_targets = targets or sorted(set(ROLE_TO_TARGET.values()))
+        return [target for target in checked_targets if self.state_store.read(target) is None]
+
     def _tmux_session_for_target(self, target: str) -> str:
         return target.split(":", 1)[0]
 
@@ -299,6 +303,13 @@ class PaneActivityGate:
         now = self.monotonic()
         if not self._director_composing_latched and current_activity > snapshot:
             self._director_composing_latched = True
+            self._director_composing_activity = current_activity
+            self._director_composing_started_at = now
+        elif (
+            self._director_composing_latched
+            and self._director_composing_activity is not None
+            and current_activity > self._director_composing_activity
+        ):
             self._director_composing_activity = current_activity
             self._director_composing_started_at = now
         if not self._director_composing_latched:
@@ -778,11 +789,26 @@ WHERE id = %s
         notifications = conn.notifies(timeout=self._wait_timeout_seconds(conn), stop_after=1)
         return next(iter(notifications), None) is not None
 
+    def _log_missing_hook_state(self) -> None:
+        gate_owner = getattr(self.activity_gate, "__self__", None)
+        missing_hook_targets = getattr(gate_owner, "missing_hook_targets", None)
+        if not callable(missing_hook_targets):
+            return
+        missing = missing_hook_targets()
+        if missing:
+            self.logger.warning(
+                "Pane hook state missing for %s; notification delivery fails closed until hooks write state",
+                ", ".join(missing),
+            )
+        else:
+            self.logger.info("Pane hook state present for all notification targets")
+
     def listen_once(self, *, max_notifications: int | None = None) -> int:
         delivered_before = self.delivered_count
         with self.connector(self.conninfo, **self._connector_kwargs()) as conn:
             conn.execute(sql.SQL("LISTEN {}").format(sql.Identifier(self.channel)))
             self.logger.info("LISTEN %s established", self.channel)
+            self._log_missing_hook_state()
             while not self.stop_event.is_set():
                 delivered = self.process_due_notifications(conn, max_notifications=max_notifications)
                 if max_notifications is not None and self.delivered_count >= max_notifications:

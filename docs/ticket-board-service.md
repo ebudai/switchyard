@@ -130,7 +130,8 @@ The listener no longer screen-scrapes pane output. Each agent CLI must run
 can read a per-pane state file from
 `$PGU_TICKET_BOARD_PANE_STATE_DIR` (default:
 `/run/user/<agent-uid>/pgu-ticket-board/pane-state`). Missing hook state fails
-closed and defers delivery.
+closed and defers delivery. The listener logs the panes still missing hook
+state on startup.
 
 Hook commands may pass `--target pgu-<role>:0.0`, set `PGU_PANE_TARGET`, or let
 the writer resolve the target from `TMUX_PANE`. The required state transitions
@@ -143,6 +144,40 @@ are:
   if the hook surface exposes them.
 - Gemini: `AfterAgent` writes `idle`; `BeforeAgent` writes `busy`. Do not use
   Gemini `Notification` for idle because it is alert/permission-oriented.
+
+Install the hook writer and persistent CLI hook config entries with:
+
+```bash
+scripts/ticket-board-install-pane-hooks install
+```
+
+That command copies the standalone writer to
+`~/.local/bin/pgu-ticket-board-pane-idle-hook` and writes managed entries to:
+
+- Claude: `~/.claude/settings.json`
+- Codex: `~/.codex/hooks.json`
+- Gemini: `~/.gemini/antigravity-cli/settings.json`
+
+The hook cutover order is strict:
+
+1. Run `scripts/ticket-board-install-pane-hooks install`.
+2. Restart every live pane CLI so it reloads its hook config.
+3. Exercise one lifecycle event in every pane, then verify all hook-state files
+   exist:
+
+```bash
+scripts/ticket-board-install-pane-hooks verify-state
+```
+
+4. Only after `verify-state` passes for every pane, deploy or restart the
+   listener:
+
+```bash
+scripts/ticket-board-notify-listener-service.sh deploy-restart
+```
+
+Do not deploy the listener first. Until each pane writes hook state, the
+listener intentionally treats that pane as busy and holds notification delivery.
 
 The director pane also uses tmux `client_activity` as a no-clobber latch. When
 the hook state transitions to `idle`, the listener snapshots the director

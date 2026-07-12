@@ -149,6 +149,21 @@ class StopAfterWaitConnection(FakeConnection):
             yield FakeNotify("")
 
 
+class FakeLogger:
+    def __init__(self) -> None:
+        self.infos: list[tuple[str, tuple[Any, ...]]] = []
+        self.warnings: list[tuple[str, tuple[Any, ...]]] = []
+
+    def info(self, message: str, *args: object) -> None:
+        self.infos.append((message, args))
+
+    def warning(self, message: str, *args: object) -> None:
+        self.warnings.append((message, args))
+
+    def exception(self, message: str, *args: object) -> None:
+        self.warning(message, *args)
+
+
 def queue_row(
     notification_id: int,
     ticket_id: str,
@@ -395,6 +410,63 @@ def test_director_abandoned_draft_timeout_releases_latch() -> None:
         assert gate.last_trace("pgu-director:0.0").reason == "hook_idle"  # type: ignore[union-attr]
 
 
+def test_director_abandoned_draft_timeout_uses_latest_keystroke() -> None:
+    now = [0.0]
+    activity = [100]
+
+    def client_activity_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=f"{activity[0]}\n")
+
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            client_activity_runner=client_activity_runner,
+            director_composing_timeout_seconds=5.0,
+            monotonic=lambda: now[0],
+        )
+        store.write("pgu-director:0.0", "idle", source="claude.Notification.idle_prompt", now=10.0)
+        assert gate.is_busy("pgu-director:0.0") is False
+
+        now[0] = 1.0
+        activity[0] = 101
+        assert gate.is_busy("pgu-director:0.0") is True
+
+        now[0] = 4.0
+        activity[0] = 105
+        assert gate.is_busy("pgu-director:0.0") is True
+
+        now[0] = 8.5
+        assert gate.is_busy("pgu-director:0.0") is True
+        assert gate.last_trace("pgu-director:0.0").reason == "human_composing"  # type: ignore[union-attr]
+
+        now[0] = 9.1
+        assert gate.is_busy("pgu-director:0.0") is False
+        assert gate.last_trace("pgu-director:0.0").reason == "hook_idle"  # type: ignore[union-attr]
+
+
+def test_listener_logs_missing_hook_state_on_startup() -> None:
+    with TemporaryStateDir() as tmp_path:
+        store, gate = hook_gate(tmp_path)
+        store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
+        logger = FakeLogger()
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda _target, _message: None,
+            activity_gate=gate.is_working,
+            connector=lambda *args, **kwargs: FakeConnection([]),
+            logger=logger,  # type: ignore[arg-type]
+        )
+
+        listener._log_missing_hook_state()
+
+    assert logger.warnings
+    message, args = logger.warnings[0]
+    assert "Pane hook state missing" in message
+    assert "pgu-director:0.0" in args[0]
+    assert "pgu-ops:0.0" not in args[0]
+
+
 def test_send_failure_uses_exponential_backoff() -> None:
     conn = FakeConnection([queue_row(7, "PGU-304", attempts=4)])
 
@@ -547,6 +619,8 @@ def main() -> int:
     test_hook_blocked_is_busy()
     test_director_client_activity_latches_no_clobber_until_busy_idle_cycle()
     test_director_abandoned_draft_timeout_releases_latch()
+    test_director_abandoned_draft_timeout_uses_latest_keystroke()
+    test_listener_logs_missing_hook_state_on_startup()
     test_send_failure_uses_exponential_backoff()
     test_stale_notification_for_cancelled_ticket_is_acked_not_delivered()
     test_eric_review_is_not_delivered()

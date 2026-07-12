@@ -574,6 +574,7 @@ ORDER BY t.ticket_number
                 edit_fields = self._pg_edit_field_patch(patch)
                 patch = {key: value for key, value in patch.items() if key not in edit_fields}
                 if edit_fields:
+                    self._materialize_edit_field_attachments(edit_fields, ticket_id, current)
                     self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps(edit_fields)))
                 if "manually_controlled" in patch:
                     self._pg_call(
@@ -697,6 +698,23 @@ ORDER BY t.ticket_number
             editable = set(editable)
         return {field: patch[field] for field in editable if field in patch}
 
+    def _materialize_edit_field_attachments(self, edit_fields: dict[str, Any], ticket_id: str, current: dict[str, Any]) -> None:
+        if "screenshots" in edit_fields:
+            edit_fields["screenshots"] = self._materialize_attachments(
+                edit_fields["screenshots"],
+                ticket_id,
+                current_paths=current.get("screenshots", []),
+            )
+            edit_fields["screenshot"] = edit_fields["screenshots"][0] if edit_fields["screenshots"] else ""
+        elif "screenshot" in edit_fields:
+            paths = self._materialize_attachments(
+                edit_fields["screenshot"],
+                ticket_id,
+                current_paths=current.get("screenshots", []),
+            )
+            edit_fields["screenshots"] = paths
+            edit_fields["screenshot"] = paths[0] if paths else ""
+
     def _validate_comments(self, raw: Any) -> list[dict[str, str]]:
         if not isinstance(raw, list):
             raise ValueError("comments must be a list")
@@ -775,6 +793,9 @@ ORDER BY t.ticket_number
     def _path_in_allowed_image_dirs(self, path: Path) -> bool:
         return self.frame_dir in path.parents or self.asset_dir in path.parents
 
+    def _path_in_asset_dir(self, path: Path) -> bool:
+        return self.asset_dir == path or self.asset_dir in path.parents
+
     def _validate_stored_screenshots(self, raw_screenshots: Any, raw_screenshot: Any) -> list[dict[str, Any]]:
         raw_items: list[Any] = []
         if raw_screenshots not in (None, "", "null"):
@@ -825,8 +846,12 @@ ORDER BY t.ticket_number
             normalized = self._normalize_image_path(item)
             if normalized in seen:
                 continue
-            if normalized in normalized_current:
+            path = Path(normalized)
+            if normalized in normalized_current and self._path_in_asset_dir(Path(normalized_current[normalized])):
                 screenshot_paths.append(normalized_current[normalized])
+            elif self._path_in_asset_dir(path):
+                self.resolve_image(normalized)
+                screenshot_paths.append(normalized)
             else:
                 screenshot_paths.append(self._copy_attachment(normalized, ticket_id))
             seen.add(normalized)

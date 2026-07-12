@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression test: Enter on create-form fields submits the ticket."""
+"""Regression test: create-form Enter submit excludes multiline body text."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ def main() -> int:
     assert "event.preventDefault();" in SCRIPT_APP
     assert "void handleCreateSubmit();" in SCRIPT_APP
     assert "titleInput.addEventListener('keydown', submitCreateOnEnter);" in SCRIPT_APP
-    assert "bodyInput.addEventListener('keydown', submitCreateOnEnter);" in SCRIPT_APP
+    assert "bodyInput.addEventListener('keydown', submitCreateOnEnter);" not in SCRIPT_APP
     assert "assigneeInput.addEventListener('keydown', submitCreateOnEnter);" in SCRIPT_APP
     assert "screenshotInput.addEventListener('keydown', submitCreateOnEnter);" in SCRIPT_APP
     print("create_ticket_enter_submit_test: ok")

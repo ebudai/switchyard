@@ -406,7 +406,6 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
 
     createBtn.addEventListener('click', handleCreateSubmit);
     titleInput.addEventListener('keydown', submitCreateOnEnter);
-    bodyInput.addEventListener('keydown', submitCreateOnEnter);
     assigneeInput.addEventListener('keydown', submitCreateOnEnter);
     screenshotInput.addEventListener('keydown', submitCreateOnEnter);
 

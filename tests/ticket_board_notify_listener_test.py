@@ -18,7 +18,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.ticket_board.notify_listener import DirectorctlSender, PaneActivityGate, TicketBoardNotifyListener
+from scripts.ticket_board.notify_listener import (
+    DEFAULT_MAX_DEFER_SECONDS,
+    DirectorctlSender,
+    PaneActivityGate,
+    TicketBoardNotifyListener,
+)
 
 
 @dataclass(frozen=True)
@@ -632,7 +637,7 @@ def test_director_composer_busy_requeues_then_idle_delivers_once() -> None:
     assert idle_conn.requeued == []
 
 
-def test_gate_async_cold_start_defaults_busy_then_static_region_idles() -> None:
+def test_agent_gate_working_indicator_stays_busy() -> None:
     capture = "old scrollback\nWorking (999s)\nPress up to edit queued messages\nesc to interrupt\n❯"
 
     def capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -644,7 +649,7 @@ def test_gate_async_cold_start_defaults_busy_then_static_region_idles() -> None:
     gate = PaneActivityGate("/tmp/directorctl", capture_runner=capture_runner, sleeper=sleeper)
 
     assert gate.is_busy("pgu-ops:0.0") is True
-    assert gate.is_busy("pgu-ops:0.0") is False
+    assert gate.is_busy("pgu-ops:0.0") is True
 
 
 def test_director_gate_treats_composer_content_as_busy_only_for_director() -> None:
@@ -699,11 +704,11 @@ Working.
 
     gate = PaneActivityGate("/tmp/directorctl", capture_runner=capture_runner)
 
-    assert gate.is_busy("pgu-director:0.0") is True
+    assert gate.is_busy("pgu-director:0.0") is False
     assert gate.is_busy("pgu-director:0.0") is False
 
 
-def test_agent_gate_hashes_status_region_without_keyword_matching() -> None:
+def test_agent_gate_treats_non_suggestion_region_change_as_busy() -> None:
     captures = iter(
         [
             "task output\nstatus tick 1\nplain footer",
@@ -716,8 +721,74 @@ def test_agent_gate_hashes_status_region_without_keyword_matching() -> None:
 
     gate = PaneActivityGate("/tmp/directorctl", capture_runner=capture_runner)
 
+    assert gate.is_busy("pgu-ops:0.0") is False
     assert gate.is_busy("pgu-ops:0.0") is True
-    assert gate.is_busy("pgu-ops:0.0") is True
+
+
+def test_agent_gate_ignores_cycling_suggestion_ghost_text() -> None:
+    captures = iter(
+        [
+            "\n".join(
+                [
+                    "previous answer",
+                    "",
+                    "› Summarize recent commits",
+                    "ctrl+c to quit",
+                    "",
+                ]
+            ),
+            "\n".join(
+                [
+                    "previous answer",
+                    "",
+                    "> Use /skills to list available skills",
+                    "ctrl+c to quit",
+                    "",
+                ]
+            ),
+        ]
+    )
+
+    def capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=next(captures))
+
+    gate = PaneActivityGate("/tmp/directorctl", capture_runner=capture_runner)
+
+    assert gate.is_busy("pgu-ops:0.0") is False
+    assert gate.is_busy("pgu-ops:0.0") is False
+
+
+def test_idle_codex_suggestion_text_delivers_queue_notification() -> None:
+    sent: list[tuple[str, str]] = []
+    capture = "\n".join(
+        [
+            "previous answer",
+            "",
+            "› Summarize recent commits",
+            "  gpt-5.5 high · ~/Projects/pgu",
+        ]
+    )
+
+    def capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=capture)
+
+    gate = PaneActivityGate("/tmp/directorctl", capture_runner=capture_runner)
+    conn = FakeConnection([queue_row(31, "PGU-283", target_role="app")])
+    listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=lambda target, message: sent.append((target, message)),
+        activity_gate=gate.is_working,
+        connector=lambda *args, **kwargs: conn,
+        poll_seconds=0,
+    )
+
+    assert listener.listen_once(max_notifications=1) == 1
+    assert sent == [("pgu-app:0.0", "New ticket for you: PGU-283 -- Queue")]
+    assert conn.acked == [31]
+    assert conn.requeued == []
+    assert trace_events(conn) == ["listener_claim", "send", "listener_ack"]
+    assert conn.traces[1][5] == "idle"
+    assert conn.traces[1][6] == "cold_start_idle"
 
 
 def test_director_gate_ignores_status_region_changes() -> None:
@@ -744,8 +815,12 @@ changed status text
 
     gate = PaneActivityGate("/tmp/directorctl", capture_runner=capture_runner)
 
-    assert gate.is_busy("pgu-director:0.0") is True
     assert gate.is_busy("pgu-director:0.0") is False
+    assert gate.is_busy("pgu-director:0.0") is False
+
+
+def test_default_max_defer_cap_is_short_backstop() -> None:
+    assert DEFAULT_MAX_DEFER_SECONDS <= 10.0
 
 
 def test_acked_notification_does_not_repeat_across_restart() -> None:
@@ -806,11 +881,14 @@ def main() -> int:
     test_escalation_for_still_stuck_implementation_ticket_delivers_to_director()
     test_nudge_analysis_copy_delivers_to_director()
     test_director_composer_busy_requeues_then_idle_delivers_once()
-    test_gate_async_cold_start_defaults_busy_then_static_region_idles()
+    test_agent_gate_working_indicator_stays_busy()
     test_director_gate_treats_composer_content_as_busy_only_for_director()
     test_director_gate_empty_composer_delivers_even_when_capture_changes()
-    test_agent_gate_hashes_status_region_without_keyword_matching()
+    test_agent_gate_treats_non_suggestion_region_change_as_busy()
+    test_agent_gate_ignores_cycling_suggestion_ghost_text()
+    test_idle_codex_suggestion_text_delivers_queue_notification()
     test_director_gate_ignores_status_region_changes()
+    test_default_max_defer_cap_is_short_backstop()
     test_acked_notification_does_not_repeat_across_restart()
     test_default_sender_delegates_to_directorctl_send()
     print("ticket_board_notify_listener_test: ok")

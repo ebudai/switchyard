@@ -30,7 +30,7 @@ DEFAULT_KEEPALIVES_COUNT = 3
 DEFAULT_DIRECTORCTL_SEND_TIMEOUT_SECONDS = 10.0
 DEFAULT_REQUEUE_BASE_SECONDS = 5.0
 DEFAULT_REQUEUE_MAX_SECONDS = 60.0
-DEFAULT_MAX_DEFER_SECONDS = 90.0
+DEFAULT_MAX_DEFER_SECONDS = 10.0
 DEFAULT_DIRECTOR_RECENT_ACTIVITY_SECONDS = 10.0
 DEFAULT_DIRECTOR_STABLE_IDLE_SECONDS = 0.0
 AGENT_STATUS_REGION_LINES = 8
@@ -212,8 +212,12 @@ class PaneActivityGate:
         return self._agent_status_region(text)
 
     def _agent_status_region(self, text: str) -> str:
-        lines = text.splitlines()
+        lines = [line for line in text.splitlines() if not self._is_volatile_composer_suggestion(line)]
         return "\n".join(lines[-AGENT_STATUS_REGION_LINES:])
+
+    def _is_volatile_composer_suggestion(self, line: str) -> bool:
+        stripped = line.strip()
+        return stripped.startswith(("> ", "› "))
 
     def _director_composer_region(self, text: str) -> str:
         if not text:
@@ -221,45 +225,73 @@ class PaneActivityGate:
         lines = text.splitlines()
         horizontal_indices = [idx for idx, line in enumerate(lines) if line.count("─") >= 40]
         if len(horizontal_indices) < 2:
-            return "\n".join(lines[-AGENT_STATUS_REGION_LINES:])
-        return "\n".join(lines[horizontal_indices[-2] + 1 : horizontal_indices[-1]])
+            return ""
+        composer_lines = lines[horizontal_indices[-2] + 1 : horizontal_indices[-1]]
+        return "\n".join(self._normalize_composer_line(line) for line in composer_lines).strip()
+
+    def _normalize_composer_line(self, line: str) -> str:
+        stripped = line.strip()
+        for prompt in ("❯", ">", "$"):
+            if stripped == prompt:
+                return ""
+            if stripped.startswith(f"{prompt} "):
+                return stripped[len(prompt) + 1 :].strip()
+        return stripped
 
     def _activity_digest(self, target: str, text: str) -> str:
         region = self._activity_region(target, text)
         return hashlib.sha256(region.encode("utf-8")).hexdigest()
 
-    def _mark_recent_activity(self, target: str, digest: str, now: float) -> bool:
-        previous = self._last_region_digest_by_target.get(target)
-        self._last_region_digest_by_target[target] = digest
-        if previous is None:
-            self._last_changed_at_by_target[target] = now
-            return True
-        if previous != digest:
-            self._last_changed_at_by_target[target] = now
-            return True
-        return False
+    def _has_working_indicator(self, target: str, region: str) -> bool:
+        if target == ROLE_TO_TARGET["director"]:
+            return bool(region.strip())
+        normalized = region.lower()
+        return (
+            "esc to interrupt" in normalized
+            or "working" in normalized
+            or "thinking" in normalized
+            or "running" in normalized
+        )
 
     def is_busy(self, target: str) -> bool:
         text = self._capture(target)
         if text is None:
             return self._record_trace(target, ActivityTrace(False, "capture_failed"))
+        first_region = self._activity_region(target, text)
         first_digest = self._activity_digest(target, text)
+        first_busy = self._has_working_indicator(target, first_region)
         if self.stable_idle_seconds > 0:
             self.sleeper(self.stable_idle_seconds)
             second_text = self._capture(target)
             if second_text is None:
                 return self._record_trace(target, ActivityTrace(False, "capture_failed", first_digest))
+            second_region = self._activity_region(target, second_text)
             second_digest = self._activity_digest(target, second_text)
             now = self.monotonic()
+            second_busy = self._has_working_indicator(target, second_region)
+            if second_busy:
+                self._last_region_digest_by_target[target] = second_digest
+                self._last_changed_at_by_target[target] = now
+                return self._record_trace(target, ActivityTrace(True, "working_indicator", second_digest))
             if first_digest != second_digest:
                 self._last_region_digest_by_target[target] = second_digest
                 self._last_changed_at_by_target[target] = now
                 return self._record_trace(target, ActivityTrace(True, "region_changed", second_digest))
             self._last_region_digest_by_target[target] = second_digest
             return self._record_trace(target, ActivityTrace(False, "stable_idle", second_digest))
-        changed = self._mark_recent_activity(target, first_digest, self.monotonic())
-        reason = "cold_start_or_region_changed" if changed else "region_stable"
-        return self._record_trace(target, ActivityTrace(changed, reason, first_digest))
+        now = self.monotonic()
+        previous = self._last_region_digest_by_target.get(target)
+        self._last_region_digest_by_target[target] = first_digest
+        if first_busy:
+            self._last_changed_at_by_target[target] = now
+            return self._record_trace(target, ActivityTrace(True, "working_indicator", first_digest))
+        if previous is None:
+            self._last_changed_at_by_target[target] = now
+            return self._record_trace(target, ActivityTrace(False, "cold_start_idle", first_digest))
+        if previous != first_digest:
+            self._last_changed_at_by_target[target] = now
+            return self._record_trace(target, ActivityTrace(True, "region_changed", first_digest))
+        return self._record_trace(target, ActivityTrace(False, "region_stable", first_digest))
 
     def is_working(self, target: str) -> bool:
         return self.is_busy(target)

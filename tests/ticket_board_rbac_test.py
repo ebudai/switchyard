@@ -93,12 +93,15 @@ def psql_error(conn: str, sql: str) -> str:
     return proc.stderr + proc.stdout
 
 
-def create_pane_roles(conn: str) -> None:
+def create_pane_roles(conn: str, *, exclude: set[str] | None = None) -> None:
+    exclude = exclude or set()
     role_sql = "\n".join(
         f"CREATE ROLE {role} LOGIN PASSWORD '{role}_preexisting_password';"
         for role in PANE_ROLES
+        if role not in exclude
     )
-    psql(conn, role_sql)
+    if role_sql:
+        psql(conn, role_sql)
 
 
 def sql_string(value: str) -> str:
@@ -647,14 +650,9 @@ def main() -> int:
             run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
             psql(admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
 
-            missing_role_error = psql_error(admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
-            assert 'role "director" does not exist' in missing_role_error, missing_role_error
-            service_after_failed_rbac = psql(admin_conn, "SELECT to_regrole('ticket_board_service') IS NULL;")
-            assert service_after_failed_rbac == "t", service_after_failed_rbac
-            listener_after_failed_rbac = psql(admin_conn, "SELECT to_regrole('ticket_board_listener') IS NULL;")
-            assert listener_after_failed_rbac == "t", listener_after_failed_rbac
-
-            create_pane_roles(admin_conn)
+            create_pane_roles(admin_conn, exclude={"inspector"})
+            missing_inspector_before = psql(admin_conn, "SELECT to_regrole('inspector') IS NULL;")
+            assert missing_inspector_before == "t", missing_inspector_before
             psql(admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
             psql(admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
 
@@ -670,7 +668,7 @@ WHERE rolname = ANY({ROLE_SQL_ARRAY});
             )
             assert sorted(role_rows) == sorted(EXPECTED_ROLES), role_rows
             for role in PANE_ROLES:
-                assert role_rows[role] == {"can_login": True, "password_is_null": False}, (role, role_rows[role])
+                assert role_rows[role] == {"can_login": True, "password_is_null": role == "inspector"}, (role, role_rows[role])
             assert role_rows["ticket_board_service"] == {"can_login": True, "password_is_null": True}, role_rows
             assert role_rows["ticket_board_listener"] == {"can_login": True, "password_is_null": True}, role_rows
 

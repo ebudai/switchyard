@@ -10,7 +10,14 @@
 BEGIN;
 
 DO $$
+DECLARE
+    role_name text;
 BEGIN
+    FOREACH role_name IN ARRAY ARRAY['director', 'eric', 'ops', 'app', 'audit', 'inspector', 'perf', 'research', 'main'] LOOP
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
+            EXECUTE format('CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION', role_name);
+        END IF;
+    END LOOP;
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ticket_board_service') THEN
         CREATE ROLE ticket_board_service LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
     END IF;

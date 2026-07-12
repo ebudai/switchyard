@@ -1080,6 +1080,7 @@ BEGIN
             WHERE (
                     (
                         t.state = 'analysis'
+                        AND NOT t.manually_controlled
                         AND NOT ticket_board.ticket_can_auto_advance_analysis(
                             t.state,
                             t.assignee,

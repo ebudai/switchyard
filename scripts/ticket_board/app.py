@@ -309,7 +309,17 @@ SELECT
     t.updated_text,
     (SELECT count(*)::int FROM ticket_board.ticket_blockers b WHERE b.ticket_id = t.id) AS blocker_count,
     (SELECT count(*)::int FROM ticket_board.ticket_comments c WHERE c.ticket_id = t.id) AS comment_count,
-    (SELECT count(*)::int FROM ticket_board.ticket_attachments a WHERE a.ticket_id = t.id) AS attachment_count
+    (SELECT count(*)::int FROM ticket_board.ticket_attachments a WHERE a.ticket_id = t.id) AS attachment_count,
+    COALESCE(
+        (
+            SELECT max(nt.id)::text
+            FROM ticket_board.notification_trace nt
+            WHERE nt.ticket_id = t.id
+              AND nt.kind = 'transition'
+              AND nt.event = 'send'
+        ),
+        ''
+    ) AS last_transition_send_trace_id
 FROM ticket_board.tickets t
 ORDER BY t.ticket_number;
 """
@@ -322,6 +332,7 @@ ORDER BY t.ticket_number;
                 int(row["blocker_count"]),
                 int(row["comment_count"]),
                 int(row["attachment_count"]),
+                str(row["last_transition_send_trace_id"]),
             )
             for row in rows
         )
@@ -339,11 +350,12 @@ WITH notification_scope AS (
         CASE
             WHEN scoped.state = 'in_progress' THEN NULLIF(scoped.assignee, 'unassigned')
             WHEN scoped.state IN ('analysis', 'director_review') THEN 'director'
+            WHEN scoped.state = 'inspection' THEN 'inspector'
             WHEN scoped.state = 'audit' THEN 'audit'
             ELSE NULL
         END AS owner_role
     FROM ticket_board.tickets scoped
-    WHERE scoped.state IN ('analysis', 'in_progress', 'audit', 'director_review')
+    WHERE scoped.state IN ('analysis', 'in_progress', 'inspection', 'audit', 'director_review')
 ),
 notification_candidates AS (
     SELECT

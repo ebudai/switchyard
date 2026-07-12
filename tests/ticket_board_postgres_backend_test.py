@@ -331,6 +331,7 @@ def main() -> int:
             insert_ticket(admin_conn, "PGU-411", title="Unassigned implementation ping", state="in_progress", assignee="unassigned")
             insert_ticket(admin_conn, "PGU-412", title="Queued-only ops implementation ping", state="in_progress", assignee="ops")
             insert_ticket(admin_conn, "PGU-413", title="Nudged-only ops implementation ping", state="in_progress", assignee="ops")
+            insert_ticket(admin_conn, "PGU-414", title="Active inspection ping", state="inspection", assignee="ops")
             insert_ticket(
                 admin_conn,
                 "PGU-405",
@@ -375,7 +376,7 @@ WHERE ticket_id = 'PGU-404';
 UPDATE ticket_board.ticket_notification_state
 SET last_transition_notified_at = clock_timestamp() + interval '4 hours',
     last_nudged_at = NULL
-WHERE ticket_id = 'PGU-412';
+WHERE ticket_id IN ('PGU-412', 'PGU-414');
 
 UPDATE ticket_board.ticket_notification_state
 SET last_transition_notified_at = '2026-07-10T11:00:00+00:00'::timestamptz,
@@ -430,7 +431,8 @@ INSERT INTO ticket_board.notification_trace (
     ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-404', 'audit', 'transition', 'send', 'audit', 'audit', 'idle', 'idle'),
     ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-408', 'ops', 'transition', 'send', 'in_progress', 'ops', 'idle', 'idle'),
     ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-410', 'app', 'transition', 'send', 'in_progress', 'app', 'idle', 'idle'),
-    ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-406', 'director', 'transition', 'send', 'director_review', 'director', 'idle', 'idle');
+    ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-406', 'director', 'transition', 'send', 'director_review', 'director', 'idle', 'idle'),
+    ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-414', 'inspector', 'transition', 'send', 'inspection', 'ops', 'idle', 'idle');
 """,
             )
 
@@ -460,8 +462,30 @@ INSERT INTO ticket_board.notification_trace (
             assert tickets_by_id["PGU-413"]["active_work_highlight"] is False, tickets_by_id["PGU-413"]
             assert tickets_by_id["PGU-406"]["active_work_highlight"] is True, tickets_by_id["PGU-406"]
             assert tickets_by_id["PGU-406"]["active_work_owner_role"] == "director", tickets_by_id["PGU-406"]
+            assert tickets_by_id["PGU-414"]["active_work_highlight"] is True, tickets_by_id["PGU-414"]
+            assert tickets_by_id["PGU-414"]["active_work_owner_role"] == "inspector", tickets_by_id["PGU-414"]
             assert tickets_by_id["PGU-405"]["active_work_highlight"] is False, tickets_by_id["PGU-405"]
             assert tickets_by_id["PGU-1"]["active_work_highlight"] is False, tickets_by_id["PGU-1"]
+
+            insert_ticket(admin_conn, "PGU-415", title="Prompt refresh analysis ping", state="analysis", assignee="ops", implementation="")
+            before_send_signature = service_app.store_signature()
+            before_send = service_app.get_ticket("PGU-415")
+            assert before_send["active_work_highlight"] is False, before_send
+            psql(
+                admin_conn,
+                """
+INSERT INTO ticket_board.notification_trace (
+    ts, ticket_id, target_role, kind, event, ticket_state_at_event, ticket_assignee_at_event, pane_busy_determination, busy_reason
+) VALUES (
+    clock_timestamp(), 'PGU-415', 'director', 'transition', 'send', 'analysis', 'ops', 'idle', 'idle'
+);
+""",
+            )
+            after_send_signature = service_app.store_signature()
+            assert after_send_signature != before_send_signature
+            after_send = service_app.get_ticket("PGU-415")
+            assert after_send["active_work_highlight"] is True, after_send
+            assert after_send["active_work_owner_role"] == "director", after_send
         finally:
             subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 

@@ -180,6 +180,26 @@ def main() -> int:
                 "UPDATE ticket_board.tickets SET title = title WHERE id = 'PGU-1';",
             )
 
+            create_attachment = frames / "create-frame-ref.png"
+            Image.new("RGB", (2, 2), (120, 40, 80)).save(create_attachment)
+            created_with_attachment = service_app.create_ticket(
+                title="Postgres create with attachment",
+                body="Created with a pasted image path.",
+                screenshot=str(create_attachment),
+                assignee="unassigned",
+                needs_eric_signoff=False,
+            )
+            created_attachment_path = Path(created_with_attachment["screenshots"][0])
+            assert created_attachment_path != create_attachment.resolve(), created_with_attachment
+            assert assets.resolve() in created_attachment_path.parents, created_with_attachment
+            assert created_with_attachment["screenshot"] == str(created_attachment_path), created_with_attachment
+            assert created_with_attachment["screenshots_info"][0]["available"] is True, created_with_attachment
+            create_attachment.unlink()
+            persisted_created_attachment = service_app.get_ticket(created_with_attachment["id"])
+            assert persisted_created_attachment["screenshots"] == [str(created_attachment_path)], persisted_created_attachment
+            assert persisted_created_attachment["screenshots_info"][0]["available"] is True, persisted_created_attachment
+            assert created_attachment_path.is_file(), created_attachment_path
+
             filed = service_app.create_ticket_record(
                 title="Filed from implementation",
                 body="Linked to source.",

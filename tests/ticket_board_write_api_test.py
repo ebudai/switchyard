@@ -10,6 +10,7 @@ import sys
 import tempfile
 import threading
 import urllib.request
+from io import BytesIO
 from pathlib import Path
 from urllib.error import HTTPError
 
@@ -204,6 +205,21 @@ def post_json(base_url: str, path: str, payload: dict[str, object], *, caller: s
         body = exc.read().decode("utf-8")
         assert exc.code == expect, (path, exc.code, body)
         return body
+
+
+def upload_png(base_url: str) -> dict[str, object]:
+    buffer = BytesIO()
+    Image.new("RGB", (2, 2), (220, 90, 40)).save(buffer, format="PNG")
+    request = urllib.request.Request(
+        base_url + "/api/upload",
+        data=buffer.getvalue(),
+        headers={"Content-Type": "image/png"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        body = response.read().decode("utf-8")
+        assert response.status == 201, (response.status, body)
+        return json.loads(body)
 
 
 def get_ticket(base_url: str, ticket_id: str) -> dict[str, object]:
@@ -472,6 +488,30 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     )
     created = created_payload["ticket"]  # type: ignore[index]
     source_id = str(created["id"])  # type: ignore[index]
+
+    uploaded = upload_png(base_url)
+    uploaded_image = uploaded["image"]  # type: ignore[index]
+    uploaded_path = Path(str(uploaded_image["path"]))  # type: ignore[index]
+    pasted_create_payload = post_json(
+        base_url,
+        "/api/tickets/actions/create_ticket",
+        {
+            "title": "API pasted image create",
+            "body": "Created with a pasted image upload.",
+            "screenshots": [str(uploaded_path)],
+        },
+        caller="director",
+        expect=201,
+    )
+    pasted_create = pasted_create_payload["ticket"]  # type: ignore[index]
+    pasted_path = Path(pasted_create["screenshots"][0])  # type: ignore[index]
+    assert pasted_path == uploaded_path.resolve(), pasted_create
+    assert assets.resolve() in pasted_path.parents, pasted_create
+    assert pasted_create["screenshot"] == str(pasted_path), pasted_create  # type: ignore[index]
+    assert pasted_create["screenshots_info"][0]["available"] is True, pasted_create  # type: ignore[index]
+    assert pasted_path.is_file(), pasted_path
+    persisted_pasted_create = get_ticket(base_url, str(pasted_create["id"]))  # type: ignore[index]
+    assert persisted_pasted_create["screenshots"] == [str(pasted_path)], persisted_pasted_create
 
     filed_payload = post_json(
         base_url,

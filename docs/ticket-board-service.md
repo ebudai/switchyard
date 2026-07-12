@@ -54,6 +54,13 @@ The service runs:
 - command: `python3 /home/agent/pgu-ticketboard-live/current/scripts/ticket-board.py --host 127.0.0.1 --port 8770`
 - logs: `/tmp/pgu-ticket-board.log`
 
+The source of truth for the live agent-user unit is
+`scripts/ticket-board-service.sh render-unit`. The future dedicated `boardsvc`
+system unit source is `deploy/systemd/pgu-ticket-board.service.boardsvc`; the
+boardsvc runbook copies that file to `/etc/systemd/system/pgu-ticket-board.service`.
+Both units must stay Postgres-only and must not pass the retired backend
+selector CLI option.
+
 ## PostgreSQL notification listener
 
 The post-cutover notification shim runs as a separate `agent` user systemd

@@ -50,6 +50,11 @@ grep -q -- "--unix-socket /tmp/pgu-ticket-board.sock" "$UNIT_DIR/service.unit" |
     echo "FAIL: unit did not expose the local pane Unix socket" >&2
     exit 1
 }
+retired_backend_flag='--store''-backend'
+if grep -q -- "$retired_backend_flag" "$UNIT_DIR/service.unit"; then
+    echo "FAIL: rendered unit should not pass the removed backend selector option" >&2
+    exit 1
+fi
 grep -q '^Environment=PGU_TICKET_BOARD_SOCKET=/tmp/pgu-ticket-board.sock$' "$UNIT_DIR/service.unit" || {
     echo "FAIL: unit did not export PGU_TICKET_BOARD_SOCKET" >&2
     exit 1

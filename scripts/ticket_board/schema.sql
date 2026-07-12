@@ -2257,6 +2257,9 @@ BEGIN
     IF patch ? 'needs_inspection' AND ticket_board.current_app_actor() <> 'director' THEN
         RAISE EXCEPTION 'needs_inspection can only be edited by director' USING ERRCODE = '42501';
     END IF;
+    IF patch ? 'commit_exempt' AND ticket_board.current_app_actor() <> 'director' THEN
+        RAISE EXCEPTION 'commit_exempt can only be edited by director' USING ERRCODE = '42501';
+    END IF;
     PERFORM 1 FROM ticket_board.tickets WHERE tickets.id = edit_fields.id;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'ticket not found: %', id;

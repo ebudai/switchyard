@@ -486,6 +486,14 @@ def exercise_write_api(base_url: str, commit_hash: str) -> None:
         expect=400,
     )
     assert "commit_hash must be a 7-40 character hex commit" in str(non_exempt_empty_submit), non_exempt_empty_submit
+    submit_exempt_forbidden = post_json(
+        base_url,
+        "/api/tickets/PGU-120/actions/edit_fields",
+        {"commit_exempt": True},
+        caller="ops",
+        expect=403,
+    )
+    assert "commit_exempt can only be edited by director" in str(submit_exempt_forbidden), submit_exempt_forbidden
     submit_exempt_set = post_json(
         base_url,
         "/api/tickets/PGU-120/actions/edit_fields",
@@ -506,6 +514,22 @@ def exercise_write_api(base_url: str, commit_hash: str) -> None:
         expect=403,
     )
     assert "needs_inspection can only be set by director" in str(eric_inspection_create), eric_inspection_create
+    eric_commit_exempt_create = post_json(
+        base_url,
+        "/api/tickets/actions/create_ticket",
+        {"title": "Eric cannot exempt commits", "body": "", "commit_exempt": True},
+        caller="eric",
+        expect=403,
+    )
+    assert "commit_exempt can only be set by director" in str(eric_commit_exempt_create), eric_commit_exempt_create
+    file_bug_commit_exempt = post_json(
+        base_url,
+        "/api/tickets/actions/file_bug",
+        {"title": "Ops cannot exempt filed bug", "body": "", "source_ticket_id": "PGU-100", "commit_exempt": True},
+        caller="ops",
+        expect=403,
+    )
+    assert "commit_exempt can only be set by director" in str(file_bug_commit_exempt), file_bug_commit_exempt
     director_inspection_create = post_json(
         base_url,
         "/api/tickets/actions/create_ticket",
@@ -628,6 +652,14 @@ def exercise_write_api(base_url: str, commit_hash: str) -> None:
         expect=400,
     )
     assert "commit_hash must be a 7-40 character hex commit" in str(non_exempt_empty_done), non_exempt_empty_done
+    done_exempt_forbidden = post_json(
+        base_url,
+        "/api/tickets/PGU-122/actions/edit_fields",
+        {"commit_exempt": True},
+        caller="ops",
+        expect=403,
+    )
+    assert "commit_exempt can only be edited by director" in str(done_exempt_forbidden), done_exempt_forbidden
     done_exempt_set = post_json(
         base_url,
         "/api/tickets/PGU-122/actions/edit_fields",

@@ -518,6 +518,23 @@ FROM ticket_board.tickets t WHERE id = 'PGU-704';
     psql(service_conn, "SELECT ticket_board.edit_fields('PGU-810', '{\"title\":\"Edited\"}'::jsonb);")
     assert psql(admin_conn, "SELECT title FROM ticket_board.tickets WHERE id = 'PGU-810';") == "Edited"
 
+    insert_ticket(admin_conn, "PGU-811", title="Commit exempt director gate", state="in_progress", assignee="ops")
+    assert "commit_exempt can only be edited by director" in psql_error(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'ops', false);
+SELECT ticket_board.edit_fields('PGU-811', '{"commit_exempt":true}'::jsonb);
+""",
+    )
+    psql(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'director', false);
+SELECT ticket_board.edit_fields('PGU-811', '{"commit_exempt":true}'::jsonb);
+""",
+    )
+    assert psql(admin_conn, "SELECT commit_exempt FROM ticket_board.tickets WHERE id = 'PGU-811';") == "t"
+
     insert_ticket(admin_conn, "PGU-820", title="Merge source", state="analysis")
     insert_ticket(admin_conn, "PGU-821", title="Merge target", state="analysis")
     psql(service_conn, "SELECT ticket_board.merge('PGU-820', 'PGU-821');")

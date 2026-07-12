@@ -17,7 +17,7 @@ def main() -> int:
     assert "{ key: 'backlog', label: 'Backlog' }" in HTML
     assert "{ key: 'ready', label: 'Ready' }" not in HTML
     assert "{ key: 'in_progress', label: 'Implementation' }" in HTML
-    assert "{ key: 'director_review', label: 'Ready' }" in HTML
+    assert "{ key: 'director_review', label: 'Final Sign-Off' }" in HTML
     assert "function defaultAdvanceState(ticket)" in HTML
     assert "if (ticket.state === 'backlog') {" in HTML
     assert "return 'analysis';" in HTML
@@ -35,8 +35,8 @@ def main() -> int:
     assert "already has an in-progress ticket" not in HTML
     assert "Save audit prompt before advancing to audit." not in HTML
     assert "Set audit signoff before advancing to Eric review." in HTML
-    assert "Set audit signoff before advancing to Ready." in HTML
-    assert "Record Eric signoff before advancing to Ready." in HTML
+    assert "Set audit signoff before advancing to Final Sign-Off." in HTML
+    assert "Record Eric signoff before advancing to Final Sign-Off." in HTML
     assert "Save a verified commit hash or enable no-commit override before advancing to done." in HTML
     assert "Advance -> ${stateLabel(detailAdvanceState)}" in HTML
     assert "await advanceTicket(ticket.id, commentText.value);" in HTML

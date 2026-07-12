@@ -385,7 +385,7 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       }
       clearDetailDraft(ticketId);
       await updateTicket(ticketId, patch, trimmedWho);
-      setCreateStatus(`Signed off ✓ ${ticketId} moved to Ready.`);
+      setCreateStatus(`Signed off ✓ ${ticketId} moved to Final Sign-Off.`);
     }
 
     async function handleCreateSubmit() {

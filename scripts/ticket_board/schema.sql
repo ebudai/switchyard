@@ -1103,6 +1103,50 @@ AS $$
     END;
 $$;
 
+CREATE OR REPLACE FUNCTION ticket_board.notification_delivery_in_backoff(
+    p_ticket_id text,
+    p_target_role text,
+    p_now timestamptz,
+    p_recent interval DEFAULT interval '5 minutes'
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $$
+    WITH latest_delivery_event AS (
+        SELECT nt.event, nt.ts
+        FROM ticket_board.notification_trace nt
+        WHERE nt.ticket_id = p_ticket_id
+          AND nt.target_role = p_target_role
+          AND nt.event IN (
+              'gate_defer',
+              'send_failed',
+              'send',
+              'listener_ack',
+              'drop',
+              'max_defer_force_deliver',
+              'ack'
+          )
+        ORDER BY nt.ts DESC, nt.id DESC
+        LIMIT 1
+    )
+    SELECT EXISTS (
+        SELECT 1
+        FROM latest_delivery_event lde
+        WHERE lde.event IN ('gate_defer', 'send_failed')
+          AND lde.ts >= p_now - p_recent
+    )
+    OR EXISTS (
+        SELECT 1
+        FROM ticket_board.ticket_notification_queue q
+        WHERE q.ticket_id = p_ticket_id
+          AND q.target_role = p_target_role
+          AND q.claimed_at IS NULL
+          AND q.next_attempt_at > p_now
+          AND btrim(coalesce(q.last_error, '')) <> ''
+    );
+$$;
+
 CREATE OR REPLACE FUNCTION ticket_board.notify_due_nudges(
     p_now timestamptz DEFAULT clock_timestamp(),
     p_cadence interval DEFAULT interval '5 minutes',
@@ -1159,6 +1203,12 @@ BEGIN
               AND ticket_board.nudge_target_role(t.state, t.assignee) IS NOT NULL
               AND ns.entered_current_state_at <= p_now - p_cadence
               AND (ns.last_nudged_at IS NULL OR ns.last_nudged_at <= p_now - p_cadence)
+              AND NOT ticket_board.notification_delivery_in_backoff(
+                  t.id,
+                  ticket_board.nudge_target_role(t.state, t.assignee),
+                  p_now,
+                  p_cadence
+              )
 
             UNION ALL
 
@@ -1201,6 +1251,7 @@ BEGIN
                 )
               AND ns.entered_current_state_at <= p_now - p_cadence
               AND (ns.last_nudged_at IS NULL OR ns.last_nudged_at <= p_now - p_cadence)
+              AND NOT ticket_board.notification_delivery_in_backoff(t.id, 'director', p_now, p_cadence)
         ) AS candidates
         ORDER BY candidates.target_role,
             candidates.priority,

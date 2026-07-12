@@ -29,7 +29,8 @@ DEFAULT_KEEPALIVES_COUNT = 3
 DEFAULT_DIRECTORCTL_SEND_TIMEOUT_SECONDS = 10.0
 DEFAULT_REQUEUE_BASE_SECONDS = 5.0
 DEFAULT_REQUEUE_MAX_SECONDS = 60.0
-DEFAULT_STABLE_IDLE_SECONDS = 0.0
+DEFAULT_BUSY_REQUEUE_SECONDS = 3.0
+DEFAULT_STABLE_IDLE_SECONDS = 3.0
 PANE_ACTIVITY_REGION_LINES = 8
 ROLE_TO_TARGET = {
     "director": "pgu-director:0.0",
@@ -169,14 +170,12 @@ class PaneActivityGate:
         capture_lines: int = 80,
         capture_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
         monotonic: Callable[[], float] = time.monotonic,
-        sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
         self.directorctl_bin = directorctl_bin
         self.stable_idle_seconds = stable_idle_seconds
         self.capture_lines = capture_lines
         self.capture_runner = capture_runner
         self.monotonic = monotonic
-        self.sleeper = sleeper
         self._last_region_digest_by_target: dict[str, str] = {}
         self._last_changed_at_by_target: dict[str, float] = {}
         self._last_trace_by_target: dict[str, ActivityTrace] = {}
@@ -202,32 +201,7 @@ class PaneActivityGate:
         return proc.stdout
 
     def _activity_region(self, target: str, text: str) -> str:
-        if target == ROLE_TO_TARGET["director"]:
-            return self._director_composer_region(text)
         return "\n".join(text.splitlines()[-PANE_ACTIVITY_REGION_LINES:])
-
-    def _director_composer_region(self, text: str) -> str:
-        if not text:
-            return ""
-        lines = text.splitlines()
-        horizontal_indices = [idx for idx, line in enumerate(lines) if line.count("─") >= 40]
-        if len(horizontal_indices) >= 2:
-            composer_lines = lines[horizontal_indices[-2] + 1 : horizontal_indices[-1]]
-            return "\n".join(self._normalize_composer_line(line) for line in composer_lines).strip()
-        for line in reversed(lines):
-            normalized = self._normalize_composer_line(line)
-            stripped = line.strip()
-            if stripped == "❯" or stripped.startswith("❯ "):
-                return normalized
-        return ""
-
-    def _normalize_composer_line(self, line: str) -> str:
-        stripped = line.strip()
-        if stripped == "❯":
-            return ""
-        if stripped.startswith("❯ "):
-            return stripped[2:].strip()
-        return stripped
 
     def _activity_digest(self, target: str, text: str) -> str:
         region = self._activity_region(target, text)
@@ -237,38 +211,22 @@ class PaneActivityGate:
         text = self._capture(target)
         if text is None:
             return self._record_trace(target, ActivityTrace(False, "capture_failed"))
-        if target == ROLE_TO_TARGET["director"]:
-            region = self._activity_region(target, text)
-            digest = hashlib.sha256(region.encode("utf-8")).hexdigest()
-            self._last_region_digest_by_target[target] = digest
-            if region.strip():
-                self._last_changed_at_by_target[target] = self.monotonic()
-                return self._record_trace(target, ActivityTrace(True, "director_composer", digest))
-            return self._record_trace(target, ActivityTrace(False, "director_composer_empty", digest))
         first_digest = self._activity_digest(target, text)
-        if self.stable_idle_seconds > 0:
-            self.sleeper(self.stable_idle_seconds)
-            second_text = self._capture(target)
-            if second_text is None:
-                return self._record_trace(target, ActivityTrace(False, "capture_failed", first_digest))
-            second_digest = self._activity_digest(target, second_text)
-            if first_digest != second_digest:
-                now = self.monotonic()
-                self._last_region_digest_by_target[target] = second_digest
-                self._last_changed_at_by_target[target] = now
-                return self._record_trace(target, ActivityTrace(True, "region_changed", second_digest))
-            self._last_region_digest_by_target[target] = second_digest
-            return self._record_trace(target, ActivityTrace(False, "stable_idle", second_digest))
         now = self.monotonic()
         previous = self._last_region_digest_by_target.get(target)
         self._last_region_digest_by_target[target] = first_digest
         if previous is None:
             self._last_changed_at_by_target[target] = now
-            return self._record_trace(target, ActivityTrace(False, "cold_start_idle", first_digest))
+            if self.stable_idle_seconds <= 0:
+                return self._record_trace(target, ActivityTrace(False, "cold_start_idle", first_digest))
+            return self._record_trace(target, ActivityTrace(True, "region_unproven", first_digest))
         if previous != first_digest:
             self._last_changed_at_by_target[target] = now
             return self._record_trace(target, ActivityTrace(True, "region_changed", first_digest))
-        return self._record_trace(target, ActivityTrace(False, "region_stable", first_digest))
+        stable_since = self._last_changed_at_by_target.get(target, now)
+        if self.stable_idle_seconds <= 0 or now - stable_since >= self.stable_idle_seconds:
+            return self._record_trace(target, ActivityTrace(False, "stable_idle", first_digest))
+        return self._record_trace(target, ActivityTrace(True, "region_settling", first_digest))
 
     def is_working(self, target: str) -> bool:
         return self.is_busy(target)
@@ -287,6 +245,7 @@ class TicketBoardNotifyListener:
         poll_seconds: float = DEFAULT_POLL_SECONDS,
         requeue_base_seconds: float = DEFAULT_REQUEUE_BASE_SECONDS,
         requeue_max_seconds: float = DEFAULT_REQUEUE_MAX_SECONDS,
+        busy_requeue_seconds: float = DEFAULT_BUSY_REQUEUE_SECONDS,
         stop_event: threading.Event | None = None,
         logger: logging.Logger = LOGGER,
     ) -> None:
@@ -299,6 +258,7 @@ class TicketBoardNotifyListener:
         self.poll_seconds = poll_seconds
         self.requeue_base_seconds = requeue_base_seconds
         self.requeue_max_seconds = requeue_max_seconds
+        self.busy_requeue_seconds = busy_requeue_seconds
         self.stop_event = stop_event or threading.Event()
         self.logger = logger
         self.delivered_count = 0
@@ -432,11 +392,19 @@ SELECT ticket_board.record_notification_trace(
     def _ack_notification(self, conn: Any, notification_id: int) -> None:
         conn.execute("SELECT ticket_board.ack_notification(%s::bigint)", (notification_id,))
 
-    def _requeue_notification(self, conn: Any, notification_id: int, attempts: int, error: str) -> None:
-        delay_seconds = self._backoff_seconds(attempts)
+    def _requeue_notification(
+        self,
+        conn: Any,
+        notification_id: int,
+        attempts: int,
+        error: str,
+        *,
+        delay_seconds: float | None = None,
+    ) -> None:
+        delay_seconds = self._backoff_seconds(attempts) if delay_seconds is None else delay_seconds
         conn.execute(
             "SELECT ticket_board.requeue_notification(%s::bigint, %s::interval, %s::text)",
-            (notification_id, f"{delay_seconds} seconds", error[:500]),
+            (notification_id, f"{delay_seconds:g} seconds", error[:500]),
         )
 
     def _current_ticket_state(self, conn: Any, ticket_id: str) -> tuple[str, str, bool, bool] | None:
@@ -612,7 +580,13 @@ WHERE id = %s
                     region_digest=activity_trace.region_digest,
                     detail={"target": target, "attempts": attempts},
                 )
-                self._requeue_notification(conn, notification_id, attempts, "pane busy")
+                self._requeue_notification(
+                    conn,
+                    notification_id,
+                    attempts,
+                    "pane busy",
+                    delay_seconds=self.busy_requeue_seconds,
+                )
                 continue
             try:
                 self.sender(target, message)

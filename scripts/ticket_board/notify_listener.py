@@ -702,6 +702,10 @@ WHERE id = %s
             self.logger.info("Delivered queued notification %s for %s to %s: %s", notification_id, ticket_id, target, payload)
         return delivered
 
+    def _wait_for_notification(self, conn: Any) -> bool:
+        notifications = conn.notifies(timeout=self.poll_seconds, stop_after=1)
+        return next(iter(notifications), None) is not None
+
     def listen_once(self, *, max_notifications: int | None = None) -> int:
         delivered_before = self.delivered_count
         with self.connector(self.conninfo, **self._connector_kwargs()) as conn:
@@ -713,8 +717,8 @@ WHERE id = %s
                     break
                 if not delivered and max_notifications is not None and self.poll_seconds <= 0:
                     break
-                notifications = conn.notifies(timeout=self.poll_seconds)
-                if not notifications and max_notifications is not None and self.poll_seconds <= 0:
+                notified = self._wait_for_notification(conn)
+                if not notified and max_notifications is not None and self.poll_seconds <= 0:
                     break
         return self.delivered_count - delivered_before
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -116,12 +117,36 @@ class FakeConnection:
             self.requeued.append((int(params[0]), params))
         return FakeResult([])
 
-    def notifies(self, *, timeout: float | None = None) -> list[FakeNotify]:
+    def notifies(self, *, timeout: float | None = None, stop_after: int | None = None) -> Any:
         if self.fail_on_notifies:
             raise psycopg.OperationalError("simulated connection drop")
         queued = [FakeNotify(payload) for payload in self.notifications]
         self.notifications = []
-        return queued
+        if stop_after is not None:
+            queued = queued[:stop_after]
+        yield from queued
+
+
+class StopAfterWaitConnection(FakeConnection):
+    def __init__(self, stop_event: Any) -> None:
+        super().__init__()
+        self.stop_event = stop_event
+        self.claim_calls = 0
+        self.notifies_advanced = 0
+
+    def execute(self, statement: Any, params: tuple[Any, ...] | None = None) -> FakeResult:
+        statement_text = str(statement)
+        if "claim_notification" in statement_text:
+            self.claim_calls += 1
+            if self.claim_calls > 1:
+                raise AssertionError("idle listener polled claim_notification again before waiting")
+        return super().execute(statement, params)
+
+    def notifies(self, *, timeout: float | None = None, stop_after: int | None = None) -> Any:
+        self.notifies_advanced += 1
+        self.stop_event.set()
+        if False:
+            yield FakeNotify("")
 
 
 def queue_row(
@@ -284,6 +309,23 @@ def test_reconnect_relistens_after_connection_drop() -> None:
 
     assert sent == [("pgu-app:0.0", "New ticket for you: PGU-215 -- Reconnect")]
     assert sum("LISTEN" in str(statement) for statement, _params in executed) == 2
+
+
+def test_idle_listener_consumes_notifies_generator_before_polling_again() -> None:
+    stop_event = threading.Event()
+    conn = StopAfterWaitConnection(stop_event)
+    listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=lambda _target, _message: None,
+        activity_gate=lambda _target: False,
+        connector=lambda *args, **kwargs: conn,
+        poll_seconds=0.01,
+        stop_event=stop_event,
+    )
+
+    assert listener.listen_once() == 0
+    assert conn.claim_calls == 1
+    assert conn.notifies_advanced == 1
 
 
 def test_send_timeout_requeues_and_does_not_block_next_pane() -> None:
@@ -754,6 +796,7 @@ def main() -> int:
     test_claimed_queue_row_delivers_to_assignee_pane_and_acks()
     test_eric_review_is_not_delivered()
     test_reconnect_relistens_after_connection_drop()
+    test_idle_listener_consumes_notifies_generator_before_polling_again()
     test_send_timeout_requeues_and_does_not_block_next_pane()
     test_busy_pane_requeues_then_idle_pane_delivers_once()
     test_busy_pane_force_delivers_after_max_defer_cap()

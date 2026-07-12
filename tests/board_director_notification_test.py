@@ -130,13 +130,22 @@ class MemoryCreateApp:
         return after
 
 
-def post_create(server: TicketBoardServer, title: str, *, state: str = "analysis") -> dict[str, object]:
+def post_create(
+    server: TicketBoardServer,
+    title: str,
+    *,
+    state: str = "analysis",
+    blocked_by: list[str] | None = None,
+    blocked_reason: str = "",
+) -> dict[str, object]:
     body = json.dumps(
         {
             "title": title,
             "body": "Created through API.",
             "assignee": "app",
             "state": state,
+            "blocked_by": blocked_by or [],
+            "blocked_reason": blocked_reason,
             "needs_eric_signoff": False,
         }
     ).encode("utf-8")
@@ -191,6 +200,33 @@ def test_server_backlog_create_does_not_notify_director() -> None:
             thread.join(timeout=2)
 
 
+def test_server_blocked_create_does_not_notify_director() -> None:
+    with tempfile.TemporaryDirectory(prefix="board-director-notify-blocked.") as tmpdir:
+        root = Path(tmpdir)
+        notifier = FakeNotifier()
+        server = TicketBoardServer(
+            ("127.0.0.1", 0),
+            MemoryCreateApp(root / "frames", root / "assets"),
+            director_notifier=notifier,
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            payload = post_create(
+                server,
+                "Quiet blocked create",
+                blocked_by=["PGU-1"],
+                blocked_reason="Waiting on PGU-1.",
+            )
+            assert payload["ticket"]["state"] == "analysis", payload
+            assert payload["ticket"]["blocked_by"] == ["PGU-1"], payload
+            assert notifier.created == [], notifier.created
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+
 def test_server_create_does_not_notify_when_ticket_is_not_persisted() -> None:
     with tempfile.TemporaryDirectory(prefix="board-director-notify-no-persist.") as tmpdir:
         root = Path(tmpdir)
@@ -230,6 +266,7 @@ def test_director_notifier_batches_quick_creates() -> None:
 def main() -> int:
     test_server_create_notifies_director()
     test_server_backlog_create_does_not_notify_director()
+    test_server_blocked_create_does_not_notify_director()
     test_server_create_does_not_notify_when_ticket_is_not_persisted()
     test_director_notifier_batches_quick_creates()
     print("board_director_notification_test: ok")

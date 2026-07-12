@@ -961,6 +961,67 @@ WHERE ticket_id = 'PGU-29702';
             ], direct_implementation_queue
 
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
+            insert_ticket(conninfo, "PGU-30900", title="Blocking dependency", state="analysis", assignee="unassigned")
+            insert_ticket(conninfo, "PGU-30901", title="Blocked transition", state="analysis", assignee="ops", implementation="")
+            psql(
+                conninfo,
+                """
+DELETE FROM ticket_board.ticket_notification_queue;
+INSERT INTO ticket_board.ticket_blockers (ticket_id, blocker_ticket_id, position)
+VALUES ('PGU-30901', 'PGU-30900', 0);
+UPDATE ticket_board.tickets
+SET implementation = 'ready',
+    state = 'in_progress'
+WHERE id = 'PGU-30901';
+""",
+            )
+            blocked_transition_queue_count = psql(
+                conninfo,
+                "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-30901';",
+            ).stdout.strip()
+            assert blocked_transition_queue_count == "0", blocked_transition_queue_count
+            psql(
+                conninfo,
+                """
+BEGIN;
+INSERT INTO ticket_board.ticket_comments (ticket_id, position, who, ts_text, text, source_json)
+VALUES (
+    'PGU-30900',
+    0,
+    'director',
+    '2026-07-10T00:30:00+00:00',
+    'Cancelling to clear dependent blocker.',
+    '{"text": "Cancelling to clear dependent blocker.", "ts": "2026-07-10T00:30:00+00:00", "who": "director"}'::jsonb
+);
+UPDATE ticket_board.tickets SET state = 'cancelled' WHERE id = 'PGU-30900';
+COMMIT;
+""",
+            )
+            unblocked_transition_queue = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_agg(jsonb_build_object(
+    'target_role', target_role,
+    'message', message,
+    'old_state', payload->>'old_state',
+    'new_state', payload->>'new_state'
+) ORDER BY id)::text
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-30901';
+""",
+                ).stdout
+            )
+            assert unblocked_transition_queue == [
+                {
+                    "target_role": "ops",
+                    "message": "New ticket for you: PGU-30901 -- Blocked transition",
+                    "old_state": None,
+                    "new_state": "in_progress",
+                }
+            ], unblocked_transition_queue
+
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
             insert_ticket(conninfo, "PGU-29703", title="Auto advance insert notify", state="analysis", assignee="ops", implementation="ready")
             auto_advance_insert_queue = json.loads(
                 psql(

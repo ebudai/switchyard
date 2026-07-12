@@ -424,6 +424,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 implementation,
                 audit_prompt,
                 parent_id,
+                bool(payload.get("blocked_by")),
+                bool(str(payload.get("blocked_reason", "")).strip()),
                 commit_hash,
                 commit_exempt,
                 comment_text,
@@ -488,7 +490,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
     def send_ticket_created(self, created: dict[str, object], before_signature: tuple[tuple[object, ...], ...]) -> None:
         after_signature = self.verify_created_ticket_persisted(created, before_signature)
         self.events.notify_change(after_signature)
-        if str(created.get("state", "")).strip() == "analysis":
+        if str(created.get("state", "")).strip() == "analysis" and not list(created.get("blocked_by") or []):
             self.director_notifier.notify_ticket_created(created)
         self.send_json({"ticket": created}, HTTPStatus.CREATED)
 

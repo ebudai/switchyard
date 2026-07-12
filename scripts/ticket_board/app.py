@@ -570,7 +570,7 @@ ORDER BY t.ticket_number
                 if caller_role:
                     self._pg_set_caller_role(conn, caller_role)
                 parent_id = "" if parent_id in (None, "", "null") else str(parent_id).strip().upper()
-                if parent_id and create_state == "analysis":
+                if parent_id and create_state == "analysis" and not blocked_by:
                     ticket_id = self._pg_call_scalar(
                         conn,
                         "SELECT ticket_board.file_bug(%s, %s, %s) AS id;",
@@ -579,8 +579,8 @@ ORDER BY t.ticket_number
                 else:
                     ticket_id = self._pg_call_scalar(
                         conn,
-                        "SELECT ticket_board.create_ticket(%s, %s, %s) AS id;",
-                        (title, body.strip(), create_state),
+                        "SELECT ticket_board.create_ticket(%s, %s, %s, %s, %s) AS id;",
+                        (title, body.strip(), create_state, blocked_by, blocked_reason),
                     )
                     if parent_id:
                         self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps({"parent_id": parent_id})))
@@ -594,8 +594,6 @@ ORDER BY t.ticket_number
                     current = self._pg_get_ticket(ticket_id, conn)
                     self._materialize_edit_field_attachments(attachment_patch, ticket_id, current)
                     self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps(attachment_patch)))
-                if blocked_by:
-                    self._pg_call(conn, "SELECT ticket_board.set_blockers(%s, %s, %s);", (ticket_id, blocked_by, blocked_reason))
                 for comment in normalized_comments:
                     self._pg_set_caller_role(conn, comment["who"])
                     self._pg_call(conn, "SELECT ticket_board.add_comment(%s, %s);", (ticket_id, comment["text"]))

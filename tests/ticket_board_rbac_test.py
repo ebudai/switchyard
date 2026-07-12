@@ -21,6 +21,7 @@ ROLE_SQL_ARRAY = "ARRAY['director','eric','ops','app','audit','inspector','perf'
 WRITE_FUNCTIONS = [
     "ticket_board.create_ticket(text,text)",
     "ticket_board.create_ticket(text,text,text)",
+    "ticket_board.create_ticket(text,text,text,text[],text)",
     "ticket_board.file_bug(text,text,text)",
     "ticket_board.route(text,text,text)",
     "ticket_board.start_work(text)",
@@ -295,6 +296,24 @@ WHERE id = {sql_string(backlog_created)};
         )
     )
     assert backlog_row == {"state": "backlog", "assignee": "unassigned", "parked": True}, backlog_row
+    blocked_created = psql(
+        service_conn,
+        f"SELECT ticket_board.create_ticket('Service blocked create', 'Body', 'analysis', ARRAY[{sql_string(created)}], 'Waiting on source.');",
+    )
+    blocked_created_row = json.loads(
+        psql(
+            admin_conn,
+            f"""
+SELECT jsonb_build_object(
+    'blocked_reason', t.blocked_reason,
+    'blocked_by', (SELECT jsonb_agg(blocker_ticket_id ORDER BY position) FROM ticket_board.ticket_blockers WHERE ticket_id = t.id)
+)::text
+FROM ticket_board.tickets t
+WHERE id = {sql_string(blocked_created)};
+""",
+        )
+    )
+    assert blocked_created_row == {"blocked_reason": "Waiting on source.", "blocked_by": [created]}, blocked_created_row
     assert "invalid create state: in_progress; allowed: analysis, backlog" in psql_error(
         service_conn,
         """

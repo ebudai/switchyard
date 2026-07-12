@@ -310,6 +310,55 @@ WHERE t.id = '{backlog_created["id"]}';
             )
             assert blocked["blocked_by"] == ["PGU-1"], blocked
             assert blocked["blocked_reason"] == "Waiting for PGU-1.", blocked
+            blocked_create_state = json.loads(
+                psql(
+                    admin_conn,
+                    f"""
+SELECT jsonb_build_object(
+    'blocked_by', (SELECT jsonb_agg(blocker_ticket_id ORDER BY position) FROM ticket_board.ticket_blockers WHERE ticket_id = t.id),
+    'blocked_reason', t.blocked_reason,
+    'queue_count', (SELECT count(*) FROM ticket_board.ticket_notification_queue q WHERE q.ticket_id = t.id),
+    'trace_count', (SELECT count(*) FROM ticket_board.notification_trace nt WHERE nt.ticket_id = t.id)
+)::text
+FROM ticket_board.tickets t
+WHERE t.id = '{blocked["id"]}';
+""",
+                )
+            )
+            assert blocked_create_state == {
+                "blocked_by": ["PGU-1"],
+                "blocked_reason": "Waiting for PGU-1.",
+                "queue_count": 0,
+                "trace_count": 0,
+            }, blocked_create_state
+            assert "blocker ticket not found: PGU-99999" in psql_error(
+                service_conn,
+                """
+SELECT set_config('ticket_board.caller_role', 'director', false);
+SELECT ticket_board.create_ticket('Missing blocker', 'Body', 'analysis', ARRAY['PGU-99999'], 'Missing dependency.');
+""",
+            )
+            next_ticket_id = psql(admin_conn, "SELECT 'PGU-' || (max(ticket_number) + 1)::text FROM ticket_board.tickets;")
+            assert "invalid blocker ticket id" in psql_error(
+                service_conn,
+                f"""
+SELECT set_config('ticket_board.caller_role', 'director', false);
+SELECT ticket_board.create_ticket('Self blocked', 'Body', 'analysis', ARRAY['{next_ticket_id}'], 'Self dependency.');
+""",
+            )
+            cycle_ticket_id = psql(admin_conn, "SELECT 'PGU-' || (max(ticket_number) + 1)::text FROM ticket_board.tickets;")
+            psql(
+                admin_conn,
+                f"INSERT INTO ticket_board.ticket_blockers (ticket_id, blocker_ticket_id, position) VALUES ('PGU-1', '{cycle_ticket_id}', 0);",
+            )
+            assert "blocked_by cycle detected" in psql_error(
+                service_conn,
+                """
+SELECT set_config('ticket_board.caller_role', 'director', false);
+SELECT ticket_board.create_ticket('Cycle blocked', 'Body', 'analysis', ARRAY['PGU-1'], 'Cycle dependency.');
+""",
+            )
+            psql(admin_conn, f"DELETE FROM ticket_board.ticket_blockers WHERE ticket_id = 'PGU-1' AND blocker_ticket_id = '{cycle_ticket_id}';")
 
             service_app.update_ticket(blocked["id"], {"comment": {"who": "director", "text": "Tracking note."}})
             cancelled = service_app.update_ticket(

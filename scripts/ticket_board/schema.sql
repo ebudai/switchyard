@@ -562,11 +562,18 @@ DECLARE
     message text;
     recommendation text;
 BEGIN
+    IF current_setting('ticket_board.suppress_create_notify', true) = 'on' THEN
+        RETURN NULL;
+    END IF;
+
     IF TG_OP = 'UPDATE' THEN
         IF coalesce(OLD.manually_controlled, false) OR coalesce(NEW.manually_controlled, false) THEN
             RETURN NULL;
         END IF;
         IF OLD.state IS NOT DISTINCT FROM NEW.state THEN
+            RETURN NULL;
+        END IF;
+        IF ticket_board.ticket_has_unresolved_blockers(NEW.id) THEN
             RETURN NULL;
         END IF;
         message := ticket_board.transition_message(NEW.id, NEW.title, OLD.state, NEW.state);
@@ -609,6 +616,9 @@ BEGIN
         IF current_state IS DISTINCT FROM NEW.state OR current_assignee IS DISTINCT FROM NEW.assignee THEN
             RETURN NULL;
         END IF;
+        IF ticket_board.ticket_has_unresolved_blockers(NEW.id) THEN
+            RETURN NULL;
+        END IF;
 
         IF ticket_board.transition_target_role(NEW.state, NEW.assignee) IS NOT NULL THEN
             PERFORM ticket_board.enqueue_transition_notification(
@@ -629,6 +639,46 @@ BEGIN
 END;
 $$;
 DROP FUNCTION IF EXISTS ticket_board.notify_ticket_insert_transition();
+
+CREATE OR REPLACE FUNCTION ticket_board.notify_unblocked_dependents()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    dependent record;
+BEGIN
+    IF TG_OP <> 'UPDATE'
+       OR OLD.state IS NOT DISTINCT FROM NEW.state
+       OR OLD.state IN ('done', 'cancelled')
+       OR NEW.state NOT IN ('done', 'cancelled') THEN
+        RETURN NULL;
+    END IF;
+
+    FOR dependent IN
+        SELECT t.id, t.title, t.state, t.assignee, t.updated_at, t.ticket_number
+        FROM ticket_board.ticket_blockers b
+        JOIN ticket_board.tickets t ON t.id = b.ticket_id
+        WHERE b.blocker_ticket_id = NEW.id
+          AND NOT t.manually_controlled
+          AND NOT ticket_board.ticket_has_unresolved_blockers(t.id)
+          AND ticket_board.transition_target_role(t.state, t.assignee) IS NOT NULL
+        ORDER BY t.ticket_number
+    LOOP
+        PERFORM ticket_board.enqueue_transition_notification(
+            dependent.id,
+            dependent.title,
+            NULL,
+            dependent.state,
+            dependent.assignee,
+            dependent.updated_at,
+            dependent.ticket_number,
+            ticket_board.transition_message(dependent.id, dependent.title, NULL, dependent.state)
+        );
+    END LOOP;
+
+    RETURN NULL;
+END;
+$$;
 
 CREATE OR REPLACE FUNCTION ticket_board.upsert_ticket_notification_state()
 RETURNS trigger
@@ -1459,6 +1509,7 @@ EXECUTE FUNCTION ticket_board.enforce_ticket_workflow_update();
 DROP TRIGGER IF EXISTS tickets_notify_state_transition ON ticket_board.tickets;
 DROP TRIGGER IF EXISTS tickets_zzz_notify_insert_transition ON ticket_board.tickets;
 DROP TRIGGER IF EXISTS tickets_zzz_notify_transition ON ticket_board.tickets;
+DROP TRIGGER IF EXISTS tickets_zzzz_notify_unblocked_dependents ON ticket_board.tickets;
 
 DROP TRIGGER IF EXISTS tickets_notification_state_insert ON ticket_board.tickets;
 CREATE TRIGGER tickets_notification_state_insert
@@ -1482,6 +1533,11 @@ CREATE TRIGGER tickets_zzz_notify_transition
 AFTER INSERT OR UPDATE ON ticket_board.tickets
 FOR EACH ROW
 EXECUTE FUNCTION ticket_board.notify_ticket_state_transition();
+
+CREATE TRIGGER tickets_zzzz_notify_unblocked_dependents
+AFTER UPDATE OF state ON ticket_board.tickets
+FOR EACH ROW
+EXECUTE FUNCTION ticket_board.notify_unblocked_dependents();
 
 DROP TRIGGER IF EXISTS ticket_comments_notification_activity ON ticket_board.ticket_comments;
 CREATE TRIGGER ticket_comments_notification_activity
@@ -1762,10 +1818,111 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION ticket_board.apply_blockers(
+    p_ticket_id text,
+    p_blocker_ids text[],
+    p_reason text
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    normalized_reason text := coalesce(p_reason, '');
+    blocker_count integer;
+    invalid_id text;
+    missing_id text;
+    cycle_id text;
+BEGIN
+    SELECT count(*)
+    INTO blocker_count
+    FROM unnest(coalesce(p_blocker_ids, ARRAY[]::text[])) AS raw_id;
+
+    IF blocker_count > 0 AND btrim(normalized_reason) = '' THEN
+        RAISE EXCEPTION 'blocked_reason must be non-empty when blockers are set';
+    END IF;
+
+    SELECT coalesce(nullif(upper(btrim(raw_id)), ''), '<empty>')
+    INTO invalid_id
+    FROM unnest(coalesce(p_blocker_ids, ARRAY[]::text[])) AS raw_id
+    WHERE raw_id IS NULL
+       OR btrim(raw_id) = ''
+       OR upper(btrim(raw_id)) !~ '^PGU-[0-9]+$'
+       OR upper(btrim(raw_id)) = p_ticket_id
+    LIMIT 1;
+    IF invalid_id IS NOT NULL THEN
+        RAISE EXCEPTION 'invalid blocker ticket id: %', invalid_id;
+    END IF;
+
+    PERFORM 1 FROM ticket_board.tickets WHERE tickets.id = p_ticket_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ticket not found: %', p_ticket_id;
+    END IF;
+
+    WITH normalized AS (
+        SELECT upper(btrim(raw_id)) AS blocker_id
+        FROM unnest(coalesce(p_blocker_ids, ARRAY[]::text[])) AS raw_id
+        GROUP BY upper(btrim(raw_id))
+    )
+    SELECT normalized.blocker_id
+    INTO missing_id
+    FROM normalized
+    LEFT JOIN ticket_board.tickets blocker ON blocker.id = normalized.blocker_id
+    WHERE blocker.id IS NULL
+    LIMIT 1;
+    IF missing_id IS NOT NULL THEN
+        RAISE EXCEPTION 'blocker ticket not found: %', missing_id;
+    END IF;
+
+    WITH RECURSIVE normalized AS (
+        SELECT upper(btrim(raw_id)) AS blocker_id
+        FROM unnest(coalesce(p_blocker_ids, ARRAY[]::text[])) AS raw_id
+        GROUP BY upper(btrim(raw_id))
+    ),
+    blocker_chain(ticket_id) AS (
+        SELECT blocker_id
+        FROM normalized
+        UNION
+        SELECT tb.blocker_ticket_id
+        FROM blocker_chain chain
+        JOIN ticket_board.ticket_blockers tb ON tb.ticket_id = chain.ticket_id
+    )
+    SELECT ticket_id
+    INTO cycle_id
+    FROM blocker_chain
+    WHERE ticket_id = p_ticket_id
+    LIMIT 1;
+    IF cycle_id IS NOT NULL THEN
+        RAISE EXCEPTION 'blocked_by cycle detected for %', p_ticket_id;
+    END IF;
+
+    DELETE FROM ticket_board.ticket_blockers
+    WHERE ticket_id = p_ticket_id;
+
+    INSERT INTO ticket_board.ticket_blockers (ticket_id, blocker_ticket_id, position)
+    SELECT p_ticket_id, blocker_id, min(ord)::integer - 1
+    FROM (
+        SELECT upper(btrim(raw_id)) AS blocker_id, ord
+        FROM unnest(coalesce(p_blocker_ids, ARRAY[]::text[])) WITH ORDINALITY AS input(raw_id, ord)
+    ) AS normalized
+    GROUP BY blocker_id
+    ORDER BY min(ord);
+
+    UPDATE ticket_board.tickets
+    SET blocked_reason = normalized_reason
+    WHERE tickets.id = p_ticket_id;
+
+    PERFORM ticket_board.refresh_ticket_source_json(p_ticket_id);
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION ticket_board.create_ticket(
     title text,
     body text,
-    initial_state text
+    initial_state text,
+    blocked_by text[],
+    blocked_reason text
 )
 RETURNS text
 LANGUAGE plpgsql
@@ -1779,6 +1936,7 @@ DECLARE
     normalized_state text := btrim(coalesce(initial_state, 'analysis'));
     normalized_assignee text := 'unassigned';
     normalized_parked boolean := false;
+    blocker_count integer;
     created_at_value timestamptz := clock_timestamp();
     created_text_value text := ticket_board.utc_text(created_at_value);
 BEGIN
@@ -1795,8 +1953,14 @@ BEGIN
     IF normalized_state = 'backlog' THEN
         normalized_parked := true;
     END IF;
+    SELECT count(*)
+    INTO blocker_count
+    FROM unnest(coalesce(blocked_by, ARRAY[]::text[])) AS raw_id;
 
     ticket_id := ticket_board.next_ticket_id();
+    IF blocker_count > 0 THEN
+        PERFORM set_config('ticket_board.suppress_create_notify', 'on', true);
+    END IF;
     INSERT INTO ticket_board.tickets (
         id,
         title,
@@ -1834,9 +1998,26 @@ BEGIN
         ),
         ticket_id || '.json'
     );
+    IF blocker_count > 0 THEN
+        PERFORM ticket_board.apply_blockers(ticket_id, blocked_by, blocked_reason);
+    END IF;
     PERFORM ticket_board.refresh_ticket_source_json(ticket_id);
     RETURN ticket_id;
 END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.create_ticket(
+    title text,
+    body text,
+    initial_state text
+)
+RETURNS text
+LANGUAGE sql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+    SELECT ticket_board.create_ticket(title, body, initial_state, ARRAY[]::text[], '');
 $$;
 
 CREATE OR REPLACE FUNCTION ticket_board.create_ticket(
@@ -2369,49 +2550,9 @@ SET search_path = ticket_board, pg_temp
 AS $$
 DECLARE
     actor text;
-    normalized_reason text := coalesce(reason, '');
-    blocker_count integer;
-    invalid_id text;
 BEGIN
     actor := ticket_board.require_actor(ARRAY['director'], 'set_blockers');
-    SELECT count(*)
-    INTO blocker_count
-    FROM unnest(coalesce(ids, ARRAY[]::text[])) AS raw_id;
-
-    IF blocker_count > 0 AND btrim(normalized_reason) = '' THEN
-        RAISE EXCEPTION 'blocked_reason must be non-empty when blockers are set';
-    END IF;
-
-    SELECT upper(btrim(raw_id))
-    INTO invalid_id
-    FROM unnest(coalesce(ids, ARRAY[]::text[])) AS raw_id
-    WHERE upper(btrim(raw_id)) !~ '^PGU-[0-9]+$'
-       OR upper(btrim(raw_id)) = set_blockers.id
-    LIMIT 1;
-    IF invalid_id IS NOT NULL THEN
-        RAISE EXCEPTION 'invalid blocker ticket id: %', invalid_id;
-    END IF;
-
-    PERFORM 1 FROM ticket_board.tickets WHERE tickets.id = set_blockers.id;
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'ticket not found: %', id;
-    END IF;
-
-    DELETE FROM ticket_board.ticket_blockers
-    WHERE ticket_id = set_blockers.id;
-
-    INSERT INTO ticket_board.ticket_blockers (ticket_id, blocker_ticket_id, position)
-    SELECT set_blockers.id, blocker_id, min(ord)::integer - 1
-    FROM (
-        SELECT upper(btrim(raw_id)) AS blocker_id, ord
-        FROM unnest(coalesce(ids, ARRAY[]::text[])) WITH ORDINALITY AS input(raw_id, ord)
-    ) AS normalized
-    GROUP BY blocker_id
-    ORDER BY min(ord);
-
-    UPDATE ticket_board.tickets
-    SET blocked_reason = normalized_reason
-    WHERE tickets.id = set_blockers.id;
+    PERFORM ticket_board.apply_blockers(id, ids, reason);
     PERFORM ticket_board.touch_ticket(id);
 END;
 $$;

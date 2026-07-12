@@ -309,6 +309,8 @@ def main() -> int:
             insert_ticket(admin_conn, "PGU-409", title="Old app implementation ping", state="in_progress", assignee="app")
             insert_ticket(admin_conn, "PGU-410", title="Active app implementation ping", state="in_progress", assignee="app")
             insert_ticket(admin_conn, "PGU-411", title="Unassigned implementation ping", state="in_progress", assignee="unassigned")
+            insert_ticket(admin_conn, "PGU-412", title="Queued-only ops implementation ping", state="in_progress", assignee="ops")
+            insert_ticket(admin_conn, "PGU-413", title="Nudged-only ops implementation ping", state="in_progress", assignee="ops")
             insert_ticket(
                 admin_conn,
                 "PGU-405",
@@ -350,6 +352,16 @@ SET last_transition_notified_at = '2026-07-10T10:00:00+00:00'::timestamptz,
     last_nudged_at = '2026-07-10T10:30:00+00:00'::timestamptz
 WHERE ticket_id = 'PGU-404';
 
+UPDATE ticket_board.ticket_notification_state
+SET last_transition_notified_at = clock_timestamp() + interval '4 hours',
+    last_nudged_at = NULL
+WHERE ticket_id = 'PGU-412';
+
+UPDATE ticket_board.ticket_notification_state
+SET last_transition_notified_at = '2026-07-10T11:00:00+00:00'::timestamptz,
+    last_nudged_at = clock_timestamp() + interval '5 hours'
+WHERE ticket_id = 'PGU-413';
+
 INSERT INTO ticket_board.ticket_notification_queue (
     ticket_id, kind, target_role, message, payload, dedupe_key, updated_at
 ) VALUES (
@@ -368,12 +380,37 @@ INSERT INTO ticket_board.ticket_notification_queue (
     jsonb_build_object('id', 'PGU-410', 'state', 'in_progress', 'target_role', 'app'),
     'active-work-test:PGU-410:app',
     clock_timestamp() + interval '2 hours'
+), (
+    'PGU-412',
+    'transition',
+    'ops',
+    'PGU-412 -- Queued-only ops implementation ping',
+    jsonb_build_object('id', 'PGU-412', 'state', 'in_progress', 'target_role', 'ops'),
+    'active-work-test:PGU-412:ops',
+    clock_timestamp() + interval '6 hours'
+), (
+    'PGU-413',
+    'nudge',
+    'ops',
+    'NUDGE PGU-413 -- Nudged-only ops implementation ping is still in progress',
+    jsonb_build_object('kind', 'nudge', 'id', 'PGU-413', 'state', 'in_progress', 'target_role', 'ops'),
+    'active-work-test:PGU-413:ops',
+    clock_timestamp() + interval '7 hours'
 );
 
 UPDATE ticket_board.ticket_notification_state
 SET last_transition_notified_at = clock_timestamp() + interval '3 hours',
     last_nudged_at = NULL
 WHERE ticket_id = 'PGU-406';
+
+INSERT INTO ticket_board.notification_trace (
+    ts, ticket_id, target_role, kind, event, ticket_state_at_event, ticket_assignee_at_event, pane_busy_determination, busy_reason
+) VALUES
+    ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-402', 'director', 'transition', 'send', 'analysis', 'ops', 'idle', 'idle'),
+    ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-404', 'audit', 'transition', 'send', 'audit', 'audit', 'idle', 'idle'),
+    ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-408', 'ops', 'transition', 'send', 'in_progress', 'ops', 'idle', 'idle'),
+    ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-410', 'app', 'transition', 'send', 'in_progress', 'app', 'idle', 'idle'),
+    ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-406', 'director', 'transition', 'send', 'director_review', 'director', 'idle', 'idle');
 """,
             )
 
@@ -399,6 +436,8 @@ WHERE ticket_id = 'PGU-406';
             assert tickets_by_id["PGU-409"]["active_work_highlight"] is False, tickets_by_id["PGU-409"]
             assert tickets_by_id["PGU-411"]["active_work_highlight"] is False, tickets_by_id["PGU-411"]
             assert tickets_by_id["PGU-411"]["active_work_owner_role"] == "", tickets_by_id["PGU-411"]
+            assert tickets_by_id["PGU-412"]["active_work_highlight"] is False, tickets_by_id["PGU-412"]
+            assert tickets_by_id["PGU-413"]["active_work_highlight"] is False, tickets_by_id["PGU-413"]
             assert tickets_by_id["PGU-406"]["active_work_highlight"] is True, tickets_by_id["PGU-406"]
             assert tickets_by_id["PGU-406"]["active_work_owner_role"] == "director", tickets_by_id["PGU-406"]
             assert tickets_by_id["PGU-405"]["active_work_highlight"] is False, tickets_by_id["PGU-405"]

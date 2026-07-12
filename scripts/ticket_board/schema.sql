@@ -1203,6 +1203,13 @@ BEGIN
               AND ticket_board.nudge_target_role(t.state, t.assignee) IS NOT NULL
               AND ns.entered_current_state_at <= p_now - p_cadence
               AND (ns.last_nudged_at IS NULL OR ns.last_nudged_at <= p_now - p_cadence)
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM ticket_board.ticket_blockers tb
+                  LEFT JOIN ticket_board.tickets blocker ON blocker.id = tb.blocker_ticket_id
+                  WHERE tb.ticket_id = t.id
+                    AND (blocker.id IS NULL OR blocker.state NOT IN ('done', 'cancelled'))
+              )
               AND NOT ticket_board.notification_delivery_in_backoff(
                   t.id,
                   ticket_board.nudge_target_role(t.state, t.assignee),
@@ -1251,6 +1258,13 @@ BEGIN
                 )
               AND ns.entered_current_state_at <= p_now - p_cadence
               AND (ns.last_nudged_at IS NULL OR ns.last_nudged_at <= p_now - p_cadence)
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM ticket_board.ticket_blockers tb
+                  LEFT JOIN ticket_board.tickets blocker ON blocker.id = tb.blocker_ticket_id
+                  WHERE tb.ticket_id = t.id
+                    AND (blocker.id IS NULL OR blocker.state NOT IN ('done', 'cancelled'))
+              )
               AND NOT ticket_board.notification_delivery_in_backoff(t.id, 'director', p_now, p_cadence)
         ) AS candidates
         ORDER BY candidates.target_role,

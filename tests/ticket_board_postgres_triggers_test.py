@@ -796,7 +796,7 @@ WHERE id = 'PGU-9';
                 title="Blocked analysis",
                 assignee="ops",
                 state="analysis",
-                implementation="Ready but blocked.",
+                implementation="",
                 manually_controlled=True,
             )
             insert_ticket(conninfo, "PGU-540", title="Open blocker", assignee="ops", state="analysis")
@@ -1142,6 +1142,78 @@ SELECT ticket_board.notify_due_nudges(clock_timestamp(), interval '5 minutes', 3
                 "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-254' AND kind IN ('nudge', 'escalation');",
             ).stdout.strip()
             assert in_progress_nudges == "1", in_progress_nudges
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
+            insert_ticket(conninfo, "PGU-2850", title="Open blocker for implementation", assignee="ops", state="analysis")
+            insert_ticket(conninfo, "PGU-2852", title="Cleared blocker for implementation", assignee="ops", state="done")
+            insert_ticket(conninfo, "PGU-2851", title="Blocked implementation nudge", assignee="app", state="in_progress", implementation="Ready.")
+            psql(
+                conninfo,
+                """
+INSERT INTO ticket_board.ticket_blockers (ticket_id, blocker_ticket_id, position)
+VALUES ('PGU-2851', 'PGU-2850', 0);
+UPDATE ticket_board.ticket_notification_state
+SET last_nudged_at = clock_timestamp() + interval '1 hour'
+WHERE ticket_id <> 'PGU-2851';
+UPDATE ticket_board.ticket_notification_state
+SET last_activity_at = clock_timestamp() - interval '1 hour',
+    entered_current_state_at = clock_timestamp() - interval '1 hour',
+    last_nudged_at = NULL,
+    nudge_count = 0
+WHERE ticket_id = 'PGU-2851';
+SELECT ticket_board.notify_due_nudges(clock_timestamp(), interval '5 minutes', 3);
+""",
+            )
+            blocked_implementation_nudge = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'queued', (
+        SELECT count(*)::int
+        FROM ticket_board.ticket_notification_queue q
+        WHERE q.ticket_id = t.id
+          AND q.kind IN ('nudge', 'escalation')
+    ),
+    'last_nudged', ns.last_nudged_at IS NOT NULL,
+    'nudge_count', ns.nudge_count
+)::text
+FROM ticket_board.tickets t
+JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
+WHERE t.id = 'PGU-2851';
+""",
+                ).stdout
+            )
+            assert blocked_implementation_nudge == {"queued": 0, "last_nudged": False, "nudge_count": 0}, blocked_implementation_nudge
+            psql(
+                conninfo,
+                """
+UPDATE ticket_board.ticket_blockers
+SET blocker_ticket_id = 'PGU-2852'
+WHERE ticket_id = 'PGU-2851';
+SELECT ticket_board.notify_due_nudges(clock_timestamp(), interval '5 minutes', 3);
+""",
+            )
+            cleared_implementation_nudge = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'queued', (
+        SELECT count(*)::int
+        FROM ticket_board.ticket_notification_queue q
+        WHERE q.ticket_id = t.id
+          AND q.kind IN ('nudge', 'escalation')
+    ),
+    'last_nudged', ns.last_nudged_at IS NOT NULL,
+    'nudge_count', ns.nudge_count
+)::text
+FROM ticket_board.tickets t
+JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
+WHERE t.id = 'PGU-2851';
+""",
+                ).stdout
+            )
+            assert cleared_implementation_nudge == {"queued": 2, "last_nudged": True, "nudge_count": 1}, cleared_implementation_nudge
             psql(
                 conninfo,
                 """
@@ -1459,15 +1531,43 @@ GROUP BY t.state, ns.last_nudged_at, ns.nudge_count;
             assert blocked_analysis_nudge == {
                 "state": "analysis",
                 "blocked_by_count": 1,
-                "last_nudged": True,
-                "nudge_count": 1,
+                "last_nudged": False,
+                "nudge_count": 0,
             }, blocked_analysis_nudge
-
-            stale_nudges_third = psql(
+            insert_ticket(conninfo, "PGU-541", title="Done blocker", assignee="ops", state="done")
+            psql(
+                conninfo,
+                """
+UPDATE ticket_board.ticket_blockers
+SET blocker_ticket_id = 'PGU-541'
+WHERE ticket_id = 'PGU-54';
+""",
+            )
+            stale_nudges_after_unblock = psql(
                 conninfo,
                 f"SELECT ticket_board.notify_due_nudges({stale_now}, interval '5 minutes', 3);",
             ).stdout.strip()
-            assert int(stale_nudges_third) >= 1, stale_nudges_third
+            assert int(stale_nudges_after_unblock) >= 1, stale_nudges_after_unblock
+            unblocked_analysis_nudge = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object('state', state, 'blocked_by_count', count(b.blocker_ticket_id), 'last_nudged', ns.last_nudged_at IS NOT NULL, 'nudge_count', ns.nudge_count)::text
+FROM ticket_board.tickets t
+JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
+LEFT JOIN ticket_board.ticket_blockers b ON b.ticket_id = t.id
+WHERE t.id = 'PGU-54'
+GROUP BY t.state, ns.last_nudged_at, ns.nudge_count;
+""",
+                ).stdout
+            )
+            assert unblocked_analysis_nudge == {
+                "state": "analysis",
+                "blocked_by_count": 1,
+                "last_nudged": True,
+                "nudge_count": 1,
+            }, unblocked_analysis_nudge
+
             backlog_nudge = json.loads(
                 psql(
                     conninfo,

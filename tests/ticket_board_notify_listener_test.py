@@ -413,7 +413,7 @@ def test_busy_pane_requeues_then_idle_pane_delivers_once() -> None:
     assert busy_delivered == 0
     assert sent == []
     assert [item[0] for item in busy_conn.requeued] == [20]
-    assert busy_conn.requeued[0][1][1] == "3 seconds"
+    assert busy_conn.requeued[0][1][1] == f"{DEFAULT_BUSY_REQUEUE_SECONDS:g} seconds"
     assert busy_conn.acked == []
     assert trace_events(busy_conn) == ["listener_claim", "gate_defer"]
     assert busy_conn.traces[1][5] == "busy"
@@ -462,7 +462,7 @@ def test_real_gate_busy_retry_is_fixed_then_delivers_after_stable_window() -> No
     assert busy_listener.listen_once(max_notifications=1) == 0
     assert sent == []
     assert [item[0] for item in busy_conn.requeued] == [26]
-    assert busy_conn.requeued[0][1][1] == "3 seconds"
+    assert busy_conn.requeued[0][1][1] == f"{DEFAULT_BUSY_REQUEUE_SECONDS:g} seconds"
     assert busy_conn.acked == []
     assert trace_events(busy_conn) == ["listener_claim", "gate_defer"]
     assert busy_conn.traces[1][6] == "region_unproven"
@@ -482,6 +482,102 @@ def test_real_gate_busy_retry_is_fixed_then_delivers_after_stable_window() -> No
     assert idle_conn.acked == [26]
     assert idle_conn.requeued == []
     assert trace_events(idle_conn) == ["listener_claim", "send", "listener_ack"]
+
+
+def test_default_busy_requeue_latency_bound_after_region_stabilizes() -> None:
+    sent: list[tuple[str, str]] = []
+    now = [0.0]
+
+    def capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if now[0] < DEFAULT_BUSY_REQUEUE_SECONDS:
+            return subprocess.CompletedProcess(args, 0, stdout=f"working timer {now[0]:.1f}\nprompt")
+        return subprocess.CompletedProcess(args, 0, stdout="idle complete\nstable prompt")
+
+    gate = PaneActivityGate(
+        "/tmp/directorctl",
+        stable_idle_seconds=DEFAULT_STABLE_IDLE_SECONDS,
+        capture_runner=capture_runner,
+        monotonic=lambda: now[0],
+    )
+    delivery_at: float | None = None
+    requeue_delays: list[str] = []
+    max_claims = int((DEFAULT_STABLE_IDLE_SECONDS + 6.0) / DEFAULT_BUSY_REQUEUE_SECONDS) + 1
+
+    for claim_index in range(max_claims):
+        now[0] = claim_index * DEFAULT_BUSY_REQUEUE_SECONDS
+        conn = FakeConnection([queue_row(27, "PGU-300", attempts=claim_index + 1)])
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=gate.is_working,
+            connector=lambda *args, conn=conn, **kwargs: conn,
+            poll_seconds=0,
+        )
+        delivered = listener.listen_once(max_notifications=1)
+        if delivered:
+            delivery_at = now[0]
+            assert conn.requeued == []
+            break
+        assert conn.requeued, f"claim {claim_index} neither delivered nor requeued"
+        requeue_delays.append(conn.requeued[0][1][1])
+
+    assert delivery_at is not None
+    assert delivery_at <= DEFAULT_STABLE_IDLE_SECONDS + 1.0
+    assert sent == [("pgu-ops:0.0", "New ticket for you: PGU-300 -- Queue")]
+    assert requeue_delays
+    assert set(requeue_delays) == {f"{DEFAULT_BUSY_REQUEUE_SECONDS:g} seconds"}
+
+
+def test_busy_reclaims_use_fixed_one_second_interval_without_growth() -> None:
+    delays: list[str] = []
+    for attempts in (1, 2, 3, 8, 20):
+        conn = FakeConnection([queue_row(28, "PGU-300", attempts=attempts)])
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda _target, _message: None,
+            activity_gate=lambda _target: True,
+            connector=lambda *args, conn=conn, **kwargs: conn,
+            poll_seconds=0,
+        )
+
+        assert listener.listen_once(max_notifications=1) == 0
+        assert conn.requeued == [(28, conn.requeued[0][1])]
+        delays.append(conn.requeued[0][1][1])
+
+    assert delays == [f"{DEFAULT_BUSY_REQUEUE_SECONDS:g} seconds"] * 5
+
+
+def test_region_changing_every_busy_requeue_interval_never_delivers() -> None:
+    sent: list[tuple[str, str]] = []
+    now = [0.0]
+
+    def capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=f"working timer {now[0]:.1f}\nprompt")
+
+    gate = PaneActivityGate(
+        "/tmp/directorctl",
+        stable_idle_seconds=DEFAULT_STABLE_IDLE_SECONDS,
+        capture_runner=capture_runner,
+        monotonic=lambda: now[0],
+    )
+    claim_count = int(DEFAULT_STABLE_IDLE_SECONDS / DEFAULT_BUSY_REQUEUE_SECONDS) + 4
+
+    for claim_index in range(claim_count):
+        now[0] = claim_index * DEFAULT_BUSY_REQUEUE_SECONDS
+        conn = FakeConnection([queue_row(29, "PGU-300", attempts=claim_index + 1)])
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=gate.is_working,
+            connector=lambda *args, conn=conn, **kwargs: conn,
+            poll_seconds=0,
+        )
+
+        assert listener.listen_once(max_notifications=1) == 0
+        assert conn.requeued[0][1][1] == f"{DEFAULT_BUSY_REQUEUE_SECONDS:g} seconds"
+
+    assert sent == []
+    assert gate.last_trace("pgu-ops:0.0").reason == "region_changed"
 
 
 def test_region_must_remain_stable_for_full_idle_window() -> None:
@@ -534,7 +630,7 @@ def test_busy_pane_never_force_delivers_old_notification() -> None:
     assert listener.listen_once(max_notifications=1) == 0
     assert sent == []
     assert [item[0] for item in conn.requeued] == [25]
-    assert conn.requeued[0][1][1] == "3 seconds"
+    assert conn.requeued[0][1][1] == f"{DEFAULT_BUSY_REQUEUE_SECONDS:g} seconds"
     assert conn.acked == []
     assert trace_events(conn) == ["listener_claim", "gate_defer"]
     assert "max_defer_force_deliver" not in trace_events(conn)
@@ -852,7 +948,7 @@ def test_changing_arbitrary_region_waits() -> None:
     assert listener.listen_once(max_notifications=1) == 0
     assert sent == []
     assert [item[0] for item in conn.requeued] == [34]
-    assert conn.requeued[0][1][1] == "3 seconds"
+    assert conn.requeued[0][1][1] == f"{DEFAULT_BUSY_REQUEUE_SECONDS:g} seconds"
     assert conn.acked == []
     assert trace_events(conn) == ["listener_claim", "gate_defer"]
     assert conn.traces[1][5] == "busy"
@@ -1124,7 +1220,7 @@ def test_director_changing_last_lines_requeues_without_force_delivery() -> None:
 
 def test_default_stable_idle_window_uses_no_sleep_async_path() -> None:
     assert DEFAULT_STABLE_IDLE_SECONDS == 3.0
-    assert DEFAULT_BUSY_REQUEUE_SECONDS == 3.0
+    assert DEFAULT_BUSY_REQUEUE_SECONDS == 1.0
 
 
 def test_default_gate_delivers_batch_without_serial_sleep() -> None:
@@ -1216,6 +1312,9 @@ def main() -> int:
     test_send_failure_uses_exponential_backoff()
     test_busy_pane_requeues_then_idle_pane_delivers_once()
     test_real_gate_busy_retry_is_fixed_then_delivers_after_stable_window()
+    test_default_busy_requeue_latency_bound_after_region_stabilizes()
+    test_busy_reclaims_use_fixed_one_second_interval_without_growth()
+    test_region_changing_every_busy_requeue_interval_never_delivers()
     test_region_must_remain_stable_for_full_idle_window()
     test_busy_pane_never_force_delivers_old_notification()
     test_stale_implementation_nudge_for_cancelled_ticket_is_acked_not_delivered()

@@ -1146,6 +1146,205 @@ SELECT ticket_board.notify_due_nudges(clock_timestamp(), interval '5 minutes', 3
                 conninfo,
                 """
 DELETE FROM ticket_board.ticket_notification_queue;
+INSERT INTO ticket_board.tickets (
+    id, title, body, state, assignee, implementation, created_text, updated_text, source_json
+) VALUES
+(
+    'PGU-2821', 'Deferred delivery should not nudge', '', 'analysis', 'app', 'Ready.',
+    '2026-07-11T00:00:00+00:00', '2026-07-11T00:00:00+00:00',
+    jsonb_build_object(
+        'id', 'PGU-2821',
+        'title', 'Deferred delivery should not nudge',
+        'body', '',
+        'state', 'analysis',
+        'assignee', 'app',
+        'comments', '[]'::jsonb,
+        'created', '2026-07-11T00:00:00+00:00',
+        'updated', '2026-07-11T00:00:00+00:00'
+    )
+),
+(
+    'PGU-2822', 'Failed delivery should not nudge', '', 'analysis', 'perf', 'Ready.',
+    '2026-07-11T00:00:00+00:00', '2026-07-11T00:00:00+00:00',
+    jsonb_build_object(
+        'id', 'PGU-2822',
+        'title', 'Failed delivery should not nudge',
+        'body', '',
+        'state', 'analysis',
+        'assignee', 'perf',
+        'comments', '[]'::jsonb,
+        'created', '2026-07-11T00:00:00+00:00',
+        'updated', '2026-07-11T00:00:00+00:00'
+    )
+),
+(
+    'PGU-2823', 'Delivered stale ticket should nudge', '', 'analysis', 'main', 'Ready.',
+    '2026-07-11T00:00:00+00:00', '2026-07-11T00:00:00+00:00',
+    jsonb_build_object(
+        'id', 'PGU-2823',
+        'title', 'Delivered stale ticket should nudge',
+        'body', '',
+        'state', 'analysis',
+        'assignee', 'main',
+        'comments', '[]'::jsonb,
+        'created', '2026-07-11T00:00:00+00:00',
+        'updated', '2026-07-11T00:00:00+00:00'
+    )
+),
+(
+    'PGU-2824', 'Live backoff queue should not nudge', '', 'analysis', 'research', 'Ready.',
+    '2026-07-11T00:00:00+00:00', '2026-07-11T00:00:00+00:00',
+    jsonb_build_object(
+        'id', 'PGU-2824',
+        'title', 'Live backoff queue should not nudge',
+        'body', '',
+        'state', 'analysis',
+        'assignee', 'research',
+        'comments', '[]'::jsonb,
+        'created', '2026-07-11T00:00:00+00:00',
+        'updated', '2026-07-11T00:00:00+00:00'
+    )
+);
+UPDATE ticket_board.tickets
+SET state = 'in_progress'
+WHERE id IN ('PGU-2821', 'PGU-2822', 'PGU-2823', 'PGU-2824');
+UPDATE ticket_board.ticket_notification_state
+SET last_nudged_at = clock_timestamp() + interval '1 hour'
+WHERE ticket_id NOT IN ('PGU-2821', 'PGU-2822', 'PGU-2823', 'PGU-2824');
+UPDATE ticket_board.ticket_notification_state
+SET entered_current_state_at = clock_timestamp() - interval '1 hour',
+    last_activity_at = clock_timestamp() - interval '1 hour',
+    last_nudged_at = NULL,
+    nudge_count = 0
+WHERE ticket_id IN ('PGU-2821', 'PGU-2822', 'PGU-2823', 'PGU-2824');
+INSERT INTO ticket_board.ticket_notification_queue (
+    ticket_id,
+    kind,
+    target_role,
+    message,
+    payload,
+    dedupe_key,
+    next_attempt_at,
+    last_error
+) VALUES (
+    'PGU-2824',
+    'transition',
+    'research',
+    'PGU-2824 -- Live backoff queue should not nudge',
+    jsonb_build_object(
+        'kind', 'transition',
+        'id', 'PGU-2824',
+        'new_state', 'in_progress',
+        'assignee', 'research'
+    ),
+    'transition:PGU-2824:research',
+    clock_timestamp() + interval '30 seconds',
+    'pane busy'
+);
+SELECT ticket_board.record_notification_trace(
+    'PGU-2821',
+    NULL,
+    'app',
+    'transition',
+    'gate_defer',
+    'busy',
+    'pane active',
+    NULL,
+    '{}'::jsonb
+);
+SELECT ticket_board.record_notification_trace(
+    'PGU-2821',
+    NULL,
+    'app',
+    'transition',
+    'requeue',
+    NULL,
+    'pane busy',
+    NULL,
+    '{}'::jsonb
+);
+SELECT ticket_board.record_notification_trace(
+    'PGU-2822',
+    NULL,
+    'perf',
+    'transition',
+    'send_failed',
+    NULL,
+    'pane unreachable',
+    NULL,
+    '{}'::jsonb
+);
+SELECT ticket_board.record_notification_trace(
+    'PGU-2822',
+    NULL,
+    'perf',
+    'transition',
+    'requeue',
+    NULL,
+    'pane unreachable',
+    NULL,
+    '{}'::jsonb
+);
+SELECT ticket_board.record_notification_trace(
+    'PGU-2823',
+    NULL,
+    'main',
+    'transition',
+    'send',
+    NULL,
+    NULL,
+    NULL,
+    '{}'::jsonb
+);
+SELECT ticket_board.record_notification_trace(
+    'PGU-2823',
+    NULL,
+    'main',
+    'transition',
+    'listener_ack',
+    NULL,
+    NULL,
+    NULL,
+    '{}'::jsonb
+);
+SELECT ticket_board.notify_due_nudges(clock_timestamp(), interval '5 minutes', 3);
+""",
+            )
+            delivery_suppression = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_object_agg(ticket_id, row_json ORDER BY ticket_id)::text
+FROM (
+    SELECT
+        t.id AS ticket_id,
+        jsonb_build_object(
+            'queued', (
+                SELECT count(*)::int
+                FROM ticket_board.ticket_notification_queue q
+                WHERE q.ticket_id = t.id
+                  AND q.kind IN ('nudge', 'escalation')
+            ),
+            'last_nudged', ns.last_nudged_at IS NOT NULL,
+            'nudge_count', ns.nudge_count
+        ) AS row_json
+    FROM ticket_board.tickets t
+    JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
+    WHERE t.id IN ('PGU-2821', 'PGU-2822', 'PGU-2823', 'PGU-2824')
+) s;
+""",
+                ).stdout
+            )
+            assert delivery_suppression == {
+                "PGU-2821": {"queued": 0, "last_nudged": False, "nudge_count": 0},
+                "PGU-2822": {"queued": 0, "last_nudged": False, "nudge_count": 0},
+                "PGU-2823": {"queued": 2, "last_nudged": True, "nudge_count": 1},
+                "PGU-2824": {"queued": 0, "last_nudged": False, "nudge_count": 0},
+            }, delivery_suppression
+            psql(
+                conninfo,
+                """
+DELETE FROM ticket_board.ticket_notification_queue;
 UPDATE ticket_board.ticket_notification_state
 SET last_activity_at = clock_timestamp() - interval '20 minutes',
     entered_current_state_at = clock_timestamp() - interval '20 minutes',

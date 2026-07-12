@@ -21,7 +21,8 @@ def main() -> int:
     assert "if (column.key === 'done' && !state.showDone) {" in HTML
     assert "function renderStateVisibilityToggles()" in HTML
     assert "const doneCount = columnTicketCount('done');" in HTML
-    assert "visibleColumns().forEach((column) => {" in HTML
+    assert "const columns = visibleColumns();" in HTML
+    assert "columns.forEach((column) => {" in HTML
     assert "showDoneInput.addEventListener('change', () => {" in HTML
     print("done_column_hidden_default_test: ok")
     return 0

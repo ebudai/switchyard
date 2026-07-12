@@ -910,9 +910,25 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       }
     }
 
+    function syncBoardGridColumns(columns) {
+      if (mobileSectionsEnabled()) {
+        boardEl.style.gridTemplateColumns = '1fr';
+        boardEl.style.minWidth = '0';
+        return;
+      }
+      const columnCount = Math.max(columns.length, 1);
+      const minColumnWidth = 205;
+      const columnGap = 16;
+      const minBoardWidth = (columnCount * minColumnWidth) + ((columnCount - 1) * columnGap);
+      boardEl.style.gridTemplateColumns = `repeat(${columnCount}, minmax(${minColumnWidth}px, 1fr))`;
+      boardEl.style.minWidth = `max(100%, ${minBoardWidth}px)`;
+    }
+
     function renderBoard() {
       boardEl.innerHTML = '';
-      visibleColumns().forEach((column) => {
+      const columns = visibleColumns();
+      syncBoardGridColumns(columns);
+      columns.forEach((column) => {
         const columnEl = document.createElement('section');
         columnEl.className = 'column';
         const tickets = columnTickets(column.key);

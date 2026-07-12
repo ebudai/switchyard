@@ -1007,6 +1007,9 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       if (ericSignoffSummary(ticket)) {
         card.classList.add('card-signed-off');
       }
+      if (ticket.active_work_highlight) {
+        card.classList.add('card-active-work');
+      }
       if (ticket.id === state.selectedId || childTickets.some((child) => child.id === state.selectedId)) {
         card.classList.add('selected');
       }

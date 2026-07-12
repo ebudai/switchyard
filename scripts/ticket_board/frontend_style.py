@@ -313,6 +313,11 @@ STYLE = """    :root {
       border-color: rgba(134, 239, 172, 0.4);
       box-shadow: 0 0 0 1px rgba(134, 239, 172, 0.15) inset;
     }
+    .card-active-work {
+      border-color: rgba(252, 211, 77, 0.58);
+      background: linear-gradient(90deg, rgba(252, 211, 77, 0.12), var(--panel-2) 30%);
+      box-shadow: 0 0 0 1px rgba(252, 211, 77, 0.22) inset;
+    }
     .card.selected {
       border-color: rgba(125, 211, 252, 0.55);
       box-shadow: 0 0 0 1px rgba(125, 211, 252, 0.3) inset;

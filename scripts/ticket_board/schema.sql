@@ -1855,7 +1855,11 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION ticket_board.audit_sign_off(id text)
+DROP FUNCTION IF EXISTS ticket_board.audit_sign_off(text);
+CREATE OR REPLACE FUNCTION ticket_board.audit_sign_off(
+    id text,
+    comment_text text
+)
 RETURNS void
 LANGUAGE plpgsql
 VOLATILE
@@ -1864,8 +1868,11 @@ SET search_path = ticket_board, pg_temp
 AS $$
 DECLARE
     actor text;
+    comment_actor text;
 BEGIN
     actor := ticket_board.require_actor(ARRAY['audit'], 'audit_sign_off');
+    comment_actor := ticket_board.current_app_actor();
+    PERFORM ticket_board.append_ticket_comment(id, comment_actor, comment_text);
     UPDATE ticket_board.tickets
     SET audit_signoff = true
     WHERE tickets.id = audit_sign_off.id
@@ -1958,7 +1965,10 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION ticket_board.eric_sign_off(id text)
+CREATE OR REPLACE FUNCTION ticket_board.eric_sign_off(
+    id text,
+    comment_text text DEFAULT ''
+)
 RETURNS void
 LANGUAGE plpgsql
 VOLATILE
@@ -1967,8 +1977,13 @@ SET search_path = ticket_board, pg_temp
 AS $$
 DECLARE
     actor text;
+    comment_actor text;
 BEGIN
     actor := ticket_board.require_actor(ARRAY['eric'], 'eric_sign_off');
+    comment_actor := ticket_board.current_app_actor();
+    IF btrim(coalesce(comment_text, '')) <> '' THEN
+        PERFORM ticket_board.append_ticket_comment(id, comment_actor, comment_text);
+    END IF;
     UPDATE ticket_board.tickets
     SET eric_signoff = true
     WHERE tickets.id = eric_sign_off.id

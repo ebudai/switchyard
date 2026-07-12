@@ -53,10 +53,13 @@ class RecordingHandler(BaseHTTPRequestHandler):
             ticket["state"] = "audit"
         elif operation == "audit_sign_off":
             ticket["state"] = "director_review"
+            ticket["comments"] = [{"who": caller, "text": payload.get("text", "")}]
         elif operation == "audit_kick_back":
             ticket["state"] = "analysis"
         elif operation == "eric_sign_off":
             ticket["state"] = "director_review"
+            if payload.get("text"):
+                ticket["comments"] = [{"who": caller, "text": payload.get("text", "")}]
         elif operation == "eric_reopen":
             ticket["state"] = "analysis"
         elif operation == "mark_done":
@@ -118,9 +121,13 @@ def exercise_client(base_url: str, commit_hash: str) -> None:
     assert client.start_work("PGU-101", caller_role="ops")["ticket"]["state"] == "in_progress"
     assert client.submit_to_audit("PGU-101", commit_hash=commit_hash, caller_role="ops")["ticket"]["state"] == "audit"
     assert client.submit_to_audit("PGU-113", caller_role="ops")["ticket"]["commit_hash"] == ""
-    assert client.audit_sign_off("PGU-102", caller_role="audit")["ticket"]["state"] == "director_review"
+    audit_signed = client.audit_sign_off("PGU-102", text="Audit verified.", caller_role="audit")
+    assert audit_signed["ticket"]["state"] == "director_review"
+    assert audit_signed["ticket"]["comments"][-1]["text"] == "Audit verified."
     assert client.audit_kick_back("PGU-103", reason="Needs another pass.", caller_role="audit")["ticket"]["state"] == "analysis"
-    assert client.eric_sign_off("PGU-104", caller_role="eric")["ticket"]["state"] == "director_review"
+    eric_signed = client.eric_sign_off("PGU-104", text="Eric approves.", caller_role="eric")
+    assert eric_signed["ticket"]["state"] == "director_review"
+    assert eric_signed["ticket"]["comments"][-1]["text"] == "Eric approves."
     assert client.eric_reopen("PGU-105", reason="Needs design revision.", caller_role="eric")["ticket"]["state"] == "analysis"
     assert client.mark_done("PGU-106", commit_hash=commit_hash)["ticket"]["state"] == "done"
     assert client.mark_done("PGU-114")["ticket"]["commit_hash"] == ""

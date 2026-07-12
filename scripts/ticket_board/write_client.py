@@ -282,8 +282,8 @@ class TicketBoardWriteClient:
     def submit_to_audit(self, ticket_id: str, *, commit_hash: str = "", caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "submit_to_audit", {"commit_hash": commit_hash}, caller_role=caller_role)
 
-    def audit_sign_off(self, ticket_id: str, *, caller_role: str | None = None) -> dict[str, Any]:
-        return self._ticket_action(ticket_id, "audit_sign_off", caller_role=caller_role)
+    def audit_sign_off(self, ticket_id: str, *, text: str, caller_role: str | None = None) -> dict[str, Any]:
+        return self._ticket_action(ticket_id, "audit_sign_off", {"text": text}, caller_role=caller_role)
 
     def audit_kick_back(self, ticket_id: str, *, reason: str, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "audit_kick_back", {"reason": reason}, caller_role=caller_role)
@@ -294,8 +294,9 @@ class TicketBoardWriteClient:
     def inspector_kick_back(self, ticket_id: str, *, recommendations: str, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "inspector_kick_back", {"recommendations": recommendations}, caller_role=caller_role)
 
-    def eric_sign_off(self, ticket_id: str, *, caller_role: str | None = None) -> dict[str, Any]:
-        return self._ticket_action(ticket_id, "eric_sign_off", caller_role=caller_role)
+    def eric_sign_off(self, ticket_id: str, *, text: str = "", caller_role: str | None = None) -> dict[str, Any]:
+        payload = {"text": text} if text else None
+        return self._ticket_action(ticket_id, "eric_sign_off", payload, caller_role=caller_role)
 
     def eric_reopen(self, ticket_id: str, *, reason: str, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "eric_reopen", {"reason": reason}, caller_role=caller_role)
@@ -387,9 +388,13 @@ def _build_parser() -> argparse.ArgumentParser:
     route.add_argument("--state", required=True)
     route.add_argument("--assignee", required=True)
 
-    for name in ("start-work", "audit-sign-off", "inspector-sign-off", "eric-sign-off", "defer"):
+    for name in ("start-work", "inspector-sign-off", "eric-sign-off", "defer"):
         sub = subparsers.add_parser(name)
         sub.add_argument("ticket_id")
+
+    audit_sign = subparsers.add_parser("audit-sign-off")
+    audit_sign.add_argument("ticket_id")
+    audit_sign.add_argument("--text", required=True)
 
     submit = subparsers.add_parser("submit-to-audit")
     submit.add_argument("ticket_id")
@@ -448,6 +453,8 @@ def main(argv: list[str] | None = None) -> int:
         response = client.route(args.ticket_id, state=args.state, assignee=args.assignee)
     elif command == "submit_to_audit":
         response = client.submit_to_audit(args.ticket_id, commit_hash=args.commit_hash)
+    elif command == "audit_sign_off":
+        response = client.audit_sign_off(args.ticket_id, text=args.text)
     elif command in {"audit_kick_back", "eric_reopen", "cancel"}:
         response = getattr(client, command)(args.ticket_id, reason=args.reason)
     elif command == "inspector_kick_back":

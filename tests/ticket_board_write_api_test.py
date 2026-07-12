@@ -665,8 +665,26 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     assert inspector_resubmitted["ticket"]["state"] == "inspection", inspector_resubmitted  # type: ignore[index]
     assert inspector_resubmitted["ticket"]["inspector_signoff"] is False, inspector_resubmitted  # type: ignore[index]
 
-    audit_signed = post_json(base_url, "/api/tickets/PGU-102/actions/audit_sign_off", {}, caller="audit")
+    audit_signoff_missing_comment = post_json(
+        base_url,
+        "/api/tickets/PGU-102/actions/audit_sign_off",
+        {},
+        caller="audit",
+        expect=400,
+    )
+    assert "audit_sign_off requires a non-empty comment" in str(audit_signoff_missing_comment), audit_signoff_missing_comment
+    audit_signoff_empty_comment = post_json(
+        base_url,
+        "/api/tickets/PGU-102/actions/audit_sign_off",
+        {"text": "   "},
+        caller="audit",
+        expect=400,
+    )
+    assert "audit_sign_off requires a non-empty comment" in str(audit_signoff_empty_comment), audit_signoff_empty_comment
+    audit_signed = post_json(base_url, "/api/tickets/PGU-102/actions/audit_sign_off", {"text": "Audit verified."}, caller="audit")
     assert audit_signed["ticket"]["state"] == "director_review", audit_signed  # type: ignore[index]
+    assert audit_signed["ticket"]["audit_signoff"] is True, audit_signed  # type: ignore[index]
+    assert audit_signed["ticket"]["comments"][-1]["text"] == "Audit verified.", audit_signed  # type: ignore[index]
     audit_kicked = post_json(
         base_url,
         "/api/tickets/PGU-103/actions/audit_kick_back",
@@ -676,8 +694,9 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     assert audit_kicked["ticket"]["state"] == "analysis", audit_kicked  # type: ignore[index]
     assert audit_kicked["ticket"]["comments"][-1]["who"] == "audit", audit_kicked  # type: ignore[index]
 
-    eric_signed = post_json(base_url, "/api/tickets/PGU-104/actions/eric_sign_off", {}, caller="eric")
+    eric_signed = post_json(base_url, "/api/tickets/PGU-104/actions/eric_sign_off", {"text": "Eric approves."}, caller="eric")
     assert eric_signed["ticket"]["state"] == "director_review", eric_signed  # type: ignore[index]
+    assert eric_signed["ticket"]["comments"][-1]["text"] == "Eric approves.", eric_signed  # type: ignore[index]
     eric_reopened = post_json(
         base_url,
         "/api/tickets/PGU-105/actions/eric_reopen",

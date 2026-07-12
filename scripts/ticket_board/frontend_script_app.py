@@ -43,7 +43,14 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       input.type = 'checkbox';
       input.checked = checked;
       input.addEventListener('change', async () => {
-        await onChange(input.checked);
+        const nextChecked = input.checked;
+        const previousChecked = !nextChecked;
+        try {
+          await onChange(nextChecked);
+        } catch (error) {
+          input.checked = previousChecked;
+          setCreateStatus(error.message, true);
+        }
       });
       label.append(input, document.createTextNode(labelText));
       return label;
@@ -261,11 +268,13 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
           await updateTicketAction(ticketId, 'eric_reopen', { reason: actionReason(patch) }, normalizedCaller);
           consumedComment = true;
         } else if (['director_review', 'eric_review'].includes(nextState) && previousState === 'audit') {
-          await updateTicketAction(ticketId, 'audit_sign_off', {}, normalizedCaller);
+          await updateTicketAction(ticketId, 'audit_sign_off', { text: actionReason(patch) }, normalizedCaller);
           consumed.add('audit_signoff');
+          consumedComment = true;
         } else if (nextState === 'director_review' && previousState === 'eric_review') {
-          await updateTicketAction(ticketId, 'eric_sign_off', {}, normalizedCaller);
+          await updateTicketAction(ticketId, 'eric_sign_off', { text: actionReason(patch) }, normalizedCaller);
           consumed.add('eric_signoff');
+          consumedComment = !!actionReason(patch);
         } else {
           await updateTicketAction(
             ticketId,
@@ -306,16 +315,18 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       }
 
       if (patch.audit_signoff === true && !consumed.has('audit_signoff')) {
-        await updateTicketAction(ticketId, 'audit_sign_off', {}, normalizedCaller);
+        await updateTicketAction(ticketId, 'audit_sign_off', { text: actionReason(patch) }, normalizedCaller);
         consumed.add('audit_signoff');
+        consumedComment = true;
       }
       if (patch.inspector_signoff === true && !consumed.has('inspector_signoff')) {
         await updateTicketAction(ticketId, 'inspector_sign_off', {}, normalizedCaller);
         consumed.add('inspector_signoff');
       }
       if (patch.eric_signoff === true && !consumed.has('eric_signoff')) {
-        await updateTicketAction(ticketId, 'eric_sign_off', {}, normalizedCaller);
+        await updateTicketAction(ticketId, 'eric_sign_off', { text: actionReason(patch) }, normalizedCaller);
         consumed.add('eric_signoff');
+        consumedComment = !!actionReason(patch);
       }
 
       if (patch.comment && !consumedComment) {

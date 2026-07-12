@@ -247,7 +247,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       return stack;
     }
 
-    async function advanceTicket(ticketId) {
+    async function advanceTicket(ticketId, commentText = '') {
       const ticket = state.tickets.find((item) => item.id === ticketId);
       if (!ticket) {
         throw new Error(`ticket not found: ${ticketId}`);
@@ -260,7 +260,11 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       if (blockedReason) {
         throw new Error(blockedReason);
       }
-      await updateTicket(ticketId, { state: nextState }, stateTransitionCallerRole(ticket));
+      const patch = { state: nextState };
+      if (commentText.trim()) {
+        patch.comment = { who: stateTransitionCallerRole(ticket), text: commentText.trim() };
+      }
+      await updateTicket(ticketId, patch, stateTransitionCallerRole(ticket));
     }
 
     async function cancelTicket(ticketId, who, text) {

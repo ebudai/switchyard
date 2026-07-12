@@ -143,15 +143,18 @@ class TicketBoardApp:
         needs_inspection: bool = False,
         blocked_by: list[str] | None = None,
         blocked_reason: str = "",
+        state: str = "analysis",
         caller_role: str | None = None,
     ) -> dict[str, Any]:
+        state = self._validate_create_state(state)
+        assignee = "unassigned" if state == "backlog" else assignee
         return self.create_ticket_record(
             title=title,
             body=body,
             screenshot=screenshot,
             screenshots=screenshots,
             assignee=assignee,
-            state="analysis",
+            state=state,
             blocked_by=blocked_by,
             parent_id="",
             implementation="",
@@ -167,6 +170,12 @@ class TicketBoardApp:
             commit_exempt=False,
             caller_role=caller_role,
         )
+
+    def _validate_create_state(self, state: str) -> str:
+        normalized = str(state).strip().lower() or "analysis"
+        if normalized not in {"analysis", "backlog"}:
+            raise ValueError(f"invalid create state: {state}; allowed: analysis, backlog")
+        return normalized
 
     def create_ticket_record(
         self,
@@ -533,6 +542,9 @@ ORDER BY t.ticket_number
         title = self._require_text(title, "title").strip()
         assignee = self._validate_assignee(assignee)
         state = self._validate_state(state)
+        create_state = self._validate_create_state(state)
+        if create_state == "backlog":
+            assignee = "unassigned"
         attachment_patch: dict[str, Any] = {}
         if screenshots not in (None, [], ""):
             attachment_patch["screenshots"] = screenshots
@@ -558,7 +570,7 @@ ORDER BY t.ticket_number
                 if caller_role:
                     self._pg_set_caller_role(conn, caller_role)
                 parent_id = "" if parent_id in (None, "", "null") else str(parent_id).strip().upper()
-                if parent_id:
+                if parent_id and create_state == "analysis":
                     ticket_id = self._pg_call_scalar(
                         conn,
                         "SELECT ticket_board.file_bug(%s, %s, %s) AS id;",
@@ -567,12 +579,16 @@ ORDER BY t.ticket_number
                 else:
                     ticket_id = self._pg_call_scalar(
                         conn,
-                        "SELECT ticket_board.create_ticket(%s, %s) AS id;",
-                        (title, body.strip()),
+                        "SELECT ticket_board.create_ticket(%s, %s, %s) AS id;",
+                        (title, body.strip(), create_state),
                     )
+                    if parent_id:
+                        self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps({"parent_id": parent_id})))
                 if needs_inspection:
                     self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps({"needs_inspection": True})))
-                if assignee != "unassigned" or state != "analysis":
+                if create_state != state:
+                    raise ValueError(f"invalid create state: {state}; allowed: analysis, backlog")
+                if create_state == "analysis" and assignee != "unassigned":
                     self._pg_call(conn, "SELECT ticket_board.route(%s, %s, %s);", (ticket_id, state, assignee))
                 if attachment_patch:
                     current = self._pg_get_ticket(ticket_id, conn)

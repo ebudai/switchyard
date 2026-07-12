@@ -50,6 +50,7 @@ GRANT SELECT ON ALL TABLES IN SCHEMA ticket_board TO director, eric, ops, app, a
 GRANT SELECT ON ticket_board.schema_migrations TO director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
 
 GRANT EXECUTE ON FUNCTION ticket_board.create_ticket(text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.create_ticket(text, text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.file_bug(text, text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.route(text, text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.start_work(text) TO ticket_board_service;

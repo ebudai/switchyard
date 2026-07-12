@@ -488,7 +488,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
     def send_ticket_created(self, created: dict[str, object], before_signature: tuple[tuple[object, ...], ...]) -> None:
         after_signature = self.verify_created_ticket_persisted(created, before_signature)
         self.events.notify_change(after_signature)
-        self.director_notifier.notify_ticket_created(created)
+        if str(created.get("state", "")).strip() == "analysis":
+            self.director_notifier.notify_ticket_created(created)
         self.send_json({"ticket": created}, HTTPStatus.CREATED)
 
     def handle_ticket_action(self, operation: str, payload: dict[str, object], ticket_id: str | None = None) -> None:

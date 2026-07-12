@@ -122,6 +122,7 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
         title: titleInput.value,
         body: bodyInput.value,
         assignee: assigneeInput.value,
+        state: createStateInput.value,
         screenshot: state.pendingCreateScreenshots[0] || null,
         screenshots: state.pendingCreateScreenshots,
         needs_eric_signoff: needsEricInput.checked,
@@ -130,6 +131,7 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       const result = await postTicketAction('/api/tickets/actions/create_ticket', payload, 'director');
       titleInput.value = '';
       bodyInput.value = '';
+      createStateInput.value = 'analysis';
       needsEricInput.checked = false;
       needsInspectionInput.checked = false;
       state.pendingCreateScreenshots = [];
@@ -404,6 +406,7 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
     createBtn.addEventListener('click', handleCreateSubmit);
     titleInput.addEventListener('keydown', submitCreateOnEnter);
     assigneeInput.addEventListener('keydown', submitCreateOnEnter);
+    createStateInput.addEventListener('keydown', submitCreateOnEnter);
 
     createSectionToggleEl.addEventListener('click', () => {
       toggleSection('new_ticket');

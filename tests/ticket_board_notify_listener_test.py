@@ -61,6 +61,7 @@ class FakeConnection:
         self.executed = executed if executed is not None else []
         self.acked: list[int] = []
         self.requeued: list[tuple[int, tuple[Any, ...] | None]] = []
+        self.traces: list[tuple[Any, ...] | None] = []
         self.closed = False
 
     def _ticket_rows_for_queue(self, queue_rows: list[tuple[int, str, str, str, str, int]]) -> dict[str, tuple[str, str, bool, bool]]:
@@ -91,6 +92,8 @@ class FakeConnection:
     def execute(self, statement: Any, params: tuple[Any, ...] | None = None) -> FakeResult:
         self.executed.append((statement, params))
         statement_text = str(statement)
+        if "record_notification_trace" in statement_text:
+            self.traces.append(params)
         if "claim_notification" in statement_text:
             if not self.queue_rows:
                 return FakeResult([])
@@ -142,6 +145,10 @@ def queue_row(
     return (notification_id, ticket_id, target_role, message, payload, attempts)
 
 
+def trace_events(conn: FakeConnection) -> list[str]:
+    return [str(params[4]) for params in conn.traces if params is not None]
+
+
 def transition_payload(
     ticket_id: str,
     *,
@@ -181,6 +188,7 @@ def test_claimed_queue_row_delivers_to_assignee_pane_and_acks() -> None:
     assert sent == [("pgu-ops:0.0", "New ticket for you: PGU-223 -- Queue")]
     assert conn.acked == [1]
     assert conn.requeued == []
+    assert trace_events(conn) == ["listener_claim", "send", "listener_ack"]
     assert any("LISTEN" in str(statement) for statement, _params in executed)
     assert conn.closed is True
 
@@ -248,6 +256,8 @@ def test_stale_inspection_queue_row_is_acked_without_delivery() -> None:
     assert sent == []
     assert conn.acked == [30]
     assert conn.requeued == []
+    assert trace_events(conn) == ["listener_claim", "drop", "listener_ack"]
+    assert conn.traces[1][6] == "stale_notification"
 
 
 def test_reconnect_relistens_after_connection_drop() -> None:
@@ -323,6 +333,8 @@ def test_busy_pane_requeues_then_idle_pane_delivers_once() -> None:
     assert sent == []
     assert [item[0] for item in busy_conn.requeued] == [20]
     assert busy_conn.acked == []
+    assert trace_events(busy_conn) == ["listener_claim", "gate_defer"]
+    assert busy_conn.traces[1][5] == "busy"
 
     idle_conn = FakeConnection([queue_row(20, "PGU-223", attempts=2)])
     idle_listener = TicketBoardNotifyListener(
@@ -338,6 +350,7 @@ def test_busy_pane_requeues_then_idle_pane_delivers_once() -> None:
     assert idle_delivered == 1
     assert sent == [("pgu-ops:0.0", "New ticket for you: PGU-223 -- Queue")]
     assert idle_conn.acked == [20]
+    assert trace_events(idle_conn) == ["listener_claim", "send", "listener_ack"]
 
 
 def test_busy_pane_force_delivers_after_max_defer_cap() -> None:
@@ -374,6 +387,8 @@ def test_busy_pane_force_delivers_after_max_defer_cap() -> None:
     assert sent == [("pgu-ops:0.0", "New ticket for you: PGU-252 -- Queue")]
     assert second_conn.acked == [25]
     assert second_conn.requeued == []
+    assert trace_events(second_conn) == ["listener_claim", "max_defer_force_deliver", "send", "listener_ack"]
+    assert second_conn.traces[1][5] == "busy"
 
 
 def test_fresh_listener_force_delivers_after_restart_from_queue_created_at() -> None:

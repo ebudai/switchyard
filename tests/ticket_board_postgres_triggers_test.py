@@ -162,6 +162,7 @@ def main() -> int:
             psql(conninfo, "GRANT EXECUTE ON FUNCTION ticket_board.claim_notification(timestamptz, interval) TO ticket_board_listener;")
             psql(conninfo, "GRANT EXECUTE ON FUNCTION ticket_board.ack_notification(bigint) TO ticket_board_listener;")
             psql(conninfo, "GRANT EXECUTE ON FUNCTION ticket_board.requeue_notification(bigint, interval, text) TO ticket_board_listener;")
+            psql(conninfo, "GRANT EXECUTE ON FUNCTION ticket_board.record_notification_trace(text, bigint, text, text, text, text, text, text, jsonb) TO ticket_board_listener;")
 
             insert_ticket(conninfo, "PGU-1", title="Workflow", assignee="app")
             assert_error(
@@ -727,6 +728,48 @@ FROM ticket_board.claim_notification() AS claimed;
                 "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-20';",
             ).stdout.strip()
             assert pending_after_ack == "0"
+            durable_trace = json.loads(
+                psql(
+                    listener_conninfo,
+                    """
+SELECT jsonb_agg(
+    jsonb_build_object(
+        'event', event,
+        'state', ticket_state_at_event,
+        'assignee', ticket_assignee_at_event,
+        'target_role', target_role,
+        'kind', kind
+    )
+    ORDER BY id
+)::text
+FROM ticket_board.notification_trace
+WHERE ticket_id = 'PGU-20';
+""",
+                ).stdout
+            )
+            assert durable_trace == [
+                {
+                    "event": "enqueue",
+                    "state": "in_progress",
+                    "assignee": "ops",
+                    "target_role": "ops",
+                    "kind": "transition",
+                },
+                {
+                    "event": "claim",
+                    "state": "in_progress",
+                    "assignee": "ops",
+                    "target_role": "ops",
+                    "kind": "transition",
+                },
+                {
+                    "event": "ack",
+                    "state": "in_progress",
+                    "assignee": "ops",
+                    "target_role": "ops",
+                    "kind": "transition",
+                },
+            ], durable_trace
 
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
             insert_ticket(

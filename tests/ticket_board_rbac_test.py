@@ -43,6 +43,7 @@ LISTENER_FUNCTIONS = [
     "ticket_board.claim_notification(timestamp with time zone,interval)",
     "ticket_board.ack_notification(bigint)",
     "ticket_board.requeue_notification(bigint,interval,text)",
+    "ticket_board.record_notification_trace(text,bigint,text,text,text,text,text,text,jsonb)",
 ]
 PRIVATE_LISTENER_FUNCTIONS = [
     "ticket_board.require_ticket_board_listener(text)",
@@ -215,8 +216,12 @@ SELECT jsonb_build_object(
     'queue_insert', has_table_privilege({sql_string(role)}, 'ticket_board.ticket_notification_queue', 'INSERT'),
     'queue_update', has_table_privilege({sql_string(role)}, 'ticket_board.ticket_notification_queue', 'UPDATE'),
     'queue_delete', has_table_privilege({sql_string(role)}, 'ticket_board.ticket_notification_queue', 'DELETE'),
+    'trace_insert', has_table_privilege({sql_string(role)}, 'ticket_board.notification_trace', 'INSERT'),
+    'trace_update', has_table_privilege({sql_string(role)}, 'ticket_board.notification_trace', 'UPDATE'),
+    'trace_delete', has_table_privilege({sql_string(role)}, 'ticket_board.notification_trace', 'DELETE'),
     'comments_sequence', has_sequence_privilege({sql_string(role)}, 'ticket_board.ticket_comments_id_seq', 'USAGE'),
-    'queue_sequence', has_sequence_privilege({sql_string(role)}, 'ticket_board.ticket_notification_queue_id_seq', 'USAGE')
+    'queue_sequence', has_sequence_privilege({sql_string(role)}, 'ticket_board.ticket_notification_queue_id_seq', 'USAGE'),
+    'trace_sequence', has_sequence_privilege({sql_string(role)}, 'ticket_board.notification_trace_id_seq', 'USAGE')
 )::text;
 """,
             )
@@ -230,8 +235,12 @@ SELECT jsonb_build_object(
             "queue_insert": False,
             "queue_update": False,
             "queue_delete": False,
+            "trace_insert": False,
+            "trace_update": False,
+            "trace_delete": False,
             "comments_sequence": False,
             "queue_sequence": False,
+            "trace_sequence": False,
         }, (role, privileges)
 
         assert_permission_denied(
@@ -628,10 +637,53 @@ FROM ticket_board.claim_notification() AS claimed;
         "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-950';",
     )
     assert after == "0", after
+    trace_events = json.loads(
+        psql(
+            listener_conn,
+            """
+SELECT jsonb_agg(event ORDER BY id)::text
+FROM ticket_board.notification_trace
+WHERE ticket_id = 'PGU-950';
+""",
+        )
+    )
+    assert trace_events == ["enqueue", "claim", "requeue", "claim", "ack"], trace_events
+    psql(
+        listener_conn,
+        """
+SELECT ticket_board.record_notification_trace(
+    'PGU-950',
+    NULL,
+    'ops',
+    'transition',
+    'manual-test',
+    'idle',
+    NULL,
+    NULL,
+    '{}'::jsonb
+);
+""",
+    )
 
     assert_permission_denied(service_conn, "SELECT * FROM ticket_board.claim_notification();")
     assert_permission_denied(service_conn, f"SELECT ticket_board.ack_notification({claimed_again['notification_id']});")
     assert_permission_denied(service_conn, f"SELECT ticket_board.requeue_notification({claimed_again['notification_id']}, interval '1 second', 'x');")
+    assert_permission_denied(
+        service_conn,
+        """
+SELECT ticket_board.record_notification_trace(
+    'PGU-950',
+    NULL,
+    'ops',
+    'transition',
+    'service-denied',
+    NULL,
+    NULL,
+    NULL,
+    '{}'::jsonb
+);
+""",
+    )
 
 
 def main() -> int:

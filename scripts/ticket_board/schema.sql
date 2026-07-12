@@ -248,6 +248,87 @@ CREATE INDEX IF NOT EXISTS ticket_notification_queue_claimed_idx
     ON ticket_board.ticket_notification_queue (claimed_at, next_attempt_at, id)
     WHERE claimed_at IS NOT NULL;
 
+CREATE TABLE IF NOT EXISTS ticket_board.notification_trace (
+    id bigserial PRIMARY KEY,
+    ts timestamptz NOT NULL DEFAULT clock_timestamp(),
+    ticket_id text REFERENCES ticket_board.tickets(id) ON DELETE SET NULL,
+    notification_id bigint,
+    target_role text,
+    kind text,
+    event text NOT NULL CHECK (btrim(event) <> ''),
+    ticket_state_at_event text,
+    ticket_assignee_at_event text,
+    pane_busy_determination text,
+    busy_reason text,
+    region_digest text,
+    detail jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS notification_trace_ticket_ts_idx
+    ON ticket_board.notification_trace (ticket_id, ts DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS notification_trace_notification_idx
+    ON ticket_board.notification_trace (notification_id, ts, id)
+    WHERE notification_id IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION ticket_board.record_notification_trace(
+    p_ticket_id text,
+    p_notification_id bigint,
+    p_target_role text,
+    p_kind text,
+    p_event text,
+    p_pane_busy_determination text DEFAULT NULL,
+    p_busy_reason text DEFAULT NULL,
+    p_region_digest text DEFAULT NULL,
+    p_detail jsonb DEFAULT '{}'::jsonb
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    current_state text;
+    current_assignee text;
+BEGIN
+    IF btrim(coalesce(p_event, '')) = '' THEN
+        RAISE EXCEPTION 'notification trace event must be non-empty';
+    END IF;
+
+    SELECT t.state, t.assignee
+    INTO current_state, current_assignee
+    FROM ticket_board.tickets t
+    WHERE t.id = p_ticket_id;
+
+    INSERT INTO ticket_board.notification_trace (
+        ticket_id,
+        notification_id,
+        target_role,
+        kind,
+        event,
+        ticket_state_at_event,
+        ticket_assignee_at_event,
+        pane_busy_determination,
+        busy_reason,
+        region_digest,
+        detail
+    ) VALUES (
+        p_ticket_id,
+        p_notification_id,
+        p_target_role,
+        p_kind,
+        p_event,
+        current_state,
+        current_assignee,
+        p_pane_busy_determination,
+        p_busy_reason,
+        p_region_digest,
+        coalesce(p_detail, '{}'::jsonb)
+    );
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION ticket_board.ticket_cluster_root_id(
     p_ticket_id text,
     p_parent_id text
@@ -780,6 +861,22 @@ BEGIN
         updated_at = clock_timestamp()
     RETURNING id INTO notification_id;
 
+    PERFORM ticket_board.record_notification_trace(
+        p_ticket_id,
+        notification_id,
+        p_target_role,
+        p_kind,
+        'enqueue',
+        NULL,
+        NULL,
+        NULL,
+        jsonb_build_object(
+            'dedupe_key', p_dedupe_key,
+            'next_attempt_at', p_next_attempt_at,
+            'payload', p_payload
+        )
+    );
+
     PERFORM pg_notify(
         'ticket_board_state_transition',
         jsonb_build_object('kind', 'wake', 'notification_id', notification_id)::text
@@ -818,9 +915,23 @@ BEGIN
         FROM candidate
         WHERE q.id = candidate.id
         RETURNING q.id, q.ticket_id, q.target_role, q.message, q.payload, q.attempts
+    ),
+    traced AS (
+        SELECT ticket_board.record_notification_trace(
+            claimed.ticket_id,
+            claimed.id,
+            claimed.target_role,
+            claimed.payload ->> 'kind',
+            'claim',
+            NULL,
+            NULL,
+            NULL,
+            jsonb_build_object('attempts', claimed.attempts, 'payload', claimed.payload)
+        )
+        FROM claimed
     )
     SELECT claimed.id, claimed.ticket_id, claimed.target_role, claimed.message, claimed.payload, claimed.attempts
-    FROM claimed;
+    FROM claimed, traced;
 END;
 $$;
 
@@ -833,6 +944,20 @@ SET search_path = ticket_board, pg_temp
 AS $$
 BEGIN
     PERFORM ticket_board.require_ticket_board_listener('ack_notification');
+    PERFORM ticket_board.record_notification_trace(
+        q.ticket_id,
+        q.id,
+        q.target_role,
+        q.kind,
+        'ack',
+        NULL,
+        NULL,
+        NULL,
+        jsonb_build_object('attempts', q.attempts, 'payload', q.payload)
+    )
+    FROM ticket_board.ticket_notification_queue q
+    WHERE q.id = p_notification_id;
+
     DELETE FROM ticket_board.ticket_notification_queue
     WHERE id = p_notification_id;
 END;
@@ -851,6 +976,20 @@ SET search_path = ticket_board, pg_temp
 AS $$
 BEGIN
     PERFORM ticket_board.require_ticket_board_listener('requeue_notification');
+    PERFORM ticket_board.record_notification_trace(
+        q.ticket_id,
+        q.id,
+        q.target_role,
+        q.kind,
+        'requeue',
+        NULL,
+        p_error,
+        NULL,
+        jsonb_build_object('delay', p_delay, 'attempts', q.attempts, 'payload', q.payload)
+    )
+    FROM ticket_board.ticket_notification_queue q
+    WHERE q.id = p_notification_id;
+
     UPDATE ticket_board.ticket_notification_queue
     SET claimed_at = NULL,
         next_attempt_at = clock_timestamp() + p_delay,

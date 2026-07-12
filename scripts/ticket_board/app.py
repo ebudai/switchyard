@@ -332,6 +332,55 @@ ORDER BY t.ticket_number;
         params = (ticket_id,) if ticket_id is not None else ()
         return conn.execute(
             f"""
+WITH notification_scope AS (
+    SELECT
+        scoped.id,
+        scoped.state,
+        scoped.ticket_number,
+        CASE
+            WHEN scoped.state IN ('analysis', 'director_review') THEN 'director'
+            WHEN scoped.state = 'audit' THEN 'audit'
+            ELSE NULL
+        END AS owner_role
+    FROM ticket_board.tickets scoped
+    WHERE scoped.state IN ('analysis', 'audit', 'director_review')
+),
+notification_candidates AS (
+    SELECT
+        notification_scope.id,
+        notification_scope.state,
+        notification_scope.ticket_number,
+        notification_scope.owner_role,
+        NULLIF(
+            GREATEST(
+                COALESCE(ns.last_transition_notified_at, '-infinity'::timestamptz),
+                COALESCE(ns.last_nudged_at, '-infinity'::timestamptz),
+                COALESCE(queue.last_queued_at, '-infinity'::timestamptz)
+            ),
+            '-infinity'::timestamptz
+        ) AS active_work_notified_at
+    FROM notification_scope
+    LEFT JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = notification_scope.id
+    LEFT JOIN LATERAL (
+        SELECT max(q.updated_at) AS last_queued_at
+        FROM ticket_board.ticket_notification_queue q
+        WHERE q.ticket_id = notification_scope.id
+          AND q.target_role = notification_scope.owner_role
+    ) queue ON true
+),
+active_work AS (
+    SELECT
+        notification_candidates.id,
+        notification_candidates.owner_role,
+        notification_candidates.active_work_notified_at,
+        notification_candidates.active_work_notified_at IS NOT NULL
+            AND row_number() OVER (
+                PARTITION BY notification_candidates.state
+                ORDER BY notification_candidates.active_work_notified_at DESC NULLS LAST,
+                    notification_candidates.ticket_number DESC
+            ) = 1 AS active_work_highlight
+    FROM notification_candidates
+)
 SELECT
     t.id,
     t.title,
@@ -352,6 +401,9 @@ SELECT
     t.commit_exempt,
     t.created_text,
     t.updated_text,
+    active_work.owner_role AS active_work_owner_role,
+    active_work.active_work_notified_at,
+    COALESCE(active_work.active_work_highlight, false) AS active_work_highlight,
     COALESCE(
         (SELECT array_agg(b.blocker_ticket_id ORDER BY b.position)
          FROM ticket_board.ticket_blockers b
@@ -371,6 +423,7 @@ SELECT
         ARRAY[]::text[]
     ) AS screenshots
 FROM ticket_board.tickets t
+LEFT JOIN active_work ON active_work.id = t.id
 {where}
 ORDER BY t.ticket_number
 ;
@@ -423,10 +476,20 @@ ORDER BY t.ticket_number
             "commit_exempt": bool(row["commit_exempt"]),
             "created": self._require_text(row["created_text"], "created"),
             "updated": self._require_text(row["updated_text"], "updated"),
+            "active_work_highlight": bool(row["active_work_highlight"]),
+            "active_work_owner_role": str(row["active_work_owner_role"] or ""),
+            "active_work_notified_at": self._format_optional_datetime(row["active_work_notified_at"]),
             "comments": self._validate_comments(comments),
         }
         self._set_screenshot_fields(ticket, self._build_screenshot_entries(list(screenshots)))
         return ticket
+
+    def _format_optional_datetime(self, value: Any) -> str:
+        if value is None:
+            return ""
+        if hasattr(value, "isoformat"):
+            return value.isoformat()
+        return str(value)
 
     def _pg_create_ticket_record(
         self,

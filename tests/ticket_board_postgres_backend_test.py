@@ -277,11 +277,82 @@ def main() -> int:
             deferred = service_app.update_ticket("PGU-1", {"state": "backlog"})
             assert deferred["state"] == "backlog", deferred
 
+            insert_ticket(admin_conn, "PGU-401", title="Old analysis ping", state="analysis", assignee="ops", implementation="")
+            insert_ticket(admin_conn, "PGU-402", title="Active analysis ping", state="analysis", assignee="ops", implementation="")
+            insert_ticket(admin_conn, "PGU-403", title="Old audit ping", state="audit", assignee="audit")
+            insert_ticket(admin_conn, "PGU-404", title="Active audit ping", state="audit", assignee="audit")
+            insert_ticket(
+                admin_conn,
+                "PGU-405",
+                title="Old director review ping",
+                state="director_review",
+                assignee="director",
+                audit_signoff=True,
+                commit_hash="abcdef2",
+            )
+            insert_ticket(
+                admin_conn,
+                "PGU-406",
+                title="Active director review ping",
+                state="director_review",
+                assignee="director",
+                audit_signoff=True,
+                commit_hash="abcdef3",
+            )
+            psql(
+                admin_conn,
+                """
+UPDATE ticket_board.ticket_notification_state
+SET last_transition_notified_at = clock_timestamp(),
+    last_nudged_at = NULL
+WHERE ticket_id IN ('PGU-401', 'PGU-403', 'PGU-405');
+
+UPDATE ticket_board.ticket_notification_state
+SET last_transition_notified_at = clock_timestamp() + interval '1 hour',
+    last_nudged_at = NULL
+WHERE ticket_id = 'PGU-402';
+
+UPDATE ticket_board.ticket_notification_state
+SET last_transition_notified_at = clock_timestamp(),
+    last_nudged_at = NULL
+WHERE ticket_id = 'PGU-404';
+
+INSERT INTO ticket_board.ticket_notification_queue (
+    ticket_id, kind, target_role, message, payload, dedupe_key, updated_at
+) VALUES (
+    'PGU-404',
+    'transition',
+    'audit',
+    'PGU-404 -- Active audit ping ready for audit',
+    jsonb_build_object('id', 'PGU-404', 'state', 'audit', 'target_role', 'audit'),
+    'active-work-test:PGU-404:audit',
+    clock_timestamp() + interval '2 hours'
+);
+
+UPDATE ticket_board.ticket_notification_state
+SET last_transition_notified_at = clock_timestamp() + interval '3 hours',
+    last_nudged_at = NULL
+WHERE ticket_id = 'PGU-406';
+""",
+            )
+
             tickets, errors = service_app.list_tickets()
             assert errors == [], errors
             assert {"PGU-1", "PGU-2", "PGU-3", "PGU-100", "PGU-200", "PGU-300", "PGU-301"}.issubset(
                 {ticket["id"] for ticket in tickets}
             ), tickets
+            tickets_by_id = {ticket["id"]: ticket for ticket in tickets}
+            assert tickets_by_id["PGU-402"]["active_work_highlight"] is True, tickets_by_id["PGU-402"]
+            assert tickets_by_id["PGU-402"]["active_work_owner_role"] == "director", tickets_by_id["PGU-402"]
+            assert tickets_by_id["PGU-402"]["active_work_notified_at"], tickets_by_id["PGU-402"]
+            assert tickets_by_id["PGU-401"]["active_work_highlight"] is False, tickets_by_id["PGU-401"]
+            assert tickets_by_id["PGU-404"]["active_work_highlight"] is True, tickets_by_id["PGU-404"]
+            assert tickets_by_id["PGU-404"]["active_work_owner_role"] == "audit", tickets_by_id["PGU-404"]
+            assert tickets_by_id["PGU-403"]["active_work_highlight"] is False, tickets_by_id["PGU-403"]
+            assert tickets_by_id["PGU-406"]["active_work_highlight"] is True, tickets_by_id["PGU-406"]
+            assert tickets_by_id["PGU-406"]["active_work_owner_role"] == "director", tickets_by_id["PGU-406"]
+            assert tickets_by_id["PGU-405"]["active_work_highlight"] is False, tickets_by_id["PGU-405"]
+            assert tickets_by_id["PGU-1"]["active_work_highlight"] is False, tickets_by_id["PGU-1"]
         finally:
             subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 

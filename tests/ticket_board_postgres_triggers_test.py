@@ -140,6 +140,21 @@ def assert_error(conninfo: str, sql: str, expected: str) -> None:
     assert expected in combined, combined
 
 
+def sql_string(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def service_call(conninfo: str, caller_role: str, sql: str) -> None:
+    psql(
+        conninfo,
+        f"""
+SET ROLE ticket_board_service;
+SELECT set_config('ticket_board.caller_role', {sql_string(caller_role)}, false);
+{sql}
+""",
+    )
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="ticket-board-triggers.") as tmpdir:
         root = Path(tmpdir)
@@ -156,7 +171,19 @@ def main() -> int:
             run(["pg_ctl", "-D", str(data_dir), "-o", f"-k {socket_dir} -p {port} -h ''", "-w", "start"], capture=False)
             run(["createdb", "-h", str(socket_dir), "-p", str(port), dbname])
             psql(conninfo, "CREATE ROLE ticket_board_listener LOGIN;")
+            psql(conninfo, "CREATE ROLE ticket_board_service;")
             psql(conninfo, SCHEMA_PATH.read_text(encoding="utf-8"))
+            psql(conninfo, "GRANT USAGE ON SCHEMA ticket_board TO ticket_board_service;")
+            psql(
+                conninfo,
+                """
+GRANT EXECUTE ON FUNCTION ticket_board.route(text, text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.start_work(text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.submit_to_audit(text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.audit_sign_off(text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.inspector_sign_off(text) TO ticket_board_service;
+""",
+            )
             psql(conninfo, "GRANT USAGE ON SCHEMA ticket_board TO ticket_board_listener;")
             psql(conninfo, "GRANT SELECT ON ALL TABLES IN SCHEMA ticket_board TO ticket_board_listener;")
             psql(conninfo, "GRANT EXECUTE ON FUNCTION ticket_board.claim_notification(timestamptz, interval) TO ticket_board_listener;")
@@ -285,7 +312,7 @@ WHERE id = 'PGU-30';
 """,
                 ).stdout
             )
-            assert inspect_submit == {"state": "inspection", "inspector_signoff": False, "commit_hash": "abcdef0"}, inspect_submit
+            assert inspect_submit == {"state": "inspection", "inspector_signoff": False, "commit_hash": ""}, inspect_submit
 
             insert_ticket(
                 conninfo,
@@ -385,7 +412,7 @@ WHERE id = 'PGU-32';
 """,
                 ).stdout
             )
-            assert inspect_resubmitted == {"state": "inspection", "inspector_signoff": False, "commit_hash": "abcdef1"}, inspect_resubmitted
+            assert inspect_resubmitted == {"state": "inspection", "inspector_signoff": False, "commit_hash": ""}, inspect_resubmitted
 
             insert_ticket(conninfo, "PGU-4", title="Review", assignee="audit", state="audit", implementation="done")
             assert_error(
@@ -542,15 +569,23 @@ WHERE id = 'PGU-8';
                 state="eric_review",
                 implementation="visual pass",
                 audit_signoff=True,
+                inspector_signoff=True,
                 needs_eric_signoff=True,
                 needs_inspection=True,
+                commit_hash="abcdef8",
             )
             psql(conninfo, "UPDATE ticket_board.tickets SET state = 'inspection' WHERE id = 'PGU-80';")
             eric_to_inspection = json.loads(
                 psql(
                     conninfo,
                     """
-SELECT jsonb_build_object('state', state, 'needs_inspection', needs_inspection, 'inspector_signoff', inspector_signoff)::text
+SELECT jsonb_build_object(
+    'state', state,
+    'needs_inspection', needs_inspection,
+    'audit_signoff', audit_signoff,
+    'inspector_signoff', inspector_signoff,
+    'commit_hash', commit_hash
+)::text
 FROM ticket_board.tickets
 WHERE id = 'PGU-80';
 """,
@@ -559,8 +594,70 @@ WHERE id = 'PGU-80';
             assert eric_to_inspection == {
                 "state": "inspection",
                 "needs_inspection": True,
+                "audit_signoff": False,
                 "inspector_signoff": False,
+                "commit_hash": "",
             }, eric_to_inspection
+
+            insert_ticket(
+                conninfo,
+                "PGU-84",
+                title="Eric review reinspection RPC chain",
+                assignee="ops",
+                state="analysis",
+                implementation="visual pass",
+                needs_eric_signoff=True,
+                needs_inspection=True,
+            )
+            service_call(conninfo, "ops", "SELECT ticket_board.start_work('PGU-84');")
+            service_call(conninfo, "ops", "SELECT ticket_board.submit_to_audit('PGU-84', 'abcdef4');")
+            service_call(conninfo, "inspector", "SELECT ticket_board.inspector_sign_off('PGU-84');")
+            service_call(conninfo, "audit", "SELECT ticket_board.audit_sign_off('PGU-84');")
+            service_call(conninfo, "director", "SELECT ticket_board.route('PGU-84', 'eric_review', 'director');")
+            service_call(conninfo, "director", "SELECT ticket_board.route('PGU-84', 'inspection', 'inspector');")
+            reinspect_entry = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'state', state,
+    'audit_signoff', audit_signoff,
+    'inspector_signoff', inspector_signoff,
+    'commit_hash', commit_hash
+)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-84';
+""",
+                ).stdout
+            )
+            assert reinspect_entry == {
+                "state": "inspection",
+                "audit_signoff": False,
+                "inspector_signoff": False,
+                "commit_hash": "",
+            }, reinspect_entry
+            service_call(conninfo, "inspector", "SELECT ticket_board.inspector_sign_off('PGU-84');")
+            reinspect_signed = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'state', state,
+    'audit_signoff', audit_signoff,
+    'inspector_signoff', inspector_signoff,
+    'commit_hash', commit_hash
+)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-84';
+""",
+                ).stdout
+            )
+            assert reinspect_signed == {
+                "state": "audit",
+                "audit_signoff": False,
+                "inspector_signoff": True,
+                "commit_hash": "",
+            }, reinspect_signed
 
             insert_ticket(
                 conninfo,

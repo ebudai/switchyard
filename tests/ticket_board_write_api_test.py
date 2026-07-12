@@ -371,8 +371,10 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
         assignee="director",
         implementation="Rendered.",
         audit_signoff=True,
+        inspector_signoff=True,
         needs_eric_signoff=True,
         needs_inspection=True,
+        commit_hash=commit_hash,
     )
     seed_ticket(
         "PGU-125",
@@ -584,6 +586,9 @@ def exercise_write_api(base_url: str, commit_hash: str) -> None:
     assert eric_review_to_inspection["ticket"]["state"] == "inspection", eric_review_to_inspection  # type: ignore[index]
     assert eric_review_to_inspection["ticket"]["assignee"] == "inspector", eric_review_to_inspection  # type: ignore[index]
     assert eric_review_to_inspection["ticket"]["needs_inspection"] is True, eric_review_to_inspection  # type: ignore[index]
+    assert eric_review_to_inspection["ticket"]["audit_signoff"] is False, eric_review_to_inspection  # type: ignore[index]
+    assert eric_review_to_inspection["ticket"]["inspector_signoff"] is False, eric_review_to_inspection  # type: ignore[index]
+    assert eric_review_to_inspection["ticket"]["commit_hash"] == "", eric_review_to_inspection  # type: ignore[index]
     eric_review_to_inspection_guard = post_json(
         base_url,
         "/api/tickets/PGU-125/actions/route",

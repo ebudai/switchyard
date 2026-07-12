@@ -1246,42 +1246,17 @@ WHERE ticket_id = 'PGU-20';
                 psql(
                     conninfo,
                     """
-SELECT jsonb_object_agg(target_role, count)::text
+SELECT jsonb_object_agg(kind || ':' || target_role, count)::text
 FROM (
-    SELECT target_role, count(*) AS count
+    SELECT payload->>'kind' AS kind, target_role, count(*) AS count
     FROM ticket_board.ticket_notification_queue
     WHERE ticket_id = 'PGU-20' AND kind = 'nudge'
-    GROUP BY target_role
+    GROUP BY payload->>'kind', target_role
 ) q;
 """,
                 ).stdout
             )
-            assert nudge_queue == {"director": 1, "ops": 1}, nudge_queue
-            director_analysis = json.loads(
-                psql(
-                    conninfo,
-                    """
-SELECT jsonb_build_object(
-    'kind', payload->>'kind',
-    'target_role', target_role,
-    'original_target_role', payload->>'original_target_role',
-    'message', message
-)::text
-FROM ticket_board.ticket_notification_queue
-WHERE ticket_id = 'PGU-20' AND kind = 'nudge' AND target_role = 'director'
-ORDER BY id DESC
-LIMIT 1;
-""",
-                ).stdout
-            )
-            assert director_analysis["kind"] == "nudge_analysis", director_analysis
-            assert director_analysis["target_role"] == "director", director_analysis
-            assert director_analysis["original_target_role"] == "ops", director_analysis
-            assert director_analysis["message"].startswith(
-                "NUDGE-ANALYSIS: PGU-20 (target=ops, state=in_progress, "
-            ), director_analysis
-            assert "s since transition" in director_analysis["message"], director_analysis
-            assert "prior_nudges=0" in director_analysis["message"], director_analysis
+            assert nudge_queue == {"nudge:ops": 1}, nudge_queue
             deduped_nudges = psql(
                 conninfo,
                 "SELECT ticket_board.notify_due_nudges(clock_timestamp() + interval '20 minutes', interval '5 minutes', 3);",
@@ -1291,17 +1266,17 @@ LIMIT 1;
                 psql(
                     conninfo,
                     """
-SELECT jsonb_object_agg(target_role, count)::text
+SELECT jsonb_object_agg(kind || ':' || target_role, count)::text
 FROM (
-    SELECT target_role, count(*) AS count
+    SELECT payload->>'kind' AS kind, target_role, count(*) AS count
     FROM ticket_board.ticket_notification_queue
     WHERE ticket_id = 'PGU-20' AND kind = 'nudge'
-    GROUP BY target_role
+    GROUP BY payload->>'kind', target_role
 ) q;
 """,
                 ).stdout
             )
-            assert deduped_queue == {"director": 1, "ops": 1}, deduped_queue
+            assert deduped_queue == {"nudge:ops": 1}, deduped_queue
             inspection_nudge = json.loads(
                 psql(
                     conninfo,
@@ -1452,7 +1427,7 @@ WHERE t.id = 'PGU-2851';
 """,
                 ).stdout
             )
-            assert cleared_implementation_nudge == {"queued": 2, "last_nudged": True, "nudge_count": 1}, cleared_implementation_nudge
+            assert cleared_implementation_nudge == {"queued": 1, "last_nudged": True, "nudge_count": 1}, cleared_implementation_nudge
             psql(
                 conninfo,
                 """
@@ -1649,7 +1624,7 @@ FROM (
             assert delivery_suppression == {
                 "PGU-2821": {"queued": 0, "last_nudged": False, "nudge_count": 0},
                 "PGU-2822": {"queued": 0, "last_nudged": False, "nudge_count": 0},
-                "PGU-2823": {"queued": 2, "last_nudged": True, "nudge_count": 1},
+                "PGU-2823": {"queued": 1, "last_nudged": True, "nudge_count": 1},
                 "PGU-2824": {"queued": 0, "last_nudged": False, "nudge_count": 0},
             }, delivery_suppression
             psql(
@@ -1761,7 +1736,7 @@ FROM (
             assert idle_stall_nudges == {
                 "PGU-3081": {
                     "state": "in_progress",
-                    "queued": {"nudge:director": 1, "nudge:ops": 1},
+                    "queued": {"nudge:ops": 1},
                     "last_nudged": True,
                     "nudge_count": 1,
                 },

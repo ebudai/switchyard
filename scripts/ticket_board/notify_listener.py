@@ -667,8 +667,6 @@ WHERE id = %s
             return None
         if kind == "escalation":
             return "director"
-        if kind == "nudge_analysis":
-            return "director"
         if state == "in_progress":
             return assignee if assignee != "unassigned" else None
         if state == "inspection":

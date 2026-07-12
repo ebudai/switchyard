@@ -17,6 +17,8 @@ def main() -> int:
     assert ".card-active-work" in HTML
     assert "ticket.active_work_highlight" in HTML
     assert "card.classList.add('card-active-work');" in HTML
+    assert "function compareTicketsWithActiveWorkFirst(left, right)" in HTML
+    assert ".sort(compareTicketsWithActiveWorkFirst);" in HTML
     print("active_work_highlight_frontend_test: ok")
     return 0
 

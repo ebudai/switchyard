@@ -771,6 +771,15 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       return ticketNumber(left.id) - ticketNumber(right.id);
     }
 
+    function compareTicketsWithActiveWorkFirst(left, right) {
+      const leftActive = !!left.active_work_highlight;
+      const rightActive = !!right.active_work_highlight;
+      if (leftActive !== rightActive) {
+        return leftActive ? -1 : 1;
+      }
+      return compareTicketsOldestFirst(left, right);
+    }
+
     function normalizedParentId(ticket) {
       return String(ticket?.parent_id || '').trim().toUpperCase();
     }
@@ -837,7 +846,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         seen.add(root.id);
         roots.push(root);
       });
-      return roots.sort(compareTicketsOldestFirst);
+      return roots.sort(compareTicketsWithActiveWorkFirst);
     }
 
     function columnTicketCount(columnKey) {
@@ -863,7 +872,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
           && (columnKey !== 'eric_review' || ticket.needs_eric_signoff)
           && isTopLevelBoardTicket(ticket)
         ))
-        .sort(compareTicketsOldestFirst);
+        .sort(compareTicketsWithActiveWorkFirst);
     }
 
     function visibleColumns() {

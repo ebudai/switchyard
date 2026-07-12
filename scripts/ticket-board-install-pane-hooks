@@ -91,6 +91,11 @@ def _install_claude_hooks(home: Path, hook_bin: Path) -> Path:
     hook = str(hook_bin)
     _merge_hook_entries(
         config,
+        "SessionStart",
+        [_hook_entry(f"{hook} idle --source claude.SessionStart --record-session")],
+    )
+    _merge_hook_entries(
+        config,
         "Notification",
         [_hook_entry(f"{hook} idle --source claude.Notification.idle_prompt", matcher="idle_prompt")],
     )
@@ -112,6 +117,7 @@ def _install_codex_hooks(home: Path, hook_bin: Path) -> Path:
     path = home / ".codex" / "hooks.json"
     config = _load_json(path)
     hook = str(hook_bin)
+    _merge_hook_entries(config, "SessionStart", [_hook_entry(f"{hook} idle --source codex.SessionStart --record-session")])
     _merge_hook_entries(config, "Stop", [_hook_entry(f"{hook} idle --source codex.Stop")])
     _merge_hook_entries(config, "UserPromptSubmit", [_hook_entry(f"{hook} busy --source codex.UserPromptSubmit")])
     _merge_hook_entries(config, "PermissionRequest", [_hook_entry(f"{hook} blocked --source codex.PermissionRequest")])
@@ -123,6 +129,7 @@ def _install_gemini_hooks(home: Path, hook_bin: Path) -> Path:
     path = home / ".gemini" / "antigravity-cli" / "settings.json"
     config = _load_json(path)
     hook = str(hook_bin)
+    _merge_hook_entries(config, "SessionStart", [_hook_entry(f"{hook} idle --source gemini.SessionStart --record-session")])
     _merge_hook_entries(config, "BeforeAgent", [_hook_entry(f"{hook} busy --source gemini.BeforeAgent")])
     _merge_hook_entries(config, "AfterAgent", [_hook_entry(f"{hook} idle --source gemini.AfterAgent")])
     _merge_hook_entries(config, "ToolPermission", [_hook_entry(f"{hook} blocked --source gemini.ToolPermission")])

@@ -70,19 +70,23 @@ def test_installer_writes_durable_cli_hook_configs_idempotently() -> None:
 
         all_commands = "\n".join(_commands([claude, codex, gemini]))
         for required in (
+            "claude.SessionStart",
             "claude.Notification.idle_prompt",
             "claude.UserPromptSubmit",
             "claude.Stop",
+            "codex.SessionStart",
             "codex.Stop",
             "codex.UserPromptSubmit",
             "codex.PermissionRequest",
+            "gemini.SessionStart",
             "gemini.BeforeAgent",
             "gemini.AfterAgent",
+            "--record-session",
         ):
             assert required in all_commands
-        assert _managed_command_count(claude) == 3
-        assert _managed_command_count(codex) == 3
-        assert _managed_command_count(gemini) == 3
+        assert _managed_command_count(claude) == 4
+        assert _managed_command_count(codex) == 4
+        assert _managed_command_count(gemini) == 4
 
 
 def test_installed_hook_writes_state_and_verify_state_checks_all_panes() -> None:
@@ -120,9 +124,50 @@ def test_installed_hook_writes_state_and_verify_state_checks_all_panes() -> None
         assert "present for all notification targets" in complete.stdout
 
 
+def test_session_start_hook_seeds_idle_state_and_records_resume_session() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        home = Path(tmp) / "home"
+        state_dir = Path(tmp) / "state"
+        session_dir = Path(tmp) / "sessions"
+        bin_path = home / ".local" / "bin" / HOOK_NAME
+        subprocess.run([str(INSTALLER), "install", "--home", str(home), "--bin-path", str(bin_path)], check=True)
+
+        session_id = "12345678-1234-5678-9abc-def012345678"
+        subprocess.run(
+            [
+                str(bin_path),
+                "idle",
+                "--target",
+                "pgu-ops:0.0",
+                "--source",
+                "codex.SessionStart",
+                "--state-dir",
+                str(state_dir),
+                "--session-dir",
+                str(session_dir),
+                "--record-session",
+            ],
+            input=json.dumps({"session_id": session_id, "cwd": "/home/agent/Projects/pgu"}),
+            text=True,
+            check=True,
+        )
+
+        state = json.loads((state_dir / "pgu-ops_0.0.json").read_text(encoding="utf-8"))
+        assert state["target"] == "pgu-ops:0.0"
+        assert state["state"] == "idle"
+        assert state["source"] == "codex.SessionStart"
+
+        session = json.loads((session_dir / "pgu-ops_0.0.json").read_text(encoding="utf-8"))
+        assert session["target"] == "pgu-ops:0.0"
+        assert session["session_id"] == session_id
+        assert session["source"] == "codex.SessionStart"
+        assert session["payload"]["cwd"] == "/home/agent/Projects/pgu"
+
+
 def main() -> int:
     test_installer_writes_durable_cli_hook_configs_idempotently()
     test_installed_hook_writes_state_and_verify_state_checks_all_panes()
+    test_session_start_hook_seeds_idle_state_and_records_resume_session()
     print("ticket_board_pane_hooks_install_test: ok")
     return 0
 

@@ -137,13 +137,20 @@ Hook commands may pass `--target pgu-<role>:0.0`, set `PGU_PANE_TARGET`, or let
 the writer resolve the target from `TMUX_PANE`. The required state transitions
 are:
 
-- Claude Code: `Notification` with matcher `idle_prompt` writes `idle`;
+- Claude Code: `SessionStart` writes initial `idle` and records the resume
+  session id; `Notification` with matcher `idle_prompt` writes `idle`;
   `UserPromptSubmit` and `Stop` write `busy`.
-- Codex: `Stop` (or legacy `notify` event `agent-turn-complete`) writes
-  `idle`; `UserPromptSubmit` writes `busy`; permission prompts write `blocked`
-  if the hook surface exposes them.
-- Gemini: `AfterAgent` writes `idle`; `BeforeAgent` writes `busy`. Do not use
-  Gemini `Notification` for idle because it is alert/permission-oriented.
+- Codex: `SessionStart` writes initial `idle` and records the resume session
+  id; `Stop` writes `idle`; `UserPromptSubmit` writes `busy`; permission
+  prompts write `blocked` if the hook surface exposes them.
+- Gemini: `SessionStart` writes initial `idle` and records the resume session
+  id; `AfterAgent` writes `idle`; `BeforeAgent` writes `busy`. Do not use Gemini
+  `Notification` for idle because it is alert/permission-oriented.
+
+Session ids are stored under `$PGU_TICKET_BOARD_PANE_SESSION_DIR` (default:
+`/run/user/<agent-uid>/pgu-ticket-board/pane-sessions`) using the same per-pane
+file naming as hook state. The launcher can use these files to pass `--resume`
+when reloading a pane without losing context.
 
 Install the hook writer and persistent CLI hook config entries with:
 
@@ -161,9 +168,9 @@ That command copies the standalone writer to
 The hook cutover order is strict:
 
 1. Run `scripts/ticket-board-install-pane-hooks install`.
-2. Restart every live pane CLI so it reloads its hook config.
-3. Exercise one lifecycle event in every pane, then verify all hook-state files
-   exist:
+2. Restart every live pane CLI so it reloads its hook config. The `SessionStart`
+   hook should seed each pane's hook-state file immediately.
+3. Verify all hook-state files exist:
 
 ```bash
 scripts/ticket-board-install-pane-hooks verify-state

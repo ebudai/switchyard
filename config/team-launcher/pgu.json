@@ -1,0 +1,110 @@
+{
+  "layout": "pgu-konsole-layout.json",
+  "project": "pgu",
+  "roles": [
+    {
+      "cli": [
+        "claude"
+      ],
+      "model": "opus",
+      "model_arg": "--model",
+      "resume_flag": "--resume",
+      "role": "director",
+      "slot": 0,
+      "target": "pgu-director:0.0",
+      "tmux_session": "pgu-director",
+      "workdir": "/home/agent/Projects/pgu"
+    },
+    {
+      "cli": [
+        "codex"
+      ],
+      "model": "gpt-5",
+      "model_arg": "--model",
+      "resume_flag": "--resume",
+      "role": "main",
+      "slot": 1,
+      "target": "pgu-main:0.0",
+      "tmux_session": "pgu-main",
+      "workdir": "/home/agent/Projects/pgu"
+    },
+    {
+      "cli": [
+        "codex"
+      ],
+      "model": "gpt-5",
+      "model_arg": "--model",
+      "resume_flag": "--resume",
+      "role": "app",
+      "slot": 2,
+      "target": "pgu-app:0.0",
+      "tmux_session": "pgu-app",
+      "workdir": "/home/agent/Projects/pgu"
+    },
+    {
+      "cli": [
+        "codex"
+      ],
+      "model": "gpt-5",
+      "model_arg": "--model",
+      "resume_flag": "--resume",
+      "role": "perf",
+      "slot": 3,
+      "target": "pgu-perf:0.0",
+      "tmux_session": "pgu-perf",
+      "workdir": "/home/agent/Projects/pgu"
+    },
+    {
+      "cli": [
+        "codex"
+      ],
+      "model": "gpt-5",
+      "model_arg": "--model",
+      "resume_flag": "--resume",
+      "role": "research",
+      "slot": 4,
+      "target": "pgu-research:0.0",
+      "tmux_session": "pgu-research",
+      "workdir": "/home/agent/Projects/pgu"
+    },
+    {
+      "cli": [
+        "codex"
+      ],
+      "model": "gpt-5",
+      "model_arg": "--model",
+      "resume_flag": "--resume",
+      "role": "ops",
+      "slot": 5,
+      "target": "pgu-ops:0.0",
+      "tmux_session": "pgu-ops",
+      "workdir": "/home/agent/Projects/pgu"
+    },
+    {
+      "cli": [
+        "codex"
+      ],
+      "model": "gpt-5",
+      "model_arg": "--model",
+      "resume_flag": "--resume",
+      "role": "audit",
+      "slot": 6,
+      "target": "pgu-audit:0.0",
+      "tmux_session": "pgu-audit",
+      "workdir": "/home/agent/Projects/pgu"
+    },
+    {
+      "cli": [
+        "gemini"
+      ],
+      "model": "pro",
+      "model_arg": "--model",
+      "resume_flag": "--resume",
+      "role": "inspector",
+      "slot": 7,
+      "target": "pgu-inspector:0.0",
+      "tmux_session": "pgu-inspector",
+      "workdir": "/home/agent/Projects/pgu"
+    }
+  ]
+}

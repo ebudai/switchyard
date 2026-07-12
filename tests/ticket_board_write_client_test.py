@@ -31,7 +31,7 @@ class RecordingHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         payload = json.loads(self.rfile.read(length) or b"{}")
         caller = self.headers.get(CALLER_ROLE_HEADER)
-        self.server.requests.append((self.path, caller))  # type: ignore[attr-defined]
+        self.server.requests.append((self.path, caller, payload))  # type: ignore[attr-defined]
         ticket_id = "PGU-NEW"
         operation = self.path.rsplit("/", 1)[-1]
         if self.path.startswith("/api/tickets/PGU-") and "/actions/" in self.path:
@@ -79,30 +79,35 @@ class RecordingHandler(BaseHTTPRequestHandler):
 
 class RecordingServer(ThreadingHTTPServer):
     def __init__(self) -> None:
-        self.requests: list[tuple[str, str | None]] = []
+        self.requests: list[tuple[str, str | None, dict[str, object]]] = []
         super().__init__(("127.0.0.1", 0), RecordingHandler)
 
 
-def assert_action_requests(requests: list[tuple[str, str | None]]) -> None:
+def request_pairs(requests: list[tuple[str, str | None, dict[str, object]]]) -> list[tuple[str, str | None]]:
+    return [(path, caller_role) for path, caller_role, _ in requests]
+
+
+def assert_action_requests(requests: list[tuple[str, str | None, dict[str, object]]]) -> None:
     assert requests, "client should send requests"
-    for path, caller_role in requests:
+    pairs = request_pairs(requests)
+    for path, caller_role in pairs:
         assert caller_role, (path, caller_role)
         assert "/actions/" in path, (path, caller_role)
-    assert ("/api/tickets/actions/create_ticket", "director") in requests
-    assert ("/api/tickets/actions/file_bug", "ops") in requests
-    assert ("/api/tickets/PGU-100/actions/route", "director") in requests
-    assert ("/api/tickets/PGU-101/actions/start_work", "ops") in requests
-    assert ("/api/tickets/PGU-101/actions/submit_to_audit", "ops") in requests
-    assert ("/api/tickets/PGU-102/actions/audit_sign_off", "audit") in requests
-    assert ("/api/tickets/PGU-103/actions/audit_kick_back", "audit") in requests
-    assert ("/api/tickets/PGU-104/actions/eric_sign_off", "eric") in requests
-    assert ("/api/tickets/PGU-105/actions/eric_reopen", "eric") in requests
-    assert ("/api/tickets/PGU-106/actions/mark_done", "director") in requests
-    assert ("/api/tickets/PGU-107/actions/defer", "director") in requests
-    assert ("/api/tickets/PGU-108/actions/cancel", "director") in requests
-    assert ("/api/tickets/PGU-109/actions/set_manually_controlled", "director") in requests
-    assert ("/api/tickets/PGU-111/actions/set_blockers", "director") in requests
-    assert ("/api/tickets/PGU-112/actions/add_comment", "director") in requests
+    assert ("/api/tickets/actions/create_ticket", "director") in pairs
+    assert ("/api/tickets/actions/file_bug", "ops") in pairs
+    assert ("/api/tickets/PGU-100/actions/route", "director") in pairs
+    assert ("/api/tickets/PGU-101/actions/start_work", "ops") in pairs
+    assert ("/api/tickets/PGU-101/actions/submit_to_audit", "ops") in pairs
+    assert ("/api/tickets/PGU-102/actions/audit_sign_off", "audit") in pairs
+    assert ("/api/tickets/PGU-103/actions/audit_kick_back", "audit") in pairs
+    assert ("/api/tickets/PGU-104/actions/eric_sign_off", "eric") in pairs
+    assert ("/api/tickets/PGU-105/actions/eric_reopen", "eric") in pairs
+    assert ("/api/tickets/PGU-106/actions/mark_done", "director") in pairs
+    assert ("/api/tickets/PGU-107/actions/defer", "director") in pairs
+    assert ("/api/tickets/PGU-108/actions/cancel", "director") in pairs
+    assert ("/api/tickets/PGU-109/actions/set_manually_controlled", "director") in pairs
+    assert ("/api/tickets/PGU-111/actions/set_blockers", "director") in pairs
+    assert ("/api/tickets/PGU-112/actions/add_comment", "director") in pairs
 
 
 def exercise_client(base_url: str, commit_hash: str) -> None:
@@ -112,11 +117,13 @@ def exercise_client(base_url: str, commit_hash: str) -> None:
     assert client.route("PGU-100", state="backlog", assignee="ops")["ticket"]["state"] == "backlog"
     assert client.start_work("PGU-101", caller_role="ops")["ticket"]["state"] == "in_progress"
     assert client.submit_to_audit("PGU-101", commit_hash=commit_hash, caller_role="ops")["ticket"]["state"] == "audit"
+    assert client.submit_to_audit("PGU-113", caller_role="ops")["ticket"]["commit_hash"] == ""
     assert client.audit_sign_off("PGU-102", caller_role="audit")["ticket"]["state"] == "director_review"
     assert client.audit_kick_back("PGU-103", reason="Needs another pass.", caller_role="audit")["ticket"]["state"] == "analysis"
     assert client.eric_sign_off("PGU-104", caller_role="eric")["ticket"]["state"] == "director_review"
     assert client.eric_reopen("PGU-105", reason="Needs design revision.", caller_role="eric")["ticket"]["state"] == "analysis"
     assert client.mark_done("PGU-106", commit_hash=commit_hash)["ticket"]["state"] == "done"
+    assert client.mark_done("PGU-114")["ticket"]["commit_hash"] == ""
     assert client.defer("PGU-107")["ticket"]["state"] == "backlog"
     assert client.cancel("PGU-108", reason="No longer needed.")["ticket"]["state"] == "cancelled"
     assert client.set_manually_controlled("PGU-109", True)["ticket"]["manually_controlled"] is True
@@ -161,7 +168,7 @@ def main() -> int:
             exercise_client(base_url, "abcdef1")
             assert_auto_socket_connect_failure_falls_back_to_tcp(base_url, root / "blocked.sock")
             assert_action_requests(server.requests)
-            assert ("/api/tickets/PGU-120/actions/start_work", "ops") in server.requests
+            assert ("/api/tickets/PGU-120/actions/start_work", "ops") in request_pairs(server.requests)
         finally:
             server.shutdown()
             server.server_close()

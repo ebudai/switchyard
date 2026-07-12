@@ -1826,9 +1826,20 @@ AS $$
 DECLARE
     actor text;
     normalized_commit text := btrim(coalesce(commit_hash, ''));
+    ticket_commit_exempt boolean;
 BEGIN
     actor := ticket_board.require_actor(ARRAY['main', 'app', 'ops', 'perf', 'research'], 'submit_to_audit');
-    IF normalized_commit !~ '^[0-9A-Fa-f]{7,40}$' THEN
+    SELECT tickets.commit_exempt
+    INTO ticket_commit_exempt
+    FROM ticket_board.tickets
+    WHERE tickets.id = submit_to_audit.id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ticket not found: %', id;
+    END IF;
+    IF normalized_commit <> '' AND normalized_commit !~ '^[0-9A-Fa-f]{7,40}$' THEN
+        RAISE EXCEPTION 'commit_hash must be a 7-40 character hex commit';
+    END IF;
+    IF normalized_commit = '' AND NOT ticket_commit_exempt THEN
         RAISE EXCEPTION 'commit_hash must be a 7-40 character hex commit';
     END IF;
     UPDATE ticket_board.tickets
@@ -1836,9 +1847,6 @@ BEGIN
         commit_hash = normalized_commit,
         inspector_signoff = false
     WHERE tickets.id = submit_to_audit.id;
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'ticket not found: %', id;
-    END IF;
     PERFORM ticket_board.touch_ticket(id);
 END;
 $$;
@@ -2009,18 +2017,26 @@ AS $$
 DECLARE
     actor text;
     normalized_commit text := btrim(coalesce(commit_hash, ''));
+    ticket_commit_exempt boolean;
 BEGIN
     actor := ticket_board.require_actor(ARRAY['director'], 'mark_done');
-    IF normalized_commit !~ '^[0-9A-Fa-f]{7,40}$' THEN
+    SELECT tickets.commit_exempt
+    INTO ticket_commit_exempt
+    FROM ticket_board.tickets
+    WHERE tickets.id = mark_done.id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ticket not found: %', id;
+    END IF;
+    IF normalized_commit <> '' AND normalized_commit !~ '^[0-9A-Fa-f]{7,40}$' THEN
+        RAISE EXCEPTION 'commit_hash must be a 7-40 character hex commit';
+    END IF;
+    IF normalized_commit = '' AND NOT ticket_commit_exempt THEN
         RAISE EXCEPTION 'commit_hash must be a 7-40 character hex commit';
     END IF;
     UPDATE ticket_board.tickets
     SET state = 'done',
         commit_hash = normalized_commit
     WHERE tickets.id = mark_done.id;
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'ticket not found: %', id;
-    END IF;
     PERFORM ticket_board.touch_ticket(id);
 END;
 $$;
@@ -2240,6 +2256,9 @@ BEGIN
     END IF;
     IF patch ? 'needs_inspection' AND ticket_board.current_app_actor() <> 'director' THEN
         RAISE EXCEPTION 'needs_inspection can only be edited by director' USING ERRCODE = '42501';
+    END IF;
+    IF patch ? 'commit_exempt' AND ticket_board.current_app_actor() <> 'director' THEN
+        RAISE EXCEPTION 'commit_exempt can only be edited by director' USING ERRCODE = '42501';
     END IF;
     PERFORM 1 FROM ticket_board.tickets WHERE tickets.id = edit_fields.id;
     IF NOT FOUND THEN

@@ -436,6 +436,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             raise ValueError("advanced create fields require /api/tickets/actions/create_ticket")
         if bool(payload.get("needs_inspection", False)) and caller_role != "director":
             raise PermissionError("needs_inspection can only be set by director")
+        if bool(payload.get("commit_exempt", False)) and caller_role != "director":
+            raise PermissionError("commit_exempt can only be set by director")
         if not advanced_create:
             return self.app.create_ticket(
                 title=str(payload.get("title", "")),
@@ -498,6 +500,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         if operation == "file_bug":
             if bool(payload.get("needs_inspection", False)) and caller != "director":
                 raise PermissionError("needs_inspection can only be set by director")
+            if bool(payload.get("commit_exempt", False)) and caller != "director":
+                raise PermissionError("commit_exempt can only be set by director")
             before_signature = self.app.store_signature()
             source_ticket_id = str(payload.get("source_ticket_id", payload.get("parent_id", ""))).strip().upper()
             created = self.app.create_ticket_record(
@@ -599,6 +603,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 raise ValueError("eric_signoff=true requires eric_sign_off")
             if "needs_inspection" in payload and caller != "director":
                 raise PermissionError("needs_inspection can only be edited by director")
+            if "commit_exempt" in payload and caller != "director":
+                raise PermissionError("commit_exempt can only be edited by director")
             patch = dict(payload)
         else:
             raise ValueError(f"unknown ticket operation: {operation}")

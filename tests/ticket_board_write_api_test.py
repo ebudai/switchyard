@@ -120,6 +120,7 @@ def seed_json_ticket(
     needs_eric_signoff: bool = False,
     eric_signoff: bool = False,
     commit_hash: str = "",
+    commit_exempt: bool = False,
 ) -> None:
     payload = {
         "id": ticket_id,
@@ -139,7 +140,7 @@ def seed_json_ticket(
         "eric_signoff": eric_signoff,
         "manually_controlled": False,
         "commit_hash": commit_hash,
-        "commit_exempt": False,
+        "commit_exempt": commit_exempt,
         "created": "2026-07-10T00:00:00+00:00",
         "updated": "2026-07-10T00:00:00+00:00",
         "comments": [],
@@ -162,6 +163,7 @@ def seed_postgres_ticket(
     needs_eric_signoff: bool = False,
     eric_signoff: bool = False,
     commit_hash: str = "",
+    commit_exempt: bool = False,
 ) -> None:
     psql(
         conn,
@@ -169,11 +171,11 @@ def seed_postgres_ticket(
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation,
     audit_signoff, needs_inspection, inspector_signoff, needs_eric_signoff, eric_signoff, commit_hash,
-    created_text, updated_text, source_json
+    commit_exempt, created_text, updated_text, source_json
 ) VALUES (
     '{ticket_id}', '{title}', '', '{state}', '{assignee}', '{implementation}',
     {str(audit_signoff).lower()}, {str(needs_inspection).lower()}, {str(inspector_signoff).lower()}, {str(needs_eric_signoff).lower()},
-    {str(eric_signoff).lower()}, '{commit_hash}',
+    {str(eric_signoff).lower()}, '{commit_hash}', {str(commit_exempt).lower()},
     '2026-07-10T00:00:00+00:00', '2026-07-10T00:00:00+00:00',
     '{ticket_source(ticket_id, title, state, assignee)}'::jsonb
 );
@@ -332,6 +334,36 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
         needs_inspection=True,
         inspector_signoff=True,
     )
+    seed_ticket(
+        "PGU-120",
+        title="Commit exempt submit",
+        state="in_progress",
+        assignee="ops",
+        implementation="No repo changes.",
+    )
+    seed_ticket(
+        "PGU-121",
+        title="Non-exempt submit",
+        state="in_progress",
+        assignee="ops",
+        implementation="Needs commit.",
+    )
+    seed_ticket(
+        "PGU-122",
+        title="Commit exempt done",
+        state="director_review",
+        assignee="director",
+        implementation="No repo changes.",
+        audit_signoff=True,
+    )
+    seed_ticket(
+        "PGU-123",
+        title="Non-exempt done",
+        state="director_review",
+        assignee="director",
+        implementation="Needs commit.",
+        audit_signoff=True,
+    )
     seed_ticket("PGU-109", title="Manual", state="analysis")
     seed_ticket("PGU-110", title="Blocker", state="analysis")
     seed_ticket("PGU-111", title="Blocked target", state="analysis")
@@ -446,6 +478,33 @@ def exercise_write_api(base_url: str, commit_hash: str) -> None:
     submitted = post_json(base_url, "/api/tickets/PGU-101/actions/submit_to_audit", {"commit_hash": commit_hash}, caller="ops")
     assert submitted["ticket"]["state"] == "audit", submitted  # type: ignore[index]
     assert submitted["ticket"]["commit_hash"] == commit_hash, submitted  # type: ignore[index]
+    non_exempt_empty_submit = post_json(
+        base_url,
+        "/api/tickets/PGU-121/actions/submit_to_audit",
+        {},
+        caller="ops",
+        expect=400,
+    )
+    assert "commit_hash must be a 7-40 character hex commit" in str(non_exempt_empty_submit), non_exempt_empty_submit
+    submit_exempt_forbidden = post_json(
+        base_url,
+        "/api/tickets/PGU-120/actions/edit_fields",
+        {"commit_exempt": True},
+        caller="ops",
+        expect=403,
+    )
+    assert "commit_exempt can only be edited by director" in str(submit_exempt_forbidden), submit_exempt_forbidden
+    submit_exempt_set = post_json(
+        base_url,
+        "/api/tickets/PGU-120/actions/edit_fields",
+        {"commit_exempt": True},
+        caller="director",
+    )
+    assert submit_exempt_set["ticket"]["commit_exempt"] is True, submit_exempt_set  # type: ignore[index]
+    exempt_submitted = post_json(base_url, "/api/tickets/PGU-120/actions/submit_to_audit", {}, caller="ops")
+    assert exempt_submitted["ticket"]["state"] == "audit", exempt_submitted  # type: ignore[index]
+    assert exempt_submitted["ticket"]["commit_hash"] == "", exempt_submitted  # type: ignore[index]
+    assert exempt_submitted["ticket"]["commit_exempt"] is True, exempt_submitted  # type: ignore[index]
 
     eric_inspection_create = post_json(
         base_url,
@@ -455,6 +514,22 @@ def exercise_write_api(base_url: str, commit_hash: str) -> None:
         expect=403,
     )
     assert "needs_inspection can only be set by director" in str(eric_inspection_create), eric_inspection_create
+    eric_commit_exempt_create = post_json(
+        base_url,
+        "/api/tickets/actions/create_ticket",
+        {"title": "Eric cannot exempt commits", "body": "", "commit_exempt": True},
+        caller="eric",
+        expect=403,
+    )
+    assert "commit_exempt can only be set by director" in str(eric_commit_exempt_create), eric_commit_exempt_create
+    file_bug_commit_exempt = post_json(
+        base_url,
+        "/api/tickets/actions/file_bug",
+        {"title": "Ops cannot exempt filed bug", "body": "", "source_ticket_id": "PGU-100", "commit_exempt": True},
+        caller="ops",
+        expect=403,
+    )
+    assert "commit_exempt can only be set by director" in str(file_bug_commit_exempt), file_bug_commit_exempt
     director_inspection_create = post_json(
         base_url,
         "/api/tickets/actions/create_ticket",
@@ -569,6 +644,33 @@ def exercise_write_api(base_url: str, commit_hash: str) -> None:
 
     done = post_json(base_url, "/api/tickets/PGU-106/actions/mark_done", {"commit_hash": commit_hash}, caller="director")
     assert done["ticket"]["state"] == "done", done  # type: ignore[index]
+    non_exempt_empty_done = post_json(
+        base_url,
+        "/api/tickets/PGU-123/actions/mark_done",
+        {},
+        caller="director",
+        expect=400,
+    )
+    assert "commit_hash must be a 7-40 character hex commit" in str(non_exempt_empty_done), non_exempt_empty_done
+    done_exempt_forbidden = post_json(
+        base_url,
+        "/api/tickets/PGU-122/actions/edit_fields",
+        {"commit_exempt": True},
+        caller="ops",
+        expect=403,
+    )
+    assert "commit_exempt can only be edited by director" in str(done_exempt_forbidden), done_exempt_forbidden
+    done_exempt_set = post_json(
+        base_url,
+        "/api/tickets/PGU-122/actions/edit_fields",
+        {"commit_exempt": True},
+        caller="director",
+    )
+    assert done_exempt_set["ticket"]["commit_exempt"] is True, done_exempt_set  # type: ignore[index]
+    exempt_done = post_json(base_url, "/api/tickets/PGU-122/actions/mark_done", {}, caller="director")
+    assert exempt_done["ticket"]["state"] == "done", exempt_done  # type: ignore[index]
+    assert exempt_done["ticket"]["commit_hash"] == "", exempt_done  # type: ignore[index]
+    assert exempt_done["ticket"]["commit_exempt"] is True, exempt_done  # type: ignore[index]
     deferred = post_json(base_url, "/api/tickets/PGU-107/actions/defer", {}, caller="director")
     assert deferred["ticket"]["state"] == "backlog", deferred  # type: ignore[index]
     cancelled = post_json(base_url, "/api/tickets/PGU-108/actions/cancel", {"reason": "No longer needed."}, caller="director")

@@ -279,7 +279,7 @@ class TicketBoardWriteClient:
     def start_work(self, ticket_id: str, *, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "start_work", caller_role=caller_role)
 
-    def submit_to_audit(self, ticket_id: str, *, commit_hash: str, caller_role: str | None = None) -> dict[str, Any]:
+    def submit_to_audit(self, ticket_id: str, *, commit_hash: str = "", caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "submit_to_audit", {"commit_hash": commit_hash}, caller_role=caller_role)
 
     def audit_sign_off(self, ticket_id: str, *, caller_role: str | None = None) -> dict[str, Any]:
@@ -300,7 +300,7 @@ class TicketBoardWriteClient:
     def eric_reopen(self, ticket_id: str, *, reason: str, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "eric_reopen", {"reason": reason}, caller_role=caller_role)
 
-    def mark_done(self, ticket_id: str, *, commit_hash: str, caller_role: str | None = None) -> dict[str, Any]:
+    def mark_done(self, ticket_id: str, *, commit_hash: str = "", caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "mark_done", {"commit_hash": commit_hash}, caller_role=caller_role)
 
     def defer(self, ticket_id: str, *, caller_role: str | None = None) -> dict[str, Any]:
@@ -393,7 +393,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     submit = subparsers.add_parser("submit-to-audit")
     submit.add_argument("ticket_id")
-    submit.add_argument("--commit-hash", required=True)
+    submit.add_argument("--commit-hash", default="")
 
     for name in ("audit-kick-back", "eric-reopen", "cancel"):
         sub = subparsers.add_parser(name)
@@ -406,7 +406,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     done = subparsers.add_parser("mark-done")
     done.add_argument("ticket_id")
-    done.add_argument("--commit-hash", required=True)
+    done.add_argument("--commit-hash", default="")
 
     manual = subparsers.add_parser("set-manually-controlled")
     manual.add_argument("ticket_id")

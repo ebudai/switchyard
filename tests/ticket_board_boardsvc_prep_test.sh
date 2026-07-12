@@ -4,6 +4,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$REPO_ROOT/scripts/ticket-board-boardsvc-setup.sh"
 UNIT="$REPO_ROOT/deploy/systemd/pgu-ticket-board.service.boardsvc"
+TMPFILES="$REPO_ROOT/deploy/tmpfiles/pgu-ticket-board.conf"
 RUNBOOK="$REPO_ROOT/docs/ticket-board-boardsvc-peer-auth-runbook.md"
 
 [[ -x "$SCRIPT" ]] || {
@@ -61,6 +62,14 @@ grep -q '^Environment=HOME=/home/agent$' "$UNIT" || {
     echo "FAIL: proposed unit does not set a stable HOME for remaining expanduser paths" >&2
     exit 1
 }
+if grep -q '^ExecStartPre=/bin/mkdir -p /tmp/pgu-frames$' "$UNIT"; then
+    echo "FAIL: proposed sandboxed unit must not pretend ExecStartPre can create ReadWritePaths targets" >&2
+    exit 1
+fi
+if grep -q '^ExecStartPre=/bin/chmod 1777 /tmp/pgu-frames$' "$UNIT"; then
+    echo "FAIL: proposed sandboxed unit must not carry dead frame-directory chmod pre-start hooks" >&2
+    exit 1
+fi
 retired_backend_flag='--store''-backend'
 if grep -q -- "$retired_backend_flag" "$UNIT"; then
     echo "FAIL: proposed unit should not pass the removed backend selector option" >&2
@@ -82,6 +91,14 @@ if grep -Eq 'PASSWORD|PGPASSWORD|postgresql://[^ ]*:' "$UNIT"; then
     echo "FAIL: proposed unit appears to contain a password-bearing credential" >&2
     exit 1
 fi
+[[ -f "$TMPFILES" ]] || {
+    echo "FAIL: tmpfiles definition is missing" >&2
+    exit 1
+}
+grep -q '^d /tmp/pgu-frames 1777 root root -$' "$TMPFILES" || {
+    echo "FAIL: tmpfiles definition does not recreate the shared frame directory on boot" >&2
+    exit 1
+}
 
 grep -q 'parser.add_argument("--assets"' "$REPO_ROOT/scripts/ticket_board/cli.py" || {
     echo "FAIL: CLI does not expose an explicit assets directory" >&2
@@ -110,6 +127,10 @@ grep -q 'PGU-197 is a prep-only package' "$RUNBOOK" || {
 }
 grep -q 'This package targets the PGU-198/PGU-209 single-writer board' "$RUNBOOK" || {
     echo "FAIL: runbook does not document DB-backed ticket-store boundary" >&2
+    exit 1
+}
+grep -q 'tmpfiles' "$RUNBOOK" || {
+    echo "FAIL: runbook does not document tmpfiles-based frame directory recreation" >&2
     exit 1
 }
 grep -q 'Do not add an ACL for `/home/agent/.claude/pgu-tickets`' "$RUNBOOK" || {

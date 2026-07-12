@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression test: board cards show an explicit assignee row."""
+"""Regression test: board cards show compact role text without workflow controls."""
 
 from __future__ import annotations
 
@@ -15,11 +15,18 @@ from scripts.ticket_board.frontend import HTML
 
 def main() -> int:
     assert ".card-assignee" in HTML
-    assert ".card-assignee-label" in HTML
     assert ".card-assignee-value" in HTML
-    assert "assigneeLabel.textContent = 'assignee';" in HTML
-    assert "assigneeValue.textContent = ticket.assignee;" in HTML
+    assert ".card-assignee-label" not in HTML
+    assert "assigneeLabel.textContent" not in HTML
+    assert "function roleLabel(role)" in HTML
+    assert "assigneeValue.textContent = roleLabel(ticket.assignee);" in HTML
+    assert "buildOption(assigneeInput, assignee, roleLabel(assignee))" in HTML
+    assert "buildOption(assigneeSelect, assignee, roleLabel(assignee))" in HTML
     assert "titleWrap.append(idEl, titleEl, assigneeLine);" in HTML
+    assert "stateTag.textContent = stateLabel(ticket.state);" not in HTML
+    assert "card.append(top, tags, badges);" not in HTML
+    assert "advanceButton.textContent = `Advance -> ${stateLabel(nextState)}`;" not in HTML
+    assert "stateSelect.addEventListener('change'" not in HTML
     print("board_card_assignee_test: ok")
     return 0
 

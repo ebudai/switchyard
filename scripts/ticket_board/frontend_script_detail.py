@@ -169,7 +169,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       const assigneeLabel = document.createElement('label');
       assigneeLabel.innerHTML = '<span class="field-label">Assignee</span>';
       const assigneeSelect = document.createElement('select');
-      state.assignees.forEach((assignee) => buildOption(assigneeSelect, assignee, assignee));
+      state.assignees.forEach((assignee) => buildOption(assigneeSelect, assignee, roleLabel(assignee)));
       assigneeSelect.value = ticket.assignee;
       assigneeSelect.addEventListener('change', async () => {
         await updateTicket(ticket.id, { assignee: assigneeSelect.value }, 'director');

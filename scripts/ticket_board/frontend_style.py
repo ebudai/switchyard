@@ -346,10 +346,6 @@ STYLE = """    :root {
       line-height: 1.3;
       color: var(--muted);
     }
-    .card-assignee-label {
-      text-transform: uppercase;
-      color: var(--muted);
-    }
     .card-assignee-value {
       color: var(--text);
       font-weight: 600;

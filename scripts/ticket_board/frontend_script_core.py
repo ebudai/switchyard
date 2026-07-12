@@ -78,6 +78,11 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       return COLUMNS.find((column) => column.key === key)?.label || key;
     }
 
+    function roleLabel(role) {
+      const raw = String(role || '').trim();
+      return raw ? raw.charAt(0).toUpperCase() + raw.slice(1) : raw;
+    }
+
     function mobileSectionsEnabled() {
       return mobileSectionMedia.matches;
     }
@@ -618,7 +623,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       const assigneeValue = assigneeInput.value;
       const screenshotValue = screenshotInput.value;
       assigneeInput.innerHTML = '';
-      state.assignees.forEach((assignee) => buildOption(assigneeInput, assignee, assignee));
+      state.assignees.forEach((assignee) => buildOption(assigneeInput, assignee, roleLabel(assignee)));
       if (assigneeValue && Array.from(assigneeInput.options).some((option) => option.value === assigneeValue)) {
         assigneeInput.value = assigneeValue;
       }
@@ -1017,13 +1022,10 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       titleEl.textContent = ticket.title;
       const assigneeLine = document.createElement('div');
       assigneeLine.className = 'card-assignee';
-      const assigneeLabel = document.createElement('span');
-      assigneeLabel.className = 'card-assignee-label';
-      assigneeLabel.textContent = 'assignee';
       const assigneeValue = document.createElement('span');
       assigneeValue.className = 'card-assignee-value';
-      assigneeValue.textContent = ticket.assignee;
-      assigneeLine.append(assigneeLabel, assigneeValue);
+      assigneeValue.textContent = roleLabel(ticket.assignee);
+      assigneeLine.appendChild(assigneeValue);
       titleWrap.append(idEl, titleEl, assigneeLine);
       if (ticket.needs_eric_signoff && ticket.state === 'eric_review') {
         const signoffState = document.createElement('div');
@@ -1032,13 +1034,6 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         titleWrap.appendChild(signoffState);
       }
       top.appendChild(titleWrap);
-
-      const tags = document.createElement('div');
-      tags.className = 'tag-row';
-      const stateTag = document.createElement('span');
-      stateTag.className = 'tag';
-      stateTag.textContent = stateLabel(ticket.state);
-      tags.append(stateTag);
 
       const badges = document.createElement('div');
       badges.className = 'badge-row';
@@ -1060,52 +1055,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         ));
       }
 
-      const controls = document.createElement('div');
-      controls.className = 'control-row';
-      const nextState = defaultAdvanceState(ticket);
-      if (nextState) {
-        const advanceButton = document.createElement('button');
-        advanceButton.className = 'small primary';
-        advanceButton.type = 'button';
-        advanceButton.textContent = `Advance -> ${stateLabel(nextState)}`;
-        const blockedReason = advanceBlockedReason(ticket);
-        if (blockedReason) {
-          advanceButton.disabled = true;
-          advanceButton.title = blockedReason;
-        }
-        advanceButton.addEventListener('click', async (event) => {
-          event.stopPropagation();
-          try {
-            await advanceTicket(ticket.id);
-          } catch (error) {
-            setCreateStatus(error.message, true);
-            await requestBoardReload();
-          }
-        });
-        controls.appendChild(advanceButton);
-      }
-      const stateSelect = document.createElement('select');
-      stateSelect.className = 'small';
-      COLUMNS.forEach((column) => {
-        const option = document.createElement('option');
-        option.value = column.key;
-        option.textContent = column.label;
-        stateSelect.appendChild(option);
-      });
-      stateSelect.value = ticket.state;
-      stateSelect.addEventListener('click', (event) => event.stopPropagation());
-      stateSelect.addEventListener('change', async (event) => {
-        const nextState = event.target.value;
-        try {
-          await updateTicket(ticket.id, { state: nextState }, stateTransitionCallerRole(ticket));
-        } catch (error) {
-          setCreateStatus(error.message, true);
-          await requestBoardReload();
-        }
-      });
-      controls.appendChild(stateSelect);
-
-      card.append(top, tags, badges);
+      card.append(top, badges);
       const alerts = renderAlertStack(ticket);
       if (alerts) {
         card.appendChild(alerts);
@@ -1119,7 +1069,6 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         missing.textContent = 'image unavailable';
         card.appendChild(missing);
       }
-      card.appendChild(controls);
       return card;
     }
 """

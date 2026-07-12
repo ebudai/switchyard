@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""Install per-pane CLI idle hooks for ticket notification delivery."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import stat
+import sys
+from pathlib import Path
+from typing import Any
+
+HOOK_BASENAME = "pgu-ticket-board-pane-idle-hook"
+DEFAULT_PANE_STATE_DIR = (
+    Path(os.environ["PGU_TICKET_BOARD_PANE_STATE_DIR"]).expanduser()
+    if os.environ.get("PGU_TICKET_BOARD_PANE_STATE_DIR")
+    else Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-state")
+)
+PANE_TARGETS = (
+    "pgu-director:0.0",
+    "pgu-main:0.0",
+    "pgu-app:0.0",
+    "pgu-perf:0.0",
+    "pgu-research:0.0",
+    "pgu-ops:0.0",
+    "pgu-audit:0.0",
+    "pgu-inspector:0.0",
+)
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _load_json(path: Path) -> dict[str, Any]:
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    if not isinstance(parsed, dict):
+        raise SystemExit(f"{path} must contain a JSON object")
+    return parsed
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def _contains_managed_hook(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(_contains_managed_hook(child) for child in value.values())
+    if isinstance(value, list):
+        return any(_contains_managed_hook(child) for child in value)
+    return isinstance(value, str) and HOOK_BASENAME in value
+
+
+def _hook_entry(command: str, *, matcher: str = "") -> dict[str, Any]:
+    entry: dict[str, Any] = {"hooks": [{"type": "command", "command": command}]}
+    if matcher:
+        entry["matcher"] = matcher
+    return entry
+
+
+def _merge_hook_entries(config: dict[str, Any], event: str, entries: list[dict[str, Any]]) -> None:
+    hooks = config.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        raise SystemExit("existing hooks field must be a JSON object")
+    existing = hooks.get(event, [])
+    if not isinstance(existing, list):
+        raise SystemExit(f"existing hooks.{event} field must be a JSON list")
+    hooks[event] = [entry for entry in existing if not _contains_managed_hook(entry)] + entries
+
+
+def _install_hook_binary(source: Path, destination: Path) -> None:
+    if not source.exists():
+        raise SystemExit(f"hook source not found: {source}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+    mode = destination.stat().st_mode
+    destination.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def _install_claude_hooks(home: Path, hook_bin: Path) -> Path:
+    path = home / ".claude" / "settings.json"
+    config = _load_json(path)
+    hook = str(hook_bin)
+    _merge_hook_entries(
+        config,
+        "Notification",
+        [_hook_entry(f"{hook} idle --source claude.Notification.idle_prompt", matcher="idle_prompt")],
+    )
+    _merge_hook_entries(
+        config,
+        "UserPromptSubmit",
+        [_hook_entry(f"{hook} busy --source claude.UserPromptSubmit")],
+    )
+    _merge_hook_entries(
+        config,
+        "Stop",
+        [_hook_entry(f"{hook} busy --source claude.Stop")],
+    )
+    _write_json(path, config)
+    return path
+
+
+def _install_codex_hooks(home: Path, hook_bin: Path) -> Path:
+    path = home / ".codex" / "hooks.json"
+    config = _load_json(path)
+    hook = str(hook_bin)
+    _merge_hook_entries(config, "Stop", [_hook_entry(f"{hook} idle --source codex.Stop")])
+    _merge_hook_entries(config, "UserPromptSubmit", [_hook_entry(f"{hook} busy --source codex.UserPromptSubmit")])
+    _merge_hook_entries(config, "PermissionRequest", [_hook_entry(f"{hook} blocked --source codex.PermissionRequest")])
+    _write_json(path, config)
+    return path
+
+
+def _install_gemini_hooks(home: Path, hook_bin: Path) -> Path:
+    path = home / ".gemini" / "antigravity-cli" / "settings.json"
+    config = _load_json(path)
+    hook = str(hook_bin)
+    _merge_hook_entries(config, "BeforeAgent", [_hook_entry(f"{hook} busy --source gemini.BeforeAgent")])
+    _merge_hook_entries(config, "AfterAgent", [_hook_entry(f"{hook} idle --source gemini.AfterAgent")])
+    _merge_hook_entries(config, "ToolPermission", [_hook_entry(f"{hook} blocked --source gemini.ToolPermission")])
+    _write_json(path, config)
+    return path
+
+
+def _target_path(state_dir: Path, target: str) -> Path:
+    safe = "".join(ch if ch.isalnum() or ch in ".-" else "_" for ch in target)
+    return state_dir / f"{safe}.json"
+
+
+def _read_state(path: Path, target: str) -> str:
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(parsed, dict) or parsed.get("target") != target:
+        return ""
+    state = str(parsed.get("state") or "").strip().lower()
+    return state if state in {"idle", "busy", "blocked"} else ""
+
+
+def install(args: argparse.Namespace) -> int:
+    home = Path(args.home).expanduser()
+    hook_source = Path(args.hook_source).expanduser()
+    hook_bin = Path(args.bin_path).expanduser()
+    _install_hook_binary(hook_source, hook_bin)
+    written = [
+        _install_claude_hooks(home, hook_bin),
+        _install_codex_hooks(home, hook_bin),
+        _install_gemini_hooks(home, hook_bin),
+    ]
+    print(f"installed {hook_bin}")
+    for path in written:
+        print(f"wrote {path}")
+    print("restart every pane CLI before restarting pgu-ticket-board-notify-listener.service")
+    return 0
+
+
+def verify_state(args: argparse.Namespace) -> int:
+    state_dir = Path(args.state_dir).expanduser()
+    missing: list[str] = []
+    for target in PANE_TARGETS:
+        state = _read_state(_target_path(state_dir, target), target)
+        if not state:
+            missing.append(target)
+    if missing:
+        print("missing pane hook state: " + ", ".join(missing), file=sys.stderr)
+        return 1
+    print("pane hook state present for all notification targets")
+    return 0
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Install and verify PGU ticket-board pane idle hooks.")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    install_parser = subparsers.add_parser("install", help="install CLI hook binary and persistent hook configs")
+    install_parser.add_argument("--home", default=str(Path.home()), help="home directory whose CLI configs will be edited")
+    install_parser.add_argument(
+        "--hook-source",
+        default=str(_repo_root() / "scripts" / "ticket-board-pane-idle-hook"),
+        help="hook writer source to install",
+    )
+    install_parser.add_argument(
+        "--bin-path",
+        default=str(Path.home() / ".local" / "bin" / HOOK_BASENAME),
+        help="installed hook binary path",
+    )
+    install_parser.set_defaults(func=install)
+
+    verify_parser = subparsers.add_parser("verify-state", help="verify all live panes have written hook state")
+    verify_parser.add_argument(
+        "--state-dir",
+        default=str(DEFAULT_PANE_STATE_DIR),
+        help=f"pane state directory (default: {DEFAULT_PANE_STATE_DIR})",
+    )
+    verify_parser.set_defaults(func=verify_state)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

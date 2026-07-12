@@ -292,7 +292,8 @@ SELECT jsonb_build_object(
     'payload_kind', payload->>'kind'
 )::text
 FROM ticket_board.ticket_notification_queue
-WHERE ticket_id = 'PGU-228';
+WHERE ticket_id = 'PGU-228'
+  AND kind = 'escalation';
 """,
                 )
             )
@@ -302,6 +303,14 @@ WHERE ticket_id = 'PGU-228';
                 "message": "PRIORITY PGU-228 -- Still stuck escalation appears stuck for ops; check/reassign",
                 "payload_kind": "escalation",
             }, escalation_row
+            psql(
+                admin_conninfo,
+                """
+DELETE FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-228'
+  AND kind = 'transition';
+""",
+            )
 
             sent.clear()
             escalation_delivered = TicketBoardNotifyListener(

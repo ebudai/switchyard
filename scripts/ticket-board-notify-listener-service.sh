@@ -106,6 +106,7 @@ Environment=PYTHONUNBUFFERED=1
 Environment=PGHOST=/var/run/postgresql
 Environment=PGDATABASE=pgu
 Environment=PGUSER=ticket_board_listener
+Environment=PGU_TICKET_BOARD_PANE_STATE_DIR=%t/pgu-ticket-board/pane-state
 EnvironmentFile=-%h/.config/pgu/ticket-board-notify-listener.env
 StandardOutput=append:$LOG_PATH
 StandardError=append:$LOG_PATH

@@ -138,6 +138,7 @@ def main() -> int:
     assert "pane_busy_determination" in schema_lower
     assert "region_digest" in schema_lower
     assert "create or replace function ticket_board.record_notification_trace" in executable_schema_lower
+    assert "create or replace function ticket_board.next_notification_attempt" in executable_schema_lower
     assert "create or replace function ticket_board.notification_delivery_in_backoff" in executable_schema_lower
 
     assert_contains_all(schema, EXPECTED_STATES, "state constraint")

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression test: board cards show compact role text without workflow controls."""
+"""Regression test: board cards show assignee only during Implementation."""
 
 from __future__ import annotations
 
@@ -22,7 +22,10 @@ def main() -> int:
     assert "assigneeValue.textContent = roleLabel(ticket.assignee);" in HTML
     assert "buildOption(assigneeInput, assignee, roleLabel(assignee))" in HTML
     assert "buildOption(assigneeSelect, assignee, roleLabel(assignee))" in HTML
-    assert "titleWrap.append(idEl, titleEl, assigneeLine);" in HTML
+    assert "titleWrap.append(idEl, titleEl);" in HTML
+    assert "if (ticket.state === 'in_progress') {" in HTML
+    assert "titleWrap.appendChild(assigneeLine);" in HTML
+    assert "titleWrap.append(idEl, titleEl, assigneeLine);" not in HTML
     assert "stateTag.textContent = stateLabel(ticket.state);" not in HTML
     assert "card.append(top, tags, badges);" not in HTML
     assert "advanceButton.textContent = `Advance -> ${stateLabel(nextState)}`;" not in HTML

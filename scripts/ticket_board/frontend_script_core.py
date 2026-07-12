@@ -1007,13 +1007,16 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       const titleEl = document.createElement('div');
       titleEl.className = 'card-title';
       titleEl.textContent = ticket.title;
-      const assigneeLine = document.createElement('div');
-      assigneeLine.className = 'card-assignee';
-      const assigneeValue = document.createElement('span');
-      assigneeValue.className = 'card-assignee-value';
-      assigneeValue.textContent = roleLabel(ticket.assignee);
-      assigneeLine.appendChild(assigneeValue);
-      titleWrap.append(idEl, titleEl, assigneeLine);
+      titleWrap.append(idEl, titleEl);
+      if (ticket.state === 'in_progress') {
+        const assigneeLine = document.createElement('div');
+        assigneeLine.className = 'card-assignee';
+        const assigneeValue = document.createElement('span');
+        assigneeValue.className = 'card-assignee-value';
+        assigneeValue.textContent = roleLabel(ticket.assignee);
+        assigneeLine.appendChild(assigneeValue);
+        titleWrap.appendChild(assigneeLine);
+      }
       if (ticket.needs_eric_signoff && ticket.state === 'eric_review') {
         const signoffState = document.createElement('div');
         signoffState.className = `card-signoff-state ${ticket.eric_signoff ? 'signed' : 'pending'}`;

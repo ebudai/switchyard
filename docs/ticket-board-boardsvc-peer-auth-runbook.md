@@ -18,6 +18,8 @@ PostgreSQL. Attachment files and captured frames remain filesystem-backed under
   the command plan by default and only changes the host with `--apply`.
 - `deploy/systemd/pgu-ticket-board.service.boardsvc`: proposed system service;
   copy to `/etc/systemd/system/pgu-ticket-board.service` during cutover.
+- `deploy/tmpfiles/pgu-ticket-board.conf`: boot-time recreation for the shared
+  `/tmp/pgu-frames` inbox; install it to `/etc/tmpfiles.d/`.
 - This runbook: root command list, verification, and rollback.
 
 ## Root Commands
@@ -33,8 +35,12 @@ id -u boardsvc >/dev/null 2>&1 || sudo useradd -r -M -d /nonexistent -s /usr/sbi
 # 2. Add local peer auth, reload Postgres, and grant deploy/assets/frames ACLs.
 sudo PG_DATABASE=pgu scripts/ticket-board-boardsvc-setup.sh --apply
 
-# 3. Install the reviewed system unit and start the board under boardsvc.
+# 3. Install the reviewed system unit and tmpfiles entry.
 sudo install -m 0644 deploy/systemd/pgu-ticket-board.service.boardsvc /etc/systemd/system/pgu-ticket-board.service
+sudo install -m 0644 deploy/tmpfiles/pgu-ticket-board.conf /etc/tmpfiles.d/pgu-ticket-board.conf
+sudo systemd-tmpfiles --create /etc/tmpfiles.d/pgu-ticket-board.conf
+
+# 4. Reload systemd and start the board under boardsvc.
 sudo systemctl daemon-reload
 sudo systemctl enable --now pgu-ticket-board.service
 ```
@@ -69,6 +75,13 @@ sudo mkdir -p /home/agent/.claude/pgu-tickets-assets /tmp/pgu-frames
 sudo setfacl -R -m u:boardsvc:rwx /home/agent/.claude/pgu-tickets-assets /tmp/pgu-frames
 find /home/agent/.claude/pgu-tickets-assets /tmp/pgu-frames -type d \
   -exec sudo setfacl -m d:u:boardsvc:rwx {} +
+```
+
+The tmpfiles entry recreates the shared frame inbox on boot before the board
+starts:
+
+```text
+d /tmp/pgu-frames 1777 root root -
 ```
 
 Do not add an ACL for `/home/agent/.claude/pgu-tickets` unless the supervised
@@ -111,6 +124,15 @@ data=json.load(sys.stdin)
 assert data["store_backend"] == "postgres", data["store_backend"]'
 BOARD_TICKETS="$(curl -fsS http://127.0.0.1:8770/api/board | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["tickets"]))')"
 test "$BOARD_TICKETS" = "$EXPECTED_TICKETS"
+```
+
+Confirm `/tmp/pgu-frames` is present again even after deleting it:
+
+```bash
+sudo rm -rf /tmp/pgu-frames
+sudo systemd-tmpfiles --create /etc/tmpfiles.d/pgu-ticket-board.conf
+test -d /tmp/pgu-frames
+test "$(stat -c '%a' /tmp/pgu-frames)" = 1777
 ```
 
 Confirm the board reports explicit non-HOME runtime paths:

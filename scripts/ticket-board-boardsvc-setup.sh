@@ -36,6 +36,8 @@ sudo PG_DATABASE=$PG_DATABASE PG_IDENT_MAP=$PG_IDENT_MAP BOARD_ROOT=$BOARD_ROOT 
 
 # 2. Install the proposed system unit after reviewing/editing PGDATABASE.
 sudo install -m 0644 deploy/systemd/pgu-ticket-board.service.boardsvc /etc/systemd/system/pgu-ticket-board.service
+sudo install -m 0644 deploy/tmpfiles/pgu-ticket-board.conf /etc/tmpfiles.d/pgu-ticket-board.conf
+sudo systemd-tmpfiles --create /etc/tmpfiles.d/pgu-ticket-board.conf
 
 # 3. Reload systemd and start the board under $SERVICE_USER.
 sudo systemctl daemon-reload

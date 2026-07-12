@@ -10,6 +10,7 @@ readonly BOARD_SCRIPT="${BOARD_SCRIPT:-$BOARD_CURRENT_LINK/scripts/ticket-board.
 readonly BOARD_HOST="${BOARD_HOST:-127.0.0.1}"
 readonly BOARD_PORT="${BOARD_PORT:-8770}"
 readonly BOARD_UNIX_SOCKET="${BOARD_UNIX_SOCKET:-/tmp/pgu-ticket-board.sock}"
+readonly FRAME_ROOT="${FRAME_ROOT:-/tmp/pgu-frames}"
 readonly LOG_PATH="${LOG_PATH:-/tmp/pgu-ticket-board.log}"
 readonly UNIT_DIR="${UNIT_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}"
 readonly UNIT_PATH="$UNIT_DIR/$SERVICE_NAME"
@@ -102,7 +103,9 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=$BOARD_CURRENT_LINK
-ExecStart=/usr/bin/python3 $BOARD_SCRIPT --host $BOARD_HOST --port $BOARD_PORT --unix-socket $BOARD_UNIX_SOCKET
+ExecStartPre=/bin/mkdir -p $FRAME_ROOT
+ExecStartPre=/bin/chmod 1777 $FRAME_ROOT
+ExecStart=/usr/bin/python3 $BOARD_SCRIPT --host $BOARD_HOST --port $BOARD_PORT --unix-socket $BOARD_UNIX_SOCKET --frames $FRAME_ROOT
 Restart=on-failure
 RestartSec=2
 Environment=PYTHONUNBUFFERED=1

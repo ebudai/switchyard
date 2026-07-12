@@ -46,8 +46,20 @@ grep -q "ExecStart=/usr/bin/python3 $DEPLOY_ROOT/current/scripts/ticket-board.py
     echo "FAIL: unit ExecStart did not point to deploy current script" >&2
     exit 1
 }
+grep -q '^ExecStartPre=/bin/mkdir -p /tmp/pgu-frames$' "$UNIT_DIR/service.unit" || {
+    echo "FAIL: unit did not recreate the frame directory before start" >&2
+    exit 1
+}
+grep -q '^ExecStartPre=/bin/chmod 1777 /tmp/pgu-frames$' "$UNIT_DIR/service.unit" || {
+    echo "FAIL: unit did not restore shared frame directory permissions before start" >&2
+    exit 1
+}
 grep -q -- "--unix-socket /tmp/pgu-ticket-board.sock" "$UNIT_DIR/service.unit" || {
     echo "FAIL: unit did not expose the local pane Unix socket" >&2
+    exit 1
+}
+grep -q -- "--frames /tmp/pgu-frames" "$UNIT_DIR/service.unit" || {
+    echo "FAIL: unit did not pin the shared frame directory explicitly" >&2
     exit 1
 }
 retired_backend_flag='--store''-backend'

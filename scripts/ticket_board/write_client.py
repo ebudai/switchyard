@@ -282,6 +282,9 @@ class TicketBoardWriteClient:
     def submit_to_audit(self, ticket_id: str, *, commit_hash: str = "", caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "submit_to_audit", {"commit_hash": commit_hash}, caller_role=caller_role)
 
+    def request_commit_exempt(self, ticket_id: str, *, reason: str, caller_role: str | None = None) -> dict[str, Any]:
+        return self._ticket_action(ticket_id, "request_commit_exempt", {"reason": reason}, caller_role=caller_role)
+
     def audit_sign_off(self, ticket_id: str, *, text: str, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "audit_sign_off", {"text": text}, caller_role=caller_role)
 
@@ -400,6 +403,10 @@ def _build_parser() -> argparse.ArgumentParser:
     submit.add_argument("ticket_id")
     submit.add_argument("--commit-hash", default="")
 
+    request_exempt = subparsers.add_parser("request-commit-exempt")
+    request_exempt.add_argument("ticket_id")
+    request_exempt.add_argument("--reason", required=True)
+
     for name in ("audit-kick-back", "eric-reopen", "cancel"):
         sub = subparsers.add_parser(name)
         sub.add_argument("ticket_id")
@@ -453,6 +460,8 @@ def main(argv: list[str] | None = None) -> int:
         response = client.route(args.ticket_id, state=args.state, assignee=args.assignee)
     elif command == "submit_to_audit":
         response = client.submit_to_audit(args.ticket_id, commit_hash=args.commit_hash)
+    elif command == "request_commit_exempt":
+        response = client.request_commit_exempt(args.ticket_id, reason=args.reason)
     elif command == "audit_sign_off":
         response = client.audit_sign_off(args.ticket_id, text=args.text)
     elif command in {"audit_kick_back", "eric_reopen", "cancel"}:

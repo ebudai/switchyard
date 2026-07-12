@@ -54,6 +54,7 @@ GRANT EXECUTE ON FUNCTION ticket_board.file_bug(text, text, text) TO ticket_boar
 GRANT EXECUTE ON FUNCTION ticket_board.route(text, text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.start_work(text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.submit_to_audit(text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.request_commit_exempt(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.audit_sign_off(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.audit_kick_back(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.inspector_sign_off(text) TO ticket_board_service;

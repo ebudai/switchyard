@@ -24,6 +24,7 @@ WRITE_FUNCTIONS = [
     "ticket_board.route(text,text,text)",
     "ticket_board.start_work(text)",
     "ticket_board.submit_to_audit(text,text)",
+    "ticket_board.request_commit_exempt(text,text)",
     "ticket_board.audit_sign_off(text,text)",
     "ticket_board.audit_kick_back(text,text)",
     "ticket_board.inspector_sign_off(text)",

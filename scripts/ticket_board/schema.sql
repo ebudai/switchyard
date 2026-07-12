@@ -1920,6 +1920,66 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION ticket_board.request_commit_exempt(
+    id text,
+    reason text
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    actor text;
+    ticket_assignee text;
+    ticket_state text;
+    ticket_commit_exempt boolean;
+    normalized_reason text := btrim(coalesce(reason, ''));
+BEGIN
+    PERFORM ticket_board.require_actor(ARRAY['main', 'app', 'ops', 'perf', 'research'], 'request_commit_exempt');
+    actor := ticket_board.current_app_actor();
+    IF actor NOT IN ('main', 'app', 'ops', 'perf', 'research') THEN
+        RAISE EXCEPTION '% cannot call request_commit_exempt', actor
+            USING ERRCODE = '42501';
+    END IF;
+    IF normalized_reason = '' THEN
+        RAISE EXCEPTION 'request_commit_exempt requires a non-empty reason';
+    END IF;
+
+    SELECT tickets.assignee, tickets.state, tickets.commit_exempt
+    INTO ticket_assignee, ticket_state, ticket_commit_exempt
+    FROM ticket_board.tickets
+    WHERE tickets.id = request_commit_exempt.id
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ticket not found: %', id;
+    END IF;
+    IF ticket_assignee <> actor THEN
+        RAISE EXCEPTION '% cannot call request_commit_exempt for ticket assigned to %', actor, ticket_assignee
+            USING ERRCODE = '42501';
+    END IF;
+    IF ticket_state <> 'in_progress' THEN
+        RAISE EXCEPTION 'request_commit_exempt requires an in_progress ticket';
+    END IF;
+    IF ticket_commit_exempt THEN
+        RAISE EXCEPTION 'ticket is already commit_exempt';
+    END IF;
+
+    PERFORM ticket_board.append_ticket_comment(
+        id,
+        actor,
+        'Commit exemption requested: ' || normalized_reason
+    );
+    UPDATE ticket_board.tickets
+    SET state = 'analysis',
+        assignee = 'unassigned',
+        parked = false
+    WHERE tickets.id = request_commit_exempt.id;
+    PERFORM ticket_board.touch_ticket(id);
+END;
+$$;
+
 DROP FUNCTION IF EXISTS ticket_board.audit_sign_off(text);
 CREATE OR REPLACE FUNCTION ticket_board.audit_sign_off(
     id text,

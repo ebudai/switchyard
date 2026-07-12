@@ -66,6 +66,7 @@ EXPECTED_FUNCTION_API = {
     "ticket_board.route",
     "ticket_board.start_work",
     "ticket_board.submit_to_audit",
+    "ticket_board.request_commit_exempt",
     "ticket_board.inspector_sign_off",
     "ticket_board.inspector_kick_back",
     "ticket_board.audit_sign_off",

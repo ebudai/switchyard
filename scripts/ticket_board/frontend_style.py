@@ -232,13 +232,13 @@ STYLE = """    :root {
       margin-bottom: 12px;
     }
     .board-scroll {
-      overflow: auto;
+      overflow-x: auto;
+      overflow-y: visible;
       padding: 18px;
     }
     .board {
-      min-width: 1320px;
+      min-width: 100%;
       display: grid;
-      grid-template-columns: repeat(6, minmax(205px, 1fr));
       gap: 16px;
       align-items: start;
     }
@@ -739,7 +739,6 @@ STYLE = """    :root {
       .detail-grid { grid-template-columns: 1fr; }
     }
     @media (max-width: 980px) {
-      .board { min-width: 980px; }
       .detail-overlay {
         padding: 0;
       }

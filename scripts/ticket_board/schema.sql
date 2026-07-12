@@ -1662,6 +1662,7 @@ BEGIN
         'commit_hash', ticket_row.commit_hash,
         'commit_exempt', ticket_row.commit_exempt,
         'manually_controlled', ticket_row.manually_controlled,
+        'parked', ticket_row.parked,
         'screenshot', ticket_row.screenshot,
         'screenshots', screenshots,
         'comments', comments,
@@ -1763,7 +1764,8 @@ $$;
 
 CREATE OR REPLACE FUNCTION ticket_board.create_ticket(
     title text,
-    body text
+    body text,
+    initial_state text
 )
 RETURNS text
 LANGUAGE plpgsql
@@ -1774,12 +1776,24 @@ AS $$
 DECLARE
     actor text;
     ticket_id text;
+    normalized_state text := btrim(coalesce(initial_state, 'analysis'));
+    normalized_assignee text := 'unassigned';
+    normalized_parked boolean := false;
     created_at_value timestamptz := clock_timestamp();
     created_text_value text := ticket_board.utc_text(created_at_value);
 BEGIN
     actor := ticket_board.require_actor(ARRAY['director', 'eric'], 'create_ticket');
     IF btrim(coalesce(title, '')) = '' THEN
         RAISE EXCEPTION 'title must be non-empty';
+    END IF;
+    IF normalized_state = '' THEN
+        normalized_state := 'analysis';
+    END IF;
+    IF normalized_state NOT IN ('analysis', 'backlog') THEN
+        RAISE EXCEPTION 'invalid create state: %; allowed: analysis, backlog', normalized_state;
+    END IF;
+    IF normalized_state = 'backlog' THEN
+        normalized_parked := true;
     END IF;
 
     ticket_id := ticket_board.next_ticket_id();
@@ -1789,6 +1803,7 @@ BEGIN
         body,
         state,
         assignee,
+        parked,
         created_text,
         updated_text,
         created_at,
@@ -1799,8 +1814,9 @@ BEGIN
         ticket_id,
         btrim(title),
         coalesce(body, ''),
-        'analysis',
-        'unassigned',
+        normalized_state,
+        normalized_assignee,
+        normalized_parked,
         created_text_value,
         created_text_value,
         created_at_value,
@@ -1809,8 +1825,9 @@ BEGIN
             'id', ticket_id,
             'title', btrim(title),
             'body', coalesce(body, ''),
-            'state', 'analysis',
-            'assignee', 'unassigned',
+            'state', normalized_state,
+            'assignee', normalized_assignee,
+            'parked', normalized_parked,
             'comments', '[]'::jsonb,
             'created', created_text_value,
             'updated', created_text_value
@@ -1820,6 +1837,19 @@ BEGIN
     PERFORM ticket_board.refresh_ticket_source_json(ticket_id);
     RETURN ticket_id;
 END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.create_ticket(
+    title text,
+    body text
+)
+RETURNS text
+LANGUAGE sql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+    SELECT ticket_board.create_ticket(title, body, 'analysis');
 $$;
 
 CREATE OR REPLACE FUNCTION ticket_board.file_bug(

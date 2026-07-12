@@ -488,6 +488,28 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     )
     created = created_payload["ticket"]  # type: ignore[index]
     source_id = str(created["id"])  # type: ignore[index]
+    assert created["state"] == "analysis", created  # type: ignore[index]
+    assert created["assignee"] == "unassigned", created  # type: ignore[index]
+
+    backlog_created_payload = post_json(
+        base_url,
+        "/api/tickets/actions/create_ticket",
+        {"title": "API backlog create", "body": "Deferred work.", "state": "backlog", "assignee": "ops"},
+        caller="director",
+        expect=201,
+    )
+    backlog_created = backlog_created_payload["ticket"]  # type: ignore[index]
+    assert backlog_created["state"] == "backlog", backlog_created  # type: ignore[index]
+    assert backlog_created["assignee"] == "unassigned", backlog_created  # type: ignore[index]
+
+    disallowed_create_state = post_json(
+        base_url,
+        "/api/tickets/actions/create_ticket",
+        {"title": "Bad create state", "body": "No.", "state": "audit"},
+        caller="director",
+        expect=400,
+    )
+    assert "invalid create state" in str(disallowed_create_state), disallowed_create_state
 
     uploaded = upload_png(base_url)
     uploaded_image = uploaded["image"]  # type: ignore[index]

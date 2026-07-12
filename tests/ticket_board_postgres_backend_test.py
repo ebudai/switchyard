@@ -173,12 +173,89 @@ def main() -> int:
                 needs_eric_signoff=False,
             )
             assert created["id"] == "PGU-1", created
+            assert created["state"] == "analysis", created
+            assert created["assignee"] == "unassigned", created
             assert service_app.verify_created_ticket_persisted(created, before_signature) != before_signature
             assert not (root / f"json-unused-{SERVICE_ROLE}").exists(), "postgres backend should not create a JSON store directory"
             assert "permission denied" in psql_error(
                 service_conn,
                 "UPDATE ticket_board.tickets SET title = title WHERE id = 'PGU-1';",
             )
+            backlog_created = service_app.create_ticket(
+                title="Postgres backlog create",
+                body="Deferred future work.",
+                screenshot=None,
+                assignee="ops",
+                needs_eric_signoff=False,
+                state="backlog",
+            )
+            assert backlog_created["state"] == "backlog", backlog_created
+            assert backlog_created["assignee"] == "unassigned", backlog_created
+            backlog_state = json.loads(
+                psql(
+                    admin_conn,
+                    f"""
+SELECT jsonb_build_object(
+    'state', t.state,
+    'assignee', t.assignee,
+    'parked', t.parked,
+    'queue_count', (SELECT count(*) FROM ticket_board.ticket_notification_queue q WHERE q.ticket_id = t.id),
+    'trace_count', (SELECT count(*) FROM ticket_board.notification_trace nt WHERE nt.ticket_id = t.id)
+)::text
+FROM ticket_board.tickets t
+WHERE t.id = '{backlog_created["id"]}';
+""",
+                )
+            )
+            assert backlog_state == {
+                "state": "backlog",
+                "assignee": "unassigned",
+                "parked": True,
+                "queue_count": 0,
+                "trace_count": 0,
+            }, backlog_state
+            psql(
+                admin_conn,
+                f"""
+UPDATE ticket_board.ticket_notification_state
+SET entered_current_state_at = clock_timestamp() - interval '1 hour',
+    last_activity_at = clock_timestamp() - interval '1 hour',
+    last_nudged_at = NULL,
+    nudge_count = 0
+WHERE ticket_id = '{backlog_created["id"]}';
+SELECT ticket_board.notify_due_nudges(clock_timestamp(), interval '5 minutes', 3);
+""",
+            )
+            backlog_nudge_state = json.loads(
+                psql(
+                    admin_conn,
+                    f"""
+SELECT jsonb_build_object(
+    'queue_count', (SELECT count(*) FROM ticket_board.ticket_notification_queue q WHERE q.ticket_id = t.id),
+    'last_nudged', ns.last_nudged_at IS NOT NULL,
+    'nudge_count', ns.nudge_count
+)::text
+FROM ticket_board.tickets t
+JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
+WHERE t.id = '{backlog_created["id"]}';
+""",
+                )
+            )
+            assert backlog_nudge_state == {"queue_count": 0, "last_nudged": False, "nudge_count": 0}, backlog_nudge_state
+            for disallowed_state in ("in_progress", "inspection", "audit", "director_review", "done", "cancelled"):
+                try:
+                    service_app.create_ticket(
+                        title=f"Bad {disallowed_state}",
+                        body="Must reject pipeline state create.",
+                        screenshot=None,
+                        assignee="ops",
+                        needs_eric_signoff=False,
+                        state=disallowed_state,
+                    )
+                except ValueError as exc:
+                    assert "invalid create state" in str(exc), exc
+                else:
+                    raise AssertionError(f"create unexpectedly accepted {disallowed_state}")
 
             create_attachment = frames / "create-frame-ref.png"
             Image.new("RGB", (2, 2), (120, 40, 80)).save(create_attachment)

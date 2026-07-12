@@ -20,6 +20,7 @@ ROLE_SQL_ARRAY = "ARRAY['director','eric','ops','app','audit','inspector','perf'
 
 WRITE_FUNCTIONS = [
     "ticket_board.create_ticket(text,text)",
+    "ticket_board.create_ticket(text,text,text)",
     "ticket_board.file_bug(text,text,text)",
     "ticket_board.route(text,text,text)",
     "ticket_board.start_work(text)",
@@ -282,6 +283,18 @@ VALUES ('PGU-1', 'transition', 'ops', 'x', '{"kind":"transition"}', 'direct-dml'
 def assert_service_can_execute_every_write_function(admin_conn: str, service_conn: str) -> None:
     created = psql(service_conn, "SELECT ticket_board.create_ticket('Service create', 'Body');")
     assert created.startswith("PGU-"), created
+    backlog_created = psql(service_conn, "SELECT ticket_board.create_ticket('Service backlog create', 'Body', 'backlog');")
+    backlog_row = json.loads(
+        psql(
+            admin_conn,
+            f"""
+SELECT jsonb_build_object('state', state, 'assignee', assignee, 'parked', parked)::text
+FROM ticket_board.tickets
+WHERE id = {sql_string(backlog_created)};
+""",
+        )
+    )
+    assert backlog_row == {"state": "backlog", "assignee": "unassigned", "parked": True}, backlog_row
 
     insert_ticket(admin_conn, "PGU-100", title="Source")
     filed = psql(service_conn, "SELECT ticket_board.file_bug('Service bug', 'Body', 'PGU-100');")
@@ -902,6 +915,7 @@ FROM unnest({ROLE_SQL_ARRAY}) AS role_name;
             assert_direct_dml_denied(admin_conn, role_conn)
             for role in PANE_ROLES:
                 assert_permission_denied(role_conn[role], "SELECT ticket_board.create_ticket('Nope', 'Body');")
+                assert_permission_denied(role_conn[role], "SELECT ticket_board.create_ticket('Nope', 'Body', 'backlog');")
 
             service_conn = role_conn["ticket_board_service"]
             listener_conn = role_conn["ticket_board_listener"]

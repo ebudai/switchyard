@@ -130,12 +130,13 @@ class MemoryCreateApp:
         return after
 
 
-def post_create(server: TicketBoardServer, title: str) -> dict[str, object]:
+def post_create(server: TicketBoardServer, title: str, *, state: str = "analysis") -> dict[str, object]:
     body = json.dumps(
         {
             "title": title,
             "body": "Created through API.",
             "assignee": "app",
+            "state": state,
             "needs_eric_signoff": False,
         }
     ).encode("utf-8")
@@ -163,6 +164,27 @@ def test_server_create_notifies_director() -> None:
         try:
             payload = post_create(server, "Instant notify")
             assert notifier.created == [{"id": payload["ticket"]["id"], "title": "Instant notify"}], notifier.created
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+
+def test_server_backlog_create_does_not_notify_director() -> None:
+    with tempfile.TemporaryDirectory(prefix="board-director-notify-backlog.") as tmpdir:
+        root = Path(tmpdir)
+        notifier = FakeNotifier()
+        server = TicketBoardServer(
+            ("127.0.0.1", 0),
+            MemoryCreateApp(root / "frames", root / "assets"),
+            director_notifier=notifier,
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            payload = post_create(server, "Quiet backlog", state="backlog")
+            assert payload["ticket"]["state"] == "backlog", payload
+            assert notifier.created == [], notifier.created
         finally:
             server.shutdown()
             server.server_close()
@@ -207,6 +229,7 @@ def test_director_notifier_batches_quick_creates() -> None:
 
 def main() -> int:
     test_server_create_notifies_director()
+    test_server_backlog_create_does_not_notify_director()
     test_server_create_does_not_notify_when_ticket_is_not_persisted()
     test_director_notifier_batches_quick_creates()
     print("board_director_notification_test: ok")

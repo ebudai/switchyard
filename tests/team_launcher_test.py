@@ -98,6 +98,7 @@ def test_pgu_config_matches_director_supplied_live_role_assignments() -> None:
     roles = {role.role: role for role in config.roles}
 
     assert set(roles) == {"director", "main", "app", "research", "ops", "audit", "inspector"}
+    assert all(role.yolo for role in roles.values())
     assert (roles["director"].cli, roles["director"].model) == (["claude"], "opus-4.8")
     assert (roles["ops"].cli, roles["ops"].model, roles["ops"].extra_args) == (
         ["codex"],
@@ -117,6 +118,25 @@ def test_pgu_config_matches_director_supplied_live_role_assignments() -> None:
     assert (roles["research"].cli, roles["research"].model) == (["claude"], "sonnet-5")
     assert (roles["audit"].cli, roles["audit"].model) == (["claude"], "sonnet-5")
     assert (roles["inspector"].cli, roles["inspector"].model) == (["gemini"], "3.5-flash")
+
+
+def test_yolo_config_translates_to_cli_specific_bypass_flags() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    roles = {role.role: role for role in config.roles}
+
+    expected_flags = {
+        "director": "--dangerously-skip-permissions",
+        "main": "--dangerously-bypass-approvals-and-sandbox",
+        "app": "--dangerously-bypass-approvals-and-sandbox",
+        "research": "--dangerously-skip-permissions",
+        "ops": "--dangerously-bypass-approvals-and-sandbox",
+        "audit": "--dangerously-skip-permissions",
+        "inspector": "--yolo",
+    }
+
+    for role_name, expected_flag in expected_flags.items():
+        command = cli_command_for_role(roles[role_name], session_dir=config.session_dir)
+        assert expected_flag in command, (role_name, command)
 
 
 def test_start_is_attach_or_start_and_never_duplicates_existing_session() -> None:
@@ -142,6 +162,7 @@ def test_start_creates_missing_session_once_then_attaches() -> None:
     assert runner.calls[0] == ["tmux", "has-session", "-t", "pgu-ops"]
     assert runner.calls[1][:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"]
     assert "PGU_PANE_TARGET=pgu-ops:0.0" in runner.calls[1][-1]
+    assert "--dangerously-bypass-approvals-and-sandbox" in runner.calls[1][-1]
     assert runner.calls[2] == ["tmux", "attach", "-t", "pgu-ops"]
 
 
@@ -212,6 +233,7 @@ def test_bootstrap_template_does_not_guess_active_roles() -> None:
 def main() -> int:
     test_dry_run_materializes_pgu_layout_with_all_role_commands()
     test_pgu_config_matches_director_supplied_live_role_assignments()
+    test_yolo_config_translates_to_cli_specific_bypass_flags()
     test_start_is_attach_or_start_and_never_duplicates_existing_session()
     test_start_creates_missing_session_once_then_attaches()
     test_reload_uses_recorded_resume_uuid_when_recreating_session()

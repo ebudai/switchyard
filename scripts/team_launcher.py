@@ -15,6 +15,11 @@ from typing import Any, Callable, Sequence
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "team-launcher"
 DEFAULT_SESSION_DIR = Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-sessions")
+YOLO_FLAGS_BY_CLI = {
+    "claude": "--dangerously-skip-permissions",
+    "codex": "--dangerously-bypass-approvals-and-sandbox",
+    "gemini": "--yolo",
+}
 
 
 @dataclass(frozen=True)
@@ -27,6 +32,7 @@ class RoleConfig:
     cli: list[str]
     model: str
     model_arg: str
+    yolo: bool
     extra_args: list[str]
     resume_flag: str
     live_commands: list[str]
@@ -66,6 +72,14 @@ def _string_list(value: Any, *, field: str, role: str) -> list[str]:
     return list(value)
 
 
+def _bool_value(value: Any, *, field: str, role: str) -> bool:
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise SystemExit(f"role {role} {field} must be a JSON boolean")
+    return value
+
+
 def _role_from_json(project: str, raw: dict[str, Any]) -> RoleConfig:
     role = str(raw.get("role") or "").strip()
     if not role:
@@ -92,6 +106,7 @@ def _role_from_json(project: str, raw: dict[str, Any]) -> RoleConfig:
         cli=cli,
         model=str(raw.get("model") or "").strip(),
         model_arg=str(raw.get("model_arg") or "--model").strip(),
+        yolo=_bool_value(raw.get("yolo"), field="yolo", role=role),
         extra_args=_string_list(raw.get("extra_args"), field="extra_args", role=role),
         resume_flag=str(raw.get("resume_flag") or "--resume").strip(),
         live_commands=_string_list(raw.get("live_commands"), field="live_commands", role=role),
@@ -146,10 +161,30 @@ def session_id_for_role(role: RoleConfig, session_dir: Path) -> str:
     return str(parsed.get("session_id") or "").strip()
 
 
+def _command_name(value: str) -> str:
+    return Path(value.strip()).name
+
+
+def yolo_flag_for_role(role: RoleConfig) -> str:
+    cli_name = _command_name(role.cli[0])
+    flag = YOLO_FLAGS_BY_CLI.get(cli_name)
+    if flag is None:
+        raise SystemExit(f"role {role.role} uses unsupported yolo cli {cli_name!r}")
+    return flag
+
+
+def yolo_args_for_role(role: RoleConfig) -> list[str]:
+    if not role.yolo:
+        return []
+    flag = yolo_flag_for_role(role)
+    return [] if flag in role.extra_args else [flag]
+
+
 def cli_command_for_role(role: RoleConfig, *, session_dir: Path, resume: bool = False) -> list[str]:
     command = list(role.cli)
     if role.model:
         command.extend([role.model_arg, role.model])
+    command.extend(yolo_args_for_role(role))
     command.extend(role.extra_args)
     if resume:
         session_id = session_id_for_role(role, session_dir)
@@ -178,10 +213,6 @@ def tmux_kill_session_args(role: RoleConfig) -> list[str]:
 
 def tmux_current_command_args(role: RoleConfig) -> list[str]:
     return ["tmux", "display-message", "-p", "-t", role.target, "#{pane_current_command}"]
-
-
-def _command_name(value: str) -> str:
-    return Path(value.strip()).name
 
 
 def expected_live_commands(role: RoleConfig) -> set[str]:

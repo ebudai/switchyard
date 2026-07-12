@@ -57,6 +57,10 @@ Each role entry contains:
 - `workdir`: working directory for the tmux session.
 - `cli`: argv array for the CLI binary.
 - `model`, `model_arg`: optional model selector appended to `cli`.
+- `yolo`: optional boolean. When true, the launcher appends the appropriate
+  bypass-permissions flag for the configured CLI: Claude uses
+  `--dangerously-skip-permissions`, Codex uses
+  `--dangerously-bypass-approvals-and-sandbox`, and Gemini uses `--yolo`.
 - `extra_args`: optional additional argv entries appended after the model.
 - `resume_flag`: flag used by that CLI for context resume.
 - `live_commands`: optional command names accepted as the live pane process

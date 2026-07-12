@@ -74,6 +74,13 @@ class Transition:
     kind: str = "transition"
 
 
+@dataclass(frozen=True)
+class ActivityTrace:
+    busy: bool
+    reason: str
+    region_digest: str = ""
+
+
 def parse_transition_payload(payload: str) -> Transition:
     parsed = json.loads(payload)
     if not isinstance(parsed, dict):
@@ -177,6 +184,14 @@ class PaneActivityGate:
         self.sleeper = sleeper
         self._last_region_digest_by_target: dict[str, str] = {}
         self._last_changed_at_by_target: dict[str, float] = {}
+        self._last_trace_by_target: dict[str, ActivityTrace] = {}
+
+    def _record_trace(self, target: str, trace: ActivityTrace) -> bool:
+        self._last_trace_by_target[target] = trace
+        return trace.busy
+
+    def last_trace(self, target: str) -> ActivityTrace | None:
+        return self._last_trace_by_target.get(target)
 
     def _capture(self, target: str) -> str | None:
         try:
@@ -227,22 +242,24 @@ class PaneActivityGate:
     def is_busy(self, target: str) -> bool:
         text = self._capture(target)
         if text is None:
-            return False
+            return self._record_trace(target, ActivityTrace(False, "capture_failed"))
         first_digest = self._activity_digest(target, text)
         if self.stable_idle_seconds > 0:
             self.sleeper(self.stable_idle_seconds)
             second_text = self._capture(target)
             if second_text is None:
-                return False
+                return self._record_trace(target, ActivityTrace(False, "capture_failed", first_digest))
             second_digest = self._activity_digest(target, second_text)
             now = self.monotonic()
             if first_digest != second_digest:
                 self._last_region_digest_by_target[target] = second_digest
                 self._last_changed_at_by_target[target] = now
-                return True
+                return self._record_trace(target, ActivityTrace(True, "region_changed", second_digest))
             self._last_region_digest_by_target[target] = second_digest
-            return False
-        return self._mark_recent_activity(target, first_digest, self.monotonic())
+            return self._record_trace(target, ActivityTrace(False, "stable_idle", second_digest))
+        changed = self._mark_recent_activity(target, first_digest, self.monotonic())
+        reason = "cold_start_or_region_changed" if changed else "region_stable"
+        return self._record_trace(target, ActivityTrace(changed, reason, first_digest))
 
     def is_working(self, target: str) -> bool:
         return self.is_busy(target)
@@ -335,6 +352,75 @@ FROM ticket_board.claim_notification()
         if isinstance(value, bytes):
             return value.decode("utf-8")
         return str(value)
+
+    def _payload_kind(self, payload: str) -> str:
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            return ""
+        if not isinstance(parsed, dict):
+            return ""
+        return str(parsed.get("kind") or "").strip().lower()
+
+    def _safe_json_payload(self, payload: str) -> Any:
+        try:
+            return json.loads(payload)
+        except json.JSONDecodeError:
+            return payload
+
+    def _activity_trace(self, target: str, pane_busy: bool) -> ActivityTrace:
+        gate_owner = getattr(self.activity_gate, "__self__", None)
+        last_trace = getattr(gate_owner, "last_trace", None)
+        if callable(last_trace):
+            trace = last_trace(target)
+            if isinstance(trace, ActivityTrace):
+                return trace
+        return ActivityTrace(pane_busy, "busy" if pane_busy else "idle")
+
+    def _trace_notification(
+        self,
+        conn: Any,
+        *,
+        notification_id: int,
+        ticket_id: str,
+        target_role: str,
+        kind: str,
+        event: str,
+        pane_busy: bool | None = None,
+        busy_reason: str | None = None,
+        region_digest: str | None = None,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        pane_state = None if pane_busy is None else ("busy" if pane_busy else "idle")
+        try:
+            conn.execute(
+                """
+SELECT ticket_board.record_notification_trace(
+    %s::text,
+    %s::bigint,
+    %s::text,
+    %s::text,
+    %s::text,
+    %s::text,
+    %s::text,
+    %s::text,
+    %s::jsonb
+)
+""",
+                (
+                    ticket_id,
+                    notification_id,
+                    target_role,
+                    kind,
+                    event,
+                    pane_state,
+                    busy_reason,
+                    region_digest,
+                    json.dumps(detail or {}, sort_keys=True),
+                ),
+            )
+        except Exception as exc:  # Trace failures must not wedge delivery.
+            self.logger.warning("Failed to record notification trace for %s/%s: %s", notification_id, event, exc)
 
     def _ack_notification(self, conn: Any, notification_id: int) -> None:
         conn.execute("SELECT ticket_board.ack_notification(%s::bigint)", (notification_id,))
@@ -470,21 +556,82 @@ WHERE id = %s
             if row is None:
                 break
             notification_id, ticket_id, target_role, message, payload, attempts = row
+            kind = self._payload_kind(payload)
+            self._trace_notification(
+                conn,
+                notification_id=notification_id,
+                ticket_id=ticket_id,
+                target_role=target_role,
+                kind=kind,
+                event="listener_claim",
+                detail={"attempts": attempts, "payload": self._safe_json_payload(payload)},
+            )
             target = ROLE_TO_TARGET.get(target_role)
             if self.stop_event.is_set():
                 break
             if target is None:
                 self.logger.warning("Acking notification %s with unknown target role %s", notification_id, target_role)
+                self._trace_notification(
+                    conn,
+                    notification_id=notification_id,
+                    ticket_id=ticket_id,
+                    target_role=target_role,
+                    kind=kind,
+                    event="drop",
+                    busy_reason="unknown_target_role",
+                    detail={"payload": self._safe_json_payload(payload)},
+                )
+                self._trace_notification(
+                    conn,
+                    notification_id=notification_id,
+                    ticket_id=ticket_id,
+                    target_role=target_role,
+                    kind=kind,
+                    event="listener_ack",
+                    detail={"reason": "unknown_target_role"},
+                )
                 self._ack_notification(conn, notification_id)
                 continue
             if not self._notification_is_current(conn, ticket_id, target_role, payload):
                 self.logger.info("Dropping stale notification %s for %s: %s", notification_id, ticket_id, payload)
+                self._trace_notification(
+                    conn,
+                    notification_id=notification_id,
+                    ticket_id=ticket_id,
+                    target_role=target_role,
+                    kind=kind,
+                    event="drop",
+                    busy_reason="stale_notification",
+                    detail={"payload": self._safe_json_payload(payload)},
+                )
+                self._trace_notification(
+                    conn,
+                    notification_id=notification_id,
+                    ticket_id=ticket_id,
+                    target_role=target_role,
+                    kind=kind,
+                    event="listener_ack",
+                    detail={"reason": "stale_notification"},
+                )
                 self._ack_notification(conn, notification_id)
                 continue
             defer_age = self._defer_age_seconds(conn, notification_id)
             pane_busy = self.activity_gate(target)
+            activity_trace = self._activity_trace(target, pane_busy)
             if pane_busy and defer_age < self.max_defer_seconds:
                 self.logger.info("Pane %s is active; requeueing notification %s for %s", target, notification_id, ticket_id)
+                self._trace_notification(
+                    conn,
+                    notification_id=notification_id,
+                    ticket_id=ticket_id,
+                    target_role=target_role,
+                    kind=kind,
+                    event="gate_defer",
+                    pane_busy=True,
+                    busy_reason=activity_trace.reason,
+                    region_digest=activity_trace.region_digest,
+                    detail={"target": target, "defer_age_seconds": defer_age, "attempts": attempts},
+                )
                 self._requeue_notification(conn, notification_id, attempts, "pane busy")
                 continue
             if pane_busy:
@@ -495,12 +642,60 @@ WHERE id = %s
                     notification_id,
                     ticket_id,
                 )
+                self._trace_notification(
+                    conn,
+                    notification_id=notification_id,
+                    ticket_id=ticket_id,
+                    target_role=target_role,
+                    kind=kind,
+                    event="max_defer_force_deliver",
+                    pane_busy=True,
+                    busy_reason=activity_trace.reason,
+                    region_digest=activity_trace.region_digest,
+                    detail={"target": target, "defer_age_seconds": defer_age, "attempts": attempts},
+                )
             try:
                 self.sender(target, message)
             except (subprocess.SubprocessError, OSError) as exc:
                 self.logger.warning("Failed to deliver queued ticket notification through directorctl: %s", exc)
+                self._trace_notification(
+                    conn,
+                    notification_id=notification_id,
+                    ticket_id=ticket_id,
+                    target_role=target_role,
+                    kind=kind,
+                    event="send_failed",
+                    pane_busy=pane_busy,
+                    busy_reason=str(exc),
+                    region_digest=activity_trace.region_digest,
+                    detail={"target": target, "message": message, "attempts": attempts},
+                )
                 self._requeue_notification(conn, notification_id, attempts, str(exc))
                 continue
+            self._trace_notification(
+                conn,
+                notification_id=notification_id,
+                ticket_id=ticket_id,
+                target_role=target_role,
+                kind=kind,
+                event="send",
+                pane_busy=pane_busy,
+                busy_reason=activity_trace.reason,
+                region_digest=activity_trace.region_digest,
+                detail={"target": target, "message": message, "attempts": attempts},
+            )
+            self._trace_notification(
+                conn,
+                notification_id=notification_id,
+                ticket_id=ticket_id,
+                target_role=target_role,
+                kind=kind,
+                event="listener_ack",
+                pane_busy=pane_busy,
+                busy_reason=activity_trace.reason,
+                region_digest=activity_trace.region_digest,
+                detail={"target": target},
+            )
             self._ack_notification(conn, notification_id)
             self.delivered_count += 1
             delivered += 1

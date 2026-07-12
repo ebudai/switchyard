@@ -131,6 +131,12 @@ def main() -> int:
     assert "create table if not exists ticket_board.ticket_blockers" in schema_lower
     assert "create table if not exists ticket_board.ticket_comments" in schema_lower
     assert "create table if not exists ticket_board.ticket_attachments" in schema_lower
+    assert "create table if not exists ticket_board.notification_trace" in schema_lower
+    assert "ticket_state_at_event" in schema_lower
+    assert "ticket_assignee_at_event" in schema_lower
+    assert "pane_busy_determination" in schema_lower
+    assert "region_digest" in schema_lower
+    assert "create or replace function ticket_board.record_notification_trace" in executable_schema_lower
 
     assert_contains_all(schema, EXPECTED_STATES, "state constraint")
     assert "'ready'" not in schema, "removed ready state must not appear in schema.sql"

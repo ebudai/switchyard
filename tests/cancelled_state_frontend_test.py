@@ -25,9 +25,13 @@ def main() -> int:
     assert "showCancelledInput.checked = state.showCancelled;" in HTML
     assert "showCancelledCountEl.textContent = `(${cancelledCount})`;" in HTML
     assert "showCancelledInput.addEventListener('change', () => {" in HTML
-    assert "async function cancelTicket(ticketId, who, text)" in HTML
+    assert "function cancelReason(text)" in HTML
+    assert "const prompted = window.prompt('Cancellation reason');" in HTML
+    assert "async function cancelTicket(ticketId, text)" in HTML
     assert "throw new Error('cancellation requires a non-empty reason');" in HTML
     assert "state: 'cancelled'," in HTML
+    assert "who: 'director'," in HTML
+    assert "}, 'director');" in HTML
     assert "cancelButton.textContent = 'Cancel Ticket';" in HTML
     assert "Requires a cancellation reason in the comment box below." in HTML
     print("cancelled_state_frontend_test: ok")

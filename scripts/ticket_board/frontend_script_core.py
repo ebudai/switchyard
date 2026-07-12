@@ -270,20 +270,28 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       await updateTicket(ticketId, patch, stateTransitionCallerRole(ticket));
     }
 
-    async function cancelTicket(ticketId, who, text) {
-      const trimmedWho = who.trim();
+    function cancelReason(text) {
       const trimmedText = text.trim();
-      if (!trimmedWho || !trimmedText) {
+      if (trimmedText) {
+        return trimmedText;
+      }
+      const prompted = window.prompt('Cancellation reason');
+      return (prompted || '').trim();
+    }
+
+    async function cancelTicket(ticketId, text) {
+      const trimmedText = text.trim();
+      if (!trimmedText) {
         throw new Error('cancellation requires a non-empty reason');
       }
       clearDetailDraft(ticketId);
       await updateTicket(ticketId, {
         state: 'cancelled',
         comment: {
-          who: trimmedWho,
+          who: 'director',
           text: trimmedText,
         },
-      }, trimmedWho);
+      }, 'director');
       setCreateStatus(`Cancelled ${ticketId}.`);
     }
 

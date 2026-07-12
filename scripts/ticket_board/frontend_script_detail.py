@@ -157,7 +157,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         cancelButton.title = 'Requires a cancellation reason in the comment box below.';
         cancelButton.addEventListener('click', async () => {
           try {
-            await cancelTicket(ticket.id, commentWho.value, commentText.value);
+            await cancelTicket(ticket.id, cancelReason(commentText.value));
           } catch (error) {
             setCreateStatus(error.message, true);
             await requestBoardReload();

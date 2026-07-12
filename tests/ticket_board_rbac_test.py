@@ -307,6 +307,27 @@ FROM ticket_board.tickets WHERE id = 'PGU-400';
     )
     assert submitted == {"state": "audit", "commit_hash": "abcdef0"}, submitted
 
+    insert_ticket(
+        admin_conn,
+        "PGU-401",
+        title="Submit exempt fixture",
+        state="in_progress",
+        assignee="ops",
+        implementation="No repo changes.",
+        commit_exempt=True,
+    )
+    psql(service_conn, "SELECT ticket_board.submit_to_audit('PGU-401', '');")
+    exempt_submitted = json.loads(
+        psql(
+            admin_conn,
+            """
+SELECT jsonb_build_object('state', state, 'commit_hash', commit_hash, 'commit_exempt', commit_exempt)::text
+FROM ticket_board.tickets WHERE id = 'PGU-401';
+""",
+        )
+    )
+    assert exempt_submitted == {"state": "audit", "commit_hash": "", "commit_exempt": True}, exempt_submitted
+
     insert_ticket(admin_conn, "PGU-500", title="Audit signoff", state="audit", assignee="audit", implementation="Done.")
     psql(service_conn, "SELECT ticket_board.audit_sign_off('PGU-500');")
     audit_signed = json.loads(
@@ -405,6 +426,28 @@ FROM ticket_board.tickets WHERE id = 'PGU-700';
     )
     assert done == {"state": "done", "commit_hash": "123abcd"}, done
 
+    insert_ticket(
+        admin_conn,
+        "PGU-705",
+        title="Done exempt",
+        state="director_review",
+        assignee="director",
+        implementation="No repo changes.",
+        audit_signoff=True,
+        commit_exempt=True,
+    )
+    psql(service_conn, "SELECT ticket_board.mark_done('PGU-705', '');")
+    exempt_done = json.loads(
+        psql(
+            admin_conn,
+            """
+SELECT jsonb_build_object('state', state, 'commit_hash', commit_hash, 'commit_exempt', commit_exempt)::text
+FROM ticket_board.tickets WHERE id = 'PGU-705';
+""",
+        )
+    )
+    assert exempt_done == {"state": "done", "commit_hash": "", "commit_exempt": True}, exempt_done
+
     insert_ticket(admin_conn, "PGU-701", title="Defer", state="analysis")
     psql(service_conn, "SELECT ticket_board.defer('PGU-701');")
     deferred = json.loads(
@@ -491,6 +534,24 @@ def assert_structural_rules_still_apply(admin_conn: str, service_conn: str) -> N
     assert "comment text must be non-empty" in psql_error(
         service_conn,
         "SELECT ticket_board.cancel('PGU-900', '');",
+    )
+    insert_ticket(admin_conn, "PGU-910", title="Submit still needs commit", state="in_progress", assignee="ops", implementation="Done.")
+    assert "commit_hash must be a 7-40 character hex commit" in psql_error(
+        service_conn,
+        "SELECT ticket_board.submit_to_audit('PGU-910', '');",
+    )
+    insert_ticket(
+        admin_conn,
+        "PGU-911",
+        title="Done still needs commit",
+        state="director_review",
+        assignee="director",
+        implementation="Done.",
+        audit_signoff=True,
+    )
+    assert "commit_hash must be a 7-40 character hex commit" in psql_error(
+        service_conn,
+        "SELECT ticket_board.mark_done('PGU-911', '');",
     )
 
     insert_ticket(admin_conn, "PGU-901", title="Illegal start", state="analysis", assignee="ops")

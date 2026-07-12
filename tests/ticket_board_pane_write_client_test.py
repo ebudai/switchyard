@@ -31,7 +31,7 @@ class RecordingHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         payload = json.loads(self.rfile.read(length) or b"{}")
         caller = self.headers.get(CALLER_ROLE_HEADER)
-        self.server.requests.append((self.path, caller))  # type: ignore[attr-defined]
+        self.server.requests.append((self.path, caller, payload))  # type: ignore[attr-defined]
         ticket_id = "PGU-NEW"
         operation = self.path.rsplit("/", 1)[-1]
         if self.path.startswith("/api/tickets/PGU-") and "/actions/" in self.path:
@@ -63,7 +63,7 @@ class RecordingHandler(BaseHTTPRequestHandler):
 
 class RecordingServer(ThreadingHTTPServer):
     def __init__(self) -> None:
-        self.requests: list[tuple[str, str | None]] = []
+        self.requests: list[tuple[str, str | None, dict[str, object]]] = []
         super().__init__(("127.0.0.1", 0), RecordingHandler)
 
 
@@ -94,6 +94,9 @@ def exercise_pane_cli(base_url: str, commit_hash: str) -> None:
     submitted = run_cli(base_url, "main", "submit-to-audit", "PGU-2100", "--commit-hash", commit_hash)
     assert submitted["state"] == "audit", submitted
     assert submitted["commit_hash"] == commit_hash, submitted
+    exempt_submitted = run_cli(base_url, "main", "submit-to-audit", "PGU-2103")
+    assert exempt_submitted["state"] == "audit", exempt_submitted
+    assert exempt_submitted["commit_hash"] == "", exempt_submitted
 
     filed = run_cli(
         base_url,
@@ -114,14 +117,18 @@ def exercise_pane_cli(base_url: str, commit_hash: str) -> None:
     assert commented["comments"][-1]["who"] == "ops", commented
 
 
-def assert_pane_requests(requests: list[tuple[str, str | None]]) -> None:
-    assert ("/api/tickets/PGU-2100/actions/start_work", "main") in requests
-    assert ("/api/tickets/PGU-2100/actions/submit_to_audit", "main") in requests
-    assert ("/api/tickets/actions/file_bug", "app") in requests
-    assert ("/api/tickets/PGU-2102/actions/add_comment", "ops") in requests
-    for path, caller_role in requests:
+def assert_pane_requests(requests: list[tuple[str, str | None, dict[str, object]]]) -> None:
+    pairs = [(path, caller_role) for path, caller_role, _ in requests]
+    assert ("/api/tickets/PGU-2100/actions/start_work", "main") in pairs
+    assert ("/api/tickets/PGU-2100/actions/submit_to_audit", "main") in pairs
+    assert ("/api/tickets/PGU-2103/actions/submit_to_audit", "main") in pairs
+    assert ("/api/tickets/actions/file_bug", "app") in pairs
+    assert ("/api/tickets/PGU-2102/actions/add_comment", "ops") in pairs
+    for path, caller_role in pairs:
         assert caller_role in {"main", "app", "ops"}, (path, caller_role)
         assert "/actions/" in path, (path, caller_role)
+    empty_submit = next(payload for path, _, payload in requests if path == "/api/tickets/PGU-2103/actions/submit_to_audit")
+    assert empty_submit == {"commit_hash": ""}, empty_submit
 
 
 def main() -> int:

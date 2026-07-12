@@ -43,7 +43,14 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       input.type = 'checkbox';
       input.checked = checked;
       input.addEventListener('change', async () => {
-        await onChange(input.checked);
+        const nextChecked = input.checked;
+        const previousChecked = !nextChecked;
+        try {
+          await onChange(nextChecked);
+        } catch (error) {
+          input.checked = previousChecked;
+          setCreateStatus(error.message, true);
+        }
       });
       label.append(input, document.createTextNode(labelText));
       return label;

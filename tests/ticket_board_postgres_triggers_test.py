@@ -180,7 +180,7 @@ def main() -> int:
 GRANT EXECUTE ON FUNCTION ticket_board.route(text, text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.start_work(text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.submit_to_audit(text, text) TO ticket_board_service;
-GRANT EXECUTE ON FUNCTION ticket_board.audit_sign_off(text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.audit_sign_off(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.inspector_sign_off(text) TO ticket_board_service;
 """,
             )
@@ -612,7 +612,7 @@ WHERE id = 'PGU-80';
             service_call(conninfo, "ops", "SELECT ticket_board.start_work('PGU-84');")
             service_call(conninfo, "ops", "SELECT ticket_board.submit_to_audit('PGU-84', 'abcdef4');")
             service_call(conninfo, "inspector", "SELECT ticket_board.inspector_sign_off('PGU-84');")
-            service_call(conninfo, "audit", "SELECT ticket_board.audit_sign_off('PGU-84');")
+            service_call(conninfo, "audit", "SELECT ticket_board.audit_sign_off('PGU-84', 'Audit verified.');")
             service_call(conninfo, "director", "SELECT ticket_board.route('PGU-84', 'eric_review', 'director');")
             service_call(conninfo, "director", "SELECT ticket_board.route('PGU-84', 'inspection', 'inspector');")
             reinspect_entry = json.loads(

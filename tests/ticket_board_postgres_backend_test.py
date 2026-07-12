@@ -247,8 +247,12 @@ def main() -> int:
             assert persisted_attachment["screenshots_info"][0]["available"] is True, persisted_attachment
             assert stored_path.is_file(), stored_path
 
-            audit_ready = service_app.update_ticket("PGU-100", {"audit_signoff": True})
+            audit_ready = service_app.update_ticket(
+                "PGU-100",
+                {"audit_signoff": True, "comment": {"who": "audit", "text": "Audit verified."}},
+            )
             assert audit_ready["state"] == "director_review", audit_ready
+            assert audit_ready["comments"][-1]["text"] == "Audit verified.", audit_ready
             done = service_app.update_ticket("PGU-100", {"state": "done", "commit_hash": "abcdef1"})
             assert done["state"] == "done", done
 
@@ -269,9 +273,13 @@ def main() -> int:
                 audit_signoff=True,
                 needs_eric_signoff=True,
             )
-            eric_signed = service_app.update_ticket("PGU-300", {"eric_signoff": True})
+            eric_signed = service_app.update_ticket(
+                "PGU-300",
+                {"eric_signoff": True, "comment": {"who": "eric", "text": "Eric approves."}},
+            )
             assert eric_signed["state"] == "director_review", eric_signed
             assert eric_signed["eric_signoff"] is True, eric_signed
+            assert eric_signed["comments"][-1]["text"] == "Eric approves.", eric_signed
 
             insert_ticket(
                 admin_conn,

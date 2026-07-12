@@ -24,11 +24,11 @@ WRITE_FUNCTIONS = [
     "ticket_board.route(text,text,text)",
     "ticket_board.start_work(text)",
     "ticket_board.submit_to_audit(text,text)",
-    "ticket_board.audit_sign_off(text)",
+    "ticket_board.audit_sign_off(text,text)",
     "ticket_board.audit_kick_back(text,text)",
     "ticket_board.inspector_sign_off(text)",
     "ticket_board.inspector_kick_back(text,text)",
-    "ticket_board.eric_sign_off(text)",
+    "ticket_board.eric_sign_off(text,text)",
     "ticket_board.eric_reopen(text,text)",
     "ticket_board.mark_done(text,text)",
     "ticket_board.defer(text)",
@@ -329,17 +329,33 @@ FROM ticket_board.tickets WHERE id = 'PGU-401';
     assert exempt_submitted == {"state": "audit", "commit_hash": "", "commit_exempt": True}, exempt_submitted
 
     insert_ticket(admin_conn, "PGU-500", title="Audit signoff", state="audit", assignee="audit", implementation="Done.")
-    psql(service_conn, "SELECT ticket_board.audit_sign_off('PGU-500');")
+    psql(service_conn, "SELECT ticket_board.audit_sign_off('PGU-500', 'Audit verified.');")
     audit_signed = json.loads(
         psql(
             admin_conn,
             """
-SELECT jsonb_build_object('state', state, 'assignee', assignee, 'audit_signoff', audit_signoff)::text
-FROM ticket_board.tickets WHERE id = 'PGU-500';
+SELECT jsonb_build_object(
+    'state', t.state,
+    'assignee', t.assignee,
+    'audit_signoff', t.audit_signoff,
+    'comment', (SELECT text FROM ticket_board.ticket_comments WHERE ticket_id = t.id ORDER BY position DESC LIMIT 1)
+)::text
+FROM ticket_board.tickets t WHERE id = 'PGU-500';
 """,
         )
     )
-    assert audit_signed == {"state": "director_review", "assignee": "director", "audit_signoff": True}, audit_signed
+    assert audit_signed == {
+        "state": "director_review",
+        "assignee": "director",
+        "audit_signoff": True,
+        "comment": "Audit verified.",
+    }, audit_signed
+
+    insert_ticket(admin_conn, "PGU-502", title="Audit signoff no comment", state="audit", assignee="audit", implementation="Done.")
+    assert "comment text must be non-empty" in psql_error(
+        service_conn,
+        "SELECT ticket_board.audit_sign_off('PGU-502', '');",
+    )
 
     insert_ticket(admin_conn, "PGU-501", title="Audit kickback", state="audit", assignee="audit", implementation="Done.")
     psql(service_conn, "SELECT ticket_board.audit_kick_back('PGU-501', 'Needs changes.');")
@@ -368,17 +384,27 @@ FROM ticket_board.tickets t WHERE id = 'PGU-501';
         audit_signoff=True,
         needs_eric_signoff=True,
     )
-    psql(service_conn, "SELECT ticket_board.eric_sign_off('PGU-600');")
+    psql(service_conn, "SELECT ticket_board.eric_sign_off('PGU-600', 'Eric approves.');")
     eric_signed = json.loads(
         psql(
             admin_conn,
             """
-SELECT jsonb_build_object('state', state, 'assignee', assignee, 'eric_signoff', eric_signoff)::text
-FROM ticket_board.tickets WHERE id = 'PGU-600';
+SELECT jsonb_build_object(
+    'state', t.state,
+    'assignee', t.assignee,
+    'eric_signoff', t.eric_signoff,
+    'comment', (SELECT text FROM ticket_board.ticket_comments WHERE ticket_id = t.id ORDER BY position DESC LIMIT 1)
+)::text
+FROM ticket_board.tickets t WHERE id = 'PGU-600';
 """,
         )
     )
-    assert eric_signed == {"state": "director_review", "assignee": "director", "eric_signoff": True}, eric_signed
+    assert eric_signed == {
+        "state": "director_review",
+        "assignee": "director",
+        "eric_signoff": True,
+        "comment": "Eric approves.",
+    }, eric_signed
 
     insert_ticket(
         admin_conn,

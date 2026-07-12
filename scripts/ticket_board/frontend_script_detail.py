@@ -142,7 +142,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         }
         advanceButton.addEventListener('click', async () => {
           try {
-            await advanceTicket(ticket.id);
+            await advanceTicket(ticket.id, commentText.value);
           } catch (error) {
             setCreateStatus(error.message, true);
             await requestBoardReload();
@@ -257,11 +257,19 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         }));
       }
       toggles.appendChild(toggleControl('Audit signoff', ticket.audit_signoff, async (checked) => {
-        await updateTicket(ticket.id, { audit_signoff: checked }, 'audit');
+        const patch = { audit_signoff: checked };
+        if (checked && commentText.value.trim()) {
+          patch.comment = { who: 'audit', text: commentText.value.trim() };
+        }
+        await updateTicket(ticket.id, patch, 'audit');
       }));
       if (ticket.needs_eric_signoff) {
         toggles.appendChild(toggleControl('Eric signoff', ticket.eric_signoff, async (checked) => {
-          await updateTicket(ticket.id, { eric_signoff: checked }, 'eric');
+          const patch = { eric_signoff: checked };
+          if (checked && commentText.value.trim()) {
+            patch.comment = { who: 'eric', text: commentText.value.trim() };
+          }
+          await updateTicket(ticket.id, patch, 'eric');
         }));
       }
 

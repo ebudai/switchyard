@@ -39,7 +39,7 @@ def main() -> int:
     assert "Record Eric signoff before advancing to Ready." in HTML
     assert "Save a verified commit hash or enable no-commit override before advancing to done." in HTML
     assert "Advance -> ${stateLabel(detailAdvanceState)}" in HTML
-    assert "await advanceTicket(ticket.id);" in HTML
+    assert "await advanceTicket(ticket.id, commentText.value);" in HTML
     print("default_advance_workflow_test: ok")
     return 0
 

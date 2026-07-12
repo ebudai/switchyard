@@ -481,6 +481,9 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             updated=created,
         )
 
+    def action_comment_text(self, payload: dict[str, object]) -> str:
+        return str(payload.get("recommendations", payload.get("reason", payload.get("text", "")))).strip()
+
     def send_ticket_created(self, created: dict[str, object], before_signature: tuple[tuple[object, ...], ...]) -> None:
         after_signature = self.verify_created_ticket_persisted(created, before_signature)
         self.events.notify_change(after_signature)
@@ -560,14 +563,20 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 "comment": {"who": caller, "text": str(payload.get("recommendations", payload.get("reason", payload.get("text", ""))))},
             }
         elif operation == "audit_sign_off":
-            patch = {"audit_signoff": True}
+            comment_text = self.action_comment_text(payload)
+            if not comment_text:
+                raise ValueError("audit_sign_off requires a non-empty comment")
+            patch = {"audit_signoff": True, "comment": {"who": caller, "text": comment_text}}
         elif operation == "audit_kick_back":
             patch = {
                 "state": "analysis",
                 "comment": {"who": caller, "text": str(payload.get("reason", payload.get("text", "")))},
             }
         elif operation == "eric_sign_off":
+            comment_text = self.action_comment_text(payload)
             patch = {"eric_signoff": True}
+            if comment_text:
+                patch["comment"] = {"who": caller, "text": comment_text}
         elif operation == "eric_reopen":
             patch = {
                 "state": "analysis",

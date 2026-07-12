@@ -610,7 +610,8 @@ ORDER BY t.ticket_number
                 if "audit_signoff" in patch:
                     if not bool(patch["audit_signoff"]):
                         raise ValueError("postgres function API only supports setting audit_signoff true")
-                    self._pg_call(conn, "SELECT ticket_board.audit_sign_off(%s);", (ticket_id,))
+                    self._pg_call(conn, "SELECT ticket_board.audit_sign_off(%s, %s);", (ticket_id, comment_text))
+                    comment_text = ""
                 inspector_signoff_handled = False
                 if "inspector_signoff" in patch:
                     if not bool(patch["inspector_signoff"]):
@@ -620,7 +621,8 @@ ORDER BY t.ticket_number
                 if "eric_signoff" in patch:
                     if not bool(patch["eric_signoff"]):
                         raise ValueError("postgres function API only supports setting eric_signoff true")
-                    self._pg_call(conn, "SELECT ticket_board.eric_sign_off(%s);", (ticket_id,))
+                    self._pg_call(conn, "SELECT ticket_board.eric_sign_off(%s, %s);", (ticket_id, comment_text))
+                    comment_text = ""
 
                 if "state" in patch:
                     if inspector_signoff_handled and state == "audit":

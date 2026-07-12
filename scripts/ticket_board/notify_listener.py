@@ -202,8 +202,32 @@ class PaneActivityGate:
         return proc.stdout
 
     def _activity_region(self, target: str, text: str) -> str:
-        del target
+        if target == ROLE_TO_TARGET["director"]:
+            return self._director_composer_region(text)
         return "\n".join(text.splitlines()[-PANE_ACTIVITY_REGION_LINES:])
+
+    def _director_composer_region(self, text: str) -> str:
+        if not text:
+            return ""
+        lines = text.splitlines()
+        horizontal_indices = [idx for idx, line in enumerate(lines) if line.count("─") >= 40]
+        if len(horizontal_indices) >= 2:
+            composer_lines = lines[horizontal_indices[-2] + 1 : horizontal_indices[-1]]
+            return "\n".join(self._normalize_composer_line(line) for line in composer_lines).strip()
+        for line in reversed(lines):
+            normalized = self._normalize_composer_line(line)
+            stripped = line.strip()
+            if stripped == "❯" or stripped.startswith("❯ "):
+                return normalized
+        return ""
+
+    def _normalize_composer_line(self, line: str) -> str:
+        stripped = line.strip()
+        if stripped == "❯":
+            return ""
+        if stripped.startswith("❯ "):
+            return stripped[2:].strip()
+        return stripped
 
     def _activity_digest(self, target: str, text: str) -> str:
         region = self._activity_region(target, text)
@@ -213,6 +237,14 @@ class PaneActivityGate:
         text = self._capture(target)
         if text is None:
             return self._record_trace(target, ActivityTrace(False, "capture_failed"))
+        if target == ROLE_TO_TARGET["director"]:
+            region = self._activity_region(target, text)
+            digest = hashlib.sha256(region.encode("utf-8")).hexdigest()
+            self._last_region_digest_by_target[target] = digest
+            if region.strip():
+                self._last_changed_at_by_target[target] = self.monotonic()
+                return self._record_trace(target, ActivityTrace(True, "director_composer", digest))
+            return self._record_trace(target, ActivityTrace(False, "director_composer_empty", digest))
         first_digest = self._activity_digest(target, text)
         if self.stable_idle_seconds > 0:
             self.sleeper(self.stable_idle_seconds)

@@ -271,6 +271,16 @@ CREATE INDEX IF NOT EXISTS notification_trace_notification_idx
     ON ticket_board.notification_trace (notification_id, ts, id)
     WHERE notification_id IS NOT NULL;
 
+CREATE INDEX IF NOT EXISTS notification_trace_send_lookup_idx
+    ON ticket_board.notification_trace (
+        ticket_id,
+        target_role,
+        ticket_state_at_event,
+        ts DESC,
+        id DESC
+    )
+    WHERE kind = 'transition' AND event = 'send';
+
 CREATE OR REPLACE FUNCTION ticket_board.record_notification_trace(
     p_ticket_id text,
     p_notification_id bigint,
@@ -326,6 +336,28 @@ BEGIN
         p_region_digest,
         coalesce(p_detail, '{}'::jsonb)
     );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.prune_notification_trace(
+    p_now timestamptz DEFAULT clock_timestamp(),
+    p_diagnostic_retention interval DEFAULT interval '1 hour'
+)
+RETURNS bigint
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    deleted_count bigint;
+BEGIN
+    DELETE FROM ticket_board.notification_trace
+    WHERE ts < p_now - p_diagnostic_retention
+      AND event IN ('claim', 'listener_claim', 'requeue', 'gate_defer');
+
+    GET DIAGNOSTICS deleted_count = ROW_COUNT;
+    RETURN deleted_count;
 END;
 $$;
 
@@ -1118,19 +1150,21 @@ SET search_path = ticket_board, pg_temp
 AS $$
 BEGIN
     PERFORM ticket_board.require_ticket_board_listener('requeue_notification');
-    PERFORM ticket_board.record_notification_trace(
-        q.ticket_id,
-        q.id,
-        q.target_role,
-        q.kind,
-        'requeue',
-        NULL,
-        p_error,
-        NULL,
-        jsonb_build_object('delay', p_delay, 'attempts', q.attempts, 'payload', q.payload)
-    )
-    FROM ticket_board.ticket_notification_queue q
-    WHERE q.id = p_notification_id;
+    IF coalesce(p_error, '') <> 'pane busy' THEN
+        PERFORM ticket_board.record_notification_trace(
+            q.ticket_id,
+            q.id,
+            q.target_role,
+            q.kind,
+            'requeue',
+            NULL,
+            p_error,
+            NULL,
+            jsonb_build_object('delay', p_delay, 'attempts', q.attempts, 'payload', q.payload)
+        )
+        FROM ticket_board.ticket_notification_queue q
+        WHERE q.id = p_notification_id;
+    END IF;
 
     UPDATE ticket_board.ticket_notification_queue
     SET claimed_at = NULL,
@@ -1679,6 +1713,36 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION ticket_board.install_notification_trace_prune_cron()
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'pg_cron') THEN
+        BEGIN
+            CREATE EXTENSION IF NOT EXISTS pg_cron;
+        EXCEPTION WHEN OTHERS THEN
+            RAISE NOTICE 'pg_cron extension for ticket_board_notification_trace_prune not installed: %', SQLERRM;
+            RETURN;
+        END;
+        BEGIN
+            PERFORM cron.unschedule('ticket_board_notification_trace_prune');
+        EXCEPTION WHEN OTHERS THEN
+            NULL;
+        END;
+        BEGIN
+            PERFORM cron.schedule(
+                'ticket_board_notification_trace_prune',
+                '17 * * * *',
+                $cron$SELECT ticket_board.prune_notification_trace();$cron$
+            );
+        EXCEPTION WHEN OTHERS THEN
+            RAISE NOTICE 'pg_cron schedule for ticket_board_notification_trace_prune not installed: %', SQLERRM;
+        END;
+    END IF;
+END;
+$$;
+
 DROP TRIGGER IF EXISTS tickets_enforce_workflow_update ON ticket_board.tickets;
 CREATE TRIGGER tickets_enforce_workflow_update
 BEFORE UPDATE ON ticket_board.tickets
@@ -1745,6 +1809,8 @@ FROM ticket_board.tickets
 ON CONFLICT (ticket_id) DO NOTHING;
 
 SELECT ticket_board.install_nudge_cron();
+SELECT ticket_board.install_notification_trace_prune_cron();
+SELECT ticket_board.prune_notification_trace();
 
 CREATE OR REPLACE FUNCTION ticket_board.current_actor_role()
 RETURNS text

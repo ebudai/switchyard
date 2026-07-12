@@ -340,6 +340,32 @@ def test_hook_busy_requeues_with_fixed_interval() -> None:
     assert delays == [f"{DEFAULT_BUSY_REQUEUE_SECONDS:g} seconds"] * 3
 
 
+def test_hook_busy_traces_only_first_gate_defer_per_notification() -> None:
+    sent: list[tuple[str, str]] = []
+    with TemporaryStateDir() as tmp_path:
+        store, gate = hook_gate(tmp_path)
+        store.write("pgu-ops:0.0", "busy", source="codex.UserPromptSubmit", now=100.0)
+        conn = FakeConnection(
+            [
+                queue_row(42, "PGU-318", attempts=1),
+                queue_row(42, "PGU-318", attempts=2),
+            ]
+        )
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=gate.is_working,
+            connector=lambda *args, **kwargs: conn,
+            poll_seconds=0,
+        )
+
+        assert listener.listen_once(max_notifications=2) == 0
+
+    assert sent == []
+    assert len(conn.requeued) == 2
+    assert trace_events(conn) == ["listener_claim", "gate_defer", "listener_claim"]
+
+
 def test_hook_blocked_is_busy() -> None:
     with TemporaryStateDir() as tmp_path:
         store, gate = hook_gate(tmp_path)
@@ -649,6 +675,7 @@ def main() -> int:
     test_external_hook_writer_records_state_file()
     test_missing_hook_state_fails_safe_and_does_not_clobber()
     test_hook_busy_requeues_with_fixed_interval()
+    test_hook_busy_traces_only_first_gate_defer_per_notification()
     test_hook_blocked_is_busy()
     test_director_client_activity_latches_no_clobber_until_busy_idle_cycle()
     test_director_abandoned_draft_timeout_releases_latch()

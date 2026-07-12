@@ -408,6 +408,7 @@ class TicketBoardNotifyListener:
         self.stop_event = stop_event or threading.Event()
         self.logger = logger
         self.delivered_count = 0
+        self._traced_gate_defer_notifications: set[int] = set()
 
     def _connector_kwargs(self) -> dict[str, int | bool]:
         return {
@@ -759,6 +760,7 @@ WHERE id = %s
                     detail={"reason": "unknown_target_role"},
                 )
                 self._ack_notification(conn, notification_id)
+                self._traced_gate_defer_notifications.discard(notification_id)
                 continue
             if not self._notification_is_current(conn, ticket_id, target_role, payload):
                 self.logger.info("Dropping stale notification %s for %s: %s", notification_id, ticket_id, payload)
@@ -782,23 +784,26 @@ WHERE id = %s
                     detail={"reason": "stale_notification"},
                 )
                 self._ack_notification(conn, notification_id)
+                self._traced_gate_defer_notifications.discard(notification_id)
                 continue
             pane_busy = self.activity_gate(target)
             activity_trace = self._activity_trace(target, pane_busy)
             if pane_busy:
                 self.logger.info("Pane %s is active; requeueing notification %s for %s", target, notification_id, ticket_id)
-                self._trace_notification(
-                    conn,
-                    notification_id=notification_id,
-                    ticket_id=ticket_id,
-                    target_role=target_role,
-                    kind=kind,
-                    event="gate_defer",
-                    pane_busy=True,
-                    busy_reason=activity_trace.reason,
-                    region_digest=activity_trace.region_digest,
-                    detail={"target": target, "attempts": attempts},
-                )
+                if notification_id not in self._traced_gate_defer_notifications:
+                    self._trace_notification(
+                        conn,
+                        notification_id=notification_id,
+                        ticket_id=ticket_id,
+                        target_role=target_role,
+                        kind=kind,
+                        event="gate_defer",
+                        pane_busy=True,
+                        busy_reason=activity_trace.reason,
+                        region_digest=activity_trace.region_digest,
+                        detail={"target": target, "attempts": attempts},
+                    )
+                    self._traced_gate_defer_notifications.add(notification_id)
                 self._requeue_notification(
                     conn,
                     notification_id,
@@ -850,6 +855,7 @@ WHERE id = %s
                 detail={"target": target},
             )
             self._ack_notification(conn, notification_id)
+            self._traced_gate_defer_notifications.discard(notification_id)
             self.delivered_count += 1
             delivered += 1
             self.logger.info("Delivered queued notification %s for %s to %s: %s", notification_id, ticket_id, target, payload)

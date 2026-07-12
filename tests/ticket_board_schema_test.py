@@ -138,6 +138,12 @@ def main() -> int:
     assert "pane_busy_determination" in schema_lower
     assert "region_digest" in schema_lower
     assert "create or replace function ticket_board.record_notification_trace" in executable_schema_lower
+    assert "create index if not exists notification_trace_send_lookup_idx" in executable_schema_lower
+    assert "where kind = 'transition' and event = 'send'" in executable_schema_lower
+    assert "create or replace function ticket_board.prune_notification_trace" in executable_schema_lower
+    assert "event in ('claim', 'listener_claim', 'requeue', 'gate_defer')" in executable_schema_lower
+    assert "create or replace function ticket_board.install_notification_trace_prune_cron" in executable_schema_lower
+    assert "ticket_board_notification_trace_prune" in executable_schema_lower
     assert "create or replace function ticket_board.next_notification_attempt" in executable_schema_lower
     assert "create or replace function ticket_board.notification_delivery_in_backoff" in executable_schema_lower
 

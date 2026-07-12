@@ -521,8 +521,11 @@ ORDER BY t.ticket_number
         title = self._require_text(title, "title").strip()
         assignee = self._validate_assignee(assignee)
         state = self._validate_state(state)
-        if screenshot not in (None, "", "null") or screenshots not in (None, [], ""):
-            raise ValueError("postgres function API does not support attachment writes yet")
+        attachment_patch: dict[str, Any] = {}
+        if screenshots not in (None, [], ""):
+            attachment_patch["screenshots"] = screenshots
+        elif screenshot not in (None, "", "null"):
+            attachment_patch["screenshot"] = screenshot
         implementation = self._require_plain_string(implementation, "implementation")
         audit_prompt = self._require_plain_string(audit_prompt, "audit_prompt")
         if implementation.strip():
@@ -559,6 +562,10 @@ ORDER BY t.ticket_number
                     self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps({"needs_inspection": True})))
                 if assignee != "unassigned" or state != "analysis":
                     self._pg_call(conn, "SELECT ticket_board.route(%s, %s, %s);", (ticket_id, state, assignee))
+                if attachment_patch:
+                    current = self._pg_get_ticket(ticket_id, conn)
+                    self._materialize_edit_field_attachments(attachment_patch, ticket_id, current)
+                    self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps(attachment_patch)))
                 if blocked_by:
                     self._pg_call(conn, "SELECT ticket_board.set_blockers(%s, %s, %s);", (ticket_id, blocked_by, blocked_reason))
                 for comment in normalized_comments:

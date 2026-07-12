@@ -56,12 +56,14 @@ Each role entry contains:
 - `target`: tmux target, normally `<project>-<role>:0.0`.
 - `workdir`: working directory for the tmux session.
 - `cli`: argv array for the CLI binary.
-- `model`, `model_arg`: optional model selector appended to `cli`.
+- `model`: optional model selector. The launcher passes it with the role's
+  `model_arg` at process launch so the pane starts on its configured model.
+- `model_arg`: optional model flag, defaulting to `--model`.
 - `yolo`: optional boolean. When true, the launcher appends the appropriate
-  bypass-permissions flag for the configured CLI: Claude uses
+  bypass-permissions flag for the configured CLI: Agy and Claude use
   `--dangerously-skip-permissions`, Codex uses
   `--dangerously-bypass-approvals-and-sandbox`, and Gemini uses `--yolo`.
-- `extra_args`: optional additional argv entries appended after the model.
+- `extra_args`: optional additional argv entries appended after the yolo flag.
 - `resume_flag`: flag used by that CLI for context resume.
 - `live_commands`: optional command names accepted as the live pane process
   before destructive reload.

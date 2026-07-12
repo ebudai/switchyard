@@ -103,21 +103,21 @@ def test_pgu_config_matches_director_supplied_live_role_assignments() -> None:
     assert (roles["ops"].cli, roles["ops"].model, roles["ops"].extra_args) == (
         ["codex"],
         "gpt-5.5",
-        ["--reasoning-effort", "high"],
+        [],
     )
     assert (roles["main"].cli, roles["main"].model, roles["main"].extra_args) == (
         ["codex"],
         "gpt-5.6-terra",
-        ["--reasoning-effort", "high"],
+        [],
     )
     assert (roles["app"].cli, roles["app"].model, roles["app"].extra_args) == (
         ["codex"],
         "gpt-5.4",
-        ["--reasoning-effort", "high"],
+        [],
     )
     assert (roles["research"].cli, roles["research"].model) == (["claude"], "sonnet-5")
     assert (roles["audit"].cli, roles["audit"].model) == (["claude"], "sonnet-5")
-    assert (roles["inspector"].cli, roles["inspector"].model) == (["gemini"], "3.5-flash")
+    assert (roles["inspector"].cli, roles["inspector"].model) == (["agy"], "3.5-flash")
 
 
 def test_yolo_config_translates_to_cli_specific_bypass_flags() -> None:
@@ -131,12 +131,34 @@ def test_yolo_config_translates_to_cli_specific_bypass_flags() -> None:
         "research": "--dangerously-skip-permissions",
         "ops": "--dangerously-bypass-approvals-and-sandbox",
         "audit": "--dangerously-skip-permissions",
-        "inspector": "--yolo",
+        "inspector": "--dangerously-skip-permissions",
     }
 
     for role_name, expected_flag in expected_flags.items():
         command = cli_command_for_role(roles[role_name], session_dir=config.session_dir)
         assert expected_flag in command, (role_name, command)
+
+
+def test_pgu_launch_commands_include_model_and_bypass_flags() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    roles = {role.role: role for role in config.roles}
+    expected_by_role = {
+        "director": ["claude", "--model", "opus-4.8", "--dangerously-skip-permissions"],
+        "main": ["codex", "--model", "gpt-5.6-terra", "--dangerously-bypass-approvals-and-sandbox"],
+        "app": ["codex", "--model", "gpt-5.4", "--dangerously-bypass-approvals-and-sandbox"],
+        "research": ["claude", "--model", "sonnet-5", "--dangerously-skip-permissions"],
+        "ops": ["codex", "--model", "gpt-5.5", "--dangerously-bypass-approvals-and-sandbox"],
+        "audit": ["claude", "--model", "sonnet-5", "--dangerously-skip-permissions"],
+        "inspector": ["agy", "--model", "3.5-flash", "--dangerously-skip-permissions"],
+    }
+
+    for role_name, expected_tail in expected_by_role.items():
+        command = cli_command_for_role(roles[role_name], session_dir=config.session_dir)
+        assert command[:2] == ["env", f"PGU_PANE_TARGET=pgu-{role_name}:0.0"]
+        assert command[2:] == expected_tail, (role_name, command)
+        assert "--reasoning-effort" not in command
+        assert "gemini" not in command
+        assert "--yolo" not in command
 
 
 def test_start_is_attach_or_start_and_never_duplicates_existing_session() -> None:
@@ -162,7 +184,9 @@ def test_start_creates_missing_session_once_then_attaches() -> None:
     assert runner.calls[0] == ["tmux", "has-session", "-t", "pgu-ops"]
     assert runner.calls[1][:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"]
     assert "PGU_PANE_TARGET=pgu-ops:0.0" in runner.calls[1][-1]
+    assert "--model gpt-5.5" in runner.calls[1][-1]
     assert "--dangerously-bypass-approvals-and-sandbox" in runner.calls[1][-1]
+    assert "--reasoning-effort" not in runner.calls[1][-1]
     assert runner.calls[2] == ["tmux", "attach", "-t", "pgu-ops"]
 
 
@@ -234,6 +258,7 @@ def main() -> int:
     test_dry_run_materializes_pgu_layout_with_all_role_commands()
     test_pgu_config_matches_director_supplied_live_role_assignments()
     test_yolo_config_translates_to_cli_specific_bypass_flags()
+    test_pgu_launch_commands_include_model_and_bypass_flags()
     test_start_is_attach_or_start_and_never_duplicates_existing_session()
     test_start_creates_missing_session_once_then_attaches()
     test_reload_uses_recorded_resume_uuid_when_recreating_session()

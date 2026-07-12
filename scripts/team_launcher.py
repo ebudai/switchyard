@@ -16,6 +16,7 @@ from typing import Any, Callable, Sequence
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "team-launcher"
 DEFAULT_SESSION_DIR = Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-sessions")
 YOLO_FLAGS_BY_CLI = {
+    "agy": "--dangerously-skip-permissions",
     "claude": "--dangerously-skip-permissions",
     "codex": "--dangerously-bypass-approvals-and-sandbox",
     "gemini": "--yolo",

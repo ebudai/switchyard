@@ -149,8 +149,12 @@ are:
 
 Session ids are stored under `$PGU_TICKET_BOARD_PANE_SESSION_DIR` (default:
 `/run/user/<agent-uid>/pgu-ticket-board/pane-sessions`) using the same per-pane
-file naming as hook state. The launcher can use these files to pass `--resume`
-when reloading a pane without losing context.
+file naming as hook state. The hook writer attempts to extract and store a
+session id from every hook payload, not only `SessionStart`, so already-running
+panes can populate resume ids from normal turn traffic. Payloads without a
+session id still update pane state and do not create a session file. The
+launcher can use these files to pass `--resume` when reloading a pane without
+losing context.
 
 Install the hook writer and persistent CLI hook config entries with:
 

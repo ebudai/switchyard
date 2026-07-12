@@ -165,6 +165,82 @@ def test_session_start_hook_seeds_idle_state_and_records_resume_session() -> Non
         assert session["payload"]["cwd"] == "/home/agent/Projects/pgu"
 
 
+def test_non_session_start_hook_records_resume_session_when_payload_has_id() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        home = Path(tmp) / "home"
+        state_dir = Path(tmp) / "state"
+        session_dir = Path(tmp) / "sessions"
+        bin_path = home / ".local" / "bin" / HOOK_NAME
+        subprocess.run([str(INSTALLER), "install", "--home", str(home), "--bin-path", str(bin_path)], check=True)
+
+        session_id = "turn_session_789"
+        subprocess.run(
+            [
+                str(bin_path),
+                "busy",
+                "--target",
+                "pgu-ops:0.0",
+                "--source",
+                "codex.UserPromptSubmit",
+                "--state-dir",
+                str(state_dir),
+                "--session-dir",
+                str(session_dir),
+            ],
+            input=json.dumps({"event": "UserPromptSubmit", "session_id": session_id}),
+            text=True,
+            check=True,
+        )
+
+        state = json.loads((state_dir / "pgu-ops_0.0.json").read_text(encoding="utf-8"))
+        assert state["target"] == "pgu-ops:0.0"
+        assert state["state"] == "busy"
+        assert state["source"] == "codex.UserPromptSubmit"
+
+        session = json.loads((session_dir / "pgu-ops_0.0.json").read_text(encoding="utf-8"))
+        assert session["target"] == "pgu-ops:0.0"
+        assert session["session_id"] == session_id
+        assert session["source"] == "codex.UserPromptSubmit"
+        assert session["payload"]["event"] == "UserPromptSubmit"
+
+
+def test_non_session_start_hook_without_session_id_only_writes_state() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        home = Path(tmp) / "home"
+        state_dir = Path(tmp) / "state"
+        session_dir = Path(tmp) / "sessions"
+        bin_path = home / ".local" / "bin" / HOOK_NAME
+        subprocess.run([str(INSTALLER), "install", "--home", str(home), "--bin-path", str(bin_path)], check=True)
+        env = os.environ.copy()
+        for key in ("PGU_PANE_SESSION_ID", "CLAUDE_SESSION_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID", "SESSION_ID"):
+            env.pop(key, None)
+
+        subprocess.run(
+            [
+                str(bin_path),
+                "idle",
+                "--target",
+                "pgu-ops:0.0",
+                "--source",
+                "codex.Stop",
+                "--state-dir",
+                str(state_dir),
+                "--session-dir",
+                str(session_dir),
+            ],
+            input=json.dumps({"event": "Stop", "cwd": "/home/agent/Projects/pgu"}),
+            text=True,
+            check=True,
+            env=env,
+        )
+
+        state = json.loads((state_dir / "pgu-ops_0.0.json").read_text(encoding="utf-8"))
+        assert state["target"] == "pgu-ops:0.0"
+        assert state["state"] == "idle"
+        assert state["source"] == "codex.Stop"
+        assert not (session_dir / "pgu-ops_0.0.json").exists()
+
+
 def test_session_start_records_non_uuid_named_session_id() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
         home = Path(tmp) / "home"
@@ -235,6 +311,8 @@ def main() -> int:
     test_installer_writes_durable_cli_hook_configs_idempotently()
     test_installed_hook_writes_state_and_verify_state_checks_all_panes()
     test_session_start_hook_seeds_idle_state_and_records_resume_session()
+    test_non_session_start_hook_records_resume_session_when_payload_has_id()
+    test_non_session_start_hook_without_session_id_only_writes_state()
     test_session_start_records_non_uuid_named_session_id()
     test_session_start_records_env_session_id_fallback()
     print("ticket_board_pane_hooks_install_test: ok")

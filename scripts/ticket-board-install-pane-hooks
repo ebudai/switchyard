@@ -107,7 +107,7 @@ def _install_claude_hooks(home: Path, hook_bin: Path) -> Path:
     _merge_hook_entries(
         config,
         "Stop",
-        [_hook_entry(f"{hook} busy --source claude.Stop")],
+        [_hook_entry(f"{hook} idle --source claude.Stop")],
     )
     _write_json(path, config)
     return path

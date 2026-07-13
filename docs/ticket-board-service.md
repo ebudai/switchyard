@@ -33,6 +33,7 @@ What this does:
 - applies `scripts/ticket_board/rbac.sql` so `ticket_board_service` and
   `ticket_board_listener` exist before the units start
 - enables and starts `pgu-ticket-board.service`
+- waits for `GET /api/board` to return HTTP 200 before reporting success
 
 Runtime dependency:
 
@@ -110,6 +111,7 @@ That command:
 4. repoints `/home/agent/pgu-ticketboard-live/current`
 5. rewrites the unit
 6. restarts the service
+7. waits for `GET /api/board` to return HTTP 200
 
 Plain `restart` only restarts the currently deployed SHA. It does **not** update
 code.

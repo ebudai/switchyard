@@ -18,6 +18,8 @@ readonly DEPLOY_REF="${DEPLOY_REF:-origin/main}"
 readonly BOARD_DATABASE_URL="${TICKET_BOARD_DATABASE_URL:-postgresql:///pgu?host=/var/run/postgresql&user=ticket_board_service}"
 readonly BOARD_ADMIN_DATABASE_URL="${TICKET_BOARD_ADMIN_DATABASE_URL:-postgresql:///pgu?host=/var/run/postgresql}"
 readonly RBAC_SQL="${RBAC_SQL:-$BOARD_CURRENT_LINK/scripts/ticket_board/rbac.sql}"
+readonly SMOKE_PATH="${BOARD_SMOKE_PATH:-/api/board}"
+readonly SMOKE_TIMEOUT_SECONDS="${BOARD_SMOKE_TIMEOUT_SECONDS:-10}"
 
 usage() {
     cat <<EOF
@@ -104,6 +106,33 @@ ensure_database_roles() {
     log "ensured ticket-board database roles using $RBAC_SQL"
 }
 
+smoke_check_http() {
+    local url
+    url="http://$BOARD_HOST:$BOARD_PORT$SMOKE_PATH"
+    python3 - "$url" "$SMOKE_TIMEOUT_SECONDS" <<'PY'
+import sys
+import time
+import urllib.error
+import urllib.request
+
+url = sys.argv[1]
+deadline = time.monotonic() + float(sys.argv[2])
+last_error = "not attempted"
+while time.monotonic() < deadline:
+    try:
+        with urllib.request.urlopen(url, timeout=1.0) as response:
+            if response.status == 200:
+                sys.exit(0)
+            last_error = f"HTTP {response.status}"
+    except (OSError, urllib.error.URLError) as exc:
+        last_error = str(exc)
+    time.sleep(0.25)
+print(f"ticket-board smoke check failed for {url}: {last_error}", file=sys.stderr)
+sys.exit(1)
+PY
+    log "HTTP smoke check passed at $url"
+}
+
 render_unit() {
     cat <<EOF
 [Unit]
@@ -142,6 +171,7 @@ install_service() {
     write_unit
     systemctl_user daemon-reload
     systemctl_user enable --now "$SERVICE_NAME"
+    smoke_check_http
     log "installed + started $SERVICE_NAME"
 }
 
@@ -152,6 +182,7 @@ deploy_restart_service() {
     write_unit
     systemctl_user daemon-reload
     systemctl_user restart "$SERVICE_NAME"
+    smoke_check_http
     log "deployed $deployed_sha from $DEPLOY_REF and restarted $SERVICE_NAME"
 }
 
@@ -179,7 +210,12 @@ main() {
         render-unit)
             render_unit
             ;;
-        start|stop|restart|status)
+        start|restart)
+            ensure_user_manager
+            systemctl_user "$1" "$SERVICE_NAME"
+            smoke_check_http
+            ;;
+        stop|status)
             ensure_user_manager
             systemctl_user "$1" "$SERVICE_NAME"
             ;;

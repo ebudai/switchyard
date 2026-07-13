@@ -83,6 +83,18 @@ grep -q 'psql -X -v ON_ERROR_STOP=1 "$BOARD_ADMIN_DATABASE_URL" -f "$RBAC_SQL"' 
     echo "FAIL: service installer does not apply RBAC SQL with psql" >&2
     exit 1
 }
+grep -q 'smoke_check_http' "$REPO_ROOT/scripts/ticket-board-service.sh" || {
+    echo "FAIL: service script lacks a post-start smoke check" >&2
+    exit 1
+}
+grep -q 'urllib.request.urlopen(url, timeout=1.0)' "$REPO_ROOT/scripts/ticket-board-service.sh" || {
+    echo "FAIL: service smoke check does not perform an HTTP request" >&2
+    exit 1
+}
+grep -q 'systemctl_user restart "$SERVICE_NAME"' "$REPO_ROOT/scripts/ticket-board-service.sh" || {
+    echo "FAIL: deploy-restart no longer restarts the service" >&2
+    exit 1
+}
 
 TICKET_BOARD_DATABASE_URL='postgresql:///custom_board?host=/tmp/pgu-pg&user=ticket_board_service' \
 BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD \

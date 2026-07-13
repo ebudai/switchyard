@@ -30,6 +30,7 @@ EXPECTED_JSON_FIELDS = {
     "needs_inspection",
     "needs_eric_signoff",
     "parent_id",
+    "regression",
     "screenshot",
     "screenshots",
     "state",
@@ -104,6 +105,7 @@ FIELD_TO_SCHEMA_TOKENS = {
     "needs_inspection": ["needs_inspection"],
     "needs_eric_signoff": ["needs_eric_signoff"],
     "parent_id": ["parent_id"],
+    "regression": ["regression"],
     "screenshot": ["screenshot", "ticket_attachments"],
     "screenshots": ["ticket_attachments"],
     "state": ["state"],
@@ -205,7 +207,12 @@ def main() -> int:
         r"parked\s+boolean\s+not null\s+default\s+false",
         schema_lower,
     ), "parked must be a default-false dedicated defer marker"
+    assert re.search(
+        r"regression\s+boolean\s+not null\s+default\s+false",
+        schema_lower,
+    ), "regression must be a default-false ticket metadata flag"
     assert "add column if not exists parked boolean not null default false" in schema_lower
+    assert "add column if not exists regression boolean not null default false" in schema_lower
     assert "{7,40}" in schema, "commit_hash check must allow historical short hashes"
     assert "create trigger tickets_enforce_workflow_update" in executable_schema_lower
     assert "create trigger tickets_zzz_notify_transition" in executable_schema_lower
@@ -294,6 +301,12 @@ def main() -> int:
     assert "create or replace function ticket_board.notify_idle_turn_end_nudges" in idle_reminder_primary_defer_migration
     assert "q.kind not in ('idle_reminder', 'escalation')" in idle_reminder_primary_defer_migration
     assert "q.target_role = candidates.target_role" in idle_reminder_primary_defer_migration
+    regression_flag_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "284_add_regression_flag.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "add column if not exists regression boolean not null default false" in regression_flag_migration
+    assert "'regression', ticket_row.regression" in regression_flag_migration
+    assert "'regression'" in regression_flag_migration
     assert "tell the director directly what is wrong" in executable_schema_lower
     assert "tell eric directly what is wrong" in executable_schema_lower
     assert "q.kind not in ('idle_reminder', 'escalation')" in executable_schema_lower

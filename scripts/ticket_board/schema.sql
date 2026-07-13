@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS ticket_board.tickets (
             OR last_rejected_commit ~ '^[0-9A-Fa-f]{7,40}$'
         ),
     commit_exempt boolean NOT NULL DEFAULT false,
+    regression boolean NOT NULL DEFAULT false,
 
     -- Back-compat mirror of the legacy top-level "screenshot" field. The
     -- canonical attachment list is ticket_attachments.
@@ -118,6 +119,8 @@ ALTER TABLE ticket_board.tickets
     ADD COLUMN IF NOT EXISTS needs_inspection boolean NOT NULL DEFAULT false;
 ALTER TABLE ticket_board.tickets
     ADD COLUMN IF NOT EXISTS inspector_signoff boolean NOT NULL DEFAULT false;
+ALTER TABLE ticket_board.tickets
+    ADD COLUMN IF NOT EXISTS regression boolean NOT NULL DEFAULT false;
 ALTER TABLE ticket_board.tickets
     DROP CONSTRAINT IF EXISTS tickets_state_check;
 ALTER TABLE ticket_board.tickets
@@ -2419,6 +2422,7 @@ BEGIN
         'eric_signoff', ticket_row.eric_signoff,
         'commit_hash', ticket_row.commit_hash,
         'commit_exempt', ticket_row.commit_exempt,
+        'regression', ticket_row.regression,
         'manually_controlled', ticket_row.manually_controlled,
         'parked', ticket_row.parked,
         'screenshot', ticket_row.screenshot,
@@ -3375,6 +3379,7 @@ BEGIN
         'needs_inspection',
         'needs_eric_signoff',
         'commit_exempt',
+        'regression',
         'commit_hash',
         'audit_signoff',
         'inspector_signoff',
@@ -3456,6 +3461,7 @@ BEGIN
         needs_inspection = CASE WHEN patch ? 'needs_inspection' THEN (patch->>'needs_inspection')::boolean ELSE needs_inspection END,
         needs_eric_signoff = CASE WHEN patch ? 'needs_eric_signoff' THEN (patch->>'needs_eric_signoff')::boolean ELSE needs_eric_signoff END,
         commit_exempt = CASE WHEN patch ? 'commit_exempt' THEN (patch->>'commit_exempt')::boolean ELSE commit_exempt END,
+        regression = CASE WHEN patch ? 'regression' THEN (patch->>'regression')::boolean ELSE regression END,
         commit_hash = CASE WHEN patch ? 'commit_hash' THEN btrim(coalesce(patch->>'commit_hash', '')) ELSE commit_hash END,
         audit_signoff = CASE WHEN patch ? 'audit_signoff' THEN (patch->>'audit_signoff')::boolean ELSE audit_signoff END,
         inspector_signoff = CASE WHEN patch ? 'inspector_signoff' THEN (patch->>'inspector_signoff')::boolean ELSE inspector_signoff END,

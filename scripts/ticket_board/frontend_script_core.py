@@ -42,6 +42,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     const createBacklogInput = document.getElementById('createBacklogInput');
     const needsEricInput = document.getElementById('needsEricInput');
     const needsInspectionInput = document.getElementById('needsInspectionInput');
+    const createRegressionInput = document.getElementById('createRegressionInput');
     const showDeferredInput = document.getElementById('showDeferredInput');
     const showDeferredCountEl = document.getElementById('showDeferredCount');
     const showDoneInput = document.getElementById('showDoneInput');
@@ -1044,6 +1045,9 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       const badges = document.createElement('div');
       badges.className = 'badge-row';
       badges.appendChild(badge(`audit ${ticket.audit_signoff ? '✓' : '✗'}`, ticket.audit_signoff));
+      if (ticket.regression) {
+        badges.appendChild(badge('regression', false));
+      }
       const unresolvedBlockers = unresolvedBlockedBy(ticket);
       if (unresolvedBlockers.length) {
         badges.appendChild(badge(

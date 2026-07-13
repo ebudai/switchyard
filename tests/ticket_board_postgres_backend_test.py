@@ -112,17 +112,19 @@ def insert_ticket(
     needs_eric_signoff: bool = False,
     eric_signoff: bool = False,
     commit_hash: str = "",
+    regression: bool = False,
 ) -> None:
     psql(
         conn,
         f"""
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation,
-    audit_signoff, needs_eric_signoff, eric_signoff, commit_hash,
+    audit_signoff, needs_eric_signoff, eric_signoff, regression, commit_hash,
     created_text, updated_text, source_json
 ) VALUES (
     '{ticket_id}', '{title}', '', '{state}', '{assignee}', '{implementation}',
     {str(audit_signoff).lower()}, {str(needs_eric_signoff).lower()},
+    {str(regression).lower()},
     {str(eric_signoff).lower()}, '{commit_hash}',
     '2026-07-10T00:00:00+00:00', '2026-07-10T00:00:00+00:00',
     '{ticket_source(ticket_id, title, state, assignee)}'::jsonb
@@ -158,6 +160,16 @@ def main() -> int:
             run(["pg_ctl", "-D", str(data_dir), "-o", f"-k {socket_dir} -p {port} -h ''", "-w", "start"], capture=False)
             run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
             psql(admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
+            assert psql(
+                admin_conn,
+                """
+SELECT column_default
+FROM information_schema.columns
+WHERE table_schema = 'ticket_board'
+  AND table_name = 'tickets'
+  AND column_name = 'regression';
+""",
+            ) == "false"
             create_roles(admin_conn)
             psql(admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
 
@@ -175,6 +187,7 @@ def main() -> int:
             assert created["id"] == "PGU-1", created
             assert created["state"] == "analysis", created
             assert created["assignee"] == "unassigned", created
+            assert created["regression"] is False, created
             assert service_app.verify_created_ticket_persisted(created, before_signature) != before_signature
             assert not (root / f"json-unused-{SERVICE_ROLE}").exists(), "postgres backend should not create a JSON store directory"
             assert "permission denied" in psql_error(
@@ -190,6 +203,29 @@ def main() -> int:
                 implementation="Use the ticket body and this implementation note.",
             )
             assert created_with_implementation["implementation"] == "Use the ticket body and this implementation note.", created_with_implementation
+            created_regression = service_app.create_ticket(
+                title="Postgres create regression",
+                body="Tracks a regression.",
+                screenshot=None,
+                assignee="unassigned",
+                needs_eric_signoff=False,
+                regression=True,
+            )
+            assert created_regression["regression"] is True, created_regression
+            regression_db_state = json.loads(
+                psql(
+                    admin_conn,
+                    f"""
+SELECT jsonb_build_object(
+    'regression', regression,
+    'source_regression', source_json->'regression'
+)::text
+FROM ticket_board.tickets
+WHERE id = '{created_regression["id"]}';
+""",
+                )
+            )
+            assert regression_db_state == {"regression": True, "source_regression": True}, regression_db_state
             backlog_created = service_app.create_ticket(
                 title="Postgres backlog create",
                 body="Deferred future work.",
@@ -392,6 +428,24 @@ SELECT ticket_board.create_ticket('Cycle blocked', 'Body', 'analysis', ARRAY['PG
             assert submitted["commit_hash"] == "abcdef1", submitted
             edited = service_app.update_ticket("PGU-100", {"implementation": "Edited through function API."})
             assert edited["implementation"] == "Edited through function API.", edited
+            regression_edited = service_app.update_ticket("PGU-100", {"regression": True})
+            assert regression_edited["regression"] is True, regression_edited
+            regression_cleared = service_app.update_ticket("PGU-100", {"regression": False})
+            assert regression_cleared["regression"] is False, regression_cleared
+            regression_round_trip = json.loads(
+                psql(
+                    admin_conn,
+                    """
+SELECT jsonb_build_object(
+    'regression', regression,
+    'source_regression', source_json->'regression'
+)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-100';
+""",
+                )
+            )
+            assert regression_round_trip == {"regression": False, "source_regression": False}, regression_round_trip
 
             frame_attachment = frames / "frame-ref.png"
             Image.new("RGB", (2, 2), (80, 120, 160)).save(frame_attachment)

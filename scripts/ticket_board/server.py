@@ -65,6 +65,7 @@ EDIT_FIELD_NAMES = {
     "needs_inspection",
     "needs_eric_signoff",
     "commit_exempt",
+    "regression",
     "commit_hash",
     "audit_signoff",
     "inspector_signoff",
@@ -415,6 +416,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         parent_id = str(payload.get("parent_id", "")).strip().upper()
         commit_hash = str(payload.get("commit_hash", ""))
         commit_exempt = bool(payload.get("commit_exempt", False))
+        regression = bool(payload.get("regression", False))
         comment_text = str(payload.get("comment_text", "")).strip()
         if not comment_text and isinstance(payload.get("comment"), dict):
             comment = payload["comment"]  # type: ignore[assignment]
@@ -429,6 +431,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 bool(str(payload.get("blocked_reason", "")).strip()),
                 commit_hash,
                 commit_exempt,
+                regression,
                 comment_text,
                 bool(payload.get("audit_signoff", False)),
                 bool(payload.get("inspector_signoff", False)),
@@ -451,6 +454,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 assignee=str(payload.get("assignee", "unassigned")),
                 needs_eric_signoff=bool(payload.get("needs_eric_signoff", False)),
                 needs_inspection=bool(payload.get("needs_inspection", False)),
+                regression=regression,
                 blocked_by=payload.get("blocked_by"),  # type: ignore[arg-type]
                 blocked_reason=str(payload.get("blocked_reason", "")),
                 notification_source_role=self.notification_source_role("create_ticket", caller_role),
@@ -477,6 +481,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             inspector_signoff=bool(payload.get("inspector_signoff", False)),
             needs_eric_signoff=bool(payload.get("needs_eric_signoff", False)),
             eric_signoff=bool(payload.get("eric_signoff", False)),
+            regression=regression,
             comments=comments,
             blocked_reason=str(payload.get("blocked_reason", "")),
             commit_hash=commit_hash,
@@ -548,6 +553,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 inspector_signoff=False,
                 needs_eric_signoff=bool(payload.get("needs_eric_signoff", False)),
                 eric_signoff=False,
+                regression=bool(payload.get("regression", False)),
                 comments=[],
                 parent_id=source_ticket_id,
                 blocked_reason=str(payload.get("blocked_reason", "")),

@@ -3,6 +3,11 @@
 `scripts/team-launcher` starts, attaches, or reloads a project team from a JSON
 config. The default PGU config is `config/team-launcher/pgu.json`.
 
+The executable wrapper self-runs as the `agent` user. If another host user runs
+`scripts/team-launcher`, the wrapper invokes `sudo -u agent -H` and passes the
+same launcher arguments through, so callers do not need to prefix the command
+manually.
+
 ## Modes
 
 ```bash

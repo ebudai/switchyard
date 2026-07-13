@@ -3,15 +3,48 @@
 
 from __future__ import annotations
 
+import os
+import pwd
+import subprocess
 import sys
 from pathlib import Path
+
+TARGET_USER = "agent"
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.team_launcher import main
+
+def current_user_name() -> str:
+    try:
+        return pwd.getpwuid(os.geteuid()).pw_name
+    except KeyError:
+        return ""
+
+
+def should_self_elevate(user_name: str, target_user: str = TARGET_USER) -> bool:
+    return user_name != target_user
+
+
+def sudo_agent_command(argv: list[str]) -> list[str]:
+    return ["sudo", "-u", TARGET_USER, "-H", sys.executable, str(Path(__file__).resolve()), *argv]
+
+
+def self_elevate_to_agent_if_needed(argv: list[str]) -> int | None:
+    if not should_self_elevate(current_user_name()):
+        return None
+    return subprocess.call(sudo_agent_command(argv))
+
+
+def run(argv: list[str]) -> int:
+    elevated_status = self_elevate_to_agent_if_needed(argv)
+    if elevated_status is not None:
+        return elevated_status
+    from scripts.team_launcher import main
+
+    return main(argv)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+    raise SystemExit(run(sys.argv[1:]))

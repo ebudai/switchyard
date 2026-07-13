@@ -234,9 +234,60 @@ def tmux_current_command_args(role: RoleConfig) -> list[str]:
     return ["tmux", "display-message", "-p", "-t", role.target, "#{pane_current_command}"]
 
 
+def tmux_pane_pid_args(role: RoleConfig) -> list[str]:
+    return ["tmux", "display-message", "-p", "-t", role.target, "#{pane_pid}"]
+
+
 def expected_live_commands(role: RoleConfig) -> set[str]:
     configured = role.live_commands or [_command_name(role.cli[0])]
     return {_command_name(command) for command in configured if _command_name(command)}
+
+
+def _children_by_parent() -> tuple[dict[int, list[int]], dict[int, set[str]]]:
+    proc = subprocess.run(
+        ["ps", "-eo", "pid=,ppid=,comm=,args="],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    if proc.returncode != 0:
+        return {}, {}
+    children: dict[int, list[int]] = {}
+    names: dict[int, set[str]] = {}
+    for line in proc.stdout.splitlines():
+        parts = line.strip().split(None, 3)
+        if len(parts) != 4:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+        except ValueError:
+            continue
+        command_names = {_command_name(parts[2])}
+        try:
+            command_names.update(_command_name(token) for token in shlex.split(parts[3]) if _command_name(token))
+        except ValueError:
+            pass
+        names[pid] = command_names
+        children.setdefault(ppid, []).append(pid)
+    return children, names
+
+
+def process_tree_contains_command(pane_pid: int, expected_commands: set[str]) -> bool:
+    if pane_pid <= 0:
+        return False
+    children_by_parent, process_names = _children_by_parent()
+    stack = [pane_pid, *children_by_parent.get(pane_pid, [])]
+    seen: set[int] = set()
+    while stack:
+        pid = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        if process_names.get(pid, set()) & expected_commands:
+            return True
+        stack.extend(children_by_parent.get(pid, []))
+    return False
 
 
 def live_command_matches_role(
@@ -244,16 +295,21 @@ def live_command_matches_role(
     *,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> bool:
-    proc = runner(
-        tmux_current_command_args(role),
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-    )
+    expected = expected_live_commands(role)
+    pid_proc = runner(tmux_pane_pid_args(role), text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    if pid_proc.returncode == 0:
+        try:
+            pane_pid = int(str(pid_proc.stdout).strip())
+        except ValueError:
+            pane_pid = 0
+        if pane_pid > 0:
+            return process_tree_contains_command(pane_pid, expected)
+
+    proc = runner(tmux_current_command_args(role), text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     if proc.returncode != 0:
         return False
     actual = _command_name(str(proc.stdout).strip())
-    return actual in expected_live_commands(role)
+    return actual in expected
 
 
 def run_role_pane(

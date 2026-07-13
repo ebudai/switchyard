@@ -161,6 +161,35 @@ SELECT set_config('ticket_board.caller_role', {sql_string(caller_role)}, false);
     )
 
 
+def cancel_with_fresh_comment(conninfo: str, ticket_id: str, caller_role: str, text: str) -> None:
+    source = json.dumps(
+        {
+            "who": caller_role,
+            "text": text,
+            "ts": "2026-07-10T00:40:00+00:00",
+        },
+        sort_keys=True,
+    ).replace("'", "''")
+    psql(
+        conninfo,
+        f"""
+SELECT set_config('ticket_board.caller_role', {sql_string(caller_role)}, false);
+BEGIN;
+INSERT INTO ticket_board.ticket_comments (ticket_id, position, who, ts_text, text, source_json)
+VALUES (
+    {sql_string(ticket_id)},
+    COALESCE((SELECT max(position) + 1 FROM ticket_board.ticket_comments WHERE ticket_id = {sql_string(ticket_id)}), 0),
+    {sql_string(caller_role)},
+    '2026-07-10T00:40:00+00:00',
+    {sql_string(text)},
+    '{source}'::jsonb
+);
+UPDATE ticket_board.tickets SET state = 'cancelled' WHERE id = {sql_string(ticket_id)};
+COMMIT;
+""",
+    )
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="ticket-board-triggers.") as tmpdir:
         root = Path(tmpdir)
@@ -1286,6 +1315,127 @@ WHERE ticket_id = 'PGU-33802';
                     "new_state": "in_progress",
                 }
             ], director_route_queue
+
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
+            insert_ticket(conninfo, "PGU-34210", title="Cross-role blocker", state="analysis", assignee="unassigned")
+            insert_ticket(conninfo, "PGU-34211", title="Cross-role dependent", state="in_progress", assignee="ops")
+            psql(
+                conninfo,
+                """
+INSERT INTO ticket_board.ticket_blockers (ticket_id, blocker_ticket_id, position)
+VALUES ('PGU-34211', 'PGU-34210', 0);
+""",
+            )
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
+            cancel_with_fresh_comment(conninfo, "PGU-34210", "director", "Cancelling blocker for another role.")
+            cross_role_unblock_queue = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_agg(jsonb_build_object(
+    'target_role', target_role,
+    'message', message,
+    'old_state', payload->>'old_state',
+    'new_state', payload->>'new_state'
+) ORDER BY id)::text
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-34211';
+""",
+                ).stdout
+            )
+            assert cross_role_unblock_queue == [
+                {
+                    "target_role": "ops",
+                    "message": "New ticket for you: PGU-34211 -- Cross-role dependent",
+                    "old_state": None,
+                    "new_state": "in_progress",
+                }
+            ], cross_role_unblock_queue
+
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
+            insert_ticket(conninfo, "PGU-34220", title="Self-owned blocker", state="analysis", assignee="unassigned")
+            insert_ticket(conninfo, "PGU-34221", title="Self-owned dependent", state="analysis", assignee="unassigned")
+            psql(
+                conninfo,
+                """
+INSERT INTO ticket_board.ticket_blockers (ticket_id, blocker_ticket_id, position)
+VALUES ('PGU-34221', 'PGU-34220', 0);
+""",
+            )
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
+            cancel_with_fresh_comment(conninfo, "PGU-34220", "director", "Cancelling blocker for my own dependent.")
+            self_owned_unblock_queue = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_agg(jsonb_build_object(
+    'target_role', target_role,
+    'message', message,
+    'old_state', payload->>'old_state',
+    'new_state', payload->>'new_state'
+) ORDER BY id)::text
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-34221';
+""",
+                ).stdout
+            )
+            assert self_owned_unblock_queue == [
+                {
+                    "target_role": "director",
+                    "message": "New ticket for you: PGU-34221 -- Self-owned dependent",
+                    "old_state": None,
+                    "new_state": "analysis",
+                }
+            ], self_owned_unblock_queue
+
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
+            insert_ticket(conninfo, "PGU-34230", title="Direct self-suppress route", state="backlog", assignee="unassigned")
+            service_call(
+                conninfo,
+                "director",
+                "SELECT ticket_board.route('PGU-34230', 'analysis', 'unassigned');",
+            )
+            direct_self_transition_count = psql(
+                conninfo,
+                "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-34230';",
+            ).stdout.strip()
+            assert direct_self_transition_count == "0", direct_self_transition_count
+
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
+            insert_ticket(conninfo, "PGU-34240", title="Backlog blocker", state="analysis", assignee="unassigned")
+            insert_ticket(conninfo, "PGU-34241", title="Backlog dependent", state="backlog", assignee="unassigned")
+            psql(
+                conninfo,
+                """
+INSERT INTO ticket_board.ticket_blockers (ticket_id, blocker_ticket_id, position)
+VALUES ('PGU-34241', 'PGU-34240', 0);
+""",
+            )
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
+            cancel_with_fresh_comment(conninfo, "PGU-34240", "director", "Cancelling blocker for backlog triage.")
+            backlog_unblock_queue = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_agg(jsonb_build_object(
+    'target_role', target_role,
+    'message', message,
+    'old_state', payload->>'old_state',
+    'new_state', payload->>'new_state'
+) ORDER BY id)::text
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-34241';
+""",
+                ).stdout
+            )
+            assert backlog_unblock_queue == [
+                {
+                    "target_role": "director",
+                    "message": "New ticket for you: PGU-34241 -- Backlog dependent",
+                    "old_state": None,
+                    "new_state": "backlog",
+                }
+            ], backlog_unblock_queue
 
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
             insert_ticket(conninfo, "PGU-20", title="Durable notify", state="analysis", assignee="ops", implementation="")

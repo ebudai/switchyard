@@ -38,6 +38,7 @@ DEFAULT_DIRECTOR_COMPOSING_TIMEOUT_SECONDS = 15 * 60.0
 DEFAULT_IDLE_STALL_GRACE_SECONDS = 45.0
 DEFAULT_IDLE_STALL_NUDGE_CADENCE_SECONDS = 5 * 60.0
 DEFAULT_IDLE_STALL_ESCALATE_AFTER = 2
+IDLE_TURN_END_SOURCES = frozenset({"claude.Stop", "codex.Stop", "gemini.AfterAgent"})
 DEFAULT_DIRECTOR_COMPOSER_HOME_X = 2
 DEFAULT_PANE_STATE_DIR = (
     Path(os.environ["PGU_TICKET_BOARD_PANE_STATE_DIR"]).expanduser()
@@ -275,6 +276,19 @@ class PaneActivityGate:
         checked_targets = targets or sorted(set(ROLE_TO_TARGET.values()))
         return [target for target in checked_targets if self.state_store.read(target) is None]
 
+    def _idle_hook_states_by_role(self, roles: list[str] | None = None) -> dict[str, PaneHookState]:
+        checked_roles = roles or sorted(ROLE_TO_TARGET)
+        idle_states: dict[str, PaneHookState] = {}
+        for role in checked_roles:
+            target = ROLE_TO_TARGET.get(role)
+            if target is None:
+                continue
+            state = self.state_store.read(target)
+            if state is None or state.state != "idle":
+                continue
+            idle_states[role] = state
+        return idle_states
+
     def idle_since_by_role(self, roles: list[str] | None = None) -> dict[str, str]:
         checked_roles = roles or sorted(ROLE_TO_TARGET)
         idle_since: dict[str, str] = {}
@@ -289,6 +303,13 @@ class PaneActivityGate:
                 continue
             idle_since[role] = datetime.fromtimestamp(state.updated_at, timezone.utc).isoformat()
         return idle_since
+
+    def turn_end_idle_since_by_role(self, roles: list[str] | None = None) -> dict[str, str]:
+        return {
+            role: datetime.fromtimestamp(state.updated_at, timezone.utc).isoformat()
+            for role, state in self._idle_hook_states_by_role(roles).items()
+            if state.source in IDLE_TURN_END_SOURCES
+        }
 
     def _tmux_session_for_target(self, target: str) -> str:
         return target.split(":", 1)[0]
@@ -412,6 +433,7 @@ class TicketBoardNotifyListener:
         self.logger = logger
         self.delivered_count = 0
         self._traced_gate_defer_notifications: set[int] = set()
+        self._seen_turn_end_idle_since_by_role: dict[str, str] = {}
 
     def _connector_kwargs(self) -> dict[str, int | bool]:
         return {
@@ -594,6 +616,58 @@ SELECT ticket_board.record_notification_trace(
         except Exception as exc:
             self.logger.warning("Failed to read pane idle hook state for stall nudges: %s", exc)
             return {}
+
+    def _turn_end_idle_since_by_role(self) -> dict[str, str]:
+        gate_owner = getattr(self.activity_gate, "__self__", None)
+        turn_end_idle_since_by_role = getattr(gate_owner, "turn_end_idle_since_by_role", None)
+        if not callable(turn_end_idle_since_by_role):
+            return {}
+        try:
+            return dict(turn_end_idle_since_by_role())
+        except Exception as exc:
+            self.logger.warning("Failed to read pane turn-end idle hook state for reminders: %s", exc)
+            return {}
+
+    def _fresh_turn_end_idle_since_by_role(self) -> dict[str, str]:
+        turn_end_idle_since = self._turn_end_idle_since_by_role()
+        fresh_turn_end_idle_since: dict[str, str] = {}
+        for role, idle_since in turn_end_idle_since.items():
+            if self._seen_turn_end_idle_since_by_role.get(role) != idle_since:
+                fresh_turn_end_idle_since[role] = idle_since
+            self._seen_turn_end_idle_since_by_role[role] = idle_since
+        stale_roles = set(self._seen_turn_end_idle_since_by_role) - set(turn_end_idle_since)
+        for role in stale_roles:
+            self._seen_turn_end_idle_since_by_role.pop(role, None)
+        return fresh_turn_end_idle_since
+
+    def process_idle_turn_end_nudges(self, conn: Any) -> int:
+        idle_since = self._fresh_turn_end_idle_since_by_role()
+        if not idle_since:
+            return 0
+        try:
+            result = conn.execute(
+                """
+SELECT ticket_board.notify_idle_turn_end_nudges(
+    %s::jsonb,
+    clock_timestamp()
+)
+""",
+                (json.dumps(idle_since, sort_keys=True),),
+            )
+            row = result.fetchone()
+        except Exception as exc:
+            self.logger.warning("Failed to enqueue idle turn-end reminders: %s", exc)
+            return 0
+        if row is None:
+            return 0
+        value = row[0] if not isinstance(row, dict) else next(iter(row.values()))
+        try:
+            enqueued = int(value)
+        except (TypeError, ValueError):
+            return 0
+        if enqueued:
+            self.logger.info("Enqueued %s idle turn-end ticket nudges", enqueued)
+        return enqueued
 
     def process_idle_stall_nudges(self, conn: Any) -> int:
         idle_since = self._idle_since_by_role()
@@ -1017,6 +1091,7 @@ LIMIT 1
             self.logger.info("LISTEN %s established", self.channel)
             self._log_missing_hook_state()
             while not self.stop_event.is_set():
+                self.process_idle_turn_end_nudges(conn)
                 self.process_idle_stall_nudges(conn)
                 delivered = self.process_due_notifications(conn, max_notifications=max_notifications)
                 if max_notifications is not None and self.delivered_count >= max_notifications:

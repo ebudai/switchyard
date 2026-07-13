@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -38,6 +39,8 @@ DEFAULT_DIRECTOR_COMPOSING_TIMEOUT_SECONDS = 15 * 60.0
 DEFAULT_IDLE_STALL_GRACE_SECONDS = 45.0
 DEFAULT_IDLE_STALL_NUDGE_CADENCE_SECONDS = 5 * 60.0
 DEFAULT_IDLE_STALL_ESCALATE_AFTER = 2
+DIRECTOR_COMPOSER_SEPARATOR_MIN = 40
+DIRECTOR_COMPOSER_PROMPT_RE = re.compile(r"^[❯\u276f\s>\-\*]+", flags=re.MULTILINE)
 DEFAULT_PANE_STATE_DIR = (
     Path(os.environ["PGU_TICKET_BOARD_PANE_STATE_DIR"]).expanduser()
     if os.environ.get("PGU_TICKET_BOARD_PANE_STATE_DIR")
@@ -242,6 +245,7 @@ class PaneActivityGate:
         state_store: PaneHookStateStore | None = None,
         director_target: str = ROLE_TO_TARGET["director"],
         client_activity_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        pane_capture_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
         director_composing_timeout_seconds: float = DEFAULT_DIRECTOR_COMPOSING_TIMEOUT_SECONDS,
         director_startup_hold_seconds: float = DEFAULT_BUSY_REQUEUE_SECONDS,
         monotonic: Callable[[], float] = time.monotonic,
@@ -250,6 +254,7 @@ class PaneActivityGate:
         self.state_store = state_store or PaneHookStateStore()
         self.director_target = director_target
         self.client_activity_runner = client_activity_runner
+        self.pane_capture_runner = pane_capture_runner
         self.director_composing_timeout_seconds = director_composing_timeout_seconds
         self.director_startup_hold_seconds = director_startup_hold_seconds
         self.monotonic = monotonic
@@ -314,6 +319,37 @@ class PaneActivityGate:
                 continue
         return max(values) if values else None
 
+    def _director_pane_capture(self, target: str) -> str | None:
+        try:
+            proc = self.pane_capture_runner(
+                ["tmux", "capture-pane", "-p", "-J", "-t", target],
+                check=True,
+                text=True,
+                capture_output=True,
+                timeout=2.0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        capture = proc.stdout
+        return capture if capture else None
+
+    @staticmethod
+    def _director_composer_text(pane_text: str) -> str:
+        lines = pane_text.splitlines()
+        separator_indices = [
+            idx for idx, line in enumerate(lines) if line.count("─") >= DIRECTOR_COMPOSER_SEPARATOR_MIN
+        ]
+        if len(separator_indices) < 2:
+            return ""
+        composer_content = "\n".join(lines[separator_indices[-2] + 1 : separator_indices[-1]])
+        return DIRECTOR_COMPOSER_PROMPT_RE.sub("", composer_content).strip()
+
+    def _director_has_unsubmitted_text(self, target: str) -> bool:
+        pane_text = self._director_pane_capture(target)
+        if not pane_text:
+            return False
+        return bool(self._director_composer_text(pane_text))
+
     def _reset_director_latch(self) -> None:
         self._director_idle_snapshot_activity = None
         self._director_idle_snapshot_state_ts = None
@@ -328,12 +364,17 @@ class PaneActivityGate:
         if current_activity is None:
             return ActivityTrace(True, "client_activity_unavailable")
         now = self.monotonic()
+        has_unsubmitted_text = self._director_has_unsubmitted_text(target)
         if self._director_idle_snapshot_state_ts != state.updated_at:
             self._director_idle_snapshot_state_ts = state.updated_at
             self._director_idle_snapshot_activity = current_activity
-            self._director_composing_latched = False
-            self._director_composing_activity = None
-            self._director_composing_started_at = None
+            self._director_composing_latched = has_unsubmitted_text
+            self._director_composing_activity = current_activity if has_unsubmitted_text else None
+            self._director_composing_started_at = now if has_unsubmitted_text else None
+            if has_unsubmitted_text:
+                self._director_startup_hold_state_ts = None
+                self._director_startup_hold_started_at = None
+                return ActivityTrace(True, "human_composing")
             if state.updated_at < self._started_at:
                 self._director_startup_hold_state_ts = state.updated_at
                 self._director_startup_hold_started_at = now
@@ -363,6 +404,12 @@ class PaneActivityGate:
         ):
             self._director_composing_activity = current_activity
             self._director_composing_started_at = now
+        if has_unsubmitted_text:
+            if not self._director_composing_latched:
+                self._director_composing_latched = True
+                self._director_composing_activity = current_activity
+                self._director_composing_started_at = now
+            return ActivityTrace(True, "human_composing")
         if not self._director_composing_latched:
             return None
         latched_activity = self._director_composing_activity

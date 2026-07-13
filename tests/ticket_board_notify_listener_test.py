@@ -260,9 +260,13 @@ def trace_events(conn: FakeConnection) -> list[str]:
     return [str(params[4]) for params in conn.traces if params is not None]
 
 
+def empty_pane_capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(args, 0, stdout="")
+
+
 def hook_gate(tmp_path: Path) -> tuple[PaneHookStateStore, PaneActivityGate]:
     store = PaneHookStateStore(tmp_path)
-    return store, PaneActivityGate(state_store=store)
+    return store, PaneActivityGate(state_store=store, pane_capture_runner=empty_pane_capture_runner)
 
 
 def test_hook_state_writer_and_gate_idle_before_arrival_delivers_immediately() -> None:
@@ -595,6 +599,7 @@ def test_director_client_activity_latches_no_clobber_until_busy_idle_cycle() -> 
         gate = PaneActivityGate(
             state_store=store,
             client_activity_runner=client_activity_runner,
+            pane_capture_runner=empty_pane_capture_runner,
             director_composing_timeout_seconds=60.0,
             monotonic=lambda: now[0],
             wall_time=lambda: 0.0,
@@ -668,6 +673,7 @@ def test_director_restart_window_holds_stale_idle_until_busy_idle_cycle() -> Non
         gate = PaneActivityGate(
             state_store=store,
             client_activity_runner=client_activity_runner,
+            pane_capture_runner=empty_pane_capture_runner,
             director_composing_timeout_seconds=60.0,
             monotonic=lambda: now[0],
             wall_time=lambda: wall[0],
@@ -739,6 +745,7 @@ def test_director_restart_window_timeout_releases_flat_idle_without_busy_cycle()
         gate = PaneActivityGate(
             state_store=store,
             client_activity_runner=client_activity_runner,
+            pane_capture_runner=empty_pane_capture_runner,
             director_composing_timeout_seconds=60.0,
             director_startup_hold_seconds=1.0,
             monotonic=lambda: now[0],
@@ -791,6 +798,7 @@ def test_director_pre_send_recheck_blocks_typing_that_starts_after_initial_idle_
         gate = PaneActivityGate(
             state_store=store,
             client_activity_runner=client_activity_runner,
+            pane_capture_runner=empty_pane_capture_runner,
             director_composing_timeout_seconds=60.0,
             wall_time=lambda: wall[0],
         )
@@ -815,6 +823,101 @@ def test_director_pre_send_recheck_blocks_typing_that_starts_after_initial_idle_
     assert json.loads(conn.traces[1][8])["phase"] == "pre_send_recheck"
 
 
+def test_director_visible_draft_holds_notifications_without_new_client_activity() -> None:
+    sent: list[tuple[str, str]] = []
+    activity = [100]
+    pane_capture = [
+        "\n".join(
+            [
+                "old output",
+                "──────────────────────────────────────────────────────────────────────────────────────────── Director ──",
+                "❯ paused director draft",
+                "────────────────────────────────────────────────────────────────────────────────────────────────────────",
+            ]
+        )
+    ]
+
+    def client_activity_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert args[:4] == ["tmux", "list-clients", "-t", "pgu-director"]
+        return subprocess.CompletedProcess(args, 0, stdout=f"{activity[0]}\n")
+
+    def pane_capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert args[:5] == ["tmux", "capture-pane", "-p", "-J", "-t"]
+        return subprocess.CompletedProcess(args, 0, stdout=pane_capture[0])
+
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            client_activity_runner=client_activity_runner,
+            pane_capture_runner=pane_capture_runner,
+            director_composing_timeout_seconds=60.0,
+            wall_time=lambda: 0.0,
+        )
+        store.write("pgu-director:0.0", "idle", source="claude.Stop", now=10.0)
+
+        conn = FakeConnection(
+            [queue_row(76, "PGU-358", target_role="director", message="PGU-358 -- Director notification")]
+        )
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=gate.is_working,
+            connector=lambda *args, **kwargs: conn,
+            poll_seconds=0,
+        )
+
+        assert listener.listen_once(max_notifications=1) == 0
+
+    assert sent == []
+    assert len(conn.requeued) == 1
+    assert conn.traces[1][6] == "human_composing"
+
+
+def test_director_visible_draft_prevents_timeout_release() -> None:
+    now = [0.0]
+    activity = [100]
+    pane_capture = [
+        "\n".join(
+            [
+                "old output",
+                "──────────────────────────────────────────────────────────────────────────────────────────── Director ──",
+                "❯ paused director draft",
+                "────────────────────────────────────────────────────────────────────────────────────────────────────────",
+            ]
+        )
+    ]
+
+    def client_activity_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=f"{activity[0]}\n")
+
+    def pane_capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=pane_capture[0])
+
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            client_activity_runner=client_activity_runner,
+            pane_capture_runner=pane_capture_runner,
+            director_composing_timeout_seconds=5.0,
+            monotonic=lambda: now[0],
+            wall_time=lambda: 0.0,
+        )
+        store.write("pgu-director:0.0", "idle", source="claude.Stop", now=10.0)
+        assert gate.is_busy("pgu-director:0.0") is True
+        assert gate.last_trace("pgu-director:0.0").reason == "human_composing"  # type: ignore[union-attr]
+
+        now[0] = 30.0
+        assert gate.is_busy("pgu-director:0.0") is True
+        assert gate.last_trace("pgu-director:0.0").reason == "human_composing"  # type: ignore[union-attr]
+
+        pane_capture[0] = "old output\nWorking\nesc to interrupt\n"
+        now[0] = 30.1
+        assert gate.is_busy("pgu-director:0.0") is False
+        assert gate.last_trace("pgu-director:0.0").reason == "hook_idle"  # type: ignore[union-attr]
+
+
 def test_director_abandoned_draft_timeout_releases_latch() -> None:
     now = [0.0]
     activity = [100]
@@ -827,6 +930,7 @@ def test_director_abandoned_draft_timeout_releases_latch() -> None:
         gate = PaneActivityGate(
             state_store=store,
             client_activity_runner=client_activity_runner,
+            pane_capture_runner=empty_pane_capture_runner,
             director_composing_timeout_seconds=5.0,
             monotonic=lambda: now[0],
             wall_time=lambda: 0.0,
@@ -852,6 +956,7 @@ def test_director_abandoned_draft_timeout_uses_latest_keystroke() -> None:
         gate = PaneActivityGate(
             state_store=store,
             client_activity_runner=client_activity_runner,
+            pane_capture_runner=empty_pane_capture_runner,
             director_composing_timeout_seconds=5.0,
             monotonic=lambda: now[0],
             wall_time=lambda: 0.0,
@@ -1060,6 +1165,8 @@ def main() -> int:
     test_director_restart_window_holds_stale_idle_until_busy_idle_cycle()
     test_director_restart_window_timeout_releases_flat_idle_without_busy_cycle()
     test_director_pre_send_recheck_blocks_typing_that_starts_after_initial_idle_check()
+    test_director_visible_draft_holds_notifications_without_new_client_activity()
+    test_director_visible_draft_prevents_timeout_release()
     test_director_abandoned_draft_timeout_releases_latch()
     test_director_abandoned_draft_timeout_uses_latest_keystroke()
     test_listener_logs_missing_hook_state_on_startup()

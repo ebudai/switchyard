@@ -72,6 +72,12 @@ CREATE TABLE IF NOT EXISTS ticket_board.tickets (
     -- Historical tickets include both full 40-char hashes and short hashes.
     commit_hash text NOT NULL DEFAULT ''
         CHECK (commit_hash = '' OR commit_hash ~ '^[0-9A-Fa-f]{7,40}$'),
+    last_rejected_commit text
+        CHECK (
+            last_rejected_commit IS NULL
+            OR last_rejected_commit = ''
+            OR last_rejected_commit ~ '^[0-9A-Fa-f]{7,40}$'
+        ),
     commit_exempt boolean NOT NULL DEFAULT false,
 
     -- Back-compat mirror of the legacy top-level "screenshot" field. The
@@ -2872,10 +2878,11 @@ DECLARE
     actor text;
     normalized_commit text := btrim(coalesce(commit_hash, ''));
     ticket_commit_exempt boolean;
+    ticket_last_rejected_commit text;
 BEGIN
     actor := ticket_board.require_actor(ARRAY['main', 'app', 'ops', 'perf', 'research'], 'submit_to_audit');
-    SELECT tickets.commit_exempt
-    INTO ticket_commit_exempt
+    SELECT tickets.commit_exempt, tickets.last_rejected_commit
+    INTO ticket_commit_exempt, ticket_last_rejected_commit
     FROM ticket_board.tickets
     WHERE tickets.id = submit_to_audit.id;
     IF NOT FOUND THEN
@@ -2887,10 +2894,15 @@ BEGIN
     IF normalized_commit = '' AND NOT ticket_commit_exempt THEN
         RAISE EXCEPTION 'commit_hash must be a 7-40 character hex commit';
     END IF;
+    IF ticket_last_rejected_commit IS NOT NULL AND normalized_commit = ticket_last_rejected_commit THEN
+        RAISE EXCEPTION 'cannot submit: commit % was just kicked back with no change -- do the fix and submit a NEW commit.',
+            coalesce(nullif(ticket_last_rejected_commit, ''), '<none>');
+    END IF;
     UPDATE ticket_board.tickets
     SET state = 'audit',
         commit_hash = normalized_commit,
-        inspector_signoff = false
+        inspector_signoff = false,
+        last_rejected_commit = NULL
     WHERE tickets.id = submit_to_audit.id;
     PERFORM ticket_board.touch_ticket(id);
 END;
@@ -3004,7 +3016,8 @@ BEGIN
     PERFORM ticket_board.append_ticket_comment(id, comment_actor, reason);
     UPDATE ticket_board.tickets
     SET state = 'analysis',
-        assignee = 'unassigned'
+        assignee = 'unassigned',
+        last_rejected_commit = commit_hash
     WHERE tickets.id = audit_kick_back.id
       AND tickets.state = 'audit';
     IF NOT FOUND THEN
@@ -3056,7 +3069,8 @@ BEGIN
     PERFORM ticket_board.append_ticket_comment(id, comment_actor, recommendations);
     UPDATE ticket_board.tickets
     SET state = 'in_progress',
-        inspector_signoff = false
+        inspector_signoff = false,
+        last_rejected_commit = commit_hash
     WHERE tickets.id = inspector_kick_back.id
       AND tickets.state = 'inspection';
     IF NOT FOUND THEN
@@ -3155,7 +3169,8 @@ BEGIN
     END IF;
     UPDATE ticket_board.tickets
     SET state = 'done',
-        commit_hash = normalized_commit
+        commit_hash = normalized_commit,
+        last_rejected_commit = NULL
     WHERE tickets.id = mark_done.id;
     PERFORM ticket_board.touch_ticket(id);
 END;

@@ -343,12 +343,12 @@ SELECT ticket_board.create_ticket('Bad direct create', 'Body', 'in_progress');
         psql(
             admin_conn,
             """
-SELECT jsonb_build_object('state', state, 'commit_hash', commit_hash)::text
+SELECT jsonb_build_object('state', state, 'commit_hash', commit_hash, 'last_rejected_commit', last_rejected_commit)::text
 FROM ticket_board.tickets WHERE id = 'PGU-400';
 """,
         )
     )
-    assert submitted == {"state": "audit", "commit_hash": "abcdef0"}, submitted
+    assert submitted == {"state": "audit", "commit_hash": "abcdef0", "last_rejected_commit": None}, submitted
 
     insert_ticket(
         admin_conn,
@@ -400,7 +400,15 @@ FROM ticket_board.tickets t WHERE id = 'PGU-500';
         "SELECT ticket_board.audit_sign_off('PGU-502', '');",
     )
 
-    insert_ticket(admin_conn, "PGU-501", title="Audit kickback", state="audit", assignee="audit", implementation="Done.")
+    insert_ticket(
+        admin_conn,
+        "PGU-501",
+        title="Audit kickback",
+        state="audit",
+        assignee="audit",
+        implementation="Done.",
+        commit_hash="abcdef1",
+    )
     psql(service_conn, "SELECT ticket_board.audit_kick_back('PGU-501', 'Needs changes.');")
     kickback = json.loads(
         psql(
@@ -409,13 +417,76 @@ FROM ticket_board.tickets t WHERE id = 'PGU-500';
 SELECT jsonb_build_object(
     'state', t.state,
     'assignee', t.assignee,
+    'commit_hash', t.commit_hash,
+    'last_rejected_commit', t.last_rejected_commit,
     'comment', (SELECT text FROM ticket_board.ticket_comments WHERE ticket_id = t.id ORDER BY position DESC LIMIT 1)
 )::text
 FROM ticket_board.tickets t WHERE id = 'PGU-501';
 """,
         )
     )
-    assert kickback == {"state": "analysis", "assignee": "unassigned", "comment": "Needs changes."}, kickback
+    assert kickback == {
+        "state": "analysis",
+        "assignee": "unassigned",
+        "commit_hash": "",
+        "last_rejected_commit": "abcdef1",
+        "comment": "Needs changes.",
+    }, kickback
+    assert "cannot submit: commit abcdef1 was just kicked back with no change -- do the fix and submit a NEW commit." in psql_error(
+        service_conn,
+        "SELECT ticket_board.submit_to_audit('PGU-501', 'abcdef1');",
+    )
+    psql(
+        admin_conn,
+        """
+UPDATE ticket_board.tickets
+SET state = 'in_progress',
+    assignee = 'ops'
+WHERE id = 'PGU-501';
+""",
+    )
+    psql(service_conn, "SELECT ticket_board.submit_to_audit('PGU-501', 'abcdef2');")
+    resubmitted = json.loads(
+        psql(
+            admin_conn,
+            """
+SELECT jsonb_build_object('state', state, 'commit_hash', commit_hash, 'last_rejected_commit', last_rejected_commit)::text
+FROM ticket_board.tickets WHERE id = 'PGU-501';
+""",
+        )
+    )
+    assert resubmitted == {"state": "audit", "commit_hash": "abcdef2", "last_rejected_commit": None}, resubmitted
+
+    insert_ticket(
+        admin_conn,
+        "PGU-503",
+        title="Inspector kickback",
+        state="inspection",
+        assignee="inspector",
+        implementation="Needs changes.",
+        commit_hash="fedcba9",
+    )
+    psql(service_conn, "SELECT ticket_board.inspector_kick_back('PGU-503', 'Please revise.');")
+    inspector_kickback = json.loads(
+        psql(
+            admin_conn,
+            """
+SELECT jsonb_build_object(
+    'state', t.state,
+    'commit_hash', t.commit_hash,
+    'last_rejected_commit', t.last_rejected_commit,
+    'comment', (SELECT text FROM ticket_board.ticket_comments WHERE ticket_id = t.id ORDER BY position DESC LIMIT 1)
+)::text
+FROM ticket_board.tickets t WHERE id = 'PGU-503';
+""",
+        )
+    )
+    assert inspector_kickback == {
+        "state": "in_progress",
+        "commit_hash": "",
+        "last_rejected_commit": "fedcba9",
+        "comment": "Please revise.",
+    }, inspector_kickback
 
     insert_ticket(
         admin_conn,

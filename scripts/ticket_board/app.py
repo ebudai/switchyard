@@ -232,12 +232,14 @@ class TicketBoardApp:
     def update_ticket(self, ticket_id: str, patch: dict[str, Any], *, caller_role: str | None = None) -> dict[str, Any]:
         return self._pg_update_ticket(ticket_id, patch, caller_role=caller_role)
 
-    def route_ticket(self, ticket_id: str, state: str, assignee: str) -> dict[str, Any]:
+    def route_ticket(self, ticket_id: str, state: str, assignee: str, *, caller_role: str | None = None) -> dict[str, Any]:
         ticket_id = str(ticket_id).strip().upper()
         state = self._validate_state(str(state))
         assignee = self._validate_assignee(str(assignee))
         with self._pg_connect() as conn:
             with conn.transaction():
+                if caller_role:
+                    self._pg_set_caller_role(conn, caller_role)
                 self._pg_call(conn, "SELECT ticket_board.route(%s, %s, %s);", (ticket_id, state, assignee))
                 return self._pg_get_ticket(ticket_id, conn)
 

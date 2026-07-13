@@ -487,10 +487,20 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
     def action_comment_text(self, payload: dict[str, object]) -> str:
         return str(payload.get("recommendations", payload.get("reason", payload.get("text", "")))).strip()
 
-    def send_ticket_created(self, created: dict[str, object], before_signature: tuple[tuple[object, ...], ...]) -> None:
+    def send_ticket_created(
+        self,
+        created: dict[str, object],
+        before_signature: tuple[tuple[object, ...], ...],
+        *,
+        caller_role: str | None = None,
+    ) -> None:
         after_signature = self.verify_created_ticket_persisted(created, before_signature)
         self.events.notify_change(after_signature)
-        if str(created.get("state", "")).strip() == "analysis" and not list(created.get("blocked_by") or []):
+        if (
+            caller_role != "director"
+            and str(created.get("state", "")).strip() == "analysis"
+            and not list(created.get("blocked_by") or [])
+        ):
             self.director_notifier.notify_ticket_created(created)
         self.send_json({"ticket": created}, HTTPStatus.CREATED)
 
@@ -501,7 +511,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         if operation == "create_ticket":
             before_signature = self.app.store_signature()
             created = self.create_ticket_from_payload(payload, caller)
-            self.send_ticket_created(created, before_signature)
+            self.send_ticket_created(created, before_signature, caller_role=caller)
             return
 
         if operation == "file_bug":
@@ -529,8 +539,9 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 comments=[],
                 parent_id=source_ticket_id,
                 blocked_reason=str(payload.get("blocked_reason", "")),
+                caller_role=caller,
             )
-            self.send_ticket_created(created, before_signature)
+            self.send_ticket_created(created, before_signature, caller_role=caller)
             return
 
         if ticket_id is None:
@@ -542,6 +553,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 ticket_id,
                 str(payload.get("state", payload.get("new_state", ""))),
                 str(payload.get("assignee", "")),
+                caller_role=caller,
             )
             self.events.notify_change(self.app.store_signature())
             self.send_json({"ticket": updated})

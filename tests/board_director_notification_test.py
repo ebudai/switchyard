@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression tests: board-created tickets notify the director immediately."""
+"""Regression tests for immediate director create notifications."""
 
 from __future__ import annotations
 
@@ -134,6 +134,7 @@ def post_create(
     server: TicketBoardServer,
     title: str,
     *,
+    caller: str,
     state: str = "analysis",
     blocked_by: list[str] | None = None,
     blocked_reason: str = "",
@@ -152,14 +153,33 @@ def post_create(
     request = urllib.request.Request(
         f"http://127.0.0.1:{server.server_port}/api/tickets/actions/create_ticket",
         data=body,
-        headers={"Content-Type": "application/json", CALLER_ROLE_HEADER: "director"},
+        headers={"Content-Type": "application/json", CALLER_ROLE_HEADER: caller},
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=5) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
-def test_server_create_notifies_director() -> None:
+def post_file_bug(server: TicketBoardServer, title: str, *, caller: str) -> dict[str, object]:
+    body = json.dumps(
+        {
+            "title": title,
+            "body": "Filed through API.",
+            "source_ticket_id": "PGU-999",
+            "assignee": "unassigned",
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{server.server_port}/api/tickets/actions/file_bug",
+        data=body,
+        headers={"Content-Type": "application/json", CALLER_ROLE_HEADER: caller},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def test_server_director_create_does_not_notify_director() -> None:
     with tempfile.TemporaryDirectory(prefix="board-director-notify-server.") as tmpdir:
         root = Path(tmpdir)
         notifier = FakeNotifier()
@@ -171,7 +191,28 @@ def test_server_create_notifies_director() -> None:
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            payload = post_create(server, "Instant notify")
+            payload = post_create(server, "Director self-create", caller="director")
+            assert payload["ticket"]["title"] == "Director self-create", payload
+            assert notifier.created == [], notifier.created
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+
+def test_server_non_director_file_bug_notifies_director() -> None:
+    with tempfile.TemporaryDirectory(prefix="board-director-notify-server.") as tmpdir:
+        root = Path(tmpdir)
+        notifier = FakeNotifier()
+        server = TicketBoardServer(
+            ("127.0.0.1", 0),
+            MemoryCreateApp(root / "frames", root / "assets"),
+            director_notifier=notifier,
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            payload = post_file_bug(server, "Instant notify", caller="ops")
             assert notifier.created == [{"id": payload["ticket"]["id"], "title": "Instant notify"}], notifier.created
         finally:
             server.shutdown()
@@ -191,7 +232,7 @@ def test_server_backlog_create_does_not_notify_director() -> None:
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            payload = post_create(server, "Quiet backlog", state="backlog")
+            payload = post_create(server, "Quiet backlog", caller="director", state="backlog")
             assert payload["ticket"]["state"] == "backlog", payload
             assert notifier.created == [], notifier.created
         finally:
@@ -215,6 +256,7 @@ def test_server_blocked_create_does_not_notify_director() -> None:
             payload = post_create(
                 server,
                 "Quiet blocked create",
+                caller="director",
                 blocked_by=["PGU-1"],
                 blocked_reason="Waiting on PGU-1.",
             )
@@ -240,7 +282,7 @@ def test_server_create_does_not_notify_when_ticket_is_not_persisted() -> None:
         thread.start()
         try:
             try:
-                post_create(server, "Phantom create")
+                post_create(server, "Phantom create", caller="director")
             except HTTPError as exc:
                 assert exc.code == 400
                 assert "created ticket was not persisted" in exc.read().decode("utf-8")
@@ -264,7 +306,8 @@ def test_director_notifier_batches_quick_creates() -> None:
 
 
 def main() -> int:
-    test_server_create_notifies_director()
+    test_server_director_create_does_not_notify_director()
+    test_server_non_director_file_bug_notifies_director()
     test_server_backlog_create_does_not_notify_director()
     test_server_blocked_create_does_not_notify_director()
     test_server_create_does_not_notify_when_ticket_is_not_persisted()

@@ -193,6 +193,7 @@ def main() -> int:
     assert "create or replace function ticket_board.unblock_transition_message" in executable_schema_lower
     assert "create or replace function ticket_board.enqueue_unblock_notification" in executable_schema_lower
     assert "create or replace function ticket_board.notify_unblocked_dependents" in executable_schema_lower
+    assert "when p_state = 'backlog' then 'director'" not in executable_schema_lower
     assert "when p_state = 'analysis' and p_assignee = 'unassigned' then 'director'" not in executable_schema_lower
     assert "source_role := nullif(current_setting('ticket_board.caller_role', true), '')" in executable_schema_lower
     assert "source_role is distinct from target_role" in executable_schema_lower
@@ -212,6 +213,12 @@ def main() -> int:
     assert "create or replace function ticket_board.unblock_transition_target_role" in dead_branch_cleanup_migration
     assert "when p_state = 'backlog' then 'director'" in dead_branch_cleanup_migration
     assert "when p_state = 'analysis' and p_assignee = 'unassigned' then 'director'" not in dead_branch_cleanup_migration
+    backlog_unblock_revert_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "276_revert_backlog_unblock_notifications.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "create or replace function ticket_board.unblock_transition_target_role" in backlog_unblock_revert_migration
+    assert "select ticket_board.transition_target_role(p_state, p_assignee);" in backlog_unblock_revert_migration
+    assert "when p_state = 'backlog' then 'director'" not in backlog_unblock_revert_migration
     assert "create or replace function ticket_board.notify_ticket_state_transition" in executable_schema_lower
     assert "pg_notify" in executable_schema_lower, "PGU-191 must notify on state transitions"
     assert "manually_controlled" in executable_schema_lower, "PGU-191 triggers must honor manual control"

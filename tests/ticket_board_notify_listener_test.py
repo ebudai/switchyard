@@ -880,6 +880,7 @@ def main() -> int:
     test_hook_state_writer_and_gate_idle_before_arrival_delivers_immediately()
     test_listener_enqueues_idle_stall_nudges_from_hook_state()
     test_external_hook_writer_records_state_file()
+    test_display_message_renames_analysis_stage_copy_without_touching_titles()
     test_missing_hook_state_fails_safe_and_does_not_clobber()
     test_hook_busy_requeues_with_fixed_interval()
     test_hook_busy_traces_only_first_gate_defer_per_notification()

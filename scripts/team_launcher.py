@@ -741,7 +741,7 @@ def run_role_pane(
         return runner(tmux_attach_args(role)).returncode
     if mode in {"start", "attach-or-start"}:
         if not exists:
-            start_result = _start_role_session(role, session_dir=session_dir, prefer_resume=False, runner=runner)
+            start_result = _start_role_session(role, session_dir=session_dir, prefer_resume=True, runner=runner)
             if start_result != 0:
                 return start_result
         return runner(tmux_attach_args(role)).returncode
@@ -777,7 +777,7 @@ def run_detached_role(
         return _start_role_session(role, session_dir=session_dir, prefer_resume=True, runner=runner)
     if mode in {"start", "attach-or-start"}:
         if not exists:
-            return _start_role_session(role, session_dir=session_dir, prefer_resume=False, runner=runner)
+            return _start_role_session(role, session_dir=session_dir, prefer_resume=True, runner=runner)
         return 0
     raise SystemExit(f"unknown detached role mode: {mode}")
 
@@ -1027,7 +1027,7 @@ def _build_parser() -> argparse.ArgumentParser:
         nargs="?",
         default="start",
         choices=["start", "attach", "reload", "bootstrap", "pane"],
-        help="start is idempotent attach-or-start; reload restarts CLIs with tracked resume ids",
+        help="start is idempotent attach-or-start (resumes tracked session ids when relaunching a stopped pane); reload force-restarts running CLIs with tracked resume ids",
     )
     parser.add_argument("pane_mode", nargs="?", choices=["start", "attach", "attach-or-start", "reload"])
     parser.add_argument("role", nargs="?")

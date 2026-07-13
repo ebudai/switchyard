@@ -510,7 +510,10 @@ def test_start_creates_missing_session_once_then_attaches() -> None:
     role = next(role for role in config.roles if role.role == "ops")
     runner = FakeRunner()
 
-    assert run_role_pane(role, mode="start", session_dir=config.session_dir, runner=runner) == 0
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        # No recorded session id -> start falls back to a fresh launch (no resume args).
+        session_dir = Path(tmp)
+        assert run_role_pane(role, mode="start", session_dir=session_dir, runner=runner) == 0
 
     assert runner.calls[0] == ["tmux", "has-session", "-t", "pgu-ops"]
     assert runner.calls[1][:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"]
@@ -521,7 +524,32 @@ def test_start_creates_missing_session_once_then_attaches() -> None:
     assert "--dangerously-bypass-approvals-and-sandbox" in runner.calls[1][-1]
     assert "--dangerously-bypass-hook-trust" in runner.calls[1][-1]
     assert "--reasoning-effort" not in runner.calls[1][-1]
+    assert " resume " not in f" {runner.calls[1][-1]} "
     assert runner.calls[2] == ["tmux", "attach", "-t", "pgu-ops"]
+
+
+def test_start_resumes_recorded_session_when_recreating_missing_pane() -> None:
+    # start (attach-or-start) must resume a tracked session id when relaunching a
+    # stopped pane -- resume is not reload-only. A cold restart uses start mode.
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    role = next(role for role in config.roles if role.role == "ops")
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        session_dir = Path(tmp)
+        session_id = "12345678-1234-5678-9abc-def012345678"
+        (session_dir / session_file_name(role.target)).write_text(
+            json.dumps({"target": role.target, "session_id": session_id}) + "\n",
+            encoding="utf-8",
+        )
+        runner = FakeRunner(current_commands={"pgu-ops:0.0": "codex"})
+
+        assert run_role_pane(role, mode="start", session_dir=session_dir, runner=runner) == 0
+
+    assert runner.calls[0] == ["tmux", "has-session", "-t", "pgu-ops"]
+    assert runner.calls[1][:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"]
+    assert f"codex resume {session_id}" in runner.calls[1][-1]
+    # resume verified via pane inspection -> no fresh fallback, then attach
+    assert ["tmux", "kill-session", "-t", "pgu-ops"] not in runner.calls
+    assert runner.calls[-1] == ["tmux", "attach", "-t", "pgu-ops"]
 
 
 def test_start_runs_research_detached_before_opening_visible_layout() -> None:
@@ -839,7 +867,7 @@ def test_start_does_not_sync_live_cli_or_model() -> None:
             ),
             encoding="utf-8",
         )
-        runner = FakeRunner()
+        runner = FakeRunner(current_commands={"pgu-research:0.0": "codex"})
         before = config_path.read_text(encoding="utf-8")
 
         assert (
@@ -856,7 +884,9 @@ def test_start_does_not_sync_live_cli_or_model() -> None:
 
         assert config_path.read_text(encoding="utf-8") == before
         research_new_session = next(call for call in runner.calls if call[:5] == ["tmux", "new-session", "-d", "-s", "pgu-research"])
-        assert "codex --model gpt-5.5" in research_new_session[-1]
+        # start resumes the recorded id; cli/model stay configured (not synced from live)
+        assert "live-research-session" in research_new_session[-1]
+        assert "--model gpt-5.5" in research_new_session[-1]
         assert "claude-sonnet-5" not in research_new_session[-1]
 
 
@@ -1097,6 +1127,7 @@ def main() -> int:
     test_konsole_launch_falls_back_to_clear_error_when_gui_user_missing()
     test_start_is_attach_or_start_and_never_duplicates_existing_session()
     test_start_creates_missing_session_once_then_attaches()
+    test_start_resumes_recorded_session_when_recreating_missing_pane()
     test_start_runs_research_detached_before_opening_visible_layout()
     test_start_force_refreshes_dirty_shared_checkout_with_real_git()
     test_bad_shared_checkout_blocks_all_roles_with_real_git()

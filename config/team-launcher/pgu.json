@@ -9,7 +9,8 @@
       "live_commands": [
         "claude"
       ],
-      "model": "opus-4.8",
+      "effort": "high",
+      "model": "claude-opus-4-8",
       "resume_flag": "--resume",
       "role": "director",
       "slot": 0,
@@ -25,6 +26,7 @@
       "live_commands": [
         "codex"
       ],
+      "effort": "high",
       "model": "gpt-5.6-terra",
       "resume_flag": "--resume",
       "role": "main",
@@ -41,6 +43,7 @@
       "live_commands": [
         "codex"
       ],
+      "effort": "high",
       "model": "gpt-5.4",
       "resume_flag": "--resume",
       "role": "app",
@@ -57,7 +60,8 @@
       "live_commands": [
         "claude"
       ],
-      "model": "sonnet-5",
+      "effort": "high",
+      "model": "claude-sonnet-5",
       "resume_flag": "--resume",
       "role": "research",
       "slot": 4,
@@ -73,6 +77,7 @@
       "live_commands": [
         "codex"
       ],
+      "effort": "high",
       "model": "gpt-5.5",
       "resume_flag": "--resume",
       "role": "ops",
@@ -89,7 +94,8 @@
       "live_commands": [
         "claude"
       ],
-      "model": "sonnet-5",
+      "effort": "high",
+      "model": "claude-sonnet-5",
       "resume_flag": "--resume",
       "role": "audit",
       "slot": 6,
@@ -105,7 +111,7 @@
       "live_commands": [
         "agy"
       ],
-      "model": "3.5-flash",
+      "model": "Gemini 3.5 Flash (Medium)",
       "resume_flag": "--resume",
       "role": "inspector",
       "slot": 7,

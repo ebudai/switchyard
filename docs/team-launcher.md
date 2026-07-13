@@ -59,10 +59,14 @@ Each role entry contains:
 - `model`: optional model selector. The launcher passes it with the role's
   `model_arg` at process launch so the pane starts on its configured model.
 - `model_arg`: optional model flag, defaulting to `--model`.
+- `effort`: optional effort selector. Claude receives it as `--effort <value>`;
+  Codex receives it as `-c reasoning_effort=<value>`; Agy and Gemini omit a
+  separate effort flag.
 - `yolo`: optional boolean. When true, the launcher appends the appropriate
   bypass-permissions flag for the configured CLI: Agy and Claude use
   `--dangerously-skip-permissions`, Codex uses
-  `--dangerously-bypass-approvals-and-sandbox`, and Gemini uses `--yolo`.
+  `--dangerously-bypass-approvals-and-sandbox` plus
+  `--dangerously-bypass-hook-trust`, and Gemini uses `--yolo`.
 - `extra_args`: optional additional argv entries appended after the yolo flag.
 - `resume_flag`: flag used by that CLI for context resume.
 - `live_commands`: optional command names accepted as the live pane process

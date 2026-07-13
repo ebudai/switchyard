@@ -99,25 +99,44 @@ def test_pgu_config_matches_director_supplied_live_role_assignments() -> None:
 
     assert set(roles) == {"director", "main", "app", "research", "ops", "audit", "inspector"}
     assert all(role.yolo for role in roles.values())
-    assert (roles["director"].cli, roles["director"].model) == (["claude"], "opus-4.8")
-    assert (roles["ops"].cli, roles["ops"].model, roles["ops"].extra_args) == (
+    assert (roles["director"].cli, roles["director"].model, roles["director"].effort) == (
+        ["claude"],
+        "claude-opus-4-8",
+        "high",
+    )
+    assert (roles["ops"].cli, roles["ops"].model, roles["ops"].effort, roles["ops"].extra_args) == (
         ["codex"],
         "gpt-5.5",
+        "high",
         [],
     )
-    assert (roles["main"].cli, roles["main"].model, roles["main"].extra_args) == (
+    assert (roles["main"].cli, roles["main"].model, roles["main"].effort, roles["main"].extra_args) == (
         ["codex"],
         "gpt-5.6-terra",
+        "high",
         [],
     )
-    assert (roles["app"].cli, roles["app"].model, roles["app"].extra_args) == (
+    assert (roles["app"].cli, roles["app"].model, roles["app"].effort, roles["app"].extra_args) == (
         ["codex"],
         "gpt-5.4",
+        "high",
         [],
     )
-    assert (roles["research"].cli, roles["research"].model) == (["claude"], "sonnet-5")
-    assert (roles["audit"].cli, roles["audit"].model) == (["claude"], "sonnet-5")
-    assert (roles["inspector"].cli, roles["inspector"].model) == (["agy"], "3.5-flash")
+    assert (roles["research"].cli, roles["research"].model, roles["research"].effort) == (
+        ["claude"],
+        "claude-sonnet-5",
+        "high",
+    )
+    assert (roles["audit"].cli, roles["audit"].model, roles["audit"].effort) == (
+        ["claude"],
+        "claude-sonnet-5",
+        "high",
+    )
+    assert (roles["inspector"].cli, roles["inspector"].model, roles["inspector"].effort) == (
+        ["agy"],
+        "Gemini 3.5 Flash (Medium)",
+        "",
+    )
 
 
 def test_yolo_config_translates_to_cli_specific_bypass_flags() -> None:
@@ -125,31 +144,78 @@ def test_yolo_config_translates_to_cli_specific_bypass_flags() -> None:
     roles = {role.role: role for role in config.roles}
 
     expected_flags = {
-        "director": "--dangerously-skip-permissions",
-        "main": "--dangerously-bypass-approvals-and-sandbox",
-        "app": "--dangerously-bypass-approvals-and-sandbox",
-        "research": "--dangerously-skip-permissions",
-        "ops": "--dangerously-bypass-approvals-and-sandbox",
-        "audit": "--dangerously-skip-permissions",
-        "inspector": "--dangerously-skip-permissions",
+        "director": ["--dangerously-skip-permissions"],
+        "main": ["--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust"],
+        "app": ["--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust"],
+        "research": ["--dangerously-skip-permissions"],
+        "ops": ["--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust"],
+        "audit": ["--dangerously-skip-permissions"],
+        "inspector": ["--dangerously-skip-permissions"],
     }
 
-    for role_name, expected_flag in expected_flags.items():
+    for role_name, flags in expected_flags.items():
         command = cli_command_for_role(roles[role_name], session_dir=config.session_dir)
-        assert expected_flag in command, (role_name, command)
+        for expected_flag in flags:
+            assert expected_flag in command, (role_name, command)
+
+
+def test_effort_config_translates_to_cli_specific_args() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    roles = {role.role: role for role in config.roles}
+
+    for role_name in ("director", "research", "audit"):
+        command = cli_command_for_role(roles[role_name], session_dir=config.session_dir)
+        assert "--effort" in command, (role_name, command)
+        assert command[command.index("--effort") + 1] == "high"
+        assert "reasoning_effort=high" not in command
+
+    for role_name in ("main", "app", "ops"):
+        command = cli_command_for_role(roles[role_name], session_dir=config.session_dir)
+        assert "-c" in command, (role_name, command)
+        assert command[command.index("-c") + 1] == "reasoning_effort=high"
+        assert "--effort" not in command
+
+    inspector_command = cli_command_for_role(roles["inspector"], session_dir=config.session_dir)
+    assert "--effort" not in inspector_command
+    assert "-c" not in inspector_command
+    assert "reasoning_effort=high" not in inspector_command
 
 
 def test_pgu_launch_commands_include_model_and_bypass_flags() -> None:
     config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
     roles = {role.role: role for role in config.roles}
     expected_by_role = {
-        "director": ["claude", "--model", "opus-4.8", "--dangerously-skip-permissions"],
-        "main": ["codex", "--model", "gpt-5.6-terra", "--dangerously-bypass-approvals-and-sandbox"],
-        "app": ["codex", "--model", "gpt-5.4", "--dangerously-bypass-approvals-and-sandbox"],
-        "research": ["claude", "--model", "sonnet-5", "--dangerously-skip-permissions"],
-        "ops": ["codex", "--model", "gpt-5.5", "--dangerously-bypass-approvals-and-sandbox"],
-        "audit": ["claude", "--model", "sonnet-5", "--dangerously-skip-permissions"],
-        "inspector": ["agy", "--model", "3.5-flash", "--dangerously-skip-permissions"],
+        "director": ["claude", "--model", "claude-opus-4-8", "--effort", "high", "--dangerously-skip-permissions"],
+        "main": [
+            "codex",
+            "--model",
+            "gpt-5.6-terra",
+            "-c",
+            "reasoning_effort=high",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--dangerously-bypass-hook-trust",
+        ],
+        "app": [
+            "codex",
+            "--model",
+            "gpt-5.4",
+            "-c",
+            "reasoning_effort=high",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--dangerously-bypass-hook-trust",
+        ],
+        "research": ["claude", "--model", "claude-sonnet-5", "--effort", "high", "--dangerously-skip-permissions"],
+        "ops": [
+            "codex",
+            "--model",
+            "gpt-5.5",
+            "-c",
+            "reasoning_effort=high",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--dangerously-bypass-hook-trust",
+        ],
+        "audit": ["claude", "--model", "claude-sonnet-5", "--effort", "high", "--dangerously-skip-permissions"],
+        "inspector": ["agy", "--model", "Gemini 3.5 Flash (Medium)", "--dangerously-skip-permissions"],
     }
 
     for role_name, expected_tail in expected_by_role.items():
@@ -185,7 +251,9 @@ def test_start_creates_missing_session_once_then_attaches() -> None:
     assert runner.calls[1][:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"]
     assert "PGU_PANE_TARGET=pgu-ops:0.0" in runner.calls[1][-1]
     assert "--model gpt-5.5" in runner.calls[1][-1]
+    assert "-c reasoning_effort=high" in runner.calls[1][-1]
     assert "--dangerously-bypass-approvals-and-sandbox" in runner.calls[1][-1]
+    assert "--dangerously-bypass-hook-trust" in runner.calls[1][-1]
     assert "--reasoning-effort" not in runner.calls[1][-1]
     assert runner.calls[2] == ["tmux", "attach", "-t", "pgu-ops"]
 
@@ -258,6 +326,7 @@ def main() -> int:
     test_dry_run_materializes_pgu_layout_with_all_role_commands()
     test_pgu_config_matches_director_supplied_live_role_assignments()
     test_yolo_config_translates_to_cli_specific_bypass_flags()
+    test_effort_config_translates_to_cli_specific_args()
     test_pgu_launch_commands_include_model_and_bypass_flags()
     test_start_is_attach_or_start_and_never_duplicates_existing_session()
     test_start_creates_missing_session_once_then_attaches()

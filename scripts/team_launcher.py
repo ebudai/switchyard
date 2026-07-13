@@ -15,11 +15,17 @@ from typing import Any, Callable, Sequence
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "team-launcher"
 DEFAULT_SESSION_DIR = Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-sessions")
-YOLO_FLAGS_BY_CLI = {
-    "agy": "--dangerously-skip-permissions",
-    "claude": "--dangerously-skip-permissions",
-    "codex": "--dangerously-bypass-approvals-and-sandbox",
-    "gemini": "--yolo",
+YOLO_ARGS_BY_CLI = {
+    "agy": ["--dangerously-skip-permissions"],
+    "claude": ["--dangerously-skip-permissions"],
+    "codex": ["--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust"],
+    "gemini": ["--yolo"],
+}
+EFFORT_STYLE_BY_CLI = {
+    "agy": None,
+    "claude": "flag",
+    "codex": "config",
+    "gemini": None,
 }
 
 
@@ -33,6 +39,7 @@ class RoleConfig:
     cli: list[str]
     model: str
     model_arg: str
+    effort: str
     yolo: bool
     extra_args: list[str]
     resume_flag: str
@@ -107,6 +114,7 @@ def _role_from_json(project: str, raw: dict[str, Any]) -> RoleConfig:
         cli=cli,
         model=str(raw.get("model") or "").strip(),
         model_arg=str(raw.get("model_arg") or "--model").strip(),
+        effort=str(raw.get("effort") or "").strip(),
         yolo=_bool_value(raw.get("yolo"), field="yolo", role=role),
         extra_args=_string_list(raw.get("extra_args"), field="extra_args", role=role),
         resume_flag=str(raw.get("resume_flag") or "--resume").strip(),
@@ -166,25 +174,35 @@ def _command_name(value: str) -> str:
     return Path(value.strip()).name
 
 
-def yolo_flag_for_role(role: RoleConfig) -> str:
-    cli_name = _command_name(role.cli[0])
-    flag = YOLO_FLAGS_BY_CLI.get(cli_name)
-    if flag is None:
-        raise SystemExit(f"role {role.role} uses unsupported yolo cli {cli_name!r}")
-    return flag
-
-
 def yolo_args_for_role(role: RoleConfig) -> list[str]:
     if not role.yolo:
         return []
-    flag = yolo_flag_for_role(role)
-    return [] if flag in role.extra_args else [flag]
+    cli_name = _command_name(role.cli[0])
+    flags = YOLO_ARGS_BY_CLI.get(cli_name)
+    if flags is None:
+        raise SystemExit(f"role {role.role} uses unsupported yolo cli {cli_name!r}")
+    return [flag for flag in flags if flag not in role.extra_args]
+
+
+def effort_args_for_role(role: RoleConfig) -> list[str]:
+    if not role.effort:
+        return []
+    cli_name = _command_name(role.cli[0])
+    style = EFFORT_STYLE_BY_CLI.get(cli_name)
+    if style == "flag":
+        return ["--effort", role.effort]
+    if style == "config":
+        return ["-c", f"reasoning_effort={role.effort}"]
+    if style is None and cli_name in EFFORT_STYLE_BY_CLI:
+        return []
+    raise SystemExit(f"role {role.role} uses unsupported effort cli {cli_name!r}")
 
 
 def cli_command_for_role(role: RoleConfig, *, session_dir: Path, resume: bool = False) -> list[str]:
     command = list(role.cli)
     if role.model:
         command.extend([role.model_arg, role.model])
+    command.extend(effort_args_for_role(role))
     command.extend(yolo_args_for_role(role))
     command.extend(role.extra_args)
     if resume:

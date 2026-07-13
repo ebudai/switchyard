@@ -117,7 +117,7 @@ Notes:
 - `eric_review` is reserved for tickets with `needs_eric_signoff: true`
 - `backlog` is for deferred or parked tickets; `analysis` is for active triage/spec work before a ticket is revived into Implementation (`in_progress`)
 - `blocked_by` is a list of ticket IDs the ticket is waiting on; unresolved blockers are any entries whose referenced ticket is not yet `done`
-- `implementation` is the director-authored implementation package/spec that must be present before a ticket can enter Implementation (`in_progress`)
+- `implementation` is an optional director-authored implementation package/spec; ticket body/comments can carry the spec, and only assignee must be set before entering Implementation (`in_progress`)
 - `in_progress` is displayed as Implementation and contains both queued and active implementation work; the highlighted card indicates the most recently notified ticket for that role
 - `director_review` is displayed as Final Sign-Off and is the director's final gate before `done`
 - `audit_prompt` is retained for reference text but is optional in the default workflow

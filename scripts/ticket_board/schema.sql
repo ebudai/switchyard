@@ -496,9 +496,6 @@ BEGIN
         IF NEW.assignee = 'unassigned' THEN
             RAISE EXCEPTION 'assignee must not be unassigned before a ticket can enter in_progress';
         END IF;
-        IF btrim(NEW.implementation) = '' THEN
-            RAISE EXCEPTION 'implementation must be non-empty before a ticket can enter in_progress';
-        END IF;
     END IF;
 
     IF OLD.state <> 'director_review' AND NEW.state = 'director_review' AND NOT NEW.audit_signoff THEN

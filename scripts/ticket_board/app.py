@@ -144,6 +144,7 @@ class TicketBoardApp:
         blocked_by: list[str] | None = None,
         blocked_reason: str = "",
         state: str = "analysis",
+        implementation: str = "",
         caller_role: str | None = None,
     ) -> dict[str, Any]:
         state = self._validate_create_state(state)
@@ -157,7 +158,7 @@ class TicketBoardApp:
             state=state,
             blocked_by=blocked_by,
             parent_id="",
-            implementation="",
+            implementation=implementation,
             audit_prompt="",
             audit_signoff=False,
             needs_inspection=needs_inspection,
@@ -552,8 +553,6 @@ ORDER BY t.ticket_number
             attachment_patch["screenshot"] = screenshot
         implementation = self._require_plain_string(implementation, "implementation")
         audit_prompt = self._require_plain_string(audit_prompt, "audit_prompt")
-        if implementation.strip():
-            raise ValueError("postgres function API does not support implementation writes yet")
         if audit_prompt.strip():
             raise ValueError("postgres function API does not support audit_prompt writes yet")
         if audit_signoff or inspector_signoff or needs_eric_signoff or eric_signoff:
@@ -584,6 +583,8 @@ ORDER BY t.ticket_number
                     )
                     if parent_id:
                         self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps({"parent_id": parent_id})))
+                if implementation:
+                    self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps({"implementation": implementation})))
                 if needs_inspection:
                     self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps({"needs_inspection": True})))
                 if create_state != state:

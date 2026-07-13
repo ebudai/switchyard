@@ -31,7 +31,7 @@ def main() -> int:
     assert "function advanceBlockedReason(ticket)" in HTML
     assert "return 'ready';" not in HTML
     assert "Assign the ticket before advancing to Implementation." in HTML
-    assert "Save implementation before advancing to Implementation." in HTML
+    assert "Save implementation before advancing to Implementation." not in HTML
     assert "already has an in-progress ticket" not in HTML
     assert "Save audit prompt before advancing to audit." not in HTML
     assert "Set audit signoff before advancing to Eric review." in HTML

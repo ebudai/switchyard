@@ -56,6 +56,7 @@ class FakeConnection:
         notifications: list[str] | None = None,
         fail_on_notifies: bool = False,
         executed: list[Any] | None = None,
+        idle_turn_end_result: int = 0,
         idle_stall_result: int = 0,
     ) -> None:
         self.queue_rows = queue_rows or []
@@ -66,10 +67,12 @@ class FakeConnection:
         self.notifications = notifications or []
         self.fail_on_notifies = fail_on_notifies
         self.executed = executed if executed is not None else []
+        self.idle_turn_end_result = idle_turn_end_result
         self.idle_stall_result = idle_stall_result
         self.acked: list[int] = []
         self.requeued: list[tuple[int, tuple[Any, ...] | None]] = []
         self.traces: list[tuple[Any, ...] | None] = []
+        self.idle_turn_end_calls: list[tuple[Any, ...] | None] = []
         self.idle_stall_calls: list[tuple[Any, ...] | None] = []
         self.notify_timeouts: list[float | None] = []
         self.closed = False
@@ -106,6 +109,9 @@ class FakeConnection:
             self.traces.append(params)
         if "next_notification_attempt" in statement_text:
             return FakeResult([(self.next_attempt_at,)])
+        if "notify_idle_turn_end_nudges" in statement_text:
+            self.idle_turn_end_calls.append(params)
+            return FakeResult([(self.idle_turn_end_result,)])
         if "notify_idle_stall_nudges" in statement_text:
             self.idle_stall_calls.append(params)
             return FakeResult([(self.idle_stall_result,)])
@@ -416,6 +422,42 @@ def test_listener_enqueues_idle_stall_nudges_from_hook_state() -> None:
         assert set(idle_since) == {"ops"}
         assert idle_since["ops"].startswith("1970-01-01T00:01:40")
         assert params[1:] == ("45 seconds", "300 seconds", 2)
+
+
+def test_listener_enqueues_idle_turn_end_nudges_on_each_turn_completion_idle() -> None:
+    with TemporaryStateDir() as tmp_path:
+        store, gate = hook_gate(tmp_path)
+        conn = FakeConnection(idle_turn_end_result=1)
+        listener = TicketBoardNotifyListener(
+            conninfo="",
+            activity_gate=gate.is_working,
+            sender=lambda _target, _message: None,
+        )
+
+        store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=100.0)
+        assert listener.process_idle_turn_end_nudges(conn) == 0
+        assert conn.idle_turn_end_calls == []
+
+        store.write("pgu-ops:0.0", "busy", source="codex.UserPromptSubmit", now=101.0)
+        store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=102.0)
+        assert listener.process_idle_turn_end_nudges(conn) == 1
+        assert len(conn.idle_turn_end_calls) == 1
+        first_params = conn.idle_turn_end_calls[0]
+        assert first_params is not None
+        first_idle_since = json.loads(str(first_params[0]))
+        assert first_idle_since == {"ops": "1970-01-01T00:01:42+00:00"}
+
+        assert listener.process_idle_turn_end_nudges(conn) == 0
+        assert len(conn.idle_turn_end_calls) == 1
+
+        store.write("pgu-ops:0.0", "busy", source="codex.UserPromptSubmit", now=103.0)
+        store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=104.0)
+        assert listener.process_idle_turn_end_nudges(conn) == 1
+        assert len(conn.idle_turn_end_calls) == 2
+        second_params = conn.idle_turn_end_calls[1]
+        assert second_params is not None
+        second_idle_since = json.loads(str(second_params[0]))
+        assert second_idle_since == {"ops": "1970-01-01T00:01:44+00:00"}
 
 
 def test_external_hook_writer_records_state_file() -> None:
@@ -933,6 +975,48 @@ def test_director_pre_send_recheck_blocks_typing_that_starts_after_initial_idle_
     assert json.loads(conn.traces[1][8])["phase"] == "pre_send_recheck"
 
 
+def test_idle_nudge_enumeration_does_not_touch_director_composing_latch() -> None:
+    sent: list[tuple[str, str]] = []
+    wall = [0.0]
+
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            cursor_position_runner=constant_cursor_runner(),
+            director_composing_timeout_seconds=60.0,
+            wall_time=lambda: wall[0],
+        )
+        store.write("pgu-director:0.0", "idle", source="claude.Notification.idle_prompt", now=10.0)
+
+        warm_conn = FakeConnection(idle_turn_end_result=0, idle_stall_result=0)
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=gate.is_working,
+            connector=lambda *args, **kwargs: warm_conn,
+            poll_seconds=0,
+        )
+        assert listener.process_idle_turn_end_nudges(warm_conn) == 0
+        assert listener.process_idle_stall_nudges(warm_conn) == 0
+
+        conn = FakeConnection(
+            [queue_row(76, "PGU-359", target_role="director", message="PGU-359 -- Director notification")]
+        )
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=gate.is_working,
+            connector=lambda *args, **kwargs: conn,
+            poll_seconds=0,
+        )
+        assert listener.listen_once(max_notifications=1) == 1
+
+    assert sent == [("pgu-director:0.0", "PGU-359 -- Director notification")]
+    assert conn.acked == [76]
+    assert conn.traces[1][6] == "hook_idle"
+
+
 def test_director_paused_mid_compose_stays_held_until_busy_idle_cycle() -> None:
     now = [0.0]
     activity = [100]
@@ -1234,6 +1318,7 @@ def main() -> int:
     test_real_idle_cursor_position_delivers_instead_of_wedging()
     test_cursor_home_delivers_regardless_of_row()
     test_listener_enqueues_idle_stall_nudges_from_hook_state()
+    test_listener_enqueues_idle_turn_end_nudges_on_each_turn_completion_idle()
     test_external_hook_writer_records_state_file()
     test_display_message_renames_analysis_stage_copy_without_touching_titles()
     test_missing_hook_state_fails_safe_and_does_not_clobber()
@@ -1249,6 +1334,7 @@ def main() -> int:
     test_director_restart_window_holds_stale_idle_until_busy_idle_cycle()
     test_director_restart_window_timeout_releases_flat_idle_without_busy_cycle()
     test_director_pre_send_recheck_blocks_typing_that_starts_after_initial_idle_check()
+    test_idle_nudge_enumeration_does_not_touch_director_composing_latch()
     test_director_paused_mid_compose_stays_held_until_busy_idle_cycle()
     test_director_idle_without_detected_activity_does_not_false_latch()
     test_director_erased_draft_releases_without_submit()

@@ -117,6 +117,20 @@ def assert_contains_all(schema: str, values: set[str], label: str) -> None:
     assert not missing, f"{label} missing from schema: {missing}"
 
 
+def queue_notification_kinds(schema_lower: str) -> set[str]:
+    match = re.search(
+        r"create table if not exists ticket_board\.ticket_notification_queue\s*\(.*?kind text not null check \(kind in \(([^)]*)\)\)",
+        schema_lower,
+        re.DOTALL,
+    )
+    assert match, "ticket_notification_queue kind constraint missing from schema"
+    return {
+        value.strip().strip("'")
+        for value in match.group(1).split(",")
+        if value.strip()
+    }
+
+
 def main() -> int:
     schema = SCHEMA_PATH.read_text(encoding="utf-8")
     schema_lower = schema.lower()
@@ -152,6 +166,9 @@ def main() -> int:
     assert "ticket_board_notification_trace_prune" in executable_schema_lower
     assert "create or replace function ticket_board.next_notification_attempt" in executable_schema_lower
     assert "create or replace function ticket_board.notification_delivery_in_backoff" in executable_schema_lower
+    assert {"transition", "ticket_update", "nudge", "escalation", "idle_reminder"} <= queue_notification_kinds(
+        executable_schema_lower
+    )
 
     assert_contains_all(schema, EXPECTED_STATES, "state constraint")
     assert "'ready'" not in schema, "removed ready state must not appear in schema.sql"
@@ -187,7 +204,6 @@ def main() -> int:
     assert "create trigger tickets_enforce_workflow_update" in executable_schema_lower
     assert "create trigger tickets_zzz_notify_transition" in executable_schema_lower
     assert "after insert or update on ticket_board.tickets" in executable_schema_lower
-    assert "kind in ('transition', 'ticket_update', 'nudge', 'escalation')" in executable_schema_lower
     assert "create or replace function ticket_board.enforce_ticket_workflow_update" in executable_schema_lower
     assert "create or replace function ticket_board.enqueue_transition_notification" in executable_schema_lower
     assert "create or replace function ticket_board.ticket_update_message" in executable_schema_lower
@@ -228,6 +244,13 @@ def main() -> int:
     assert "ticket_update" in owner_update_notify_migration
     assert "create or replace function ticket_board.notify_ticket_owner_in_place_change" in owner_update_notify_migration
     assert "current_state is not distinct from new_state" in owner_update_notify_migration
+    idle_turn_end_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "278_idle_turn_end_nudges.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "idle_reminder" in idle_turn_end_migration
+    assert "ticket_update" in idle_turn_end_migration
+    assert "create or replace function ticket_board.notify_idle_turn_end_nudges" in idle_turn_end_migration
+    assert "create or replace function ticket_board.idle_without_advancing_message" in idle_turn_end_migration
     assert "create or replace function ticket_board.notify_ticket_state_transition" in executable_schema_lower
     assert "pg_notify" in executable_schema_lower, "PGU-191 must notify on state transitions"
     assert "manually_controlled" in executable_schema_lower, "PGU-191 triggers must honor manual control"

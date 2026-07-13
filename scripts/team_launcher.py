@@ -198,8 +198,8 @@ def load_project_config(project: str, config_path: Path | None = None) -> Projec
     worktree_base_raw = config.get("worktree_base")
     if worktree_base_raw is not None:
         worktree_base = _expand_path(str(worktree_base_raw), base=base)
-    if (repository is None) != (worktree_base is None):
-        raise SystemExit(f"{path} must define repository and worktree_base together")
+    if repository is None and worktree_base is not None:
+        raise SystemExit(f"{path} must not define worktree_base without repository")
     worktree_remote = str(config.get("worktree_remote") or "origin").strip()
     worktree_branch = str(config.get("worktree_branch") or "main").strip()
     if not worktree_remote or not worktree_branch:
@@ -209,7 +209,7 @@ def load_project_config(project: str, config_path: Path | None = None) -> Projec
             project,
             raw,
             base=base,
-            default_workdir=(worktree_base / str(raw.get("role")).strip()) if worktree_base is not None else None,
+            default_workdir=repository,
         )
         for raw in roles_raw
         if isinstance(raw, dict)
@@ -225,16 +225,19 @@ def load_project_config(project: str, config_path: Path | None = None) -> Projec
     visible_without_slots = [role.role for role in roles if not role.detached and role.slot is None]
     if visible_without_slots:
         raise SystemExit(f"{path} visible roles must define layout slots: {', '.join(visible_without_slots)}")
-    workdirs = [Path(role.workdir) for role in roles]
-    if len({_normalized_path(workdir) for workdir in workdirs}) != len(workdirs):
-        raise SystemExit(f"{path} contains duplicate role workdir assignments")
     if repository is not None:
         repo_path = _normalized_path(repository)
-        shared_checkout_roles = [role.role for role in roles if _normalized_path(Path(role.workdir)) == repo_path]
-        if shared_checkout_roles:
-            raise SystemExit(
-                f"{path} role workdirs must not use the shared repository checkout: {', '.join(shared_checkout_roles)}"
-            )
+    else:
+        repo_path = ""
+    seen_workdirs: dict[str, str] = {}
+    duplicate_non_shared: list[str] = []
+    for role in roles:
+        normalized_workdir = _normalized_path(Path(role.workdir))
+        previous_role = seen_workdirs.setdefault(normalized_workdir, role.role)
+        if previous_role != role.role and normalized_workdir != repo_path:
+            duplicate_non_shared.append(f"{previous_role}/{role.role}:{normalized_workdir}")
+    if duplicate_non_shared:
+        raise SystemExit(f"{path} contains duplicate non-shared role workdir assignments: {', '.join(duplicate_non_shared)}")
     return ProjectConfig(
         project=config_project,
         layout=layout,
@@ -365,12 +368,30 @@ def git_worktree_check_args(role: RoleConfig) -> list[str]:
     return ["git", "-C", role.workdir, "rev-parse", "--is-inside-work-tree"]
 
 
+def git_shared_checkout_check_args(config: ProjectConfig) -> list[str]:
+    if config.repository is None:
+        raise SystemExit("project config does not define repository")
+    return ["git", "-C", str(config.repository), "rev-parse", "--is-inside-work-tree"]
+
+
 def git_checkout_worktree_ref_args(config: ProjectConfig, role: RoleConfig) -> list[str]:
     return ["git", "-C", role.workdir, "checkout", "--detach", "--force", worktree_ref(config)]
 
 
 def git_clean_worktree_args(role: RoleConfig) -> list[str]:
     return ["git", "-C", role.workdir, "clean", "-fdx"]
+
+
+def git_checkout_shared_ref_args(config: ProjectConfig) -> list[str]:
+    if config.repository is None:
+        raise SystemExit("project config does not define repository")
+    return ["git", "-C", str(config.repository), "checkout", "--detach", "--force", worktree_ref(config)]
+
+
+def git_clean_shared_checkout_args(config: ProjectConfig) -> list[str]:
+    if config.repository is None:
+        raise SystemExit("project config does not define repository")
+    return ["git", "-C", str(config.repository), "clean", "-fdx"]
 
 
 def _proc_failure_reason(proc: subprocess.CompletedProcess[Any], fallback: str) -> str:
@@ -432,13 +453,25 @@ def ensure_project_worktrees(
     if fetch_proc.returncode != 0:
         reason = _proc_failure_reason(fetch_proc, f"fetch failed with exit {fetch_proc.returncode}")
         return WorktreeProvisionResult({role.role: reason for role in config.roles})
-    failed_roles: dict[str, str] = {}
-    for role in config.roles:
-        reason = ensure_role_worktree(config, role, refresh=refresh, runner=runner)
-        if reason is not None:
-            failed_roles[role.role] = reason
-            print(f"worktree refresh failed for {role.role}: {reason}", file=sys.stderr)
-    return WorktreeProvisionResult(failed_roles)
+    if not refresh:
+        return WorktreeProvisionResult({})
+    check_proc = runner(
+        git_shared_checkout_check_args(config),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if check_proc.returncode != 0:
+        reason = _proc_failure_reason(check_proc, f"repository check failed with exit {check_proc.returncode}")
+        return WorktreeProvisionResult({role.role: reason for role in config.roles})
+    checkout_proc = runner(git_checkout_shared_ref_args(config))
+    if checkout_proc.returncode != 0:
+        reason = _proc_failure_reason(checkout_proc, f"checkout failed with exit {checkout_proc.returncode}")
+        return WorktreeProvisionResult({role.role: reason for role in config.roles})
+    clean_proc = runner(git_clean_shared_checkout_args(config))
+    if clean_proc.returncode != 0:
+        reason = _proc_failure_reason(clean_proc, f"clean failed with exit {clean_proc.returncode}")
+        return WorktreeProvisionResult({role.role: reason for role in config.roles})
+    return WorktreeProvisionResult({})
 
 
 def fetch_project_worktree_ref(
@@ -643,7 +676,7 @@ def pane_command(
 
 
 def failed_role_command(role: RoleConfig, reason: str) -> str:
-    message = f"PGU launcher did not start {role.role}: worktree refresh failed: {reason}"
+    message = f"PGU launcher did not start {role.role}: checkout refresh failed: {reason}"
     return _quote_command(["sh", "-lc", f"printf '%s\\n' {shlex.quote(message)}; sleep 30"])
 
 

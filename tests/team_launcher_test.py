@@ -21,10 +21,10 @@ import scripts.team_launcher as team_launcher
 from scripts.team_launcher import (
     cli_command_for_role,
     ensure_project_worktrees,
-    git_clean_worktree_args,
-    git_checkout_worktree_ref_args,
+    git_clean_shared_checkout_args,
+    git_checkout_shared_ref_args,
     git_fetch_worktree_ref_args,
-    git_worktree_add_args,
+    git_shared_checkout_check_args,
     konsole_launch_args,
     launch_project,
     live_command_matches_role,
@@ -124,7 +124,7 @@ def test_pgu_layout_matches_reference_six_pane_geometry() -> None:
     }
 
 
-def _write_pgu_config_with_worktree_base(tmp: Path) -> Path:
+def _write_pgu_config_with_shared_checkout(tmp: Path) -> Path:
     source = json.loads((ROOT / "config" / "team-launcher" / "pgu.json").read_text(encoding="utf-8"))
     source["layout"] = str(ROOT / "config" / "team-launcher" / "pgu-konsole-layout.json")
     source["repository"] = str(tmp / "repo")
@@ -160,7 +160,7 @@ def _make_origin_backed_repo(tmp: Path) -> tuple[Path, Path]:
     return origin, repo
 
 
-def _write_minimal_worktree_config(tmp: Path, repo: Path, roles: list[str]) -> Path:
+def _write_minimal_shared_checkout_config(tmp: Path, repo: Path, roles: list[str]) -> Path:
     layout = {
         "KonsoleTabs": [
             {
@@ -229,7 +229,7 @@ def test_pgu_config_matches_director_supplied_live_role_assignments() -> None:
     assert set(roles) == {"director", "main", "app", "research", "ops", "audit", "inspector"}
     assert all(role.yolo for role in roles.values())
     assert config.repository == Path("/home/agent/Projects/pgu")
-    assert config.worktree_base == Path("/home/agent/.claude/worktrees/pgu-team")
+    assert config.worktree_base is None
     assert worktree_ref(config) == "origin/main"
     assert roles["research"].detached
     assert roles["research"].slot is None
@@ -242,8 +242,7 @@ def test_pgu_config_matches_director_supplied_live_role_assignments() -> None:
         "inspector": 5,
     }
     for role_name, role in roles.items():
-        assert role.workdir == f"/home/agent/.claude/worktrees/pgu-team/{role_name}"
-        assert role.workdir != "/home/agent/Projects/pgu"
+        assert role.workdir == "/home/agent/Projects/pgu", role_name
     assert (roles["director"].cli, roles["director"].model, roles["director"].effort) == (
         ["claude"],
         "claude-opus-4-8",
@@ -368,6 +367,8 @@ def test_pgu_launch_commands_include_model_and_bypass_flags() -> None:
         assert command[:2] == ["env", f"PGU_PANE_TARGET=pgu-{role_name}:0.0"]
         assert command[2:] == expected_tail, (role_name, command)
         assert "--reasoning-effort" not in command
+        assert "--continue" not in command
+        assert "--last" not in command
         assert "gemini" not in command
         assert "--yolo" not in command
 
@@ -458,7 +459,7 @@ def test_start_creates_missing_session_once_then_attaches() -> None:
 
     assert runner.calls[0] == ["tmux", "has-session", "-t", "pgu-ops"]
     assert runner.calls[1][:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"]
-    assert runner.calls[1][5:7] == ["-c", "/home/agent/.claude/worktrees/pgu-team/ops"]
+    assert runner.calls[1][5:7] == ["-c", "/home/agent/Projects/pgu"]
     assert "PGU_PANE_TARGET=pgu-ops:0.0" in runner.calls[1][-1]
     assert "--model gpt-5.5" in runner.calls[1][-1]
     assert "-c reasoning_effort=high" in runner.calls[1][-1]
@@ -471,7 +472,7 @@ def test_start_creates_missing_session_once_then_attaches() -> None:
 def test_start_runs_research_detached_before_opening_visible_layout() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
         tmp_path = Path(tmp)
-        config_path = _write_pgu_config_with_worktree_base(tmp_path)
+        config_path = _write_pgu_config_with_shared_checkout(tmp_path)
         config = load_project_config("pgu", config_path)
         runner = FakeRunner()
         layout_output = tmp_path / "layout.json"
@@ -489,65 +490,61 @@ def test_start_runs_research_detached_before_opening_visible_layout() -> None:
         )
 
         assert runner.calls[0] == git_fetch_worktree_ref_args(config)
-        add_calls = [call for call in runner.calls if call[:5] == ["git", "-C", str(config.repository), "worktree", "add"]]
-        clean_calls = [call for call in runner.calls if call[:5] == ["git", "-C", call[2], "clean", "-fdx"]]
-        assert len(add_calls) == 7
-        assert len(clean_calls) == 7
-        assert git_worktree_add_args(config, next(role for role in config.roles if role.role == "research")) in add_calls
+        assert runner.calls[1] == git_shared_checkout_check_args(config)
+        assert runner.calls[2] == git_checkout_shared_ref_args(config)
+        assert runner.calls[3] == git_clean_shared_checkout_args(config)
+        assert not any(call[:5] == ["git", "-C", call[2], "worktree", "add"] for call in runner.calls)
         research_has_session_index = runner.calls.index(["tmux", "has-session", "-t", "pgu-research"])
         research_new_session = runner.calls[research_has_session_index + 1]
         assert research_new_session[:5] == ["tmux", "new-session", "-d", "-s", "pgu-research"]
-        assert research_new_session[5:7] == ["-c", str(tmp_path / "worktrees" / "research")]
+        assert research_new_session[5:7] == ["-c", str(tmp_path / "repo")]
         assert "PGU_PANE_TARGET=pgu-research:0.0" in research_new_session[-1]
         assert "--model claude-sonnet-5" in research_new_session[-1]
+        layout = json.loads(layout_output.read_text(encoding="utf-8"))
+        assert {leaf.get("WorkingDirectory") for leaf in team_launcher._layout_leaves(layout)} == {str(tmp_path / "repo")}
         assert runner.calls[-1] == konsole_launch_args(layout_output)
         assert ["tmux", "attach", "-t", "pgu-research"] not in runner.calls
 
 
-def test_start_force_refreshes_dirty_role_worktrees_with_real_git() -> None:
+def test_start_force_refreshes_dirty_shared_checkout_with_real_git() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-git.") as tmp:
         tmp_path = Path(tmp)
         _origin, repo = _make_origin_backed_repo(tmp_path)
-        config_path = _write_minimal_worktree_config(tmp_path, repo, ["ops"])
+        config_path = _write_minimal_shared_checkout_config(tmp_path, repo, ["ops"])
         config = load_project_config("pgu", config_path)
-        role = config.roles[0]
+        shared_checkout = Path(config.roles[0].workdir)
+        assert shared_checkout == repo
 
         assert ensure_project_worktrees(config, refresh=True).ok
 
-        role_worktree = Path(role.workdir)
-        (role_worktree / "tracked.txt").write_text("dirty tracked edit\n", encoding="utf-8")
-        (role_worktree / "untracked.tmp").write_text("junk\n", encoding="utf-8")
+        (shared_checkout / "tracked.txt").write_text("dirty tracked edit\n", encoding="utf-8")
+        (shared_checkout / "untracked.tmp").write_text("junk\n", encoding="utf-8")
 
         assert ensure_project_worktrees(config, refresh=True).ok
 
-        assert (role_worktree / "tracked.txt").read_text(encoding="utf-8") == "initial\n"
-        assert not (role_worktree / "untracked.tmp").exists()
-        status = _run_git(["git", "status", "--porcelain"], cwd=role_worktree).stdout
+        assert (shared_checkout / "tracked.txt").read_text(encoding="utf-8") == "initial\n"
+        assert not (shared_checkout / "untracked.tmp").exists()
+        status = _run_git(["git", "status", "--porcelain"], cwd=shared_checkout).stdout
         assert status == ""
 
 
-def test_bad_role_worktree_does_not_block_other_roles_with_real_git() -> None:
+def test_bad_shared_checkout_blocks_all_roles_with_real_git() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-git.") as tmp:
         tmp_path = Path(tmp)
-        _origin, repo = _make_origin_backed_repo(tmp_path)
-        config_path = _write_minimal_worktree_config(tmp_path, repo, ["ops", "app"])
+        repo = tmp_path / "not-a-git-checkout"
+        repo.mkdir()
+        config_path = _write_minimal_shared_checkout_config(tmp_path, repo, ["ops", "app"])
         config = load_project_config("pgu", config_path)
-        roles = {role.role: role for role in config.roles}
-        bad_workdir = Path(roles["ops"].workdir)
-        bad_workdir.mkdir(parents=True)
-        (bad_workdir / "not-a-worktree.txt").write_text("bad\n", encoding="utf-8")
 
         result = ensure_project_worktrees(config, refresh=True)
 
-        assert set(result.failed_roles) == {"ops"}
-        assert "non-git workdir" in result.failed_roles["ops"]
-        assert _run_git(["git", "rev-parse", "--is-inside-work-tree"], cwd=Path(roles["app"].workdir)).stdout.strip() == "true"
+        assert set(result.failed_roles) == {"ops", "app"}
 
 
-def test_reload_fetches_without_refreshing_role_worktrees() -> None:
+def test_reload_fetches_without_refreshing_shared_checkout() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
         tmp_path = Path(tmp)
-        config_path = _write_pgu_config_with_worktree_base(tmp_path)
+        config_path = _write_pgu_config_with_shared_checkout(tmp_path)
         config = load_project_config("pgu", config_path)
         runner = FakeRunner()
         layout_output = tmp_path / "layout.json"
@@ -566,11 +563,11 @@ def test_reload_fetches_without_refreshing_role_worktrees() -> None:
 
         assert runner.calls[0] == git_fetch_worktree_ref_args(config)
         assert not any(call[:5] == ["git", "-C", call[2], "worktree", "add"] for call in runner.calls)
-        assert not any(call == git_checkout_worktree_ref_args(config, role) for role in config.roles for call in runner.calls)
-        assert not any(call == git_clean_worktree_args(role) for role in config.roles for call in runner.calls)
+        assert git_checkout_shared_ref_args(config) not in runner.calls
+        assert git_clean_shared_checkout_args(config) not in runner.calls
 
 
-def test_dry_run_reports_isolated_worktrees_without_syncing_them() -> None:
+def test_dry_run_reports_shared_checkout_without_syncing_it() -> None:
     config_path = ROOT / "config" / "team-launcher" / "pgu.json"
     config = load_project_config("pgu", config_path)
     runner = FakeRunner()
@@ -591,6 +588,10 @@ def test_dry_run_reports_isolated_worktrees_without_syncing_them() -> None:
         )
 
         assert runner.calls == []
+        plan = json.loads(layout_output.read_text(encoding="utf-8"))
+        assert {leaf.get("WorkingDirectory") for leaf in team_launcher._layout_leaves(plan)} == {
+            "/home/agent/Projects/pgu"
+        }
         layout = json.loads(layout_output.read_text(encoding="utf-8"))
         commands = _leaf_commands(layout)
         assert len(commands) == 6
@@ -627,6 +628,8 @@ def test_reload_uses_recorded_resume_uuid_when_recreating_session() -> None:
         assert runner.calls[3] == ["tmux", "kill-session", "-t", "pgu-ops"]
         assert runner.calls[4][:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"]
         assert f"--resume {session_id}" in runner.calls[4][-1]
+        assert "--continue" not in runner.calls[4][-1]
+        assert "--last" not in runner.calls[4][-1]
         assert runner.calls[5] == ["tmux", "attach", "-t", "pgu-ops"]
 
 
@@ -749,10 +752,10 @@ def main() -> int:
     test_start_is_attach_or_start_and_never_duplicates_existing_session()
     test_start_creates_missing_session_once_then_attaches()
     test_start_runs_research_detached_before_opening_visible_layout()
-    test_start_force_refreshes_dirty_role_worktrees_with_real_git()
-    test_bad_role_worktree_does_not_block_other_roles_with_real_git()
-    test_reload_fetches_without_refreshing_role_worktrees()
-    test_dry_run_reports_isolated_worktrees_without_syncing_them()
+    test_start_force_refreshes_dirty_shared_checkout_with_real_git()
+    test_bad_shared_checkout_blocks_all_roles_with_real_git()
+    test_reload_fetches_without_refreshing_shared_checkout()
+    test_dry_run_reports_shared_checkout_without_syncing_it()
     test_detached_research_attach_checks_session_without_attaching()
     test_reload_uses_recorded_resume_uuid_when_recreating_session()
     test_reload_refuses_to_kill_session_when_live_command_mismatches_config()

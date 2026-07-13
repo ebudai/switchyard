@@ -10,6 +10,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -33,6 +34,22 @@ EFFORT_STYLE_BY_CLI = {
     "gemini": None,
 }
 KNOWN_LIVE_CLI_NAMES = {"agy", "claude", "codex", "gemini"}
+DEFAULT_RESUME_MODE_BY_CLI = {
+    "agy": "flag",
+    "claude": "flag",
+    "codex": "subcommand",
+    "gemini": "flag",
+}
+DEFAULT_RESUME_FLAG_BY_CLI = {
+    "agy": "--conversation",
+    "claude": "--resume",
+    "gemini": "--conversation",
+}
+DEFAULT_RESUME_SUBCOMMAND_BY_CLI = {
+    "codex": "resume",
+}
+RESUME_STARTUP_TIMEOUT_SECONDS = 1.5
+RESUME_STARTUP_POLL_SECONDS = 0.1
 
 
 @dataclass(frozen=True)
@@ -49,7 +66,9 @@ class RoleConfig:
     effort: str
     yolo: bool
     extra_args: list[str]
+    resume_mode: str
     resume_flag: str
+    resume_subcommand: str
     live_commands: list[str]
     env: dict[str, str]
 
@@ -176,6 +195,10 @@ def _role_from_json(project: str, raw: dict[str, Any], *, base: Path, default_wo
         workdir = str(default_workdir or Path.cwd())
     else:
         workdir = str(_expand_path(str(workdir_raw), base=base))
+    cli_name = _command_name(cli[0])
+    resume_mode = str(raw.get("resume_mode") or DEFAULT_RESUME_MODE_BY_CLI.get(cli_name, "flag")).strip()
+    resume_flag = str(raw.get("resume_flag") or DEFAULT_RESUME_FLAG_BY_CLI.get(cli_name, "--resume")).strip()
+    resume_subcommand = str(raw.get("resume_subcommand") or DEFAULT_RESUME_SUBCOMMAND_BY_CLI.get(cli_name, "resume")).strip()
     return RoleConfig(
         role=role,
         slot=slot,
@@ -189,7 +212,9 @@ def _role_from_json(project: str, raw: dict[str, Any], *, base: Path, default_wo
         effort=str(raw.get("effort") or "").strip(),
         yolo=_bool_value(raw.get("yolo"), field="yolo", role=role),
         extra_args=_string_list(raw.get("extra_args"), field="extra_args", role=role),
-        resume_flag=str(raw.get("resume_flag") or "--resume").strip(),
+        resume_mode=resume_mode,
+        resume_flag=resume_flag,
+        resume_subcommand=resume_subcommand,
         live_commands=_string_list(raw.get("live_commands"), field="live_commands", role=role),
         env={str(key): str(value) for key, value in env_raw.items()},
     )
@@ -342,17 +367,24 @@ def effort_args_for_role(role: RoleConfig) -> list[str]:
     raise SystemExit(f"role {role.role} uses unsupported effort cli {cli_name!r}")
 
 
+def _resume_args_for_role(role: RoleConfig, session_id: str) -> list[str]:
+    if not session_id:
+        return []
+    if role.resume_mode == "flag":
+        return [role.resume_flag, session_id]
+    if role.resume_mode == "subcommand":
+        return [role.resume_subcommand, session_id]
+    raise SystemExit(f"role {role.role} uses unsupported resume_mode {role.resume_mode!r}")
+
+
 def cli_command_for_role(role: RoleConfig, *, session_dir: Path, resume: bool = False) -> list[str]:
-    command = list(role.cli)
+    session_id = session_id_for_role(role, session_dir) if resume else ""
+    command = [*role.cli, *_resume_args_for_role(role, session_id)]
     if role.model:
         command.extend([role.model_arg, role.model])
     command.extend(effort_args_for_role(role))
     command.extend(yolo_args_for_role(role))
     command.extend(role.extra_args)
-    if resume:
-        session_id = session_id_for_role(role, session_dir)
-        if session_id:
-            command.extend([role.resume_flag, session_id])
     env = {"PGU_PANE_TARGET": role.target, **role.env}
     return ["env", *_env_prefix(env), *command]
 
@@ -624,6 +656,59 @@ def live_command_matches_role(
     return actual in expected
 
 
+def _resume_launch_verified(
+    role: RoleConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> bool:
+    deadline = time.monotonic() + RESUME_STARTUP_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if live_command_matches_role(role, runner=runner):
+            return True
+        if runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+            return False
+        time.sleep(RESUME_STARTUP_POLL_SECONDS)
+    return live_command_matches_role(role, runner=runner)
+
+
+def _start_role_session(
+    role: RoleConfig,
+    *,
+    session_dir: Path,
+    prefer_resume: bool,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> int:
+    session_id = session_id_for_role(role, session_dir) if prefer_resume else ""
+    if prefer_resume and not session_id:
+        print(
+            f"team-launcher: no recorded session id for {role.role}; starting fresh session",
+            file=sys.stderr,
+        )
+        prefer_resume = False
+    start_proc = runner(tmux_new_session_args(role, session_dir=session_dir, resume=prefer_resume))
+    if start_proc.returncode != 0:
+        return int(start_proc.returncode)
+    if not prefer_resume:
+        return 0
+    if _resume_launch_verified(role, runner=runner):
+        return 0
+    print(
+        f"team-launcher: resume failed for {role.role} using session {session_id}; falling back to fresh session",
+        file=sys.stderr,
+    )
+    kill_proc = runner(tmux_kill_session_args(role))
+    if kill_proc.returncode != 0:
+        return int(kill_proc.returncode)
+    fresh_proc = runner(tmux_new_session_args(role, session_dir=session_dir, resume=False))
+    if fresh_proc.returncode != 0:
+        return int(fresh_proc.returncode)
+    print(
+        f"team-launcher: started fresh session for {role.role} after resume fallback",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def run_role_pane(
     role: RoleConfig,
     *,
@@ -650,15 +735,15 @@ def run_role_pane(
             kill_proc = runner(tmux_kill_session_args(role))
             if kill_proc.returncode != 0:
                 return int(kill_proc.returncode)
-        start_proc = runner(tmux_new_session_args(role, session_dir=session_dir, resume=True))
-        if start_proc.returncode != 0:
-            return int(start_proc.returncode)
+        start_result = _start_role_session(role, session_dir=session_dir, prefer_resume=True, runner=runner)
+        if start_result != 0:
+            return start_result
         return runner(tmux_attach_args(role)).returncode
     if mode in {"start", "attach-or-start"}:
         if not exists:
-            start_proc = runner(tmux_new_session_args(role, session_dir=session_dir, resume=False))
-            if start_proc.returncode != 0:
-                return int(start_proc.returncode)
+            start_result = _start_role_session(role, session_dir=session_dir, prefer_resume=False, runner=runner)
+            if start_result != 0:
+                return start_result
         return runner(tmux_attach_args(role)).returncode
     raise SystemExit(f"unknown pane mode: {mode}")
 
@@ -689,12 +774,10 @@ def run_detached_role(
             kill_proc = runner(tmux_kill_session_args(role))
             if kill_proc.returncode != 0:
                 return int(kill_proc.returncode)
-        start_proc = runner(tmux_new_session_args(role, session_dir=session_dir, resume=True))
-        return int(start_proc.returncode)
+        return _start_role_session(role, session_dir=session_dir, prefer_resume=True, runner=runner)
     if mode in {"start", "attach-or-start"}:
         if not exists:
-            start_proc = runner(tmux_new_session_args(role, session_dir=session_dir, resume=False))
-            return int(start_proc.returncode)
+            return _start_role_session(role, session_dir=session_dir, prefer_resume=False, runner=runner)
         return 0
     raise SystemExit(f"unknown detached role mode: {mode}")
 

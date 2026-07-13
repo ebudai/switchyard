@@ -10,6 +10,8 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import redirect_stderr
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
@@ -42,13 +44,24 @@ class FakeRunner:
         self,
         existing_sessions: set[str] | None = None,
         *,
-        current_commands: dict[str, str] | None = None,
-        pane_pids: dict[str, int] | None = None,
+        current_commands: dict[str, str | list[str]] | None = None,
+        pane_pids: dict[str, int | list[int]] | None = None,
     ) -> None:
         self.existing_sessions = set(existing_sessions or set())
         self.current_commands = current_commands or {}
         self.pane_pids = pane_pids or {}
         self.calls: list[list[str]] = []
+
+    @staticmethod
+    def _value_for(mapping: dict[str, Any], key: str, default: Any) -> Any:
+        value = mapping.get(key, default)
+        if isinstance(value, list):
+            if len(value) > 1:
+                return value.pop(0)
+            if len(value) == 1:
+                return value[0]
+            return default
+        return value
 
     def __call__(self, args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         self.calls.append(args)
@@ -58,9 +71,9 @@ class FakeRunner:
         if args[:3] == ["tmux", "display-message", "-p"]:
             target = args[args.index("-t") + 1]
             if args[-1] == "#{pane_pid}":
-                pane_pid = self.pane_pids.get(target, 0)
+                pane_pid = int(self._value_for(self.pane_pids, target, 0) or 0)
                 return subprocess.CompletedProcess(args, 0 if pane_pid else 1, stdout=f"{pane_pid}\n" if pane_pid else "")
-            command = self.current_commands.get(target, "")
+            command = str(self._value_for(self.current_commands, target, "") or "")
             return subprocess.CompletedProcess(args, 0 if command else 1, stdout=command + "\n")
         if args[:2] == ["tmux", "new-session"]:
             session = args[args.index("-s") + 1]
@@ -276,39 +289,46 @@ def test_pgu_config_matches_director_supplied_live_role_assignments() -> None:
         "claude-opus-4-8",
         "high",
     )
+    assert (roles["director"].resume_mode, roles["director"].resume_flag) == ("flag", "--resume")
     assert (roles["ops"].cli, roles["ops"].model, roles["ops"].effort, roles["ops"].extra_args) == (
         ["codex"],
         "gpt-5.5",
         "high",
         [],
     )
+    assert (roles["ops"].resume_mode, roles["ops"].resume_subcommand) == ("subcommand", "resume")
     assert (roles["main"].cli, roles["main"].model, roles["main"].effort, roles["main"].extra_args) == (
         ["codex"],
         "gpt-5.6-terra",
         "high",
         [],
     )
+    assert (roles["main"].resume_mode, roles["main"].resume_subcommand) == ("subcommand", "resume")
     assert (roles["app"].cli, roles["app"].model, roles["app"].effort, roles["app"].extra_args) == (
         ["codex"],
         "gpt-5.4",
         "high",
         [],
     )
+    assert (roles["app"].resume_mode, roles["app"].resume_subcommand) == ("subcommand", "resume")
     assert (roles["research"].cli, roles["research"].model, roles["research"].effort) == (
         ["claude"],
         "claude-sonnet-5",
         "high",
     )
+    assert (roles["research"].resume_mode, roles["research"].resume_flag) == ("flag", "--resume")
     assert (roles["audit"].cli, roles["audit"].model, roles["audit"].effort) == (
         ["claude"],
         "claude-sonnet-5",
         "high",
     )
+    assert (roles["audit"].resume_mode, roles["audit"].resume_flag) == ("flag", "--resume")
     assert (roles["inspector"].cli, roles["inspector"].model, roles["inspector"].effort) == (
         ["agy"],
         "Gemini 3.5 Flash (Medium)",
         "",
     )
+    assert (roles["inspector"].resume_mode, roles["inspector"].resume_flag) == ("flag", "--conversation")
 
 
 def test_yolo_config_translates_to_cli_specific_bypass_flags() -> None:
@@ -651,8 +671,7 @@ def test_reload_syncs_live_cli_and_model_from_process_argv_before_relaunch() -> 
         assert synced_research["yolo"] is True
 
         research_new_session = next(call for call in runner.calls if call[:5] == ["tmux", "new-session", "-d", "-s", "pgu-research"])
-        assert "claude --model claude-sonnet-5" in research_new_session[-1]
-        assert "--resume live-research-session" in research_new_session[-1]
+        assert "claude --resume live-research-session --model claude-sonnet-5" in research_new_session[-1]
         assert "codex" not in research_new_session[-1]
 
 
@@ -856,7 +875,7 @@ def test_reload_uses_recorded_resume_uuid_when_recreating_session() -> None:
         )
         runner = FakeRunner(existing_sessions={"pgu-ops"}, current_commands={"pgu-ops:0.0": "codex"})
 
-        assert cli_command_for_role(role, session_dir=session_dir, resume=True)[-2:] == ["--resume", session_id]
+        assert cli_command_for_role(role, session_dir=session_dir, resume=True)[2:5] == ["codex", "resume", session_id]
         assert run_role_pane(role, mode="reload", session_dir=session_dir, runner=runner) == 0
 
         assert runner.calls[0] == ["tmux", "has-session", "-t", "pgu-ops"]
@@ -864,10 +883,91 @@ def test_reload_uses_recorded_resume_uuid_when_recreating_session() -> None:
         assert runner.calls[2] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_current_command}"]
         assert runner.calls[3] == ["tmux", "kill-session", "-t", "pgu-ops"]
         assert runner.calls[4][:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"]
-        assert f"--resume {session_id}" in runner.calls[4][-1]
+        assert f"codex resume {session_id}" in runner.calls[4][-1]
         assert "--continue" not in runner.calls[4][-1]
         assert "--last" not in runner.calls[4][-1]
-        assert runner.calls[5] == ["tmux", "attach", "-t", "pgu-ops"]
+        assert runner.calls[5] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_pid}"]
+        assert runner.calls[6] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_current_command}"]
+        assert runner.calls[7] == ["tmux", "attach", "-t", "pgu-ops"]
+
+
+def test_resume_commands_use_cli_specific_shapes_and_front_position() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    roles = {role.role: role for role in config.roles}
+    session_id = "12345678-1234-5678-9abc-def012345678"
+
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        session_dir = Path(tmp)
+        for role_name in ("director", "ops", "inspector"):
+            role = roles[role_name]
+            (session_dir / session_file_name(role.target)).write_text(
+                json.dumps({"target": role.target, "session_id": session_id}) + "\n",
+                encoding="utf-8",
+            )
+
+        director_command = cli_command_for_role(roles["director"], session_dir=session_dir, resume=True)
+        ops_command = cli_command_for_role(roles["ops"], session_dir=session_dir, resume=True)
+        inspector_command = cli_command_for_role(roles["inspector"], session_dir=session_dir, resume=True)
+
+        assert director_command[2:5] == ["claude", "--resume", session_id]
+        assert director_command[5:9] == ["--model", "claude-opus-4-8", "--effort", "high"]
+
+        assert ops_command[2:5] == ["codex", "resume", session_id]
+        assert ops_command[5:9] == ["--model", "gpt-5.5", "-c", "reasoning_effort=high"]
+
+        assert inspector_command[2:5] == ["agy", "--conversation", session_id]
+        assert inspector_command[5:7] == ["--model", "Gemini 3.5 Flash (Medium)"]
+
+
+def test_reload_without_recorded_resume_id_logs_fresh_start() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    role = next(role for role in config.roles if role.role == "ops")
+    runner = FakeRunner(existing_sessions={"pgu-ops"}, current_commands={"pgu-ops:0.0": "codex"})
+    stderr = StringIO()
+
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        with redirect_stderr(stderr):
+            assert run_role_pane(role, mode="reload", session_dir=Path(tmp), runner=runner) == 0
+
+    assert "team-launcher: no recorded session id for ops; starting fresh session" in stderr.getvalue()
+    assert runner.calls[4][:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"]
+    assert " resume " not in f" {runner.calls[4][-1]} "
+    assert "--resume" not in runner.calls[4][-1]
+
+
+def test_reload_logs_resume_fallback_when_cli_never_starts() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    role = next(role for role in config.roles if role.role == "ops")
+    stderr = StringIO()
+    original_timeout = team_launcher.RESUME_STARTUP_TIMEOUT_SECONDS
+    original_poll = team_launcher.RESUME_STARTUP_POLL_SECONDS
+    try:
+        team_launcher.RESUME_STARTUP_TIMEOUT_SECONDS = 0.02
+        team_launcher.RESUME_STARTUP_POLL_SECONDS = 0.0
+        with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+            session_dir = Path(tmp)
+            session_id = "12345678-1234-5678-9abc-def012345678"
+            (session_dir / session_file_name(role.target)).write_text(
+                json.dumps({"target": role.target, "session_id": session_id}) + "\n",
+                encoding="utf-8",
+            )
+            runner = FakeRunner(
+                existing_sessions={"pgu-ops"},
+                current_commands={"pgu-ops:0.0": ["codex", "fish", "fish", "fish"]},
+            )
+
+            with redirect_stderr(stderr):
+                assert run_role_pane(role, mode="reload", session_dir=session_dir, runner=runner) == 0
+
+        assert f"team-launcher: resume failed for ops using session {session_id}; falling back to fresh session" in stderr.getvalue()
+        assert "team-launcher: started fresh session for ops after resume fallback" in stderr.getvalue()
+        new_sessions = [call for call in runner.calls if call[:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"]]
+        assert len(new_sessions) == 2
+        assert f"codex resume {session_id}" in new_sessions[0][-1]
+        assert " resume " not in f" {new_sessions[1][-1]} "
+    finally:
+        team_launcher.RESUME_STARTUP_TIMEOUT_SECONDS = original_timeout
+        team_launcher.RESUME_STARTUP_POLL_SECONDS = original_poll
 
 
 def test_reload_refuses_to_kill_session_when_live_command_mismatches_config() -> None:
@@ -930,7 +1030,9 @@ def test_reload_guard_matches_cli_child_under_shell_in_real_tmux() -> None:
             effort="",
             yolo=False,
             extra_args=[],
+            resume_mode=role.resume_mode,
             resume_flag=role.resume_flag,
+            resume_subcommand=role.resume_subcommand,
             live_commands=["codex"],
             env={},
         )
@@ -1000,6 +1102,9 @@ def main() -> int:
     test_start_does_not_sync_live_cli_or_model()
     test_detached_research_attach_checks_session_without_attaching()
     test_reload_uses_recorded_resume_uuid_when_recreating_session()
+    test_resume_commands_use_cli_specific_shapes_and_front_position()
+    test_reload_without_recorded_resume_id_logs_fresh_start()
+    test_reload_logs_resume_fallback_when_cli_never_starts()
     test_reload_refuses_to_kill_session_when_live_command_mismatches_config()
     test_reload_force_bypasses_live_command_guard()
     test_reload_guard_matches_cli_child_under_shell_in_real_tmux()

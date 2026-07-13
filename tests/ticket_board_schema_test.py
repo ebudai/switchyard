@@ -195,6 +195,8 @@ def main() -> int:
     assert_contains_all(schema, EXPECTED_ASSIGNEES, "assignee constraint")
 
     assert re.search(r"commit_hash\s+text\s+not null", schema_lower), "commit_hash column should be text"
+    assert re.search(r"last_rejected_commit\s+text", schema_lower), "last_rejected_commit column should be text"
+    assert "cannot submit: commit %" in schema, "stale resubmit guard message missing from schema"
     assert re.search(
         r"manually_controlled\s+boolean\s+not null\s+default\s+false",
         schema_lower,
@@ -224,6 +226,12 @@ def main() -> int:
         ROOT / "scripts" / "ticket_board" / "migrations" / "273_suppress_self_notifications.sql"
     ).read_text(encoding="utf-8").lower()
     assert "source_role is distinct from target_role" in suppress_self_notify_migration
+    stale_resubmit_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "280_reject_stale_resubmit.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "add column if not exists last_rejected_commit" in stale_resubmit_migration
+    assert "cannot submit: commit %" in stale_resubmit_migration
+    assert "ticket_last_rejected_commit <> ''" in stale_resubmit_migration
     unblock_notify_migration = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "274_unblock_notifications.sql"
     ).read_text(encoding="utf-8").lower()

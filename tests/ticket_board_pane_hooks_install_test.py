@@ -52,6 +52,16 @@ def _managed_command_count(config: dict[str, Any]) -> int:
     return sum(1 for command in _commands(config) if HOOK_NAME in command)
 
 
+def _managed_commands_by_source(config: dict[str, Any]) -> dict[str, str]:
+    commands: dict[str, str] = {}
+    for command in _commands(config):
+        if HOOK_NAME not in command or "--source " not in command:
+            continue
+        source = command.split("--source ", 1)[1].split()[0]
+        commands[source] = command
+    return commands
+
+
 def test_installer_writes_durable_cli_hook_configs_idempotently() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
         home = Path(tmp) / "home"
@@ -89,6 +99,10 @@ def test_installer_writes_durable_cli_hook_configs_idempotently() -> None:
         assert _managed_command_count(claude) == 4
         assert _managed_command_count(codex) == 4
         assert _managed_command_count(gemini) == 4
+
+        claude_commands = _managed_commands_by_source(claude)
+        assert " idle --source claude.Stop" in claude_commands["claude.Stop"]
+        assert " busy --source claude.Stop" not in claude_commands["claude.Stop"]
 
 
 def test_installed_hook_writes_state_and_verify_state_checks_all_panes() -> None:

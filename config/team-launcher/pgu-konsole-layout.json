@@ -24,26 +24,12 @@
           "Lines": 24,
           "SessionRestoreId": 0,
           "WorkingDirectory": "/home/agent/Projects/pgu"
-        },
-        {
-          "Columns": 80,
-          "Command": "",
-          "Lines": 24,
-          "SessionRestoreId": 0,
-          "WorkingDirectory": "/home/agent/Projects/pgu"
         }
       ]
     },
     {
       "Orientation": "Vertical",
       "Widgets": [
-        {
-          "Columns": 80,
-          "Command": "",
-          "Lines": 24,
-          "SessionRestoreId": 0,
-          "WorkingDirectory": "/home/agent/Projects/pgu"
-        },
         {
           "Columns": 80,
           "Command": "",

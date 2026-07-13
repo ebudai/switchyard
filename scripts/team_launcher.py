@@ -33,6 +33,7 @@ EFFORT_STYLE_BY_CLI = {
 class RoleConfig:
     role: str
     slot: int | None
+    detached: bool
     tmux_session: str
     target: str
     workdir: str
@@ -108,6 +109,7 @@ def _role_from_json(project: str, raw: dict[str, Any]) -> RoleConfig:
     return RoleConfig(
         role=role,
         slot=slot,
+        detached=_bool_value(raw.get("detached"), field="detached", role=role),
         tmux_session=tmux_session,
         target=str(raw.get("target") or f"{tmux_session}:0.0").strip(),
         workdir=str(raw.get("workdir") or os.getcwd()),
@@ -141,6 +143,12 @@ def load_project_config(project: str, config_path: Path | None = None) -> Projec
     slots = [role.slot for role in roles if role.slot is not None]
     if len(set(slots)) != len(slots):
         raise SystemExit(f"{path} contains duplicate role slot assignments")
+    detached_with_slots = [role.role for role in roles if role.detached and role.slot is not None]
+    if detached_with_slots:
+        raise SystemExit(f"{path} detached roles must not define layout slots: {', '.join(detached_with_slots)}")
+    visible_without_slots = [role.role for role in roles if not role.detached and role.slot is None]
+    if visible_without_slots:
+        raise SystemExit(f"{path} visible roles must define layout slots: {', '.join(visible_without_slots)}")
     return ProjectConfig(project=config_project, layout=layout, session_dir=session_dir, roles=roles)
 
 
@@ -351,6 +359,42 @@ def run_role_pane(
     raise SystemExit(f"unknown pane mode: {mode}")
 
 
+def run_detached_role(
+    role: RoleConfig,
+    *,
+    mode: str,
+    session_dir: Path,
+    force_reload: bool = False,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> int:
+    exists = runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    if mode == "attach":
+        if not exists:
+            print(f"tmux session {role.tmux_session} does not exist", file=sys.stderr)
+            return 1
+        return 0
+    if mode == "reload":
+        if exists:
+            if not force_reload and not live_command_matches_role(role, runner=runner):
+                print(
+                    f"refusing to reload {role.tmux_session}: live pane command does not match configured CLI; "
+                    "rerun with --force to override",
+                    file=sys.stderr,
+                )
+                return 1
+            kill_proc = runner(tmux_kill_session_args(role))
+            if kill_proc.returncode != 0:
+                return int(kill_proc.returncode)
+        start_proc = runner(tmux_new_session_args(role, session_dir=session_dir, resume=True))
+        return int(start_proc.returncode)
+    if mode in {"start", "attach-or-start"}:
+        if not exists:
+            start_proc = runner(tmux_new_session_args(role, session_dir=session_dir, resume=False))
+            return int(start_proc.returncode)
+        return 0
+    raise SystemExit(f"unknown detached role mode: {mode}")
+
+
 def _layout_leaves(node: Any) -> list[dict[str, Any]]:
     leaves: list[dict[str, Any]] = []
     if isinstance(node, dict):
@@ -398,6 +442,8 @@ def materialize_layout(
     layout = json.loads(config.layout.read_text(encoding="utf-8"))
     leaves = _layout_leaves(layout)
     for role in config.roles:
+        if role.detached:
+            continue
         if role.slot is None:
             continue
         if role.slot < 0 or role.slot >= len(leaves):
@@ -461,11 +507,33 @@ def launch_project(
                 ),
             }
             for role in config.roles
+            if not role.detached
+        ],
+        "detached_roles": [
+            {
+                "role": role.role,
+                "tmux_session": role.tmux_session,
+                "target": role.target,
+            }
+            for role in config.roles
+            if role.detached
         ],
     }
     if dry_run:
         print(json.dumps(plan, indent=2, sort_keys=True))
         return 0
+    for role in config.roles:
+        if not role.detached:
+            continue
+        result = run_detached_role(
+            role,
+            mode=mode,
+            session_dir=config.session_dir,
+            force_reload=force_reload,
+            runner=runner,
+        )
+        if result != 0:
+            return result
     return runner(["konsole", "--layout", str(output_path)]).returncode
 
 
@@ -522,6 +590,8 @@ def main(argv: list[str] | None = None) -> int:
         if not args.pane_mode or not args.role:
             raise SystemExit("pane mode requires <start|attach|attach-or-start|reload> and <role>")
         role = _role_by_name(config, args.role)
+        if role.detached:
+            return run_detached_role(role, mode=args.pane_mode, session_dir=config.session_dir, force_reload=args.force)
         return run_role_pane(role, mode=args.pane_mode, session_dir=config.session_dir, force_reload=args.force)
     return launch_project(
         config,

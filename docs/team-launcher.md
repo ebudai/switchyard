@@ -1,7 +1,9 @@
 # Team Launcher
 
 `scripts/team-launcher` starts, attaches, or reloads a project team from a JSON
-config. The default PGU config is `config/team-launcher/pgu.json`.
+config. The default PGU config is `config/team-launcher/pgu.json`. PGU starts
+six visible roles in a single Konsole layout window and starts `research` as a
+detached background tmux session.
 
 The executable wrapper self-runs as the `agent` user. If another host user runs
 `scripts/team-launcher`, the wrapper invokes `sudo -u agent -H` and passes the
@@ -16,18 +18,22 @@ scripts/team-launcher pgu attach
 scripts/team-launcher pgu reload
 ```
 
-`start` is intentionally idempotent. Each Konsole pane runs the launcher in
-`pane attach-or-start <role>` mode. If `tmux has-session -t pgu-<role>` succeeds,
-it attaches to that existing session. It only runs `tmux new-session` when the
-role session does not exist.
+`start` is intentionally idempotent. Each visible Konsole pane runs the launcher
+in `pane attach-or-start <role>` mode. If `tmux has-session -t pgu-<role>`
+succeeds, it attaches to that existing session. It only runs `tmux new-session`
+when the role session does not exist. Roles marked `detached` are started
+directly by the launcher before Konsole opens and are not assigned a visible
+layout pane.
 
-`attach` only attaches to existing sessions and fails if a role session is
-missing.
+`attach` only attaches visible panes to existing sessions and fails if a role
+session is missing. Detached roles are checked for existence but remain
+detached.
 
 `reload` kills and recreates each configured role session, then starts the
-configured CLI with its recorded resume id when one exists. Resume ids are read
-from `/run/user/<uid>/pgu-ticket-board/pane-sessions/<target>.json` by default.
-The SessionStart hook installer writes those files.
+configured CLI with its recorded resume id when one exists. Detached roles are
+also reloaded, but remain detached instead of attaching to a pane. Resume ids
+are read from `/run/user/<uid>/pgu-ticket-board/pane-sessions/<target>.json` by
+default. The SessionStart hook installer writes those files.
 
 Reload is guarded because it is destructive. Before killing an existing tmux
 session, the launcher reads `#{pane_current_command}` for that role target and
@@ -56,7 +62,10 @@ Each project config contains:
 Each role entry contains:
 
 - `role`: board/team role name.
-- `slot`: zero-based terminal leaf in the Konsole layout.
+- `slot`: zero-based terminal leaf in the Konsole layout. Required for visible
+  roles and forbidden for detached roles.
+- `detached`: optional boolean. When true, the role is started/reloaded as a
+  background tmux session and omitted from the Konsole layout.
 - `tmux_session`: session name, normally `<project>-<role>`.
 - `target`: tmux target, normally `<project>-<role>:0.0`.
 - `workdir`: working directory for the tmux session.
@@ -81,7 +90,8 @@ Each role entry contains:
 Do not put guessed/default roles into a real project config. If a role is not
 currently active or its CLI/model assignment is unknown, omit it until the
 assignment is verified. The PGU config intentionally omits `perf` because that
-pane is not currently running.
+pane is not currently running. PGU keeps `research` configured but detached so
+the visible launch window remains a six-pane operator layout.
 
 ## Bootstrap
 

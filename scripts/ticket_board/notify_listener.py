@@ -716,6 +716,40 @@ WHERE id = %s
         current_target_role = self._current_target_role(kind, current_state, current_assignee)
         return current_target_role is None or current_target_role == target_role
 
+    def _finish_current_blocker(self, conn: Any, ticket_id: str, target_role: str, payload: str) -> str:
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            return ""
+        if not isinstance(parsed, dict):
+            return ""
+        if str(parsed.get("kind") or "").strip().lower() != "transition":
+            return ""
+        if str(parsed.get("new_state") or "").strip() != "in_progress":
+            return ""
+        assignee = str(parsed.get("assignee") or target_role).strip().lower()
+        if assignee != target_role or target_role in {"director", "audit", "inspector"}:
+            return ""
+        result = conn.execute(
+            """
+SELECT t.id
+FROM ticket_board.tickets t
+WHERE t.state = 'in_progress'
+  AND t.assignee = %s
+  AND t.id <> %s
+  AND NOT t.manually_controlled
+ORDER BY t.ticket_number
+LIMIT 1
+""",
+            (target_role, ticket_id),
+        )
+        row = result.fetchone()
+        if row is None:
+            return ""
+        if isinstance(row, dict):
+            return self._decode_text(row.get("id", ""))
+        return self._decode_text(row[0])
+
     def process_due_notifications(self, conn: Any, *, max_notifications: int | None = None) -> int:
         delivered = 0
         while not self.stop_event.is_set():
@@ -785,6 +819,35 @@ WHERE id = %s
                 )
                 self._ack_notification(conn, notification_id)
                 self._traced_gate_defer_notifications.discard(notification_id)
+                continue
+            finish_current_ticket = self._finish_current_blocker(conn, ticket_id, target_role, payload)
+            if finish_current_ticket:
+                self.logger.info(
+                    "Holding notification %s for %s until %s leaves in_progress",
+                    notification_id,
+                    ticket_id,
+                    finish_current_ticket,
+                )
+                if notification_id not in self._traced_gate_defer_notifications:
+                    self._trace_notification(
+                        conn,
+                        notification_id=notification_id,
+                        ticket_id=ticket_id,
+                        target_role=target_role,
+                        kind=kind,
+                        event="finish_current_defer",
+                        pane_busy=True,
+                        busy_reason="finish_current",
+                        detail={"current_ticket_id": finish_current_ticket, "attempts": attempts},
+                    )
+                    self._traced_gate_defer_notifications.add(notification_id)
+                self._requeue_notification(
+                    conn,
+                    notification_id,
+                    attempts,
+                    "finish current",
+                    delay_seconds=self.busy_requeue_seconds,
+                )
                 continue
             pane_busy = self.activity_gate(target)
             activity_trace = self._activity_trace(target, pane_busy)

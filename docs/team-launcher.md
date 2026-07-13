@@ -3,9 +3,9 @@
 `scripts/team-launcher` starts, attaches, or reloads a project team from a JSON
 config. The default PGU config is `config/team-launcher/pgu.json`. PGU starts
 six visible roles in a single Konsole layout window and starts `research` as a
-detached background tmux session. Each role runs from its own git worktree under
-`/home/agent/.claude/worktrees/pgu-team`, synced to `origin/main`, instead of
-sharing `/home/agent/Projects/pgu`.
+detached background tmux session. Each role pane starts in the shared checkout
+at `/home/agent/Projects/pgu`; feature work still happens in explicit
+per-ticket worktrees created outside the launcher.
 
 The executable wrapper self-runs as the `agent` user. If another host user runs
 `scripts/team-launcher`, the wrapper invokes `sudo -u agent -H` and passes the
@@ -42,13 +42,12 @@ in `pane attach-or-start <role>` mode. If `tmux has-session -t pgu-<role>`
 succeeds, it attaches to that existing session. It only runs `tmux new-session`
 when the role session does not exist. Roles marked `detached` are started
 directly by the launcher before Konsole opens and are not assigned a visible
-layout pane. Before opening Konsole, `start` fetches `origin main`, creates any
-missing role worktrees from `origin/main`, and checks existing role worktrees out
-to `origin/main` with `--force`, then runs `git clean -fdx`. These per-role
-worktrees are disposable launcher workspaces; uncommitted files in them are
-discarded on start. A worktree failure is isolated to that role: a failed visible
-role pane prints the worktree error instead of launching the CLI, while detached
-failed roles are skipped.
+layout pane. Before opening Konsole, `start` fetches `origin main`, checks the
+shared checkout out to `origin/main` with `--force`, then runs `git clean -fdx`.
+This is intentionally destructive to uncommitted files in the shared checkout;
+use a ticket worktree for implementation work. A shared checkout refresh failure
+blocks every role: visible panes print the checkout error instead of launching
+the CLI, while detached roles are skipped.
 
 `attach` only attaches visible panes to existing sessions and fails if a role
 session is missing. Detached roles are checked for existence but remain
@@ -58,7 +57,7 @@ detached.
 configured CLI with its recorded resume id when one exists. Detached roles are
 also reloaded, but remain detached instead of attaching to a pane. `reload`
 fetches the configured worktree ref for freshness, but does not checkout or clean
-role worktrees before recreating sessions; this preserves files in resumed panes.
+the shared checkout before recreating sessions; this preserves files in resumed panes.
 Resume ids are read from
 `/run/user/<uid>/pgu-ticket-board/pane-sessions/<target>.json` by default. The
 SessionStart hook installer writes those files.
@@ -85,13 +84,13 @@ Each project config contains:
 - `layout`: Konsole JSON layout path, relative to the config file if not
   absolute.
 - `session_dir`: optional directory containing per-pane resume session files.
-- `repository`: optional source repository used for managed role worktrees.
-- `worktree_base`: optional directory where managed role worktrees live.
-  Required when `repository` is set; each role defaults to
-  `<worktree_base>/<role>`.
-- `worktree_remote`: optional remote for managed worktrees, defaulting to
+- `repository`: optional shared checkout used as the default pane cwd and the
+  checkout refreshed by `start`.
+- `worktree_base`: legacy optional setting retained for existing configs. It is
+  not used as the pane cwd when `repository` is set.
+- `worktree_remote`: optional remote for the shared checkout, defaulting to
   `origin`.
-- `worktree_branch`: optional branch for managed worktrees, defaulting to
+- `worktree_branch`: optional branch for the shared checkout, defaulting to
   `main`.
 - `roles`: list of role entries.
 
@@ -104,10 +103,9 @@ Each role entry contains:
   background tmux session and omitted from the Konsole layout.
 - `tmux_session`: session name, normally `<project>-<role>`.
 - `target`: tmux target, normally `<project>-<role>:0.0`.
-- `workdir`: working directory for the tmux session. When project-level
-  worktree management is enabled, omit this unless a role needs an explicit
-  override; duplicate role workdirs and the shared repository checkout are
-  rejected.
+- `workdir`: working directory for the tmux session. Omit it for PGU roles so
+  they default to the shared `repository` checkout. Duplicate role workdirs are
+  allowed only when the duplicate path is the shared checkout.
 - `cli`: argv array for the CLI binary.
 - `model`: optional model selector. The launcher passes it with the role's
   `model_arg` at process launch so the pane starts on its configured model.

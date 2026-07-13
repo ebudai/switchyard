@@ -2,7 +2,6 @@
   "layout": "pgu-konsole-layout.json",
   "project": "pgu",
   "repository": "/home/agent/Projects/pgu",
-  "worktree_base": "/home/agent/.claude/worktrees/pgu-team",
   "worktree_branch": "main",
   "worktree_remote": "origin",
   "roles": [

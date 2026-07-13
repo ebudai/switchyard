@@ -224,7 +224,7 @@ CREATE INDEX IF NOT EXISTS ticket_notification_state_due_idx
 CREATE TABLE IF NOT EXISTS ticket_board.ticket_notification_queue (
     id bigserial PRIMARY KEY,
     ticket_id text NOT NULL REFERENCES ticket_board.tickets(id) ON DELETE CASCADE,
-    kind text NOT NULL CHECK (kind IN ('transition', 'nudge', 'escalation')),
+    kind text NOT NULL CHECK (kind IN ('transition', 'ticket_update', 'nudge', 'escalation')),
     target_role text NOT NULL
         CHECK (target_role IN ('director', 'main', 'app', 'perf', 'ops', 'audit', 'inspector', 'research')),
     message text NOT NULL CHECK (btrim(message) <> ''),
@@ -1041,6 +1041,99 @@ AS $$
             THEN p_ticket_id || CASE WHEN p_title <> '' THEN ' -- ' || p_title ELSE '' END || ' ready for your review'
         ELSE NULL
     END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.ticket_update_message(
+    p_ticket_id text,
+    p_title text,
+    p_state text,
+    p_actor text,
+    p_change_summary text DEFAULT NULL
+)
+RETURNS text
+LANGUAGE plpgsql
+IMMUTABLE
+AS $$
+DECLARE
+    title_suffix text := CASE WHEN coalesce(p_title, '') <> '' THEN ' -- ' || p_title ELSE '' END;
+    summary_suffix text := nullif(btrim(coalesce(p_change_summary, '')), '');
+BEGIN
+    RETURN
+        p_ticket_id
+        || title_suffix
+        || ' (in '
+        || p_state
+        || ', that you own) was changed by '
+        || p_actor
+        || CASE
+            WHEN summary_suffix IS NULL THEN ''
+            ELSE ': ' || summary_suffix
+        END
+        || ' -- re-read it before continuing.';
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.notify_ticket_owner_in_place_change(
+    p_ticket_id text,
+    p_change_summary text DEFAULT NULL
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    ticket_row ticket_board.tickets%ROWTYPE;
+    actor text;
+    target_role text;
+    change_summary text := nullif(btrim(coalesce(p_change_summary, '')), '');
+    message text;
+BEGIN
+    actor := ticket_board.current_app_actor();
+    SELECT *
+    INTO ticket_row
+    FROM ticket_board.tickets
+    WHERE id = p_ticket_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ticket not found: %', p_ticket_id;
+    END IF;
+
+    target_role := ticket_board.transition_target_role(ticket_row.state, ticket_row.assignee);
+    IF target_role IS NULL OR actor IS NULL OR actor = target_role THEN
+        RETURN;
+    END IF;
+
+    message := ticket_board.ticket_update_message(
+        p_ticket_id,
+        ticket_row.title,
+        ticket_row.state,
+        actor,
+        change_summary
+    );
+
+    PERFORM ticket_board.enqueue_notification(
+        p_ticket_id,
+        'ticket_update',
+        target_role,
+        message,
+        jsonb_build_object(
+            'kind', 'ticket_update',
+            'id', p_ticket_id,
+            'title', ticket_row.title,
+            'state', ticket_row.state,
+            'assignee', ticket_row.assignee,
+            'updated_at', ticket_row.updated_at,
+            'ticket_number', ticket_row.ticket_number,
+            'target_role', target_role,
+            'message', message,
+            'actor', actor,
+            'change_summary', change_summary
+        ),
+        'ticket_update:' || p_ticket_id || ':' || pg_current_xact_id()::text
+    );
+END;
 $$;
 
 CREATE OR REPLACE FUNCTION ticket_board.unblock_transition_target_role(p_state text, p_assignee text)
@@ -2538,6 +2631,8 @@ SET search_path = ticket_board, pg_temp
 AS $$
 DECLARE
     actor text;
+    current_state text;
+    current_assignee text;
 BEGIN
     actor := ticket_board.require_actor(ARRAY['director'], 'route');
     IF new_state NOT IN ('backlog', 'analysis', 'in_progress', 'inspection', 'audit', 'eric_review', 'director_review', 'done', 'cancelled') THEN
@@ -2547,15 +2642,24 @@ BEGIN
         RAISE EXCEPTION 'invalid assignee: %', assignee;
     END IF;
 
+    SELECT tickets.state, tickets.assignee
+    INTO current_state, current_assignee
+    FROM ticket_board.tickets
+    WHERE tickets.id = route.id
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ticket not found: %', id;
+    END IF;
+
     UPDATE ticket_board.tickets
     SET state = new_state,
         assignee = route.assignee,
         parked = false
     WHERE tickets.id = route.id;
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'ticket not found: %', id;
-    END IF;
     PERFORM ticket_board.touch_ticket(id);
+    IF current_state IS NOT DISTINCT FROM new_state AND current_assignee IS DISTINCT FROM assignee THEN
+        PERFORM ticket_board.notify_ticket_owner_in_place_change(id, 'assignee');
+    END IF;
 END;
 $$;
 
@@ -2970,10 +3074,39 @@ SET search_path = ticket_board, pg_temp
 AS $$
 DECLARE
     actor text;
+    current_blockers text[];
+    current_reason text;
+    next_blockers text[];
+    next_reason text := coalesce(reason, '');
 BEGIN
     actor := ticket_board.require_actor(ARRAY['director'], 'set_blockers');
+    SELECT tickets.blocked_reason
+    INTO current_reason
+    FROM ticket_board.tickets
+    WHERE tickets.id = set_blockers.id
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ticket not found: %', id;
+    END IF;
+
+    SELECT COALESCE(array_agg(blocker_ticket_id ORDER BY position), ARRAY[]::text[])
+    INTO current_blockers
+    FROM ticket_board.ticket_blockers
+    WHERE ticket_id = set_blockers.id;
+
+    SELECT COALESCE(array_agg(blocker_id ORDER BY first_ord), ARRAY[]::text[])
+    INTO next_blockers
+    FROM (
+        SELECT upper(btrim(raw_id)) AS blocker_id, min(ord) AS first_ord
+        FROM unnest(coalesce(ids, ARRAY[]::text[])) WITH ORDINALITY AS input(raw_id, ord)
+        GROUP BY upper(btrim(raw_id))
+    ) AS normalized;
+
     PERFORM ticket_board.apply_blockers(id, ids, reason);
     PERFORM ticket_board.touch_ticket(id);
+    IF current_blockers IS DISTINCT FROM next_blockers OR coalesce(current_reason, '') IS DISTINCT FROM next_reason THEN
+        PERFORM ticket_board.notify_ticket_owner_in_place_change(id, 'blockers');
+    END IF;
 END;
 $$;
 
@@ -2995,6 +3128,7 @@ BEGIN
     comment_actor := ticket_board.current_app_actor();
     PERFORM ticket_board.append_ticket_comment(id, comment_actor, text);
     PERFORM ticket_board.touch_ticket(id);
+    PERFORM ticket_board.notify_ticket_owner_in_place_change(id, 'new comment');
 END;
 $$;
 
@@ -3011,8 +3145,10 @@ AS $$
 DECLARE
     actor text;
     invalid_field text;
+    current_ticket ticket_board.tickets%ROWTYPE;
     normalized_parent text;
     current_parent text;
+    changed_fields text[] := ARRAY[]::text[];
     seen text[];
     screenshot_value text;
 BEGIN
@@ -3029,6 +3165,7 @@ BEGIN
     FROM jsonb_object_keys(patch) AS key
     WHERE key NOT IN (
         'title',
+        'body',
         'parent_id',
         'screenshots',
         'screenshot',
@@ -3062,13 +3199,26 @@ BEGIN
     IF patch ? 'commit_exempt' AND ticket_board.current_app_actor() <> 'director' THEN
         RAISE EXCEPTION 'commit_exempt can only be edited by director' USING ERRCODE = '42501';
     END IF;
-    PERFORM 1 FROM ticket_board.tickets WHERE tickets.id = edit_fields.id;
+    SELECT *
+    INTO current_ticket
+    FROM ticket_board.tickets
+    WHERE tickets.id = edit_fields.id
+    FOR UPDATE;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'ticket not found: %', id;
     END IF;
 
     IF patch ? 'title' AND btrim(coalesce(patch->>'title', '')) = '' THEN
         RAISE EXCEPTION 'title must be non-empty';
+    END IF;
+    IF patch ? 'title' AND btrim(patch->>'title') IS DISTINCT FROM current_ticket.title THEN
+        changed_fields := array_append(changed_fields, 'title');
+    END IF;
+    IF patch ? 'body' AND coalesce(patch->>'body', '') IS DISTINCT FROM current_ticket.body THEN
+        changed_fields := array_append(changed_fields, 'body');
+    END IF;
+    IF patch ? 'implementation' AND coalesce(patch->>'implementation', '') IS DISTINCT FROM current_ticket.implementation THEN
+        changed_fields := array_append(changed_fields, 'implementation');
     END IF;
     IF patch ? 'parent_id' THEN
         normalized_parent := upper(btrim(coalesce(patch->>'parent_id', '')));
@@ -3098,6 +3248,7 @@ BEGIN
 
     UPDATE ticket_board.tickets
     SET title = CASE WHEN patch ? 'title' THEN btrim(patch->>'title') ELSE title END,
+        body = CASE WHEN patch ? 'body' THEN coalesce(patch->>'body', '') ELSE body END,
         parent_id = CASE WHEN patch ? 'parent_id' THEN upper(btrim(coalesce(patch->>'parent_id', ''))) ELSE parent_id END,
         implementation = CASE WHEN patch ? 'implementation' THEN coalesce(patch->>'implementation', '') ELSE implementation END,
         audit_prompt = CASE WHEN patch ? 'audit_prompt' THEN coalesce(patch->>'audit_prompt', '') ELSE audit_prompt END,
@@ -3133,6 +3284,9 @@ BEGIN
     END IF;
 
     PERFORM ticket_board.touch_ticket(id);
+    IF cardinality(changed_fields) > 0 THEN
+        PERFORM ticket_board.notify_ticket_owner_in_place_change(id, array_to_string(changed_fields, ', '));
+    END IF;
 END;
 $$;
 

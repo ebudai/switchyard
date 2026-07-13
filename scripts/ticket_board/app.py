@@ -733,6 +733,7 @@ ORDER BY t.ticket_number
     def _pg_edit_field_patch(self, patch: dict[str, Any]) -> dict[str, Any]:
         editable = {
             "title",
+            "body",
             "parent_id",
             "screenshots",
             "screenshot",

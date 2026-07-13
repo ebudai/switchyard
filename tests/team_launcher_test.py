@@ -22,6 +22,7 @@ from scripts.team_launcher import (
     launch_project,
     live_command_matches_role,
     load_project_config,
+    run_detached_role,
     run_role_pane,
     session_file_name,
     write_template,
@@ -69,7 +70,43 @@ def _leaf_commands(node: object) -> list[str]:
     return commands
 
 
-def test_dry_run_materializes_pgu_layout_with_all_role_commands() -> None:
+def _layout_shape(node: object) -> object:
+    if isinstance(node, dict) and isinstance(node.get("Widgets"), list):
+        return {
+            "Orientation": node.get("Orientation"),
+            "Widgets": [_layout_shape(child) for child in node["Widgets"]],
+        }
+    return "leaf"
+
+
+def test_pgu_layout_matches_reference_six_pane_geometry() -> None:
+    layout = json.loads((ROOT / "config" / "team-launcher" / "pgu-konsole-layout.json").read_text(encoding="utf-8"))
+
+    assert _layout_shape(layout) == {
+        "Orientation": "Horizontal",
+        "Widgets": [
+            {
+                "Orientation": "Vertical",
+                "Widgets": ["leaf", "leaf"],
+            },
+            {
+                "Orientation": "Vertical",
+                "Widgets": [
+                    {
+                        "Orientation": "Horizontal",
+                        "Widgets": ["leaf", "leaf"],
+                    },
+                    {
+                        "Orientation": "Horizontal",
+                        "Widgets": ["leaf", "leaf"],
+                    },
+                ],
+            },
+        ],
+    }
+
+
+def test_dry_run_materializes_pgu_layout_with_six_visible_role_commands() -> None:
     config_path = ROOT / "config" / "team-launcher" / "pgu.json"
     config = load_project_config("pgu", config_path)
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
@@ -86,14 +123,15 @@ def test_dry_run_materializes_pgu_layout_with_all_role_commands() -> None:
         assert result == 0
         layout = json.loads(layout_output.read_text(encoding="utf-8"))
         commands = _leaf_commands(layout)
-        assert len(commands) == 8
+        assert len(commands) == 6
         active_commands = [command for command in commands if command]
-        assert len(active_commands) == 7
-        for role in ("director", "main", "app", "research", "ops", "audit", "inspector"):
+        assert len(active_commands) == 6
+        for role in ("director", "main", "app", "ops", "audit", "inspector"):
             matching = [command for command in commands if f" {role} " in f" {command} " or command.endswith(f" {role}")]
             assert matching, (role, commands)
             assert " pane attach-or-start " in matching[0]
             assert "team-launcher" in matching[0]
+        assert not any(" research " in f" {command} " for command in commands)
         assert not any(" perf " in f" {command} " for command in commands)
 
 
@@ -103,6 +141,16 @@ def test_pgu_config_matches_director_supplied_live_role_assignments() -> None:
 
     assert set(roles) == {"director", "main", "app", "research", "ops", "audit", "inspector"}
     assert all(role.yolo for role in roles.values())
+    assert roles["research"].detached
+    assert roles["research"].slot is None
+    assert {role.role: role.slot for role in roles.values() if not role.detached} == {
+        "director": 0,
+        "main": 1,
+        "app": 2,
+        "ops": 3,
+        "audit": 4,
+        "inspector": 5,
+    }
     assert (roles["director"].cli, roles["director"].model, roles["director"].effort) == (
         ["claude"],
         "claude-opus-4-8",
@@ -262,6 +310,43 @@ def test_start_creates_missing_session_once_then_attaches() -> None:
     assert runner.calls[2] == ["tmux", "attach", "-t", "pgu-ops"]
 
 
+def test_start_runs_research_detached_before_opening_visible_layout() -> None:
+    config_path = ROOT / "config" / "team-launcher" / "pgu.json"
+    config = load_project_config("pgu", config_path)
+    runner = FakeRunner()
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        layout_output = Path(tmp) / "layout.json"
+
+        assert (
+            launch_project(
+                config,
+                config_path=config_path,
+                mode="start",
+                script_path=ROOT / "scripts" / "team-launcher",
+                runner=runner,
+                layout_output=layout_output,
+            )
+            == 0
+        )
+
+        assert runner.calls[0] == ["tmux", "has-session", "-t", "pgu-research"]
+        assert runner.calls[1][:5] == ["tmux", "new-session", "-d", "-s", "pgu-research"]
+        assert "PGU_PANE_TARGET=pgu-research:0.0" in runner.calls[1][-1]
+        assert "--model claude-sonnet-5" in runner.calls[1][-1]
+        assert runner.calls[2] == ["konsole", "--layout", str(layout_output)]
+        assert ["tmux", "attach", "-t", "pgu-research"] not in runner.calls
+
+
+def test_detached_research_attach_checks_session_without_attaching() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    role = next(role for role in config.roles if role.role == "research")
+    runner = FakeRunner(existing_sessions={"pgu-research"})
+
+    assert run_detached_role(role, mode="attach", session_dir=config.session_dir, runner=runner) == 0
+
+    assert runner.calls == [["tmux", "has-session", "-t", "pgu-research"]]
+
+
 def test_reload_uses_recorded_resume_uuid_when_recreating_session() -> None:
     config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
     role = next(role for role in config.roles if role.role == "ops")
@@ -336,6 +421,7 @@ def test_reload_guard_matches_cli_child_under_shell_in_real_tmux() -> None:
         role = role.__class__(
             role=role.role,
             slot=role.slot,
+            detached=False,
             tmux_session=session,
             target=f"{session}:0.0",
             workdir=tmp,
@@ -392,13 +478,16 @@ def test_bootstrap_template_does_not_guess_active_roles() -> None:
 
 
 def main() -> int:
-    test_dry_run_materializes_pgu_layout_with_all_role_commands()
+    test_pgu_layout_matches_reference_six_pane_geometry()
+    test_dry_run_materializes_pgu_layout_with_six_visible_role_commands()
     test_pgu_config_matches_director_supplied_live_role_assignments()
     test_yolo_config_translates_to_cli_specific_bypass_flags()
     test_effort_config_translates_to_cli_specific_args()
     test_pgu_launch_commands_include_model_and_bypass_flags()
     test_start_is_attach_or_start_and_never_duplicates_existing_session()
     test_start_creates_missing_session_once_then_attaches()
+    test_start_runs_research_detached_before_opening_visible_layout()
+    test_detached_research_attach_checks_session_without_attaching()
     test_reload_uses_recorded_resume_uuid_when_recreating_session()
     test_reload_refuses_to_kill_session_when_live_command_mismatches_config()
     test_reload_force_bypasses_live_command_guard()

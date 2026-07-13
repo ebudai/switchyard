@@ -38,6 +38,7 @@ def test_non_agent_user_self_elevates_with_sudo_agent_home() -> None:
         return 17
 
     wrapper.current_user_name = lambda: "eric"
+    wrapper.host_wayland_display = lambda: "/run/user/1000/wayland-0"
     wrapper.subprocess.call = fake_call
 
     assert wrapper.self_elevate_to_agent_if_needed(["pgu", "start"]) == 17
@@ -46,6 +47,8 @@ def test_non_agent_user_self_elevates_with_sudo_agent_home() -> None:
         "-u",
         "agent",
         "-H",
+        "env",
+        "PGU_HOST_WAYLAND_DISPLAY=/run/user/1000/wayland-0",
         sys.executable,
         str(WRAPPER_PATH.resolve()),
         "pgu",
@@ -57,6 +60,16 @@ def test_unknown_user_self_elevates_safe() -> None:
     wrapper = load_wrapper()
 
     assert wrapper.should_self_elevate("")
+
+
+def test_host_wayland_display_absolutizes_relative_socket() -> None:
+    wrapper = load_wrapper()
+
+    assert wrapper.host_wayland_display({
+        "XDG_RUNTIME_DIR": "/run/user/1000",
+        "WAYLAND_DISPLAY": "wayland-0",
+    }) == "/run/user/1000/wayland-0"
+    assert wrapper.host_wayland_display({"WAYLAND_DISPLAY": "/run/user/1000/wayland-1"}) == "/run/user/1000/wayland-1"
 
 
 def test_agent_user_runs_launcher_without_sudo() -> None:
@@ -78,6 +91,7 @@ def main() -> int:
     test_agent_user_does_not_self_elevate()
     test_non_agent_user_self_elevates_with_sudo_agent_home()
     test_unknown_user_self_elevates_safe()
+    test_host_wayland_display_absolutizes_relative_socket()
     test_agent_user_runs_launcher_without_sudo()
     print("team_launcher_wrapper_test: ok")
     return 0

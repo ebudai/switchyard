@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 TARGET_USER = "agent"
+HOST_WAYLAND_ENV = "PGU_HOST_WAYLAND_DISPLAY"
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -27,8 +28,27 @@ def should_self_elevate(user_name: str, target_user: str = TARGET_USER) -> bool:
     return user_name != target_user
 
 
+def host_wayland_display(environ: dict[str, str] = os.environ) -> str:
+    wayland_display = str(environ.get("WAYLAND_DISPLAY", "")).strip()
+    if wayland_display.startswith("/"):
+        return wayland_display
+    runtime_dir = str(environ.get("XDG_RUNTIME_DIR", "")).strip()
+    if wayland_display and runtime_dir:
+        return str(Path(runtime_dir) / wayland_display)
+    if runtime_dir:
+        fallback = Path(runtime_dir) / "wayland-0"
+        if fallback.exists():
+            return str(fallback)
+    return ""
+
+
 def sudo_agent_command(argv: list[str]) -> list[str]:
-    return ["sudo", "-u", TARGET_USER, "-H", sys.executable, str(Path(__file__).resolve()), *argv]
+    command = ["sudo", "-u", TARGET_USER, "-H"]
+    display = host_wayland_display()
+    if display:
+        command.extend(["env", f"{HOST_WAYLAND_ENV}={display}"])
+    command.extend([sys.executable, str(Path(__file__).resolve()), *argv])
+    return command
 
 
 def self_elevate_to_agent_if_needed(argv: list[str]) -> int | None:

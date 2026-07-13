@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
+import subprocess
 import tempfile
 import threading
 from http import HTTPStatus
@@ -94,6 +96,39 @@ def request_pairs(requests: list[tuple[str, str | None, dict[str, object]]]) -> 
     return [(path, caller_role) for path, caller_role, _ in requests]
 
 
+def run_git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", *args], cwd=cwd, text=True, capture_output=True, check=True)
+
+
+def setup_git_repo(root: Path) -> tuple[Path, str, str]:
+    origin = root / "origin.git"
+    repo = root / "repo"
+    run_git(root, "init", "--bare", str(origin))
+    run_git(root, "clone", str(origin), str(repo))
+    run_git(repo, "config", "user.name", "PGU Test")
+    run_git(repo, "config", "user.email", "pgu-test@example.com")
+    (repo / "README.md").write_text("initial\n", encoding="utf-8")
+    run_git(repo, "add", "README.md")
+    run_git(repo, "commit", "-m", "Initial commit")
+    run_git(repo, "branch", "-M", "main")
+    run_git(repo, "push", "-u", "origin", "main")
+    pushed_hash = run_git(repo, "rev-parse", "HEAD").stdout.strip()
+    (repo / "README.md").write_text("initial\nlocal only\n", encoding="utf-8")
+    run_git(repo, "commit", "-am", "Local-only commit")
+    local_only_hash = run_git(repo, "rev-parse", "HEAD").stdout.strip()
+    return repo, pushed_hash, local_only_hash
+
+
+@contextlib.contextmanager
+def pushd(path: Path):
+    previous = Path.cwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(previous)
+
+
 def assert_action_requests(requests: list[tuple[str, str | None, dict[str, object]]]) -> None:
     assert requests, "client should send requests"
     pairs = request_pairs(requests)
@@ -118,33 +153,53 @@ def assert_action_requests(requests: list[tuple[str, str | None, dict[str, objec
     assert ("/api/tickets/PGU-112/actions/add_comment", "director") in pairs
 
 
-def exercise_client(base_url: str, commit_hash: str) -> None:
-    client = TicketBoardWriteClient(base_url, "director")
-    assert client.create_ticket(title="Client create", body="Created.", assignee="director")["ticket"]["id"] == "PGU-NEW"
-    assert client.file_bug(title="Bug", body="Body", source_ticket_id="PGU-NEW", caller_role="ops")["ticket"]["parent_id"] == "PGU-NEW"
-    assert client.route("PGU-100", state="backlog", assignee="ops")["ticket"]["state"] == "backlog"
-    assert client.start_work("PGU-101", caller_role="ops")["ticket"]["state"] == "in_progress"
-    assert client.submit_to_audit("PGU-101", commit_hash=commit_hash, caller_role="ops")["ticket"]["state"] == "audit"
-    assert client.submit_to_audit("PGU-113", caller_role="ops")["ticket"]["commit_hash"] == ""
-    requested = client.request_commit_exempt("PGU-121", reason="No repo change for this ticket.", caller_role="ops")
-    assert requested["ticket"]["state"] == "analysis"
-    assert requested["ticket"]["assignee"] == "unassigned"
-    assert "No repo change" in requested["ticket"]["comments"][-1]["text"]
-    audit_signed = client.audit_sign_off("PGU-102", text="Audit verified.", caller_role="audit")
-    assert audit_signed["ticket"]["state"] == "director_review"
-    assert audit_signed["ticket"]["comments"][-1]["text"] == "Audit verified."
-    assert client.audit_kick_back("PGU-103", reason="Needs another pass.", caller_role="audit")["ticket"]["state"] == "analysis"
-    eric_signed = client.eric_sign_off("PGU-104", text="Eric approves.", caller_role="eric")
-    assert eric_signed["ticket"]["state"] == "director_review"
-    assert eric_signed["ticket"]["comments"][-1]["text"] == "Eric approves."
-    assert client.eric_reopen("PGU-105", reason="Needs design revision.", caller_role="eric")["ticket"]["state"] == "analysis"
-    assert client.mark_done("PGU-106", commit_hash=commit_hash)["ticket"]["state"] == "done"
-    assert client.mark_done("PGU-114")["ticket"]["commit_hash"] == ""
-    assert client.defer("PGU-107")["ticket"]["state"] == "backlog"
-    assert client.cancel("PGU-108", reason="No longer needed.")["ticket"]["state"] == "cancelled"
-    assert client.set_manually_controlled("PGU-109", True)["ticket"]["manually_controlled"] is True
-    assert client.set_blockers("PGU-111", blocked_by=["PGU-110"], blocked_reason="Waiting.")["ticket"]["blocked_by"] == ["PGU-110"]
-    assert client.add_comment("PGU-112", text="Director note.")["ticket"]["comments"][-1]["who"] == "director"
+def exercise_client(base_url: str, repo: Path, commit_hash: str) -> None:
+    with pushd(repo):
+        client = TicketBoardWriteClient(base_url, "director")
+        assert client.create_ticket(title="Client create", body="Created.", assignee="director")["ticket"]["id"] == "PGU-NEW"
+        assert client.file_bug(title="Bug", body="Body", source_ticket_id="PGU-NEW", caller_role="ops")["ticket"]["parent_id"] == "PGU-NEW"
+        assert client.route("PGU-100", state="backlog", assignee="ops")["ticket"]["state"] == "backlog"
+        assert client.start_work("PGU-101", caller_role="ops")["ticket"]["state"] == "in_progress"
+        assert client.submit_to_audit("PGU-101", commit_hash=commit_hash, caller_role="ops")["ticket"]["state"] == "audit"
+        assert client.submit_to_audit("PGU-113", caller_role="ops")["ticket"]["commit_hash"] == ""
+        requested = client.request_commit_exempt("PGU-121", reason="No repo change for this ticket.", caller_role="ops")
+        assert requested["ticket"]["state"] == "analysis"
+        assert requested["ticket"]["assignee"] == "unassigned"
+        assert "No repo change" in requested["ticket"]["comments"][-1]["text"]
+        audit_signed = client.audit_sign_off("PGU-102", text="Audit verified.", caller_role="audit")
+        assert audit_signed["ticket"]["state"] == "director_review"
+        assert audit_signed["ticket"]["comments"][-1]["text"] == "Audit verified."
+        assert client.audit_kick_back("PGU-103", reason="Needs another pass.", caller_role="audit")["ticket"]["state"] == "analysis"
+        eric_signed = client.eric_sign_off("PGU-104", text="Eric approves.", caller_role="eric")
+        assert eric_signed["ticket"]["state"] == "director_review"
+        assert eric_signed["ticket"]["comments"][-1]["text"] == "Eric approves."
+        assert client.eric_reopen("PGU-105", reason="Needs design revision.", caller_role="eric")["ticket"]["state"] == "analysis"
+        assert client.mark_done("PGU-106", commit_hash=commit_hash)["ticket"]["state"] == "done"
+        assert client.mark_done("PGU-114")["ticket"]["commit_hash"] == ""
+        assert client.defer("PGU-107")["ticket"]["state"] == "backlog"
+        assert client.cancel("PGU-108", reason="No longer needed.")["ticket"]["state"] == "cancelled"
+        assert client.set_manually_controlled("PGU-109", True)["ticket"]["manually_controlled"] is True
+        assert client.set_blockers("PGU-111", blocked_by=["PGU-110"], blocked_reason="Waiting.")["ticket"]["blocked_by"] == ["PGU-110"]
+        assert client.add_comment("PGU-112", text="Director note.")["ticket"]["comments"][-1]["who"] == "director"
+
+
+def assert_submit_rejects_unpushed_commit(
+    base_url: str,
+    repo: Path,
+    local_only_hash: str,
+    requests: list[tuple[str, str | None, dict[str, object]]],
+) -> None:
+    with pushd(repo):
+        client = TicketBoardWriteClient(base_url, "director")
+        before = len(requests)
+        try:
+            client.submit_to_audit("PGU-122", commit_hash=local_only_hash, caller_role="ops")
+        except write_client_module.TicketBoardWriteError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("local-only commit unexpectedly submitted to audit")
+        assert "is not pushed to origin" in message, message
+        assert len(requests) == before, requests[before:]
 
 
 def assert_auto_socket_connect_failure_falls_back_to_tcp(base_url: str, socket_path: Path) -> None:
@@ -176,15 +231,18 @@ def assert_auto_socket_connect_failure_falls_back_to_tcp(base_url: str, socket_p
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="ticket-board-write-client.") as tmpdir:
         root = Path(tmpdir)
+        repo, pushed_hash, local_only_hash = setup_git_repo(root)
         server = RecordingServer()
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
             base_url = f"http://127.0.0.1:{server.server_port}"
-            exercise_client(base_url, "abcdef1")
+            exercise_client(base_url, repo, pushed_hash)
+            assert_submit_rejects_unpushed_commit(base_url, repo, local_only_hash, server.requests)
             assert_auto_socket_connect_failure_falls_back_to_tcp(base_url, root / "blocked.sock")
             assert_action_requests(server.requests)
             assert ("/api/tickets/PGU-120/actions/start_work", "ops") in request_pairs(server.requests)
+            assert all(path != "/api/tickets/PGU-122/actions/submit_to_audit" for path, _, _ in server.requests)
         finally:
             server.shutdown()
             server.server_close()

@@ -39,7 +39,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     const createPreviewGalleryEl = document.getElementById('createPreviewGallery');
     const titleInput = document.getElementById('titleInput');
     const bodyInput = document.getElementById('bodyInput');
-    const createStateInput = document.getElementById('createStateInput');
+    const createBacklogInput = document.getElementById('createBacklogInput');
     const needsEricInput = document.getElementById('needsEricInput');
     const needsInspectionInput = document.getElementById('needsInspectionInput');
     const showDeferredInput = document.getElementById('showDeferredInput');

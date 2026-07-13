@@ -409,7 +409,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 raise PermissionError(f"{caller_role} cannot call {operation} for ticket assigned to {ticket.get('assignee')}")
 
     def create_ticket_from_payload(self, payload: dict[str, object], caller_role: str | None = None) -> dict[str, object]:
-        state = str(payload.get("state", "analysis")).strip() or "analysis"
+        state = str(payload.get("initial_state", payload.get("state", "analysis"))).strip() or "analysis"
         implementation = str(payload.get("implementation", ""))
         audit_prompt = str(payload.get("audit_prompt", ""))
         parent_id = str(payload.get("parent_id", "")).strip().upper()

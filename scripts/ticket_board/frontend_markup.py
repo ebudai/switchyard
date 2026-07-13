@@ -33,12 +33,9 @@ MARKUP = """  <div class="layout">
             Assignee
             <select id="assigneeInput"></select>
           </label>
-          <label>
-            Initial State
-            <select id="createStateInput">
-              <option value="analysis" selected>Triage</option>
-              <option value="backlog">Backlog</option>
-            </select>
+          <label class="check">
+            <input id="createBacklogInput" type="checkbox">
+            Start in backlog
           </label>
           <div class="paste-hint">Paste an image from the clipboard here to upload and attach it.</div>
           <div id="createPreview" class="preview-card" hidden>

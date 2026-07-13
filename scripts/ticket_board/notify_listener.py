@@ -19,7 +19,11 @@ import psycopg
 from psycopg import sql
 
 CHANNEL = "ticket_board_state_transition"
-DEFAULT_DATABASE_URL = os.environ.get("TICKET_BOARD_NOTIFY_DATABASE_URL") or os.environ.get("DATABASE_URL", "")
+DEFAULT_DATABASE_URL = (
+    os.environ.get("TICKET_BOARD_NOTIFY_DATABASE_URL")
+    or os.environ.get("TICKET_BOARD_DATABASE_URL")
+    or os.environ.get("DATABASE_URL", "")
+)
 DEFAULT_RECONNECT_SECONDS = 2.0
 DEFAULT_POLL_SECONDS = 5.0
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 10
@@ -985,7 +989,7 @@ def database_url_from_environment() -> str:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Deliver ticket-board pg_notify state transitions to tmux panes.")
-    parser.add_argument("--database", default=database_url_from_environment(), help="PostgreSQL connection string. Defaults to TICKET_BOARD_NOTIFY_DATABASE_URL or DATABASE_URL, otherwise libpq environment.")
+    parser.add_argument("--database", default=database_url_from_environment(), help="PostgreSQL connection string. Defaults to TICKET_BOARD_NOTIFY_DATABASE_URL, TICKET_BOARD_DATABASE_URL, or DATABASE_URL; otherwise libpq environment.")
     parser.add_argument("--channel", default=CHANNEL, help=f"LISTEN channel (default: {CHANNEL})")
     parser.add_argument("--directorctl", default=DEFAULT_DIRECTORCTL, help=f"directorctl path (default: {DEFAULT_DIRECTORCTL})")
     parser.add_argument("--reconnect-seconds", type=float, default=DEFAULT_RECONNECT_SECONDS)

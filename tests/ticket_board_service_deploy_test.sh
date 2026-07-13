@@ -71,5 +71,26 @@ grep -q '^Environment=PGU_TICKET_BOARD_SOCKET=/tmp/pgu-ticket-board.sock$' "$UNI
     echo "FAIL: unit did not export PGU_TICKET_BOARD_SOCKET" >&2
     exit 1
 }
+grep -q '^Environment=TICKET_BOARD_DATABASE_URL=postgresql:///pgu?host=/var/run/postgresql&user=ticket_board_service$' "$UNIT_DIR/service.unit" || {
+    echo "FAIL: unit did not bake the service database URL" >&2
+    exit 1
+}
+grep -q 'ensure_database_roles' "$REPO_ROOT/scripts/ticket-board-service.sh" || {
+    echo "FAIL: install path does not ensure ticket-board service roles" >&2
+    exit 1
+}
+grep -q 'psql -X -v ON_ERROR_STOP=1 "$BOARD_ADMIN_DATABASE_URL" -f "$RBAC_SQL"' "$REPO_ROOT/scripts/ticket-board-service.sh" || {
+    echo "FAIL: service installer does not apply RBAC SQL with psql" >&2
+    exit 1
+}
+
+TICKET_BOARD_DATABASE_URL='postgresql:///custom_board?host=/tmp/pgu-pg&user=ticket_board_service' \
+BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD \
+    "$REPO_ROOT/scripts/ticket-board-service.sh" render-unit >"$UNIT_DIR/service-custom-db.unit"
+
+grep -q '^Environment=TICKET_BOARD_DATABASE_URL=postgresql:///custom_board?host=/tmp/pgu-pg&user=ticket_board_service$' "$UNIT_DIR/service-custom-db.unit" || {
+    echo "FAIL: unit did not bake caller-provided TICKET_BOARD_DATABASE_URL" >&2
+    exit 1
+}
 
 echo "ticket_board_service_deploy_test: ok"

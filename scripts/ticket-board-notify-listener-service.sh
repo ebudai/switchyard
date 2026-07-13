@@ -11,6 +11,9 @@ readonly LOG_PATH="${LOG_PATH:-/tmp/pgu-ticket-board-notify-listener.log}"
 readonly UNIT_DIR="${UNIT_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}"
 readonly UNIT_PATH="$UNIT_DIR/$SERVICE_NAME"
 readonly DEPLOY_REF="${DEPLOY_REF:-origin/main}"
+readonly LISTENER_DATABASE_URL="${TICKET_BOARD_NOTIFY_DATABASE_URL:-${TICKET_BOARD_DATABASE_URL:-postgresql:///pgu?host=/var/run/postgresql&user=ticket_board_listener}}"
+readonly BOARD_ADMIN_DATABASE_URL="${TICKET_BOARD_ADMIN_DATABASE_URL:-postgresql:///pgu?host=/var/run/postgresql}"
+readonly RBAC_SQL="${RBAC_SQL:-$BOARD_CURRENT_LINK/scripts/ticket_board/rbac.sql}"
 
 usage() {
     cat <<EOF
@@ -90,6 +93,13 @@ deploy_export() {
     printf '%s\n' "$resolved_ref"
 }
 
+ensure_database_roles() {
+    [[ -f "$RBAC_SQL" ]] || die "missing ticket-board RBAC SQL after deploy: $RBAC_SQL"
+    command -v psql >/dev/null 2>&1 || die "psql is required to ensure ticket-board service roles"
+    psql -X -v ON_ERROR_STOP=1 "$BOARD_ADMIN_DATABASE_URL" -f "$RBAC_SQL" >/dev/null
+    log "ensured ticket-board database roles using $RBAC_SQL"
+}
+
 render_unit() {
     cat <<EOF
 [Unit]
@@ -106,6 +116,8 @@ Environment=PYTHONUNBUFFERED=1
 Environment=PGHOST=/var/run/postgresql
 Environment=PGDATABASE=pgu
 Environment=PGUSER=ticket_board_listener
+Environment=TICKET_BOARD_DATABASE_URL=$LISTENER_DATABASE_URL
+Environment=TICKET_BOARD_NOTIFY_DATABASE_URL=$LISTENER_DATABASE_URL
 Environment=PGU_TICKET_BOARD_PANE_STATE_DIR=%t/pgu-ticket-board/pane-state
 EnvironmentFile=-%h/.config/pgu/ticket-board-notify-listener.env
 StandardOutput=append:$LOG_PATH
@@ -124,6 +136,7 @@ write_unit() {
 install_service() {
     deploy_export >/dev/null
     [[ -f "$LISTENER_SCRIPT" ]] || die "missing listener script after deploy: $LISTENER_SCRIPT"
+    ensure_database_roles
     ensure_user_manager
     write_unit
     systemctl_user daemon-reload

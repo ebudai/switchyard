@@ -74,8 +74,20 @@ grep -q 'ensure_database_roles' "$REPO_ROOT/scripts/ticket-board-notify-listener
     echo "FAIL: listener install path does not ensure ticket-board service roles" >&2
     exit 1
 }
+grep -q 'BOARD_ADMIN_DATABASE_URL=".*user=postgres' "$REPO_ROOT/scripts/ticket-board-notify-listener-service.sh" || {
+    echo "FAIL: listener installer admin connection does not default to user=postgres" >&2
+    exit 1
+}
 grep -q 'psql -X -v ON_ERROR_STOP=1 "$BOARD_ADMIN_DATABASE_URL" -f "$RBAC_SQL"' "$REPO_ROOT/scripts/ticket-board-notify-listener-service.sh" || {
     echo "FAIL: listener installer does not apply RBAC SQL with psql" >&2
+    exit 1
+}
+grep -q 'must connect as a PostgreSQL role with CREATEROLE' "$REPO_ROOT/scripts/ticket-board-notify-listener-service.sh" || {
+    echo "FAIL: listener installer lacks a clear RBAC privilege error" >&2
+    exit 1
+}
+grep -q 'ensure-roles)' "$REPO_ROOT/scripts/ticket-board-notify-listener-service.sh" || {
+    echo "FAIL: listener script does not expose ensure-roles for bootstrap testing" >&2
     exit 1
 }
 

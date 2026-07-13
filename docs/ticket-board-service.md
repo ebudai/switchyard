@@ -90,7 +90,12 @@ The listener service runs:
 with read-only table access and no write-function grants. The install commands
 apply that RBAC file idempotently before starting the services. Override
 `TICKET_BOARD_ADMIN_DATABASE_URL` if the installer needs a non-default admin
-connection. The rendered listener unit bakes
+connection; by default it targets the local `pgu` database as PostgreSQL
+`user=postgres`, because creating missing roles requires `CREATEROLE`.
+You can run only the RBAC bootstrap with
+`scripts/ticket-board-service.sh ensure-roles` or
+`scripts/ticket-board-notify-listener-service.sh ensure-roles`. The rendered
+listener unit bakes
 `TICKET_BOARD_NOTIFY_DATABASE_URL=postgresql:///pgu?host=/var/run/postgresql&user=ticket_board_listener`
 by default; the optional env file can still override it for nonstandard local
 auth.

@@ -12,12 +12,12 @@ readonly UNIT_DIR="${UNIT_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}"
 readonly UNIT_PATH="$UNIT_DIR/$SERVICE_NAME"
 readonly DEPLOY_REF="${DEPLOY_REF:-origin/main}"
 readonly LISTENER_DATABASE_URL="${TICKET_BOARD_NOTIFY_DATABASE_URL:-${TICKET_BOARD_DATABASE_URL:-postgresql:///pgu?host=/var/run/postgresql&user=ticket_board_listener}}"
-readonly BOARD_ADMIN_DATABASE_URL="${TICKET_BOARD_ADMIN_DATABASE_URL:-postgresql:///pgu?host=/var/run/postgresql}"
+readonly BOARD_ADMIN_DATABASE_URL="${TICKET_BOARD_ADMIN_DATABASE_URL:-postgresql:///pgu?host=/var/run/postgresql&user=postgres}"
 readonly RBAC_SQL="${RBAC_SQL:-$BOARD_CURRENT_LINK/scripts/ticket_board/rbac.sql}"
 
 usage() {
     cat <<EOF
-Usage: scripts/ticket-board-notify-listener-service.sh <install|deploy|deploy-restart|render-unit|start|stop|restart|status|logs>
+Usage: scripts/ticket-board-notify-listener-service.sh <install|deploy|deploy-restart|ensure-roles|render-unit|start|stop|restart|status|logs>
 
 Manage the PGU ticket-board PostgreSQL LISTEN shim as an agent user systemd service.
 
@@ -25,6 +25,7 @@ Commands:
   install         Export $DEPLOY_REF into $BOARD_ROOT/current, write the unit, enable and start it
   deploy          Refresh $BOARD_ROOT/current from $DEPLOY_REF without restarting the service
   deploy-restart  Refresh $BOARD_ROOT/current from $DEPLOY_REF and restart the service
+  ensure-roles    Apply the idempotent ticket-board RBAC SQL using a privileged admin connection
   render-unit     Print the systemd unit contents to stdout
   start|stop|restart|status
                   Pass through to systemctl --user for $SERVICE_NAME
@@ -96,7 +97,12 @@ deploy_export() {
 ensure_database_roles() {
     [[ -f "$RBAC_SQL" ]] || die "missing ticket-board RBAC SQL after deploy: $RBAC_SQL"
     command -v psql >/dev/null 2>&1 || die "psql is required to ensure ticket-board service roles"
-    psql -X -v ON_ERROR_STOP=1 "$BOARD_ADMIN_DATABASE_URL" -f "$RBAC_SQL" >/dev/null
+    local output
+    if ! output="$(psql -X -v ON_ERROR_STOP=1 "$BOARD_ADMIN_DATABASE_URL" -f "$RBAC_SQL" 2>&1)"; then
+        printf '[ticket-board-notify-listener-service] ERROR: failed to ensure ticket-board database roles using TICKET_BOARD_ADMIN_DATABASE_URL. This must connect as a PostgreSQL role with CREATEROLE (default: user=postgres); override TICKET_BOARD_ADMIN_DATABASE_URL for nonstandard clusters.\n' >&2
+        printf '%s\n' "$output" >&2
+        exit 1
+    fi
     log "ensured ticket-board database roles using $RBAC_SQL"
 }
 
@@ -174,6 +180,9 @@ main() {
             ;;
         deploy-restart)
             deploy_restart_service
+            ;;
+        ensure-roles)
+            ensure_database_roles
             ;;
         render-unit)
             render_unit

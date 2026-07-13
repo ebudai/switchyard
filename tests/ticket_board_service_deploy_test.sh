@@ -79,8 +79,16 @@ grep -q 'ensure_database_roles' "$REPO_ROOT/scripts/ticket-board-service.sh" || 
     echo "FAIL: install path does not ensure ticket-board service roles" >&2
     exit 1
 }
+grep -q 'BOARD_ADMIN_DATABASE_URL=".*user=postgres' "$REPO_ROOT/scripts/ticket-board-service.sh" || {
+    echo "FAIL: service installer admin connection does not default to user=postgres" >&2
+    exit 1
+}
 grep -q 'psql -X -v ON_ERROR_STOP=1 "$BOARD_ADMIN_DATABASE_URL" -f "$RBAC_SQL"' "$REPO_ROOT/scripts/ticket-board-service.sh" || {
     echo "FAIL: service installer does not apply RBAC SQL with psql" >&2
+    exit 1
+}
+grep -q 'must connect as a PostgreSQL role with CREATEROLE' "$REPO_ROOT/scripts/ticket-board-service.sh" || {
+    echo "FAIL: service installer lacks a clear RBAC privilege error" >&2
     exit 1
 }
 grep -q 'smoke_check_http' "$REPO_ROOT/scripts/ticket-board-service.sh" || {
@@ -93,6 +101,10 @@ grep -q 'urllib.request.urlopen(url, timeout=1.0)' "$REPO_ROOT/scripts/ticket-bo
 }
 grep -q 'systemctl_user restart "$SERVICE_NAME"' "$REPO_ROOT/scripts/ticket-board-service.sh" || {
     echo "FAIL: deploy-restart no longer restarts the service" >&2
+    exit 1
+}
+grep -q 'ensure-roles)' "$REPO_ROOT/scripts/ticket-board-service.sh" || {
+    echo "FAIL: service script does not expose ensure-roles for bootstrap testing" >&2
     exit 1
 }
 

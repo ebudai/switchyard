@@ -141,6 +141,14 @@ Notes:
 PostgreSQL board backend:
 
 - `scripts/ticket_board/schema.sql` is the live board schema.
+- `scripts/ticket-board-migrate` records migration filenames by `name` in
+  `ticket_board.schema_migrations`; new migrations must use the collision-free
+  `pgu<num>_slug.sql` naming scheme. The legacy `270-287` numbered filenames
+  are preserved as historical names and backfilled as already-applied when a DB
+  was provisioned directly from `schema.sql`.
+- Migration apply order is deterministic filename order only. If two unapplied
+  migrations genuinely depend on each other, rebase/combine them before merge
+  rather than expecting the runner to infer dependencies.
 - Tickets are stored in normalized ticket, blocker, comment, and attachment tables.
 - The PostgreSQL backend requires psycopg 3 at runtime and for
   `tests/ticket_board_postgres_backend_test.py`. On Arch/CachyOS install it

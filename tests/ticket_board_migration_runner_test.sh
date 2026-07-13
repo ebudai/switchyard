@@ -29,12 +29,13 @@ psql_test() {
 PGDATA_DIR="$TMPDIR_T/pgdata"
 SOCKET_DIR="$TMPDIR_T/socket"
 MIGRATIONS_DIR="$TMPDIR_T/migrations"
+TRANSITION_MIGRATIONS_DIR="$TMPDIR_T/transition-migrations"
 mkdir -p "$SOCKET_DIR" "$MIGRATIONS_DIR"
 PORT="$(free_port)"
 DBNAME="pgu_migration_runner_test"
 ADMIN_CONN="host=$SOCKET_DIR port=$PORT dbname=$DBNAME user=postgres"
 
-cat >"$MIGRATIONS_DIR/001_create_probe.sql" <<'SQL'
+cat >"$MIGRATIONS_DIR/pgu401_create_probe.sql" <<'SQL'
 CREATE SCHEMA IF NOT EXISTS ticket_board;
 CREATE TABLE ticket_board.migration_probe (
     id integer PRIMARY KEY,
@@ -43,7 +44,7 @@ CREATE TABLE ticket_board.migration_probe (
 INSERT INTO ticket_board.migration_probe (id, value) VALUES (1, 'first');
 SQL
 
-cat >"$MIGRATIONS_DIR/002_update_probe.sql" <<'SQL'
+cat >"$MIGRATIONS_DIR/pgu402_update_probe.sql" <<'SQL'
 UPDATE ticket_board.migration_probe
 SET value = value || '+second'
 WHERE id = 1;
@@ -58,11 +59,11 @@ TICKET_BOARD_ADMIN_DATABASE_URL="$ADMIN_CONN" TICKET_BOARD_MIGRATIONS_DIR="$MIGR
 
 applied="$(
     psql_test <<'SQL'
-SELECT string_agg(version::text || ':' || description, ',' ORDER BY version)
+SELECT string_agg(name || ':' || seq::text, ',' ORDER BY seq)
 FROM ticket_board.schema_migrations;
 SQL
 )"
-[[ "$applied" == "1:create_probe,2:update_probe" ]] || {
+[[ "$applied" == "pgu401_create_probe.sql:1,pgu402_update_probe.sql:2" ]] || {
     echo "FAIL: migrations were not recorded correctly: $applied" >&2
     exit 1
 }
@@ -88,7 +89,7 @@ value_after_rerun="$(psql_test -c "SELECT value FROM ticket_board.migration_prob
     exit 1
 }
 
-cat >"$MIGRATIONS_DIR/003_late_probe.sql" <<'SQL'
+cat >"$MIGRATIONS_DIR/pgu403_late_probe.sql" <<'SQL'
 UPDATE ticket_board.migration_probe
 SET value = value || '+third'
 WHERE id = 1;
@@ -99,11 +100,11 @@ TICKET_BOARD_ADMIN_DATABASE_URL="$ADMIN_CONN" TICKET_BOARD_MIGRATIONS_DIR="$MIGR
 
 late_applied="$(
     psql_test <<'SQL'
-SELECT string_agg(version::text || ':' || description, ',' ORDER BY version)
+SELECT string_agg(name || ':' || seq::text, ',' ORDER BY seq)
 FROM ticket_board.schema_migrations;
 SQL
 )"
-[[ "$late_applied" == "1:create_probe,2:update_probe,3:late_probe" ]] || {
+[[ "$late_applied" == "pgu401_create_probe.sql:1,pgu402_update_probe.sql:2,pgu403_late_probe.sql:3" ]] || {
     echo "FAIL: late migration was not recorded correctly: $late_applied" >&2
     exit 1
 }
@@ -111,6 +112,48 @@ SQL
 late_value="$(psql_test -c "SELECT value FROM ticket_board.migration_probe WHERE id = 1;")"
 [[ "$late_value" == "first+second+third" ]] || {
     echo "FAIL: late migration did not apply exactly once: $late_value" >&2
+    exit 1
+}
+
+TRANSITION_DBNAME="pgu_migration_runner_transition_test"
+TRANSITION_CONN="host=$SOCKET_DIR port=$PORT dbname=$TRANSITION_DBNAME user=postgres"
+mkdir -p "$TRANSITION_MIGRATIONS_DIR"
+createdb -h "$SOCKET_DIR" -p "$PORT" -U postgres "$TRANSITION_DBNAME"
+psql -X -v ON_ERROR_STOP=1 "$TRANSITION_CONN" -f "$REPO_ROOT/scripts/ticket_board/schema.sql" >/dev/null
+cp "$REPO_ROOT"/scripts/ticket_board/migrations/*.sql "$TRANSITION_MIGRATIONS_DIR/"
+cat >"$TRANSITION_MIGRATIONS_DIR/270_ready_to_in_progress.sql" <<'SQL'
+DO $$
+BEGIN
+    RAISE EXCEPTION 'legacy migration should have been backfilled, not executed';
+END;
+$$;
+SQL
+cat >"$TRANSITION_MIGRATIONS_DIR/pgu999_runner_probe.sql" <<'SQL'
+CREATE TABLE ticket_board.runner_probe (
+    id integer PRIMARY KEY,
+    value text NOT NULL
+);
+INSERT INTO ticket_board.runner_probe (id, value) VALUES (1, 'applied');
+SQL
+
+TICKET_BOARD_ADMIN_DATABASE_URL="$TRANSITION_CONN" TICKET_BOARD_MIGRATIONS_DIR="$TRANSITION_MIGRATIONS_DIR" \
+    "$REPO_ROOT/scripts/ticket-board-migrate" >/dev/null
+
+transition_applied="$(
+    psql -X -v ON_ERROR_STOP=1 -tA "$TRANSITION_CONN" <<'SQL'
+SELECT string_agg(name, ',' ORDER BY seq)
+FROM ticket_board.schema_migrations;
+SQL
+)"
+expected_transition_applied="schema.sql,270_ready_to_in_progress.sql,271_optional_implementation.sql,272_resolved_blockers.sql,273_suppress_self_notifications.sql,274_unblock_notifications.sql,275_remove_dead_unblock_analysis_branch.sql,276_revert_backlog_unblock_notifications.sql,277_owner_update_notifications.sql,278_idle_turn_end_nudges.sql,279_idle_reminder_escalation.sql,280_reject_stale_resubmit.sql,281_idle_reminder_escalate_problem_clause.sql,282_http_director_create_notification_source.sql,283_idle_reminder_defers_to_primary.sql,284_add_regression_flag.sql,285_require_actor_caller_role_backstop.sql,286_allow_audit_file_bug.sql,287_active_inprogress_idle_filter.sql,pgu999_runner_probe.sql"
+[[ "$transition_applied" == "$expected_transition_applied" ]] || {
+    echo "FAIL: schema.sql backfill did not record legacy migration names correctly: $transition_applied" >&2
+    exit 1
+}
+
+transition_value="$(psql -X -v ON_ERROR_STOP=1 -tA "$TRANSITION_CONN" -c "SELECT value FROM ticket_board.runner_probe WHERE id = 1;")"
+[[ "$transition_value" == "applied" ]] || {
+    echo "FAIL: pgu999_runner_probe.sql did not apply on top of schema.sql snapshot: $transition_value" >&2
     exit 1
 }
 
@@ -124,12 +167,12 @@ cp "$REPO_ROOT/scripts/ticket-board-migrate" "$SOURCE_REPO/scripts/ticket-board-
 chmod +x "$SOURCE_REPO/scripts/ticket-board-migrate"
 printf '#!/usr/bin/env python3\nprint("board")\n' >"$SOURCE_REPO/scripts/ticket-board.py"
 chmod +x "$SOURCE_REPO/scripts/ticket-board.py"
-cat >"$SOURCE_REPO/scripts/ticket_board/migrations/004_deploy_probe.sql" <<'SQL'
+cat >"$SOURCE_REPO/scripts/ticket_board/migrations/pgu404_deploy_probe.sql" <<'SQL'
 UPDATE ticket_board.migration_probe
 SET value = value || '+deploy'
 WHERE id = 1;
 SQL
-git -C "$SOURCE_REPO" add scripts/ticket-board-migrate scripts/ticket-board.py scripts/ticket_board/migrations/004_deploy_probe.sql
+git -C "$SOURCE_REPO" add scripts/ticket-board-migrate scripts/ticket-board.py scripts/ticket_board/migrations/pgu404_deploy_probe.sql
 git -C "$SOURCE_REPO" commit -m "seed deploy migration" >/dev/null
 
 BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_ADMIN_DATABASE_URL="$ADMIN_CONN" \
@@ -143,11 +186,11 @@ deploy_value="$(psql_test -c "SELECT value FROM ticket_board.migration_probe WHE
 
 deploy_applied="$(
     psql_test <<'SQL'
-SELECT string_agg(version::text || ':' || description, ',' ORDER BY version)
+SELECT string_agg(name || ':' || seq::text, ',' ORDER BY seq)
 FROM ticket_board.schema_migrations;
 SQL
 )"
-[[ "$deploy_applied" == "1:create_probe,2:update_probe,3:late_probe,4:deploy_probe" ]] || {
+[[ "$deploy_applied" == "pgu401_create_probe.sql:1,pgu402_update_probe.sql:2,pgu403_late_probe.sql:3,pgu404_deploy_probe.sql:4" ]] || {
     echo "FAIL: service deploy did not record the pending migration: $deploy_applied" >&2
     exit 1
 }

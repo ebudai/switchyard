@@ -33,7 +33,7 @@ Commands:
   deploy          Refresh $BOARD_ROOT/current from $DEPLOY_REF without restarting the service
   deploy-restart  Refresh $BOARD_ROOT/current from $DEPLOY_REF and restart the service
   ensure-migrations
-                  Apply numbered SQL migrations and record them in schema_migrations
+                  Apply SQL migrations and record their names in schema_migrations
   ensure-roles    Apply the idempotent ticket-board RBAC SQL using a privileged admin connection
   render-unit     Print the systemd unit contents to stdout
   start|stop|restart|status

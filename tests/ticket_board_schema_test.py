@@ -148,9 +148,12 @@ def main() -> int:
 
     assert "source_json jsonb not null" in schema_lower, "tickets.source_json is required for lossless import"
     assert "create table if not exists ticket_board.schema_migrations" in schema_lower
-    assert "version integer primary key" in schema_lower
-    assert "description text not null" in schema_lower
+    assert "create sequence if not exists ticket_board.schema_migrations_seq as bigint" in schema_lower
+    assert "name text primary key" in schema_lower
+    assert "seq bigint not null default nextval('ticket_board.schema_migrations_seq')" in schema_lower
     assert "applied_at timestamptz not null default now()" in schema_lower
+    assert "create unique index if not exists schema_migrations_seq_idx" in schema_lower
+    assert "values ('schema.sql')" in schema_lower
     assert "create table if not exists ticket_board.ticket_blockers" in schema_lower
     assert "create table if not exists ticket_board.ticket_comments" in schema_lower
     assert "create table if not exists ticket_board.ticket_attachments" in schema_lower

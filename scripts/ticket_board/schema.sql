@@ -14,11 +14,19 @@ BEGIN;
 
 CREATE SCHEMA IF NOT EXISTS ticket_board;
 
+CREATE SEQUENCE IF NOT EXISTS ticket_board.schema_migrations_seq AS bigint;
+
 CREATE TABLE IF NOT EXISTS ticket_board.schema_migrations (
-    version integer PRIMARY KEY,
-    description text NOT NULL,
+    name text PRIMARY KEY,
+    seq bigint NOT NULL DEFAULT nextval('ticket_board.schema_migrations_seq'),
     applied_at timestamptz NOT NULL DEFAULT now()
 );
+
+ALTER SEQUENCE ticket_board.schema_migrations_seq
+    OWNED BY ticket_board.schema_migrations.seq;
+
+CREATE UNIQUE INDEX IF NOT EXISTS schema_migrations_seq_idx
+    ON ticket_board.schema_migrations (seq);
 
 CREATE TABLE IF NOT EXISTS ticket_board.tickets (
     id text PRIMARY KEY
@@ -3641,8 +3649,8 @@ BEGIN
 END;
 $$;
 
-INSERT INTO ticket_board.schema_migrations (version, description)
-VALUES (1, 'initial ticket-board schema for JSON ticket import')
-ON CONFLICT (version) DO NOTHING;
+INSERT INTO ticket_board.schema_migrations (name)
+VALUES ('schema.sql')
+ON CONFLICT (name) DO NOTHING;
 
 COMMIT;

@@ -16,6 +16,7 @@ EXPECTED_JSON_FIELDS = {
     "audit_signoff",
     "inspector_signoff",
     "blocked_by",
+    "blockers",
     "blocked_reason",
     "body",
     "comments",
@@ -89,6 +90,7 @@ FIELD_TO_SCHEMA_TOKENS = {
     "audit_signoff": ["audit_signoff"],
     "inspector_signoff": ["inspector_signoff"],
     "blocked_by": ["ticket_blockers", "blocker_ticket_id"],
+    "blockers": ["ticket_blockers", "resolved"],
     "blocked_reason": ["blocked_reason"],
     "body": ["body"],
     "comments": ["ticket_comments"],
@@ -151,6 +153,17 @@ def main() -> int:
     assert "'ready'" not in schema, "removed ready state must not appear in schema.sql"
     assert "implementation must be non-empty before a ticket can enter in_progress" not in schema
     assert "assignee must not be unassigned before a ticket can enter in_progress" in schema
+    assert re.search(
+        r"resolved\s+boolean\s+not null\s+default\s+false",
+        schema_lower,
+    ), "ticket_blockers.resolved must persist blocker resolution"
+    assert "unresolved blocker prevents forward promotion" in schema
+    assert "create or replace function ticket_board.ticket_is_forward_promotion" in executable_schema_lower
+    assert "create or replace function ticket_board.resolve_completed_blockers" in executable_schema_lower
+    assert "create trigger tickets_zzzy_resolve_completed_blockers" in executable_schema_lower
+    resolved_blockers_migration = (ROOT / "scripts" / "ticket_board" / "migrations" / "272_resolved_blockers.sql").read_text(encoding="utf-8").lower()
+    assert "add column if not exists resolved boolean" in resolved_blockers_migration
+    assert "unresolved blocker prevents forward promotion" in resolved_blockers_migration
     optional_implementation_migration = (ROOT / "scripts" / "ticket_board" / "migrations" / "271_optional_implementation.sql").read_text(encoding="utf-8")
     assert "implementation must be non-empty before a ticket can enter in_progress" not in optional_implementation_migration
     assert "assignee must not be unassigned before a ticket can enter in_progress" in optional_implementation_migration

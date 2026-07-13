@@ -22,6 +22,8 @@ def main() -> int:
     assert "card.classList.add('card-blocked');" in HTML
     assert "blocked_reason: blockedReasonInput.value" in HTML
     assert "Required when blocked-by dependencies are set. Also use this for non-dependency stalls." in HTML
+    assert "Array.isArray(ticket.blockers)" in HTML
+    assert ".filter((blocker) => blocker && !blocker.resolved)" in HTML
     assert "Blocked by ${formatBlockedByList(unresolved)}. Add a blocked reason." in HTML
     print("blocked_reason_frontend_test: ok")
     return 0

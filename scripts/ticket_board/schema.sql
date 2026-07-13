@@ -156,10 +156,14 @@ CREATE TABLE IF NOT EXISTS ticket_board.ticket_blockers (
     blocker_ticket_id text NOT NULL
         CHECK (blocker_ticket_id ~ '^PGU-[0-9]+$'),
     position integer NOT NULL CHECK (position >= 0),
+    resolved boolean NOT NULL DEFAULT false,
     PRIMARY KEY (ticket_id, blocker_ticket_id),
     UNIQUE (ticket_id, position),
     CHECK (ticket_id <> blocker_ticket_id)
 );
+
+ALTER TABLE ticket_board.ticket_blockers
+    ADD COLUMN IF NOT EXISTS resolved boolean NOT NULL DEFAULT false;
 
 CREATE INDEX IF NOT EXISTS ticket_blockers_blocker_idx
     ON ticket_board.ticket_blockers (blocker_ticket_id);
@@ -394,11 +398,29 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION ticket_board.ticket_is_forward_promotion(
+    p_old_state text,
+    p_new_state text
+)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT (p_old_state = 'backlog' AND p_new_state = 'analysis')
+        OR (p_old_state = 'analysis' AND p_new_state = 'in_progress')
+        OR (p_old_state = 'in_progress' AND p_new_state IN ('inspection', 'audit'))
+        OR (p_old_state = 'inspection' AND p_new_state = 'audit')
+        OR (p_old_state = 'audit' AND p_new_state IN ('eric_review', 'director_review', 'done'))
+        OR (p_old_state = 'eric_review' AND p_new_state = 'director_review')
+        OR (p_old_state = 'director_review' AND p_new_state = 'done');
+$$;
+
 CREATE OR REPLACE FUNCTION ticket_board.enforce_ticket_workflow_update()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 DECLARE
+    blocker_id text;
 BEGIN
     IF NEW.state <> 'backlog' OR OLD.state IN ('done', 'cancelled') THEN
         NEW.parked := false;
@@ -496,6 +518,19 @@ BEGIN
         IF NEW.assignee = 'unassigned' THEN
             RAISE EXCEPTION 'assignee must not be unassigned before a ticket can enter in_progress';
         END IF;
+    END IF;
+
+    IF OLD.state IS DISTINCT FROM NEW.state
+       AND ticket_board.ticket_is_forward_promotion(OLD.state, NEW.state)
+       AND ticket_board.ticket_has_unresolved_blockers(NEW.id) THEN
+        SELECT b.blocker_ticket_id
+        INTO blocker_id
+        FROM ticket_board.ticket_blockers b
+        WHERE b.ticket_id = NEW.id
+          AND NOT b.resolved
+        ORDER BY b.position
+        LIMIT 1;
+        RAISE EXCEPTION 'unresolved blocker prevents forward promotion: %', blocker_id;
     END IF;
 
     IF OLD.state <> 'director_review' AND NEW.state = 'director_review' AND NOT NEW.audit_signoff THEN
@@ -709,6 +744,50 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION ticket_board.sync_blocker_resolved_from_state()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    NEW.resolved := EXISTS (
+        SELECT 1
+        FROM ticket_board.tickets t
+        WHERE t.id = NEW.blocker_ticket_id
+          AND t.state IN ('done', 'cancelled')
+    );
+
+    RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.resolve_completed_blockers()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    dependent_id text;
+BEGIN
+    IF TG_OP <> 'UPDATE'
+       OR OLD.state IS NOT DISTINCT FROM NEW.state
+       OR OLD.state IN ('done', 'cancelled')
+       OR NEW.state NOT IN ('done', 'cancelled') THEN
+        RETURN NULL;
+    END IF;
+
+    FOR dependent_id IN
+        UPDATE ticket_board.ticket_blockers
+        SET resolved = true
+        WHERE blocker_ticket_id = NEW.id
+          AND NOT resolved
+        RETURNING ticket_id
+    LOOP
+        PERFORM ticket_board.refresh_ticket_source_json(dependent_id);
+    END LOOP;
+
+    RETURN NULL;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION ticket_board.upsert_ticket_notification_state()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -825,9 +904,8 @@ AS $$
     SELECT EXISTS (
         SELECT 1
         FROM ticket_board.ticket_blockers b
-        LEFT JOIN ticket_board.tickets blocker ON blocker.id = b.blocker_ticket_id
         WHERE b.ticket_id = p_ticket_id
-          AND coalesce(blocker.state NOT IN ('done', 'cancelled'), true)
+          AND NOT b.resolved
     );
 $$;
 
@@ -1749,7 +1827,9 @@ EXECUTE FUNCTION ticket_board.enforce_ticket_workflow_update();
 DROP TRIGGER IF EXISTS tickets_notify_state_transition ON ticket_board.tickets;
 DROP TRIGGER IF EXISTS tickets_zzz_notify_insert_transition ON ticket_board.tickets;
 DROP TRIGGER IF EXISTS tickets_zzz_notify_transition ON ticket_board.tickets;
+DROP TRIGGER IF EXISTS tickets_zzzy_resolve_completed_blockers ON ticket_board.tickets;
 DROP TRIGGER IF EXISTS tickets_zzzz_notify_unblocked_dependents ON ticket_board.tickets;
+DROP TRIGGER IF EXISTS ticket_blockers_sync_resolved ON ticket_board.ticket_blockers;
 
 DROP TRIGGER IF EXISTS tickets_notification_state_insert ON ticket_board.tickets;
 CREATE TRIGGER tickets_notification_state_insert
@@ -1774,10 +1854,20 @@ AFTER INSERT OR UPDATE ON ticket_board.tickets
 FOR EACH ROW
 EXECUTE FUNCTION ticket_board.notify_ticket_state_transition();
 
+CREATE TRIGGER tickets_zzzy_resolve_completed_blockers
+AFTER UPDATE OF state ON ticket_board.tickets
+FOR EACH ROW
+EXECUTE FUNCTION ticket_board.resolve_completed_blockers();
+
 CREATE TRIGGER tickets_zzzz_notify_unblocked_dependents
 AFTER UPDATE OF state ON ticket_board.tickets
 FOR EACH ROW
 EXECUTE FUNCTION ticket_board.notify_unblocked_dependents();
+
+CREATE TRIGGER ticket_blockers_sync_resolved
+BEFORE INSERT OR UPDATE OF blocker_ticket_id ON ticket_board.ticket_blockers
+FOR EACH ROW
+EXECUTE FUNCTION ticket_board.sync_blocker_resolved_from_state();
 
 DROP TRIGGER IF EXISTS ticket_comments_notification_activity ON ticket_board.ticket_comments;
 CREATE TRIGGER ticket_comments_notification_activity
@@ -1907,6 +1997,7 @@ SET search_path = ticket_board, pg_temp
 AS $$
 DECLARE
     ticket_row ticket_board.tickets%ROWTYPE;
+    blocked_by jsonb;
     blockers jsonb;
     comments jsonb;
     screenshots jsonb;
@@ -1921,6 +2012,17 @@ BEGIN
     END IF;
 
     SELECT COALESCE(jsonb_agg(blocker_ticket_id ORDER BY position), '[]'::jsonb)
+    INTO blocked_by
+    FROM ticket_board.ticket_blockers
+    WHERE ticket_id = p_ticket_id;
+
+    SELECT COALESCE(
+        jsonb_agg(
+            jsonb_build_object('id', blocker_ticket_id, 'resolved', resolved)
+            ORDER BY position
+        ),
+        '[]'::jsonb
+    )
     INTO blockers
     FROM ticket_board.ticket_blockers
     WHERE ticket_id = p_ticket_id;
@@ -1947,7 +2049,8 @@ BEGIN
         'body', ticket_row.body,
         'state', ticket_row.state,
         'assignee', ticket_row.assignee,
-        'blocked_by', blockers,
+        'blocked_by', blocked_by,
+        'blockers', blockers,
         'parent_id', ticket_row.parent_id,
         'blocked_reason', ticket_row.blocked_reason,
         'implementation', ticket_row.implementation,
@@ -2142,14 +2245,15 @@ BEGIN
     DELETE FROM ticket_board.ticket_blockers
     WHERE ticket_id = p_ticket_id;
 
-    INSERT INTO ticket_board.ticket_blockers (ticket_id, blocker_ticket_id, position)
-    SELECT p_ticket_id, blocker_id, min(ord)::integer - 1
+    INSERT INTO ticket_board.ticket_blockers (ticket_id, blocker_ticket_id, position, resolved)
+    SELECT p_ticket_id, normalized.blocker_id, min(normalized.ord)::integer - 1, bool_or(blocker.state IN ('done', 'cancelled'))
     FROM (
         SELECT upper(btrim(raw_id)) AS blocker_id, ord
         FROM unnest(coalesce(p_blocker_ids, ARRAY[]::text[])) WITH ORDINALITY AS input(raw_id, ord)
     ) AS normalized
-    GROUP BY blocker_id
-    ORDER BY min(ord);
+    JOIN ticket_board.tickets blocker ON blocker.id = normalized.blocker_id
+    GROUP BY normalized.blocker_id
+    ORDER BY min(normalized.ord);
 
     UPDATE ticket_board.tickets
     SET blocked_reason = normalized_reason

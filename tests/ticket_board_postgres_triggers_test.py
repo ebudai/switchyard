@@ -962,12 +962,29 @@ WHERE ticket_id = 'PGU-29702';
 DELETE FROM ticket_board.ticket_notification_queue;
 INSERT INTO ticket_board.ticket_blockers (ticket_id, blocker_ticket_id, position)
 VALUES ('PGU-30901', 'PGU-30900', 0);
+""",
+            )
+            blocked_transition_error = psql(
+                conninfo,
+                """
 UPDATE ticket_board.tickets
 SET implementation = 'ready',
     state = 'in_progress'
 WHERE id = 'PGU-30901';
 """,
-            )
+                expect_ok=False,
+            ).stderr
+            assert "unresolved blocker prevents forward promotion: PGU-30900" in blocked_transition_error, blocked_transition_error
+            blocked_transition_state = psql(
+                conninfo,
+                "SELECT state FROM ticket_board.tickets WHERE id = 'PGU-30901';",
+            ).stdout.strip()
+            assert blocked_transition_state == "analysis", blocked_transition_state
+            blocker_before_resolution = psql(
+                conninfo,
+                "SELECT resolved::text FROM ticket_board.ticket_blockers WHERE ticket_id = 'PGU-30901' AND blocker_ticket_id = 'PGU-30900';",
+            ).stdout.strip()
+            assert blocker_before_resolution == "false", blocker_before_resolution
             blocked_transition_queue_count = psql(
                 conninfo,
                 "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-30901';",
@@ -990,6 +1007,21 @@ UPDATE ticket_board.tickets SET state = 'cancelled' WHERE id = 'PGU-30900';
 COMMIT;
 """,
             )
+            blocker_after_resolution = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'row_exists', count(*) = 1,
+    'resolved', bool_or(resolved)
+)::text
+FROM ticket_board.ticket_blockers
+WHERE ticket_id = 'PGU-30901'
+  AND blocker_ticket_id = 'PGU-30900';
+""",
+                ).stdout
+            )
+            assert blocker_after_resolution == {"row_exists": True, "resolved": True}, blocker_after_resolution
             unblocked_transition_queue = json.loads(
                 psql(
                     conninfo,
@@ -1007,12 +1039,65 @@ WHERE ticket_id = 'PGU-30901';
             )
             assert unblocked_transition_queue == [
                 {
-                    "target_role": "ops",
+                    "target_role": "director",
                     "message": "New ticket for you: PGU-30901 -- Blocked transition",
                     "old_state": None,
-                    "new_state": "in_progress",
+                    "new_state": "analysis",
                 }
             ], unblocked_transition_queue
+
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
+            insert_ticket(conninfo, "PGU-30910", title="Still unresolved blocker", state="analysis", assignee="unassigned")
+            insert_ticket(conninfo, "PGU-30911", title="Blocked backward move", state="in_progress", assignee="ops")
+            insert_ticket(conninfo, "PGU-30912", title="Blocked park move", state="analysis", assignee="ops", implementation="")
+            insert_ticket(conninfo, "PGU-30913", title="Blocked cancel move", state="analysis", assignee="ops", implementation="")
+            psql(
+                conninfo,
+                """
+INSERT INTO ticket_board.ticket_blockers (ticket_id, blocker_ticket_id, position)
+VALUES
+    ('PGU-30911', 'PGU-30910', 0),
+    ('PGU-30912', 'PGU-30910', 0),
+    ('PGU-30913', 'PGU-30910', 0);
+UPDATE ticket_board.tickets SET state = 'analysis' WHERE id = 'PGU-30911';
+UPDATE ticket_board.tickets SET state = 'backlog' WHERE id = 'PGU-30912';
+BEGIN;
+INSERT INTO ticket_board.ticket_comments (ticket_id, position, who, ts_text, text, source_json)
+VALUES (
+    'PGU-30913',
+    0,
+    'director',
+    '2026-07-10T00:35:00+00:00',
+    'Cancelling while dependency remains unresolved.',
+    '{"text": "Cancelling while dependency remains unresolved.", "ts": "2026-07-10T00:35:00+00:00", "who": "director"}'::jsonb
+);
+UPDATE ticket_board.tickets SET state = 'cancelled' WHERE id = 'PGU-30913';
+COMMIT;
+""",
+            )
+            blocked_non_forward_moves = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_agg(
+    jsonb_build_object(
+        'id', t.id,
+        'state', t.state,
+        'resolved', b.resolved
+    )
+    ORDER BY t.id
+)::text
+FROM ticket_board.tickets t
+JOIN ticket_board.ticket_blockers b ON b.ticket_id = t.id
+WHERE t.id IN ('PGU-30911', 'PGU-30912', 'PGU-30913');
+""",
+                ).stdout
+            )
+            assert blocked_non_forward_moves == [
+                {"id": "PGU-30911", "state": "analysis", "resolved": False},
+                {"id": "PGU-30912", "state": "backlog", "resolved": False},
+                {"id": "PGU-30913", "state": "cancelled", "resolved": False},
+            ], blocked_non_forward_moves
 
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
             insert_ticket(conninfo, "PGU-29703", title="Auto advance insert notify", state="analysis", assignee="ops", implementation="ready")

@@ -318,6 +318,7 @@ WHERE t.id = '{backlog_created["id"]}';
                 blocked_reason="Waiting for PGU-1.",
             )
             assert blocked["blocked_by"] == ["PGU-1"], blocked
+            assert blocked["blockers"] == [{"id": "PGU-1", "resolved": False}], blocked
             assert blocked["blocked_reason"] == "Waiting for PGU-1.", blocked
             blocked_create_state = json.loads(
                 psql(
@@ -325,6 +326,7 @@ WHERE t.id = '{backlog_created["id"]}';
                     f"""
 SELECT jsonb_build_object(
     'blocked_by', (SELECT jsonb_agg(blocker_ticket_id ORDER BY position) FROM ticket_board.ticket_blockers WHERE ticket_id = t.id),
+    'blockers', (SELECT jsonb_agg(jsonb_build_object('id', blocker_ticket_id, 'resolved', resolved) ORDER BY position) FROM ticket_board.ticket_blockers WHERE ticket_id = t.id),
     'blocked_reason', t.blocked_reason,
     'queue_count', (SELECT count(*) FROM ticket_board.ticket_notification_queue q WHERE q.ticket_id = t.id),
     'trace_count', (SELECT count(*) FROM ticket_board.notification_trace nt WHERE nt.ticket_id = t.id)
@@ -336,6 +338,7 @@ WHERE t.id = '{blocked["id"]}';
             )
             assert blocked_create_state == {
                 "blocked_by": ["PGU-1"],
+                "blockers": [{"id": "PGU-1", "resolved": False}],
                 "blocked_reason": "Waiting for PGU-1.",
                 "queue_count": 0,
                 "trace_count": 0,

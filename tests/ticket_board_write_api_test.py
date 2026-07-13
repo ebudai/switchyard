@@ -124,6 +124,7 @@ def seed_json_ticket(
     eric_signoff: bool = False,
     commit_hash: str = "",
     commit_exempt: bool = False,
+    regression: bool = False,
 ) -> None:
     payload = {
         "id": ticket_id,
@@ -144,6 +145,7 @@ def seed_json_ticket(
         "manually_controlled": False,
         "commit_hash": commit_hash,
         "commit_exempt": commit_exempt,
+        "regression": regression,
         "created": "2026-07-10T00:00:00+00:00",
         "updated": "2026-07-10T00:00:00+00:00",
         "comments": [],
@@ -167,6 +169,7 @@ def seed_postgres_ticket(
     eric_signoff: bool = False,
     commit_hash: str = "",
     commit_exempt: bool = False,
+    regression: bool = False,
 ) -> None:
     psql(
         conn,
@@ -174,11 +177,11 @@ def seed_postgres_ticket(
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation,
     audit_signoff, needs_inspection, inspector_signoff, needs_eric_signoff, eric_signoff, commit_hash,
-    commit_exempt, created_text, updated_text, source_json
+    commit_exempt, regression, created_text, updated_text, source_json
 ) VALUES (
     '{ticket_id}', '{title}', '', '{state}', '{assignee}', '{implementation}',
     {str(audit_signoff).lower()}, {str(needs_inspection).lower()}, {str(inspector_signoff).lower()}, {str(needs_eric_signoff).lower()},
-    {str(eric_signoff).lower()}, '{commit_hash}', {str(commit_exempt).lower()},
+    {str(eric_signoff).lower()}, '{commit_hash}', {str(commit_exempt).lower()}, {str(regression).lower()},
     '2026-07-10T00:00:00+00:00', '2026-07-10T00:00:00+00:00',
     '{ticket_source(ticket_id, title, state, assignee)}'::jsonb
 );
@@ -651,6 +654,23 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
         expect=201,
     )
     assert director_inspection_create["ticket"]["needs_inspection"] is True, director_inspection_create  # type: ignore[index]
+    regression_create = post_json(
+        base_url,
+        "/api/tickets/actions/create_ticket",
+        {"title": "Director marks regression", "body": "", "regression": True},
+        caller="director",
+        expect=201,
+    )
+    assert regression_create["ticket"]["regression"] is True, regression_create  # type: ignore[index]
+    assert get_ticket(base_url, str(regression_create["ticket"]["id"]))["regression"] is True
+    regression_file_bug = post_json(
+        base_url,
+        "/api/tickets/actions/file_bug",
+        {"title": "Regression bug child", "body": "", "source_ticket_id": "PGU-100", "regression": True},
+        caller="ops",
+        expect=201,
+    )
+    assert regression_file_bug["ticket"]["regression"] is True, regression_file_bug  # type: ignore[index]
 
     inspector_field_forbidden = post_json(
         base_url,
@@ -667,6 +687,21 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
         caller="director",
     )
     assert inspector_field_director["ticket"]["needs_inspection"] is True, inspector_field_director  # type: ignore[index]
+    regression_field_set = post_json(
+        base_url,
+        "/api/tickets/PGU-112/actions/edit_fields",
+        {"regression": True},
+        caller="app",
+    )
+    assert regression_field_set["ticket"]["regression"] is True, regression_field_set  # type: ignore[index]
+    regression_field_cleared = post_json(
+        base_url,
+        "/api/tickets/PGU-112/actions/edit_fields",
+        {"regression": False},
+        caller="app",
+    )
+    assert regression_field_cleared["ticket"]["regression"] is False, regression_field_cleared  # type: ignore[index]
+    assert get_ticket(base_url, "PGU-112")["regression"] is False
 
     eric_review_to_inspection = post_json(
         base_url,
@@ -892,6 +927,7 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     merged_source = get_ticket(base_url, "PGU-113")
     assert merged_source["state"] == "done", merged_source
     assert merged_source["commit_exempt"] is True, merged_source
+    assert "regression" in merged_source, merged_source
 
 
 def exercise_postgres_backend(commit_hash: str) -> None:
@@ -912,6 +948,16 @@ def exercise_postgres_backend(commit_hash: str) -> None:
             run(["pg_ctl", "-D", str(data_dir), "-o", f"-k {socket_dir} -p {port} -h ''", "-w", "start"], capture=False)
             run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
             psql(admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
+            assert psql(
+                admin_conn,
+                """
+SELECT column_default
+FROM information_schema.columns
+WHERE table_schema = 'ticket_board'
+  AND table_name = 'tickets'
+  AND column_name = 'regression';
+""",
+            ) == "false"
             create_roles(admin_conn)
             psql(admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
             seed_fixtures(lambda ticket_id, **kwargs: seed_postgres_ticket(admin_conn, ticket_id, **kwargs), commit_hash)

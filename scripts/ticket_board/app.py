@@ -141,6 +141,7 @@ class TicketBoardApp:
         assignee: str,
         needs_eric_signoff: bool,
         needs_inspection: bool = False,
+        regression: bool = False,
         blocked_by: list[str] | None = None,
         blocked_reason: str = "",
         state: str = "analysis",
@@ -166,6 +167,7 @@ class TicketBoardApp:
             inspector_signoff=False,
             needs_eric_signoff=needs_eric_signoff,
             eric_signoff=False,
+            regression=regression,
             comments=[],
             blocked_reason=blocked_reason,
             commit_hash="",
@@ -197,6 +199,7 @@ class TicketBoardApp:
         inspector_signoff: bool = False,
         needs_eric_signoff: bool,
         eric_signoff: bool,
+        regression: bool = False,
         comments: list[dict[str, Any]],
         parent_id: str = "",
         blocked_reason: str = "",
@@ -222,6 +225,7 @@ class TicketBoardApp:
             inspector_signoff=inspector_signoff,
             needs_eric_signoff=needs_eric_signoff,
             eric_signoff=eric_signoff,
+            regression=regression,
             comments=comments,
             parent_id=parent_id,
             blocked_reason=blocked_reason,
@@ -427,6 +431,7 @@ SELECT
     t.inspector_signoff,
     t.needs_eric_signoff,
     t.eric_signoff,
+    t.regression,
     t.manually_controlled,
     t.commit_hash,
     t.commit_exempt,
@@ -512,6 +517,7 @@ ORDER BY t.ticket_number
             "inspector_signoff": bool(row["inspector_signoff"]),
             "needs_eric_signoff": bool(row["needs_eric_signoff"]),
             "eric_signoff": bool(row["eric_signoff"]),
+            "regression": bool(row["regression"]),
             "manually_controlled": bool(row["manually_controlled"]),
             "commit_hash": str(row["commit_hash"] or ""),
             "commit_exempt": bool(row["commit_exempt"]),
@@ -549,6 +555,7 @@ ORDER BY t.ticket_number
         inspector_signoff: bool = False,
         needs_eric_signoff: bool,
         eric_signoff: bool,
+        regression: bool = False,
         comments: list[dict[str, Any]],
         parent_id: str = "",
         blocked_reason: str = "",
@@ -608,6 +615,8 @@ ORDER BY t.ticket_number
                     self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps({"implementation": implementation})))
                 if needs_inspection:
                     self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps({"needs_inspection": True})))
+                if regression:
+                    self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps({"regression": True})))
                 if create_state != state:
                     raise ValueError(f"invalid create state: {state}; allowed: analysis, backlog")
                 if create_state == "analysis" and assignee != "unassigned":
@@ -755,6 +764,7 @@ ORDER BY t.ticket_number
             "needs_inspection",
             "needs_eric_signoff",
             "commit_exempt",
+            "regression",
             "commit_hash",
         }
         if patch.get("inspector_signoff") is False:

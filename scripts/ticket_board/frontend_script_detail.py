@@ -221,6 +221,9 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       toggles.appendChild(toggleControl('Needs inspection', ticket.needs_inspection, async (checked) => {
         await updateTicket(ticket.id, { needs_inspection: checked }, 'director');
       }));
+      toggles.appendChild(toggleControl('Regression', ticket.regression, async (checked) => {
+        await updateTicket(ticket.id, { regression: checked }, detailCallerRole());
+      }));
       if (ticket.needs_inspection) {
         toggles.appendChild(toggleControl('Inspector signoff', ticket.inspector_signoff, async (checked) => {
           await updateTicket(ticket.id, { inspector_signoff: checked }, 'inspector');

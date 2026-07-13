@@ -185,6 +185,12 @@ def main() -> int:
     assert "after insert or update on ticket_board.tickets" in executable_schema_lower
     assert "create or replace function ticket_board.enforce_ticket_workflow_update" in executable_schema_lower
     assert "create or replace function ticket_board.enqueue_transition_notification" in executable_schema_lower
+    assert "source_role := nullif(current_setting('ticket_board.caller_role', true), '')" in executable_schema_lower
+    assert "source_role is distinct from target_role" in executable_schema_lower
+    suppress_self_notify_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "273_suppress_self_notifications.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "source_role is distinct from target_role" in suppress_self_notify_migration
     assert "create or replace function ticket_board.notify_ticket_state_transition" in executable_schema_lower
     assert "pg_notify" in executable_schema_lower, "PGU-191 must notify on state transitions"
     assert "manually_controlled" in executable_schema_lower, "PGU-191 triggers must honor manual control"

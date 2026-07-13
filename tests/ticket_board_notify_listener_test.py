@@ -337,6 +337,61 @@ def test_worker_cursor_advanced_holds_notification_delivery() -> None:
     assert conn.traces[1][6] == "human_composing"
 
 
+def test_real_idle_cursor_position_delivers_instead_of_wedging() -> None:
+    sent: list[tuple[str, str]] = []
+    cursor = ["2 40 43"]
+
+    def cursor_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=f"{cursor[0]}\n")
+
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(state_store=store, cursor_position_runner=cursor_runner)
+        store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
+        conn = FakeConnection([queue_row(79, "PGU-365", target_role="ops", message="PGU-365 -- Ops notification")])
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=gate.is_working,
+            connector=lambda *args, **kwargs: conn,
+            poll_seconds=0,
+        )
+
+        assert listener.listen_once(max_notifications=1) == 1
+
+    assert sent == [("pgu-ops:0.0", "PGU-365 -- Ops notification")]
+    assert conn.requeued == []
+    assert conn.acked == [79]
+    assert conn.traces[1][6] == "hook_idle"
+
+
+def test_cursor_home_delivers_regardless_of_row() -> None:
+    for cursor_value in ("2 40 43", "2 42 43"):
+        sent: list[tuple[str, str]] = []
+
+        def cursor_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(args, 0, stdout=f"{cursor_value}\n")
+
+        with TemporaryStateDir() as tmp_path:
+            store = PaneHookStateStore(tmp_path)
+            gate = PaneActivityGate(state_store=store, cursor_position_runner=cursor_runner)
+            store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
+            conn = FakeConnection([queue_row(80, "PGU-365A", target_role="ops", message="PGU-365A -- Ops notification")])
+            listener = TicketBoardNotifyListener(
+                conninfo="dbname=test",
+                sender=lambda target, message: sent.append((target, message)),
+                activity_gate=gate.is_working,
+                connector=lambda *args, **kwargs: conn,
+                poll_seconds=0,
+            )
+
+            assert listener.listen_once(max_notifications=1) == 1
+
+        assert sent == [("pgu-ops:0.0", "PGU-365A -- Ops notification")]
+        assert conn.acked == [80]
+        assert conn.traces[1][6] == "hook_idle"
+
+
 def test_listener_enqueues_idle_stall_nudges_from_hook_state() -> None:
     with TemporaryStateDir() as tmp_path:
         store, gate = hook_gate(tmp_path)
@@ -1176,6 +1231,8 @@ class TemporaryStateDir:
 def main() -> int:
     test_hook_state_writer_and_gate_idle_before_arrival_delivers_immediately()
     test_worker_cursor_advanced_holds_notification_delivery()
+    test_real_idle_cursor_position_delivers_instead_of_wedging()
+    test_cursor_home_delivers_regardless_of_row()
     test_listener_enqueues_idle_stall_nudges_from_hook_state()
     test_external_hook_writer_records_state_file()
     test_display_message_renames_analysis_stage_copy_without_touching_titles()

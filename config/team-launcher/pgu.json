@@ -16,7 +16,7 @@
       "model": "claude-opus-4-8",
       "resume_flag": "--resume",
       "role": "director",
-      "slot": 0,
+      "slot": 2,
       "target": "pgu-director:0.0",
       "tmux_session": "pgu-director",
       "yolo": true
@@ -48,7 +48,7 @@
       "model": "gpt-5.4",
       "resume_flag": "--resume",
       "role": "app",
-      "slot": 2,
+      "slot": 4,
       "target": "pgu-app:0.0",
       "tmux_session": "pgu-app",
       "yolo": true
@@ -80,7 +80,7 @@
       "model": "gpt-5.5",
       "resume_flag": "--resume",
       "role": "ops",
-      "slot": 3,
+      "slot": 5,
       "target": "pgu-ops:0.0",
       "tmux_session": "pgu-ops",
       "yolo": true
@@ -96,7 +96,7 @@
       "model": "claude-sonnet-5",
       "resume_flag": "--resume",
       "role": "audit",
-      "slot": 4,
+      "slot": 3,
       "target": "pgu-audit:0.0",
       "tmux_session": "pgu-audit",
       "yolo": true
@@ -111,7 +111,7 @@
       "model": "Gemini 3.5 Flash (Medium)",
       "resume_flag": "--resume",
       "role": "inspector",
-      "slot": 5,
+      "slot": 0,
       "target": "pgu-inspector:0.0",
       "tmux_session": "pgu-inspector",
       "yolo": true

@@ -102,6 +102,9 @@ def _layout_shape(node: object) -> object:
     return "leaf"
 
 
+PANEL_CLOCKWISE_SLOT_ORDER = (0, 2, 3, 5, 4, 1)
+
+
 def test_pgu_layout_matches_reference_six_pane_geometry() -> None:
     layout = json.loads((ROOT / "config" / "team-launcher" / "pgu-konsole-layout.json").read_text(encoding="utf-8"))
 
@@ -241,11 +244,15 @@ def test_dry_run_materializes_pgu_layout_with_six_visible_role_commands() -> Non
         assert len(commands) == 6
         active_commands = [command for command in commands if command]
         assert len(active_commands) == 6
+        clockwise_commands = [commands[index] for index in PANEL_CLOCKWISE_SLOT_ORDER]
+        expected_clockwise_roles = ["inspector", "director", "audit", "ops", "app", "main"]
         for role in ("director", "main", "app", "ops", "audit", "inspector"):
             matching = [command for command in commands if f" {role} " in f" {command} " or command.endswith(f" {role}")]
             assert matching, (role, commands)
             assert " pane attach-or-start " in matching[0]
             assert "team-launcher" in matching[0]
+        for role, command in zip(expected_clockwise_roles, clockwise_commands):
+            assert f" {role} " in f" {command} ", (role, clockwise_commands)
         assert not any(" research " in f" {command} " for command in commands)
         assert not any(" perf " in f" {command} " for command in commands)
 
@@ -262,12 +269,12 @@ def test_pgu_config_matches_director_supplied_live_role_assignments() -> None:
     assert roles["research"].detached
     assert roles["research"].slot is None
     assert {role.role: role.slot for role in roles.values() if not role.detached} == {
-        "director": 0,
+        "director": 2,
         "main": 1,
-        "app": 2,
-        "ops": 3,
-        "audit": 4,
-        "inspector": 5,
+        "app": 4,
+        "ops": 5,
+        "audit": 3,
+        "inspector": 0,
     }
     for role_name, role in roles.items():
         assert role.workdir == "/home/agent/Projects/pgu", role_name

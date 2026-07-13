@@ -231,6 +231,7 @@ def main() -> int:
     ).read_text(encoding="utf-8").lower()
     assert "add column if not exists last_rejected_commit" in stale_resubmit_migration
     assert "cannot submit: commit %" in stale_resubmit_migration
+    assert "ticket_last_rejected_commit <> ''" in stale_resubmit_migration
     unblock_notify_migration = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "274_unblock_notifications.sql"
     ).read_text(encoding="utf-8").lower()

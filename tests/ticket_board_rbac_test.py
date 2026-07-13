@@ -459,6 +459,48 @@ FROM ticket_board.tickets WHERE id = 'PGU-501';
 
     insert_ticket(
         admin_conn,
+        "PGU-504",
+        title="Commit exempt resubmit after kickback",
+        state="in_progress",
+        assignee="ops",
+        implementation="No repo changes.",
+        commit_exempt=True,
+    )
+    psql(service_conn, "SELECT ticket_board.submit_to_audit('PGU-504', '');")
+    psql(service_conn, "SELECT ticket_board.audit_kick_back('PGU-504', 'Document the change.');")
+    psql(
+        admin_conn,
+        """
+UPDATE ticket_board.tickets
+SET state = 'in_progress',
+    assignee = 'ops'
+WHERE id = 'PGU-504';
+""",
+    )
+    psql(service_conn, "SELECT ticket_board.submit_to_audit('PGU-504', '');")
+    exempt_resubmitted = json.loads(
+        psql(
+            admin_conn,
+            """
+SELECT jsonb_build_object(
+    'state', state,
+    'commit_hash', commit_hash,
+    'commit_exempt', commit_exempt,
+    'last_rejected_commit', last_rejected_commit
+)::text
+FROM ticket_board.tickets WHERE id = 'PGU-504';
+""",
+        )
+    )
+    assert exempt_resubmitted == {
+        "state": "audit",
+        "commit_hash": "",
+        "commit_exempt": True,
+        "last_rejected_commit": None,
+    }, exempt_resubmitted
+
+    insert_ticket(
+        admin_conn,
         "PGU-503",
         title="Inspector kickback",
         state="inspection",

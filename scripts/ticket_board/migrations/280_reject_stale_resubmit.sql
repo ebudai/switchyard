@@ -36,7 +36,9 @@ BEGIN
     IF normalized_commit = '' AND NOT ticket_commit_exempt THEN
         RAISE EXCEPTION 'commit_hash must be a 7-40 character hex commit';
     END IF;
-    IF ticket_last_rejected_commit IS NOT NULL AND normalized_commit = ticket_last_rejected_commit THEN
+    IF ticket_last_rejected_commit IS NOT NULL
+       AND ticket_last_rejected_commit <> ''
+       AND normalized_commit = ticket_last_rejected_commit THEN
         RAISE EXCEPTION 'cannot submit: commit % was just kicked back with no change -- do the fix and submit a NEW commit.',
             coalesce(nullif(ticket_last_rejected_commit, ''), '<none>');
     END IF;

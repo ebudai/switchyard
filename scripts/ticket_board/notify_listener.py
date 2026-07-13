@@ -308,13 +308,14 @@ class PaneActivityGate:
         if len(fields) != 3:
             return None
         try:
-            cursor_x, cursor_y, pane_height = (int(field) for field in fields)
+            cursor_x = int(fields[0])
+            cursor_y = int(fields[1])
+            pane_height = int(fields[2])
         except ValueError:
             return None
         if pane_height <= 0 or cursor_x < 0 or cursor_y < 0:
             return None
-        home_row = pane_height - 1
-        return cursor_x > self.director_composer_home_x or cursor_y < home_row
+        return cursor_x > self.director_composer_home_x
 
     def _reset_director_startup_hold(self, *, clear_released: bool = True) -> None:
         self._director_startup_hold_state_ts = None

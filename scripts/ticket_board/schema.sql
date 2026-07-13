@@ -1697,6 +1697,13 @@ BEGIN
                     AND (blocker.id IS NULL OR blocker.state NOT IN ('done', 'cancelled'))
               )
         ) AS candidates
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM ticket_board.ticket_notification_queue q
+            WHERE q.ticket_id = candidates.id
+              AND q.target_role = candidates.target_role
+              AND q.kind NOT IN ('idle_reminder', 'escalation')
+        )
         ORDER BY candidates.target_role, candidates.priority, candidates.ticket_number
     LOOP
         payload := jsonb_build_object(

@@ -224,11 +224,101 @@ LIMIT 1;
                 conninfo,
                 """
 DELETE FROM ticket_board.ticket_notification_queue;
+INSERT INTO ticket_board.ticket_notification_queue (
+    ticket_id, kind, target_role, message, payload, dedupe_key
+) VALUES (
+    'PGU-3542',
+    'transition',
+    'director',
+    'PGU-3542 kicked back to you',
+    jsonb_build_object('id', 'PGU-3542', 'state', 'analysis', 'target_role', 'director', 'kind', 'transition'),
+    'pending-primary:PGU-3542:director'
+);
+""",
+            )
+            deferred_wave_returned = psql(
+                conninfo,
+                """
+SET ROLE ticket_board_listener;
+WITH params AS (
+    SELECT clock_timestamp() AS now_at
+)
+SELECT ticket_board.notify_idle_turn_end_nudges(
+    jsonb_build_object('director', (now_at - interval '5 seconds')::text),
+    now_at
+)
+FROM params;
+RESET ROLE;
+""",
+            ).splitlines()[-2]
+            assert deferred_wave_returned == "0", deferred_wave_returned
+            deferred_wave_counts = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_object_agg(kind || ':' || target_role, count ORDER BY kind || ':' || target_role)::text
+FROM (
+    SELECT kind, target_role, count(*)::int AS count
+    FROM ticket_board.ticket_notification_queue
+    WHERE ticket_id = 'PGU-3542'
+    GROUP BY kind, target_role
+) counts;
+""",
+                )
+            )
+            assert deferred_wave_counts == {"transition:director": 1}, deferred_wave_counts
+
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
+            delivered_primary_wave_returned = psql(
+                conninfo,
+                """
+SET ROLE ticket_board_listener;
+WITH params AS (
+    SELECT clock_timestamp() AS now_at
+)
+SELECT ticket_board.notify_idle_turn_end_nudges(
+    jsonb_build_object('director', (now_at - interval '5 seconds')::text),
+    now_at
+)
+FROM params;
+RESET ROLE;
+""",
+            ).splitlines()[-2]
+            assert delivered_primary_wave_returned == "1", delivered_primary_wave_returned
+            delivered_primary_wave_row = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'target_role', target_role,
+    'kind', kind,
+    'message', message,
+    'state', payload->>'state'
+)::text
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-3542'
+ORDER BY id DESC
+LIMIT 1;
+""",
+                )
+            )
+            assert delivered_primary_wave_row == {
+                "target_role": "director",
+                "kind": "idle_reminder",
+                "message": "PGU-3542 is still in analysis and you haven't advanced it. Advance it now (do the work or hand it off). If you genuinely CANNOT move it forward, tell Eric directly what is wrong. Do NOT do nothing.",
+                "state": "analysis",
+            }, delivered_primary_wave_row
+
+            psql(
+                conninfo,
+                """
+DELETE FROM ticket_board.ticket_notification_queue;
 UPDATE ticket_board.tickets
 SET state = 'in_progress',
     assignee = 'main',
     implementation = 'Ready.'
 WHERE id = 'PGU-3542';
+DELETE FROM ticket_board.ticket_notification_queue;
 """,
             )
             advanced_wave_returned = psql(
@@ -288,6 +378,7 @@ UPDATE ticket_board.ticket_notification_state
 SET entered_current_state_at = clock_timestamp() - interval '10 minutes',
     last_activity_at = clock_timestamp() - interval '10 minutes'
 WHERE ticket_id = 'PGU-3547';
+DELETE FROM ticket_board.ticket_notification_queue;
 """,
             )
             director_review_returned = psql(

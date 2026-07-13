@@ -1139,6 +1139,70 @@ WHERE payload->>'title' = 'Eric-created analysis';
             ], eric_created_analysis_queue
 
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
+            insert_ticket(conninfo, "PGU-33801", title="Audit kickback still notifies director", state="audit", assignee="audit", implementation="done")
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
+            service_call(
+                conninfo,
+                "audit",
+                "SELECT ticket_board.audit_kick_back('PGU-33801', 'Needs another implementation pass.');",
+            )
+            audit_kickback_queue = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_agg(jsonb_build_object(
+    'target_role', target_role,
+    'message', message,
+    'old_state', payload->>'old_state',
+    'new_state', payload->>'new_state'
+) ORDER BY id)::text
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-33801';
+""",
+                ).stdout
+            )
+            assert audit_kickback_queue == [
+                {
+                    "target_role": "director",
+                    "message": "PGU-33801 -- Audit kickback still notifies director kicked back to you",
+                    "old_state": "audit",
+                    "new_state": "analysis",
+                }
+            ], audit_kickback_queue
+
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
+            insert_ticket(conninfo, "PGU-33802", title="Director route still notifies ops", state="analysis", assignee="unassigned", implementation="")
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
+            service_call(
+                conninfo,
+                "director",
+                "SELECT ticket_board.route('PGU-33802', 'in_progress', 'ops');",
+            )
+            director_route_queue = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_agg(jsonb_build_object(
+    'target_role', target_role,
+    'message', message,
+    'old_state', payload->>'old_state',
+    'new_state', payload->>'new_state'
+) ORDER BY id)::text
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-33802';
+""",
+                ).stdout
+            )
+            assert director_route_queue == [
+                {
+                    "target_role": "ops",
+                    "message": "New ticket for you: PGU-33802 -- Director route still notifies ops",
+                    "old_state": "analysis",
+                    "new_state": "in_progress",
+                }
+            ], director_route_queue
+
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
             insert_ticket(conninfo, "PGU-20", title="Durable notify", state="analysis", assignee="ops", implementation="")
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-20';")
             psql(conninfo, "DELETE FROM ticket_board.notification_trace WHERE ticket_id = 'PGU-20';")

@@ -243,20 +243,27 @@ class PaneActivityGate:
         director_target: str = ROLE_TO_TARGET["director"],
         client_activity_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
         director_composing_timeout_seconds: float = DEFAULT_DIRECTOR_COMPOSING_TIMEOUT_SECONDS,
+        director_startup_hold_seconds: float = DEFAULT_BUSY_REQUEUE_SECONDS,
         monotonic: Callable[[], float] = time.monotonic,
+        wall_time: Callable[[], float] = time.time,
     ) -> None:
         self.state_store = state_store or PaneHookStateStore()
         self.director_target = director_target
         self.client_activity_runner = client_activity_runner
         self.director_composing_timeout_seconds = director_composing_timeout_seconds
+        self.director_startup_hold_seconds = director_startup_hold_seconds
         self.monotonic = monotonic
+        self.wall_time = wall_time
         self._last_trace_by_target: dict[str, ActivityTrace] = {}
         self._last_hook_state_by_target: dict[str, tuple[str, float]] = {}
+        self._started_at = self.wall_time()
         self._director_idle_snapshot_activity: int | None = None
         self._director_idle_snapshot_state_ts: float | None = None
         self._director_composing_latched = False
         self._director_composing_activity: int | None = None
         self._director_composing_started_at: float | None = None
+        self._director_startup_hold_state_ts: float | None = None
+        self._director_startup_hold_started_at: float | None = None
 
     def _record_trace(self, target: str, trace: ActivityTrace) -> bool:
         self._last_trace_by_target[target] = trace
@@ -313,23 +320,38 @@ class PaneActivityGate:
         self._director_composing_latched = False
         self._director_composing_activity = None
         self._director_composing_started_at = None
+        self._director_startup_hold_state_ts = None
+        self._director_startup_hold_started_at = None
 
     def _director_is_composing(self, target: str, state: PaneHookState) -> ActivityTrace | None:
         current_activity = self._director_client_activity(target)
         if current_activity is None:
             return ActivityTrace(True, "client_activity_unavailable")
+        now = self.monotonic()
         if self._director_idle_snapshot_state_ts != state.updated_at:
             self._director_idle_snapshot_state_ts = state.updated_at
             self._director_idle_snapshot_activity = current_activity
             self._director_composing_latched = False
             self._director_composing_activity = None
             self._director_composing_started_at = None
+            if state.updated_at < self._started_at:
+                self._director_startup_hold_state_ts = state.updated_at
+                self._director_startup_hold_started_at = now
+                return ActivityTrace(True, "startup_latch_unestablished")
+            self._director_startup_hold_state_ts = None
+            self._director_startup_hold_started_at = None
             return None
         snapshot = self._director_idle_snapshot_activity
         if snapshot is None:
             self._director_idle_snapshot_activity = current_activity
             return None
-        now = self.monotonic()
+        if self._director_startup_hold_state_ts == state.updated_at and current_activity == snapshot:
+            hold_started_at = self._director_startup_hold_started_at if self._director_startup_hold_started_at is not None else now
+            if now - hold_started_at < self.director_startup_hold_seconds:
+                return ActivityTrace(True, "startup_latch_unestablished")
+            self._director_startup_hold_state_ts = None
+            self._director_startup_hold_started_at = None
+            return None
         if not self._director_composing_latched and current_activity > snapshot:
             self._director_composing_latched = True
             self._director_composing_activity = current_activity
@@ -910,6 +932,37 @@ LIMIT 1
                         busy_reason=activity_trace.reason,
                         region_digest=activity_trace.region_digest,
                         detail={"target": target, "attempts": attempts},
+                    )
+                    self._traced_gate_defer_notifications.add(notification_id)
+                self._requeue_notification(
+                    conn,
+                    notification_id,
+                    attempts,
+                    "pane busy",
+                    delay_seconds=self.busy_requeue_seconds,
+                )
+                continue
+            pane_busy = self.activity_gate(target)
+            activity_trace = self._activity_trace(target, pane_busy)
+            if pane_busy:
+                self.logger.info(
+                    "Pane %s became active before send; requeueing notification %s for %s",
+                    target,
+                    notification_id,
+                    ticket_id,
+                )
+                if notification_id not in self._traced_gate_defer_notifications:
+                    self._trace_notification(
+                        conn,
+                        notification_id=notification_id,
+                        ticket_id=ticket_id,
+                        target_role=target_role,
+                        kind=kind,
+                        event="gate_defer",
+                        pane_busy=True,
+                        busy_reason=activity_trace.reason,
+                        region_digest=activity_trace.region_digest,
+                        detail={"target": target, "attempts": attempts, "phase": "pre_send_recheck"},
                     )
                     self._traced_gate_defer_notifications.add(notification_id)
                 self._requeue_notification(

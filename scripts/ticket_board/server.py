@@ -56,6 +56,7 @@ OPERATION_ALLOWED_ROLES = {
 }
 EDIT_FIELD_NAMES = {
     "title",
+    "body",
     "parent_id",
     "screenshots",
     "screenshot",

@@ -187,8 +187,11 @@ def main() -> int:
     assert "create trigger tickets_enforce_workflow_update" in executable_schema_lower
     assert "create trigger tickets_zzz_notify_transition" in executable_schema_lower
     assert "after insert or update on ticket_board.tickets" in executable_schema_lower
+    assert "kind in ('transition', 'ticket_update', 'nudge', 'escalation')" in executable_schema_lower
     assert "create or replace function ticket_board.enforce_ticket_workflow_update" in executable_schema_lower
     assert "create or replace function ticket_board.enqueue_transition_notification" in executable_schema_lower
+    assert "create or replace function ticket_board.ticket_update_message" in executable_schema_lower
+    assert "create or replace function ticket_board.notify_ticket_owner_in_place_change" in executable_schema_lower
     assert "create or replace function ticket_board.unblock_transition_target_role" in executable_schema_lower
     assert "create or replace function ticket_board.unblock_transition_message" in executable_schema_lower
     assert "create or replace function ticket_board.enqueue_unblock_notification" in executable_schema_lower
@@ -219,6 +222,12 @@ def main() -> int:
     assert "create or replace function ticket_board.unblock_transition_target_role" in backlog_unblock_revert_migration
     assert "select ticket_board.transition_target_role(p_state, p_assignee);" in backlog_unblock_revert_migration
     assert "when p_state = 'backlog' then 'director'" not in backlog_unblock_revert_migration
+    owner_update_notify_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "277_owner_update_notifications.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "ticket_update" in owner_update_notify_migration
+    assert "create or replace function ticket_board.notify_ticket_owner_in_place_change" in owner_update_notify_migration
+    assert "current_state is not distinct from new_state" in owner_update_notify_migration
     assert "create or replace function ticket_board.notify_ticket_state_transition" in executable_schema_lower
     assert "pg_notify" in executable_schema_lower, "PGU-191 must notify on state transitions"
     assert "manually_controlled" in executable_schema_lower, "PGU-191 triggers must honor manual control"

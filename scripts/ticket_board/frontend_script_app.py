@@ -175,6 +175,7 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
     function metadataPatch(patch) {
       const allowed = new Set([
         'title',
+        'body',
         'parent_id',
         'screenshots',
         'screenshot',

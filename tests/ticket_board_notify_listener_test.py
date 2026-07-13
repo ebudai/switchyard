@@ -981,6 +981,32 @@ def test_director_erased_draft_releases_without_submit() -> None:
         assert gate.last_trace("pgu-director:0.0").reason == "hook_idle"  # type: ignore[union-attr]
 
 
+def test_cursor_advanced_never_releases_on_elapsed_time() -> None:
+    now = [0.0]
+    cursor = ["5 23 24"]
+
+    def cursor_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=f"{cursor[0]}\n")
+
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            cursor_position_runner=cursor_runner,
+            director_composing_timeout_seconds=0.01,
+            monotonic=lambda: now[0],
+            wall_time=lambda: 0.0,
+        )
+        store.write("pgu-director:0.0", "idle", source="claude.Notification.idle_prompt", now=10.0)
+
+        assert gate.is_busy("pgu-director:0.0") is True
+        assert gate.last_trace("pgu-director:0.0").reason == "human_composing"  # type: ignore[union-attr]
+
+        now[0] = 10_000.0
+        assert gate.is_busy("pgu-director:0.0") is True
+        assert gate.last_trace("pgu-director:0.0").reason == "human_composing"  # type: ignore[union-attr]
+
+
 def test_listener_logs_missing_hook_state_on_startup() -> None:
     with TemporaryStateDir() as tmp_path:
         store, gate = hook_gate(tmp_path)
@@ -1169,6 +1195,7 @@ def main() -> int:
     test_director_paused_mid_compose_stays_held_until_busy_idle_cycle()
     test_director_idle_without_detected_activity_does_not_false_latch()
     test_director_erased_draft_releases_without_submit()
+    test_cursor_advanced_never_releases_on_elapsed_time()
     test_listener_logs_missing_hook_state_on_startup()
     test_send_failure_uses_exponential_backoff()
     test_stale_notification_for_cancelled_ticket_is_acked_not_delivered()

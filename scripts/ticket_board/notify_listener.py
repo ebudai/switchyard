@@ -252,9 +252,7 @@ class PaneActivityGate:
     ) -> None:
         self.state_store = state_store or PaneHookStateStore()
         self.director_target = director_target
-        self.client_activity_runner = client_activity_runner
         self.cursor_position_runner = cursor_position_runner
-        self.director_composing_timeout_seconds = director_composing_timeout_seconds
         self.director_startup_hold_seconds = director_startup_hold_seconds
         self.director_composer_home_x = director_composer_home_x
         self.monotonic = monotonic
@@ -262,13 +260,9 @@ class PaneActivityGate:
         self._last_trace_by_target: dict[str, ActivityTrace] = {}
         self._last_hook_state_by_target: dict[str, tuple[str, float]] = {}
         self._started_at = self.wall_time()
-        self._director_idle_snapshot_activity: int | None = None
-        self._director_idle_snapshot_state_ts: float | None = None
-        self._director_composing_latched = False
-        self._director_composing_activity: int | None = None
-        self._director_composing_started_at: float | None = None
         self._director_startup_hold_state_ts: float | None = None
         self._director_startup_hold_started_at: float | None = None
+        self._director_startup_released_state_ts: float | None = None
 
     def _record_trace(self, target: str, trace: ActivityTrace) -> bool:
         self._last_trace_by_target[target] = trace
@@ -299,26 +293,6 @@ class PaneActivityGate:
     def _tmux_session_for_target(self, target: str) -> str:
         return target.split(":", 1)[0]
 
-    def _director_client_activity(self, target: str) -> int | None:
-        session = self._tmux_session_for_target(target)
-        try:
-            proc = self.client_activity_runner(
-                ["tmux", "list-clients", "-t", session, "-F", "#{client_activity}"],
-                check=True,
-                text=True,
-                capture_output=True,
-                timeout=2.0,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return None
-        values: list[int] = []
-        for line in proc.stdout.splitlines():
-            try:
-                values.append(int(line.strip()))
-            except ValueError:
-                continue
-        return max(values) if values else None
-
     def _target_cursor_state(self, target: str) -> bool | None:
         try:
             proc = self.cursor_position_runner(
@@ -342,101 +316,59 @@ class PaneActivityGate:
         home_row = pane_height - 1
         return cursor_x > self.director_composer_home_x or cursor_y < home_row
 
-    def _reset_director_latch(self) -> None:
-        self._director_idle_snapshot_activity = None
-        self._director_idle_snapshot_state_ts = None
-        self._director_composing_latched = False
-        self._director_composing_activity = None
-        self._director_composing_started_at = None
+    def _reset_director_startup_hold(self, *, clear_released: bool = True) -> None:
         self._director_startup_hold_state_ts = None
         self._director_startup_hold_started_at = None
+        if clear_released:
+            self._director_startup_released_state_ts = None
 
-    def _director_is_composing(self, target: str, state: PaneHookState, *, cursor_composing: bool | None) -> ActivityTrace | None:
-        current_activity = self._director_client_activity(target)
-        if current_activity is None:
-            return ActivityTrace(True, "client_activity_unavailable")
+    def _director_startup_hold_trace(self, state: PaneHookState) -> ActivityTrace | None:
+        if state.updated_at >= self._started_at:
+            self._reset_director_startup_hold()
+            return None
+        if self._director_startup_released_state_ts == state.updated_at:
+            return None
         now = self.monotonic()
-        if self._director_idle_snapshot_state_ts != state.updated_at:
-            self._director_idle_snapshot_state_ts = state.updated_at
-            self._director_idle_snapshot_activity = current_activity
-            self._director_composing_latched = False
-            self._director_composing_activity = None
-            self._director_composing_started_at = None
-            if cursor_composing:
-                self._director_composing_latched = True
-                self._director_composing_activity = current_activity
-                self._director_composing_started_at = now
-                self._director_startup_hold_state_ts = None
-                self._director_startup_hold_started_at = None
-                return ActivityTrace(True, "human_composing")
-            if state.updated_at < self._started_at:
-                self._director_startup_hold_state_ts = state.updated_at
-                self._director_startup_hold_started_at = now
-                return ActivityTrace(True, "startup_latch_unestablished")
-            self._director_startup_hold_state_ts = None
-            self._director_startup_hold_started_at = None
-            return None
-        snapshot = self._director_idle_snapshot_activity
-        if snapshot is None:
-            self._director_idle_snapshot_activity = current_activity
-            return None
-        if self._director_startup_hold_state_ts == state.updated_at and current_activity == snapshot:
-            hold_started_at = self._director_startup_hold_started_at if self._director_startup_hold_started_at is not None else now
-            if now - hold_started_at < self.director_startup_hold_seconds:
-                return ActivityTrace(True, "startup_latch_unestablished")
-            self._director_startup_hold_state_ts = None
-            self._director_startup_hold_started_at = None
-            return None
-        if cursor_composing is True:
-            self._director_composing_latched = True
-            self._director_composing_activity = current_activity
-            self._director_composing_started_at = now
+        if self._director_startup_hold_state_ts != state.updated_at:
+            self._director_startup_hold_state_ts = state.updated_at
+            self._director_startup_hold_started_at = now
+            return ActivityTrace(True, "startup_latch_unestablished")
+        hold_started_at = self._director_startup_hold_started_at if self._director_startup_hold_started_at is not None else now
+        if now - hold_started_at < self.director_startup_hold_seconds:
+            return ActivityTrace(True, "startup_latch_unestablished")
+        self._director_startup_released_state_ts = state.updated_at
+        self._reset_director_startup_hold(clear_released=False)
+        return None
+
+    def _idle_cursor_trace(self, target: str, state: PaneHookState) -> ActivityTrace:
+        cursor_composing = self._target_cursor_state(target)
+        if target == self.director_target:
+            startup_trace = self._director_startup_hold_trace(state)
+            if startup_trace is not None and cursor_composing is not True:
+                return startup_trace
+        if cursor_composing is None:
+            return ActivityTrace(True, "cursor_state_unavailable")
+        if cursor_composing:
             return ActivityTrace(True, "human_composing")
-        if cursor_composing is False:
-            self._director_idle_snapshot_activity = current_activity
-            self._director_composing_latched = False
-            self._director_composing_activity = None
-            self._director_composing_started_at = None
-            return None
-        if not self._director_composing_latched and current_activity > snapshot:
-            self._director_composing_latched = True
-            self._director_composing_activity = current_activity
-            self._director_composing_started_at = now
-        elif (
-            self._director_composing_latched
-            and self._director_composing_activity is not None
-            and current_activity > self._director_composing_activity
-        ):
-            self._director_composing_activity = current_activity
-            self._director_composing_started_at = now
-        if not self._director_composing_latched:
-            return None
-        return ActivityTrace(True, "human_composing")
+        return ActivityTrace(False, "hook_idle")
 
     def is_busy(self, target: str) -> bool:
         state = self.state_store.read(target)
         if state is None:
             if target == self.director_target:
-                self._reset_director_latch()
+                self._reset_director_startup_hold()
             return self._record_trace(target, ActivityTrace(True, "no_hook_state"))
         previous = self._last_hook_state_by_target.get(target)
         current = (state.state, state.updated_at)
         self._last_hook_state_by_target[target] = current
         if state.state != "idle":
             if target == self.director_target:
-                self._reset_director_latch()
+                self._reset_director_startup_hold()
             reason = "hook_blocked" if state.state == "blocked" else "hook_busy"
             return self._record_trace(target, ActivityTrace(True, reason))
         if previous is not None and previous[0] != "idle" and target == self.director_target:
-            self._reset_director_latch()
-        cursor_composing = self._target_cursor_state(target)
-        if target == self.director_target:
-            composing_trace = self._director_is_composing(target, state, cursor_composing=cursor_composing)
-            if composing_trace is not None:
-                return self._record_trace(target, composing_trace)
-        elif cursor_composing:
-            return self._record_trace(target, ActivityTrace(True, "human_composing"))
-        return self._record_trace(target, ActivityTrace(False, "hook_idle"))
+            self._reset_director_startup_hold()
+        return self._record_trace(target, self._idle_cursor_trace(target, state))
 
     def is_working(self, target: str) -> bool:
         return self.is_busy(target)

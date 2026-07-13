@@ -1052,7 +1052,6 @@ AS $$
         ticket_board.transition_target_role(p_state, p_assignee),
         CASE
             WHEN p_state = 'backlog' THEN 'director'
-            WHEN p_state = 'analysis' AND p_assignee = 'unassigned' THEN 'director'
             ELSE NULL
         END
     );

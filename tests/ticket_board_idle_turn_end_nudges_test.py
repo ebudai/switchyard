@@ -160,21 +160,24 @@ FROM (
             assert first_wave_rows == {
                 "PGU-3541": {
                     "queued": {"idle_reminder:ops": 1},
-                    "message": "PGU-3541 is still in in_progress and you haven't advanced it. Advance it now (do the work or hand it off). If you genuinely CANNOT, notify the director directly with the reason. Do NOT do nothing.",
+                    "message": "PGU-3541 is still in in_progress and you haven't advanced it. Advance it now (do the work or hand it off). If you genuinely CANNOT move it forward, tell the director directly what is wrong. Do NOT do nothing.",
                 },
                 "PGU-3543": {
                     "queued": {"idle_reminder:audit": 1},
-                    "message": "PGU-3543 is still in audit and you haven't advanced it. Advance it now (do the work or hand it off). If you genuinely CANNOT, notify the director directly with the reason. Do NOT do nothing.",
+                    "message": "PGU-3543 is still in audit and you haven't advanced it. Advance it now (do the work or hand it off). If you genuinely CANNOT move it forward, tell the director directly what is wrong. Do NOT do nothing.",
                 },
                 "PGU-3545": {
                     "queued": {"idle_reminder:inspector": 1},
-                    "message": "PGU-3545 is still in inspection and you haven't advanced it. Advance it now (do the work or hand it off). If you genuinely CANNOT, notify the director directly with the reason. Do NOT do nothing.",
+                    "message": "PGU-3545 is still in inspection and you haven't advanced it. Advance it now (do the work or hand it off). If you genuinely CANNOT move it forward, tell the director directly what is wrong. Do NOT do nothing.",
                 },
                 "PGU-3546": {
                     "queued": None,
                     "message": None,
                 },
             }, first_wave_rows
+            for ticket_id in ("PGU-3541", "PGU-3543", "PGU-3545"):
+                assert "<" not in first_wave_rows[ticket_id]["message"], first_wave_rows
+                assert "Eric" not in first_wave_rows[ticket_id]["message"], first_wave_rows
 
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
             analysis_wave_returned = psql(
@@ -211,9 +214,11 @@ LIMIT 1;
             )
             assert analysis_wave_row == {
                 "target_role": "director",
-                "message": "PGU-3542 is still in analysis and you haven't advanced it. Advance it now (do the work or hand it off). Do NOT do nothing.",
+                "message": "PGU-3542 is still in analysis and you haven't advanced it. Advance it now (do the work or hand it off). If you genuinely CANNOT move it forward, tell Eric directly what is wrong. Do NOT do nothing.",
                 "state": "analysis",
             }, analysis_wave_row
+            assert "<" not in analysis_wave_row["message"], analysis_wave_row
+            assert "tell Eric directly what is wrong" in analysis_wave_row["message"], analysis_wave_row
 
             psql(
                 conninfo,
@@ -262,9 +267,11 @@ LIMIT 1;
             assert advanced_wave_row == {
                 "target_role": "main",
                 "kind": "idle_reminder",
-                "message": "PGU-3542 is still in in_progress and you haven't advanced it. Advance it now (do the work or hand it off). If you genuinely CANNOT, notify the director directly with the reason. Do NOT do nothing.",
+                "message": "PGU-3542 is still in in_progress and you haven't advanced it. Advance it now (do the work or hand it off). If you genuinely CANNOT move it forward, tell the director directly what is wrong. Do NOT do nothing.",
                 "state": "in_progress",
             }, advanced_wave_row
+            assert "<" not in advanced_wave_row["message"], advanced_wave_row
+            assert "Eric" not in advanced_wave_row["message"], advanced_wave_row
 
             psql(
                 conninfo,
@@ -317,9 +324,11 @@ LIMIT 1;
             )
             assert director_review_row == {
                 "target_role": "director",
-                "message": "PGU-3547 is still in director_review and you haven't advanced it. Advance it now (do the work or hand it off). Do NOT do nothing.",
+                "message": "PGU-3547 is still in director_review and you haven't advanced it. Advance it now (do the work or hand it off). If you genuinely CANNOT move it forward, tell Eric directly what is wrong. Do NOT do nothing.",
                 "state": "director_review",
             }, director_review_row
+            assert "<" not in director_review_row["message"], director_review_row
+            assert "tell Eric directly what is wrong" in director_review_row["message"], director_review_row
 
             second_director_review_returned = psql(
                 conninfo,

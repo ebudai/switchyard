@@ -271,6 +271,14 @@ def main() -> int:
     assert "create or replace function ticket_board.idle_without_advancing_director_message" in idle_reminder_escalation_migration
     assert "'escalation'" in idle_reminder_escalation_migration
     assert "idle_reminder_count = idle_reminder_count + 1" in idle_reminder_escalation_migration
+    idle_reminder_clause_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "281_idle_reminder_escalate_problem_clause.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "tell the director directly what is wrong" in idle_reminder_clause_migration
+    assert "tell eric directly what is wrong" in idle_reminder_clause_migration
+    assert "<the next rung>" not in idle_reminder_clause_migration
+    assert "tell the director directly what is wrong" in executable_schema_lower
+    assert "tell eric directly what is wrong" in executable_schema_lower
     assert "create or replace function ticket_board.notify_ticket_state_transition" in executable_schema_lower
     assert "pg_notify" in executable_schema_lower, "PGU-191 must notify on state transitions"
     assert "manually_controlled" in executable_schema_lower, "PGU-191 triggers must honor manual control"

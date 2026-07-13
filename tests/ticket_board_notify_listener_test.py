@@ -622,6 +622,154 @@ def test_hook_busy_requeues_with_fixed_interval() -> None:
     assert delays == [f"{DEFAULT_BUSY_REQUEUE_SECONDS:g} seconds"] * 3
 
 
+def test_ticket_update_delivers_immediately_to_busy_worker_with_empty_composer() -> None:
+    sent: list[tuple[str, str]] = []
+    with TemporaryStateDir() as tmp_path:
+        store, gate = hook_gate(tmp_path)
+        store.write("pgu-ops:0.0", "busy", source="codex.PreToolUse", now=100.0)
+        conn = FakeConnection(
+            [
+                queue_row(
+                    82,
+                    "PGU-361",
+                    kind="ticket_update",
+                    state="in_progress",
+                    assignee="ops",
+                    target_role="ops",
+                    message="PGU-361 (in in_progress, that you own) was changed by director: spec updated -- re-read it before continuing.",
+                )
+            ],
+            ticket_rows={"PGU-361": ("in_progress", "ops", False, False)},
+        )
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=gate.is_working,
+            connector=lambda *args, **kwargs: conn,
+            poll_seconds=0,
+        )
+
+        assert listener.process_due_notifications(conn, max_notifications=1) == 1
+
+    assert sent == [
+        (
+            "pgu-ops:0.0",
+            "PGU-361 (in in_progress, that you own) was changed by director: spec updated -- re-read it before continuing.",
+        )
+    ]
+    assert conn.requeued == []
+    assert conn.acked == [82]
+    assert trace_events(conn) == ["listener_claim", "send", "listener_ack"]
+
+
+def test_ticket_update_waits_for_worker_human_composing_to_clear() -> None:
+    sent: list[tuple[str, str]] = []
+    cursor = ["5 23 24"]
+
+    def cursor_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=f"{cursor[0]}\n")
+
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(state_store=store, cursor_position_runner=cursor_runner)
+        store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
+
+        held_conn = FakeConnection(
+            [
+                queue_row(
+                    83,
+                    "PGU-361A",
+                    kind="ticket_update",
+                    state="in_progress",
+                    assignee="ops",
+                    target_role="ops",
+                    message="PGU-361A (in in_progress, that you own) was changed by director: spec updated -- re-read it before continuing.",
+                )
+            ],
+            ticket_rows={"PGU-361A": ("in_progress", "ops", False, False)},
+        )
+        held_listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=gate.is_working,
+            connector=lambda *args, **kwargs: held_conn,
+            poll_seconds=0,
+        )
+        assert held_listener.process_due_notifications(held_conn, max_notifications=1) == 0
+        assert sent == []
+        assert held_conn.requeued == [(83, (83, "1 seconds", "pane busy"))]
+        assert held_conn.traces[1][6] == "human_composing"
+
+        cursor[0] = "2 23 24"
+        delivered_conn = FakeConnection(
+            [
+                queue_row(
+                    84,
+                    "PGU-361A",
+                    kind="ticket_update",
+                    state="in_progress",
+                    assignee="ops",
+                    target_role="ops",
+                    message="PGU-361A (in in_progress, that you own) was changed by director: spec updated -- re-read it before continuing.",
+                )
+            ],
+            ticket_rows={"PGU-361A": ("in_progress", "ops", False, False)},
+        )
+        delivered_listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=gate.is_working,
+            connector=lambda *args, **kwargs: delivered_conn,
+            poll_seconds=0,
+        )
+        assert delivered_listener.process_due_notifications(delivered_conn, max_notifications=1) == 1
+
+    assert sent == [
+        (
+            "pgu-ops:0.0",
+            "PGU-361A (in in_progress, that you own) was changed by director: spec updated -- re-read it before continuing.",
+        )
+    ]
+    assert delivered_conn.acked == [84]
+
+
+def test_ticket_update_holds_busy_worker_with_advanced_cursor() -> None:
+    sent: list[tuple[str, str]] = []
+    cursor_runner = constant_cursor_runner("5 23 24")
+
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(state_store=store, cursor_position_runner=cursor_runner)
+        store.write("pgu-ops:0.0", "busy", source="codex.PreToolUse", now=100.0)
+        conn = FakeConnection(
+            [
+                queue_row(
+                    88,
+                    "PGU-361B",
+                    kind="ticket_update",
+                    state="in_progress",
+                    assignee="ops",
+                    target_role="ops",
+                    message="PGU-361B (in in_progress, that you own) was changed by director: spec updated -- re-read it before continuing.",
+                )
+            ],
+            ticket_rows={"PGU-361B": ("in_progress", "ops", False, False)},
+        )
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=gate.is_working,
+            connector=lambda *args, **kwargs: conn,
+            poll_seconds=0,
+        )
+
+        assert listener.process_due_notifications(conn, max_notifications=1) == 0
+
+    assert sent == []
+    assert conn.requeued == [(88, (88, "1 seconds", "pane busy"))]
+    assert conn.traces[1][6] == "human_composing"
+
+
 def test_hook_busy_traces_only_first_gate_defer_per_notification() -> None:
     sent: list[tuple[str, str]] = []
     with TemporaryStateDir() as tmp_path:
@@ -1441,6 +1589,9 @@ def main() -> int:
     test_display_message_renames_analysis_stage_copy_without_touching_titles()
     test_missing_hook_state_fails_safe_and_does_not_clobber()
     test_hook_busy_requeues_with_fixed_interval()
+    test_ticket_update_delivers_immediately_to_busy_worker_with_empty_composer()
+    test_ticket_update_waits_for_worker_human_composing_to_clear()
+    test_ticket_update_holds_busy_worker_with_advanced_cursor()
     test_hook_busy_traces_only_first_gate_defer_per_notification()
     test_new_assignment_waits_behind_existing_in_progress_ticket()
     test_two_in_progress_tickets_do_not_mutually_finish_current_deadlock()

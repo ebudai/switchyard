@@ -39,6 +39,7 @@ DEFAULT_IDLE_STALL_GRACE_SECONDS = 45.0
 DEFAULT_IDLE_STALL_NUDGE_CADENCE_SECONDS = 5 * 60.0
 DEFAULT_IDLE_STALL_ESCALATE_AFTER = 2
 IDLE_TURN_END_SOURCES = frozenset({"claude.Stop", "codex.Stop", "gemini.AfterAgent"})
+IMMEDIATE_DELIVERY_KINDS = frozenset({"ticket_update"})
 DEFAULT_PRE_SEND_RECHECK_DELAY_SECONDS = 0.5
 DEFAULT_DIRECTOR_COMPOSER_HOME_X = 2
 DEFAULT_PANE_STATE_DIR = (
@@ -375,6 +376,31 @@ class PaneActivityGate:
             return ActivityTrace(True, "human_composing")
         return ActivityTrace(False, "hook_idle")
 
+    def anti_clobber_trace(self, target: str) -> ActivityTrace:
+        state = self.state_store.read(target)
+        if state is None:
+            if target == self.director_target:
+                self._reset_director_startup_hold()
+            return ActivityTrace(True, "no_hook_state")
+        previous = self._last_hook_state_by_target.get(target)
+        current = (state.state, state.updated_at)
+        self._last_hook_state_by_target[target] = current
+        if state.state != "idle":
+            if target == self.director_target:
+                self._reset_director_startup_hold()
+            cursor_composing = self._target_cursor_state(target)
+            if cursor_composing is None:
+                return ActivityTrace(True, "cursor_state_unavailable")
+            if cursor_composing:
+                return ActivityTrace(True, "human_composing")
+            return ActivityTrace(False, "hook_idle")
+        if previous is not None and previous[0] != "idle" and target == self.director_target:
+            self._reset_director_startup_hold()
+        return self._idle_cursor_trace(target, state)
+
+    def anti_clobber_busy(self, target: str) -> bool:
+        return self._record_trace(target, self.anti_clobber_trace(target))
+
     def is_busy(self, target: str) -> bool:
         state = self.state_store.read(target)
         if state is None:
@@ -520,6 +546,19 @@ FROM ticket_board.claim_notification()
             if isinstance(trace, ActivityTrace):
                 return trace
         return ActivityTrace(pane_busy, "busy" if pane_busy else "idle")
+
+    def _activity_state_for_notification(self, kind: str, target: str) -> tuple[bool, ActivityTrace]:
+        gate_owner = getattr(self.activity_gate, "__self__", None)
+        if kind in IMMEDIATE_DELIVERY_KINDS:
+            anti_clobber_busy = getattr(gate_owner, "anti_clobber_busy", None)
+            if callable(anti_clobber_busy):
+                pane_busy = bool(anti_clobber_busy(target))
+                return pane_busy, self._activity_trace(target, pane_busy)
+        pane_busy = self.activity_gate(target)
+        return pane_busy, self._activity_trace(target, pane_busy)
+
+    def _should_defer_for_activity(self, activity_trace: ActivityTrace) -> bool:
+        return activity_trace.busy
 
     def _trace_notification(
         self,
@@ -965,9 +1004,8 @@ LIMIT 1
                     delay_seconds=self.busy_requeue_seconds,
                 )
                 continue
-            pane_busy = self.activity_gate(target)
-            activity_trace = self._activity_trace(target, pane_busy)
-            if pane_busy:
+            pane_busy, activity_trace = self._activity_state_for_notification(kind, target)
+            if self._should_defer_for_activity(activity_trace):
                 self.logger.info("Pane %s is active; requeueing notification %s for %s", target, notification_id, ticket_id)
                 if notification_id not in self._traced_gate_defer_notifications:
                     self._trace_notification(
@@ -995,9 +1033,8 @@ LIMIT 1
                 self.sleeper(self.pre_send_recheck_delay_seconds)
                 if self.stop_event.is_set():
                     break
-            pane_busy = self.activity_gate(target)
-            activity_trace = self._activity_trace(target, pane_busy)
-            if pane_busy:
+            pane_busy, activity_trace = self._activity_state_for_notification(kind, target)
+            if self._should_defer_for_activity(activity_trace):
                 self.logger.info(
                     "Pane %s became active before send; requeueing notification %s for %s",
                     target,

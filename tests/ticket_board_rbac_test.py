@@ -180,7 +180,10 @@ FROM unnest({ROLE_SQL_ARRAY}) AS role_name;
             )
         )
         for role in EXPECTED_ROLES:
-            assert rows[role] == (role == "ticket_board_service"), (signature, role, rows)
+            expected = role == "ticket_board_service"
+            if signature == "ticket_board.file_bug(text,text,text)" and role == "audit":
+                expected = True
+            assert rows[role] == expected, (signature, role, rows)
     for signature in LISTENER_FUNCTIONS:
         rows = json.loads(
             psql(
@@ -723,6 +726,23 @@ SELECT ticket_board.edit_fields('PGU-811', '{"commit_exempt":true}'::jsonb);
     assert psql(admin_conn, "SELECT state || ':' || commit_exempt::text FROM ticket_board.tickets WHERE id = 'PGU-820';") == "done:true"
 
 
+def assert_audit_direct_file_bug_grant(admin_conn: str, role_conn: dict[str, str]) -> None:
+    insert_ticket(admin_conn, "PGU-150", title="Direct audit source")
+    filed = psql(role_conn["audit"], "SELECT ticket_board.file_bug('Direct audit bug', 'Body', 'PGU-150');")
+    filed_row = json.loads(
+        psql(
+            admin_conn,
+            f"""
+SELECT jsonb_build_object('state', state, 'assignee', assignee, 'parent_id', parent_id)::text
+FROM ticket_board.tickets
+WHERE id = {sql_string(filed)};
+""",
+        )
+    )
+    assert filed_row == {"state": "analysis", "assignee": "unassigned", "parent_id": "PGU-150"}, filed_row
+    assert_permission_denied(role_conn["main"], "SELECT ticket_board.file_bug('Main cannot file bug', 'Body', 'PGU-150');")
+
+
 def assert_structural_rules_still_apply(admin_conn: str, service_conn: str) -> None:
     assert "source_ticket_id must look like PGU-N" in psql_error(
         service_conn,
@@ -1066,6 +1086,7 @@ FROM unnest({ROLE_SQL_ARRAY}) AS role_name;
             service_conn = role_conn["ticket_board_service"]
             listener_conn = role_conn["ticket_board_listener"]
             assert_service_can_execute_every_write_function(admin_conn, service_conn)
+            assert_audit_direct_file_bug_grant(admin_conn, role_conn)
             assert_structural_rules_still_apply(admin_conn, service_conn)
             assert_deferred_cancel_resurrect_clears_park_and_notifies(admin_conn, service_conn)
             assert_listener_can_execute_reconcile_functions(admin_conn, listener_conn, service_conn)

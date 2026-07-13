@@ -2758,7 +2758,15 @@ DECLARE
     created_at_value timestamptz := clock_timestamp();
     created_text_value text := ticket_board.utc_text(created_at_value);
 BEGIN
-    actor := ticket_board.require_actor(ARRAY['main', 'app', 'ops', 'perf', 'research'], 'file_bug');
+    actor := ticket_board.current_actor_role();
+    IF actor = 'ticket_board_service' THEN
+        PERFORM ticket_board.require_actor(ARRAY['main', 'app', 'ops', 'perf', 'research', 'audit'], 'file_bug');
+        actor := ticket_board.current_app_actor();
+    END IF;
+    IF actor NOT IN ('ticket_board_service', 'main', 'app', 'ops', 'perf', 'research', 'audit') THEN
+        RAISE EXCEPTION 'role % cannot call file_bug', actor
+            USING ERRCODE = '42501';
+    END IF;
     IF btrim(coalesce(title, '')) = '' THEN
         RAISE EXCEPTION 'title must be non-empty';
     END IF;

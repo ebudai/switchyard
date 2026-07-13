@@ -34,7 +34,7 @@ IMPLEMENTER_ROLES = {"main", "app", "ops", "perf", "research"}
 CALLER_ROLES = IMPLEMENTER_ROLES | {"director", "eric", "audit", "inspector"}
 OPERATION_ALLOWED_ROLES = {
     "create_ticket": {"director", "eric"},
-    "file_bug": IMPLEMENTER_ROLES,
+    "file_bug": IMPLEMENTER_ROLES | {"audit"},
     "route": {"director"},
     "start_work": IMPLEMENTER_ROLES,
     "submit_to_audit": IMPLEMENTER_ROLES,

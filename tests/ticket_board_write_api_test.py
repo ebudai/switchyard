@@ -547,6 +547,28 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     )
     filed = filed_payload["ticket"]  # type: ignore[index]
     assert filed["parent_id"] == source_id, filed  # type: ignore[index]
+    audit_filed_payload = post_json(
+        base_url,
+        "/api/tickets/actions/file_bug",
+        {"title": "Audit filed bug", "body": "Found during review.", "source_ticket_id": source_id},
+        caller="audit",
+        expect=201,
+    )
+    audit_filed = audit_filed_payload["ticket"]  # type: ignore[index]
+    assert audit_filed["parent_id"] == source_id, audit_filed  # type: ignore[index]
+    assert audit_filed["state"] == "analysis", audit_filed  # type: ignore[index]
+    assert audit_filed["assignee"] == "unassigned", audit_filed  # type: ignore[index]
+    main_filed_payload = post_json(
+        base_url,
+        "/api/tickets/actions/file_bug",
+        {"title": "Main filed bug", "body": "Found in implementation.", "source_ticket_id": source_id},
+        caller="main",
+        expect=201,
+    )
+    main_filed = main_filed_payload["ticket"]  # type: ignore[index]
+    assert main_filed["parent_id"] == source_id, main_filed  # type: ignore[index]
+    assert main_filed["state"] == "analysis", main_filed  # type: ignore[index]
+    assert main_filed["assignee"] == "unassigned", main_filed  # type: ignore[index]
 
     routed = post_json(base_url, "/api/tickets/PGU-100/actions/route", {"state": "backlog", "assignee": "ops"}, caller="director")
     assert routed["ticket"]["state"] == "backlog", routed  # type: ignore[index]

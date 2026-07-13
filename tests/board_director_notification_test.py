@@ -136,6 +136,7 @@ def post_create(
     *,
     caller: str,
     state: str = "analysis",
+    assignee: str = "app",
     blocked_by: list[str] | None = None,
     blocked_reason: str = "",
 ) -> dict[str, object]:
@@ -143,7 +144,7 @@ def post_create(
         {
             "title": title,
             "body": "Created through API.",
-            "assignee": "app",
+            "assignee": assignee,
             "state": state,
             "blocked_by": blocked_by or [],
             "blocked_reason": blocked_reason,
@@ -179,7 +180,7 @@ def post_file_bug(server: TicketBoardServer, title: str, *, caller: str) -> dict
         return json.loads(response.read().decode("utf-8"))
 
 
-def test_server_director_create_does_not_notify_director() -> None:
+def test_server_human_web_director_create_notifies_director() -> None:
     with tempfile.TemporaryDirectory(prefix="board-director-notify-server.") as tmpdir:
         root = Path(tmpdir)
         notifier = FakeNotifier()
@@ -191,9 +192,14 @@ def test_server_director_create_does_not_notify_director() -> None:
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            payload = post_create(server, "Director self-create", caller="director")
-            assert payload["ticket"]["title"] == "Director self-create", payload
-            assert notifier.created == [], notifier.created
+            payload = post_create(
+                server,
+                "Director web create",
+                caller="director",
+                assignee="unassigned",
+            )
+            assert payload["ticket"]["title"] == "Director web create", payload
+            assert notifier.created == [{"id": payload["ticket"]["id"], "title": "Director web create"}], notifier.created
         finally:
             server.shutdown()
             server.server_close()
@@ -306,7 +312,7 @@ def test_director_notifier_batches_quick_creates() -> None:
 
 
 def main() -> int:
-    test_server_director_create_does_not_notify_director()
+    test_server_human_web_director_create_notifies_director()
     test_server_non_director_file_bug_notifies_director()
     test_server_backlog_create_does_not_notify_director()
     test_server_blocked_create_does_not_notify_director()

@@ -145,6 +145,7 @@ class TicketBoardApp:
         blocked_reason: str = "",
         state: str = "analysis",
         implementation: str = "",
+        notification_source_role: str | None = None,
         caller_role: str | None = None,
     ) -> dict[str, Any]:
         state = self._validate_create_state(state)
@@ -169,6 +170,7 @@ class TicketBoardApp:
             blocked_reason=blocked_reason,
             commit_hash="",
             commit_exempt=False,
+            notification_source_role=notification_source_role,
             caller_role=caller_role,
         )
 
@@ -202,6 +204,7 @@ class TicketBoardApp:
         commit_exempt: bool = False,
         created: str | None = None,
         updated: str | None = None,
+        notification_source_role: str | None = None,
         caller_role: str | None = None,
     ) -> dict[str, Any]:
         return self._pg_create_ticket_record(
@@ -226,6 +229,7 @@ class TicketBoardApp:
             commit_exempt=commit_exempt,
             created=created,
             updated=updated,
+            notification_source_role=notification_source_role,
             caller_role=caller_role,
         )
 
@@ -552,6 +556,7 @@ ORDER BY t.ticket_number
         commit_exempt: bool = False,
         created: str | None = None,
         updated: str | None = None,
+        notification_source_role: str | None = None,
         caller_role: str | None = None,
     ) -> dict[str, Any]:
         title = self._require_text(title, "title").strip()
@@ -582,6 +587,8 @@ ORDER BY t.ticket_number
             with conn.transaction():
                 if caller_role:
                     self._pg_set_caller_role(conn, caller_role)
+                if notification_source_role:
+                    self._pg_set_notification_source_role(conn, notification_source_role)
                 parent_id = "" if parent_id in (None, "", "null") else str(parent_id).strip().upper()
                 if parent_id and create_state == "analysis" and not blocked_by:
                     ticket_id = self._pg_call_scalar(
@@ -722,6 +729,12 @@ ORDER BY t.ticket_number
 
     def _pg_set_caller_role(self, conn: Any, caller_role: str) -> None:
         conn.execute("SELECT set_config('ticket_board.caller_role', %s, true);", (caller_role,))
+
+    def _pg_set_notification_source_role(self, conn: Any, notification_source_role: str) -> None:
+        conn.execute(
+            "SELECT set_config('ticket_board.notification_source_role', %s, true);",
+            (notification_source_role,),
+        )
 
     def _pg_call_scalar(self, conn: Any, sql: str, params: tuple[Any, ...]) -> str:
         row = conn.execute(sql, params).fetchone()

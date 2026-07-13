@@ -19,7 +19,7 @@ chmod +x "$SOURCE_REPO/scripts/ticket-board-notify-listener"
 git -C "$SOURCE_REPO" add scripts/ticket-board-notify-listener
 git -C "$SOURCE_REPO" commit -m "seed" >/dev/null
 
-BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD \
+BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
     "$REPO_ROOT/scripts/ticket-board-notify-listener-service.sh" deploy >/dev/null
 
 [[ -L "$DEPLOY_ROOT/current" ]] || {
@@ -72,6 +72,18 @@ if grep -q '^RuntimeMaxSec=' "$UNIT_DIR/service.unit"; then
 fi
 grep -q 'ensure_database_roles' "$REPO_ROOT/scripts/ticket-board-notify-listener-service.sh" || {
     echo "FAIL: listener install path does not ensure ticket-board service roles" >&2
+    exit 1
+}
+grep -q 'apply_database_migrations' "$REPO_ROOT/scripts/ticket-board-notify-listener-service.sh" || {
+    echo "FAIL: listener deploy path does not apply ticket-board migrations" >&2
+    exit 1
+}
+grep -q 'ensure-migrations)' "$REPO_ROOT/scripts/ticket-board-notify-listener-service.sh" || {
+    echo "FAIL: listener script does not expose ensure-migrations for bootstrap testing" >&2
+    exit 1
+}
+grep -q 'TICKET_BOARD_ADMIN_DATABASE_URL="$BOARD_ADMIN_DATABASE_URL" "$MIGRATION_RUNNER"' "$REPO_ROOT/scripts/ticket-board-notify-listener-service.sh" || {
+    echo "FAIL: listener migration runner does not use the privileged admin database URL" >&2
     exit 1
 }
 grep -q 'BOARD_ADMIN_DATABASE_URL=".*user=postgres' "$REPO_ROOT/scripts/ticket-board-notify-listener-service.sh" || {

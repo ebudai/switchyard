@@ -18,12 +18,13 @@ readonly DEPLOY_REF="${DEPLOY_REF:-origin/main}"
 readonly BOARD_DATABASE_URL="${TICKET_BOARD_DATABASE_URL:-postgresql:///pgu?host=/var/run/postgresql&user=ticket_board_service}"
 readonly BOARD_ADMIN_DATABASE_URL="${TICKET_BOARD_ADMIN_DATABASE_URL:-postgresql:///pgu?host=/var/run/postgresql&user=postgres}"
 readonly RBAC_SQL="${RBAC_SQL:-$BOARD_CURRENT_LINK/scripts/ticket_board/rbac.sql}"
+readonly MIGRATION_RUNNER="${TICKET_BOARD_MIGRATION_RUNNER:-$BOARD_CURRENT_LINK/scripts/ticket-board-migrate}"
 readonly SMOKE_PATH="${BOARD_SMOKE_PATH:-/api/board}"
 readonly SMOKE_TIMEOUT_SECONDS="${BOARD_SMOKE_TIMEOUT_SECONDS:-10}"
 
 usage() {
     cat <<EOF
-Usage: scripts/ticket-board-service.sh <install|deploy|deploy-restart|ensure-roles|render-unit|start|stop|restart|status|logs>
+Usage: scripts/ticket-board-service.sh <install|deploy|deploy-restart|ensure-migrations|ensure-roles|render-unit|start|stop|restart|status|logs>
 
 Manage the PGU ticket board as an agent user systemd service.
 
@@ -31,6 +32,8 @@ Commands:
   install         Export $DEPLOY_REF into $BOARD_ROOT/current, write the unit, enable and start it
   deploy          Refresh $BOARD_ROOT/current from $DEPLOY_REF without restarting the service
   deploy-restart  Refresh $BOARD_ROOT/current from $DEPLOY_REF and restart the service
+  ensure-migrations
+                  Apply numbered SQL migrations and record them in schema_migrations
   ensure-roles    Apply the idempotent ticket-board RBAC SQL using a privileged admin connection
   render-unit     Print the systemd unit contents to stdout
   start|stop|restart|status
@@ -98,6 +101,16 @@ deploy_export() {
     fi
     ln -sfn "$release_dir" "$BOARD_CURRENT_LINK"
     printf '%s\n' "$resolved_ref"
+}
+
+apply_database_migrations() {
+    if [[ "${TICKET_BOARD_SKIP_MIGRATIONS:-}" == "1" ]]; then
+        log "skipping ticket-board migrations because TICKET_BOARD_SKIP_MIGRATIONS=1"
+        return 0
+    fi
+    [[ -x "$MIGRATION_RUNNER" ]] || die "missing executable migration runner after deploy: $MIGRATION_RUNNER"
+    TICKET_BOARD_ADMIN_DATABASE_URL="$BOARD_ADMIN_DATABASE_URL" "$MIGRATION_RUNNER"
+    log "applied ticket-board database migrations using $MIGRATION_RUNNER"
 }
 
 ensure_database_roles() {
@@ -172,6 +185,7 @@ write_unit() {
 install_service() {
     deploy_export >/dev/null
     [[ -f "$BOARD_SCRIPT" ]] || die "missing board script after deploy: $BOARD_SCRIPT"
+    apply_database_migrations
     ensure_database_roles
     ensure_user_manager
     write_unit
@@ -181,9 +195,17 @@ install_service() {
     log "installed + started $SERVICE_NAME"
 }
 
+deploy_service() {
+    local deployed_sha
+    deployed_sha="$(deploy_export)"
+    apply_database_migrations
+    printf '%s\n' "$deployed_sha"
+}
+
 deploy_restart_service() {
     local deployed_sha
     deployed_sha="$(deploy_export)"
+    apply_database_migrations
     ensure_user_manager
     write_unit
     systemctl_user daemon-reload
@@ -208,10 +230,13 @@ main() {
             install_service
             ;;
         deploy)
-            deploy_export
+            deploy_service
             ;;
         deploy-restart)
             deploy_restart_service
+            ;;
+        ensure-migrations)
+            apply_database_migrations
             ;;
         ensure-roles)
             ensure_database_roles

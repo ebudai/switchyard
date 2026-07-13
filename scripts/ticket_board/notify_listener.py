@@ -157,6 +157,13 @@ def message_for_transition(transition: Transition) -> str | None:
     return None
 
 
+def display_message(message: str) -> str:
+    return message.replace(
+        "needs director triage in analysis",
+        "needs director triage in Triage",
+    )
+
+
 class DirectorctlSender:
     def __init__(
         self,
@@ -438,7 +445,7 @@ class TicketBoardNotifyListener:
         if self.activity_gate(target):
             self.logger.info("Deferred notification for active pane %s", target)
             return False
-        self.sender(target, message)
+        self.sender(target, display_message(message))
         self.delivered_count += 1
         self.logger.info("Delivered %s transition to %s", transition.ticket_id, target)
         return True
@@ -914,7 +921,7 @@ LIMIT 1
                 )
                 continue
             try:
-                self.sender(target, message)
+                self.sender(target, display_message(message))
             except (subprocess.SubprocessError, OSError) as exc:
                 self.logger.warning("Failed to deliver queued ticket notification through directorctl: %s", exc)
                 self._trace_notification(

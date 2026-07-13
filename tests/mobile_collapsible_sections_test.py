@@ -101,7 +101,7 @@ def run_browser_check(playwright: object, server_port: int) -> None:
         assert create_toggle.get_attribute("aria-expanded") == "true"
         create_content.locator("#titleInput").wait_for(timeout=5000)
 
-        analysis_head = mobile.locator(".column-head").filter(has=mobile.locator(".column-title", has_text="Analysis"))
+        analysis_head = mobile.locator(".column-head").filter(has=mobile.locator(".column-title", has_text="Triage"))
         implementation_head = mobile.locator(".column-head").filter(has=mobile.locator(".column-title", has_text="Implementation"))
         audit_head = mobile.locator(".column-head").filter(has=mobile.locator(".column-title", has_text="Audit"))
         eric_head = mobile.locator(".column-head").filter(has=mobile.locator(".column-title", has_text="Eric Review"))
@@ -111,7 +111,7 @@ def run_browser_check(playwright: object, server_port: int) -> None:
         audit_head.get_by_text("(1)", exact=True).wait_for(timeout=5000)
         assert eric_head.locator(".mobile-section-count").count() == 0
 
-        analysis_column = mobile.locator(".column").filter(has=mobile.locator(".column-title", has_text="Analysis"))
+        analysis_column = mobile.locator(".column").filter(has=mobile.locator(".column-title", has_text="Triage"))
         assert analysis_head.get_attribute("aria-expanded") == "false"
         assert analysis_column.locator(".column-body").is_hidden()
         analysis_head.click()
@@ -131,11 +131,11 @@ def run_browser_check(playwright: object, server_port: int) -> None:
         desktop.goto(f"http://127.0.0.1:{server_port}/", wait_until="domcontentloaded")
         assert desktop.locator("#createSectionToggle").is_hidden()
         desktop_analysis_head = desktop.locator(".column-head").filter(
-            has=desktop.locator(".column-title", has_text="Analysis"),
+            has=desktop.locator(".column-title", has_text="Triage"),
         )
         assert desktop_analysis_head.get_attribute("aria-expanded") is None
         desktop.locator(".column").filter(
-            has=desktop.locator(".column-title", has_text="Analysis"),
+            has=desktop.locator(".column-title", has_text="Triage"),
         ).get_by_text("PGU-1", exact=True).wait_for(timeout=5000)
     finally:
         browser.close()

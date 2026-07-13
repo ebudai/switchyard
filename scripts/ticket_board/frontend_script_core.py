@@ -3,7 +3,7 @@
 SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     const COLUMNS = [
       { key: 'backlog', label: 'Backlog' },
-      { key: 'analysis', label: 'Analysis' },
+      { key: 'analysis', label: 'Triage' },
       { key: 'in_progress', label: 'Implementation' },
       { key: 'inspection', label: 'Inspection' },
       { key: 'audit', label: 'Audit' },

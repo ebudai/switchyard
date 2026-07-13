@@ -36,7 +36,7 @@ MARKUP = """  <div class="layout">
           <label>
             Initial State
             <select id="createStateInput">
-              <option value="analysis" selected>Analysis</option>
+              <option value="analysis" selected>Triage</option>
               <option value="backlog">Backlog</option>
             </select>
           </label>

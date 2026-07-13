@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression test: create form can choose Analysis or Backlog only."""
+"""Regression test: create form can choose Triage or Backlog only."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from scripts.ticket_board.frontend_script_core import SCRIPT_CORE
 
 def main() -> int:
     assert 'id="createStateInput"' in MARKUP
-    assert '<option value="analysis" selected>Analysis</option>' in MARKUP
+    assert '<option value="analysis" selected>Triage</option>' in MARKUP
     assert '<option value="backlog">Backlog</option>' in MARKUP
     assert "const createStateInput = document.getElementById('createStateInput');" in SCRIPT_CORE
     assert "state: createStateInput.value" in SCRIPT_APP

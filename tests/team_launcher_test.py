@@ -70,6 +70,42 @@ def _leaf_commands(node: object) -> list[str]:
     return commands
 
 
+def _layout_shape(node: object) -> object:
+    if isinstance(node, dict) and isinstance(node.get("Widgets"), list):
+        return {
+            "Orientation": node.get("Orientation"),
+            "Widgets": [_layout_shape(child) for child in node["Widgets"]],
+        }
+    return "leaf"
+
+
+def test_pgu_layout_matches_reference_six_pane_geometry() -> None:
+    layout = json.loads((ROOT / "config" / "team-launcher" / "pgu-konsole-layout.json").read_text(encoding="utf-8"))
+
+    assert _layout_shape(layout) == {
+        "Orientation": "Horizontal",
+        "Widgets": [
+            {
+                "Orientation": "Vertical",
+                "Widgets": ["leaf", "leaf"],
+            },
+            {
+                "Orientation": "Vertical",
+                "Widgets": [
+                    {
+                        "Orientation": "Horizontal",
+                        "Widgets": ["leaf", "leaf"],
+                    },
+                    {
+                        "Orientation": "Horizontal",
+                        "Widgets": ["leaf", "leaf"],
+                    },
+                ],
+            },
+        ],
+    }
+
+
 def test_dry_run_materializes_pgu_layout_with_six_visible_role_commands() -> None:
     config_path = ROOT / "config" / "team-launcher" / "pgu.json"
     config = load_project_config("pgu", config_path)
@@ -385,6 +421,7 @@ def test_reload_guard_matches_cli_child_under_shell_in_real_tmux() -> None:
         role = role.__class__(
             role=role.role,
             slot=role.slot,
+            detached=False,
             tmux_session=session,
             target=f"{session}:0.0",
             workdir=tmp,
@@ -441,6 +478,7 @@ def test_bootstrap_template_does_not_guess_active_roles() -> None:
 
 
 def main() -> int:
+    test_pgu_layout_matches_reference_six_pane_geometry()
     test_dry_run_materializes_pgu_layout_with_six_visible_role_commands()
     test_pgu_config_matches_director_supplied_live_role_assignments()
     test_yolo_config_translates_to_cli_specific_bypass_flags()

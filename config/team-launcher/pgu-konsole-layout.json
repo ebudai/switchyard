@@ -5,23 +5,16 @@
       "Orientation": "Vertical",
       "Widgets": [
         {
-          "Columns": 80,
+          "Columns": 109,
           "Command": "",
-          "Lines": 24,
+          "Lines": 43,
           "SessionRestoreId": 0,
           "WorkingDirectory": "/home/agent/Projects/pgu"
         },
         {
-          "Columns": 80,
+          "Columns": 109,
           "Command": "",
-          "Lines": 24,
-          "SessionRestoreId": 0,
-          "WorkingDirectory": "/home/agent/Projects/pgu"
-        },
-        {
-          "Columns": 80,
-          "Command": "",
-          "Lines": 24,
+          "Lines": 43,
           "SessionRestoreId": 0,
           "WorkingDirectory": "/home/agent/Projects/pgu"
         }
@@ -31,25 +24,42 @@
       "Orientation": "Vertical",
       "Widgets": [
         {
-          "Columns": 80,
-          "Command": "",
-          "Lines": 24,
-          "SessionRestoreId": 0,
-          "WorkingDirectory": "/home/agent/Projects/pgu"
+          "Orientation": "Horizontal",
+          "Widgets": [
+            {
+              "Columns": 105,
+              "Command": "",
+              "Lines": 43,
+              "SessionRestoreId": 0,
+              "WorkingDirectory": "/home/agent/Projects/pgu"
+            },
+            {
+              "Columns": 105,
+              "Command": "",
+              "Lines": 43,
+              "SessionRestoreId": 0,
+              "WorkingDirectory": "/home/agent/Projects/pgu"
+            }
+          ]
         },
         {
-          "Columns": 80,
-          "Command": "",
-          "Lines": 24,
-          "SessionRestoreId": 0,
-          "WorkingDirectory": "/home/agent/Projects/pgu"
-        },
-        {
-          "Columns": 80,
-          "Command": "",
-          "Lines": 24,
-          "SessionRestoreId": 0,
-          "WorkingDirectory": "/home/agent/Projects/pgu"
+          "Orientation": "Horizontal",
+          "Widgets": [
+            {
+              "Columns": 105,
+              "Command": "",
+              "Lines": 43,
+              "SessionRestoreId": 0,
+              "WorkingDirectory": "/home/agent/Projects/pgu"
+            },
+            {
+              "Columns": 105,
+              "Command": "",
+              "Lines": 43,
+              "SessionRestoreId": 0,
+              "WorkingDirectory": "/home/agent/Projects/pgu"
+            }
+          ]
         }
       ]
     }

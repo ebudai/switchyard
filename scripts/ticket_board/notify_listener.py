@@ -39,6 +39,7 @@ DEFAULT_IDLE_STALL_GRACE_SECONDS = 45.0
 DEFAULT_IDLE_STALL_NUDGE_CADENCE_SECONDS = 5 * 60.0
 DEFAULT_IDLE_STALL_ESCALATE_AFTER = 2
 IDLE_TURN_END_SOURCES = frozenset({"claude.Stop", "codex.Stop", "gemini.AfterAgent"})
+DEFAULT_PRE_SEND_RECHECK_DELAY_SECONDS = 0.5
 DEFAULT_DIRECTOR_COMPOSER_HOME_X = 2
 DEFAULT_PANE_STATE_DIR = (
     Path(os.environ["PGU_TICKET_BOARD_PANE_STATE_DIR"]).expanduser()
@@ -413,6 +414,8 @@ class TicketBoardNotifyListener:
         idle_stall_grace_seconds: float = DEFAULT_IDLE_STALL_GRACE_SECONDS,
         idle_stall_nudge_cadence_seconds: float = DEFAULT_IDLE_STALL_NUDGE_CADENCE_SECONDS,
         idle_stall_escalate_after: int = DEFAULT_IDLE_STALL_ESCALATE_AFTER,
+        pre_send_recheck_delay_seconds: float = 0.0,
+        sleeper: Callable[[float], None] = time.sleep,
         stop_event: threading.Event | None = None,
         logger: logging.Logger = LOGGER,
     ) -> None:
@@ -429,6 +432,8 @@ class TicketBoardNotifyListener:
         self.idle_stall_grace_seconds = idle_stall_grace_seconds
         self.idle_stall_nudge_cadence_seconds = idle_stall_nudge_cadence_seconds
         self.idle_stall_escalate_after = idle_stall_escalate_after
+        self.pre_send_recheck_delay_seconds = max(0.0, pre_send_recheck_delay_seconds)
+        self.sleeper = sleeper
         self.stop_event = stop_event or threading.Event()
         self.logger = logger
         self.delivered_count = 0
@@ -986,6 +991,10 @@ LIMIT 1
                     delay_seconds=self.busy_requeue_seconds,
                 )
                 continue
+            if self.pre_send_recheck_delay_seconds > 0:
+                self.sleeper(self.pre_send_recheck_delay_seconds)
+                if self.stop_event.is_set():
+                    break
             pane_busy = self.activity_gate(target)
             activity_trace = self._activity_trace(target, pane_busy)
             if pane_busy:
@@ -1135,6 +1144,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS)
     parser.add_argument("--pane-state-dir", default=str(DEFAULT_PANE_STATE_DIR), help=f"per-pane hook state directory (default: {DEFAULT_PANE_STATE_DIR})")
     parser.add_argument("--director-composing-timeout-seconds", type=float, default=DEFAULT_DIRECTOR_COMPOSING_TIMEOUT_SECONDS)
+    parser.add_argument("--pre-send-recheck-delay-seconds", type=float, default=DEFAULT_PRE_SEND_RECHECK_DELAY_SECONDS)
     parser.add_argument("--verbose", action="store_true")
     return parser
 
@@ -1155,6 +1165,7 @@ def main(argv: list[str] | None = None) -> int:
         ).is_working,
         reconnect_seconds=args.reconnect_seconds,
         poll_seconds=args.poll_seconds,
+        pre_send_recheck_delay_seconds=args.pre_send_recheck_delay_seconds,
     )
     listener.run_forever()
     return 0

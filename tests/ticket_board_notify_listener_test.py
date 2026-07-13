@@ -398,6 +398,91 @@ def test_cursor_home_delivers_regardless_of_row() -> None:
         assert conn.traces[1][6] == "hook_idle"
 
 
+def test_pre_send_recheck_waits_and_holds_when_cursor_advances_on_second_read() -> None:
+    sent: list[tuple[str, str]] = []
+    sleep_calls: list[float] = []
+    cursor_runner = sequenced_cursor_runner("2 23 24", "5 23 24")
+
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(state_store=store, cursor_position_runner=cursor_runner)
+        store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
+        conn = FakeConnection([queue_row(85, "PGU-364", target_role="ops", message="PGU-364 -- Ops notification")])
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=gate.is_working,
+            connector=lambda *args, **kwargs: conn,
+            pre_send_recheck_delay_seconds=0.5,
+            sleeper=lambda seconds: sleep_calls.append(seconds),
+            poll_seconds=0,
+        )
+
+        assert listener.process_due_notifications(conn, max_notifications=1) == 0
+
+    assert sent == []
+    assert sleep_calls == [0.5]
+    assert conn.requeued == [(85, (85, "1 seconds", "pane busy"))]
+    assert conn.traces[1][6] == "human_composing"
+    assert json.loads(conn.traces[1][8])["phase"] == "pre_send_recheck"
+
+
+def test_pre_send_recheck_delivers_when_cursor_stays_home() -> None:
+    sent: list[tuple[str, str]] = []
+    sleep_calls: list[float] = []
+    cursor_runner = sequenced_cursor_runner("2 23 24", "2 23 24")
+
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(state_store=store, cursor_position_runner=cursor_runner)
+        store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
+        conn = FakeConnection([queue_row(86, "PGU-364A", target_role="ops", message="PGU-364A -- Ops notification")])
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=gate.is_working,
+            connector=lambda *args, **kwargs: conn,
+            pre_send_recheck_delay_seconds=0.5,
+            sleeper=lambda seconds: sleep_calls.append(seconds),
+            poll_seconds=0,
+        )
+
+        assert listener.process_due_notifications(conn, max_notifications=1) == 1
+
+    assert sent == [("pgu-ops:0.0", "PGU-364A -- Ops notification")]
+    assert sleep_calls == [0.5]
+    assert conn.requeued == []
+    assert conn.acked == [86]
+
+
+def test_advanced_cursor_holds_immediately_without_second_read() -> None:
+    sent: list[tuple[str, str]] = []
+    sleep_calls: list[float] = []
+    cursor_runner = sequenced_cursor_runner("5 23 24")
+
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(state_store=store, cursor_position_runner=cursor_runner)
+        store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
+        conn = FakeConnection([queue_row(87, "PGU-364B", target_role="ops", message="PGU-364B -- Ops notification")])
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=gate.is_working,
+            connector=lambda *args, **kwargs: conn,
+            pre_send_recheck_delay_seconds=0.5,
+            sleeper=lambda seconds: sleep_calls.append(seconds),
+            poll_seconds=0,
+        )
+
+        assert listener.process_due_notifications(conn, max_notifications=1) == 0
+
+    assert sent == []
+    assert sleep_calls == []
+    assert conn.requeued == [(87, (87, "1 seconds", "pane busy"))]
+    assert conn.traces[1][6] == "human_composing"
+
+
 def test_listener_enqueues_idle_stall_nudges_from_hook_state() -> None:
     with TemporaryStateDir() as tmp_path:
         store, gate = hook_gate(tmp_path)
@@ -1347,6 +1432,9 @@ def main() -> int:
     test_worker_cursor_advanced_holds_notification_delivery()
     test_real_idle_cursor_position_delivers_instead_of_wedging()
     test_cursor_home_delivers_regardless_of_row()
+    test_pre_send_recheck_waits_and_holds_when_cursor_advances_on_second_read()
+    test_pre_send_recheck_delivers_when_cursor_stays_home()
+    test_advanced_cursor_holds_immediately_without_second_read()
     test_listener_enqueues_idle_stall_nudges_from_hook_state()
     test_listener_enqueues_idle_turn_end_nudges_on_each_turn_completion_idle()
     test_external_hook_writer_records_state_file()

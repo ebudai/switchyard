@@ -65,9 +65,14 @@ INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation, audit_signoff, created_text, updated_text, source_json
 ) VALUES
 (
-    'PGU-3541', 'Idle implementation reminder', '', 'in_progress', 'ops', 'Working.', false,
+    'PGU-3541', 'Queued implementation reminder', '', 'in_progress', 'ops', 'Queued.', false,
     '2026-07-13T00:00:00+00:00', '2026-07-13T00:00:00+00:00',
-    jsonb_build_object('id', 'PGU-3541', 'title', 'Idle implementation reminder', 'body', '', 'state', 'in_progress', 'assignee', 'ops', 'implementation', 'Working.', 'comments', '[]'::jsonb, 'created', '2026-07-13T00:00:00+00:00', 'updated', '2026-07-13T00:00:00+00:00')
+    jsonb_build_object('id', 'PGU-3541', 'title', 'Queued implementation reminder', 'body', '', 'state', 'in_progress', 'assignee', 'ops', 'implementation', 'Queued.', 'comments', '[]'::jsonb, 'created', '2026-07-13T00:00:00+00:00', 'updated', '2026-07-13T00:00:00+00:00')
+),
+(
+    'PGU-3544', 'Active implementation reminder', '', 'in_progress', 'ops', 'Working.', false,
+    '2026-07-13T00:00:00+00:00', '2026-07-13T00:00:00+00:00',
+    jsonb_build_object('id', 'PGU-3544', 'title', 'Active implementation reminder', 'body', '', 'state', 'in_progress', 'assignee', 'ops', 'implementation', 'Working.', 'comments', '[]'::jsonb, 'created', '2026-07-13T00:00:00+00:00', 'updated', '2026-07-13T00:00:00+00:00')
 ),
 (
     'PGU-3542', 'Idle analysis reminder', '', 'analysis', 'app', '', false,
@@ -98,7 +103,13 @@ INSERT INTO ticket_board.tickets (
 UPDATE ticket_board.ticket_notification_state
 SET entered_current_state_at = clock_timestamp() - interval '10 minutes',
     last_activity_at = clock_timestamp() - interval '10 minutes'
-WHERE ticket_id IN ('PGU-3541', 'PGU-3542', 'PGU-3543', 'PGU-3545', 'PGU-3546', 'PGU-3661');
+WHERE ticket_id IN ('PGU-3541', 'PGU-3542', 'PGU-3543', 'PGU-3544', 'PGU-3545', 'PGU-3546', 'PGU-3661');
+
+INSERT INTO ticket_board.notification_trace (
+    ts, ticket_id, target_role, kind, event, ticket_state_at_event, ticket_assignee_at_event, pane_busy_determination, busy_reason
+) VALUES
+    ('2026-07-13T00:01:00+00:00'::timestamptz, 'PGU-3541', 'ops', 'transition', 'send', 'in_progress', 'ops', 'idle', 'idle'),
+    ('2026-07-13T00:02:00+00:00'::timestamptz, 'PGU-3544', 'ops', 'transition', 'send', 'in_progress', 'ops', 'idle', 'idle');
 
 DELETE FROM ticket_board.ticket_notification_queue;
 """,
@@ -152,19 +163,23 @@ FROM (
             )
         ) AS row_json
     FROM ticket_board.tickets t
-    WHERE t.id IN ('PGU-3541', 'PGU-3543', 'PGU-3545', 'PGU-3546')
+    WHERE t.id IN ('PGU-3541', 'PGU-3543', 'PGU-3544', 'PGU-3545', 'PGU-3546')
 ) s;
 """,
                 )
             )
             assert first_wave_rows == {
                 "PGU-3541": {
-                    "queued": {"idle_reminder:ops": 1},
-                    "message": "PGU-3541 is still in in_progress and you haven't advanced it. Advance it now (do the work or hand it off). If you genuinely CANNOT move it forward, tell the director directly what is wrong. Do NOT do nothing.",
+                    "queued": None,
+                    "message": None,
                 },
                 "PGU-3543": {
                     "queued": {"idle_reminder:audit": 1},
                     "message": "PGU-3543 is still in audit and you haven't advanced it. Advance it now (do the work or hand it off). If you genuinely CANNOT move it forward, tell the director directly what is wrong. Do NOT do nothing.",
+                },
+                "PGU-3544": {
+                    "queued": {"idle_reminder:ops": 1},
+                    "message": "PGU-3544 is still in in_progress and you haven't advanced it. Advance it now (do the work or hand it off). If you genuinely CANNOT move it forward, tell the director directly what is wrong. Do NOT do nothing.",
                 },
                 "PGU-3545": {
                     "queued": {"idle_reminder:inspector": 1},
@@ -175,7 +190,7 @@ FROM (
                     "message": None,
                 },
             }, first_wave_rows
-            for ticket_id in ("PGU-3541", "PGU-3543", "PGU-3545"):
+            for ticket_id in ("PGU-3543", "PGU-3544", "PGU-3545"):
                 assert "<" not in first_wave_rows[ticket_id]["message"], first_wave_rows
                 assert "Eric" not in first_wave_rows[ticket_id]["message"], first_wave_rows
 

@@ -326,6 +326,13 @@ def main() -> int:
     assert "grant execute on function ticket_board.file_bug(text, text, text) to audit" in (
         ROOT / "scripts" / "ticket_board" / "rbac.sql"
     ).read_text(encoding="utf-8").lower()
+    active_inprogress_idle_filter_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "287_active_inprogress_idle_filter.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "create or replace function ticket_board.notify_idle_turn_end_nudges" in active_inprogress_idle_filter_migration
+    assert "row_number() over" in active_inprogress_idle_filter_migration
+    assert "notification_trace trace" in active_inprogress_idle_filter_migration
+    assert "candidates.state <> 'in_progress' or candidates.in_progress_rank = 1" in active_inprogress_idle_filter_migration
     assert "tell the director directly what is wrong" in executable_schema_lower
     assert "tell eric directly what is wrong" in executable_schema_lower
     assert "q.kind not in ('idle_reminder', 'escalation')" in executable_schema_lower
@@ -337,6 +344,7 @@ def main() -> int:
     assert "current_actor_role()" in executable_schema_lower
     assert "current_app_actor()" in executable_schema_lower
     assert "role % cannot call file_bug" in executable_schema_lower
+    assert "candidates.state <> 'in_progress' or candidates.in_progress_rank = 1" in executable_schema_lower
     assert "create or replace function ticket_board.notify_ticket_state_transition" in executable_schema_lower
     assert "pg_notify" in executable_schema_lower, "PGU-191 must notify on state transitions"
     assert "manually_controlled" in executable_schema_lower, "PGU-191 triggers must honor manual control"

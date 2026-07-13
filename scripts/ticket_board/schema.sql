@@ -1654,53 +1654,89 @@ BEGIN
             candidates.idle_since_at
         FROM (
             SELECT
-                t.id,
-                t.state,
-                t.assignee,
-                t.ticket_number,
-                ns.entered_current_state_at,
-                ns.idle_reminder_count,
-                ticket_board.transition_target_role(t.state, t.assignee) AS owner_role,
+                notification_scope.id,
+                notification_scope.state,
+                notification_scope.assignee,
+                notification_scope.ticket_number,
+                notification_scope.entered_current_state_at,
+                notification_scope.idle_reminder_count,
+                notification_scope.owner_role,
                 CASE
-                    WHEN ticket_board.transition_target_role(t.state, t.assignee) <> 'director'
-                         AND ns.idle_reminder_count >= 1 THEN 'escalation'
+                    WHEN notification_scope.owner_role <> 'director'
+                         AND notification_scope.idle_reminder_count >= 1 THEN 'escalation'
                     ELSE 'idle_reminder'
                 END AS kind,
                 CASE
-                    WHEN ticket_board.transition_target_role(t.state, t.assignee) <> 'director'
-                         AND ns.idle_reminder_count >= 1 THEN 'director'
-                    ELSE ticket_board.transition_target_role(t.state, t.assignee)
+                    WHEN notification_scope.owner_role <> 'director'
+                         AND notification_scope.idle_reminder_count >= 1 THEN 'director'
+                    ELSE notification_scope.owner_role
                 END AS target_role,
-                (p_idle_since_by_role ->> ticket_board.transition_target_role(t.state, t.assignee))::timestamptz AS idle_since_at,
+                notification_scope.idle_since_at,
                 CASE
-                    WHEN ticket_board.transition_target_role(t.state, t.assignee) <> 'director'
-                         AND ns.idle_reminder_count >= 1 THEN -1
-                    WHEN t.state = 'analysis' THEN 0
-                    WHEN t.state = 'inspection' THEN 2
-                    WHEN t.state = 'in_progress' THEN 3
-                    WHEN t.state = 'audit' THEN 4
-                    WHEN t.state = 'director_review' THEN 5
+                    WHEN notification_scope.owner_role <> 'director'
+                         AND notification_scope.idle_reminder_count >= 1 THEN -1
+                    WHEN notification_scope.state = 'analysis' THEN 0
+                    WHEN notification_scope.state = 'inspection' THEN 2
+                    WHEN notification_scope.state = 'in_progress' THEN 3
+                    WHEN notification_scope.state = 'audit' THEN 4
+                    WHEN notification_scope.state = 'director_review' THEN 5
                     ELSE 9
-                END AS priority
-            FROM ticket_board.tickets t
-            JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
-            WHERE t.state IN ('analysis', 'in_progress', 'inspection', 'audit', 'director_review')
-              AND NOT t.manually_controlled
-              AND ticket_board.transition_target_role(t.state, t.assignee) IS NOT NULL
-              AND p_idle_since_by_role ? ticket_board.transition_target_role(t.state, t.assignee)
-              AND greatest(
+                END AS priority,
+                row_number() OVER (
+                    PARTITION BY notification_scope.active_work_partition
+                    ORDER BY sent.last_sent_at DESC NULLS LAST,
+                        notification_scope.ticket_number DESC
+                ) AS in_progress_rank
+            FROM (
+                SELECT
+                    t.id,
+                    t.state,
+                    t.assignee,
+                    t.ticket_number,
                     ns.entered_current_state_at,
-                    (p_idle_since_by_role ->> ticket_board.transition_target_role(t.state, t.assignee))::timestamptz
+                    ns.idle_reminder_count,
+                    ticket_board.transition_target_role(t.state, t.assignee) AS owner_role,
+                    CASE
+                        WHEN t.state = 'in_progress'
+                            THEN t.state || ':' || ticket_board.transition_target_role(t.state, t.assignee)
+                        ELSE NULL
+                    END AS active_work_partition,
+                    (p_idle_since_by_role ->> ticket_board.transition_target_role(t.state, t.assignee))::timestamptz AS idle_since_at
+                FROM ticket_board.tickets t
+                JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
+                WHERE t.state IN ('analysis', 'in_progress', 'inspection', 'audit', 'director_review')
+                  AND NOT t.manually_controlled
+                  AND ticket_board.transition_target_role(t.state, t.assignee) IS NOT NULL
+                  AND p_idle_since_by_role ? ticket_board.transition_target_role(t.state, t.assignee)
+                  AND greatest(
+                        ns.entered_current_state_at,
+                        (p_idle_since_by_role ->> ticket_board.transition_target_role(t.state, t.assignee))::timestamptz
+                      ) <= p_now
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM ticket_board.ticket_blockers tb
+                      LEFT JOIN ticket_board.tickets blocker ON blocker.id = tb.blocker_ticket_id
+                      WHERE tb.ticket_id = t.id
+                        AND (blocker.id IS NULL OR blocker.state NOT IN ('done', 'cancelled'))
+                  )
+            ) AS notification_scope
+            LEFT JOIN LATERAL (
+                SELECT max(trace.ts) AS last_sent_at
+                FROM ticket_board.notification_trace trace
+                WHERE trace.ticket_id = notification_scope.id
+                  AND trace.target_role = notification_scope.owner_role
+                  AND trace.kind = 'transition'
+                  AND trace.event = 'send'
+                  AND trace.ticket_state_at_event = notification_scope.state
+            ) sent ON true
+            WHERE greatest(
+                    notification_scope.entered_current_state_at,
+                    notification_scope.idle_since_at
                   ) <= p_now
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM ticket_board.ticket_blockers tb
-                  LEFT JOIN ticket_board.tickets blocker ON blocker.id = tb.blocker_ticket_id
-                  WHERE tb.ticket_id = t.id
-                    AND (blocker.id IS NULL OR blocker.state NOT IN ('done', 'cancelled'))
-              )
+              AND notification_scope.owner_role IS NOT NULL
         ) AS candidates
-        WHERE NOT EXISTS (
+        WHERE (candidates.state <> 'in_progress' OR candidates.in_progress_rank = 1)
+          AND NOT EXISTS (
             SELECT 1
             FROM ticket_board.ticket_notification_queue q
             WHERE q.ticket_id = candidates.id

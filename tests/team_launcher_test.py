@@ -43,9 +43,11 @@ class FakeRunner:
         existing_sessions: set[str] | None = None,
         *,
         current_commands: dict[str, str] | None = None,
+        pane_pids: dict[str, int] | None = None,
     ) -> None:
         self.existing_sessions = set(existing_sessions or set())
         self.current_commands = current_commands or {}
+        self.pane_pids = pane_pids or {}
         self.calls: list[list[str]] = []
 
     def __call__(self, args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -55,6 +57,9 @@ class FakeRunner:
             return subprocess.CompletedProcess(args, 0 if session in self.existing_sessions else 1)
         if args[:3] == ["tmux", "display-message", "-p"]:
             target = args[args.index("-t") + 1]
+            if args[-1] == "#{pane_pid}":
+                pane_pid = self.pane_pids.get(target, 0)
+                return subprocess.CompletedProcess(args, 0 if pane_pid else 1, stdout=f"{pane_pid}\n" if pane_pid else "")
             command = self.current_commands.get(target, "")
             return subprocess.CompletedProcess(args, 0 if command else 1, stdout=command + "\n")
         if args[:2] == ["tmux", "new-session"]:
@@ -129,6 +134,7 @@ def _write_pgu_config_with_shared_checkout(tmp: Path) -> Path:
     source["layout"] = str(ROOT / "config" / "team-launcher" / "pgu-konsole-layout.json")
     source["repository"] = str(tmp / "repo")
     source["worktree_base"] = str(tmp / "worktrees")
+    source["session_dir"] = str(tmp / "sessions")
     config_path = tmp / "pgu.json"
     config_path.write_text(json.dumps(source, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return config_path
@@ -191,6 +197,28 @@ def _write_minimal_shared_checkout_config(tmp: Path, repo: Path, roles: list[str
     config_path = tmp / "pgu.json"
     config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return config_path
+
+
+def _session_payload(target: str, session_id: str, payload: dict[str, object]) -> str:
+    return json.dumps(
+        {
+            "target": target,
+            "session_id": session_id,
+            "source": "codex.SessionStart",
+            "payload": payload,
+        }
+    ) + "\n"
+
+
+def _patch_process_snapshot(
+    parents_by_pid: dict[int, int],
+    children_by_parent: dict[int, list[int]],
+    process_names: dict[int, set[str]],
+    argv_by_pid: dict[int, list[str]],
+) -> Any:
+    original = team_launcher._process_snapshot
+    team_launcher._process_snapshot = lambda: (parents_by_pid, children_by_parent, process_names, argv_by_pid)
+    return original
 
 
 def test_dry_run_materializes_pgu_layout_with_six_visible_role_commands() -> None:
@@ -567,6 +595,173 @@ def test_reload_fetches_without_refreshing_shared_checkout() -> None:
         assert git_clean_shared_checkout_args(config) not in runner.calls
 
 
+def test_reload_syncs_live_cli_and_model_from_process_argv_before_relaunch() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        tmp_path = Path(tmp)
+        config_path = _write_pgu_config_with_shared_checkout(tmp_path)
+        raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+        research_raw = next(role for role in raw_config["roles"] if role["role"] == "research")
+        research_raw["cli"] = ["codex"]
+        research_raw["model"] = "gpt-5.5"
+        config_path.write_text(json.dumps(raw_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+        config = load_project_config("pgu", config_path)
+        research = next(role for role in config.roles if role.role == "research")
+        config.session_dir.mkdir(parents=True, exist_ok=True)
+        (config.session_dir / session_file_name(research.target)).write_text(
+            _session_payload(
+                research.target,
+                "live-research-session",
+                {"session_id": "live-research-session", "cwd": "/home/agent/Projects/pgu"},
+            ),
+            encoding="utf-8",
+        )
+        runner = FakeRunner(existing_sessions={"pgu-research"}, pane_pids={research.target: 1200})
+        original_snapshot = _patch_process_snapshot(
+            {1200: 6388, 1201: 1200},
+            {1200: [1201]},
+            {1200: {"fish", "claude"}, 1201: {"claude"}},
+            {
+                1200: ["fish", "-c", "claude", "--model", "claude-sonnet-5", "--dangerously-skip-permissions"],
+                1201: ["claude", "--model", "claude-sonnet-5", "--dangerously-skip-permissions"],
+            },
+        )
+        try:
+            assert (
+                launch_project(
+                    config,
+                    config_path=config_path,
+                    mode="reload",
+                    script_path=ROOT / "scripts" / "team-launcher",
+                    runner=runner,
+                    layout_output=tmp_path / "layout.json",
+                )
+                == 0
+            )
+        finally:
+            team_launcher._process_snapshot = original_snapshot
+
+        synced = json.loads(config_path.read_text(encoding="utf-8"))
+        synced_research = next(role for role in synced["roles"] if role["role"] == "research")
+        assert synced_research["cli"] == ["claude"]
+        assert synced_research["model"] == "claude-sonnet-5"
+        assert synced_research["detached"] is True
+        assert synced_research["target"] == "pgu-research:0.0"
+        assert synced_research["effort"] == "high"
+        assert synced_research["yolo"] is True
+
+        research_new_session = next(call for call in runner.calls if call[:5] == ["tmux", "new-session", "-d", "-s", "pgu-research"])
+        assert "claude --model claude-sonnet-5" in research_new_session[-1]
+        assert "--resume live-research-session" in research_new_session[-1]
+        assert "codex" not in research_new_session[-1]
+
+
+def test_reload_sync_leaves_config_unchanged_when_live_matches() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        tmp_path = Path(tmp)
+        config_path = _write_pgu_config_with_shared_checkout(tmp_path)
+        config = load_project_config("pgu", config_path)
+        research = next(role for role in config.roles if role.role == "research")
+        config.session_dir.mkdir(parents=True, exist_ok=True)
+        (config.session_dir / session_file_name(research.target)).write_text(
+            _session_payload(
+                research.target,
+                "live-research-session",
+                {"session_id": "live-research-session", "cwd": "/home/agent/Projects/pgu"},
+            ),
+            encoding="utf-8",
+        )
+        runner = FakeRunner(existing_sessions={"pgu-research"}, pane_pids={research.target: 1300})
+        before = config_path.read_text(encoding="utf-8")
+        original_snapshot = _patch_process_snapshot(
+            {1300: 6388, 1301: 1300},
+            {1300: [1301]},
+            {1300: {"fish", "claude"}, 1301: {"claude"}},
+            {
+                1300: ["fish", "-c", "claude", "--model", "claude-sonnet-5", "--dangerously-skip-permissions"],
+                1301: ["claude", "--model", "claude-sonnet-5", "--dangerously-skip-permissions"],
+            },
+        )
+        try:
+            synced = team_launcher.sync_reload_config_to_live_sessions(config, config_path=config_path, runner=runner)
+        finally:
+            team_launcher._process_snapshot = original_snapshot
+
+        assert synced is config
+        assert config_path.read_text(encoding="utf-8") == before
+
+
+def test_reload_sync_leaves_config_unchanged_when_role_not_running() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        tmp_path = Path(tmp)
+        config_path = _write_pgu_config_with_shared_checkout(tmp_path)
+        raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+        research_raw = next(role for role in raw_config["roles"] if role["role"] == "research")
+        research_raw["cli"] = ["codex"]
+        research_raw["model"] = "gpt-5.5"
+        config_path.write_text(json.dumps(raw_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+        config = load_project_config("pgu", config_path)
+        research = next(role for role in config.roles if role.role == "research")
+        config.session_dir.mkdir(parents=True, exist_ok=True)
+        (config.session_dir / session_file_name(research.target)).write_text(
+            _session_payload(
+                research.target,
+                "live-research-session",
+                {"session_id": "live-research-session", "cwd": "/home/agent/Projects/pgu"},
+            ),
+            encoding="utf-8",
+        )
+        runner = FakeRunner()
+        before = config_path.read_text(encoding="utf-8")
+
+        synced = team_launcher.sync_reload_config_to_live_sessions(config, config_path=config_path, runner=runner)
+
+        assert synced is config
+        assert config_path.read_text(encoding="utf-8") == before
+
+
+def test_reload_sync_leaves_config_unchanged_when_model_is_unparseable() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        tmp_path = Path(tmp)
+        config_path = _write_pgu_config_with_shared_checkout(tmp_path)
+        raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+        research_raw = next(role for role in raw_config["roles"] if role["role"] == "research")
+        research_raw["cli"] = ["codex"]
+        research_raw["model"] = "gpt-5.5"
+        config_path.write_text(json.dumps(raw_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+        config = load_project_config("pgu", config_path)
+        research = next(role for role in config.roles if role.role == "research")
+        config.session_dir.mkdir(parents=True, exist_ok=True)
+        (config.session_dir / session_file_name(research.target)).write_text(
+            _session_payload(
+                research.target,
+                "live-research-session",
+                {"session_id": "live-research-session", "cwd": "/home/agent/Projects/pgu"},
+            ),
+            encoding="utf-8",
+        )
+        runner = FakeRunner(existing_sessions={"pgu-research"}, pane_pids={research.target: 1400})
+        before = config_path.read_text(encoding="utf-8")
+        original_snapshot = _patch_process_snapshot(
+            {1400: 6388, 1401: 1400},
+            {1400: [1401]},
+            {1400: {"fish", "claude"}, 1401: {"claude"}},
+            {
+                1400: ["fish", "-c", "claude", "--dangerously-skip-permissions"],
+                1401: ["claude", "--dangerously-skip-permissions"],
+            },
+        )
+        try:
+            synced = team_launcher.sync_reload_config_to_live_sessions(config, config_path=config_path, runner=runner)
+        finally:
+            team_launcher._process_snapshot = original_snapshot
+
+        assert synced is config
+        assert config_path.read_text(encoding="utf-8") == before
+
+
 def test_dry_run_reports_shared_checkout_without_syncing_it() -> None:
     config_path = ROOT / "config" / "team-launcher" / "pgu.json"
     config = load_project_config("pgu", config_path)
@@ -595,6 +790,48 @@ def test_dry_run_reports_shared_checkout_without_syncing_it() -> None:
         layout = json.loads(layout_output.read_text(encoding="utf-8"))
         commands = _leaf_commands(layout)
         assert len(commands) == 6
+
+
+def test_start_does_not_sync_live_cli_or_model() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        tmp_path = Path(tmp)
+        config_path = _write_pgu_config_with_shared_checkout(tmp_path)
+        raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+        research_raw = next(role for role in raw_config["roles"] if role["role"] == "research")
+        research_raw["cli"] = ["codex"]
+        research_raw["model"] = "gpt-5.5"
+        config_path.write_text(json.dumps(raw_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+        config = load_project_config("pgu", config_path)
+        research = next(role for role in config.roles if role.role == "research")
+        config.session_dir.mkdir(parents=True, exist_ok=True)
+        (config.session_dir / session_file_name(research.target)).write_text(
+            _session_payload(
+                research.target,
+                "live-research-session",
+                {"session_id": "live-research-session", "cwd": "/home/agent/Projects/pgu"},
+            ),
+            encoding="utf-8",
+        )
+        runner = FakeRunner()
+        before = config_path.read_text(encoding="utf-8")
+
+        assert (
+            launch_project(
+                config,
+                config_path=config_path,
+                mode="start",
+                script_path=ROOT / "scripts" / "team-launcher",
+                runner=runner,
+                layout_output=tmp_path / "layout.json",
+            )
+            == 0
+        )
+
+        assert config_path.read_text(encoding="utf-8") == before
+        research_new_session = next(call for call in runner.calls if call[:5] == ["tmux", "new-session", "-d", "-s", "pgu-research"])
+        assert "codex --model gpt-5.5" in research_new_session[-1]
+        assert "claude-sonnet-5" not in research_new_session[-1]
 
 
 def test_detached_research_attach_checks_session_without_attaching() -> None:
@@ -755,7 +992,12 @@ def main() -> int:
     test_start_force_refreshes_dirty_shared_checkout_with_real_git()
     test_bad_shared_checkout_blocks_all_roles_with_real_git()
     test_reload_fetches_without_refreshing_shared_checkout()
+    test_reload_syncs_live_cli_and_model_from_process_argv_before_relaunch()
+    test_reload_sync_leaves_config_unchanged_when_live_matches()
+    test_reload_sync_leaves_config_unchanged_when_role_not_running()
+    test_reload_sync_leaves_config_unchanged_when_model_is_unparseable()
     test_dry_run_reports_shared_checkout_without_syncing_it()
+    test_start_does_not_sync_live_cli_or_model()
     test_detached_research_attach_checks_session_without_attaching()
     test_reload_uses_recorded_resume_uuid_when_recreating_session()
     test_reload_refuses_to_kill_session_when_live_command_mismatches_config()

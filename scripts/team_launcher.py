@@ -10,7 +10,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -32,6 +32,7 @@ EFFORT_STYLE_BY_CLI = {
     "codex": "config",
     "gemini": None,
 }
+KNOWN_LIVE_CLI_NAMES = {"agy", "claude", "codex", "gemini"}
 
 
 @dataclass(frozen=True)
@@ -119,6 +120,22 @@ def _load_json(path: Path) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise SystemExit(f"{path} must contain a JSON object")
     return parsed
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+        temp_path = Path(handle.name)
+    temp_path.replace(path)
 
 
 def _string_list(value: Any, *, field: str, role: str) -> list[str]:
@@ -268,16 +285,33 @@ def session_file_name(target: str) -> str:
 
 
 def session_id_for_role(role: RoleConfig, session_dir: Path) -> str:
+    parsed = _session_record_for_role(role, session_dir)
+    if parsed is None:
+        return ""
+    return str(parsed.get("session_id") or "").strip()
+
+
+def _session_record_for_role(role: RoleConfig, session_dir: Path) -> dict[str, Any] | None:
     path = session_dir / session_file_name(role.target)
     try:
         parsed = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return ""
+        return None
     if not isinstance(parsed, dict):
-        return ""
+        return None
     if str(parsed.get("target") or "") != role.target:
+        return None
+    return parsed
+
+
+def _session_payload_model_for_role(role: RoleConfig, session_dir: Path) -> str:
+    session = _session_record_for_role(role, session_dir)
+    if session is None:
         return ""
-    return str(parsed.get("session_id") or "").strip()
+    payload = session.get("payload")
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("model") or "").strip()
 
 
 def _command_name(value: str) -> str:
@@ -346,6 +380,20 @@ def tmux_current_command_args(role: RoleConfig) -> list[str]:
 
 def tmux_pane_pid_args(role: RoleConfig) -> list[str]:
     return ["tmux", "display-message", "-p", "-t", role.target, "#{pane_pid}"]
+
+
+def pane_pid_for_role(
+    role: RoleConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> int:
+    proc = runner(tmux_pane_pid_args(role), text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    if proc.returncode != 0:
+        return 0
+    try:
+        return int(str(proc.stdout).strip())
+    except ValueError:
+        return 0
 
 
 def worktree_ref(config: ProjectConfig) -> str:
@@ -440,7 +488,7 @@ def expected_live_commands(role: RoleConfig) -> set[str]:
     return {_command_name(command) for command in configured if _command_name(command)}
 
 
-def _children_by_parent() -> tuple[dict[int, list[int]], dict[int, set[str]]]:
+def _process_snapshot() -> tuple[dict[int, int], dict[int, list[int]], dict[int, set[str]], dict[int, list[str]]]:
     proc = subprocess.run(
         ["ps", "-eo", "pid=,ppid=,comm=,args="],
         text=True,
@@ -448,9 +496,11 @@ def _children_by_parent() -> tuple[dict[int, list[int]], dict[int, set[str]]]:
         stderr=subprocess.DEVNULL,
     )
     if proc.returncode != 0:
-        return {}, {}
+        return {}, {}, {}, {}
+    parents: dict[int, int] = {}
     children: dict[int, list[int]] = {}
     names: dict[int, set[str]] = {}
+    argv_by_pid: dict[int, list[str]] = {}
     for line in proc.stdout.splitlines():
         parts = line.strip().split(None, 3)
         if len(parts) != 4:
@@ -460,31 +510,101 @@ def _children_by_parent() -> tuple[dict[int, list[int]], dict[int, set[str]]]:
             ppid = int(parts[1])
         except ValueError:
             continue
-        command_names = {_command_name(parts[2])}
+        parents[pid] = ppid
+        argv: list[str]
         try:
-            command_names.update(_command_name(token) for token in shlex.split(parts[3]) if _command_name(token))
+            argv = shlex.split(parts[3])
         except ValueError:
-            pass
+            argv = []
+        argv_by_pid[pid] = argv
+        command_names = {_command_name(parts[2])}
+        command_names.update(_command_name(token) for token in argv if _command_name(token))
         names[pid] = command_names
         children.setdefault(ppid, []).append(pid)
-    return children, names
+    return parents, children, names, argv_by_pid
 
 
-def process_tree_contains_command(pane_pid: int, expected_commands: set[str]) -> bool:
+def process_tree_command_names(pane_pid: int) -> set[str]:
     if pane_pid <= 0:
-        return False
-    children_by_parent, process_names = _children_by_parent()
-    stack = [pane_pid, *children_by_parent.get(pane_pid, [])]
+        return set()
+    _parents_by_pid, children_by_parent, process_names, _argv_by_pid = _process_snapshot()
+    stack = [pane_pid]
     seen: set[int] = set()
+    names: set[str] = set()
     while stack:
         pid = stack.pop()
         if pid in seen:
             continue
         seen.add(pid)
-        if process_names.get(pid, set()) & expected_commands:
-            return True
+        names.update(process_names.get(pid, set()))
         stack.extend(children_by_parent.get(pid, []))
-    return False
+    return names
+
+
+def process_tree_argvs(pane_pid: int) -> list[list[str]]:
+    if pane_pid <= 0:
+        return []
+    _parents_by_pid, children_by_parent, _process_names, argv_by_pid = _process_snapshot()
+    stack = [pane_pid]
+    seen: set[int] = set()
+    records: list[list[str]] = []
+    while stack:
+        pid = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        argv = argv_by_pid.get(pid, [])
+        if argv:
+            records.append(list(argv))
+        stack.extend(children_by_parent.get(pid, []))
+    return records
+
+
+def _model_from_argv(argv: Sequence[str], *, model_arg: str) -> str:
+    if not model_arg:
+        return ""
+    for index, token in enumerate(argv):
+        if token == model_arg and index + 1 < len(argv):
+            return str(argv[index + 1]).strip()
+        if token.startswith(f"{model_arg}="):
+            return token.split("=", 1)[1].strip()
+    return ""
+
+
+def process_tree_contains_command(pane_pid: int, expected_commands: set[str]) -> bool:
+    return bool(process_tree_command_names(pane_pid) & expected_commands)
+
+
+def live_cli_for_role(
+    role: RoleConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> list[str]:
+    pane_pid = pane_pid_for_role(role, runner=runner)
+    if pane_pid <= 0:
+        return []
+    matches = sorted(name for name in process_tree_command_names(pane_pid) if name in KNOWN_LIVE_CLI_NAMES)
+    if len(matches) == 1:
+        return [matches[0]]
+    configured_cli = _command_name(role.cli[0])
+    if configured_cli in matches:
+        return [configured_cli]
+    return []
+
+
+def live_model_for_role(
+    role: RoleConfig,
+    *,
+    session_dir: Path,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> str:
+    pane_pid = pane_pid_for_role(role, runner=runner)
+    if pane_pid > 0:
+        for argv in process_tree_argvs(pane_pid):
+            model = _model_from_argv(argv, model_arg=role.model_arg)
+            if model:
+                return model
+    return _session_payload_model_for_role(role, session_dir)
 
 
 def live_command_matches_role(
@@ -493,14 +613,9 @@ def live_command_matches_role(
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> bool:
     expected = expected_live_commands(role)
-    pid_proc = runner(tmux_pane_pid_args(role), text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    if pid_proc.returncode == 0:
-        try:
-            pane_pid = int(str(pid_proc.stdout).strip())
-        except ValueError:
-            pane_pid = 0
-        if pane_pid > 0:
-            return process_tree_contains_command(pane_pid, expected)
+    pane_pid = pane_pid_for_role(role, runner=runner)
+    if pane_pid > 0:
+        return process_tree_contains_command(pane_pid, expected)
 
     proc = runner(tmux_current_command_args(role), text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     if proc.returncode != 0:
@@ -663,6 +778,50 @@ def materialize_layout(
     return output_path
 
 
+def sync_reload_config_to_live_sessions(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> ProjectConfig:
+    raw_config = _load_json(config_path)
+    raw_roles = raw_config.get("roles")
+    if not isinstance(raw_roles, list):
+        return config
+    role_by_name = {role.role: role for role in config.roles}
+    updated_roles: list[RoleConfig] = []
+    changed = False
+    for raw_role in raw_roles:
+        if not isinstance(raw_role, dict):
+            continue
+        role_name = str(raw_role.get("role") or "").strip()
+        role = role_by_name.get(role_name)
+        if role is None:
+            continue
+        if runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+            updated_roles.append(role)
+            continue
+        live_model = live_model_for_role(role, session_dir=config.session_dir, runner=runner)
+        if not live_model:
+            updated_roles.append(role)
+            continue
+        live_cli = live_cli_for_role(role, runner=runner)
+        next_role = role
+        if live_cli and live_cli != role.cli:
+            raw_role["cli"] = live_cli
+            next_role = replace(next_role, cli=live_cli)
+            changed = True
+        if live_model != role.model:
+            raw_role["model"] = live_model
+            next_role = replace(next_role, model=live_model)
+            changed = True
+        updated_roles.append(next_role)
+    if not changed:
+        return config
+    _write_json_atomic(config_path, raw_config)
+    return replace(config, roles=updated_roles)
+
+
 def launch_project(
     config: ProjectConfig,
     *,
@@ -685,6 +844,7 @@ def launch_project(
             failed_roles = ensure_project_worktrees(config, refresh=True, runner=runner).failed_roles
         elif mode == "reload":
             fetch_project_worktree_ref(config, runner=runner)
+            config = sync_reload_config_to_live_sessions(config, config_path=config_path, runner=runner)
     materialize_layout(
         config,
         config_path=config_path,

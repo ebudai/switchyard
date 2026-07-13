@@ -9,7 +9,7 @@ usage() {
     cat <<EOF
 Usage: scripts/ticket-board-migrate
 
-Apply numbered ticket-board PostgreSQL migrations from:
+Apply ticket-board PostgreSQL migrations from:
   $MIGRATIONS_DIR
 
 Environment:
@@ -18,6 +18,27 @@ Environment:
   TICKET_BOARD_MIGRATIONS_DIR      override migrations directory
 EOF
 }
+
+readonly LEGACY_TRACKED_MIGRATIONS=(
+    "270_ready_to_in_progress.sql"
+    "271_optional_implementation.sql"
+    "272_resolved_blockers.sql"
+    "273_suppress_self_notifications.sql"
+    "274_unblock_notifications.sql"
+    "275_remove_dead_unblock_analysis_branch.sql"
+    "276_revert_backlog_unblock_notifications.sql"
+    "277_owner_update_notifications.sql"
+    "278_idle_turn_end_nudges.sql"
+    "279_idle_reminder_escalation.sql"
+    "280_reject_stale_resubmit.sql"
+    "281_idle_reminder_escalate_problem_clause.sql"
+    "282_http_director_create_notification_source.sql"
+    "283_idle_reminder_defers_to_primary.sql"
+    "284_add_regression_flag.sql"
+    "285_require_actor_caller_role_backstop.sql"
+    "286_allow_audit_file_bug.sql"
+    "287_active_inprogress_idle_filter.sql"
+)
 
 die() {
     printf '[ticket-board-migrate] ERROR: %s\n' "$*" >&2
@@ -35,23 +56,140 @@ psql_migrate() {
 ensure_tracking_table() {
     psql_migrate <<'SQL' >/dev/null
 CREATE SCHEMA IF NOT EXISTS ticket_board;
-CREATE TABLE IF NOT EXISTS ticket_board.schema_migrations (
-    version integer PRIMARY KEY,
-    description text NOT NULL,
-    applied_at timestamptz NOT NULL DEFAULT now()
+DO $$
+DECLARE
+    has_tracking_table boolean;
+    has_version boolean;
+    has_name boolean;
+BEGIN
+    SELECT EXISTS (
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = 'ticket_board'
+          AND table_name = 'schema_migrations'
+    ) INTO has_tracking_table;
+
+    CREATE SEQUENCE IF NOT EXISTS ticket_board.schema_migrations_seq AS bigint;
+
+    IF NOT has_tracking_table THEN
+        CREATE TABLE ticket_board.schema_migrations (
+            name text PRIMARY KEY,
+            seq bigint NOT NULL DEFAULT nextval('ticket_board.schema_migrations_seq'),
+            applied_at timestamptz NOT NULL DEFAULT now()
+        );
+        RETURN;
+    END IF;
+
+    SELECT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'ticket_board'
+          AND table_name = 'schema_migrations'
+          AND column_name = 'version'
+    ) INTO has_version;
+    SELECT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'ticket_board'
+          AND table_name = 'schema_migrations'
+          AND column_name = 'name'
+    ) INTO has_name;
+
+    IF has_version THEN
+        ALTER TABLE ticket_board.schema_migrations RENAME TO schema_migrations_legacy;
+        CREATE TABLE ticket_board.schema_migrations (
+            name text PRIMARY KEY,
+            seq bigint NOT NULL DEFAULT nextval('ticket_board.schema_migrations_seq'),
+            applied_at timestamptz NOT NULL DEFAULT now()
+        );
+        INSERT INTO ticket_board.schema_migrations (name, seq, applied_at)
+        SELECT
+            CASE
+                WHEN version = 1 AND description = 'initial ticket-board schema for JSON ticket import'
+                    THEN 'schema.sql'
+                ELSE lpad(version::text, 3, '0') || '_' || description || '.sql'
+            END,
+            row_number() OVER (
+                ORDER BY
+                    CASE WHEN version = 1 THEN 0 ELSE 1 END,
+                    version
+            ),
+            applied_at
+        FROM ticket_board.schema_migrations_legacy
+        ORDER BY
+            CASE WHEN version = 1 THEN 0 ELSE 1 END,
+            version;
+        DROP TABLE ticket_board.schema_migrations_legacy;
+    ELSIF has_name THEN
+        ALTER TABLE ticket_board.schema_migrations
+            ADD COLUMN IF NOT EXISTS seq bigint;
+        ALTER TABLE ticket_board.schema_migrations
+            ADD COLUMN IF NOT EXISTS applied_at timestamptz NOT NULL DEFAULT now();
+        WITH ordered AS (
+            SELECT
+                name,
+                row_number() OVER (ORDER BY applied_at, name) AS new_seq
+            FROM ticket_board.schema_migrations
+        )
+        UPDATE ticket_board.schema_migrations AS target
+        SET seq = ordered.new_seq
+        FROM ordered
+        WHERE target.name = ordered.name
+          AND (target.seq IS NULL OR target.seq <> ordered.new_seq);
+    ELSE
+        RAISE EXCEPTION 'ticket_board.schema_migrations has unsupported columns';
+    END IF;
+END $$;
+
+ALTER SEQUENCE ticket_board.schema_migrations_seq OWNED BY ticket_board.schema_migrations.seq;
+ALTER TABLE ticket_board.schema_migrations
+    ALTER COLUMN seq SET DEFAULT nextval('ticket_board.schema_migrations_seq');
+ALTER TABLE ticket_board.schema_migrations
+    ALTER COLUMN seq SET NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS schema_migrations_seq_idx
+    ON ticket_board.schema_migrations (seq);
+SELECT setval(
+    'ticket_board.schema_migrations_seq',
+    GREATEST(COALESCE((SELECT max(seq) FROM ticket_board.schema_migrations), 0), 1),
+    EXISTS (SELECT 1 FROM ticket_board.schema_migrations)
 );
 SQL
 }
 
+backfill_schema_snapshot_legacy_migrations() {
+    local legacy_values
+    legacy_values="$(printf "('%s')," "${LEGACY_TRACKED_MIGRATIONS[@]}")"
+    legacy_values="${legacy_values%,}"
+    psql_migrate <<SQL >/dev/null
+WITH legacy_names(name) AS (
+    VALUES $legacy_values
+)
+INSERT INTO ticket_board.schema_migrations (name)
+SELECT legacy_names.name
+FROM legacy_names
+WHERE EXISTS (
+    SELECT 1
+    FROM ticket_board.schema_migrations
+    WHERE name = 'schema.sql'
+)
+  AND NOT EXISTS (
+    SELECT 1
+    FROM ticket_board.schema_migrations existing
+    WHERE existing.name = legacy_names.name
+)
+ORDER BY legacy_names.name;
+SQL
+}
+
 migration_applied() {
-    local version="$1"
+    local name="$1"
     local applied
     applied="$(
-        psql_migrate -tA -v version="$version" <<'SQL'
+        psql_migrate -tA -v name="$name" <<'SQL'
 SELECT EXISTS (
     SELECT 1
     FROM ticket_board.schema_migrations
-    WHERE version = :version
+    WHERE name = :'name'
 );
 SQL
     )"
@@ -59,34 +197,30 @@ SQL
 }
 
 record_migration() {
-    local version="$1"
-    local description="$2"
-    psql_migrate -v version="$version" -v description="$description" <<'SQL' >/dev/null
-INSERT INTO ticket_board.schema_migrations (version, description)
-VALUES (:version, :'description')
-ON CONFLICT (version) DO NOTHING;
+    local name="$1"
+    psql_migrate -v name="$name" <<'SQL' >/dev/null
+INSERT INTO ticket_board.schema_migrations (name)
+VALUES (:'name')
+ON CONFLICT (name) DO NOTHING;
 SQL
 }
 
 apply_migration() {
     local file="$1"
-    local filename version description
+    local filename
     filename="$(basename "$file")"
-    if [[ ! "$filename" =~ ^([0-9]+)_(.+)\.sql$ ]]; then
-        die "migration file must be named <number>_<description>.sql: $filename"
+    if [[ ! "$filename" =~ ^([0-9]+_[a-z0-9_]+|pgu[0-9]+_[a-z0-9_]+)\.sql$ ]]; then
+        die "migration file must be named <number>_<description>.sql or pgu<number>_<description>.sql: $filename"
     fi
-    version="${BASH_REMATCH[1]}"
-    description="${BASH_REMATCH[2]}"
-    version="$((10#$version))"
 
-    if migration_applied "$version"; then
+    if migration_applied "$filename"; then
         log "skip $filename"
         return 0
     fi
 
     log "apply $filename"
     psql_migrate -f "$file" >/dev/null
-    record_migration "$version" "$description"
+    record_migration "$filename"
 }
 
 main() {
@@ -106,13 +240,14 @@ main() {
     command -v psql >/dev/null 2>&1 || die "psql is required to apply ticket-board migrations"
     [[ -d "$MIGRATIONS_DIR" ]] || die "missing migrations directory: $MIGRATIONS_DIR"
     ensure_tracking_table
+    backfill_schema_snapshot_legacy_migrations
 
     local found=0
     local migration
     while IFS= read -r -d '' migration; do
         found=1
         apply_migration "$migration"
-    done < <(find "$MIGRATIONS_DIR" -maxdepth 1 -type f -name '*.sql' -printf '%f\0' | sort -zV | while IFS= read -r -d '' name; do
+    done < <(find "$MIGRATIONS_DIR" -maxdepth 1 -type f -name '*.sql' -printf '%f\0' | sort -z | while IFS= read -r -d '' name; do
         printf '%s\0' "$MIGRATIONS_DIR/$name"
     done)
 

@@ -30,8 +30,8 @@ What this does:
 - writes `~/.config/systemd/user/pgu-ticket-board.service`
 - bakes `TICKET_BOARD_DATABASE_URL` into the unit so the service does not depend
   on the installing shell environment after reboot
-- applies unrecorded numbered SQL migrations from
-  `scripts/ticket_board/migrations/` and records them in
+- applies unrecorded SQL migrations from `scripts/ticket_board/migrations/`
+  and records their filenames in
   `ticket_board.schema_migrations`
 - applies `scripts/ticket_board/rbac.sql` so `ticket_board_service` and
   `ticket_board_listener` exist before the units start
@@ -108,9 +108,12 @@ You can run only the migration bootstrap with
 `scripts/ticket-board-notify-listener-service.sh ensure-migrations`. Both use
 `TICKET_BOARD_ADMIN_DATABASE_URL` because migrations may need DDL privileges.
 The underlying runner is `scripts/ticket-board-migrate`; it applies
-`NNN_description.sql` files in numeric order, skips versions already present in
-`ticket_board.schema_migrations`, and records a version only after that SQL file
-successfully applies.
+legacy `NNN_description.sql` files plus new `pgu<num>_description.sql` files
+in deterministic filename order, skips names already present in
+`ticket_board.schema_migrations`, and records a migration name only after that
+SQL file successfully applies. The runner does not do dependency resolution:
+if two unapplied migrations genuinely depend on each other, they must be
+rebased/combined before merge so the file order is already settled.
 
 ## Controlled deploy / restart
 
@@ -126,7 +129,7 @@ That command:
 2. resolves `origin/main`
 3. exports that exact SHA into `/home/agent/pgu-ticketboard-live/releases/<sha>`
 4. repoints `/home/agent/pgu-ticketboard-live/current`
-5. applies unrecorded numbered SQL migrations from that deployed SHA
+5. applies unrecorded SQL migrations from that deployed SHA
 6. rewrites the unit
 7. restarts the service
 8. waits for `GET /api/board` to return HTTP 200

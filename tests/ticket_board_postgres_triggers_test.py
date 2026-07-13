@@ -1092,6 +1092,53 @@ WHERE ticket_board.transition_target_role(states.state, 'ops') IS NOT NULL;
             assert non_transition_targets == "0"
 
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
+            service_call(
+                conninfo,
+                "director",
+                "SELECT ticket_board.create_ticket('Director self-create analysis', 'Body', 'analysis');",
+            )
+            director_self_create_queue_count = psql(
+                conninfo,
+                """
+SELECT count(*)
+FROM ticket_board.ticket_notification_queue
+WHERE payload->>'title' = 'Director self-create analysis'
+  AND target_role = 'director';
+""",
+            ).stdout.strip()
+            assert director_self_create_queue_count == "0", director_self_create_queue_count
+
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
+            service_call(
+                conninfo,
+                "eric",
+                "SELECT ticket_board.create_ticket('Eric-created analysis', 'Body', 'analysis');",
+            )
+            eric_created_analysis_queue = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_agg(jsonb_build_object(
+    'target_role', target_role,
+    'title', payload->>'title',
+    'old_state', payload->>'old_state',
+    'new_state', payload->>'new_state'
+) ORDER BY id)::text
+FROM ticket_board.ticket_notification_queue
+WHERE payload->>'title' = 'Eric-created analysis';
+""",
+                ).stdout
+            )
+            assert eric_created_analysis_queue == [
+                {
+                    "target_role": "director",
+                    "title": "Eric-created analysis",
+                    "old_state": None,
+                    "new_state": "analysis",
+                }
+            ], eric_created_analysis_queue
+
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
             insert_ticket(conninfo, "PGU-20", title="Durable notify", state="analysis", assignee="ops", implementation="")
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-20';")
             psql(conninfo, "DELETE FROM ticket_board.notification_trace WHERE ticket_id = 'PGU-20';")

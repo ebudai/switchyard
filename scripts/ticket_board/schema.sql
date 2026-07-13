@@ -549,10 +549,12 @@ AS $$
 DECLARE
     target_role text;
     message text;
+    source_role text;
 BEGIN
     target_role := ticket_board.transition_target_role(p_new_state, p_assignee);
     message := p_message;
-    IF target_role IS NOT NULL AND message IS NOT NULL THEN
+    source_role := nullif(current_setting('ticket_board.caller_role', true), '');
+    IF target_role IS NOT NULL AND message IS NOT NULL AND source_role IS DISTINCT FROM target_role THEN
         PERFORM ticket_board.enqueue_notification(
             p_ticket_id,
             'transition',

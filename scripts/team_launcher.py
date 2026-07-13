@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import pwd
 import shlex
 import subprocess
 import sys
@@ -15,6 +16,10 @@ from typing import Any, Callable, Sequence
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "team-launcher"
 DEFAULT_SESSION_DIR = Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-sessions")
+DEFAULT_GUI_USER = "eric"
+GUI_USER_ENV = "PGU_TEAM_LAUNCHER_GUI_USER"
+GUI_WAYLAND_ENV = "PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY"
+HOST_WAYLAND_ENV = "PGU_HOST_WAYLAND_DISPLAY"
 YOLO_ARGS_BY_CLI = {
     "agy": ["--dangerously-skip-permissions"],
     "claude": ["--dangerously-skip-permissions"],
@@ -71,6 +76,36 @@ class WorktreeProvisionResult:
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+def uid_for_user(user_name: str) -> int | None:
+    try:
+        return int(pwd.getpwnam(user_name).pw_uid)
+    except KeyError:
+        return None
+
+
+def konsole_launch_args(layout_path: Path, *, gui_user: str | None = None) -> list[str]:
+    wayland_display = str(os.environ.get(HOST_WAYLAND_ENV, "")).strip()
+    if not wayland_display:
+        user = (gui_user if gui_user is not None else os.environ.get(GUI_USER_ENV, DEFAULT_GUI_USER)).strip()
+        uid = uid_for_user(user) if user else None
+        if uid is not None:
+            wayland_display = f"/run/user/{uid}/{os.environ.get(GUI_WAYLAND_ENV, 'wayland-0')}"
+    if not wayland_display:
+        return [
+            "sh",
+            "-lc",
+            "printf '%s\\n' 'team-launcher: no host Wayland display; run from Eric desktop session' >&2; exit 1",
+        ]
+    return [
+        "env",
+        "QT_QPA_PLATFORM=wayland",
+        f"WAYLAND_DISPLAY={wayland_display}",
+        "konsole",
+        "--layout",
+        str(layout_path),
+    ]
 
 
 def _expand_path(value: str, *, base: Path) -> Path:
@@ -740,7 +775,7 @@ def launch_project(
         )
         if result != 0:
             return result
-    return runner(["konsole", "--layout", str(output_path)]).returncode
+    return runner(konsole_launch_args(output_path)).returncode
 
 
 def write_template(project: str, output: Path) -> int:

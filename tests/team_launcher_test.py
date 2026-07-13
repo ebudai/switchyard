@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import scripts.team_launcher as team_launcher
 from scripts.team_launcher import (
     cli_command_for_role,
     ensure_project_worktrees,
@@ -24,6 +25,7 @@ from scripts.team_launcher import (
     git_checkout_worktree_ref_args,
     git_fetch_worktree_ref_args,
     git_worktree_add_args,
+    konsole_launch_args,
     launch_project,
     live_command_matches_role,
     load_project_config,
@@ -370,6 +372,70 @@ def test_pgu_launch_commands_include_model_and_bypass_flags() -> None:
         assert "--yolo" not in command
 
 
+def test_konsole_launch_uses_gui_user_display_environment() -> None:
+    original_uid_for_user = team_launcher.uid_for_user
+    original_host_wayland = os.environ.get("PGU_HOST_WAYLAND_DISPLAY")
+    try:
+        os.environ["PGU_HOST_WAYLAND_DISPLAY"] = "/run/user/1000/wayland-0"
+        team_launcher.uid_for_user = lambda _user_name: None
+
+        assert konsole_launch_args(Path("/tmp/layout.json"), gui_user="eric") == [
+            "env",
+            "QT_QPA_PLATFORM=wayland",
+            "WAYLAND_DISPLAY=/run/user/1000/wayland-0",
+            "konsole",
+            "--layout",
+            "/tmp/layout.json",
+        ]
+    finally:
+        team_launcher.uid_for_user = original_uid_for_user
+        if original_host_wayland is None:
+            os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
+        else:
+            os.environ["PGU_HOST_WAYLAND_DISPLAY"] = original_host_wayland
+
+
+def test_konsole_launch_can_fallback_to_gui_user_uid_without_host_var() -> None:
+    original_uid_for_user = team_launcher.uid_for_user
+    original_host_wayland = os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
+    original_wayland_name = os.environ.get("PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY")
+    try:
+        os.environ["PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY"] = "wayland-test"
+        team_launcher.uid_for_user = lambda user_name: 4242 if user_name == "eric" else None
+
+        assert konsole_launch_args(Path("/tmp/layout.json"), gui_user="eric") == [
+            "env",
+            "QT_QPA_PLATFORM=wayland",
+            "WAYLAND_DISPLAY=/run/user/4242/wayland-test",
+            "konsole",
+            "--layout",
+            "/tmp/layout.json",
+        ]
+    finally:
+        team_launcher.uid_for_user = original_uid_for_user
+        if original_host_wayland is not None:
+            os.environ["PGU_HOST_WAYLAND_DISPLAY"] = original_host_wayland
+        if original_wayland_name is None:
+            os.environ.pop("PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY", None)
+        else:
+            os.environ["PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY"] = original_wayland_name
+
+
+def test_konsole_launch_falls_back_to_clear_error_when_gui_user_missing() -> None:
+    original_uid_for_user = team_launcher.uid_for_user
+    original_host_wayland = os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
+    try:
+        team_launcher.uid_for_user = lambda _user_name: None
+
+        command = konsole_launch_args(Path("/tmp/layout.json"), gui_user="nobody")
+        assert command[:2] == ["sh", "-lc"]
+        assert "no host Wayland display" in command[2]
+    finally:
+        team_launcher.uid_for_user = original_uid_for_user
+        if original_host_wayland is not None:
+            os.environ["PGU_HOST_WAYLAND_DISPLAY"] = original_host_wayland
+
+
 def test_start_is_attach_or_start_and_never_duplicates_existing_session() -> None:
     config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
     role = next(role for role in config.roles if role.role == "ops")
@@ -434,7 +500,7 @@ def test_start_runs_research_detached_before_opening_visible_layout() -> None:
         assert research_new_session[5:7] == ["-c", str(tmp_path / "worktrees" / "research")]
         assert "PGU_PANE_TARGET=pgu-research:0.0" in research_new_session[-1]
         assert "--model claude-sonnet-5" in research_new_session[-1]
-        assert runner.calls[-1] == ["konsole", "--layout", str(layout_output)]
+        assert runner.calls[-1] == konsole_launch_args(layout_output)
         assert ["tmux", "attach", "-t", "pgu-research"] not in runner.calls
 
 
@@ -677,6 +743,9 @@ def main() -> int:
     test_yolo_config_translates_to_cli_specific_bypass_flags()
     test_effort_config_translates_to_cli_specific_args()
     test_pgu_launch_commands_include_model_and_bypass_flags()
+    test_konsole_launch_uses_gui_user_display_environment()
+    test_konsole_launch_can_fallback_to_gui_user_uid_without_host_var()
+    test_konsole_launch_falls_back_to_clear_error_when_gui_user_missing()
     test_start_is_attach_or_start_and_never_duplicates_existing_session()
     test_start_creates_missing_session_once_then_attaches()
     test_start_runs_research_detached_before_opening_visible_layout()

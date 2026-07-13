@@ -38,6 +38,7 @@ DEFAULT_DIRECTOR_COMPOSING_TIMEOUT_SECONDS = 15 * 60.0
 DEFAULT_IDLE_STALL_GRACE_SECONDS = 45.0
 DEFAULT_IDLE_STALL_NUDGE_CADENCE_SECONDS = 5 * 60.0
 DEFAULT_IDLE_STALL_ESCALATE_AFTER = 2
+DEFAULT_DIRECTOR_COMPOSER_HOME_X = 2
 DEFAULT_PANE_STATE_DIR = (
     Path(os.environ["PGU_TICKET_BOARD_PANE_STATE_DIR"]).expanduser()
     if os.environ.get("PGU_TICKET_BOARD_PANE_STATE_DIR")
@@ -242,16 +243,20 @@ class PaneActivityGate:
         state_store: PaneHookStateStore | None = None,
         director_target: str = ROLE_TO_TARGET["director"],
         client_activity_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        cursor_position_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
         director_composing_timeout_seconds: float = DEFAULT_DIRECTOR_COMPOSING_TIMEOUT_SECONDS,
         director_startup_hold_seconds: float = DEFAULT_BUSY_REQUEUE_SECONDS,
+        director_composer_home_x: int = DEFAULT_DIRECTOR_COMPOSER_HOME_X,
         monotonic: Callable[[], float] = time.monotonic,
         wall_time: Callable[[], float] = time.time,
     ) -> None:
         self.state_store = state_store or PaneHookStateStore()
         self.director_target = director_target
         self.client_activity_runner = client_activity_runner
+        self.cursor_position_runner = cursor_position_runner
         self.director_composing_timeout_seconds = director_composing_timeout_seconds
         self.director_startup_hold_seconds = director_startup_hold_seconds
+        self.director_composer_home_x = director_composer_home_x
         self.monotonic = monotonic
         self.wall_time = wall_time
         self._last_trace_by_target: dict[str, ActivityTrace] = {}
@@ -314,6 +319,29 @@ class PaneActivityGate:
                 continue
         return max(values) if values else None
 
+    def _target_cursor_state(self, target: str) -> bool | None:
+        try:
+            proc = self.cursor_position_runner(
+                ["tmux", "display-message", "-p", "-t", target, "#{cursor_x} #{cursor_y} #{pane_height}"],
+                check=True,
+                text=True,
+                capture_output=True,
+                timeout=2.0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        fields = proc.stdout.strip().split()
+        if len(fields) != 3:
+            return None
+        try:
+            cursor_x, cursor_y, pane_height = (int(field) for field in fields)
+        except ValueError:
+            return None
+        if pane_height <= 0 or cursor_x < 0 or cursor_y < 0:
+            return None
+        home_row = pane_height - 1
+        return cursor_x > self.director_composer_home_x or cursor_y < home_row
+
     def _reset_director_latch(self) -> None:
         self._director_idle_snapshot_activity = None
         self._director_idle_snapshot_state_ts = None
@@ -323,7 +351,7 @@ class PaneActivityGate:
         self._director_startup_hold_state_ts = None
         self._director_startup_hold_started_at = None
 
-    def _director_is_composing(self, target: str, state: PaneHookState) -> ActivityTrace | None:
+    def _director_is_composing(self, target: str, state: PaneHookState, *, cursor_composing: bool | None) -> ActivityTrace | None:
         current_activity = self._director_client_activity(target)
         if current_activity is None:
             return ActivityTrace(True, "client_activity_unavailable")
@@ -334,6 +362,13 @@ class PaneActivityGate:
             self._director_composing_latched = False
             self._director_composing_activity = None
             self._director_composing_started_at = None
+            if cursor_composing:
+                self._director_composing_latched = True
+                self._director_composing_activity = current_activity
+                self._director_composing_started_at = now
+                self._director_startup_hold_state_ts = None
+                self._director_startup_hold_started_at = None
+                return ActivityTrace(True, "human_composing")
             if state.updated_at < self._started_at:
                 self._director_startup_hold_state_ts = state.updated_at
                 self._director_startup_hold_started_at = now
@@ -351,6 +386,17 @@ class PaneActivityGate:
                 return ActivityTrace(True, "startup_latch_unestablished")
             self._director_startup_hold_state_ts = None
             self._director_startup_hold_started_at = None
+            return None
+        if cursor_composing is True:
+            self._director_composing_latched = True
+            self._director_composing_activity = current_activity
+            self._director_composing_started_at = now
+            return ActivityTrace(True, "human_composing")
+        if cursor_composing is False:
+            self._director_idle_snapshot_activity = current_activity
+            self._director_composing_latched = False
+            self._director_composing_activity = None
+            self._director_composing_started_at = None
             return None
         if not self._director_composing_latched and current_activity > snapshot:
             self._director_composing_latched = True
@@ -383,10 +429,13 @@ class PaneActivityGate:
             return self._record_trace(target, ActivityTrace(True, reason))
         if previous is not None and previous[0] != "idle" and target == self.director_target:
             self._reset_director_latch()
+        cursor_composing = self._target_cursor_state(target)
         if target == self.director_target:
-            composing_trace = self._director_is_composing(target, state)
+            composing_trace = self._director_is_composing(target, state, cursor_composing=cursor_composing)
             if composing_trace is not None:
                 return self._record_trace(target, composing_trace)
+        elif cursor_composing:
+            return self._record_trace(target, ActivityTrace(True, "human_composing"))
         return self._record_trace(target, ActivityTrace(False, "hook_idle"))
 
     def is_working(self, target: str) -> bool:

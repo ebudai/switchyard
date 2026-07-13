@@ -260,9 +260,27 @@ def trace_events(conn: FakeConnection) -> list[str]:
     return [str(params[4]) for params in conn.traces if params is not None]
 
 
+def constant_cursor_runner(output: str = "2 23 24") -> Any:
+    def runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=f"{output}\n")
+
+    return runner
+
+
+def sequenced_cursor_runner(*outputs: str) -> Any:
+    values = list(outputs)
+    fallback = values[-1] if values else "2 23 24"
+
+    def runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        value = values.pop(0) if values else fallback
+        return subprocess.CompletedProcess(args, 0, stdout=f"{value}\n")
+
+    return runner
+
+
 def hook_gate(tmp_path: Path) -> tuple[PaneHookStateStore, PaneActivityGate]:
     store = PaneHookStateStore(tmp_path)
-    return store, PaneActivityGate(state_store=store)
+    return store, PaneActivityGate(state_store=store, cursor_position_runner=constant_cursor_runner())
 
 
 def test_hook_state_writer_and_gate_idle_before_arrival_delivers_immediately() -> None:
@@ -290,6 +308,33 @@ def test_hook_state_writer_and_gate_idle_before_arrival_delivers_immediately() -
     assert conn.acked == [1]
     assert conn.traces[1][5] == "idle"
     assert conn.traces[1][6] == "hook_idle"
+
+
+def test_worker_cursor_advanced_holds_notification_delivery() -> None:
+    sent: list[tuple[str, str]] = []
+    cursor = ["5 23 24"]
+
+    def cursor_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=f"{cursor[0]}\n")
+
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(state_store=store, cursor_position_runner=cursor_runner)
+        store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
+        conn = FakeConnection([queue_row(78, "PGU-358A", target_role="ops", message="PGU-358A -- Ops notification")])
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=gate.is_working,
+            connector=lambda *args, **kwargs: conn,
+            poll_seconds=0,
+        )
+
+        assert listener.listen_once(max_notifications=1) == 0
+
+    assert sent == []
+    assert len(conn.requeued) == 1
+    assert conn.traces[1][6] == "human_composing"
 
 
 def test_listener_enqueues_idle_stall_nudges_from_hook_state() -> None:
@@ -585,16 +630,21 @@ def test_director_client_activity_latches_no_clobber_until_busy_idle_cycle() -> 
     sent: list[tuple[str, str]] = []
     now = [0.0]
     activity = [100]
+    cursor = ["2 23 24"]
 
     def client_activity_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         assert args[:4] == ["tmux", "list-clients", "-t", "pgu-director"]
         return subprocess.CompletedProcess(args, 0, stdout=f"{activity[0]}\n")
+
+    def cursor_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=f"{cursor[0]}\n")
 
     with TemporaryStateDir() as tmp_path:
         store = PaneHookStateStore(tmp_path)
         gate = PaneActivityGate(
             state_store=store,
             client_activity_runner=client_activity_runner,
+            cursor_position_runner=cursor_runner,
             director_composing_timeout_seconds=60.0,
             monotonic=lambda: now[0],
             wall_time=lambda: 0.0,
@@ -603,6 +653,7 @@ def test_director_client_activity_latches_no_clobber_until_busy_idle_cycle() -> 
         assert gate.is_busy("pgu-director:0.0") is False
 
         activity[0] = 101
+        cursor[0] = "5 23 24"
         conn = FakeConnection(
             [queue_row(4, "PGU-304", target_role="director", message="PGU-304 -- Director notification")]
         )
@@ -635,6 +686,7 @@ def test_director_client_activity_latches_no_clobber_until_busy_idle_cycle() -> 
         store.write("pgu-director:0.0", "busy", source="claude.UserPromptSubmit", now=60.0)
         assert gate.is_busy("pgu-director:0.0") is True
         store.write("pgu-director:0.0", "idle", source="claude.Notification.idle_prompt", now=61.0)
+        cursor[0] = "2 23 24"
         assert gate.is_busy("pgu-director:0.0") is False
 
         delivered_conn = FakeConnection(
@@ -657,10 +709,14 @@ def test_director_restart_window_holds_stale_idle_until_busy_idle_cycle() -> Non
     now = [0.0]
     wall = [50.0]
     activity = [100]
+    cursor = ["2 23 24"]
 
     def client_activity_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         assert args[:4] == ["tmux", "list-clients", "-t", "pgu-director"]
         return subprocess.CompletedProcess(args, 0, stdout=f"{activity[0]}\n")
+
+    def cursor_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=f"{cursor[0]}\n")
 
     with TemporaryStateDir() as tmp_path:
         store = PaneHookStateStore(tmp_path)
@@ -668,6 +724,7 @@ def test_director_restart_window_holds_stale_idle_until_busy_idle_cycle() -> Non
         gate = PaneActivityGate(
             state_store=store,
             client_activity_runner=client_activity_runner,
+            cursor_position_runner=cursor_runner,
             director_composing_timeout_seconds=60.0,
             monotonic=lambda: now[0],
             wall_time=lambda: wall[0],
@@ -689,6 +746,7 @@ def test_director_restart_window_holds_stale_idle_until_busy_idle_cycle() -> Non
 
         now[0] = 1.0
         activity[0] = 101
+        cursor[0] = "5 23 24"
         composing_conn = FakeConnection(
             [queue_row(71, "PGU-354", target_role="director", message="PGU-354 -- Director notification")]
         )
@@ -706,6 +764,7 @@ def test_director_restart_window_holds_stale_idle_until_busy_idle_cycle() -> Non
         store.write("pgu-director:0.0", "busy", source="claude.UserPromptSubmit", now=60.0)
         assert gate.is_busy("pgu-director:0.0") is True
         store.write("pgu-director:0.0", "idle", source="claude.Notification.idle_prompt", now=61.0)
+        cursor[0] = "2 23 24"
         assert gate.is_busy("pgu-director:0.0") is False
 
         delivered_conn = FakeConnection(
@@ -728,6 +787,7 @@ def test_director_restart_window_timeout_releases_flat_idle_without_busy_cycle()
     now = [0.0]
     wall = [50.0]
     activity = [100]
+    cursor_runner = constant_cursor_runner()
 
     def client_activity_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         assert args[:4] == ["tmux", "list-clients", "-t", "pgu-director"]
@@ -739,6 +799,7 @@ def test_director_restart_window_timeout_releases_flat_idle_without_busy_cycle()
         gate = PaneActivityGate(
             state_store=store,
             client_activity_runner=client_activity_runner,
+            cursor_position_runner=cursor_runner,
             director_composing_timeout_seconds=60.0,
             director_startup_hold_seconds=1.0,
             monotonic=lambda: now[0],
@@ -780,6 +841,7 @@ def test_director_pre_send_recheck_blocks_typing_that_starts_after_initial_idle_
     sent: list[tuple[str, str]] = []
     wall = [0.0]
     activity_values = [100, 100, 101]
+    cursor_runner = sequenced_cursor_runner("2 23 24", "2 23 24", "5 23 24")
 
     def client_activity_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         assert args[:4] == ["tmux", "list-clients", "-t", "pgu-director"]
@@ -791,6 +853,7 @@ def test_director_pre_send_recheck_blocks_typing_that_starts_after_initial_idle_
         gate = PaneActivityGate(
             state_store=store,
             client_activity_runner=client_activity_runner,
+            cursor_position_runner=cursor_runner,
             director_composing_timeout_seconds=60.0,
             wall_time=lambda: wall[0],
         )
@@ -818,15 +881,20 @@ def test_director_pre_send_recheck_blocks_typing_that_starts_after_initial_idle_
 def test_director_paused_mid_compose_stays_held_until_busy_idle_cycle() -> None:
     now = [0.0]
     activity = [100]
+    cursor = ["2 23 24"]
 
     def client_activity_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(args, 0, stdout=f"{activity[0]}\n")
+
+    def cursor_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=f"{cursor[0]}\n")
 
     with TemporaryStateDir() as tmp_path:
         store = PaneHookStateStore(tmp_path)
         gate = PaneActivityGate(
             state_store=store,
             client_activity_runner=client_activity_runner,
+            cursor_position_runner=cursor_runner,
             director_composing_timeout_seconds=5.0,
             monotonic=lambda: now[0],
             wall_time=lambda: 0.0,
@@ -835,6 +903,7 @@ def test_director_paused_mid_compose_stays_held_until_busy_idle_cycle() -> None:
         assert gate.is_busy("pgu-director:0.0") is False
 
         activity[0] = 101
+        cursor[0] = "5 23 24"
         assert gate.is_busy("pgu-director:0.0") is True
         assert gate.last_trace("pgu-director:0.0").reason == "human_composing"  # type: ignore[union-attr]
 
@@ -846,6 +915,7 @@ def test_director_paused_mid_compose_stays_held_until_busy_idle_cycle() -> None:
         assert gate.is_busy("pgu-director:0.0") is True
 
         store.write("pgu-director:0.0", "idle", source="claude.Stop", now=61.0)
+        cursor[0] = "2 23 24"
         assert gate.is_busy("pgu-director:0.0") is False
         assert gate.last_trace("pgu-director:0.0").reason == "hook_idle"  # type: ignore[union-attr]
 
@@ -853,6 +923,7 @@ def test_director_paused_mid_compose_stays_held_until_busy_idle_cycle() -> None:
 def test_director_idle_without_detected_activity_does_not_false_latch() -> None:
     now = [0.0]
     activity = [100]
+    cursor_runner = constant_cursor_runner()
 
     def client_activity_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(args, 0, stdout=f"{activity[0]}\n")
@@ -862,6 +933,7 @@ def test_director_idle_without_detected_activity_does_not_false_latch() -> None:
         gate = PaneActivityGate(
             state_store=store,
             client_activity_runner=client_activity_runner,
+            cursor_position_runner=cursor_runner,
             director_composing_timeout_seconds=5.0,
             monotonic=lambda: now[0],
             wall_time=lambda: 0.0,
@@ -870,6 +942,41 @@ def test_director_idle_without_detected_activity_does_not_false_latch() -> None:
         assert gate.is_busy("pgu-director:0.0") is False
 
         now[0] = 600.0
+        assert gate.is_busy("pgu-director:0.0") is False
+        assert gate.last_trace("pgu-director:0.0").reason == "hook_idle"  # type: ignore[union-attr]
+
+
+def test_director_erased_draft_releases_without_submit() -> None:
+    now = [0.0]
+    activity = [100]
+    cursor = ["2 23 24"]
+
+    def client_activity_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=f"{activity[0]}\n")
+
+    def cursor_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=f"{cursor[0]}\n")
+
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            client_activity_runner=client_activity_runner,
+            cursor_position_runner=cursor_runner,
+            director_composing_timeout_seconds=5.0,
+            monotonic=lambda: now[0],
+            wall_time=lambda: 0.0,
+        )
+        store.write("pgu-director:0.0", "idle", source="claude.Notification.idle_prompt", now=10.0)
+        assert gate.is_busy("pgu-director:0.0") is False
+
+        activity[0] = 101
+        cursor[0] = "5 23 24"
+        assert gate.is_busy("pgu-director:0.0") is True
+        assert gate.last_trace("pgu-director:0.0").reason == "human_composing"  # type: ignore[union-attr]
+
+        now[0] = 30.0
+        cursor[0] = "2 23 24"
         assert gate.is_busy("pgu-director:0.0") is False
         assert gate.last_trace("pgu-director:0.0").reason == "hook_idle"  # type: ignore[union-attr]
 
@@ -1042,6 +1149,7 @@ class TemporaryStateDir:
 
 def main() -> int:
     test_hook_state_writer_and_gate_idle_before_arrival_delivers_immediately()
+    test_worker_cursor_advanced_holds_notification_delivery()
     test_listener_enqueues_idle_stall_nudges_from_hook_state()
     test_external_hook_writer_records_state_file()
     test_display_message_renames_analysis_stage_copy_without_touching_titles()
@@ -1060,6 +1168,7 @@ def main() -> int:
     test_director_pre_send_recheck_blocks_typing_that_starts_after_initial_idle_check()
     test_director_paused_mid_compose_stays_held_until_busy_idle_cycle()
     test_director_idle_without_detected_activity_does_not_false_latch()
+    test_director_erased_draft_releases_without_submit()
     test_listener_logs_missing_hook_state_on_startup()
     test_send_failure_uses_exponential_backoff()
     test_stale_notification_for_cancelled_ticket_is_acked_not_delivered()

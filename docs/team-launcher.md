@@ -12,6 +12,18 @@ The executable wrapper self-runs as the `agent` user. If another host user runs
 same launcher arguments through, so callers do not need to prefix the command
 manually.
 
+The visible Konsole window is opened by the `agent` launcher with Eric's desktop
+session environment: by default the launcher runs
+`env XDG_RUNTIME_DIR=/run/user/<eric-uid>
+DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<eric-uid>/bus
+WAYLAND_DISPLAY=wayland-0 konsole --layout ...`. Set
+`PGU_TEAM_LAUNCHER_GUI_USER` or `PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY` only if the
+desktop session changes. This depends on the existing Wayland ACL setup that
+allows `agent` to access Eric's runtime dir and Wayland socket. The commands
+inside the Konsole layout still call `scripts/team-launcher pane ...`, so the
+wrapper self-elevates those pane commands back to `agent` before tmux
+attach/start when needed.
+
 ## Modes
 
 ```bash

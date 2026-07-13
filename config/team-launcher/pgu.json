@@ -1,6 +1,10 @@
 {
   "layout": "pgu-konsole-layout.json",
   "project": "pgu",
+  "repository": "/home/agent/Projects/pgu",
+  "worktree_base": "/home/agent/.claude/worktrees/pgu-team",
+  "worktree_branch": "main",
+  "worktree_remote": "origin",
   "roles": [
     {
       "cli": [
@@ -16,7 +20,6 @@
       "slot": 0,
       "target": "pgu-director:0.0",
       "tmux_session": "pgu-director",
-      "workdir": "/home/agent/Projects/pgu",
       "yolo": true
     },
     {
@@ -33,7 +36,6 @@
       "slot": 1,
       "target": "pgu-main:0.0",
       "tmux_session": "pgu-main",
-      "workdir": "/home/agent/Projects/pgu",
       "yolo": true
     },
     {
@@ -50,7 +52,6 @@
       "slot": 2,
       "target": "pgu-app:0.0",
       "tmux_session": "pgu-app",
-      "workdir": "/home/agent/Projects/pgu",
       "yolo": true
     },
     {
@@ -67,7 +68,6 @@
       "role": "research",
       "target": "pgu-research:0.0",
       "tmux_session": "pgu-research",
-      "workdir": "/home/agent/Projects/pgu",
       "yolo": true
     },
     {
@@ -84,7 +84,6 @@
       "slot": 3,
       "target": "pgu-ops:0.0",
       "tmux_session": "pgu-ops",
-      "workdir": "/home/agent/Projects/pgu",
       "yolo": true
     },
     {
@@ -101,7 +100,6 @@
       "slot": 4,
       "target": "pgu-audit:0.0",
       "tmux_session": "pgu-audit",
-      "workdir": "/home/agent/Projects/pgu",
       "yolo": true
     },
     {
@@ -117,7 +115,6 @@
       "slot": 5,
       "target": "pgu-inspector:0.0",
       "tmux_session": "pgu-inspector",
-      "workdir": "/home/agent/Projects/pgu",
       "yolo": true
     }
   ]

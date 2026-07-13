@@ -53,7 +53,20 @@ class ProjectConfig:
     project: str
     layout: Path
     session_dir: Path
+    repository: Path | None
+    worktree_base: Path | None
+    worktree_remote: str
+    worktree_branch: str
     roles: list[RoleConfig]
+
+
+@dataclass(frozen=True)
+class WorktreeProvisionResult:
+    failed_roles: dict[str, str]
+
+    @property
+    def ok(self) -> bool:
+        return not self.failed_roles
 
 
 def _repo_root() -> Path:
@@ -89,7 +102,7 @@ def _bool_value(value: Any, *, field: str, role: str) -> bool:
     return value
 
 
-def _role_from_json(project: str, raw: dict[str, Any]) -> RoleConfig:
+def _role_from_json(project: str, raw: dict[str, Any], *, base: Path, default_workdir: Path | None) -> RoleConfig:
     role = str(raw.get("role") or "").strip()
     if not role:
         raise SystemExit("team launcher role entry missing role")
@@ -106,13 +119,18 @@ def _role_from_json(project: str, raw: dict[str, Any]) -> RoleConfig:
     env_raw = raw.get("env", {})
     if not isinstance(env_raw, dict):
         raise SystemExit(f"role {role} env must be a JSON object")
+    workdir_raw = raw.get("workdir")
+    if workdir_raw is None:
+        workdir = str(default_workdir or Path.cwd())
+    else:
+        workdir = str(_expand_path(str(workdir_raw), base=base))
     return RoleConfig(
         role=role,
         slot=slot,
         detached=_bool_value(raw.get("detached"), field="detached", role=role),
         tmux_session=tmux_session,
         target=str(raw.get("target") or f"{tmux_session}:0.0").strip(),
-        workdir=str(raw.get("workdir") or os.getcwd()),
+        workdir=workdir,
         cli=cli,
         model=str(raw.get("model") or "").strip(),
         model_arg=str(raw.get("model_arg") or "--model").strip(),
@@ -137,7 +155,30 @@ def load_project_config(project: str, config_path: Path | None = None) -> Projec
     base = path.parent
     layout = _expand_path(str(config.get("layout") or f"{project}-konsole-layout.json"), base=base)
     session_dir = _expand_path(str(config.get("session_dir") or str(DEFAULT_SESSION_DIR)), base=base)
-    roles = [_role_from_json(project, raw) for raw in roles_raw if isinstance(raw, dict)]
+    repository = None
+    repository_raw = config.get("repository")
+    if repository_raw is not None:
+        repository = _expand_path(str(repository_raw), base=base)
+    worktree_base = None
+    worktree_base_raw = config.get("worktree_base")
+    if worktree_base_raw is not None:
+        worktree_base = _expand_path(str(worktree_base_raw), base=base)
+    if (repository is None) != (worktree_base is None):
+        raise SystemExit(f"{path} must define repository and worktree_base together")
+    worktree_remote = str(config.get("worktree_remote") or "origin").strip()
+    worktree_branch = str(config.get("worktree_branch") or "main").strip()
+    if not worktree_remote or not worktree_branch:
+        raise SystemExit(f"{path} worktree_remote and worktree_branch must be non-empty")
+    roles = [
+        _role_from_json(
+            project,
+            raw,
+            base=base,
+            default_workdir=(worktree_base / str(raw.get("role")).strip()) if worktree_base is not None else None,
+        )
+        for raw in roles_raw
+        if isinstance(raw, dict)
+    ]
     if len(roles) != len(roles_raw):
         raise SystemExit(f"{path} roles must all be JSON objects")
     slots = [role.slot for role in roles if role.slot is not None]
@@ -149,7 +190,30 @@ def load_project_config(project: str, config_path: Path | None = None) -> Projec
     visible_without_slots = [role.role for role in roles if not role.detached and role.slot is None]
     if visible_without_slots:
         raise SystemExit(f"{path} visible roles must define layout slots: {', '.join(visible_without_slots)}")
-    return ProjectConfig(project=config_project, layout=layout, session_dir=session_dir, roles=roles)
+    workdirs = [Path(role.workdir) for role in roles]
+    if len({_normalized_path(workdir) for workdir in workdirs}) != len(workdirs):
+        raise SystemExit(f"{path} contains duplicate role workdir assignments")
+    if repository is not None:
+        repo_path = _normalized_path(repository)
+        shared_checkout_roles = [role.role for role in roles if _normalized_path(Path(role.workdir)) == repo_path]
+        if shared_checkout_roles:
+            raise SystemExit(
+                f"{path} role workdirs must not use the shared repository checkout: {', '.join(shared_checkout_roles)}"
+            )
+    return ProjectConfig(
+        project=config_project,
+        layout=layout,
+        session_dir=session_dir,
+        repository=repository,
+        worktree_base=worktree_base,
+        worktree_remote=worktree_remote,
+        worktree_branch=worktree_branch,
+        roles=roles,
+    )
+
+
+def _normalized_path(path: Path) -> str:
+    return str(path.expanduser().resolve(strict=False))
 
 
 def _quote_command(args: Sequence[str]) -> str:
@@ -244,6 +308,119 @@ def tmux_current_command_args(role: RoleConfig) -> list[str]:
 
 def tmux_pane_pid_args(role: RoleConfig) -> list[str]:
     return ["tmux", "display-message", "-p", "-t", role.target, "#{pane_pid}"]
+
+
+def worktree_ref(config: ProjectConfig) -> str:
+    return f"{config.worktree_remote}/{config.worktree_branch}"
+
+
+def git_fetch_worktree_ref_args(config: ProjectConfig) -> list[str]:
+    if config.repository is None:
+        raise SystemExit("project config does not define repository")
+    return ["git", "-C", str(config.repository), "fetch", config.worktree_remote, config.worktree_branch]
+
+
+def git_worktree_add_args(config: ProjectConfig, role: RoleConfig) -> list[str]:
+    if config.repository is None:
+        raise SystemExit("project config does not define repository")
+    return ["git", "-C", str(config.repository), "worktree", "add", "--detach", role.workdir, worktree_ref(config)]
+
+
+def git_worktree_check_args(role: RoleConfig) -> list[str]:
+    return ["git", "-C", role.workdir, "rev-parse", "--is-inside-work-tree"]
+
+
+def git_checkout_worktree_ref_args(config: ProjectConfig, role: RoleConfig) -> list[str]:
+    return ["git", "-C", role.workdir, "checkout", "--detach", "--force", worktree_ref(config)]
+
+
+def git_clean_worktree_args(role: RoleConfig) -> list[str]:
+    return ["git", "-C", role.workdir, "clean", "-fdx"]
+
+
+def _proc_failure_reason(proc: subprocess.CompletedProcess[Any], fallback: str) -> str:
+    stderr = getattr(proc, "stderr", None)
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    if isinstance(stderr, str) and stderr.strip():
+        return stderr.strip().splitlines()[-1]
+    return fallback
+
+
+def ensure_role_worktree(
+    config: ProjectConfig,
+    role: RoleConfig,
+    *,
+    refresh: bool,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> str | None:
+    if config.repository is None:
+        return None
+    workdir = Path(role.workdir)
+    if workdir.exists():
+        check_proc = runner(
+            git_worktree_check_args(role),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if check_proc.returncode != 0:
+            return f"refusing to use non-git workdir: {role.workdir}"
+        if not refresh:
+            return None
+        checkout_proc = runner(git_checkout_worktree_ref_args(config, role))
+        if checkout_proc.returncode != 0:
+            return _proc_failure_reason(checkout_proc, f"checkout failed with exit {checkout_proc.returncode}")
+        clean_proc = runner(git_clean_worktree_args(role))
+        if clean_proc.returncode != 0:
+            return _proc_failure_reason(clean_proc, f"clean failed with exit {clean_proc.returncode}")
+        return None
+    workdir.parent.mkdir(parents=True, exist_ok=True)
+    add_proc = runner(git_worktree_add_args(config, role))
+    if add_proc.returncode != 0:
+        return _proc_failure_reason(add_proc, f"worktree add failed with exit {add_proc.returncode}")
+    if refresh:
+        clean_proc = runner(git_clean_worktree_args(role))
+        if clean_proc.returncode != 0:
+            return _proc_failure_reason(clean_proc, f"clean failed with exit {clean_proc.returncode}")
+    return None
+
+
+def ensure_project_worktrees(
+    config: ProjectConfig,
+    *,
+    refresh: bool,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> WorktreeProvisionResult:
+    if config.repository is None:
+        return WorktreeProvisionResult({})
+    fetch_proc = runner(git_fetch_worktree_ref_args(config))
+    if fetch_proc.returncode != 0:
+        reason = _proc_failure_reason(fetch_proc, f"fetch failed with exit {fetch_proc.returncode}")
+        return WorktreeProvisionResult({role.role: reason for role in config.roles})
+    failed_roles: dict[str, str] = {}
+    for role in config.roles:
+        reason = ensure_role_worktree(config, role, refresh=refresh, runner=runner)
+        if reason is not None:
+            failed_roles[role.role] = reason
+            print(f"worktree refresh failed for {role.role}: {reason}", file=sys.stderr)
+    return WorktreeProvisionResult(failed_roles)
+
+
+def fetch_project_worktree_ref(
+    config: ProjectConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> int:
+    if config.repository is None:
+        return 0
+    fetch_proc = runner(git_fetch_worktree_ref_args(config))
+    if fetch_proc.returncode != 0:
+        print(
+            f"warning: failed to fetch {worktree_ref(config)} for reload: "
+            f"{_proc_failure_reason(fetch_proc, f'exit {fetch_proc.returncode}')}",
+            file=sys.stderr,
+        )
+    return int(fetch_proc.returncode)
 
 
 def expected_live_commands(role: RoleConfig) -> set[str]:
@@ -430,6 +607,11 @@ def pane_command(
     return _quote_command(args)
 
 
+def failed_role_command(role: RoleConfig, reason: str) -> str:
+    message = f"PGU launcher did not start {role.role}: worktree refresh failed: {reason}"
+    return _quote_command(["sh", "-lc", f"printf '%s\\n' {shlex.quote(message)}; sleep 30"])
+
+
 def materialize_layout(
     config: ProjectConfig,
     *,
@@ -438,7 +620,9 @@ def materialize_layout(
     script_path: Path,
     output_path: Path,
     force_reload: bool = False,
+    failed_roles: dict[str, str] | None = None,
 ) -> Path:
+    failed_roles = failed_roles or {}
     layout = json.loads(config.layout.read_text(encoding="utf-8"))
     leaves = _layout_leaves(layout)
     for role in config.roles:
@@ -449,15 +633,19 @@ def materialize_layout(
         if role.slot < 0 or role.slot >= len(leaves):
             raise SystemExit(f"role {role.role} slot {role.slot} is outside layout leaf count {len(leaves)}")
         leaf = leaves[role.slot]
-        leaf["Command"] = pane_command(
-            config.project,
-            role,
-            config_path=config_path,
-            mode=mode,
-            script_path=script_path,
-            force_reload=force_reload,
-        )
-        leaf["WorkingDirectory"] = role.workdir
+        if role.role in failed_roles:
+            leaf["Command"] = failed_role_command(role, failed_roles[role.role])
+            leaf["WorkingDirectory"] = str(Path.home())
+        else:
+            leaf["Command"] = pane_command(
+                config.project,
+                role,
+                config_path=config_path,
+                mode=mode,
+                script_path=script_path,
+                force_reload=force_reload,
+            )
+            leaf["WorkingDirectory"] = role.workdir
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(layout, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return output_path
@@ -479,6 +667,12 @@ def launch_project(
     if mode not in {"attach", "attach-or-start", "reload"}:
         raise SystemExit(f"unknown launch mode: {mode}")
     output_path = layout_output or Path(tempfile.gettempdir()) / f"{config.project}-team-layout.json"
+    failed_roles: dict[str, str] = {}
+    if not dry_run:
+        if mode == "attach-or-start":
+            failed_roles = ensure_project_worktrees(config, refresh=True, runner=runner).failed_roles
+        elif mode == "reload":
+            fetch_project_worktree_ref(config, runner=runner)
     materialize_layout(
         config,
         config_path=config_path,
@@ -486,25 +680,33 @@ def launch_project(
         script_path=script_path,
         output_path=output_path,
         force_reload=force_reload,
+        failed_roles=failed_roles,
     )
     plan = {
         "project": config.project,
         "mode": mode,
         "layout": str(output_path),
+        "worktree_ref": worktree_ref(config) if config.repository is not None else None,
         "roles": [
             {
                 "role": role.role,
                 "slot": role.slot,
                 "tmux_session": role.tmux_session,
                 "target": role.target,
-                "command": pane_command(
-                    config.project,
-                    role,
-                    config_path=config_path,
-                    mode=mode,
-                    script_path=script_path,
-                    force_reload=force_reload,
+                "workdir": str(Path.home()) if role.role in failed_roles else role.workdir,
+                "command": (
+                    failed_role_command(role, failed_roles[role.role])
+                    if role.role in failed_roles
+                    else pane_command(
+                        config.project,
+                        role,
+                        config_path=config_path,
+                        mode=mode,
+                        script_path=script_path,
+                        force_reload=force_reload,
+                    )
                 ),
+                "worktree_error": failed_roles.get(role.role, ""),
             }
             for role in config.roles
             if not role.detached
@@ -514,6 +716,7 @@ def launch_project(
                 "role": role.role,
                 "tmux_session": role.tmux_session,
                 "target": role.target,
+                "workdir": role.workdir,
             }
             for role in config.roles
             if role.detached
@@ -524,6 +727,9 @@ def launch_project(
         return 0
     for role in config.roles:
         if not role.detached:
+            continue
+        if role.role in failed_roles:
+            print(f"skipping detached role {role.role}: {failed_roles[role.role]}", file=sys.stderr)
             continue
         result = run_detached_role(
             role,

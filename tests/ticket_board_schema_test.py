@@ -288,8 +288,16 @@ def main() -> int:
     assert "tell the director directly what is wrong" in idle_reminder_clause_migration
     assert "tell eric directly what is wrong" in idle_reminder_clause_migration
     assert "<the next rung>" not in idle_reminder_clause_migration
+    idle_reminder_primary_defer_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "283_idle_reminder_defers_to_primary.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "create or replace function ticket_board.notify_idle_turn_end_nudges" in idle_reminder_primary_defer_migration
+    assert "q.kind not in ('idle_reminder', 'escalation')" in idle_reminder_primary_defer_migration
+    assert "q.target_role = candidates.target_role" in idle_reminder_primary_defer_migration
     assert "tell the director directly what is wrong" in executable_schema_lower
     assert "tell eric directly what is wrong" in executable_schema_lower
+    assert "q.kind not in ('idle_reminder', 'escalation')" in executable_schema_lower
+    assert "q.target_role = candidates.target_role" in executable_schema_lower
     assert "create or replace function ticket_board.notify_ticket_state_transition" in executable_schema_lower
     assert "pg_notify" in executable_schema_lower, "PGU-191 must notify on state transitions"
     assert "manually_controlled" in executable_schema_lower, "PGU-191 triggers must honor manual control"

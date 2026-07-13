@@ -15,10 +15,15 @@ readonly LOG_PATH="${LOG_PATH:-/tmp/pgu-ticket-board.log}"
 readonly UNIT_DIR="${UNIT_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}"
 readonly UNIT_PATH="$UNIT_DIR/$SERVICE_NAME"
 readonly DEPLOY_REF="${DEPLOY_REF:-origin/main}"
+readonly BOARD_DATABASE_URL="${TICKET_BOARD_DATABASE_URL:-postgresql:///pgu?host=/var/run/postgresql&user=ticket_board_service}"
+readonly BOARD_ADMIN_DATABASE_URL="${TICKET_BOARD_ADMIN_DATABASE_URL:-postgresql:///pgu?host=/var/run/postgresql&user=postgres}"
+readonly RBAC_SQL="${RBAC_SQL:-$BOARD_CURRENT_LINK/scripts/ticket_board/rbac.sql}"
+readonly SMOKE_PATH="${BOARD_SMOKE_PATH:-/api/board}"
+readonly SMOKE_TIMEOUT_SECONDS="${BOARD_SMOKE_TIMEOUT_SECONDS:-10}"
 
 usage() {
     cat <<EOF
-Usage: scripts/ticket-board-service.sh <install|deploy|deploy-restart|render-unit|start|stop|restart|status|logs>
+Usage: scripts/ticket-board-service.sh <install|deploy|deploy-restart|ensure-roles|render-unit|start|stop|restart|status|logs>
 
 Manage the PGU ticket board as an agent user systemd service.
 
@@ -26,6 +31,7 @@ Commands:
   install         Export $DEPLOY_REF into $BOARD_ROOT/current, write the unit, enable and start it
   deploy          Refresh $BOARD_ROOT/current from $DEPLOY_REF without restarting the service
   deploy-restart  Refresh $BOARD_ROOT/current from $DEPLOY_REF and restart the service
+  ensure-roles    Apply the idempotent ticket-board RBAC SQL using a privileged admin connection
   render-unit     Print the systemd unit contents to stdout
   start|stop|restart|status
                   Pass through to systemctl --user for $SERVICE_NAME
@@ -94,6 +100,45 @@ deploy_export() {
     printf '%s\n' "$resolved_ref"
 }
 
+ensure_database_roles() {
+    [[ -f "$RBAC_SQL" ]] || die "missing ticket-board RBAC SQL after deploy: $RBAC_SQL"
+    command -v psql >/dev/null 2>&1 || die "psql is required to ensure ticket-board service roles"
+    local output
+    if ! output="$(psql -X -v ON_ERROR_STOP=1 "$BOARD_ADMIN_DATABASE_URL" -f "$RBAC_SQL" 2>&1)"; then
+        printf '[ticket-board-service] ERROR: failed to ensure ticket-board database roles using TICKET_BOARD_ADMIN_DATABASE_URL. This must connect as a PostgreSQL role with CREATEROLE (default: user=postgres); override TICKET_BOARD_ADMIN_DATABASE_URL for nonstandard clusters.\n' >&2
+        printf '%s\n' "$output" >&2
+        exit 1
+    fi
+    log "ensured ticket-board database roles using $RBAC_SQL"
+}
+
+smoke_check_http() {
+    local url
+    url="http://$BOARD_HOST:$BOARD_PORT$SMOKE_PATH"
+    python3 - "$url" "$SMOKE_TIMEOUT_SECONDS" <<'PY'
+import sys
+import time
+import urllib.error
+import urllib.request
+
+url = sys.argv[1]
+deadline = time.monotonic() + float(sys.argv[2])
+last_error = "not attempted"
+while time.monotonic() < deadline:
+    try:
+        with urllib.request.urlopen(url, timeout=1.0) as response:
+            if response.status == 200:
+                sys.exit(0)
+            last_error = f"HTTP {response.status}"
+    except (OSError, urllib.error.URLError) as exc:
+        last_error = str(exc)
+    time.sleep(0.25)
+print(f"ticket-board smoke check failed for {url}: {last_error}", file=sys.stderr)
+sys.exit(1)
+PY
+    log "HTTP smoke check passed at $url"
+}
+
 render_unit() {
     cat <<EOF
 [Unit]
@@ -110,6 +155,7 @@ Restart=on-failure
 RestartSec=2
 Environment=PYTHONUNBUFFERED=1
 Environment=PGU_TICKET_BOARD_SOCKET=$BOARD_UNIX_SOCKET
+Environment=TICKET_BOARD_DATABASE_URL=$BOARD_DATABASE_URL
 StandardOutput=append:$LOG_PATH
 StandardError=append:$LOG_PATH
 
@@ -126,10 +172,12 @@ write_unit() {
 install_service() {
     deploy_export >/dev/null
     [[ -f "$BOARD_SCRIPT" ]] || die "missing board script after deploy: $BOARD_SCRIPT"
+    ensure_database_roles
     ensure_user_manager
     write_unit
     systemctl_user daemon-reload
     systemctl_user enable --now "$SERVICE_NAME"
+    smoke_check_http
     log "installed + started $SERVICE_NAME"
 }
 
@@ -140,6 +188,7 @@ deploy_restart_service() {
     write_unit
     systemctl_user daemon-reload
     systemctl_user restart "$SERVICE_NAME"
+    smoke_check_http
     log "deployed $deployed_sha from $DEPLOY_REF and restarted $SERVICE_NAME"
 }
 
@@ -164,10 +213,18 @@ main() {
         deploy-restart)
             deploy_restart_service
             ;;
+        ensure-roles)
+            ensure_database_roles
+            ;;
         render-unit)
             render_unit
             ;;
-        start|stop|restart|status)
+        start|restart)
+            ensure_user_manager
+            systemctl_user "$1" "$SERVICE_NAME"
+            smoke_check_http
+            ;;
+        stop|status)
             ensure_user_manager
             systemctl_user "$1" "$SERVICE_NAME"
             ;;

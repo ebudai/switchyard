@@ -58,6 +58,10 @@ grep -q '^Environment=PGUSER=ticket_board_service$' "$UNIT" || {
     echo "FAIL: proposed unit does not select ticket_board_service" >&2
     exit 1
 }
+grep -q '^Environment=TICKET_BOARD_DATABASE_URL=postgresql:///pgu?host=/var/run/postgresql&user=ticket_board_service$' "$UNIT" || {
+    echo "FAIL: proposed unit does not bake the service database URL" >&2
+    exit 1
+}
 grep -q '^Environment=HOME=/home/agent$' "$UNIT" || {
     echo "FAIL: proposed unit does not set a stable HOME for remaining expanduser paths" >&2
     exit 1

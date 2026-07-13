@@ -28,7 +28,12 @@ What this does:
 
 - exports `origin/main` into `/home/agent/pgu-ticketboard-live/current`
 - writes `~/.config/systemd/user/pgu-ticket-board.service`
+- bakes `TICKET_BOARD_DATABASE_URL` into the unit so the service does not depend
+  on the installing shell environment after reboot
+- applies `scripts/ticket_board/rbac.sql` so `ticket_board_service` and
+  `ticket_board_listener` exist before the units start
 - enables and starts `pgu-ticket-board.service`
+- waits for `GET /api/board` to return HTTP 200 before reporting success
 
 Runtime dependency:
 
@@ -53,6 +58,7 @@ The service runs:
 - working directory: `/home/agent/pgu-ticketboard-live/current`
 - command: `python3 /home/agent/pgu-ticketboard-live/current/scripts/ticket-board.py --host 127.0.0.1 --port 8770`
 - logs: `/tmp/pgu-ticket-board.log`
+- default DB URL: `postgresql:///pgu?host=/var/run/postgresql&user=ticket_board_service`
 
 The source of truth for the live agent-user unit is
 `scripts/ticket-board-service.sh render-unit`. The future dedicated `boardsvc`
@@ -81,11 +87,18 @@ The listener service runs:
 - optional env file: `~/.config/pgu/ticket-board-notify-listener.env`
 
 `scripts/ticket_board/rbac.sql` creates `ticket_board_listener` as a login role
-with read-only table access and no write-function grants. Eric still needs to
-provision its password or equivalent local auth before starting the service. As
-an interim deployment escape hatch, the env file can set
-`TICKET_BOARD_NOTIFY_DATABASE_URL` to any read-only-capable board connection
-string.
+with read-only table access and no write-function grants. The install commands
+apply that RBAC file idempotently before starting the services. Override
+`TICKET_BOARD_ADMIN_DATABASE_URL` if the installer needs a non-default admin
+connection; by default it targets the local `pgu` database as PostgreSQL
+`user=postgres`, because creating missing roles requires `CREATEROLE`.
+You can run only the RBAC bootstrap with
+`scripts/ticket-board-service.sh ensure-roles` or
+`scripts/ticket-board-notify-listener-service.sh ensure-roles`. The rendered
+listener unit bakes
+`TICKET_BOARD_NOTIFY_DATABASE_URL=postgresql:///pgu?host=/var/run/postgresql&user=ticket_board_listener`
+by default; the optional env file can still override it for nonstandard local
+auth.
 
 ## Controlled deploy / restart
 
@@ -103,6 +116,7 @@ That command:
 4. repoints `/home/agent/pgu-ticketboard-live/current`
 5. rewrites the unit
 6. restarts the service
+7. waits for `GET /api/board` to return HTTP 200
 
 Plain `restart` only restarts the currently deployed SHA. It does **not** update
 code.

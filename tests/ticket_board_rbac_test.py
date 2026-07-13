@@ -393,6 +393,23 @@ FROM ticket_board.tickets t WHERE id = 'PGU-500';
         "audit_signoff": True,
         "comment": "Audit verified.",
     }, audit_signed
+    insert_ticket(admin_conn, "PGU-505", title="Require actor backstop", state="audit", assignee="audit", implementation="Done.")
+    assert "role app cannot call audit_sign_off" in psql_error(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'app', false);
+SELECT ticket_board.audit_sign_off('PGU-505', 'Nope.');
+""",
+    )
+    insert_ticket(admin_conn, "PGU-506", title="Require actor empty caller role", state="audit", assignee="audit", implementation="Done.")
+    psql(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', '', false);
+SELECT ticket_board.audit_sign_off('PGU-506', 'Allowed with empty caller role.');
+""",
+    )
+    assert psql(admin_conn, "SELECT state || ':' || assignee || ':' || audit_signoff::text FROM ticket_board.tickets WHERE id = 'PGU-506';") == "director_review:director:true"
 
     insert_ticket(admin_conn, "PGU-502", title="Audit signoff no comment", state="audit", assignee="audit", implementation="Done.")
     assert "comment text must be non-empty" in psql_error(

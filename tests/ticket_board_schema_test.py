@@ -307,10 +307,20 @@ def main() -> int:
     assert "add column if not exists regression boolean not null default false" in regression_flag_migration
     assert "'regression', ticket_row.regression" in regression_flag_migration
     assert "'regression'" in regression_flag_migration
+    require_actor_backstop_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "285_require_actor_caller_role_backstop.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "create or replace function ticket_board.require_actor" in require_actor_backstop_migration
+    assert "caller_role := nullif(current_setting('ticket_board.caller_role', true), '')" in require_actor_backstop_migration
+    assert "caller_role <> all(p_allowed_roles)" in require_actor_backstop_migration
+    assert "role % cannot call %" in require_actor_backstop_migration
     assert "tell the director directly what is wrong" in executable_schema_lower
     assert "tell eric directly what is wrong" in executable_schema_lower
     assert "q.kind not in ('idle_reminder', 'escalation')" in executable_schema_lower
     assert "q.target_role = candidates.target_role" in executable_schema_lower
+    assert "caller_role := nullif(current_setting('ticket_board.caller_role', true), '')" in executable_schema_lower
+    assert "caller_role <> all(p_allowed_roles)" in executable_schema_lower
+    assert "role % cannot call %" in executable_schema_lower
     assert "create or replace function ticket_board.notify_ticket_state_transition" in executable_schema_lower
     assert "pg_notify" in executable_schema_lower, "PGU-191 must notify on state transitions"
     assert "manually_controlled" in executable_schema_lower, "PGU-191 triggers must honor manual control"

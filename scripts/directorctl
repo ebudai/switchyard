@@ -281,8 +281,10 @@ sys.exit(0) # Unsure (markers missing) -> play it safe (busy)
 send_payload() {
     local target="$1"
     local payload="$2"
+    local original_payload="$payload"
     local staged_path
     local pointer_payload
+    local delivery_mode="direct"
 
     # Guard against active typing in the director pane. Ordinary director-bound
     # sends wait until the composer is clear. Automation may bound this wait
@@ -308,17 +310,23 @@ send_payload() {
     # Codex panes do not submit bracketed paste on Enter/C-m. Large or
     # multiline payloads must be staged to a file and referenced indirectly.
     if payload_requires_pointer "$payload"; then
+        delivery_mode="staged"
         staged_path="$(stage_payload_file "$payload")"
         local first_line
         first_line="$(echo "$payload" | head -n 1)"
         first_line="$(echo "$first_line" | sed -E 's/[[:space:]]+/ /g;s/^[[:space:]]+//;s/[[:space:]]+$//' | cut -c1-120)"
         pointer_payload="please read $staged_path ($first_line) and follow the instructions therein"
         submit_short_line "$target" "$pointer_payload"
-        return 0
+    else
+        submit_short_line "$target" "$payload"
     fi
 
-    submit_short_line "$target" "$payload"
     record_ticket_notification "$target" "$payload"
+    if [ "$delivery_mode" = "staged" ]; then
+        printf 'directorctl: delivered to %s (%d chars, staged via file)\n' "$target" "${#original_payload}"
+    else
+        printf 'directorctl: delivered to %s (%d chars)\n' "$target" "${#original_payload}"
+    fi
 }
 
 

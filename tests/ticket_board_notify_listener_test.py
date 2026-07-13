@@ -1208,6 +1208,36 @@ def test_stale_notification_for_cancelled_ticket_is_acked_not_delivered() -> Non
     assert trace_events(conn) == ["listener_claim", "drop", "listener_ack"]
 
 
+def test_idle_reminder_repeat_escalation_delivers_to_director() -> None:
+    sent: list[tuple[str, str]] = []
+    message = "ops was reminded about PGU-366 (in in_progress) and still hasn't advanced it -- may be stuck."
+    conn = FakeConnection(
+        [
+            queue_row(
+                81,
+                "PGU-366",
+                kind="escalation",
+                state="in_progress",
+                assignee="ops",
+                target_role="director",
+                message=message,
+            )
+        ],
+        ticket_rows={"PGU-366": ("in_progress", "ops", False, False)},
+    )
+    listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=lambda target, text: sent.append((target, text)),
+        activity_gate=lambda _target: False,
+        connector=lambda *args, **kwargs: conn,
+        poll_seconds=0,
+    )
+
+    assert listener.listen_once(max_notifications=1) == 1
+    assert sent == [("pgu-director:0.0", message)]
+    assert conn.acked == [81]
+
+
 def test_eric_review_is_not_delivered() -> None:
     sent: list[tuple[str, str]] = []
     listener = TicketBoardNotifyListener(
@@ -1342,6 +1372,7 @@ def main() -> int:
     test_listener_logs_missing_hook_state_on_startup()
     test_send_failure_uses_exponential_backoff()
     test_stale_notification_for_cancelled_ticket_is_acked_not_delivered()
+    test_idle_reminder_repeat_escalation_delivers_to_director()
     test_eric_review_is_not_delivered()
     test_reconnect_relistens_after_connection_drop()
     test_idle_listener_consumes_notifies_generator_before_polling_again()

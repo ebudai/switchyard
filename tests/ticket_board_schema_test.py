@@ -178,6 +178,10 @@ def main() -> int:
         r"resolved\s+boolean\s+not null\s+default\s+false",
         schema_lower,
     ), "ticket_blockers.resolved must persist blocker resolution"
+    assert re.search(
+        r"idle_reminder_count\s+integer\s+not null\s+default\s+0",
+        schema_lower,
+    ), "ticket_notification_state.idle_reminder_count must persist per-episode reminder state"
     assert "unresolved blocker prevents forward promotion" in schema
     assert "create or replace function ticket_board.ticket_is_forward_promotion" in executable_schema_lower
     assert "create or replace function ticket_board.resolve_completed_blockers" in executable_schema_lower
@@ -251,6 +255,14 @@ def main() -> int:
     assert "ticket_update" in idle_turn_end_migration
     assert "create or replace function ticket_board.notify_idle_turn_end_nudges" in idle_turn_end_migration
     assert "create or replace function ticket_board.idle_without_advancing_message" in idle_turn_end_migration
+    idle_reminder_escalation_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "279_idle_reminder_escalation.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "add column if not exists idle_reminder_count integer not null default 0" in idle_reminder_escalation_migration
+    assert "create or replace function ticket_board.idle_without_advancing_escalation_message" in idle_reminder_escalation_migration
+    assert "create or replace function ticket_board.idle_without_advancing_director_message" in idle_reminder_escalation_migration
+    assert "'escalation'" in idle_reminder_escalation_migration
+    assert "idle_reminder_count = idle_reminder_count + 1" in idle_reminder_escalation_migration
     assert "create or replace function ticket_board.notify_ticket_state_transition" in executable_schema_lower
     assert "pg_notify" in executable_schema_lower, "PGU-191 must notify on state transitions"
     assert "manually_controlled" in executable_schema_lower, "PGU-191 triggers must honor manual control"

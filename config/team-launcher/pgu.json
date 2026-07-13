@@ -17,7 +17,7 @@
       "resume_mode": "flag",
       "resume_flag": "--resume",
       "role": "director",
-      "slot": 0,
+      "slot": 2,
       "target": "pgu-director:0.0",
       "tmux_session": "pgu-director",
       "yolo": true
@@ -51,7 +51,7 @@
       "resume_mode": "subcommand",
       "resume_subcommand": "resume",
       "role": "app",
-      "slot": 2,
+      "slot": 4,
       "target": "pgu-app:0.0",
       "tmux_session": "pgu-app",
       "yolo": true
@@ -85,7 +85,7 @@
       "resume_mode": "subcommand",
       "resume_subcommand": "resume",
       "role": "ops",
-      "slot": 3,
+      "slot": 5,
       "target": "pgu-ops:0.0",
       "tmux_session": "pgu-ops",
       "yolo": true
@@ -102,7 +102,7 @@
       "resume_mode": "flag",
       "resume_flag": "--resume",
       "role": "audit",
-      "slot": 4,
+      "slot": 3,
       "target": "pgu-audit:0.0",
       "tmux_session": "pgu-audit",
       "yolo": true
@@ -118,7 +118,7 @@
       "resume_mode": "flag",
       "resume_flag": "--conversation",
       "role": "inspector",
-      "slot": 5,
+      "slot": 0,
       "target": "pgu-inspector:0.0",
       "tmux_session": "pgu-inspector",
       "yolo": true

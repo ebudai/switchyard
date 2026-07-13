@@ -102,6 +102,14 @@ def default_caller_role(environ: Mapping[str, str] = os.environ) -> str:
     return _caller_role_from_tmux_session(environ) or DEFAULT_CALLER_ROLE
 
 
+def _run_git(args: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", *args], capture_output=True, text=True, check=False)
+
+
+def _git_error_detail(proc: subprocess.CompletedProcess[str]) -> str:
+    return proc.stderr.strip() or proc.stdout.strip() or f"git exited with status {proc.returncode}"
+
+
 @dataclass(frozen=True)
 class TicketBoardWriteClient:
     board_url: str = DEFAULT_BOARD_URL
@@ -207,6 +215,36 @@ class TicketBoardWriteClient:
         encoded_operation = parse.quote(operation, safe="")
         return self._post(f"/{encoded_ticket}/actions/{encoded_operation}", payload or {}, caller_role=caller_role)
 
+    def _require_commit_pushed_to_origin(self, commit_hash: str, *, operation: str) -> None:
+        normalized = commit_hash.strip()
+        if not normalized:
+            return
+        resolved = _run_git(["rev-parse", "--verify", f"{normalized}^{{commit}}"])
+        if resolved.returncode != 0 or not resolved.stdout.strip():
+            raise TicketBoardWriteError(f"unknown commit_hash: {normalized}")
+        fetch = _run_git(["fetch", "origin"])
+        if fetch.returncode != 0:
+            raise TicketBoardWriteError(
+                f"unable to verify commit {normalized} against origin before {operation}: {_git_error_detail(fetch)}"
+            )
+        contains = _run_git(
+            [
+                "for-each-ref",
+                "--format=%(refname:short)",
+                f"--contains={resolved.stdout.strip()}",
+                "refs/remotes/origin",
+            ]
+        )
+        if contains.returncode != 0:
+            raise TicketBoardWriteError(
+                f"unable to verify commit {normalized} against origin before {operation}: {_git_error_detail(contains)}"
+            )
+        if not any(line.strip().startswith("origin/") for line in contains.stdout.splitlines()):
+            raise TicketBoardWriteError(
+                f"commit {normalized} is not pushed to origin; "
+                f"push your branch (git push origin HEAD:refs/heads/feature/...) before {operation}."
+            )
+
     def create_ticket(
         self,
         *,
@@ -280,6 +318,7 @@ class TicketBoardWriteClient:
         return self._ticket_action(ticket_id, "start_work", caller_role=caller_role)
 
     def submit_to_audit(self, ticket_id: str, *, commit_hash: str = "", caller_role: str | None = None) -> dict[str, Any]:
+        self._require_commit_pushed_to_origin(commit_hash, operation="submit_to_audit")
         return self._ticket_action(ticket_id, "submit_to_audit", {"commit_hash": commit_hash}, caller_role=caller_role)
 
     def request_commit_exempt(self, ticket_id: str, *, reason: str, caller_role: str | None = None) -> dict[str, Any]:
@@ -436,48 +475,52 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
-    client = TicketBoardWriteClient(args.board_url, args.caller_role, socket_path=args.socket_path)
-    command = args.command.replace("-", "_")
-    if command == "create_ticket":
-        response = client.create_ticket(
-            title=args.title,
-            body=args.body,
-            screenshot=args.screenshot,
-            assignee=args.assignee,
-            state=args.state,
-            blocked_by=args.blocked_by,
-            blocked_reason=args.blocked_reason,
-            implementation=args.implementation,
-            audit_prompt=args.audit_prompt,
-            needs_inspection=args.needs_inspection,
-            needs_eric_signoff=args.needs_eric_signoff,
-            comment_text=args.comment_text,
-        )
-    elif command == "file_bug":
-        response = client.file_bug(title=args.title, body=args.body, source_ticket_id=args.source_ticket_id, assignee=args.assignee)
-    elif command == "route":
-        response = client.route(args.ticket_id, state=args.state, assignee=args.assignee)
-    elif command == "submit_to_audit":
-        response = client.submit_to_audit(args.ticket_id, commit_hash=args.commit_hash)
-    elif command == "request_commit_exempt":
-        response = client.request_commit_exempt(args.ticket_id, reason=args.reason)
-    elif command == "audit_sign_off":
-        response = client.audit_sign_off(args.ticket_id, text=args.text)
-    elif command in {"audit_kick_back", "eric_reopen", "cancel"}:
-        response = getattr(client, command)(args.ticket_id, reason=args.reason)
-    elif command == "inspector_kick_back":
-        response = client.inspector_kick_back(args.ticket_id, recommendations=args.recommendations)
-    elif command == "mark_done":
-        response = client.mark_done(args.ticket_id, commit_hash=args.commit_hash)
-    elif command == "set_manually_controlled":
-        response = client.set_manually_controlled(args.ticket_id, args.value)
-    elif command == "set_blockers":
-        response = client.set_blockers(args.ticket_id, blocked_by=args.blocked_by, blocked_reason=args.blocked_reason)
-    elif command == "add_comment":
-        response = client.add_comment(args.ticket_id, text=args.text)
-    else:
-        response = getattr(client, command)(args.ticket_id)
+    try:
+        args = _build_parser().parse_args(argv)
+        client = TicketBoardWriteClient(args.board_url, args.caller_role, socket_path=args.socket_path)
+        command = args.command.replace("-", "_")
+        if command == "create_ticket":
+            response = client.create_ticket(
+                title=args.title,
+                body=args.body,
+                screenshot=args.screenshot,
+                assignee=args.assignee,
+                state=args.state,
+                blocked_by=args.blocked_by,
+                blocked_reason=args.blocked_reason,
+                implementation=args.implementation,
+                audit_prompt=args.audit_prompt,
+                needs_inspection=args.needs_inspection,
+                needs_eric_signoff=args.needs_eric_signoff,
+                comment_text=args.comment_text,
+            )
+        elif command == "file_bug":
+            response = client.file_bug(title=args.title, body=args.body, source_ticket_id=args.source_ticket_id, assignee=args.assignee)
+        elif command == "route":
+            response = client.route(args.ticket_id, state=args.state, assignee=args.assignee)
+        elif command == "submit_to_audit":
+            response = client.submit_to_audit(args.ticket_id, commit_hash=args.commit_hash)
+        elif command == "request_commit_exempt":
+            response = client.request_commit_exempt(args.ticket_id, reason=args.reason)
+        elif command == "audit_sign_off":
+            response = client.audit_sign_off(args.ticket_id, text=args.text)
+        elif command in {"audit_kick_back", "eric_reopen", "cancel"}:
+            response = getattr(client, command)(args.ticket_id, reason=args.reason)
+        elif command == "inspector_kick_back":
+            response = client.inspector_kick_back(args.ticket_id, recommendations=args.recommendations)
+        elif command == "mark_done":
+            response = client.mark_done(args.ticket_id, commit_hash=args.commit_hash)
+        elif command == "set_manually_controlled":
+            response = client.set_manually_controlled(args.ticket_id, args.value)
+        elif command == "set_blockers":
+            response = client.set_blockers(args.ticket_id, blocked_by=args.blocked_by, blocked_reason=args.blocked_reason)
+        elif command == "add_comment":
+            response = client.add_comment(args.ticket_id, text=args.text)
+        else:
+            response = getattr(client, command)(args.ticket_id)
+    except TicketBoardWriteError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     print(json.dumps(_ticket_from_response(response)))
     return 0
 

@@ -254,12 +254,7 @@ COMMIT;
             backlog_analysis = psql(conninfo, "SELECT state FROM ticket_board.tickets WHERE id = 'PGU-11';").stdout.strip()
             assert backlog_analysis == "in_progress", backlog_analysis
 
-            assert_error(
-                conninfo,
-                "UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-1';",
-                "implementation must be non-empty",
-            )
-            psql(conninfo, "UPDATE ticket_board.tickets SET implementation = 'ship it', state = 'in_progress' WHERE id = 'PGU-1';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET implementation = '', state = 'in_progress' WHERE id = 'PGU-1';")
             handoff_notice = json.loads(
                 psql(
                     conninfo,
@@ -502,17 +497,15 @@ WHERE id = 'PGU-40';
             insert_ticket(
                 conninfo,
                 "PGU-42",
-                title="Director kickback missing implementation",
+                title="Director kickback empty implementation allowed",
                 assignee="director",
                 state="director_review",
                 implementation="done",
                 audit_signoff=True,
             )
-            assert_error(
-                conninfo,
-                "UPDATE ticket_board.tickets SET state = 'in_progress', assignee = 'ops', implementation = '' WHERE id = 'PGU-42';",
-                "implementation must be non-empty",
-            )
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'in_progress', assignee = 'ops', implementation = '' WHERE id = 'PGU-42';")
+            kicked_back_empty_implementation = psql(conninfo, "SELECT state || ':' || assignee || ':' || implementation FROM ticket_board.tickets WHERE id = 'PGU-42';").stdout.strip()
+            assert kicked_back_empty_implementation == "in_progress:ops:", kicked_back_empty_implementation
 
             insert_ticket(conninfo, "PGU-6", title="Kickback", assignee="audit", state="audit", implementation="done")
             psql(conninfo, "UPDATE ticket_board.tickets SET state = 'analysis' WHERE id = 'PGU-6';")

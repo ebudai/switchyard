@@ -181,6 +181,15 @@ def main() -> int:
                 service_conn,
                 "UPDATE ticket_board.tickets SET title = title WHERE id = 'PGU-1';",
             )
+            created_with_implementation = service_app.create_ticket(
+                title="Postgres create with implementation",
+                body="Created with spec text up front.",
+                screenshot=None,
+                assignee="unassigned",
+                needs_eric_signoff=False,
+                implementation="Use the ticket body and this implementation note.",
+            )
+            assert created_with_implementation["implementation"] == "Use the ticket body and this implementation note.", created_with_implementation
             backlog_created = service_app.create_ticket(
                 title="Postgres backlog create",
                 body="Deferred future work.",
@@ -371,9 +380,10 @@ SELECT ticket_board.create_ticket('Cycle blocked', 'Body', 'analysis', ARRAY['PG
             assert cancelled["state"] == "cancelled", cancelled
             assert cancelled["comments"][-1]["text"] == "Covered by PGU-1.", cancelled
 
-            insert_ticket(admin_conn, "PGU-100", title="Ops implementation", state="analysis", assignee="ops")
+            insert_ticket(admin_conn, "PGU-100", title="Ops implementation", state="analysis", assignee="ops", implementation="")
             in_progress = service_app.update_ticket("PGU-100", {"state": "in_progress"})
             assert in_progress["state"] == "in_progress", in_progress
+            assert in_progress["implementation"] == "", in_progress
             submitted = service_app.update_ticket("PGU-100", {"state": "audit", "commit_hash": "abcdef1"})
             assert submitted["state"] == "audit", submitted
             assert submitted["commit_hash"] == "abcdef1", submitted

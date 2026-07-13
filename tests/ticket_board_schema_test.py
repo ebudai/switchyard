@@ -149,6 +149,11 @@ def main() -> int:
 
     assert_contains_all(schema, EXPECTED_STATES, "state constraint")
     assert "'ready'" not in schema, "removed ready state must not appear in schema.sql"
+    assert "implementation must be non-empty before a ticket can enter in_progress" not in schema
+    assert "assignee must not be unassigned before a ticket can enter in_progress" in schema
+    optional_implementation_migration = (ROOT / "scripts" / "ticket_board" / "migrations" / "271_optional_implementation.sql").read_text(encoding="utf-8")
+    assert "implementation must be non-empty before a ticket can enter in_progress" not in optional_implementation_migration
+    assert "assignee must not be unassigned before a ticket can enter in_progress" in optional_implementation_migration
     assert_contains_all(schema, EXPECTED_ASSIGNEES, "assignee constraint")
 
     assert re.search(r"commit_hash\s+text\s+not null", schema_lower), "commit_hash column should be text"

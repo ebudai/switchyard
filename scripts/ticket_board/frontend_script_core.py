@@ -151,9 +151,6 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         if (ticket.assignee === 'unassigned') {
           return 'Assign the ticket before advancing to Implementation.';
         }
-        if (!(ticket.implementation || '').trim()) {
-          return 'Save implementation before advancing to Implementation.';
-        }
       }
       if (ticket.state === 'inspection' && !ticket.inspector_signoff) {
         return 'Record inspector signoff before advancing to audit.';

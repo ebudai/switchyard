@@ -358,28 +358,10 @@ def git_fetch_worktree_ref_args(config: ProjectConfig) -> list[str]:
     return ["git", "-C", str(config.repository), "fetch", config.worktree_remote, config.worktree_branch]
 
 
-def git_worktree_add_args(config: ProjectConfig, role: RoleConfig) -> list[str]:
-    if config.repository is None:
-        raise SystemExit("project config does not define repository")
-    return ["git", "-C", str(config.repository), "worktree", "add", "--detach", role.workdir, worktree_ref(config)]
-
-
-def git_worktree_check_args(role: RoleConfig) -> list[str]:
-    return ["git", "-C", role.workdir, "rev-parse", "--is-inside-work-tree"]
-
-
 def git_shared_checkout_check_args(config: ProjectConfig) -> list[str]:
     if config.repository is None:
         raise SystemExit("project config does not define repository")
     return ["git", "-C", str(config.repository), "rev-parse", "--is-inside-work-tree"]
-
-
-def git_checkout_worktree_ref_args(config: ProjectConfig, role: RoleConfig) -> list[str]:
-    return ["git", "-C", role.workdir, "checkout", "--detach", "--force", worktree_ref(config)]
-
-
-def git_clean_worktree_args(role: RoleConfig) -> list[str]:
-    return ["git", "-C", role.workdir, "clean", "-fdx"]
 
 
 def git_checkout_shared_ref_args(config: ProjectConfig) -> list[str]:
@@ -401,44 +383,6 @@ def _proc_failure_reason(proc: subprocess.CompletedProcess[Any], fallback: str) 
     if isinstance(stderr, str) and stderr.strip():
         return stderr.strip().splitlines()[-1]
     return fallback
-
-
-def ensure_role_worktree(
-    config: ProjectConfig,
-    role: RoleConfig,
-    *,
-    refresh: bool,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-) -> str | None:
-    if config.repository is None:
-        return None
-    workdir = Path(role.workdir)
-    if workdir.exists():
-        check_proc = runner(
-            git_worktree_check_args(role),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        if check_proc.returncode != 0:
-            return f"refusing to use non-git workdir: {role.workdir}"
-        if not refresh:
-            return None
-        checkout_proc = runner(git_checkout_worktree_ref_args(config, role))
-        if checkout_proc.returncode != 0:
-            return _proc_failure_reason(checkout_proc, f"checkout failed with exit {checkout_proc.returncode}")
-        clean_proc = runner(git_clean_worktree_args(role))
-        if clean_proc.returncode != 0:
-            return _proc_failure_reason(clean_proc, f"clean failed with exit {clean_proc.returncode}")
-        return None
-    workdir.parent.mkdir(parents=True, exist_ok=True)
-    add_proc = runner(git_worktree_add_args(config, role))
-    if add_proc.returncode != 0:
-        return _proc_failure_reason(add_proc, f"worktree add failed with exit {add_proc.returncode}")
-    if refresh:
-        clean_proc = runner(git_clean_worktree_args(role))
-        if clean_proc.returncode != 0:
-            return _proc_failure_reason(clean_proc, f"clean failed with exit {clean_proc.returncode}")
-    return None
 
 
 def ensure_project_worktrees(

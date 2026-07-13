@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression test: create form can choose Triage or Backlog only."""
+"""Regression test: create form offers a backlog checkbox and maps it to create state."""
 
 from __future__ import annotations
 
@@ -16,13 +16,13 @@ from scripts.ticket_board.frontend_script_core import SCRIPT_CORE
 
 
 def main() -> int:
-    assert 'id="createStateInput"' in MARKUP
-    assert '<option value="analysis" selected>Triage</option>' in MARKUP
-    assert '<option value="backlog">Backlog</option>' in MARKUP
-    assert "const createStateInput = document.getElementById('createStateInput');" in SCRIPT_CORE
-    assert "state: createStateInput.value" in SCRIPT_APP
-    assert "createStateInput.value = 'analysis';" in SCRIPT_APP
-    assert "createStateInput.addEventListener('keydown', submitCreateOnEnter);" in SCRIPT_APP
+    assert 'id="createBacklogInput"' in MARKUP
+    assert "Start in backlog" in MARKUP
+    assert 'id="createStateInput"' not in MARKUP
+    assert "const createBacklogInput = document.getElementById('createBacklogInput');" in SCRIPT_CORE
+    assert "initial_state: createBacklogInput.checked ? 'backlog' : 'analysis'" in SCRIPT_APP
+    assert "createBacklogInput.checked = false;" in SCRIPT_APP
+    assert "createBacklogInput.addEventListener('keydown', submitCreateOnEnter);" in SCRIPT_APP
     print("create_ticket_backlog_frontend_test: ok")
     return 0
 

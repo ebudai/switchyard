@@ -494,7 +494,7 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     backlog_created_payload = post_json(
         base_url,
         "/api/tickets/actions/create_ticket",
-        {"title": "API backlog create", "body": "Deferred work.", "state": "backlog", "assignee": "ops"},
+        {"title": "API backlog create", "body": "Deferred work.", "initial_state": "backlog", "assignee": "ops"},
         caller="director",
         expect=201,
     )
@@ -505,7 +505,7 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     disallowed_create_state = post_json(
         base_url,
         "/api/tickets/actions/create_ticket",
-        {"title": "Bad create state", "body": "No.", "state": "audit"},
+        {"title": "Bad create state", "body": "No.", "initial_state": "audit"},
         caller="director",
         expect=400,
     )

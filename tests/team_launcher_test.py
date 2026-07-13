@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +20,7 @@ if str(ROOT) not in sys.path:
 from scripts.team_launcher import (
     cli_command_for_role,
     launch_project,
+    live_command_matches_role,
     load_project_config,
     run_role_pane,
     session_file_name,
@@ -274,11 +278,12 @@ def test_reload_uses_recorded_resume_uuid_when_recreating_session() -> None:
         assert run_role_pane(role, mode="reload", session_dir=session_dir, runner=runner) == 0
 
         assert runner.calls[0] == ["tmux", "has-session", "-t", "pgu-ops"]
-        assert runner.calls[1] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_current_command}"]
-        assert runner.calls[2] == ["tmux", "kill-session", "-t", "pgu-ops"]
-        assert runner.calls[3][:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"]
-        assert f"--resume {session_id}" in runner.calls[3][-1]
-        assert runner.calls[4] == ["tmux", "attach", "-t", "pgu-ops"]
+        assert runner.calls[1] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_pid}"]
+        assert runner.calls[2] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_current_command}"]
+        assert runner.calls[3] == ["tmux", "kill-session", "-t", "pgu-ops"]
+        assert runner.calls[4][:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"]
+        assert f"--resume {session_id}" in runner.calls[4][-1]
+        assert runner.calls[5] == ["tmux", "attach", "-t", "pgu-ops"]
 
 
 def test_reload_refuses_to_kill_session_when_live_command_mismatches_config() -> None:
@@ -290,6 +295,7 @@ def test_reload_refuses_to_kill_session_when_live_command_mismatches_config() ->
 
     assert runner.calls == [
         ["tmux", "has-session", "-t", "pgu-ops"],
+        ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_pid}"],
         ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_current_command}"],
     ]
 
@@ -309,6 +315,69 @@ def test_reload_force_bypasses_live_command_guard() -> None:
 
     assert runner.calls[0] == ["tmux", "has-session", "-t", "pgu-ops"]
     assert runner.calls[1] == ["tmux", "kill-session", "-t", "pgu-ops"]
+
+
+def test_reload_guard_matches_cli_child_under_shell_in_real_tmux() -> None:
+    if shutil.which("tmux") is None:
+        return
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-real-tmux.") as tmp:
+        helper = Path(tmp) / "codex"
+        marker = Path(tmp) / "running"
+        helper.write_text(
+            "#!/bin/sh\n"
+            f"touch {marker}\n"
+            "trap 'exit 0' TERM INT\n"
+            "while :; do sleep 1; done\n",
+            encoding="utf-8",
+        )
+        helper.chmod(0o755)
+        session = f"pgu-321-reload-guard-{os.getpid()}"
+        role = next(role for role in load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json").roles if role.role == "ops")
+        role = role.__class__(
+            role=role.role,
+            slot=role.slot,
+            tmux_session=session,
+            target=f"{session}:0.0",
+            workdir=tmp,
+            cli=[str(helper)],
+            model="",
+            model_arg=role.model_arg,
+            effort="",
+            yolo=False,
+            extra_args=[],
+            resume_flag=role.resume_flag,
+            live_commands=["codex"],
+            env={},
+        )
+        try:
+            subprocess.run(
+                [
+                    "tmux",
+                    "new-session",
+                    "-d",
+                    "-s",
+                    session,
+                    "sh",
+                    "-c",
+                    f"exec {helper}",
+                ],
+                check=True,
+            )
+            for _ in range(50):
+                if marker.exists():
+                    break
+                time.sleep(0.1)
+            assert marker.exists(), "real tmux helper never started"
+            pane_command = subprocess.run(
+                ["tmux", "display-message", "-p", "-t", role.target, "#{pane_current_command}"],
+                text=True,
+                stdout=subprocess.PIPE,
+                check=True,
+            ).stdout.strip()
+            assert pane_command in {"sh", "fish", "bash", "zsh"}, pane_command
+            assert live_command_matches_role(role)
+        finally:
+            subprocess.run(["tmux", "kill-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def test_bootstrap_template_does_not_guess_active_roles() -> None:
@@ -333,6 +402,7 @@ def main() -> int:
     test_reload_uses_recorded_resume_uuid_when_recreating_session()
     test_reload_refuses_to_kill_session_when_live_command_mismatches_config()
     test_reload_force_bypasses_live_command_guard()
+    test_reload_guard_matches_cli_child_under_shell_in_real_tmux()
     test_bootstrap_template_does_not_guess_active_roles()
     print("team_launcher_test: ok")
     return 0

@@ -50,6 +50,7 @@ class FakeConnection:
         *,
         ticket_rows: dict[str, tuple[str, str] | tuple[str, str, bool, bool]] | None = None,
         finish_current_blockers: dict[str, str] | None = None,
+        in_progress_entries: dict[str, tuple[str, float | None]] | None = None,
         next_attempt_at: datetime | None = None,
         notifications: list[str] | None = None,
         fail_on_notifies: bool = False,
@@ -59,6 +60,7 @@ class FakeConnection:
         self.queue_rows = queue_rows or []
         self.ticket_rows = ticket_rows if ticket_rows is not None else self._ticket_rows_for_queue(self.queue_rows)
         self.finish_current_blockers = finish_current_blockers or {}
+        self.in_progress_entries = in_progress_entries or {}
         self.next_attempt_at = next_attempt_at
         self.notifications = notifications or []
         self.fail_on_notifies = fail_on_notifies
@@ -110,10 +112,12 @@ class FakeConnection:
             if not self.queue_rows:
                 return FakeResult([])
             return FakeResult([self.queue_rows.pop(0)])
-        if "t.state = 'in_progress'" in statement_text and "t.id <> %s" in statement_text:
+        if "current_ticket AS" in statement_text and "t.state = 'in_progress'" in statement_text:
             assert params is not None
-            current_ticket_id = self.finish_current_blockers.get(str(params[0]))
-            if current_ticket_id and current_ticket_id != str(params[1]):
+            ticket_id = str(params[0])
+            target_role = str(params[1])
+            current_ticket_id = self._finish_current_blocker_for(ticket_id, target_role)
+            if current_ticket_id:
                 return FakeResult([(current_ticket_id,)])
             return FakeResult([])
         if "FROM ticket_board.tickets" in statement_text:
@@ -129,6 +133,37 @@ class FakeConnection:
             assert params is not None
             self.requeued.append((int(params[0]), params))
         return FakeResult([])
+
+    def _ticket_number(self, ticket_id: str) -> int:
+        try:
+            return int(ticket_id.split("-", 1)[1])
+        except (IndexError, ValueError):
+            return 0
+
+    def _finish_current_blocker_for(self, ticket_id: str, target_role: str) -> str:
+        if self.in_progress_entries:
+            current_entry = self.in_progress_entries.get(ticket_id)
+            if current_entry is None or current_entry[0] != target_role:
+                return ""
+            current_entered_at = current_entry[1]
+            current_number = self._ticket_number(ticket_id)
+            older: list[tuple[float, int, str]] = []
+            for candidate_id, (assignee, entered_at) in self.in_progress_entries.items():
+                if candidate_id == ticket_id or assignee != target_role:
+                    continue
+                candidate_number = self._ticket_number(candidate_id)
+                if entered_at is not None and current_entered_at is not None and entered_at < current_entered_at:
+                    older.append((entered_at, candidate_number, candidate_id))
+                elif (
+                    entered_at is None
+                    or current_entered_at is None
+                    or entered_at == current_entered_at
+                ) and candidate_number < current_number:
+                    older.append((float("inf"), candidate_number, candidate_id))
+            if not older:
+                return ""
+            return sorted(older)[0][2]
+        return self.finish_current_blockers.get(ticket_id, self.finish_current_blockers.get(target_role, ""))
 
     def notifies(self, *, timeout: float | None = None, stop_after: int | None = None) -> Any:
         self.notify_timeouts.append(timeout)
@@ -399,6 +434,131 @@ def test_new_assignment_waits_behind_existing_in_progress_ticket() -> None:
     assert conn.requeued[0][0] == 43
     assert conn.requeued[0][1][2] == "finish current"
     assert trace_events(conn) == ["listener_claim", "finish_current_defer"]
+
+
+def test_two_in_progress_tickets_do_not_mutually_finish_current_deadlock() -> None:
+    sent: list[tuple[str, str]] = []
+    with TemporaryStateDir() as tmp_path:
+        store, gate = hook_gate(tmp_path)
+        store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
+        conn = FakeConnection(
+            [
+                queue_row(625, "PGU-336", state="in_progress", assignee="ops", attempts=1),
+                queue_row(623, "PGU-334", state="in_progress", assignee="ops", attempts=1),
+            ],
+            in_progress_entries={
+                "PGU-334": ("ops", 10.0),
+                "PGU-336": ("ops", 20.0),
+            },
+        )
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=gate.is_working,
+            connector=lambda *args, **kwargs: conn,
+            poll_seconds=0,
+        )
+
+        assert listener.listen_once(max_notifications=2) == 1
+
+    assert sent == [("pgu-ops:0.0", "New ticket for you: PGU-334 -- Queue")]
+    assert conn.acked == [623]
+    assert [row[0] for row in conn.requeued] == [625]
+    assert conn.requeued[0][1][2] == "finish current"
+    assert trace_events(conn) == [
+        "listener_claim",
+        "finish_current_defer",
+        "listener_claim",
+        "send",
+        "listener_ack",
+    ]
+
+
+def test_finish_current_releases_next_oldest_after_oldest_leaves_in_progress() -> None:
+    sent: list[tuple[str, str]] = []
+    with TemporaryStateDir() as tmp_path:
+        store, gate = hook_gate(tmp_path)
+        store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
+        conn = FakeConnection(
+            [queue_row(625, "PGU-336", state="in_progress", assignee="ops", attempts=2)],
+            in_progress_entries={
+                "PGU-336": ("ops", 20.0),
+            },
+        )
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=gate.is_working,
+            connector=lambda *args, **kwargs: conn,
+            poll_seconds=0,
+        )
+
+        assert listener.listen_once(max_notifications=1) == 1
+
+    assert sent == [("pgu-ops:0.0", "New ticket for you: PGU-336 -- Queue")]
+    assert conn.acked == [625]
+    assert conn.requeued == []
+
+
+def test_three_in_progress_tickets_deliver_oldest_first_one_at_a_time() -> None:
+    sent: list[tuple[str, str]] = []
+    with TemporaryStateDir() as tmp_path:
+        store, gate = hook_gate(tmp_path)
+        store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
+        conn = FakeConnection(
+            [
+                queue_row(102, "PGU-102", state="in_progress", assignee="ops", attempts=1),
+                queue_row(101, "PGU-101", state="in_progress", assignee="ops", attempts=1),
+                queue_row(100, "PGU-100", state="in_progress", assignee="ops", attempts=1),
+            ],
+            in_progress_entries={
+                "PGU-100": ("ops", 10.0),
+                "PGU-101": ("ops", 20.0),
+                "PGU-102": ("ops", 30.0),
+            },
+        )
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=gate.is_working,
+            connector=lambda *args, **kwargs: conn,
+            poll_seconds=0,
+        )
+
+        assert listener.listen_once(max_notifications=3) == 1
+
+    assert sent == [("pgu-ops:0.0", "New ticket for you: PGU-100 -- Queue")]
+    assert conn.acked == [100]
+    assert [row[0] for row in conn.requeued] == [102, 101]
+
+
+def test_finish_current_missing_entry_time_falls_back_to_lowest_ticket_number() -> None:
+    sent: list[tuple[str, str]] = []
+    with TemporaryStateDir() as tmp_path:
+        store, gate = hook_gate(tmp_path)
+        store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
+        conn = FakeConnection(
+            [queue_row(102, "PGU-102", state="in_progress", assignee="ops", attempts=1)],
+            in_progress_entries={
+                "PGU-100": ("ops", 30.0),
+                "PGU-101": ("ops", 10.0),
+                "PGU-102": ("ops", None),
+            },
+        )
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=gate.is_working,
+            connector=lambda *args, **kwargs: conn,
+            poll_seconds=0,
+        )
+
+        assert listener.listen_once(max_notifications=1) == 0
+
+    assert sent == []
+    assert conn.requeued[0][0] == 102
+    finish_current_traces = [params for params in conn.traces if params is not None and params[4] == "finish_current_defer"]
+    assert json.loads(finish_current_traces[0][8])["current_ticket_id"] == "PGU-100"
 
 
 def test_hook_blocked_is_busy() -> None:
@@ -712,6 +872,10 @@ def main() -> int:
     test_hook_busy_requeues_with_fixed_interval()
     test_hook_busy_traces_only_first_gate_defer_per_notification()
     test_new_assignment_waits_behind_existing_in_progress_ticket()
+    test_two_in_progress_tickets_do_not_mutually_finish_current_deadlock()
+    test_finish_current_releases_next_oldest_after_oldest_leaves_in_progress()
+    test_three_in_progress_tickets_deliver_oldest_first_one_at_a_time()
+    test_finish_current_missing_entry_time_falls_back_to_lowest_ticket_number()
     test_hook_blocked_is_busy()
     test_director_client_activity_latches_no_clobber_until_busy_idle_cycle()
     test_director_abandoned_draft_timeout_releases_latch()

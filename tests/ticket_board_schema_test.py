@@ -220,6 +220,7 @@ def main() -> int:
     assert "create or replace function ticket_board.notify_unblocked_dependents" in executable_schema_lower
     assert "when p_state = 'backlog' then 'director'" not in executable_schema_lower
     assert "when p_state = 'analysis' and p_assignee = 'unassigned' then 'director'" not in executable_schema_lower
+    assert "source_role := nullif(current_setting('ticket_board.notification_source_role', true), '')" in executable_schema_lower
     assert "source_role := nullif(current_setting('ticket_board.caller_role', true), '')" in executable_schema_lower
     assert "source_role is distinct from target_role" in executable_schema_lower
     suppress_self_notify_migration = (
@@ -232,6 +233,16 @@ def main() -> int:
     assert "add column if not exists last_rejected_commit" in stale_resubmit_migration
     assert "cannot submit: commit %" in stale_resubmit_migration
     assert "ticket_last_rejected_commit <> ''" in stale_resubmit_migration
+    http_director_create_notify_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "282_http_director_create_notification_source.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "create or replace function ticket_board.enqueue_transition_notification" in http_director_create_notify_migration
+    assert "current_setting('ticket_board.notification_source_role', true)" in http_director_create_notify_migration
+    assert "source_role is distinct from target_role" in http_director_create_notify_migration
+    assert "coalesce(p_old_state, 'insert')" in http_director_create_notify_migration
+    assert "pg_current_xact_id()::text" in http_director_create_notify_migration
+    assert "pg_notify" in http_director_create_notify_migration
+    assert "jsonb_build_object('kind', 'wake'" in http_director_create_notify_migration
     unblock_notify_migration = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "274_unblock_notifications.sql"
     ).read_text(encoding="utf-8").lower()

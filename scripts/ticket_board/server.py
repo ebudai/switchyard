@@ -453,6 +453,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 needs_inspection=bool(payload.get("needs_inspection", False)),
                 blocked_by=payload.get("blocked_by"),  # type: ignore[arg-type]
                 blocked_reason=str(payload.get("blocked_reason", "")),
+                notification_source_role=self.notification_source_role("create_ticket", caller_role),
                 caller_role=caller_role,
             )
 
@@ -480,10 +481,16 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             blocked_reason=str(payload.get("blocked_reason", "")),
             commit_hash=commit_hash,
             commit_exempt=commit_exempt,
+            notification_source_role=self.notification_source_role("create_ticket", caller_role),
             caller_role=caller_role,
             created=created,
             updated=created,
         )
+
+    def notification_source_role(self, operation: str, caller_role: str | None) -> str | None:
+        if operation == "create_ticket" and caller_role == "director" and self.caller_registry is None:
+            return "eric"
+        return None
 
     def action_comment_text(self, payload: dict[str, object]) -> str:
         return str(payload.get("recommendations", payload.get("reason", payload.get("text", "")))).strip()
@@ -493,12 +500,12 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         created: dict[str, object],
         before_signature: tuple[tuple[object, ...], ...],
         *,
-        caller_role: str | None = None,
+        notification_source_role: str | None = None,
     ) -> None:
         after_signature = self.verify_created_ticket_persisted(created, before_signature)
         self.events.notify_change(after_signature)
         if (
-            caller_role != "director"
+            notification_source_role != "director"
             and str(created.get("state", "")).strip() == "analysis"
             and not list(created.get("blocked_by") or [])
         ):
@@ -512,7 +519,11 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         if operation == "create_ticket":
             before_signature = self.app.store_signature()
             created = self.create_ticket_from_payload(payload, caller)
-            self.send_ticket_created(created, before_signature, caller_role=caller)
+            self.send_ticket_created(
+                created,
+                before_signature,
+                notification_source_role=self.notification_source_role(operation, caller) or caller,
+            )
             return
 
         if operation == "file_bug":
@@ -542,7 +553,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 blocked_reason=str(payload.get("blocked_reason", "")),
                 caller_role=caller,
             )
-            self.send_ticket_created(created, before_signature, caller_role=caller)
+            self.send_ticket_created(created, before_signature, notification_source_role=caller)
             return
 
         if ticket_id is None:

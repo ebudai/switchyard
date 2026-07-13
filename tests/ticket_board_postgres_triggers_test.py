@@ -150,12 +150,19 @@ def sql_string(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def service_call(conninfo: str, caller_role: str, sql: str) -> None:
+def service_call(conninfo: str, caller_role: str, sql: str, *, notification_source_role: str | None = None) -> None:
+    notification_source_sql = ""
+    if notification_source_role is not None:
+        notification_source_sql = (
+            f"SELECT set_config('ticket_board.notification_source_role', "
+            f"{sql_string(notification_source_role)}, false);\n"
+        )
     psql(
         conninfo,
         f"""
 SET ROLE ticket_board_service;
 SELECT set_config('ticket_board.caller_role', {sql_string(caller_role)}, false);
+{notification_source_sql}
 {sql}
 """,
     )
@@ -957,7 +964,90 @@ WHERE ticket_id = 'PGU-29701';
             assert analysis_pending_after_listener == "0"
 
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
-            insert_ticket(conninfo, "PGU-29702", title="Direct implementation insert", state="in_progress", assignee="ops")
+            web_created_ticket_id = "PGU-37201"
+            web_created_source = ticket_source(
+                web_created_ticket_id,
+                "Human web create notify",
+                "analysis",
+                "unassigned",
+            )
+            psql(
+                conninfo,
+                f"""
+SELECT set_config('ticket_board.caller_role', 'director', false);
+SELECT set_config('ticket_board.notification_source_role', 'eric', false);
+INSERT INTO ticket_board.tickets (
+    id, title, body, state, assignee, parent_id, implementation,
+    audit_signoff, needs_inspection, inspector_signoff, needs_eric_signoff, eric_signoff, commit_hash,
+    commit_exempt, manually_controlled, parked, created_text, updated_text, source_json
+) VALUES (
+    '{web_created_ticket_id}', 'Human web create notify', '', 'analysis', 'unassigned', '', '',
+    false, false, false, false, false, '',
+    false, false, false, '2026-07-10T00:00:00+00:00',
+    '2026-07-10T00:00:00+00:00', '{web_created_source}'::jsonb
+);
+""",
+            )
+            web_create_queue = json.loads(
+                psql(
+                    conninfo,
+                    f"""
+SELECT jsonb_agg(jsonb_build_object(
+    'kind', kind,
+    'target_role', target_role,
+    'message', message,
+    'old_state', payload->>'old_state',
+    'new_state', payload->>'new_state',
+    'payload_kind', payload->>'kind'
+) ORDER BY id)::text
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = '{web_created_ticket_id}';
+""",
+                ).stdout
+            )
+            assert web_create_queue == [
+                {
+                    "kind": "transition",
+                    "target_role": "director",
+                    "message": f"New ticket for you: {web_created_ticket_id} -- Human web create notify",
+                    "old_state": None,
+                    "new_state": "analysis",
+                    "payload_kind": "transition",
+                }
+            ], web_create_queue
+
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
+            agent_created_ticket_id = "PGU-37202"
+            agent_created_source = ticket_source(
+                agent_created_ticket_id,
+                "Director self-create suppress",
+                "analysis",
+                "unassigned",
+            )
+            psql(
+                conninfo,
+                f"""
+SELECT set_config('ticket_board.caller_role', 'director', false);
+INSERT INTO ticket_board.tickets (
+    id, title, body, state, assignee, parent_id, implementation,
+    audit_signoff, needs_inspection, inspector_signoff, needs_eric_signoff, eric_signoff, commit_hash,
+    commit_exempt, manually_controlled, parked, created_text, updated_text, source_json
+) VALUES (
+    '{agent_created_ticket_id}', 'Director self-create suppress', '', 'analysis', 'unassigned', '', '',
+    false, false, false, false, false, '',
+    false, false, false, '2026-07-10T00:00:00+00:00',
+    '2026-07-10T00:00:00+00:00', '{agent_created_source}'::jsonb
+);
+""",
+            )
+            direct_create_self_suppressed = psql(
+                conninfo,
+                f"SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = '{agent_created_ticket_id}';",
+            ).stdout.strip()
+            assert direct_create_self_suppressed == "0", direct_create_self_suppressed
+
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
+            insert_ticket(conninfo, "PGU-29710", title="Direct implementation insert", state="in_progress", assignee="ops")
             direct_implementation_queue = json.loads(
                 psql(
                     conninfo,
@@ -969,14 +1059,14 @@ SELECT jsonb_agg(jsonb_build_object(
     'new_state', payload->>'new_state'
 ) ORDER BY id)::text
 FROM ticket_board.ticket_notification_queue
-WHERE ticket_id = 'PGU-29702';
+WHERE ticket_id = 'PGU-29710';
 """,
                 ).stdout
             )
             assert direct_implementation_queue == [
                 {
                     "target_role": "ops",
-                    "message": "New ticket for you: PGU-29702 -- Direct implementation insert",
+                    "message": "New ticket for you: PGU-29710 -- Direct implementation insert",
                     "old_state": None,
                     "new_state": "in_progress",
                 }

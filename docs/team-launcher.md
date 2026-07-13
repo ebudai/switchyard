@@ -54,11 +54,17 @@ session is missing. Detached roles are checked for existence but remain
 detached.
 
 `reload` kills and recreates each configured role session, then starts the
-configured CLI with its recorded resume id when one exists. Detached roles are
-also reloaded, but remain detached instead of attaching to a pane. `reload`
-fetches the configured worktree ref for freshness, but does not checkout or clean
-the shared checkout before recreating sessions; this preserves files in resumed panes.
-Resume ids are read from
+configured CLI with its recorded resume id when one exists. Before restarting a
+running role, the launcher compares the config's `cli` and `model` against the
+live pane. The CLI is inferred from the pane process tree, and the model is
+read from the live process argv when available, falling back to the latest
+SessionStart hook record. If either value differs, reload rewrites only that
+role's `cli` and `model` fields atomically so the live choice becomes the new
+default for future reloads. Detached roles are also reloaded, but remain
+detached instead of attaching to a pane. `reload` fetches the configured
+worktree ref for freshness, but does not checkout or clean the shared checkout
+before recreating sessions; this preserves files in resumed panes. Resume ids
+are read from
 `/run/user/<uid>/pgu-ticket-board/pane-sessions/<target>.json` by default. The
 SessionStart hook installer writes those files.
 

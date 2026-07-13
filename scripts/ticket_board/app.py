@@ -318,6 +318,7 @@ SELECT
     t.row_updated_at::text AS row_updated_at,
     t.updated_text,
     (SELECT count(*)::int FROM ticket_board.ticket_blockers b WHERE b.ticket_id = t.id) AS blocker_count,
+    (SELECT count(*)::int FROM ticket_board.ticket_blockers b WHERE b.ticket_id = t.id AND b.resolved) AS resolved_blocker_count,
     (SELECT count(*)::int FROM ticket_board.ticket_comments c WHERE c.ticket_id = t.id) AS comment_count,
     (SELECT count(*)::int FROM ticket_board.ticket_attachments a WHERE a.ticket_id = t.id) AS attachment_count,
     COALESCE(
@@ -340,6 +341,7 @@ ORDER BY t.ticket_number;
                 str(row["row_updated_at"]),
                 str(row["updated_text"]),
                 int(row["blocker_count"]),
+                int(row["resolved_blocker_count"]),
                 int(row["comment_count"]),
                 int(row["attachment_count"]),
                 str(row["last_transition_send_trace_id"]),
@@ -434,6 +436,12 @@ SELECT
         ARRAY[]::text[]
     ) AS blocked_by,
     COALESCE(
+        (SELECT jsonb_agg(jsonb_build_object('id', b.blocker_ticket_id, 'resolved', b.resolved) ORDER BY b.position)
+         FROM ticket_board.ticket_blockers b
+         WHERE b.ticket_id = t.id),
+        '[]'::jsonb
+    ) AS blockers,
+    COALESCE(
         (SELECT jsonb_agg(jsonb_build_object('who', c.who, 'text', c.text, 'ts', c.ts_text) ORDER BY c.position)
          FROM ticket_board.ticket_comments c
          WHERE c.ticket_id = t.id),
@@ -477,6 +485,9 @@ ORDER BY t.ticket_number
         comments = row["comments"]
         if isinstance(comments, str):
             comments = json.loads(comments)
+        blockers = row["blockers"]
+        if isinstance(blockers, str):
+            blockers = json.loads(blockers)
         screenshots = row["screenshots"] or []
         ticket = {
             "id": str(row["id"]),
@@ -485,6 +496,7 @@ ORDER BY t.ticket_number
             "assignee": self._validate_assignee(str(row["assignee"])),
             "state": self._validate_state(str(row["state"])),
             "blocked_by": self._validate_blocked_by(list(row["blocked_by"] or []), str(row["id"])),
+            "blockers": self._validate_blockers(blockers, str(row["id"])),
             "parent_id": str(row["parent_id"] or ""),
             "blocked_reason": self._require_plain_string(row["blocked_reason"], "blocked_reason"),
             "implementation": self._require_plain_string(row["implementation"], "implementation"),
@@ -797,6 +809,24 @@ ORDER BY t.ticket_number
             if blocker_id not in blocked_by:
                 blocked_by.append(blocker_id)
         return blocked_by
+
+    def _validate_blockers(self, raw: Any, ticket_id: str) -> list[dict[str, Any]]:
+        if raw in (None, "", "null"):
+            return []
+        if not isinstance(raw, list):
+            raise ValueError("blockers must be a list")
+        blockers: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in raw:
+            if not isinstance(item, dict):
+                raise ValueError("blockers entries must be objects")
+            blocker_id = str(item.get("id", "")).strip().upper()
+            normalized_id = self._validate_blocked_by([blocker_id], ticket_id)[0]
+            if normalized_id in seen:
+                continue
+            seen.add(normalized_id)
+            blockers.append({"id": normalized_id, "resolved": bool(item.get("resolved"))})
+        return blockers
 
     def _enforce_blocked_reason_rule(self, blocked_by: list[str], blocked_reason: str) -> None:
         if blocked_by and not blocked_reason.strip():

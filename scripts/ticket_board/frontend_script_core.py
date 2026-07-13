@@ -147,6 +147,10 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       if (!nextState) {
         return 'No default advance from this state.';
       }
+      const unresolved = unresolvedBlockedBy(ticket);
+      if (unresolved.length) {
+        return `Resolve blockers before advancing: ${formatBlockedByList(unresolved)}.`;
+      }
       if (ticket.state === 'analysis') {
         if (ticket.assignee === 'unassigned') {
           return 'Assign the ticket before advancing to Implementation.';
@@ -489,9 +493,14 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     }
 
     function unresolvedBlockedBy(ticket) {
+      if (Array.isArray(ticket.blockers)) {
+        return ticket.blockers
+          .filter((blocker) => blocker && !blocker.resolved)
+          .map((blocker) => blocker.id);
+      }
       return (ticket.blocked_by || []).filter((id) => {
         const blocker = blockerTicket(id);
-        return !blocker || blocker.state !== 'done';
+        return !blocker || !['done', 'cancelled'].includes(blocker.state);
       });
     }
 

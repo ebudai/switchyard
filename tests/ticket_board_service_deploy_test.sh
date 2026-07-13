@@ -19,7 +19,7 @@ chmod +x "$SOURCE_REPO/scripts/ticket-board.py"
 git -C "$SOURCE_REPO" add scripts/ticket-board.py
 git -C "$SOURCE_REPO" commit -m "seed" >/dev/null
 
-BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD \
+BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
     "$REPO_ROOT/scripts/ticket-board-service.sh" deploy >/dev/null
 
 [[ -L "$DEPLOY_ROOT/current" ]] || {
@@ -35,7 +35,7 @@ if [[ -d "$DEPLOY_ROOT/current/.git" ]]; then
     exit 1
 fi
 
-BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD \
+BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
     "$REPO_ROOT/scripts/ticket-board-service.sh" render-unit >"$UNIT_DIR/service.unit"
 
 grep -q "WorkingDirectory=$DEPLOY_ROOT/current" "$UNIT_DIR/service.unit" || {
@@ -79,6 +79,18 @@ grep -q 'ensure_database_roles' "$REPO_ROOT/scripts/ticket-board-service.sh" || 
     echo "FAIL: install path does not ensure ticket-board service roles" >&2
     exit 1
 }
+grep -q 'apply_database_migrations' "$REPO_ROOT/scripts/ticket-board-service.sh" || {
+    echo "FAIL: service deploy path does not apply ticket-board migrations" >&2
+    exit 1
+}
+grep -q 'ensure-migrations)' "$REPO_ROOT/scripts/ticket-board-service.sh" || {
+    echo "FAIL: service script does not expose ensure-migrations for bootstrap testing" >&2
+    exit 1
+}
+grep -q 'TICKET_BOARD_ADMIN_DATABASE_URL="$BOARD_ADMIN_DATABASE_URL" "$MIGRATION_RUNNER"' "$REPO_ROOT/scripts/ticket-board-service.sh" || {
+    echo "FAIL: service migration runner does not use the privileged admin database URL" >&2
+    exit 1
+}
 grep -q 'BOARD_ADMIN_DATABASE_URL=".*user=postgres' "$REPO_ROOT/scripts/ticket-board-service.sh" || {
     echo "FAIL: service installer admin connection does not default to user=postgres" >&2
     exit 1
@@ -109,7 +121,7 @@ grep -q 'ensure-roles)' "$REPO_ROOT/scripts/ticket-board-service.sh" || {
 }
 
 TICKET_BOARD_DATABASE_URL='postgresql:///custom_board?host=/tmp/pgu-pg&user=ticket_board_service' \
-BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD \
+BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
     "$REPO_ROOT/scripts/ticket-board-service.sh" render-unit >"$UNIT_DIR/service-custom-db.unit"
 
 grep -q '^Environment=TICKET_BOARD_DATABASE_URL=postgresql:///custom_board?host=/tmp/pgu-pg&user=ticket_board_service$' "$UNIT_DIR/service-custom-db.unit" || {

@@ -14,10 +14,11 @@ readonly DEPLOY_REF="${DEPLOY_REF:-origin/main}"
 readonly LISTENER_DATABASE_URL="${TICKET_BOARD_NOTIFY_DATABASE_URL:-${TICKET_BOARD_DATABASE_URL:-postgresql:///pgu?host=/var/run/postgresql&user=ticket_board_listener}}"
 readonly BOARD_ADMIN_DATABASE_URL="${TICKET_BOARD_ADMIN_DATABASE_URL:-postgresql:///pgu?host=/var/run/postgresql&user=postgres}"
 readonly RBAC_SQL="${RBAC_SQL:-$BOARD_CURRENT_LINK/scripts/ticket_board/rbac.sql}"
+readonly MIGRATION_RUNNER="${TICKET_BOARD_MIGRATION_RUNNER:-$BOARD_CURRENT_LINK/scripts/ticket-board-migrate}"
 
 usage() {
     cat <<EOF
-Usage: scripts/ticket-board-notify-listener-service.sh <install|deploy|deploy-restart|ensure-roles|render-unit|start|stop|restart|status|logs>
+Usage: scripts/ticket-board-notify-listener-service.sh <install|deploy|deploy-restart|ensure-migrations|ensure-roles|render-unit|start|stop|restart|status|logs>
 
 Manage the PGU ticket-board PostgreSQL LISTEN shim as an agent user systemd service.
 
@@ -25,6 +26,8 @@ Commands:
   install         Export $DEPLOY_REF into $BOARD_ROOT/current, write the unit, enable and start it
   deploy          Refresh $BOARD_ROOT/current from $DEPLOY_REF without restarting the service
   deploy-restart  Refresh $BOARD_ROOT/current from $DEPLOY_REF and restart the service
+  ensure-migrations
+                  Apply numbered SQL migrations and record them in schema_migrations
   ensure-roles    Apply the idempotent ticket-board RBAC SQL using a privileged admin connection
   render-unit     Print the systemd unit contents to stdout
   start|stop|restart|status
@@ -94,6 +97,16 @@ deploy_export() {
     printf '%s\n' "$resolved_ref"
 }
 
+apply_database_migrations() {
+    if [[ "${TICKET_BOARD_SKIP_MIGRATIONS:-}" == "1" ]]; then
+        log "skipping ticket-board migrations because TICKET_BOARD_SKIP_MIGRATIONS=1"
+        return 0
+    fi
+    [[ -x "$MIGRATION_RUNNER" ]] || die "missing executable migration runner after deploy: $MIGRATION_RUNNER"
+    TICKET_BOARD_ADMIN_DATABASE_URL="$BOARD_ADMIN_DATABASE_URL" "$MIGRATION_RUNNER"
+    log "applied ticket-board database migrations using $MIGRATION_RUNNER"
+}
+
 ensure_database_roles() {
     [[ -f "$RBAC_SQL" ]] || die "missing ticket-board RBAC SQL after deploy: $RBAC_SQL"
     command -v psql >/dev/null 2>&1 || die "psql is required to ensure ticket-board service roles"
@@ -142,6 +155,7 @@ write_unit() {
 install_service() {
     deploy_export >/dev/null
     [[ -f "$LISTENER_SCRIPT" ]] || die "missing listener script after deploy: $LISTENER_SCRIPT"
+    apply_database_migrations
     ensure_database_roles
     ensure_user_manager
     write_unit
@@ -150,9 +164,17 @@ install_service() {
     log "installed + started $SERVICE_NAME"
 }
 
+deploy_service() {
+    local deployed_sha
+    deployed_sha="$(deploy_export)"
+    apply_database_migrations
+    printf '%s\n' "$deployed_sha"
+}
+
 deploy_restart_service() {
     local deployed_sha
     deployed_sha="$(deploy_export)"
+    apply_database_migrations
     ensure_user_manager
     write_unit
     systemctl_user daemon-reload
@@ -176,10 +198,13 @@ main() {
             install_service
             ;;
         deploy)
-            deploy_export
+            deploy_service
             ;;
         deploy-restart)
             deploy_restart_service
+            ;;
+        ensure-migrations)
+            apply_database_migrations
             ;;
         ensure-roles)
             ensure_database_roles

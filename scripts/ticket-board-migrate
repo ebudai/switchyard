@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MIGRATIONS_DIR="${TICKET_BOARD_MIGRATIONS_DIR:-$SCRIPT_DIR/ticket_board/migrations}"
+DATABASE_URL="${TICKET_BOARD_ADMIN_DATABASE_URL:-${TICKET_BOARD_DATABASE_URL:-postgresql:///pgu?host=/var/run/postgresql&user=postgres}}"
+
+usage() {
+    cat <<EOF
+Usage: scripts/ticket-board-migrate
+
+Apply numbered ticket-board PostgreSQL migrations from:
+  $MIGRATIONS_DIR
+
+Environment:
+  TICKET_BOARD_ADMIN_DATABASE_URL  privileged PostgreSQL connection string
+  TICKET_BOARD_DATABASE_URL        fallback connection string
+  TICKET_BOARD_MIGRATIONS_DIR      override migrations directory
+EOF
+}
+
+die() {
+    printf '[ticket-board-migrate] ERROR: %s\n' "$*" >&2
+    exit 1
+}
+
+log() {
+    printf '[ticket-board-migrate] %s\n' "$*" >&2
+}
+
+psql_migrate() {
+    psql -X -v ON_ERROR_STOP=1 "$DATABASE_URL" "$@"
+}
+
+ensure_tracking_table() {
+    psql_migrate <<'SQL' >/dev/null
+CREATE SCHEMA IF NOT EXISTS ticket_board;
+CREATE TABLE IF NOT EXISTS ticket_board.schema_migrations (
+    version integer PRIMARY KEY,
+    description text NOT NULL,
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+SQL
+}
+
+migration_applied() {
+    local version="$1"
+    local applied
+    applied="$(
+        psql_migrate -tA -v version="$version" <<'SQL'
+SELECT EXISTS (
+    SELECT 1
+    FROM ticket_board.schema_migrations
+    WHERE version = :version
+);
+SQL
+    )"
+    [[ "$applied" == "t" ]]
+}
+
+record_migration() {
+    local version="$1"
+    local description="$2"
+    psql_migrate -v version="$version" -v description="$description" <<'SQL' >/dev/null
+INSERT INTO ticket_board.schema_migrations (version, description)
+VALUES (:version, :'description')
+ON CONFLICT (version) DO NOTHING;
+SQL
+}
+
+apply_migration() {
+    local file="$1"
+    local filename version description
+    filename="$(basename "$file")"
+    if [[ ! "$filename" =~ ^([0-9]+)_(.+)\.sql$ ]]; then
+        die "migration file must be named <number>_<description>.sql: $filename"
+    fi
+    version="${BASH_REMATCH[1]}"
+    description="${BASH_REMATCH[2]}"
+    version="$((10#$version))"
+
+    if migration_applied "$version"; then
+        log "skip $filename"
+        return 0
+    fi
+
+    log "apply $filename"
+    psql_migrate -f "$file" >/dev/null
+    record_migration "$version" "$description"
+}
+
+main() {
+    case "${1:-}" in
+        -h|--help)
+            usage
+            return 0
+            ;;
+        "")
+            ;;
+        *)
+            usage >&2
+            return 1
+            ;;
+    esac
+
+    command -v psql >/dev/null 2>&1 || die "psql is required to apply ticket-board migrations"
+    [[ -d "$MIGRATIONS_DIR" ]] || die "missing migrations directory: $MIGRATIONS_DIR"
+    ensure_tracking_table
+
+    local found=0
+    local migration
+    while IFS= read -r -d '' migration; do
+        found=1
+        apply_migration "$migration"
+    done < <(find "$MIGRATIONS_DIR" -maxdepth 1 -type f -name '*.sql' -printf '%f\0' | sort -zV | while IFS= read -r -d '' name; do
+        printf '%s\0' "$MIGRATIONS_DIR/$name"
+    done)
+
+    if [[ "$found" == "0" ]]; then
+        log "no migrations found in $MIGRATIONS_DIR"
+    fi
+}
+
+main "$@"

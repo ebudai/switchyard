@@ -131,6 +131,10 @@ def main() -> int:
         assert field in schema, f"comment field {field!r} missing from schema"
 
     assert "source_json jsonb not null" in schema_lower, "tickets.source_json is required for lossless import"
+    assert "create table if not exists ticket_board.schema_migrations" in schema_lower
+    assert "version integer primary key" in schema_lower
+    assert "description text not null" in schema_lower
+    assert "applied_at timestamptz not null default now()" in schema_lower
     assert "create table if not exists ticket_board.ticket_blockers" in schema_lower
     assert "create table if not exists ticket_board.ticket_comments" in schema_lower
     assert "create table if not exists ticket_board.ticket_attachments" in schema_lower

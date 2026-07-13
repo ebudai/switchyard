@@ -25,6 +25,7 @@ from scripts.ticket_board.notify_listener import (
     PaneActivityGate,
     PaneHookStateStore,
     TicketBoardNotifyListener,
+    display_message,
 )
 
 
@@ -337,6 +338,17 @@ def test_external_hook_writer_records_state_file() -> None:
     assert state is not None
     assert state.state == "idle"
     assert state.source == "codex.Stop"
+
+
+def test_display_message_renames_analysis_stage_copy_without_touching_titles() -> None:
+    assert (
+        display_message("NUDGE PGU-328 -- Queue needs director triage in analysis")
+        == "NUDGE PGU-328 -- Queue needs director triage in Triage"
+    )
+    assert (
+        display_message("New ticket for you: PGU-29701 -- Analysis insert notify")
+        == "New ticket for you: PGU-29701 -- Analysis insert notify"
+    )
 
 
 def test_missing_hook_state_fails_safe_and_does_not_clobber() -> None:

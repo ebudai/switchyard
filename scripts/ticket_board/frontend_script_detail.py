@@ -502,7 +502,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         commentActions.appendChild(kickbackButton);
       } else if (ticket.state === 'audit') {
         const kickbackButton = document.createElement('button');
-        kickbackButton.textContent = 'Comment + Return to Analysis';
+        kickbackButton.textContent = 'Comment + Return to Triage';
         kickbackButton.addEventListener('click', async () => {
           await submitComment(ticket.id, commentWho.value, commentText.value, 'analysis');
         });

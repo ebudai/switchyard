@@ -100,7 +100,7 @@ def run_browser_check(playwright: object, server_port: int) -> None:
         page.goto(f"http://127.0.0.1:{server_port}/", wait_until="domcontentloaded")
 
         page.get_by_text("PGU-1", exact=True).wait_for(timeout=5000)
-        analysis_column = page.locator(".column").filter(has=page.locator(".column-title", has_text="Analysis"))
+        analysis_column = page.locator(".column").filter(has=page.locator(".column-title", has_text="Triage"))
         analysis_column.get_by_text("PGU-1", exact=True).wait_for(timeout=5000)
         analysis_column.get_by_text("PGU-2", exact=True).wait_for(timeout=5000)
         analysis_column.get_by_text("PGU-3", exact=True).wait_for(timeout=5000)

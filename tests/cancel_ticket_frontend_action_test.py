@@ -107,7 +107,7 @@ def run_browser_check(playwright: object, server_port: int, app: CancelBoardApp)
     try:
         page = browser.new_page(viewport={"width": 1280, "height": 800})
         page.goto(f"http://127.0.0.1:{server_port}/", wait_until="domcontentloaded")
-        page.locator(".column-title", has_text="Analysis").wait_for(timeout=5000)
+        page.locator(".column-title", has_text="Triage").wait_for(timeout=5000)
         page.locator(".card", has_text="PGU-293").click()
 
         page.once("dialog", lambda dialog: dialog.dismiss())

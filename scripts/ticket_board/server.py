@@ -693,6 +693,14 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if parsed.path.startswith("/api/tickets/") and "/actions/" not in parsed.path:
+            ticket_id = urllib.parse.unquote(parsed.path.removeprefix("/api/tickets/").strip("/"))
+            if ticket_id:
+                try:
+                    self.send_json(self.app.get_ticket(ticket_id))
+                except FileNotFoundError:
+                    self.send_text("ticket not found", HTTPStatus.NOT_FOUND)
+                return
         self.send_text("Not found", HTTPStatus.NOT_FOUND)
 
     def serve_events(self) -> None:

@@ -20,6 +20,8 @@ def main() -> int:
     assert "blockedByInput.placeholder = 'PGU-23, PGU-25';" in HTML
     assert "blocked_by: parseBlockedByInput(blockedByInput.value)," in HTML
     assert "blocked_reason: blockedReasonInput.value," in HTML
+    assert "appendLinkedTicketText(body, text);" in HTML
+    assert "appendLinkedTicketText(body, item.text);" in HTML
     assert "blocked_by" in HTML
     print("blocked_by_frontend_test: ok")
     return 0

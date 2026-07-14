@@ -215,7 +215,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
 
       const toggles = document.createElement('div');
       toggles.className = 'tag-row';
-      toggles.appendChild(toggleControl('Needs UAT', ticket.needs_eric_signoff, async (checked) => {
+      toggles.appendChild(toggleControl('UAT sign-off', ticket.needs_eric_signoff, async (checked) => {
         await updateTicket(ticket.id, { needs_eric_signoff: checked }, detailCallerRole());
       }));
       toggles.appendChild(toggleControl('Needs inspection', ticket.needs_inspection, async (checked) => {

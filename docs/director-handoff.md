@@ -1,4 +1,4 @@
-# Director Handoff — PGU-256 Surfel Video Codec
+# Director Handoff — PGU-256 Gaussian Video Codec
 
 **Provenance note (added 2026-07-05):** This file is handoff material from a *different, unrelated project* (internally called SRX), copied into this repo's `docs/` folder with a mechanical case-insensitive `srx`→`pgu` text replacement. It is retained only as process-pattern reference (director/implementer/auditor workflow, prompt composition, tmux routing). None of the project specifics below — commit hashes, test counts, benchmark numbers, decision log entries (D-031/032/033), the "PGU-256 codec" identity itself — describe this repository's actual history. This repo's real project is the procedural galaxy/point-cloud renderer in `main.cpp`; see `docs/galaxy_architecture.md` for its actual design doc.
 
@@ -15,10 +15,10 @@
 ## 1. What Is This Project
 
 PGU-256 is a C++23 experimental video codec targeting 4K 30fps @ 256 kbps (aspirational). Instead of traditional 2D pixel compression, it:
-1. Initializes a surfel cloud (3D surface elements) from the source image
+1. Initializes a gaussian cloud (3D surface elements) from the source image
 2. Rasterizes via EWA Gaussian splatting with SH shading
 3. Compresses and transmits only the residual error (dirty blocks via DCT + rANS)
-4. Uses a persistent surfel atlas dictionary for cross-frame/cross-GOP reuse
+4. Uses a persistent gaussian atlas dictionary for cross-frame/cross-GOP reuse
 
 The codec is at 19 completed pillars, ~80 commits. Current operating point on Sintel 1080p: **34.4 dB PSNR at 97% byte savings** (ds8+guided upsample path), or **47.4 dB at full-resolution error**.
 
@@ -50,22 +50,22 @@ Compiler: C++23, AVX-512 on x86_64. CUDA for optional GPU rasterizer (compile in
 
 ### Fix 1: Decoder double-reprojection bug (PRODUCTION CODE)
 **File**: `pgu_core/src/pgu_sequence.cpp` line ~1043
-**Bug**: Decoder's atlas path called `reproject_to_ellipsoids(cloud_)` on a cloud already serialized with reprojected tangents from the encoder. Double-reprojection corrupted surfel geometry, producing arc/streak artifacts.
-**Fix**: Use a copy — `SurfelCloud atlas_cloud = cloud_;` — for atlas signature computation, leaving `cloud_` intact for rendering.
+**Bug**: Decoder's atlas path called `reproject_to_ellipsoids(cloud_)` on a cloud already serialized with reprojected tangents from the encoder. Double-reprojection corrupted gaussian geometry, producing arc/streak artifacts.
+**Fix**: Use a copy — `GaussianCloud atlas_cloud = cloud_;` — for atlas signature computation, leaving `cloud_` intact for rendering.
 **Impact**: All historical PSNR numbers in `docs/implementer-report.md` are wrong. Corrected numbers are in `docs/packet_31_1.md`. This bug was present since atlas support was added but hidden by black placeholder test data.
 
 ### Fix 2: Atlas diagnostic visualization (TEST CODE)
 **File**: `pgu_tests/src/test_atlas_benchmark.cpp` line ~628
-**Bug**: Diagnostic cloud was copied AFTER `reproject_to_ellipsoids()` modified tangent vectors in-place, causing 99.9% surfel culling during rendering.
-**Fix**: Copy cloud BEFORE reprojection — `const pgu::SurfelCloud render_cloud = cloud;` before `reproject_to_ellipsoids(cloud, segmentation)`.
+**Bug**: Diagnostic cloud was copied AFTER `reproject_to_ellipsoids()` modified tangent vectors in-place, causing 99.9% gaussian culling during rendering.
+**Fix**: Copy cloud BEFORE reprojection — `const pgu::GaussianCloud render_cloud = cloud;` before `reproject_to_ellipsoids(cloud, segmentation)`.
 
 ### Partial implementation: Coverage-gap guided upsample fix
 **File**: `pgu_core/src/pgu_decoder.cpp` (61 lines changed)
-**Status**: Coverage weight bilinear fallback and error_blend_scale are implemented, build passes, 467/470 tests pass. However, the most visible dots PERSIST — they are NOT zero-coverage gaps. They are **surfel Gaussian tail bleed** across depth/color edges. The fix helps with true zero-coverage pixels but the primary visual artifact requires a rasterizer-level fix (depth-discontinuity clipping or post-filter). See updated `docs/packet_31_1.md` for analysis and potential rasterizer approaches.
+**Status**: Coverage weight bilinear fallback and error_blend_scale are implemented, build passes, 467/470 tests pass. However, the most visible dots PERSIST — they are NOT zero-coverage gaps. They are **gaussian Gaussian tail bleed** across depth/color edges. The fix helps with true zero-coverage pixels but the primary visual artifact requires a rasterizer-level fix (depth-discontinuity clipping or post-filter). See updated `docs/packet_31_1.md` for analysis and potential rasterizer approaches.
 **File**: `pgu_tests/src/test_pipeline.cpp` (98 lines added) — test helpers for coverage-specific error measurement.
 
-### New diagnostic: Surfel render output
-**File**: `pgu_tests/src/test_atlas_benchmark.cpp` — added raw surfel render diagnostic to "Atlas diagnostic visualization" benchmark, outputs to `docs/diag_surfel_render/frame_%04d.ppm`.
+### New diagnostic: Gaussian render output
+**File**: `pgu_tests/src/test_atlas_benchmark.cpp` — added raw gaussian render diagnostic to "Atlas diagnostic visualization" benchmark, outputs to `docs/diag_gaussian_render/frame_%04d.ppm`.
 
 ### New packet
 **File**: `docs/packet_31_1.md` — work packet for coverage gap dots + ds8 blur reduction.
@@ -80,13 +80,13 @@ These fail with OR without the uncommitted changes. Baselines were calibrated ag
 
 1. **Replaced black placeholder Sintel PNGs** with real frames → all benchmarks now run on real content
 2. **Discovered and fixed decoder double-reprojection bug** — the fundamental corruption had been hidden by black test data
-3. **Fixed atlas diagnostic rendering** — same root cause pattern (in-place modification of surfel cloud)
+3. **Fixed atlas diagnostic rendering** — same root cause pattern (in-place modification of gaussian cloud)
 4. **Re-ran benchmarks** with corrected decoder:
    - Full-res PSNR: 41.8 → **47.4 dB** (old numbers were corrupted)
    - ds8+guided PSNR: 40.2 → **34.4 dB** (old "40 dB" was measuring corrupted vs corrupted)
    - Byte savings: **97%** (stable — encoder-side, unaffected)
 5. **Diagnosed remaining visual artifacts**:
-   - **Bright dots at coverage gaps**: Guided upsample bilateral filter isolates zero-coverage pixels from covered neighbors due to extreme color difference vs sigma_range. Confirmed: raw surfel render is clean; dots introduced by error correction path only.
+   - **Bright dots at coverage gaps**: Guided upsample bilateral filter isolates zero-coverage pixels from covered neighbors due to extreme color difference vs sigma_range. Confirmed: raw gaussian render is clean; dots introduced by error correction path only.
    - **Overall blur vs source**: Inherent to ds8 error correction losing high-frequency detail. Not from post-processing (confirmed OFF).
 6. **Wrote Packet 31.1** covering both artifact fixes
 
@@ -98,7 +98,7 @@ The double-reprojection fix and diagnostic improvements should be committed. The
 ### Packet 31.1 — Coverage gap + blur fix
 Ready for implementer. `docs/packet_31_1.md` has the full spec:
 - 31.1.1: Weight-buffer bilinear fallback at zero-coverage pixels
-- 31.1.2: Coverage-weighted error blending to preserve surfel texture
+- 31.1.2: Coverage-weighted error blending to preserve gaussian texture
 
 Note: `pgu_decoder.cpp` already has a partial implementation in the working tree. The implementer should validate and complete it, not start from scratch.
 
@@ -137,32 +137,32 @@ Input Frame
     +-- estimate_grain() -> GrainParams          [strip pre-encode]
     +-- strip_grain() -> Clean Frame
     |
-    +-- init_surfels_from_image() -> SurfelCloud
-    +-- segment_surfel_cloud() -> labels
+    +-- init_gaussians_from_image() -> GaussianCloud
+    +-- segment_gaussian_cloud() -> labels
     +-- reproject_to_ellipsoids() -> Ellipsoid wrapping  [MODIFIES CLOUD IN-PLACE]
     +-- compute_cluster_signatures() -> atlas matching
     +-- atlas_.ingest_frame() -> persistent dictionary
     |
-    +-- refine_surfel_colors() -> iterative color correction
-    +-- SurfelRasterizer::render() -> Reconstructed Frame
+    +-- refine_gaussian_colors() -> iterative color correction
+    +-- GaussianRasterizer::render() -> Reconstructed Frame
     +-- ErrorAnalyzer::analyze() -> Dirty Blocks
     +-- ErrorPatchCompressor::compress() -> DCT + rANS
     +-- BitstreamWriter::finalize() -> Bitstream
-    +-- save_surfel_cloud_v7() -> Cloud Bytes (I-frame)
+    +-- save_gaussian_cloud_v7() -> Cloud Bytes (I-frame)
     |
     +-- SequenceEncoder manages GOP lifecycle
 
 Decode Side:
-    +-- load_surfel_cloud_v7() (I-frame, needs AtlasDictionary)
+    +-- load_gaussian_cloud_v7() (I-frame, needs AtlasDictionary)
     +-- BitstreamReader -> Error patches
-    +-- SurfelRasterizer::render() -> Raw surfel frame
+    +-- GaussianRasterizer::render() -> Raw gaussian frame
     +-- apply_error_layers() -> ds8 guided upsample + composite
-    +-- refine_surfel_colors() -> update cloud for next frame
+    +-- refine_gaussian_colors() -> update cloud for next frame
     +-- synthesize_grain() -> Final Frame (if post-process enabled)
 ```
 
 ### Critical invariant: `reproject_to_ellipsoids()` modifies cloud in-place
-This function takes `SurfelCloud&` (non-const) and rewrites tangent vectors. Any code that needs the original cloud MUST copy it BEFORE calling this function. This was the root cause of both bugs found this session. The next director should watch for this pattern in any new code that touches ellipsoid/atlas processing.
+This function takes `GaussianCloud&` (non-const) and rewrites tangent vectors. Any code that needs the original cloud MUST copy it BEFORE calling this function. This was the root cause of both bugs found this session. The next director should watch for this pattern in any new code that touches ellipsoid/atlas processing.
 
 ### Key file counts
 - 32 headers in `pgu_core/include/`
@@ -172,7 +172,7 @@ This function takes `SurfelCloud&` (non-const) and rewrites tangent vectors. Any
 ## 9. Diagnostic Output Inventory
 
 All generated with real Sintel 1080p data, post double-reprojection fix:
-- `docs/diag_surfel_render/frame_%04d.ppm` — raw surfel rasterization (no error correction) — **NEW, clean baseline**
+- `docs/diag_gaussian_render/frame_%04d.ppm` — raw gaussian rasterization (no error correction) — **NEW, clean baseline**
 - `docs/diag_decoded/frame_%04d.ppm` — full decode pipeline output (has dot artifacts)
 - `docs/diag_atlas/frame_%04d.ppm` — atlas entry coloring (RGBCMY for top 6 entries)
 - `docs/diag_error/frame_%04d.ppm` — error patch heat maps
@@ -186,7 +186,7 @@ All generated with real Sintel 1080p data, post double-reprojection fix:
 |----|----------|-----------|
 | D-031 | Use copy for atlas signature computation in decoder | reproject_to_ellipsoids modifies cloud in-place; decoder was double-reprojecting |
 | D-032 | Coverage gap fix via weight buffer bilinear fallback | Surgical fix at zero-coverage pixels without degrading guided upsample elsewhere |
-| D-033 | ds8 blur to be addressed via coverage-weighted error blending | Reduce correction magnitude at well-covered pixels where surfel render is already sharp |
+| D-033 | ds8 blur to be addressed via coverage-weighted error blending | Reduce correction magnitude at well-covered pixels where gaussian render is already sharp |
 
 ## 11. Memory System
 

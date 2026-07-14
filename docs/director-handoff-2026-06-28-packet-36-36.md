@@ -9,7 +9,7 @@ The project is in the object-ownership / background-billboarding phase. The curr
 1. Establish object segmentation and permanence first.
 2. Treat background as whatever remains after object extraction, not as a depth-only far-plane threshold.
 3. Use background billboarding after ownership is reliable.
-4. Return to surfel cloud merging and atlasing once object/background ownership is stable.
+4. Return to gaussian cloud merging and atlasing once object/background ownership is stable.
 
 The immediate blocker is object ownership recall. The proposal masks are now source-matched and useful, but they still miss many real objects or only outline them. The next packet is intended to expand recall using model proposals plus mechanical/depth/thin-structure evidence.
 
@@ -273,7 +273,7 @@ Useful future ideas already discussed:
 
 - Object segmentation/permanence before billboarding.
 - Background atlas/billboard after object removal.
-- Foreground affine-transformed billboard/object cards for planar-ish foreground regions, possibly cheaper than surfels.
+- Foreground affine-transformed billboard/object cards for planar-ish foreground regions, possibly cheaper than gaussians.
 - Two error layers:
   - object/statistic correction layer;
   - pixel correction layer.

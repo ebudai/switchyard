@@ -95,17 +95,6 @@ class FakeRunner:
         return subprocess.CompletedProcess(args, 0)
 
 
-def _pane_cli_tail(command: list[str], role_name: str) -> list[str]:
-    assert command[:5] == [
-        "env",
-        "DISPLAY=",
-        "PGU_AGENT_NO_GUI=1",
-        f"PGU_PANE_TARGET=pgu-{role_name}:0.0",
-        "WAYLAND_DISPLAY=",
-    ]
-    return command[5:]
-
-
 def _leaf_commands(node: object) -> list[str]:
     commands: list[str] = []
     if isinstance(node, dict):
@@ -431,14 +420,8 @@ def test_pgu_launch_commands_include_model_and_bypass_flags() -> None:
 
     for role_name, expected_tail in expected_by_role.items():
         command = cli_command_for_role(roles[role_name], session_dir=config.session_dir)
-        assert command[:5] == [
-            "env",
-            "DISPLAY=",
-            "PGU_AGENT_NO_GUI=1",
-            f"PGU_PANE_TARGET=pgu-{role_name}:0.0",
-            "WAYLAND_DISPLAY=",
-        ]
-        assert command[5:] == expected_tail, (role_name, command)
+        assert command[:2] == ["env", f"PGU_PANE_TARGET=pgu-{role_name}:0.0"]
+        assert command[2:] == expected_tail, (role_name, command)
         assert "--reasoning-effort" not in command
         assert "--continue" not in command
         assert "--last" not in command
@@ -975,11 +958,7 @@ def test_reload_uses_recorded_resume_uuid_when_recreating_session() -> None:
         )
         runner = FakeRunner(existing_sessions={"pgu-ops"}, current_commands={"pgu-ops:0.0": "codex"})
 
-        assert _pane_cli_tail(cli_command_for_role(role, session_dir=session_dir, resume=True), "ops")[:3] == [
-            "codex",
-            "resume",
-            session_id,
-        ]
+        assert cli_command_for_role(role, session_dir=session_dir, resume=True)[2:5] == ["codex", "resume", session_id]
         assert run_role_pane(role, mode="reload", session_dir=session_dir, runner=runner) == 0
 
         assert runner.calls[0] == ["tmux", "has-session", "-t", "pgu-ops"]
@@ -1013,17 +992,14 @@ def test_resume_commands_use_cli_specific_shapes_and_front_position() -> None:
         ops_command = cli_command_for_role(roles["ops"], session_dir=session_dir, resume=True)
         inspector_command = cli_command_for_role(roles["inspector"], session_dir=session_dir, resume=True)
 
-        director_tail = _pane_cli_tail(director_command, "director")
-        assert director_tail[:3] == ["claude", "--resume", session_id]
-        assert director_tail[3:7] == ["--model", "claude-opus-4-8", "--effort", "high"]
+        assert director_command[2:5] == ["claude", "--resume", session_id]
+        assert director_command[5:9] == ["--model", "claude-opus-4-8", "--effort", "high"]
 
-        ops_tail = _pane_cli_tail(ops_command, "ops")
-        assert ops_tail[:3] == ["codex", "resume", session_id]
-        assert ops_tail[3:7] == ["--model", "gpt-5.5", "-c", "reasoning_effort=high"]
+        assert ops_command[2:5] == ["codex", "resume", session_id]
+        assert ops_command[5:9] == ["--model", "gpt-5.5", "-c", "reasoning_effort=high"]
 
-        inspector_tail = _pane_cli_tail(inspector_command, "inspector")
-        assert inspector_tail[:3] == ["agy", "--conversation", session_id]
-        assert inspector_tail[3:5] == ["--model", "Gemini 3.5 Flash (Medium)"]
+        assert inspector_command[2:5] == ["agy", "--conversation", session_id]
+        assert inspector_command[5:7] == ["--model", "Gemini 3.5 Flash (Medium)"]
 
 
 def test_reload_without_recorded_resume_id_logs_fresh_start() -> None:

@@ -37,7 +37,7 @@ def main() -> int:
     assert "Save audit prompt before advancing to audit." not in HTML
     assert "Set audit signoff before advancing to UAT." in HTML
     assert "Set audit signoff before advancing to Final Sign-Off." in HTML
-    assert "Record Eric signoff before advancing to Final Sign-Off." in HTML
+    assert "Record UAT sign-off before advancing to Final Sign-Off." in HTML
     assert "Save a verified commit hash or enable no-commit override before advancing to done." in HTML
     assert "Advance -> ${stateLabel(detailAdvanceState)}" in HTML
     assert "await advanceTicket(ticket.id, commentText.value);" in HTML

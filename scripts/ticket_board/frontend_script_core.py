@@ -171,7 +171,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
           : 'Set audit signoff before advancing to Final Sign-Off.';
       }
       if (ticket.state === 'eric_review' && ticket.needs_eric_signoff && !ticket.eric_signoff) {
-        return 'Record Eric signoff before advancing to Final Sign-Off.';
+        return 'Record UAT sign-off before advancing to Final Sign-Off.';
       }
       if (nextState === 'done' && !ticket.commit_exempt && !(ticket.commit_hash || '').trim()) {
         return 'Save a verified commit hash or enable no-commit override before advancing to done.';
@@ -204,10 +204,10 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         return '';
       }
       if (ticket.state === 'eric_review') {
-        return 'Eric signed off. Waiting for Final Sign-Off.';
+        return 'UAT signed off. Waiting for Final Sign-Off.';
       }
       if (ticket.state === 'director_review') {
-        return 'Eric signed off. In Final Sign-Off.';
+        return 'UAT signed off. In Final Sign-Off.';
       }
       return '';
     }
@@ -1063,7 +1063,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
           const empty = document.createElement('div');
           empty.className = 'empty';
           empty.textContent = column.key === 'eric_review'
-            ? 'Only tickets flagged for Eric signoff appear in UAT.'
+            ? 'Only tickets flagged for UAT appear here.'
             : 'No tickets in this state.';
           body.appendChild(empty);
         }

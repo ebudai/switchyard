@@ -860,51 +860,8 @@ WHERE id = %s
         if assignee != target_role or target_role in {"director", "audit", "inspector"}:
             return ""
         result = conn.execute(
-            """
-WITH current_ticket AS (
-    SELECT
-        t.ticket_number,
-        ns.entered_current_state_at
-    FROM ticket_board.tickets t
-    LEFT JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
-    WHERE t.id = %s
-      AND t.state = 'in_progress'
-      AND t.assignee = %s
-      AND NOT t.manually_controlled
-)
-SELECT t.id
-FROM current_ticket c
-JOIN ticket_board.tickets t ON t.state = 'in_progress'
-LEFT JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
-WHERE t.assignee = %s
-  AND t.id <> %s
-  AND NOT t.manually_controlled
-  AND (
-      (
-          ns.entered_current_state_at IS NOT NULL
-          AND c.entered_current_state_at IS NOT NULL
-          AND ns.entered_current_state_at < c.entered_current_state_at
-      )
-      OR (
-          (
-              ns.entered_current_state_at IS NULL
-              OR c.entered_current_state_at IS NULL
-              OR ns.entered_current_state_at = c.entered_current_state_at
-          )
-          AND t.ticket_number < c.ticket_number
-      )
-  )
-ORDER BY
-    CASE
-        WHEN ns.entered_current_state_at IS NOT NULL
-             AND c.entered_current_state_at IS NOT NULL
-            THEN ns.entered_current_state_at
-        ELSE NULL
-    END NULLS LAST,
-    t.ticket_number
-LIMIT 1
-""",
-            (ticket_id, target_role, target_role, ticket_id),
+            "SELECT ticket_board.finish_current_blocker(%s::text, %s::text)",
+            (ticket_id, target_role),
         )
         row = result.fetchone()
         if row is None:

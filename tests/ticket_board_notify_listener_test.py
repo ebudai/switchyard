@@ -119,6 +119,9 @@ class FakeConnection:
             if not self.queue_rows:
                 return FakeResult([])
             return FakeResult([self.queue_rows.pop(0)])
+        if "finish_current_blocker" in statement_text:
+            assert params is not None
+            return FakeResult([(self._finish_current_blocker_for(str(params[0]), str(params[1])),)])
         if "current_ticket AS" in statement_text and "t.state = 'in_progress'" in statement_text:
             assert params is not None
             ticket_id = str(params[0])

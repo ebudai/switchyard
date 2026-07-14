@@ -195,6 +195,8 @@ VALUES (
 );
 UPDATE ticket_board.tickets SET state = 'cancelled' WHERE id = 'PGU-226';
 COMMIT;
+DELETE FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-226' AND kind = 'transition';
 """,
             )
             sent.clear()

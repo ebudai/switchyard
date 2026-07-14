@@ -75,6 +75,7 @@ GRANT EXECUTE ON FUNCTION ticket_board.merge(text, text) TO ticket_board_service
 
 GRANT EXECUTE ON FUNCTION ticket_board.claim_notification(timestamptz, interval) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.next_notification_attempt(timestamptz, interval) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.finish_current_blocker(text, text, timestamptz, interval) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.ack_notification(bigint) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.requeue_notification(bigint, interval, text) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.record_notification_trace(text, bigint, text, text, text, text, text, text, jsonb) TO ticket_board_listener;

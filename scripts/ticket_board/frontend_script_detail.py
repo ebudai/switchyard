@@ -237,7 +237,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         await updateTicket(ticket.id, patch, 'audit');
       }));
       if (ticket.needs_eric_signoff) {
-        toggles.appendChild(toggleControl('Eric signoff', ticket.eric_signoff, async (checked) => {
+        toggles.appendChild(toggleControl('UAT sign-off', ticket.eric_signoff, async (checked) => {
           const patch = { eric_signoff: checked };
           if (checked && commentText.value.trim()) {
             patch.comment = { who: 'eric', text: commentText.value.trim() };

@@ -19,6 +19,7 @@ onto Wayland:
 
 ```bash
 env QT_QPA_PLATFORM=wayland \
+  QT_LOGGING_RULES=qt.qpa.wayland.warning=false \
   WAYLAND_DISPLAY=/run/user/<eric-uid>/wayland-0 \
   konsole --layout ...
 ```
@@ -42,8 +43,11 @@ in `pane attach-or-start <role>` mode. If `tmux has-session -t pgu-<role>`
 succeeds, it attaches to that existing session. It only runs `tmux new-session`
 when the role session does not exist. Roles marked `detached` are started
 directly by the launcher before Konsole opens and are not assigned a visible
-layout pane. Before opening Konsole, `start` fetches `origin main`, checks the
-shared checkout out to `origin/main` with `--force`, then runs `git clean -fdx`.
+layout pane. The visible Konsole window is then launched in the background so
+`start` returns promptly to the invoking shell with a short status line instead
+of blocking on the window process. Before opening Konsole, `start` fetches
+`origin main`, checks the shared checkout out to `origin/main` with `--force`,
+then runs `git clean -fdx`.
 This is intentionally destructive to uncommitted files in the shared checkout;
 use a ticket worktree for implementation work. A shared checkout refresh failure
 blocks every role: visible panes print the checkout error instead of launching

@@ -21,6 +21,7 @@ DEFAULT_GUI_USER = "eric"
 GUI_USER_ENV = "PGU_TEAM_LAUNCHER_GUI_USER"
 GUI_WAYLAND_ENV = "PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY"
 HOST_WAYLAND_ENV = "PGU_HOST_WAYLAND_DISPLAY"
+KONSOLE_QT_LOGGING_RULES = "qt.qpa.wayland.warning=false"
 YOLO_ARGS_BY_CLI = {
     "agy": ["--dangerously-skip-permissions"],
     "claude": ["--dangerously-skip-permissions"],
@@ -121,11 +122,54 @@ def konsole_launch_args(layout_path: Path, *, gui_user: str | None = None) -> li
     return [
         "env",
         "QT_QPA_PLATFORM=wayland",
+        f"QT_LOGGING_RULES={KONSOLE_QT_LOGGING_RULES}",
         f"WAYLAND_DISPLAY={wayland_display}",
         "konsole",
         "--layout",
         str(layout_path),
     ]
+
+
+def launch_konsole_window(
+    layout_path: Path,
+    *,
+    project: str,
+    gui_user: str | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> int:
+    args = konsole_launch_args(layout_path, gui_user=gui_user)
+    if args[:2] == ["sh", "-lc"] or runner is not subprocess.run:
+        return runner(args).returncode
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="ab",
+            prefix=f"{project}-team-launcher-konsole.",
+            suffix=".log",
+            delete=False,
+        ) as handle:
+            log_path = Path(handle.name)
+            proc = subprocess.Popen(
+                args,
+                stdin=subprocess.DEVNULL,
+                stdout=handle,
+                stderr=handle,
+                start_new_session=True,
+            )
+    except OSError as exc:
+        print(f"team-launcher: failed to launch Konsole: {exc}", file=sys.stderr)
+        return 1
+    time.sleep(0.2)
+    returncode = proc.poll()
+    if returncode is not None:
+        print(
+            f"team-launcher: Konsole exited immediately with status {returncode}; see {log_path}",
+            file=sys.stderr,
+        )
+        return returncode
+    print(
+        f"team-launcher: started {project} in background (Konsole pid {proc.pid}; log {log_path})"
+    )
+    return 0
 
 
 def _expand_path(value: str, *, base: Path) -> Path:
@@ -995,7 +1039,7 @@ def launch_project(
         )
         if result != 0:
             return result
-    return runner(konsole_launch_args(output_path)).returncode
+    return launch_konsole_window(output_path, project=config.project, runner=runner)
 
 
 def write_template(project: str, output: Path) -> int:

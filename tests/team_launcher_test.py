@@ -28,6 +28,7 @@ from scripts.team_launcher import (
     git_fetch_worktree_ref_args,
     git_shared_checkout_check_args,
     konsole_launch_args,
+    launch_konsole_window,
     launch_project,
     live_command_matches_role,
     load_project_config,
@@ -438,6 +439,7 @@ def test_konsole_launch_uses_gui_user_display_environment() -> None:
         assert konsole_launch_args(Path("/tmp/layout.json"), gui_user="eric") == [
             "env",
             "QT_QPA_PLATFORM=wayland",
+            "QT_LOGGING_RULES=qt.qpa.wayland.warning=false",
             "WAYLAND_DISPLAY=/run/user/1000/wayland-0",
             "konsole",
             "--layout",
@@ -462,6 +464,7 @@ def test_konsole_launch_can_fallback_to_gui_user_uid_without_host_var() -> None:
         assert konsole_launch_args(Path("/tmp/layout.json"), gui_user="eric") == [
             "env",
             "QT_QPA_PLATFORM=wayland",
+            "QT_LOGGING_RULES=qt.qpa.wayland.warning=false",
             "WAYLAND_DISPLAY=/run/user/4242/wayland-test",
             "konsole",
             "--layout",
@@ -490,6 +493,49 @@ def test_konsole_launch_falls_back_to_clear_error_when_gui_user_missing() -> Non
         team_launcher.uid_for_user = original_uid_for_user
         if original_host_wayland is not None:
             os.environ["PGU_HOST_WAYLAND_DISPLAY"] = original_host_wayland
+
+
+def test_launch_konsole_window_detaches_real_spawn_and_returns_status_line() -> None:
+    original_host_wayland = os.environ.get("PGU_HOST_WAYLAND_DISPLAY")
+    original_popen = team_launcher.subprocess.Popen
+    original_sleep = team_launcher.time.sleep
+    original_stdout = sys.stdout
+    stdout = StringIO()
+    popen_calls: list[dict[str, object]] = []
+
+    class FakePopen:
+        def __init__(self, args: list[str], **kwargs: Any) -> None:
+            popen_calls.append({"args": args, "kwargs": kwargs})
+            self.pid = 424242
+
+        def poll(self) -> int | None:
+            return None
+
+    try:
+        os.environ["PGU_HOST_WAYLAND_DISPLAY"] = "/run/user/1000/wayland-0"
+        team_launcher.subprocess.Popen = FakePopen
+        team_launcher.time.sleep = lambda _seconds: None
+        sys.stdout = stdout
+
+        assert launch_konsole_window(Path("/tmp/layout.json"), project="pgu") == 0
+    finally:
+        team_launcher.subprocess.Popen = original_popen
+        team_launcher.time.sleep = original_sleep
+        sys.stdout = original_stdout
+        if original_host_wayland is None:
+            os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
+        else:
+            os.environ["PGU_HOST_WAYLAND_DISPLAY"] = original_host_wayland
+
+    assert len(popen_calls) == 1
+    call = popen_calls[0]
+    assert call["args"] == konsole_launch_args(Path("/tmp/layout.json"))
+    kwargs = call["kwargs"]
+    assert kwargs["stdin"] is subprocess.DEVNULL
+    assert kwargs["start_new_session"] is True
+    assert hasattr(kwargs["stdout"], "name")
+    assert kwargs["stderr"] is kwargs["stdout"]
+    assert "team-launcher: started pgu in background (Konsole pid 424242; log " in stdout.getvalue()
 
 
 def test_start_is_attach_or_start_and_never_duplicates_existing_session() -> None:

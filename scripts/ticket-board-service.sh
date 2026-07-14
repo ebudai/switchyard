@@ -14,6 +14,7 @@ readonly FRAME_ROOT="${FRAME_ROOT:-/tmp/pgu-frames}"
 readonly LOG_PATH="${LOG_PATH:-/tmp/pgu-ticket-board.log}"
 readonly UNIT_DIR="${UNIT_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}"
 readonly UNIT_PATH="$UNIT_DIR/$SERVICE_NAME"
+readonly SYSTEM_UNIT_PATH="${TICKET_BOARD_SYSTEM_UNIT_PATH:-/etc/systemd/system/$SERVICE_NAME}"
 readonly DEPLOY_REF="${DEPLOY_REF:-origin/main}"
 readonly BOARD_DATABASE_URL="${TICKET_BOARD_DATABASE_URL:-postgresql:///pgu?host=/var/run/postgresql&user=ticket_board_service}"
 readonly BOARD_ADMIN_DATABASE_URL="${TICKET_BOARD_ADMIN_DATABASE_URL:-postgresql:///pgu?host=/var/run/postgresql&user=postgres}"
@@ -21,23 +22,24 @@ readonly RBAC_SQL="${RBAC_SQL:-$BOARD_CURRENT_LINK/scripts/ticket_board/rbac.sql
 readonly MIGRATION_RUNNER="${TICKET_BOARD_MIGRATION_RUNNER:-$BOARD_CURRENT_LINK/scripts/ticket-board-migrate}"
 readonly SMOKE_PATH="${BOARD_SMOKE_PATH:-/api/board}"
 readonly SMOKE_TIMEOUT_SECONDS="${BOARD_SMOKE_TIMEOUT_SECONDS:-10}"
+readonly SERVICE_SCOPE="${TICKET_BOARD_SERVICE_SCOPE:-auto}"
 
 usage() {
     cat <<EOF
 Usage: scripts/ticket-board-service.sh <install|deploy|deploy-restart|ensure-migrations|ensure-roles|render-unit|start|stop|restart|status|logs>
 
-Manage the PGU ticket board as an agent user systemd service.
+Manage the PGU ticket board service.
 
 Commands:
   install         Export $DEPLOY_REF into $BOARD_ROOT/current, write the unit, enable and start it
   deploy          Refresh $BOARD_ROOT/current from $DEPLOY_REF without restarting the service
-  deploy-restart  Refresh $BOARD_ROOT/current from $DEPLOY_REF and restart the service
+  deploy-restart  Refresh $BOARD_ROOT/current from $DEPLOY_REF and restart the live service
   ensure-migrations
                   Apply SQL migrations and record their names in schema_migrations
   ensure-roles    Apply the idempotent ticket-board RBAC SQL using a privileged admin connection
   render-unit     Print the systemd unit contents to stdout
   start|stop|restart|status
-                  Pass through to systemctl --user for $SERVICE_NAME
+                  Operate on the live service (system unit if installed, else --user)
   logs            Tail $LOG_PATH
 EOF
 }
@@ -73,6 +75,53 @@ systemctl_user() {
     XDG_RUNTIME_DIR="$runtime" \
     DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus" \
         systemctl --user "$@"
+}
+
+systemctl_system() {
+    if [[ "$(id -u)" == "0" ]]; then
+        systemctl "$@"
+        return
+    fi
+    sudo systemctl "$@"
+}
+
+system_unit_fragment_path() {
+    systemctl show "$SERVICE_NAME" -p FragmentPath --value 2>/dev/null || true
+}
+
+system_service_installed() {
+    local fragment
+    fragment="$(system_unit_fragment_path)"
+    [[ -n "$fragment" ]] || [[ -f "$SYSTEM_UNIT_PATH" ]]
+}
+
+resolved_service_scope() {
+    case "$SERVICE_SCOPE" in
+        auto)
+            if system_service_installed; then
+                printf 'system\n'
+            else
+                printf 'user\n'
+            fi
+            ;;
+        user|system)
+            printf '%s\n' "$SERVICE_SCOPE"
+            ;;
+        *)
+            die "invalid TICKET_BOARD_SERVICE_SCOPE=$SERVICE_SCOPE (expected auto|user|system)"
+            ;;
+    esac
+}
+
+quiesce_user_shadow_unit() {
+    local runtime
+    runtime="$(runtime_dir)"
+    if [[ ! -d "$runtime" || ! -S "$runtime/bus" ]]; then
+        return
+    fi
+    systemctl_user stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+    systemctl_user disable "$SERVICE_NAME" >/dev/null 2>&1 || true
+    systemctl_user reset-failed "$SERVICE_NAME" >/dev/null 2>&1 || true
 }
 
 ensure_source_repo() {
@@ -204,14 +253,22 @@ deploy_service() {
 
 deploy_restart_service() {
     local deployed_sha
+    local scope
     deployed_sha="$(deploy_export)"
     apply_database_migrations
-    ensure_user_manager
-    write_unit
-    systemctl_user daemon-reload
-    systemctl_user restart "$SERVICE_NAME"
+    scope="$(resolved_service_scope)"
+    if [[ "$scope" == "system" ]]; then
+        quiesce_user_shadow_unit
+        systemctl_system daemon-reload
+        systemctl_system restart "$SERVICE_NAME"
+    else
+        ensure_user_manager
+        write_unit
+        systemctl_user daemon-reload
+        systemctl_user restart "$SERVICE_NAME"
+    fi
     smoke_check_http
-    log "deployed $deployed_sha from $DEPLOY_REF and restarted $SERVICE_NAME"
+    log "deployed $deployed_sha from $DEPLOY_REF and restarted $SERVICE_NAME ($scope scope)"
 }
 
 show_logs() {
@@ -245,13 +302,23 @@ main() {
             render_unit
             ;;
         start|restart)
-            ensure_user_manager
-            systemctl_user "$1" "$SERVICE_NAME"
+            if [[ "$(resolved_service_scope)" == "system" ]]; then
+                quiesce_user_shadow_unit
+                systemctl_system daemon-reload
+                systemctl_system "$1" "$SERVICE_NAME"
+            else
+                ensure_user_manager
+                systemctl_user "$1" "$SERVICE_NAME"
+            fi
             smoke_check_http
             ;;
         stop|status)
-            ensure_user_manager
-            systemctl_user "$1" "$SERVICE_NAME"
+            if [[ "$(resolved_service_scope)" == "system" ]]; then
+                systemctl_system "$1" "$SERVICE_NAME"
+            else
+                ensure_user_manager
+                systemctl_user "$1" "$SERVICE_NAME"
+            fi
             ;;
         logs)
             show_logs

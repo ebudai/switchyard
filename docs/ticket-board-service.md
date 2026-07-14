@@ -1,11 +1,18 @@
 # Ticket Board Service
 
-The ticket board runs as an `agent` user `systemd` service on `127.0.0.1:8770`.
+The deploy tooling auto-targets the live board unit:
 
-Prep artifacts for the future supervised cutover to a dedicated `boardsvc`
-system service with PostgreSQL peer auth live in
-`docs/ticket-board-boardsvc-peer-auth-runbook.md`. That package is review-only
-until Eric runs the privileged cutover steps.
+- if a system `pgu-ticket-board.service` is installed, deploy/start/stop/
+  restart/status operate that system unit
+- otherwise the scripts fall back to the legacy `agent` user unit
+
+Today the production board is the privileged `boardsvc` system unit on
+`127.0.0.1:8770`.
+
+The `boardsvc` cutover package lives in
+`docs/ticket-board-boardsvc-peer-auth-runbook.md`. Once that system unit
+exists, `scripts/ticket-board-service.sh` must restart it rather than the
+shadow `--user` unit.
 
 The live service does **not** run from a mutable git checkout anymore. It runs
 from a controlled export root:
@@ -24,7 +31,7 @@ until the next explicit deploy.
 scripts/ticket-board-service.sh install
 ```
 
-What this does:
+For a legacy user-unit install, this does:
 
 - exports `origin/main` into `/home/agent/pgu-ticketboard-live/current`
 - writes `~/.config/systemd/user/pgu-ticket-board.service`
@@ -63,7 +70,7 @@ The service runs:
 - logs: `/tmp/pgu-ticket-board.log`
 - default DB URL: `postgresql:///pgu?host=/var/run/postgresql&user=ticket_board_service`
 
-The source of truth for the live agent-user unit is
+The source of truth for the legacy agent-user unit is
 `scripts/ticket-board-service.sh render-unit`. The future dedicated `boardsvc`
 system unit source is `deploy/systemd/pgu-ticket-board.service.boardsvc`; the
 boardsvc runbook copies that file to `/etc/systemd/system/pgu-ticket-board.service`.
@@ -76,6 +83,9 @@ The post-cutover notification shim runs as a separate `agent` user systemd
 service. It uses PostgreSQL `LISTEN ticket_board_state_transition`, maps each
 state-transition payload to the appropriate `pgu-<role>:0.0` tmux pane, and
 does not deliver `eric_review` transitions.
+
+Unlike the board web server, the notify-listener currently remains a user unit;
+there is no parallel `boardsvc` system listener in production.
 
 ```bash
 scripts/ticket-board-notify-listener-service.sh install
@@ -130,9 +140,15 @@ That command:
 3. exports that exact SHA into `/home/agent/pgu-ticketboard-live/releases/<sha>`
 4. repoints `/home/agent/pgu-ticketboard-live/current`
 5. applies unrecorded SQL migrations from that deployed SHA
-6. rewrites the unit
-7. restarts the service
+6. restarts the live board unit
+7. when the live unit is system-scoped, stops/disables any shadow `--user`
+   board unit so it cannot crash-loop on port `8770`
 8. waits for `GET /api/board` to return HTTP 200
+
+If `/etc/systemd/system/pgu-ticket-board.service` exists, `deploy-restart`
+targets that system unit and may prompt for `sudo` credentials. This is
+expected: a successful deploy must restart the process that actually owns
+port `8770`, not merely refresh `/home/agent/pgu-ticketboard-live/current`.
 
 Plain `restart` only restarts the currently deployed SHA. It does **not** update
 code.

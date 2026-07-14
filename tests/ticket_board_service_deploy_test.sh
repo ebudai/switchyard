@@ -111,8 +111,20 @@ grep -q 'urllib.request.urlopen(url, timeout=1.0)' "$REPO_ROOT/scripts/ticket-bo
     echo "FAIL: service smoke check does not perform an HTTP request" >&2
     exit 1
 }
+grep -q 'resolved_service_scope' "$REPO_ROOT/scripts/ticket-board-service.sh" || {
+    echo "FAIL: service script does not resolve the live service scope" >&2
+    exit 1
+}
+grep -q 'systemctl_system restart "$SERVICE_NAME"' "$REPO_ROOT/scripts/ticket-board-service.sh" || {
+    echo "FAIL: deploy-restart does not restart the system service when it is live" >&2
+    exit 1
+}
 grep -q 'systemctl_user restart "$SERVICE_NAME"' "$REPO_ROOT/scripts/ticket-board-service.sh" || {
-    echo "FAIL: deploy-restart no longer restarts the service" >&2
+    echo "FAIL: deploy-restart no longer supports the user-unit path" >&2
+    exit 1
+}
+grep -q 'quiesce_user_shadow_unit' "$REPO_ROOT/scripts/ticket-board-service.sh" || {
+    echo "FAIL: system-scope deploy does not quiesce the shadow user unit" >&2
     exit 1
 }
 grep -q 'ensure-roles)' "$REPO_ROOT/scripts/ticket-board-service.sh" || {
@@ -128,5 +140,69 @@ grep -q '^Environment=TICKET_BOARD_DATABASE_URL=postgresql:///custom_board?host=
     echo "FAIL: unit did not bake caller-provided TICKET_BOARD_DATABASE_URL" >&2
     exit 1
 }
+
+MOCKDIR="$TMPDIR_T/mockbin"
+LOGFILE="$TMPDIR_T/service-scope.log"
+mkdir -p "$MOCKDIR"
+: >"$LOGFILE"
+
+cat >"$MOCKDIR/sudo" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+"$@"
+EOF
+chmod +x "$MOCKDIR/sudo"
+
+cat >"$MOCKDIR/systemctl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "--user" ]]; then
+    shift
+    printf 'user:%s\n' "$*" >>"$TICKET_BOARD_SERVICE_TEST_LOG"
+    exit 0
+fi
+printf 'system:%s\n' "$*" >>"$TICKET_BOARD_SERVICE_TEST_LOG"
+if [[ "${1:-}" == "show" && "${2:-}" == "pgu-ticket-board.service" && "${3:-}" == "-p" && "${4:-}" == "FragmentPath" && "${5:-}" == "--value" ]]; then
+    printf '/etc/systemd/system/pgu-ticket-board.service\n'
+fi
+EOF
+chmod +x "$MOCKDIR/systemctl"
+
+cat >"$MOCKDIR/python3" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "-" ]]; then
+    cat >/dev/null
+    exit 0
+fi
+exec /usr/bin/python3 "$@"
+EOF
+chmod +x "$MOCKDIR/python3"
+
+PATH="$MOCKDIR:/usr/bin:/bin" \
+TICKET_BOARD_SERVICE_TEST_LOG="$LOGFILE" \
+BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
+    "$REPO_ROOT/scripts/ticket-board-service.sh" deploy-restart >/dev/null
+
+grep -q '^system:show pgu-ticket-board.service -p FragmentPath --value$' "$LOGFILE" || {
+    echo "FAIL: deploy-restart did not inspect the system unit fragment path" >&2
+    cat "$LOGFILE" >&2
+    exit 1
+}
+grep -q '^system:daemon-reload$' "$LOGFILE" || {
+    echo "FAIL: deploy-restart did not reload the live system service manager" >&2
+    cat "$LOGFILE" >&2
+    exit 1
+}
+grep -q '^system:restart pgu-ticket-board.service$' "$LOGFILE" || {
+    echo "FAIL: deploy-restart did not restart the live system unit" >&2
+    cat "$LOGFILE" >&2
+    exit 1
+}
+if grep -q '^user:restart pgu-ticket-board.service$' "$LOGFILE"; then
+    echo "FAIL: deploy-restart incorrectly restarted the shadow user unit" >&2
+    cat "$LOGFILE" >&2
+    exit 1
+fi
 
 echo "ticket_board_service_deploy_test: ok"

@@ -504,6 +504,58 @@ STYLE = """    :root {
       border-bottom: 1px solid var(--border);
       background: rgba(15, 17, 21, 0.96);
     }
+    .detail-ticket-headline {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      line-height: 1.35;
+    }
+    .detail-stage-chip {
+      display: inline-flex;
+      align-items: center;
+      width: fit-content;
+      max-width: 100%;
+      padding: 4px 9px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.05);
+      color: var(--text);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .detail-stage-analysis {
+      color: var(--accent);
+      border-color: rgba(125, 211, 252, 0.35);
+      background: rgba(125, 211, 252, 0.12);
+    }
+    .detail-stage-in_progress,
+    .detail-stage-inspection {
+      color: var(--warn);
+      border-color: rgba(252, 211, 77, 0.35);
+      background: rgba(252, 211, 77, 0.1);
+    }
+    .detail-stage-audit,
+    .detail-stage-eric_review,
+    .detail-stage-director_review {
+      color: rgba(196, 181, 253, 0.96);
+      border-color: rgba(196, 181, 253, 0.35);
+      background: rgba(196, 181, 253, 0.12);
+    }
+    .detail-stage-done {
+      color: var(--ok);
+      border-color: rgba(134, 239, 172, 0.35);
+      background: rgba(134, 239, 172, 0.1);
+    }
+    .detail-stage-cancelled,
+    .detail-stage-backlog {
+      color: var(--muted);
+      border-color: rgba(148, 163, 184, 0.3);
+      background: rgba(148, 163, 184, 0.08);
+    }
     .detail-modal-body {
       overflow: auto;
       min-height: 0;

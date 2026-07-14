@@ -291,11 +291,17 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       titleActions.append(mergeTargetInput, mergeButton);
       titleField.append(titleEditInput, titleActions);
       const metaLine1 = document.createElement('div');
+      metaLine1.className = 'detail-ticket-headline';
       const strong = document.createElement('strong');
       strong.textContent = ticket.id;
-      metaLine1.append(strong, document.createTextNode(` - ${ticket.title}`));
+      const stageChip = document.createElement('span');
+      stageChip.className = `detail-stage-chip detail-stage-${ticket.state}`;
+      stageChip.textContent = stateLabel(ticket.state);
+      const titleText = document.createElement('span');
+      titleText.textContent = ticket.title;
+      metaLine1.append(strong, stageChip, titleText);
       const metaLine2 = document.createElement('div');
-      metaLine2.textContent = `State: ${stateLabel(ticket.state)} | Created: ${formatWhen(ticket.created)} | Updated: ${formatWhen(ticket.updated)}`;
+      metaLine2.textContent = `Created: ${formatWhen(ticket.created)} | Updated: ${formatWhen(ticket.updated)}`;
       meta.append(metaLine1, metaLine2);
       const visibleBlockedBy = unresolvedBlockedBy(ticket);
       if (visibleBlockedBy.length) {

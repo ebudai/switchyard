@@ -230,8 +230,8 @@ Environment:
                                   Large payloads add extra settle time.
   PGU_DIRECTORCTL_DIRECTOR_TYPING_MAX_ATTEMPTS
                                   Maximum number of 5s waits for a busy
-                                  director composer before delivering anyway.
-                                  Unset means wait indefinitely.
+                                  director composer before failing without
+                                  delivery. Unset means wait indefinitely.
   PGU_DIRECTORCTL_EXTRA_SESSIONS  Whitespace-separated list of additional
                                   tmux session names to include in status.
                                   Duplicates of built-in sessions are ignored.
@@ -255,8 +255,9 @@ is_director_typing() {
     
     local capture
     if ! capture="$(capture_raw_pane "$target" 2>/dev/null)" || [ -z "$capture" ]; then
-        # Capture failed or empty. Prioritize delivery over splice prevention.
-        return 1
+        # Capture failed or empty. Fail safe: never inject into a pane whose
+        # composer state cannot be read.
+        return 0
     fi
     
     # Inline python using our safe-biased composer check
@@ -264,7 +265,7 @@ is_director_typing() {
 import sys, re
 pane_text = sys.stdin.read()
 if not pane_text:
-    sys.exit(1) # Empty stdin -> treat as not typing for delivery reliability
+    sys.exit(0) # Empty stdin -> fail safe and hold delivery
 lines = pane_text.splitlines()
 horizontal_indices = [
     idx for idx, line in enumerate(lines)
@@ -288,15 +289,16 @@ send_payload() {
 
     # Guard against active typing in the director pane. Ordinary director-bound
     # sends wait until the composer is clear. Automation may bound this wait
-    # with PGU_DIRECTORCTL_DIRECTOR_TYPING_MAX_ATTEMPTS so one busy director
-    # composer cannot block unrelated notification delivery forever.
+    # with PGU_DIRECTORCTL_DIRECTOR_TYPING_MAX_ATTEMPTS; when the bound is hit,
+    # fail without delivery so the caller can requeue instead of clobbering
+    # human input.
     local attempt=1
     local max_attempts
     max_attempts="$(director_typing_max_attempts)"
     while is_director_typing "$target"; do
         if [ "$max_attempts" -ge 0 ] && [ "$attempt" -gt "$max_attempts" ]; then
-            echo "watchdog/directorctl: director is typing after $max_attempts attempts; delivering anyway" >&2
-            break
+            echo "watchdog/directorctl: director is typing after $max_attempts attempts; holding delivery" >&2
+            return 75
         fi
         echo "watchdog/directorctl: director is typing (attempt $attempt). Waiting 5 seconds to retry..." >&2
         sleep "$DIRECTOR_TYPING_RETRY_SECONDS"

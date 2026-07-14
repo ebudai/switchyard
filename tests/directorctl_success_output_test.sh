@@ -55,6 +55,19 @@ esc to interrupt
 PANE
         fi
         ;;
+      director-typing)
+        cat <<'PANE'
+old output
+──────────────────────────────────────────────────────────────────────────────────────────── Director ──
+❯ Eric is typing a message
+────────────────────────────────────────────────────────────────────────────────────────────────────────
+PANE
+        ;;
+      empty)
+        ;;
+      capture-fail)
+        exit 2
+        ;;
       failure)
         cat <<'PANE'
 old output
@@ -146,5 +159,30 @@ if ! grep -q -- "warning: pgu-ops:0.0 did not show a submission transition" "$fa
     cat "$failure_stderr" >&2
     exit 1
 fi
+
+for mode in director-typing empty capture-fail; do
+    reset_tmux_state "$mode"
+    hold_stdout="$TMPDIR_T/$mode.stdout"
+    hold_stderr="$TMPDIR_T/$mode.stderr"
+    if run_directorctl callback 'do not clobber Eric' >"$hold_stdout" 2>"$hold_stderr"; then
+        echo "FAIL: expected $mode director callback to hold delivery" >&2
+        exit 1
+    fi
+    if [ -s "$hold_stdout" ]; then
+        echo "FAIL: $mode hold printed a false success line" >&2
+        cat "$hold_stdout" >&2
+        exit 1
+    fi
+    if [ -s "$TMUX_LOG" ]; then
+        echo "FAIL: $mode hold sent keys into the director pane" >&2
+        cat "$TMUX_LOG" >&2
+        exit 1
+    fi
+    if ! grep -q -- "director is typing after 0 attempts; holding delivery" "$hold_stderr"; then
+        echo "FAIL: $mode hold did not report held delivery" >&2
+        cat "$hold_stderr" >&2
+        exit 1
+    fi
+done
 
 echo "directorctl_success_output_test: ok"

@@ -244,9 +244,8 @@ scripts/ticket-board-notify-listener-service.sh deploy-restart
 Do not deploy the listener first. Until each pane writes hook state, the
 listener intentionally treats that pane as busy and holds notification delivery.
 
-The director pane also uses tmux `client_activity` as a no-clobber latch. When
-the hook state transitions to `idle`, the listener snapshots the director
-client's activity timestamp. If human input advances it before delivery, the
-notification is held through thinking pauses until the next `busy` -> `idle`
-hook cycle. An abandoned draft releases after the listener's
-`--director-composing-timeout-seconds` timeout.
+The director pane also uses cursor/composer checks as a no-clobber latch. The
+listener treats unavailable cursor state as busy, and `directorctl` is a final
+guard: if the director composer is active or unreadable, bounded notification
+delivery exits without sending keys so the listener can requeue instead of
+splicing into human input.

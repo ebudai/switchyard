@@ -179,14 +179,19 @@ def run_with_env(args, **kwargs):
 
 try:
     subprocess.run = run_with_env
-    DirectorctlSender(str(root / "scripts" / "directorctl"))("pgu-director:0.0", payload)
+    try:
+        DirectorctlSender(str(root / "scripts" / "directorctl"))("pgu-director:0.0", payload)
+    except subprocess.CalledProcessError as exc:
+        if exc.returncode != 75:
+            raise AssertionError(f"expected held delivery exit 75, got {exc.returncode}") from exc
+    else:
+        raise AssertionError("expected busy director delivery to be held")
 finally:
     subprocess.run = original_run
 PY
 
-director_payload_sends="$(grep -c -- "-l PGU-219 -- Busy director bounded delivery" "$TMUX_LOG")"
-if [ "$director_payload_sends" -ne 1 ]; then
-    echo "FAIL: expected bounded director payload delivery despite busy composer" >&2
+if [ -s "$TMUX_LOG" ]; then
+    echo "FAIL: busy director delivery sent keys instead of holding" >&2
     cat "$TMUX_LOG" >&2
     exit 1
 fi

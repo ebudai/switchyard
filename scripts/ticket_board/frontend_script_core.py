@@ -506,15 +506,11 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     }
 
     function blockedBySummary(ticket) {
-      const blockedBy = ticket.blocked_by || [];
-      if (!blockedBy.length) {
-        return 'No ticket blockers recorded.';
-      }
       const unresolved = unresolvedBlockedBy(ticket);
       if (!unresolved.length) {
-        return `Resolved blockers: ${formatBlockedByList(blockedBy)}`;
+        return 'No ticket blockers recorded.';
       }
-      return `Unresolved blockers: ${formatBlockedByList(unresolved)}`;
+      return `Blocked by: ${formatBlockedByList(unresolved)}`;
     }
 
     function buildOption(select, value, label) {

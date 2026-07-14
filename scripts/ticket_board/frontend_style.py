@@ -164,6 +164,20 @@ STYLE = """    :root {
       background: rgba(255,255,255,0.03);
       overflow: hidden;
     }
+    .attachment-card-clickable {
+      cursor: zoom-in;
+      transition: border-color 120ms ease, transform 120ms ease, background 120ms ease;
+    }
+    .attachment-card-clickable:hover,
+    .attachment-card-clickable:focus-visible {
+      border-color: rgba(125, 211, 252, 0.45);
+      background: rgba(125, 211, 252, 0.08);
+      transform: translateY(-1px);
+    }
+    .attachment-card-clickable:focus-visible {
+      outline: 2px solid rgba(125, 211, 252, 0.5);
+      outline-offset: 2px;
+    }
     .attachment-thumb,
     .attachment-missing {
       width: 100%;
@@ -495,6 +509,66 @@ STYLE = """    :root {
       overflow: hidden;
       min-height: 0;
     }
+    .image-lightbox-overlay[hidden] { display: none; }
+    .image-lightbox-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 30;
+      display: grid;
+      place-items: center;
+      background: rgba(4, 6, 10, 0.84);
+      padding: 24px;
+    }
+    .image-lightbox {
+      width: min(100%, 1220px);
+      max-height: 100%;
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+      gap: 12px;
+      padding: 16px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: rgba(15, 17, 21, 0.98);
+      box-shadow: 0 30px 90px rgba(0, 0, 0, 0.48);
+    }
+    .image-lightbox-stage {
+      min-height: 0;
+      display: grid;
+      place-items: center;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #0b0d11;
+      padding: 12px;
+    }
+    .image-lightbox-image {
+      display: block;
+      max-width: 100%;
+      max-height: min(78vh, 920px);
+      width: auto;
+      height: auto;
+      object-fit: contain;
+      border-radius: 6px;
+      background: #0b0d11;
+    }
+    .image-lightbox-caption {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+    .image-lightbox-close {
+      width: 40px;
+      height: 40px;
+      min-width: 40px;
+      padding: 0;
+      justify-self: end;
+      border-radius: 999px;
+      font-size: 24px;
+      line-height: 1;
+      display: grid;
+      place-items: center;
+    }
     .detail-modal-head {
       display: flex;
       justify-content: space-between;
@@ -790,6 +864,9 @@ STYLE = """    :root {
       .detail-overlay {
         padding: 0;
       }
+      .image-lightbox-overlay {
+        padding: 12px;
+      }
       .detail-modal {
         width: 100%;
         height: 100vh;
@@ -807,6 +884,13 @@ STYLE = """    :root {
         padding-left: calc(16px + env(safe-area-inset-left, 0px));
         padding-right: calc(16px + env(safe-area-inset-right, 0px));
         padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+      }
+      .image-lightbox {
+        width: 100%;
+        max-height: 100%;
+      }
+      .image-lightbox-stage {
+        padding: 8px;
       }
     }
     @media (max-width: 900px) {

@@ -500,6 +500,8 @@ SCRIPT_DETAIL = """    function selectedTicket() {
           await updateTicket(ticket.id, {
             screenshots: ticketScreenshotPaths(ticket).filter((item) => item !== path),
           }, detailCallerRole());
+        }, (entry) => {
+          openImageLightbox(entry);
         });
         imageWrap.appendChild(gallery);
         box.appendChild(imageWrap);

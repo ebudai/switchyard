@@ -30,6 +30,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       loadQueued: false,
       pendingCreateScreenshots: [],
       mobileSectionOpen: {},
+      lightboxEntry: null,
     };
 
     const mobileSectionMedia = window.matchMedia('(max-width: 900px)');
@@ -62,6 +63,10 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     const detailModalTitleEl = document.getElementById('detailModalTitle');
     const detailCloseBtn = document.getElementById('detailCloseBtn');
     const detailContentEl = document.getElementById('detailContent');
+    const imageLightboxOverlayEl = document.getElementById('imageLightboxOverlay');
+    const imageLightboxCloseBtn = document.getElementById('imageLightboxCloseBtn');
+    const imageLightboxImageEl = document.getElementById('imageLightboxImage');
+    const imageLightboxCaptionEl = document.getElementById('imageLightboxCaption');
 
     function formatWhen(raw) {
       const date = new Date(raw);
@@ -305,25 +310,76 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       }
     }
 
+    function detailModalIsOpen() {
+      return !!(state.detailOpen && selectedTicket());
+    }
+
+    function imageLightboxIsOpen() {
+      return !!state.lightboxEntry;
+    }
+
+    function syncBodyModalState() {
+      document.body.classList.toggle('detail-open', detailModalIsOpen() || imageLightboxIsOpen());
+    }
+
     function syncDetailOverlay() {
       const ticket = selectedTicket();
-      const isOpen = !!(state.detailOpen && ticket);
+      const isOpen = detailModalIsOpen();
       detailOverlayEl.hidden = !isOpen;
-      document.body.classList.toggle('detail-open', isOpen);
+      syncBodyModalState();
       detailModalTitleEl.textContent = ticket ? `${ticket.id} - ${ticket.title}` : 'Select a ticket';
+    }
+
+    function syncImageLightbox() {
+      const entry = state.lightboxEntry;
+      const isOpen = !!entry;
+      imageLightboxOverlayEl.hidden = !isOpen;
+      if (isOpen) {
+        imageLightboxImageEl.src = previewUrlFor(entry.path);
+        imageLightboxImageEl.alt = entry.label;
+        imageLightboxCaptionEl.textContent = entry.label;
+      } else {
+        imageLightboxImageEl.removeAttribute('src');
+        imageLightboxImageEl.alt = '';
+        imageLightboxCaptionEl.textContent = '';
+      }
+      syncBodyModalState();
+    }
+
+    function openImageLightbox(entry) {
+      if (!entry || !entry.available) {
+        return;
+      }
+      state.lightboxEntry = {
+        path: entry.path,
+        label: entry.label || screenshotLabelFor(entry.path),
+      };
+      syncImageLightbox();
+      imageLightboxCloseBtn.focus();
+    }
+
+    function closeImageLightbox() {
+      if (!state.lightboxEntry) {
+        return;
+      }
+      state.lightboxEntry = null;
+      syncImageLightbox();
     }
 
     function openDetail(ticketId) {
       if (state.selectedId !== ticketId) {
         clearDetailDraft();
       }
+      state.lightboxEntry = null;
       state.selectedId = ticketId;
       state.detailOpen = true;
       renderBoard();
       renderDetail();
+      syncImageLightbox();
     }
 
     function closeDetail() {
+      closeImageLightbox();
       const ticketId = state.selectedId;
       clearDetailDraft(ticketId);
       state.selectedId = null;
@@ -571,11 +627,28 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       });
     }
 
-    function renderAttachmentGallery(container, entries, removeLabel, onRemove) {
+    function renderAttachmentGallery(container, entries, removeLabel, onRemove, onOpen = null) {
       container.innerHTML = '';
       entries.forEach((entry) => {
         const card = document.createElement('div');
         card.className = 'attachment-card';
+        if (onOpen && entry.available) {
+          card.classList.add('attachment-card-clickable');
+          card.tabIndex = 0;
+          card.setAttribute('role', 'button');
+          card.setAttribute('aria-haspopup', 'dialog');
+          card.setAttribute('aria-label', `Open attachment full size: ${entry.label}`);
+          card.addEventListener('click', () => onOpen(entry));
+          card.addEventListener('keydown', (event) => {
+            if (event.target !== card) {
+              return;
+            }
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault();
+              onOpen(entry);
+            }
+          });
+        }
         if (onRemove) {
           const removeButton = document.createElement('button');
           removeButton.type = 'button';

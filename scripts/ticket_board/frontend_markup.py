@@ -108,4 +108,21 @@ MARKUP = """  <div class="layout">
       </div>
     </section>
   </div>
+
+  <div id="imageLightboxOverlay" class="image-lightbox-overlay" hidden>
+    <section class="image-lightbox" role="dialog" aria-modal="true" aria-labelledby="imageLightboxCaption">
+      <button
+        id="imageLightboxCloseBtn"
+        class="image-lightbox-close"
+        type="button"
+        aria-label="Close attachment preview"
+      >
+        ×
+      </button>
+      <div class="image-lightbox-stage">
+        <img id="imageLightboxImage" class="image-lightbox-image" alt="">
+      </div>
+      <div id="imageLightboxCaption" class="image-lightbox-caption"></div>
+    </section>
+  </div>
 """

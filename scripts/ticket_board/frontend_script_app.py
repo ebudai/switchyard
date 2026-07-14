@@ -69,6 +69,7 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
         clearDetailDraft();
         state.selectedId = null;
         state.detailOpen = false;
+        state.lightboxEntry = null;
       }
       storePathEl.textContent = payload.store_path;
       framePathEl.textContent = payload.frame_dir;
@@ -79,6 +80,7 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       renderStateVisibilityToggles();
       renderBoard();
       renderDetail();
+      syncImageLightbox();
     }
 
     async function requestBoardReload() {
@@ -445,8 +447,25 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       }
     });
 
+    imageLightboxCloseBtn.addEventListener('click', () => {
+      closeImageLightbox();
+    });
+
+    imageLightboxOverlayEl.addEventListener('click', (event) => {
+      if (event.target === imageLightboxOverlayEl) {
+        closeImageLightbox();
+      }
+    });
+
     document.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape' && state.detailOpen) {
+      if (event.key !== 'Escape') {
+        return;
+      }
+      if (imageLightboxIsOpen()) {
+        closeImageLightbox();
+        return;
+      }
+      if (state.detailOpen) {
         closeDetail();
       }
     });

@@ -17,9 +17,14 @@ def main() -> int:
     assert "pendingCreateScreenshots" in HTML
     assert ".attachment-gallery" in HTML
     assert ".attachment-remove" in HTML
+    assert ".attachment-card-clickable" in HTML
     assert "ticketScreenshotEntries(ticket).length" in HTML
     assert "screenshots: ticketScreenshotPaths(ticket).filter((item) => item !== path)" in HTML
     assert "state.pendingCreateScreenshots = uniquePaths([...state.pendingCreateScreenshots, uploaded.path]);" in HTML
+    assert "imageLightboxOverlay" in HTML
+    assert "imageLightboxCloseBtn" in HTML
+    assert "openImageLightbox(entry);" in HTML
+    assert "Open attachment full size:" in HTML
     assert "Available Frame" not in HTML
     assert "screenshotInput" not in HTML
     assert "screenshotSelect" not in HTML

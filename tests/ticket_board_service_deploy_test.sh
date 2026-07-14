@@ -143,6 +143,7 @@ grep -q '^Environment=TICKET_BOARD_DATABASE_URL=postgresql:///custom_board?host=
 
 MOCKDIR="$TMPDIR_T/mockbin"
 LOGFILE="$TMPDIR_T/service-scope.log"
+HASH_RECORD="$TMPDIR_T/system-unit.sha256"
 mkdir -p "$MOCKDIR"
 : >"$LOGFILE"
 
@@ -202,6 +203,7 @@ chmod +x "$MOCKDIR/python3"
 
 PATH="$MOCKDIR:/usr/bin:/bin" \
 TICKET_BOARD_SERVICE_TEST_LOG="$LOGFILE" \
+TICKET_BOARD_SYSTEM_UNIT_HASH_RECORD="$HASH_RECORD" \
 BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
     "$REPO_ROOT/scripts/ticket-board-service.sh" deploy-restart >/dev/null
 
@@ -210,11 +212,11 @@ grep -q '^system:show pgu-ticket-board.service -p FragmentPath --value$' "$LOGFI
     cat "$LOGFILE" >&2
     exit 1
 }
-grep -q '^system:daemon-reload$' "$LOGFILE" || {
-    echo "FAIL: deploy-restart did not reload the live system service manager" >&2
+if grep -q '^system:daemon-reload$' "$LOGFILE"; then
+    echo "FAIL: code-only deploy-restart should not reload the system service manager" >&2
     cat "$LOGFILE" >&2
     exit 1
-}
+fi
 grep -q '^system:restart pgu-ticket-board.service$' "$LOGFILE" || {
     echo "FAIL: deploy-restart did not restart the live system unit" >&2
     cat "$LOGFILE" >&2
@@ -230,5 +232,29 @@ if grep -q 'sudo' "$LOGFILE"; then
     cat "$LOGFILE" >&2
     exit 1
 fi
+[[ -s "$HASH_RECORD" ]] || {
+    echo "FAIL: deploy-restart did not record the live system unit hash" >&2
+    exit 1
+}
+
+printf 'stale-unit-hash\n' >"$HASH_RECORD"
+: >"$LOGFILE"
+
+PATH="$MOCKDIR:/usr/bin:/bin" \
+TICKET_BOARD_SERVICE_TEST_LOG="$LOGFILE" \
+TICKET_BOARD_SYSTEM_UNIT_HASH_RECORD="$HASH_RECORD" \
+BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
+    "$REPO_ROOT/scripts/ticket-board-service.sh" deploy-restart >/dev/null
+
+grep -q '^system:daemon-reload$' "$LOGFILE" || {
+    echo "FAIL: deploy-restart should reload systemd when the unit hash changes" >&2
+    cat "$LOGFILE" >&2
+    exit 1
+}
+grep -q '^system:restart pgu-ticket-board.service$' "$LOGFILE" || {
+    echo "FAIL: changed-unit deploy-restart did not restart the live system unit" >&2
+    cat "$LOGFILE" >&2
+    exit 1
+}
 
 echo "ticket_board_service_deploy_test: ok"

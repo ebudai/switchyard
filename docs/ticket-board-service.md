@@ -154,6 +154,10 @@ than hanging indefinitely. This is intentional: a successful deploy must
 restart the process that actually owns port `8770`, not merely refresh
 `/home/agent/pgu-ticketboard-live/current`.
 
+For that system-unit path, code-only deploys skip `daemon-reload` unless the
+installed unit file hash changed since the last deploy, so the common restart
+flow produces one polkit approval instead of two.
+
 Plain `restart` only restarts the currently deployed SHA. It does **not** update
 code.
 

@@ -297,10 +297,11 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       const metaLine2 = document.createElement('div');
       metaLine2.textContent = `State: ${stateLabel(ticket.state)} | Created: ${formatWhen(ticket.created)} | Updated: ${formatWhen(ticket.updated)}`;
       meta.append(metaLine1, metaLine2);
-      if ((ticket.blocked_by || []).length) {
+      const visibleBlockedBy = unresolvedBlockedBy(ticket);
+      if (visibleBlockedBy.length) {
         const metaLine3 = document.createElement('div');
         metaLine3.appendChild(document.createTextNode('Blocked By: '));
-        metaLine3.appendChild(linkedTicketRow(ticket.blocked_by || []));
+        metaLine3.appendChild(linkedTicketRow(visibleBlockedBy));
         meta.appendChild(metaLine3);
       }
 
@@ -376,7 +377,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       const blockedByLinksLabel = document.createElement('div');
       blockedByLinksLabel.className = 'field-preview-label';
       blockedByLinksLabel.textContent = 'Linked Tickets';
-      blockedByLinks.append(blockedByLinksLabel, linkedTicketRow(ticket.blocked_by || []));
+      blockedByLinks.append(blockedByLinksLabel, linkedTicketRow(visibleBlockedBy));
       blockedBy.append(blockedByInput, blockerPickerLabel, blockedByActions, blockedByNote, blockedByLinks);
 
       const blockedReason = document.createElement('div');

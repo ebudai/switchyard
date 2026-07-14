@@ -181,10 +181,11 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     function manualBlockedSummary(ticket) {
       const reason = ticketBlockedReason(ticket);
       const unresolved = unresolvedBlockedBy(ticket);
+      const manuallyHeld = !!ticket.manually_controlled || !!ticket.parked;
       if (reason && unresolved.length) {
         return `${reason} (blocked by ${formatBlockedByList(unresolved)})`;
       }
-      if (reason) {
+      if (reason && manuallyHeld) {
         return reason;
       }
       if (unresolved.length) {
@@ -506,15 +507,11 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     }
 
     function blockedBySummary(ticket) {
-      const blockedBy = ticket.blocked_by || [];
-      if (!blockedBy.length) {
-        return 'No ticket blockers recorded.';
-      }
       const unresolved = unresolvedBlockedBy(ticket);
       if (!unresolved.length) {
-        return `Resolved blockers: ${formatBlockedByList(blockedBy)}`;
+        return 'No ticket blockers recorded.';
       }
-      return `Unresolved blockers: ${formatBlockedByList(unresolved)}`;
+      return `Blocked by: ${formatBlockedByList(unresolved)}`;
     }
 
     function availableBlockerTickets(ticket) {

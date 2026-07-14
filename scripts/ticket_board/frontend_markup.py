@@ -43,7 +43,7 @@ MARKUP = """  <div class="layout">
           </div>
           <label class="check">
             <input id="needsEricInput" type="checkbox">
-            Needs Eric signoff
+            Needs UAT
           </label>
           <label class="check">
             <input id="needsInspectionInput" type="checkbox">

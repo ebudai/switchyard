@@ -523,7 +523,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       return [
         { label: 'Audit sign-off', ok: !!ticket.audit_signoff },
         { label: 'Inspector sign-off', ok: !ticket.needs_inspection || !!ticket.inspector_signoff },
-        { label: 'Needs Eric sign-off', ok: !!ticket.needs_eric_signoff },
+        { label: 'Needs UAT', ok: !!ticket.needs_eric_signoff },
         {
           label: 'Commit evidence',
           ok: !!ticket.commit_exempt || !!(ticket.commit_hash || '').trim(),

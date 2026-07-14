@@ -33,14 +33,14 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         ericBanner.className = signoffRecorded ? 'eric-banner eric-banner-confirmed' : 'eric-banner';
         const ericBannerSubtitle = document.createElement('div');
         ericBannerSubtitle.className = 'eric-banner-subtitle';
-        ericBannerSubtitle.textContent = signoffRecorded ? 'Signed Off ✓' : 'Awaiting Eric sign-off';
+        ericBannerSubtitle.textContent = signoffRecorded ? 'Signed Off ✓' : 'Awaiting UAT sign-off';
         const ericBannerTitle = document.createElement('div');
         ericBannerTitle.className = 'eric-banner-title';
         ericBannerTitle.textContent = ticket.title;
         const ericBannerNote = document.createElement('div');
         ericBannerNote.className = 'eric-banner-note';
         ericBannerNote.textContent = signoffRecorded
-          ? 'Eric sign-off recorded. Waiting for director completion.'
+          ? 'UAT sign-off recorded. Waiting for director completion.'
           : ericReviewCheckText(ticket);
         const ericSummary = document.createElement('div');
         ericSummary.className = 'eric-summary';
@@ -215,7 +215,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
 
       const toggles = document.createElement('div');
       toggles.className = 'tag-row';
-      toggles.appendChild(toggleControl('Needs Eric signoff', ticket.needs_eric_signoff, async (checked) => {
+      toggles.appendChild(toggleControl('Needs UAT', ticket.needs_eric_signoff, async (checked) => {
         await updateTicket(ticket.id, { needs_eric_signoff: checked }, detailCallerRole());
       }));
       toggles.appendChild(toggleControl('Needs inspection', ticket.needs_inspection, async (checked) => {

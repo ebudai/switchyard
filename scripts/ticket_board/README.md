@@ -133,7 +133,7 @@ Notes:
 - New transitions into `done` require either a verified `commit_hash` or `commit_exempt: true`
 - `analysis -> in_progress` is the default handoff from triage/spec to Implementation
 - Any state can move to `backlog` to defer work; backlog tickets can be revived to `analysis`
-- The default review path is `in_progress -> audit -> UAT (internal state: eric_review) -> director_review -> done`, or `in_progress -> audit -> director_review -> done` when Eric sign-off is not required
+- The default review path is `in_progress -> audit -> UAT (internal state: eric_review) -> director_review -> done`, or `in_progress -> audit -> director_review -> done` when UAT is not required
 - Multiple tickets per assignee may be in `in_progress`; the active one is inferred from notification delivery and highlighted in the board
 - For new shell-created tickets, use `scripts/directorctl ticket-create`; it writes through the board action API.
 - Do not hand-write `PGU-N.json` files. The retired JSON store is not a board backend.

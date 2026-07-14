@@ -211,7 +211,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       const strong = document.createElement('strong');
       strong.textContent = title;
       const body = document.createElement('div');
-      body.textContent = text;
+      appendLinkedTicketText(body, text);
       alert.append(strong, body);
       return alert;
     }
@@ -245,7 +245,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
           const strong = document.createElement('strong');
           strong.textContent = item.title;
           const body = document.createElement('div');
-          body.textContent = item.text;
+          appendLinkedTicketText(body, item.text);
           alert.append(strong, body);
         }
         stack.appendChild(alert);

@@ -336,6 +336,13 @@ def main() -> int:
     assert "row_number() over" in active_inprogress_idle_filter_migration
     assert "notification_trace trace" in active_inprogress_idle_filter_migration
     assert "candidates.state <> 'in_progress' or candidates.in_progress_rank = 1" in active_inprogress_idle_filter_migration
+    terminal_transition_notify_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu405_terminal_transition_assignee_notify.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "target_role is null and p_new_state in ('done', 'cancelled')" in terminal_transition_notify_migration
+    assert "transition_target_role(p_old_state, p_assignee)" in terminal_transition_notify_migration
+    assert "when p_new_state = 'done'" in terminal_transition_notify_migration
+    assert "when p_new_state = 'cancelled'" in terminal_transition_notify_migration
     assert "tell the director directly what is wrong" in executable_schema_lower
     assert "tell eric directly what is wrong" in executable_schema_lower
     assert "q.kind not in ('idle_reminder', 'escalation')" in executable_schema_lower
@@ -348,6 +355,10 @@ def main() -> int:
     assert "current_app_actor()" in executable_schema_lower
     assert "role % cannot call file_bug" in executable_schema_lower
     assert "candidates.state <> 'in_progress' or candidates.in_progress_rank = 1" in executable_schema_lower
+    assert "target_role is null and p_new_state in ('done', 'cancelled')" in executable_schema_lower
+    assert "transition_target_role(p_old_state, p_assignee)" in executable_schema_lower
+    assert "when p_new_state = 'done'" in executable_schema_lower
+    assert "when p_new_state = 'cancelled'" in executable_schema_lower
     assert "create or replace function ticket_board.notify_ticket_state_transition" in executable_schema_lower
     assert "pg_notify" in executable_schema_lower, "PGU-191 must notify on state transitions"
     assert "manually_controlled" in executable_schema_lower, "PGU-191 triggers must honor manual control"

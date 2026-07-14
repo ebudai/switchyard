@@ -802,14 +802,16 @@ WHERE id = %s
         if current is None:
             return False
         current_state, current_assignee, manually_controlled, parked = current
-        if current_state in TERMINAL_STATES:
-            return False
 
         try:
             parsed = json.loads(payload)
         except json.JSONDecodeError:
+            if current_state in TERMINAL_STATES:
+                return False
             return True
         if not isinstance(parsed, dict):
+            if current_state in TERMINAL_STATES:
+                return False
             return True
 
         payload_ticket_id = str(parsed.get("id", ticket_id)).strip().upper()
@@ -825,6 +827,12 @@ WHERE id = %s
             return False
 
         kind = str(parsed.get("kind") or "").strip().lower()
+        if current_state in TERMINAL_STATES:
+            return (
+                kind == "transition"
+                and expected_state in TERMINAL_STATES
+                and current_state == expected_state
+            )
         if kind == "escalation":
             return (
                 target_role == "director"

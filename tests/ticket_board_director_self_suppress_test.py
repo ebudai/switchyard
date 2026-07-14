@@ -239,6 +239,51 @@ def assert_director_write_client_self_suppresses_notifications() -> None:
                         "new_state": "in_progress",
                     }
                 ], queued_notifications(admin_conn, "PGU-35002")
+
+                seed_postgres_ticket(
+                    admin_conn,
+                    "PGU-40501",
+                    title="Director cancel should notify active ops",
+                    state="in_progress",
+                    assignee="ops",
+                    implementation="Ready.",
+                )
+                clear_notifications(admin_conn, "PGU-40501")
+                cancelled_ops = client.cancel("PGU-40501", reason="Split into follow-up tickets.")["ticket"]
+                assert cancelled_ops["state"] == "cancelled", cancelled_ops
+                assert queued_notifications(admin_conn, "PGU-40501") == [
+                    {
+                        "target_role": "ops",
+                        "message": "PGU-40501 -- Director cancel should notify active ops cancelled",
+                        "old_state": "in_progress",
+                        "new_state": "cancelled",
+                    }
+                ], queued_notifications(admin_conn, "PGU-40501")
+
+                seed_postgres_ticket(
+                    admin_conn,
+                    "PGU-40502",
+                    title="Director cancel analysis self-suppresses",
+                    state="analysis",
+                    assignee="unassigned",
+                )
+                clear_notifications(admin_conn, "PGU-40502")
+                cancelled_director = client.cancel("PGU-40502", reason="No longer needed.")["ticket"]
+                assert cancelled_director["state"] == "cancelled", cancelled_director
+                assert queued_notifications(admin_conn, "PGU-40502") == [], queued_notifications(admin_conn, "PGU-40502")
+
+                seed_postgres_ticket(
+                    admin_conn,
+                    "PGU-40503",
+                    title="Director done self-suppresses",
+                    state="director_review",
+                    assignee="director",
+                    implementation="Ready.",
+                )
+                clear_notifications(admin_conn, "PGU-40503")
+                done_director = client.mark_done("PGU-40503", commit_hash="123abcd")["ticket"]
+                assert done_director["state"] == "done", done_director
+                assert queued_notifications(admin_conn, "PGU-40503") == [], queued_notifications(admin_conn, "PGU-40503")
             finally:
                 server.shutdown()
                 server.server_close()

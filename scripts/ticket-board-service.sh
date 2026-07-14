@@ -23,6 +23,8 @@ readonly MIGRATION_RUNNER="${TICKET_BOARD_MIGRATION_RUNNER:-$BOARD_CURRENT_LINK/
 readonly SMOKE_PATH="${BOARD_SMOKE_PATH:-/api/board}"
 readonly SMOKE_TIMEOUT_SECONDS="${BOARD_SMOKE_TIMEOUT_SECONDS:-10}"
 readonly SERVICE_SCOPE="${TICKET_BOARD_SERVICE_SCOPE:-auto}"
+readonly POLKIT_APPROVAL_USER="${TICKET_BOARD_POLKIT_APPROVAL_USER:-eric}"
+readonly POLKIT_TIMEOUT_SECONDS="${TICKET_BOARD_POLKIT_TIMEOUT_SECONDS:-30}"
 
 usage() {
     cat <<EOF
@@ -82,7 +84,61 @@ systemctl_system() {
         systemctl "$@"
         return
     fi
-    sudo systemctl "$@"
+    local session_check_status=0
+    polkit_graphical_session_available "$POLKIT_APPROVAL_USER" || session_check_status=$?
+    if [[ "$session_check_status" == "1" ]]; then
+        die "system service action requires polkit approval from $POLKIT_APPROVAL_USER's active graphical session; run this from that session so the KDE prompt can appear"
+    fi
+    run_systemctl_with_polkit_timeout "$@"
+}
+
+loginctl_session_property() {
+    local session_id="$1"
+    local property="$2"
+    loginctl show-session "$session_id" -p "$property" --value 2>/dev/null || true
+}
+
+polkit_graphical_session_available() {
+    local target_user="$1"
+    local session_id listed_user active remote session_type
+    command -v loginctl >/dev/null 2>&1 || return 2
+    while read -r session_id _ listed_user _; do
+        [[ -n "$session_id" ]] || continue
+        [[ "$listed_user" == "$target_user" ]] || continue
+        active="$(loginctl_session_property "$session_id" Active)"
+        remote="$(loginctl_session_property "$session_id" Remote)"
+        session_type="$(loginctl_session_property "$session_id" Type)"
+        if [[ "$active" == "yes" && "$remote" != "yes" && ( "$session_type" == "wayland" || "$session_type" == "x11" ) ]]; then
+            return 0
+        fi
+    done < <(loginctl list-sessions --no-legend 2>/dev/null || true)
+    return 1
+}
+
+run_systemctl_with_polkit_timeout() {
+    local output status
+    local timeout_args=()
+    if command -v timeout >/dev/null 2>&1; then
+        timeout_args=(timeout --foreground "${POLKIT_TIMEOUT_SECONDS}s")
+    fi
+    if output="$("${timeout_args[@]}" systemctl "$@" 2>&1)"; then
+        if [[ -n "$output" ]]; then
+            printf '%s\n' "$output"
+        fi
+        return 0
+    else
+        status=$?
+    fi
+    if [[ -n "$output" ]]; then
+        printf '%s\n' "$output" >&2
+    fi
+    if [[ "$status" == "124" ]]; then
+        die "systemctl $* timed out waiting for polkit approval; run this from $POLKIT_APPROVAL_USER's active graphical session so the KDE prompt can be approved"
+    fi
+    if [[ "$output" == *"Interactive authentication required"* ]]; then
+        die "systemctl $* could not reach an interactive polkit approval flow; run this from $POLKIT_APPROVAL_USER's active graphical session so the KDE prompt can appear"
+    fi
+    return "$status"
 }
 
 system_unit_fragment_path() {

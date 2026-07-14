@@ -146,9 +146,13 @@ That command:
 8. waits for `GET /api/board` to return HTTP 200
 
 If `/etc/systemd/system/pgu-ticket-board.service` exists, `deploy-restart`
-targets that system unit and may prompt for `sudo` credentials. This is
-expected: a successful deploy must restart the process that actually owns
-port `8770`, not merely refresh `/home/agent/pgu-ticketboard-live/current`.
+targets that system unit with plain `systemctl`, not `sudo`. The expected path
+is polkit approval from Eric's active KDE graphical session: the command checks
+for that session first, then waits up to `TICKET_BOARD_POLKIT_TIMEOUT_SECONDS`
+(default `30`) for the approval flow before failing with a clear message rather
+than hanging indefinitely. This is intentional: a successful deploy must
+restart the process that actually owns port `8770`, not merely refresh
+`/home/agent/pgu-ticketboard-live/current`.
 
 Plain `restart` only restarts the currently deployed SHA. It does **not** update
 code.

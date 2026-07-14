@@ -957,3 +957,68 @@ Fresh `cmake -S . -B build` + `cmake --build build -j32` (on the branch as check
 ## 5. Verdict
 
 **Clean.** Scope is confirmed by diff content, not just file names: zero lines in either commit touch the star field, the Stage-1 resolved-star layer, or the dust path. The new clustering logic — cluster-shared host/radius/peak-angle sampling, the active-cluster probability gate, the 1–7 member-count draw, the post-jitter `normalizedArm≥0.54` halo gate, and the `complexScale`/`memberScale` size-variation pair — was traced end-to-end through the combined post-both-commits code, not just diffed in isolation, and every piece named in the director's ask was located and confirmed to match exactly (including the specific "1-7" range and the specific "0.54" threshold). No NaN/Inf/div0 anywhere: the one division has a provably-bounded-away-from-zero denominator, every sigma feeding the covariance is provably strictly positive, every `sqrt` argument is floored. Fully deterministic (same pure-`random01`-chain pattern as everything else in this codebase). Buffer sizing follows the same now-four-times-verified safe pattern: the cap (`kMaxNebulaGaussians=8192`) and the leaf count (`kNebulaLeafCount=12000`) are two independent constant families with no cross-contamination, and the `leafCount>cap` case is safe because hierarchy construction has zero dependency on the render cap. Build is clean. Recommend merging (cherry-pick the two HII commits onto `main`, per the director's stated plan).
+
+---
+
+# Validator Audit Report — Round HII Knots & Core Streak Fix (PGU-22)
+
+**Methodology:** Independent Reproduction, Code Review & Live Visual QA (using visual verification on local virtual desktop `pgu-test` per the behavioral contract, plus committed C++ and Python regression tests).
+**Branch reviewed:** `fix/pgu-22-round-hii-knots`, commit `6a1817924a3f0c7dd4c4ed6cdd75a3fd1d0aef70` ("PGU-22: round close HII knots"), reviewed in git worktree `/tmp/pgu-22-round-hii-knots`.
+**Status:** **Clean.** Both the central core streak and the off-core "comet-tail/tadpole" elongation defects are resolved. The code is well-structured, compiles cleanly, and is verified by committed tests.
+
+---
+
+## 1. Root Cause Identification & Verification
+
+The ticket addresses two distinct visual defects in close zoom views ($r=2.7$) of HII knots:
+1. **Central core magenta bar/streak**: A screen-space horizontal bar through the core. Verified as HII samples stacking up in close oblique views. Resolved in the previous pass via an `innerHiiGate` that keeps HII knots out of the bulge core.
+2. **Off-core "comet-tail/tadpole" streaks**: HII knots rendering with a bright head and a soft trailing tail in static frames. 
+
+The investigation traced the off-core tadpole tail to HII cluster offsets:
+- In `galaxy_media_build.h`, each HII cluster spread its members using a `tangentialOffset` that was `0.11f * scaleRadius` (2x larger than the `radialOffset` of `0.055f`).
+- This 2x wider tangent spread forced cluster members to form a stretched ellipse along the arm tangent. Combined with independent member brightness draws, the cluster presented as a bright member followed by soft trailing neighbors (a static comet tail).
+- The LOD hierarchy merge compounded this by stretching the mixture covariance along the tangent direction, baking the comet-tail shape into coarser LOD nodes.
+
+## 2. Code Review of the Fixes
+
+The fix branch resolves both issues in `galaxy_media_build.h`:
+1. **Bulge Core Gating**: Retains the `innerHiiGate` (smoothstep from `0.18` to `0.34 * scaleRadius`) to prevent core-region HII sample stacking.
+2. **Isotropic Member Spread**: Replaces the asymmetric 2x tangential spread with a deterministic isotropic disk offset around the cluster anchor:
+```cpp
+const float clusterOffsetRadius = std::sqrt(random01(seed, i, 70)) * comp.scaleRadius * 0.055f;
+const float clusterOffsetAngle = random01(seed, i, 75) * 2.0f * pi;
+const float radialOffset = clusterOffsetRadius * std::cos(clusterOffsetAngle);
+const float tangentialOffset = clusterOffsetRadius * std::sin(clusterOffsetAngle);
+```
+3. **Tightened Axes**: Ensures individual splat sigmas (`alongSigma` and `acrossSigma`) remain near-spherical.
+
+## 3. Live Visual & Regression Testing
+
+Using `/tmp/render_test_helper.py` to run on display `:0` and move to desktop `pgu-test` (desktop 1):
+1. **Oblique Pose ($r=2.7$) Visual QA**:
+   - The central magenta core bar is gone.
+   - Individual off-core HII knots now render as compact, round clumps rather than elongated "tadpoles" or lozenges.
+   - The composite view shows HII knots blending naturally as round clusters in the spiral arms, with the core reading as a clean, warm stellar bulge.
+2. **Face-on Pose ($r=20$) Wide QA**:
+   - Wide shots are visually identical, confirming that the new isotropic distribution does not regress or wash out the wide-view arm-hugging character.
+
+## 4. Committed Regression Tests
+
+Two regression tests are committed under `tests/` to prevent future regressions:
+1. **Python Invariant Check** ([tests/hii_knot_roundness_test.py](file:///tmp/pgu-22-round-hii-knots/tests/hii_knot_roundness_test.py)): Checks `galaxy_media_build.h` for the new isotropic disk equations and validates that the old asymmetric tangential offset is absent.
+2. **C++ Invariant Check** ([tests/nebula_core_structure_test.cpp](file:///tmp/pgu-22-round-hii-knots/tests/nebula_core_structure_test.cpp)): Standalone test compiling with `g++ -std=c++20 -O2 -I. tests/nebula_core_structure_test.cpp`. It verifies:
+   - HII samples reach the inner core (`minimumRadius < diskScale * 0.03f`).
+   - HII leaf covariances are not globally axis-aligned (`rotatedCovariances > leaves / 8`).
+   - Leaves in the disk plane remain nearly round (`worstInPlaneAspectRatio < 1.19f`).
+
+### Test Results against Pre-Fix (detached parent `4ba99ea`) vs. Fix branch tip (`6a18179`):
+- **Pre-Fix (`4ba99ea`)**:
+  - Python check: **FAIL** (missing isotropic disk equations).
+  - C++ check: **FAIL** (`nebula leaves must remain nearly round in the disk plane`, due to aspect ratio exceeding `1.19f`).
+- **Fix Branch Tip (`6a18179`)**:
+  - Python check: **PASS** (`hii_knot_roundness_test: ok`).
+  - C++ check: **PASS** (`nebula_core_structure_test: ok`).
+
+## 5. Verdict
+
+**Approved & Signed Off.** The HII clumping has been made isotropic, eliminating the comet-tail elongation. The fixes are mathematically clean, verified by both static and dynamic regression tests, and resolve all reported close-up streaks with no regressions.

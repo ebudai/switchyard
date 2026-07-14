@@ -7,7 +7,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       { key: 'in_progress', label: 'Implementation' },
       { key: 'inspection', label: 'Inspection' },
       { key: 'audit', label: 'Audit' },
-      { key: 'eric_review', label: 'Eric Review' },
+      { key: 'eric_review', label: 'UAT' },
       { key: 'director_review', label: 'Final Sign-Off' },
       { key: 'done', label: 'Done' },
       { key: 'cancelled', label: 'Cancelled' },
@@ -167,7 +167,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       }
       if (ticket.state === 'audit' && !ticket.audit_signoff) {
         return ticket.needs_eric_signoff
-          ? 'Set audit signoff before advancing to Eric review.'
+          ? 'Set audit signoff before advancing to UAT.'
           : 'Set audit signoff before advancing to Final Sign-Off.';
       }
       if (ticket.state === 'eric_review' && ticket.needs_eric_signoff && !ticket.eric_signoff) {
@@ -471,7 +471,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     function ericReviewCheckText(ticket) {
       return firstNonEmptyLine(ticket.implementation)
         || firstNonEmptyLine(ticket.body)
-        || 'Review this ticket, then sign off when it looks right.';
+        || 'Review this ticket during UAT, then sign off when it looks right.';
     }
 
     function checklistItemsFromText(text) {
@@ -1063,7 +1063,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
           const empty = document.createElement('div');
           empty.className = 'empty';
           empty.textContent = column.key === 'eric_review'
-            ? 'Only tickets flagged for Eric signoff appear here.'
+            ? 'Only tickets flagged for Eric signoff appear in UAT.'
             : 'No tickets in this state.';
           body.appendChild(empty);
         }

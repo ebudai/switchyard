@@ -47,8 +47,6 @@ def test_non_agent_user_self_elevates_with_sudo_agent_home() -> None:
         "-u",
         "agent",
         "-H",
-        "env",
-        "PGU_HOST_WAYLAND_DISPLAY=/run/user/1000/wayland-0",
         sys.executable,
         str(WRAPPER_PATH.resolve()),
         "pgu",

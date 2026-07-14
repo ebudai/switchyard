@@ -21,6 +21,7 @@ DEFAULT_GUI_USER = "eric"
 GUI_USER_ENV = "PGU_TEAM_LAUNCHER_GUI_USER"
 GUI_WAYLAND_ENV = "PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY"
 HOST_WAYLAND_ENV = "PGU_HOST_WAYLAND_DISPLAY"
+AGENT_NO_GUI_ENV = "PGU_AGENT_NO_GUI"
 KONSOLE_QT_LOGGING_RULES = "qt.qpa.wayland.warning=false"
 YOLO_ARGS_BY_CLI = {
     "agy": ["--dangerously-skip-permissions"],
@@ -429,7 +430,7 @@ def cli_command_for_role(role: RoleConfig, *, session_dir: Path, resume: bool = 
     command.extend(effort_args_for_role(role))
     command.extend(yolo_args_for_role(role))
     command.extend(role.extra_args)
-    env = {"PGU_PANE_TARGET": role.target, **role.env}
+    env = {**role.env, "DISPLAY": "", "WAYLAND_DISPLAY": "", "PGU_PANE_TARGET": role.target, AGENT_NO_GUI_ENV: "1"}
     return ["env", *_env_prefix(env), *command]
 
 

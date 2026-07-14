@@ -215,7 +215,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
 
       const toggles = document.createElement('div');
       toggles.className = 'tag-row';
-      toggles.appendChild(toggleControl('UAT sign-off', ticket.needs_eric_signoff, async (checked) => {
+      toggles.appendChild(toggleControl('Requires UAT', ticket.needs_eric_signoff, async (checked) => {
         await updateTicket(ticket.id, { needs_eric_signoff: checked }, detailCallerRole());
       }));
       toggles.appendChild(toggleControl('Needs inspection', ticket.needs_inspection, async (checked) => {
@@ -236,15 +236,16 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         }
         await updateTicket(ticket.id, patch, 'audit');
       }));
-      if (ticket.needs_eric_signoff) {
-        toggles.appendChild(toggleControl('UAT sign-off', ticket.eric_signoff, async (checked) => {
-          const patch = { eric_signoff: checked };
-          if (checked && commentText.value.trim()) {
-            patch.comment = { who: 'eric', text: commentText.value.trim() };
-          }
-          await updateTicket(ticket.id, patch, 'eric');
-        }));
-      }
+      toggles.appendChild(toggleControl('UAT sign-off', ticket.eric_signoff, async (checked) => {
+        const patch = { eric_signoff: checked };
+        if (checked && commentText.value.trim()) {
+          patch.comment = { who: 'eric', text: commentText.value.trim() };
+        }
+        await updateTicket(ticket.id, patch, 'eric');
+      }, {
+        disabled: !ticket.needs_eric_signoff,
+        title: ticket.needs_eric_signoff ? '' : 'Ticket does not require UAT sign-off.',
+      }));
 
       const meta = document.createElement('div');
       meta.className = 'meta';

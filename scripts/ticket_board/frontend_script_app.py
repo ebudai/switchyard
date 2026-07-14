@@ -34,12 +34,16 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       setCreateStatus('Pasted image attached to the new ticket.');
     }
 
-    function toggleControl(labelText, checked, onChange) {
+    function toggleControl(labelText, checked, onChange, options = {}) {
       const label = document.createElement('label');
       label.className = 'check';
       const input = document.createElement('input');
       input.type = 'checkbox';
       input.checked = checked;
+      input.disabled = !!options.disabled;
+      if (options.title) {
+        label.title = options.title;
+      }
       input.addEventListener('change', async () => {
         const nextChecked = input.checked;
         const previousChecked = !nextChecked;

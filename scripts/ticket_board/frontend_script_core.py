@@ -181,10 +181,11 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     function manualBlockedSummary(ticket) {
       const reason = ticketBlockedReason(ticket);
       const unresolved = unresolvedBlockedBy(ticket);
+      const manuallyHeld = !!ticket.manually_controlled || !!ticket.parked;
       if (reason && unresolved.length) {
         return `${reason} (blocked by ${formatBlockedByList(unresolved)})`;
       }
-      if (reason) {
+      if (reason && manuallyHeld) {
         return reason;
       }
       if (unresolved.length) {
@@ -211,7 +212,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       const strong = document.createElement('strong');
       strong.textContent = title;
       const body = document.createElement('div');
-      body.textContent = text;
+      appendLinkedTicketText(body, text);
       alert.append(strong, body);
       return alert;
     }
@@ -245,7 +246,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
           const strong = document.createElement('strong');
           strong.textContent = item.title;
           const body = document.createElement('div');
-          body.textContent = item.text;
+          appendLinkedTicketText(body, item.text);
           alert.append(strong, body);
         }
         stack.appendChild(alert);
@@ -511,6 +512,13 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         return 'No ticket blockers recorded.';
       }
       return `Blocked by: ${formatBlockedByList(unresolved)}`;
+    }
+
+    function availableBlockerTickets(ticket) {
+      const currentId = String(ticket?.id || '').toUpperCase();
+      return state.tickets
+        .filter((candidate) => candidate.id !== currentId && !['done', 'cancelled'].includes(candidate.state))
+        .sort(compareTicketsOldestFirst);
     }
 
     function buildOption(select, value, label) {

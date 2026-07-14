@@ -910,6 +910,14 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     )
     assert blockers["ticket"]["blocked_by"] == ["PGU-110"], blockers  # type: ignore[index]
     assert blockers["ticket"]["blocked_reason"] == "Waiting on blocker.", blockers  # type: ignore[index]
+    terminal_blocker = post_json(
+        base_url,
+        "/api/tickets/PGU-111/actions/set_blockers",
+        {"blocked_by": ["PGU-106"], "blocked_reason": "Waiting on a done ticket."},
+        caller="director",
+        expect=400,
+    )
+    assert "terminal tickets cannot block other tickets: PGU-106 is done" in str(terminal_blocker), terminal_blocker
     blocked_reason_forbidden = post_json(
         base_url,
         "/api/tickets/PGU-111/actions/edit_fields",

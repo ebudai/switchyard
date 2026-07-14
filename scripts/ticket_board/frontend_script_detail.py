@@ -339,6 +339,27 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       bindDetailDraftField(draftFields, blockedByInput, 'blockedBy', blockedByInput.value);
       const blockedByActions = document.createElement('div');
       blockedByActions.className = 'inline-actions';
+      const blockerPickerLabel = document.createElement('div');
+      blockerPickerLabel.className = 'soft-note';
+      blockerPickerLabel.textContent = 'Add blocker';
+      const blockerPicker = document.createElement('select');
+      buildOption(blockerPicker, '', 'Choose a non-terminal ticket…');
+      availableBlockerTickets(ticket).forEach((candidate) => {
+        buildOption(blockerPicker, candidate.id, `${candidate.id} - ${candidate.title}`);
+      });
+      const addBlockedByButton = document.createElement('button');
+      addBlockedByButton.type = 'button';
+      addBlockedByButton.textContent = 'Add Selected';
+      addBlockedByButton.disabled = blockerPicker.options.length <= 1;
+      addBlockedByButton.addEventListener('click', () => {
+        const blockerId = blockerPicker.value.trim().toUpperCase();
+        if (!blockerId) {
+          return;
+        }
+        const nextBlockedBy = Array.from(new Set([...parseBlockedByInput(blockedByInput.value), blockerId]));
+        blockedByInput.value = formatBlockedByList(nextBlockedBy);
+        persistDetailDraftField(ticket.id, 'blockedBy', blockedByInput.value);
+      });
       const saveBlockedByButton = document.createElement('button');
       saveBlockedByButton.textContent = 'Save Blockers';
       saveBlockedByButton.addEventListener('click', async () => {
@@ -347,17 +368,17 @@ SCRIPT_DETAIL = """    function selectedTicket() {
           blocked_reason: blockedReasonInput.value,
         }, detailCallerRole());
       });
-      blockedByActions.appendChild(saveBlockedByButton);
+      blockedByActions.append(blockerPicker, addBlockedByButton, saveBlockedByButton);
       const blockedByNote = document.createElement('div');
       blockedByNote.className = 'soft-note';
-      blockedByNote.textContent = blockedBySummary(ticket);
+      blockedByNote.textContent = `${blockedBySummary(ticket)} Only non-terminal tickets are selectable as blockers.`;
       const blockedByLinks = document.createElement('div');
       blockedByLinks.className = 'field-preview';
       const blockedByLinksLabel = document.createElement('div');
       blockedByLinksLabel.className = 'field-preview-label';
       blockedByLinksLabel.textContent = 'Linked Tickets';
       blockedByLinks.append(blockedByLinksLabel, linkedTicketRow(visibleBlockedBy));
-      blockedBy.append(blockedByInput, blockedByActions, blockedByNote, blockedByLinks);
+      blockedBy.append(blockedByInput, blockerPickerLabel, blockedByActions, blockedByNote, blockedByLinks);
 
       const blockedReason = document.createElement('div');
       blockedReason.innerHTML = '<div class="field-label">Blocked Reason</div>';

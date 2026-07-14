@@ -35,7 +35,7 @@ def main() -> int:
     assert "Save implementation before advancing to Implementation." not in HTML
     assert "already has an in-progress ticket" not in HTML
     assert "Save audit prompt before advancing to audit." not in HTML
-    assert "Set audit signoff before advancing to Eric review." in HTML
+    assert "Set audit signoff before advancing to UAT." in HTML
     assert "Set audit signoff before advancing to Final Sign-Off." in HTML
     assert "Record Eric signoff before advancing to Final Sign-Off." in HTML
     assert "Save a verified commit hash or enable no-commit override before advancing to done." in HTML

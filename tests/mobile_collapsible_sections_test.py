@@ -104,7 +104,7 @@ def run_browser_check(playwright: object, server_port: int) -> None:
         analysis_head = mobile.locator(".column-head").filter(has=mobile.locator(".column-title", has_text="Triage"))
         implementation_head = mobile.locator(".column-head").filter(has=mobile.locator(".column-title", has_text="Implementation"))
         audit_head = mobile.locator(".column-head").filter(has=mobile.locator(".column-title", has_text="Audit"))
-        eric_head = mobile.locator(".column-head").filter(has=mobile.locator(".column-title", has_text="Eric Review"))
+        eric_head = mobile.locator(".column-head").filter(has=mobile.locator(".column-title", has_text="UAT"))
 
         analysis_head.get_by_text("(1)", exact=True).wait_for(timeout=5000)
         implementation_head.get_by_text("(1)", exact=True).wait_for(timeout=5000)

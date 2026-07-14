@@ -146,13 +146,6 @@ LOGFILE="$TMPDIR_T/service-scope.log"
 mkdir -p "$MOCKDIR"
 : >"$LOGFILE"
 
-cat >"$MOCKDIR/sudo" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-"$@"
-EOF
-chmod +x "$MOCKDIR/sudo"
-
 cat >"$MOCKDIR/systemctl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -167,6 +160,34 @@ if [[ "${1:-}" == "show" && "${2:-}" == "pgu-ticket-board.service" && "${3:-}" =
 fi
 EOF
 chmod +x "$MOCKDIR/systemctl"
+
+cat >"$MOCKDIR/loginctl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "list-sessions" && "${2:-}" == "--no-legend" ]]; then
+    printf '3 1000 eric seat0\n'
+    exit 0
+fi
+if [[ "${1:-}" == "show-session" && "${3:-}" == "-p" && "${5:-}" == "--value" ]]; then
+    case "${4:-}" in
+        Active)
+            printf 'yes\n'
+            ;;
+        Remote)
+            printf 'no\n'
+            ;;
+        Type)
+            printf 'wayland\n'
+            ;;
+        *)
+            exit 1
+            ;;
+    esac
+    exit 0
+fi
+exit 1
+EOF
+chmod +x "$MOCKDIR/loginctl"
 
 cat >"$MOCKDIR/python3" <<'EOF'
 #!/usr/bin/env bash
@@ -201,6 +222,11 @@ grep -q '^system:restart pgu-ticket-board.service$' "$LOGFILE" || {
 }
 if grep -q '^user:restart pgu-ticket-board.service$' "$LOGFILE"; then
     echo "FAIL: deploy-restart incorrectly restarted the shadow user unit" >&2
+    cat "$LOGFILE" >&2
+    exit 1
+fi
+if grep -q 'sudo' "$LOGFILE"; then
+    echo "FAIL: deploy-restart should use plain systemctl, not sudo" >&2
     cat "$LOGFILE" >&2
     exit 1
 fi

@@ -15,6 +15,7 @@ readonly LOG_PATH="${LOG_PATH:-/tmp/pgu-ticket-board.log}"
 readonly UNIT_DIR="${UNIT_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}"
 readonly UNIT_PATH="$UNIT_DIR/$SERVICE_NAME"
 readonly SYSTEM_UNIT_PATH="${TICKET_BOARD_SYSTEM_UNIT_PATH:-/etc/systemd/system/$SERVICE_NAME}"
+readonly SYSTEM_UNIT_HASH_RECORD="${TICKET_BOARD_SYSTEM_UNIT_HASH_RECORD:-$BOARD_ROOT/system-unit.sha256}"
 readonly DEPLOY_REF="${DEPLOY_REF:-origin/main}"
 readonly BOARD_DATABASE_URL="${TICKET_BOARD_DATABASE_URL:-postgresql:///pgu?host=/var/run/postgresql&user=ticket_board_service}"
 readonly BOARD_ADMIN_DATABASE_URL="${TICKET_BOARD_ADMIN_DATABASE_URL:-postgresql:///pgu?host=/var/run/postgresql&user=postgres}"
@@ -143,6 +144,41 @@ run_systemctl_with_polkit_timeout() {
 
 system_unit_fragment_path() {
     systemctl show "$SERVICE_NAME" -p FragmentPath --value 2>/dev/null || true
+}
+
+system_unit_file_path() {
+    local fragment
+    fragment="$(system_unit_fragment_path)"
+    if [[ -n "$fragment" && -f "$fragment" ]]; then
+        printf '%s\n' "$fragment"
+        return 0
+    fi
+    if [[ -f "$SYSTEM_UNIT_PATH" ]]; then
+        printf '%s\n' "$SYSTEM_UNIT_PATH"
+        return 0
+    fi
+    return 1
+}
+
+system_unit_hash() {
+    local unit_path
+    unit_path="$(system_unit_file_path)" || return 1
+    sha256sum "$unit_path" | awk '{print $1}'
+}
+
+system_unit_reload_required() {
+    local current_hash recorded_hash=""
+    current_hash="$(system_unit_hash)" || return 1
+    [[ -f "$SYSTEM_UNIT_HASH_RECORD" ]] || return 1
+    recorded_hash="$(<"$SYSTEM_UNIT_HASH_RECORD")"
+    [[ "$current_hash" != "$recorded_hash" ]]
+}
+
+record_system_unit_hash() {
+    local current_hash
+    current_hash="$(system_unit_hash)" || return 0
+    mkdir -p "$(dirname "$SYSTEM_UNIT_HASH_RECORD")"
+    printf '%s\n' "$current_hash" >"$SYSTEM_UNIT_HASH_RECORD"
 }
 
 system_service_installed() {
@@ -315,7 +351,10 @@ deploy_restart_service() {
     scope="$(resolved_service_scope)"
     if [[ "$scope" == "system" ]]; then
         quiesce_user_shadow_unit
-        systemctl_system daemon-reload
+        if system_unit_reload_required; then
+            systemctl_system daemon-reload
+        fi
+        record_system_unit_hash
         systemctl_system restart "$SERVICE_NAME"
     else
         ensure_user_manager

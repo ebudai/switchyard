@@ -517,6 +517,13 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       return `Unresolved blockers: ${formatBlockedByList(unresolved)}`;
     }
 
+    function availableBlockerTickets(ticket) {
+      const currentId = String(ticket?.id || '').toUpperCase();
+      return state.tickets
+        .filter((candidate) => candidate.id !== currentId && !['done', 'cancelled'].includes(candidate.state))
+        .sort(compareTicketsOldestFirst);
+    }
+
     function buildOption(select, value, label) {
       const option = document.createElement('option');
       option.value = value;

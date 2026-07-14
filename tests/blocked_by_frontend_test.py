@@ -16,8 +16,12 @@ from scripts.ticket_board.frontend import HTML
 def main() -> int:
     assert "function parseBlockedByInput(value)" in HTML
     assert "function unresolvedBlockedBy(ticket)" in HTML
+    assert "function availableBlockerTickets(ticket)" in HTML
     assert "Blocked By" in HTML
     assert "blockedByInput.placeholder = 'PGU-23, PGU-25';" in HTML
+    assert "Choose a non-terminal ticket…" in HTML
+    assert "Only non-terminal tickets are selectable as blockers." in HTML
+    assert "!['done', 'cancelled'].includes(candidate.state)" in HTML
     assert "blocked_by: parseBlockedByInput(blockedByInput.value)," in HTML
     assert "blocked_reason: blockedReasonInput.value," in HTML
     assert "blocked_by" in HTML

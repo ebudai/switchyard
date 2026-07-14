@@ -596,6 +596,7 @@ ORDER BY t.ticket_number
                     self._pg_set_caller_role(conn, caller_role)
                 if notification_source_role:
                     self._pg_set_notification_source_role(conn, notification_source_role)
+                self._validate_blocker_ticket_states(conn, blocked_by)
                 parent_id = "" if parent_id in (None, "", "null") else str(parent_id).strip().upper()
                 if parent_id and create_state == "analysis" and not blocked_by:
                     ticket_id = self._pg_call_scalar(
@@ -655,6 +656,7 @@ ORDER BY t.ticket_number
                         "blocked_reason",
                     )
                     self._enforce_blocked_reason_rule(blocked_by, blocked_reason)
+                    self._validate_blocker_ticket_states(conn, blocked_by)
                     self._pg_call(conn, "SELECT ticket_board.set_blockers(%s, %s, %s);", (ticket_id, blocked_by, blocked_reason))
 
                 comment_text = ""
@@ -853,6 +855,21 @@ ORDER BY t.ticket_number
             seen.add(normalized_id)
             blockers.append({"id": normalized_id, "resolved": bool(item.get("resolved"))})
         return blockers
+
+    def _validate_blocker_ticket_states(self, conn: Any, blocked_by: list[str]) -> None:
+        if not blocked_by:
+            return
+        rows = conn.execute(
+            "SELECT id, state FROM ticket_board.tickets WHERE id = ANY(%s);",
+            (blocked_by,),
+        ).fetchall()
+        state_by_id = {str(row["id"]): str(row["state"]) for row in rows}
+        for blocker_id in blocked_by:
+            blocker_state = state_by_id.get(blocker_id)
+            if blocker_state is None:
+                raise ValueError(f"blocker ticket not found: {blocker_id}")
+            if blocker_state in TERMINAL_STATES:
+                raise ValueError(f"terminal tickets cannot block other tickets: {blocker_id} is {blocker_state}")
 
     def _enforce_blocked_reason_rule(self, blocked_by: list[str], blocked_reason: str) -> None:
         if blocked_by and not blocked_reason.strip():

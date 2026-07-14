@@ -1396,6 +1396,19 @@ SET search_path = ticket_board, pg_temp
 AS $$
 BEGIN
     PERFORM ticket_board.require_ticket_board_listener('ack_notification');
+    UPDATE ticket_board.ticket_notification_state ns
+    SET idle_reminder_count = CASE
+            WHEN q.kind = 'idle_reminder' THEN ns.idle_reminder_count + 1
+            ELSE ns.idle_reminder_count
+        END,
+        last_transition_notified_at = CASE
+            WHEN q.kind = 'transition' THEN clock_timestamp()
+            ELSE ns.last_transition_notified_at
+        END
+    FROM ticket_board.ticket_notification_queue q
+    WHERE q.id = p_notification_id
+      AND ns.ticket_id = q.ticket_id;
+
     PERFORM ticket_board.record_notification_trace(
         q.ticket_id,
         q.id,
@@ -1603,9 +1616,9 @@ LANGUAGE sql
 IMMUTABLE
 AS $$
     SELECT p_ticket_id
-        || ' is still in '
+        || ' is waiting in your '
         || p_state
-        || ' and you haven''t advanced it. Advance it now (do the work or hand it off). If you genuinely CANNOT move it forward, tell the director directly what is wrong. Do NOT do nothing.';
+        || ' queue. Advance it or hand it off. If you cannot move it forward, tell the director what is wrong.';
 $$;
 
 CREATE OR REPLACE FUNCTION ticket_board.idle_without_advancing_director_message(p_ticket_id text, p_state text)
@@ -1614,9 +1627,26 @@ LANGUAGE sql
 IMMUTABLE
 AS $$
     SELECT p_ticket_id
+        || ' is waiting in your '
+        || p_state
+        || ' queue. Advance it or hand it off. If you cannot move it forward, tell Eric what is wrong.';
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.idle_without_advancing_problem_message(
+    p_ticket_id text,
+    p_state text,
+    p_contact text
+)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT p_ticket_id
         || ' is still in '
         || p_state
-        || ' and you haven''t advanced it. Advance it now (do the work or hand it off). If you genuinely CANNOT move it forward, tell Eric directly what is wrong. Do NOT do nothing.';
+        || ' and you haven''t advanced it. Advance it now (do the work or hand it off). If you genuinely CANNOT move it forward, tell '
+        || p_contact
+        || ' directly what is wrong. Do NOT do nothing.';
 $$;
 
 CREATE OR REPLACE FUNCTION ticket_board.idle_without_advancing_escalation_message(
@@ -1773,6 +1803,11 @@ BEGIN
                     candidate.id,
                     candidate.state
                 )
+                WHEN candidate.owner_role = 'director' AND candidate.idle_reminder_count >= 1 THEN ticket_board.idle_without_advancing_problem_message(
+                    candidate.id,
+                    candidate.state,
+                    'Eric'
+                )
                 WHEN candidate.owner_role = 'director' THEN ticket_board.idle_without_advancing_director_message(
                     candidate.id,
                     candidate.state
@@ -1795,9 +1830,6 @@ BEGIN
                     'idle-reminder:' || candidate.id || ':' || candidate.target_role || ':' || extract(epoch FROM candidate.idle_since_at)::bigint::text
             END
         );
-        UPDATE ticket_board.ticket_notification_state
-        SET idle_reminder_count = idle_reminder_count + 1
-        WHERE ticket_id = candidate.id;
         delivered_count := delivered_count + 1;
     END LOOP;
 

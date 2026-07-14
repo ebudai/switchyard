@@ -1649,6 +1649,15 @@ WHERE ticket_id = 'PGU-20';
                     "kind": "transition",
                 },
             ], durable_trace
+            transition_marked_at = psql(
+                listener_conninfo,
+                """
+SELECT (last_transition_notified_at IS NOT NULL)::text
+FROM ticket_board.ticket_notification_state
+WHERE ticket_id = 'PGU-20';
+""",
+            ).stdout.strip()
+            assert transition_marked_at == "true", transition_marked_at
 
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
             insert_ticket(

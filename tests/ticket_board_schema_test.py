@@ -304,6 +304,14 @@ def main() -> int:
     assert "create or replace function ticket_board.notify_idle_turn_end_nudges" in idle_reminder_primary_defer_migration
     assert "q.kind not in ('idle_reminder', 'escalation')" in idle_reminder_primary_defer_migration
     assert "q.target_role = candidates.target_role" in idle_reminder_primary_defer_migration
+    idle_reminder_delivery_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu437_idle_reminder_delivery_count.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "create or replace function ticket_board.ack_notification" in idle_reminder_delivery_migration
+    assert "when q.kind = 'idle_reminder' then ns.idle_reminder_count + 1" in idle_reminder_delivery_migration
+    assert "when q.kind = 'transition' then clock_timestamp()" in idle_reminder_delivery_migration
+    assert "create or replace function ticket_board.idle_without_advancing_problem_message" in idle_reminder_delivery_migration
+    assert "is waiting in your " in idle_reminder_delivery_migration
     regression_flag_migration = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "284_add_regression_flag.sql"
     ).read_text(encoding="utf-8").lower()
@@ -343,10 +351,14 @@ def main() -> int:
     assert "transition_target_role(p_old_state, p_assignee)" in terminal_transition_notify_migration
     assert "when p_new_state = 'done'" in terminal_transition_notify_migration
     assert "when p_new_state = 'cancelled'" in terminal_transition_notify_migration
-    assert "tell the director directly what is wrong" in executable_schema_lower
-    assert "tell eric directly what is wrong" in executable_schema_lower
+    assert "create or replace function ticket_board.idle_without_advancing_problem_message" in executable_schema_lower
+    assert "do not do nothing." in executable_schema_lower
+    assert "tell '" in executable_schema_lower
+    assert "is waiting in your " in executable_schema_lower
     assert "q.kind not in ('idle_reminder', 'escalation')" in executable_schema_lower
     assert "q.target_role = candidates.target_role" in executable_schema_lower
+    assert "when q.kind = 'idle_reminder' then ns.idle_reminder_count + 1" in executable_schema_lower
+    assert "when q.kind = 'transition' then clock_timestamp()" in executable_schema_lower
     assert "caller_role := nullif(current_setting('ticket_board.caller_role', true), '')" in executable_schema_lower
     assert "caller_role <> all(p_allowed_roles)" in executable_schema_lower
     assert "role % cannot call %" in executable_schema_lower

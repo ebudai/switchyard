@@ -605,6 +605,9 @@ DECLARE
     source_role text;
 BEGIN
     target_role := ticket_board.transition_target_role(p_new_state, p_assignee);
+    IF target_role IS NULL AND p_new_state IN ('done', 'cancelled') THEN
+        target_role := ticket_board.transition_target_role(p_old_state, p_assignee);
+    END IF;
     message := p_message;
     source_role := nullif(current_setting('ticket_board.notification_source_role', true), '');
     IF source_role IS NULL THEN
@@ -1068,6 +1071,10 @@ AS $$
             THEN p_ticket_id || CASE WHEN p_title <> '' THEN ' -- ' || p_title ELSE '' END || ' ready for audit'
         WHEN p_new_state = 'director_review'
             THEN p_ticket_id || CASE WHEN p_title <> '' THEN ' -- ' || p_title ELSE '' END || ' ready for your review'
+        WHEN p_new_state = 'done'
+            THEN p_ticket_id || CASE WHEN p_title <> '' THEN ' -- ' || p_title ELSE '' END || ' marked done'
+        WHEN p_new_state = 'cancelled'
+            THEN p_ticket_id || CASE WHEN p_title <> '' THEN ' -- ' || p_title ELSE '' END || ' cancelled'
         ELSE NULL
     END;
 $$;

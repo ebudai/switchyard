@@ -1441,6 +1441,35 @@ def test_stale_notification_for_cancelled_ticket_is_acked_not_delivered() -> Non
     assert trace_events(conn) == ["listener_claim", "drop", "listener_ack"]
 
 
+def test_terminal_transition_notification_is_delivered_to_prior_owner() -> None:
+    sent: list[tuple[str, str]] = []
+    message = "PGU-405 -- Terminal notify fixture cancelled"
+    conn = FakeConnection(
+        [
+            queue_row(
+                9,
+                "PGU-405",
+                state="cancelled",
+                assignee="ops",
+                target_role="ops",
+                message=message,
+            )
+        ],
+        ticket_rows={"PGU-405": ("cancelled", "ops", False, False)},
+    )
+    listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=lambda target, text: sent.append((target, text)),
+        activity_gate=lambda _target: False,
+        connector=lambda *args, **kwargs: conn,
+        poll_seconds=0,
+    )
+
+    assert listener.listen_once(max_notifications=1) == 1
+    assert sent == [("pgu-ops:0.0", message)]
+    assert conn.acked == [9]
+
+
 def test_idle_reminder_repeat_escalation_delivers_to_director() -> None:
     sent: list[tuple[str, str]] = []
     message = "ops was reminded about PGU-366 (in in_progress) and still hasn't advanced it -- may be stuck."
@@ -1611,6 +1640,7 @@ def main() -> int:
     test_listener_logs_missing_hook_state_on_startup()
     test_send_failure_uses_exponential_backoff()
     test_stale_notification_for_cancelled_ticket_is_acked_not_delivered()
+    test_terminal_transition_notification_is_delivered_to_prior_owner()
     test_idle_reminder_repeat_escalation_delivers_to_director()
     test_eric_review_is_not_delivered()
     test_reconnect_relistens_after_connection_drop()

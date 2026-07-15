@@ -29,10 +29,11 @@ Pane write API:
   - `POST /api/tickets/actions/create_ticket`
   - `POST /api/tickets/actions/file_bug`
   - `POST /api/tickets/<PGU-N>/actions/<operation>`
-- Each operation request must include `X-PGU-Caller-Role` with one of
-  `director`, `eric`, `main`, `app`, `ops`, `audit`, `perf`, or `research`.
-  The board trusts this localhost/tailnet caller identity for app-layer
-  permission checks and comment attribution on the TCP web/UI path.
+- Browser HTTP operation requests must include the per-process
+  `X-PGU-Write-Token` emitted into the served board page, plus
+  `X-PGU-Caller-Role` with one of `director`, `eric`, `main`, `app`, `ops`,
+  `audit`, `perf`, or `research`. Without the token, HTTP writes are rejected;
+  read-only HTTP requests remain available.
 - Local pane tooling should write through the Unix-domain socket at
   `/tmp/pgu-ticket-board.sock` when it exists. The write client registers the
   auto-resolved pane role on `/api/register-caller`; the board derives the

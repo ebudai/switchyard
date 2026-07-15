@@ -22,6 +22,7 @@ def main() -> int:
     assert not hasattr(args, "store_backend")
     assert not hasattr(args, "allow_" + "json_store")
     assert not hasattr(args, "store")
+    assert args.unix_socket == "/tmp/pgu-ticket-board.sock"
 
     with tempfile.TemporaryDirectory(prefix="ticket-board-postgres-only.") as tmpdir:
         root = Path(tmpdir)

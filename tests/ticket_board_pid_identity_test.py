@@ -112,7 +112,11 @@ class MemoryBoardApp:
 
     def update_ticket(self, ticket_id: str, patch: dict[str, object], *, caller_role: str | None = None) -> dict[str, object]:
         ticket = self.tickets[ticket_id]
+        comment = patch.pop("comment", None)
         ticket.update(patch)
+        if isinstance(comment, dict):
+            ticket.setdefault("comments", [])
+            ticket["comments"].append({"who": comment.get("who", caller_role), "text": comment.get("text", "")})  # type: ignore[union-attr]
         ticket["updated"] = iso_now()
         return ticket
 
@@ -259,9 +263,85 @@ def assert_unix_socket_write_derives_role_and_releases_registration() -> None:
             thread.join(timeout=2)
 
 
+def assert_unix_socket_replaces_stale_socket_file() -> None:
+    with tempfile.TemporaryDirectory(prefix="ticket-board-stale-socket.") as tmpdir:
+        root = Path(tmpdir)
+        frames = root / "frames"
+        assets = root / "assets"
+        socket_path = root / "board.sock"
+        frames.mkdir()
+        assets.mkdir()
+        socket_path.touch()
+        app = MemoryBoardApp(
+            [ticket_payload("PGU-302", title="Stale socket replaced", state="in_progress", assignee="ops", implementation="Ready.")],
+            frames,
+            assets,
+        )
+        events = TicketBoardEventHub(app)
+        server = TicketBoardUnixServer(socket_path, app, events=events, director_notifier=QuietNotifier(), caller_registry=CallerRegistry())
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            assert stat.S_ISSOCK(socket_path.stat().st_mode), socket_path.stat()
+            client = TicketBoardWriteClient(socket_path=str(socket_path), caller_role="ops")
+            started = client.start_work("PGU-302")["ticket"]
+            assert started["state"] == "in_progress", started
+        finally:
+            server.shutdown()
+            server.server_close()
+            events.close()
+            thread.join(timeout=2)
+
+
+def assert_all_pane_roles_write_through_socket() -> None:
+    with tempfile.TemporaryDirectory(prefix="ticket-board-pane-roles.") as tmpdir:
+        root = Path(tmpdir)
+        frames = root / "frames"
+        assets = root / "assets"
+        socket_path = root / "board.sock"
+        frames.mkdir()
+        assets.mkdir()
+        implementers = ["main", "app", "ops", "perf", "research"]
+        support_roles = ["director", "audit", "inspector"]
+        tickets = [
+            ticket_payload(f"PGU-{400 + index}", title=f"{role} work", state="analysis", assignee=role, implementation="Ready.")
+            for index, role in enumerate(implementers)
+        ]
+        tickets.extend(
+            ticket_payload(f"PGU-{500 + index}", title=f"{role} note", state="analysis")
+            for index, role in enumerate(support_roles)
+        )
+        app = MemoryBoardApp(tickets, frames, assets)
+        events = TicketBoardEventHub(app)
+        registry = CallerRegistry()
+        server = TicketBoardUnixServer(socket_path, app, events=events, director_notifier=QuietNotifier(), caller_registry=registry)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            for index, role in enumerate(implementers):
+                ticket_id = f"PGU-{400 + index}"
+                client = TicketBoardWriteClient(socket_path=str(socket_path), caller_role=role)
+                started = client.start_work(ticket_id)["ticket"]
+                assert started["state"] == "in_progress", (role, started)
+                wait_until(lambda role=role: registry.pid_for_role(role) is None)
+            for index, role in enumerate(support_roles):
+                ticket_id = f"PGU-{500 + index}"
+                client = TicketBoardWriteClient(socket_path=str(socket_path), caller_role=role)
+                commented = client.add_comment(ticket_id, text=f"{role} note")["ticket"]
+                assert commented["comments"][-1]["who"] == role, (role, commented)
+                wait_until(lambda role=role: registry.pid_for_role(role) is None)
+        finally:
+            server.shutdown()
+            server.server_close()
+            events.close()
+            thread.join(timeout=2)
+
+
 def main() -> int:
     assert_registry_rejects_duplicate_live_role_and_releases_stale_pid()
     assert_unix_socket_write_derives_role_and_releases_registration()
+    assert_unix_socket_replaces_stale_socket_file()
+    assert_all_pane_roles_write_through_socket()
     print("ticket_board_pid_identity_test: ok")
     return 0
 

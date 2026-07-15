@@ -29,7 +29,7 @@ except ModuleNotFoundError:
     )
 
 from scripts.ticket_board.app import TicketBoardApp
-from scripts.ticket_board.server import CALLER_ROLE_HEADER, TicketBoardServer
+from scripts.ticket_board.server import CALLER_ROLE_HEADER, WRITE_TOKEN_HEADER, TicketBoardServer
 
 
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
@@ -41,6 +41,8 @@ FRONTEND_SCRIPT_PATHS = [
     ROOT / "scripts" / "ticket_board" / "frontend_script_core.py",
     ROOT / "scripts" / "ticket_board" / "frontend_script_detail.py",
 ]
+DEFAULT_TOKEN = object()
+TEST_WRITE_TOKEN: str | None = None
 
 
 class QuietNotifier:
@@ -192,10 +194,21 @@ INSERT INTO ticket_board.tickets (
     )
 
 
-def post_json(base_url: str, path: str, payload: dict[str, object], *, caller: str | None = None, expect: int = 200) -> dict[str, object] | str:
+def post_json(
+    base_url: str,
+    path: str,
+    payload: dict[str, object],
+    *,
+    caller: str | None = None,
+    token: str | None | object = DEFAULT_TOKEN,
+    expect: int = 200,
+) -> dict[str, object] | str:
     headers = {"Content-Type": "application/json"}
     if caller is not None:
         headers[CALLER_ROLE_HEADER] = caller
+    effective_token = TEST_WRITE_TOKEN if token is DEFAULT_TOKEN else token
+    if effective_token:
+        headers[WRITE_TOKEN_HEADER] = effective_token
     request = urllib.request.Request(
         base_url + path,
         data=json.dumps(payload).encode("utf-8"),
@@ -216,10 +229,13 @@ def post_json(base_url: str, path: str, payload: dict[str, object], *, caller: s
 def upload_png(base_url: str) -> dict[str, object]:
     buffer = BytesIO()
     Image.new("RGB", (2, 2), (220, 90, 40)).save(buffer, format="PNG")
+    headers = {"Content-Type": "image/png"}
+    if TEST_WRITE_TOKEN:
+        headers[WRITE_TOKEN_HEADER] = TEST_WRITE_TOKEN
     request = urllib.request.Request(
         base_url + "/api/upload",
         data=buffer.getvalue(),
-        headers={"Content-Type": "image/png"},
+        headers=headers,
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=5) as response:
@@ -235,6 +251,13 @@ def get_ticket(base_url: str, ticket_id: str) -> dict[str, object]:
         if ticket["id"] == ticket_id:
             return ticket
     raise AssertionError(f"{ticket_id} not found in board")
+
+
+def assert_served_html_contains_write_token(base_url: str) -> None:
+    with urllib.request.urlopen(base_url + "/", timeout=5) as response:
+        html = response.read().decode("utf-8")
+    assert "window.PGU_TICKET_BOARD_WRITE_TOKEN" in html
+    assert TEST_WRITE_TOKEN and TEST_WRITE_TOKEN in html
 
 
 def call_arguments(source: str, open_paren: int) -> list[str]:
@@ -296,6 +319,12 @@ def assert_frontend_update_calls_send_caller_role() -> None:
         if len(args) < 3
     ]
     assert not missing, "frontend updateTicket calls missing caller role: " + ", ".join(missing)
+
+
+def assert_frontend_writes_send_auth_token() -> None:
+    source = "\n".join(path.read_text(encoding="utf-8") for path in FRONTEND_SCRIPT_PATHS)
+    assert "X-PGU-Write-Token" in source
+    assert "window.PGU_TICKET_BOARD_WRITE_TOKEN" in source
 
 
 def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
@@ -430,6 +459,25 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
 
 
 def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets: Path) -> None:
+    assert_served_html_contains_write_token(base_url)
+    unauth_spoof = post_json(
+        base_url,
+        "/api/tickets/PGU-100/actions/route",
+        {"state": "backlog", "assignee": "ops"},
+        caller="director",
+        token=None,
+        expect=403,
+    )
+    assert "missing or invalid X-PGU-Write-Token" in str(unauth_spoof), unauth_spoof
+    wrong_token = post_json(
+        base_url,
+        "/api/tickets/PGU-100/actions/route",
+        {"state": "backlog", "assignee": "ops"},
+        caller="director",
+        token="wrong-token",
+        expect=403,
+    )
+    assert "missing or invalid X-PGU-Write-Token" in str(wrong_token), wrong_token
     missing = post_json(base_url, "/api/tickets/actions/create_ticket", {"title": "No caller", "body": ""}, expect=400)
     assert "missing X-PGU-Caller-Role" in str(missing), missing
     forbidden = post_json(
@@ -1126,6 +1174,8 @@ WHERE table_schema = 'ticket_board'
                 database_url=conninfo(socket_dir, port, dbname, SERVICE_ROLE),
             )
             server = TicketBoardServer(("127.0.0.1", 0), app, director_notifier=QuietNotifier())
+            global TEST_WRITE_TOKEN
+            TEST_WRITE_TOKEN = server.write_token
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:
@@ -1146,6 +1196,7 @@ WHERE table_schema = 'ticket_board'
 def main() -> int:
     commit_hash = main_commit()
     assert_frontend_update_calls_send_caller_role()
+    assert_frontend_writes_send_auth_token()
     exercise_postgres_backend(commit_hash)
     print("ticket_board_write_api_test: ok")
     return 0

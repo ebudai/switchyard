@@ -17,7 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.ticket_board.app import ASSIGNEES, STATES, iso_now
-from scripts.ticket_board.server import CALLER_ROLE_HEADER, DirectorNotifier, TicketBoardServer
+from scripts.ticket_board.server import CALLER_ROLE_HEADER, WRITE_TOKEN_HEADER, DirectorNotifier, TicketBoardServer
 
 
 class FakeNotifier:
@@ -154,7 +154,7 @@ def post_create(
     request = urllib.request.Request(
         f"http://127.0.0.1:{server.server_port}/api/tickets/actions/create_ticket",
         data=body,
-        headers={"Content-Type": "application/json", CALLER_ROLE_HEADER: caller},
+        headers={"Content-Type": "application/json", CALLER_ROLE_HEADER: caller, WRITE_TOKEN_HEADER: server.write_token},
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=5) as response:
@@ -173,7 +173,7 @@ def post_file_bug(server: TicketBoardServer, title: str, *, caller: str) -> dict
     request = urllib.request.Request(
         f"http://127.0.0.1:{server.server_port}/api/tickets/actions/file_bug",
         data=body,
-        headers={"Content-Type": "application/json", CALLER_ROLE_HEADER: caller},
+        headers={"Content-Type": "application/json", CALLER_ROLE_HEADER: caller, WRITE_TOKEN_HEADER: server.write_token},
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=5) as response:

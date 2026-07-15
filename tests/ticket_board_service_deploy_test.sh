@@ -54,7 +54,11 @@ grep -q '^ExecStartPre=/bin/chmod 1777 /tmp/pgu-frames$' "$UNIT_DIR/service.unit
     echo "FAIL: unit did not restore shared frame directory permissions before start" >&2
     exit 1
 }
-grep -q -- "--unix-socket /tmp/pgu-ticket-board.sock" "$UNIT_DIR/service.unit" || {
+grep -q '^RuntimeDirectory=pgu-ticket-board$' "$UNIT_DIR/service.unit" || {
+    echo "FAIL: unit did not request a service-owned runtime directory" >&2
+    exit 1
+}
+grep -q -- "--unix-socket /run/pgu-ticket-board/ticket-board.sock" "$UNIT_DIR/service.unit" || {
     echo "FAIL: unit did not expose the local pane Unix socket" >&2
     exit 1
 }
@@ -67,7 +71,7 @@ if grep -q -- "$retired_backend_flag" "$UNIT_DIR/service.unit"; then
     echo "FAIL: rendered unit should not pass the removed backend selector option" >&2
     exit 1
 fi
-grep -q '^Environment=PGU_TICKET_BOARD_SOCKET=/tmp/pgu-ticket-board.sock$' "$UNIT_DIR/service.unit" || {
+grep -q '^Environment=PGU_TICKET_BOARD_SOCKET=/run/pgu-ticket-board/ticket-board.sock$' "$UNIT_DIR/service.unit" || {
     echo "FAIL: unit did not export PGU_TICKET_BOARD_SOCKET" >&2
     exit 1
 }

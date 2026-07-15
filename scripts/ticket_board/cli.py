@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import threading
 import webbrowser
 from pathlib import Path
@@ -15,7 +16,7 @@ from .app import (
 )
 from .server import CallerRegistry, DirectorNotifier, TicketBoardEventHub, TicketBoardServer, TicketBoardUnixServer
 
-DEFAULT_UNIX_SOCKET = "/tmp/pgu-ticket-board.sock"
+DEFAULT_UNIX_SOCKET = "/run/pgu-ticket-board/ticket-board.sock"
 
 
 def parse_args() -> argparse.Namespace:
@@ -56,15 +57,19 @@ def run_server(args: argparse.Namespace) -> int:
     unix_server = None
     unix_thread = None
     if args.unix_socket:
-        unix_server = TicketBoardUnixServer(
-            Path(args.unix_socket),
-            app,
-            events=event_hub,
-            director_notifier=director_notifier,
-            caller_registry=caller_registry,
-        )
-        unix_thread = threading.Thread(target=unix_server.serve_forever, name="ticket-board-unix-socket", daemon=True)
-        unix_thread.start()
+        try:
+            unix_server = TicketBoardUnixServer(
+                Path(args.unix_socket),
+                app,
+                events=event_hub,
+                director_notifier=director_notifier,
+                caller_registry=caller_registry,
+            )
+        except OSError as exc:
+            print(f"[ticket-board] WARNING: local write socket disabled at {args.unix_socket}: {exc}", file=sys.stderr)
+        else:
+            unix_thread = threading.Thread(target=unix_server.serve_forever, name="ticket-board-unix-socket", daemon=True)
+            unix_thread.start()
     host, port = server.server_address[:2]
     url = f"http://{host}:{port}/"
     print(f"[ticket-board] backend: {app.store_backend}")

@@ -274,6 +274,31 @@ def assert_auto_socket_connect_failure_falls_back_to_tcp(base_url: str, socket_p
         socket_path.unlink(missing_ok=True)
 
 
+def assert_socket_discovery_prefers_runtime_then_legacy(root: Path) -> None:
+    runtime_socket = root / "run" / "pgu-ticket-board" / "ticket-board.sock"
+    legacy_socket = root / "pgu-ticket-board.sock"
+    runtime_socket.parent.mkdir(parents=True)
+    old_default_url = write_client_module.DEFAULT_BOARD_URL
+    old_default_socket = write_client_module.DEFAULT_BOARD_SOCKET
+    old_legacy_socket = write_client_module.LEGACY_BOARD_SOCKET
+    old_env_socket = os.environ.pop("PGU_TICKET_BOARD_SOCKET", None)
+    try:
+        write_client_module.DEFAULT_BOARD_URL = "http://127.0.0.1:8770"
+        write_client_module.DEFAULT_BOARD_SOCKET = str(runtime_socket)
+        write_client_module.LEGACY_BOARD_SOCKET = str(legacy_socket)
+        assert TicketBoardWriteClient("http://127.0.0.1:8770", "ops").effective_socket_path is None
+        legacy_socket.touch()
+        assert TicketBoardWriteClient("http://127.0.0.1:8770", "ops").effective_socket_path == str(legacy_socket)
+        runtime_socket.touch()
+        assert TicketBoardWriteClient("http://127.0.0.1:8770", "ops").effective_socket_path == str(runtime_socket)
+    finally:
+        write_client_module.DEFAULT_BOARD_URL = old_default_url
+        write_client_module.DEFAULT_BOARD_SOCKET = old_default_socket
+        write_client_module.LEGACY_BOARD_SOCKET = old_legacy_socket
+        if old_env_socket is not None:
+            os.environ["PGU_TICKET_BOARD_SOCKET"] = old_env_socket
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="ticket-board-write-client.") as tmpdir:
         root = Path(tmpdir)
@@ -285,6 +310,7 @@ def main() -> int:
             base_url = f"http://127.0.0.1:{server.server_port}"
             exercise_client(base_url, repo, pushed_hash)
             assert_submit_rejects_unpushed_commit(base_url, repo, local_only_hash, server.requests)
+            assert_socket_discovery_prefers_runtime_then_legacy(root)
             assert_auto_socket_connect_failure_falls_back_to_tcp(base_url, root / "blocked.sock")
             assert_action_requests(server.requests)
             assert ("/api/tickets/PGU-120/actions/start_work", "ops") in request_pairs(server.requests)

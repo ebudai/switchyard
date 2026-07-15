@@ -35,7 +35,7 @@ Pane write API:
   `audit`, `perf`, or `research`. Without the token, HTTP writes are rejected;
   read-only HTTP requests remain available.
 - Local pane tooling should write through the Unix-domain socket at
-  `/tmp/pgu-ticket-board.sock` when it exists. The write client registers the
+  `/run/pgu-ticket-board/ticket-board.sock` when it exists. The write client registers the
   auto-resolved pane role on `/api/register-caller`; the board derives the
   caller role from the socket connection's OS-verified `SO_PEERCRED` PID and
   ignores `X-PGU-Caller-Role` for socket writes.

@@ -7,6 +7,7 @@ import logging
 import mimetypes
 import os
 import queue
+import secrets
 import socket
 import socketserver
 import struct
@@ -28,6 +29,7 @@ DIRECTOR_TARGET = "pgu-director:0.0"
 DIRECTOR_NOTIFICATION_BATCH_WINDOW_SECONDS = 0.35
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CALLER_ROLE_HEADER = "X-PGU-Caller-Role"
+WRITE_TOKEN_HEADER = "X-PGU-Write-Token"
 SO_PEERCRED_FORMAT = "3i"
 PANE_SOCKET_MODE = 0o666
 IMPLEMENTER_ROLES = {"main", "app", "ops", "perf", "research"}
@@ -352,6 +354,10 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
     def caller_registry(self) -> CallerRegistry | None:
         return getattr(self.server, "caller_registry", None)
 
+    @property
+    def write_token(self) -> str:
+        return self.server.write_token  # type: ignore[attr-defined]
+
     def send_no_cache_headers(self) -> None:
         self.send_header("Cache-Control", "no-cache")
 
@@ -390,6 +396,13 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         if role not in CALLER_ROLES:
             raise ValueError(f"invalid caller role: {raw}")
         return role
+
+    def require_http_write_token(self) -> None:
+        if self.caller_registry is not None:
+            return
+        raw = self.headers.get(WRITE_TOKEN_HEADER, "")
+        if not raw or not secrets.compare_digest(raw, self.write_token):
+            raise PermissionError(f"missing or invalid {WRITE_TOKEN_HEADER}")
 
     def handle_register_caller(self, payload: dict[str, object]) -> None:
         if self.caller_registry is None or self._local_peer_credentials is None:
@@ -706,7 +719,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/":
-            body = HTML.encode("utf-8")
+            token_script = f"  <script>window.PGU_TICKET_BOARD_WRITE_TOKEN = {json.dumps(self.write_token)};</script>\n"
+            body = HTML.replace("  <script>\n", token_script + "  <script>\n", 1).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_no_cache_headers()
@@ -771,6 +785,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
         try:
+            self.require_http_write_token()
             length = int(self.headers.get("Content-Length", "0"))
             if parsed.path == "/api/upload":
                 content_type = self.headers.get("Content-Type", "")
@@ -814,6 +829,7 @@ class TicketBoardServer(ThreadingHTTPServer):
         director_notifier: DirectorNotifier | None = None,
         events: TicketBoardEventHub | None = None,
         caller_registry: CallerRegistry | None = None,
+        write_token: str | None = None,
     ) -> None:
         self.app = app
         self.events = events or TicketBoardEventHub(app)
@@ -821,6 +837,7 @@ class TicketBoardServer(ThreadingHTTPServer):
         self.director_notifier = director_notifier or DirectorNotifier()
         self._owns_director_notifier = director_notifier is None
         self.caller_registry = caller_registry
+        self.write_token = write_token or secrets.token_urlsafe(32)
         super().__init__(address, TicketBoardHandler)
 
     def server_close(self) -> None:
@@ -851,6 +868,7 @@ class TicketBoardUnixServer(ThreadingUnixHTTPServer):
         self.events = events
         self.director_notifier = director_notifier
         self.caller_registry = caller_registry or CallerRegistry()
+        self.write_token = ""
         socket_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             socket_path.unlink()

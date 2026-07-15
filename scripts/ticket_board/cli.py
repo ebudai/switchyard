@@ -15,6 +15,8 @@ from .app import (
 )
 from .server import CallerRegistry, DirectorNotifier, TicketBoardEventHub, TicketBoardServer, TicketBoardUnixServer
 
+DEFAULT_UNIX_SOCKET = "/tmp/pgu-ticket-board.sock"
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Serve a lightweight local "Jira but easier" ticket board for PGU.')
@@ -29,8 +31,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=8770, help="Bind port. Default: 8770")
     parser.add_argument(
         "--unix-socket",
-        default="",
-        help="Optional Unix-domain socket path for local pane writes with SO_PEERCRED caller identity.",
+        default=DEFAULT_UNIX_SOCKET,
+        help=f"Unix-domain socket path for local pane writes with SO_PEERCRED caller identity. Default: {DEFAULT_UNIX_SOCKET}.",
     )
     parser.add_argument("--open-browser", action="store_true", help="Open the board URL automatically.")
     return parser.parse_args()

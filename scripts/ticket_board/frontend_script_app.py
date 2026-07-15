@@ -1,9 +1,13 @@
 """Board frontend API, event, and boot JavaScript."""
 
 SCRIPT_APP = """    async function uploadImageBlob(blob) {
+      const headers = { 'Content-Type': blob.type || 'image/png' };
+      if (window.PGU_TICKET_BOARD_WRITE_TOKEN) {
+        headers['X-PGU-Write-Token'] = window.PGU_TICKET_BOARD_WRITE_TOKEN;
+      }
       const response = await fetch('/api/upload', {
         method: 'POST',
-        headers: { 'Content-Type': blob.type || 'image/png' },
+        headers,
         body: blob,
       });
       if (!response.ok) {
@@ -150,6 +154,9 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
 
     function ticketWriteHeaders(callerRole = null) {
       const headers = { 'Content-Type': 'application/json' };
+      if (window.PGU_TICKET_BOARD_WRITE_TOKEN) {
+        headers['X-PGU-Write-Token'] = window.PGU_TICKET_BOARD_WRITE_TOKEN;
+      }
       const normalizedCaller = callerRole ? callerRole.trim().toLowerCase() : '';
       if (normalizedCaller) {
         headers['X-PGU-Caller-Role'] = normalizedCaller;

@@ -32,6 +32,14 @@ exit 0
 EOF
 chmod +x "$MOCKDIR/systemctl"
 
+cat >"$MOCKDIR/systemd-run" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'systemd-run %s\n' "$*" >>"$TICKET_BOARD_SERVICE_TEST_LOG"
+exit 0
+EOF
+chmod +x "$MOCKDIR/systemd-run"
+
 cat >"$MOCKDIR/loginctl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import os
 import sys
@@ -251,7 +252,13 @@ def assert_auto_socket_connect_failure_falls_back_to_tcp(base_url: str, socket_p
         write_client_module.DEFAULT_BOARD_URL = base_url
         write_client_module.DEFAULT_BOARD_SOCKET = str(socket_path)
         client = TicketBoardWriteClient(base_url, "ops")
-        assert client.start_work("PGU-120")["ticket"]["state"] == "in_progress"
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            assert client.start_work("PGU-120")["ticket"]["state"] == "in_progress"
+        warning = stderr.getvalue()
+        assert "WARNING: ticket board Unix socket" in warning, warning
+        assert str(socket_path) in warning, warning
+        assert "falling back to TCP" in warning, warning
         explicit_client = TicketBoardWriteClient(base_url, "ops", socket_path=str(socket_path))
         try:
             explicit_client.start_work("PGU-120")

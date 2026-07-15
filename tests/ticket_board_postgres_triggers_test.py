@@ -2016,7 +2016,7 @@ WHERE ticket_id NOT IN ('PGU-20', 'PGU-21');
             )
             nudges = nudge_proc.stdout.strip()
             assert int(nudges) >= 1, nudges
-            assert "WARNING:  wedged-pane nudge backstop fired for PGU-20 targeting main (" in nudge_proc.stderr
+            assert "WARNING:  wedged-pane nudge backstop fired for PGU-20 targeting director (" in nudge_proc.stderr
             assert "s since transition)" in nudge_proc.stderr
             nudge_state = json.loads(
                 psql(
@@ -2043,7 +2043,7 @@ FROM (
 """,
                 ).stdout
             )
-            assert nudge_queue == {"nudge:main": 1}, nudge_queue
+            assert nudge_queue == {"nudge:director": 1}, nudge_queue
             deduped_nudges = psql(
                 conninfo,
                 "SELECT ticket_board.notify_due_nudges(clock_timestamp() + interval '20 minutes', interval '5 minutes', 3);",
@@ -2063,21 +2063,21 @@ FROM (
 """,
                 ).stdout
             )
-            assert deduped_queue == {"nudge:main": 1}, deduped_queue
+            assert deduped_queue == {"nudge:director": 1}, deduped_queue
             inspection_nudge = json.loads(
                 psql(
                     conninfo,
                     """
 SELECT jsonb_build_object('target_role', target_role, 'message', message, 'state', payload->>'state')::text
 FROM ticket_board.ticket_notification_queue
-WHERE ticket_id = 'PGU-21' AND kind = 'nudge' AND target_role = 'inspector'
+WHERE ticket_id = 'PGU-21' AND kind = 'nudge' AND target_role = 'director'
 ORDER BY id DESC
 LIMIT 1;
 """,
                 ).stdout
             )
             assert inspection_nudge == {
-                "target_role": "inspector",
+                "target_role": "director",
                 "message": "NUDGE PGU-21 -- Inspection notify ready for inspection",
                 "state": "inspection",
             }, inspection_nudge
@@ -2631,7 +2631,7 @@ FROM (
             assert idle_stall_nudges == {
                 "PGU-3081": {
                     "state": "in_progress",
-                    "queued": {"nudge:research": 1},
+                    "queued": {"nudge:director": 1},
                     "last_nudged": True,
                     "nudge_count": 1,
                 },
@@ -2649,7 +2649,7 @@ FROM (
                 },
                 "PGU-3084": {
                     "state": "inspection",
-                    "queued": {"escalation:director": 1},
+                    "queued": {"nudge:director": 1},
                     "last_nudged": True,
                     "nudge_count": 3,
                 },
@@ -2667,7 +2667,7 @@ FROM (
                 },
                 "PGU-4532": {
                     "state": "audit",
-                    "queued": {"nudge:audit": 1},
+                    "queued": {"nudge:director": 1},
                     "last_nudged": True,
                     "nudge_count": 1,
                 },
@@ -2723,7 +2723,7 @@ WHERE ns.ticket_id = 'PGU-4531';
             assert resumed_after_role_activity == {
                 "awaiting_role": "",
                 "awaiting_since_cleared": True,
-                "queued": {"nudge:app": 1},
+                "queued": {"nudge:director": 1},
                 "last_nudged": True,
                 "nudge_count": 1,
             }, resumed_after_role_activity
@@ -2754,7 +2754,7 @@ SELECT jsonb_build_object(
         FROM ticket_board.ticket_notification_queue q
         WHERE q.ticket_id = t.id
           AND q.kind = 'nudge'
-          AND q.target_role = 'main'
+          AND q.target_role = 'director'
     ),
     'last_nudged', ns.last_nudged_at IS NOT NULL,
     'nudge_count', ns.nudge_count

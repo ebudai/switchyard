@@ -2331,7 +2331,7 @@ DECLARE
     payload jsonb;
 BEGIN
     FOR candidate IN
-        SELECT DISTINCT ON (candidates.target_role)
+        SELECT DISTINCT ON (candidates.owner_role)
             candidates.id,
             candidates.title,
             candidates.state,
@@ -2342,6 +2342,7 @@ BEGIN
             candidates.last_nudged_at,
             candidates.nudge_count,
             candidates.dedupe_key,
+            candidates.owner_role,
             candidates.target_role
         FROM (
             SELECT
@@ -2354,8 +2355,9 @@ BEGIN
                 ns.entered_current_state_at,
                 ns.last_nudged_at,
                 ns.nudge_count,
-                'nudge:' || t.id || ':' || ticket_board.nudge_target_role(t.state, t.assignee) AS dedupe_key,
-                ticket_board.nudge_target_role(t.state, t.assignee) AS target_role,
+                'nudge:' || t.id || ':director' AS dedupe_key,
+                ticket_board.nudge_target_role(t.state, t.assignee) AS owner_role,
+                'director' AS target_role,
                 CASE t.state
                     WHEN 'inspection' THEN 2
                     WHEN 'audit' THEN 4
@@ -2387,6 +2389,12 @@ BEGIN
                   p_now,
                   p_cadence
               )
+              AND NOT ticket_board.notification_delivery_in_backoff(
+                  t.id,
+                  'director',
+                  p_now,
+                  p_cadence
+              )
 
             UNION ALL
 
@@ -2401,6 +2409,7 @@ BEGIN
                 ns.last_nudged_at,
                 ns.nudge_count,
                 'nudge:' || t.id || ':director' AS dedupe_key,
+                'director' AS owner_role,
                 'director' AS target_role,
                 CASE t.state
                     WHEN 'analysis' THEN 0
@@ -2439,7 +2448,7 @@ BEGIN
               )
               AND NOT ticket_board.notification_delivery_in_backoff(t.id, 'director', p_now, p_cadence)
         ) AS candidates
-        ORDER BY candidates.target_role,
+        ORDER BY candidates.owner_role,
             candidates.priority,
             candidates.ticket_number
     LOOP
@@ -2522,7 +2531,7 @@ BEGIN
     END IF;
 
     FOR candidate IN
-        SELECT DISTINCT ON (candidates.target_role)
+        SELECT DISTINCT ON (candidates.owner_role)
             candidates.id,
             candidates.title,
             candidates.state,
@@ -2534,6 +2543,7 @@ BEGIN
             candidates.last_nudged_at,
             candidates.nudge_count,
             candidates.dedupe_key,
+            candidates.owner_role,
             candidates.target_role
         FROM (
             SELECT
@@ -2547,8 +2557,9 @@ BEGIN
                 (p_idle_since_by_role ->> ticket_board.nudge_target_role(t.state, t.assignee))::timestamptz AS idle_since_at,
                 ns.last_nudged_at,
                 ns.nudge_count,
-                'nudge:' || t.id || ':' || ticket_board.nudge_target_role(t.state, t.assignee) AS dedupe_key,
-                ticket_board.nudge_target_role(t.state, t.assignee) AS target_role,
+                'nudge:' || t.id || ':director' AS dedupe_key,
+                ticket_board.nudge_target_role(t.state, t.assignee) AS owner_role,
+                'director' AS target_role,
                 CASE t.state
                     WHEN 'inspection' THEN 2
                     WHEN 'audit' THEN 4
@@ -2583,6 +2594,12 @@ BEGIN
                   p_now,
                   p_cadence
               )
+              AND NOT ticket_board.notification_delivery_in_backoff(
+                  t.id,
+                  'director',
+                  p_now,
+                  p_cadence
+              )
 
             UNION ALL
 
@@ -2598,6 +2615,7 @@ BEGIN
                 ns.last_nudged_at,
                 ns.nudge_count,
                 'nudge:' || t.id || ':director' AS dedupe_key,
+                'director' AS owner_role,
                 'director' AS target_role,
                 CASE t.state
                     WHEN 'analysis' THEN 0
@@ -2636,7 +2654,7 @@ BEGIN
               )
               AND NOT ticket_board.notification_delivery_in_backoff(t.id, 'director', p_now, p_cadence)
         ) AS candidates
-        ORDER BY candidates.target_role,
+        ORDER BY candidates.owner_role,
             candidates.priority,
             candidates.ticket_number
     LOOP

@@ -137,6 +137,7 @@ Notes:
 - Implementer focus is reserved from `in_progress` through review (`inspection`, `audit`, UAT, and director review); finishing/cancelling/parking the reserved ticket auto-activates that implementer's oldest unblocked queued backlog ticket
 - Director deferral parks the current ticket as `backlog` with `parked: true`; queued implementer backlog (`parked: false`) is intentionally excluded from idle-stall nudges until it becomes active
 - When a ticket is legitimately waiting on another pane, use `scripts/ticket-board-write await-role PGU-N --role perf|inspector|audit|...`; active awaiting markers suppress stall nudges, clear when that role acts on the ticket, and expire after the fallback timeout
+- Discretionary idle-stall/backstop nudges route to the director as coordination signals; primary transition/work-delivery notifications still route to the responsible pane
 - For new shell-created tickets, use `scripts/directorctl ticket-create`; it writes through the board action API.
 - Do not hand-write `PGU-N.json` files. The retired JSON store is not a board backend.
 

@@ -9,7 +9,7 @@ readonly BOARD_CURRENT_LINK="$BOARD_ROOT/current"
 readonly BOARD_SCRIPT="${BOARD_SCRIPT:-$BOARD_CURRENT_LINK/scripts/ticket-board.py}"
 readonly BOARD_HOST="${BOARD_HOST:-127.0.0.1}"
 readonly BOARD_PORT="${BOARD_PORT:-8770}"
-readonly BOARD_UNIX_SOCKET="${BOARD_UNIX_SOCKET:-/tmp/pgu-ticket-board.sock}"
+readonly BOARD_UNIX_SOCKET="${BOARD_UNIX_SOCKET:-/run/pgu-ticket-board/ticket-board.sock}"
 readonly FRAME_ROOT="${FRAME_ROOT:-/tmp/pgu-frames}"
 readonly LOG_PATH="${LOG_PATH:-/tmp/pgu-ticket-board.log}"
 readonly UNIT_DIR="${UNIT_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}"
@@ -302,6 +302,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=$BOARD_CURRENT_LINK
+RuntimeDirectory=pgu-ticket-board
 ExecStartPre=/bin/mkdir -p $FRAME_ROOT
 ExecStartPre=/bin/chmod 1777 $FRAME_ROOT
 ExecStart=/usr/bin/python3 $BOARD_SCRIPT --host $BOARD_HOST --port $BOARD_PORT --unix-socket $BOARD_UNIX_SOCKET --frames $FRAME_ROOT

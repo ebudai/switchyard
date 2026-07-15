@@ -54,6 +54,18 @@ grep -q '^User=boardsvc$' "$UNIT" || {
     echo "FAIL: proposed unit does not run as boardsvc" >&2
     exit 1
 }
+grep -q '^RuntimeDirectory=pgu-ticket-board$' "$UNIT" || {
+    echo "FAIL: proposed unit does not request a service-owned runtime directory" >&2
+    exit 1
+}
+grep -q -- '--unix-socket /run/pgu-ticket-board/ticket-board.sock' "$UNIT" || {
+    echo "FAIL: proposed unit does not bind the pane socket in the runtime directory" >&2
+    exit 1
+}
+grep -q '^Environment=PGU_TICKET_BOARD_SOCKET=/run/pgu-ticket-board/ticket-board.sock$' "$UNIT" || {
+    echo "FAIL: proposed unit does not export the runtime socket path" >&2
+    exit 1
+}
 grep -q '^Environment=PGUSER=ticket_board_service$' "$UNIT" || {
     echo "FAIL: proposed unit does not select ticket_board_service" >&2
     exit 1

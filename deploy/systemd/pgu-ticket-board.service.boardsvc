@@ -7,7 +7,8 @@ Wants=postgresql.service
 Type=simple
 User=boardsvc
 WorkingDirectory=/home/agent/pgu-ticketboard-live/current
-ExecStart=/usr/bin/python3 /home/agent/pgu-ticketboard-live/current/scripts/ticket-board.py --host 127.0.0.1 --port 8770 --frames /tmp/pgu-frames --assets /home/agent/.claude/pgu-tickets-assets
+RuntimeDirectory=pgu-ticket-board
+ExecStart=/usr/bin/python3 /home/agent/pgu-ticketboard-live/current/scripts/ticket-board.py --host 127.0.0.1 --port 8770 --unix-socket /run/pgu-ticket-board/ticket-board.sock --frames /tmp/pgu-frames --assets /home/agent/.claude/pgu-tickets-assets
 Restart=on-failure
 RestartSec=2
 Environment=PYTHONUNBUFFERED=1
@@ -15,6 +16,7 @@ Environment=HOME=/home/agent
 Environment=PGHOST=/var/run/postgresql
 Environment=PGDATABASE=pgu
 Environment=PGUSER=ticket_board_service
+Environment=PGU_TICKET_BOARD_SOCKET=/run/pgu-ticket-board/ticket-board.sock
 Environment=TICKET_BOARD_DATABASE_URL=postgresql:///pgu?host=/var/run/postgresql&user=ticket_board_service
 NoNewPrivileges=true
 ProtectSystem=full

@@ -66,7 +66,7 @@ python3 -m venv --system-site-packages /tmp/pgu-ticket-board-venv
 The service runs:
 
 - working directory: `/home/agent/pgu-ticketboard-live/current`
-- command: `python3 /home/agent/pgu-ticketboard-live/current/scripts/ticket-board.py --host 127.0.0.1 --port 8770 --unix-socket /tmp/pgu-ticket-board.sock`
+- command: `python3 /home/agent/pgu-ticketboard-live/current/scripts/ticket-board.py --host 127.0.0.1 --port 8770 --unix-socket /run/pgu-ticket-board/ticket-board.sock`
 - logs: `/tmp/pgu-ticket-board.log`
 - default DB URL: `postgresql:///pgu?host=/var/run/postgresql&user=ticket_board_service`
 

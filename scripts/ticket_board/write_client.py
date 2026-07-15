@@ -17,7 +17,8 @@ from urllib import parse, request
 
 CALLER_ROLE_HEADER = "X-PGU-Caller-Role"
 DEFAULT_BOARD_URL = os.environ.get("PGU_TICKET_BOARD_URL", "http://127.0.0.1:8770")
-DEFAULT_BOARD_SOCKET = os.environ.get("PGU_TICKET_BOARD_SOCKET", "/tmp/pgu-ticket-board.sock")
+DEFAULT_BOARD_SOCKET = os.environ.get("PGU_TICKET_BOARD_SOCKET", "/run/pgu-ticket-board/ticket-board.sock")
+LEGACY_BOARD_SOCKET = "/tmp/pgu-ticket-board.sock"
 DEFAULT_CALLER_ROLE = "director"
 PANE_SESSION_CALLER_ROLES = {
     "pgu-director": "director",
@@ -69,6 +70,8 @@ def _default_socket_path(board_url: str, environ: Mapping[str, str] = os.environ
         return None
     if Path(DEFAULT_BOARD_SOCKET).exists():
         return DEFAULT_BOARD_SOCKET
+    if DEFAULT_BOARD_SOCKET != LEGACY_BOARD_SOCKET and Path(LEGACY_BOARD_SOCKET).exists():
+        return LEGACY_BOARD_SOCKET
     return None
 
 

@@ -324,6 +324,13 @@ class TicketBoardWriteClient:
     def request_commit_exempt(self, ticket_id: str, *, reason: str, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "request_commit_exempt", {"reason": reason}, caller_role=caller_role)
 
+    def start_task(self, ticket_id: str, *, text: str = "", caller_role: str | None = None) -> dict[str, Any]:
+        payload = {"text": text} if text else None
+        return self._ticket_action(ticket_id, "start_task", payload, caller_role=caller_role)
+
+    def complete_task(self, ticket_id: str, *, text: str, caller_role: str | None = None) -> dict[str, Any]:
+        return self._ticket_action(ticket_id, "complete_task", {"text": text}, caller_role=caller_role)
+
     def await_role(self, ticket_id: str, *, role: str, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "await_role", {"role": role}, caller_role=caller_role)
 
@@ -460,6 +467,14 @@ def _build_parser() -> argparse.ArgumentParser:
         sub = subparsers.add_parser(name)
         sub.add_argument("ticket_id")
 
+    start_task = subparsers.add_parser("start-task")
+    start_task.add_argument("ticket_id")
+    start_task.add_argument("--text", default="")
+
+    complete_task = subparsers.add_parser("complete-task")
+    complete_task.add_argument("ticket_id")
+    complete_task.add_argument("--text", required=True)
+
     audit_sign = subparsers.add_parser("audit-sign-off")
     audit_sign.add_argument("ticket_id")
     audit_sign.add_argument("--text", required=True)
@@ -541,6 +556,10 @@ def main(argv: list[str] | None = None) -> int:
             response = client.submit_to_audit(args.ticket_id, commit_hash=args.commit_hash)
         elif command == "request_commit_exempt":
             response = client.request_commit_exempt(args.ticket_id, reason=args.reason)
+        elif command == "start_task":
+            response = client.start_task(args.ticket_id, text=args.text)
+        elif command == "complete_task":
+            response = client.complete_task(args.ticket_id, text=args.text)
         elif command == "await_role":
             response = client.await_role(args.ticket_id, role=args.role)
         elif command == "clear_awaiting_role":

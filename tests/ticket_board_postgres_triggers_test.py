@@ -222,6 +222,8 @@ def main() -> int:
 GRANT EXECUTE ON FUNCTION ticket_board.route(text, text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.start_work(text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.submit_to_audit(text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.start_task(text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.complete_task(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.audit_sign_off(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.inspector_sign_off(text) TO ticket_board_service;
 """,
@@ -886,6 +888,82 @@ WHERE id = 'PGU-84';
                 "inspector_signoff": True,
                 "commit_hash": "abcdef4",
             }, reinspect_signed
+
+            insert_ticket(
+                conninfo,
+                "PGU-85",
+                title="Inspector utility task",
+                assignee="inspector",
+                state="backlog",
+                parked=True,
+            )
+            service_call(conninfo, "inspector", "SELECT ticket_board.start_task('PGU-85', 'Starting utility work.');")
+            utility_started = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'state', t.state,
+    'parked', t.parked,
+    'comment', (SELECT text FROM ticket_board.ticket_comments WHERE ticket_id = t.id ORDER BY position DESC LIMIT 1)
+)::text
+FROM ticket_board.tickets t
+WHERE id = 'PGU-85';
+""",
+                ).stdout
+            )
+            assert utility_started == {
+                "state": "analysis",
+                "parked": False,
+                "comment": "Starting utility work.",
+            }, utility_started
+            assert_error(
+                conninfo,
+                """
+SET ROLE ticket_board_service;
+SELECT set_config('ticket_board.caller_role', 'audit', false);
+SELECT ticket_board.complete_task('PGU-85', 'Wrong assignee completion.');
+""",
+                "audit cannot call complete_task for ticket assigned to inspector",
+            )
+            service_call(conninfo, "inspector", "SELECT ticket_board.complete_task('PGU-85', 'Inspector task complete.');")
+            utility_done = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'state', t.state,
+    'commit_exempt', t.commit_exempt,
+    'commit_hash', t.commit_hash,
+    'comment', (SELECT text FROM ticket_board.ticket_comments WHERE ticket_id = t.id ORDER BY position DESC LIMIT 1)
+)::text
+FROM ticket_board.tickets t
+WHERE id = 'PGU-85';
+""",
+                ).stdout
+            )
+            assert utility_done == {
+                "state": "done",
+                "commit_exempt": True,
+                "commit_hash": "",
+                "comment": "Inspector task complete.",
+            }, utility_done
+
+            insert_ticket(conninfo, "PGU-86", title="Direct done still blocked", assignee="inspector", state="analysis")
+            assert_error(
+                conninfo,
+                "UPDATE ticket_board.tickets SET commit_exempt = true, state = 'done' WHERE id = 'PGU-86';",
+                "illegal state transition: analysis -> done",
+            )
+            assert_error(
+                conninfo,
+                """
+SET ROLE ticket_board_service;
+SELECT set_config('ticket_board.caller_role', 'inspector', false);
+SELECT ticket_board.complete_task('PGU-84', 'Trying to skip audit.');
+""",
+                "complete_task requires a backlog or analysis ticket",
+            )
             service_call(conninfo, "audit", "SELECT ticket_board.audit_sign_off('PGU-84', 'Audit verified after reinspection.');")
             psql(conninfo, "UPDATE ticket_board.tickets SET eric_signoff = true, state = 'director_review' WHERE id = 'PGU-84';")
             psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-84';")

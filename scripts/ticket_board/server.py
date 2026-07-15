@@ -32,6 +32,7 @@ SO_PEERCRED_FORMAT = "3i"
 PANE_SOCKET_MODE = 0o666
 IMPLEMENTER_ROLES = {"main", "app", "ops", "perf", "research"}
 CALLER_ROLES = IMPLEMENTER_ROLES | {"director", "eric", "audit", "inspector"}
+TASK_ROLES = IMPLEMENTER_ROLES | {"director", "audit", "inspector"}
 OPERATION_ALLOWED_ROLES = {
     "create_ticket": {"director", "eric"},
     "file_bug": IMPLEMENTER_ROLES | {"audit"},
@@ -39,6 +40,8 @@ OPERATION_ALLOWED_ROLES = {
     "start_work": IMPLEMENTER_ROLES,
     "submit_to_audit": IMPLEMENTER_ROLES,
     "request_commit_exempt": IMPLEMENTER_ROLES,
+    "start_task": TASK_ROLES,
+    "complete_task": TASK_ROLES,
     "await_role": CALLER_ROLES,
     "clear_awaiting_role": CALLER_ROLES,
     "inspector_sign_off": {"inspector"},
@@ -406,9 +409,9 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             raise ValueError(f"unknown ticket operation: {operation}")
         if caller_role not in allowed:
             raise PermissionError(f"{caller_role} cannot call {operation}")
-        if operation in {"start_work", "submit_to_audit", "request_commit_exempt"} and ticket_id is not None:
+        if operation in {"start_work", "submit_to_audit", "request_commit_exempt", "start_task", "complete_task"} and ticket_id is not None:
             ticket = self.app.get_ticket(ticket_id)
-            if str(ticket.get("assignee", "")).strip().lower() != caller_role:
+            if caller_role != "director" and str(ticket.get("assignee", "")).strip().lower() != caller_role:
                 raise PermissionError(f"{caller_role} cannot call {operation} for ticket assigned to {ticket.get('assignee')}")
 
     def create_ticket_from_payload(self, payload: dict[str, object], caller_role: str | None = None) -> dict[str, object]:
@@ -593,6 +596,16 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             patch = {"state": "audit", "commit_hash": str(payload.get("commit_hash", ""))}
         elif operation == "request_commit_exempt":
             updated = self.app.request_commit_exempt(ticket_id, self.action_comment_text(payload), caller_role=caller)
+            self.events.notify_change(self.app.store_signature())
+            self.send_json({"ticket": updated})
+            return
+        elif operation == "start_task":
+            updated = self.app.start_task(ticket_id, self.action_comment_text(payload), caller_role=caller)
+            self.events.notify_change(self.app.store_signature())
+            self.send_json({"ticket": updated})
+            return
+        elif operation == "complete_task":
+            updated = self.app.complete_task(ticket_id, self.action_comment_text(payload), caller_role=caller)
             self.events.notify_change(self.app.store_signature())
             self.send_json({"ticket": updated})
             return

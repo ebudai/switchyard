@@ -411,6 +411,7 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
         needs_inspection=False,
     )
     seed_ticket("PGU-126", title="Invalid implementation assignee", state="analysis")
+    seed_ticket("PGU-127", title="Inspector utility task", state="backlog", assignee="inspector", parked=True)
     seed_ticket("PGU-109", title="Manual", state="analysis")
     seed_ticket("PGU-110", title="Blocker", state="analysis")
     seed_ticket("PGU-111", title="Blocked target", state="analysis")
@@ -598,8 +599,49 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
 
     wrong_assignee = post_json(base_url, "/api/tickets/PGU-101/actions/start_work", {}, caller="app", expect=403)
     assert "app cannot call start_work for ticket assigned to ops" in str(wrong_assignee), wrong_assignee
+    utility_wrong_assignee = post_json(
+        base_url,
+        "/api/tickets/PGU-127/actions/start_task",
+        {"text": "Wrong pane start."},
+        caller="audit",
+        expect=403,
+    )
+    assert "audit cannot call start_task for ticket assigned to inspector" in str(utility_wrong_assignee), utility_wrong_assignee
+    utility_started = post_json(
+        base_url,
+        "/api/tickets/PGU-127/actions/start_task",
+        {"text": "Starting utility task."},
+        caller="inspector",
+    )
+    assert utility_started["ticket"]["state"] == "analysis", utility_started  # type: ignore[index]
+    assert utility_started["ticket"]["comments"][-1]["text"] == "Starting utility task.", utility_started  # type: ignore[index]
+    empty_utility_complete = post_json(
+        base_url,
+        "/api/tickets/PGU-127/actions/complete_task",
+        {"text": "   "},
+        caller="inspector",
+        expect=400,
+    )
+    assert "completion_note must be a non-empty string" in str(empty_utility_complete), empty_utility_complete
+    utility_completed = post_json(
+        base_url,
+        "/api/tickets/PGU-127/actions/complete_task",
+        {"text": "Utility task complete."},
+        caller="inspector",
+    )
+    assert utility_completed["ticket"]["state"] == "done", utility_completed  # type: ignore[index]
+    assert utility_completed["ticket"]["commit_exempt"] is True, utility_completed  # type: ignore[index]
+    assert utility_completed["ticket"]["comments"][-1]["text"] == "Utility task complete.", utility_completed  # type: ignore[index]
     started = post_json(base_url, "/api/tickets/PGU-101/actions/start_work", {}, caller="ops")
     assert started["ticket"]["state"] == "in_progress", started  # type: ignore[index]
+    in_progress_utility_complete = post_json(
+        base_url,
+        "/api/tickets/PGU-101/actions/complete_task",
+        {"text": "Trying to skip audit."},
+        caller="ops",
+        expect=400,
+    )
+    assert "complete_task requires a backlog or analysis ticket" in str(in_progress_utility_complete), in_progress_utility_complete
     submitted = post_json(base_url, "/api/tickets/PGU-101/actions/submit_to_audit", {"commit_hash": commit_hash}, caller="ops")
     assert submitted["ticket"]["state"] == "audit", submitted  # type: ignore[index]
     assert submitted["ticket"]["commit_hash"] == commit_hash, submitted  # type: ignore[index]

@@ -57,6 +57,14 @@ class RecordingHandler(BaseHTTPRequestHandler):
             ticket["state"] = "analysis"
             ticket["assignee"] = "unassigned"
             ticket["comments"] = [{"who": caller, "text": f"Commit exemption requested: {payload.get('reason', '')}"}]
+        elif operation == "start_task":
+            ticket["state"] = "analysis"
+            if payload.get("text"):
+                ticket["comments"] = [{"who": caller, "text": payload.get("text", "")}]
+        elif operation == "complete_task":
+            ticket["state"] = "done"
+            ticket["commit_exempt"] = True
+            ticket["comments"] = [{"who": caller, "text": payload.get("text", "")}]
         elif operation == "await_role":
             ticket["awaiting_role"] = payload.get("role", "")
         elif operation == "clear_awaiting_role":
@@ -146,6 +154,8 @@ def assert_action_requests(requests: list[tuple[str, str | None, dict[str, objec
     assert ("/api/tickets/PGU-101/actions/start_work", "ops") in pairs
     assert ("/api/tickets/PGU-101/actions/submit_to_audit", "ops") in pairs
     assert ("/api/tickets/PGU-121/actions/request_commit_exempt", "ops") in pairs
+    assert ("/api/tickets/PGU-124/actions/start_task", "inspector") in pairs
+    assert ("/api/tickets/PGU-124/actions/complete_task", "inspector") in pairs
     assert ("/api/tickets/PGU-123/actions/await_role", "ops") in pairs
     assert ("/api/tickets/PGU-123/actions/clear_awaiting_role", "ops") in pairs
     assert ("/api/tickets/PGU-102/actions/audit_sign_off", "audit") in pairs
@@ -173,6 +183,13 @@ def exercise_client(base_url: str, repo: Path, commit_hash: str) -> None:
         assert requested["ticket"]["state"] == "analysis"
         assert requested["ticket"]["assignee"] == "unassigned"
         assert "No repo change" in requested["ticket"]["comments"][-1]["text"]
+        task_started = client.start_task("PGU-124", text="Starting inspection utility.", caller_role="inspector")
+        assert task_started["ticket"]["state"] == "analysis"
+        assert task_started["ticket"]["comments"][-1]["text"] == "Starting inspection utility."
+        task_completed = client.complete_task("PGU-124", text="Inspection utility complete.", caller_role="inspector")
+        assert task_completed["ticket"]["state"] == "done"
+        assert task_completed["ticket"]["commit_exempt"] is True
+        assert task_completed["ticket"]["comments"][-1]["text"] == "Inspection utility complete."
         assert client.await_role("PGU-123", role="perf", caller_role="ops")["ticket"]["awaiting_role"] == "perf"
         assert client.clear_awaiting_role("PGU-123", caller_role="ops")["ticket"]["awaiting_role"] == ""
         audit_signed = client.audit_sign_off("PGU-102", text="Audit verified.", caller_role="audit")

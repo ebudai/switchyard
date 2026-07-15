@@ -743,6 +743,24 @@ ORDER BY t.ticket_number
                 self._pg_call(conn, "SELECT ticket_board.request_commit_exempt(%s, %s);", (ticket_id, reason))
                 return self._pg_get_ticket(ticket_id, conn)
 
+    def start_task(self, ticket_id: str, note: str = "", *, caller_role: str) -> dict[str, Any]:
+        ticket_id = str(ticket_id).strip().upper()
+        note = self._require_plain_string(note, "note").strip()
+        with self._pg_connect() as conn:
+            with conn.transaction():
+                self._pg_set_caller_role(conn, caller_role)
+                self._pg_call(conn, "SELECT ticket_board.start_task(%s, %s);", (ticket_id, note))
+                return self._pg_get_ticket(ticket_id, conn)
+
+    def complete_task(self, ticket_id: str, completion_note: str, *, caller_role: str) -> dict[str, Any]:
+        ticket_id = str(ticket_id).strip().upper()
+        completion_note = self._require_text(completion_note, "completion_note").strip()
+        with self._pg_connect() as conn:
+            with conn.transaction():
+                self._pg_set_caller_role(conn, caller_role)
+                self._pg_call(conn, "SELECT ticket_board.complete_task(%s, %s);", (ticket_id, completion_note))
+                return self._pg_get_ticket(ticket_id, conn)
+
     def set_awaiting_role(self, ticket_id: str, awaiting_role: str, *, caller_role: str) -> dict[str, Any]:
         ticket_id = str(ticket_id).strip().upper()
         awaiting_role = self._require_text(awaiting_role, "awaiting_role").strip().lower()

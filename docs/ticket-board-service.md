@@ -173,8 +173,8 @@ scripts/ticket-board-service.sh logs
 
 ## Notification Delivery
 
-The old polling `director_watchdog.py` is retired. Ticket notification delivery
-is split between PostgreSQL trigger/cron state and the
+The old polling watchdog path is retired. Ticket notification delivery is split
+between PostgreSQL trigger/cron state and the
 `pgu-ticket-board-notify-listener.service` user service. The listener handles
 real-time `LISTEN` delivery, replay reconciliation after reconnect, and
 NUDGE-message gating against live pane activity.

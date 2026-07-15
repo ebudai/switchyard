@@ -2661,8 +2661,7 @@ BEGIN
         target_role := candidate.target_role;
         IF candidate.nudge_count >= p_escalate_after
            AND candidate.last_nudged_at IS NOT NULL
-           AND candidate.last_activity_at <= candidate.last_nudged_at
-           AND target_role <> 'director' THEN
+           AND candidate.last_activity_at <= candidate.last_nudged_at THEN
             target_role := 'director';
             payload := jsonb_build_object(
                 'kind', 'escalation',

@@ -2649,7 +2649,7 @@ FROM (
                 },
                 "PGU-3084": {
                     "state": "inspection",
-                    "queued": {"nudge:director": 1},
+                    "queued": {"escalation:director": 1},
                     "last_nudged": True,
                     "nudge_count": 3,
                 },

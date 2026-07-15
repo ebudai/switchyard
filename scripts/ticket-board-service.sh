@@ -10,6 +10,15 @@ readonly BOARD_SCRIPT="${BOARD_SCRIPT:-$BOARD_CURRENT_LINK/scripts/ticket-board.
 readonly BOARD_HOST="${BOARD_HOST:-127.0.0.1}"
 readonly BOARD_PORT="${BOARD_PORT:-8770}"
 readonly BOARD_UNIX_SOCKET="${BOARD_UNIX_SOCKET:-/run/pgu-ticket-board/ticket-board.sock}"
+readonly SMOKE_PATH="${BOARD_SMOKE_PATH:-/api/board}"
+readonly SMOKE_TIMEOUT_SECONDS="${BOARD_SMOKE_TIMEOUT_SECONDS:-10}"
+readonly BOARD_CANARY_USER_OVERRIDE="${BOARD_CANARY_USER:-}"
+readonly BOARD_CANARY_USER="${BOARD_CANARY_USER:-boardsvc}"
+readonly BOARD_CANARY_PORT="${BOARD_CANARY_PORT:-}"
+readonly BOARD_CANARY_TIMEOUT_SECONDS="${BOARD_CANARY_TIMEOUT_SECONDS:-$SMOKE_TIMEOUT_SECONDS}"
+readonly BOARD_CANARY_SOCKET="${BOARD_CANARY_SOCKET:-}"
+readonly BOARD_CANARY_UNIT_PREFIX="${BOARD_CANARY_UNIT_PREFIX:-pgu-ticket-board-canary}"
+readonly PYTHON_BIN="${TICKET_BOARD_PYTHON:-/usr/bin/python3}"
 readonly FRAME_ROOT="${FRAME_ROOT:-/tmp/pgu-frames}"
 readonly LOG_PATH="${LOG_PATH:-/tmp/pgu-ticket-board.log}"
 readonly UNIT_DIR="${UNIT_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}"
@@ -21,8 +30,6 @@ readonly BOARD_DATABASE_URL="${TICKET_BOARD_DATABASE_URL:-postgresql:///pgu?host
 readonly BOARD_ADMIN_DATABASE_URL="${TICKET_BOARD_ADMIN_DATABASE_URL:-postgresql:///pgu?host=/var/run/postgresql&user=postgres}"
 readonly RBAC_SQL="${RBAC_SQL:-$BOARD_CURRENT_LINK/scripts/ticket_board/rbac.sql}"
 readonly MIGRATION_RUNNER="${TICKET_BOARD_MIGRATION_RUNNER:-$BOARD_CURRENT_LINK/scripts/ticket-board-migrate}"
-readonly SMOKE_PATH="${BOARD_SMOKE_PATH:-/api/board}"
-readonly SMOKE_TIMEOUT_SECONDS="${BOARD_SMOKE_TIMEOUT_SECONDS:-10}"
 readonly SERVICE_SCOPE="${TICKET_BOARD_SERVICE_SCOPE:-auto}"
 readonly POLKIT_APPROVAL_USER="${TICKET_BOARD_POLKIT_APPROVAL_USER:-eric}"
 readonly POLKIT_TIMEOUT_SECONDS="${TICKET_BOARD_POLKIT_TIMEOUT_SECONDS:-30}"
@@ -226,7 +233,7 @@ maybe_fetch_origin() {
     fi
 }
 
-deploy_export() {
+deploy_export_release() {
     local resolved_ref release_dir tmp_dir
     ensure_source_repo
     maybe_fetch_origin
@@ -240,18 +247,41 @@ deploy_export() {
         git -C "$SOURCE_REPO" archive "$resolved_ref" | tar -x -C "$tmp_dir"
         mv "$tmp_dir" "$release_dir"
     fi
-    ln -sfn "$release_dir" "$BOARD_CURRENT_LINK"
-    printf '%s\n' "$resolved_ref"
+    printf '%s\t%s\n' "$resolved_ref" "$release_dir"
 }
 
-apply_database_migrations() {
+activate_release() {
+    local release_dir="$1"
+    ln -sfn "$release_dir" "$BOARD_CURRENT_LINK"
+}
+
+current_release_dir() {
+    if [[ -L "$BOARD_CURRENT_LINK" || -e "$BOARD_CURRENT_LINK" ]]; then
+        readlink -f "$BOARD_CURRENT_LINK"
+    fi
+}
+
+deploy_export() {
+    local deployed_sha release_dir
+    IFS=$'\t' read -r deployed_sha release_dir < <(deploy_export_release)
+    activate_release "$release_dir"
+    printf '%s\n' "$deployed_sha"
+}
+
+apply_database_migrations_for_release() {
+    local release_dir="$1"
+    local migration_runner="$release_dir/scripts/ticket-board-migrate"
     if [[ "${TICKET_BOARD_SKIP_MIGRATIONS:-}" == "1" ]]; then
         log "skipping ticket-board migrations because TICKET_BOARD_SKIP_MIGRATIONS=1"
         return 0
     fi
-    [[ -x "$MIGRATION_RUNNER" ]] || die "missing executable migration runner after deploy: $MIGRATION_RUNNER"
-    TICKET_BOARD_ADMIN_DATABASE_URL="$BOARD_ADMIN_DATABASE_URL" "$MIGRATION_RUNNER"
-    log "applied ticket-board database migrations using $MIGRATION_RUNNER"
+    [[ -x "$migration_runner" ]] || die "missing executable migration runner after deploy: $migration_runner"
+    TICKET_BOARD_ADMIN_DATABASE_URL="$BOARD_ADMIN_DATABASE_URL" "$migration_runner"
+    log "applied ticket-board database migrations using $migration_runner"
+}
+
+apply_database_migrations() {
+    apply_database_migrations_for_release "$BOARD_CURRENT_LINK"
 }
 
 ensure_database_roles() {
@@ -266,10 +296,10 @@ ensure_database_roles() {
     log "ensured ticket-board database roles using $RBAC_SQL"
 }
 
-smoke_check_http() {
-    local url
-    url="http://$BOARD_HOST:$BOARD_PORT$SMOKE_PATH"
-    python3 - "$url" "$SMOKE_TIMEOUT_SECONDS" <<'PY'
+smoke_check_url() {
+    local url="$1"
+    local timeout_seconds="$2"
+    if python3 - "$url" "$timeout_seconds" <<'PY'
 import sys
 import time
 import urllib.error
@@ -290,7 +320,127 @@ while time.monotonic() < deadline:
 print(f"ticket-board smoke check failed for {url}: {last_error}", file=sys.stderr)
 sys.exit(1)
 PY
-    log "HTTP smoke check passed at $url"
+    then
+        log "HTTP smoke check passed at $url"
+        return 0
+    fi
+    return 1
+}
+
+smoke_check_http() {
+    smoke_check_url "http://$BOARD_HOST:$BOARD_PORT$SMOKE_PATH" "$SMOKE_TIMEOUT_SECONDS"
+}
+
+free_tcp_port() {
+    "$PYTHON_BIN" - <<'PY'
+import socket
+
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+}
+
+start_canary_direct() {
+    local release_dir="$1"
+    local port="$2"
+    local socket_path="$3"
+    local frame_dir="$4"
+    local canary_log="$5"
+    (
+        cd "$release_dir"
+        PYTHONUNBUFFERED=1 \
+        PGU_TICKET_BOARD_SOCKET="$socket_path" \
+        TICKET_BOARD_DATABASE_URL="$BOARD_DATABASE_URL" \
+            "$PYTHON_BIN" "$release_dir/scripts/ticket-board.py" \
+                --host "$BOARD_HOST" \
+                --port "$port" \
+                --unix-socket "$socket_path" \
+                --frames "$frame_dir"
+    ) >"$canary_log" 2>&1 &
+    printf '%s\n' "$!"
+}
+
+stop_canary_direct() {
+    local pid="$1"
+    kill "$pid" >/dev/null 2>&1 || true
+    wait "$pid" >/dev/null 2>&1 || true
+}
+
+start_canary_systemd() {
+    local release_dir="$1"
+    local port="$2"
+    local socket_path="$3"
+    local frame_dir="$4"
+    local unit_name="$5"
+    local canary_user="$6"
+    local session_check_status=0
+    if [[ "$(id -u)" != "0" ]]; then
+        polkit_graphical_session_available "$POLKIT_APPROVAL_USER" || session_check_status=$?
+        if [[ "$session_check_status" == "1" ]]; then
+            die "system service action requires polkit approval from $POLKIT_APPROVAL_USER's active graphical session; run this from that session so the KDE prompt can appear"
+        fi
+    fi
+    systemd-run \
+        --quiet \
+        --collect \
+        --unit "$unit_name" \
+        --uid "$canary_user" \
+        --property "WorkingDirectory=$release_dir" \
+        --setenv "PYTHONUNBUFFERED=1" \
+        --setenv "PGU_TICKET_BOARD_SOCKET=$socket_path" \
+        --setenv "TICKET_BOARD_DATABASE_URL=$BOARD_DATABASE_URL" \
+        "$PYTHON_BIN" "$release_dir/scripts/ticket-board.py" \
+            --host "$BOARD_HOST" \
+            --port "$port" \
+            --unix-socket "$socket_path" \
+            --frames "$frame_dir"
+}
+
+stop_canary_systemd() {
+    local unit_name="$1"
+    systemctl_system stop "$unit_name" >/dev/null 2>&1 || true
+}
+
+run_release_canary() {
+    local release_dir="$1"
+    local scope="$2"
+    local canary_user="$BOARD_CANARY_USER"
+    local port socket_root socket_path frame_dir unit_name current_user canary_log pid="" status=0
+    if [[ "${TICKET_BOARD_SKIP_CANARY:-}" == "1" ]]; then
+        log "skipping deploy canary because TICKET_BOARD_SKIP_CANARY=1"
+        return 0
+    fi
+    if [[ "$scope" == "user" && -z "$BOARD_CANARY_USER_OVERRIDE" ]]; then
+        canary_user="$(id -un)"
+    fi
+    [[ -x "$release_dir/scripts/ticket-board.py" ]] || die "missing board script in release: $release_dir/scripts/ticket-board.py"
+    port="${BOARD_CANARY_PORT:-$(free_tcp_port)}"
+    socket_root="$(mktemp -d "${TMPDIR:-/tmp}/pgu-ticket-board-canary.XXXXXX")"
+    socket_path="${BOARD_CANARY_SOCKET:-$socket_root/ticket-board.sock}"
+    frame_dir="$socket_root/frames"
+    canary_log="$socket_root/canary.log"
+    unit_name="$BOARD_CANARY_UNIT_PREFIX-$$"
+    mkdir -p "$frame_dir"
+    chmod 1777 "$frame_dir"
+    log "starting deploy canary for $release_dir as $canary_user on port $port"
+    current_user="$(id -un)"
+    if [[ "$current_user" == "$canary_user" ]]; then
+        pid="$(start_canary_direct "$release_dir" "$port" "$socket_path" "$frame_dir" "$canary_log")"
+    else
+        start_canary_systemd "$release_dir" "$port" "$socket_path" "$frame_dir" "$unit_name" "$canary_user"
+    fi
+    smoke_check_url "http://$BOARD_HOST:$port$SMOKE_PATH" "$BOARD_CANARY_TIMEOUT_SECONDS" || status=$?
+    if [[ -n "$pid" ]]; then
+        stop_canary_direct "$pid"
+    else
+        stop_canary_systemd "$unit_name"
+    fi
+    rm -rf "$socket_root"
+    if (( status != 0 )); then
+        die "canary failed; leaving $BOARD_CURRENT_LINK unchanged"
+    fi
+    log "canary-pass for $release_dir"
 }
 
 render_unit() {
@@ -345,11 +495,23 @@ deploy_service() {
 }
 
 deploy_restart_service() {
-    local deployed_sha
-    local scope
-    deployed_sha="$(deploy_export)"
-    apply_database_migrations
+    local deployed_sha release_dir previous_release scope
+    IFS=$'\t' read -r deployed_sha release_dir < <(deploy_export_release)
+    previous_release="$(current_release_dir || true)"
     scope="$(resolved_service_scope)"
+    apply_database_migrations_for_release "$release_dir"
+    run_release_canary "$release_dir" "$scope"
+    activate_release "$release_dir"
+    restart_live_service "$scope"
+    if ! smoke_check_http; then
+        rollback_live_service "$scope" "$previous_release"
+        exit 1
+    fi
+    log "deployed $deployed_sha from $DEPLOY_REF and restarted $SERVICE_NAME ($scope scope)"
+}
+
+restart_live_service() {
+    local scope="$1"
     if [[ "$scope" == "system" ]]; then
         quiesce_user_shadow_unit
         if system_unit_reload_required; then
@@ -363,8 +525,19 @@ deploy_restart_service() {
         systemctl_user daemon-reload
         systemctl_user restart "$SERVICE_NAME"
     fi
+}
+
+rollback_live_service() {
+    local scope="$1"
+    local previous_release="$2"
+    if [[ -z "$previous_release" || ! -d "$previous_release" ]]; then
+        die "post-restart smoke failed and no previous release is available for rollback"
+    fi
+    log "post-restart smoke failed; rolling back current to $previous_release"
+    activate_release "$previous_release"
+    restart_live_service "$scope"
     smoke_check_http
-    log "deployed $deployed_sha from $DEPLOY_REF and restarted $SERVICE_NAME ($scope scope)"
+    log "rollback-pass; restored $previous_release"
 }
 
 show_logs() {

@@ -91,8 +91,8 @@ grep -q 'ensure-migrations)' "$REPO_ROOT/scripts/ticket-board-service.sh" || {
     echo "FAIL: service script does not expose ensure-migrations for bootstrap testing" >&2
     exit 1
 }
-grep -q 'TICKET_BOARD_ADMIN_DATABASE_URL="$BOARD_ADMIN_DATABASE_URL" "$MIGRATION_RUNNER"' "$REPO_ROOT/scripts/ticket-board-service.sh" || {
-    echo "FAIL: service migration runner does not use the privileged admin database URL" >&2
+grep -q 'TICKET_BOARD_ADMIN_DATABASE_URL="$BOARD_ADMIN_DATABASE_URL" "$migration_runner"' "$REPO_ROOT/scripts/ticket-board-service.sh" || {
+    echo "FAIL: service migration runner does not use the privileged admin database URL for the selected release" >&2
     exit 1
 }
 grep -q 'BOARD_ADMIN_DATABASE_URL=".*user=postgres' "$REPO_ROOT/scripts/ticket-board-service.sh" || {
@@ -165,6 +165,13 @@ if [[ "${1:-}" == "show" && "${2:-}" == "pgu-ticket-board.service" && "${3:-}" =
 fi
 EOF
 chmod +x "$MOCKDIR/systemctl"
+
+cat >"$MOCKDIR/systemd-run" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'systemd-run:%s\n' "$*" >>"$TICKET_BOARD_SERVICE_TEST_LOG"
+EOF
+chmod +x "$MOCKDIR/systemd-run"
 
 cat >"$MOCKDIR/loginctl" <<'EOF'
 #!/usr/bin/env bash

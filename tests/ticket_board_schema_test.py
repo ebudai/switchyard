@@ -69,6 +69,8 @@ EXPECTED_FUNCTION_API = {
     "ticket_board.start_work",
     "ticket_board.submit_to_audit",
     "ticket_board.request_commit_exempt",
+    "ticket_board.set_awaiting_role",
+    "ticket_board.clear_awaiting_role",
     "ticket_board.inspector_sign_off",
     "ticket_board.inspector_kick_back",
     "ticket_board.audit_sign_off",
@@ -189,6 +191,13 @@ def main() -> int:
         r"idle_reminder_count\s+integer\s+not null\s+default\s+0",
         schema_lower,
     ), "ticket_notification_state.idle_reminder_count must persist per-episode reminder state"
+    assert re.search(
+        r"awaiting_role\s+text\s+not null\s+default\s+''",
+        schema_lower,
+    ), "ticket_notification_state.awaiting_role must persist explicit cross-pane waits"
+    assert "create or replace function ticket_board.ticket_awaiting_role_is_active" in executable_schema_lower
+    assert "create or replace function ticket_board.set_awaiting_role" in executable_schema_lower
+    assert "create or replace function ticket_board.clear_awaiting_role" in executable_schema_lower
     assert "unresolved blocker prevents forward promotion" in schema
     assert "create or replace function ticket_board.ticket_is_forward_promotion" in executable_schema_lower
     assert "create or replace function ticket_board.resolve_completed_blockers" in executable_schema_lower

@@ -324,6 +324,12 @@ class TicketBoardWriteClient:
     def request_commit_exempt(self, ticket_id: str, *, reason: str, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "request_commit_exempt", {"reason": reason}, caller_role=caller_role)
 
+    def await_role(self, ticket_id: str, *, role: str, caller_role: str | None = None) -> dict[str, Any]:
+        return self._ticket_action(ticket_id, "await_role", {"role": role}, caller_role=caller_role)
+
+    def clear_awaiting_role(self, ticket_id: str, *, caller_role: str | None = None) -> dict[str, Any]:
+        return self._ticket_action(ticket_id, "clear_awaiting_role", caller_role=caller_role)
+
     def audit_sign_off(self, ticket_id: str, *, text: str, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "audit_sign_off", {"text": text}, caller_role=caller_role)
 
@@ -466,6 +472,13 @@ def _build_parser() -> argparse.ArgumentParser:
     request_exempt.add_argument("ticket_id")
     request_exempt.add_argument("--reason", required=True)
 
+    await_role = subparsers.add_parser("await-role")
+    await_role.add_argument("ticket_id")
+    await_role.add_argument("--role", required=True)
+
+    clear_awaiting = subparsers.add_parser("clear-awaiting-role")
+    clear_awaiting.add_argument("ticket_id")
+
     audit_kick = subparsers.add_parser("audit-kick-back")
     audit_kick.add_argument("ticket_id")
     audit_kick.add_argument("--reason", required=True)
@@ -528,6 +541,10 @@ def main(argv: list[str] | None = None) -> int:
             response = client.submit_to_audit(args.ticket_id, commit_hash=args.commit_hash)
         elif command == "request_commit_exempt":
             response = client.request_commit_exempt(args.ticket_id, reason=args.reason)
+        elif command == "await_role":
+            response = client.await_role(args.ticket_id, role=args.role)
+        elif command == "clear_awaiting_role":
+            response = client.clear_awaiting_role(args.ticket_id)
         elif command == "audit_sign_off":
             response = client.audit_sign_off(args.ticket_id, text=args.text)
         elif command == "audit_kick_back":

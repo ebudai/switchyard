@@ -234,6 +234,12 @@ CREATE TABLE IF NOT EXISTS ticket_board.ticket_notification_state (
     last_nudged_at timestamptz,
     nudge_count integer NOT NULL DEFAULT 0 CHECK (nudge_count >= 0),
     idle_reminder_count integer NOT NULL DEFAULT 0 CHECK (idle_reminder_count >= 0),
+    awaiting_role text NOT NULL DEFAULT ''
+        CHECK (
+            awaiting_role = ''
+            OR awaiting_role IN ('director', 'main', 'app', 'perf', 'ops', 'audit', 'inspector', 'research')
+        ),
+    awaiting_since_at timestamptz,
     last_implementer_assignee text NOT NULL DEFAULT ''
         CHECK (
             last_implementer_assignee = ''
@@ -242,6 +248,18 @@ CREATE TABLE IF NOT EXISTS ticket_board.ticket_notification_state (
 );
 ALTER TABLE ticket_board.ticket_notification_state
     ADD COLUMN IF NOT EXISTS last_implementer_assignee text NOT NULL DEFAULT '';
+ALTER TABLE ticket_board.ticket_notification_state
+    ADD COLUMN IF NOT EXISTS awaiting_role text NOT NULL DEFAULT '';
+ALTER TABLE ticket_board.ticket_notification_state
+    ADD COLUMN IF NOT EXISTS awaiting_since_at timestamptz;
+ALTER TABLE ticket_board.ticket_notification_state
+    DROP CONSTRAINT IF EXISTS ticket_notification_state_awaiting_role_check;
+ALTER TABLE ticket_board.ticket_notification_state
+    ADD CONSTRAINT ticket_notification_state_awaiting_role_check
+    CHECK (
+        awaiting_role = ''
+        OR awaiting_role IN ('director', 'main', 'app', 'perf', 'ops', 'audit', 'inspector', 'research')
+    );
 
 CREATE INDEX IF NOT EXISTS ticket_notification_state_due_idx
     ON ticket_board.ticket_notification_state (
@@ -1056,6 +1074,16 @@ BEGIN
             WHEN reset_idle_reminder THEN 0
             ELSE ticket_board.ticket_notification_state.idle_reminder_count
         END,
+        awaiting_role = CASE
+            WHEN reset_idle_reminder THEN ''
+            WHEN nullif(current_setting('ticket_board.caller_role', true), '') = ticket_board.ticket_notification_state.awaiting_role THEN ''
+            ELSE ticket_board.ticket_notification_state.awaiting_role
+        END,
+        awaiting_since_at = CASE
+            WHEN reset_idle_reminder THEN NULL
+            WHEN nullif(current_setting('ticket_board.caller_role', true), '') = ticket_board.ticket_notification_state.awaiting_role THEN NULL
+            ELSE ticket_board.ticket_notification_state.awaiting_since_at
+        END,
         last_implementer_assignee = CASE
             WHEN NEW.state = 'in_progress' AND ticket_board.ticket_is_implementer_assignee(NEW.assignee) THEN NEW.assignee
             WHEN OLD.state = 'in_progress' AND ticket_board.ticket_is_implementer_assignee(OLD.assignee) THEN OLD.assignee
@@ -1075,8 +1103,119 @@ DECLARE
 BEGIN
     UPDATE ticket_board.ticket_notification_state
     SET last_activity_at = activity_at,
-        nudge_count = 0
+        nudge_count = 0,
+        awaiting_role = CASE
+            WHEN awaiting_role = NEW.who THEN ''
+            ELSE awaiting_role
+        END,
+        awaiting_since_at = CASE
+            WHEN awaiting_role = NEW.who THEN NULL
+            ELSE awaiting_since_at
+        END
     WHERE ticket_id = NEW.ticket_id;
+    RETURN NULL;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.ticket_awaiting_role_is_active(
+    p_awaiting_role text,
+    p_awaiting_since_at timestamptz,
+    p_now timestamptz,
+    p_timeout interval DEFAULT interval '4 hours'
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT nullif(p_awaiting_role, '') IS NOT NULL
+       AND p_awaiting_since_at IS NOT NULL
+       AND p_awaiting_since_at > p_now - p_timeout;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.set_awaiting_role(
+    id text,
+    awaiting_role text
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    actor text;
+    normalized_role text := lower(btrim(coalesce(awaiting_role, '')));
+BEGIN
+    actor := ticket_board.require_actor(
+        ARRAY['director', 'main', 'app', 'ops', 'audit', 'inspector', 'perf', 'research'],
+        'set_awaiting_role'
+    );
+    IF normalized_role NOT IN ('director', 'main', 'app', 'perf', 'ops', 'audit', 'inspector', 'research') THEN
+        RAISE EXCEPTION 'invalid awaiting_role: %', awaiting_role;
+    END IF;
+    IF normalized_role = ticket_board.current_app_actor() THEN
+        RAISE EXCEPTION 'awaiting_role cannot be the caller role: %', normalized_role;
+    END IF;
+    UPDATE ticket_board.ticket_notification_state ns
+    SET awaiting_role = normalized_role,
+        awaiting_since_at = clock_timestamp(),
+        last_activity_at = clock_timestamp(),
+        nudge_count = 0
+    FROM ticket_board.tickets t
+    WHERE t.id = set_awaiting_role.id
+      AND ns.ticket_id = t.id
+      AND t.state IN ('in_progress', 'inspection', 'audit');
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'active ticket not found for awaiting_role: %', id;
+    END IF;
+    PERFORM ticket_board.touch_ticket(id);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.clear_awaiting_role(id text)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    actor text;
+BEGIN
+    actor := ticket_board.require_actor(
+        ARRAY['director', 'main', 'app', 'ops', 'audit', 'inspector', 'perf', 'research'],
+        'clear_awaiting_role'
+    );
+    UPDATE ticket_board.ticket_notification_state
+    SET awaiting_role = '',
+        awaiting_since_at = NULL,
+        last_activity_at = clock_timestamp(),
+        nudge_count = 0
+    WHERE ticket_id = clear_awaiting_role.id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ticket not found: %', id;
+    END IF;
+    PERFORM ticket_board.touch_ticket(id);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.clear_awaiting_role_from_ticket_activity()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    actor text := nullif(current_setting('ticket_board.caller_role', true), '');
+BEGIN
+    UPDATE ticket_board.ticket_notification_state
+    SET awaiting_role = '',
+        awaiting_since_at = NULL
+    WHERE ticket_id = NEW.id
+      AND awaiting_role <> ''
+      AND (
+          OLD.state IS DISTINCT FROM NEW.state
+          OR OLD.assignee IS DISTINCT FROM NEW.assignee
+          OR actor = awaiting_role
+      );
     RETURN NULL;
 END;
 $$;
@@ -1936,6 +2075,16 @@ AS $$
           AND q.claimed_at IS NULL
           AND q.next_attempt_at > p_now
           AND btrim(coalesce(q.last_error, '')) <> ''
+    )
+    OR EXISTS (
+        SELECT 1
+        FROM ticket_board.ticket_notification_state ns
+        WHERE ns.ticket_id = p_ticket_id
+          AND ticket_board.ticket_awaiting_role_is_active(
+              ns.awaiting_role,
+              ns.awaiting_since_at,
+              p_now
+          )
     );
 $$;
 
@@ -2227,6 +2376,11 @@ BEGIN
                   WHERE tb.ticket_id = t.id
                     AND (blocker.id IS NULL OR blocker.state NOT IN ('done', 'cancelled'))
               )
+              AND NOT ticket_board.ticket_awaiting_role_is_active(
+                  ns.awaiting_role,
+                  ns.awaiting_since_at,
+                  p_now
+              )
               AND NOT ticket_board.notification_delivery_in_backoff(
                   t.id,
                   ticket_board.nudge_target_role(t.state, t.assignee),
@@ -2417,6 +2571,11 @@ BEGIN
                   LEFT JOIN ticket_board.tickets blocker ON blocker.id = tb.blocker_ticket_id
                   WHERE tb.ticket_id = t.id
                     AND (blocker.id IS NULL OR blocker.state NOT IN ('done', 'cancelled'))
+              )
+              AND NOT ticket_board.ticket_awaiting_role_is_active(
+                  ns.awaiting_role,
+                  ns.awaiting_since_at,
+                  p_now
               )
               AND NOT ticket_board.notification_delivery_in_backoff(
                   t.id,
@@ -2659,6 +2818,12 @@ CREATE TRIGGER ticket_comments_notification_activity
 AFTER INSERT ON ticket_board.ticket_comments
 FOR EACH ROW
 EXECUTE FUNCTION ticket_board.touch_ticket_notification_activity();
+
+DROP TRIGGER IF EXISTS tickets_clear_awaiting_role_activity ON ticket_board.tickets;
+CREATE TRIGGER tickets_clear_awaiting_role_activity
+AFTER UPDATE OF state, assignee, updated_at ON ticket_board.tickets
+FOR EACH ROW
+EXECUTE FUNCTION ticket_board.clear_awaiting_role_from_ticket_activity();
 
 INSERT INTO ticket_board.ticket_notification_state (
     ticket_id,

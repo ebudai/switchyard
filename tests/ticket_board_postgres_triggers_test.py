@@ -2223,6 +2223,20 @@ WHERE t.id = 'PGU-2851';
                 conninfo,
                 """
 DELETE FROM ticket_board.ticket_notification_queue;
+UPDATE ticket_board.tickets
+SET commit_exempt = true,
+    manually_controlled = true,
+    state = 'done'
+WHERE id NOT IN ('PGU-21', 'PGU-57')
+  AND state IN ('in_progress', 'inspection', 'audit', 'eric_review', 'director_review')
+  AND (
+      assignee IN ('app', 'ops')
+      OR id IN (
+          SELECT ticket_id
+          FROM ticket_board.ticket_notification_state
+          WHERE last_implementer_assignee IN ('app', 'ops')
+      )
+  );
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation, created_text, updated_text, source_json
 ) VALUES
@@ -2519,13 +2533,31 @@ INSERT INTO ticket_board.tickets (
     'PGU-3085', 'Held director review is not idle-nudged', '', 'director_review', 'director', 'Working.',
     '2026-07-12T00:00:00+00:00', '2026-07-12T00:00:00+00:00',
     jsonb_build_object('id', 'PGU-3085', 'title', 'Held director review is not idle-nudged', 'body', '', 'state', 'director_review', 'assignee', 'director', 'comments', '[]'::jsonb, 'created', '2026-07-12T00:00:00+00:00', 'updated', '2026-07-12T00:00:00+00:00')
+),
+(
+    'PGU-4531', 'Awaiting perf is not idle-nudged', '', 'in_progress', 'app', 'Working.',
+    '2026-07-12T00:00:00+00:00', '2026-07-12T00:00:00+00:00',
+    jsonb_build_object('id', 'PGU-4531', 'title', 'Awaiting perf is not idle-nudged', 'body', '', 'state', 'in_progress', 'assignee', 'app', 'comments', '[]'::jsonb, 'created', '2026-07-12T00:00:00+00:00', 'updated', '2026-07-12T00:00:00+00:00')
+),
+(
+    'PGU-4532', 'Expired awaiting marker nudges again', '', 'audit', 'audit', 'Working.',
+    '2026-07-12T00:00:00+00:00', '2026-07-12T00:00:00+00:00',
+    jsonb_build_object('id', 'PGU-4532', 'title', 'Expired awaiting marker nudges again', 'body', '', 'state', 'audit', 'assignee', 'audit', 'comments', '[]'::jsonb, 'created', '2026-07-12T00:00:00+00:00', 'updated', '2026-07-12T00:00:00+00:00')
 );
 UPDATE ticket_board.ticket_notification_state
 SET entered_current_state_at = clock_timestamp() - interval '10 minutes',
     last_activity_at = clock_timestamp() - interval '10 minutes',
     last_nudged_at = NULL,
     nudge_count = 0
-WHERE ticket_id IN ('PGU-3081', 'PGU-3082', 'PGU-3084', 'PGU-3085');
+WHERE ticket_id IN ('PGU-3081', 'PGU-3082', 'PGU-3084', 'PGU-3085', 'PGU-4531', 'PGU-4532');
+UPDATE ticket_board.ticket_notification_state
+SET awaiting_role = 'perf',
+    awaiting_since_at = clock_timestamp() - interval '10 minutes'
+WHERE ticket_id = 'PGU-4531';
+UPDATE ticket_board.ticket_notification_state
+SET awaiting_role = 'inspector',
+    awaiting_since_at = clock_timestamp() - interval '5 hours'
+WHERE ticket_id = 'PGU-4532';
 UPDATE ticket_board.ticket_notification_state
 SET entered_current_state_at = clock_timestamp() - interval '20 seconds',
     last_activity_at = clock_timestamp() - interval '20 seconds',
@@ -2551,6 +2583,8 @@ WITH params AS (
 SELECT ticket_board.notify_idle_stall_nudges(
     jsonb_build_object(
         'research', (now_at - interval '2 minutes')::text,
+        'app', (now_at - interval '2 minutes')::text,
+        'audit', (now_at - interval '2 minutes')::text,
         'perf', (now_at - interval '2 minutes')::text,
         'inspector', (now_at - interval '2 minutes')::text,
         'director', (now_at - interval '2 minutes')::text
@@ -2589,7 +2623,7 @@ FROM (
         ) AS row_json
     FROM ticket_board.tickets t
     JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
-    WHERE t.id IN ('PGU-3081', 'PGU-3082', 'PGU-3083', 'PGU-3084', 'PGU-3085')
+    WHERE t.id IN ('PGU-3081', 'PGU-3082', 'PGU-3083', 'PGU-3084', 'PGU-3085', 'PGU-4531', 'PGU-4532')
 ) s;
 """,
                 ).stdout
@@ -2625,7 +2659,74 @@ FROM (
                     "last_nudged": False,
                     "nudge_count": 0,
                 },
+                "PGU-4531": {
+                    "state": "in_progress",
+                    "queued": None,
+                    "last_nudged": False,
+                    "nudge_count": 0,
+                },
+                "PGU-4532": {
+                    "state": "audit",
+                    "queued": {"nudge:audit": 1},
+                    "last_nudged": True,
+                    "nudge_count": 1,
+                },
             }, idle_stall_nudges
+            psql(
+                conninfo,
+                """
+DELETE FROM ticket_board.ticket_notification_queue;
+UPDATE ticket_board.ticket_notification_state
+SET last_nudged_at = clock_timestamp() + interval '1 hour'
+WHERE ticket_id <> 'PGU-4531';
+SELECT ticket_board.append_ticket_comment('PGU-4531', 'perf', 'Perf measurement posted.');
+SET ROLE ticket_board_listener;
+WITH params AS (
+    SELECT clock_timestamp() AS now_at
+)
+SELECT ticket_board.notify_idle_stall_nudges(
+    jsonb_build_object('app', (now_at - interval '2 minutes')::text),
+    now_at,
+    interval '45 seconds',
+    interval '5 minutes',
+    2
+)
+FROM params;
+RESET ROLE;
+""",
+            )
+            resumed_after_role_activity = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'awaiting_role', ns.awaiting_role,
+    'awaiting_since_cleared', ns.awaiting_since_at IS NULL,
+    'queued', (
+        SELECT jsonb_object_agg(kind || ':' || target_role, count ORDER BY kind || ':' || target_role)
+        FROM (
+            SELECT kind, target_role, count(*)::int AS count
+            FROM ticket_board.ticket_notification_queue q
+            WHERE q.ticket_id = 'PGU-4531'
+              AND q.kind IN ('nudge', 'escalation')
+            GROUP BY kind, target_role
+        ) q_counts
+    ),
+    'last_nudged', ns.last_nudged_at IS NOT NULL,
+    'nudge_count', ns.nudge_count
+)::text
+FROM ticket_board.ticket_notification_state ns
+WHERE ns.ticket_id = 'PGU-4531';
+""",
+                ).stdout
+            )
+            assert resumed_after_role_activity == {
+                "awaiting_role": "",
+                "awaiting_since_cleared": True,
+                "queued": {"nudge:app": 1},
+                "last_nudged": True,
+                "nudge_count": 1,
+            }, resumed_after_role_activity
             psql(
                 conninfo,
                 """

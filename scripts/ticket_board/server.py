@@ -39,6 +39,8 @@ OPERATION_ALLOWED_ROLES = {
     "start_work": IMPLEMENTER_ROLES,
     "submit_to_audit": IMPLEMENTER_ROLES,
     "request_commit_exempt": IMPLEMENTER_ROLES,
+    "await_role": CALLER_ROLES,
+    "clear_awaiting_role": CALLER_ROLES,
     "inspector_sign_off": {"inspector"},
     "inspector_kick_back": {"inspector"},
     "audit_sign_off": {"audit"},
@@ -591,6 +593,16 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             patch = {"state": "audit", "commit_hash": str(payload.get("commit_hash", ""))}
         elif operation == "request_commit_exempt":
             updated = self.app.request_commit_exempt(ticket_id, self.action_comment_text(payload), caller_role=caller)
+            self.events.notify_change(self.app.store_signature())
+            self.send_json({"ticket": updated})
+            return
+        elif operation == "await_role":
+            updated = self.app.set_awaiting_role(ticket_id, str(payload.get("role", payload.get("awaiting_role", ""))), caller_role=caller)
+            self.events.notify_change(self.app.store_signature())
+            self.send_json({"ticket": updated})
+            return
+        elif operation == "clear_awaiting_role":
+            updated = self.app.clear_awaiting_role(ticket_id, caller_role=caller)
             self.events.notify_change(self.app.store_signature())
             self.send_json({"ticket": updated})
             return

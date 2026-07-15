@@ -743,6 +743,23 @@ ORDER BY t.ticket_number
                 self._pg_call(conn, "SELECT ticket_board.request_commit_exempt(%s, %s);", (ticket_id, reason))
                 return self._pg_get_ticket(ticket_id, conn)
 
+    def set_awaiting_role(self, ticket_id: str, awaiting_role: str, *, caller_role: str) -> dict[str, Any]:
+        ticket_id = str(ticket_id).strip().upper()
+        awaiting_role = self._require_text(awaiting_role, "awaiting_role").strip().lower()
+        with self._pg_connect() as conn:
+            with conn.transaction():
+                self._pg_set_caller_role(conn, caller_role)
+                self._pg_call(conn, "SELECT ticket_board.set_awaiting_role(%s, %s);", (ticket_id, awaiting_role))
+                return self._pg_get_ticket(ticket_id, conn)
+
+    def clear_awaiting_role(self, ticket_id: str, *, caller_role: str) -> dict[str, Any]:
+        ticket_id = str(ticket_id).strip().upper()
+        with self._pg_connect() as conn:
+            with conn.transaction():
+                self._pg_set_caller_role(conn, caller_role)
+                self._pg_call(conn, "SELECT ticket_board.clear_awaiting_role(%s);", (ticket_id,))
+                return self._pg_get_ticket(ticket_id, conn)
+
     def _pg_call(self, conn: Any, sql: str, params: tuple[Any, ...]) -> None:
         conn.execute(sql, params)
 

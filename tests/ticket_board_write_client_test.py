@@ -57,6 +57,10 @@ class RecordingHandler(BaseHTTPRequestHandler):
             ticket["state"] = "analysis"
             ticket["assignee"] = "unassigned"
             ticket["comments"] = [{"who": caller, "text": f"Commit exemption requested: {payload.get('reason', '')}"}]
+        elif operation == "await_role":
+            ticket["awaiting_role"] = payload.get("role", "")
+        elif operation == "clear_awaiting_role":
+            ticket["awaiting_role"] = ""
         elif operation == "audit_sign_off":
             ticket["state"] = "director_review"
             ticket["comments"] = [{"who": caller, "text": payload.get("text", "")}]
@@ -142,6 +146,8 @@ def assert_action_requests(requests: list[tuple[str, str | None, dict[str, objec
     assert ("/api/tickets/PGU-101/actions/start_work", "ops") in pairs
     assert ("/api/tickets/PGU-101/actions/submit_to_audit", "ops") in pairs
     assert ("/api/tickets/PGU-121/actions/request_commit_exempt", "ops") in pairs
+    assert ("/api/tickets/PGU-123/actions/await_role", "ops") in pairs
+    assert ("/api/tickets/PGU-123/actions/clear_awaiting_role", "ops") in pairs
     assert ("/api/tickets/PGU-102/actions/audit_sign_off", "audit") in pairs
     assert ("/api/tickets/PGU-103/actions/audit_kick_back", "audit") in pairs
     assert ("/api/tickets/PGU-104/actions/eric_sign_off", "eric") in pairs
@@ -167,6 +173,8 @@ def exercise_client(base_url: str, repo: Path, commit_hash: str) -> None:
         assert requested["ticket"]["state"] == "analysis"
         assert requested["ticket"]["assignee"] == "unassigned"
         assert "No repo change" in requested["ticket"]["comments"][-1]["text"]
+        assert client.await_role("PGU-123", role="perf", caller_role="ops")["ticket"]["awaiting_role"] == "perf"
+        assert client.clear_awaiting_role("PGU-123", caller_role="ops")["ticket"]["awaiting_role"] == ""
         audit_signed = client.audit_sign_off("PGU-102", text="Audit verified.", caller_role="audit")
         assert audit_signed["ticket"]["state"] == "director_review"
         assert audit_signed["ticket"]["comments"][-1]["text"] == "Audit verified."

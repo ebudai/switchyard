@@ -412,6 +412,7 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
     )
     seed_ticket("PGU-126", title="Invalid implementation assignee", state="analysis")
     seed_ticket("PGU-127", title="Inspector utility task", state="backlog", assignee="inspector", parked=True)
+    seed_ticket("PGU-129", title="Force move override", state="analysis", assignee="unassigned")
     seed_ticket("PGU-109", title="Manual", state="analysis")
     seed_ticket("PGU-110", title="Blocker", state="analysis")
     seed_ticket("PGU-111", title="Blocked target", state="analysis")
@@ -596,6 +597,33 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
         expect=400,
     )
     assert "in_progress tickets require an implementer assignee" in str(invalid_implementation_assignee), invalid_implementation_assignee
+    normal_done_blocked = post_json(
+        base_url,
+        "/api/tickets/PGU-129/actions/route",
+        {"state": "done", "assignee": "director"},
+        caller="director",
+        expect=400,
+    )
+    assert "illegal state transition: analysis -> done" in str(normal_done_blocked), normal_done_blocked
+    force_move_forbidden = post_json(
+        base_url,
+        "/api/tickets/PGU-129/actions/override_move",
+        {"state": "done", "assignee": "director"},
+        caller="ops",
+        expect=403,
+    )
+    assert "ops cannot call override_move" in str(force_move_forbidden), force_move_forbidden
+    force_moved = post_json(
+        base_url,
+        "/api/tickets/PGU-129/actions/override_move",
+        {"state": "done", "assignee": "director", "no_notify": True},
+        caller="director",
+    )
+    assert force_moved["ticket"]["state"] == "done", force_moved  # type: ignore[index]
+    assert force_moved["ticket"]["assignee"] == "director", force_moved  # type: ignore[index]
+    assert force_moved["ticket"]["comments"][-1]["text"] == (
+        "Director override: analysis/unassigned -> done/director (notification suppressed)"
+    ), force_moved  # type: ignore[index]
 
     wrong_assignee = post_json(base_url, "/api/tickets/PGU-101/actions/start_work", {}, caller="app", expect=403)
     assert "app cannot call start_work for ticket assigned to ops" in str(wrong_assignee), wrong_assignee

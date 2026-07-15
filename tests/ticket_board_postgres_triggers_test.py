@@ -220,6 +220,7 @@ def main() -> int:
                 conninfo,
                 """
 GRANT EXECUTE ON FUNCTION ticket_board.route(text, text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.force_move(text, text, text, boolean) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.start_work(text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.submit_to_audit(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.start_task(text, text) TO ticket_board_service;
@@ -955,6 +956,63 @@ WHERE id = 'PGU-85';
                 "UPDATE ticket_board.tickets SET commit_exempt = true, state = 'done' WHERE id = 'PGU-86';",
                 "illegal state transition: analysis -> done",
             )
+            insert_ticket(conninfo, "PGU-34001", title="Force move to done", assignee="unassigned", state="analysis")
+            assert_error(
+                conninfo,
+                """
+SET ROLE ticket_board_service;
+SELECT set_config('ticket_board.caller_role', 'director', false);
+SELECT ticket_board.route('PGU-34001', 'done', 'director');
+""",
+                "illegal state transition: analysis -> done",
+            )
+            service_call(conninfo, "director", "SELECT ticket_board.force_move('PGU-34001', 'done', 'director', true);")
+            forced_done = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'state', t.state,
+    'assignee', t.assignee,
+    'commit_hash', t.commit_hash,
+    'comment', (SELECT text FROM ticket_board.ticket_comments WHERE ticket_id = t.id ORDER BY position DESC LIMIT 1)
+)::text
+FROM ticket_board.tickets t
+WHERE t.id = 'PGU-34001';
+""",
+                ).stdout
+            )
+            assert forced_done == {
+                "state": "done",
+                "assignee": "director",
+                "commit_hash": "",
+                "comment": "Director override: analysis/unassigned -> done/director (notification suppressed)",
+            }, forced_done
+
+            insert_ticket(conninfo, "PGU-34002", title="Force move notifies", assignee="unassigned", state="analysis")
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-34002';")
+            service_call(conninfo, "director", "SELECT ticket_board.force_move('PGU-34002', 'audit', 'audit', false);")
+            assert psql(conninfo, "SELECT count(*)::int FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-34002';").stdout.strip() == "1"
+
+            insert_ticket(conninfo, "PGU-34003", title="Force move suppresses", assignee="unassigned", state="analysis")
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-34003';")
+            service_call(conninfo, "director", "SELECT ticket_board.force_move('PGU-34003', 'audit', 'audit', true);")
+            assert psql(conninfo, "SELECT count(*)::int FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-34003';").stdout.strip() == "0"
+
+            insert_ticket(conninfo, "PGU-34004", title="Force move invalid in-progress assignee", assignee="unassigned", state="analysis")
+            service_call(conninfo, "director", "SELECT ticket_board.force_move('PGU-34004', 'in_progress', 'director', true);")
+            forced_in_progress = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object('state', state, 'assignee', assignee)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-34004';
+""",
+                ).stdout
+            )
+            assert forced_in_progress == {"state": "in_progress", "assignee": "director"}, forced_in_progress
+
             assert_error(
                 conninfo,
                 """

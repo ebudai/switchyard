@@ -314,6 +314,38 @@ class TicketBoardWriteClient:
     def route(self, ticket_id: str, *, state: str, assignee: str, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "route", {"state": state, "assignee": assignee}, caller_role=caller_role)
 
+    def force_move(
+        self,
+        ticket_id: str,
+        *,
+        state: str,
+        assignee: str,
+        suppress_notification: bool = False,
+        caller_role: str | None = None,
+    ) -> dict[str, Any]:
+        return self._ticket_action(
+            ticket_id,
+            "force_move",
+            {"state": state, "assignee": assignee, "suppress_notification": suppress_notification},
+            caller_role=caller_role,
+        )
+
+    def override_move(
+        self,
+        ticket_id: str,
+        *,
+        state: str,
+        assignee: str,
+        notify: bool = True,
+        caller_role: str | None = None,
+    ) -> dict[str, Any]:
+        return self._ticket_action(
+            ticket_id,
+            "override_move",
+            {"state": state, "assignee": assignee, "suppress_notification": not notify},
+            caller_role=caller_role,
+        )
+
     def start_work(self, ticket_id: str, *, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "start_work", caller_role=caller_role)
 
@@ -463,6 +495,18 @@ def _build_parser() -> argparse.ArgumentParser:
     route.add_argument("--state", required=True)
     route.add_argument("--assignee", required=True)
 
+    force_move = subparsers.add_parser("force-move")
+    force_move.add_argument("ticket_id")
+    force_move.add_argument("--state", required=True)
+    force_move.add_argument("--assignee", required=True)
+    force_move.add_argument("--suppress-notification", action="store_true")
+
+    override_move = subparsers.add_parser("override-move")
+    override_move.add_argument("ticket_id")
+    override_move.add_argument("--state", required=True)
+    override_move.add_argument("--assignee", required=True)
+    override_move.add_argument("--no-notify", action="store_true")
+
     for name in ("start-work", "inspector-sign-off", "eric-sign-off", "defer"):
         sub = subparsers.add_parser(name)
         sub.add_argument("ticket_id")
@@ -552,6 +596,20 @@ def main(argv: list[str] | None = None) -> int:
             response = client.file_bug(title=args.title, body=args.body, source_ticket_id=args.source_ticket_id, assignee=args.assignee)
         elif command == "route":
             response = client.route(args.ticket_id, state=args.state, assignee=args.assignee)
+        elif command == "force_move":
+            response = client.force_move(
+                args.ticket_id,
+                state=args.state,
+                assignee=args.assignee,
+                suppress_notification=args.suppress_notification,
+            )
+        elif command == "override_move":
+            response = client.override_move(
+                args.ticket_id,
+                state=args.state,
+                assignee=args.assignee,
+                notify=not args.no_notify,
+            )
         elif command == "submit_to_audit":
             response = client.submit_to_audit(args.ticket_id, commit_hash=args.commit_hash)
         elif command == "request_commit_exempt":

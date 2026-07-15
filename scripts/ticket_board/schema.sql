@@ -160,11 +160,6 @@ ALTER TABLE ticket_board.tickets
     ));
 ALTER TABLE ticket_board.tickets
     DROP CONSTRAINT IF EXISTS tickets_in_progress_assignee_check;
-ALTER TABLE ticket_board.tickets
-    ADD CONSTRAINT tickets_in_progress_assignee_check CHECK (
-        state <> 'in_progress'
-        OR assignee IN ('main', 'app', 'perf', 'ops', 'research')
-    );
 CREATE UNIQUE INDEX IF NOT EXISTS tickets_ticket_number_key
     ON ticket_board.tickets (ticket_number);
 CREATE INDEX IF NOT EXISTS tickets_state_assignee_idx
@@ -591,6 +586,10 @@ BEGIN
         NEW.parked := false;
     END IF;
 
+    IF current_setting('ticket_board.force_move', true) = 'on' THEN
+        RETURN NEW;
+    END IF;
+
     IF NEW.state = 'in_progress' AND NOT ticket_board.ticket_is_implementer_assignee(NEW.assignee) THEN
         RAISE EXCEPTION 'in_progress tickets require an implementer assignee (main, app, ops, perf, or research)';
     END IF;
@@ -812,6 +811,9 @@ DECLARE
     recommendation text;
 BEGIN
     IF current_setting('ticket_board.suppress_create_notify', true) = 'on' THEN
+        RETURN NULL;
+    END IF;
+    IF current_setting('ticket_board.suppress_transition_notify', true) = 'on' THEN
         RETURN NULL;
     END IF;
 
@@ -3487,6 +3489,72 @@ BEGIN
     WHERE tickets.id = route.id;
     PERFORM ticket_board.touch_ticket(id);
     IF current_state IS NOT DISTINCT FROM new_state AND current_assignee IS DISTINCT FROM assignee THEN
+        PERFORM ticket_board.notify_ticket_owner_in_place_change(id, 'assignee');
+    END IF;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.force_move(
+    id text,
+    new_state text,
+    assignee text,
+    suppress_notification boolean DEFAULT false
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    actor text;
+    current_state text;
+    current_assignee text;
+BEGIN
+    actor := ticket_board.require_actor(ARRAY['director'], 'force_move');
+    IF new_state NOT IN ('backlog', 'analysis', 'in_progress', 'inspection', 'audit', 'eric_review', 'director_review', 'done', 'cancelled') THEN
+        RAISE EXCEPTION 'invalid state: %', new_state;
+    END IF;
+    IF assignee NOT IN ('unassigned', 'main', 'app', 'perf', 'ops', 'audit', 'inspector', 'agent', 'director', 'research') THEN
+        RAISE EXCEPTION 'invalid assignee: %', assignee;
+    END IF;
+
+    SELECT tickets.state, tickets.assignee
+    INTO current_state, current_assignee
+    FROM ticket_board.tickets
+    WHERE tickets.id = force_move.id
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ticket not found: %', id;
+    END IF;
+
+    PERFORM set_config('ticket_board.force_move', 'on', true);
+    IF suppress_notification THEN
+        PERFORM set_config('ticket_board.suppress_transition_notify', 'on', true);
+    END IF;
+    PERFORM ticket_board.append_ticket_comment(
+        id,
+        actor,
+        'Director override: '
+        || current_state
+        || '/'
+        || current_assignee
+        || ' -> '
+        || new_state
+        || '/'
+        || assignee
+        || CASE WHEN suppress_notification THEN ' (notification suppressed)' ELSE '' END
+    );
+
+    UPDATE ticket_board.tickets
+    SET state = new_state,
+        assignee = force_move.assignee,
+        parked = false
+    WHERE tickets.id = force_move.id;
+    PERFORM ticket_board.touch_ticket(id);
+    IF NOT suppress_notification
+       AND current_state IS NOT DISTINCT FROM new_state
+       AND current_assignee IS DISTINCT FROM assignee THEN
         PERFORM ticket_board.notify_ticket_owner_in_place_change(id, 'assignee');
     END IF;
 END;

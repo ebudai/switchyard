@@ -66,6 +66,7 @@ EXPECTED_FUNCTION_API = {
     "ticket_board.create_ticket",
     "ticket_board.file_bug",
     "ticket_board.route",
+    "ticket_board.force_move",
     "ticket_board.start_work",
     "ticket_board.submit_to_audit",
     "ticket_board.request_commit_exempt",
@@ -184,7 +185,7 @@ def main() -> int:
     assert "implementation must be non-empty before a ticket can enter in_progress" not in schema
     assert "in_progress tickets require an implementer assignee" in schema
     assert "create or replace function ticket_board.ticket_is_implementer_assignee" in executable_schema_lower
-    assert "tickets_in_progress_assignee_check" in schema_lower
+    assert "add constraint tickets_in_progress_assignee_check" not in schema_lower
     assert re.search(
         r"resolved\s+boolean\s+not null\s+default\s+false",
         schema_lower,

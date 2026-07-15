@@ -51,6 +51,9 @@ class RecordingHandler(BaseHTTPRequestHandler):
         }
         if operation == "start_work":
             ticket["state"] = "in_progress"
+        elif operation in {"force_move", "override_move"}:
+            ticket["state"] = payload.get("state", "analysis")
+            ticket["assignee"] = payload.get("assignee", caller or "director")
         elif operation == "submit_to_audit":
             ticket["state"] = "audit"
         elif operation == "request_commit_exempt":
@@ -151,6 +154,8 @@ def assert_action_requests(requests: list[tuple[str, str | None, dict[str, objec
     assert ("/api/tickets/actions/create_ticket", "director") in pairs
     assert ("/api/tickets/actions/file_bug", "ops") in pairs
     assert ("/api/tickets/PGU-100/actions/route", "director") in pairs
+    assert ("/api/tickets/PGU-115/actions/force_move", "director") in pairs
+    assert ("/api/tickets/PGU-116/actions/override_move", "director") in pairs
     assert ("/api/tickets/PGU-101/actions/start_work", "ops") in pairs
     assert ("/api/tickets/PGU-101/actions/submit_to_audit", "ops") in pairs
     assert ("/api/tickets/PGU-121/actions/request_commit_exempt", "ops") in pairs
@@ -176,6 +181,12 @@ def exercise_client(base_url: str, repo: Path, commit_hash: str) -> None:
         assert client.create_ticket(title="Client create", body="Created.", assignee="director")["ticket"]["id"] == "PGU-NEW"
         assert client.file_bug(title="Bug", body="Body", source_ticket_id="PGU-NEW", caller_role="ops")["ticket"]["parent_id"] == "PGU-NEW"
         assert client.route("PGU-100", state="backlog", assignee="ops")["ticket"]["state"] == "backlog"
+        forced = client.force_move("PGU-115", state="done", assignee="director", suppress_notification=True)
+        assert forced["ticket"]["state"] == "done"
+        assert forced["ticket"]["assignee"] == "director"
+        overridden = client.override_move("PGU-116", state="cancelled", assignee="director", notify=False)
+        assert overridden["ticket"]["state"] == "cancelled"
+        assert overridden["ticket"]["assignee"] == "director"
         assert client.start_work("PGU-101", caller_role="ops")["ticket"]["state"] == "in_progress"
         assert client.submit_to_audit("PGU-101", commit_hash=commit_hash, caller_role="ops")["ticket"]["state"] == "audit"
         assert client.submit_to_audit("PGU-113", caller_role="ops")["ticket"]["commit_hash"] == ""

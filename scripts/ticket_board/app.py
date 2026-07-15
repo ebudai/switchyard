@@ -251,6 +251,29 @@ class TicketBoardApp:
                 self._pg_call(conn, "SELECT ticket_board.route(%s, %s, %s);", (ticket_id, state, assignee))
                 return self._pg_get_ticket(ticket_id, conn)
 
+    def force_move_ticket(
+        self,
+        ticket_id: str,
+        state: str,
+        assignee: str,
+        *,
+        suppress_notification: bool = False,
+        caller_role: str | None = None,
+    ) -> dict[str, Any]:
+        ticket_id = str(ticket_id).strip().upper()
+        state = self._validate_state(str(state))
+        assignee = self._validate_assignee(str(assignee))
+        with self._pg_connect() as conn:
+            with conn.transaction():
+                if caller_role:
+                    self._pg_set_caller_role(conn, caller_role)
+                self._pg_call(
+                    conn,
+                    "SELECT ticket_board.force_move(%s, %s, %s, %s);",
+                    (ticket_id, state, assignee, suppress_notification),
+                )
+                return self._pg_get_ticket(ticket_id, conn)
+
     def merge_tickets(self, source_ticket_id: str, target_ticket_id: str, *, actor: str) -> dict[str, dict[str, Any]]:
         actor_normalized = str(actor).strip().lower()
         if actor_normalized != "director":

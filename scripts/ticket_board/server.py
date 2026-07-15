@@ -37,6 +37,8 @@ OPERATION_ALLOWED_ROLES = {
     "create_ticket": {"director", "eric"},
     "file_bug": IMPLEMENTER_ROLES | {"audit"},
     "route": {"director"},
+    "force_move": {"director"},
+    "override_move": {"director"},
     "start_work": IMPLEMENTER_ROLES,
     "submit_to_audit": IMPLEMENTER_ROLES,
     "request_commit_exempt": IMPLEMENTER_ROLES,
@@ -576,6 +578,17 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 ticket_id,
                 str(payload.get("state", payload.get("new_state", ""))),
                 str(payload.get("assignee", "")),
+                caller_role=caller,
+            )
+            self.events.notify_change(self.app.store_signature())
+            self.send_json({"ticket": updated})
+            return
+        elif operation in {"force_move", "override_move"}:
+            updated = self.app.force_move_ticket(
+                ticket_id,
+                str(payload.get("state", payload.get("new_state", ""))),
+                str(payload.get("assignee", "")),
+                suppress_notification=bool(payload.get("suppress_notification", payload.get("no_notify", False))),
                 caller_role=caller,
             )
             self.events.notify_change(self.app.store_signature())

@@ -55,6 +55,7 @@ GRANT EXECUTE ON FUNCTION ticket_board.create_ticket(text, text, text, text[], t
 GRANT EXECUTE ON FUNCTION ticket_board.file_bug(text, text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.file_bug(text, text, text) TO audit;
 GRANT EXECUTE ON FUNCTION ticket_board.route(text, text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.force_move(text, text, text, boolean) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.start_work(text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.submit_to_audit(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.request_commit_exempt(text, text) TO ticket_board_service;

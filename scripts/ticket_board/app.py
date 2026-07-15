@@ -466,7 +466,8 @@ SELECT
     COALESCE(
         (SELECT array_agg(b.blocker_ticket_id ORDER BY b.position)
          FROM ticket_board.ticket_blockers b
-         WHERE b.ticket_id = t.id),
+         WHERE b.ticket_id = t.id
+           AND NOT b.resolved),
         ARRAY[]::text[]
     ) AS blocked_by,
     COALESCE(

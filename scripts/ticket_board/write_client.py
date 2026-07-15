@@ -140,9 +140,10 @@ class TicketBoardWriteClient:
         if socket_path:
             try:
                 return self._post_unix(path, payload, role, socket_path)
-            except OSError:
+            except OSError as exc:
                 if _has_explicit_socket_path(self.socket_path):
                     raise
+                print(f"WARNING: ticket board Unix socket {socket_path} failed ({exc}); falling back to TCP {self.api_url}", file=sys.stderr)
         body = json.dumps(payload).encode("utf-8")
         req = request.Request(
             f"{self.api_url}{path}",

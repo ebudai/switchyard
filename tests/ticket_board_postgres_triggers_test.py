@@ -999,6 +999,43 @@ WHERE t.id = 'PGU-34001';
             service_call(conninfo, "director", "SELECT ticket_board.force_move('PGU-34003', 'audit', 'audit', true);")
             assert psql(conninfo, "SELECT count(*)::int FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-34003';").stdout.strip() == "0"
 
+            insert_ticket(conninfo, "PGU-34005", title="Force move blocker", assignee="unassigned", state="analysis")
+            insert_ticket(conninfo, "PGU-34006", title="Force move blocked target", assignee="unassigned", state="analysis")
+            psql(
+                conninfo,
+                """
+DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-34006';
+DELETE FROM ticket_board.notification_trace WHERE ticket_id = 'PGU-34006';
+DELETE FROM ticket_board.ticket_comments WHERE ticket_id = 'PGU-34006';
+INSERT INTO ticket_board.ticket_blockers (ticket_id, blocker_ticket_id, position)
+VALUES ('PGU-34006', 'PGU-34005', 0);
+""",
+            )
+            service_call(conninfo, "director", "SELECT ticket_board.force_move('PGU-34006', 'audit', 'audit', false);")
+            blocked_override_record = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'state', t.state,
+    'assignee', t.assignee,
+    'queue_count', (SELECT count(*)::int FROM ticket_board.ticket_notification_queue WHERE ticket_id = t.id),
+    'trace_count', (SELECT count(*)::int FROM ticket_board.notification_trace WHERE ticket_id = t.id),
+    'comment', (SELECT text FROM ticket_board.ticket_comments WHERE ticket_id = t.id ORDER BY position DESC LIMIT 1)
+)::text
+FROM ticket_board.tickets t
+WHERE t.id = 'PGU-34006';
+""",
+                ).stdout
+            )
+            assert blocked_override_record == {
+                "state": "audit",
+                "assignee": "audit",
+                "queue_count": 0,
+                "trace_count": 0,
+                "comment": "Director override: analysis/unassigned -> audit/audit",
+            }, blocked_override_record
+
             insert_ticket(conninfo, "PGU-34004", title="Force move invalid in-progress assignee", assignee="unassigned", state="analysis")
             service_call(conninfo, "director", "SELECT ticket_board.force_move('PGU-34004', 'in_progress', 'director', true);")
             forced_in_progress = json.loads(

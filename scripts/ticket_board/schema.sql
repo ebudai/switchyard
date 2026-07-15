@@ -3003,7 +3003,8 @@ BEGIN
     SELECT COALESCE(jsonb_agg(blocker_ticket_id ORDER BY position), '[]'::jsonb)
     INTO blocked_by
     FROM ticket_board.ticket_blockers
-    WHERE ticket_id = p_ticket_id;
+    WHERE ticket_id = p_ticket_id
+      AND NOT resolved;
 
     SELECT COALESCE(
         jsonb_agg(

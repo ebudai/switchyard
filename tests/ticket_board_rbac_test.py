@@ -29,8 +29,10 @@ WRITE_FUNCTIONS = [
     "ticket_board.request_commit_exempt(text,text)",
     "ticket_board.audit_sign_off(text,text)",
     "ticket_board.audit_kick_back(text,text)",
+    "ticket_board.audit_kick_back(text,text,text)",
     "ticket_board.inspector_sign_off(text)",
     "ticket_board.inspector_kick_back(text,text)",
+    "ticket_board.inspector_kick_back(text,text,text)",
     "ticket_board.eric_sign_off(text,text)",
     "ticket_board.eric_reopen(text,text)",
     "ticket_board.mark_done(text,text)",
@@ -447,8 +449,8 @@ FROM ticket_board.tickets t WHERE id = 'PGU-501';
         )
     )
     assert kickback == {
-        "state": "analysis",
-        "assignee": "unassigned",
+        "state": "in_progress",
+        "assignee": "ops",
         "commit_hash": "",
         "last_rejected_commit": "abcdef1",
         "comment": "Needs changes.",
@@ -553,6 +555,28 @@ FROM ticket_board.tickets t WHERE id = 'PGU-503';
 
     insert_ticket(
         admin_conn,
+        "PGU-507",
+        title="Targeted audit kickback",
+        state="analysis",
+        assignee="ops",
+        implementation="Done.",
+    )
+    psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-507';")
+    psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'audit', assignee = 'audit', commit_hash = '1234567' WHERE id = 'PGU-507';")
+    psql(service_conn, "SELECT ticket_board.audit_kick_back('PGU-507', 'Send to research.', 'research');")
+    targeted_audit_kickback = json.loads(
+        psql(
+            admin_conn,
+            """
+SELECT jsonb_build_object('state', state, 'assignee', assignee)::text
+FROM ticket_board.tickets WHERE id = 'PGU-507';
+""",
+        )
+    )
+    assert targeted_audit_kickback == {"state": "in_progress", "assignee": "research"}, targeted_audit_kickback
+
+    insert_ticket(
+        admin_conn,
         "PGU-600",
         title="Eric signoff",
         state="eric_review",
@@ -606,7 +630,7 @@ FROM ticket_board.tickets t WHERE id = 'PGU-601';
 """,
         )
     )
-    assert eric_reopened == {"state": "in_progress", "comment": "Needs another pass."}, eric_reopened
+    assert eric_reopened == {"state": "analysis", "comment": "Needs another pass."}, eric_reopened
 
     insert_ticket(
         admin_conn,
@@ -840,7 +864,7 @@ FROM ticket_board.tickets t WHERE id = 'PGU-914';
     assert psql(admin_conn, "SELECT state FROM ticket_board.tickets WHERE id = 'PGU-901';") == "in_progress"
 
     insert_ticket(admin_conn, "PGU-905", title="Unassigned start still illegal", state="analysis", assignee="unassigned", implementation="")
-    assert "assignee must not be unassigned" in psql_error(
+    assert "in_progress tickets require an implementer assignee" in psql_error(
         service_conn,
         "SELECT ticket_board.start_work('PGU-905');",
     )

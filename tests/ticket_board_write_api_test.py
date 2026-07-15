@@ -846,7 +846,8 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
         {"reason": "Needs another pass."},
         caller="audit",
     )
-    assert audit_kicked["ticket"]["state"] == "analysis", audit_kicked  # type: ignore[index]
+    assert audit_kicked["ticket"]["state"] == "in_progress", audit_kicked  # type: ignore[index]
+    assert audit_kicked["ticket"]["assignee"] == "ops", audit_kicked  # type: ignore[index]
     assert audit_kicked["ticket"]["comments"][-1]["who"] == "audit", audit_kicked  # type: ignore[index]
 
     eric_signed = post_json(base_url, "/api/tickets/PGU-104/actions/eric_sign_off", {"text": "Eric approves."}, caller="eric")

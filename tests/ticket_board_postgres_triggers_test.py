@@ -438,6 +438,74 @@ LIMIT 1;
                 "message": "PGU-32 -- Inspection kickback kicked back to you: Frame has banding.",
                 "new_state": "in_progress",
             }, inspect_kick_notice
+
+            insert_ticket(
+                conninfo,
+                "PGU-45010",
+                title="Normal inspector kickback remembers implementer",
+                assignee="app",
+                state="in_progress",
+                implementation="rendered",
+                needs_inspection=True,
+                inspector_signoff=False,
+            )
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'inspection', assignee = 'inspector' WHERE id = 'PGU-45010';")
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-45010';")
+            service_call(
+                conninfo,
+                "inspector",
+                "SELECT ticket_board.inspector_kick_back('PGU-45010', 'Edges need cleanup.');",
+            )
+            normal_inspector_kickback = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object('state', state, 'assignee', assignee, 'inspector_signoff', inspector_signoff)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-45010';
+""",
+                ).stdout
+            )
+            assert normal_inspector_kickback == {
+                "state": "in_progress",
+                "assignee": "app",
+                "inspector_signoff": False,
+            }, normal_inspector_kickback
+            normal_inspector_notice = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object('target_role', target_role, 'message', message, 'new_state', payload->>'new_state')::text
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-45010' AND payload->>'new_state' = 'in_progress'
+ORDER BY id DESC
+LIMIT 1;
+""",
+                ).stdout
+            )
+            assert normal_inspector_notice == {
+                "target_role": "app",
+                "message": "PGU-45010 -- Normal inspector kickback remembers implementer kicked back to you: Edges need cleanup.",
+                "new_state": "in_progress",
+            }, normal_inspector_notice
+
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'inspection', assignee = 'inspector' WHERE id = 'PGU-45010';")
+            service_call(
+                conninfo,
+                "inspector",
+                "SELECT ticket_board.inspector_kick_back('PGU-45010', 'Send to perf.', 'perf');",
+            )
+            targeted_inspector_kickback = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object('state', state, 'assignee', assignee)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-45010';
+""",
+                ).stdout
+            )
+            assert targeted_inspector_kickback == {"state": "in_progress", "assignee": "perf"}, targeted_inspector_kickback
             psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = 'abcdef1' WHERE id = 'PGU-32';")
             inspect_resubmitted = json.loads(
                 psql(
@@ -1391,7 +1459,7 @@ WHERE payload->>'title' = 'Eric-created analysis';
             ], eric_created_analysis_queue
 
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
-            insert_ticket(conninfo, "PGU-33801", title="Audit kickback still notifies director", state="audit", assignee="audit", implementation="done")
+            insert_ticket(conninfo, "PGU-33801", title="Audit kickback notifies implementation", state="audit", assignee="audit", implementation="done")
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
             service_call(
                 conninfo,
@@ -1415,12 +1483,67 @@ WHERE ticket_id = 'PGU-33801';
             )
             assert audit_kickback_queue == [
                 {
-                    "target_role": "director",
-                    "message": "PGU-33801 -- Audit kickback still notifies director kicked back to you",
+                    "target_role": "ops",
+                    "message": "PGU-33801 -- Audit kickback notifies implementation kicked back to you",
                     "old_state": "audit",
-                    "new_state": "analysis",
+                    "new_state": "in_progress",
                 }
             ], audit_kickback_queue
+
+            insert_ticket(
+                conninfo,
+                "PGU-45091",
+                title="Normal audit kickback remembers implementer",
+                state="in_progress",
+                assignee="main",
+                implementation="done",
+                commit_hash="4501111",
+            )
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', assignee = 'audit' WHERE id = 'PGU-45091';")
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-45091';")
+            service_call(
+                conninfo,
+                "audit",
+                "SELECT ticket_board.audit_kick_back('PGU-45091', 'Needs another implementation pass.');",
+            )
+            normal_audit_kickback = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'state', state,
+    'assignee', assignee,
+    'commit_hash', commit_hash,
+    'last_rejected_commit', last_rejected_commit
+)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-45091';
+""",
+                ).stdout
+            )
+            assert normal_audit_kickback == {
+                "state": "in_progress",
+                "assignee": "main",
+                "commit_hash": "",
+                "last_rejected_commit": "4501111",
+            }, normal_audit_kickback
+            normal_audit_notice = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object('target_role', target_role, 'message', message, 'new_state', payload->>'new_state')::text
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-45091' AND payload->>'new_state' = 'in_progress'
+ORDER BY id DESC
+LIMIT 1;
+""",
+                ).stdout
+            )
+            assert normal_audit_notice == {
+                "target_role": "main",
+                "message": "PGU-45091 -- Normal audit kickback remembers implementer kicked back to you",
+                "new_state": "in_progress",
+            }, normal_audit_notice
 
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
             insert_ticket(conninfo, "PGU-33802", title="Director route still notifies ops", state="analysis", assignee="unassigned", implementation="")

@@ -228,7 +228,20 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       if (Object.prototype.hasOwnProperty.call(patch, 'state')) {
         const nextState = String(patch.state || '').trim().toLowerCase();
         if (nextState === 'in_progress' && patch.comment && previousState === 'inspection') {
-          await updateTicketAction(ticketId, 'inspector_kick_back', { recommendations: actionReason(patch) }, normalizedCaller);
+          const payload = { recommendations: actionReason(patch) };
+          if (Object.prototype.hasOwnProperty.call(patch, 'assignee')) {
+            payload.target_assignee = patch.assignee;
+          }
+          await updateTicketAction(ticketId, 'inspector_kick_back', payload, normalizedCaller);
+          consumed.add('assignee');
+          consumedComment = true;
+        } else if (nextState === 'in_progress' && patch.comment && previousState === 'audit') {
+          const payload = { reason: actionReason(patch) };
+          if (Object.prototype.hasOwnProperty.call(patch, 'assignee')) {
+            payload.target_assignee = patch.assignee;
+          }
+          await updateTicketAction(ticketId, 'audit_kick_back', payload, normalizedCaller);
+          consumed.add('assignee');
           consumedComment = true;
         } else if (nextState === 'in_progress' && Object.prototype.hasOwnProperty.call(patch, 'assignee')) {
           await updateTicketAction(
@@ -273,9 +286,6 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
           await updateTicketAction(ticketId, 'defer', {}, normalizedCaller);
         } else if (nextState === 'cancelled') {
           await updateTicketAction(ticketId, 'cancel', { reason: actionReason(patch) }, normalizedCaller);
-          consumedComment = true;
-        } else if (nextState === 'analysis' && patch.comment && previousState === 'audit') {
-          await updateTicketAction(ticketId, 'audit_kick_back', { reason: actionReason(patch) }, normalizedCaller);
           consumedComment = true;
         } else if (
           nextState === 'analysis' &&

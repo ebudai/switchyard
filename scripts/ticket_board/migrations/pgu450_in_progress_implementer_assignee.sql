@@ -6,6 +6,87 @@ AS $$
     SELECT p_assignee IN ('main', 'app', 'perf', 'ops', 'research');
 $$;
 
+ALTER TABLE ticket_board.ticket_notification_state
+    ADD COLUMN IF NOT EXISTS last_implementer_assignee text NOT NULL DEFAULT '';
+
+UPDATE ticket_board.ticket_notification_state ns
+SET last_implementer_assignee = t.assignee
+FROM ticket_board.tickets t
+WHERE ns.ticket_id = t.id
+  AND t.state = 'in_progress'
+  AND ticket_board.ticket_is_implementer_assignee(t.assignee);
+
+CREATE OR REPLACE FUNCTION ticket_board.ticket_kickback_target_assignee(
+    p_ticket_id text,
+    p_target_assignee text DEFAULT NULL
+)
+RETURNS text
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    normalized_target text := btrim(lower(coalesce(p_target_assignee, '')));
+    tracked_target text;
+    current_target text;
+BEGIN
+    IF normalized_target <> '' THEN
+        IF NOT ticket_board.ticket_is_implementer_assignee(normalized_target) THEN
+            RAISE EXCEPTION 'kickback target assignee must be an implementer (main, app, ops, perf, or research)';
+        END IF;
+        RETURN normalized_target;
+    END IF;
+
+    SELECT nullif(ns.last_implementer_assignee, '')
+    INTO tracked_target
+    FROM ticket_board.ticket_notification_state ns
+    WHERE ns.ticket_id = p_ticket_id;
+    IF ticket_board.ticket_is_implementer_assignee(tracked_target) THEN
+        RETURN tracked_target;
+    END IF;
+
+    SELECT t.assignee
+    INTO current_target
+    FROM ticket_board.tickets t
+    WHERE t.id = p_ticket_id;
+    IF ticket_board.ticket_is_implementer_assignee(current_target) THEN
+        RETURN current_target;
+    END IF;
+
+    RETURN 'ops';
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.remember_ticket_implementer_assignee()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    implementer text := '';
+BEGIN
+    IF NEW.state = 'in_progress' AND ticket_board.ticket_is_implementer_assignee(NEW.assignee) THEN
+        implementer := NEW.assignee;
+    ELSIF TG_OP = 'UPDATE' AND OLD.state = 'in_progress' AND ticket_board.ticket_is_implementer_assignee(OLD.assignee) THEN
+        implementer := OLD.assignee;
+    END IF;
+
+    IF implementer <> '' THEN
+        UPDATE ticket_board.ticket_notification_state
+        SET last_implementer_assignee = implementer
+        WHERE ticket_id = NEW.id;
+    END IF;
+
+    RETURN NULL;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tickets_remember_implementer_assignee ON ticket_board.tickets;
+CREATE TRIGGER tickets_remember_implementer_assignee
+AFTER INSERT OR UPDATE ON ticket_board.tickets
+FOR EACH ROW
+EXECUTE FUNCTION ticket_board.remember_ticket_implementer_assignee();
+
 CREATE OR REPLACE FUNCTION ticket_board.ticket_can_auto_advance_analysis(
     p_state text,
     p_assignee text,
@@ -91,7 +172,7 @@ BEGIN
             (OLD.state = 'analysis' AND NEW.state IN ('in_progress', 'backlog', 'cancelled')) OR
             (OLD.state = 'in_progress' AND NEW.state IN ('inspection', 'audit', 'analysis', 'backlog', 'cancelled')) OR
             (OLD.state = 'inspection' AND NEW.state IN ('audit', 'in_progress', 'backlog', 'cancelled')) OR
-            (OLD.state = 'audit' AND NEW.state IN ('eric_review', 'director_review', 'analysis', 'backlog', 'cancelled')) OR
+            (OLD.state = 'audit' AND NEW.state IN ('eric_review', 'director_review', 'in_progress', 'analysis', 'backlog', 'cancelled')) OR
             (OLD.state = 'eric_review' AND NEW.state IN ('inspection', 'director_review', 'audit', 'analysis', 'backlog', 'cancelled')) OR
             (OLD.state = 'director_review' AND NEW.state IN ('done', 'in_progress', 'analysis', 'backlog', 'cancelled')) OR
             (OLD.state = 'done' AND NEW.state IN ('analysis', 'backlog')) OR
@@ -200,3 +281,136 @@ ALTER TABLE ticket_board.tickets
         state <> 'in_progress'
         OR assignee IN ('main', 'app', 'perf', 'ops', 'research')
     ) NOT VALID;
+
+CREATE OR REPLACE FUNCTION ticket_board.audit_kick_back(
+    id text,
+    reason text
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    actor text;
+    comment_actor text;
+BEGIN
+    actor := ticket_board.require_actor(ARRAY['audit'], 'audit_kick_back');
+    comment_actor := ticket_board.current_app_actor();
+    PERFORM ticket_board.append_ticket_comment(id, comment_actor, reason);
+    UPDATE ticket_board.tickets
+    SET state = 'in_progress',
+        assignee = ticket_board.ticket_kickback_target_assignee(audit_kick_back.id),
+        last_rejected_commit = commit_hash
+    WHERE tickets.id = audit_kick_back.id
+      AND tickets.state = 'audit';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'audit ticket not found: %', id;
+    END IF;
+    PERFORM ticket_board.touch_ticket(id);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.audit_kick_back(
+    id text,
+    reason text,
+    target_assignee text
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    actor text;
+    comment_actor text;
+BEGIN
+    actor := ticket_board.require_actor(ARRAY['audit'], 'audit_kick_back');
+    comment_actor := ticket_board.current_app_actor();
+    PERFORM ticket_board.append_ticket_comment(id, comment_actor, reason);
+    UPDATE ticket_board.tickets
+    SET state = 'in_progress',
+        assignee = ticket_board.ticket_kickback_target_assignee(audit_kick_back.id, target_assignee),
+        last_rejected_commit = commit_hash
+    WHERE tickets.id = audit_kick_back.id
+      AND tickets.state = 'audit';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'audit ticket not found: %', id;
+    END IF;
+    PERFORM ticket_board.touch_ticket(id);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.inspector_kick_back(
+    id text,
+    recommendations text
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    actor text;
+    comment_actor text;
+BEGIN
+    actor := ticket_board.require_actor(ARRAY['inspector'], 'inspector_kick_back');
+    comment_actor := ticket_board.current_app_actor();
+    PERFORM ticket_board.append_ticket_comment(id, comment_actor, recommendations);
+    UPDATE ticket_board.tickets
+    SET state = 'in_progress',
+        assignee = ticket_board.ticket_kickback_target_assignee(inspector_kick_back.id),
+        inspector_signoff = false,
+        last_rejected_commit = commit_hash
+    WHERE tickets.id = inspector_kick_back.id
+      AND tickets.state = 'inspection';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'inspection ticket not found: %', id;
+    END IF;
+    PERFORM ticket_board.touch_ticket(id);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.inspector_kick_back(
+    id text,
+    recommendations text,
+    target_assignee text
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    actor text;
+    comment_actor text;
+BEGIN
+    actor := ticket_board.require_actor(ARRAY['inspector'], 'inspector_kick_back');
+    comment_actor := ticket_board.current_app_actor();
+    PERFORM ticket_board.append_ticket_comment(id, comment_actor, recommendations);
+    UPDATE ticket_board.tickets
+    SET state = 'in_progress',
+        assignee = ticket_board.ticket_kickback_target_assignee(inspector_kick_back.id, target_assignee),
+        inspector_signoff = false,
+        last_rejected_commit = commit_hash
+    WHERE tickets.id = inspector_kick_back.id
+      AND tickets.state = 'inspection';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'inspection ticket not found: %', id;
+    END IF;
+    PERFORM ticket_board.touch_ticket(id);
+END;
+$$;
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ticket_board_service') THEN
+        GRANT EXECUTE ON FUNCTION ticket_board.audit_kick_back(text, text, text) TO ticket_board_service;
+        GRANT EXECUTE ON FUNCTION ticket_board.inspector_kick_back(text, text, text) TO ticket_board_service;
+    END IF;
+END;
+$$;

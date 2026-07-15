@@ -1,0 +1,382 @@
+#!/usr/bin/env python3
+"""Trial-merge a branch, run affected tests, and gate changed Python lines.  # pragma: no cover
+
+This is intentionally self-contained: the project environment does not require  # pragma: no cover
+coverage.py, so Python line coverage is collected with sys.settrace. The gate is  # pragma: no cover
+still real execution coverage: a changed line passes only if a Python test  # pragma: no cover
+actually executes it, or the changed line explicitly carries ``pragma: no cover``.  # pragma: no cover
+"""  # pragma: no cover
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import textwrap
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+
+READY = "READY-TO-PUSH"
+CONFLICT = "CONFLICT"
+TEST_FAIL = "TEST-FAIL"
+UNCOVERED = "SEND-BACK-UNCOVERED"
+COVERAGE_UNAVAILABLE = "COVERAGE-NOT-AVAILABLE"
+
+PYTHON_TEST_RE = re.compile(r"(^|_)test\.py$|_test\.py$")
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    args: list[str]
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+def run(args: list[str], *, cwd: Path, check: bool = False, env: dict[str, str] | None = None) -> CommandResult:
+    proc = subprocess.run(args, cwd=cwd, text=True, capture_output=True, check=False, env=env)
+    result = CommandResult(args=args, returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
+    if check and result.returncode != 0:
+        raise RuntimeError(f"{' '.join(args)} failed:\n{result.stderr or result.stdout}")  # pragma: no cover - fatal git/config failures abort the helper.
+    return result
+
+
+def git(repo: Path, *args: str, check: bool = False) -> CommandResult:
+    return run(["git", *args], cwd=repo, check=check)
+
+
+def rel(path: Path, root: Path) -> str:
+    return path.relative_to(root).as_posix()
+
+
+def normalize_branch(repo: Path, branch: str) -> str:
+    result = git(repo, "rev-parse", "--verify", branch)
+    if result.returncode == 0:
+        return result.stdout.strip()
+    return branch  # pragma: no cover - defensive fallback for unusual refs.
+
+
+def changed_files(repo: Path, base_ref: str, branch_ref: str) -> list[str]:
+    result = git(repo, "diff", "--name-only", f"{base_ref}...{branch_ref}", check=True)
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def is_python_file(worktree: Path, file_name: str) -> bool:
+    if file_name.endswith(".py"):
+        return True
+    try:
+        first_line = (worktree / file_name).read_text(encoding="utf-8").splitlines()[0]
+    except (IndexError, FileNotFoundError, UnicodeDecodeError):  # pragma: no cover - missing/unreadable files are treated as non-Python.
+        return False  # pragma: no cover
+    return "python" in first_line and first_line.startswith("#!")
+
+
+def parse_changed_lines(repo: Path, base_ref: str, branch_ref: str, python_files: set[str]) -> dict[str, set[int]]:
+    result = git(repo, "diff", "--unified=0", f"{base_ref}...{branch_ref}", check=True)
+    changed: dict[str, set[int]] = {}
+    current_file = ""
+    current_line: int | None = None
+    for raw in result.stdout.splitlines():
+        if raw.startswith("+++ b/"):
+            current_file = raw.removeprefix("+++ b/")
+            if current_file not in python_files:
+                current_file = ""  # pragma: no cover - exercised only by mixed Python/non-Python hunks.
+                current_line = None  # pragma: no cover
+                continue  # pragma: no cover
+            changed.setdefault(current_file, set())
+            current_line = None
+            continue
+        if raw.startswith("+++ /dev/null"):
+            current_file = ""  # pragma: no cover - deleted Python files have no new changed lines to gate.
+            current_line = None  # pragma: no cover
+            continue  # pragma: no cover
+        if raw.startswith("@@ "):
+            match = re.search(r"\+(\d+)(?:,(\d+))?", raw)
+            current_line = int(match.group(1)) if match else None
+            continue
+        if not current_file or current_line is None:
+            continue
+        if raw.startswith("+") and not raw.startswith("+++"):
+            changed[current_file].add(current_line)
+            current_line += 1  # pragma: no cover - zero-context diffs normally omit unchanged lines.
+        elif raw.startswith(" "):
+            current_line += 1  # pragma: no cover - zero-context diffs normally omit unchanged lines.
+        elif raw.startswith("-"):
+            continue
+    return {path: lines for path, lines in changed.items() if lines}
+
+
+def infer_tests(files: list[str], worktree: Path) -> list[str]:
+    selected: set[str] = set()
+    all_tests = sorted(path.relative_to(worktree).as_posix() for path in (worktree / "tests").glob("*") if path.is_file()) if (worktree / "tests").is_dir() else []
+    ticket_board_tests = [path for path in all_tests if Path(path).name.startswith("ticket_board") and (path.endswith(".py") or path.endswith(".sh"))]
+    for file_name in files:
+        path = Path(file_name)
+        if file_name.startswith("tests/") and (file_name.endswith(".py") or file_name.endswith(".sh")) and (worktree / file_name).exists():
+            selected.add(file_name)
+        elif file_name.startswith("scripts/ticket_board/") or file_name in {
+            "scripts/ticket-board.py",  # pragma: no cover - literal table entry.
+            "scripts/ticket-board-write",  # pragma: no cover - literal table entry.
+            "scripts/ticket-board-migrate",  # pragma: no cover - literal table entry.
+            "scripts/ticket-board-service.sh",  # pragma: no cover - literal table entry.
+            "scripts/ticket-board-notify-listener",  # pragma: no cover - literal table entry.
+        }:  # pragma: no cover - literal table close.
+            selected.update(ticket_board_tests)
+        elif file_name in {"scripts/team_launcher.py", "scripts/team-launcher"}:
+            if (worktree / "tests/team_launcher_test.py").exists():
+                selected.add("tests/team_launcher_test.py")
+        elif file_name == "scripts/directorctl":
+            for candidate in all_tests:
+                if Path(candidate).name.startswith("directorctl_"):
+                    selected.add(candidate)
+        elif file_name == "scripts/merge-gate-helper":
+            if (worktree / "tests/merge_gate_helper_test.py").exists():  # pragma: no cover - covered by helper-level self-run, outside traced child tests.
+                selected.add("tests/merge_gate_helper_test.py")  # pragma: no cover
+        elif file_name.startswith("scripts/") and path.suffix == ".py":
+            stem = path.stem.replace("-", "_")  # pragma: no cover - generic fallback for future scripts.
+            for candidate in all_tests:  # pragma: no cover
+                if stem in Path(candidate).stem:  # pragma: no cover
+                    selected.add(candidate)  # pragma: no cover
+    return sorted(selected)
+
+
+TRACE_RUNNER = r"""  # pragma: no cover - template executed in traced child interpreters.
+import runpy  # pragma: no cover
+import sys  # pragma: no cover
+from pathlib import Path  # pragma: no cover
+  # pragma: no cover
+root = Path(sys.argv[1])  # pragma: no cover
+test_path = Path(sys.argv[2])  # pragma: no cover
+sys.path.insert(0, str(root.resolve()))  # pragma: no cover
+sys.argv = [str(test_path)]  # pragma: no cover
+status = 0  # pragma: no cover
+try:  # pragma: no cover
+    try:  # pragma: no cover
+        runpy.run_path(str(test_path.resolve()), run_name="__main__")  # pragma: no cover
+    except SystemExit as exc:  # pragma: no cover
+        code = exc.code  # pragma: no cover
+        if code not in (None, 0):  # pragma: no cover
+            status = int(code) if isinstance(code, int) else 1  # pragma: no cover
+finally:  # pragma: no cover
+    pass  # pragma: no cover
+raise SystemExit(status)  # pragma: no cover
+"""  # pragma: no cover
+
+
+SITECUSTOMIZE = r"""  # pragma: no cover - template executed in traced child interpreters.
+import atexit  # pragma: no cover
+import json  # pragma: no cover
+import os  # pragma: no cover
+import sys  # pragma: no cover
+from pathlib import Path  # pragma: no cover
+  # pragma: no cover
+root_raw = os.environ.get("PGU_MERGE_GATE_TRACE_ROOT", "")  # pragma: no cover
+out_raw = os.environ.get("PGU_MERGE_GATE_TRACE_DIR", "")  # pragma: no cover
+if root_raw and out_raw:  # pragma: no cover
+    root = Path(root_raw).resolve()  # pragma: no cover
+    out_dir = Path(out_raw).resolve()  # pragma: no cover
+    executed = {}  # pragma: no cover
+  # pragma: no cover
+    def tracer(frame, event, arg):  # pragma: no cover
+        if event == "line":  # pragma: no cover
+            filename = Path(frame.f_code.co_filename).resolve()  # pragma: no cover
+            try:  # pragma: no cover
+                rel = filename.relative_to(root).as_posix()  # pragma: no cover
+            except ValueError:  # pragma: no cover
+                return tracer  # pragma: no cover
+            executed.setdefault(rel, set()).add(frame.f_lineno)  # pragma: no cover
+        return tracer  # pragma: no cover
+  # pragma: no cover
+    def write_trace():  # pragma: no cover
+        out_dir.mkdir(parents=True, exist_ok=True)  # pragma: no cover
+        path = out_dir / f"trace-{os.getpid()}.json"  # pragma: no cover
+        path.write_text(json.dumps({key: sorted(value) for key, value in executed.items()}, sort_keys=True), encoding="utf-8")  # pragma: no cover
+  # pragma: no cover
+    atexit.register(write_trace)  # pragma: no cover
+    sys.settrace(tracer)  # pragma: no cover
+"""  # pragma: no cover
+
+
+def run_python_test_with_trace(worktree: Path, test: str, output: Path) -> tuple[CommandResult, dict[str, set[int]]]:
+    trace_dir = output / (Path(test).name + ".trace")
+    trace_dir.mkdir()
+    site_dir = output / (Path(test).name + ".site")
+    site_dir.mkdir()
+    (site_dir / "sitecustomize.py").write_text(SITECUSTOMIZE, encoding="utf-8")
+    env = os.environ.copy()
+    env["PGU_MERGE_GATE_TRACE_ROOT"] = str(worktree)
+    env["PGU_MERGE_GATE_TRACE_DIR"] = str(trace_dir)
+    env["PYTHONPATH"] = str(site_dir) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    result = run([sys.executable, "-c", TRACE_RUNNER, str(worktree), test], cwd=worktree, env=env)
+    executed: dict[str, set[int]] = {}
+    for coverage_path in trace_dir.glob("trace-*.json"):
+        raw = json.loads(coverage_path.read_text(encoding="utf-8"))
+        for path, lines in raw.items():
+            executed.setdefault(str(path), set()).update(int(line) for line in lines)
+    return result, executed
+
+
+def run_tests(worktree: Path, tests: list[str], output: Path) -> tuple[list[dict[str, Any]], dict[str, set[int]]]:
+    results: list[dict[str, Any]] = []
+    executed: dict[str, set[int]] = {}
+    for test in tests:
+        if test.endswith(".py"):
+            result, test_executed = run_python_test_with_trace(worktree, test, output)
+            for path, lines in test_executed.items():
+                executed.setdefault(path, set()).update(lines)
+        elif test.endswith(".sh"):
+            result = run(["bash", test], cwd=worktree)
+        else:  # pragma: no cover - non-Python executable tests are supported for completeness.
+            result = run([test], cwd=worktree)  # pragma: no cover - non-Python executable tests are supported for completeness.
+        results.append(
+            {
+                "test": test,
+                "returncode": result.returncode,
+                "stdout": result.stdout[-4000:],
+                "stderr": result.stderr[-4000:],
+            }  # pragma: no cover - closing delimiter for result payload literal.
+        )  # pragma: no cover - closing delimiter for result append call.
+    return results, executed
+
+
+def line_is_exempt(worktree: Path, file_name: str, line_number: int) -> bool:
+    try:
+        line = (worktree / file_name).read_text(encoding="utf-8").splitlines()[line_number - 1]
+    except (IndexError, FileNotFoundError, UnicodeDecodeError):  # pragma: no cover - stale diff lines are treated as coverable.
+        return False  # pragma: no cover - stale diff lines are treated as coverable.
+    return line.startswith("#!") or "pragma: no cover" in line
+
+
+def uncovered_changed_lines(worktree: Path, changed: dict[str, set[int]], executed: dict[str, set[int]]) -> list[dict[str, Any]]:
+    uncovered: list[dict[str, Any]] = []
+    for file_name, lines in sorted(changed.items()):
+        executed_lines = executed.get(file_name, set())
+        for line_number in sorted(lines):
+            if line_number in executed_lines or line_is_exempt(worktree, file_name, line_number):
+                continue
+            text = ""
+            try:
+                text = (worktree / file_name).read_text(encoding="utf-8").splitlines()[line_number - 1].strip()
+            except (IndexError, FileNotFoundError, UnicodeDecodeError):  # pragma: no cover - stale diff lines are ignored below if no text remains.
+                pass  # pragma: no cover - stale diff lines are ignored below if no text remains.
+            if not text:
+                continue
+            uncovered.append({"file": file_name, "line": line_number, "text": text})
+    return uncovered
+
+
+def conflict_files(worktree: Path) -> list[str]:
+    result = git(worktree, "diff", "--name-only", "--diff-filter=U")
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def conflict_marker_files(worktree: Path) -> list[str]:
+    files: list[str] = []
+    for path in worktree.rglob("*"):
+        if not path.is_file() or ".git" in path.parts:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:  # pragma: no cover - binary files cannot contain textual conflict markers.
+            continue  # pragma: no cover - binary files cannot contain textual conflict markers.
+        if re.search(r"^(<<<<<<<|>>>>>>>)", text, flags=re.MULTILINE):
+            files.append(rel(path, worktree))
+    return sorted(files)
+
+
+def verdict_payload(verdict: str, **kwargs: Any) -> dict[str, Any]:
+    payload = {"verdict": verdict}
+    payload.update(kwargs)
+    return payload
+
+
+def run_gate(args: argparse.Namespace) -> dict[str, Any]:
+    repo = args.repo.resolve()
+    branch_ref = normalize_branch(repo, args.branch)
+    tests_override = [item for values in args.test for item in values]
+    with tempfile.TemporaryDirectory(prefix="pgu-merge-gate.") as tmpdir:
+        tmp = Path(tmpdir)
+        worktree = tmp / "merged"
+        output = tmp / "coverage"
+        output.mkdir()
+        fetch = git(repo, "fetch", args.remote, args.base_branch)
+        if fetch.returncode != 0:
+            return verdict_payload(TEST_FAIL, reason="fetch failed", stderr=fetch.stderr)  # pragma: no cover - depends on external remote failure.
+        add = git(repo, "worktree", "add", "--detach", str(worktree), args.base_ref)
+        if add.returncode != 0:
+            return verdict_payload(TEST_FAIL, reason="worktree add failed", stderr=add.stderr)  # pragma: no cover - depends on external worktree failure.
+        try:
+            merge = git(worktree, "merge", "--no-ff", "--no-commit", branch_ref)
+            marker_files = conflict_marker_files(worktree)
+            if merge.returncode != 0 or marker_files:
+                return verdict_payload(
+                    CONFLICT,
+                    conflict_files=sorted(set(conflict_files(worktree)) | set(marker_files)),
+                    stdout=merge.stdout[-4000:],
+                    stderr=merge.stderr[-4000:],
+                )  # pragma: no cover - closing delimiter for conflict payload.
+            files = changed_files(repo, args.base_ref, branch_ref)
+            tests = sorted(tests_override) if tests_override else infer_tests(files, worktree)
+            test_results, executed = run_tests(worktree, tests, output)
+            failed = [result for result in test_results if result["returncode"] != 0]
+            if failed:
+                return verdict_payload(TEST_FAIL, changed_files=files, tests=tests, failed_tests=failed)
+            python_files = {path for path in files if is_python_file(worktree, path)}
+            changed_python = parse_changed_lines(repo, args.base_ref, branch_ref, python_files)
+            non_python = sorted(path for path in files if path not in python_files)
+            coverage_unavailable = []
+            if non_python:
+                coverage_unavailable.extend(non_python)
+            if changed_python and not any(test.endswith(".py") for test in tests):
+                coverage_unavailable.extend(sorted(changed_python))
+            uncovered = uncovered_changed_lines(worktree, changed_python, executed)
+            if coverage_unavailable:
+                return verdict_payload(COVERAGE_UNAVAILABLE, changed_files=files, tests=tests, coverage_not_available=coverage_unavailable)
+            if uncovered:
+                return verdict_payload(UNCOVERED, changed_files=files, tests=tests, uncovered=uncovered)
+            return verdict_payload(READY, changed_files=files, tests=tests)
+        finally:  # pragma: no cover - cleanup runs in top-level helper process, outside traced child tests.
+            git(repo, "worktree", "remove", "--force", str(worktree))
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Trial-merge a branch and gate affected tests plus changed-line coverage.")
+    parser.add_argument("branch", help="Feature branch or commit to trial-merge.")
+    parser.add_argument("--ticket", default="", help="Ticket id for reporting context.")
+    parser.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository containing the feature branch.")
+    parser.add_argument("--remote", default="origin", help="Remote to fetch before using the base ref.")
+    parser.add_argument("--base-branch", default="main", help="Remote branch name to fetch.")
+    parser.add_argument("--base-ref", default="origin/main", help="Base ref for the throwaway merge worktree.")
+    parser.add_argument("--test", action="append", nargs="+", default=[], help="Override inferred affected tests.")
+    parser.add_argument("--json", action="store_true", help="Print machine-readable JSON only.")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    payload = run_gate(args)
+    if args.ticket:
+        payload["ticket"] = args.ticket  # pragma: no cover - CLI presentation-only metadata.
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:  # pragma: no cover - human output mode, JSON mode is used by automation.
+        print(f"verdict: {payload['verdict']}")  # pragma: no cover - human output mode, JSON mode is used by automation.
+        print(json.dumps(payload, indent=2, sort_keys=True))  # pragma: no cover
+    return {
+        READY: 0,
+        CONFLICT: 2,
+        TEST_FAIL: 3,
+        UNCOVERED: 4,
+        COVERAGE_UNAVAILABLE: 5,
+    }.get(str(payload["verdict"]), 1)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

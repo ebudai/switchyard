@@ -61,7 +61,8 @@ class RecordingHandler(BaseHTTPRequestHandler):
             ticket["state"] = "director_review"
             ticket["comments"] = [{"who": caller, "text": payload.get("text", "")}]
         elif operation == "audit_kick_back":
-            ticket["state"] = "analysis"
+            ticket["state"] = "in_progress"
+            ticket["assignee"] = payload.get("target_assignee", payload.get("assignee", "ops"))
         elif operation == "eric_sign_off":
             ticket["state"] = "director_review"
             if payload.get("text"):
@@ -169,7 +170,9 @@ def exercise_client(base_url: str, repo: Path, commit_hash: str) -> None:
         audit_signed = client.audit_sign_off("PGU-102", text="Audit verified.", caller_role="audit")
         assert audit_signed["ticket"]["state"] == "director_review"
         assert audit_signed["ticket"]["comments"][-1]["text"] == "Audit verified."
-        assert client.audit_kick_back("PGU-103", reason="Needs another pass.", caller_role="audit")["ticket"]["state"] == "analysis"
+        audit_kicked = client.audit_kick_back("PGU-103", reason="Needs another pass.", target_assignee="ops", caller_role="audit")
+        assert audit_kicked["ticket"]["state"] == "in_progress"
+        assert audit_kicked["ticket"]["assignee"] == "ops"
         eric_signed = client.eric_sign_off("PGU-104", text="Eric approves.", caller_role="eric")
         assert eric_signed["ticket"]["state"] == "director_review"
         assert eric_signed["ticket"]["comments"][-1]["text"] == "Eric approves."

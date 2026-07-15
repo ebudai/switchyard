@@ -536,9 +536,9 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         commentActions.appendChild(kickbackButton);
       } else if (ticket.state === 'audit') {
         const kickbackButton = document.createElement('button');
-        kickbackButton.textContent = 'Comment + Return to Triage';
+        kickbackButton.textContent = 'Comment + Return to Implementation';
         kickbackButton.addEventListener('click', async () => {
-          await submitComment(ticket.id, commentWho.value, commentText.value, 'analysis');
+          await submitComment(ticket.id, commentWho.value, commentText.value, 'in_progress');
         });
         commentActions.appendChild(kickbackButton);
       } else if (ticketAllowsKickback(ticket)) {

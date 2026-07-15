@@ -327,14 +327,34 @@ class TicketBoardWriteClient:
     def audit_sign_off(self, ticket_id: str, *, text: str, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "audit_sign_off", {"text": text}, caller_role=caller_role)
 
-    def audit_kick_back(self, ticket_id: str, *, reason: str, caller_role: str | None = None) -> dict[str, Any]:
-        return self._ticket_action(ticket_id, "audit_kick_back", {"reason": reason}, caller_role=caller_role)
+    def audit_kick_back(
+        self,
+        ticket_id: str,
+        *,
+        reason: str,
+        target_assignee: str = "",
+        caller_role: str | None = None,
+    ) -> dict[str, Any]:
+        payload = {"reason": reason}
+        if target_assignee:
+            payload["target_assignee"] = target_assignee
+        return self._ticket_action(ticket_id, "audit_kick_back", payload, caller_role=caller_role)
 
     def inspector_sign_off(self, ticket_id: str, *, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "inspector_sign_off", caller_role=caller_role)
 
-    def inspector_kick_back(self, ticket_id: str, *, recommendations: str, caller_role: str | None = None) -> dict[str, Any]:
-        return self._ticket_action(ticket_id, "inspector_kick_back", {"recommendations": recommendations}, caller_role=caller_role)
+    def inspector_kick_back(
+        self,
+        ticket_id: str,
+        *,
+        recommendations: str,
+        target_assignee: str = "",
+        caller_role: str | None = None,
+    ) -> dict[str, Any]:
+        payload = {"recommendations": recommendations}
+        if target_assignee:
+            payload["target_assignee"] = target_assignee
+        return self._ticket_action(ticket_id, "inspector_kick_back", payload, caller_role=caller_role)
 
     def eric_sign_off(self, ticket_id: str, *, text: str = "", caller_role: str | None = None) -> dict[str, Any]:
         payload = {"text": text} if text else None
@@ -446,7 +466,12 @@ def _build_parser() -> argparse.ArgumentParser:
     request_exempt.add_argument("ticket_id")
     request_exempt.add_argument("--reason", required=True)
 
-    for name in ("audit-kick-back", "eric-reopen", "cancel"):
+    audit_kick = subparsers.add_parser("audit-kick-back")
+    audit_kick.add_argument("ticket_id")
+    audit_kick.add_argument("--reason", required=True)
+    audit_kick.add_argument("--target-assignee", default="")
+
+    for name in ("eric-reopen", "cancel"):
         sub = subparsers.add_parser(name)
         sub.add_argument("ticket_id")
         sub.add_argument("--reason", required=True)
@@ -454,6 +479,7 @@ def _build_parser() -> argparse.ArgumentParser:
     inspector_kick = subparsers.add_parser("inspector-kick-back")
     inspector_kick.add_argument("ticket_id")
     inspector_kick.add_argument("--recommendations", required=True)
+    inspector_kick.add_argument("--target-assignee", default="")
 
     done = subparsers.add_parser("mark-done")
     done.add_argument("ticket_id")
@@ -504,10 +530,16 @@ def main(argv: list[str] | None = None) -> int:
             response = client.request_commit_exempt(args.ticket_id, reason=args.reason)
         elif command == "audit_sign_off":
             response = client.audit_sign_off(args.ticket_id, text=args.text)
-        elif command in {"audit_kick_back", "eric_reopen", "cancel"}:
+        elif command == "audit_kick_back":
+            response = client.audit_kick_back(args.ticket_id, reason=args.reason, target_assignee=args.target_assignee)
+        elif command in {"eric_reopen", "cancel"}:
             response = getattr(client, command)(args.ticket_id, reason=args.reason)
         elif command == "inspector_kick_back":
-            response = client.inspector_kick_back(args.ticket_id, recommendations=args.recommendations)
+            response = client.inspector_kick_back(
+                args.ticket_id,
+                recommendations=args.recommendations,
+                target_assignee=args.target_assignee,
+            )
         elif command == "mark_done":
             response = client.mark_done(args.ticket_id, commit_hash=args.commit_hash)
         elif command == "set_manually_controlled":

@@ -696,8 +696,15 @@ ORDER BY t.ticket_number
                     if inspector_signoff_handled and state == "audit":
                         pass
                     elif state == "in_progress" and comment_text and current["state"] == "inspection":
-                        self._pg_call(conn, "SELECT ticket_board.inspector_kick_back(%s, %s);", (ticket_id, comment_text))
+                        target_assignee = assignee if "assignee" in patch else ""
+                        self._pg_call(conn, "SELECT ticket_board.inspector_kick_back(%s, %s, %s);", (ticket_id, comment_text, target_assignee))
                         comment_text = ""
+                    elif state == "in_progress" and comment_text and current["state"] == "audit":
+                        target_assignee = assignee if "assignee" in patch else ""
+                        self._pg_call(conn, "SELECT ticket_board.audit_kick_back(%s, %s, %s);", (ticket_id, comment_text, target_assignee))
+                        comment_text = ""
+                    elif state == "in_progress" and "assignee" in patch:
+                        self._pg_call(conn, "SELECT ticket_board.route(%s, %s, %s);", (ticket_id, state, assignee))
                     elif state == "in_progress":
                         self._pg_call(conn, "SELECT ticket_board.start_work(%s);", (ticket_id,))
                     elif state == "audit":
@@ -712,7 +719,8 @@ ORDER BY t.ticket_number
                         self._pg_call(conn, "SELECT ticket_board.cancel(%s, %s);", (ticket_id, comment_text))
                         comment_text = ""
                     elif state == "analysis" and comment_text and current["state"] == "audit":
-                        self._pg_call(conn, "SELECT ticket_board.audit_kick_back(%s, %s);", (ticket_id, comment_text))
+                        target_assignee = assignee if "assignee" in patch else ""
+                        self._pg_call(conn, "SELECT ticket_board.audit_kick_back(%s, %s, %s);", (ticket_id, comment_text, target_assignee))
                         comment_text = ""
                     elif state == "analysis" and comment_text and current["state"] in {"eric_review", "director_review", "done"}:
                         self._pg_call(conn, "SELECT ticket_board.eric_reopen(%s, %s);", (ticket_id, comment_text))

@@ -88,6 +88,10 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       return raw ? raw.charAt(0).toUpperCase() + raw.slice(1) : raw;
     }
 
+    function isImplementerAssignee(role) {
+      return ['main', 'app', 'perf', 'ops', 'research'].includes(String(role || '').trim().toLowerCase());
+    }
+
     function mobileSectionsEnabled() {
       return mobileSectionMedia.matches;
     }
@@ -158,8 +162,8 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         return `Resolve blockers before advancing: ${formatBlockedByList(unresolved)}.`;
       }
       if (ticket.state === 'analysis') {
-        if (ticket.assignee === 'unassigned') {
-          return 'Assign the ticket before advancing to Implementation.';
+        if (!isImplementerAssignee(ticket.assignee)) {
+          return 'Assign an implementer before advancing to Implementation.';
         }
       }
       if (ticket.state === 'inspection' && !ticket.inspector_signoff) {

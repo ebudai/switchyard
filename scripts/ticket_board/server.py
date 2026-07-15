@@ -601,6 +601,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 "state": "in_progress",
                 "comment": {"who": caller, "text": str(payload.get("recommendations", payload.get("reason", payload.get("text", ""))))},
             }
+            if payload.get("target_assignee") or payload.get("assignee"):
+                patch["assignee"] = str(payload.get("target_assignee", payload.get("assignee", "")))
         elif operation == "audit_sign_off":
             comment_text = self.action_comment_text(payload)
             if not comment_text:
@@ -608,9 +610,11 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             patch = {"audit_signoff": True, "comment": {"who": caller, "text": comment_text}}
         elif operation == "audit_kick_back":
             patch = {
-                "state": "analysis",
+                "state": "in_progress",
                 "comment": {"who": caller, "text": str(payload.get("reason", payload.get("text", "")))},
             }
+            if payload.get("target_assignee") or payload.get("assignee"):
+                patch["assignee"] = str(payload.get("target_assignee", payload.get("assignee", "")))
         elif operation == "eric_sign_off":
             comment_text = self.action_comment_text(payload)
             patch = {"eric_signoff": True}

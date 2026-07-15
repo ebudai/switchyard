@@ -178,7 +178,9 @@ def main() -> int:
     assert_contains_all(schema, EXPECTED_STATES, "state constraint")
     assert "'ready'" not in schema, "removed ready state must not appear in schema.sql"
     assert "implementation must be non-empty before a ticket can enter in_progress" not in schema
-    assert "assignee must not be unassigned before a ticket can enter in_progress" in schema
+    assert "in_progress tickets require an implementer assignee" in schema
+    assert "create or replace function ticket_board.ticket_is_implementer_assignee" in executable_schema_lower
+    assert "tickets_in_progress_assignee_check" in schema_lower
     assert re.search(
         r"resolved\s+boolean\s+not null\s+default\s+false",
         schema_lower,
@@ -196,7 +198,6 @@ def main() -> int:
     assert "unresolved blocker prevents forward promotion" in resolved_blockers_migration
     optional_implementation_migration = (ROOT / "scripts" / "ticket_board" / "migrations" / "271_optional_implementation.sql").read_text(encoding="utf-8")
     assert "implementation must be non-empty before a ticket can enter in_progress" not in optional_implementation_migration
-    assert "assignee must not be unassigned before a ticket can enter in_progress" in optional_implementation_migration
     assert_contains_all(schema, EXPECTED_ASSIGNEES, "assignee constraint")
 
     assert re.search(r"commit_hash\s+text\s+not null", schema_lower), "commit_hash column should be text"
@@ -218,6 +219,7 @@ def main() -> int:
     assert "add column if not exists regression boolean not null default false" in schema_lower
     assert "{7,40}" in schema, "commit_hash check must allow historical short hashes"
     assert "create trigger tickets_enforce_workflow_update" in executable_schema_lower
+    assert "create trigger tickets_enforce_workflow_insert" in executable_schema_lower
     assert "create trigger tickets_zzz_notify_transition" in executable_schema_lower
     assert "after insert or update on ticket_board.tickets" in executable_schema_lower
     assert "create or replace function ticket_board.enforce_ticket_workflow_update" in executable_schema_lower

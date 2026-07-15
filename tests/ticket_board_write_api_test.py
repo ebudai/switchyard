@@ -407,6 +407,7 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
         needs_eric_signoff=True,
         needs_inspection=False,
     )
+    seed_ticket("PGU-126", title="Invalid implementation assignee", state="analysis")
     seed_ticket("PGU-109", title="Manual", state="analysis")
     seed_ticket("PGU-110", title="Blocker", state="analysis")
     seed_ticket("PGU-111", title="Blocked target", state="analysis")
@@ -581,6 +582,14 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     )
     assert director_implementation["ticket"]["state"] == "in_progress", director_implementation  # type: ignore[index]
     assert director_implementation["ticket"]["assignee"] == "ops", director_implementation  # type: ignore[index]
+    invalid_implementation_assignee = post_json(
+        base_url,
+        "/api/tickets/PGU-126/actions/route",
+        {"state": "in_progress", "assignee": "director"},
+        caller="director",
+        expect=400,
+    )
+    assert "in_progress tickets require an implementer assignee" in str(invalid_implementation_assignee), invalid_implementation_assignee
 
     wrong_assignee = post_json(base_url, "/api/tickets/PGU-101/actions/start_work", {}, caller="app", expect=403)
     assert "app cannot call start_work for ticket assigned to ops" in str(wrong_assignee), wrong_assignee

@@ -29,8 +29,11 @@ def main() -> int:
     assert "if (ticket.state === 'director_review') {" in HTML
     assert "return 'done';" in HTML
     assert "function advanceBlockedReason(ticket)" in HTML
+    assert "nextState === 'in_progress' && Object.prototype.hasOwnProperty.call(patch, 'assignee')" in HTML
+    assert "{ state: nextState, assignee: patch.assignee }" in HTML
     assert "return 'ready';" not in HTML
-    assert "Assign the ticket before advancing to Implementation." in HTML
+    assert "function isImplementerAssignee(role)" in HTML
+    assert "Assign an implementer before advancing to Implementation." in HTML
     assert "Resolve blockers before advancing: ${formatBlockedByList(unresolved)}." in HTML
     assert "Save implementation before advancing to Implementation." not in HTML
     assert "already has an in-progress ticket" not in HTML

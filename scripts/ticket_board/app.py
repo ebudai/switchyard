@@ -698,6 +698,8 @@ ORDER BY t.ticket_number
                     elif state == "in_progress" and comment_text and current["state"] == "inspection":
                         self._pg_call(conn, "SELECT ticket_board.inspector_kick_back(%s, %s);", (ticket_id, comment_text))
                         comment_text = ""
+                    elif state == "in_progress" and "assignee" in patch:
+                        self._pg_call(conn, "SELECT ticket_board.route(%s, %s, %s);", (ticket_id, state, assignee))
                     elif state == "in_progress":
                         self._pg_call(conn, "SELECT ticket_board.start_work(%s);", (ticket_id,))
                     elif state == "audit":

@@ -158,6 +158,13 @@ ALTER TABLE ticket_board.tickets
         'director',
         'research'
     ));
+ALTER TABLE ticket_board.tickets
+    DROP CONSTRAINT IF EXISTS tickets_in_progress_assignee_check;
+ALTER TABLE ticket_board.tickets
+    ADD CONSTRAINT tickets_in_progress_assignee_check CHECK (
+        state <> 'in_progress'
+        OR assignee IN ('main', 'app', 'perf', 'ops', 'research')
+    );
 
 CREATE UNIQUE INDEX IF NOT EXISTS tickets_ticket_number_key
     ON ticket_board.tickets (ticket_number);
@@ -433,6 +440,26 @@ AS $$
         OR (p_old_state = 'director_review' AND p_new_state = 'done');
 $$;
 
+CREATE OR REPLACE FUNCTION ticket_board.ticket_is_implementer_assignee(p_assignee text)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT p_assignee IN ('main', 'app', 'perf', 'ops', 'research');
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.enforce_ticket_workflow_insert()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.state = 'in_progress' AND NOT ticket_board.ticket_is_implementer_assignee(NEW.assignee) THEN
+        RAISE EXCEPTION 'in_progress tickets require an implementer assignee (main, app, ops, perf, or research)';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION ticket_board.enforce_ticket_workflow_update()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -442,6 +469,10 @@ DECLARE
 BEGIN
     IF NEW.state <> 'backlog' OR OLD.state IN ('done', 'cancelled') THEN
         NEW.parked := false;
+    END IF;
+
+    IF NEW.state = 'in_progress' AND NOT ticket_board.ticket_is_implementer_assignee(NEW.assignee) THEN
+        RAISE EXCEPTION 'in_progress tickets require an implementer assignee (main, app, ops, perf, or research)';
     END IF;
 
     IF coalesce(OLD.manually_controlled, false) OR coalesce(NEW.manually_controlled, false) THEN
@@ -530,12 +561,6 @@ BEGIN
         END IF;
     ELSIF OLD.state IN ('done', 'cancelled') AND NEW.state = 'cancelled' AND OLD.state IS DISTINCT FROM NEW.state THEN
         RAISE EXCEPTION 'only active tickets can be cancelled';
-    END IF;
-
-    IF OLD.state <> 'in_progress' AND NEW.state = 'in_progress' THEN
-        IF NEW.assignee = 'unassigned' THEN
-            RAISE EXCEPTION 'assignee must not be unassigned before a ticket can enter in_progress';
-        END IF;
     END IF;
 
     IF OLD.state IS DISTINCT FROM NEW.state
@@ -955,7 +980,7 @@ LANGUAGE sql
 STABLE
 AS $$
     SELECT p_state = 'analysis'
-       AND p_assignee <> 'unassigned'
+       AND ticket_board.ticket_is_implementer_assignee(p_assignee)
        AND btrim(coalesce(p_implementation, '')) <> ''
        AND NOT coalesce(p_manually_controlled, false)
        AND NOT ticket_board.ticket_has_unresolved_blockers(p_ticket_id);
@@ -2352,6 +2377,12 @@ BEGIN
     END IF;
 END;
 $$;
+
+DROP TRIGGER IF EXISTS tickets_enforce_workflow_insert ON ticket_board.tickets;
+CREATE TRIGGER tickets_enforce_workflow_insert
+BEFORE INSERT ON ticket_board.tickets
+FOR EACH ROW
+EXECUTE FUNCTION ticket_board.enforce_ticket_workflow_insert();
 
 DROP TRIGGER IF EXISTS tickets_enforce_workflow_update ON ticket_board.tickets;
 CREATE TRIGGER tickets_enforce_workflow_update

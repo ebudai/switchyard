@@ -476,13 +476,13 @@ WHERE id = 'PGU-32';
                 psql(
                     conninfo,
                     """
-SELECT jsonb_build_object('state', state, 'audit_signoff', audit_signoff, 'commit_hash', commit_hash)::text
+SELECT jsonb_build_object('state', state, 'assignee', assignee, 'audit_signoff', audit_signoff, 'commit_hash', commit_hash)::text
 FROM ticket_board.tickets
 WHERE id = 'PGU-4';
 """,
                 ).stdout
             )
-            assert reopened == {"state": "in_progress", "audit_signoff": False, "commit_hash": ""}, reopened
+            assert reopened == {"state": "analysis", "assignee": "audit", "audit_signoff": False, "commit_hash": ""}, reopened
 
             insert_ticket(
                 conninfo,
@@ -528,8 +528,24 @@ WHERE id = 'PGU-40';
             assert_error(
                 conninfo,
                 "UPDATE ticket_board.tickets SET state = 'in_progress', assignee = 'unassigned' WHERE id = 'PGU-41';",
-                "assignee must not be unassigned",
+                "in_progress tickets require an implementer assignee",
             )
+            for invalid_index, invalid_assignee in enumerate(("audit", "inspector", "director", "agent"), start=1):
+                invalid_ticket_id = f"PGU-41{invalid_index}"
+                insert_ticket(
+                    conninfo,
+                    invalid_ticket_id,
+                    title=f"Director kickback invalid {invalid_assignee}",
+                    assignee="director",
+                    state="director_review",
+                    implementation="done",
+                    audit_signoff=True,
+                )
+                assert_error(
+                    conninfo,
+                    f"UPDATE ticket_board.tickets SET state = 'in_progress', assignee = '{invalid_assignee}' WHERE id = '{invalid_ticket_id}';",
+                    "in_progress tickets require an implementer assignee",
+                )
             insert_ticket(
                 conninfo,
                 "PGU-42",
@@ -801,6 +817,16 @@ WHERE id = 'PGU-9';
             psql(conninfo, "UPDATE ticket_board.tickets SET implementation = 'Ready now.' WHERE id = 'PGU-51';")
             auto_implementation_update = psql(conninfo, "SELECT state FROM ticket_board.tickets WHERE id = 'PGU-51';").stdout.strip()
             assert auto_implementation_update == "in_progress", auto_implementation_update
+            insert_ticket(
+                conninfo,
+                "PGU-510",
+                title="Non-implementer auto advance blocked",
+                assignee="audit",
+                state="analysis",
+                implementation="Ready but no implementer.",
+            )
+            non_implementer_auto_state = psql(conninfo, "SELECT state FROM ticket_board.tickets WHERE id = 'PGU-510';").stdout.strip()
+            assert non_implementer_auto_state == "analysis", non_implementer_auto_state
 
             insert_ticket(
                 conninfo,
@@ -1071,6 +1097,28 @@ WHERE ticket_id = 'PGU-29710';
                     "new_state": "in_progress",
                 }
             ], direct_implementation_queue
+            invalid_direct_source = ticket_source("PGU-29711", "Invalid direct implementation insert", "in_progress", "director")
+            assert_error(
+                conninfo,
+                f"""
+INSERT INTO ticket_board.tickets (
+    id, title, body, state, assignee, parent_id, implementation,
+    audit_signoff, needs_inspection, inspector_signoff, needs_eric_signoff, eric_signoff, commit_hash,
+    commit_exempt, manually_controlled, parked, created_text, updated_text, source_json
+) VALUES (
+    'PGU-29711', 'Invalid direct implementation insert', '', 'in_progress', 'director', '', '',
+    false, false, false, false, false, '',
+    false, false, false, '2026-07-10T00:00:00+00:00',
+    '2026-07-10T00:00:00+00:00', '{invalid_direct_source}'::jsonb
+);
+""",
+                "in_progress tickets require an implementer assignee",
+            )
+            assert_error(
+                conninfo,
+                "UPDATE ticket_board.tickets SET assignee = 'director' WHERE id = 'PGU-29710';",
+                "in_progress tickets require an implementer assignee",
+            )
 
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
             insert_ticket(conninfo, "PGU-30900", title="Blocking dependency", state="analysis", assignee="unassigned")
@@ -2501,6 +2549,7 @@ WHERE t.id = 'PGU-57';
 SELECT count(*)
 FROM pg_trigger
 WHERE tgname IN (
+    'tickets_enforce_workflow_insert',
     'tickets_enforce_workflow_update',
     'tickets_notification_state_insert',
     'tickets_notification_state_update',
@@ -2511,7 +2560,7 @@ WHERE tgname IN (
   AND NOT tgisinternal;
 """,
             ).stdout.strip()
-            assert trigger_count == "6"
+            assert trigger_count == "7"
         finally:
             subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], check=False)
 

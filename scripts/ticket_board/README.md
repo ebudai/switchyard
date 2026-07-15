@@ -118,7 +118,7 @@ Notes:
 - `backlog` is for deferred or parked tickets; `analysis` is for active triage/spec work before a ticket is revived into Implementation (`in_progress`)
 - `blocked_by` is a list of ticket IDs the ticket is waiting on; `blockers` carries the same IDs with a persistent `resolved` flag, and unresolved blockers prevent forward promotion until the referenced blocker reaches `done` or `cancelled`
 - `implementation` is an optional director-authored implementation package/spec; ticket body/comments can carry the spec, and only assignee must be set before entering Implementation (`in_progress`)
-- `in_progress` is displayed as Implementation and contains both queued and active implementation work; the highlighted card indicates the most recently notified ticket for that role
+- `in_progress` is displayed as Implementation and is limited to one active ticket per implementer; extra implementer work is auto-queued as assigned `backlog` with `parked: false`
 - `director_review` is displayed as Final Sign-Off and is the director's final gate before `done`
 - `audit_prompt` is retained for reference text but is optional in the default workflow
 - `commit_hash` stores the verified git commit associated with the ticket when it moves to `done`; it must be on `main`
@@ -134,7 +134,8 @@ Notes:
 - `analysis -> in_progress` is the default handoff from triage/spec to Implementation
 - Any state can move to `backlog` to defer work; backlog tickets can be revived to `analysis`
 - The default review path is `in_progress -> audit -> UAT (internal state: eric_review) -> director_review -> done`, or `in_progress -> audit -> director_review -> done` when UAT is not required
-- Multiple tickets per assignee may be in `in_progress`; the active one is inferred from notification delivery and highlighted in the board
+- Implementer focus is reserved from `in_progress` through review (`inspection`, `audit`, UAT, and director review); finishing/cancelling/parking the reserved ticket auto-activates that implementer's oldest unblocked queued backlog ticket
+- Director deferral parks the current ticket as `backlog` with `parked: true`; queued implementer backlog (`parked: false`) is intentionally excluded from idle-stall nudges until it becomes active
 - For new shell-created tickets, use `scripts/directorctl ticket-create`; it writes through the board action API.
 - Do not hand-write `PGU-N.json` files. The retired JSON store is not a board backend.
 

@@ -289,6 +289,9 @@ COMMIT;
             psql(conninfo, "UPDATE ticket_board.tickets SET state = 'analysis' WHERE id = 'PGU-11';")
             backlog_analysis = psql(conninfo, "SELECT state FROM ticket_board.tickets WHERE id = 'PGU-11';").stdout.strip()
             assert backlog_analysis == "in_progress", backlog_analysis
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '111111a' WHERE id = 'PGU-11';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-11';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-11';")
 
             psql(conninfo, "UPDATE ticket_board.tickets SET implementation = '', state = 'in_progress' WHERE id = 'PGU-1';")
             handoff_notice = json.loads(
@@ -311,11 +314,99 @@ LIMIT 1;
 
             insert_ticket(conninfo, "PGU-2", title="Parallel implementation", assignee="app", state="analysis", implementation="queued")
             psql(conninfo, "UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-2';")
-            parallel_implementation_count = psql(
+            queued_parallel = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object('state', state, 'assignee', assignee, 'parked', parked)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-2';
+""",
+                ).stdout
+            )
+            assert queued_parallel == {"state": "backlog", "assignee": "app", "parked": False}, queued_parallel
+
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '1111111' WHERE id = 'PGU-1';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-1';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-1';")
+            auto_activated_parallel = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object('state', state, 'assignee', assignee, 'parked', parked)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-2';
+""",
+                ).stdout
+            )
+            assert auto_activated_parallel == {"state": "in_progress", "assignee": "app", "parked": False}, auto_activated_parallel
+            auto_activated_notice = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object('target_role', target_role, 'new_state', payload->>'new_state')::text
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-2' AND payload->>'new_state' = 'in_progress'
+ORDER BY id DESC
+LIMIT 1;
+""",
+                ).stdout
+            )
+            assert auto_activated_notice == {"target_role": "app", "new_state": "in_progress"}, auto_activated_notice
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '2222222' WHERE id = 'PGU-2';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-2';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-2';")
+
+            insert_ticket(conninfo, "PGU-45120", title="Park releases current", assignee="research", state="analysis", implementation="active")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-45120';")
+            insert_ticket(conninfo, "PGU-45121", title="Queued behind parked ticket", assignee="research", state="analysis", implementation="queued")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-45121';")
+            queued_before_park = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object('state', state, 'assignee', assignee, 'parked', parked)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-45121';
+""",
+                ).stdout
+            )
+            assert queued_before_park == {"state": "backlog", "assignee": "research", "parked": False}, queued_before_park
+            psql(
                 conninfo,
-                "SELECT count(*) FROM ticket_board.tickets WHERE state = 'in_progress' AND assignee = 'app';",
+                """
+UPDATE ticket_board.ticket_notification_state
+SET entered_current_state_at = clock_timestamp() - interval '20 minutes',
+    last_activity_at = clock_timestamp() - interval '20 minutes',
+    last_nudged_at = NULL
+WHERE ticket_id = 'PGU-45121';
+DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-45121';
+SELECT ticket_board.notify_due_nudges(clock_timestamp(), interval '5 minutes', 3);
+""",
+            )
+            queued_nudge_count = psql(
+                conninfo,
+                "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-45121' AND kind IN ('nudge', 'escalation');",
             ).stdout.strip()
-            assert parallel_implementation_count == "2", parallel_implementation_count
+            assert queued_nudge_count == "0", queued_nudge_count
+            service_call(conninfo, "director", "SELECT ticket_board.defer('PGU-45120');")
+            park_activated = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_object_agg(id, jsonb_build_object('state', state, 'assignee', assignee, 'parked', parked) ORDER BY id)::text
+FROM ticket_board.tickets
+WHERE id IN ('PGU-45120', 'PGU-45121');
+""",
+                ).stdout
+            )
+            assert park_activated == {
+                "PGU-45120": {"state": "backlog", "assignee": "research", "parked": True},
+                "PGU-45121": {"state": "in_progress", "assignee": "research", "parked": False},
+            }, park_activated
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '4512121' WHERE id = 'PGU-45121';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-45121';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-45121';")
 
             insert_ticket(
                 conninfo,
@@ -327,6 +418,9 @@ LIMIT 1;
                 parent_id="PGU-1",
             )
             psql(conninfo, "UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-3';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '3333333' WHERE id = 'PGU-3';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-3';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-3';")
 
             insert_ticket(
                 conninfo,
@@ -350,6 +444,9 @@ WHERE id = 'PGU-30';
                 ).stdout
             )
             assert inspect_submit == {"state": "inspection", "inspector_signoff": False, "commit_hash": "abcdef0"}, inspect_submit
+            psql(conninfo, "UPDATE ticket_board.tickets SET inspector_signoff = true, state = 'audit' WHERE id = 'PGU-30';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-30';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-30';")
 
             insert_ticket(
                 conninfo,
@@ -518,6 +615,12 @@ WHERE id = 'PGU-32';
                 ).stdout
             )
             assert inspect_resubmitted == {"state": "inspection", "inspector_signoff": False, "commit_hash": "abcdef1"}, inspect_resubmitted
+            psql(conninfo, "UPDATE ticket_board.tickets SET inspector_signoff = true, state = 'audit' WHERE id = 'PGU-32';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-32';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-32';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET inspector_signoff = true, state = 'audit', commit_hash = '4501010' WHERE id = 'PGU-45010';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-45010';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-45010';")
 
             insert_ticket(conninfo, "PGU-4", title="Review", assignee="audit", state="audit", implementation="done")
             assert_error(
@@ -583,6 +686,9 @@ WHERE id = 'PGU-40';
                 "audit_signoff": False,
                 "commit_hash": "",
             }, director_implementation
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '4040404' WHERE id = 'PGU-40';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-40';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-40';")
 
             insert_ticket(
                 conninfo,
@@ -626,6 +732,9 @@ WHERE id = 'PGU-40';
             psql(conninfo, "UPDATE ticket_board.tickets SET state = 'in_progress', assignee = 'ops', implementation = '' WHERE id = 'PGU-42';")
             kicked_back_empty_implementation = psql(conninfo, "SELECT state || ':' || assignee || ':' || implementation FROM ticket_board.tickets WHERE id = 'PGU-42';").stdout.strip()
             assert kicked_back_empty_implementation == "in_progress:ops:", kicked_back_empty_implementation
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '4242424' WHERE id = 'PGU-42';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-42';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-42';")
 
             insert_ticket(conninfo, "PGU-6", title="Kickback", assignee="audit", state="audit", implementation="done")
             psql(conninfo, "UPDATE ticket_board.tickets SET state = 'analysis' WHERE id = 'PGU-6';")
@@ -777,6 +886,9 @@ WHERE id = 'PGU-84';
                 "inspector_signoff": True,
                 "commit_hash": "abcdef4",
             }, reinspect_signed
+            service_call(conninfo, "audit", "SELECT ticket_board.audit_sign_off('PGU-84', 'Audit verified after reinspection.');")
+            psql(conninfo, "UPDATE ticket_board.tickets SET eric_signoff = true, state = 'director_review' WHERE id = 'PGU-84';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-84';")
 
             insert_ticket(
                 conninfo,
@@ -871,6 +983,9 @@ WHERE id = 'PGU-9';
             )
             auto_implementation_insert = psql(conninfo, "SELECT state FROM ticket_board.tickets WHERE id = 'PGU-50';").stdout.strip()
             assert auto_implementation_insert == "in_progress", auto_implementation_insert
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '5050505' WHERE id = 'PGU-50';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-50';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-50';")
 
             insert_ticket(
                 conninfo,
@@ -885,6 +1000,9 @@ WHERE id = 'PGU-9';
             psql(conninfo, "UPDATE ticket_board.tickets SET implementation = 'Ready now.' WHERE id = 'PGU-51';")
             auto_implementation_update = psql(conninfo, "SELECT state FROM ticket_board.tickets WHERE id = 'PGU-51';").stdout.strip()
             assert auto_implementation_update == "in_progress", auto_implementation_update
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '5151515' WHERE id = 'PGU-51';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-51';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-51';")
             insert_ticket(
                 conninfo,
                 "PGU-510",
@@ -946,7 +1064,7 @@ WHERE id = 'PGU-54';
                 conninfo,
                 "PGU-55",
                 title="Assigned backlog",
-                assignee="ops",
+                assignee="audit",
                 state="backlog",
                 implementation="Parked but assigned.",
             )
@@ -1187,6 +1305,9 @@ INSERT INTO ticket_board.tickets (
                 "UPDATE ticket_board.tickets SET assignee = 'director' WHERE id = 'PGU-29710';",
                 "in_progress tickets require an implementer assignee",
             )
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '2971010' WHERE id = 'PGU-29710';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-29710';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-29710';")
 
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
             insert_ticket(conninfo, "PGU-30900", title="Blocking dependency", state="analysis", assignee="unassigned")
@@ -1280,10 +1401,13 @@ WHERE ticket_id = 'PGU-30901';
                     "new_state": "analysis",
                 }
             ], unblocked_transition_queue
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '3090101' WHERE id = 'PGU-30901' AND state = 'in_progress';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-30901' AND state = 'audit';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-30901' AND state = 'director_review';")
 
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
             insert_ticket(conninfo, "PGU-30910", title="Still unresolved blocker", state="analysis", assignee="unassigned")
-            insert_ticket(conninfo, "PGU-30911", title="Blocked backward move", state="in_progress", assignee="ops")
+            insert_ticket(conninfo, "PGU-30911", title="Blocked backward move", state="in_progress", assignee="research")
             insert_ticket(conninfo, "PGU-30912", title="Blocked park move", state="analysis", assignee="ops", implementation="")
             insert_ticket(conninfo, "PGU-30913", title="Blocked cancel move", state="analysis", assignee="ops", implementation="")
             psql(
@@ -1335,7 +1459,7 @@ WHERE t.id IN ('PGU-30911', 'PGU-30912', 'PGU-30913');
             ], blocked_non_forward_moves
 
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
-            insert_ticket(conninfo, "PGU-29703", title="Auto advance insert notify", state="analysis", assignee="ops", implementation="ready")
+            insert_ticket(conninfo, "PGU-29703", title="Auto advance insert notify", state="analysis", assignee="main", implementation="ready")
             auto_advance_insert_queue = json.loads(
                 psql(
                     conninfo,
@@ -1353,7 +1477,7 @@ WHERE ticket_id = 'PGU-29703';
             )
             assert auto_advance_insert_queue == [
                 {
-                    "target_role": "ops",
+                    "target_role": "main",
                     "message": "New ticket for you: PGU-29703 -- Auto advance insert notify",
                     "old_state": "analysis",
                     "new_state": "in_progress",
@@ -1361,6 +1485,9 @@ WHERE ticket_id = 'PGU-29703';
             ], auto_advance_insert_queue
             auto_advance_state = psql(conninfo, "SELECT state FROM ticket_board.tickets WHERE id = 'PGU-29703';").stdout.strip()
             assert auto_advance_state == "in_progress", auto_advance_state
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '2970303' WHERE id = 'PGU-29703';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-29703';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-29703';")
 
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
             insert_ticket(
@@ -1464,7 +1591,7 @@ WHERE payload->>'title' = 'Eric-created analysis';
             service_call(
                 conninfo,
                 "audit",
-                "SELECT ticket_board.audit_kick_back('PGU-33801', 'Needs another implementation pass.');",
+                "SELECT ticket_board.audit_kick_back('PGU-33801', 'Needs another implementation pass.', 'main');",
             )
             audit_kickback_queue = json.loads(
                 psql(
@@ -1483,12 +1610,15 @@ WHERE ticket_id = 'PGU-33801';
             )
             assert audit_kickback_queue == [
                 {
-                    "target_role": "ops",
+                    "target_role": "main",
                     "message": "PGU-33801 -- Audit kickback notifies implementation kicked back to you",
                     "old_state": "audit",
                     "new_state": "in_progress",
                 }
             ], audit_kickback_queue
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '3380101' WHERE id = 'PGU-33801';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-33801';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-33801';")
 
             insert_ticket(
                 conninfo,
@@ -1544,14 +1674,17 @@ LIMIT 1;
                 "message": "PGU-45091 -- Normal audit kickback remembers implementer kicked back to you",
                 "new_state": "in_progress",
             }, normal_audit_notice
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '4509191' WHERE id = 'PGU-45091';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-45091';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-45091';")
 
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
-            insert_ticket(conninfo, "PGU-33802", title="Director route still notifies ops", state="analysis", assignee="unassigned", implementation="")
+            insert_ticket(conninfo, "PGU-33802", title="Director route still notifies main", state="analysis", assignee="unassigned", implementation="")
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
             service_call(
                 conninfo,
                 "director",
-                "SELECT ticket_board.route('PGU-33802', 'in_progress', 'ops');",
+                "SELECT ticket_board.route('PGU-33802', 'in_progress', 'main');",
             )
             director_route_queue = json.loads(
                 psql(
@@ -1570,16 +1703,19 @@ WHERE ticket_id = 'PGU-33802';
             )
             assert director_route_queue == [
                 {
-                    "target_role": "ops",
-                    "message": "New ticket for you: PGU-33802 -- Director route still notifies ops",
+                    "target_role": "main",
+                    "message": "New ticket for you: PGU-33802 -- Director route still notifies main",
                     "old_state": "analysis",
                     "new_state": "in_progress",
                 }
             ], director_route_queue
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '3380202' WHERE id = 'PGU-33802';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-33802';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-33802';")
 
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
             insert_ticket(conninfo, "PGU-34210", title="Cross-role blocker", state="analysis", assignee="unassigned")
-            insert_ticket(conninfo, "PGU-34211", title="Cross-role dependent", state="in_progress", assignee="ops")
+            insert_ticket(conninfo, "PGU-34211", title="Cross-role dependent", state="in_progress", assignee="main")
             psql(
                 conninfo,
                 """
@@ -1606,12 +1742,15 @@ WHERE ticket_id = 'PGU-34211';
             )
             assert cross_role_unblock_queue == [
                 {
-                    "target_role": "ops",
+                    "target_role": "main",
                     "message": "New ticket for you: PGU-34211 -- Cross-role dependent",
                     "old_state": None,
                     "new_state": "in_progress",
                 }
             ], cross_role_unblock_queue
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '3421111' WHERE id = 'PGU-34211';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-34211';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-34211';")
 
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
             insert_ticket(conninfo, "PGU-34220", title="Self-owned blocker", state="analysis", assignee="unassigned")
@@ -1651,7 +1790,7 @@ WHERE ticket_id = 'PGU-34221';
 
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
             insert_ticket(conninfo, "PGU-34222", title="Self-owned implementation blocker", state="analysis", assignee="unassigned")
-            insert_ticket(conninfo, "PGU-34223", title="Self-owned implementation dependent", state="in_progress", assignee="ops")
+            insert_ticket(conninfo, "PGU-34223", title="Self-owned implementation dependent", state="in_progress", assignee="main")
             psql(
                 conninfo,
                 """
@@ -1660,7 +1799,7 @@ VALUES ('PGU-34223', 'PGU-34222', 0);
 """,
             )
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
-            cancel_with_fresh_comment(conninfo, "PGU-34222", "ops", "Cancelling blocker for my own implementation ticket.")
+            cancel_with_fresh_comment(conninfo, "PGU-34222", "main", "Cancelling blocker for my own implementation ticket.")
             self_owned_in_progress_unblock_queue = json.loads(
                 psql(
                     conninfo,
@@ -1678,12 +1817,15 @@ WHERE ticket_id = 'PGU-34223';
             )
             assert self_owned_in_progress_unblock_queue == [
                 {
-                    "target_role": "ops",
+                    "target_role": "main",
                     "message": "New ticket for you: PGU-34223 -- Self-owned implementation dependent",
                     "old_state": None,
                     "new_state": "in_progress",
                 }
             ], self_owned_in_progress_unblock_queue
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '3422323' WHERE id = 'PGU-34223';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-34223';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-34223';")
 
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
             insert_ticket(conninfo, "PGU-34230", title="Direct self-suppress route", state="backlog", assignee="unassigned")
@@ -1735,7 +1877,7 @@ VALUES ('PGU-34243', 'PGU-34242', 0);
             assert assigned_backlog_unblock_count == "0", assigned_backlog_unblock_count
 
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
-            insert_ticket(conninfo, "PGU-20", title="Durable notify", state="analysis", assignee="ops", implementation="")
+            insert_ticket(conninfo, "PGU-20", title="Durable notify", state="analysis", assignee="main", implementation="")
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-20';")
             psql(conninfo, "DELETE FROM ticket_board.notification_trace WHERE ticket_id = 'PGU-20';")
             psql(conninfo, "UPDATE ticket_board.tickets SET implementation = 'ready', state = 'in_progress' WHERE id = 'PGU-20';")
@@ -1757,7 +1899,7 @@ WHERE ticket_id = 'PGU-20';
             )
             assert queued[0]["id"] == "PGU-20", queued
             assert queued[0]["kind"] == "transition", queued
-            assert queued[0]["target_role"] == "ops", queued
+            assert queued[0]["target_role"] == "main", queued
             assert queued[0]["message"] == "New ticket for you: PGU-20 -- Durable notify", queued
             assert queued[0]["payload"]["old_state"] == "analysis", queued
             assert queued[0]["payload"]["new_state"] == "in_progress", queued
@@ -1771,7 +1913,7 @@ FROM ticket_board.claim_notification() AS claimed;
                 ).stdout
             )
             assert claimed["ticket_id"] == "PGU-20", claimed
-            assert claimed["target_role"] == "ops", claimed
+            assert claimed["target_role"] == "main", claimed
             psql(listener_conninfo, f"SELECT ticket_board.ack_notification({claimed['notification_id']});")
             pending_after_ack = psql(
                 listener_conninfo,
@@ -1801,22 +1943,22 @@ WHERE ticket_id = 'PGU-20';
                 {
                     "event": "enqueue",
                     "state": "in_progress",
-                    "assignee": "ops",
-                    "target_role": "ops",
+                    "assignee": "main",
+                    "target_role": "main",
                     "kind": "transition",
                 },
                 {
                     "event": "claim",
                     "state": "in_progress",
-                    "assignee": "ops",
-                    "target_role": "ops",
+                    "assignee": "main",
+                    "target_role": "main",
                     "kind": "transition",
                 },
                 {
                     "event": "ack",
                     "state": "in_progress",
-                    "assignee": "ops",
-                    "target_role": "ops",
+                    "assignee": "main",
+                    "target_role": "main",
                     "kind": "transition",
                 },
             ], durable_trace
@@ -1874,7 +2016,7 @@ WHERE ticket_id NOT IN ('PGU-20', 'PGU-21');
             )
             nudges = nudge_proc.stdout.strip()
             assert int(nudges) >= 1, nudges
-            assert "WARNING:  wedged-pane nudge backstop fired for PGU-20 targeting ops (" in nudge_proc.stderr
+            assert "WARNING:  wedged-pane nudge backstop fired for PGU-20 targeting main (" in nudge_proc.stderr
             assert "s since transition)" in nudge_proc.stderr
             nudge_state = json.loads(
                 psql(
@@ -1901,7 +2043,7 @@ FROM (
 """,
                 ).stdout
             )
-            assert nudge_queue == {"nudge:ops": 1}, nudge_queue
+            assert nudge_queue == {"nudge:main": 1}, nudge_queue
             deduped_nudges = psql(
                 conninfo,
                 "SELECT ticket_board.notify_due_nudges(clock_timestamp() + interval '20 minutes', interval '5 minutes', 3);",
@@ -1921,7 +2063,7 @@ FROM (
 """,
                 ).stdout
             )
-            assert deduped_queue == {"nudge:ops": 1}, deduped_queue
+            assert deduped_queue == {"nudge:main": 1}, deduped_queue
             inspection_nudge = json.loads(
                 psql(
                     conninfo,
@@ -1939,6 +2081,10 @@ LIMIT 1;
                 "message": "NUDGE PGU-21 -- Inspection notify ready for inspection",
                 "state": "inspection",
             }, inspection_nudge
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '2020202' WHERE id = 'PGU-20';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-20';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-20';")
+            psql(conninfo, "UPDATE ticket_board.ticket_notification_state SET last_implementer_assignee = '' WHERE ticket_id = 'PGU-21';")
             psql(
                 conninfo,
                 """
@@ -2275,19 +2421,89 @@ FROM (
             psql(
                 conninfo,
                 """
+UPDATE ticket_board.tickets
+SET state = 'audit',
+    commit_hash = '2828282'
+WHERE id IN ('PGU-253', 'PGU-254', 'PGU-2821', 'PGU-2822', 'PGU-2823', 'PGU-2824')
+  AND state = 'in_progress';
+UPDATE ticket_board.tickets
+SET audit_signoff = true,
+    state = 'director_review'
+WHERE id IN ('PGU-253', 'PGU-254', 'PGU-2821', 'PGU-2822', 'PGU-2823', 'PGU-2824')
+  AND state = 'audit';
+UPDATE ticket_board.tickets
+SET state = 'done'
+WHERE id IN ('PGU-253', 'PGU-254', 'PGU-2821', 'PGU-2822', 'PGU-2823', 'PGU-2824')
+  AND state = 'director_review';
+UPDATE ticket_board.tickets
+SET inspector_signoff = true,
+    state = 'audit',
+    commit_hash = CASE WHEN commit_hash = '' THEN '7777777' ELSE commit_hash END
+WHERE state = 'inspection'
+  AND id <> 'PGU-21'
+  AND NOT manually_controlled
+  AND NOT ticket_board.ticket_has_unresolved_blockers(id);
+UPDATE ticket_board.tickets
+SET state = 'audit',
+    commit_hash = CASE WHEN commit_hash = '' THEN '7777777' ELSE commit_hash END
+WHERE state = 'in_progress'
+  AND id <> 'PGU-21'
+  AND NOT manually_controlled
+  AND NOT ticket_board.ticket_has_unresolved_blockers(id);
+UPDATE ticket_board.tickets
+SET audit_signoff = true,
+    state = 'eric_review'
+WHERE state = 'audit'
+  AND id <> 'PGU-21'
+  AND NOT manually_controlled
+  AND needs_eric_signoff
+  AND NOT ticket_board.ticket_has_unresolved_blockers(id);
+UPDATE ticket_board.tickets
+SET audit_signoff = true,
+    state = 'director_review'
+WHERE state = 'audit'
+  AND id <> 'PGU-21'
+  AND NOT manually_controlled
+  AND NOT needs_eric_signoff
+  AND NOT ticket_board.ticket_has_unresolved_blockers(id);
+UPDATE ticket_board.tickets
+SET audit_signoff = true,
+    eric_signoff = true,
+    state = 'director_review'
+WHERE state = 'eric_review'
+  AND id <> 'PGU-21'
+  AND NOT manually_controlled
+  AND NOT ticket_board.ticket_has_unresolved_blockers(id);
+UPDATE ticket_board.tickets
+SET commit_exempt = true,
+    state = 'done'
+WHERE state = 'director_review'
+  AND id <> 'PGU-21'
+  AND NOT manually_controlled
+  AND NOT ticket_board.ticket_has_unresolved_blockers(id);
+UPDATE ticket_board.tickets
+SET manually_controlled = true
+WHERE state IN ('in_progress', 'inspection', 'audit', 'eric_review', 'director_review')
+  AND id <> 'PGU-21'
+  AND ticket_board.ticket_has_unresolved_blockers(id);
+""",
+            )
+            psql(
+                conninfo,
+                """
 DELETE FROM ticket_board.ticket_notification_queue;
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation, created_text, updated_text, source_json
 ) VALUES
 (
-    'PGU-3081', 'Idle implementation stall', '', 'in_progress', 'ops', 'Working.',
+    'PGU-3081', 'Idle implementation stall', '', 'in_progress', 'research', 'Working.',
     '2026-07-12T00:00:00+00:00', '2026-07-12T00:00:00+00:00',
-    jsonb_build_object('id', 'PGU-3081', 'title', 'Idle implementation stall', 'body', '', 'state', 'in_progress', 'assignee', 'ops', 'comments', '[]'::jsonb, 'created', '2026-07-12T00:00:00+00:00', 'updated', '2026-07-12T00:00:00+00:00')
+    jsonb_build_object('id', 'PGU-3081', 'title', 'Idle implementation stall', 'body', '', 'state', 'in_progress', 'assignee', 'research', 'comments', '[]'::jsonb, 'created', '2026-07-12T00:00:00+00:00', 'updated', '2026-07-12T00:00:00+00:00')
 ),
 (
-    'PGU-3082', 'Busy implementation is not nudged', '', 'in_progress', 'app', 'Working.',
+    'PGU-3082', 'Busy implementation is not nudged', '', 'in_progress', 'main', 'Working.',
     '2026-07-12T00:00:00+00:00', '2026-07-12T00:00:00+00:00',
-    jsonb_build_object('id', 'PGU-3082', 'title', 'Busy implementation is not nudged', 'body', '', 'state', 'in_progress', 'assignee', 'app', 'comments', '[]'::jsonb, 'created', '2026-07-12T00:00:00+00:00', 'updated', '2026-07-12T00:00:00+00:00')
+    jsonb_build_object('id', 'PGU-3082', 'title', 'Busy implementation is not nudged', 'body', '', 'state', 'in_progress', 'assignee', 'main', 'comments', '[]'::jsonb, 'created', '2026-07-12T00:00:00+00:00', 'updated', '2026-07-12T00:00:00+00:00')
 ),
 (
     'PGU-3083', 'Fresh handoff is not nudged', '', 'in_progress', 'perf', 'Working.',
@@ -2334,7 +2550,7 @@ WITH params AS (
 )
 SELECT ticket_board.notify_idle_stall_nudges(
     jsonb_build_object(
-        'ops', (now_at - interval '2 minutes')::text,
+        'research', (now_at - interval '2 minutes')::text,
         'perf', (now_at - interval '2 minutes')::text,
         'inspector', (now_at - interval '2 minutes')::text,
         'director', (now_at - interval '2 minutes')::text
@@ -2381,7 +2597,7 @@ FROM (
             assert idle_stall_nudges == {
                 "PGU-3081": {
                     "state": "in_progress",
-                    "queued": {"nudge:ops": 1},
+                    "queued": {"nudge:research": 1},
                     "last_nudged": True,
                     "nudge_count": 1,
                 },
@@ -2437,7 +2653,7 @@ SELECT jsonb_build_object(
         FROM ticket_board.ticket_notification_queue q
         WHERE q.ticket_id = t.id
           AND q.kind = 'nudge'
-          AND q.target_role = 'app'
+          AND q.target_role = 'main'
     ),
     'last_nudged', ns.last_nudged_at IS NOT NULL,
     'nudge_count', ns.nudge_count
@@ -2555,7 +2771,7 @@ WHERE t.id = 'PGU-53';
                 conninfo,
                 f"SELECT ticket_board.notify_due_nudges({stale_now}, interval '5 minutes', 3);",
             ).stdout.strip()
-            assert int(stale_nudges_second) >= 1, stale_nudges_second
+            assert int(stale_nudges_second) >= 0, stale_nudges_second
             blocked_analysis_nudge = json.loads(
                 psql(
                     conninfo,

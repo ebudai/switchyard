@@ -125,6 +125,7 @@ def seed_json_ticket(
     commit_hash: str = "",
     commit_exempt: bool = False,
     regression: bool = False,
+    parked: bool = False,
 ) -> None:
     payload = {
         "id": ticket_id,
@@ -143,6 +144,7 @@ def seed_json_ticket(
         "needs_eric_signoff": needs_eric_signoff,
         "eric_signoff": eric_signoff,
         "manually_controlled": False,
+        "parked": parked,
         "commit_hash": commit_hash,
         "commit_exempt": commit_exempt,
         "regression": regression,
@@ -170,6 +172,7 @@ def seed_postgres_ticket(
     commit_hash: str = "",
     commit_exempt: bool = False,
     regression: bool = False,
+    parked: bool = False,
 ) -> None:
     psql(
         conn,
@@ -177,11 +180,11 @@ def seed_postgres_ticket(
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation,
     audit_signoff, needs_inspection, inspector_signoff, needs_eric_signoff, eric_signoff, commit_hash,
-    commit_exempt, regression, created_text, updated_text, source_json
+    commit_exempt, regression, parked, created_text, updated_text, source_json
 ) VALUES (
     '{ticket_id}', '{title}', '', '{state}', '{assignee}', '{implementation}',
     {str(audit_signoff).lower()}, {str(needs_inspection).lower()}, {str(inspector_signoff).lower()}, {str(needs_eric_signoff).lower()},
-    {str(eric_signoff).lower()}, '{commit_hash}', {str(commit_exempt).lower()}, {str(regression).lower()},
+    {str(eric_signoff).lower()}, '{commit_hash}', {str(commit_exempt).lower()}, {str(regression).lower()}, {str(parked).lower()},
     '2026-07-10T00:00:00+00:00', '2026-07-10T00:00:00+00:00',
     '{ticket_source(ticket_id, title, state, assignee)}'::jsonb
 );
@@ -329,7 +332,7 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
     )
     seed_ticket("PGU-107", title="Defer", state="analysis")
     seed_ticket("PGU-108", title="Cancel", state="analysis")
-    seed_ticket("PGU-116", title="Backlog cancel", state="backlog", assignee="ops")
+    seed_ticket("PGU-116", title="Backlog cancel", state="backlog", assignee="ops", parked=True)
     seed_ticket(
         "PGU-117",
         title="Needs inspection submit",
@@ -359,14 +362,14 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
         "PGU-120",
         title="Commit exempt submit",
         state="in_progress",
-        assignee="ops",
+        assignee="research",
         implementation="No repo changes.",
     )
     seed_ticket(
         "PGU-121",
         title="Non-exempt submit",
         state="in_progress",
-        assignee="ops",
+        assignee="perf",
         implementation="Needs commit.",
     )
     seed_ticket(
@@ -574,14 +577,16 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     routed = post_json(base_url, "/api/tickets/PGU-100/actions/route", {"state": "backlog", "assignee": "ops"}, caller="director")
     assert routed["ticket"]["state"] == "backlog", routed  # type: ignore[index]
     assert routed["ticket"]["assignee"] == "ops", routed  # type: ignore[index]
+    parked_routed = post_json(base_url, "/api/tickets/PGU-100/actions/defer", {}, caller="director")
+    assert parked_routed["ticket"]["state"] == "backlog", parked_routed  # type: ignore[index]
     director_implementation = post_json(
         base_url,
         "/api/tickets/PGU-115/actions/route",
-        {"state": "in_progress", "assignee": "ops"},
+        {"state": "in_progress", "assignee": "main"},
         caller="director",
     )
     assert director_implementation["ticket"]["state"] == "in_progress", director_implementation  # type: ignore[index]
-    assert director_implementation["ticket"]["assignee"] == "ops", director_implementation  # type: ignore[index]
+    assert director_implementation["ticket"]["assignee"] == "main", director_implementation  # type: ignore[index]
     invalid_implementation_assignee = post_json(
         base_url,
         "/api/tickets/PGU-126/actions/route",
@@ -598,11 +603,25 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     submitted = post_json(base_url, "/api/tickets/PGU-101/actions/submit_to_audit", {"commit_hash": commit_hash}, caller="ops")
     assert submitted["ticket"]["state"] == "audit", submitted  # type: ignore[index]
     assert submitted["ticket"]["commit_hash"] == commit_hash, submitted  # type: ignore[index]
+    signed_off_submitted = post_json(
+        base_url,
+        "/api/tickets/PGU-101/actions/audit_sign_off",
+        {"text": "Audit verified for serial-focus release."},
+        caller="audit",
+    )
+    assert signed_off_submitted["ticket"]["state"] == "director_review", signed_off_submitted  # type: ignore[index]
+    completed_submitted = post_json(
+        base_url,
+        "/api/tickets/PGU-101/actions/mark_done",
+        {"commit_hash": commit_hash},
+        caller="director",
+    )
+    assert completed_submitted["ticket"]["state"] == "done", completed_submitted  # type: ignore[index]
     non_exempt_empty_submit = post_json(
         base_url,
         "/api/tickets/PGU-121/actions/submit_to_audit",
         {},
-        caller="ops",
+        caller="perf",
         expect=400,
     )
     assert "commit_hash must be a 7-40 character hex commit" in str(non_exempt_empty_submit), non_exempt_empty_submit
@@ -613,12 +632,12 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
         caller="app",
         expect=403,
     )
-    assert "app cannot call request_commit_exempt for ticket assigned to ops" in str(wrong_assignee_exempt_request), wrong_assignee_exempt_request
+    assert "app cannot call request_commit_exempt for ticket assigned to perf" in str(wrong_assignee_exempt_request), wrong_assignee_exempt_request
     empty_exempt_request = post_json(
         base_url,
         "/api/tickets/PGU-121/actions/request_commit_exempt",
         {"reason": "   "},
-        caller="ops",
+        caller="perf",
         expect=400,
     )
     assert "reason must be a non-empty string" in str(empty_exempt_request), empty_exempt_request
@@ -626,12 +645,12 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
         base_url,
         "/api/tickets/PGU-121/actions/request_commit_exempt",
         {"reason": "No repository change was needed."},
-        caller="ops",
+        caller="perf",
     )
     assert exempt_requested["ticket"]["state"] == "analysis", exempt_requested  # type: ignore[index]
     assert exempt_requested["ticket"]["assignee"] == "unassigned", exempt_requested  # type: ignore[index]
     assert exempt_requested["ticket"]["commit_exempt"] is False, exempt_requested  # type: ignore[index]
-    assert exempt_requested["ticket"]["comments"][-1]["who"] == "ops", exempt_requested  # type: ignore[index]
+    assert exempt_requested["ticket"]["comments"][-1]["who"] == "perf", exempt_requested  # type: ignore[index]
     assert "Commit exemption requested: No repository change was needed." == exempt_requested["ticket"]["comments"][-1]["text"], exempt_requested  # type: ignore[index]
     submit_exempt_forbidden = post_json(
         base_url,
@@ -648,7 +667,7 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
         caller="director",
     )
     assert submit_exempt_set["ticket"]["commit_exempt"] is True, submit_exempt_set  # type: ignore[index]
-    exempt_submitted = post_json(base_url, "/api/tickets/PGU-120/actions/submit_to_audit", {}, caller="ops")
+    exempt_submitted = post_json(base_url, "/api/tickets/PGU-120/actions/submit_to_audit", {}, caller="research")
     assert exempt_submitted["ticket"]["state"] == "audit", exempt_submitted  # type: ignore[index]
     assert exempt_submitted["ticket"]["commit_hash"] == "", exempt_submitted  # type: ignore[index]
     assert exempt_submitted["ticket"]["commit_exempt"] is True, exempt_submitted  # type: ignore[index]
@@ -790,6 +809,20 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     inspection_signed = post_json(base_url, "/api/tickets/PGU-117/actions/inspector_sign_off", {}, caller="inspector")
     assert inspection_signed["ticket"]["state"] == "audit", inspection_signed  # type: ignore[index]
     assert inspection_signed["ticket"]["inspector_signoff"] is True, inspection_signed  # type: ignore[index]
+    inspection_audit_signed = post_json(
+        base_url,
+        "/api/tickets/PGU-117/actions/audit_sign_off",
+        {"text": "Inspection path verified."},
+        caller="audit",
+    )
+    assert inspection_audit_signed["ticket"]["state"] == "director_review", inspection_audit_signed  # type: ignore[index]
+    inspection_done = post_json(
+        base_url,
+        "/api/tickets/PGU-117/actions/mark_done",
+        {"commit_hash": commit_hash},
+        caller="director",
+    )
+    assert inspection_done["ticket"]["state"] == "done", inspection_done  # type: ignore[index]
 
     empty_inspector_kick = post_json(
         base_url,
@@ -819,6 +852,22 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     )
     assert inspector_resubmitted["ticket"]["state"] == "inspection", inspector_resubmitted  # type: ignore[index]
     assert inspector_resubmitted["ticket"]["inspector_signoff"] is False, inspector_resubmitted  # type: ignore[index]
+    inspector_resubmitted_signed = post_json(base_url, "/api/tickets/PGU-119/actions/inspector_sign_off", {}, caller="inspector")
+    assert inspector_resubmitted_signed["ticket"]["state"] == "audit", inspector_resubmitted_signed  # type: ignore[index]
+    inspector_resubmitted_audit = post_json(
+        base_url,
+        "/api/tickets/PGU-119/actions/audit_sign_off",
+        {"text": "Inspector kickback path verified."},
+        caller="audit",
+    )
+    assert inspector_resubmitted_audit["ticket"]["state"] == "director_review", inspector_resubmitted_audit  # type: ignore[index]
+    inspector_resubmitted_done = post_json(
+        base_url,
+        "/api/tickets/PGU-119/actions/mark_done",
+        {"commit_hash": commit_hash},
+        caller="director",
+    )
+    assert inspector_resubmitted_done["ticket"]["state"] == "done", inspector_resubmitted_done  # type: ignore[index]
 
     audit_signoff_missing_comment = post_json(
         base_url,

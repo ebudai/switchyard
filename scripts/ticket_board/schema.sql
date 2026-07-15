@@ -438,6 +438,7 @@ LANGUAGE sql
 IMMUTABLE
 AS $$
     SELECT (p_old_state = 'backlog' AND p_new_state = 'analysis')
+        OR (p_old_state = 'backlog' AND p_new_state = 'in_progress')
         OR (p_old_state = 'analysis' AND p_new_state = 'in_progress')
         OR (p_old_state = 'in_progress' AND p_new_state IN ('inspection', 'audit'))
         OR (p_old_state = 'inspection' AND p_new_state = 'audit')
@@ -452,6 +453,53 @@ LANGUAGE sql
 IMMUTABLE
 AS $$
     SELECT p_assignee IN ('main', 'app', 'perf', 'ops', 'research');
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.ticket_reserved_implementer(
+    p_ticket_id text,
+    p_state text,
+    p_assignee text
+)
+RETURNS text
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT CASE
+        WHEN p_state = 'in_progress' AND ticket_board.ticket_is_implementer_assignee(p_assignee) THEN p_assignee
+        WHEN p_state IN ('inspection', 'audit', 'eric_review', 'director_review') THEN (
+            SELECT nullif(ns.last_implementer_assignee, '')
+            FROM ticket_board.ticket_notification_state ns
+            WHERE ns.ticket_id = p_ticket_id
+              AND ticket_board.ticket_is_implementer_assignee(nullif(ns.last_implementer_assignee, ''))
+        )
+        ELSE NULL
+    END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.ticket_current_reserved_ticket(
+    p_implementer text,
+    p_excluding_ticket_id text DEFAULT NULL
+)
+RETURNS text
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT t.id
+    FROM ticket_board.tickets t
+    JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
+    WHERE ticket_board.ticket_is_implementer_assignee(p_implementer)
+      AND (p_excluding_ticket_id IS NULL OR t.id <> p_excluding_ticket_id)
+      AND NOT t.manually_controlled
+      AND t.state IN ('in_progress', 'inspection', 'audit', 'eric_review', 'director_review')
+      AND (
+          (t.state = 'in_progress' AND t.assignee = p_implementer)
+          OR (
+              t.state IN ('inspection', 'audit', 'eric_review', 'director_review')
+              AND ns.last_implementer_assignee = p_implementer
+          )
+      )
+    ORDER BY ns.entered_current_state_at, t.ticket_number
+    LIMIT 1;
 $$;
 
 CREATE OR REPLACE FUNCTION ticket_board.ticket_kickback_target_assignee(
@@ -503,6 +551,12 @@ AS $$
 BEGIN
     IF NEW.state = 'in_progress' AND NOT ticket_board.ticket_is_implementer_assignee(NEW.assignee) THEN
         RAISE EXCEPTION 'in_progress tickets require an implementer assignee (main, app, ops, perf, or research)';
+    END IF;
+    IF NEW.state = 'in_progress'
+       AND ticket_board.ticket_is_implementer_assignee(NEW.assignee)
+       AND ticket_board.ticket_current_reserved_ticket(NEW.assignee, NEW.id) IS NOT NULL THEN
+        NEW.state := 'backlog';
+        NEW.parked := false;
     END IF;
     RETURN NEW;
 END;
@@ -559,7 +613,7 @@ BEGIN
 
     IF OLD.state IS DISTINCT FROM NEW.state THEN
         IF NOT (
-            (OLD.state = 'backlog' AND NEW.state IN ('analysis', 'cancelled')) OR
+            (OLD.state = 'backlog' AND NEW.state IN ('analysis', 'in_progress', 'cancelled')) OR
             (OLD.state = 'analysis' AND NEW.state IN ('in_progress', 'backlog', 'cancelled')) OR
             (OLD.state = 'in_progress' AND NEW.state IN ('inspection', 'audit', 'analysis', 'backlog', 'cancelled')) OR
             (OLD.state = 'inspection' AND NEW.state IN ('audit', 'in_progress', 'backlog', 'cancelled')) OR
@@ -622,6 +676,13 @@ BEGIN
         ORDER BY b.position
         LIMIT 1;
         RAISE EXCEPTION 'unresolved blocker prevents forward promotion: %', blocker_id;
+    END IF;
+
+    IF NEW.state = 'in_progress'
+       AND ticket_board.ticket_is_implementer_assignee(NEW.assignee)
+       AND ticket_board.ticket_current_reserved_ticket(NEW.assignee, NEW.id) IS NOT NULL THEN
+        NEW.state := 'backlog';
+        NEW.parked := false;
     END IF;
 
     IF OLD.state <> 'director_review' AND NEW.state = 'director_review' AND NOT NEW.audit_signoff THEN
@@ -1071,6 +1132,92 @@ BEGIN
         SET state = 'in_progress'
         WHERE id = NEW.id
           AND state = 'analysis';
+    END IF;
+
+    RETURN NULL;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.activate_next_queued_ticket(p_implementer text)
+RETURNS text
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    next_ticket_id text;
+BEGIN
+    IF NOT ticket_board.ticket_is_implementer_assignee(p_implementer) THEN
+        RETURN NULL;
+    END IF;
+
+    IF ticket_board.ticket_current_reserved_ticket(p_implementer) IS NOT NULL THEN
+        RETURN NULL;
+    END IF;
+
+    SELECT t.id
+    INTO next_ticket_id
+    FROM ticket_board.tickets t
+    JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
+    WHERE t.state = 'backlog'
+      AND t.assignee = p_implementer
+      AND NOT t.parked
+      AND NOT t.manually_controlled
+      AND NOT ticket_board.ticket_has_unresolved_blockers(t.id)
+    ORDER BY ns.entered_current_state_at, t.ticket_number
+    FOR UPDATE OF t SKIP LOCKED
+    LIMIT 1;
+
+    IF next_ticket_id IS NULL THEN
+        RETURN NULL;
+    END IF;
+
+    UPDATE ticket_board.tickets
+    SET state = 'in_progress',
+        parked = false
+    WHERE id = next_ticket_id
+      AND state = 'backlog'
+      AND assignee = p_implementer
+      AND NOT parked;
+
+    IF NOT FOUND THEN
+        RETURN NULL;
+    END IF;
+
+    PERFORM ticket_board.touch_ticket(next_ticket_id);
+    RETURN next_ticket_id;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.release_implementer_and_activate_next()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    released_implementer text;
+BEGIN
+    IF pg_trigger_depth() > 1 THEN
+        RETURN NULL;
+    END IF;
+
+    IF NOT (
+        NEW.state IN ('done', 'cancelled')
+        OR (NEW.state = 'backlog' AND NEW.parked AND OLD.state IS DISTINCT FROM 'backlog')
+    ) THEN
+        RETURN NULL;
+    END IF;
+
+    released_implementer := ticket_board.ticket_reserved_implementer(OLD.id, OLD.state, OLD.assignee);
+    IF released_implementer IS NULL THEN
+        SELECT nullif(ns.last_implementer_assignee, '')
+        INTO released_implementer
+        FROM ticket_board.ticket_notification_state ns
+        WHERE ns.ticket_id = NEW.id;
+    END IF;
+
+    IF ticket_board.ticket_is_implementer_assignee(released_implementer) THEN
+        PERFORM ticket_board.activate_next_queued_ticket(released_implementer);
     END IF;
 
     RETURN NULL;
@@ -2124,6 +2271,7 @@ BEGIN
                         t.state = 'backlog'
                         AND t.assignee <> 'unassigned'
                         AND NOT t.parked
+                        AND NOT ticket_board.ticket_is_implementer_assignee(t.assignee)
                     )
                 )
               AND ns.entered_current_state_at <= p_now - p_cadence
@@ -2460,6 +2608,7 @@ DROP TRIGGER IF EXISTS tickets_zzz_notify_insert_transition ON ticket_board.tick
 DROP TRIGGER IF EXISTS tickets_zzz_notify_transition ON ticket_board.tickets;
 DROP TRIGGER IF EXISTS tickets_zzzy_resolve_completed_blockers ON ticket_board.tickets;
 DROP TRIGGER IF EXISTS tickets_zzzz_notify_unblocked_dependents ON ticket_board.tickets;
+DROP TRIGGER IF EXISTS tickets_zzzzz_release_implementer ON ticket_board.tickets;
 DROP TRIGGER IF EXISTS ticket_blockers_sync_resolved ON ticket_board.ticket_blockers;
 
 DROP TRIGGER IF EXISTS tickets_notification_state_insert ON ticket_board.tickets;
@@ -2494,6 +2643,11 @@ CREATE TRIGGER tickets_zzzz_notify_unblocked_dependents
 AFTER UPDATE OF state ON ticket_board.tickets
 FOR EACH ROW
 EXECUTE FUNCTION ticket_board.notify_unblocked_dependents();
+
+CREATE TRIGGER tickets_zzzzz_release_implementer
+AFTER UPDATE OF state, parked ON ticket_board.tickets
+FOR EACH ROW
+EXECUTE FUNCTION ticket_board.release_implementer_and_activate_next();
 
 CREATE TRIGGER ticket_blockers_sync_resolved
 BEFORE INSERT OR UPDATE OF blocker_ticket_id ON ticket_board.ticket_blockers

@@ -338,10 +338,14 @@ SELECT ticket_board.create_ticket('Bad direct create', 'Body', 'in_progress');
     insert_ticket(admin_conn, "PGU-200", title="Route fixture", state="analysis")
     psql(service_conn, "SELECT ticket_board.route('PGU-200', 'backlog', 'ops');")
     assert psql(admin_conn, "SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = 'PGU-200';") == "backlog:ops"
+    psql(admin_conn, "UPDATE ticket_board.tickets SET parked = true WHERE id = 'PGU-200';")
 
     insert_ticket(admin_conn, "PGU-300", title="Start fixture", state="analysis", assignee="ops", implementation="Ready.")
     psql(service_conn, "SELECT ticket_board.start_work('PGU-300');")
     assert psql(admin_conn, "SELECT state FROM ticket_board.tickets WHERE id = 'PGU-300';") == "in_progress"
+    psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '3003003' WHERE id = 'PGU-300';")
+    psql(admin_conn, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-300';")
+    psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-300';")
 
     insert_ticket(admin_conn, "PGU-400", title="Submit fixture", state="in_progress", assignee="app", implementation="Done.")
     psql(service_conn, "SELECT ticket_board.submit_to_audit('PGU-400', 'abcdef0');")
@@ -355,13 +359,15 @@ FROM ticket_board.tickets WHERE id = 'PGU-400';
         )
     )
     assert submitted == {"state": "audit", "commit_hash": "abcdef0", "last_rejected_commit": None}, submitted
+    psql(admin_conn, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-400';")
+    psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-400';")
 
     insert_ticket(
         admin_conn,
         "PGU-401",
         title="Submit exempt fixture",
         state="in_progress",
-        assignee="ops",
+        assignee="app",
         implementation="No repo changes.",
         commit_exempt=True,
     )
@@ -376,6 +382,8 @@ FROM ticket_board.tickets WHERE id = 'PGU-401';
         )
     )
     assert exempt_submitted == {"state": "audit", "commit_hash": "", "commit_exempt": True}, exempt_submitted
+    psql(admin_conn, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-401';")
+    psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-401';")
 
     insert_ticket(admin_conn, "PGU-500", title="Audit signoff", state="audit", assignee="audit", implementation="Done.")
     psql(service_conn, "SELECT ticket_board.audit_sign_off('PGU-500', 'Audit verified.');")
@@ -479,6 +487,8 @@ FROM ticket_board.tickets WHERE id = 'PGU-501';
         )
     )
     assert resubmitted == {"state": "audit", "commit_hash": "abcdef2", "last_rejected_commit": None}, resubmitted
+    psql(admin_conn, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-501';")
+    psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-501';")
 
     insert_ticket(
         admin_conn,
@@ -521,6 +531,8 @@ FROM ticket_board.tickets WHERE id = 'PGU-504';
         "commit_exempt": True,
         "last_rejected_commit": None,
     }, exempt_resubmitted
+    psql(admin_conn, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-504';")
+    psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-504';")
 
     insert_ticket(
         admin_conn,
@@ -552,6 +564,9 @@ FROM ticket_board.tickets t WHERE id = 'PGU-503';
         "last_rejected_commit": "fedcba9",
         "comment": "Please revise.",
     }, inspector_kickback
+    psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '5035035' WHERE id = 'PGU-503';")
+    psql(admin_conn, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-503';")
+    psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-503';")
 
     insert_ticket(
         admin_conn,
@@ -817,11 +832,66 @@ SELECT set_config('ticket_board.caller_role', 'ops', false);
 SELECT ticket_board.request_commit_exempt('PGU-913', '   ');
 """,
     )
-    insert_ticket(admin_conn, "PGU-914", title="Request exempt happy path", state="in_progress", assignee="ops", implementation="Done.")
+    psql(
+        admin_conn,
+        """
+UPDATE ticket_board.tickets
+SET state = 'audit',
+    commit_hash = '9129130'
+WHERE id IN ('PGU-912', 'PGU-913')
+  AND state = 'in_progress';
+UPDATE ticket_board.tickets
+SET audit_signoff = true,
+    state = 'director_review'
+WHERE id IN ('PGU-912', 'PGU-913')
+  AND state = 'audit';
+UPDATE ticket_board.tickets
+SET state = 'done'
+WHERE id IN ('PGU-912', 'PGU-913')
+  AND state = 'director_review';
+UPDATE ticket_board.tickets
+SET manually_controlled = true
+WHERE state IN ('in_progress', 'inspection', 'audit', 'eric_review', 'director_review')
+  AND id NOT IN ('PGU-914');
+UPDATE ticket_board.tickets
+SET state = 'audit',
+    commit_hash = '9149140'
+WHERE state = 'in_progress'
+  AND NOT manually_controlled
+  AND NOT ticket_board.ticket_has_unresolved_blockers(id);
+UPDATE ticket_board.tickets
+SET audit_signoff = true,
+    state = 'director_review'
+WHERE state = 'audit'
+  AND NOT needs_eric_signoff
+  AND NOT manually_controlled
+  AND NOT ticket_board.ticket_has_unresolved_blockers(id);
+UPDATE ticket_board.tickets
+SET audit_signoff = true,
+    state = 'eric_review'
+WHERE state = 'audit'
+  AND needs_eric_signoff
+  AND NOT manually_controlled
+  AND NOT ticket_board.ticket_has_unresolved_blockers(id);
+UPDATE ticket_board.tickets
+SET audit_signoff = true,
+    eric_signoff = true,
+    state = 'director_review'
+WHERE state = 'eric_review'
+  AND NOT manually_controlled
+  AND NOT ticket_board.ticket_has_unresolved_blockers(id);
+UPDATE ticket_board.tickets
+SET state = 'done'
+WHERE state = 'director_review'
+  AND NOT manually_controlled
+  AND NOT ticket_board.ticket_has_unresolved_blockers(id);
+""",
+    )
+    insert_ticket(admin_conn, "PGU-914", title="Request exempt happy path", state="in_progress", assignee="research", implementation="Done.")
     psql(
         service_conn,
         """
-SELECT set_config('ticket_board.caller_role', 'ops', false);
+SELECT set_config('ticket_board.caller_role', 'research', false);
 SELECT ticket_board.request_commit_exempt('PGU-914', 'No repo change.');
 """,
     )
@@ -928,7 +998,7 @@ WHERE id = 'PGU-930';
     assert cancelled == {"state": "cancelled", "parked": False, "manually_controlled": False}, cancelled
 
     psql(admin_conn, "DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-930';")
-    psql(service_conn, "SELECT ticket_board.route('PGU-930', 'analysis', 'ops');")
+    psql(service_conn, "SELECT ticket_board.route('PGU-930', 'analysis', 'research');")
     resurrected = json.loads(
         psql(
             admin_conn,
@@ -950,7 +1020,7 @@ SELECT jsonb_build_object(
         FROM ticket_board.ticket_notification_queue q
         WHERE q.ticket_id = t.id
           AND q.kind = 'transition'
-          AND q.target_role = 'ops'
+          AND q.target_role = 'research'
           AND q.payload->>'new_state' = 'in_progress'
     )
 )::text
@@ -961,17 +1031,20 @@ WHERE id = 'PGU-930';
     )
     assert resurrected == {
         "state": "in_progress",
-        "assignee": "ops",
+        "assignee": "research",
         "parked": False,
         "manually_controlled": False,
         "can_auto_advance": True,
         "implementation_notifications": 1,
     }, resurrected
+    psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '9309300' WHERE id = 'PGU-930';")
+    psql(admin_conn, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-930';")
+    psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-930';")
 
 
 def assert_listener_can_execute_reconcile_functions(admin_conn: str, listener_conn: str, service_conn: str) -> None:
     psql(admin_conn, "DELETE FROM ticket_board.ticket_notification_queue;")
-    insert_ticket(admin_conn, "PGU-950", title="Listener queue", state="analysis", assignee="ops", implementation="Ready.")
+    insert_ticket(admin_conn, "PGU-950", title="Listener queue", state="analysis", assignee="research", implementation="Ready.")
     psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-950';")
 
     claimed = json.loads(
@@ -984,7 +1057,7 @@ FROM ticket_board.claim_notification() AS claimed;
         )
     )
     assert claimed["ticket_id"] == "PGU-950", claimed
-    assert claimed["target_role"] == "ops", claimed
+    assert claimed["target_role"] == "research", claimed
     assert claimed["message"] == "New ticket for you: PGU-950 -- Listener queue", claimed
     assert claimed["attempts"] == 1, claimed
 

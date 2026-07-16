@@ -589,35 +589,60 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       const addCommentButton = document.createElement('button');
       addCommentButton.textContent = 'Add Comment';
       addCommentButton.addEventListener('click', async () => {
-        await submitComment(ticket.id, commentWho.value, commentText.value, null, commentUrgent.checked);
+        try {
+          await submitComment(ticket.id, commentWho.value, commentText.value, null, commentUrgent.checked);
+        } catch (error) {
+          setCreateStatus(error.message, true);
+          await requestBoardReload();
+        }
       });
       commentActions.appendChild(addCommentButton);
       if (ticketIsEricReview(ticket)) {
         const kickbackButton = document.createElement('button');
         kickbackButton.textContent = 'Return for Rework';
         kickbackButton.addEventListener('click', async () => {
-          await submitComment(ticket.id, commentWho.value, commentText.value, 'analysis');
+          try {
+            await submitComment(ticket.id, commentWho.value, commentText.value, 'analysis');
+          } catch (error) {
+            setCreateStatus(error.message, true);
+            await requestBoardReload();
+          }
         });
         commentActions.appendChild(kickbackButton);
       } else if (ticket.state === 'inspection') {
         const kickbackButton = document.createElement('button');
         kickbackButton.textContent = 'Comment + Return to Implementation';
         kickbackButton.addEventListener('click', async () => {
-          await submitComment(ticket.id, 'inspector', commentText.value, 'in_progress');
+          try {
+            await submitComment(ticket.id, 'inspector', commentText.value, 'in_progress');
+          } catch (error) {
+            setCreateStatus(error.message, true);
+            await requestBoardReload();
+          }
         });
         commentActions.appendChild(kickbackButton);
       } else if (ticket.state === 'audit') {
         const kickbackButton = document.createElement('button');
         kickbackButton.textContent = 'Comment + Return to Implementation';
         kickbackButton.addEventListener('click', async () => {
-          await submitComment(ticket.id, commentWho.value, commentText.value, 'in_progress');
+          try {
+            await submitComment(ticket.id, commentWho.value, commentText.value, 'in_progress');
+          } catch (error) {
+            setCreateStatus(error.message, true);
+            await requestBoardReload();
+          }
         });
         commentActions.appendChild(kickbackButton);
       } else if (ticketAllowsKickback(ticket)) {
         const kickbackButton = document.createElement('button');
         kickbackButton.textContent = 'Comment + Move to Implementation';
         kickbackButton.addEventListener('click', async () => {
-          await submitComment(ticket.id, commentWho.value, commentText.value, 'in_progress');
+          try {
+            await submitComment(ticket.id, commentWho.value, commentText.value, 'in_progress');
+          } catch (error) {
+            setCreateStatus(error.message, true);
+            await requestBoardReload();
+          }
         });
         commentActions.appendChild(kickbackButton);
       }

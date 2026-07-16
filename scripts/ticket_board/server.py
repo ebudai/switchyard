@@ -653,10 +653,10 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         elif operation == "inspector_sign_off":
             patch = {"state": "audit", "inspector_signoff": True}
         elif operation == "inspector_kick_back":
-            patch = {
-                "state": "in_progress",
-                "comment": {"who": caller, "text": str(payload.get("recommendations", payload.get("reason", payload.get("text", ""))))},
-            }
+            patch = {"state": "in_progress"}
+            comment_text = self.action_comment_text(payload)
+            if comment_text:
+                patch["comment"] = {"who": caller, "text": comment_text}
             if payload.get("target_assignee") or payload.get("assignee"):
                 patch["assignee"] = str(payload.get("target_assignee", payload.get("assignee", "")))
         elif operation == "audit_sign_off":
@@ -665,10 +665,10 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 raise ValueError("audit_sign_off requires a non-empty comment")
             patch = {"audit_signoff": True, "comment": {"who": caller, "text": comment_text}}
         elif operation == "audit_kick_back":
-            patch = {
-                "state": "in_progress",
-                "comment": {"who": caller, "text": str(payload.get("reason", payload.get("text", "")))},
-            }
+            patch = {"state": "in_progress"}
+            comment_text = self.action_comment_text(payload)
+            if comment_text:
+                patch["comment"] = {"who": caller, "text": comment_text}
             if payload.get("target_assignee") or payload.get("assignee"):
                 patch["assignee"] = str(payload.get("target_assignee", payload.get("assignee", "")))
         elif operation == "eric_sign_off":
@@ -677,10 +677,10 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             if comment_text:
                 patch["comment"] = {"who": caller, "text": comment_text}
         elif operation == "eric_reopen":
-            patch = {
-                "state": "analysis",
-                "comment": {"who": caller, "text": str(payload.get("reason", payload.get("text", "")))},
-            }
+            patch = {"state": "analysis"}
+            comment_text = self.action_comment_text(payload)
+            if comment_text:
+                patch["comment"] = {"who": caller, "text": comment_text}
         elif operation == "mark_done":
             patch = {"state": "done", "commit_hash": str(payload.get("commit_hash", ""))}
         elif operation == "defer":

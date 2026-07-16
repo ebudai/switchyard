@@ -503,21 +503,26 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
     async function submitComment(ticketId, who, text, nextState = null, urgent = false) {
       const trimmedWho = who.trim();
       const trimmedText = text.trim();
-      if (!trimmedWho || !trimmedText) {
-        throw new Error('comment requires both who and text');
+      if (!trimmedWho) {
+        throw new Error('comment requires an author');
       }
-      const patch = {
-        comment: {
+      if (!trimmedText && !nextState) {
+        throw new Error('comment requires non-empty text');
+      }
+      const patch = {};
+      if (trimmedText) {
+        patch.comment = {
           who: trimmedWho,
           text: trimmedText,
           urgent: !!urgent,
-        },
-      };
+        };
+      }
       if (nextState) {
         patch.state = nextState;
       }
       clearDetailDraft(ticketId);
       await updateTicket(ticketId, patch, trimmedWho);
+      setCreateStatus(nextState ? `Moved ${ticketId} to ${stateLabel(nextState)}.` : `Comment added to ${ticketId}.`);
     }
 
     async function submitEricSignoff(ticketId, who, text) {

@@ -119,7 +119,36 @@ TRANSITION_DBNAME="pgu_migration_runner_transition_test"
 TRANSITION_CONN="host=$SOCKET_DIR port=$PORT dbname=$TRANSITION_DBNAME user=postgres"
 mkdir -p "$TRANSITION_MIGRATIONS_DIR"
 createdb -h "$SOCKET_DIR" -p "$PORT" -U postgres "$TRANSITION_DBNAME"
+psql -X -v ON_ERROR_STOP=1 "$TRANSITION_CONN" <<'SQL' >/dev/null
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ticket_board_service') THEN
+        CREATE ROLE ticket_board_service;
+    END IF;
+END $$;
+SQL
 psql -X -v ON_ERROR_STOP=1 "$TRANSITION_CONN" -f "$REPO_ROOT/scripts/ticket_board/schema.sql" >/dev/null
+psql -X -v ON_ERROR_STOP=1 "$TRANSITION_CONN" <<'SQL' >/dev/null
+GRANT USAGE ON SCHEMA ticket_board TO ticket_board_service;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA ticket_board TO ticket_board_service;
+SQL
+psql -X -v ON_ERROR_STOP=1 "$TRANSITION_CONN" <<'SQL' >/dev/null
+CREATE OR REPLACE FUNCTION ticket_board.append_ticket_comment(
+    p_id text,
+    p_who text,
+    p_text text
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+BEGIN
+    PERFORM ticket_board.append_ticket_comment(p_id, p_who, p_text, false);
+END;
+$$;
+SQL
 cp "$REPO_ROOT"/scripts/ticket_board/migrations/*.sql "$TRANSITION_MIGRATIONS_DIR/"
 cat >"$TRANSITION_MIGRATIONS_DIR/270_ready_to_in_progress.sql" <<'SQL'
 DO $$
@@ -145,9 +174,62 @@ SELECT string_agg(name, ',' ORDER BY seq)
 FROM ticket_board.schema_migrations;
 SQL
 )"
-expected_transition_applied="schema.sql,270_ready_to_in_progress.sql,271_optional_implementation.sql,272_resolved_blockers.sql,273_suppress_self_notifications.sql,274_unblock_notifications.sql,275_remove_dead_unblock_analysis_branch.sql,276_revert_backlog_unblock_notifications.sql,277_owner_update_notifications.sql,278_idle_turn_end_nudges.sql,279_idle_reminder_escalation.sql,280_reject_stale_resubmit.sql,281_idle_reminder_escalate_problem_clause.sql,282_http_director_create_notification_source.sql,283_idle_reminder_defers_to_primary.sql,284_add_regression_flag.sql,285_require_actor_caller_role_backstop.sql,286_allow_audit_file_bug.sql,287_active_inprogress_idle_filter.sql,pgu367_unresolved_blocked_by_source_json.sql,pgu405_terminal_transition_assignee_notify.sql,pgu437_idle_reminder_delivery_count.sql,pgu444_finish_current_locked_reconcile.sql,pgu450_in_progress_implementer_assignee.sql,pgu451_serial_implementer_focus.sql,pgu453_awaiting_role_nudge_suppression.sql,pgu455_director_discretionary_nudges.sql,pgu457_close_utility_tasks.sql,pgu458_pgu340_director_force_move.sql,pgu458_submit_to_inspection.sql,pgu471_coalesce_new_ticket_notifications.sql,pgu472_urgent_comment_notifications.sql,pgu474_hard_serial_focus_force_move.sql,pgu999_runner_probe.sql"
+expected_transition_applied="schema.sql,270_ready_to_in_progress.sql,271_optional_implementation.sql,272_resolved_blockers.sql,273_suppress_self_notifications.sql,274_unblock_notifications.sql,275_remove_dead_unblock_analysis_branch.sql,276_revert_backlog_unblock_notifications.sql,277_owner_update_notifications.sql,278_idle_turn_end_nudges.sql,279_idle_reminder_escalation.sql,280_reject_stale_resubmit.sql,281_idle_reminder_escalate_problem_clause.sql,282_http_director_create_notification_source.sql,283_idle_reminder_defers_to_primary.sql,284_add_regression_flag.sql,285_require_actor_caller_role_backstop.sql,286_allow_audit_file_bug.sql,287_active_inprogress_idle_filter.sql,pgu367_unresolved_blocked_by_source_json.sql,pgu405_terminal_transition_assignee_notify.sql,pgu437_idle_reminder_delivery_count.sql,pgu444_finish_current_locked_reconcile.sql,pgu450_in_progress_implementer_assignee.sql,pgu451_serial_implementer_focus.sql,pgu453_awaiting_role_nudge_suppression.sql,pgu455_director_discretionary_nudges.sql,pgu457_close_utility_tasks.sql,pgu458_pgu340_director_force_move.sql,pgu458_submit_to_inspection.sql,pgu471_coalesce_new_ticket_notifications.sql,pgu472_urgent_comment_notifications.sql,pgu474_hard_serial_focus_force_move.sql,pgu477_drop_legacy_append_ticket_comment.sql,pgu999_runner_probe.sql"
 [[ "$transition_applied" == "$expected_transition_applied" ]] || {
     echo "FAIL: schema.sql backfill did not record legacy migration names correctly: $transition_applied" >&2
+    exit 1
+}
+
+legacy_append_overload_count="$(
+    psql -X -v ON_ERROR_STOP=1 -tA "$TRANSITION_CONN" <<'SQL'
+SELECT count(*)
+FROM pg_proc p
+JOIN pg_namespace n ON n.oid = p.pronamespace
+WHERE n.nspname = 'ticket_board'
+  AND p.proname = 'append_ticket_comment'
+  AND p.pronargs = 3;
+SQL
+)"
+[[ "$legacy_append_overload_count" == "0" ]] || {
+    echo "FAIL: legacy 3-arg append_ticket_comment overload survived migrations" >&2
+    exit 1
+}
+
+psql -X -v ON_ERROR_STOP=1 "$TRANSITION_CONN" <<'SQL' >/dev/null
+INSERT INTO ticket_board.tickets (id, title, body, state, assignee, created_text, updated_text, created_at, updated_at, source_json)
+VALUES
+    ('PGU-47701', 'Force move append regression', '', 'analysis', 'unassigned', '2026-07-16T00:00:00+00:00', '2026-07-16T00:00:00+00:00', clock_timestamp(), clock_timestamp(), '{"id":"PGU-47701","title":"Force move append regression","body":"","state":"analysis","assignee":"unassigned","comments":[],"created":"2026-07-16T00:00:00+00:00","updated":"2026-07-16T00:00:00+00:00"}'::jsonb),
+    ('PGU-47702', 'Eric reopen append regression', '', 'eric_review', 'director', '2026-07-16T00:00:00+00:00', '2026-07-16T00:00:00+00:00', clock_timestamp(), clock_timestamp(), '{"id":"PGU-47702","title":"Eric reopen append regression","body":"","state":"eric_review","assignee":"director","comments":[],"created":"2026-07-16T00:00:00+00:00","updated":"2026-07-16T00:00:00+00:00"}'::jsonb),
+    ('PGU-47703', 'Audit kickback append regression', '', 'audit', 'audit', '2026-07-16T00:00:00+00:00', '2026-07-16T00:00:00+00:00', clock_timestamp(), clock_timestamp(), '{"id":"PGU-47703","title":"Audit kickback append regression","body":"","state":"audit","assignee":"audit","comments":[],"created":"2026-07-16T00:00:00+00:00","updated":"2026-07-16T00:00:00+00:00"}'::jsonb);
+
+SET ROLE ticket_board_service;
+SELECT set_config('ticket_board.caller_role', 'director', false);
+SELECT ticket_board.force_move('PGU-47701', 'done', 'director', true);
+SELECT set_config('ticket_board.caller_role', 'eric', false);
+SELECT ticket_board.eric_reopen('PGU-47702', 'Return for rework regression check.');
+SELECT set_config('ticket_board.caller_role', 'audit', false);
+SELECT ticket_board.audit_kick_back('PGU-47703', 'Audit kickback regression check.', 'main');
+RESET ROLE;
+SQL
+
+append_action_result="$(
+    psql -X -v ON_ERROR_STOP=1 -tA "$TRANSITION_CONN" <<'SQL'
+SELECT jsonb_object_agg(
+    t.id,
+    jsonb_build_object(
+        'state', t.state,
+        'assignee', t.assignee,
+        'comments', (SELECT count(*)::int FROM ticket_board.ticket_comments c WHERE c.ticket_id = t.id)
+    )
+    ORDER BY t.id
+)::text
+FROM ticket_board.tickets t
+WHERE t.id IN ('PGU-47701', 'PGU-47702', 'PGU-47703');
+SQL
+)"
+expected_append_action_result='{"PGU-47701": {"state": "done", "assignee": "director", "comments": 1}, "PGU-47702": {"state": "analysis", "assignee": "director", "comments": 1}, "PGU-47703": {"state": "in_progress", "assignee": "main", "comments": 1}}'
+[[ "$append_action_result" == "$expected_append_action_result" ]] || {
+    echo "FAIL: migrated DB append actions failed or produced wrong state: $append_action_result" >&2
     exit 1
 }
 

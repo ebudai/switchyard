@@ -37,7 +37,11 @@ MARKUP = """  <div class="layout">
             <input id="createBacklogInput" type="checkbox">
             Start in backlog
           </label>
-          <div class="paste-hint">Paste an image from the clipboard here to upload and attach it.</div>
+          <div class="attach-panel" id="createAttachDropZone">
+            <input id="createImageInput" class="visually-hidden" type="file" accept="image/*" multiple>
+            <button id="createAttachImageBtn" type="button">Attach image</button>
+            <div class="attach-help">Choose image files, drag them here, or paste from the clipboard to attach them.</div>
+          </div>
           <div id="createPreview" class="preview-card" hidden>
             <div id="createPreviewGallery" class="attachment-gallery"></div>
           </div>

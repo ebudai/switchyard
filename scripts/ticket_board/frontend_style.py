@@ -131,7 +131,18 @@ STYLE = """    :root {
       border-radius: 999px;
       background: rgba(255,255,255,0.03);
     }
-    .paste-hint {
+    .visually-hidden {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+    .attach-panel {
       border: 1px dashed var(--border);
       border-radius: 8px;
       padding: 10px 12px;
@@ -139,6 +150,24 @@ STYLE = """    :root {
       font-size: 12px;
       line-height: 1.45;
       background: rgba(255,255,255,0.02);
+      display: grid;
+      gap: 8px;
+      transition: border-color 120ms ease, background 120ms ease;
+    }
+    .attach-panel.drag-active {
+      border-color: rgba(125, 211, 252, 0.75);
+      background: rgba(125, 211, 252, 0.1);
+    }
+    .attach-panel button {
+      width: fit-content;
+      max-width: 100%;
+      background: var(--accent-soft);
+      border-color: rgba(125, 211, 252, 0.45);
+    }
+    .attach-help {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
     }
     .preview-card {
       display: grid;

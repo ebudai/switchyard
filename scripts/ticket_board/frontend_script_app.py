@@ -17,6 +17,80 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       return payload.image;
     }
 
+    function imageFilesFromList(files) {
+      return Array.from(files || []).filter((file) => String(file.type || '').startsWith('image/'));
+    }
+
+    async function attachImageFiles(files, context) {
+      const imageFiles = imageFilesFromList(files);
+      if (!imageFiles.length) {
+        throw new Error('attach requires at least one image file');
+      }
+      const detailTicket = context === 'detail' ? selectedTicket() : null;
+      if (context === 'detail' && !detailTicket) {
+        throw new Error('no ticket selected for image attach');
+      }
+      const label = imageFiles.length === 1 ? 'image' : `${imageFiles.length} images`;
+      setCreateStatus(`Uploading ${label}…`);
+      const uploaded = [];
+      for (const imageFile of imageFiles) {
+        uploaded.push(await uploadImageBlob(imageFile));
+      }
+      const uploadedPaths = uploaded.map((item) => item.path);
+      await requestBoardReload();
+      if (context === 'detail') {
+        const ticket = selectedTicket();
+        if (!ticket || ticket.id !== detailTicket.id) {
+          throw new Error('selected ticket changed during image attach');
+        }
+        await updateTicket(ticket.id, {
+          screenshots: uniquePaths([...ticketScreenshotPaths(ticket), ...uploadedPaths]),
+        }, 'director');
+        setCreateStatus(`Attached ${label} to ${ticket.id}.`);
+        return;
+      }
+      state.pendingCreateScreenshots = uniquePaths([...state.pendingCreateScreenshots, ...uploadedPaths]);
+      renderCreatePreview();
+      setCreateStatus(`Attached ${label} to the new ticket.`);
+    }
+
+    function wireImageDropZone(dropZone, context) {
+      if (!dropZone) {
+        return;
+      }
+      const reset = () => dropZone.classList.remove('drag-active');
+      dropZone.addEventListener('dragover', (event) => {
+        const items = Array.from(event.dataTransfer?.items || []);
+        const hasImage = items.some((item) => String(item.type || '').startsWith('image/'))
+          || imageFilesFromList(event.dataTransfer?.files || []).length > 0;
+        if (!hasImage) {
+          return;
+        }
+        event.preventDefault();
+        dropZone.classList.add('drag-active');
+      });
+      dropZone.addEventListener('dragleave', (event) => {
+        if (!dropZone.contains(event.relatedTarget)) {
+          reset();
+        }
+      });
+      dropZone.addEventListener('drop', async (event) => {
+        const files = imageFilesFromList(event.dataTransfer?.files || []);
+        if (!files.length) {
+          reset();
+          return;
+        }
+        event.preventDefault();
+        reset();
+        try {
+          await attachImageFiles(files, context);
+        } catch (error) {
+          setCreateStatus(error.message, true);
+          await requestBoardReload();
+        }
+      });
+    }
+
     async function attachPastedImage(image, context) {
       const label = context === 'detail' ? 'Attaching pasted screenshot…' : 'Uploading pasted screenshot…';
       setCreateStatus(label);
@@ -441,6 +515,19 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
     }
 
     createBtn.addEventListener('click', handleCreateSubmit);
+    createAttachImageBtn.addEventListener('click', () => {
+      createImageInput.click();
+    });
+    createImageInput.addEventListener('change', async () => {
+      try {
+        await attachImageFiles(createImageInput.files, 'create');
+      } catch (error) {
+        setCreateStatus(error.message, true);
+      } finally {
+        createImageInput.value = '';
+      }
+    });
+    wireImageDropZone(createAttachDropZone, 'create');
     titleInput.addEventListener('keydown', submitCreateOnEnter);
     assigneeInput.addEventListener('keydown', submitCreateOnEnter);
     createBacklogInput.addEventListener('keydown', submitCreateOnEnter);

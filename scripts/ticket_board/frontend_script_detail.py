@@ -485,6 +485,35 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         : 'A verified git commit is required before moving this ticket to done.';
       commitInfo.append(commitOverride, commitNote);
 
+      const attachmentUpload = document.createElement('div');
+      attachmentUpload.className = 'attach-panel detail-attach-panel';
+      const detailImageInput = document.createElement('input');
+      detailImageInput.className = 'visually-hidden';
+      detailImageInput.type = 'file';
+      detailImageInput.accept = 'image/*';
+      detailImageInput.multiple = true;
+      const detailAttachButton = document.createElement('button');
+      detailAttachButton.type = 'button';
+      detailAttachButton.textContent = 'Attach image';
+      const attachmentHelp = document.createElement('div');
+      attachmentHelp.className = 'attach-help';
+      attachmentHelp.textContent = 'Choose image files, drag them here, or paste while editing this ticket.';
+      detailAttachButton.addEventListener('click', () => {
+        detailImageInput.click();
+      });
+      detailImageInput.addEventListener('change', async () => {
+        try {
+          await attachImageFiles(detailImageInput.files, 'detail');
+        } catch (error) {
+          setCreateStatus(error.message, true);
+          await requestBoardReload();
+        } finally {
+          detailImageInput.value = '';
+        }
+      });
+      attachmentUpload.append(detailImageInput, detailAttachButton, attachmentHelp);
+      wireImageDropZone(attachmentUpload, 'detail');
+
       box.append(
         titleField,
         meta,
@@ -498,6 +527,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         implementation,
         auditPrompt,
         commitInfo,
+        attachmentUpload,
       );
 
       if (ticketScreenshotEntries(ticket).length) {

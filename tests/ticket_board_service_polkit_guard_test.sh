@@ -153,6 +153,29 @@ grep -q '^show pgu-ticket-board.service -p FragmentPath --value$' "$LOGFILE" || 
     exit 1
 }
 
+(
+    # Predicate-level regression guard: only exact board-unit actions may skip
+    # the interactive polkit path.
+    # shellcheck source=/dev/null
+    source "$REPO_ROOT/scripts/ticket-board-service.sh"
+    is_board_service_systemctl_action restart pgu-ticket-board.service || {
+        echo "FAIL: exact board-unit restart should match the whitelist predicate" >&2
+        exit 1
+    }
+    if is_board_service_systemctl_action restart unrelated.service; then
+        echo "FAIL: restart of a different unit must not match the whitelist predicate" >&2
+        exit 1
+    fi
+    if is_board_service_systemctl_action restart pgu-ticket-board.service --no-block; then
+        echo "FAIL: board-unit restart with extra args must not match the whitelist predicate" >&2
+        exit 1
+    fi
+    if is_board_service_systemctl_action daemon-reload; then
+        echo "FAIL: daemon-reload must not match the board-unit whitelist predicate" >&2
+        exit 1
+    fi
+)
+
 cat >"$MOCKDIR/systemctl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail

@@ -81,10 +81,18 @@ class MutableAttachApp:
         self.ticket["last_caller_role"] = caller_role
         return self.ticket
 
-    def save_uploaded_image(self, raw_bytes: bytes) -> dict[str, str]:
+    def save_uploaded_image(
+        self,
+        raw_bytes: bytes,
+        *,
+        upload_set: str = "",
+        set_label: str = "",
+        attempt_number: str = "",
+    ) -> dict[str, str]:
         self.upload_count += 1
         self.asset_dir.mkdir(parents=True, exist_ok=True)
-        path = self.asset_dir / f"upload_{self.upload_count}.png"
+        prefix = "target__" if upload_set == "target" else ""
+        path = self.asset_dir / f"{prefix}upload_{self.upload_count}.png"
         path.write_bytes(raw_bytes)
         return {"path": str(path), "name": path.name, "modified": format_timestamp(path)}
 

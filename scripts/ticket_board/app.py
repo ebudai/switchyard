@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import time
 from io import BytesIO
@@ -50,6 +51,11 @@ def ticket_number(ticket_id: str) -> int:
     if not value.startswith("PGU-") or not value[4:].isdigit():
         return 0
     return int(value[4:])
+
+
+def upload_set_slug(raw: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", str(raw or "").strip().lower()).strip("-")
+    return slug[:80]
 
 
 class TicketBoardApp:
@@ -118,20 +124,53 @@ class TicketBoardApp:
             raise FileNotFoundError(f"unsupported image type: {path.name}")
         return path
 
-    def save_uploaded_image(self, raw_bytes: bytes) -> dict[str, str]:
+    def save_uploaded_image(
+        self,
+        raw_bytes: bytes,
+        *,
+        upload_set: str = "",
+        set_label: str = "",
+        attempt_number: str = "",
+    ) -> dict[str, str]:
         if not raw_bytes:
             raise ValueError("uploaded image is empty")
         self.asset_dir.mkdir(parents=True, exist_ok=True)
+        prefix = self._upload_filename_prefix(upload_set, set_label, attempt_number)
         with Image.open(BytesIO(raw_bytes)) as image:
             image.load()
             output = image if image.mode in ("RGB", "RGBA", "L", "LA", "P") else image.convert("RGBA")
-            path = self.asset_dir / f"upload_{time.time_ns()}.png"
+            filename = f"upload_{time.time_ns()}.png"
+            if prefix:
+                filename = f"{prefix}__{filename}"
+            path = self.asset_dir / filename
             output.save(path, format="PNG")
         return {
             "path": str(path.resolve()),
             "name": path.name,
             "modified": format_timestamp(path),
         }
+
+    def _upload_filename_prefix(self, upload_set: str, set_label: str, attempt_number: str) -> str:
+        normalized_set = upload_set_slug(upload_set)
+        label_slug = upload_set_slug(set_label)
+        if normalized_set in {"", "ungrouped"}:
+            return ""
+        if normalized_set == "target":
+            return "target"
+        if normalized_set == "attempt":
+            try:
+                attempt = int(str(attempt_number).strip())
+            except ValueError as exc:
+                raise ValueError("attempt upload set requires an attempt number") from exc
+            if attempt <= 0 or attempt > 999:
+                raise ValueError("attempt upload set requires attempt number 1-999")
+            prefix = f"attempt-{attempt:03d}"
+            if label_slug:
+                prefix = f"{prefix}-{label_slug}"
+            return prefix
+        if normalized_set == "feedback" and not label_slug:
+            return "feedback"
+        return label_slug or normalized_set
 
     def create_ticket(
         self,

@@ -20,18 +20,24 @@ def main() -> int:
     assert ".attach-panel" in HTML
     assert "id=\"createImageInput\" class=\"visually-hidden\" type=\"file\" accept=\"image/*\" multiple" in HTML
     assert "id=\"createAttachImageBtn\" type=\"button\">Attach image</button>" in HTML
-    assert "function attachImageFiles(files, context)" in HTML
-    assert "function wireImageDropZone(dropZone, context)" in HTML
-    assert "await attachImageFiles(detailImageInput.files, 'detail');" in HTML
-    assert "wireImageDropZone(attachmentUpload, 'detail');" in HTML
-    assert "await attachImageFiles(createImageInput.files, 'create');" in HTML
-    assert "wireImageDropZone(createAttachDropZone, 'create');" in HTML
+    assert "data-attach-set" in HTML
+    assert "data-attach-attempt" in HTML
+    assert "data-attach-label" in HTML
+    assert "function uploadSetQuery(setOptions = {})" in HTML
+    assert "function readAttachmentSetOptions(root)" in HTML
+    assert "function attachImageFiles(files, context, setOptions = {})" in HTML
+    assert "function wireImageDropZone(dropZone, context, getSetOptions = () => ({}))" in HTML
+    assert "await attachImageFiles(detailImageInput.files, 'detail', readAttachmentSetOptions(attachmentUpload));" in HTML
+    assert "wireImageDropZone(attachmentUpload, 'detail', () => readAttachmentSetOptions(attachmentUpload));" in HTML
+    assert "await attachImageFiles(createImageInput.files, 'create', readCreateAttachmentSetOptions());" in HTML
+    assert "wireImageDropZone(createAttachDropZone, 'create', readCreateAttachmentSetOptions);" in HTML
     assert "selected ticket changed during image attach" in HTML
     assert "function parseAttachmentSet(path)" in HTML
     assert "function groupAttachmentEntries(entries)" in HTML
     assert "function renderAttachmentSetGroups(container, entries, removeLabel, onRemove, onOpen = null)" in HTML
     assert "filename.match(/^target__(.+)$/i)" in HTML
     assert "filename.match(/^attempt-(\\d+)(?:-(.+?))?__(.+)$/i)" in HTML
+    assert "filename.match(/^([a-z0-9][a-z0-9-]*)__(.+)$/i)" in HTML
     assert "newestAttempt.open = true;" in HTML
     assert ".attachment-remove" in HTML
     assert ".attachment-card-clickable" in HTML

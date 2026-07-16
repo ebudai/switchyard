@@ -591,39 +591,28 @@ WHERE id = 'PGU-31';
                 needs_inspection=True,
                 inspector_signoff=True,
             )
-            assert_error(
-                conninfo,
-                "UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-32';",
-                "inspector kickback requires",
-            )
-            psql(
-                conninfo,
-                """
-BEGIN;
-INSERT INTO ticket_board.ticket_comments (ticket_id, position, who, ts_text, text, source_json)
-VALUES (
-    'PGU-32',
-    COALESCE((SELECT max(position) + 1 FROM ticket_board.ticket_comments WHERE ticket_id = 'PGU-32'), 0),
-    'inspector',
-    '2026-07-10T00:10:00+00:00',
-    'Frame has banding.',
-    '{"who":"inspector","ts":"2026-07-10T00:10:00+00:00","text":"Frame has banding."}'::jsonb
-);
-UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-32';
-COMMIT;
-""",
-            )
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-32';")
             inspect_kicked = json.loads(
                 psql(
                     conninfo,
                     """
-SELECT jsonb_build_object('state', state, 'inspector_signoff', inspector_signoff, 'audit_signoff', audit_signoff)::text
+SELECT jsonb_build_object(
+    'state', state,
+    'inspector_signoff', inspector_signoff,
+    'audit_signoff', audit_signoff,
+    'comment_count', (SELECT count(*) FROM ticket_board.ticket_comments WHERE ticket_id = 'PGU-32')
+)::text
 FROM ticket_board.tickets
 WHERE id = 'PGU-32';
 """,
                 ).stdout
             )
-            assert inspect_kicked == {"state": "in_progress", "inspector_signoff": False, "audit_signoff": False}, inspect_kicked
+            assert inspect_kicked == {
+                "state": "in_progress",
+                "inspector_signoff": False,
+                "audit_signoff": False,
+                "comment_count": 0,
+            }, inspect_kicked
             inspect_kick_notice = json.loads(
                 psql(
                     conninfo,
@@ -638,7 +627,7 @@ LIMIT 1;
             )
             assert inspect_kick_notice == {
                 "target_role": "ops",
-                "message": "PGU-32 -- Inspection kickback kicked back to you: Frame has banding.",
+                "message": "PGU-32 -- Inspection kickback kicked back to you",
                 "new_state": "in_progress",
             }, inspect_kick_notice
 

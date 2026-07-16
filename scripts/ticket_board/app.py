@@ -726,12 +726,16 @@ ORDER BY t.ticket_number
 
                 comment_text = ""
                 comment_who = ""
+                comment_urgent = False
                 if "comment" in patch:
                     comment = patch["comment"]
                     comment_who = str(comment.get("who", "")).strip()
                     comment_text = str(comment.get("text", "")).strip()
-                    if not comment_who or not comment_text:
-                        raise ValueError("comment requires non-empty who and text")
+                    comment_urgent = bool(comment.get("urgent", False))
+                    if not comment_who:
+                        raise ValueError("comment requires an author")
+                    if not comment_text and "state" not in patch:
+                        raise ValueError("comment requires non-empty text")
                     self._pg_set_caller_role(conn, comment_who)
 
                 state = self._validate_state(str(patch["state"])) if "state" in patch else current["state"]
@@ -760,13 +764,16 @@ ORDER BY t.ticket_number
                 if "state" in patch:
                     if inspector_signoff_handled and state == "audit":
                         pass
-                    elif state == "in_progress" and comment_text and current["state"] == "inspection":
+                    elif state == "in_progress" and current["state"] == "inspection":
                         target_assignee = assignee if "assignee" in patch else ""
                         self._pg_call(conn, "SELECT ticket_board.inspector_kick_back(%s, %s, %s);", (ticket_id, comment_text, target_assignee))
                         comment_text = ""
-                    elif state == "in_progress" and comment_text and current["state"] == "audit":
+                    elif state == "in_progress" and current["state"] == "audit":
                         target_assignee = assignee if "assignee" in patch else ""
                         self._pg_call(conn, "SELECT ticket_board.audit_kick_back(%s, %s, %s);", (ticket_id, comment_text, target_assignee))
+                        comment_text = ""
+                    elif state == "analysis" and current["state"] in {"eric_review", "director_review", "done"}:
+                        self._pg_call(conn, "SELECT ticket_board.eric_reopen(%s, %s);", (ticket_id, comment_text))
                         comment_text = ""
                     elif state == "in_progress" and "assignee" in patch:
                         self._pg_call(conn, "SELECT ticket_board.route(%s, %s, %s);", (ticket_id, state, assignee))
@@ -789,16 +796,13 @@ ORDER BY t.ticket_number
                         target_assignee = assignee if "assignee" in patch else ""
                         self._pg_call(conn, "SELECT ticket_board.audit_kick_back(%s, %s, %s);", (ticket_id, comment_text, target_assignee))
                         comment_text = ""
-                    elif state == "analysis" and comment_text and current["state"] in {"eric_review", "director_review", "done"}:
-                        self._pg_call(conn, "SELECT ticket_board.eric_reopen(%s, %s);", (ticket_id, comment_text))
-                        comment_text = ""
                     else:
                         self._pg_call(conn, "SELECT ticket_board.route(%s, %s, %s);", (ticket_id, state, assignee))
                 elif "assignee" in patch:
                     self._pg_call(conn, "SELECT ticket_board.route(%s, %s, %s);", (ticket_id, current["state"], assignee))
 
                 if comment_text:
-                    self._pg_call(conn, "SELECT ticket_board.add_comment(%s, %s, %s);", (ticket_id, comment_text, bool(comment.get("urgent", False)) if "comment" in patch else False))
+                    self._pg_call(conn, "SELECT ticket_board.add_comment(%s, %s, %s);", (ticket_id, comment_text, comment_urgent))
                 return self._pg_get_ticket(ticket_id, conn)
 
     def request_commit_exempt(self, ticket_id: str, reason: str, *, caller_role: str) -> dict[str, Any]:

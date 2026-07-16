@@ -389,6 +389,25 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
         inspector_signoff=True,
     )
     seed_ticket(
+        "PGU-133",
+        title="Inspection kickback with comment",
+        state="inspection",
+        assignee="ops",
+        implementation="Rendered.",
+        needs_inspection=True,
+        inspector_signoff=True,
+    )
+    seed_ticket("PGU-134", title="Audit kickback empty", state="audit", assignee="audit", implementation="Done.")
+    seed_ticket(
+        "PGU-135",
+        title="Eric reopen empty",
+        state="eric_review",
+        assignee="director",
+        implementation="Done.",
+        audit_signoff=True,
+        needs_eric_signoff=True,
+    )
+    seed_ticket(
         "PGU-130",
         title="Submit to inspection",
         state="analysis",
@@ -1039,41 +1058,49 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
         "/api/tickets/PGU-119/actions/inspector_kick_back",
         {"recommendations": ""},
         caller="inspector",
-        expect=400,
     )
-    assert "non-empty" in str(empty_inspector_kick), empty_inspector_kick
+    assert empty_inspector_kick["ticket"]["state"] == "in_progress", empty_inspector_kick  # type: ignore[index]
+    assert empty_inspector_kick["ticket"]["inspector_signoff"] is False, empty_inspector_kick  # type: ignore[index]
+    assert empty_inspector_kick["ticket"]["comments"] == [], empty_inspector_kick  # type: ignore[index]
+    post_json(
+        base_url,
+        "/api/tickets/PGU-119/actions/force_move",
+        {"state": "done", "assignee": "director", "suppress_notification": True},
+        caller="director",
+    )
     inspector_kicked = post_json(
         base_url,
-        "/api/tickets/PGU-119/actions/inspector_kick_back",
+        "/api/tickets/PGU-133/actions/inspector_kick_back",
         {"recommendations": "Frame has visible banding."},
         caller="inspector",
     )
     assert inspector_kicked["ticket"]["state"] == "in_progress", inspector_kicked  # type: ignore[index]
+    assert inspector_kicked["ticket"]["assignee"] == "ops", inspector_kicked  # type: ignore[index]
     assert inspector_kicked["ticket"]["inspector_signoff"] is False, inspector_kicked  # type: ignore[index]
     assert inspector_kicked["ticket"]["comments"][-1]["who"] == "inspector", inspector_kicked  # type: ignore[index]
     assert "Frame has visible banding." in inspector_kicked["ticket"]["comments"][-1]["text"], inspector_kicked  # type: ignore[index]
-    inspector_restarted = post_json(base_url, "/api/tickets/PGU-119/actions/start_work", {}, caller="ops")
+    inspector_restarted = post_json(base_url, "/api/tickets/PGU-133/actions/start_work", {}, caller="ops")
     assert inspector_restarted["ticket"]["state"] == "in_progress", inspector_restarted  # type: ignore[index]
     inspector_resubmitted = post_json(
         base_url,
-        "/api/tickets/PGU-119/actions/submit_to_audit",
+        "/api/tickets/PGU-133/actions/submit_to_audit",
         {"commit_hash": commit_hash},
         caller="ops",
     )
     assert inspector_resubmitted["ticket"]["state"] == "inspection", inspector_resubmitted  # type: ignore[index]
     assert inspector_resubmitted["ticket"]["inspector_signoff"] is False, inspector_resubmitted  # type: ignore[index]
-    inspector_resubmitted_signed = post_json(base_url, "/api/tickets/PGU-119/actions/inspector_sign_off", {}, caller="inspector")
+    inspector_resubmitted_signed = post_json(base_url, "/api/tickets/PGU-133/actions/inspector_sign_off", {}, caller="inspector")
     assert inspector_resubmitted_signed["ticket"]["state"] == "audit", inspector_resubmitted_signed  # type: ignore[index]
     inspector_resubmitted_audit = post_json(
         base_url,
-        "/api/tickets/PGU-119/actions/audit_sign_off",
+        "/api/tickets/PGU-133/actions/audit_sign_off",
         {"text": "Inspector kickback path verified."},
         caller="audit",
     )
     assert inspector_resubmitted_audit["ticket"]["state"] == "director_review", inspector_resubmitted_audit  # type: ignore[index]
     inspector_resubmitted_done = post_json(
         base_url,
-        "/api/tickets/PGU-119/actions/mark_done",
+        "/api/tickets/PGU-133/actions/mark_done",
         {"commit_hash": commit_hash},
         caller="director",
     )
@@ -1108,6 +1135,20 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     assert audit_kicked["ticket"]["state"] == "in_progress", audit_kicked  # type: ignore[index]
     assert audit_kicked["ticket"]["assignee"] == "ops", audit_kicked  # type: ignore[index]
     assert audit_kicked["ticket"]["comments"][-1]["who"] == "audit", audit_kicked  # type: ignore[index]
+    post_json(
+        base_url,
+        "/api/tickets/PGU-103/actions/force_move",
+        {"state": "done", "assignee": "director", "suppress_notification": True},
+        caller="director",
+    )
+    empty_audit_kicked = post_json(
+        base_url,
+        "/api/tickets/PGU-134/actions/audit_kick_back",
+        {},
+        caller="audit",
+    )
+    assert empty_audit_kicked["ticket"]["state"] == "in_progress", empty_audit_kicked  # type: ignore[index]
+    assert empty_audit_kicked["ticket"]["comments"] == [], empty_audit_kicked  # type: ignore[index]
 
     eric_signed = post_json(base_url, "/api/tickets/PGU-104/actions/eric_sign_off", {"text": "Eric approves."}, caller="eric")
     assert eric_signed["ticket"]["state"] == "director_review", eric_signed  # type: ignore[index]
@@ -1120,6 +1161,14 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     )
     assert eric_reopened["ticket"]["state"] in {"analysis", "in_progress"}, eric_reopened  # type: ignore[index]
     assert eric_reopened["ticket"]["comments"][-1]["who"] == "eric", eric_reopened  # type: ignore[index]
+    empty_eric_reopened = post_json(
+        base_url,
+        "/api/tickets/PGU-135/actions/eric_reopen",
+        {},
+        caller="eric",
+    )
+    assert empty_eric_reopened["ticket"]["state"] == "analysis", empty_eric_reopened  # type: ignore[index]
+    assert empty_eric_reopened["ticket"]["comments"] == [], empty_eric_reopened  # type: ignore[index]
 
     done = post_json(base_url, "/api/tickets/PGU-106/actions/mark_done", {"commit_hash": commit_hash}, caller="director")
     assert done["ticket"]["state"] == "done", done  # type: ignore[index]

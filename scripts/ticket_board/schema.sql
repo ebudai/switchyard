@@ -662,15 +662,6 @@ BEGIN
     END IF;
 
     IF OLD.state = 'inspection' AND NEW.state = 'in_progress' THEN
-        IF NOT EXISTS (
-            SELECT 1
-            FROM ticket_board.ticket_comments
-            WHERE ticket_id = NEW.id
-              AND btrim(text) <> ''
-              AND xmin = pg_current_xact_id()::xid
-        ) THEN
-            RAISE EXCEPTION 'inspector kickback requires a non-empty recommendations comment';
-        END IF;
         NEW.inspector_signoff := false;
     END IF;
 
@@ -3911,7 +3902,9 @@ DECLARE
 BEGIN
     actor := ticket_board.require_actor(ARRAY['audit'], 'audit_kick_back');
     comment_actor := ticket_board.current_app_actor();
-    PERFORM ticket_board.append_ticket_comment(id, comment_actor, reason);
+    IF btrim(coalesce(reason, '')) <> '' THEN
+        PERFORM ticket_board.append_ticket_comment(id, comment_actor, reason);
+    END IF;
     UPDATE ticket_board.tickets
     SET state = 'in_progress',
         assignee = ticket_board.ticket_kickback_target_assignee(audit_kick_back.id),
@@ -3942,7 +3935,9 @@ DECLARE
 BEGIN
     actor := ticket_board.require_actor(ARRAY['audit'], 'audit_kick_back');
     comment_actor := ticket_board.current_app_actor();
-    PERFORM ticket_board.append_ticket_comment(id, comment_actor, reason);
+    IF btrim(coalesce(reason, '')) <> '' THEN
+        PERFORM ticket_board.append_ticket_comment(id, comment_actor, reason);
+    END IF;
     UPDATE ticket_board.tickets
     SET state = 'in_progress',
         assignee = ticket_board.ticket_kickback_target_assignee(audit_kick_back.id, target_assignee),
@@ -3995,7 +3990,9 @@ DECLARE
 BEGIN
     actor := ticket_board.require_actor(ARRAY['inspector'], 'inspector_kick_back');
     comment_actor := ticket_board.current_app_actor();
-    PERFORM ticket_board.append_ticket_comment(id, comment_actor, recommendations);
+    IF btrim(coalesce(recommendations, '')) <> '' THEN
+        PERFORM ticket_board.append_ticket_comment(id, comment_actor, recommendations);
+    END IF;
     UPDATE ticket_board.tickets
     SET state = 'in_progress',
         assignee = ticket_board.ticket_kickback_target_assignee(inspector_kick_back.id),
@@ -4027,7 +4024,9 @@ DECLARE
 BEGIN
     actor := ticket_board.require_actor(ARRAY['inspector'], 'inspector_kick_back');
     comment_actor := ticket_board.current_app_actor();
-    PERFORM ticket_board.append_ticket_comment(id, comment_actor, recommendations);
+    IF btrim(coalesce(recommendations, '')) <> '' THEN
+        PERFORM ticket_board.append_ticket_comment(id, comment_actor, recommendations);
+    END IF;
     UPDATE ticket_board.tickets
     SET state = 'in_progress',
         assignee = ticket_board.ticket_kickback_target_assignee(inspector_kick_back.id, target_assignee),
@@ -4088,7 +4087,9 @@ DECLARE
 BEGIN
     actor := ticket_board.require_actor(ARRAY['eric'], 'eric_reopen');
     comment_actor := ticket_board.current_app_actor();
-    PERFORM ticket_board.append_ticket_comment(id, comment_actor, reason);
+    IF btrim(coalesce(reason, '')) <> '' THEN
+        PERFORM ticket_board.append_ticket_comment(id, comment_actor, reason);
+    END IF;
     UPDATE ticket_board.tickets
     SET state = 'analysis'
     WHERE tickets.id = eric_reopen.id

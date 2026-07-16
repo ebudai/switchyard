@@ -87,8 +87,25 @@ systemctl_user() {
         systemctl --user "$@"
 }
 
+is_board_service_systemctl_action() {
+    case "${1:-}" in
+        start|stop|restart|status)
+            [[ "${2:-}" == "$SERVICE_NAME" && "$#" -eq 2 ]]
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 systemctl_system() {
     if [[ "$(id -u)" == "0" ]]; then
+        systemctl "$@"
+        return
+    fi
+    # Eric installs /etc/polkit-1/rules.d/49-pgu-board-restart.rules on the
+    # host to allow agent to manage this unit without an interactive KDE prompt.
+    if is_board_service_systemctl_action "$@"; then
         systemctl "$@"
         return
     fi

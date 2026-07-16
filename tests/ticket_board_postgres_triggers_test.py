@@ -222,6 +222,7 @@ def main() -> int:
 GRANT EXECUTE ON FUNCTION ticket_board.route(text, text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.force_move(text, text, text, boolean) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.start_work(text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.submit_to_inspection(text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.submit_to_audit(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.start_task(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.complete_task(text, text) TO ticket_board_service;
@@ -450,6 +451,108 @@ WHERE id = 'PGU-30';
             psql(conninfo, "UPDATE ticket_board.tickets SET inspector_signoff = true, state = 'audit' WHERE id = 'PGU-30';")
             psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-30';")
             psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-30';")
+
+            insert_ticket(
+                conninfo,
+                "PGU-35",
+                title="Submit to inspection function",
+                assignee="main",
+                state="analysis",
+                implementation="rendered",
+                needs_inspection=True,
+            )
+            service_call(conninfo, "main", "SELECT ticket_board.start_work('PGU-35');")
+            service_call(conninfo, "main", "SELECT ticket_board.submit_to_inspection('PGU-35');")
+            submitted_to_inspection = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object('state', state, 'assignee', assignee, 'inspector_signoff', inspector_signoff, 'commit_hash', commit_hash)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-35';
+""",
+                ).stdout
+            )
+            assert submitted_to_inspection == {
+                "state": "inspection",
+                "assignee": "inspector",
+                "inspector_signoff": False,
+                "commit_hash": "",
+            }, submitted_to_inspection
+            retained_reservation = psql(
+                conninfo,
+                "SELECT last_implementer_assignee FROM ticket_board.ticket_notification_state WHERE ticket_id = 'PGU-35';",
+            ).stdout.strip()
+            assert retained_reservation == "main", retained_reservation
+            service_call(conninfo, "inspector", "SELECT ticket_board.inspector_kick_back('PGU-35', 'Needs a sharper crop.');")
+            service_call(conninfo, "main", "SELECT ticket_board.submit_to_inspection('PGU-35');")
+            round_two_inspection = json.loads(
+                psql(
+                    conninfo,
+                    "SELECT jsonb_build_object('state', state, 'assignee', assignee)::text FROM ticket_board.tickets WHERE id = 'PGU-35';",
+                ).stdout
+            )
+            assert round_two_inspection == {"state": "inspection", "assignee": "inspector"}, round_two_inspection
+            assert_error(
+                conninfo,
+                """
+SET ROLE ticket_board_service;
+SELECT set_config('ticket_board.caller_role', 'audit', false);
+SELECT ticket_board.submit_to_inspection('PGU-35');
+""",
+                "audit cannot call submit_to_inspection",
+            )
+
+            insert_ticket(
+                conninfo,
+                "PGU-36",
+                title="Submit to inspection not applicable",
+                assignee="app",
+                state="analysis",
+                implementation="not visual",
+                needs_inspection=False,
+            )
+            service_call(conninfo, "app", "SELECT ticket_board.start_work('PGU-36');")
+            assert_error(
+                conninfo,
+                """
+SET ROLE ticket_board_service;
+SELECT set_config('ticket_board.caller_role', 'app', false);
+SELECT ticket_board.submit_to_inspection('PGU-36');
+""",
+                "submit_to_inspection requires needs_inspection=true",
+            )
+
+            insert_ticket(
+                conninfo,
+                "PGU-37",
+                title="Submit to inspection wrong state",
+                assignee="ops",
+                state="audit",
+                implementation="already submitted",
+                commit_hash="3737373",
+            )
+            assert_error(
+                conninfo,
+                """
+SET ROLE ticket_board_service;
+SELECT set_config('ticket_board.caller_role', 'ops', false);
+SELECT ticket_board.submit_to_inspection('PGU-37');
+""",
+                "submit_to_inspection requires an in_progress ticket",
+            )
+            psql(
+                conninfo,
+                """
+BEGIN;
+SELECT set_config('ticket_board.force_move', 'on', true);
+UPDATE ticket_board.tickets
+SET state = 'done',
+    assignee = 'director'
+WHERE id IN ('PGU-35', 'PGU-36', 'PGU-37');
+COMMIT;
+""",
+            )
 
             insert_ticket(
                 conninfo,

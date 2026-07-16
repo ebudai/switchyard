@@ -42,6 +42,7 @@ OPERATION_ALLOWED_ROLES = {
     "force_move": {"director"},
     "override_move": {"director"},
     "start_work": IMPLEMENTER_ROLES,
+    "submit_to_inspection": IMPLEMENTER_ROLES,
     "submit_to_audit": IMPLEMENTER_ROLES,
     "request_commit_exempt": IMPLEMENTER_ROLES,
     "start_task": TASK_ROLES,
@@ -424,7 +425,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             raise ValueError(f"unknown ticket operation: {operation}")
         if caller_role not in allowed:
             raise PermissionError(f"{caller_role} cannot call {operation}")
-        if operation in {"start_work", "submit_to_audit", "request_commit_exempt", "start_task", "complete_task"} and ticket_id is not None:
+        if operation in {"start_work", "submit_to_inspection", "submit_to_audit", "request_commit_exempt", "start_task", "complete_task"} and ticket_id is not None:
             ticket = self.app.get_ticket(ticket_id)
             if caller_role != "director" and str(ticket.get("assignee", "")).strip().lower() != caller_role:
                 raise PermissionError(f"{caller_role} cannot call {operation} for ticket assigned to {ticket.get('assignee')}")
@@ -618,6 +619,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             return
         elif operation == "start_work":
             patch = {"state": "in_progress"}
+        elif operation == "submit_to_inspection":
+            patch = {"state": "inspection", "assignee": "inspector"}
         elif operation == "submit_to_audit":
             patch = {"state": "audit", "commit_hash": str(payload.get("commit_hash", ""))}
         elif operation == "request_commit_exempt":

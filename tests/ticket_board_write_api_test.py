@@ -388,6 +388,30 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
         inspector_signoff=True,
     )
     seed_ticket(
+        "PGU-130",
+        title="Submit to inspection",
+        state="analysis",
+        assignee="unassigned",
+        implementation="Rendered.",
+        needs_inspection=True,
+    )
+    seed_ticket(
+        "PGU-131",
+        title="Submit to inspection not applicable",
+        state="analysis",
+        assignee="unassigned",
+        implementation="Non-visual change.",
+        needs_inspection=False,
+    )
+    seed_ticket(
+        "PGU-132",
+        title="Submit to inspection wrong state",
+        state="audit",
+        assignee="ops",
+        implementation="Already in audit.",
+        commit_hash=commit_hash,
+    )
+    seed_ticket(
         "PGU-120",
         title="Commit exempt submit",
         state="in_progress",
@@ -902,6 +926,67 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     )
     assert inspect_submitted["ticket"]["state"] == "inspection", inspect_submitted  # type: ignore[index]
     assert inspect_submitted["ticket"]["inspector_signoff"] is False, inspect_submitted  # type: ignore[index]
+
+    self_inspect_started = post_json(
+        base_url,
+        "/api/tickets/PGU-130/actions/route",
+        {"state": "in_progress", "assignee": "app"},
+        caller="director",
+    )
+    assert self_inspect_started["ticket"]["state"] == "in_progress", self_inspect_started  # type: ignore[index]
+    self_inspect_submitted = post_json(base_url, "/api/tickets/PGU-130/actions/submit_to_inspection", {}, caller="app")
+    assert self_inspect_submitted["ticket"]["state"] == "inspection", self_inspect_submitted  # type: ignore[index]
+    assert self_inspect_submitted["ticket"]["assignee"] == "inspector", self_inspect_submitted  # type: ignore[index]
+    assert self_inspect_submitted["ticket"]["commit_hash"] == "", self_inspect_submitted  # type: ignore[index]
+    assert self_inspect_submitted["ticket"]["inspector_signoff"] is False, self_inspect_submitted  # type: ignore[index]
+    audit_cannot_submit_inspection = post_json(
+        base_url,
+        "/api/tickets/PGU-130/actions/submit_to_inspection",
+        {},
+        caller="audit",
+        expect=403,
+    )
+    assert "audit cannot call submit_to_inspection" in str(audit_cannot_submit_inspection), audit_cannot_submit_inspection
+    inspect_pingback = post_json(
+        base_url,
+        "/api/tickets/PGU-130/actions/inspector_kick_back",
+        {"recommendations": "Sharper crop needed."},
+        caller="inspector",
+    )
+    assert inspect_pingback["ticket"]["state"] == "in_progress", inspect_pingback  # type: ignore[index]
+    assert inspect_pingback["ticket"]["assignee"] == "app", inspect_pingback  # type: ignore[index]
+    inspect_round_two = post_json(base_url, "/api/tickets/PGU-130/actions/submit_to_inspection", {}, caller="app")
+    assert inspect_round_two["ticket"]["state"] == "inspection", inspect_round_two  # type: ignore[index]
+    assert inspect_round_two["ticket"]["assignee"] == "inspector", inspect_round_two  # type: ignore[index]
+    post_json(
+        base_url,
+        "/api/tickets/PGU-130/actions/force_move",
+        {"state": "done", "assignee": "director", "suppress_notification": True},
+        caller="director",
+    )
+    not_applicable_started = post_json(
+        base_url,
+        "/api/tickets/PGU-131/actions/route",
+        {"state": "in_progress", "assignee": "app"},
+        caller="director",
+    )
+    assert not_applicable_started["ticket"]["state"] == "in_progress", not_applicable_started  # type: ignore[index]
+    not_applicable_inspection = post_json(
+        base_url,
+        "/api/tickets/PGU-131/actions/submit_to_inspection",
+        {},
+        caller="app",
+        expect=400,
+    )
+    assert "submit_to_inspection requires needs_inspection=true" in str(not_applicable_inspection), not_applicable_inspection
+    wrong_state_inspection = post_json(
+        base_url,
+        "/api/tickets/PGU-132/actions/submit_to_inspection",
+        {},
+        caller="ops",
+        expect=400,
+    )
+    assert "submit_to_inspection requires an in_progress ticket" in str(wrong_state_inspection), wrong_state_inspection
 
     inspector_cannot_audit = post_json(base_url, "/api/tickets/PGU-102/actions/audit_sign_off", {}, caller="inspector", expect=403)
     assert "inspector cannot call audit_sign_off" in str(inspector_cannot_audit), inspector_cannot_audit

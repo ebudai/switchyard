@@ -68,6 +68,7 @@ EXPECTED_FUNCTION_API = {
     "ticket_board.route",
     "ticket_board.force_move",
     "ticket_board.start_work",
+    "ticket_board.submit_to_inspection",
     "ticket_board.submit_to_audit",
     "ticket_board.request_commit_exempt",
     "ticket_board.start_task",

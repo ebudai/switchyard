@@ -731,6 +731,8 @@ ORDER BY t.ticket_number
                         self._pg_call(conn, "SELECT ticket_board.route(%s, %s, %s);", (ticket_id, state, assignee))
                     elif state == "in_progress":
                         self._pg_call(conn, "SELECT ticket_board.start_work(%s);", (ticket_id,))
+                    elif state == "inspection":
+                        self._pg_call(conn, "SELECT ticket_board.submit_to_inspection(%s);", (ticket_id,))
                     elif state == "audit":
                         self._pg_call(conn, "SELECT ticket_board.submit_to_audit(%s, %s);", (ticket_id, commit_hash))
                     elif state == "done":

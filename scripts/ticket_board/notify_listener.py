@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -99,6 +100,26 @@ class ActivityTrace:
 
 
 @dataclass(frozen=True)
+class ComposerSnapshot:
+    available: bool
+    marker_found: bool = False
+    active: bool = False
+    content_sha256: str = ""
+    content_length: int = 0
+    error: str = ""
+
+    def as_trace_detail(self) -> dict[str, Any]:
+        return {
+            "available": self.available,
+            "marker_found": self.marker_found,
+            "active": self.active,
+            "content_sha256": self.content_sha256,
+            "content_length": self.content_length,
+            "error": self.error,
+        }
+
+
+@dataclass(frozen=True)
 class PaneHookState:
     target: str
     state: str
@@ -172,6 +193,26 @@ def display_message(message: str) -> str:
     )
 
 
+def composer_snapshot_from_pane_text(pane_text: str) -> ComposerSnapshot:
+    if not pane_text:
+        return ComposerSnapshot(False, error="empty_capture")
+    lines = pane_text.splitlines()
+    horizontal_indices = [idx for idx, line in enumerate(lines) if line.count("─") >= 40]
+    if len(horizontal_indices) < 2:
+        return ComposerSnapshot(True, marker_found=False)
+    composer_content = "\n".join(lines[horizontal_indices[-2] + 1 : horizontal_indices[-1]])
+    cleaned = re.sub(r"^[❯\u276f\s\>\-\*]+", "", composer_content, flags=re.MULTILINE)
+    stripped = cleaned.strip()
+    digest = hashlib.sha256(stripped.encode("utf-8")).hexdigest() if stripped else ""
+    return ComposerSnapshot(
+        True,
+        marker_found=True,
+        active=bool(stripped),
+        content_sha256=digest,
+        content_length=len(stripped),
+    )
+
+
 class DirectorctlSender:
     def __init__(
         self,
@@ -184,15 +225,35 @@ class DirectorctlSender:
         self.timeout_seconds = timeout_seconds
         self.director_typing_max_attempts = director_typing_max_attempts
 
-    def __call__(self, target: str, message: str) -> None:
+    def __call__(self, target: str, message: str) -> dict[str, Any]:
         env = os.environ.copy()
         env["PGU_DIRECTORCTL_DIRECTOR_TYPING_MAX_ATTEMPTS"] = str(self.director_typing_max_attempts)
-        subprocess.run(
+        env["PGU_DIRECTORCTL_DIAGNOSTICS"] = "1"
+        proc = subprocess.run(
             [self.directorctl_bin, "send", target, message],
             check=True,
             timeout=self.timeout_seconds,
             env=env,
+            text=True,
+            capture_output=True,
         )
+        return parse_directorctl_diagnostic(proc.stdout)
+
+
+def parse_directorctl_diagnostic(output: str | None) -> dict[str, Any]:
+    if not output:
+        return {}
+    for line in output.splitlines():
+        prefix = "directorctl: diagnostic "
+        if not line.startswith(prefix):
+            continue
+        try:
+            parsed = json.loads(line[len(prefix):])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
 
 
 class PaneHookStateStore:
@@ -353,6 +414,19 @@ class PaneActivityGate:
             seconds = int(match.group("seconds"))
             latest = minutes * 60 + seconds
         return latest
+
+    def composer_snapshot(self, target: str) -> ComposerSnapshot:
+        try:
+            proc = self.capture_pane_runner(
+                ["tmux", "capture-pane", "-p", "-J", "-t", target],
+                check=True,
+                text=True,
+                capture_output=True,
+                timeout=2.0,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return ComposerSnapshot(False, error=str(exc))
+        return composer_snapshot_from_pane_text(proc.stdout)
 
     def _working_timer_trace(self, target: str, *, sample_delay_seconds: float | None = None) -> ActivityTrace | None:
         first = self._captured_working_timer_seconds(target)
@@ -606,6 +680,18 @@ FROM ticket_board.claim_notification()
                 return trace
         return ActivityTrace(pane_busy, "busy" if pane_busy else "idle")
 
+    def _composer_snapshot(self, target: str) -> ComposerSnapshot:
+        gate_owner = getattr(self.activity_gate, "__self__", None)
+        composer_snapshot = getattr(gate_owner, "composer_snapshot", None)
+        if callable(composer_snapshot):
+            try:
+                snapshot = composer_snapshot(target)
+            except Exception as exc:
+                return ComposerSnapshot(False, error=str(exc))
+            if isinstance(snapshot, ComposerSnapshot):
+                return snapshot
+        return ComposerSnapshot(False, error="snapshot_unavailable")
+
     def _activity_state_for_notification(self, kind: str, target: str) -> tuple[bool, ActivityTrace]:
         gate_owner = getattr(self.activity_gate, "__self__", None)
         if kind in IMMEDIATE_DELIVERY_KINDS:
@@ -618,6 +704,45 @@ FROM ticket_board.claim_notification()
 
     def _should_defer_for_activity(self, activity_trace: ActivityTrace) -> bool:
         return activity_trace.busy
+
+    def _delivery_diagnostic_detail(
+        self,
+        *,
+        target: str,
+        message: str,
+        attempts: int,
+        activity_trace: ActivityTrace,
+        before: ComposerSnapshot,
+        decision: str,
+        reason: str,
+        after: ComposerSnapshot | None = None,
+        directorctl_diagnostic: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        after_detail = after.as_trace_detail() if after is not None else None
+        composer_changed = (
+            after is not None
+            and before.available
+            and after.available
+            and before.content_sha256 != after.content_sha256
+        )
+        suspected_clobber = decision == "send" and before.active
+        return {
+            "target": target,
+            "message": message,
+            "attempts": attempts,
+            "anti_clobber": {
+                "busy": activity_trace.busy,
+                "reason": activity_trace.reason,
+                "region_digest": activity_trace.region_digest,
+            },
+            "decision": decision,
+            "decision_reason": reason,
+            "composer_before": before.as_trace_detail(),
+            "composer_after": after_detail,
+            "composer_changed": composer_changed,
+            "suspected_clobber": suspected_clobber,
+            "directorctl": directorctl_diagnostic or {},
+        }
 
     def _trace_notification(
         self,
@@ -1029,6 +1154,7 @@ WHERE id = %s
                 )
                 continue
             pane_busy, activity_trace = self._activity_state_for_notification(kind, target)
+            composer_before = self._composer_snapshot(target)
             if self._should_defer_for_activity(activity_trace):
                 self.logger.info("Pane %s is active; requeueing notification %s for %s", target, notification_id, ticket_id)
                 if notification_id not in self._traced_gate_defer_notifications:
@@ -1042,7 +1168,15 @@ WHERE id = %s
                         pane_busy=True,
                         busy_reason=activity_trace.reason,
                         region_digest=activity_trace.region_digest,
-                        detail={"target": target, "attempts": attempts},
+                        detail=self._delivery_diagnostic_detail(
+                            target=target,
+                            message=message,
+                            attempts=attempts,
+                            activity_trace=activity_trace,
+                            before=composer_before,
+                            decision="defer",
+                            reason=activity_trace.reason,
+                        ),
                     )
                     self._traced_gate_defer_notifications.add(notification_id)
                 self._requeue_notification(
@@ -1058,6 +1192,7 @@ WHERE id = %s
                 if self.stop_event.is_set():
                     break
             pane_busy, activity_trace = self._activity_state_for_notification(kind, target)
+            composer_before = self._composer_snapshot(target)
             if self._should_defer_for_activity(activity_trace):
                 self.logger.info(
                     "Pane %s became active before send; requeueing notification %s for %s",
@@ -1076,7 +1211,18 @@ WHERE id = %s
                         pane_busy=True,
                         busy_reason=activity_trace.reason,
                         region_digest=activity_trace.region_digest,
-                        detail={"target": target, "attempts": attempts, "phase": "pre_send_recheck"},
+                        detail={
+                            **self._delivery_diagnostic_detail(
+                                target=target,
+                                message=message,
+                                attempts=attempts,
+                                activity_trace=activity_trace,
+                                before=composer_before,
+                                decision="defer",
+                                reason=activity_trace.reason,
+                            ),
+                            "phase": "pre_send_recheck",
+                        },
                     )
                     self._traced_gate_defer_notifications.add(notification_id)
                 self._requeue_notification(
@@ -1087,10 +1233,17 @@ WHERE id = %s
                     delay_seconds=self.busy_requeue_seconds,
                 )
                 continue
+            directorctl_diagnostic: dict[str, Any] = {}
             try:
-                self.sender(target, display_message(message))
+                sender_result = self.sender(target, display_message(message))
+                if isinstance(sender_result, dict):
+                    directorctl_diagnostic = sender_result
             except (subprocess.SubprocessError, OSError) as exc:
+                if isinstance(exc, subprocess.CalledProcessError):
+                    stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout
+                    directorctl_diagnostic = parse_directorctl_diagnostic(stdout if isinstance(stdout, str) else None)
                 self.logger.warning("Failed to deliver queued ticket notification through directorctl: %s", exc)
+                composer_after = self._composer_snapshot(target)
                 self._trace_notification(
                     conn,
                     notification_id=notification_id,
@@ -1101,10 +1254,21 @@ WHERE id = %s
                     pane_busy=pane_busy,
                     busy_reason=str(exc),
                     region_digest=activity_trace.region_digest,
-                    detail={"target": target, "message": message, "attempts": attempts},
+                    detail=self._delivery_diagnostic_detail(
+                        target=target,
+                        message=message,
+                        attempts=attempts,
+                        activity_trace=activity_trace,
+                        before=composer_before,
+                        after=composer_after,
+                        decision="send_failed",
+                        reason=str(exc),
+                        directorctl_diagnostic=directorctl_diagnostic,
+                    ),
                 )
                 self._requeue_notification(conn, notification_id, attempts, str(exc))
                 continue
+            composer_after = self._composer_snapshot(target)
             self._trace_notification(
                 conn,
                 notification_id=notification_id,
@@ -1115,7 +1279,17 @@ WHERE id = %s
                 pane_busy=pane_busy,
                 busy_reason=activity_trace.reason,
                 region_digest=activity_trace.region_digest,
-                detail={"target": target, "message": message, "attempts": attempts},
+                detail=self._delivery_diagnostic_detail(
+                    target=target,
+                    message=message,
+                    attempts=attempts,
+                    activity_trace=activity_trace,
+                    before=composer_before,
+                    after=composer_after,
+                    decision="send",
+                    reason=activity_trace.reason,
+                    directorctl_diagnostic=directorctl_diagnostic,
+                ),
             )
             self._trace_notification(
                 conn,

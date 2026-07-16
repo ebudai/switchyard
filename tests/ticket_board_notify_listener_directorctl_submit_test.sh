@@ -107,6 +107,21 @@ if [ "$(cat "$CAPTURE_COUNT")" -lt 2 ]; then
     exit 1
 fi
 
+printf '0\n' >"$CAPTURE_COUNT"
+diagnostic_output="$(
+  PATH="$TMPDIR_T:$PATH" \
+  TMUX_LOG_PATH="$TMUX_LOG" \
+  TMUX_CAPTURE_COUNT_PATH="$CAPTURE_COUNT" \
+  PGU_DIRECTORCTL_ENTER_DELAY=0 \
+  PGU_DIRECTORCTL_DIAGNOSTICS=1 \
+  "$CANONICAL_DIRECTORCTL" send pgu-ops:0.0 "PGU-482 diagnostic smoke"
+)"
+if ! grep -q 'directorctl: diagnostic ' <<<"$diagnostic_output"; then
+    echo "FAIL: directorctl did not emit diagnostic JSON" >&2
+    echo "$diagnostic_output" >&2
+    exit 1
+fi
+
 >"$TMUX_LOG"
 printf '0\n' >"$CAPTURE_COUNT"
 

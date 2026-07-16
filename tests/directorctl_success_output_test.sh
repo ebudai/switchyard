@@ -8,6 +8,7 @@ trap 'rm -rf "$TMPDIR_T"' EXIT
 TMUX_LOG="$TMPDIR_T/tmux.log"
 CAPTURE_MODE="$TMPDIR_T/capture-mode"
 CAPTURE_COUNT="$TMPDIR_T/capture-count"
+: >"$TMUX_LOG"
 
 cat >"$TMPDIR_T/tmux" <<'EOF'
 #!/usr/bin/env bash
@@ -130,6 +131,30 @@ run_directorctl() {
     PGU_DIRECTORCTL_DIRECTOR_TYPING_MAX_ATTEMPTS=0 \
     "$REPO_ROOT/scripts/directorctl" "$@"
 }
+
+help_stdout="$(run_directorctl --help)"
+if grep -q -- "directorctl clear" <<<"$help_stdout" || grep -q -- "clear        Send Ctrl-C" <<<"$help_stdout"; then
+    echo "FAIL: directorctl --help still lists unsafe clear subcommand" >&2
+    echo "$help_stdout" >&2
+    exit 1
+fi
+
+clear_stdout="$TMPDIR_T/clear.stdout"
+clear_stderr="$TMPDIR_T/clear.stderr"
+if run_directorctl clear pgu-main:0.0 >"$clear_stdout" 2>"$clear_stderr"; then
+    echo "FAIL: directorctl clear unexpectedly succeeded" >&2
+    exit 1
+fi
+if ! grep -q -- "error: unknown command: clear" "$clear_stderr"; then
+    echo "FAIL: directorctl clear did not report unknown command" >&2
+    cat "$clear_stderr" >&2
+    exit 1
+fi
+if grep -q -- "C-c" "$TMUX_LOG"; then
+    echo "FAIL: directorctl clear sent Ctrl-C" >&2
+    cat "$TMUX_LOG" >&2
+    exit 1
+fi
 
 reset_tmux_state success
 send_stdout="$(run_directorctl send pgu-ops:0.0 'hello world')"

@@ -26,6 +26,10 @@ def main() -> int:
     assert "linkedPreview('Rendered Preview', ticket.audit_prompt, '(no audit notes yet)')" in HTML
     assert "blockedByLinksLabel.textContent = 'Linked Tickets';" in HTML
     assert "appendLinkedTicketText(text, comment.text);" in HTML
+    assert "commentUrgent.type = 'checkbox';" in HTML
+    assert "await submitComment(ticket.id, commentWho.value, commentText.value, null, commentUrgent.checked);" in HTML
+    assert "urgent: !!patch.comment.urgent" in HTML
+    assert "comment-urgent-marker" in HTML
     assert "reference.disabled = true;" in HTML
     start = HTML.index("const lines = source.split(")
     segment = HTML[start:start + 40]

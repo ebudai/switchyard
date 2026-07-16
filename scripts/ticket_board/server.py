@@ -697,7 +697,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 "blocked_reason": str(payload.get("blocked_reason", payload.get("reason", ""))),
             }
         elif operation == "add_comment":
-            patch = {"comment": {"who": caller, "text": str(payload.get("text", ""))}}
+            patch = {"comment": {"who": caller, "text": str(payload.get("text", "")), "urgent": bool(payload.get("urgent", False))}}
         elif operation == "edit_fields":
             invalid_fields = sorted(set(payload) - EDIT_FIELD_NAMES)
             if invalid_fields:

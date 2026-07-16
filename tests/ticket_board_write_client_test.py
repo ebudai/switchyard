@@ -95,7 +95,7 @@ class RecordingHandler(BaseHTTPRequestHandler):
         elif operation == "cancel":
             ticket["state"] = "cancelled"
         elif operation == "add_comment":
-            ticket["comments"] = [{"who": caller, "text": payload.get("text", "")}]
+            ticket["comments"] = [{"who": caller, "text": payload.get("text", ""), "urgent": bool(payload.get("urgent", False))}]
         elif operation == "file_bug":
             ticket["parent_id"] = payload.get("source_ticket_id", "")
         body = json.dumps({"ticket": ticket}).encode("utf-8")
@@ -228,6 +228,7 @@ def exercise_client(base_url: str, repo: Path, commit_hash: str) -> None:
         assert client.set_manually_controlled("PGU-109", True)["ticket"]["manually_controlled"] is True
         assert client.set_blockers("PGU-111", blocked_by=["PGU-110"], blocked_reason="Waiting.")["ticket"]["blocked_by"] == ["PGU-110"]
         assert client.add_comment("PGU-112", text="Director note.")["ticket"]["comments"][-1]["who"] == "director"
+        assert client.add_comment("PGU-112", text="Urgent director note.", urgent=True)["ticket"]["comments"][-1]["urgent"] is True
 
 
 def assert_submit_rejects_unpushed_commit(

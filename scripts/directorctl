@@ -12,6 +12,7 @@ readonly STAGED_PAYLOAD_RETENTION_MINUTES=60
 readonly DEFAULT_TICKET_NOTIFICATION_JOURNAL="/tmp/pgu-ticket-notification-journal.jsonl"
 readonly DEFAULT_TICKET_BOARD_URL="http://127.0.0.1:8770"
 readonly DIRECTOR_TYPING_RETRY_SECONDS=5
+readonly DEFAULT_DIRECTOR_TYPING_MAX_ATTEMPTS=6
 
 validate_enter_delay() {
     local val="${PGU_DIRECTORCTL_ENTER_DELAY:-0.6}"
@@ -24,9 +25,9 @@ validate_enter_delay() {
 }
 
 director_typing_max_attempts() {
-    local val="${PGU_DIRECTORCTL_DIRECTOR_TYPING_MAX_ATTEMPTS:-}"
+    local val="${PGU_DIRECTORCTL_DIRECTOR_TYPING_MAX_ATTEMPTS:-$DEFAULT_DIRECTOR_TYPING_MAX_ATTEMPTS}"
     if [ -z "$val" ]; then
-        printf '%s' "-1"
+        printf '%s' "$DEFAULT_DIRECTOR_TYPING_MAX_ATTEMPTS"
         return 0
     fi
     if ! [[ "$val" =~ ^[0-9]+$ ]]; then
@@ -230,8 +231,8 @@ Environment:
                                   Large payloads add extra settle time.
   PGU_DIRECTORCTL_DIRECTOR_TYPING_MAX_ATTEMPTS
                                   Maximum number of 5s waits for a busy
-                                  director composer before failing without
-                                  delivery. Unset means wait indefinitely.
+                                  director composer before delivering anyway
+                                  with a warning (default: 6).
   PGU_DIRECTORCTL_EXTRA_SESSIONS  Whitespace-separated list of additional
                                   tmux session names to include in status.
                                   Duplicates of built-in sessions are ignored.
@@ -265,7 +266,7 @@ is_director_typing() {
 import sys, re
 pane_text = sys.stdin.read()
 if not pane_text:
-    sys.exit(0) # Empty stdin -> fail safe and hold delivery
+    sys.exit(0) # Empty stdin -> uncertain; outer bounded wait prevents starvation
 lines = pane_text.splitlines()
 horizontal_indices = [
     idx for idx, line in enumerate(lines)
@@ -275,7 +276,7 @@ if len(horizontal_indices) >= 2:
     composer_content = "\n".join(lines[horizontal_indices[-2] + 1 : horizontal_indices[-1]])
     cleaned = re.sub(r"^[❯\u276f\s\>\-\*]+", "", composer_content, flags=re.MULTILINE)
     sys.exit(0 if len(cleaned.strip()) > 0 else 1)
-sys.exit(0) # Unsure (markers missing) -> play it safe (busy)
+sys.exit(1) # Missing composer markers usually means agent/tool output, not human typing
 ' <<< "$capture"
 }
 
@@ -287,18 +288,17 @@ send_payload() {
     local pointer_payload
     local delivery_mode="direct"
 
-    # Guard against active typing in the director pane. Ordinary director-bound
-    # sends wait until the composer is clear. Automation may bound this wait
-    # with PGU_DIRECTORCTL_DIRECTOR_TYPING_MAX_ATTEMPTS; when the bound is hit,
-    # fail without delivery so the caller can requeue instead of clobbering
-    # human input.
+    # Guard against active human typing in the director pane. Missing composer
+    # markers are treated as agent/tool output, not typing. Genuine typed
+    # composer content waits only up to a bounded retry count; after that,
+    # deliver anyway so pane-to-director escalations cannot starve forever.
     local attempt=1
     local max_attempts
     max_attempts="$(director_typing_max_attempts)"
     while is_director_typing "$target"; do
         if [ "$max_attempts" -ge 0 ] && [ "$attempt" -gt "$max_attempts" ]; then
-            echo "watchdog/directorctl: director is typing after $max_attempts attempts; holding delivery" >&2
-            return 75
+            echo "watchdog/directorctl: director still appears to be typing after $max_attempts attempts; delivering anyway" >&2
+            break
         fi
         echo "watchdog/directorctl: director is typing (attempt $attempt). Waiting 5 seconds to retry..." >&2
         sleep "$DIRECTOR_TYPING_RETRY_SECONDS"

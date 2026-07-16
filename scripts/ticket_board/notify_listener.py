@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -42,6 +43,8 @@ IDLE_TURN_END_SOURCES = frozenset({"claude.Stop", "codex.Stop", "gemini.AfterAge
 IMMEDIATE_DELIVERY_KINDS = frozenset({"ticket_update"})
 DEFAULT_PRE_SEND_RECHECK_DELAY_SECONDS = 0.5
 DEFAULT_DIRECTOR_COMPOSER_HOME_X = 2
+DEFAULT_WORKING_TIMER_SAMPLE_DELAY_SECONDS = 0.0
+DEFAULT_IDLE_WORKING_TIMER_SAMPLE_DELAY_SECONDS = 1.1
 DEFAULT_PANE_STATE_DIR = (
     Path(os.environ["PGU_TICKET_BOARD_PANE_STATE_DIR"]).expanduser()
     if os.environ.get("PGU_TICKET_BOARD_PANE_STATE_DIR")
@@ -70,6 +73,7 @@ STATE_RANK = {
 }
 TERMINAL_STATES = {"done", "cancelled"}
 NUDGE_ELIGIBLE_STATES = {"in_progress", "inspection", "audit", "director_review", "analysis", "backlog"}
+WORKING_TIMER_RE = re.compile(r"Working\s*\(\s*(?:(?P<minutes>\d+)m\s*)?(?P<seconds>\d+)s\b")
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_DIRECTORCTL = str(Path(__file__).resolve().parents[1] / "directorctl")
@@ -247,21 +251,30 @@ class PaneActivityGate:
         director_target: str = ROLE_TO_TARGET["director"],
         client_activity_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
         cursor_position_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        capture_pane_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
         director_composing_timeout_seconds: float = DEFAULT_DIRECTOR_COMPOSING_TIMEOUT_SECONDS,
         director_startup_hold_seconds: float = DEFAULT_BUSY_REQUEUE_SECONDS,
         director_composer_home_x: int = DEFAULT_DIRECTOR_COMPOSER_HOME_X,
+        working_timer_sample_delay_seconds: float = DEFAULT_WORKING_TIMER_SAMPLE_DELAY_SECONDS,
+        idle_working_timer_sample_delay_seconds: float = DEFAULT_IDLE_WORKING_TIMER_SAMPLE_DELAY_SECONDS,
         monotonic: Callable[[], float] = time.monotonic,
         wall_time: Callable[[], float] = time.time,
+        sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
         self.state_store = state_store or PaneHookStateStore()
         self.director_target = director_target
         self.cursor_position_runner = cursor_position_runner
+        self.capture_pane_runner = capture_pane_runner
         self.director_startup_hold_seconds = director_startup_hold_seconds
         self.director_composer_home_x = director_composer_home_x
+        self.working_timer_sample_delay_seconds = max(0.0, working_timer_sample_delay_seconds)
+        self.idle_working_timer_sample_delay_seconds = max(0.0, idle_working_timer_sample_delay_seconds)
         self.monotonic = monotonic
         self.wall_time = wall_time
+        self.sleeper = sleeper
         self._last_trace_by_target: dict[str, ActivityTrace] = {}
         self._last_hook_state_by_target: dict[str, tuple[str, float]] = {}
+        self._last_working_timer_by_target: dict[str, int] = {}
         self._started_at = self.wall_time()
         self._director_startup_hold_state_ts: float | None = None
         self._director_startup_hold_started_at: float | None = None
@@ -298,6 +311,13 @@ class PaneActivityGate:
             target = ROLE_TO_TARGET.get(role)
             if target is None:
                 continue
+            working_trace = self._working_timer_trace(
+                target,
+                sample_delay_seconds=self.idle_working_timer_sample_delay_seconds,
+            )
+            if working_trace is not None:
+                self._record_trace(target, working_trace)
+                continue
             if self.is_busy(target):
                 continue
             state = self.state_store.read(target)
@@ -315,6 +335,45 @@ class PaneActivityGate:
 
     def _tmux_session_for_target(self, target: str) -> str:
         return target.split(":", 1)[0]
+
+    def _captured_working_timer_seconds(self, target: str) -> int | None:
+        try:
+            proc = self.capture_pane_runner(
+                ["tmux", "capture-pane", "-p", "-J", "-t", target, "-S", "-8"],
+                check=True,
+                text=True,
+                capture_output=True,
+                timeout=2.0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        latest: int | None = None
+        for match in WORKING_TIMER_RE.finditer(proc.stdout):
+            minutes = int(match.group("minutes") or "0")
+            seconds = int(match.group("seconds"))
+            latest = minutes * 60 + seconds
+        return latest
+
+    def _working_timer_trace(self, target: str, *, sample_delay_seconds: float | None = None) -> ActivityTrace | None:
+        first = self._captured_working_timer_seconds(target)
+        if first is None:
+            self._last_working_timer_by_target.pop(target, None)
+            return None
+        previous = self._last_working_timer_by_target.get(target)
+        if previous is not None and first > previous:
+            self._last_working_timer_by_target[target] = first
+            return ActivityTrace(True, "working_timer")
+        sample_delay = self.working_timer_sample_delay_seconds if sample_delay_seconds is None else sample_delay_seconds
+        if previous is None and sample_delay > 0:
+            self.sleeper(sample_delay)
+            second = self._captured_working_timer_seconds(target)
+            if second is not None:
+                self._last_working_timer_by_target[target] = second
+                if second > first:
+                    return ActivityTrace(True, "working_timer")
+                return None
+        self._last_working_timer_by_target[target] = first
+        return None
 
     def _target_cursor_state(self, target: str) -> bool | None:
         try:
@@ -1147,6 +1206,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pane-state-dir", default=str(DEFAULT_PANE_STATE_DIR), help=f"per-pane hook state directory (default: {DEFAULT_PANE_STATE_DIR})")
     parser.add_argument("--director-composing-timeout-seconds", type=float, default=DEFAULT_DIRECTOR_COMPOSING_TIMEOUT_SECONDS)
     parser.add_argument("--pre-send-recheck-delay-seconds", type=float, default=DEFAULT_PRE_SEND_RECHECK_DELAY_SECONDS)
+    parser.add_argument("--idle-working-timer-sample-delay-seconds", type=float, default=DEFAULT_IDLE_WORKING_TIMER_SAMPLE_DELAY_SECONDS)
     parser.add_argument("--verbose", action="store_true")
     return parser
 
@@ -1164,6 +1224,7 @@ def main(argv: list[str] | None = None) -> int:
         activity_gate=PaneActivityGate(
             state_store=PaneHookStateStore(args.pane_state_dir),
             director_composing_timeout_seconds=args.director_composing_timeout_seconds,
+            idle_working_timer_sample_delay_seconds=args.idle_working_timer_sample_delay_seconds,
         ).is_working,
         reconnect_seconds=args.reconnect_seconds,
         poll_seconds=args.poll_seconds,

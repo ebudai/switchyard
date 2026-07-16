@@ -26,6 +26,7 @@ from .frontend import HTML
 
 LOGGER = logging.getLogger(__name__)
 DIRECTOR_TARGET = "pgu-director:0.0"
+DEFAULT_DIRECTORCTL = "/home/agent/bin/directorctl"
 DIRECTOR_NOTIFICATION_BATCH_WINDOW_SECONDS = 0.35
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CALLER_ROLE_HEADER = "X-PGU-Caller-Role"
@@ -208,7 +209,7 @@ def peer_credentials(connection: socket.socket) -> PeerCredentials:
 
 def send_director_message(payload: str, target: str = DIRECTOR_TARGET) -> None:
     subprocess.run(
-        [str(REPO_ROOT / "scripts" / "directorctl"), "send", target, payload],
+        [DEFAULT_DIRECTORCTL, "send", target, payload],
         check=True,
         capture_output=True,
         text=True,

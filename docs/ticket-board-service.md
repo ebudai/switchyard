@@ -70,6 +70,17 @@ The service runs:
 - logs: `/tmp/pgu-ticket-board.log`
 - default DB URL: `postgresql:///pgu?host=/var/run/postgresql&user=ticket_board_service`
 
+## Canonical directorctl
+
+The runtime `directorctl` is `/home/agent/bin/directorctl`. Keep
+`scripts/directorctl` as the reviewed source, but do not invoke per-checkout
+copies from panes or board services. After changing `scripts/directorctl`,
+refresh the canonical runtime copy with:
+
+```bash
+scripts/install-directorctl
+```
+
 The source of truth for the legacy agent-user unit is
 `scripts/ticket-board-service.sh render-unit`. The future dedicated `boardsvc`
 system unit source is `deploy/systemd/pgu-ticket-board.service.boardsvc`; the

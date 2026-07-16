@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 
 from scripts.ticket_board.app import TicketBoardApp
 from scripts.ticket_board import cli as cli_module
+from scripts.ticket_board import server as server_module
 from scripts.ticket_board.cli import parse_args
 
 
@@ -53,6 +54,8 @@ class FakeEventHub:
 
 
 def main() -> int:
+    assert server_module.DEFAULT_DIRECTORCTL == "/home/agent/bin/directorctl"
+
     with patch.object(sys, "argv", ["ticket-board"]):
         args = parse_args()
     assert not hasattr(args, "store_backend")

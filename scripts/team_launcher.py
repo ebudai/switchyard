@@ -17,6 +17,7 @@ from typing import Any, Callable, Sequence
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "team-launcher"
 DEFAULT_SESSION_DIR = Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-sessions")
+CANONICAL_AGENT_BIN = "/home/agent/bin"
 DEFAULT_GUI_USER = "eric"
 GUI_USER_ENV = "PGU_TEAM_LAUNCHER_GUI_USER"
 GUI_WAYLAND_ENV = "PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY"
@@ -345,7 +346,16 @@ def _quote_command(args: Sequence[str]) -> str:
 
 
 def _env_prefix(env: dict[str, str]) -> list[str]:
-    return [f"{key}={value}" for key, value in sorted(env.items())]
+    return [
+        f"{key}={value}"
+        for key, value in sorted(env.items(), key=lambda item: (item[0] != "PGU_PANE_TARGET", item[0]))
+    ]
+
+
+def _prepend_path(path_value: str, directory: str) -> str:
+    parts = [part for part in path_value.split(":") if part]
+    parts = [part for part in parts if part != directory]
+    return ":".join([directory, *parts])
 
 
 def session_file_name(target: str) -> str:
@@ -430,6 +440,7 @@ def cli_command_for_role(role: RoleConfig, *, session_dir: Path, resume: bool = 
     command.extend(yolo_args_for_role(role))
     command.extend(role.extra_args)
     env = {"PGU_PANE_TARGET": role.target, **role.env}
+    env["PATH"] = _prepend_path(env.get("PATH") or os.environ.get("PATH", ""), CANONICAL_AGENT_BIN)
     return ["env", *_env_prefix(env), *command]
 
 

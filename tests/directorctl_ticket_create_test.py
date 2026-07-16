@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -14,7 +15,6 @@ from multiprocessing import Process, Queue
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DIRECTORCTL = ROOT / "scripts" / "directorctl"
 WORKERS = 8
 
 
@@ -67,9 +67,9 @@ class CreateServer(ThreadingHTTPServer):
             return ticket_id
 
 
-def run_create(index: int, board_url: str, queue: Queue[dict[str, object]]) -> None:
+def run_create(index: int, board_url: str, directorctl: str, queue: Queue[dict[str, object]]) -> None:
     cmd = [
-        str(DIRECTORCTL),
+        directorctl,
         "ticket-create",
         "--board-url",
         board_url,
@@ -97,7 +97,14 @@ def run_create(index: int, board_url: str, queue: Queue[dict[str, object]]) -> N
 
 
 def main() -> int:
-    with tempfile.TemporaryDirectory(prefix="directorctl-ticket-create."):
+    with tempfile.TemporaryDirectory(prefix="directorctl-ticket-create.") as tmpdir:
+        directorctl = str(Path(tmpdir) / "bin" / "directorctl")
+        subprocess.run(
+            [str(ROOT / "scripts" / "install-directorctl")],
+            check=True,
+            env={**os.environ, "PGU_DIRECTORCTL_INSTALL_PATH": directorctl},
+            stdout=subprocess.DEVNULL,
+        )
         server = CreateServer()
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -106,7 +113,7 @@ def main() -> int:
         try:
             single = subprocess.run(
                 [
-                    str(DIRECTORCTL),
+                    directorctl,
                     "ticket-create",
                     "--board-url",
                     board_url,
@@ -145,7 +152,7 @@ def main() -> int:
             assert ticket["implementation"] == "ship the helper"
 
             queue: Queue[dict[str, object]] = Queue()
-            workers = [Process(target=run_create, args=(index, board_url, queue)) for index in range(WORKERS)]
+            workers = [Process(target=run_create, args=(index, board_url, directorctl, queue)) for index in range(WORKERS)]
             for worker in workers:
                 worker.start()
             for worker in workers:

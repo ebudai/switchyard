@@ -76,6 +76,7 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
         if (!ticket || ticket.id !== detailTicket.id) {
           throw new Error('selected ticket changed during image attach');
         }
+        setCreateStatus(`Attached ${label} to ${ticket.id}.`);
         await updateTicket(ticket.id, {
           screenshots: uniquePaths([...ticketScreenshotPaths(ticket), ...uploadedPaths]),
         }, 'director');

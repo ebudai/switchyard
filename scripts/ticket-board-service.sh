@@ -331,6 +331,96 @@ smoke_check_http() {
     smoke_check_url "http://$BOARD_HOST:$BOARD_PORT$SMOKE_PATH" "$SMOKE_TIMEOUT_SECONDS"
 }
 
+verify_local_socket_available() {
+    local socket_dir
+    if [[ "${TICKET_BOARD_SKIP_POST_DEPLOY_SOCKET_VERIFY:-}" == "1" ]]; then
+        log "skipping post-deploy socket verification because TICKET_BOARD_SKIP_POST_DEPLOY_SOCKET_VERIFY=1"
+        return 0
+    fi
+    socket_dir="$(dirname "$BOARD_UNIX_SOCKET")"
+    [[ -d "$socket_dir" ]] || die "post-deploy socket verification failed: missing runtime directory $socket_dir"
+    [[ -S "$BOARD_UNIX_SOCKET" ]] || die "post-deploy socket verification failed: missing Unix socket $BOARD_UNIX_SOCKET"
+    "$PYTHON_BIN" - "$BOARD_UNIX_SOCKET" "$SMOKE_TIMEOUT_SECONDS" <<'PY'
+import json
+import socket
+import sys
+import time
+
+socket_path = sys.argv[1]
+deadline = time.monotonic() + float(sys.argv[2])
+body = json.dumps({"role": "ops"}).encode("utf-8")
+request = (
+    b"POST /api/register-caller HTTP/1.1\r\n"
+    b"Host: localhost\r\n"
+    b"Content-Type: application/json\r\n"
+    + f"Content-Length: {len(body)}\r\n".encode("ascii")
+    + b"Connection: close\r\n\r\n"
+    + body
+)
+last_error = "not attempted"
+while time.monotonic() < deadline:
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(1.0)
+            sock.connect(socket_path)
+            sock.sendall(request)
+            response = sock.recv(4096)
+        status_line = response.split(b"\r\n", 1)[0]
+        if b" 200 " in status_line:
+            sys.exit(0)
+        last_error = status_line.decode("utf-8", errors="replace")
+    except OSError as exc:
+        last_error = str(exc)
+    time.sleep(0.25)
+print(f"ticket-board Unix socket verification failed for {socket_path}: {last_error}", file=sys.stderr)
+sys.exit(1)
+PY
+    log "Unix socket verification passed at $BOARD_UNIX_SOCKET"
+}
+
+verify_http_write_token_required() {
+    if [[ "${TICKET_BOARD_SKIP_POST_DEPLOY_SOCKET_VERIFY:-}" == "1" ]]; then
+        return 0
+    fi
+    "$PYTHON_BIN" - "http://$BOARD_HOST:$BOARD_PORT/api/register-caller" "$SMOKE_TIMEOUT_SECONDS" <<'PY'
+import json
+import sys
+import time
+import urllib.error
+import urllib.request
+
+url = sys.argv[1]
+deadline = time.monotonic() + float(sys.argv[2])
+body = json.dumps({"role": "ops"}).encode("utf-8")
+last_error = "not attempted"
+while time.monotonic() < deadline:
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        urllib.request.urlopen(request, timeout=1.0).close()
+        last_error = "HTTP write unexpectedly succeeded without X-PGU-Write-Token"
+    except urllib.error.HTTPError as exc:
+        if exc.code == 403:
+            sys.exit(0)
+        last_error = f"HTTP {exc.code}"
+    except (OSError, urllib.error.URLError) as exc:
+        last_error = str(exc)
+    time.sleep(0.25)
+print(f"ticket-board HTTP token verification failed for {url}: {last_error}", file=sys.stderr)
+sys.exit(1)
+PY
+    log "HTTP write-token verification passed"
+}
+
+verify_post_deploy_system_runtime() {
+    verify_local_socket_available
+    verify_http_write_token_required
+}
+
 free_tcp_port() {
     "$PYTHON_BIN" - <<'PY'
 import socket
@@ -421,6 +511,7 @@ run_release_canary() {
     frame_dir="$socket_root/frames"
     canary_log="$socket_root/canary.log"
     unit_name="$BOARD_CANARY_UNIT_PREFIX-$$"
+    chmod 1777 "$socket_root"
     mkdir -p "$frame_dir"
     chmod 1777 "$frame_dir"
     log "starting deploy canary for $release_dir as $canary_user on port $port"
@@ -469,9 +560,64 @@ WantedBy=default.target
 EOF
 }
 
+render_system_unit() {
+    local production_unit="$BOARD_CURRENT_LINK/deploy/systemd/pgu-ticket-board.service.boardsvc"
+    if [[ -f "$production_unit" ]]; then
+        cat "$production_unit"
+        return
+    fi
+    render_unit
+}
+
 write_unit() {
     mkdir -p "$UNIT_DIR"
     render_unit >"$UNIT_PATH"
+}
+
+install_system_unit_file() {
+    local source_path="$1"
+    local destination_path="$2"
+    local destination_dir
+    destination_dir="$(dirname "$destination_path")"
+    if [[ "$(id -u)" == "0" ]]; then
+        install -D -m 0644 "$source_path" "$destination_path"
+        return
+    fi
+    if [[ -d "$destination_dir" && -w "$destination_dir" && ( ! -e "$destination_path" || -w "$destination_path" ) ]]; then
+        install -D -m 0644 "$source_path" "$destination_path"
+        return
+    fi
+    polkit_graphical_session_available "$POLKIT_APPROVAL_USER" || die "system unit install requires polkit approval from $POLKIT_APPROVAL_USER's active graphical session; run this from that session so the KDE prompt can appear"
+    command -v pkexec >/dev/null 2>&1 || die "system unit install requires pkexec because $destination_path is not writable"
+    local output status timeout_args=()
+    if command -v timeout >/dev/null 2>&1; then
+        timeout_args=(timeout --foreground "${POLKIT_TIMEOUT_SECONDS}s")
+    fi
+    if output="$("${timeout_args[@]}" pkexec /usr/bin/install -D -m 0644 "$source_path" "$destination_path" 2>&1)"; then
+        [[ -z "$output" ]] || printf '%s\n' "$output"
+        return
+    else
+        status=$?
+    fi
+    [[ -z "$output" ]] || printf '%s\n' "$output" >&2
+    if [[ "$status" == "124" ]]; then
+        die "installing $destination_path timed out waiting for polkit approval"
+    fi
+    return "$status"
+}
+
+install_system_unit_if_changed() {
+    local rendered_unit
+    rendered_unit="$(mktemp "${TMPDIR:-/tmp}/pgu-ticket-board-unit.XXXXXX")"
+    render_system_unit >"$rendered_unit"
+    if [[ -f "$SYSTEM_UNIT_PATH" ]] && cmp -s "$rendered_unit" "$SYSTEM_UNIT_PATH"; then
+        rm -f "$rendered_unit"
+        return 1
+    fi
+    install_system_unit_file "$rendered_unit" "$SYSTEM_UNIT_PATH"
+    rm -f "$rendered_unit"
+    log "installed updated system unit at $SYSTEM_UNIT_PATH"
+    return 0
 }
 
 install_service() {
@@ -507,14 +653,21 @@ deploy_restart_service() {
         rollback_live_service "$scope" "$previous_release"
         exit 1
     fi
+    if [[ "$scope" == "system" ]]; then
+        verify_post_deploy_system_runtime
+    fi
     log "deployed $deployed_sha from $DEPLOY_REF and restarted $SERVICE_NAME ($scope scope)"
 }
 
 restart_live_service() {
     local scope="$1"
     if [[ "$scope" == "system" ]]; then
+        local unit_installed=0
         quiesce_user_shadow_unit
-        if system_unit_reload_required; then
+        if install_system_unit_if_changed; then
+            unit_installed=1
+        fi
+        if (( unit_installed )) || system_unit_reload_required; then
             systemctl_system daemon-reload
         fi
         record_system_unit_hash

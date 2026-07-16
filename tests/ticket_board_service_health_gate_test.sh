@@ -63,6 +63,28 @@ EOF
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'systemd-run:%s\n' "$*" >>"$TICKET_BOARD_HEALTH_GATE_LOG"
+socket_path=""
+previous=""
+for arg in "$@"; do
+    if [[ "$previous" == "--unix-socket" ]]; then
+        socket_path="$arg"
+        break
+    fi
+    previous="$arg"
+done
+if [[ -n "$socket_path" ]]; then
+    socket_parent="$(dirname "$socket_path")"
+    socket_parent_mode="$(stat -c %a "$socket_parent")"
+    socket_parent_other="${socket_parent_mode: -1}"
+    case "$socket_parent_other" in
+        3|7)
+            ;;
+        *)
+            echo "canary socket parent is not writable/traversable by boardsvc: $socket_parent mode $socket_parent_mode" >&2
+            exit 1
+            ;;
+    esac
+fi
 EOF
     chmod +x "$mockdir/systemd-run"
 
@@ -98,6 +120,7 @@ run_service() {
     TICKET_BOARD_FAIL_LIVE_SMOKE_ONCE="${TICKET_BOARD_FAIL_LIVE_SMOKE_ONCE:-}" \
     TICKET_BOARD_SYSTEM_UNIT_PATH="$SYSTEM_UNIT_PATH" \
     TICKET_BOARD_SYSTEM_UNIT_HASH_RECORD="$HASH_RECORD" \
+    TICKET_BOARD_SKIP_POST_DEPLOY_SOCKET_VERIFY=1 \
     TICKET_BOARD_SKIP_MIGRATIONS=1 \
     BOARD_CANARY_PORT=19001 \
     BOARD_CANARY_TIMEOUT_SECONDS=1 \

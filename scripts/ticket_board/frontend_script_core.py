@@ -631,6 +631,101 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       });
     }
 
+    function attachmentSetLabelSlug(slug) {
+      return String(slug || '')
+        .replace(/[-_]+/g, ' ')
+        .replace(/([A-Za-z])(\\d)/g, '$1 $2')
+        .replace(/\\s+/g, ' ')
+        .trim()
+        .split(' ')
+        .map((word) => word.length <= 3 ? word.toUpperCase() : `${word.charAt(0).toUpperCase()}${word.slice(1)}`)
+        .join(' ');
+    }
+
+    function parseAttachmentSet(path) {
+      const filename = String(path || '').split('/').pop() || '';
+      const targetMatch = filename.match(/^target__(.+)$/i);
+      if (targetMatch) {
+        return {
+          key: 'target',
+          type: 'target',
+          label: 'Target',
+          order: -1000000,
+          itemLabel: targetMatch[1],
+        };
+      }
+      const attemptMatch = filename.match(/^attempt-(\\d+)(?:-(.+?))?__(.+)$/i);
+      if (attemptMatch) {
+        const attemptNumber = Number.parseInt(attemptMatch[1], 10);
+        const labelSlug = attemptMatch[2] || '';
+        const suffix = attachmentSetLabelSlug(labelSlug);
+        return {
+          key: `attempt-${attemptMatch[1]}-${labelSlug}`,
+          type: 'attempt',
+          attemptNumber,
+          label: `Render Attempt ${attemptMatch[1]}${suffix ? ` - ${suffix}` : ''}`,
+          order: attemptNumber,
+          itemLabel: attemptMatch[3],
+        };
+      }
+      return {
+        key: 'ungrouped',
+        type: 'ungrouped',
+        label: 'Ungrouped',
+        order: 1000000,
+        itemLabel: filename,
+      };
+    }
+
+    function groupAttachmentEntries(entries) {
+      const groupsByKey = new Map();
+      entries.forEach((entry) => {
+        const parsed = parseAttachmentSet(entry.path);
+        if (!groupsByKey.has(parsed.key)) {
+          groupsByKey.set(parsed.key, {
+            key: parsed.key,
+            type: parsed.type,
+            label: parsed.label,
+            order: parsed.order,
+            attemptNumber: parsed.attemptNumber || 0,
+            entries: [],
+            open: false,
+          });
+        }
+        groupsByKey.get(parsed.key).entries.push({
+          ...entry,
+          label: parsed.itemLabel || entry.label,
+        });
+      });
+      const groups = Array.from(groupsByKey.values()).sort((left, right) => {
+        if (left.type === 'target' && right.type !== 'target') {
+          return -1;
+        }
+        if (right.type === 'target' && left.type !== 'target') {
+          return 1;
+        }
+        if (left.type === 'attempt' && right.type === 'attempt') {
+          return right.attemptNumber - left.attemptNumber || left.label.localeCompare(right.label);
+        }
+        if (left.type === 'attempt' && right.type !== 'attempt') {
+          return -1;
+        }
+        if (right.type === 'attempt' && left.type !== 'attempt') {
+          return 1;
+        }
+        return left.label.localeCompare(right.label);
+      });
+      const newestAttempt = groups
+        .filter((group) => group.type === 'attempt')
+        .sort((left, right) => right.attemptNumber - left.attemptNumber)[0];
+      if (newestAttempt) {
+        newestAttempt.open = true;
+      } else if (groups.length === 1) {
+        groups[0].open = true;
+      }
+      return groups;
+    }
+
     function renderAttachmentGallery(container, entries, removeLabel, onRemove, onOpen = null) {
       container.innerHTML = '';
       entries.forEach((entry) => {
@@ -683,6 +778,23 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         meta.textContent = entry.label;
         card.appendChild(meta);
         container.appendChild(card);
+      });
+    }
+
+    function renderAttachmentSetGroups(container, entries, removeLabel, onRemove, onOpen = null) {
+      container.innerHTML = '';
+      groupAttachmentEntries(entries).forEach((group) => {
+        const details = document.createElement('details');
+        details.className = `attachment-set attachment-set-${group.type}`;
+        details.open = group.open;
+        const summary = document.createElement('summary');
+        summary.className = 'attachment-set-summary';
+        summary.textContent = `${group.label} (${group.entries.length} image${group.entries.length === 1 ? '' : 's'})`;
+        const gallery = document.createElement('div');
+        gallery.className = 'attachment-gallery';
+        renderAttachmentGallery(gallery, group.entries, removeLabel, onRemove, onOpen);
+        details.append(summary, gallery);
+        container.appendChild(details);
       });
     }
 

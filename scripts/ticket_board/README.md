@@ -132,7 +132,18 @@ Notes:
 - Screenshots referenced by tickets may live in either `/tmp/pgu-frames` or `/home/agent/.claude/pgu-tickets-assets`
 - API/write-client attachment paths may still reference `/tmp/pgu-frames` as a transient inbox; once attached to a ticket, each selected image is copied into `/home/agent/.claude/pgu-tickets-assets`
 - Clipboard-pasted screenshots are normalized to PNG and staged under `/home/agent/.claude/pgu-tickets-assets` before ticket attachment
-- The detail view renders attachments as a gallery; hover an image to remove it from the ticket
+- The detail view groups image attachments into collapsible sets by filename prefix:
+  `target__<name>.png` goes into `Target`,
+  `attempt-<NNN>-<label>__<name>.png` goes into `Render Attempt NNN - Label`,
+  and unprefixed legacy images go into `Ungrouped`. The newest numbered render
+  attempt is expanded by default; older attempts, target references, and
+  ungrouped images start collapsed.
+- For visual rework tickets, attach reference images with the `target__` prefix
+  and attach each new render batch under the next attempt prefix, for example
+  `attempt-003-uat-rework__front.png`. Keep the existing descriptive filename
+  after the double underscore so lightbox captions remain readable.
+- The detail view renders attachments as grouped galleries; click an image to
+  view it inline, and hover an image to remove it from the ticket
 - New transitions into `done` require either a verified `commit_hash` or `commit_exempt: true`
 - `analysis -> in_progress` is the default handoff from triage/spec to Implementation
 - Any state can move to `backlog` to defer work; backlog tickets can be revived to `analysis`

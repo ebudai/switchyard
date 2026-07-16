@@ -105,7 +105,7 @@ def ticket_payload(ticket_id: str, screenshots: list[Path]) -> dict[str, object]
     }
 
 
-def run_browser_check(playwright: object, server_port: int, first_name: str, second_name: str) -> None:
+def run_browser_check(playwright: object, server_port: int) -> None:
     browser = playwright.chromium.launch(headless=True)
     try:
         page = browser.new_page(viewport={"width": 1440, "height": 1024})
@@ -114,16 +114,26 @@ def run_browser_check(playwright: object, server_port: int, first_name: str, sec
         page.get_by_text("PGU-420", exact=True).click()
 
         page.locator(".detail-modal").wait_for(timeout=5000)
-        gallery = page.locator(".detail-modal .attachment-gallery")
-        gallery.wait_for(timeout=5000)
-        assert gallery.locator(".attachment-card-clickable").count() == 2
+        set_list = page.locator(".detail-modal .attachment-set-list")
+        set_list.wait_for(timeout=5000)
+        groups = page.locator(".detail-modal .attachment-set")
+        assert groups.count() == 4
+        assert page.locator(".detail-modal .attachment-set-summary").nth(0).inner_text() == "Target (1 image)"
+        assert page.locator(".detail-modal .attachment-set-summary").nth(1).inner_text() == "Render Attempt 002 - UAT Rework (1 image)"
+        assert page.locator(".detail-modal .attachment-set-summary").nth(2).inner_text() == "Render Attempt 001 - Phase 1 (1 image)"
+        assert page.locator(".detail-modal .attachment-set-summary").nth(3).inner_text() == "Ungrouped (1 image)"
+        assert groups.nth(0).evaluate("node => node.open") is False
+        assert groups.nth(1).evaluate("node => node.open") is True
+        assert groups.nth(2).evaluate("node => node.open") is False
+        assert groups.nth(3).evaluate("node => node.open") is False
+        assert page.locator(".detail-modal .attachment-card-clickable").count() == 4
 
-        page.locator(".detail-modal .attachment-card-clickable", has_text=first_name).click()
+        page.locator(".detail-modal .attachment-card-clickable", has_text="render-new.png").click()
         page.locator("#imageLightboxOverlay").wait_for(timeout=5000)
         page.wait_for_function(
             "() => { const img = document.getElementById('imageLightboxImage'); return !!img && img.complete && img.naturalWidth > 0; }"
         )
-        assert page.locator("#imageLightboxCaption").inner_text() == first_name
+        assert page.locator("#imageLightboxCaption").inner_text() == "render-new.png"
         assert "/api/image/" in (page.locator("#imageLightboxImage").get_attribute("src") or "")
         assert page.locator(".detail-modal").is_visible()
 
@@ -131,9 +141,10 @@ def run_browser_check(playwright: object, server_port: int, first_name: str, sec
         page.locator("#imageLightboxOverlay").wait_for(state="hidden", timeout=5000)
         assert page.locator(".detail-modal").is_visible()
 
-        page.locator(".detail-modal .attachment-card-clickable", has_text=second_name).click()
+        page.locator(".detail-modal .attachment-set-summary", has_text="Target").click()
+        page.locator(".detail-modal .attachment-card-clickable", has_text="reference.png").click()
         page.locator("#imageLightboxOverlay").wait_for(timeout=5000)
-        assert page.locator("#imageLightboxCaption").inner_text() == second_name
+        assert page.locator("#imageLightboxCaption").inner_text() == "reference.png"
         page.locator("#imageLightboxOverlay").click(position={"x": 8, "y": 8})
         page.locator("#imageLightboxOverlay").wait_for(state="hidden", timeout=5000)
     finally:
@@ -148,18 +159,22 @@ def main() -> int:
         assets = root / "assets"
         frames.mkdir()
         assets.mkdir()
-        first = assets / "spiral-arm.png"
-        second = assets / "bulge-core.png"
-        write_png(first, (48, 96, 180))
-        write_png(second, (180, 120, 48))
+        target = assets / "target__reference.png"
+        first_attempt = assets / "attempt-001-phase1__render-old.png"
+        newest_attempt = assets / "attempt-002-uat_rework__render-new.png"
+        legacy = assets / "legacy-flat.png"
+        write_png(target, (48, 96, 180))
+        write_png(first_attempt, (120, 72, 180))
+        write_png(newest_attempt, (180, 120, 48))
+        write_png(legacy, (90, 120, 80))
 
-        app = StaticBoardApp([ticket_payload("PGU-420", [first, second])], frames, assets)
+        app = StaticBoardApp([ticket_payload("PGU-420", [target, first_attempt, newest_attempt, legacy])], frames, assets)
         server = TicketBoardServer(("127.0.0.1", 0), app, director_notifier=QuietNotifier())
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
             with sync_playwright() as playwright:
-                run_browser_check(playwright, server.server_port, first.name, second.name)
+                run_browser_check(playwright, server.server_port)
         finally:
             server.shutdown()
             server.server_close()

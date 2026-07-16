@@ -495,16 +495,16 @@ SCRIPT_DETAIL = """    function selectedTicket() {
           ...entry,
           label: screenshotLabelFor(entry.path),
         }));
-        const gallery = document.createElement('div');
-        gallery.className = 'attachment-gallery';
-        renderAttachmentGallery(gallery, entries, 'Remove attachment', async (path) => {
+        const groups = document.createElement('div');
+        groups.className = 'attachment-set-list';
+        renderAttachmentSetGroups(groups, entries, 'Remove attachment', async (path) => {
           await updateTicket(ticket.id, {
             screenshots: ticketScreenshotPaths(ticket).filter((item) => item !== path),
           }, detailCallerRole());
         }, (entry) => {
           openImageLightbox(entry);
         });
-        imageWrap.appendChild(gallery);
+        imageWrap.appendChild(groups);
         box.appendChild(imageWrap);
       }
 

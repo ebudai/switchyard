@@ -165,13 +165,20 @@ check fails, it repoints `current` back to the previous release, restarts the
 service again, verifies the old release is healthy, and exits nonzero.
 
 If `/etc/systemd/system/pgu-ticket-board.service` exists, `deploy-restart`
-targets that system unit with plain `systemctl`, not `sudo`. The expected path
-is polkit approval from Eric's active KDE graphical session: the command checks
-for that session first, then waits up to `TICKET_BOARD_POLKIT_TIMEOUT_SECONDS`
-(default `30`) for the approval flow before failing with a clear message rather
-than hanging indefinitely. This is intentional: a successful deploy must
-restart the process that actually owns port `8770`, not merely refresh
-`/home/agent/pgu-ticketboard-live/current`.
+targets that system unit with plain `systemctl`, not `sudo`. Live board-unit
+actions (`start`, `stop`, `restart`, `status` for
+`pgu-ticket-board.service`) intentionally do not require Eric's active KDE
+session: the host is expected to install
+`/etc/polkit-1/rules.d/49-pgu-board-restart.rules`, allowing `agent` to manage
+`pgu-ticket-board.service` through polkit without an interactive prompt. If
+that host rule is absent, `systemctl` fails with its normal authorization error.
+This is intentional: a successful deploy must restart the process that actually
+owns port `8770`, not merely refresh `/home/agent/pgu-ticketboard-live/current`.
+
+Other privileged system actions, including system unit installation,
+`daemon-reload`, and transient canary units, still use the guarded interactive
+polkit path and may require Eric's active graphical session unless separately
+authorized by host configuration.
 
 For that system-unit path, code-only deploys skip `daemon-reload` unless the
 installed unit file hash changed since the last deploy, so the common restart

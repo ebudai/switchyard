@@ -13,10 +13,26 @@ mkdir -p "$UNIT_DIR"
 git init "$SOURCE_REPO" >/dev/null
 git -C "$SOURCE_REPO" config user.name Test
 git -C "$SOURCE_REPO" config user.email test@example.com
-mkdir -p "$SOURCE_REPO/scripts"
+mkdir -p "$SOURCE_REPO/deploy/systemd" "$SOURCE_REPO/scripts"
 printf '#!/usr/bin/env python3\nprint("board")\n' >"$SOURCE_REPO/scripts/ticket-board.py"
+cat >"$SOURCE_REPO/deploy/systemd/pgu-ticket-board.service.boardsvc" <<'EOF'
+[Unit]
+Description=PGU Ticket Board Test boardsvc Unit
+
+[Service]
+Type=simple
+User=boardsvc
+WorkingDirectory=/home/agent/pgu-ticketboard-live/current
+RuntimeDirectory=pgu-ticket-board
+ExecStart=/usr/bin/python3 /home/agent/pgu-ticketboard-live/current/scripts/ticket-board.py --host 127.0.0.1 --port 8770 --unix-socket /run/pgu-ticket-board/ticket-board.sock --frames /tmp/pgu-frames --assets /home/agent/.claude/pgu-tickets-assets
+Environment=PGU_TICKET_BOARD_SOCKET=/run/pgu-ticket-board/ticket-board.sock
+Environment=TICKET_BOARD_DATABASE_URL=postgresql:///pgu?host=/var/run/postgresql&user=ticket_board_service
+
+[Install]
+WantedBy=multi-user.target
+EOF
 chmod +x "$SOURCE_REPO/scripts/ticket-board.py"
-git -C "$SOURCE_REPO" add scripts/ticket-board.py
+git -C "$SOURCE_REPO" add deploy/systemd/pgu-ticket-board.service.boardsvc scripts/ticket-board.py
 git -C "$SOURCE_REPO" commit -m "seed" >/dev/null
 
 BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
@@ -148,7 +164,8 @@ grep -q '^Environment=TICKET_BOARD_DATABASE_URL=postgresql:///custom_board?host=
 MOCKDIR="$TMPDIR_T/mockbin"
 LOGFILE="$TMPDIR_T/service-scope.log"
 HASH_RECORD="$TMPDIR_T/system-unit.sha256"
-mkdir -p "$MOCKDIR"
+SYSTEM_UNIT_PATH="$TMPDIR_T/systemd/pgu-ticket-board.service"
+mkdir -p "$MOCKDIR" "$(dirname "$SYSTEM_UNIT_PATH")"
 : >"$LOGFILE"
 
 cat >"$MOCKDIR/systemctl" <<'EOF'
@@ -161,7 +178,7 @@ if [[ "${1:-}" == "--user" ]]; then
 fi
 printf 'system:%s\n' "$*" >>"$TICKET_BOARD_SERVICE_TEST_LOG"
 if [[ "${1:-}" == "show" && "${2:-}" == "pgu-ticket-board.service" && "${3:-}" == "-p" && "${4:-}" == "FragmentPath" && "${5:-}" == "--value" ]]; then
-    printf '/etc/systemd/system/pgu-ticket-board.service\n'
+    printf '%s\n' "$TICKET_BOARD_SYSTEM_UNIT_PATH"
 fi
 EOF
 chmod +x "$MOCKDIR/systemctl"
@@ -212,9 +229,14 @@ exec /usr/bin/python3 "$@"
 EOF
 chmod +x "$MOCKDIR/python3"
 
+cp "$DEPLOY_ROOT/current/deploy/systemd/pgu-ticket-board.service.boardsvc" "$SYSTEM_UNIT_PATH"
+sha256sum "$SYSTEM_UNIT_PATH" | awk '{print $1}' >"$HASH_RECORD"
+
 PATH="$MOCKDIR:/usr/bin:/bin" \
 TICKET_BOARD_SERVICE_TEST_LOG="$LOGFILE" \
+TICKET_BOARD_SYSTEM_UNIT_PATH="$SYSTEM_UNIT_PATH" \
 TICKET_BOARD_SYSTEM_UNIT_HASH_RECORD="$HASH_RECORD" \
+TICKET_BOARD_SKIP_POST_DEPLOY_SOCKET_VERIFY=1 \
 BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
     "$REPO_ROOT/scripts/ticket-board-service.sh" deploy-restart >/dev/null
 
@@ -248,15 +270,28 @@ fi
     exit 1
 }
 
+printf 'stale unit\n' >"$SYSTEM_UNIT_PATH"
 printf 'stale-unit-hash\n' >"$HASH_RECORD"
 : >"$LOGFILE"
 
 PATH="$MOCKDIR:/usr/bin:/bin" \
 TICKET_BOARD_SERVICE_TEST_LOG="$LOGFILE" \
+TICKET_BOARD_SYSTEM_UNIT_PATH="$SYSTEM_UNIT_PATH" \
 TICKET_BOARD_SYSTEM_UNIT_HASH_RECORD="$HASH_RECORD" \
+TICKET_BOARD_SKIP_POST_DEPLOY_SOCKET_VERIFY=1 \
 BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
     "$REPO_ROOT/scripts/ticket-board-service.sh" deploy-restart >/dev/null
 
+grep -q '^RuntimeDirectory=pgu-ticket-board$' "$SYSTEM_UNIT_PATH" || {
+    echo "FAIL: deploy-restart did not install the rendered system unit" >&2
+    cat "$SYSTEM_UNIT_PATH" >&2
+    exit 1
+}
+grep -q '^User=boardsvc$' "$SYSTEM_UNIT_PATH" || {
+    echo "FAIL: deploy-restart did not install the release boardsvc system unit" >&2
+    cat "$SYSTEM_UNIT_PATH" >&2
+    exit 1
+}
 grep -q '^system:daemon-reload$' "$LOGFILE" || {
     echo "FAIL: deploy-restart should reload systemd when the unit hash changes" >&2
     cat "$LOGFILE" >&2

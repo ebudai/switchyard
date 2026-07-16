@@ -63,6 +63,28 @@ EOF
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'systemd-run:%s\n' "$*" >>"$TICKET_BOARD_HEALTH_GATE_LOG"
+socket_path=""
+previous=""
+for arg in "$@"; do
+    if [[ "$previous" == "--unix-socket" ]]; then
+        socket_path="$arg"
+        break
+    fi
+    previous="$arg"
+done
+if [[ -n "$socket_path" ]]; then
+    socket_parent="$(dirname "$socket_path")"
+    socket_parent_mode="$(stat -c %a "$socket_parent")"
+    socket_parent_other="${socket_parent_mode: -1}"
+    case "$socket_parent_other" in
+        3|7)
+            ;;
+        *)
+            echo "canary socket parent is not writable/traversable by boardsvc: $socket_parent mode $socket_parent_mode" >&2
+            exit 1
+            ;;
+    esac
+fi
 EOF
     chmod +x "$mockdir/systemd-run"
 
@@ -90,6 +112,7 @@ EOF
 run_service() {
     local source_repo="$1"
     local deploy_root="$2"
+    local skip_socket_verify="${TICKET_BOARD_SKIP_POST_DEPLOY_SOCKET_VERIFY:-1}"
     shift 2
     PATH="$MOCKDIR:/usr/bin:/bin" \
     TICKET_BOARD_HEALTH_GATE_LOG="$LOGFILE" \
@@ -98,6 +121,7 @@ run_service() {
     TICKET_BOARD_FAIL_LIVE_SMOKE_ONCE="${TICKET_BOARD_FAIL_LIVE_SMOKE_ONCE:-}" \
     TICKET_BOARD_SYSTEM_UNIT_PATH="$SYSTEM_UNIT_PATH" \
     TICKET_BOARD_SYSTEM_UNIT_HASH_RECORD="$HASH_RECORD" \
+    TICKET_BOARD_SKIP_POST_DEPLOY_SOCKET_VERIFY="$skip_socket_verify" \
     TICKET_BOARD_SKIP_MIGRATIONS=1 \
     BOARD_CANARY_PORT=19001 \
     BOARD_CANARY_TIMEOUT_SECONDS=1 \
@@ -179,6 +203,32 @@ unset TICKET_BOARD_FAIL_LIVE_SMOKE_ONCE
 restart_count="$(grep -c 'systemctl:restart pgu-ticket-board.service' "$LOGFILE" || true)"
 [[ "$restart_count" == "2" ]] || {
     echo "FAIL: rollback should restart once for deploy and once after restoring previous release, saw $restart_count" >&2
+    cat "$LOGFILE" >&2
+    exit 1
+}
+
+printf '#!/usr/bin/env python3\nprint("socketless board")\n' >"$SOURCE_REPO/scripts/ticket-board.py"
+git -C "$SOURCE_REPO" add scripts/ticket-board.py
+git -C "$SOURCE_REPO" commit -m "socketless release" >/dev/null
+: >"$LOGFILE"
+export TICKET_BOARD_SKIP_POST_DEPLOY_SOCKET_VERIFY=0
+if BOARD_UNIX_SOCKET="$TMPDIR_T/missing-runtime/ticket-board.sock" run_service "$SOURCE_REPO" "$DEPLOY_ROOT" deploy-restart >"$TMPDIR_T/socket-verify.out" 2>"$TMPDIR_T/socket-verify.err"; then
+    echo "FAIL: deploy-restart should exit nonzero after rolling back failed socket verification" >&2
+    exit 1
+fi
+unset TICKET_BOARD_SKIP_POST_DEPLOY_SOCKET_VERIFY
+grep -q 'post-deploy socket verification failed: missing runtime directory' "$TMPDIR_T/socket-verify.err" || {
+    echo "FAIL: socket verification failure was not reported" >&2
+    cat "$TMPDIR_T/socket-verify.err" >&2
+    exit 1
+}
+[[ "$(readlink -f "$DEPLOY_ROOT/current")" == "$new_current" ]] || {
+    echo "FAIL: post-deploy socket verification failure did not roll back current" >&2
+    exit 1
+}
+restart_count="$(grep -c 'systemctl:restart pgu-ticket-board.service' "$LOGFILE" || true)"
+[[ "$restart_count" == "2" ]] || {
+    echo "FAIL: socket verification rollback should restart once for deploy and once after restoring previous release, saw $restart_count" >&2
     cat "$LOGFILE" >&2
     exit 1
 }

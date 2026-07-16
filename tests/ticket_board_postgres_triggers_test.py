@@ -1761,6 +1761,60 @@ WHERE ticket_id = 'PGU-29703';
             ], auto_advance_insert_queue
             auto_advance_state = psql(conninfo, "SELECT state FROM ticket_board.tickets WHERE id = 'PGU-29703';").stdout.strip()
             assert auto_advance_state == "in_progress", auto_advance_state
+            insert_ticket(conninfo, "PGU-47100", title="Create auto activate duplicate", state="analysis", assignee="director")
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
+            psql(
+                conninfo,
+                """
+BEGIN;
+SELECT ticket_board.enqueue_transition_notification(
+    'PGU-47100',
+    'Create auto activate duplicate',
+    NULL,
+    'analysis',
+    'director',
+    clock_timestamp(),
+    47100,
+    ticket_board.transition_message('PGU-47100', 'Create auto activate duplicate', NULL, 'analysis')
+);
+SELECT ticket_board.enqueue_transition_notification(
+    'PGU-47100',
+    'Create auto activate duplicate',
+    'analysis',
+    'in_progress',
+    'director',
+    clock_timestamp(),
+    47100,
+    ticket_board.transition_message('PGU-47100', 'Create auto activate duplicate', 'analysis', 'in_progress')
+);
+COMMIT;
+""",
+            )
+            coalesced_create_activate_queue = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_agg(jsonb_build_object(
+    'target_role', target_role,
+    'message', message,
+    'old_state', payload->>'old_state',
+    'new_state', payload->>'new_state',
+    'dedupe_prefix', split_part(dedupe_key, ':', 1) || ':' || split_part(dedupe_key, ':', 2)
+) ORDER BY id)::text
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-47100';
+""",
+                ).stdout
+            )
+            assert coalesced_create_activate_queue == [
+                {
+                    "target_role": "director",
+                    "message": "New ticket for you: PGU-47100 -- Create auto activate duplicate",
+                    "old_state": "analysis",
+                    "new_state": "in_progress",
+                    "dedupe_prefix": "transition:new_ticket",
+                }
+            ], coalesced_create_activate_queue
             psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '2970303' WHERE id = 'PGU-29703';")
             psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-29703';")
             psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-29703';")

@@ -761,6 +761,7 @@ DECLARE
     target_role text;
     message text;
     source_role text;
+    dedupe_key text;
 BEGIN
     target_role := ticket_board.transition_target_role(p_new_state, p_assignee);
     IF target_role IS NULL AND p_new_state IN ('done', 'cancelled') THEN
@@ -772,6 +773,11 @@ BEGIN
         source_role := nullif(current_setting('ticket_board.caller_role', true), '');
     END IF;
     IF target_role IS NOT NULL AND message IS NOT NULL AND source_role IS DISTINCT FROM target_role THEN
+        dedupe_key := 'transition:' || p_ticket_id || ':' || coalesce(p_old_state, 'insert') || ':' || p_new_state || ':' || pg_current_xact_id()::text;
+        IF p_new_state IN ('analysis', 'in_progress')
+           AND message LIKE 'New ticket for you: %' THEN
+            dedupe_key := 'transition:new_ticket:' || p_ticket_id || ':' || target_role || ':' || pg_current_xact_id()::text;
+        END IF;
         PERFORM ticket_board.enqueue_notification(
             p_ticket_id,
             'transition',
@@ -789,7 +795,7 @@ BEGIN
                 'target_role', target_role,
                 'message', message
             ),
-            'transition:' || p_ticket_id || ':' || coalesce(p_old_state, 'insert') || ':' || p_new_state || ':' || pg_current_xact_id()::text
+            dedupe_key
         );
     ELSE
         PERFORM pg_notify(

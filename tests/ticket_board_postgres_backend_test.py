@@ -496,7 +496,8 @@ WHERE id = 'PGU-100';
                 "PGU-200",
                 {"state": "analysis", "comment": {"who": "audit", "text": "Needs another pass."}},
             )
-            assert kicked["state"] == "analysis", kicked
+            assert kicked["state"] == "in_progress", kicked
+            assert kicked["assignee"] == "ops", kicked
             assert kicked["comments"][-1]["text"] == "Needs another pass.", kicked
 
             insert_ticket(
@@ -529,7 +530,7 @@ WHERE id = 'PGU-100';
                 "PGU-301",
                 {"state": "analysis", "comment": {"who": "eric", "text": "Needs design revision."}},
             )
-            assert eric_reopened["state"] == "in_progress", eric_reopened
+            assert eric_reopened["state"] == "analysis", eric_reopened
             assert eric_reopened["comments"][-1]["text"] == "Needs design revision.", eric_reopened
 
             deferred = service_app.update_ticket("PGU-1", {"state": "backlog"})
@@ -539,11 +540,11 @@ WHERE id = 'PGU-100';
             insert_ticket(admin_conn, "PGU-402", title="Active analysis ping", state="analysis", assignee="ops", implementation="")
             insert_ticket(admin_conn, "PGU-403", title="Old audit ping", state="audit", assignee="audit")
             insert_ticket(admin_conn, "PGU-404", title="Active audit ping", state="audit", assignee="audit")
-            insert_ticket(admin_conn, "PGU-407", title="Old ops implementation ping", state="in_progress", assignee="ops")
-            insert_ticket(admin_conn, "PGU-408", title="Active ops implementation ping", state="in_progress", assignee="ops")
+            insert_ticket(admin_conn, "PGU-407", title="Old perf implementation ping", state="in_progress", assignee="perf")
+            insert_ticket(admin_conn, "PGU-408", title="Active main implementation ping", state="in_progress", assignee="main")
             insert_ticket(admin_conn, "PGU-409", title="Old app implementation ping", state="in_progress", assignee="app")
-            insert_ticket(admin_conn, "PGU-410", title="Active app implementation ping", state="in_progress", assignee="app")
-            insert_ticket(admin_conn, "PGU-411", title="Unassigned implementation ping", state="in_progress", assignee="unassigned")
+            insert_ticket(admin_conn, "PGU-410", title="Active research implementation ping", state="in_progress", assignee="research")
+            insert_ticket(admin_conn, "PGU-411", title="Unassigned backlog ping", state="backlog", assignee="unassigned")
             insert_ticket(admin_conn, "PGU-412", title="Queued-only ops implementation ping", state="in_progress", assignee="ops")
             insert_ticket(admin_conn, "PGU-413", title="Nudged-only ops implementation ping", state="in_progress", assignee="ops")
             insert_ticket(admin_conn, "PGU-414", title="Active inspection ping", state="inspection", assignee="ops")
@@ -611,10 +612,10 @@ INSERT INTO ticket_board.ticket_notification_queue (
 ), (
     'PGU-410',
     'transition',
-    'app',
-    'PGU-410 -- Active app implementation ping',
-    jsonb_build_object('id', 'PGU-410', 'state', 'in_progress', 'target_role', 'app'),
-    'active-work-test:PGU-410:app',
+    'research',
+    'PGU-410 -- Active research implementation ping',
+    jsonb_build_object('id', 'PGU-410', 'state', 'in_progress', 'target_role', 'research'),
+    'active-work-test:PGU-410:research',
     clock_timestamp() + interval '2 hours'
 ), (
     'PGU-412',
@@ -644,8 +645,8 @@ INSERT INTO ticket_board.notification_trace (
 ) VALUES
     ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-402', 'director', 'transition', 'send', 'analysis', 'ops', 'idle', 'idle'),
     ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-404', 'audit', 'transition', 'send', 'audit', 'audit', 'idle', 'idle'),
-    ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-408', 'ops', 'transition', 'send', 'in_progress', 'ops', 'idle', 'idle'),
-    ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-410', 'app', 'transition', 'send', 'in_progress', 'app', 'idle', 'idle'),
+    ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-408', 'main', 'transition', 'send', 'in_progress', 'main', 'idle', 'idle'),
+    ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-410', 'research', 'transition', 'send', 'in_progress', 'research', 'idle', 'idle'),
     ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-406', 'director', 'transition', 'send', 'director_review', 'director', 'idle', 'idle'),
     ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-414', 'inspector', 'transition', 'send', 'inspection', 'ops', 'idle', 'idle');
 """,
@@ -665,11 +666,11 @@ INSERT INTO ticket_board.notification_trace (
             assert tickets_by_id["PGU-404"]["active_work_owner_role"] == "audit", tickets_by_id["PGU-404"]
             assert tickets_by_id["PGU-403"]["active_work_highlight"] is False, tickets_by_id["PGU-403"]
             assert tickets_by_id["PGU-408"]["active_work_highlight"] is True, tickets_by_id["PGU-408"]
-            assert tickets_by_id["PGU-408"]["active_work_owner_role"] == "ops", tickets_by_id["PGU-408"]
+            assert tickets_by_id["PGU-408"]["active_work_owner_role"] == "main", tickets_by_id["PGU-408"]
             assert tickets_by_id["PGU-408"]["active_work_notified_at"], tickets_by_id["PGU-408"]
             assert tickets_by_id["PGU-407"]["active_work_highlight"] is False, tickets_by_id["PGU-407"]
             assert tickets_by_id["PGU-410"]["active_work_highlight"] is True, tickets_by_id["PGU-410"]
-            assert tickets_by_id["PGU-410"]["active_work_owner_role"] == "app", tickets_by_id["PGU-410"]
+            assert tickets_by_id["PGU-410"]["active_work_owner_role"] == "research", tickets_by_id["PGU-410"]
             assert tickets_by_id["PGU-409"]["active_work_highlight"] is False, tickets_by_id["PGU-409"]
             assert tickets_by_id["PGU-411"]["active_work_highlight"] is False, tickets_by_id["PGU-411"]
             assert tickets_by_id["PGU-411"]["active_work_owner_role"] == "", tickets_by_id["PGU-411"]

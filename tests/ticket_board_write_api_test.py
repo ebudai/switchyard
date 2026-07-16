@@ -872,6 +872,15 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
         expect=201,
     )
     assert director_inspection_create["ticket"]["needs_inspection"] is True, director_inspection_create  # type: ignore[index]
+    director_uat_create = post_json(
+        base_url,
+        "/api/tickets/actions/create_ticket",
+        {"title": "Director requires UAT", "body": "", "needs_eric_signoff": True},
+        caller="director",
+        expect=201,
+    )
+    assert director_uat_create["ticket"]["needs_eric_signoff"] is True, director_uat_create  # type: ignore[index]
+    assert get_ticket(base_url, str(director_uat_create["ticket"]["id"]))["needs_eric_signoff"] is True
     regression_create = post_json(
         base_url,
         "/api/tickets/actions/create_ticket",

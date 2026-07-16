@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.ticket_board.app import TicketBoardApp
+from scripts.ticket_board.app import CALLER_ROLES, TicketBoardApp
 from scripts.ticket_board import cli as cli_module
 from scripts.ticket_board import server as server_module
 from scripts.ticket_board.cli import parse_args
@@ -71,6 +71,11 @@ def main() -> int:
         app = TicketBoardApp(frames, assets, database_url="")
         assert getattr(app, "store_backend") == "postgres"
         assert not retired_path.exists(), "postgres-only app should not create a JSON store directory"
+        app.list_tickets = lambda: ([], [])  # type: ignore[method-assign]
+        app.list_screenshots = lambda: []  # type: ignore[method-assign]
+        snapshot = app.snapshot()
+        assert snapshot["caller_roles"] == list(CALLER_ROLES)
+        assert set(server_module.CALLER_ROLES) == set(CALLER_ROLES)
 
         args = SimpleNamespace(
             frames=str(frames),

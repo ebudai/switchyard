@@ -21,6 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
 
+from .app import CALLER_ROLES as APP_CALLER_ROLES
 from .app import TicketBoardApp, iso_now
 from .frontend import HTML
 
@@ -34,7 +35,7 @@ WRITE_TOKEN_HEADER = "X-PGU-Write-Token"
 SO_PEERCRED_FORMAT = "3i"
 PANE_SOCKET_MODE = 0o666
 IMPLEMENTER_ROLES = {"main", "app", "ops", "perf", "research"}
-CALLER_ROLES = IMPLEMENTER_ROLES | {"director", "eric", "audit", "inspector"}
+CALLER_ROLES = set(APP_CALLER_ROLES)
 TASK_ROLES = IMPLEMENTER_ROLES | {"director", "audit", "inspector"}
 OPERATION_ALLOWED_ROLES = {
     "create_ticket": {"director", "eric"},

@@ -19,6 +19,7 @@ REPO_ROOT_DEFAULT = Path(__file__).resolve().parents[2]
 COMMIT_GIT_DIR_DEFAULT = Path("/data/git/pgu.git")
 POSTGRES_DSN_DEFAULT = os.environ.get("TICKET_BOARD_DATABASE_URL") or os.environ.get("DATABASE_URL", "")
 ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "inspector", "agent", "director", "research")
+CALLER_ROLES = ("director", "main", "app", "ops", "perf", "audit", "inspector", "research", "eric")
 LEGACY_ASSIGNEE_ALIASES = {"ui": "app"}
 LEGACY_STATE_ALIASES = {"open": "analysis"}
 STATES = (
@@ -75,6 +76,7 @@ class TicketBoardApp:
             "errors": errors,
             "states": list(STATES),
             "assignees": list(ASSIGNEES),
+            "caller_roles": list(CALLER_ROLES),
             "screenshots": self.list_screenshots(),
             "store_backend": self.store_backend,
             "store_path": "postgres",

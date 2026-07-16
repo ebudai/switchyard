@@ -17,9 +17,14 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       const box = document.createElement('div');
       box.className = 'detail-box';
       const draftFields = new Map();
-      const commentWho = document.createElement('input');
-      commentWho.type = 'text';
-      commentWho.placeholder = 'who';
+      const commentWho = document.createElement('select');
+      commentWho.setAttribute('aria-label', 'Comment author');
+      const commentAuthorRoles = state.callerRoles.length
+        ? state.callerRoles
+        : ['director', 'main', 'app', 'ops', 'perf', 'audit', 'inspector', 'research', 'eric'];
+      commentAuthorRoles.forEach((role) => {
+        buildOption(commentWho, role, roleLabel(role));
+      });
       commentWho.value = ticketIsEricReview(ticket) ? 'eric' : 'director';
       bindDetailDraftField(draftFields, commentWho, 'commentWho', commentWho.value);
       const commentText = document.createElement('textarea');

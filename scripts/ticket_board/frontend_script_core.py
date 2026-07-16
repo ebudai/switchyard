@@ -18,6 +18,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       screenshots: [],
       errors: [],
       assignees: [],
+      callerRoles: [],
       selectedId: null,
       detailOpen: false,
       showDeferred: false,

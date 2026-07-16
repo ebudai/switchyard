@@ -1092,6 +1092,49 @@ WHERE t.id = 'PGU-34001';
                 "comment": "Director override: analysis/unassigned -> done/director (notification suppressed)",
             }, forced_done
 
+            insert_ticket(conninfo, "PGU-47401", title="Force move active work", assignee="app", state="analysis", implementation="active")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-47401';")
+            insert_ticket(conninfo, "PGU-47402", title="Force move queued work", assignee="unassigned", state="analysis", implementation="queued")
+            service_call(conninfo, "director", "SELECT ticket_board.force_move('PGU-47402', 'in_progress', 'app', false);")
+            force_move_queued = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'state', t.state,
+    'assignee', t.assignee,
+    'parked', t.parked,
+    'comment', (SELECT text FROM ticket_board.ticket_comments WHERE ticket_id = t.id ORDER BY position DESC LIMIT 1)
+)::text
+FROM ticket_board.tickets t
+WHERE t.id = 'PGU-47402';
+""",
+                ).stdout
+            )
+            assert force_move_queued == {
+                "state": "backlog",
+                "assignee": "app",
+                "parked": False,
+                "comment": "Director override: analysis/unassigned -> in_progress/app (queued: implementer already has active work)",
+            }, force_move_queued
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '4740101' WHERE id = 'PGU-47401';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-47401';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-47401';")
+            force_move_auto_activated = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object('state', state, 'assignee', assignee, 'parked', parked)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-47402';
+""",
+                ).stdout
+            )
+            assert force_move_auto_activated == {"state": "in_progress", "assignee": "app", "parked": False}, force_move_auto_activated
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '4740202' WHERE id = 'PGU-47402';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-47402';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-47402';")
+
             insert_ticket(conninfo, "PGU-34002", title="Force move notifies", assignee="unassigned", state="analysis")
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-34002';")
             service_call(conninfo, "director", "SELECT ticket_board.force_move('PGU-34002', 'audit', 'audit', false);")

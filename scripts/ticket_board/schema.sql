@@ -3523,6 +3523,8 @@ DECLARE
     actor text;
     current_state text;
     current_assignee text;
+    target_state text;
+    serial_focus_queued boolean := false;
 BEGIN
     actor := ticket_board.require_actor(ARRAY['director'], 'force_move');
     IF new_state NOT IN ('backlog', 'analysis', 'in_progress', 'inspection', 'audit', 'eric_review', 'director_review', 'done', 'cancelled') THEN
@@ -3541,6 +3543,14 @@ BEGIN
         RAISE EXCEPTION 'ticket not found: %', id;
     END IF;
 
+    target_state := new_state;
+    IF new_state = 'in_progress'
+       AND ticket_board.ticket_is_implementer_assignee(force_move.assignee)
+       AND ticket_board.ticket_current_reserved_ticket(force_move.assignee, force_move.id) IS NOT NULL THEN
+        target_state := 'backlog';
+        serial_focus_queued := true;
+    END IF;
+
     PERFORM set_config('ticket_board.force_move', 'on', true);
     IF suppress_notification THEN
         PERFORM set_config('ticket_board.suppress_transition_notify', 'on', true);
@@ -3556,17 +3566,21 @@ BEGIN
         || new_state
         || '/'
         || assignee
+        || CASE
+            WHEN serial_focus_queued THEN ' (queued: implementer already has active work)'
+            ELSE ''
+        END
         || CASE WHEN suppress_notification THEN ' (notification suppressed)' ELSE '' END
     );
 
     UPDATE ticket_board.tickets
-    SET state = new_state,
+    SET state = target_state,
         assignee = force_move.assignee,
         parked = false
     WHERE tickets.id = force_move.id;
     PERFORM ticket_board.touch_ticket(id);
     IF NOT suppress_notification
-       AND current_state IS NOT DISTINCT FROM new_state
+       AND current_state IS NOT DISTINCT FROM target_state
        AND current_assignee IS DISTINCT FROM assignee THEN
         PERFORM ticket_board.notify_ticket_owner_in_place_change(id, 'assignee');
     END IF;

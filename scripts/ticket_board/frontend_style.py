@@ -164,6 +164,15 @@ STYLE = """    :root {
       background: var(--accent-soft);
       border-color: rgba(125, 211, 252, 0.45);
     }
+    .attach-set-grid {
+      display: grid;
+      grid-template-columns: minmax(120px, 0.8fr) minmax(90px, 0.5fr) minmax(160px, 1fr);
+      gap: 8px;
+      align-items: end;
+    }
+    .attach-set-grid label {
+      min-width: 0;
+    }
     .attach-help {
       color: var(--muted);
       font-size: 12px;

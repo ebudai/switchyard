@@ -796,7 +796,13 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 content_type = self.headers.get("Content-Type", "")
                 if not content_type.startswith("image/"):
                     raise ValueError("upload requires an image/* Content-Type")
-                uploaded = self.app.save_uploaded_image(self.rfile.read(length))
+                query = urllib.parse.parse_qs(parsed.query)
+                uploaded = self.app.save_uploaded_image(
+                    self.rfile.read(length),
+                    upload_set=query.get("set", [""])[0],
+                    set_label=query.get("label", [""])[0],
+                    attempt_number=query.get("attempt", [""])[0],
+                )
                 self.send_json({"image": uploaded}, HTTPStatus.CREATED)
                 return
             payload = json.loads(self.rfile.read(length) or b"{}")

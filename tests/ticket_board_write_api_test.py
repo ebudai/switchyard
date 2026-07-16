@@ -226,14 +226,15 @@ def post_json(
         return body
 
 
-def upload_png(base_url: str) -> dict[str, object]:
+def upload_png(base_url: str, query: str = "") -> dict[str, object]:
     buffer = BytesIO()
     Image.new("RGB", (2, 2), (220, 90, 40)).save(buffer, format="PNG")
     headers = {"Content-Type": "image/png"}
     if TEST_WRITE_TOKEN:
         headers[WRITE_TOKEN_HEADER] = TEST_WRITE_TOKEN
+    suffix = f"?{query}" if query else ""
     request = urllib.request.Request(
-        base_url + "/api/upload",
+        base_url + "/api/upload" + suffix,
         data=buffer.getvalue(),
         headers=headers,
         method="POST",
@@ -595,6 +596,12 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     uploaded = upload_png(base_url)
     uploaded_image = uploaded["image"]  # type: ignore[index]
     uploaded_path = Path(str(uploaded_image["path"]))  # type: ignore[index]
+    target_uploaded = upload_png(base_url, "set=target")
+    assert str(target_uploaded["image"]["name"]).startswith("target__upload_"), target_uploaded  # type: ignore[index]
+    attempt_uploaded = upload_png(base_url, "set=attempt&attempt=7&label=UAT%20Rework")
+    assert str(attempt_uploaded["image"]["name"]).startswith("attempt-007-uat-rework__upload_"), attempt_uploaded  # type: ignore[index]
+    feedback_uploaded = upload_png(base_url, "set=feedback")
+    assert str(feedback_uploaded["image"]["name"]).startswith("feedback__upload_"), feedback_uploaded  # type: ignore[index]
     pasted_create_payload = post_json(
         base_url,
         "/api/tickets/actions/create_ticket",

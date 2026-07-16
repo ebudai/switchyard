@@ -672,6 +672,17 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
           itemLabel: attemptMatch[3],
         };
       }
+      const namedSetMatch = filename.match(/^([a-z0-9][a-z0-9-]*)__(.+)$/i);
+      if (namedSetMatch) {
+        const label = attachmentSetLabelSlug(namedSetMatch[1]);
+        return {
+          key: `named-${namedSetMatch[1].toLowerCase()}`,
+          type: 'named',
+          label,
+          order: 500000,
+          itemLabel: namedSetMatch[2],
+        };
+      }
       return {
         key: 'ungrouped',
         type: 'ungrouped',
@@ -715,6 +726,15 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
           return -1;
         }
         if (right.type === 'attempt' && left.type !== 'attempt') {
+          return 1;
+        }
+        if (left.type === 'named' && right.type === 'named') {
+          return left.label.localeCompare(right.label);
+        }
+        if (left.type === 'named' && right.type !== 'named') {
+          return -1;
+        }
+        if (right.type === 'named' && left.type !== 'named') {
           return 1;
         }
         return left.label.localeCompare(right.label);

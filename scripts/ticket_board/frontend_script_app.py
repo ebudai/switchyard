@@ -1,11 +1,29 @@
 """Board frontend API, event, and boot JavaScript."""
 
-SCRIPT_APP = """    async function uploadImageBlob(blob) {
+SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
+      const params = new URLSearchParams();
+      const setKind = String(setOptions.set || '').trim();
+      const label = String(setOptions.label || '').trim();
+      const attempt = String(setOptions.attempt || '').trim();
+      if (setKind) {
+        params.set('set', setKind);
+      }
+      if (label) {
+        params.set('label', label);
+      }
+      if (attempt) {
+        params.set('attempt', attempt);
+      }
+      const query = params.toString();
+      return query ? `?${query}` : '';
+    }
+
+    async function uploadImageBlob(blob, setOptions = {}) {
       const headers = { 'Content-Type': blob.type || 'image/png' };
       if (window.PGU_TICKET_BOARD_WRITE_TOKEN) {
         headers['X-PGU-Write-Token'] = window.PGU_TICKET_BOARD_WRITE_TOKEN;
       }
-      const response = await fetch('/api/upload', {
+      const response = await fetch(`/api/upload${uploadSetQuery(setOptions)}`, {
         method: 'POST',
         headers,
         body: blob,
@@ -17,11 +35,26 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       return payload.image;
     }
 
+    function readAttachmentSetOptions(root) {
+      if (!root) {
+        return {};
+      }
+      return {
+        set: root.querySelector('[data-attach-set]')?.value || '',
+        label: root.querySelector('[data-attach-label]')?.value || '',
+        attempt: root.querySelector('[data-attach-attempt]')?.value || '',
+      };
+    }
+
+    function readCreateAttachmentSetOptions() {
+      return readAttachmentSetOptions(createAttachDropZone);
+    }
+
     function imageFilesFromList(files) {
       return Array.from(files || []).filter((file) => String(file.type || '').startsWith('image/'));
     }
 
-    async function attachImageFiles(files, context) {
+    async function attachImageFiles(files, context, setOptions = {}) {
       const imageFiles = imageFilesFromList(files);
       if (!imageFiles.length) {
         throw new Error('attach requires at least one image file');
@@ -34,7 +67,7 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       setCreateStatus(`Uploading ${label}…`);
       const uploaded = [];
       for (const imageFile of imageFiles) {
-        uploaded.push(await uploadImageBlob(imageFile));
+        uploaded.push(await uploadImageBlob(imageFile, setOptions));
       }
       const uploadedPaths = uploaded.map((item) => item.path);
       await requestBoardReload();
@@ -54,7 +87,7 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       setCreateStatus(`Attached ${label} to the new ticket.`);
     }
 
-    function wireImageDropZone(dropZone, context) {
+    function wireImageDropZone(dropZone, context, getSetOptions = () => ({})) {
       if (!dropZone) {
         return;
       }
@@ -83,7 +116,7 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
         event.preventDefault();
         reset();
         try {
-          await attachImageFiles(files, context);
+          await attachImageFiles(files, context, getSetOptions());
         } catch (error) {
           setCreateStatus(error.message, true);
           await requestBoardReload();
@@ -94,7 +127,10 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
     async function attachPastedImage(image, context) {
       const label = context === 'detail' ? 'Attaching pasted screenshot…' : 'Uploading pasted screenshot…';
       setCreateStatus(label);
-      const uploaded = await uploadImageBlob(image);
+      const uploaded = await uploadImageBlob(
+        image,
+        context === 'detail' ? readAttachmentSetOptions(detailContentEl) : readCreateAttachmentSetOptions(),
+      );
       await requestBoardReload();
       if (context === 'detail') {
         const ticket = selectedTicket();
@@ -520,14 +556,14 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
     });
     createImageInput.addEventListener('change', async () => {
       try {
-        await attachImageFiles(createImageInput.files, 'create');
+        await attachImageFiles(createImageInput.files, 'create', readCreateAttachmentSetOptions());
       } catch (error) {
         setCreateStatus(error.message, true);
       } finally {
         createImageInput.value = '';
       }
     });
-    wireImageDropZone(createAttachDropZone, 'create');
+    wireImageDropZone(createAttachDropZone, 'create', readCreateAttachmentSetOptions);
     titleInput.addEventListener('keydown', submitCreateOnEnter);
     assigneeInput.addEventListener('keydown', submitCreateOnEnter);
     createBacklogInput.addEventListener('keydown', submitCreateOnEnter);

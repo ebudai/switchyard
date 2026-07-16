@@ -39,6 +39,25 @@ MARKUP = """  <div class="layout">
           </label>
           <div class="attach-panel" id="createAttachDropZone">
             <input id="createImageInput" class="visually-hidden" type="file" accept="image/*" multiple>
+            <div class="attach-set-grid">
+              <label>
+                Set
+                <select data-attach-set>
+                  <option value="">Ungrouped</option>
+                  <option value="target">Target</option>
+                  <option value="attempt">Attempt</option>
+                  <option value="feedback">Feedback</option>
+                </select>
+              </label>
+              <label>
+                Attempt #
+                <input data-attach-attempt type="number" min="1" max="999" placeholder="3">
+              </label>
+              <label>
+                Label
+                <input data-attach-label type="text" placeholder="uat rework, zoom-in, feedback">
+              </label>
+            </div>
             <button id="createAttachImageBtn" type="button">Attach image</button>
             <div class="attach-help">Choose image files, drag them here, or paste from the clipboard to attach them.</div>
           </div>

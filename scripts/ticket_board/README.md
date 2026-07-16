@@ -132,9 +132,15 @@ Notes:
 - Screenshots referenced by tickets may live in either `/tmp/pgu-frames` or `/home/agent/.claude/pgu-tickets-assets`
 - API/write-client attachment paths may still reference `/tmp/pgu-frames` as a transient inbox; once attached to a ticket, each selected image is copied into `/home/agent/.claude/pgu-tickets-assets`
 - Clipboard-pasted screenshots are normalized to PNG and staged under `/home/agent/.claude/pgu-tickets-assets` before ticket attachment
+- Web uploads can tag a set before attaching. Target uploads are saved as
+  `target__upload_<ns>.png`, attempt uploads as
+  `attempt-<NNN>-<label>__upload_<ns>.png`, and feedback/freeform labels as
+  `<label>__upload_<ns>.png`; untagged uploads keep the legacy
+  `upload_<ns>.png` name.
 - The detail view groups image attachments into collapsible sets by filename prefix:
   `target__<name>.png` goes into `Target`,
   `attempt-<NNN>-<label>__<name>.png` goes into `Render Attempt NNN - Label`,
+  `<label>__<name>.png` goes into a named set such as `Feedback`,
   and unprefixed legacy images go into `Ungrouped`. The newest numbered render
   attempt is expanded by default; older attempts, target references, and
   ungrouped images start collapsed.

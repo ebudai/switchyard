@@ -492,6 +492,36 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       detailImageInput.type = 'file';
       detailImageInput.accept = 'image/*';
       detailImageInput.multiple = true;
+      const detailSetGrid = document.createElement('div');
+      detailSetGrid.className = 'attach-set-grid';
+      const detailSetLabel = document.createElement('label');
+      detailSetLabel.textContent = 'Set';
+      const detailSetSelect = document.createElement('select');
+      detailSetSelect.dataset.attachSet = 'true';
+      [
+        ['', 'Ungrouped'],
+        ['target', 'Target'],
+        ['attempt', 'Attempt'],
+        ['feedback', 'Feedback'],
+      ].forEach(([value, label]) => buildOption(detailSetSelect, value, label));
+      detailSetLabel.appendChild(detailSetSelect);
+      const detailAttemptLabel = document.createElement('label');
+      detailAttemptLabel.textContent = 'Attempt #';
+      const detailAttemptInput = document.createElement('input');
+      detailAttemptInput.dataset.attachAttempt = 'true';
+      detailAttemptInput.type = 'number';
+      detailAttemptInput.min = '1';
+      detailAttemptInput.max = '999';
+      detailAttemptInput.placeholder = '3';
+      detailAttemptLabel.appendChild(detailAttemptInput);
+      const detailLabelLabel = document.createElement('label');
+      detailLabelLabel.textContent = 'Label';
+      const detailLabelInput = document.createElement('input');
+      detailLabelInput.dataset.attachLabel = 'true';
+      detailLabelInput.type = 'text';
+      detailLabelInput.placeholder = 'uat rework, zoom-in, feedback';
+      detailLabelLabel.appendChild(detailLabelInput);
+      detailSetGrid.append(detailSetLabel, detailAttemptLabel, detailLabelLabel);
       const detailAttachButton = document.createElement('button');
       detailAttachButton.type = 'button';
       detailAttachButton.textContent = 'Attach image';
@@ -503,7 +533,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       });
       detailImageInput.addEventListener('change', async () => {
         try {
-          await attachImageFiles(detailImageInput.files, 'detail');
+          await attachImageFiles(detailImageInput.files, 'detail', readAttachmentSetOptions(attachmentUpload));
         } catch (error) {
           setCreateStatus(error.message, true);
           await requestBoardReload();
@@ -511,8 +541,8 @@ SCRIPT_DETAIL = """    function selectedTicket() {
           detailImageInput.value = '';
         }
       });
-      attachmentUpload.append(detailImageInput, detailAttachButton, attachmentHelp);
-      wireImageDropZone(attachmentUpload, 'detail');
+      attachmentUpload.append(detailImageInput, detailSetGrid, detailAttachButton, attachmentHelp);
+      wireImageDropZone(attachmentUpload, 'detail', () => readAttachmentSetOptions(attachmentUpload));
 
       box.append(
         titleField,

@@ -47,6 +47,9 @@ class RecordingHandler(BaseHTTPRequestHandler):
         }
         if operation == "start_work":
             ticket["state"] = "in_progress"
+        elif operation == "submit_to_inspection":
+            ticket["state"] = "inspection"
+            ticket["assignee"] = "inspector"
         elif operation == "submit_to_audit":
             ticket["state"] = "audit"
         elif operation == "file_bug":
@@ -133,6 +136,9 @@ def exercise_pane_cli(base_url: str, repo: Path, commit_hash: str, local_only_ha
     submitted = run_cli(base_url, "main", repo, "submit-to-audit", "PGU-2100", "--commit-hash", commit_hash)
     assert submitted["state"] == "audit", submitted
     assert submitted["commit_hash"] == commit_hash, submitted
+    submitted_to_inspection = run_cli(base_url, "main", repo, "submit-to-inspection", "PGU-2105")
+    assert submitted_to_inspection["state"] == "inspection", submitted_to_inspection
+    assert submitted_to_inspection["assignee"] == "inspector", submitted_to_inspection
     exempt_submitted = run_cli(base_url, "main", repo, "submit-to-audit", "PGU-2103")
     assert exempt_submitted["state"] == "audit", exempt_submitted
     assert exempt_submitted["commit_hash"] == "", exempt_submitted
@@ -163,6 +169,7 @@ def assert_pane_requests(requests: list[tuple[str, str | None, dict[str, object]
     pairs = [(path, caller_role) for path, caller_role, _ in requests]
     assert ("/api/tickets/PGU-2100/actions/start_work", "main") in pairs
     assert ("/api/tickets/PGU-2100/actions/submit_to_audit", "main") in pairs
+    assert ("/api/tickets/PGU-2105/actions/submit_to_inspection", "main") in pairs
     assert ("/api/tickets/PGU-2103/actions/submit_to_audit", "main") in pairs
     assert ("/api/tickets/actions/file_bug", "app") in pairs
     assert ("/api/tickets/PGU-2102/actions/add_comment", "ops") in pairs
@@ -172,6 +179,8 @@ def assert_pane_requests(requests: list[tuple[str, str | None, dict[str, object]
         assert "/actions/" in path, (path, caller_role)
     empty_submit = next(payload for path, _, payload in requests if path == "/api/tickets/PGU-2103/actions/submit_to_audit")
     assert empty_submit == {"commit_hash": ""}, empty_submit
+    inspection_submit = next(payload for path, _, payload in requests if path == "/api/tickets/PGU-2105/actions/submit_to_inspection")
+    assert inspection_submit == {}, inspection_submit
 
 
 def main() -> int:

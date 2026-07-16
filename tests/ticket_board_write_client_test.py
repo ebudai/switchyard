@@ -52,6 +52,9 @@ class RecordingHandler(BaseHTTPRequestHandler):
         }
         if operation == "start_work":
             ticket["state"] = "in_progress"
+        elif operation == "submit_to_inspection":
+            ticket["state"] = "inspection"
+            ticket["assignee"] = "inspector"
         elif operation in {"force_move", "override_move"}:
             ticket["state"] = payload.get("state", "analysis")
             ticket["assignee"] = payload.get("assignee", caller or "director")
@@ -158,6 +161,7 @@ def assert_action_requests(requests: list[tuple[str, str | None, dict[str, objec
     assert ("/api/tickets/PGU-115/actions/force_move", "director") in pairs
     assert ("/api/tickets/PGU-116/actions/override_move", "director") in pairs
     assert ("/api/tickets/PGU-101/actions/start_work", "ops") in pairs
+    assert ("/api/tickets/PGU-101/actions/submit_to_inspection", "ops") in pairs
     assert ("/api/tickets/PGU-101/actions/submit_to_audit", "ops") in pairs
     assert ("/api/tickets/PGU-121/actions/request_commit_exempt", "ops") in pairs
     assert ("/api/tickets/PGU-124/actions/start_task", "inspector") in pairs
@@ -189,6 +193,9 @@ def exercise_client(base_url: str, repo: Path, commit_hash: str) -> None:
         assert overridden["ticket"]["state"] == "cancelled"
         assert overridden["ticket"]["assignee"] == "director"
         assert client.start_work("PGU-101", caller_role="ops")["ticket"]["state"] == "in_progress"
+        inspected = client.submit_to_inspection("PGU-101", caller_role="ops")
+        assert inspected["ticket"]["state"] == "inspection"
+        assert inspected["ticket"]["assignee"] == "inspector"
         assert client.submit_to_audit("PGU-101", commit_hash=commit_hash, caller_role="ops")["ticket"]["state"] == "audit"
         assert client.submit_to_audit("PGU-113", caller_role="ops")["ticket"]["commit_hash"] == ""
         requested = client.request_commit_exempt("PGU-121", reason="No repo change for this ticket.", caller_role="ops")

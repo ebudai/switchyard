@@ -42,7 +42,8 @@ Pane write API:
 - The Unix-socket registration allows one live PID per pane role. Duplicate
   live registrations are rejected and logged; the registration is released when
   the socket connection closes, and stale dead-PID registrations are dropped.
-- Ticket-scoped operations are `route`, `start_work`, `submit_to_audit`,
+- Ticket-scoped operations are `route`, `start_work`, `submit_to_inspection`,
+  `submit_to_audit`,
   `audit_sign_off`, `audit_kick_back`, `eric_sign_off`, `eric_reopen`,
   `mark_done`, `defer`, `cancel`, `set_manually_controlled`, `set_blockers`,
   `add_comment`, `edit_fields`, and `merge`.
@@ -56,6 +57,7 @@ Pane write API:
   different board role.
 - The main/app/ops panes should use their own role for allowed pane operations,
   for example `scripts/ticket-board-write start-work PGU-123`,
+  `scripts/ticket-board-write submit-to-inspection PGU-123`,
   `scripts/ticket-board-write submit-to-audit PGU-123 --commit-hash <sha>`,
   `scripts/ticket-board-write file-bug --source-ticket-id PGU-123 ...`, and
   `scripts/ticket-board-write add-comment PGU-123 --text ...`.

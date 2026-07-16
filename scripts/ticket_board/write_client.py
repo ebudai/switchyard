@@ -357,6 +357,9 @@ class TicketBoardWriteClient:
         self._require_commit_pushed_to_origin(commit_hash, operation="submit_to_audit")
         return self._ticket_action(ticket_id, "submit_to_audit", {"commit_hash": commit_hash}, caller_role=caller_role)
 
+    def submit_to_inspection(self, ticket_id: str, *, caller_role: str | None = None) -> dict[str, Any]:
+        return self._ticket_action(ticket_id, "submit_to_inspection", caller_role=caller_role)
+
     def request_commit_exempt(self, ticket_id: str, *, reason: str, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "request_commit_exempt", {"reason": reason}, caller_role=caller_role)
 
@@ -531,6 +534,9 @@ def _build_parser() -> argparse.ArgumentParser:
     submit.add_argument("ticket_id")
     submit.add_argument("--commit-hash", default="")
 
+    submit_inspection = subparsers.add_parser("submit-to-inspection")
+    submit_inspection.add_argument("ticket_id")
+
     request_exempt = subparsers.add_parser("request-commit-exempt")
     request_exempt.add_argument("ticket_id")
     request_exempt.add_argument("--reason", required=True)
@@ -616,6 +622,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif command == "submit_to_audit":
             response = client.submit_to_audit(args.ticket_id, commit_hash=args.commit_hash)
+        elif command == "submit_to_inspection":
+            response = client.submit_to_inspection(args.ticket_id)
         elif command == "request_commit_exempt":
             response = client.request_commit_exempt(args.ticket_id, reason=args.reason)
         elif command == "start_task":

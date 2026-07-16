@@ -651,7 +651,22 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       if (ticket.comments.length) {
         const list = document.createElement('div');
         list.className = 'comment-list';
-        ticket.comments.forEach((comment) => {
+        const sortedComments = ticket.comments
+          .map((comment, index) => ({ comment, index }))
+          .sort((left, right) => {
+            const leftTime = Date.parse(left.comment.ts || '');
+            const rightTime = Date.parse(right.comment.ts || '');
+            const leftValid = Number.isFinite(leftTime);
+            const rightValid = Number.isFinite(rightTime);
+            if (leftValid && rightValid && leftTime !== rightTime) {
+              return rightTime - leftTime;
+            }
+            if (leftValid !== rightValid) {
+              return leftValid ? -1 : 1;
+            }
+            return right.index - left.index;
+          });
+        sortedComments.forEach(({ comment }) => {
           const item = document.createElement('div');
           item.className = 'comment';
           const header = document.createElement('div');

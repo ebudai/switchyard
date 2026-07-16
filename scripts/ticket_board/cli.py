@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import signal
 import sys
 import threading
 import webbrowser
@@ -81,13 +82,42 @@ def run_server(args: argparse.Namespace) -> int:
     print("[ticket-board] press Ctrl+C to stop")
     if args.open_browser:
         threading.Timer(0.25, lambda: webbrowser.open(url)).start()
+    shutdown_started = threading.Event()
+    shutdown_complete = threading.Event()
+
+    def request_shutdown(signum: int, _frame: object) -> None:
+        if shutdown_started.is_set():
+            return
+        shutdown_started.set()
+        signal_name = signal.Signals(signum).name
+        print(f"\n[ticket-board] received {signal_name}; stopping")
+
+        def shutdown_servers() -> None:
+            try:
+                if unix_server is not None:
+                    unix_server.shutdown()
+                server.shutdown()
+            finally:
+                shutdown_complete.set()
+
+        threading.Thread(target=shutdown_servers, name="ticket-board-shutdown", daemon=True).start()
+
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGTERM, request_shutdown)
+    signal.signal(signal.SIGINT, request_shutdown)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\n[ticket-board] stopping")
     finally:
-        if unix_server is not None:
+        signal.signal(signal.SIGTERM, previous_sigterm)
+        signal.signal(signal.SIGINT, previous_sigint)
+        if shutdown_started.is_set():
+            shutdown_complete.wait(timeout=5)
+        elif unix_server is not None:
             unix_server.shutdown()
+        if unix_server is not None:
             unix_server.server_close()
         if unix_thread is not None:
             unix_thread.join(timeout=2)

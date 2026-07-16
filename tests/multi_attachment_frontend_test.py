@@ -16,10 +16,18 @@ from scripts.ticket_board.frontend import HTML
 def main() -> int:
     assert "pendingCreateScreenshots" in HTML
     assert ".attachment-gallery" in HTML
+    assert ".attachment-set-list" in HTML
+    assert "function parseAttachmentSet(path)" in HTML
+    assert "function groupAttachmentEntries(entries)" in HTML
+    assert "function renderAttachmentSetGroups(container, entries, removeLabel, onRemove, onOpen = null)" in HTML
+    assert "filename.match(/^target__(.+)$/i)" in HTML
+    assert "filename.match(/^attempt-(\\d+)(?:-(.+?))?__(.+)$/i)" in HTML
+    assert "newestAttempt.open = true;" in HTML
     assert ".attachment-remove" in HTML
     assert ".attachment-card-clickable" in HTML
     assert "ticketScreenshotEntries(ticket).length" in HTML
     assert "screenshots: ticketScreenshotPaths(ticket).filter((item) => item !== path)" in HTML
+    assert "renderAttachmentSetGroups(groups, entries, 'Remove attachment'" in HTML
     assert "state.pendingCreateScreenshots = uniquePaths([...state.pendingCreateScreenshots, uploaded.path]);" in HTML
     assert "imageLightboxOverlay" in HTML
     assert "imageLightboxCloseBtn" in HTML

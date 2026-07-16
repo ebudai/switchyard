@@ -154,6 +154,30 @@ STYLE = """    :root {
       grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
       gap: 10px;
     }
+    .attachment-set-list {
+      display: grid;
+      gap: 12px;
+    }
+    .attachment-set {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: rgba(255,255,255,0.025);
+      overflow: hidden;
+    }
+    .attachment-set-summary {
+      cursor: pointer;
+      padding: 10px 12px;
+      color: var(--text);
+      font-weight: 700;
+      background: rgba(125, 211, 252, 0.055);
+      border-bottom: 1px solid transparent;
+    }
+    .attachment-set[open] .attachment-set-summary {
+      border-bottom-color: var(--border);
+    }
+    .attachment-set .attachment-gallery {
+      padding: 12px;
+    }
     .attachment-card {
       position: relative;
       display: grid;

@@ -393,6 +393,37 @@ SELECT ticket_board.notify_due_nudges(clock_timestamp(), interval '5 minutes', 3
                 "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-45121' AND kind IN ('nudge', 'escalation');",
             ).stdout.strip()
             assert queued_nudge_count == "0", queued_nudge_count
+            psql(
+                conninfo,
+                """
+UPDATE ticket_board.ticket_notification_state
+SET entered_current_state_at = clock_timestamp() - interval '20 minutes',
+    last_activity_at = clock_timestamp() - interval '20 minutes',
+    last_nudged_at = clock_timestamp() - interval '10 minutes',
+    nudge_count = 3
+WHERE ticket_id = 'PGU-45121';
+DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-45121';
+GRANT EXECUTE ON FUNCTION ticket_board.notify_idle_stall_nudges(jsonb, timestamptz, interval, interval, integer) TO ticket_board_listener;
+SET ROLE ticket_board_listener;
+WITH params AS (
+    SELECT clock_timestamp() AS now_at
+)
+SELECT ticket_board.notify_idle_stall_nudges(
+    jsonb_build_object('director', (now_at - interval '2 minutes')::text),
+    now_at,
+    interval '45 seconds',
+    interval '5 minutes',
+    2
+)
+FROM params;
+RESET ROLE;
+""",
+            )
+            queued_idle_stall_nudge_count = psql(
+                conninfo,
+                "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-45121' AND kind IN ('nudge', 'escalation');",
+            ).stdout.strip()
+            assert queued_idle_stall_nudge_count == "0", queued_idle_stall_nudge_count
             service_call(conninfo, "director", "SELECT ticket_board.defer('PGU-45120');")
             park_activated = json.loads(
                 psql(

@@ -56,12 +56,35 @@ PANE
         fi
         ;;
       director-typing)
-        cat <<'PANE'
+        if [ "$count" -lt 2 ]; then
+          cat <<'PANE'
 old output
 ──────────────────────────────────────────────────────────────────────────────────────────── Director ──
 ❯ Eric is typing a message
 ────────────────────────────────────────────────────────────────────────────────────────────────────────
 PANE
+        else
+          cat <<'PANE'
+old output
+Working
+esc to interrupt
+PANE
+        fi
+        ;;
+      director-agent-output)
+        if [ "$count" -lt 2 ]; then
+          cat <<'PANE'
+old output
+Claude is using a tool
+● Running shell command
+PANE
+        else
+          cat <<'PANE'
+old output
+Working
+esc to interrupt
+PANE
+        fi
         ;;
       empty)
         ;;
@@ -142,6 +165,13 @@ if [[ "$callback_stdout" != "directorctl: delivered to pgu-director:0.0 (28 char
     exit 1
 fi
 
+reset_tmux_state director-agent-output
+agent_stdout="$(run_directorctl callback 'agent director should queue this')"
+if [[ "$agent_stdout" != "directorctl: delivered to pgu-director:0.0 (32 chars)" ]]; then
+    echo "FAIL: markerless agent-output callback did not deliver: $agent_stdout" >&2
+    exit 1
+fi
+
 reset_tmux_state failure
 failure_stdout="$TMPDIR_T/failure.stdout"
 failure_stderr="$TMPDIR_T/failure.stderr"
@@ -160,29 +190,41 @@ if ! grep -q -- "warning: pgu-ops:0.0 did not show a submission transition" "$fa
     exit 1
 fi
 
-for mode in director-typing empty capture-fail; do
-    reset_tmux_state "$mode"
-    hold_stdout="$TMPDIR_T/$mode.stdout"
-    hold_stderr="$TMPDIR_T/$mode.stderr"
-    if run_directorctl callback 'do not clobber Eric' >"$hold_stdout" 2>"$hold_stderr"; then
-        echo "FAIL: expected $mode director callback to hold delivery" >&2
-        exit 1
-    fi
-    if [ -s "$hold_stdout" ]; then
-        echo "FAIL: $mode hold printed a false success line" >&2
-        cat "$hold_stdout" >&2
-        exit 1
-    fi
-    if [ -s "$TMUX_LOG" ]; then
-        echo "FAIL: $mode hold sent keys into the director pane" >&2
-        cat "$TMUX_LOG" >&2
-        exit 1
-    fi
-    if ! grep -q -- "director is typing after 0 attempts; holding delivery" "$hold_stderr"; then
-        echo "FAIL: $mode hold did not report held delivery" >&2
-        cat "$hold_stderr" >&2
-        exit 1
-    fi
-done
+reset_tmux_state director-typing
+typing_stdout="$TMPDIR_T/director-typing.stdout"
+typing_stderr="$TMPDIR_T/director-typing.stderr"
+if ! run_directorctl callback 'do not starve Eric escalation' >"$typing_stdout" 2>"$typing_stderr"; then
+    echo "FAIL: bounded director typing callback did not eventually deliver" >&2
+    cat "$typing_stderr" >&2
+    exit 1
+fi
+if ! grep -q -- "director still appears to be typing after 0 attempts; delivering anyway" "$typing_stderr"; then
+    echo "FAIL: bounded director typing callback did not warn" >&2
+    cat "$typing_stderr" >&2
+    exit 1
+fi
+if ! grep -q -- "-l do not starve Eric escalation" "$TMUX_LOG"; then
+    echo "FAIL: bounded director typing callback did not send payload" >&2
+    cat "$TMUX_LOG" >&2
+    exit 1
+fi
+if [[ "$(cat "$typing_stdout")" != "directorctl: delivered to pgu-director:0.0 (29 chars)" ]]; then
+    echo "FAIL: bounded director typing callback success output mismatch" >&2
+    cat "$typing_stdout" >&2
+    exit 1
+fi
+
+reset_tmux_state capture-fail
+capture_fail_stdout="$TMPDIR_T/capture-fail.stdout"
+capture_fail_stderr="$TMPDIR_T/capture-fail.stderr"
+if run_directorctl callback 'capture still fails fast' >"$capture_fail_stdout" 2>"$capture_fail_stderr"; then
+    echo "FAIL: expected capture-fail callback to fail verification" >&2
+    exit 1
+fi
+if ! grep -q -- "director still appears to be typing after 0 attempts; delivering anyway" "$capture_fail_stderr"; then
+    echo "FAIL: capture-fail callback did not leave the bounded wait" >&2
+    cat "$capture_fail_stderr" >&2
+    exit 1
+fi
 
 echo "directorctl_success_output_test: ok"

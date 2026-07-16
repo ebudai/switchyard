@@ -253,7 +253,8 @@ Do not deploy the listener first. Until each pane writes hook state, the
 listener intentionally treats that pane as busy and holds notification delivery.
 
 The director pane also uses cursor/composer checks as a no-clobber latch. The
-listener treats unavailable cursor state as busy, and `directorctl` is a final
-guard: if the director composer is active or unreadable, bounded notification
-delivery exits without sending keys so the listener can requeue instead of
-splicing into human input.
+listener treats unavailable cursor state as busy. `directorctl` is a final
+guard only for a positively detected non-empty human composer: markerless
+agent/tool output is delivered to the director, and a still-busy composer waits
+only for the bounded retry count before delivering with a warning so
+pane-to-director escalations cannot starve forever.

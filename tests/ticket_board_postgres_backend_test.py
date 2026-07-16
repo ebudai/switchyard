@@ -212,6 +212,28 @@ WHERE table_schema = 'ticket_board'
                 regression=True,
             )
             assert created_regression["regression"] is True, created_regression
+            created_needs_uat = service_app.create_ticket(
+                title="Postgres create requires UAT",
+                body="Created with UAT requirement up front.",
+                screenshot=None,
+                assignee="unassigned",
+                needs_eric_signoff=True,
+            )
+            assert created_needs_uat["needs_eric_signoff"] is True, created_needs_uat
+            needs_uat_db_state = json.loads(
+                psql(
+                    admin_conn,
+                    f"""
+SELECT jsonb_build_object(
+    'needs_eric_signoff', needs_eric_signoff,
+    'source_needs_eric_signoff', source_json->'needs_eric_signoff'
+)::text
+FROM ticket_board.tickets
+WHERE id = '{created_needs_uat["id"]}';
+""",
+                )
+            )
+            assert needs_uat_db_state == {"needs_eric_signoff": True, "source_needs_eric_signoff": True}, needs_uat_db_state
             regression_db_state = json.loads(
                 psql(
                     admin_conn,

@@ -646,7 +646,7 @@ ORDER BY t.ticket_number
         audit_prompt = self._require_plain_string(audit_prompt, "audit_prompt")
         if audit_prompt.strip():
             raise ValueError("postgres function API does not support audit_prompt writes yet")
-        if audit_signoff or inspector_signoff or needs_eric_signoff or eric_signoff:
+        if audit_signoff or inspector_signoff or eric_signoff:
             raise ValueError("postgres function API does not support initial signoff fields yet")
         if commit_hash or commit_exempt:
             raise ValueError("postgres function API does not support initial commit fields yet")
@@ -663,20 +663,24 @@ ORDER BY t.ticket_number
                     self._pg_set_notification_source_role(conn, notification_source_role)
                 self._validate_blocker_ticket_states(conn, blocked_by)
                 parent_id = "" if parent_id in (None, "", "null") else str(parent_id).strip().upper()
+                created_via_file_bug = False
                 if parent_id and create_state == "analysis" and not blocked_by:
                     ticket_id = self._pg_call_scalar(
                         conn,
                         "SELECT ticket_board.file_bug(%s, %s, %s) AS id;",
                         (title, body.strip(), parent_id),
                     )
+                    created_via_file_bug = True
                 else:
                     ticket_id = self._pg_call_scalar(
                         conn,
-                        "SELECT ticket_board.create_ticket(%s, %s, %s, %s, %s) AS id;",
-                        (title, body.strip(), create_state, blocked_by, blocked_reason),
+                        "SELECT ticket_board.create_ticket(%s, %s, %s, %s, %s, %s) AS id;",
+                        (title, body.strip(), create_state, blocked_by, blocked_reason, needs_eric_signoff),
                     )
                     if parent_id:
                         self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps({"parent_id": parent_id})))
+                if created_via_file_bug and needs_eric_signoff:
+                    self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps({"needs_eric_signoff": True})))
                 if implementation:
                     self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps({"implementation": implementation})))
                 if needs_inspection:

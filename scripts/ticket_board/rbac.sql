@@ -52,6 +52,7 @@ GRANT SELECT ON ticket_board.schema_migrations TO director, eric, ops, app, audi
 GRANT EXECUTE ON FUNCTION ticket_board.create_ticket(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.create_ticket(text, text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.create_ticket(text, text, text, text[], text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.create_ticket(text, text, text, text[], text, boolean) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.file_bug(text, text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.file_bug(text, text, text) TO audit;
 GRANT EXECUTE ON FUNCTION ticket_board.route(text, text, text) TO ticket_board_service;

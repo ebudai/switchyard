@@ -22,6 +22,7 @@ WRITE_FUNCTIONS = [
     "ticket_board.create_ticket(text,text)",
     "ticket_board.create_ticket(text,text,text)",
     "ticket_board.create_ticket(text,text,text,text[],text)",
+    "ticket_board.create_ticket(text,text,text,text[],text,boolean)",
     "ticket_board.file_bug(text,text,text)",
     "ticket_board.route(text,text,text)",
     "ticket_board.force_move(text,text,text,boolean)",

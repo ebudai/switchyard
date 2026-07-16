@@ -3294,7 +3294,8 @@ CREATE OR REPLACE FUNCTION ticket_board.create_ticket(
     body text,
     initial_state text,
     blocked_by text[],
-    blocked_reason text
+    blocked_reason text,
+    needs_eric_signoff boolean
 )
 RETURNS text
 LANGUAGE plpgsql
@@ -3340,6 +3341,7 @@ BEGIN
         state,
         assignee,
         parked,
+        needs_eric_signoff,
         created_text,
         updated_text,
         created_at,
@@ -3353,6 +3355,7 @@ BEGIN
         normalized_state,
         normalized_assignee,
         normalized_parked,
+        coalesce(needs_eric_signoff, false),
         created_text_value,
         created_text_value,
         created_at_value,
@@ -3364,6 +3367,7 @@ BEGIN
             'state', normalized_state,
             'assignee', normalized_assignee,
             'parked', normalized_parked,
+            'needs_eric_signoff', coalesce(needs_eric_signoff, false),
             'comments', '[]'::jsonb,
             'created', created_text_value,
             'updated', created_text_value
@@ -3376,6 +3380,22 @@ BEGIN
     PERFORM ticket_board.refresh_ticket_source_json(ticket_id);
     RETURN ticket_id;
 END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.create_ticket(
+    title text,
+    body text,
+    initial_state text,
+    blocked_by text[],
+    blocked_reason text
+)
+RETURNS text
+LANGUAGE sql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+    SELECT ticket_board.create_ticket(title, body, initial_state, blocked_by, blocked_reason, false);
 $$;
 
 CREATE OR REPLACE FUNCTION ticket_board.create_ticket(

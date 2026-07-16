@@ -287,9 +287,24 @@ def sequenced_cursor_runner(*outputs: str) -> Any:
     return runner
 
 
+def sequenced_capture_runner(*outputs: str) -> Any:
+    values = list(outputs)
+    fallback = values[-1] if values else ""
+
+    def runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        value = values.pop(0) if values else fallback
+        return subprocess.CompletedProcess(args, 0, stdout=value)
+
+    return runner
+
+
 def hook_gate(tmp_path: Path) -> tuple[PaneHookStateStore, PaneActivityGate]:
     store = PaneHookStateStore(tmp_path)
-    return store, PaneActivityGate(state_store=store, cursor_position_runner=constant_cursor_runner())
+    return store, PaneActivityGate(
+        state_store=store,
+        cursor_position_runner=constant_cursor_runner(),
+        capture_pane_runner=sequenced_capture_runner(""),
+    )
 
 
 def test_hook_state_writer_and_gate_idle_before_arrival_delivers_immediately() -> None:
@@ -510,6 +525,91 @@ def test_listener_enqueues_idle_stall_nudges_from_hook_state() -> None:
         assert set(idle_since) == {"ops"}
         assert idle_since["ops"].startswith("1970-01-01T00:01:40")
         assert params[1:] == ("45 seconds", "300 seconds", 2)
+
+
+def test_advancing_working_timer_suppresses_idle_stall_nudge() -> None:
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            cursor_position_runner=constant_cursor_runner(),
+            capture_pane_runner=sequenced_capture_runner(
+                "Working (12s · esc to interrupt)\n",
+                "Working (13s · esc to interrupt)\n",
+            ),
+            working_timer_sample_delay_seconds=1.1,
+            sleeper=lambda _seconds: None,
+        )
+        store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
+        conn = FakeConnection(idle_stall_result=1)
+        listener = TicketBoardNotifyListener(
+            conninfo="",
+            activity_gate=gate.is_working,
+            sender=lambda _target, _message: None,
+            idle_stall_grace_seconds=45,
+            idle_stall_nudge_cadence_seconds=300,
+            idle_stall_escalate_after=2,
+        )
+
+        assert listener.process_idle_stall_nudges(conn) == 0
+
+    assert conn.idle_stall_calls == []
+    assert gate.last_trace("pgu-ops:0.0").reason == "working_timer"  # type: ignore[union-attr]
+
+
+def test_static_working_timer_does_not_suppress_idle_stall_nudge() -> None:
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            cursor_position_runner=constant_cursor_runner(),
+            capture_pane_runner=sequenced_capture_runner(
+                "Working (12s · esc to interrupt)\n",
+                "Working (12s · esc to interrupt)\n",
+            ),
+            working_timer_sample_delay_seconds=1.1,
+            sleeper=lambda _seconds: None,
+        )
+        store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
+        conn = FakeConnection(idle_stall_result=1)
+        listener = TicketBoardNotifyListener(
+            conninfo="",
+            activity_gate=gate.is_working,
+            sender=lambda _target, _message: None,
+            idle_stall_grace_seconds=45,
+            idle_stall_nudge_cadence_seconds=300,
+            idle_stall_escalate_after=2,
+        )
+
+        assert listener.process_idle_stall_nudges(conn) == 1
+
+        assert len(conn.idle_stall_calls) == 1
+        params = conn.idle_stall_calls[0]
+        assert params is not None
+        idle_since = json.loads(str(params[0]))
+        assert set(idle_since) == {"ops"}
+        assert gate.last_trace("pgu-ops:0.0").reason == "hook_idle"  # type: ignore[union-attr]
+
+
+def test_cached_working_timer_increment_suppresses_next_idle_since_scan() -> None:
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            cursor_position_runner=constant_cursor_runner(),
+            capture_pane_runner=sequenced_capture_runner(
+                "Working (12s · esc to interrupt)\n",
+                "Working (12s · esc to interrupt)\n",
+                "Working (18s · esc to interrupt)\n",
+            ),
+            working_timer_sample_delay_seconds=1.1,
+            sleeper=lambda _seconds: None,
+        )
+        store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
+
+        assert set(gate.idle_since_by_role(["ops"])) == {"ops"}
+        assert gate.idle_since_by_role(["ops"]) == {}
+        assert gate.last_trace("pgu-ops:0.0").reason == "working_timer"  # type: ignore[union-attr]
 
 
 def test_listener_enqueues_idle_turn_end_nudges_on_each_turn_completion_idle() -> None:

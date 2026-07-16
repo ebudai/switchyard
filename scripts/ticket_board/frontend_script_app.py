@@ -364,7 +364,7 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       }
 
       if (patch.comment && !consumedComment) {
-        await updateTicketAction(ticketId, 'add_comment', { text: patch.comment.text || '' }, normalizedCaller);
+        await updateTicketAction(ticketId, 'add_comment', { text: patch.comment.text || '', urgent: !!patch.comment.urgent }, normalizedCaller);
         consumed.add('comment');
       }
 
@@ -388,7 +388,7 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       setCreateStatus(`Merged ${sourceTicketId} into ${targetTicketId}.`);
     }
 
-    async function submitComment(ticketId, who, text, nextState = null) {
+    async function submitComment(ticketId, who, text, nextState = null, urgent = false) {
       const trimmedWho = who.trim();
       const trimmedText = text.trim();
       if (!trimmedWho || !trimmedText) {
@@ -398,6 +398,7 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
         comment: {
           who: trimmedWho,
           text: trimmedText,
+          urgent: !!urgent,
         },
       };
       if (nextState) {

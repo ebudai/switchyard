@@ -269,6 +269,15 @@ STYLE = """    :root {
       gap: 10px;
       margin-bottom: 12px;
     }
+    .urgent-comment-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      width: fit-content;
+      color: var(--muted);
+      font-size: 0.9rem;
+      font-weight: 700;
+    }
     .board-scroll {
       overflow-x: auto;
       overflow-y: visible;
@@ -880,6 +889,17 @@ STYLE = """    :root {
       padding: 10px 0 10px 12px;
       background: rgba(255,255,255,0.02);
       border-radius: 0 8px 8px 0;
+    }
+    .comment-urgent-marker {
+      display: inline-block;
+      margin-left: 8px;
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: rgba(248, 113, 113, 0.16);
+      color: #fecaca;
+      font-size: 0.72rem;
+      font-weight: 800;
+      letter-spacing: 0.04em;
     }
     @media (max-width: 1200px) {
       .detail-grid { grid-template-columns: 1fr; }

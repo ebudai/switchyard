@@ -45,6 +45,7 @@ WRITE_FUNCTIONS = [
     "ticket_board.set_manually_controlled(text,boolean)",
     "ticket_board.set_blockers(text,text[],text)",
     "ticket_board.add_comment(text,text)",
+    "ticket_board.add_comment(text,text,boolean)",
     "ticket_board.edit_fields(text,jsonb)",
     "ticket_board.merge(text,text)",
 ]

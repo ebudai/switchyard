@@ -1191,7 +1191,10 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     assert get_ticket(base_url, "PGU-111")["blocked_reason"] == "Waiting on blocker."
     comment = post_json(base_url, "/api/tickets/PGU-112/actions/add_comment", {"text": "Pane note."}, caller="app")
     assert comment["ticket"]["comments"][-1]["who"] == "app", comment  # type: ignore[index]
+    assert comment["ticket"]["comments"][-1]["urgent"] is False, comment  # type: ignore[index]
     assert get_ticket(base_url, "PGU-112")["comments"][-1]["text"] == "Pane note."
+    urgent_comment = post_json(base_url, "/api/tickets/PGU-112/actions/add_comment", {"text": "Urgent pane note.", "urgent": True}, caller="app")
+    assert urgent_comment["ticket"]["comments"][-1]["urgent"] is True, urgent_comment  # type: ignore[index]
     edited = post_json(base_url, "/api/tickets/PGU-112/actions/edit_fields", {"title": "Edited through action"}, caller="app")
     assert edited["ticket"]["title"] == "Edited through action", edited  # type: ignore[index]
     invalid_edit = post_json(base_url, "/api/tickets/PGU-112/actions/edit_fields", {"state": "done"}, caller="app", expect=400)

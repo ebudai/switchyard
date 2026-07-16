@@ -442,8 +442,8 @@ class TicketBoardWriteClient:
             caller_role=caller_role,
         )
 
-    def add_comment(self, ticket_id: str, *, text: str, caller_role: str | None = None) -> dict[str, Any]:
-        return self._ticket_action(ticket_id, "add_comment", {"text": text}, caller_role=caller_role)
+    def add_comment(self, ticket_id: str, *, text: str, urgent: bool = False, caller_role: str | None = None) -> dict[str, Any]:
+        return self._ticket_action(ticket_id, "add_comment", {"text": text, "urgent": urgent}, caller_role=caller_role)
 
 
 def _ticket_from_response(response: dict[str, Any]) -> dict[str, Any]:
@@ -579,6 +579,7 @@ def _build_parser() -> argparse.ArgumentParser:
     comment = subparsers.add_parser("add-comment")
     comment.add_argument("ticket_id")
     comment.add_argument("--text", required=True)
+    comment.add_argument("--urgent", action="store_true")
     return parser
 
 
@@ -653,7 +654,7 @@ def main(argv: list[str] | None = None) -> int:
         elif command == "set_blockers":
             response = client.set_blockers(args.ticket_id, blocked_by=args.blocked_by, blocked_reason=args.blocked_reason)
         elif command == "add_comment":
-            response = client.add_comment(args.ticket_id, text=args.text)
+            response = client.add_comment(args.ticket_id, text=args.text, urgent=args.urgent)
         else:
             response = getattr(client, command)(args.ticket_id)
     except TicketBoardWriteError as exc:

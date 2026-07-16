@@ -477,7 +477,7 @@ SELECT
         '[]'::jsonb
     ) AS blockers,
     COALESCE(
-        (SELECT jsonb_agg(jsonb_build_object('who', c.who, 'text', c.text, 'ts', c.ts_text) ORDER BY c.position)
+        (SELECT jsonb_agg(jsonb_build_object('who', c.who, 'text', c.text, 'ts', c.ts_text, 'urgent', c.urgent) ORDER BY c.position)
          FROM ticket_board.ticket_comments c
          WHERE c.ticket_id = t.id),
         '[]'::jsonb
@@ -652,7 +652,7 @@ ORDER BY t.ticket_number
                     self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps(attachment_patch)))
                 for comment in normalized_comments:
                     self._pg_set_caller_role(conn, comment["who"])
-                    self._pg_call(conn, "SELECT ticket_board.add_comment(%s, %s);", (ticket_id, comment["text"]))
+                    self._pg_call(conn, "SELECT ticket_board.add_comment(%s, %s, %s);", (ticket_id, comment["text"], bool(comment.get("urgent", False))))
                 return self._pg_get_ticket(ticket_id, conn)
 
     def _pg_update_ticket(self, ticket_id: str, patch: dict[str, Any], *, caller_role: str | None = None) -> dict[str, Any]:
@@ -757,7 +757,7 @@ ORDER BY t.ticket_number
                     self._pg_call(conn, "SELECT ticket_board.route(%s, %s, %s);", (ticket_id, current["state"], assignee))
 
                 if comment_text:
-                    self._pg_call(conn, "SELECT ticket_board.add_comment(%s, %s);", (ticket_id, comment_text))
+                    self._pg_call(conn, "SELECT ticket_board.add_comment(%s, %s, %s);", (ticket_id, comment_text, bool(comment.get("urgent", False)) if "comment" in patch else False))
                 return self._pg_get_ticket(ticket_id, conn)
 
     def request_commit_exempt(self, ticket_id: str, reason: str, *, caller_role: str) -> dict[str, Any]:
@@ -871,10 +871,10 @@ ORDER BY t.ticket_number
             edit_fields["screenshots"] = paths
             edit_fields["screenshot"] = paths[0] if paths else ""
 
-    def _validate_comments(self, raw: Any) -> list[dict[str, str]]:
+    def _validate_comments(self, raw: Any) -> list[dict[str, Any]]:
         if not isinstance(raw, list):
             raise ValueError("comments must be a list")
-        comments: list[dict[str, str]] = []
+        comments: list[dict[str, Any]] = []
         for item in raw:
             if not isinstance(item, dict):
                 raise ValueError("comment entries must be objects")
@@ -883,6 +883,7 @@ ORDER BY t.ticket_number
                     "who": self._require_text(item.get("who"), "comment.who"),
                     "text": self._require_text(item.get("text"), "comment.text"),
                     "ts": self._require_text(item.get("ts"), "comment.ts"),
+                    "urgent": bool(item.get("urgent", False)),
                 }
             )
         return comments

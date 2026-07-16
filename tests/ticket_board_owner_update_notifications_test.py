@@ -200,6 +200,7 @@ GRANT EXECUTE ON FUNCTION ticket_board.route(text, text, text) TO ticket_board_s
 GRANT EXECUTE ON FUNCTION ticket_board.edit_fields(text, jsonb) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.set_blockers(text, text[], text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.add_comment(text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.add_comment(text, text, boolean) TO ticket_board_service;
 """,
             )
 
@@ -259,23 +260,29 @@ GRANT EXECUTE ON FUNCTION ticket_board.add_comment(text, text) TO ticket_board_s
                 "director",
                 "SELECT ticket_board.add_comment('PGU-35502', 'Please re-read this ticket.');",
             )
-            assert_single_ticket_update(
-                conninfo,
-                "PGU-35502",
-                target_role="app",
-                state="in_progress",
-                assignee="app",
-                actor="director",
-                summary="new comment",
-                title="Comment edit",
-            )
-            clear_notifications(conninfo, "PGU-35502")
+            assert queued_notifications(conninfo, "PGU-35502") == [], queued_notifications(conninfo, "PGU-35502")
             service_call(
                 conninfo,
                 "audit",
                 "SELECT ticket_board.add_comment('PGU-35502', 'Audit note should not interrupt mid-work.');",
             )
             assert queued_notifications(conninfo, "PGU-35502") == [], queued_notifications(conninfo, "PGU-35502")
+            service_call(
+                conninfo,
+                "audit",
+                "SELECT ticket_board.add_comment('PGU-35502', 'Urgent audit note should interrupt mid-work.', true);",
+            )
+            assert_single_ticket_update(
+                conninfo,
+                "PGU-35502",
+                target_role="app",
+                state="in_progress",
+                assignee="app",
+                actor="audit",
+                summary="new comment",
+                title="Comment edit",
+            )
+            clear_notifications(conninfo, "PGU-35502")
             service_call(
                 conninfo,
                 "inspector",

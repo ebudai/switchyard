@@ -194,12 +194,15 @@ CREATE TABLE IF NOT EXISTS ticket_board.ticket_comments (
     ts_text text NOT NULL,
     ts timestamptz,
     text text NOT NULL,
+    urgent boolean NOT NULL DEFAULT false,
     source_json jsonb NOT NULL,
     UNIQUE (ticket_id, position),
     CHECK (source_json ? 'who'),
     CHECK (source_json ? 'ts'),
     CHECK (source_json ? 'text')
 );
+ALTER TABLE ticket_board.ticket_comments
+    ADD COLUMN IF NOT EXISTS urgent boolean NOT NULL DEFAULT false;
 
 CREATE INDEX IF NOT EXISTS ticket_comments_ticket_ts_idx
     ON ticket_board.ticket_comments (ticket_id, ts NULLS LAST, position);
@@ -3019,7 +3022,7 @@ BEGIN
 
     SELECT COALESCE(
         jsonb_agg(
-            jsonb_build_object('who', who, 'ts', ts_text, 'text', text)
+            jsonb_build_object('who', who, 'ts', ts_text, 'text', text, 'urgent', urgent)
             ORDER BY position
         ),
         '[]'::jsonb
@@ -3107,7 +3110,8 @@ $$;
 CREATE OR REPLACE FUNCTION ticket_board.append_ticket_comment(
     p_id text,
     p_who text,
-    p_text text
+    p_text text,
+    p_urgent boolean DEFAULT false
 )
 RETURNS void
 LANGUAGE plpgsql
@@ -3141,6 +3145,7 @@ BEGIN
         ts_text,
         ts,
         text,
+        urgent,
         source_json
     ) VALUES (
         p_id,
@@ -3149,7 +3154,8 @@ BEGIN
         ts_text_value,
         ts_value,
         p_text,
-        jsonb_build_object('who', p_who, 'ts', ts_text_value, 'text', p_text)
+        coalesce(p_urgent, false),
+        jsonb_build_object('who', p_who, 'ts', ts_text_value, 'text', p_text, 'urgent', coalesce(p_urgent, false))
     );
 END;
 $$;
@@ -4237,7 +4243,8 @@ $$;
 
 CREATE OR REPLACE FUNCTION ticket_board.add_comment(
     id text,
-    text text
+    text text,
+    urgent boolean
 )
 RETURNS void
 LANGUAGE plpgsql
@@ -4251,12 +4258,25 @@ DECLARE
 BEGIN
     actor := ticket_board.require_actor(ARRAY['director', 'eric', 'main', 'app', 'ops', 'audit', 'inspector', 'perf', 'research'], 'add_comment');
     comment_actor := ticket_board.current_app_actor();
-    PERFORM ticket_board.append_ticket_comment(id, comment_actor, text);
+    PERFORM ticket_board.append_ticket_comment(id, comment_actor, text, urgent);
     PERFORM ticket_board.touch_ticket(id);
-    IF comment_actor = 'director' THEN
+    IF urgent THEN
         PERFORM ticket_board.notify_ticket_owner_in_place_change(id, 'new comment');
     END IF;
 END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.add_comment(
+    id text,
+    text text
+)
+RETURNS void
+LANGUAGE sql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+    SELECT ticket_board.add_comment(id, text, false);
 $$;
 
 CREATE OR REPLACE FUNCTION ticket_board.edit_fields(

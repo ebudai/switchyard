@@ -25,6 +25,13 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       const commentText = document.createElement('textarea');
       commentText.placeholder = 'Add a comment or bounce-back note';
       bindDetailDraftField(draftFields, commentText, 'commentText', '');
+      const commentUrgentLabel = document.createElement('label');
+      commentUrgentLabel.className = 'urgent-comment-toggle';
+      const commentUrgent = document.createElement('input');
+      commentUrgent.type = 'checkbox';
+      const commentUrgentText = document.createElement('span');
+      commentUrgentText.textContent = 'Urgent';
+      commentUrgentLabel.append(commentUrgent, commentUrgentText);
       const detailCallerRole = () => commentWho.value;
 
       if (ticketIsEricReview(ticket)) {
@@ -517,7 +524,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       const addCommentButton = document.createElement('button');
       addCommentButton.textContent = 'Add Comment';
       addCommentButton.addEventListener('click', async () => {
-        await submitComment(ticket.id, commentWho.value, commentText.value);
+        await submitComment(ticket.id, commentWho.value, commentText.value, null, commentUrgent.checked);
       });
       commentActions.appendChild(addCommentButton);
       if (ticketIsEricReview(ticket)) {
@@ -549,7 +556,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         });
         commentActions.appendChild(kickbackButton);
       }
-      commentComposer.append(commentWho, commentText, commentActions);
+      commentComposer.append(commentWho, commentText, commentUrgentLabel, commentActions);
       comments.appendChild(commentComposer);
       if (ticket.comments.length) {
         const list = document.createElement('div');
@@ -563,7 +570,14 @@ SCRIPT_DETAIL = """    function selectedTicket() {
           const ts = document.createElement('span');
           ts.className = 'meta';
           ts.textContent = ` ${formatWhen(comment.ts)}`;
-          header.append(who, ts);
+          header.append(who);
+          if (comment.urgent) {
+            const urgent = document.createElement('span');
+            urgent.className = 'comment-urgent-marker';
+            urgent.textContent = 'URGENT';
+            header.appendChild(urgent);
+          }
+          header.append(ts);
           const text = document.createElement('div');
           text.className = 'body-text linked-text';
           appendLinkedTicketText(text, comment.text);

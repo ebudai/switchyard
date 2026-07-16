@@ -338,9 +338,15 @@ verify_local_socket_available() {
         return 0
     fi
     socket_dir="$(dirname "$BOARD_UNIX_SOCKET")"
-    [[ -d "$socket_dir" ]] || die "post-deploy socket verification failed: missing runtime directory $socket_dir"
-    [[ -S "$BOARD_UNIX_SOCKET" ]] || die "post-deploy socket verification failed: missing Unix socket $BOARD_UNIX_SOCKET"
-    "$PYTHON_BIN" - "$BOARD_UNIX_SOCKET" "$SMOKE_TIMEOUT_SECONDS" <<'PY'
+    if [[ ! -d "$socket_dir" ]]; then
+        log "post-deploy socket verification failed: missing runtime directory $socket_dir"
+        return 1
+    fi
+    if [[ ! -S "$BOARD_UNIX_SOCKET" ]]; then
+        log "post-deploy socket verification failed: missing Unix socket $BOARD_UNIX_SOCKET"
+        return 1
+    fi
+    if ! "$PYTHON_BIN" - "$BOARD_UNIX_SOCKET" "$SMOKE_TIMEOUT_SECONDS" <<'PY'
 import json
 import socket
 import sys
@@ -375,6 +381,9 @@ while time.monotonic() < deadline:
 print(f"ticket-board Unix socket verification failed for {socket_path}: {last_error}", file=sys.stderr)
 sys.exit(1)
 PY
+    then
+        return 1
+    fi
     log "Unix socket verification passed at $BOARD_UNIX_SOCKET"
 }
 
@@ -382,7 +391,7 @@ verify_http_write_token_required() {
     if [[ "${TICKET_BOARD_SKIP_POST_DEPLOY_SOCKET_VERIFY:-}" == "1" ]]; then
         return 0
     fi
-    "$PYTHON_BIN" - "http://$BOARD_HOST:$BOARD_PORT/api/register-caller" "$SMOKE_TIMEOUT_SECONDS" <<'PY'
+    if ! "$PYTHON_BIN" - "http://$BOARD_HOST:$BOARD_PORT/api/register-caller" "$SMOKE_TIMEOUT_SECONDS" <<'PY'
 import json
 import sys
 import time
@@ -413,12 +422,14 @@ while time.monotonic() < deadline:
 print(f"ticket-board HTTP token verification failed for {url}: {last_error}", file=sys.stderr)
 sys.exit(1)
 PY
+    then
+        return 1
+    fi
     log "HTTP write-token verification passed"
 }
 
 verify_post_deploy_system_runtime() {
-    verify_local_socket_available
-    verify_http_write_token_required
+    verify_local_socket_available && verify_http_write_token_required
 }
 
 free_tcp_port() {
@@ -654,7 +665,10 @@ deploy_restart_service() {
         exit 1
     fi
     if [[ "$scope" == "system" ]]; then
-        verify_post_deploy_system_runtime
+        if ! verify_post_deploy_system_runtime; then
+            rollback_live_service "$scope" "$previous_release"
+            exit 1
+        fi
     fi
     log "deployed $deployed_sha from $DEPLOY_REF and restarted $SERVICE_NAME ($scope scope)"
 }

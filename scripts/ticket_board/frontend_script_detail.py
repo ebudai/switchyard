@@ -522,9 +522,9 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       commentActions.appendChild(addCommentButton);
       if (ticketIsEricReview(ticket)) {
         const kickbackButton = document.createElement('button');
-        kickbackButton.textContent = 'Kick Back -> Implementation';
+        kickbackButton.textContent = 'Return for Rework';
         kickbackButton.addEventListener('click', async () => {
-          await submitComment(ticket.id, commentWho.value, commentText.value, 'in_progress');
+          await submitComment(ticket.id, commentWho.value, commentText.value, 'analysis');
         });
         commentActions.appendChild(kickbackButton);
       } else if (ticket.state === 'inspection') {

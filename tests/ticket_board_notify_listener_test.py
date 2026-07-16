@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
 
 from scripts.ticket_board.notify_listener import (
     DEFAULT_BUSY_REQUEUE_SECONDS,
+    DEFAULT_DIRECTORCTL,
     DirectorctlSender,
     PaneActivityGate,
     PaneHookStateStore,
@@ -1712,6 +1713,10 @@ def test_default_sender_delegates_to_directorctl_send() -> None:
     assert calls == [(["/tmp/directorctl", "send", "pgu-ops:0.0", "New ticket for you: PGU-215 -- Submit"], True)]
 
 
+def test_default_directorctl_path_is_canonical_runtime() -> None:
+    assert DEFAULT_DIRECTORCTL == "/home/agent/bin/directorctl"
+
+
 class TemporaryStateDir:
     def __enter__(self) -> Path:
         import tempfile
@@ -1769,6 +1774,7 @@ def main() -> int:
     test_idle_listener_consumes_notifies_generator_before_polling_again()
     test_wait_timeout_uses_next_attempt_instead_of_poll_ceiling()
     test_default_sender_delegates_to_directorctl_send()
+    test_default_directorctl_path_is_canonical_runtime()
     print("ticket_board_notify_listener_test: ok")
     return 0
 

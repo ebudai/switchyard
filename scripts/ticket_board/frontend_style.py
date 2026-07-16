@@ -1036,6 +1036,57 @@ STYLE = """    :root {
       aside { border-bottom: 1px solid var(--border); }
       .topbar { position: static; }
     }
+    @media (max-width: 640px) {
+      html,
+      body {
+        max-width: 100%;
+        overflow-x: hidden;
+      }
+      .layout,
+      .shell,
+      aside,
+      .topbar,
+      .board-scroll,
+      .board,
+      .column,
+      .card,
+      .panel-head,
+      .panel-body {
+        min-width: 0;
+        max-width: 100%;
+      }
+      .layout {
+        width: 100%;
+        max-width: 100vw;
+        grid-template-columns: minmax(0, 1fr);
+      }
+      .topbar,
+      .panel-head,
+      .panel-body,
+      .board-scroll {
+        padding-left: 12px;
+        padding-right: 12px;
+      }
+      .board-scroll {
+        overflow-x: hidden;
+      }
+      .board {
+        width: 100%;
+      }
+      .topbar-controls {
+        width: 100%;
+      }
+      .paths {
+        max-width: 100%;
+        overflow-wrap: anywhere;
+      }
+      .attach-set-grid {
+        grid-template-columns: 1fr;
+      }
+      .child-ticket-item {
+        flex-wrap: wrap;
+      }
+    }
     @supports (height: 100dvh) {
       body,
       .layout,

@@ -87,14 +87,14 @@ Expected sessions:
 Use:
 
 ```bash
-scripts/directorctl status
+/home/agent/bin/directorctl status
 tmux capture-pane -t pgu-main:0.0 -p -S -80
 tmux capture-pane -t pgu-audit:0.0 -p -S -80
 ```
 
 Prompt delivery note:
 
-- Prefer `scripts/directorctl`.
+- Prefer `/home/agent/bin/directorctl`.
 - For raw tmux, use delayed `C-m` after paste/text send.
 - If text lands but does not submit, send one additional `C-m` or `Enter`.
 - Do not poll lanes; fire-and-forget prompts plus explicit callbacks.
@@ -121,7 +121,7 @@ Prompt delivery note:
 git status --short --branch
 git log --oneline --decorate -8
 git branch --all --contains bcb0cfe
-scripts/directorctl status
+/home/agent/bin/directorctl status
 scripts/report_viz_disk_usage.fish
 ```
 

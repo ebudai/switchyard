@@ -7,7 +7,9 @@ trap 'rm -rf "$TMPDIR_T"' EXIT
 
 TMUX_LOG="$TMPDIR_T/tmux.log"
 CAPTURE_COUNT="$TMPDIR_T/capture-count"
+CANONICAL_DIRECTORCTL="$TMPDIR_T/bin/directorctl"
 printf '0\n' >"$CAPTURE_COUNT"
+PGU_DIRECTORCTL_INSTALL_PATH="$CANONICAL_DIRECTORCTL" "$REPO_ROOT/scripts/install-directorctl" >/dev/null
 
 cat >"$TMPDIR_T/tmux" <<'EOF'
 #!/usr/bin/env bash
@@ -47,7 +49,7 @@ esac
 EOF
 chmod +x "$TMPDIR_T/tmux"
 
-python3 - <<'PY' "$REPO_ROOT" "$TMPDIR_T" "$TMUX_LOG" "$CAPTURE_COUNT"
+python3 - <<'PY' "$REPO_ROOT" "$TMPDIR_T" "$TMUX_LOG" "$CAPTURE_COUNT" "$CANONICAL_DIRECTORCTL"
 import os
 import sys
 from pathlib import Path
@@ -55,6 +57,7 @@ from pathlib import Path
 root = Path(sys.argv[1])
 tmpdir = Path(sys.argv[2])
 tmux_log = Path(sys.argv[3])
+directorctl = Path(sys.argv[5])
 sys.path.insert(0, str(root))
 
 from scripts.ticket_board.notify_listener import DirectorctlSender
@@ -81,7 +84,7 @@ def run_with_env(args, **kwargs):
 
 try:
     subprocess.run = run_with_env
-    DirectorctlSender(str(root / "scripts" / "directorctl"))("pgu-ops:0.0", payload)
+    DirectorctlSender(str(directorctl))("pgu-ops:0.0", payload)
 finally:
     subprocess.run = original_run
 PY
@@ -145,7 +148,7 @@ esac
 EOF
 chmod +x "$TMPDIR_T/tmux"
 
-python3 - <<'PY' "$REPO_ROOT" "$TMPDIR_T" "$TMUX_LOG" "$CAPTURE_COUNT"
+python3 - <<'PY' "$REPO_ROOT" "$TMPDIR_T" "$TMUX_LOG" "$CAPTURE_COUNT" "$CANONICAL_DIRECTORCTL"
 import os
 import sys
 from pathlib import Path
@@ -153,6 +156,7 @@ from pathlib import Path
 root = Path(sys.argv[1])
 tmpdir = Path(sys.argv[2])
 tmux_log = Path(sys.argv[3])
+directorctl = Path(sys.argv[5])
 sys.path.insert(0, str(root))
 
 from scripts.ticket_board.notify_listener import DirectorctlSender
@@ -179,7 +183,7 @@ def run_with_env(args, **kwargs):
 
 try:
     subprocess.run = run_with_env
-    DirectorctlSender(str(root / "scripts" / "directorctl"))("pgu-director:0.0", payload)
+    DirectorctlSender(str(directorctl))("pgu-director:0.0", payload)
 finally:
     subprocess.run = original_run
 PY

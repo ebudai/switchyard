@@ -11,7 +11,7 @@ python3 scripts/ticket-board.py --host 127.0.0.1 --port 8770
 Shared shell-side ticket creation:
 
 ```bash
-scripts/directorctl ticket-create \
+/home/agent/bin/directorctl ticket-create \
   --board-url http://127.0.0.1:8770 \
   --assignee app \
   --state in_progress \
@@ -141,7 +141,7 @@ Notes:
 - Director deferral parks the current ticket as `backlog` with `parked: true`; queued implementer backlog (`parked: false`) is intentionally excluded from idle-stall nudges until it becomes active
 - When a ticket is legitimately waiting on another pane, use `scripts/ticket-board-write await-role PGU-N --role perf|inspector|audit|...`; active awaiting markers suppress stall nudges, clear when that role acts on the ticket, and expire after the fallback timeout
 - Discretionary idle-stall/backstop nudges route to the director as coordination signals; primary transition/work-delivery notifications still route to the responsible pane
-- For new shell-created tickets, use `scripts/directorctl ticket-create`; it writes through the board action API.
+- For new shell-created tickets, use `/home/agent/bin/directorctl ticket-create`; it writes through the board action API.
 - Do not hand-write `PGU-N.json` files. The retired JSON store is not a board backend.
 
 PostgreSQL board backend:

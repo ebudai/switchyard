@@ -76,7 +76,7 @@ NUDGE_ELIGIBLE_STATES = {"in_progress", "inspection", "audit", "director_review"
 WORKING_TIMER_RE = re.compile(r"Working\s*\(\s*(?:(?P<minutes>\d+)m\s*)?(?P<seconds>\d+)s\b")
 
 LOGGER = logging.getLogger(__name__)
-DEFAULT_DIRECTORCTL = str(Path(__file__).resolve().parents[1] / "directorctl")
+DEFAULT_DIRECTORCTL = "/home/agent/bin/directorctl"
 
 
 @dataclass(frozen=True)

@@ -70,10 +70,10 @@ docker exec pgu-team tmux send-keys -t <session>:0.0 "2"
 docker exec pgu-team tmux send-keys -t <session>:0.0 Enter
 ```
 
-`scripts/directorctl` works unchanged from inside the container:
+Use the canonical host-side `directorctl`:
 
 ```fish
-docker exec pgu-team bash -c "cd ~/Projects/pgu && scripts/directorctl status"
+/home/agent/bin/directorctl status
 ```
 
 ## Per-role model config (`roles.json`)

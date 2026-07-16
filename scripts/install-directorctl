@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SOURCE_PATH="${PGU_DIRECTORCTL_SOURCE_PATH:-$REPO_ROOT/scripts/directorctl}"
+INSTALL_PATH="${PGU_DIRECTORCTL_INSTALL_PATH:-/home/agent/bin/directorctl}"
+
+if [[ ! -f "$SOURCE_PATH" ]]; then
+    printf 'install-directorctl: source not found: %s\n' "$SOURCE_PATH" >&2
+    exit 1
+fi
+
+mkdir -p "$(dirname "$INSTALL_PATH")"
+install -m 0755 "$SOURCE_PATH" "$INSTALL_PATH"
+printf 'installed directorctl: %s\n' "$INSTALL_PATH"

@@ -8,6 +8,7 @@ trap 'rm -rf "$TMPDIR_T"' EXIT
 TMUX_LOG="$TMPDIR_T/tmux.log"
 CAPTURE_MODE="$TMPDIR_T/capture-mode"
 CAPTURE_COUNT="$TMPDIR_T/capture-count"
+CANONICAL_DIRECTORCTL="$TMPDIR_T/bin/directorctl"
 : >"$TMUX_LOG"
 
 cat >"$TMPDIR_T/tmux" <<'EOF'
@@ -115,6 +116,7 @@ PANE
 esac
 EOF
 chmod +x "$TMPDIR_T/tmux"
+PGU_DIRECTORCTL_INSTALL_PATH="$CANONICAL_DIRECTORCTL" "$REPO_ROOT/scripts/install-directorctl" >/dev/null
 
 reset_tmux_state() {
     : >"$TMUX_LOG"
@@ -129,7 +131,7 @@ run_directorctl() {
     TMUX_CAPTURE_COUNT_PATH="$CAPTURE_COUNT" \
     PGU_DIRECTORCTL_ENTER_DELAY=0 \
     PGU_DIRECTORCTL_DIRECTOR_TYPING_MAX_ATTEMPTS=0 \
-    "$REPO_ROOT/scripts/directorctl" "$@"
+    "$CANONICAL_DIRECTORCTL" "$@"
 }
 
 help_stdout="$(run_directorctl --help)"

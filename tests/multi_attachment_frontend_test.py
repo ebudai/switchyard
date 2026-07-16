@@ -17,6 +17,16 @@ def main() -> int:
     assert "pendingCreateScreenshots" in HTML
     assert ".attachment-gallery" in HTML
     assert ".attachment-set-list" in HTML
+    assert ".attach-panel" in HTML
+    assert "id=\"createImageInput\" class=\"visually-hidden\" type=\"file\" accept=\"image/*\" multiple" in HTML
+    assert "id=\"createAttachImageBtn\" type=\"button\">Attach image</button>" in HTML
+    assert "function attachImageFiles(files, context)" in HTML
+    assert "function wireImageDropZone(dropZone, context)" in HTML
+    assert "await attachImageFiles(detailImageInput.files, 'detail');" in HTML
+    assert "wireImageDropZone(attachmentUpload, 'detail');" in HTML
+    assert "await attachImageFiles(createImageInput.files, 'create');" in HTML
+    assert "wireImageDropZone(createAttachDropZone, 'create');" in HTML
+    assert "selected ticket changed during image attach" in HTML
     assert "function parseAttachmentSet(path)" in HTML
     assert "function groupAttachmentEntries(entries)" in HTML
     assert "function renderAttachmentSetGroups(container, entries, removeLabel, onRemove, onOpen = null)" in HTML

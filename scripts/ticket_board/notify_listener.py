@@ -44,7 +44,7 @@ IMMEDIATE_DELIVERY_KINDS = frozenset({"ticket_update"})
 DEFAULT_PRE_SEND_RECHECK_DELAY_SECONDS = 0.5
 DEFAULT_DIRECTOR_COMPOSER_HOME_X = 2
 DEFAULT_WORKING_TIMER_SAMPLE_DELAY_SECONDS = 0.0
-DEFAULT_IDLE_WORKING_TIMER_SAMPLE_DELAY_SECONDS = 0.0
+DEFAULT_IDLE_WORKING_TIMER_SAMPLE_DELAY_SECONDS = 1.1
 DEFAULT_PANE_STATE_DIR = (
     Path(os.environ["PGU_TICKET_BOARD_PANE_STATE_DIR"]).expanduser()
     if os.environ.get("PGU_TICKET_BOARD_PANE_STATE_DIR")
@@ -1206,6 +1206,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pane-state-dir", default=str(DEFAULT_PANE_STATE_DIR), help=f"per-pane hook state directory (default: {DEFAULT_PANE_STATE_DIR})")
     parser.add_argument("--director-composing-timeout-seconds", type=float, default=DEFAULT_DIRECTOR_COMPOSING_TIMEOUT_SECONDS)
     parser.add_argument("--pre-send-recheck-delay-seconds", type=float, default=DEFAULT_PRE_SEND_RECHECK_DELAY_SECONDS)
+    parser.add_argument("--idle-working-timer-sample-delay-seconds", type=float, default=DEFAULT_IDLE_WORKING_TIMER_SAMPLE_DELAY_SECONDS)
     parser.add_argument("--verbose", action="store_true")
     return parser
 
@@ -1223,6 +1224,7 @@ def main(argv: list[str] | None = None) -> int:
         activity_gate=PaneActivityGate(
             state_store=PaneHookStateStore(args.pane_state_dir),
             director_composing_timeout_seconds=args.director_composing_timeout_seconds,
+            idle_working_timer_sample_delay_seconds=args.idle_working_timer_sample_delay_seconds,
         ).is_working,
         reconnect_seconds=args.reconnect_seconds,
         poll_seconds=args.poll_seconds,

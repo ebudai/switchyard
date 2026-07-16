@@ -298,6 +298,20 @@ def sequenced_capture_runner(*outputs: str) -> Any:
     return runner
 
 
+def targeted_capture_runner(target: str, *outputs: str) -> Any:
+    values = list(outputs)
+    fallback = values[-1] if values else ""
+
+    def runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        requested_target = str(args[args.index("-t") + 1]) if "-t" in args else ""
+        if requested_target != target:
+            return subprocess.CompletedProcess(args, 0, stdout="")
+        value = values.pop(0) if values else fallback
+        return subprocess.CompletedProcess(args, 0, stdout=value)
+
+    return runner
+
+
 def hook_gate(tmp_path: Path) -> tuple[PaneHookStateStore, PaneActivityGate]:
     store = PaneHookStateStore(tmp_path)
     return store, PaneActivityGate(
@@ -533,11 +547,12 @@ def test_advancing_working_timer_suppresses_idle_stall_nudge() -> None:
         gate = PaneActivityGate(
             state_store=store,
             cursor_position_runner=constant_cursor_runner(),
-            capture_pane_runner=sequenced_capture_runner(
+            capture_pane_runner=targeted_capture_runner(
+                "pgu-ops:0.0",
                 "Working (12s · esc to interrupt)\n",
                 "Working (13s · esc to interrupt)\n",
             ),
-            working_timer_sample_delay_seconds=1.1,
+            idle_working_timer_sample_delay_seconds=1.1,
             sleeper=lambda _seconds: None,
         )
         store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
@@ -563,11 +578,12 @@ def test_static_working_timer_does_not_suppress_idle_stall_nudge() -> None:
         gate = PaneActivityGate(
             state_store=store,
             cursor_position_runner=constant_cursor_runner(),
-            capture_pane_runner=sequenced_capture_runner(
+            capture_pane_runner=targeted_capture_runner(
+                "pgu-ops:0.0",
                 "Working (12s · esc to interrupt)\n",
                 "Working (12s · esc to interrupt)\n",
             ),
-            working_timer_sample_delay_seconds=1.1,
+            idle_working_timer_sample_delay_seconds=1.1,
             sleeper=lambda _seconds: None,
         )
         store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
@@ -602,7 +618,7 @@ def test_cached_working_timer_increment_suppresses_next_idle_since_scan() -> Non
                 "Working (12s · esc to interrupt)\n",
                 "Working (18s · esc to interrupt)\n",
             ),
-            working_timer_sample_delay_seconds=1.1,
+            idle_working_timer_sample_delay_seconds=1.1,
             sleeper=lambda _seconds: None,
         )
         store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
@@ -1716,6 +1732,9 @@ def main() -> int:
     test_pre_send_recheck_delivers_when_cursor_stays_home()
     test_advanced_cursor_holds_immediately_without_second_read()
     test_listener_enqueues_idle_stall_nudges_from_hook_state()
+    test_advancing_working_timer_suppresses_idle_stall_nudge()
+    test_static_working_timer_does_not_suppress_idle_stall_nudge()
+    test_cached_working_timer_increment_suppresses_next_idle_since_scan()
     test_listener_enqueues_idle_turn_end_nudges_on_each_turn_completion_idle()
     test_external_hook_writer_records_state_file()
     test_display_message_renames_analysis_stage_copy_without_touching_titles()

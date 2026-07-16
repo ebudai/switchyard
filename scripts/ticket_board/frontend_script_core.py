@@ -596,6 +596,10 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       return `/api/image/${encodeURIComponent(path)}`;
     }
 
+    function thumbnailUrlFor(path) {
+      return `/api/thumb/${encodeURIComponent(path)}?w=512`;
+    }
+
     function ticketScreenshotEntries(ticket) {
       if (ticket.screenshots_info && ticket.screenshots_info.length) {
         return ticket.screenshots_info;
@@ -788,7 +792,9 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         if (entry.available) {
           const image = document.createElement('img');
           image.className = 'attachment-thumb';
-          image.src = previewUrlFor(entry.path);
+          image.src = thumbnailUrlFor(entry.path);
+          image.loading = 'lazy';
+          image.decoding = 'async';
           image.alt = entry.path;
           card.appendChild(image);
         } else {

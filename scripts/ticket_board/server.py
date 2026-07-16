@@ -15,11 +15,15 @@ import subprocess
 import threading
 import time
 import urllib.parse
+from email.utils import formatdate, parsedate_to_datetime
+from hashlib import sha256
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
+
+from PIL import Image
 
 from .app import CALLER_ROLES as APP_CALLER_ROLES
 from .app import TicketBoardApp, iso_now
@@ -34,6 +38,9 @@ CALLER_ROLE_HEADER = "X-PGU-Caller-Role"
 WRITE_TOKEN_HEADER = "X-PGU-Write-Token"
 SO_PEERCRED_FORMAT = "3i"
 PANE_SOCKET_MODE = 0o666
+IMAGE_CACHE_CONTROL = "public, max-age=31536000, immutable"
+THUMBNAIL_MAX_SIZE = 512
+THUMBNAIL_QUALITY = 80
 IMPLEMENTER_ROLES = {"main", "app", "ops", "perf", "research"}
 CALLER_ROLES = set(APP_CALLER_ROLES)
 TASK_ROLES = IMPLEMENTER_ROLES | {"director", "audit", "inspector"}
@@ -363,6 +370,75 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
 
     def send_no_cache_headers(self) -> None:
         self.send_header("Cache-Control", "no-cache")
+
+    def cache_headers_for_file(self, path: Path, *, variant: str = "original") -> tuple[str, str]:
+        stat = path.stat()
+        etag_seed = f"{variant}\0{path.resolve()}\0{stat.st_mtime_ns}\0{stat.st_size}".encode("utf-8")
+        etag = f'"{sha256(etag_seed).hexdigest()}"'
+        last_modified = formatdate(stat.st_mtime, usegmt=True)
+        return etag, last_modified
+
+    def request_cache_matches(self, etag: str, last_modified: str) -> bool:
+        if_none_match = self.headers.get("If-None-Match", "")
+        if if_none_match:
+            requested_etags = {item.strip() for item in if_none_match.split(",")}
+            if "*" in requested_etags or etag in requested_etags:
+                return True
+        if_modified_since = self.headers.get("If-Modified-Since")
+        if if_modified_since:
+            try:
+                requested_date = parsedate_to_datetime(if_modified_since)
+                current_date = parsedate_to_datetime(last_modified)
+            except (TypeError, ValueError):
+                return False
+            return requested_date >= current_date
+        return False
+
+    def send_cached_bytes(self, body: bytes, *, content_type: str, source_path: Path, variant: str = "original") -> None:
+        etag, last_modified = self.cache_headers_for_file(source_path, variant=variant)
+        if self.request_cache_matches(etag, last_modified):
+            self.send_response(HTTPStatus.NOT_MODIFIED)
+            self.send_header("Cache-Control", IMAGE_CACHE_CONTROL)
+            self.send_header("ETag", etag)
+            self.send_header("Last-Modified", last_modified)
+            self.end_headers()
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", IMAGE_CACHE_CONTROL)
+        self.send_header("ETag", etag)
+        self.send_header("Last-Modified", last_modified)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def thumbnail_cache_path(self, source_path: Path, size: int) -> Path:
+        stat = source_path.stat()
+        cache_key = sha256(f"{source_path.resolve()}\0{size}\0{stat.st_mtime_ns}\0{stat.st_size}".encode("utf-8")).hexdigest()
+        return self.app.asset_dir / ".thumb-cache" / f"{cache_key}.jpg"
+
+    def thumbnail_bytes_for(self, source_path: Path, size: int = THUMBNAIL_MAX_SIZE) -> bytes:
+        size = max(64, min(size, THUMBNAIL_MAX_SIZE))
+        cache_path = self.thumbnail_cache_path(source_path, size)
+        if cache_path.is_file():
+            return cache_path.read_bytes()
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = cache_path.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
+        with Image.open(source_path) as image:
+            image.load()
+            image.thumbnail((size, size), Image.Resampling.LANCZOS)
+            if image.mode not in ("RGB", "L"):
+                background = Image.new("RGB", image.size, (255, 255, 255))
+                if image.mode in ("RGBA", "LA"):
+                    background.paste(image, mask=image.getchannel("A"))
+                    output = background
+                else:
+                    output = image.convert("RGB")
+            else:
+                output = image.convert("RGB") if image.mode == "L" else image
+            output.save(tmp_path, format="JPEG", quality=THUMBNAIL_QUALITY, optimize=True)
+        tmp_path.replace(cache_path)
+        return cache_path.read_bytes()
 
     def send_json(self, payload: dict[str, object], status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload).encode("utf-8")
@@ -748,11 +824,26 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 return
             body = path.read_bytes()
             content_type, _ = mimetypes.guess_type(path.name)
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", content_type or "application/octet-stream")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self.send_cached_bytes(body, content_type=content_type or "application/octet-stream", source_path=path)
+            return
+        if parsed.path.startswith("/api/thumb/"):
+            raw = urllib.parse.unquote(parsed.path.removeprefix("/api/thumb/"))
+            query = urllib.parse.parse_qs(parsed.query)
+            requested_size = query.get("w", [str(THUMBNAIL_MAX_SIZE)])[0]
+            try:
+                size = int(requested_size)
+            except ValueError:
+                size = THUMBNAIL_MAX_SIZE
+            try:
+                path = self.app.resolve_image(raw)
+                body = self.thumbnail_bytes_for(path, size)
+            except FileNotFoundError as exc:
+                self.send_text(str(exc), HTTPStatus.NOT_FOUND)
+                return
+            except OSError as exc:
+                self.send_text(f"thumbnail generation failed: {exc}", HTTPStatus.BAD_REQUEST)
+                return
+            self.send_cached_bytes(body, content_type="image/jpeg", source_path=path, variant=f"thumb-{max(64, min(size, THUMBNAIL_MAX_SIZE))}")
             return
         if parsed.path.startswith("/api/tickets/") and "/actions/" not in parsed.path:
             ticket_id = urllib.parse.unquote(parsed.path.removeprefix("/api/tickets/").strip("/"))

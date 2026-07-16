@@ -4253,7 +4253,9 @@ BEGIN
     comment_actor := ticket_board.current_app_actor();
     PERFORM ticket_board.append_ticket_comment(id, comment_actor, text);
     PERFORM ticket_board.touch_ticket(id);
-    PERFORM ticket_board.notify_ticket_owner_in_place_change(id, 'new comment');
+    IF comment_actor = 'director' THEN
+        PERFORM ticket_board.notify_ticket_owner_in_place_change(id, 'new comment');
+    END IF;
 END;
 $$;
 

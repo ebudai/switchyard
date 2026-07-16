@@ -251,7 +251,7 @@ GRANT EXECUTE ON FUNCTION ticket_board.add_comment(text, text) TO ticket_board_s
                 "PGU-35502",
                 title="Comment edit",
                 state="in_progress",
-                assignee="ops",
+                assignee="app",
             )
             clear_notifications(conninfo, "PGU-35502")
             service_call(
@@ -262,20 +262,33 @@ GRANT EXECUTE ON FUNCTION ticket_board.add_comment(text, text) TO ticket_board_s
             assert_single_ticket_update(
                 conninfo,
                 "PGU-35502",
-                target_role="ops",
+                target_role="app",
                 state="in_progress",
-                assignee="ops",
+                assignee="app",
                 actor="director",
                 summary="new comment",
                 title="Comment edit",
             )
+            clear_notifications(conninfo, "PGU-35502")
+            service_call(
+                conninfo,
+                "audit",
+                "SELECT ticket_board.add_comment('PGU-35502', 'Audit note should not interrupt mid-work.');",
+            )
+            assert queued_notifications(conninfo, "PGU-35502") == [], queued_notifications(conninfo, "PGU-35502")
+            service_call(
+                conninfo,
+                "inspector",
+                "SELECT ticket_board.add_comment('PGU-35502', 'Inspector note should not interrupt mid-work.');",
+            )
+            assert queued_notifications(conninfo, "PGU-35502") == [], queued_notifications(conninfo, "PGU-35502")
 
             insert_ticket(
                 conninfo,
                 "PGU-35503",
                 title="Blocked implementation",
                 state="in_progress",
-                assignee="ops",
+                assignee="perf",
             )
             insert_ticket(
                 conninfo,
@@ -293,9 +306,9 @@ GRANT EXECUTE ON FUNCTION ticket_board.add_comment(text, text) TO ticket_board_s
             assert_single_ticket_update(
                 conninfo,
                 "PGU-35503",
-                target_role="ops",
+                target_role="perf",
                 state="in_progress",
-                assignee="ops",
+                assignee="perf",
                 actor="director",
                 summary="blockers",
                 title="Blocked implementation",
@@ -335,6 +348,17 @@ GRANT EXECUTE ON FUNCTION ticket_board.add_comment(text, text) TO ticket_board_s
                 )
                 assert queued_notifications(conninfo, ticket_id) == [], queued_notifications(conninfo, ticket_id)
 
+            psql(
+                conninfo,
+                """
+SELECT set_config('ticket_board.force_move', 'on', false);
+UPDATE ticket_board.tickets
+SET state = 'done',
+    commit_hash = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+WHERE id IN ('PGU-35501', 'PGU-35502', 'PGU-35503', 'PGU-35505');
+""",
+            )
+
             insert_ticket(conninfo, "PGU-35509", title="Transition only", state="analysis", assignee="unassigned")
             clear_notifications(conninfo, "PGU-35509")
             service_call(
@@ -355,6 +379,17 @@ GRANT EXECUTE ON FUNCTION ticket_board.add_comment(text, text) TO ticket_board_s
                     "change_summary": None,
                 }
             ], transition_only
+
+            psql(
+                conninfo,
+                """
+SELECT set_config('ticket_board.force_move', 'on', false);
+UPDATE ticket_board.tickets
+SET state = 'done',
+    commit_hash = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+WHERE id = 'PGU-35509';
+""",
+            )
 
             insert_ticket(conninfo, "PGU-35510", title="Reassign active work", state="in_progress", assignee="ops")
             clear_notifications(conninfo, "PGU-35510")

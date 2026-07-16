@@ -275,7 +275,48 @@ if len(horizontal_indices) >= 2:
     cleaned = re.sub(r"^[❯\u276f\s\>\-\*]+", "", composer_content, flags=re.MULTILINE)
     sys.exit(0 if len(cleaned.strip()) > 0 else 1)
 sys.exit(1) # Missing composer markers usually means agent/tool output, not human typing
-' <<< "$capture"
+	' <<< "$capture"
+}
+
+composer_state_json() {
+    local target="$1"
+    local capture=""
+    local available=1
+    if ! capture="$(capture_raw_pane "$target" 2>/dev/null)" || [ -z "$capture" ]; then
+        available=0
+    fi
+    COMPOSER_CAPTURE="$capture" COMPOSER_AVAILABLE="$available" python3 - <<'PY'
+import hashlib
+import json
+import os
+import re
+
+pane_text = os.environ.get("COMPOSER_CAPTURE", "")
+available = os.environ.get("COMPOSER_AVAILABLE") == "1"
+result = {
+    "available": available,
+    "marker_found": False,
+    "active": False,
+    "content_sha256": "",
+    "content_length": 0,
+}
+if available and pane_text:
+    lines = pane_text.splitlines()
+    horizontal_indices = [idx for idx, line in enumerate(lines) if line.count("─") >= 40]
+    if len(horizontal_indices) >= 2:
+        composer_content = "\n".join(lines[horizontal_indices[-2] + 1 : horizontal_indices[-1]])
+        cleaned = re.sub(r"^[❯\u276f\s\>\-\*]+", "", composer_content, flags=re.MULTILINE)
+        stripped = cleaned.strip()
+        result.update({
+            "marker_found": True,
+            "active": bool(stripped),
+            "content_sha256": hashlib.sha256(stripped.encode("utf-8")).hexdigest() if stripped else "",
+            "content_length": len(stripped),
+        })
+elif not available:
+    result["error"] = "capture_unavailable"
+print(json.dumps(result, sort_keys=True))
+PY
 }
 
 send_payload() {
@@ -285,6 +326,10 @@ send_payload() {
     local staged_path
     local pointer_payload
     local delivery_mode="direct"
+    local typing_wait_attempts=0
+    local forced_delivery=0
+    local composer_before=""
+    local composer_after=""
 
     # Guard against active human typing in the director pane. Missing composer
     # markers are treated as agent/tool output, not typing. Genuine typed
@@ -296,15 +341,21 @@ send_payload() {
     while is_director_typing "$target"; do
         if [ "$max_attempts" -ge 0 ] && [ "$attempt" -gt "$max_attempts" ]; then
             echo "watchdog/directorctl: director still appears to be typing after $max_attempts attempts; delivering anyway" >&2
+            forced_delivery=1
             break
         fi
         echo "watchdog/directorctl: director is typing (attempt $attempt). Waiting 5 seconds to retry..." >&2
         sleep "$DIRECTOR_TYPING_RETRY_SECONDS"
+        typing_wait_attempts="$attempt"
         attempt=$((attempt + 1))
     done
 
     if [ "$target" = "$DEFAULT_DIRECTOR_TARGET" ]; then
         payload="$(normalize_director_payload "$payload")"
+    fi
+
+    if [ "${PGU_DIRECTORCTL_DIAGNOSTICS:-}" = "1" ]; then
+        composer_before="$(composer_state_json "$target")"
     fi
 
     # Codex panes do not submit bracketed paste on Enter/C-m. Large or
@@ -319,6 +370,37 @@ send_payload() {
         submit_short_line "$target" "$pointer_payload"
     else
         submit_short_line "$target" "$payload"
+    fi
+
+    if [ "${PGU_DIRECTORCTL_DIAGNOSTICS:-}" = "1" ]; then
+        composer_after="$(composer_state_json "$target")"
+        DIRECTORCTL_DIAG_TARGET="$target" \
+        DIRECTORCTL_DIAG_MODE="$delivery_mode" \
+        DIRECTORCTL_DIAG_TYPING_WAITS="$typing_wait_attempts" \
+        DIRECTORCTL_DIAG_FORCED="$forced_delivery" \
+        DIRECTORCTL_DIAG_BEFORE="$composer_before" \
+        DIRECTORCTL_DIAG_AFTER="$composer_after" \
+        python3 - <<'PY'
+import json
+import os
+
+def parsed_env_json(name):
+    try:
+        value = json.loads(os.environ.get(name, "{}"))
+    except json.JSONDecodeError:
+        value = {}
+    return value if isinstance(value, dict) else {}
+
+payload = {
+    "target": os.environ.get("DIRECTORCTL_DIAG_TARGET", ""),
+    "delivery_mode": os.environ.get("DIRECTORCTL_DIAG_MODE", ""),
+    "typing_wait_attempts": int(os.environ.get("DIRECTORCTL_DIAG_TYPING_WAITS", "0") or "0"),
+    "forced_delivery": os.environ.get("DIRECTORCTL_DIAG_FORCED") == "1",
+    "composer_before": parsed_env_json("DIRECTORCTL_DIAG_BEFORE"),
+    "composer_after": parsed_env_json("DIRECTORCTL_DIAG_AFTER"),
+}
+print("directorctl: diagnostic " + json.dumps(payload, sort_keys=True))
+PY
     fi
 
     record_ticket_notification "$target" "$payload"

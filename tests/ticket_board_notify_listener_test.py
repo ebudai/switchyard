@@ -488,6 +488,56 @@ def test_pre_send_recheck_delivers_when_cursor_stays_home() -> None:
     assert conn.acked == [86]
 
 
+def test_send_trace_records_composer_diagnostics_and_suspected_clobber() -> None:
+    sent: list[tuple[str, str]] = []
+    pane_before = """old output
+──────────────────────────────────────────────────────────────────────────────────────────── Ops ──
+❯ human draft
+────────────────────────────────────────────────────────────────────────────────────────────────────────
+"""
+    pane_after = """old output
+──────────────────────────────────────────────────────────────────────────────────────────── Ops ──
+❯ human draft New ticket for you: PGU-482 -- Diagnostic
+────────────────────────────────────────────────────────────────────────────────────────────────────────
+"""
+
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            cursor_position_runner=constant_cursor_runner("2 23 24"),
+            capture_pane_runner=targeted_capture_runner("pgu-ops:0.0", pane_before, pane_before, pane_after),
+        )
+        store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
+        conn = FakeConnection([queue_row(482, "PGU-482", target_role="ops", message="New ticket for you: PGU-482 -- Diagnostic")])
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, message: {
+                "delivery_mode": "direct",
+                "composer_before": {"active": True, "content_length": 11},
+                "composer_after": {"active": True, "content_length": 48},
+            } if not sent.append((target, message)) else {},
+            activity_gate=gate.is_working,
+            connector=lambda *args, **kwargs: conn,
+            pre_send_recheck_delay_seconds=0,
+            poll_seconds=0,
+        )
+
+        assert listener.process_due_notifications(conn, max_notifications=1) == 1
+
+    send_traces = [params for params in conn.traces if params is not None and params[4] == "send"]
+    assert len(send_traces) == 1
+    detail = json.loads(send_traces[0][8])
+    assert detail["decision"] == "send"
+    assert detail["composer_before"]["active"] is True
+    assert detail["composer_before"]["content_length"] == len("human draft")
+    assert detail["composer_before"]["content_sha256"]
+    assert detail["composer_after"]["active"] is True
+    assert detail["composer_changed"] is True
+    assert detail["suspected_clobber"] is True
+    assert detail["directorctl"]["delivery_mode"] == "direct"
+
+
 def test_advanced_cursor_holds_immediately_without_second_read() -> None:
     sent: list[tuple[str, str]] = []
     sleep_calls: list[float] = []
@@ -1697,20 +1747,25 @@ def test_wait_timeout_uses_next_attempt_instead_of_poll_ceiling() -> None:
 
 
 def test_default_sender_delegates_to_directorctl_send() -> None:
-    calls: list[tuple[list[str], bool]] = []
+    calls: list[tuple[list[str], bool, bool, bool]] = []
     original_run = subprocess.run
 
     def fake_run(args: list[str], *, check: bool = False, **kwargs: object) -> subprocess.CompletedProcess[str]:
-        calls.append((args, check))
-        return subprocess.CompletedProcess(args, 0)
+        calls.append((args, check, bool(kwargs.get("capture_output")), bool(kwargs.get("text"))))
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout='directorctl: diagnostic {"delivery_mode":"direct","forced_delivery":false}\n',
+        )
 
     try:
         subprocess.run = fake_run  # type: ignore[assignment]
-        DirectorctlSender("/tmp/directorctl")("pgu-ops:0.0", "New ticket for you: PGU-215 -- Submit")
+        diagnostic = DirectorctlSender("/tmp/directorctl")("pgu-ops:0.0", "New ticket for you: PGU-215 -- Submit")
     finally:
         subprocess.run = original_run  # type: ignore[assignment]
 
-    assert calls == [(["/tmp/directorctl", "send", "pgu-ops:0.0", "New ticket for you: PGU-215 -- Submit"], True)]
+    assert calls == [(["/tmp/directorctl", "send", "pgu-ops:0.0", "New ticket for you: PGU-215 -- Submit"], True, True, True)]
+    assert diagnostic == {"delivery_mode": "direct", "forced_delivery": False}
 
 
 def test_default_directorctl_path_is_canonical_runtime() -> None:
@@ -1735,6 +1790,7 @@ def main() -> int:
     test_cursor_home_delivers_regardless_of_row()
     test_pre_send_recheck_waits_and_holds_when_cursor_advances_on_second_read()
     test_pre_send_recheck_delivers_when_cursor_stays_home()
+    test_send_trace_records_composer_diagnostics_and_suspected_clobber()
     test_advanced_cursor_holds_immediately_without_second_read()
     test_listener_enqueues_idle_stall_nudges_from_hook_state()
     test_advancing_working_timer_suppresses_idle_stall_nudge()

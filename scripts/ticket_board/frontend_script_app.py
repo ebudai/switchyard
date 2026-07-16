@@ -73,6 +73,7 @@ SCRIPT_APP = """    async function uploadImageBlob(blob) {
       state.screenshots = payload.screenshots;
       state.errors = payload.errors;
       state.assignees = payload.assignees;
+      state.callerRoles = payload.caller_roles || [];
       if (state.selectedId && !state.tickets.some((ticket) => ticket.id === state.selectedId)) {
         clearDetailDraft();
         state.selectedId = null;

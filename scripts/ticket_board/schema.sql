@@ -1242,6 +1242,25 @@ AS $$
     );
 $$;
 
+CREATE OR REPLACE FUNCTION ticket_board.ticket_is_queued_for_reserved_implementer(
+    p_ticket_id text,
+    p_state text,
+    p_assignee text,
+    p_parked boolean,
+    p_manually_controlled boolean
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT p_state = 'backlog'
+       AND ticket_board.ticket_is_implementer_assignee(p_assignee)
+       AND NOT coalesce(p_parked, false)
+       AND NOT coalesce(p_manually_controlled, false)
+       AND NOT ticket_board.ticket_has_unresolved_blockers(p_ticket_id)
+       AND ticket_board.ticket_current_reserved_ticket(p_assignee, p_ticket_id) IS NOT NULL;
+$$;
+
 CREATE OR REPLACE FUNCTION ticket_board.ticket_can_auto_advance_analysis(
     p_state text,
     p_assignee text,
@@ -2443,7 +2462,13 @@ BEGIN
                         t.state = 'backlog'
                         AND t.assignee <> 'unassigned'
                         AND NOT t.parked
-                        AND NOT ticket_board.ticket_is_implementer_assignee(t.assignee)
+                        AND NOT ticket_board.ticket_is_queued_for_reserved_implementer(
+                            t.id,
+                            t.state,
+                            t.assignee,
+                            t.parked,
+                            t.manually_controlled
+                        )
                     )
                 )
               AND ns.entered_current_state_at <= p_now - p_cadence
@@ -2649,6 +2674,13 @@ BEGIN
                         t.state = 'backlog'
                         AND t.assignee <> 'unassigned'
                         AND NOT t.parked
+                        AND NOT ticket_board.ticket_is_queued_for_reserved_implementer(
+                            t.id,
+                            t.state,
+                            t.assignee,
+                            t.parked,
+                            t.manually_controlled
+                        )
                     )
                 )
               AND p_idle_since_by_role ? 'director'

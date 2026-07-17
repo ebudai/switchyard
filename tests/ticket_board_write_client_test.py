@@ -88,6 +88,8 @@ class RecordingHandler(BaseHTTPRequestHandler):
                 ticket["comments"] = [{"who": caller, "text": payload.get("text", "")}]
         elif operation == "eric_reopen":
             ticket["state"] = "analysis"
+        elif operation == "release_draft":
+            ticket["state"] = "analysis"
         elif operation == "mark_done":
             ticket["state"] = "done"
         elif operation == "defer":
@@ -172,6 +174,7 @@ def assert_action_requests(requests: list[tuple[str, str | None, dict[str, objec
     assert ("/api/tickets/PGU-103/actions/audit_kick_back", "audit") in pairs
     assert ("/api/tickets/PGU-104/actions/eric_sign_off", "eric") in pairs
     assert ("/api/tickets/PGU-105/actions/eric_reopen", "eric") in pairs
+    assert ("/api/tickets/PGU-140/actions/release_draft", "eric") in pairs
     assert ("/api/tickets/PGU-106/actions/mark_done", "director") in pairs
     assert ("/api/tickets/PGU-107/actions/defer", "director") in pairs
     assert ("/api/tickets/PGU-108/actions/cancel", "director") in pairs
@@ -221,6 +224,7 @@ def exercise_client(base_url: str, repo: Path, commit_hash: str) -> None:
         assert eric_signed["ticket"]["state"] == "director_review"
         assert eric_signed["ticket"]["comments"][-1]["text"] == "Eric approves."
         assert client.eric_reopen("PGU-105", reason="Needs design revision.", caller_role="eric")["ticket"]["state"] == "analysis"
+        assert client.release_draft("PGU-140", caller_role="eric")["ticket"]["state"] == "analysis"
         assert client.mark_done("PGU-106", commit_hash=commit_hash)["ticket"]["state"] == "done"
         assert client.mark_done("PGU-114")["ticket"]["commit_hash"] == ""
         assert client.defer("PGU-107")["ticket"]["state"] == "backlog"

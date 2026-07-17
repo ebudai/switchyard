@@ -24,6 +24,7 @@ WRITE_FUNCTIONS = [
     "ticket_board.create_ticket(text,text,text,text[],text)",
     "ticket_board.create_ticket(text,text,text,text[],text,boolean)",
     "ticket_board.file_bug(text,text,text)",
+    "ticket_board.release_draft(text)",
     "ticket_board.route(text,text,text)",
     "ticket_board.force_move(text,text,text,boolean)",
     "ticket_board.start_work(text)",
@@ -311,6 +312,65 @@ WHERE id = {sql_string(backlog_created)};
         )
     )
     assert backlog_row == {"state": "backlog", "assignee": "unassigned", "parked": True}, backlog_row
+    draft_created = psql(service_conn, "SELECT ticket_board.create_ticket('Service draft create', 'Body', 'draft');")
+    draft_row = json.loads(
+        psql(
+            admin_conn,
+            f"""
+SELECT jsonb_build_object(
+    'state', state,
+    'assignee', assignee,
+    'parked', parked,
+    'queue_count', (SELECT count(*)::int FROM ticket_board.ticket_notification_queue WHERE ticket_id = t.id)
+)::text
+FROM ticket_board.tickets t
+WHERE id = {sql_string(draft_created)};
+""",
+        )
+    )
+    assert draft_row == {"state": "draft", "assignee": "unassigned", "parked": False, "queue_count": 0}, draft_row
+    psql(
+        service_conn,
+        f"""
+SELECT set_config('ticket_board.caller_role', 'director', false);
+SELECT ticket_board.edit_fields({sql_string(draft_created)}, '{{"title":"Edited draft"}}'::jsonb);
+""",
+    )
+    assert psql(admin_conn, f"SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = {sql_string(draft_created)};") == "0"
+    draft_illegal = psql(service_conn, "SELECT ticket_board.create_ticket('Service draft illegal transition', 'Body', 'draft');")
+    assert "illegal state transition: draft -> in_progress" in psql_error(
+        admin_conn,
+        f"UPDATE ticket_board.tickets SET state = 'in_progress', assignee = 'ops' WHERE id = {sql_string(draft_illegal)};",
+    )
+    assert "illegal state transition: draft -> audit" in psql_error(
+        admin_conn,
+        f"UPDATE ticket_board.tickets SET state = 'audit', assignee = 'audit' WHERE id = {sql_string(draft_illegal)};",
+    )
+    assert "ops cannot call release_draft" in psql_error(
+        service_conn,
+        f"""
+SELECT set_config('ticket_board.caller_role', 'ops', false);
+SELECT ticket_board.release_draft({sql_string(draft_created)});
+""",
+    )
+    psql(
+        service_conn,
+        f"""
+SELECT set_config('ticket_board.caller_role', 'eric', false);
+SELECT ticket_board.release_draft({sql_string(draft_created)});
+""",
+    )
+    released_draft = json.loads(
+        psql(
+            admin_conn,
+            f"""
+SELECT jsonb_build_object('state', state, 'assignee', assignee)::text
+FROM ticket_board.tickets
+WHERE id = {sql_string(draft_created)};
+""",
+        )
+    )
+    assert released_draft == {"state": "analysis", "assignee": "unassigned"}, released_draft
     blocked_created = psql(
         service_conn,
         f"SELECT ticket_board.create_ticket('Service blocked create', 'Body', 'analysis', ARRAY[{sql_string(created)}], 'Waiting on source.');",
@@ -329,7 +389,7 @@ WHERE id = {sql_string(blocked_created)};
         )
     )
     assert blocked_created_row == {"blocked_reason": "Waiting on source.", "blocked_by": [created]}, blocked_created_row
-    assert "invalid create state: in_progress; allowed: analysis, backlog" in psql_error(
+    assert "invalid create state: in_progress; allowed: draft, analysis, backlog" in psql_error(
         service_conn,
         """
 SELECT set_config('ticket_board.caller_role', 'director', false);

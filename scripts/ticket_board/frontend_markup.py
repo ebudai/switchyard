@@ -34,6 +34,10 @@ MARKUP = """  <div class="layout">
             <select id="assigneeInput"></select>
           </label>
           <label class="check">
+            <input id="createDraftInput" type="checkbox">
+            Create as draft
+          </label>
+          <label class="check">
             <input id="createBacklogInput" type="checkbox">
             Start in backlog
           </label>

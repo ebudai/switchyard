@@ -2,6 +2,7 @@
 
 SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     const COLUMNS = [
+      { key: 'draft', label: 'Draft' },
       { key: 'backlog', label: 'Backlog' },
       { key: 'analysis', label: 'Triage' },
       { key: 'in_progress', label: 'Implementation' },
@@ -45,6 +46,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     const createAttachDropZone = document.getElementById('createAttachDropZone');
     const titleInput = document.getElementById('titleInput');
     const bodyInput = document.getElementById('bodyInput');
+    const createDraftInput = document.getElementById('createDraftInput');
     const createBacklogInput = document.getElementById('createBacklogInput');
     const needsEricInput = document.getElementById('needsEricInput');
     const needsInspectionInput = document.getElementById('needsInspectionInput');
@@ -124,6 +126,9 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     }
 
     function defaultAdvanceState(ticket) {
+      if (ticket.state === 'draft') {
+        return 'analysis';
+      }
       if (ticket.state === 'backlog') {
         return 'analysis';
       }

@@ -47,6 +47,7 @@ TASK_ROLES = IMPLEMENTER_ROLES | {"director", "audit", "inspector"}
 OPERATION_ALLOWED_ROLES = {
     "create_ticket": {"director", "eric"},
     "file_bug": IMPLEMENTER_ROLES | {"audit"},
+    "release_draft": {"director", "eric"},
     "route": {"director"},
     "force_move": {"director"},
     "override_move": {"director"},
@@ -672,6 +673,11 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 str(payload.get("assignee", "")),
                 caller_role=caller,
             )
+            self.events.notify_change(self.app.store_signature())
+            self.send_json({"ticket": updated})
+            return
+        if operation == "release_draft":
+            updated = self.app.release_draft(ticket_id, caller_role=caller)
             self.events.notify_change(self.app.store_signature())
             self.send_json({"ticket": updated})
             return

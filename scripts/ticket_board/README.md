@@ -134,11 +134,12 @@ Ticket schema:
 Allowed values:
 
 - `assignee`: `main`, `app`, `perf`, `ops`, `audit`, `agent`, `director`, `unassigned`
-- `state`: `backlog`, `analysis`, `in_progress`, `inspection`, `audit`, `eric_review`, `director_review`, `done`, `cancelled`
+- `state`: `draft`, `backlog`, `analysis`, `in_progress`, `inspection`, `audit`, `eric_review`, `director_review`, `done`, `cancelled`
 
 Notes:
 
 - `eric_review` is reserved for tickets with `needs_eric_signoff: true` and is displayed in the UI as `UAT`
+- `draft` is an opt-in pre-triage staging state for director/Eric prep; it stays unassigned and does not notify until released to `analysis`
 - `backlog` is for deferred or parked tickets; `analysis` is for active triage/spec work before a ticket is revived into Implementation (`in_progress`)
 - `blocked_by` is a list of ticket IDs the ticket is waiting on; `blockers` carries the same IDs with a persistent `resolved` flag, and unresolved blockers prevent forward promotion until the referenced blocker reaches `done` or `cancelled`
 - `implementation` is an optional director-authored implementation package/spec; ticket body/comments can carry the spec, and only assignee must be set before entering Implementation (`in_progress`)
@@ -172,6 +173,7 @@ Notes:
 - The detail view renders attachments as grouped galleries; click an image to
   view it inline, and hover an image to remove it from the ticket
 - New transitions into `done` require either a verified `commit_hash` or `commit_exempt: true`
+- `draft -> analysis` must use the `release_draft` operation and is restricted to director/Eric
 - `analysis -> in_progress` is the default handoff from triage/spec to Implementation
 - Any state can move to `backlog` to defer work; backlog tickets can be revived to `analysis`
 - The default review path is `in_progress -> audit -> UAT (internal state: eric_review) -> director_review -> done`, or `in_progress -> audit -> director_review -> done` when UAT is not required

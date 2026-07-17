@@ -273,6 +273,9 @@ class InMemoryTicketBoardApp:
     def route_ticket(self, ticket_id: str, state: str, assignee: str, *, caller_role: str | None = None) -> dict[str, Any]:
         return self._mutate_ticket(ticket_id, {"state": state, "assignee": assignee}, caller_role=caller_role)
 
+    def release_draft(self, ticket_id: str, *, caller_role: str) -> dict[str, Any]:
+        return self._mutate_ticket(ticket_id, {"state": "analysis", "assignee": "unassigned"}, caller_role=caller_role)
+
     def force_move_ticket(
         self,
         ticket_id: str,

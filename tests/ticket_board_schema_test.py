@@ -40,6 +40,7 @@ EXPECTED_JSON_FIELDS = {
 
 EXPECTED_COMMENT_FIELDS = {"who", "ts", "text"}
 EXPECTED_STATES = {
+    "draft",
     "backlog",
     "analysis",
     "in_progress",
@@ -65,6 +66,7 @@ EXPECTED_ASSIGNEES = {
 EXPECTED_FUNCTION_API = {
     "ticket_board.create_ticket",
     "ticket_board.file_bug",
+    "ticket_board.release_draft",
     "ticket_board.route",
     "ticket_board.force_move",
     "ticket_board.start_work",

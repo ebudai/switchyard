@@ -24,6 +24,7 @@ CALLER_ROLES = ("director", "main", "app", "ops", "perf", "audit", "inspector", 
 LEGACY_ASSIGNEE_ALIASES = {"ui": "app"}
 LEGACY_STATE_ALIASES = {"open": "analysis"}
 STATES = (
+    "draft",
     "backlog",
     "analysis",
     "in_progress",
@@ -237,7 +238,7 @@ class TicketBoardApp:
         caller_role: str | None = None,
     ) -> dict[str, Any]:
         state = self._validate_create_state(state)
-        assignee = "unassigned" if state == "backlog" else assignee
+        assignee = "unassigned" if state in {"draft", "backlog"} else assignee
         return self.create_ticket_record(
             title=title,
             body=body,
@@ -265,8 +266,8 @@ class TicketBoardApp:
 
     def _validate_create_state(self, state: str) -> str:
         normalized = str(state).strip().lower() or "analysis"
-        if normalized not in {"analysis", "backlog"}:
-            raise ValueError(f"invalid create state: {state}; allowed: analysis, backlog")
+        if normalized not in {"draft", "analysis", "backlog"}:
+            raise ValueError(f"invalid create state: {state}; allowed: draft, analysis, backlog")
         return normalized
 
     def create_ticket_record(
@@ -336,6 +337,14 @@ class TicketBoardApp:
                 if caller_role:
                     self._pg_set_caller_role(conn, caller_role)
                 self._pg_call(conn, "SELECT ticket_board.route(%s, %s, %s);", (ticket_id, state, assignee))
+                return self._pg_get_ticket(ticket_id, conn)
+
+    def release_draft(self, ticket_id: str, *, caller_role: str) -> dict[str, Any]:
+        ticket_id = str(ticket_id).strip().upper()
+        with self._pg_connect() as conn:
+            with conn.transaction():
+                self._pg_set_caller_role(conn, caller_role)
+                self._pg_call(conn, "SELECT ticket_board.release_draft(%s);", (ticket_id,))
                 return self._pg_get_ticket(ticket_id, conn)
 
     def force_move_ticket(
@@ -681,7 +690,7 @@ ORDER BY t.ticket_number
         assignee = self._validate_assignee(assignee)
         state = self._validate_state(state)
         create_state = self._validate_create_state(state)
-        if create_state == "backlog":
+        if create_state in {"draft", "backlog"}:
             assignee = "unassigned"
         attachment_patch: dict[str, Any] = {}
         if screenshots not in (None, [], ""):
@@ -734,7 +743,7 @@ ORDER BY t.ticket_number
                 if regression:
                     self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps({"regression": True})))
                 if create_state != state:
-                    raise ValueError(f"invalid create state: {state}; allowed: analysis, backlog")
+                    raise ValueError(f"invalid create state: {state}; allowed: draft, analysis, backlog")
                 if create_state == "analysis" and assignee != "unassigned":
                     self._pg_call(conn, "SELECT ticket_board.route(%s, %s, %s);", (ticket_id, state, assignee))
                 if attachment_patch:
@@ -822,6 +831,8 @@ ORDER BY t.ticket_number
                         target_assignee = assignee if "assignee" in patch else ""
                         self._pg_call(conn, "SELECT ticket_board.audit_kick_back(%s, %s, %s);", (ticket_id, comment_text, target_assignee))
                         comment_text = ""
+                    elif state == "analysis" and current["state"] == "draft":
+                        self._pg_call(conn, "SELECT ticket_board.release_draft(%s);", (ticket_id,))
                     elif state == "analysis" and current["state"] in {"eric_review", "director_review", "done"}:
                         self._pg_call(conn, "SELECT ticket_board.eric_reopen(%s, %s);", (ticket_id, comment_text))
                         comment_text = ""

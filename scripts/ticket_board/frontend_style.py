@@ -705,6 +705,7 @@ STYLE = """    :root {
       background: rgba(134, 239, 172, 0.1);
     }
     .detail-stage-cancelled,
+    .detail-stage-draft,
     .detail-stage-backlog {
       color: var(--muted);
       border-color: rgba(148, 163, 184, 0.3);

@@ -318,6 +318,9 @@ class TicketBoardWriteClient:
     def route(self, ticket_id: str, *, state: str, assignee: str, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "route", {"state": state, "assignee": assignee}, caller_role=caller_role)
 
+    def release_draft(self, ticket_id: str, *, caller_role: str | None = None) -> dict[str, Any]:
+        return self._ticket_action(ticket_id, "release_draft", {}, caller_role=caller_role)
+
     def force_move(
         self,
         ticket_id: str,
@@ -482,6 +485,7 @@ def _build_parser() -> argparse.ArgumentParser:
     create.add_argument("--body", required=True)
     create.add_argument("--assignee", default="unassigned")
     create.add_argument("--state", default="analysis")
+    create.add_argument("--draft", action="store_true")
     create.add_argument("--screenshot")
     create.add_argument("--blocked-by", action="append", default=[])
     create.add_argument("--blocked-reason", default="")
@@ -514,7 +518,7 @@ def _build_parser() -> argparse.ArgumentParser:
     override_move.add_argument("--assignee", required=True)
     override_move.add_argument("--no-notify", action="store_true")
 
-    for name in ("start-work", "inspector-sign-off", "eric-sign-off", "defer"):
+    for name in ("start-work", "inspector-sign-off", "eric-sign-off", "release-draft", "defer"):
         sub = subparsers.add_parser(name)
         sub.add_argument("ticket_id")
 
@@ -594,7 +598,7 @@ def main(argv: list[str] | None = None) -> int:
                 body=args.body,
                 screenshot=args.screenshot,
                 assignee=args.assignee,
-                state=args.state,
+                state="draft" if args.draft else args.state,
                 blocked_by=args.blocked_by,
                 blocked_reason=args.blocked_reason,
                 implementation=args.implementation,

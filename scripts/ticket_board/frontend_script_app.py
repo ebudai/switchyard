@@ -253,7 +253,7 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
         title: titleInput.value,
         body: bodyInput.value,
         assignee: assigneeInput.value,
-        initial_state: createBacklogInput.checked ? 'backlog' : 'analysis',
+        initial_state: createDraftInput.checked ? 'draft' : (createBacklogInput.checked ? 'backlog' : 'analysis'),
         screenshot: state.pendingCreateScreenshots[0] || null,
         screenshots: state.pendingCreateScreenshots,
         needs_eric_signoff: needsEricInput.checked,
@@ -263,6 +263,7 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
       const result = await postTicketAction('/api/tickets/actions/create_ticket', payload, 'director');
       titleInput.value = '';
       bodyInput.value = '';
+      createDraftInput.checked = false;
       createBacklogInput.checked = false;
       needsEricInput.checked = false;
       needsInspectionInput.checked = false;
@@ -433,6 +434,8 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
         } else if (nextState === 'cancelled') {
           await updateTicketAction(ticketId, 'cancel', { reason: actionReason(patch) }, normalizedCaller);
           consumedComment = true;
+        } else if (nextState === 'analysis' && previousState === 'draft') {
+          await updateTicketAction(ticketId, 'release_draft', {}, normalizedCaller);
         } else if (
           nextState === 'analysis' &&
           ['eric_review', 'director_review', 'done'].includes(previousState)
@@ -600,6 +603,7 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
     wireImageDropZone(createAttachDropZone, 'create', readCreateAttachmentSetOptions);
     titleInput.addEventListener('keydown', submitCreateOnEnter);
     assigneeInput.addEventListener('keydown', submitCreateOnEnter);
+    createDraftInput.addEventListener('keydown', submitCreateOnEnter);
     createBacklogInput.addEventListener('keydown', submitCreateOnEnter);
     createRegressionInput.addEventListener('keydown', submitCreateOnEnter);
 

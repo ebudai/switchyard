@@ -497,6 +497,7 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
     seed_ticket("PGU-112", title="Comment", state="analysis")
     seed_ticket("PGU-113", title="Merge source", state="analysis")
     seed_ticket("PGU-114", title="Merge target", state="analysis")
+    seed_ticket("PGU-140", title="Draft release", state="draft", assignee="unassigned")
     seed_ticket(
         "PGU-115",
         title="Director kickback to implementation",
@@ -507,7 +508,7 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
     )
 
 
-def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets: Path) -> None:
+def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets: Path, admin_conn: str) -> None:
     assert_served_html_contains_write_token(base_url)
     unauth_spoof = post_json(
         base_url,
@@ -607,6 +608,55 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     backlog_created = backlog_created_payload["ticket"]  # type: ignore[index]
     assert backlog_created["state"] == "backlog", backlog_created  # type: ignore[index]
     assert backlog_created["assignee"] == "unassigned", backlog_created  # type: ignore[index]
+
+    draft_created_payload = post_json(
+        base_url,
+        "/api/tickets/actions/create_ticket",
+        {"title": "API draft create", "body": "Staged work.", "initial_state": "draft", "assignee": "ops"},
+        caller="director",
+        expect=201,
+    )
+    draft_created = draft_created_payload["ticket"]  # type: ignore[index]
+    draft_id = str(draft_created["id"])  # type: ignore[index]
+    assert draft_created["state"] == "draft", draft_created  # type: ignore[index]
+    assert draft_created["assignee"] == "unassigned", draft_created  # type: ignore[index]
+    assert psql(admin_conn, f"SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = '{draft_id}';") == "0"
+
+    draft_route_rejected = post_json(
+        base_url,
+        "/api/tickets/PGU-140/actions/route",
+        {"state": "analysis", "assignee": "unassigned"},
+        caller="director",
+        expect=400,
+    )
+    assert "draft tickets must be released with release_draft" in str(draft_route_rejected), draft_route_rejected
+    draft_release_forbidden = post_json(
+        base_url,
+        f"/api/tickets/{draft_id}/actions/release_draft",
+        {},
+        caller="ops",
+        expect=403,
+    )
+    assert "ops cannot call release_draft" in str(draft_release_forbidden), draft_release_forbidden
+    draft_released = post_json(base_url, f"/api/tickets/{draft_id}/actions/release_draft", {}, caller="eric")
+    assert draft_released["ticket"]["state"] == "analysis", draft_released  # type: ignore[index]
+    assert draft_released["ticket"]["assignee"] == "unassigned", draft_released  # type: ignore[index]
+
+    draft_cancel_payload = post_json(
+        base_url,
+        "/api/tickets/actions/create_ticket",
+        {"title": "API draft cancel", "body": "Discard.", "initial_state": "draft"},
+        caller="director",
+        expect=201,
+    )
+    draft_cancel_id = str(draft_cancel_payload["ticket"]["id"])  # type: ignore[index]
+    draft_cancelled = post_json(
+        base_url,
+        f"/api/tickets/{draft_cancel_id}/actions/cancel",
+        {"reason": "Abandon draft."},
+        caller="director",
+    )
+    assert draft_cancelled["ticket"]["state"] == "cancelled", draft_cancelled  # type: ignore[index]
 
     disallowed_create_state = post_json(
         base_url,
@@ -1345,7 +1395,13 @@ WHERE table_schema = 'ticket_board'
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:
-                exercise_write_api(f"http://127.0.0.1:{server.server_port}", commit_hash, frames=frames, assets=assets)
+                exercise_write_api(
+                    f"http://127.0.0.1:{server.server_port}",
+                    commit_hash,
+                    frames=frames,
+                    assets=assets,
+                    admin_conn=admin_conn,
+                )
             finally:
                 server.shutdown()
                 server.server_close()

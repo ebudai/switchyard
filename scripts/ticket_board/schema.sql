@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS ticket_board.tickets (
     body text NOT NULL DEFAULT '',
     state text NOT NULL
         CHECK (state IN (
+            'draft',
             'backlog',
             'analysis',
             'in_progress',
@@ -133,6 +134,7 @@ ALTER TABLE ticket_board.tickets
     DROP CONSTRAINT IF EXISTS tickets_state_check;
 ALTER TABLE ticket_board.tickets
     ADD CONSTRAINT tickets_state_check CHECK (state IN (
+        'draft',
         'backlog',
         'analysis',
         'in_progress',
@@ -454,6 +456,7 @@ LANGUAGE sql
 IMMUTABLE
 AS $$
     SELECT (p_old_state = 'backlog' AND p_new_state = 'analysis')
+        OR (p_old_state = 'draft' AND p_new_state = 'analysis')
         OR (p_old_state = 'backlog' AND p_new_state = 'in_progress')
         OR (p_old_state = 'analysis' AND p_new_state = 'in_progress')
         OR (p_old_state = 'in_progress' AND p_new_state IN ('inspection', 'audit'))
@@ -565,6 +568,10 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    IF NEW.state = 'draft' THEN
+        NEW.assignee := 'unassigned';
+        NEW.parked := false;
+    END IF;
     IF NEW.state = 'in_progress' AND NOT ticket_board.ticket_is_implementer_assignee(NEW.assignee) THEN
         RAISE EXCEPTION 'in_progress tickets require an implementer assignee (main, app, ops, perf, or research)';
     END IF;
@@ -585,6 +592,11 @@ AS $$
 DECLARE
     blocker_id text;
 BEGIN
+    IF NEW.state = 'draft' THEN
+        NEW.assignee := 'unassigned';
+        NEW.parked := false;
+    END IF;
+
     IF NEW.state <> 'backlog' OR OLD.state IN ('done', 'cancelled') THEN
         NEW.parked := false;
     END IF;
@@ -641,6 +653,7 @@ BEGIN
     IF OLD.state IS DISTINCT FROM NEW.state THEN
         IF NOT (
             (OLD.state = 'backlog' AND NEW.state IN ('analysis', 'in_progress', 'cancelled')) OR
+            (OLD.state = 'draft' AND NEW.state IN ('analysis', 'cancelled')) OR
             (OLD.state = 'analysis' AND NEW.state IN ('in_progress', 'backlog', 'cancelled')) OR
             (OLD.state = 'in_progress' AND NEW.state IN ('inspection', 'audit', 'analysis', 'backlog', 'cancelled')) OR
             (OLD.state = 'inspection' AND NEW.state IN ('audit', 'in_progress', 'backlog', 'cancelled')) OR
@@ -1438,8 +1451,9 @@ LANGUAGE sql
 IMMUTABLE
 AS $$
     SELECT CASE p_state
-        WHEN 'backlog' THEN 0
-        WHEN 'analysis' THEN 1
+        WHEN 'draft' THEN 0
+        WHEN 'backlog' THEN 1
+        WHEN 'analysis' THEN 2
         WHEN 'in_progress' THEN 3
         WHEN 'inspection' THEN 4
         WHEN 'audit' THEN 5
@@ -3323,8 +3337,8 @@ BEGIN
     IF normalized_state = '' THEN
         normalized_state := 'analysis';
     END IF;
-    IF normalized_state NOT IN ('analysis', 'backlog') THEN
-        RAISE EXCEPTION 'invalid create state: %; allowed: analysis, backlog', normalized_state;
+    IF normalized_state NOT IN ('draft', 'analysis', 'backlog') THEN
+        RAISE EXCEPTION 'invalid create state: %; allowed: draft, analysis, backlog', normalized_state;
     END IF;
     IF normalized_state = 'backlog' THEN
         normalized_parked := true;
@@ -3525,7 +3539,7 @@ DECLARE
     current_assignee text;
 BEGIN
     actor := ticket_board.require_actor(ARRAY['director'], 'route');
-    IF new_state NOT IN ('backlog', 'analysis', 'in_progress', 'inspection', 'audit', 'eric_review', 'director_review', 'done', 'cancelled') THEN
+    IF new_state NOT IN ('draft', 'backlog', 'analysis', 'in_progress', 'inspection', 'audit', 'eric_review', 'director_review', 'done', 'cancelled') THEN
         RAISE EXCEPTION 'invalid state: %', new_state;
     END IF;
     IF assignee NOT IN ('unassigned', 'main', 'app', 'perf', 'ops', 'audit', 'inspector', 'agent', 'director', 'research') THEN
@@ -3540,6 +3554,9 @@ BEGIN
     IF NOT FOUND THEN
         RAISE EXCEPTION 'ticket not found: %', id;
     END IF;
+    IF current_state = 'draft' THEN
+        RAISE EXCEPTION 'draft tickets must be released with release_draft';
+    END IF;
 
     UPDATE ticket_board.tickets
     SET state = new_state,
@@ -3550,6 +3567,39 @@ BEGIN
     IF current_state IS NOT DISTINCT FROM new_state AND current_assignee IS DISTINCT FROM assignee THEN
         PERFORM ticket_board.notify_ticket_owner_in_place_change(id, 'assignee');
     END IF;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.release_draft(id text)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    actor text;
+    current_state text;
+BEGIN
+    actor := ticket_board.require_actor(ARRAY['director', 'eric'], 'release_draft');
+    SELECT tickets.state
+    INTO current_state
+    FROM ticket_board.tickets
+    WHERE tickets.id = release_draft.id
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ticket not found: %', id;
+    END IF;
+    IF current_state <> 'draft' THEN
+        RAISE EXCEPTION 'release_draft requires a draft ticket';
+    END IF;
+
+    UPDATE ticket_board.tickets
+    SET state = 'analysis',
+        assignee = 'unassigned',
+        parked = false
+    WHERE tickets.id = release_draft.id;
+    PERFORM ticket_board.touch_ticket(id);
 END;
 $$;
 
@@ -3573,7 +3623,7 @@ DECLARE
     serial_focus_queued boolean := false;
 BEGIN
     actor := ticket_board.require_actor(ARRAY['director'], 'force_move');
-    IF new_state NOT IN ('backlog', 'analysis', 'in_progress', 'inspection', 'audit', 'eric_review', 'director_review', 'done', 'cancelled') THEN
+    IF new_state NOT IN ('draft', 'backlog', 'analysis', 'in_progress', 'inspection', 'audit', 'eric_review', 'director_review', 'done', 'cancelled') THEN
         RAISE EXCEPTION 'invalid state: %', new_state;
     END IF;
     IF assignee NOT IN ('unassigned', 'main', 'app', 'perf', 'ops', 'audit', 'inspector', 'agent', 'director', 'research') THEN

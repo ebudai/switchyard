@@ -627,7 +627,19 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         }
       });
       commentActions.appendChild(addCommentButton);
-      if (ticketIsEricReview(ticket)) {
+      if (ticket.state === 'draft') {
+        const releaseButton = document.createElement('button');
+        releaseButton.textContent = 'Release to Triage';
+        releaseButton.addEventListener('click', async () => {
+          try {
+            await submitComment(ticket.id, commentWho.value, commentText.value, 'analysis');
+          } catch (error) {
+            setCreateStatus(error.message, true);
+            await requestBoardReload();
+          }
+        });
+        commentActions.appendChild(releaseButton);
+      } else if (ticketIsEricReview(ticket)) {
         const kickbackButton = document.createElement('button');
         kickbackButton.textContent = 'Return for Rework';
         kickbackButton.addEventListener('click', async () => {

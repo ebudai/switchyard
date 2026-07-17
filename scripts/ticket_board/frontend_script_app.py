@@ -14,6 +14,9 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
       if (attempt) {
         params.set('attempt', attempt);
       }
+      if (setOptions.filename) {
+        params.set('filename', String(setOptions.filename));
+      }
       const query = params.toString();
       return query ? `?${query}` : '';
     }
@@ -67,7 +70,7 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
       setCreateStatus(`Uploading ${label}…`);
       const uploaded = [];
       for (const imageFile of imageFiles) {
-        uploaded.push(await uploadImageBlob(imageFile, setOptions));
+        uploaded.push(await uploadImageBlob(imageFile, { ...setOptions, filename: imageFile.name || '' }));
       }
       const uploadedPaths = uploaded.map((item) => item.path);
       await requestBoardReload();

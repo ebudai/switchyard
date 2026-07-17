@@ -58,6 +58,18 @@ def upload_set_slug(raw: str) -> str:
     return slug[:80]
 
 
+def uploaded_filename_slug(raw: str) -> str:
+    name = Path(str(raw or "").replace("\\", "/")).name
+    suffix = Path(name).suffix.lower()
+    stem = name[: -len(suffix)] if suffix else name
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", stem.strip().lower()).strip("-")[:120]
+    if not slug:
+        return ""
+    if suffix not in IMAGE_EXTENSIONS:
+        suffix = ".png"
+    return f"{slug}{suffix}"
+
+
 class TicketBoardApp:
     def __init__(
         self,
@@ -131,24 +143,49 @@ class TicketBoardApp:
         upload_set: str = "",
         set_label: str = "",
         attempt_number: str = "",
+        original_filename: str = "",
     ) -> dict[str, str]:
         if not raw_bytes:
             raise ValueError("uploaded image is empty")
         self.asset_dir.mkdir(parents=True, exist_ok=True)
         prefix = self._upload_filename_prefix(upload_set, set_label, attempt_number)
+        base_name = uploaded_filename_slug(original_filename) or f"upload_{time.time_ns()}.png"
+        if prefix:
+            base_name = f"{prefix}__{base_name}"
+        path = self._dedupe_asset_path(base_name)
         with Image.open(BytesIO(raw_bytes)) as image:
             image.load()
-            output = image if image.mode in ("RGB", "RGBA", "L", "LA", "P") else image.convert("RGBA")
-            filename = f"upload_{time.time_ns()}.png"
-            if prefix:
-                filename = f"{prefix}__{filename}"
-            path = self.asset_dir / filename
-            output.save(path, format="PNG")
+            output_format = self._image_save_format(path.suffix)
+            if output_format == "JPEG" and image.mode not in ("RGB", "L"):
+                output = image.convert("RGB")
+            else:
+                output = image if image.mode in ("RGB", "RGBA", "L", "LA", "P") else image.convert("RGBA")
+            output.save(path, format=output_format)
         return {
             "path": str(path.resolve()),
             "name": path.name,
             "modified": format_timestamp(path),
         }
+
+    def _dedupe_asset_path(self, filename: str) -> Path:
+        candidate = self.asset_dir / filename
+        if not candidate.exists():
+            return candidate
+        suffix = candidate.suffix
+        stem = candidate.stem
+        for index in range(2, 10000):
+            candidate = self.asset_dir / f"{stem}-{index}{suffix}"
+            if not candidate.exists():
+                return candidate
+        raise ValueError(f"could not allocate unique upload filename for {filename}")
+
+    def _image_save_format(self, suffix: str) -> str:
+        normalized = suffix.lower()
+        if normalized in {".jpg", ".jpeg"}:
+            return "JPEG"
+        if normalized == ".webp":
+            return "WEBP"
+        return "PNG"
 
     def _upload_filename_prefix(self, upload_set: str, set_label: str, attempt_number: str) -> str:
         normalized_set = upload_set_slug(upload_set)

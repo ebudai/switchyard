@@ -893,6 +893,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                     upload_set=query.get("set", [""])[0],
                     set_label=query.get("label", [""])[0],
                     attempt_number=query.get("attempt", [""])[0],
+                    original_filename=query.get("filename", [""])[0],
                 )
                 self.send_json({"image": uploaded}, HTTPStatus.CREATED)
                 return

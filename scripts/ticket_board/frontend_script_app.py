@@ -362,7 +362,7 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
     }
 
     function isStaleWriteTokenError(status, text) {
-      return status === 403 && /invalid write token/i.test(text || '');
+      return status === 403 || (/write[- ]token/i.test(text || '') && /(invalid|missing)/i.test(text || ''));
     }
 
     async function postTicketAction(path, payload, callerRole, options = {}) {

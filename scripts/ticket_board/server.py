@@ -952,15 +952,16 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
         try:
-            self.require_http_write_token()
             length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            self.require_http_write_token()
             if parsed.path == "/api/upload":
                 content_type = self.headers.get("Content-Type", "")
                 if not content_type.startswith("image/"):
                     raise ValueError("upload requires an image/* Content-Type")
                 query = urllib.parse.parse_qs(parsed.query)
                 uploaded = self.app.save_uploaded_image(
-                    self.rfile.read(length),
+                    body,
                     upload_set=query.get("set", [""])[0],
                     set_label=query.get("label", [""])[0],
                     attempt_number=query.get("attempt", [""])[0],
@@ -968,7 +969,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 )
                 self.send_json({"image": uploaded}, HTTPStatus.CREATED)
                 return
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = json.loads(body or b"{}")
             if parsed.path == "/api/register-caller":
                 self.handle_register_caller(payload)
                 return

@@ -254,6 +254,17 @@ CREATE TABLE IF NOT EXISTS ticket_board.workflow_transitions (
     PRIMARY KEY (from_stage, to_stage, action_name)
 );
 
+CREATE TABLE IF NOT EXISTS ticket_board.workflow_transition_shadow_log (
+    id bigserial PRIMARY KEY,
+    ts timestamptz NOT NULL DEFAULT clock_timestamp(),
+    ticket_id text,
+    from_state text,
+    to_state text,
+    actor text,
+    hardcoded_allowed boolean NOT NULL,
+    config_allowed boolean NOT NULL
+);
+
 INSERT INTO ticket_board.workflow_stages (
     name,
     display_label,
@@ -579,6 +590,84 @@ AS $$
         OR (p_old_state = 'director_review' AND p_new_state = 'done');
 $$;
 
+CREATE OR REPLACE FUNCTION ticket_board.workflow_transition_allowed_hardcoded(
+    p_from_state text,
+    p_to_state text
+)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT (p_from_state = 'backlog' AND p_to_state IN ('analysis', 'in_progress', 'cancelled'))
+        OR (p_from_state = 'draft' AND p_to_state IN ('analysis', 'cancelled'))
+        OR (p_from_state = 'analysis' AND p_to_state IN ('in_progress', 'backlog', 'cancelled'))
+        OR (p_from_state = 'in_progress' AND p_to_state IN ('inspection', 'audit', 'analysis', 'backlog', 'cancelled'))
+        OR (p_from_state = 'inspection' AND p_to_state IN ('audit', 'in_progress', 'backlog', 'cancelled'))
+        OR (p_from_state = 'audit' AND p_to_state IN ('eric_review', 'director_review', 'in_progress', 'analysis', 'backlog', 'cancelled'))
+        OR (p_from_state = 'eric_review' AND p_to_state IN ('inspection', 'director_review', 'audit', 'analysis', 'backlog', 'cancelled'))
+        OR (p_from_state = 'director_review' AND p_to_state IN ('done', 'in_progress', 'analysis', 'backlog', 'cancelled'))
+        OR (p_from_state = 'done' AND p_to_state IN ('analysis', 'backlog'))
+        OR (p_from_state = 'cancelled' AND p_to_state IN ('analysis', 'backlog'));
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.workflow_transition_allowed_config(
+    p_from_state text,
+    p_to_state text
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT EXISTS (
+        SELECT 1
+        FROM ticket_board.workflow_transitions wt
+        WHERE wt.from_stage = p_from_state
+          AND wt.to_stage = p_to_state
+    );
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.log_workflow_transition_shadow_mismatch(
+    p_ticket_id text,
+    p_from_state text,
+    p_to_state text,
+    p_actor text,
+    p_hardcoded_allowed boolean,
+    p_config_allowed boolean
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+BEGIN
+    IF p_hardcoded_allowed IS DISTINCT FROM p_config_allowed THEN
+        INSERT INTO ticket_board.workflow_transition_shadow_log (
+            ticket_id,
+            from_state,
+            to_state,
+            actor,
+            hardcoded_allowed,
+            config_allowed
+        ) VALUES (
+            p_ticket_id,
+            p_from_state,
+            p_to_state,
+            p_actor,
+            p_hardcoded_allowed,
+            p_config_allowed
+        );
+        RAISE WARNING 'workflow transition shadow mismatch for %: % -> % actor=% hardcoded=% config=%',
+            p_ticket_id,
+            p_from_state,
+            p_to_state,
+            p_actor,
+            p_hardcoded_allowed,
+            p_config_allowed;
+    END IF;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION ticket_board.ticket_is_implementer_assignee(p_assignee text)
 RETURNS boolean
 LANGUAGE sql
@@ -704,6 +793,9 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     blocker_id text;
+    hardcoded_transition_allowed boolean;
+    config_transition_allowed boolean;
+    shadow_actor text;
 BEGIN
     IF NEW.state = 'draft' THEN
         NEW.assignee := 'unassigned';
@@ -764,18 +856,18 @@ BEGIN
     END IF;
 
     IF OLD.state IS DISTINCT FROM NEW.state THEN
-        IF NOT (
-            (OLD.state = 'backlog' AND NEW.state IN ('analysis', 'in_progress', 'cancelled')) OR
-            (OLD.state = 'draft' AND NEW.state IN ('analysis', 'cancelled')) OR
-            (OLD.state = 'analysis' AND NEW.state IN ('in_progress', 'backlog', 'cancelled')) OR
-            (OLD.state = 'in_progress' AND NEW.state IN ('inspection', 'audit', 'analysis', 'backlog', 'cancelled')) OR
-            (OLD.state = 'inspection' AND NEW.state IN ('audit', 'in_progress', 'backlog', 'cancelled')) OR
-            (OLD.state = 'audit' AND NEW.state IN ('eric_review', 'director_review', 'in_progress', 'analysis', 'backlog', 'cancelled')) OR
-            (OLD.state = 'eric_review' AND NEW.state IN ('inspection', 'director_review', 'audit', 'analysis', 'backlog', 'cancelled')) OR
-            (OLD.state = 'director_review' AND NEW.state IN ('done', 'in_progress', 'analysis', 'backlog', 'cancelled')) OR
-            (OLD.state = 'done' AND NEW.state IN ('analysis', 'backlog')) OR
-            (OLD.state = 'cancelled' AND NEW.state IN ('analysis', 'backlog'))
-        ) THEN
+        hardcoded_transition_allowed := ticket_board.workflow_transition_allowed_hardcoded(OLD.state, NEW.state);
+        config_transition_allowed := ticket_board.workflow_transition_allowed_config(OLD.state, NEW.state);
+        shadow_actor := coalesce(nullif(current_setting('ticket_board.caller_role', true), ''), current_user);
+        PERFORM ticket_board.log_workflow_transition_shadow_mismatch(
+            NEW.id,
+            OLD.state,
+            NEW.state,
+            shadow_actor,
+            hardcoded_transition_allowed,
+            config_transition_allowed
+        );
+        IF NOT hardcoded_transition_allowed THEN
             RAISE EXCEPTION 'illegal state transition: % -> %', OLD.state, NEW.state;
         END IF;
     END IF;

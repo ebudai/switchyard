@@ -232,12 +232,15 @@ def main() -> int:
     ), "regression must be a default-false ticket metadata flag"
     assert "create table if not exists ticket_board.workflow_stages" in schema_lower
     assert "create table if not exists ticket_board.workflow_transitions" in schema_lower
+    assert "create table if not exists ticket_board.workflow_transition_shadow_log" in schema_lower
     assert "display_label text not null" in schema_lower
     assert "owner_roles text[] not null default array[]::text[]" in schema_lower
     assert "entry_gate_field text" in schema_lower
     assert "gate_skip_to text references ticket_board.workflow_stages(name)" in schema_lower
     assert "exit_signoff_field text" in schema_lower
     assert "is_terminal boolean not null default false" in schema_lower
+    assert "hardcoded_allowed boolean not null" in schema_lower
+    assert "config_allowed boolean not null" in schema_lower
     workflow_config_migration = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "pgu517_workflow_config_phase0.sql"
     ).read_text(encoding="utf-8").lower()
@@ -254,6 +257,19 @@ def main() -> int:
     assert "from ticket_board.workflow_stages" in executable_schema_lower
     assert "create or replace function ticket_board.state_rank(p_state text)" in executable_schema_lower
     assert "language sql\nstable" in executable_schema_lower
+    transition_shadow_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu521_workflow_transition_shadow_mode.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "create table if not exists ticket_board.workflow_transition_shadow_log" in transition_shadow_migration
+    assert "create or replace function ticket_board.workflow_transition_allowed_hardcoded" in transition_shadow_migration
+    assert "create or replace function ticket_board.workflow_transition_allowed_config" in transition_shadow_migration
+    assert "create or replace function ticket_board.log_workflow_transition_shadow_mismatch" in transition_shadow_migration
+    assert "create or replace function ticket_board.workflow_transition_allowed_hardcoded" in executable_schema_lower
+    assert "create or replace function ticket_board.workflow_transition_allowed_config" in executable_schema_lower
+    assert "create or replace function ticket_board.log_workflow_transition_shadow_mismatch" in executable_schema_lower
+    assert "workflow transition shadow mismatch" in executable_schema_lower
+    assert "workflow_transition_allowed_hardcoded(old.state, new.state)" in executable_schema_lower
+    assert "workflow_transition_allowed_config(old.state, new.state)" in executable_schema_lower
     assert "add column if not exists parked boolean not null default false" in schema_lower
     assert "add column if not exists regression boolean not null default false" in schema_lower
     assert "{7,40}" in schema, "commit_hash check must allow historical short hashes"

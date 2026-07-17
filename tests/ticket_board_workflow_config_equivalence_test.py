@@ -82,14 +82,14 @@ def transition_target_role_case_from_db(conn: str) -> str:
 
 
 def transition_whitelist_from_db(conn: str) -> list[tuple[str, list[str]]]:
-    definition = function_def(conn, "ticket_board.enforce_ticket_workflow_update()")
-    block_match = re.search(r"IF NOT \(\n(?P<body>.*?)\n\s+\) THEN", definition, re.S)
-    if not block_match:
-        raise AssertionError(f"could not extract enforce_ticket_workflow_update whitelist:\n{definition}")
+    definition = function_def(conn, "ticket_board.workflow_transition_allowed_hardcoded(text,text)")
+    body_match = re.search(r"AS \$[^$]*\$\n(?P<body>.*?)\n\$[^$]*\$", definition, re.S)
+    if not body_match:
+        raise AssertionError(f"could not extract workflow_transition_allowed_hardcoded body:\n{definition}")
     whitelist: list[tuple[str, list[str]]] = []
-    for line in normalize_sql_body(block_match.group("body")).splitlines():
+    for line in normalize_sql_body(body_match.group("body")).splitlines():
         line_match = re.fullmatch(
-            r"\s*\(OLD\.state = '([^']+)' AND NEW\.state IN \((.*?)\)\)(?: OR)?",
+            r"\s*(?:SELECT\s+|OR\s+)?\(p_from_state = '([^']+)' AND p_to_state IN \((.*?)\)\);?",
             line,
         )
         if not line_match:

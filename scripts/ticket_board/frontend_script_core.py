@@ -1,23 +1,12 @@
 """Core board frontend JavaScript helpers and board rendering."""
 
 SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
-    const COLUMNS = [
-      { key: 'draft', label: 'Draft' },
-      { key: 'backlog', label: 'Backlog' },
-      { key: 'analysis', label: 'Triage' },
-      { key: 'in_progress', label: 'Implementation' },
-      { key: 'inspection', label: 'Inspection' },
-      { key: 'audit', label: 'Audit' },
-      { key: 'eric_review', label: 'UAT' },
-      { key: 'director_review', label: 'Final Sign-Off' },
-      { key: 'done', label: 'Done' },
-      { key: 'cancelled', label: 'Cancelled' },
-    ];
-
     const state = {
       tickets: [],
       screenshots: [],
       errors: [],
+      states: [],
+      columns: [],
       assignees: [],
       callerRoles: [],
       selectedId: null,
@@ -87,7 +76,21 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     }
 
     function stateLabel(key) {
-      return COLUMNS.find((column) => column.key === key)?.label || key;
+      return boardColumns().find((column) => column.key === key)?.label || key;
+    }
+
+    function normalizeBoardColumns(columns, states) {
+      const source = Array.isArray(columns) && columns.length ? columns : (states || []).map((key) => ({ key, label: key }));
+      return source
+        .map((column) => ({
+          key: String(column?.key || '').trim(),
+          label: String(column?.label || column?.key || '').trim(),
+        }))
+        .filter((column) => column.key);
+    }
+
+    function boardColumns() {
+      return state.columns.length ? state.columns : normalizeBoardColumns([], state.states);
     }
 
     function roleLabel(role) {
@@ -1162,7 +1165,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     }
 
     function visibleColumns() {
-      return COLUMNS.filter((column) => {
+      return boardColumns().filter((column) => {
         if (column.key === 'backlog' && !state.showDeferred) {
           return false;
         }

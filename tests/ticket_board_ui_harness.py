@@ -33,6 +33,19 @@ from scripts.ticket_board.app import (
 )
 from scripts.ticket_board.server import DirectorNotifier, TicketBoardServer
 
+WORKFLOW_COLUMNS = [
+    {"key": "draft", "label": "Draft"},
+    {"key": "backlog", "label": "Backlog"},
+    {"key": "analysis", "label": "Triage"},
+    {"key": "in_progress", "label": "Implementation"},
+    {"key": "inspection", "label": "Inspection"},
+    {"key": "audit", "label": "Audit"},
+    {"key": "eric_review", "label": "UAT"},
+    {"key": "director_review", "label": "Final Sign-Off"},
+    {"key": "done", "label": "Done"},
+    {"key": "cancelled", "label": "Cancelled"},
+]
+
 
 def load_playwright() -> object:
     try:
@@ -140,6 +153,7 @@ class InMemoryTicketBoardApp:
             "tickets": [copy.deepcopy(ticket) for ticket in sorted(self.tickets.values(), key=lambda item: ticket_number(item["id"]))],
             "errors": [],
             "states": list(STATES),
+            "columns": copy.deepcopy(WORKFLOW_COLUMNS),
             "assignees": list(ASSIGNEES),
             "caller_roles": list(CALLER_ROLES),
             "screenshots": self.list_screenshots(),

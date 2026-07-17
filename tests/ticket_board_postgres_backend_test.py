@@ -31,6 +31,18 @@ SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
 RBAC_PATH = ROOT / "scripts" / "ticket_board" / "rbac.sql"
 PANE_ROLES = ["director", "eric", "ops", "app", "audit", "inspector", "perf", "research", "main"]
 SERVICE_ROLE = "ticket_board_service"
+EXPECTED_COLUMNS = [
+    {"key": "draft", "label": "Draft"},
+    {"key": "backlog", "label": "Backlog"},
+    {"key": "analysis", "label": "Triage"},
+    {"key": "in_progress", "label": "Implementation"},
+    {"key": "inspection", "label": "Inspection"},
+    {"key": "audit", "label": "Audit"},
+    {"key": "eric_review", "label": "UAT"},
+    {"key": "director_review", "label": "Final Sign-Off"},
+    {"key": "done", "label": "Done"},
+    {"key": "cancelled", "label": "Cancelled"},
+]
 
 
 def run(args: list[str], *, input_text: str | None = None, capture: bool = True) -> subprocess.CompletedProcess[str]:
@@ -175,6 +187,9 @@ WHERE table_schema = 'ticket_board'
 
             service_app = make_app(root, socket_dir, port, dbname, SERVICE_ROLE)
             service_conn = conninfo(socket_dir, port, dbname, SERVICE_ROLE)
+            assert service_app.workflow_columns() == EXPECTED_COLUMNS
+            initial_snapshot = service_app.snapshot()
+            assert initial_snapshot["columns"] == EXPECTED_COLUMNS, initial_snapshot["columns"]
 
             before_signature = service_app.store_signature()
             created = service_app.create_ticket(

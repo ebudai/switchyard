@@ -246,6 +246,14 @@ def main() -> int:
     assert "('analysis', 'triage', 2, array['director']::text[]" in workflow_config_migration
     assert "('eric_review', 'uat', 6, array['director']::text[]" in workflow_config_migration
     assert "('draft', 'analysis', 'release_draft', array['director', 'eric']::text[])" in workflow_config_migration
+    cosmetic_derivation_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu520_workflow_config_cosmetic_derivation.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "create or replace function ticket_board.state_rank" in cosmetic_derivation_migration
+    assert "from ticket_board.workflow_stages" in cosmetic_derivation_migration
+    assert "from ticket_board.workflow_stages" in executable_schema_lower
+    assert "create or replace function ticket_board.state_rank(p_state text)" in executable_schema_lower
+    assert "language sql\nstable" in executable_schema_lower
     assert "add column if not exists parked boolean not null default false" in schema_lower
     assert "add column if not exists regression boolean not null default false" in schema_lower
     assert "{7,40}" in schema, "commit_hash check must allow historical short hashes"

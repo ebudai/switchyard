@@ -90,10 +90,16 @@ class TicketBoardApp:
 
     def snapshot(self) -> dict[str, object]:
         tickets, errors = self.list_tickets()
+        try:
+            columns = self.workflow_columns()
+        except Exception as exc:  # noqa: BLE001
+            errors = [*errors, {"file": "postgres", "error": str(exc)}]
+            columns = [{"key": state, "label": state} for state in STATES]
         return {
             "tickets": tickets,
             "errors": errors,
             "states": list(STATES),
+            "columns": columns,
             "assignees": list(ASSIGNEES),
             "caller_roles": list(CALLER_ROLES),
             "screenshots": self.list_screenshots(),
@@ -112,6 +118,9 @@ class TicketBoardApp:
             return self._pg_list_tickets(), []
         except Exception as exc:  # noqa: BLE001
             return [], [{"file": "postgres", "error": str(exc)}]
+
+    def workflow_columns(self) -> list[dict[str, str]]:
+        return self._pg_workflow_columns()
 
     def list_screenshots(self) -> list[dict[str, str]]:
         if not self.frame_dir.is_dir():
@@ -602,6 +611,17 @@ ORDER BY t.ticket_number
             reverse=True,
         )
         return tickets
+
+    def _pg_workflow_columns(self) -> list[dict[str, str]]:
+        with self._pg_connect() as conn:
+            rows = conn.execute(
+                """
+SELECT name, display_label
+FROM ticket_board.workflow_stages
+ORDER BY rank;
+"""
+            ).fetchall()
+        return [{"key": str(row["name"]), "label": str(row["display_label"])} for row in rows]
 
     def _pg_get_ticket(self, ticket_id: str, conn: Any | None = None) -> dict[str, Any]:
         if conn is None:

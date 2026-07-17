@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.ticket_board import frontend_script_core  # noqa: E402
-from scripts.ticket_board.app import STATES  # noqa: E402
+from scripts.ticket_board.app import STATES, TicketBoardApp  # noqa: E402
 
 
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
@@ -59,12 +59,18 @@ def normalize_sql_body(body: str) -> str:
     return "\n".join(line.rstrip() for line in body.strip("\n").splitlines())
 
 
-def state_rank_case_from_db(conn: str) -> str:
-    definition = function_def(conn, "ticket_board.state_rank(text)")
-    match = re.search(r"SELECT CASE p_state\n(?P<body>.*?)\n\s+ELSE NULL", definition, re.S)
-    if not match:
-        raise AssertionError(f"could not extract state_rank CASE body:\n{definition}")
-    return normalize_sql_body(match.group("body"))
+def state_rank_values_from_db(conn: str, stages: list[dict[str, object]]) -> dict[str, int | None]:
+    values_sql = ", ".join(f"('{stage['name']}')" for stage in stages)
+    rows = json.loads(
+        psql(
+            conn,
+            f"""
+SELECT jsonb_object_agg(state_name, ticket_board.state_rank(state_name) ORDER BY state_name)::text
+FROM (VALUES {values_sql}) AS states(state_name);
+""",
+        )
+    )
+    return {str(key): value for key, value in rows.items()}
 
 
 def transition_target_role_case_from_db(conn: str) -> str:
@@ -121,19 +127,19 @@ WHERE n.nspname = 'ticket_board';
     return dict(sorted(action_roles.items()))
 
 
-def frontend_columns_literal() -> str:
-    match = re.search(r"    const COLUMNS = \[\n(?P<body>.*?)\n    \];", frontend_script_core.SCRIPT_CORE, re.S)
-    if not match:
-        raise AssertionError("could not locate frontend COLUMNS literal")
-    return match.group("body")
+def assert_frontend_columns_are_dynamic() -> None:
+    assert "const COLUMNS = [" not in frontend_script_core.SCRIPT_CORE
+    assert "function normalizeBoardColumns(" in frontend_script_core.SCRIPT_CORE
+    assert "function boardColumns()" in frontend_script_core.SCRIPT_CORE
+    assert "visibleColumns() {\n      return boardColumns().filter" in frontend_script_core.SCRIPT_CORE
 
 
-def compile_columns(stages: list[dict[str, object]]) -> str:
-    return "\n".join(f"      {{ key: '{stage['name']}', label: '{stage['display_label']}' }}," for stage in stages)
+def compile_columns(stages: list[dict[str, object]]) -> list[dict[str, str]]:
+    return [{"key": str(stage["name"]), "label": str(stage["display_label"])} for stage in stages]
 
 
-def compile_state_rank(stages: list[dict[str, object]]) -> str:
-    return "\n".join(f"        WHEN '{stage['name']}' THEN {stage['rank']}" for stage in stages)
+def compile_state_rank(stages: list[dict[str, object]]) -> dict[str, int]:
+    return {str(stage["name"]): int(stage["rank"]) for stage in stages}
 
 
 def compile_transition_target_role(stages: list[dict[str, object]]) -> str:
@@ -241,10 +247,12 @@ def main() -> int:
             db_transition_whitelist = transition_whitelist_from_db(admin_conn)
             transition_actions = {str(transition["action_name"]) for transition in transitions}
             db_action_roles = action_roles_from_db(admin_conn)
+            app_columns = TicketBoardApp(database_url=admin_conn).workflow_columns()
 
             assert tuple(stage["name"] for stage in stages) == STATES
-            assert compile_columns(stages) == frontend_columns_literal()
-            assert compile_state_rank(stages) == state_rank_case_from_db(admin_conn)
+            assert_frontend_columns_are_dynamic()
+            assert compile_columns(stages) == app_columns
+            assert compile_state_rank(stages) == state_rank_values_from_db(admin_conn, stages)
             assert compile_transition_target_role(stages) == transition_target_role_case_from_db(admin_conn)
             assert compile_transition_whitelist(stages, transitions, db_transition_whitelist) == normalize_sql_body(
                 "\n".join(

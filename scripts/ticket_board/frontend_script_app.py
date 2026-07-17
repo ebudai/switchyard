@@ -192,6 +192,8 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
       state.tickets = payload.tickets;
       state.screenshots = payload.screenshots;
       state.errors = payload.errors;
+      state.states = payload.states || [];
+      state.columns = normalizeBoardColumns(payload.columns || [], state.states);
       state.assignees = payload.assignees;
       state.callerRoles = payload.caller_roles || [];
       if (state.selectedId && !state.tickets.some((ticket) => ticket.id === state.selectedId)) {

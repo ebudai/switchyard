@@ -1561,21 +1561,11 @@ $$;
 CREATE OR REPLACE FUNCTION ticket_board.state_rank(p_state text)
 RETURNS integer
 LANGUAGE sql
-IMMUTABLE
+STABLE
 AS $$
-    SELECT CASE p_state
-        WHEN 'draft' THEN 0
-        WHEN 'backlog' THEN 1
-        WHEN 'analysis' THEN 2
-        WHEN 'in_progress' THEN 3
-        WHEN 'inspection' THEN 4
-        WHEN 'audit' THEN 5
-        WHEN 'eric_review' THEN 6
-        WHEN 'director_review' THEN 7
-        WHEN 'done' THEN 8
-        WHEN 'cancelled' THEN 9
-        ELSE NULL
-    END;
+    SELECT rank
+    FROM ticket_board.workflow_stages
+    WHERE name = p_state;
 $$;
 
 CREATE OR REPLACE FUNCTION ticket_board.transition_message(

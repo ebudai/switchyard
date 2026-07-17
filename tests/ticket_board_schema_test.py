@@ -270,6 +270,13 @@ def main() -> int:
     assert "workflow transition shadow mismatch" in executable_schema_lower
     assert "workflow_transition_allowed_hardcoded(old.state, new.state)" in executable_schema_lower
     assert "workflow_transition_allowed_config(old.state, new.state)" in executable_schema_lower
+    rbac_sql = (ROOT / "scripts" / "ticket_board" / "rbac.sql").read_text(encoding="utf-8").lower()
+    assert "revoke all on ticket_board.workflow_transition_shadow_log" in rbac_sql
+    assert "grant select on ticket_board.workflow_transition_shadow_log" in rbac_sql
+    shadow_log_grants_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu521_zz_shadow_log_read_grants.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "grant select on ticket_board.workflow_transition_shadow_log" in shadow_log_grants_migration
     assert "if not config_transition_allowed then" in executable_schema_lower
     assert "if not hardcoded_transition_allowed then" not in executable_schema_lower
     config_authoritative_migration = (

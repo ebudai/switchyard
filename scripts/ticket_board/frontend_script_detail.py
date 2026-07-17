@@ -399,7 +399,6 @@ SCRIPT_DETAIL = """    function selectedTicket() {
             const nextBlockedBy = (ticket.blocked_by || []).filter((item) => item !== blockerId);
             await updateTicket(ticket.id, {
               blocked_by: nextBlockedBy,
-              blocked_reason: nextBlockedBy.length ? blockedReasonInput.value : '',
             }, detailCallerRole());
           });
           removeBlockedByActions.appendChild(removeBlockedByButton);

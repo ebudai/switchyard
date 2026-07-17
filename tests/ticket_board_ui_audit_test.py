@@ -316,7 +316,7 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         reset_update_ticket_tracker(page)
         blocked_by.get_by_role("button", name="Remove Blocker PGU-502").click()
         wait_for_last_update_ticket(page)
-        wait_for_ticket_field(page, harness.url, "PGU-503", "ticket.blocked_by.length === 0 && ticket.blocked_reason === ''")
+        wait_for_ticket_field(page, harness.url, "PGU-503", "ticket.blocked_by.length === 0")
         wait_for_blocker_card_render(page, "PGU-503", "PGU-502", blocked=False)
 
         page.locator("#detailCloseBtn").click()

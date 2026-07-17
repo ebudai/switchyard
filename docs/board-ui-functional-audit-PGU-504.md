@@ -40,6 +40,8 @@ Current live state:
 
 Result: `PGU-502` does not appear in the `PGU-503` blocker picker. That matches current product rules: terminal tickets (`done`, `cancelled`) are intentionally not selectable as blockers. The harness separately verifies the current PGU-505 non-terminal blocker flow by adding `PGU-502` with the `Add Blocker` button, asserting immediate persistence/rendering, then removing it with `Remove Blocker PGU-502`.
 
+The focused blocker browser test also covers the multi-blocker removal edge case: with two blockers present and the Blocked Reason textarea locally cleared but unsaved, removing one blocker preserves the persisted blocked reason for the remaining blocker and does not raise a page error.
+
 The reusable in-memory upload path mirrors the production PGU-502/PGU-503 attachment filename validation. The browser audit now checks that an unnumbered `Feedback` upload surfaces `feedback upload set requires a feedback number`, then verifies a numbered feedback upload preserves a sanitized original filename, de-duplicates a repeated filename with `-2`, and strips a traversal-style filename down to the sanitized basename under the `feedback-007-phone-proof__...` prefix.
 
 The blocker-card assertion now uses a retry-safe browser render check after the API has persisted the blocker update. The flake exposed a stale-load rendering race: an older `/api/board` response could finish after a newer load and overwrite the card DOM with stale blocker state. The frontend now tracks a `loadSequence` and discards superseded `loadBoard()` responses, and the test waits for the clicked `updateTicket()` promise before checking the rendered blocker card.

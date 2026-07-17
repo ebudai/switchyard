@@ -372,6 +372,25 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         page.wait_for_function("() => window.PGU_TICKET_BOARD_BUILD_ID === 'pgu-525-detail-open-build'", timeout=5000)
         page.locator(".card", has=page.locator(".card-id", has_text="PGU-512")).click()
         modal.wait_for(timeout=5000)
+        page.evaluate("""() => { window.PGU_TICKET_BOARD_REFRESH_IDLE_MS = 25; state.lastActivityAt = 0; }""")
+        comment_box = modal.get_by_placeholder("Add a comment or bounce-back note")
+        comment_box.fill("Submit survives token rotation")
+        harness.server.build_id = "pgu-525-submit-build"
+        harness.server.write_token = "pgu-525-rotated-token"
+        modal.get_by_role("button", name="Add Comment").click()
+        page.locator("#createStatus", has_text="Comment added to PGU-512.").wait_for(timeout=5000)
+        wait_for_ticket_field(page, harness.url, "PGU-512", "ticket.comments.some((comment) => comment.text === 'Submit survives token rotation')")
+        page.wait_for_function(
+            "(element) => element.value === ''",
+            arg=comment_box.element_handle(timeout=5000),
+            timeout=5000,
+        )
+        page.locator("#detailCloseBtn").click()
+        page.wait_for_load_state("domcontentloaded")
+        page.locator(".column-title", has_text="Triage").wait_for(timeout=5000)
+        page.wait_for_function("() => window.PGU_TICKET_BOARD_BUILD_ID === 'pgu-525-submit-build'", timeout=5000)
+        page.locator(".card", has=page.locator(".card-id", has_text="PGU-512")).click()
+        modal.wait_for(timeout=5000)
 
         detail_field(modal, "Parent Ticket").locator("input").fill("PGU-502")
         detail_field(modal, "Parent Ticket").get_by_role("button", name="Save Parent Link").click()

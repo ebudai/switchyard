@@ -329,6 +329,24 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
       return metadata;
     }
 
+    function savedDraftFieldsForPatch(patch, consumed) {
+      const fieldKeys = {
+        title: 'title',
+        parent_id: 'parentId',
+        blocked_reason: 'blockedReason',
+        implementation: 'implementation',
+        audit_prompt: 'auditPrompt',
+        commit_hash: 'commitHash',
+      };
+      const savedFields = {};
+      Object.entries(fieldKeys).forEach(([patchKey, draftKey]) => {
+        if (Object.prototype.hasOwnProperty.call(patch, patchKey) && consumed.has(patchKey)) {
+          savedFields[draftKey] = patch[patchKey];
+        }
+      });
+      return savedFields;
+    }
+
     async function updateTicketAction(ticketId, operation, payload, callerRole) {
       return postTicketAction(
         `/api/tickets/${encodeURIComponent(ticketId)}/actions/${encodeURIComponent(operation)}`,
@@ -487,7 +505,9 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
       consumed.forEach((key) => delete editable[key]);
       if (Object.keys(editable).length) {
         await updateTicketAction(ticketId, 'edit_fields', editable, normalizedCaller);
+        Object.keys(editable).forEach((key) => consumed.add(key));
       }
+      markDetailDraftFieldsSaved(ticketId, savedDraftFieldsForPatch(patch, consumed));
       await requestBoardReload();
     }
 

@@ -170,6 +170,7 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
         } catch (error) {
           input.checked = previousChecked;
           setCreateStatus(error.message, true);
+          await requestBoardReload();
         }
       });
       label.append(input, document.createTextNode(labelText));

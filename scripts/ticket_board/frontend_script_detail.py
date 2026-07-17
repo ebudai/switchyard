@@ -38,6 +38,23 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       commentUrgentText.textContent = 'Urgent';
       commentUrgentLabel.append(commentUrgent, commentUrgentText);
       const detailCallerRole = () => commentWho.value;
+      const updateDetailTicket = async (patch, callerRole = null) => {
+        try {
+          await updateTicket(ticket.id, patch, callerRole || detailCallerRole());
+        } catch (error) {
+          setCreateStatus(error.message, true);
+          await requestBoardReload();
+        }
+      };
+      const updateDetailTicketForToggle = async (patch, callerRole = null) => {
+        try {
+          await updateTicket(ticket.id, patch, callerRole || detailCallerRole());
+        } catch (error) {
+          setCreateStatus(error.message, true);
+          await requestBoardReload();
+          throw error;
+        }
+      };
 
       if (ticketIsEricReview(ticket)) {
         const signoffRecorded = !!ticket.eric_signoff;
@@ -184,7 +201,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       state.assignees.forEach((assignee) => buildOption(assigneeSelect, assignee, roleLabel(assignee)));
       assigneeSelect.value = ticket.assignee;
       assigneeSelect.addEventListener('change', async () => {
-        await updateTicket(ticket.id, { assignee: assigneeSelect.value }, 'director');
+        await updateDetailTicket({ assignee: assigneeSelect.value }, 'director');
       });
       assigneeLabel.appendChild(assigneeSelect);
 
@@ -200,7 +217,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       const saveParentLinkButton = document.createElement('button');
       saveParentLinkButton.textContent = 'Save Parent Link';
       saveParentLinkButton.addEventListener('click', async () => {
-        await updateTicket(ticket.id, { parent_id: parentLinkInput.value.trim().toUpperCase() }, detailCallerRole());
+        await updateDetailTicket({ parent_id: parentLinkInput.value.trim().toUpperCase() });
       });
       parentLinkActions.appendChild(saveParentLinkButton);
       if (ticket.parent_id) {
@@ -208,7 +225,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         clearParentLinkButton.textContent = 'Clear Parent Link';
         clearParentLinkButton.addEventListener('click', async () => {
           parentLinkInput.value = '';
-          await updateTicket(ticket.id, { parent_id: '' }, detailCallerRole());
+          await updateDetailTicket({ parent_id: '' });
         });
         parentLinkActions.appendChild(clearParentLinkButton);
       }
@@ -228,22 +245,22 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       const toggles = document.createElement('div');
       toggles.className = 'tag-row';
       toggles.appendChild(toggleControl('Requires UAT', ticket.needs_eric_signoff, async (checked) => {
-        await updateTicket(ticket.id, { needs_eric_signoff: checked }, detailCallerRole());
+        await updateDetailTicketForToggle({ needs_eric_signoff: checked });
       }));
       toggles.appendChild(toggleControl('Needs inspection', ticket.needs_inspection, async (checked) => {
-        await updateTicket(ticket.id, { needs_inspection: checked }, 'director');
+        await updateDetailTicketForToggle({ needs_inspection: checked }, 'director');
       }));
       toggles.appendChild(toggleControl('Regression', ticket.regression, async (checked) => {
-        await updateTicket(ticket.id, { regression: checked }, detailCallerRole());
+        await updateDetailTicketForToggle({ regression: checked });
       }));
       toggles.appendChild(toggleControl('Manual control', ticket.manually_controlled, async (checked) => {
-        await updateTicket(ticket.id, { manually_controlled: checked }, 'director');
+        await updateDetailTicketForToggle({ manually_controlled: checked }, 'director');
       }, {
         title: 'Director-only: hold or release this ticket outside automatic workflow movement.',
       }));
       if (ticket.needs_inspection) {
         toggles.appendChild(toggleControl('Inspector signoff', ticket.inspector_signoff, async (checked) => {
-          await updateTicket(ticket.id, { inspector_signoff: checked }, 'inspector');
+          await updateDetailTicketForToggle({ inspector_signoff: checked }, 'inspector');
         }));
       }
       toggles.appendChild(toggleControl('Audit signoff', ticket.audit_signoff, async (checked) => {
@@ -251,14 +268,14 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         if (checked && commentText.value.trim()) {
           patch.comment = { who: 'audit', text: commentText.value.trim() };
         }
-        await updateTicket(ticket.id, patch, 'audit');
+        await updateDetailTicketForToggle(patch, 'audit');
       }));
       toggles.appendChild(toggleControl('UAT sign-off', ticket.eric_signoff, async (checked) => {
         const patch = { eric_signoff: checked };
         if (checked && commentText.value.trim()) {
           patch.comment = { who: 'eric', text: commentText.value.trim() };
         }
-        await updateTicket(ticket.id, patch, 'eric');
+        await updateDetailTicketForToggle(patch, 'eric');
       }, {
         disabled: !ticket.needs_eric_signoff,
         title: ticket.needs_eric_signoff ? '' : 'Ticket does not require UAT sign-off.',
@@ -278,7 +295,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       const saveTitleButton = document.createElement('button');
       saveTitleButton.textContent = 'Save Title';
       saveTitleButton.addEventListener('click', async () => {
-        await updateTicket(ticket.id, { title: titleEditInput.value }, detailCallerRole());
+        await updateDetailTicket({ title: titleEditInput.value });
       });
       titleActions.appendChild(saveTitleButton);
       const mergeTargetInput = document.createElement('input');
@@ -378,10 +395,10 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         const nextBlockedBy = Array.from(new Set([...(ticket.blocked_by || []), blockerId]));
         const blockedReasonValue = blockedReasonInput.value.trim() || `Waiting on ${blockerId}.`;
         blockedReasonInput.value = blockedReasonValue;
-        await updateTicket(ticket.id, {
+        await updateDetailTicket({
           blocked_by: nextBlockedBy,
           blocked_reason: blockedReasonValue,
-        }, detailCallerRole());
+        });
       });
       blockedByActions.append(blockerPicker, addBlockedByButton);
       const blockedByNote = document.createElement('div');
@@ -407,7 +424,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       const saveBlockedReasonButton = document.createElement('button');
       saveBlockedReasonButton.textContent = 'Save Blocked Reason';
       saveBlockedReasonButton.addEventListener('click', async () => {
-        await updateTicket(ticket.id, { blocked_reason: blockedReasonInput.value }, detailCallerRole());
+        await updateDetailTicket({ blocked_reason: blockedReasonInput.value });
       });
       blockedReasonActions.appendChild(saveBlockedReasonButton);
       const blockedReasonNote = document.createElement('div');
@@ -426,7 +443,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       const saveImplementationButton = document.createElement('button');
       saveImplementationButton.textContent = 'Save Implementation';
       saveImplementationButton.addEventListener('click', async () => {
-        await updateTicket(ticket.id, { implementation: implementationInput.value }, detailCallerRole());
+        await updateDetailTicket({ implementation: implementationInput.value });
       });
       implementationActions.appendChild(saveImplementationButton);
       implementation.append(
@@ -446,7 +463,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       const saveAuditPromptButton = document.createElement('button');
       saveAuditPromptButton.textContent = 'Save Audit Notes';
       saveAuditPromptButton.addEventListener('click', async () => {
-        await updateTicket(ticket.id, { audit_prompt: auditPromptInput.value }, detailCallerRole());
+        await updateDetailTicket({ audit_prompt: auditPromptInput.value });
       });
       auditPromptActions.appendChild(saveAuditPromptButton);
       auditPrompt.append(
@@ -467,12 +484,12 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       const saveCommitButton = document.createElement('button');
       saveCommitButton.textContent = 'Save Commit';
       saveCommitButton.addEventListener('click', async () => {
-        await updateTicket(ticket.id, { commit_hash: commitHashInput.value }, detailCallerRole());
+        await updateDetailTicket({ commit_hash: commitHashInput.value });
       });
       commitActions.appendChild(saveCommitButton);
       commitInfo.append(commitHashInput, commitActions);
       const commitOverride = toggleControl('No commit required', ticket.commit_exempt, async (checked) => {
-        await updateTicket(ticket.id, { commit_exempt: checked }, detailCallerRole());
+        await updateDetailTicketForToggle({ commit_exempt: checked });
       });
       const commitNote = document.createElement('div');
       commitNote.className = 'soft-note';
@@ -566,9 +583,9 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         const groups = document.createElement('div');
         groups.className = 'attachment-set-list';
         renderAttachmentSetGroups(groups, entries, 'Remove attachment', async (path) => {
-          await updateTicket(ticket.id, {
+          await updateDetailTicket({
             screenshots: ticketScreenshotPaths(ticket).filter((item) => item !== path),
-          }, detailCallerRole());
+          });
         }, (entry) => {
           openImageLightbox(entry);
         });

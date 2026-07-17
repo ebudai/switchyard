@@ -37,6 +37,10 @@ def main() -> int:
     assert "function renderAttachmentSetGroups(container, entries, removeLabel, onRemove, onOpen = null)" in HTML
     assert "filename.match(/^target__(.+)$/i)" in HTML
     assert "filename.match(/^attempt-(\\d+)(?:-(.+?))?__(.+)$/i)" in HTML
+    assert "filename.match(/^feedback-(\\d+)(?:-(.+?))?__(.+)$/i)" in HTML
+    assert "label: `Feedback #${feedbackNumber}${suffix ? ` - ${suffix}` : ''}`" in HTML
+    assert "right.feedbackNumber - left.feedbackNumber" in HTML
+    assert "newestFeedback.open = true;" in HTML
     assert "filename.match(/^([a-z0-9][a-z0-9-]*)__(.+)$/i)" in HTML
     assert "newestAttempt.open = true;" in HTML
     assert ".attachment-remove" in HTML

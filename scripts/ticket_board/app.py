@@ -168,8 +168,17 @@ class TicketBoardApp:
             if label_slug:
                 prefix = f"{prefix}-{label_slug}"
             return prefix
-        if normalized_set == "feedback" and not label_slug:
-            return "feedback"
+        if normalized_set == "feedback":
+            try:
+                feedback = int(str(attempt_number).strip())
+            except ValueError as exc:
+                raise ValueError("feedback upload set requires a feedback number") from exc
+            if feedback <= 0 or feedback > 999:
+                raise ValueError("feedback upload set requires feedback number 1-999")
+            prefix = f"feedback-{feedback:03d}"
+            if label_slug:
+                prefix = f"{prefix}-{label_slug}"
+            return prefix
         return label_slug or normalized_set
 
     def create_ticket(

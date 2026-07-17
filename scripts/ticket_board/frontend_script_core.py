@@ -676,6 +676,20 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
           itemLabel: attemptMatch[3],
         };
       }
+      const feedbackMatch = filename.match(/^feedback-(\\d+)(?:-(.+?))?__(.+)$/i);
+      if (feedbackMatch) {
+        const feedbackNumber = Number.parseInt(feedbackMatch[1], 10);
+        const labelSlug = feedbackMatch[2] || '';
+        const suffix = attachmentSetLabelSlug(labelSlug);
+        return {
+          key: `feedback-${feedbackMatch[1]}-${labelSlug}`,
+          type: 'feedback',
+          feedbackNumber,
+          label: `Feedback #${feedbackNumber}${suffix ? ` - ${suffix}` : ''}`,
+          order: feedbackNumber,
+          itemLabel: feedbackMatch[3],
+        };
+      }
       const namedSetMatch = filename.match(/^([a-z0-9][a-z0-9-]*)__(.+)$/i);
       if (namedSetMatch) {
         const label = attachmentSetLabelSlug(namedSetMatch[1]);
@@ -707,6 +721,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
             label: parsed.label,
             order: parsed.order,
             attemptNumber: parsed.attemptNumber || 0,
+            feedbackNumber: parsed.feedbackNumber || 0,
             entries: [],
             open: false,
           });
@@ -732,6 +747,15 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         if (right.type === 'attempt' && left.type !== 'attempt') {
           return 1;
         }
+        if (left.type === 'feedback' && right.type === 'feedback') {
+          return right.feedbackNumber - left.feedbackNumber || left.label.localeCompare(right.label);
+        }
+        if (left.type === 'feedback' && right.type !== 'feedback') {
+          return -1;
+        }
+        if (right.type === 'feedback' && left.type !== 'feedback') {
+          return 1;
+        }
         if (left.type === 'named' && right.type === 'named') {
           return left.label.localeCompare(right.label);
         }
@@ -746,8 +770,13 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       const newestAttempt = groups
         .filter((group) => group.type === 'attempt')
         .sort((left, right) => right.attemptNumber - left.attemptNumber)[0];
+      const newestFeedback = groups
+        .filter((group) => group.type === 'feedback')
+        .sort((left, right) => right.feedbackNumber - left.feedbackNumber)[0];
       if (newestAttempt) {
         newestAttempt.open = true;
+      } else if (newestFeedback) {
+        newestFeedback.open = true;
       } else if (groups.length === 1) {
         groups[0].open = true;
       }

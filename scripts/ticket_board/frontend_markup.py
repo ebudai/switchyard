@@ -50,7 +50,7 @@ MARKUP = """  <div class="layout">
                 </select>
               </label>
               <label>
-                Attempt #
+                Set #
                 <input data-attach-attempt type="number" min="1" max="999" placeholder="3">
               </label>
               <label>

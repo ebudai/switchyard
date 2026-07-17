@@ -506,7 +506,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       ].forEach(([value, label]) => buildOption(detailSetSelect, value, label));
       detailSetLabel.appendChild(detailSetSelect);
       const detailAttemptLabel = document.createElement('label');
-      detailAttemptLabel.textContent = 'Attempt #';
+      detailAttemptLabel.textContent = 'Set #';
       const detailAttemptInput = document.createElement('input');
       detailAttemptInput.dataset.attachAttempt = 'true';
       detailAttemptInput.type = 'number';

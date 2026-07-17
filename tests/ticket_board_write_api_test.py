@@ -226,7 +226,7 @@ def post_json(
         return body
 
 
-def upload_png(base_url: str, query: str = "") -> dict[str, object]:
+def upload_png(base_url: str, query: str = "", *, expect: int = 201) -> dict[str, object] | str:
     buffer = BytesIO()
     Image.new("RGB", (2, 2), (220, 90, 40)).save(buffer, format="PNG")
     headers = {"Content-Type": "image/png"}
@@ -239,10 +239,15 @@ def upload_png(base_url: str, query: str = "") -> dict[str, object]:
         headers=headers,
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=5) as response:
-        body = response.read().decode("utf-8")
-        assert response.status == 201, (response.status, body)
-        return json.loads(body)
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            body = response.read().decode("utf-8")
+            assert response.status == expect, (response.status, body)
+            return json.loads(body)
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8")
+        assert exc.code == expect, (exc.code, body)
+        return body
 
 
 def get_ticket(base_url: str, ticket_id: str) -> dict[str, object]:
@@ -619,8 +624,12 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     assert str(target_uploaded["image"]["name"]).startswith("target__upload_"), target_uploaded  # type: ignore[index]
     attempt_uploaded = upload_png(base_url, "set=attempt&attempt=7&label=UAT%20Rework")
     assert str(attempt_uploaded["image"]["name"]).startswith("attempt-007-uat-rework__upload_"), attempt_uploaded  # type: ignore[index]
-    feedback_uploaded = upload_png(base_url, "set=feedback")
-    assert str(feedback_uploaded["image"]["name"]).startswith("feedback__upload_"), feedback_uploaded  # type: ignore[index]
+    feedback_without_number = upload_png(base_url, "set=feedback", expect=400)
+    assert "feedback upload set requires a feedback number" in str(feedback_without_number), feedback_without_number
+    feedback_uploaded = upload_png(base_url, "set=feedback&attempt=2")
+    assert str(feedback_uploaded["image"]["name"]).startswith("feedback-002__upload_"), feedback_uploaded  # type: ignore[index]
+    labeled_feedback_uploaded = upload_png(base_url, "set=feedback&attempt=3&label=Eric%20Markup")
+    assert str(labeled_feedback_uploaded["image"]["name"]).startswith("feedback-003-eric-markup__upload_"), labeled_feedback_uploaded  # type: ignore[index]
     pasted_create_payload = post_json(
         base_url,
         "/api/tickets/actions/create_ticket",

@@ -29,6 +29,7 @@ def main() -> int:
     assert "Save Blockers" not in HTML
     assert "const nextBlockedBy = Array.from(new Set([...(ticket.blocked_by || []), blockerId]));" in HTML
     assert "const blockedReasonValue = blockedReasonInput.value.trim() || `Waiting on ${blockerId}.`;" in HTML
+    assert "persistDetailDraftField(" not in HTML
     assert "await updateTicket(ticket.id, {" in HTML
     assert "blocked_by: nextBlockedBy," in HTML
     assert "blocked_reason: blockedReasonValue," in HTML

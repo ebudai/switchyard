@@ -373,7 +373,6 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         const nextBlockedBy = Array.from(new Set([...(ticket.blocked_by || []), blockerId]));
         const blockedReasonValue = blockedReasonInput.value.trim() || `Waiting on ${blockerId}.`;
         blockedReasonInput.value = blockedReasonValue;
-        persistDetailDraftField(ticket.id, 'blockedReason', blockedReasonValue);
         await updateTicket(ticket.id, {
           blocked_by: nextBlockedBy,
           blocked_reason: blockedReasonValue,

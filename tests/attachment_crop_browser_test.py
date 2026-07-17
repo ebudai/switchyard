@@ -17,9 +17,9 @@ from tests.ticket_board_ui_harness import BoardHarness, load_playwright, ticket_
 
 def write_source_image(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    image = Image.new("RGB", (100, 80), color=(20, 30, 40))
-    for x in range(100):
-        for y in range(80):
+    image = Image.new("RGB", (2000, 1500), color=(20, 30, 40))
+    for x in range(2000):
+        for y in range(1500):
             image.putpixel((x, y), (x * 2 % 255, y * 3 % 255, (x + y) % 255))
     image.save(path)
 
@@ -46,8 +46,22 @@ def run_browser_check(playwright: object) -> None:
             page.locator(".detail-modal .attachment-card-clickable", has_text="render-original.png").click()
             page.locator("#imageLightboxOverlay").wait_for(timeout=5000)
             page.wait_for_function(
-                "() => { const img = document.getElementById('imageLightboxImage'); return !!img && img.complete && img.naturalWidth === 100 && img.naturalHeight === 80; }"
+                "() => { const img = document.getElementById('imageLightboxImage'); return !!img && img.complete && img.naturalWidth === 2000 && img.naturalHeight === 1500; }"
             )
+            displayed = page.evaluate(
+                """() => {
+                  const img = document.getElementById('imageLightboxImage');
+                  const rect = img.getBoundingClientRect();
+                  return {
+                    naturalWidth: img.naturalWidth,
+                    naturalHeight: img.naturalHeight,
+                    displayedWidth: rect.width,
+                    displayedHeight: rect.height,
+                  };
+                }"""
+            )
+            assert displayed["displayedWidth"] < displayed["naturalWidth"], displayed
+            assert displayed["displayedHeight"] < displayed["naturalHeight"], displayed
 
             page.get_by_role("button", name="Crop for feedback").click()
             drag = page.evaluate(
@@ -79,12 +93,14 @@ def run_browser_check(playwright: object) -> None:
             metadata = crop_entry["metadata"]
             crop_name = Path(crop_entry["path"]).name
             assert crop_name.startswith("feedback-001__crop-of-")
-            assert "x20-y20-w50-h40" in crop_name
+            assert "x400-y375-w1000-h750" in crop_name
             assert metadata["source_path"] == str(source)
             assert metadata["source_name"] == source.name
-            assert metadata["rect"] == {"x": 20, "y": 20, "w": 50, "h": 40}
-            assert metadata["caption"] == "crop of attempt-001__render-original.png @ 20,20,50,40"
+            assert metadata["rect"] == {"x": 400, "y": 375, "w": 1000, "h": 750}
+            assert metadata["caption"] == "crop of attempt-001__render-original.png @ 400,375,1000,750"
             assert Path(crop_entry["path"]).is_file()
+            with Image.open(crop_entry["path"]) as crop_image:
+                assert crop_image.size == (1000, 750)
 
             page.evaluate(
                 """() => {
@@ -97,13 +113,13 @@ def run_browser_check(playwright: object) -> None:
                 }"""
             )
             page.wait_for_function(
-                "() => Array.from(document.querySelectorAll('.detail-modal .attachment-card-clickable')).some((node) => (node.getAttribute('aria-label') || '').includes('x20-y20-w50-h40'))",
+                "() => Array.from(document.querySelectorAll('.detail-modal .attachment-card-clickable')).some((node) => (node.getAttribute('aria-label') || '').includes('x400-y375-w1000-h750'))",
                 timeout=5000,
             )
-            crop_card = page.locator(".detail-modal .attachment-card-clickable[aria-label*='x20-y20-w50-h40']")
+            crop_card = page.locator(".detail-modal .attachment-card-clickable[aria-label*='x400-y375-w1000-h750']")
             assert crop_card.count() >= 1
             crop_card.nth(0).dispatch_event("click")
-            assert "crop of attempt-001__render-original.png @ 20,20,50,40" in page.locator("#imageLightboxCaption").inner_text()
+            assert "crop of attempt-001__render-original.png @ 400,375,1000,750" in page.locator("#imageLightboxCaption").inner_text()
         finally:
             browser.close()
 

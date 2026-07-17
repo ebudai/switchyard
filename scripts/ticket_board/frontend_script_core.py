@@ -30,6 +30,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       pendingCreateScreenshots: [],
       mobileSectionOpen: {},
       lightboxEntry: null,
+      cropState: null,
     };
 
     const mobileSectionMedia = window.matchMedia('(max-width: 900px)');
@@ -68,8 +69,15 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     const detailContentEl = document.getElementById('detailContent');
     const imageLightboxOverlayEl = document.getElementById('imageLightboxOverlay');
     const imageLightboxCloseBtn = document.getElementById('imageLightboxCloseBtn');
+    const imageLightboxToolbarEl = document.getElementById('imageLightboxToolbar');
     const imageLightboxImageEl = document.getElementById('imageLightboxImage');
     const imageLightboxCaptionEl = document.getElementById('imageLightboxCaption');
+    const imageCropStartBtn = document.getElementById('imageCropStartBtn');
+    const imageCropFeedbackInput = document.getElementById('imageCropFeedbackInput');
+    const imageCropConfirmBtn = document.getElementById('imageCropConfirmBtn');
+    const imageCropCancelBtn = document.getElementById('imageCropCancelBtn');
+    const imageCropLayerEl = document.getElementById('imageCropLayer');
+    const imageCropBoxEl = document.getElementById('imageCropBox');
     const refreshUpdateBannerEl = document.getElementById('refreshUpdateBanner');
     const refreshUpdateButtonEl = document.getElementById('refreshUpdateButton');
 
@@ -561,6 +569,16 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       return !!state.lightboxEntry;
     }
 
+    function cropMetadataCaption(entry) {
+      const metadata = entry?.metadata || {};
+      if (metadata.kind !== 'crop' || !metadata.rect) {
+        return '';
+      }
+      const rect = metadata.rect;
+      return metadata.caption
+        || `crop of ${metadata.source_name || 'source'} @ ${rect.x},${rect.y},${rect.w},${rect.h}`;
+    }
+
     function syncBodyModalState() {
       document.body.classList.toggle('detail-open', detailModalIsOpen() || imageLightboxIsOpen());
     }
@@ -580,22 +598,30 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       if (isOpen) {
         imageLightboxImageEl.src = previewUrlFor(entry.path);
         imageLightboxImageEl.alt = entry.label;
-        imageLightboxCaptionEl.textContent = entry.label;
+        const provenance = cropMetadataCaption(entry);
+        imageLightboxCaptionEl.textContent = provenance ? `${entry.label} - ${provenance}` : entry.label;
+        imageCropStartBtn.hidden = !entry.ticketId;
+        imageLightboxToolbarEl.hidden = !entry.ticketId;
       } else {
         imageLightboxImageEl.removeAttribute('src');
         imageLightboxImageEl.alt = '';
         imageLightboxCaptionEl.textContent = '';
+        imageLightboxToolbarEl.hidden = true;
       }
+      syncCropControls();
       syncBodyModalState();
     }
 
-    function openImageLightbox(entry) {
+    function openImageLightbox(entry, ticket = null) {
       if (!entry || !entry.available) {
         return;
       }
+      state.cropState = null;
       state.lightboxEntry = {
         path: entry.path,
         label: entry.label || screenshotLabelFor(entry.path),
+        metadata: entry.metadata || {},
+        ticketId: ticket?.id || '',
       };
       syncImageLightbox();
       imageLightboxCloseBtn.focus();
@@ -605,9 +631,115 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       if (!state.lightboxEntry) {
         return;
       }
+      state.cropState = null;
       state.lightboxEntry = null;
       syncImageLightbox();
       scheduleAutoRefreshCheck();
+    }
+
+    function syncCropControls() {
+      const active = !!state.cropState;
+      imageCropLayerEl.hidden = !active;
+      imageCropConfirmBtn.hidden = !active;
+      imageCropCancelBtn.hidden = !active;
+      imageCropStartBtn.hidden = active || !state.lightboxEntry?.ticketId;
+      imageCropBoxEl.hidden = !active || !state.cropState?.box;
+      if (active && state.cropState?.box) {
+        const box = state.cropState.box;
+        imageCropBoxEl.style.left = `${box.left}px`;
+        imageCropBoxEl.style.top = `${box.top}px`;
+        imageCropBoxEl.style.width = `${box.width}px`;
+        imageCropBoxEl.style.height = `${box.height}px`;
+      } else {
+        imageCropBoxEl.removeAttribute('style');
+      }
+    }
+
+    function imageDisplayRectInLayer() {
+      const imageRect = imageLightboxImageEl.getBoundingClientRect();
+      const layerRect = imageCropLayerEl.getBoundingClientRect();
+      return {
+        left: imageRect.left - layerRect.left,
+        top: imageRect.top - layerRect.top,
+        width: imageRect.width,
+        height: imageRect.height,
+      };
+    }
+
+    function clampPointToDisplayedImage(clientX, clientY) {
+      const imageRect = imageLightboxImageEl.getBoundingClientRect();
+      return {
+        x: Math.max(imageRect.left, Math.min(clientX, imageRect.right)) - imageRect.left,
+        y: Math.max(imageRect.top, Math.min(clientY, imageRect.bottom)) - imageRect.top,
+      };
+    }
+
+    function startImageCrop() {
+      if (!state.lightboxEntry?.ticketId || !imageLightboxImageEl.complete || !imageLightboxImageEl.naturalWidth) {
+        return;
+      }
+      state.cropState = { dragging: false, start: null, box: null };
+      syncCropControls();
+      setCreateStatus('Draw a crop rectangle over the image, then attach it to feedback.');
+    }
+
+    function cancelImageCrop() {
+      state.cropState = null;
+      syncCropControls();
+      setCreateStatus('Crop cancelled.');
+    }
+
+    function cropRectInSourcePixels() {
+      if (!state.cropState?.box) {
+        throw new Error('draw a crop rectangle first');
+      }
+      const display = imageDisplayRectInLayer();
+      if (display.width <= 0 || display.height <= 0) {
+        throw new Error('image is not ready for cropping');
+      }
+      const box = state.cropState.box;
+      const scaleX = imageLightboxImageEl.naturalWidth / display.width;
+      const scaleY = imageLightboxImageEl.naturalHeight / display.height;
+      const x = Math.round((box.left - display.left) * scaleX);
+      const y = Math.round((box.top - display.top) * scaleY);
+      const w = Math.round(box.width * scaleX);
+      const h = Math.round(box.height * scaleY);
+      if (w <= 0 || h <= 0) {
+        throw new Error('crop rectangle is too small');
+      }
+      return { x, y, w, h };
+    }
+
+    function setCropBoxFromPoints(start, end) {
+      const display = imageDisplayRectInLayer();
+      const left = display.left + Math.min(start.x, end.x);
+      const top = display.top + Math.min(start.y, end.y);
+      const width = Math.abs(end.x - start.x);
+      const height = Math.abs(end.y - start.y);
+      state.cropState.box = { left, top, width, height };
+      syncCropControls();
+    }
+
+    async function attachCurrentCrop() {
+      if (!state.lightboxEntry?.ticketId) {
+        throw new Error('no ticket selected for crop attach');
+      }
+      const ticketId = state.lightboxEntry.ticketId;
+      const rect = cropRectInSourcePixels();
+      const feedbackValue = String(imageCropFeedbackInput.value || '').trim();
+      const payload = {
+        source_path: state.lightboxEntry.path,
+        rect,
+      };
+      if (feedbackValue) {
+        payload.feedback_number = Number.parseInt(feedbackValue, 10);
+      }
+      setCreateStatus(`Attaching crop ${rect.x},${rect.y},${rect.w},${rect.h}…`);
+      await updateTicketAction(ticketId, 'crop_attachment', payload, 'director');
+      state.cropState = null;
+      closeImageLightbox();
+      await requestBoardReload();
+      setCreateStatus(`Attached crop to ${ticketId}.`);
     }
 
     function openDetail(ticketId) {
@@ -1064,6 +1196,13 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         meta.className = 'attachment-meta';
         meta.textContent = entry.label;
         card.appendChild(meta);
+        const provenance = cropMetadataCaption(entry);
+        if (provenance) {
+          const provenanceLine = document.createElement('div');
+          provenanceLine.className = 'attachment-provenance';
+          provenanceLine.textContent = provenance;
+          card.appendChild(provenanceLine);
+        }
         container.appendChild(card);
       });
     }

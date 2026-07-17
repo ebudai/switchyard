@@ -165,6 +165,16 @@ def main() -> int:
     assert "create table if not exists ticket_board.ticket_blockers" in schema_lower
     assert "create table if not exists ticket_board.ticket_comments" in schema_lower
     assert "create table if not exists ticket_board.ticket_attachments" in schema_lower
+    assert "metadata jsonb not null default '{}'::jsonb" in schema_lower
+    assert "create or replace function ticket_board.append_ticket_attachment" in schema_lower
+    rbac_sql = (ROOT / "scripts" / "ticket_board" / "rbac.sql").read_text(encoding="utf-8").lower()
+    assert "grant execute on function ticket_board.append_ticket_attachment(text, text, jsonb) to ticket_board_service" in rbac_sql
+    crop_metadata_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu531_attachment_crop_metadata.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "add column if not exists metadata jsonb not null default '{}'::jsonb" in crop_metadata_migration
+    assert "create or replace function ticket_board.append_ticket_attachment" in crop_metadata_migration
+    assert "grant execute on function ticket_board.append_ticket_attachment(text, text, jsonb) to ticket_board_service" in crop_metadata_migration
     assert "create table if not exists ticket_board.notification_trace" in schema_lower
     assert "ticket_state_at_event" in schema_lower
     assert "ticket_assignee_at_event" in schema_lower

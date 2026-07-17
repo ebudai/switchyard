@@ -73,6 +73,7 @@ OPERATION_ALLOWED_ROLES = {
     "set_blockers": {"director"},
     "add_comment": CALLER_ROLES,
     "edit_fields": CALLER_ROLES,
+    "crop_attachment": {"director", "eric"},
     "merge": {"director"},
 }
 EDIT_FIELD_NAMES = {
@@ -852,6 +853,18 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             if "commit_exempt" in payload and caller != "director":
                 raise PermissionError("commit_exempt can only be edited by director")
             patch = dict(payload)
+        elif operation == "crop_attachment":
+            updated = self.app.crop_attachment(
+                ticket_id,
+                source_path=str(payload.get("source_path", "")),
+                rect=payload.get("rect", {}),  # type: ignore[arg-type]
+                feedback_number=int(payload["feedback_number"]) if payload.get("feedback_number") not in (None, "") else None,
+                set_label=str(payload.get("label", "")),
+                caller_role=caller,
+            )
+            self.events.notify_change(self.app.store_signature())
+            self.send_json({"ticket": updated})
+            return
         else:
             raise ValueError(f"unknown ticket operation: {operation}")
 

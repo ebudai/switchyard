@@ -88,6 +88,7 @@ class MutableAttachApp:
         upload_set: str = "",
         set_label: str = "",
         attempt_number: str = "",
+        original_filename: str = "",
     ) -> dict[str, str]:
         self.upload_count += 1
         self.asset_dir.mkdir(parents=True, exist_ok=True)

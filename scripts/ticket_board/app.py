@@ -71,6 +71,11 @@ def uploaded_filename_slug(raw: str) -> str:
     return f"{slug}{suffix}"
 
 
+def crop_filename_slug(raw: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", str(raw or "").strip().lower()).strip("-")
+    return slug[:80] or "render"
+
+
 class TicketBoardApp:
     def __init__(
         self,
@@ -176,6 +181,98 @@ class TicketBoardApp:
             "name": path.name,
             "modified": format_timestamp(path),
         }
+
+    def crop_attachment(
+        self,
+        ticket_id: str,
+        *,
+        source_path: str,
+        rect: dict[str, Any],
+        feedback_number: int | None = None,
+        set_label: str = "",
+        caller_role: str | None = None,
+    ) -> dict[str, Any]:
+        ticket_id = str(ticket_id).strip().upper()
+        ticket = self.get_ticket(ticket_id)
+        source = self.resolve_image(source_path)
+        normalized_source = str(source.resolve())
+        attached_paths = {str(path) for path in ticket.get("screenshots", [])}
+        if normalized_source not in attached_paths:
+            raise ValueError("crop source must already be attached to the ticket")
+
+        with Image.open(source) as image:
+            image.load()
+            source_width, source_height = image.size
+            crop_rect = self._normalize_crop_rect(rect, source_width, source_height)
+            cropped = image.crop(
+                (
+                    crop_rect["x"],
+                    crop_rect["y"],
+                    crop_rect["x"] + crop_rect["w"],
+                    crop_rect["y"] + crop_rect["h"],
+                )
+            )
+            if cropped.mode not in ("RGB", "RGBA", "L", "LA", "P"):
+                cropped = cropped.convert("RGBA")
+            feedback = feedback_number or self._next_feedback_number(ticket)
+            if feedback <= 0 or feedback > 999:
+                raise ValueError("feedback crop requires feedback number 1-999")
+            label_slug = upload_set_slug(set_label)
+            prefix = f"feedback-{feedback:03d}"
+            if label_slug:
+                prefix = f"{prefix}-{label_slug}"
+            source_slug = crop_filename_slug(source.stem)
+            crop_suffix = f"x{crop_rect['x']}-y{crop_rect['y']}-w{crop_rect['w']}-h{crop_rect['h']}"
+            destination = self._dedupe_asset_path(f"{prefix}__crop-of-{source_slug}-{crop_suffix}.png")
+            cropped.save(destination, format="PNG")
+
+        metadata = {
+            "kind": "crop",
+            "source_path": normalized_source,
+            "source_name": source.name,
+            "rect": crop_rect,
+            "source_size": {"w": source_width, "h": source_height},
+            "feedback_number": feedback,
+            "caption": (
+                f"crop of {source.name} @ "
+                f"{crop_rect['x']},{crop_rect['y']},{crop_rect['w']},{crop_rect['h']}"
+            ),
+        }
+        with self._pg_connect() as conn:
+            self._pg_set_caller_role(conn, caller_role or "director")
+            self._pg_call(
+                conn,
+                "SELECT ticket_board.append_ticket_attachment(%s, %s, %s::jsonb);",
+                (ticket_id, str(destination.resolve()), json.dumps(metadata)),
+            )
+            return self._pg_get_ticket(ticket_id, conn)
+
+    def _normalize_crop_rect(self, raw: dict[str, Any], image_width: int, image_height: int) -> dict[str, int]:
+        def number(name: str) -> int:
+            try:
+                return int(round(float(raw.get(name))))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"crop rect requires numeric {name}") from exc
+
+        x = number("x")
+        y = number("y")
+        w = number("w")
+        h = number("h")
+        if w <= 0 or h <= 0:
+            raise ValueError("crop width and height must be positive")
+        x = max(0, min(x, image_width - 1))
+        y = max(0, min(y, image_height - 1))
+        w = max(1, min(w, image_width - x))
+        h = max(1, min(h, image_height - y))
+        return {"x": x, "y": y, "w": w, "h": h}
+
+    def _next_feedback_number(self, ticket: dict[str, Any]) -> int:
+        highest = 0
+        for path in ticket.get("screenshots", []) or []:
+            match = re.search(r"(?:^|/)feedback-(\d+)", str(path))
+            if match:
+                highest = max(highest, int(match.group(1)))
+        return min(highest + 1, 999)
 
     def _dedupe_asset_path(self, filename: str) -> Path:
         candidate = self.asset_dir / filename
@@ -588,10 +685,10 @@ SELECT
         '[]'::jsonb
     ) AS comments,
     COALESCE(
-        (SELECT array_agg(a.path ORDER BY a.position)
+        (SELECT jsonb_agg(jsonb_build_object('path', a.path, 'metadata', a.metadata) ORDER BY a.position)
          FROM ticket_board.ticket_attachments a
          WHERE a.ticket_id = t.id),
-        ARRAY[]::text[]
+        '[]'::jsonb
     ) AS screenshots
 FROM ticket_board.tickets t
 LEFT JOIN active_work ON active_work.id = t.id
@@ -640,6 +737,8 @@ ORDER BY rank;
         if isinstance(blockers, str):
             blockers = json.loads(blockers)
         screenshots = row["screenshots"] or []
+        if isinstance(screenshots, str):
+            screenshots = json.loads(screenshots)
         ticket = {
             "id": str(row["id"]),
             "title": self._require_text(row["title"], "title"),
@@ -1184,8 +1283,20 @@ ORDER BY rank;
             source.unlink(missing_ok=True)
         return str(destination.resolve())
 
-    def _build_screenshot_entries(self, paths: list[str]) -> list[dict[str, Any]]:
-        return [{"path": path, "available": Path(path).is_file()} for path in paths]
+    def _build_screenshot_entries(self, paths: list[Any]) -> list[dict[str, Any]]:
+        entries: list[dict[str, Any]] = []
+        for item in paths:
+            if isinstance(item, dict):
+                path = str(item.get("path", ""))
+                metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            else:
+                path = str(item)
+                metadata = {}
+            entry: dict[str, Any] = {"path": path, "available": Path(path).is_file()}
+            if metadata:
+                entry["metadata"] = metadata
+            entries.append(entry)
+        return entries
 
     def _unique_paths(self, paths: list[str]) -> list[str]:
         unique: list[str] = []

@@ -89,6 +89,7 @@ GRANT EXECUTE ON FUNCTION ticket_board.set_blockers(text, text[], text) TO ticke
 GRANT EXECUTE ON FUNCTION ticket_board.add_comment(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.add_comment(text, text, boolean) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.edit_fields(text, jsonb) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.append_ticket_attachment(text, text, jsonb) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.merge(text, text) TO ticket_board_service;
 
 GRANT EXECUTE ON FUNCTION ticket_board.claim_notification(timestamptz, interval) TO ticket_board_listener;

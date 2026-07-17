@@ -608,7 +608,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
             screenshots: ticketScreenshotPaths(ticket).filter((item) => item !== path),
           });
         }, (entry) => {
-          openImageLightbox(entry);
+          openImageLightbox(entry, ticket);
         });
         imageWrap.appendChild(groups);
         box.appendChild(imageWrap);

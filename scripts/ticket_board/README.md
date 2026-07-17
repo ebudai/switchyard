@@ -172,6 +172,10 @@ Notes:
   after the double underscore so lightbox captions remain readable.
 - The detail view renders attachments as grouped galleries; click an image to
   view it inline, and hover an image to remove it from the ticket
+- Detail image lightboxes can crop an attached render into a numbered Feedback
+  set. Crop outputs are named with the source + `x/y/w/h` rectangle and carry
+  structured attachment metadata with `source_path`, `source_name`, and the
+  original-pixel crop rectangle.
 - New transitions into `done` require either a verified `commit_hash` or `commit_exempt: true`
 - `draft -> analysis` must use the `release_draft` operation and is restricted to director/Eric
 - `analysis -> in_progress` is the default handoff from triage/spec to Implementation

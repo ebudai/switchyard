@@ -272,6 +272,13 @@ STYLE = """    :root {
       color: var(--muted);
       overflow-wrap: anywhere;
     }
+    .attachment-provenance {
+      margin-top: -2px;
+      font-size: 11px;
+      line-height: 1.35;
+      color: #fbbf24;
+      overflow-wrap: anywhere;
+    }
     .attachment-remove {
       position: absolute;
       top: 10px;
@@ -626,13 +633,31 @@ STYLE = """    :root {
       width: min(100%, 1220px);
       max-height: 100%;
       display: grid;
-      grid-template-rows: auto minmax(0, 1fr) auto;
+      grid-template-rows: auto auto minmax(0, 1fr) auto;
       gap: 12px;
       padding: 16px;
       border: 1px solid var(--border);
       border-radius: 10px;
       background: rgba(15, 17, 21, 0.98);
       box-shadow: 0 30px 90px rgba(0, 0, 0, 0.48);
+    }
+    .image-lightbox-toolbar[hidden] { display: none; }
+    .image-lightbox-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: end;
+      gap: 10px;
+    }
+    .image-lightbox-toolbar label {
+      display: grid;
+      gap: 4px;
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .image-lightbox-toolbar input {
+      width: 96px;
     }
     .image-lightbox-stage {
       min-height: 0;
@@ -643,6 +668,7 @@ STYLE = """    :root {
       border-radius: 8px;
       background: #0b0d11;
       padding: 12px;
+      position: relative;
     }
     .image-lightbox-image {
       display: block;
@@ -653,6 +679,22 @@ STYLE = """    :root {
       object-fit: contain;
       border-radius: 6px;
       background: #0b0d11;
+    }
+    .image-crop-layer[hidden] { display: none; }
+    .image-crop-layer {
+      position: absolute;
+      inset: 12px;
+      z-index: 2;
+      cursor: crosshair;
+      touch-action: none;
+    }
+    .image-crop-box[hidden] { display: none; }
+    .image-crop-box {
+      position: absolute;
+      border: 2px solid #fbbf24;
+      background: rgba(251, 191, 36, 0.16);
+      box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.28);
+      pointer-events: none;
     }
     .image-lightbox-caption {
       color: var(--muted);

@@ -768,8 +768,60 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
       }
     });
 
+    imageCropStartBtn.addEventListener('click', () => {
+      startImageCrop();
+    });
+
+    imageCropCancelBtn.addEventListener('click', () => {
+      cancelImageCrop();
+    });
+
+    imageCropConfirmBtn.addEventListener('click', async () => {
+      try {
+        await attachCurrentCrop();
+      } catch (error) {
+        setCreateStatus(error.message, true);
+        await requestBoardReload();
+      }
+    });
+
+    imageCropLayerEl.addEventListener('pointerdown', (event) => {
+      if (!state.cropState) {
+        return;
+      }
+      event.preventDefault();
+      imageCropLayerEl.setPointerCapture(event.pointerId);
+      const point = clampPointToDisplayedImage(event.clientX, event.clientY);
+      state.cropState.dragging = true;
+      state.cropState.start = point;
+      state.cropState.box = null;
+      syncCropControls();
+    });
+
+    imageCropLayerEl.addEventListener('pointermove', (event) => {
+      if (!state.cropState?.dragging || !state.cropState.start) {
+        return;
+      }
+      event.preventDefault();
+      setCropBoxFromPoints(state.cropState.start, clampPointToDisplayedImage(event.clientX, event.clientY));
+    });
+
+    imageCropLayerEl.addEventListener('pointerup', (event) => {
+      if (!state.cropState?.dragging || !state.cropState.start) {
+        return;
+      }
+      event.preventDefault();
+      setCropBoxFromPoints(state.cropState.start, clampPointToDisplayedImage(event.clientX, event.clientY));
+      state.cropState.dragging = false;
+      imageCropLayerEl.releasePointerCapture(event.pointerId);
+    });
+
     document.addEventListener('keydown', (event) => {
       if (event.key !== 'Escape') {
+        return;
+      }
+      if (state.cropState) {
+        cancelImageCrop();
         return;
       }
       if (imageLightboxIsOpen()) {

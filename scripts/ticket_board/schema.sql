@@ -216,9 +216,12 @@ CREATE TABLE IF NOT EXISTS ticket_board.ticket_attachments (
     is_primary boolean NOT NULL DEFAULT false,
     source_field text NOT NULL
         CHECK (source_field IN ('screenshots', 'screenshot')),
+    metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
     PRIMARY KEY (ticket_id, position),
     UNIQUE (ticket_id, path)
 );
+ALTER TABLE ticket_board.ticket_attachments
+    ADD COLUMN IF NOT EXISTS metadata jsonb NOT NULL DEFAULT '{}'::jsonb;
 
 CREATE INDEX IF NOT EXISTS ticket_attachments_path_idx
     ON ticket_board.ticket_attachments (path);
@@ -4877,11 +4880,30 @@ BEGIN
         IF jsonb_typeof(patch->'screenshots') <> 'array' THEN
             RAISE EXCEPTION 'screenshots must be an array';
         END IF;
-        DELETE FROM ticket_board.ticket_attachments WHERE ticket_id = edit_fields.id;
-        INSERT INTO ticket_board.ticket_attachments (ticket_id, position, path, is_primary, source_field)
-        SELECT edit_fields.id, ord::integer - 1, path, ord = 1, 'screenshots'
-        FROM jsonb_array_elements_text(patch->'screenshots') WITH ORDINALITY AS item(path, ord)
-        WHERE btrim(path) <> '';
+        WITH existing AS (
+            SELECT path, metadata
+            FROM ticket_board.ticket_attachments
+            WHERE ticket_id = edit_fields.id
+        ),
+        deleted AS (
+            DELETE FROM ticket_board.ticket_attachments
+            WHERE ticket_id = edit_fields.id
+        ),
+        requested AS (
+            SELECT btrim(path) AS path, ord::integer - 1 AS position
+            FROM jsonb_array_elements_text(patch->'screenshots') WITH ORDINALITY AS item(path, ord)
+            WHERE btrim(path) <> ''
+        )
+        INSERT INTO ticket_board.ticket_attachments (ticket_id, position, path, is_primary, source_field, metadata)
+        SELECT edit_fields.id,
+               requested.position,
+               requested.path,
+               requested.position = 0,
+               'screenshots',
+               coalesce(existing.metadata, '{}'::jsonb)
+        FROM requested
+        LEFT JOIN existing ON existing.path = requested.path
+        ORDER BY requested.position;
 
         SELECT path
         INTO screenshot_value
@@ -4898,6 +4920,57 @@ BEGIN
     IF cardinality(changed_fields) > 0 THEN
         PERFORM ticket_board.notify_ticket_owner_in_place_change(id, array_to_string(changed_fields, ', '));
     END IF;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.append_ticket_attachment(
+    p_id text,
+    p_path text,
+    p_metadata jsonb DEFAULT '{}'::jsonb
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    next_position integer;
+    normalized_path text := btrim(coalesce(p_path, ''));
+BEGIN
+    IF normalized_path = '' THEN
+        RAISE EXCEPTION 'attachment path must be non-empty';
+    END IF;
+
+    PERFORM 1 FROM ticket_board.tickets WHERE id = p_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ticket not found: %', p_id;
+    END IF;
+
+    SELECT COALESCE(max(position), -1) + 1
+    INTO next_position
+    FROM ticket_board.ticket_attachments
+    WHERE ticket_id = p_id;
+
+    INSERT INTO ticket_board.ticket_attachments (ticket_id, position, path, is_primary, source_field, metadata)
+    VALUES (p_id, next_position, normalized_path, next_position = 0, 'screenshots', coalesce(p_metadata, '{}'::jsonb))
+    ON CONFLICT (ticket_id, path) DO UPDATE
+    SET metadata = EXCLUDED.metadata;
+
+    UPDATE ticket_board.tickets
+    SET screenshot = COALESCE(
+        screenshot,
+        (
+            SELECT path
+            FROM ticket_board.ticket_attachments
+            WHERE ticket_id = p_id
+            ORDER BY position
+            LIMIT 1
+        )
+    )
+    WHERE id = p_id;
+
+    PERFORM ticket_board.touch_ticket(p_id);
 END;
 $$;
 
@@ -4962,12 +5035,13 @@ BEGIN
     FROM ticket_board.ticket_attachments
     WHERE ticket_id = target_id;
 
-    INSERT INTO ticket_board.ticket_attachments (ticket_id, position, path, is_primary, source_field)
+    INSERT INTO ticket_board.ticket_attachments (ticket_id, position, path, is_primary, source_field, metadata)
     SELECT target_id,
            next_attachment_position + row_number() OVER (ORDER BY position)::integer - 1,
            source.path,
            false,
-           source.source_field
+           source.source_field,
+           source.metadata
     FROM ticket_board.ticket_attachments AS source
     WHERE source.ticket_id = source_id
       AND NOT EXISTS (

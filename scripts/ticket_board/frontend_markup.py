@@ -146,8 +146,20 @@ MARKUP = """  <div class="layout">
       >
         ×
       </button>
+      <div id="imageLightboxToolbar" class="image-lightbox-toolbar">
+        <button id="imageCropStartBtn" type="button">Crop for feedback</button>
+        <label id="imageCropFeedbackLabel">
+          Feedback #
+          <input id="imageCropFeedbackInput" type="number" min="1" max="999" placeholder="auto">
+        </label>
+        <button id="imageCropConfirmBtn" class="primary" type="button" hidden>Attach crop</button>
+        <button id="imageCropCancelBtn" type="button" hidden>Cancel crop</button>
+      </div>
       <div class="image-lightbox-stage">
         <img id="imageLightboxImage" class="image-lightbox-image" alt="">
+        <div id="imageCropLayer" class="image-crop-layer" hidden>
+          <div id="imageCropBox" class="image-crop-box"></div>
+        </div>
       </div>
       <div id="imageLightboxCaption" class="image-lightbox-caption"></div>
     </section>

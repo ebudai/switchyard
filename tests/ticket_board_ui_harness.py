@@ -369,6 +369,56 @@ class InMemoryTicketBoardApp:
             output.save(path, format=output_format)
         return {"path": str(path.resolve()), "name": path.name, "modified": format_timestamp(path)}
 
+    def crop_attachment(
+        self,
+        ticket_id: str,
+        *,
+        source_path: str,
+        rect: dict[str, Any],
+        feedback_number: int | None = None,
+        set_label: str = "",
+        caller_role: str | None = None,
+    ) -> dict[str, Any]:
+        ticket = self._ticket_ref(ticket_id)
+        source = Path(source_path)
+        if str(source) not in ticket.get("screenshots", []):
+            raise ValueError("crop source must already be attached to the ticket")
+        with Image.open(source) as image:
+            image.load()
+            crop_rect = {
+                "x": int(round(float(rect["x"]))),
+                "y": int(round(float(rect["y"]))),
+                "w": int(round(float(rect["w"]))),
+                "h": int(round(float(rect["h"]))),
+            }
+            crop = image.crop(
+                (
+                    crop_rect["x"],
+                    crop_rect["y"],
+                    crop_rect["x"] + crop_rect["w"],
+                    crop_rect["y"] + crop_rect["h"],
+                )
+            )
+            feedback = feedback_number or 1
+            destination = self.asset_dir / (
+                f"feedback-{feedback:03d}__crop-of-{source.stem}-"
+                f"x{crop_rect['x']}-y{crop_rect['y']}-w{crop_rect['w']}-h{crop_rect['h']}.png"
+            )
+            crop.save(destination)
+        metadata = {
+            "kind": "crop",
+            "source_path": str(source),
+            "source_name": source.name,
+            "rect": crop_rect,
+            "feedback_number": feedback,
+            "caption": f"crop of {source.name} @ {crop_rect['x']},{crop_rect['y']},{crop_rect['w']},{crop_rect['h']}",
+        }
+        ticket.setdefault("screenshots", []).append(str(destination))
+        ticket.setdefault("screenshots_info", []).append({"path": str(destination), "available": True, "metadata": metadata})
+        self._touch(ticket)
+        self._sync_attachment_fields(ticket)
+        return copy.deepcopy(ticket)
+
     def resolve_image(self, raw_path: str) -> Path:
         path = Path(raw_path).expanduser().resolve()
         if not (self.asset_dir == path.parent or self.frame_dir == path.parent or self.asset_dir in path.parents or self.frame_dir in path.parents):
@@ -566,9 +616,21 @@ class InMemoryTicketBoardApp:
             self._sync_attachment_fields(ticket)
 
     def _sync_attachment_fields(self, ticket: dict[str, Any]) -> None:
+        metadata_by_path = {
+            str(entry.get("path", "")): entry.get("metadata", {})
+            for entry in ticket.get("screenshots_info") or []
+            if isinstance(entry, dict)
+        }
         paths = self._unique([str(path) for path in ticket.get("screenshots") or [] if str(path)])
         ticket["screenshots"] = paths
-        ticket["screenshots_info"] = [{"path": path, "available": Path(path).is_file()} for path in paths]
+        ticket["screenshots_info"] = [
+            {
+                "path": path,
+                "available": Path(path).is_file(),
+                **({"metadata": metadata_by_path[path]} if metadata_by_path.get(path) else {}),
+            }
+            for path in paths
+        ]
         ticket["screenshot"] = paths[0] if paths else None
         ticket["screenshot_available"] = bool(paths and Path(paths[0]).is_file())
 

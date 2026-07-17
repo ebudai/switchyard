@@ -402,19 +402,19 @@ SELECT ticket_board.create_ticket('Bad direct create', 'Body', 'in_progress');
     assert psql(admin_conn, f"SELECT parent_id FROM ticket_board.tickets WHERE id = {sql_string(filed)};") == "PGU-100"
 
     insert_ticket(admin_conn, "PGU-200", title="Route fixture", state="analysis")
-    psql(service_conn, "SELECT ticket_board.route('PGU-200', 'backlog', 'ops');")
+    psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'director', false); SELECT ticket_board.route('PGU-200', 'backlog', 'ops');")
     assert psql(admin_conn, "SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = 'PGU-200';") == "backlog:ops"
     psql(admin_conn, "UPDATE ticket_board.tickets SET parked = true WHERE id = 'PGU-200';")
 
     insert_ticket(admin_conn, "PGU-300", title="Start fixture", state="analysis", assignee="ops", implementation="Ready.")
-    psql(service_conn, "SELECT ticket_board.start_work('PGU-300');")
+    psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'ops', false); SELECT ticket_board.start_work('PGU-300');")
     assert psql(admin_conn, "SELECT state FROM ticket_board.tickets WHERE id = 'PGU-300';") == "in_progress"
     psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '3003003' WHERE id = 'PGU-300';")
     psql(admin_conn, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-300';")
     psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-300';")
 
     insert_ticket(admin_conn, "PGU-400", title="Submit fixture", state="in_progress", assignee="app", implementation="Done.")
-    psql(service_conn, "SELECT ticket_board.submit_to_audit('PGU-400', 'abcdef0');")
+    psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'app', false); SELECT ticket_board.submit_to_audit('PGU-400', 'abcdef0');")
     submitted = json.loads(
         psql(
             admin_conn,
@@ -437,7 +437,7 @@ FROM ticket_board.tickets WHERE id = 'PGU-400';
         implementation="No repo changes.",
         commit_exempt=True,
     )
-    psql(service_conn, "SELECT ticket_board.submit_to_audit('PGU-401', '');")
+    psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'app', false); SELECT ticket_board.submit_to_audit('PGU-401', '');")
     exempt_submitted = json.loads(
         psql(
             admin_conn,
@@ -452,7 +452,7 @@ FROM ticket_board.tickets WHERE id = 'PGU-401';
     psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-401';")
 
     insert_ticket(admin_conn, "PGU-500", title="Audit signoff", state="audit", assignee="audit", implementation="Done.")
-    psql(service_conn, "SELECT ticket_board.audit_sign_off('PGU-500', 'Audit verified.');")
+    psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'audit', false); SELECT ticket_board.audit_sign_off('PGU-500', 'Audit verified.');")
     audit_signed = json.loads(
         psql(
             admin_conn,
@@ -482,19 +482,18 @@ SELECT ticket_board.audit_sign_off('PGU-505', 'Nope.');
 """,
     )
     insert_ticket(admin_conn, "PGU-506", title="Require actor empty caller role", state="audit", assignee="audit", implementation="Done.")
-    psql(
+    assert "role ticket_board_service cannot call audit_sign_off" in psql_error(
         service_conn,
         """
 SELECT set_config('ticket_board.caller_role', '', false);
-SELECT ticket_board.audit_sign_off('PGU-506', 'Allowed with empty caller role.');
+SELECT ticket_board.audit_sign_off('PGU-506', 'Denied with empty caller role.');
 """,
     )
-    assert psql(admin_conn, "SELECT state || ':' || assignee || ':' || audit_signoff::text FROM ticket_board.tickets WHERE id = 'PGU-506';") == "director_review:director:true"
 
     insert_ticket(admin_conn, "PGU-502", title="Audit signoff no comment", state="audit", assignee="audit", implementation="Done.")
     assert "comment text must be non-empty" in psql_error(
         service_conn,
-        "SELECT ticket_board.audit_sign_off('PGU-502', '');",
+        "SELECT set_config('ticket_board.caller_role', 'audit', false); SELECT ticket_board.audit_sign_off('PGU-502', '');",
     )
 
     insert_ticket(
@@ -506,7 +505,7 @@ SELECT ticket_board.audit_sign_off('PGU-506', 'Allowed with empty caller role.')
         implementation="Done.",
         commit_hash="abcdef1",
     )
-    psql(service_conn, "SELECT ticket_board.audit_kick_back('PGU-501', 'Needs changes.');")
+    psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'audit', false); SELECT ticket_board.audit_kick_back('PGU-501', 'Needs changes.');")
     kickback = json.loads(
         psql(
             admin_conn,
@@ -531,7 +530,7 @@ FROM ticket_board.tickets t WHERE id = 'PGU-501';
     }, kickback
     assert "cannot submit: commit abcdef1 was just kicked back with no change -- do the fix and submit a NEW commit." in psql_error(
         service_conn,
-        "SELECT ticket_board.submit_to_audit('PGU-501', 'abcdef1');",
+        "SELECT set_config('ticket_board.caller_role', 'ops', false); SELECT ticket_board.submit_to_audit('PGU-501', 'abcdef1');",
     )
     psql(
         admin_conn,
@@ -542,7 +541,7 @@ SET state = 'in_progress',
 WHERE id = 'PGU-501';
 """,
     )
-    psql(service_conn, "SELECT ticket_board.submit_to_audit('PGU-501', 'abcdef2');")
+    psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'ops', false); SELECT ticket_board.submit_to_audit('PGU-501', 'abcdef2');")
     resubmitted = json.loads(
         psql(
             admin_conn,
@@ -565,8 +564,8 @@ FROM ticket_board.tickets WHERE id = 'PGU-501';
         implementation="No repo changes.",
         commit_exempt=True,
     )
-    psql(service_conn, "SELECT ticket_board.submit_to_audit('PGU-504', '');")
-    psql(service_conn, "SELECT ticket_board.audit_kick_back('PGU-504', 'Document the change.');")
+    psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'ops', false); SELECT ticket_board.submit_to_audit('PGU-504', '');")
+    psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'audit', false); SELECT ticket_board.audit_kick_back('PGU-504', 'Document the change.');")
     psql(
         admin_conn,
         """
@@ -576,7 +575,7 @@ SET state = 'in_progress',
 WHERE id = 'PGU-504';
 """,
     )
-    psql(service_conn, "SELECT ticket_board.submit_to_audit('PGU-504', '');")
+    psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'ops', false); SELECT ticket_board.submit_to_audit('PGU-504', '');")
     exempt_resubmitted = json.loads(
         psql(
             admin_conn,
@@ -609,7 +608,7 @@ FROM ticket_board.tickets WHERE id = 'PGU-504';
         implementation="Needs changes.",
         commit_hash="fedcba9",
     )
-    psql(service_conn, "SELECT ticket_board.inspector_kick_back('PGU-503', 'Please revise.');")
+    psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'inspector', false); SELECT ticket_board.inspector_kick_back('PGU-503', 'Please revise.');")
     inspector_kickback = json.loads(
         psql(
             admin_conn,
@@ -644,7 +643,7 @@ FROM ticket_board.tickets t WHERE id = 'PGU-503';
     )
     psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-507';")
     psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'audit', assignee = 'audit', commit_hash = '1234567' WHERE id = 'PGU-507';")
-    psql(service_conn, "SELECT ticket_board.audit_kick_back('PGU-507', 'Send to research.', 'research');")
+    psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'audit', false); SELECT ticket_board.audit_kick_back('PGU-507', 'Send to research.', 'research');")
     targeted_audit_kickback = json.loads(
         psql(
             admin_conn,
@@ -666,7 +665,7 @@ FROM ticket_board.tickets WHERE id = 'PGU-507';
         audit_signoff=True,
         needs_eric_signoff=True,
     )
-    psql(service_conn, "SELECT ticket_board.eric_sign_off('PGU-600', 'Eric approves.');")
+    psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'eric', false); SELECT ticket_board.eric_sign_off('PGU-600', 'Eric approves.');")
     eric_signed = json.loads(
         psql(
             admin_conn,
@@ -698,7 +697,7 @@ FROM ticket_board.tickets t WHERE id = 'PGU-600';
         audit_signoff=True,
         needs_eric_signoff=True,
     )
-    psql(service_conn, "SELECT ticket_board.eric_reopen('PGU-601', 'Needs another pass.');")
+    psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'eric', false); SELECT ticket_board.eric_reopen('PGU-601', 'Needs another pass.');")
     eric_reopened = json.loads(
         psql(
             admin_conn,
@@ -722,7 +721,7 @@ FROM ticket_board.tickets t WHERE id = 'PGU-601';
         implementation="Done.",
         audit_signoff=True,
     )
-    psql(service_conn, "SELECT ticket_board.mark_done('PGU-700', '123abcd');")
+    psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'director', false); SELECT ticket_board.mark_done('PGU-700', '123abcd');")
     done = json.loads(
         psql(
             admin_conn,
@@ -744,7 +743,7 @@ FROM ticket_board.tickets WHERE id = 'PGU-700';
         audit_signoff=True,
         commit_exempt=True,
     )
-    psql(service_conn, "SELECT ticket_board.mark_done('PGU-705', '');")
+    psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'director', false); SELECT ticket_board.mark_done('PGU-705', '');")
     exempt_done = json.loads(
         psql(
             admin_conn,
@@ -757,7 +756,7 @@ FROM ticket_board.tickets WHERE id = 'PGU-705';
     assert exempt_done == {"state": "done", "commit_hash": "", "commit_exempt": True}, exempt_done
 
     insert_ticket(admin_conn, "PGU-701", title="Defer", state="analysis")
-    psql(service_conn, "SELECT ticket_board.defer('PGU-701');")
+    psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'director', false); SELECT ticket_board.defer('PGU-701');")
     deferred = json.loads(
         psql(
             admin_conn,
@@ -769,7 +768,7 @@ WHERE id = 'PGU-701';
         )
     )
     assert deferred == {"state": "backlog", "parked": True, "manually_controlled": False}, deferred
-    psql(service_conn, "SELECT ticket_board.route('PGU-701', 'analysis', 'ops');")
+    psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'director', false); SELECT ticket_board.route('PGU-701', 'analysis', 'ops');")
     undeferred = json.loads(
         psql(
             admin_conn,
@@ -783,7 +782,7 @@ WHERE id = 'PGU-701';
     assert undeferred == {"state": "analysis", "assignee": "ops", "parked": False, "manually_controlled": False}, undeferred
 
     insert_ticket(admin_conn, "PGU-702", title="Cancel", state="analysis")
-    psql(service_conn, "SELECT ticket_board.cancel('PGU-702', 'Cancelled by app policy.');")
+    psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'director', false); SELECT ticket_board.cancel('PGU-702', 'Cancelled by app policy.');")
     cancelled = json.loads(
         psql(
             admin_conn,
@@ -875,15 +874,15 @@ def assert_structural_rules_still_apply(admin_conn: str, service_conn: str) -> N
     insert_ticket(admin_conn, "PGU-900", title="No cancel reason", state="analysis")
     assert "comment text must be non-empty" in psql_error(
         service_conn,
-        "SELECT ticket_board.cancel('PGU-900', '');",
+        "SELECT set_config('ticket_board.caller_role', 'director', false); SELECT ticket_board.cancel('PGU-900', '');",
     )
     insert_ticket(admin_conn, "PGU-910", title="Submit still needs commit", state="in_progress", assignee="ops", implementation="Done.")
     assert "commit_hash must be a 7-40 character hex commit" in psql_error(
         service_conn,
-        "SELECT ticket_board.submit_to_audit('PGU-910', '');",
+        "SELECT set_config('ticket_board.caller_role', 'ops', false); SELECT ticket_board.submit_to_audit('PGU-910', '');",
     )
     insert_ticket(admin_conn, "PGU-912", title="Request exempt wrong assignee", state="in_progress", assignee="ops", implementation="Done.")
-    assert "app cannot call request_commit_exempt for ticket assigned to ops" in psql_error(
+    assert "role app cannot call request_commit_exempt" in psql_error(
         service_conn,
         """
 SELECT set_config('ticket_board.caller_role', 'app', false);
@@ -992,23 +991,23 @@ FROM ticket_board.tickets t WHERE id = 'PGU-914';
     )
     assert "commit_hash must be a 7-40 character hex commit" in psql_error(
         service_conn,
-        "SELECT ticket_board.mark_done('PGU-911', '');",
+        "SELECT set_config('ticket_board.caller_role', 'director', false); SELECT ticket_board.mark_done('PGU-911', '');",
     )
 
     insert_ticket(admin_conn, "PGU-901", title="Optional implementation start", state="analysis", assignee="ops", implementation="")
-    psql(service_conn, "SELECT ticket_board.start_work('PGU-901');")
+    psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'ops', false); SELECT ticket_board.start_work('PGU-901');")
     assert psql(admin_conn, "SELECT state FROM ticket_board.tickets WHERE id = 'PGU-901';") == "in_progress"
 
     insert_ticket(admin_conn, "PGU-905", title="Unassigned start still illegal", state="analysis", assignee="unassigned", implementation="")
     assert "in_progress tickets require an implementer assignee" in psql_error(
         service_conn,
-        "SELECT ticket_board.start_work('PGU-905');",
+        "SELECT set_config('ticket_board.caller_role', 'ops', false); SELECT ticket_board.start_work('PGU-905');",
     )
 
     insert_ticket(admin_conn, "PGU-902", title="Bad route", state="analysis")
     assert "invalid state" in psql_error(
         service_conn,
-        "SELECT ticket_board.route('PGU-902', 'bogus', 'ops');",
+        "SELECT set_config('ticket_board.caller_role', 'director', false); SELECT ticket_board.route('PGU-902', 'bogus', 'ops');",
     )
 
     insert_ticket(admin_conn, "PGU-903", title="Bad blockers", state="analysis")
@@ -1029,7 +1028,7 @@ def assert_deferred_cancel_resurrect_clears_park_and_notifies(admin_conn: str, s
     )
     psql(admin_conn, "DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-930';")
 
-    psql(service_conn, "SELECT ticket_board.defer('PGU-930');")
+    psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'director', false); SELECT ticket_board.defer('PGU-930');")
     deferred = json.loads(
         psql(
             admin_conn,
@@ -1046,7 +1045,7 @@ WHERE id = 'PGU-930';
     )
     assert deferred == {"state": "backlog", "parked": True, "manually_controlled": False}, deferred
 
-    psql(service_conn, "SELECT ticket_board.cancel('PGU-930', 'No longer needed.');")
+    psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'director', false); SELECT ticket_board.cancel('PGU-930', 'No longer needed.');")
     cancelled = json.loads(
         psql(
             admin_conn,
@@ -1064,7 +1063,7 @@ WHERE id = 'PGU-930';
     assert cancelled == {"state": "cancelled", "parked": False, "manually_controlled": False}, cancelled
 
     psql(admin_conn, "DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-930';")
-    psql(service_conn, "SELECT ticket_board.route('PGU-930', 'analysis', 'research');")
+    psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'director', false); SELECT ticket_board.route('PGU-930', 'analysis', 'research');")
     resurrected = json.loads(
         psql(
             admin_conn,

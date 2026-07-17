@@ -252,11 +252,15 @@ CREATE TABLE IF NOT EXISTS ticket_board.workflow_transitions (
     action_name text NOT NULL CHECK (btrim(action_name) <> ''),
     allowed_roles text[] NOT NULL DEFAULT ARRAY[]::text[],
     owner_scoped boolean NOT NULL DEFAULT false,
+    director_override boolean NOT NULL DEFAULT false,
     PRIMARY KEY (from_stage, to_stage, action_name)
 );
 
 ALTER TABLE ticket_board.workflow_transitions
     ADD COLUMN IF NOT EXISTS owner_scoped boolean NOT NULL DEFAULT false;
+
+ALTER TABLE ticket_board.workflow_transitions
+    ADD COLUMN IF NOT EXISTS director_override boolean NOT NULL DEFAULT false;
 
 CREATE TABLE IF NOT EXISTS ticket_board.workflow_transition_shadow_log (
     id bigserial PRIMARY KEY,
@@ -310,59 +314,60 @@ SET display_label = EXCLUDED.display_label,
     exit_signoff_field = EXCLUDED.exit_signoff_field,
     is_terminal = EXCLUDED.is_terminal;
 
-INSERT INTO ticket_board.workflow_transitions (from_stage, to_stage, action_name, allowed_roles, owner_scoped)
+INSERT INTO ticket_board.workflow_transitions (from_stage, to_stage, action_name, allowed_roles, owner_scoped, director_override)
 VALUES
-    ('draft', 'analysis', 'release_draft', ARRAY['director', 'eric']::text[], false),
-    ('draft', 'cancelled', 'cancel', ARRAY['director']::text[], false),
-    ('backlog', 'analysis', 'route', ARRAY['director']::text[], false),
-    ('backlog', 'analysis', 'start_task', ARRAY['director', 'main', 'app', 'ops', 'perf', 'research', 'audit', 'inspector']::text[], true),
-    ('backlog', 'in_progress', 'route', ARRAY['director']::text[], false),
-    ('backlog', 'in_progress', 'start_work', ARRAY['main', 'app', 'ops', 'perf', 'research']::text[], false),
-    ('backlog', 'cancelled', 'cancel', ARRAY['director']::text[], false),
-    ('analysis', 'in_progress', 'route', ARRAY['director']::text[], false),
-    ('analysis', 'in_progress', 'start_work', ARRAY['main', 'app', 'ops', 'perf', 'research']::text[], false),
-    ('analysis', 'backlog', 'defer', ARRAY['director']::text[], false),
-    ('analysis', 'cancelled', 'cancel', ARRAY['director']::text[], false),
-    ('in_progress', 'inspection', 'submit_to_inspection', ARRAY['main', 'app', 'ops', 'perf', 'research']::text[], true),
-    ('in_progress', 'audit', 'submit_to_audit', ARRAY['main', 'app', 'ops', 'perf', 'research']::text[], false),
-    ('in_progress', 'analysis', 'request_commit_exempt', ARRAY['main', 'app', 'ops', 'perf', 'research']::text[], true),
-    ('in_progress', 'analysis', 'route', ARRAY['director']::text[], false),
-    ('in_progress', 'backlog', 'defer', ARRAY['director']::text[], false),
-    ('in_progress', 'cancelled', 'cancel', ARRAY['director']::text[], false),
-    ('inspection', 'audit', 'inspector_sign_off', ARRAY['inspector']::text[], false),
-    ('inspection', 'audit', 'route', ARRAY['director']::text[], false),
-    ('inspection', 'in_progress', 'inspector_kick_back', ARRAY['inspector']::text[], false),
-    ('inspection', 'in_progress', 'route', ARRAY['director']::text[], false),
-    ('inspection', 'backlog', 'defer', ARRAY['director']::text[], false),
-    ('inspection', 'cancelled', 'cancel', ARRAY['director']::text[], false),
-    ('audit', 'eric_review', 'audit_sign_off', ARRAY['audit']::text[], false),
-    ('audit', 'director_review', 'audit_sign_off', ARRAY['audit']::text[], false),
-    ('audit', 'in_progress', 'audit_kick_back', ARRAY['audit']::text[], false),
-    ('audit', 'in_progress', 'route', ARRAY['director']::text[], false),
-    ('audit', 'analysis', 'route', ARRAY['director']::text[], false),
-    ('audit', 'backlog', 'defer', ARRAY['director']::text[], false),
-    ('audit', 'cancelled', 'cancel', ARRAY['director']::text[], false),
-    ('eric_review', 'inspection', 'route', ARRAY['director']::text[], false),
-    ('eric_review', 'director_review', 'eric_sign_off', ARRAY['eric']::text[], false),
-    ('eric_review', 'audit', 'route', ARRAY['director']::text[], false),
-    ('eric_review', 'analysis', 'eric_reopen', ARRAY['eric']::text[], false),
-    ('eric_review', 'analysis', 'route', ARRAY['director']::text[], false),
-    ('eric_review', 'backlog', 'defer', ARRAY['director']::text[], false),
-    ('eric_review', 'cancelled', 'cancel', ARRAY['director']::text[], false),
-    ('director_review', 'done', 'mark_done', ARRAY['director']::text[], false),
-    ('director_review', 'in_progress', 'route', ARRAY['director']::text[], false),
-    ('director_review', 'analysis', 'eric_reopen', ARRAY['eric']::text[], false),
-    ('director_review', 'analysis', 'route', ARRAY['director']::text[], false),
-    ('director_review', 'backlog', 'defer', ARRAY['director']::text[], false),
-    ('director_review', 'cancelled', 'cancel', ARRAY['director']::text[], false),
-    ('done', 'analysis', 'eric_reopen', ARRAY['eric']::text[], false),
-    ('done', 'analysis', 'route', ARRAY['director']::text[], false),
-    ('done', 'backlog', 'defer', ARRAY['director']::text[], false),
-    ('cancelled', 'analysis', 'route', ARRAY['director']::text[], false),
-    ('cancelled', 'backlog', 'defer', ARRAY['director']::text[], false)
+    ('draft', 'analysis', 'release_draft', ARRAY['director', 'eric']::text[], false, false),
+    ('draft', 'cancelled', 'cancel', ARRAY['director']::text[], false, false),
+    ('backlog', 'analysis', 'route', ARRAY['director']::text[], false, false),
+    ('backlog', 'analysis', 'start_task', ARRAY['director', 'main', 'app', 'ops', 'perf', 'research', 'audit', 'inspector']::text[], true, true),
+    ('backlog', 'in_progress', 'route', ARRAY['director']::text[], false, false),
+    ('backlog', 'in_progress', 'start_work', ARRAY['main', 'app', 'ops', 'perf', 'research']::text[], false, false),
+    ('backlog', 'cancelled', 'cancel', ARRAY['director']::text[], false, false),
+    ('analysis', 'in_progress', 'route', ARRAY['director']::text[], false, false),
+    ('analysis', 'in_progress', 'start_work', ARRAY['main', 'app', 'ops', 'perf', 'research']::text[], false, false),
+    ('analysis', 'backlog', 'defer', ARRAY['director']::text[], false, false),
+    ('analysis', 'cancelled', 'cancel', ARRAY['director']::text[], false, false),
+    ('in_progress', 'inspection', 'submit_to_inspection', ARRAY['main', 'app', 'ops', 'perf', 'research']::text[], true, false),
+    ('in_progress', 'audit', 'submit_to_audit', ARRAY['main', 'app', 'ops', 'perf', 'research']::text[], false, false),
+    ('in_progress', 'analysis', 'request_commit_exempt', ARRAY['main', 'app', 'ops', 'perf', 'research']::text[], true, false),
+    ('in_progress', 'analysis', 'route', ARRAY['director']::text[], false, false),
+    ('in_progress', 'backlog', 'defer', ARRAY['director']::text[], false, false),
+    ('in_progress', 'cancelled', 'cancel', ARRAY['director']::text[], false, false),
+    ('inspection', 'audit', 'inspector_sign_off', ARRAY['inspector']::text[], false, false),
+    ('inspection', 'audit', 'route', ARRAY['director']::text[], false, false),
+    ('inspection', 'in_progress', 'inspector_kick_back', ARRAY['inspector']::text[], false, false),
+    ('inspection', 'in_progress', 'route', ARRAY['director']::text[], false, false),
+    ('inspection', 'backlog', 'defer', ARRAY['director']::text[], false, false),
+    ('inspection', 'cancelled', 'cancel', ARRAY['director']::text[], false, false),
+    ('audit', 'eric_review', 'audit_sign_off', ARRAY['audit']::text[], false, false),
+    ('audit', 'director_review', 'audit_sign_off', ARRAY['audit']::text[], false, false),
+    ('audit', 'in_progress', 'audit_kick_back', ARRAY['audit']::text[], false, false),
+    ('audit', 'in_progress', 'route', ARRAY['director']::text[], false, false),
+    ('audit', 'analysis', 'route', ARRAY['director']::text[], false, false),
+    ('audit', 'backlog', 'defer', ARRAY['director']::text[], false, false),
+    ('audit', 'cancelled', 'cancel', ARRAY['director']::text[], false, false),
+    ('eric_review', 'inspection', 'route', ARRAY['director']::text[], false, false),
+    ('eric_review', 'director_review', 'eric_sign_off', ARRAY['eric']::text[], false, false),
+    ('eric_review', 'audit', 'route', ARRAY['director']::text[], false, false),
+    ('eric_review', 'analysis', 'eric_reopen', ARRAY['eric']::text[], false, false),
+    ('eric_review', 'analysis', 'route', ARRAY['director']::text[], false, false),
+    ('eric_review', 'backlog', 'defer', ARRAY['director']::text[], false, false),
+    ('eric_review', 'cancelled', 'cancel', ARRAY['director']::text[], false, false),
+    ('director_review', 'done', 'mark_done', ARRAY['director']::text[], false, false),
+    ('director_review', 'in_progress', 'route', ARRAY['director']::text[], false, false),
+    ('director_review', 'analysis', 'eric_reopen', ARRAY['eric']::text[], false, false),
+    ('director_review', 'analysis', 'route', ARRAY['director']::text[], false, false),
+    ('director_review', 'backlog', 'defer', ARRAY['director']::text[], false, false),
+    ('director_review', 'cancelled', 'cancel', ARRAY['director']::text[], false, false),
+    ('done', 'analysis', 'eric_reopen', ARRAY['eric']::text[], false, false),
+    ('done', 'analysis', 'route', ARRAY['director']::text[], false, false),
+    ('done', 'backlog', 'defer', ARRAY['director']::text[], false, false),
+    ('cancelled', 'analysis', 'route', ARRAY['director']::text[], false, false),
+    ('cancelled', 'backlog', 'defer', ARRAY['director']::text[], false, false)
 ON CONFLICT (from_stage, to_stage, action_name) DO UPDATE
 SET allowed_roles = EXCLUDED.allowed_roles,
-    owner_scoped = EXCLUDED.owner_scoped;
+    owner_scoped = EXCLUDED.owner_scoped,
+    director_override = EXCLUDED.director_override;
 
 CREATE TABLE IF NOT EXISTS ticket_board.ticket_notification_state (
     ticket_id text PRIMARY KEY REFERENCES ticket_board.tickets(id) ON DELETE CASCADE,
@@ -3206,7 +3211,7 @@ AS $$
           AND (
               NOT wt.owner_scoped
               OR p_actor = p_ticket_assignee
-              OR p_actor = 'director'
+              OR (wt.director_override AND p_actor = 'director')
           )
     );
 $$;
@@ -3221,6 +3226,59 @@ AS $$
     SELECT COALESCE(bool_or(wt.owner_scoped), false)
     FROM ticket_board.workflow_transitions wt
     WHERE wt.action_name = p_action_name;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.workflow_transition_rbac_director_override_config(
+    p_action_name text
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT COALESCE(bool_or(wt.director_override), false)
+    FROM ticket_board.workflow_transitions wt
+    WHERE wt.action_name = p_action_name;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.require_workflow_transition_actor(
+    p_action_name text,
+    p_ticket_id text DEFAULT NULL,
+    p_ticket_assignee text DEFAULT NULL
+)
+RETURNS text
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    actor text;
+    resolved_assignee text := p_ticket_assignee;
+BEGIN
+    actor := ticket_board.current_app_actor();
+    IF actor IS NULL THEN
+        RAISE EXCEPTION 'missing ticket_board.caller_role for %', p_action_name
+            USING ERRCODE = '42501';
+    END IF;
+
+    IF resolved_assignee IS NULL AND p_ticket_id IS NOT NULL THEN
+        SELECT t.assignee
+        INTO resolved_assignee
+        FROM ticket_board.tickets t
+        WHERE t.id = p_ticket_id;
+    END IF;
+
+    IF NOT ticket_board.workflow_transition_rbac_allowed_config(
+        p_action_name,
+        actor,
+        resolved_assignee
+    ) THEN
+        RAISE EXCEPTION 'role % cannot call %', actor, p_action_name
+            USING ERRCODE = '42501';
+    END IF;
+
+    RETURN actor;
+END;
 $$;
 
 CREATE OR REPLACE FUNCTION ticket_board.log_workflow_transition_rbac_shadow_mismatch(
@@ -3846,7 +3904,6 @@ DECLARE
     current_state text;
     current_assignee text;
 BEGIN
-    actor := ticket_board.require_actor(ARRAY['director'], 'route');
     IF new_state NOT IN ('draft', 'backlog', 'analysis', 'in_progress', 'inspection', 'audit', 'eric_review', 'director_review', 'done', 'cancelled') THEN
         RAISE EXCEPTION 'invalid state: %', new_state;
     END IF;
@@ -3862,16 +3919,10 @@ BEGIN
     IF NOT FOUND THEN
         RAISE EXCEPTION 'ticket not found: %', id;
     END IF;
+    actor := ticket_board.require_workflow_transition_actor('route', id, current_assignee);
     IF current_state = 'draft' THEN
         RAISE EXCEPTION 'draft tickets must be released with release_draft';
     END IF;
-    PERFORM ticket_board.log_workflow_transition_rbac_shadow_mismatch(
-        id,
-        'route',
-        ticket_board.current_app_actor(),
-        current_assignee,
-        true
-    );
 
     UPDATE ticket_board.tickets
     SET state = new_state,
@@ -3896,7 +3947,6 @@ DECLARE
     actor text;
     current_state text;
 BEGIN
-    actor := ticket_board.require_actor(ARRAY['director', 'eric'], 'release_draft');
     SELECT tickets.state
     INTO current_state
     FROM ticket_board.tickets
@@ -3905,16 +3955,10 @@ BEGIN
     IF NOT FOUND THEN
         RAISE EXCEPTION 'ticket not found: %', id;
     END IF;
+    actor := ticket_board.require_workflow_transition_actor('release_draft', id);
     IF current_state <> 'draft' THEN
         RAISE EXCEPTION 'release_draft requires a draft ticket';
     END IF;
-    PERFORM ticket_board.log_workflow_transition_rbac_shadow_mismatch(
-        id,
-        'release_draft',
-        ticket_board.current_app_actor(),
-        NULL,
-        true
-    );
 
     UPDATE ticket_board.tickets
     SET state = 'analysis',
@@ -4015,14 +4059,7 @@ AS $$
 DECLARE
     actor text;
 BEGIN
-    actor := ticket_board.require_actor(ARRAY['main', 'app', 'ops', 'perf', 'research'], 'start_work');
-    PERFORM ticket_board.log_workflow_transition_rbac_shadow_mismatch(
-        id,
-        'start_work',
-        ticket_board.current_app_actor(),
-        NULL,
-        true
-    );
+    actor := ticket_board.require_workflow_transition_actor('start_work', id);
     UPDATE ticket_board.tickets
     SET state = 'in_progress'
     WHERE tickets.id = start_work.id;
@@ -4049,7 +4086,7 @@ DECLARE
     ticket_commit_exempt boolean;
     ticket_last_rejected_commit text;
 BEGIN
-    actor := ticket_board.require_actor(ARRAY['main', 'app', 'ops', 'perf', 'research'], 'submit_to_audit');
+    actor := ticket_board.require_workflow_transition_actor('submit_to_audit', id);
     SELECT tickets.commit_exempt, tickets.last_rejected_commit
     INTO ticket_commit_exempt, ticket_last_rejected_commit
     FROM ticket_board.tickets
@@ -4069,13 +4106,6 @@ BEGIN
         RAISE EXCEPTION 'cannot submit: commit % was just kicked back with no change -- do the fix and submit a NEW commit.',
             coalesce(nullif(ticket_last_rejected_commit, ''), '<none>');
     END IF;
-    PERFORM ticket_board.log_workflow_transition_rbac_shadow_mismatch(
-        id,
-        'submit_to_audit',
-        ticket_board.current_app_actor(),
-        NULL,
-        true
-    );
     UPDATE ticket_board.tickets
     SET state = 'audit',
         commit_hash = normalized_commit,
@@ -4099,8 +4129,6 @@ DECLARE
     ticket_assignee text;
     ticket_needs_inspection boolean;
 BEGIN
-    PERFORM ticket_board.require_actor(ARRAY['main', 'app', 'ops', 'perf', 'research'], 'submit_to_inspection');
-    actor := ticket_board.current_app_actor();
     SELECT tickets.state, tickets.assignee, tickets.needs_inspection
     INTO ticket_state, ticket_assignee, ticket_needs_inspection
     FROM ticket_board.tickets
@@ -4108,20 +4136,10 @@ BEGIN
     IF NOT FOUND THEN
         RAISE EXCEPTION 'ticket not found: %', id;
     END IF;
+    actor := ticket_board.require_workflow_transition_actor('submit_to_inspection', id, ticket_assignee);
     IF ticket_state <> 'in_progress' THEN
         RAISE EXCEPTION 'submit_to_inspection requires an in_progress ticket';
     END IF;
-    IF ticket_assignee <> actor THEN
-        RAISE EXCEPTION '% cannot submit_to_inspection for ticket assigned to %', actor, ticket_assignee
-            USING ERRCODE = '42501';
-    END IF;
-    PERFORM ticket_board.log_workflow_transition_rbac_shadow_mismatch(
-        id,
-        'submit_to_inspection',
-        actor,
-        ticket_assignee,
-        true
-    );
     IF NOT ticket_needs_inspection THEN
         RAISE EXCEPTION 'submit_to_inspection requires needs_inspection=true';
     END IF;
@@ -4150,12 +4168,6 @@ DECLARE
     ticket_commit_exempt boolean;
     normalized_reason text := btrim(coalesce(reason, ''));
 BEGIN
-    PERFORM ticket_board.require_actor(ARRAY['main', 'app', 'ops', 'perf', 'research'], 'request_commit_exempt');
-    actor := ticket_board.current_app_actor();
-    IF actor NOT IN ('main', 'app', 'ops', 'perf', 'research') THEN
-        RAISE EXCEPTION '% cannot call request_commit_exempt', actor
-            USING ERRCODE = '42501';
-    END IF;
     IF normalized_reason = '' THEN
         RAISE EXCEPTION 'request_commit_exempt requires a non-empty reason';
     END IF;
@@ -4168,17 +4180,7 @@ BEGIN
     IF NOT FOUND THEN
         RAISE EXCEPTION 'ticket not found: %', id;
     END IF;
-    IF ticket_assignee <> actor THEN
-        RAISE EXCEPTION '% cannot call request_commit_exempt for ticket assigned to %', actor, ticket_assignee
-            USING ERRCODE = '42501';
-    END IF;
-    PERFORM ticket_board.log_workflow_transition_rbac_shadow_mismatch(
-        id,
-        'request_commit_exempt',
-        actor,
-        ticket_assignee,
-        true
-    );
+    actor := ticket_board.require_workflow_transition_actor('request_commit_exempt', id, ticket_assignee);
     IF ticket_state <> 'in_progress' THEN
         RAISE EXCEPTION 'request_commit_exempt requires an in_progress ticket';
     END IF;
@@ -4217,11 +4219,6 @@ DECLARE
     ticket_assignee text;
     normalized_note text := btrim(coalesce(note, ''));
 BEGIN
-    actor := ticket_board.require_actor(
-        ARRAY['director', 'main', 'app', 'ops', 'perf', 'research', 'audit', 'inspector'],
-        'start_task'
-    );
-    comment_actor := ticket_board.current_app_actor();
     SELECT tickets.state, tickets.assignee
     INTO ticket_state, ticket_assignee
     FROM ticket_board.tickets
@@ -4230,17 +4227,7 @@ BEGIN
     IF NOT FOUND THEN
         RAISE EXCEPTION 'ticket not found: %', id;
     END IF;
-    IF ticket_assignee <> comment_actor AND comment_actor <> 'director' THEN
-        RAISE EXCEPTION '% cannot call start_task for ticket assigned to %', comment_actor, ticket_assignee
-            USING ERRCODE = '42501';
-    END IF;
-    PERFORM ticket_board.log_workflow_transition_rbac_shadow_mismatch(
-        id,
-        'start_task',
-        comment_actor,
-        ticket_assignee,
-        true
-    );
+    comment_actor := ticket_board.require_workflow_transition_actor('start_task', id, ticket_assignee);
     IF ticket_state <> 'backlog' THEN
         RAISE EXCEPTION 'start_task requires a backlog ticket';
     END IF;
@@ -4334,15 +4321,7 @@ DECLARE
     actor text;
     comment_actor text;
 BEGIN
-    actor := ticket_board.require_actor(ARRAY['audit'], 'audit_sign_off');
-    comment_actor := ticket_board.current_app_actor();
-    PERFORM ticket_board.log_workflow_transition_rbac_shadow_mismatch(
-        id,
-        'audit_sign_off',
-        comment_actor,
-        NULL,
-        true
-    );
+    comment_actor := ticket_board.require_workflow_transition_actor('audit_sign_off', id);
     PERFORM ticket_board.append_ticket_comment(id, comment_actor, comment_text);
     UPDATE ticket_board.tickets
     SET audit_signoff = true
@@ -4369,15 +4348,7 @@ DECLARE
     actor text;
     comment_actor text;
 BEGIN
-    actor := ticket_board.require_actor(ARRAY['audit'], 'audit_kick_back');
-    comment_actor := ticket_board.current_app_actor();
-    PERFORM ticket_board.log_workflow_transition_rbac_shadow_mismatch(
-        id,
-        'audit_kick_back',
-        comment_actor,
-        NULL,
-        true
-    );
+    comment_actor := ticket_board.require_workflow_transition_actor('audit_kick_back', id);
     IF btrim(coalesce(reason, '')) <> '' THEN
         PERFORM ticket_board.append_ticket_comment(id, comment_actor, reason);
     END IF;
@@ -4409,15 +4380,7 @@ DECLARE
     actor text;
     comment_actor text;
 BEGIN
-    actor := ticket_board.require_actor(ARRAY['audit'], 'audit_kick_back');
-    comment_actor := ticket_board.current_app_actor();
-    PERFORM ticket_board.log_workflow_transition_rbac_shadow_mismatch(
-        id,
-        'audit_kick_back',
-        comment_actor,
-        NULL,
-        true
-    );
+    comment_actor := ticket_board.require_workflow_transition_actor('audit_kick_back', id);
     IF btrim(coalesce(reason, '')) <> '' THEN
         PERFORM ticket_board.append_ticket_comment(id, comment_actor, reason);
     END IF;
@@ -4444,14 +4407,7 @@ AS $$
 DECLARE
     actor text;
 BEGIN
-    actor := ticket_board.require_actor(ARRAY['inspector'], 'inspector_sign_off');
-    PERFORM ticket_board.log_workflow_transition_rbac_shadow_mismatch(
-        id,
-        'inspector_sign_off',
-        ticket_board.current_app_actor(),
-        NULL,
-        true
-    );
+    actor := ticket_board.require_workflow_transition_actor('inspector_sign_off', id);
     UPDATE ticket_board.tickets
     SET inspector_signoff = true,
         state = 'audit'
@@ -4478,15 +4434,7 @@ DECLARE
     actor text;
     comment_actor text;
 BEGIN
-    actor := ticket_board.require_actor(ARRAY['inspector'], 'inspector_kick_back');
-    comment_actor := ticket_board.current_app_actor();
-    PERFORM ticket_board.log_workflow_transition_rbac_shadow_mismatch(
-        id,
-        'inspector_kick_back',
-        comment_actor,
-        NULL,
-        true
-    );
+    comment_actor := ticket_board.require_workflow_transition_actor('inspector_kick_back', id);
     IF btrim(coalesce(recommendations, '')) <> '' THEN
         PERFORM ticket_board.append_ticket_comment(id, comment_actor, recommendations);
     END IF;
@@ -4519,15 +4467,7 @@ DECLARE
     actor text;
     comment_actor text;
 BEGIN
-    actor := ticket_board.require_actor(ARRAY['inspector'], 'inspector_kick_back');
-    comment_actor := ticket_board.current_app_actor();
-    PERFORM ticket_board.log_workflow_transition_rbac_shadow_mismatch(
-        id,
-        'inspector_kick_back',
-        comment_actor,
-        NULL,
-        true
-    );
+    comment_actor := ticket_board.require_workflow_transition_actor('inspector_kick_back', id);
     IF btrim(coalesce(recommendations, '')) <> '' THEN
         PERFORM ticket_board.append_ticket_comment(id, comment_actor, recommendations);
     END IF;
@@ -4559,15 +4499,7 @@ DECLARE
     actor text;
     comment_actor text;
 BEGIN
-    actor := ticket_board.require_actor(ARRAY['eric'], 'eric_sign_off');
-    comment_actor := ticket_board.current_app_actor();
-    PERFORM ticket_board.log_workflow_transition_rbac_shadow_mismatch(
-        id,
-        'eric_sign_off',
-        comment_actor,
-        NULL,
-        true
-    );
+    comment_actor := ticket_board.require_workflow_transition_actor('eric_sign_off', id);
     IF btrim(coalesce(comment_text, '')) <> '' THEN
         PERFORM ticket_board.append_ticket_comment(id, comment_actor, comment_text);
     END IF;
@@ -4596,15 +4528,7 @@ DECLARE
     actor text;
     comment_actor text;
 BEGIN
-    actor := ticket_board.require_actor(ARRAY['eric'], 'eric_reopen');
-    comment_actor := ticket_board.current_app_actor();
-    PERFORM ticket_board.log_workflow_transition_rbac_shadow_mismatch(
-        id,
-        'eric_reopen',
-        comment_actor,
-        NULL,
-        true
-    );
+    comment_actor := ticket_board.require_workflow_transition_actor('eric_reopen', id);
     IF btrim(coalesce(reason, '')) <> '' THEN
         PERFORM ticket_board.append_ticket_comment(id, comment_actor, reason);
     END IF;
@@ -4634,14 +4558,7 @@ DECLARE
     normalized_commit text := btrim(coalesce(commit_hash, ''));
     ticket_commit_exempt boolean;
 BEGIN
-    actor := ticket_board.require_actor(ARRAY['director'], 'mark_done');
-    PERFORM ticket_board.log_workflow_transition_rbac_shadow_mismatch(
-        id,
-        'mark_done',
-        ticket_board.current_app_actor(),
-        NULL,
-        true
-    );
+    actor := ticket_board.require_workflow_transition_actor('mark_done', id);
     SELECT tickets.commit_exempt
     INTO ticket_commit_exempt
     FROM ticket_board.tickets
@@ -4674,14 +4591,7 @@ AS $$
 DECLARE
     actor text;
 BEGIN
-    actor := ticket_board.require_actor(ARRAY['director'], 'defer');
-    PERFORM ticket_board.log_workflow_transition_rbac_shadow_mismatch(
-        id,
-        'defer',
-        ticket_board.current_app_actor(),
-        NULL,
-        true
-    );
+    actor := ticket_board.require_workflow_transition_actor('defer', id);
     UPDATE ticket_board.tickets
     SET state = 'backlog',
         parked = true
@@ -4707,15 +4617,7 @@ DECLARE
     actor text;
     comment_actor text;
 BEGIN
-    actor := ticket_board.require_actor(ARRAY['director'], 'cancel');
-    comment_actor := ticket_board.current_app_actor();
-    PERFORM ticket_board.log_workflow_transition_rbac_shadow_mismatch(
-        id,
-        'cancel',
-        comment_actor,
-        NULL,
-        true
-    );
+    comment_actor := ticket_board.require_workflow_transition_actor('cancel', id);
     PERFORM ticket_board.append_ticket_comment(id, comment_actor, reason);
     UPDATE ticket_board.tickets
     SET state = 'cancelled',

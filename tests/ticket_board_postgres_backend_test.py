@@ -457,10 +457,10 @@ SELECT ticket_board.create_ticket('Cycle blocked', 'Body', 'analysis', ARRAY['PG
             assert cancelled["comments"][-1]["text"] == "Covered by PGU-1.", cancelled
 
             insert_ticket(admin_conn, "PGU-100", title="Ops implementation", state="analysis", assignee="ops", implementation="")
-            in_progress = service_app.update_ticket("PGU-100", {"state": "in_progress"})
+            in_progress = service_app.update_ticket("PGU-100", {"state": "in_progress"}, caller_role="ops")
             assert in_progress["state"] == "in_progress", in_progress
             assert in_progress["implementation"] == "", in_progress
-            submitted = service_app.update_ticket("PGU-100", {"state": "audit", "commit_hash": "abcdef1"})
+            submitted = service_app.update_ticket("PGU-100", {"state": "audit", "commit_hash": "abcdef1"}, caller_role="ops")
             assert submitted["state"] == "audit", submitted
             assert submitted["commit_hash"] == "abcdef1", submitted
             edited = service_app.update_ticket("PGU-100", {"implementation": "Edited through function API."})
@@ -500,16 +500,18 @@ WHERE id = 'PGU-100';
             audit_ready = service_app.update_ticket(
                 "PGU-100",
                 {"audit_signoff": True, "comment": {"who": "audit", "text": "Audit verified."}},
+                caller_role="audit",
             )
             assert audit_ready["state"] == "director_review", audit_ready
             assert audit_ready["comments"][-1]["text"] == "Audit verified.", audit_ready
-            done = service_app.update_ticket("PGU-100", {"state": "done", "commit_hash": "abcdef1"})
+            done = service_app.update_ticket("PGU-100", {"state": "done", "commit_hash": "abcdef1"}, caller_role="director")
             assert done["state"] == "done", done
 
             insert_ticket(admin_conn, "PGU-200", title="Audit kickback", state="audit", assignee="audit")
             kicked = service_app.update_ticket(
                 "PGU-200",
                 {"state": "analysis", "comment": {"who": "audit", "text": "Needs another pass."}},
+                caller_role="audit",
             )
             assert kicked["state"] == "in_progress", kicked
             assert kicked["assignee"] == "ops", kicked
@@ -527,6 +529,7 @@ WHERE id = 'PGU-100';
             eric_signed = service_app.update_ticket(
                 "PGU-300",
                 {"eric_signoff": True, "comment": {"who": "eric", "text": "Eric approves."}},
+                caller_role="eric",
             )
             assert eric_signed["state"] == "director_review", eric_signed
             assert eric_signed["eric_signoff"] is True, eric_signed
@@ -544,11 +547,12 @@ WHERE id = 'PGU-100';
             eric_reopened = service_app.update_ticket(
                 "PGU-301",
                 {"state": "analysis", "comment": {"who": "eric", "text": "Needs design revision."}},
+                caller_role="eric",
             )
             assert eric_reopened["state"] == "analysis", eric_reopened
             assert eric_reopened["comments"][-1]["text"] == "Needs design revision.", eric_reopened
 
-            deferred = service_app.update_ticket("PGU-1", {"state": "backlog"})
+            deferred = service_app.update_ticket("PGU-1", {"state": "backlog"}, caller_role="director")
             assert deferred["state"] == "backlog", deferred
 
             insert_ticket(admin_conn, "PGU-401", title="Old analysis ping", state="analysis", assignee="ops", implementation="")

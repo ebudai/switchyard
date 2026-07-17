@@ -237,6 +237,7 @@ def main() -> int:
     assert "display_label text not null" in schema_lower
     assert "owner_roles text[] not null default array[]::text[]" in schema_lower
     assert "owner_scoped boolean not null default false" in schema_lower
+    assert "director_override boolean not null default false" in schema_lower
     assert "entry_gate_field text" in schema_lower
     assert "gate_skip_to text references ticket_board.workflow_stages(name)" in schema_lower
     assert "exit_signoff_field text" in schema_lower
@@ -271,6 +272,8 @@ def main() -> int:
     assert "create or replace function ticket_board.log_workflow_transition_shadow_mismatch" in executable_schema_lower
     assert "create or replace function ticket_board.workflow_transition_rbac_allowed_config" in executable_schema_lower
     assert "create or replace function ticket_board.workflow_transition_rbac_owner_scoped_config" in executable_schema_lower
+    assert "create or replace function ticket_board.workflow_transition_rbac_director_override_config" in executable_schema_lower
+    assert "create or replace function ticket_board.require_workflow_transition_actor" in executable_schema_lower
     assert "create or replace function ticket_board.log_workflow_transition_rbac_shadow_mismatch" in executable_schema_lower
     assert "workflow transition shadow mismatch" in executable_schema_lower
     assert "workflow transition rbac shadow mismatch" in executable_schema_lower
@@ -293,6 +296,15 @@ def main() -> int:
     assert "create or replace function ticket_board.workflow_transition_rbac_allowed_config" in rbac_shadow_migration
     assert "create or replace function ticket_board.log_workflow_transition_rbac_shadow_mismatch" in rbac_shadow_migration
     assert "grant select on ticket_board.workflow_transition_rbac_shadow_log" in rbac_shadow_migration
+    rbac_cutover_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu528_workflow_rbac_config_authoritative.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "add column if not exists director_override" in rbac_cutover_migration
+    assert "create or replace function ticket_board.require_workflow_transition_actor" in rbac_cutover_migration
+    assert "wt.director_override and p_actor = 'director'" in executable_schema_lower
+    assert "ticket_board.require_workflow_transition_actor('submit_to_inspection'" in executable_schema_lower
+    assert "ticket_board.require_workflow_transition_actor('request_commit_exempt'" in executable_schema_lower
+    assert "ticket_board.require_workflow_transition_actor('start_task'" in executable_schema_lower
     assert "if not config_transition_allowed then" in executable_schema_lower
     assert "if not hardcoded_transition_allowed then" not in executable_schema_lower
     config_authoritative_migration = (

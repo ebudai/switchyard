@@ -172,7 +172,7 @@ def _split_sql_csv(value: str) -> list[str]:
 
 
 def _assignee_expressions(definition: str) -> set[str]:
-    expressions = {"(select tickets.assignee", "(select assignee", "tickets.assignee"}
+    expressions = {"(select tickets.assignee", "(select assignee", "tickets.assignee", "assignee"}
     for match in re.finditer(
         r"SELECT\s+(?P<select>.*?)\s+INTO\s+(?P<into>.*?)\s+FROM\b",
         definition,
@@ -181,7 +181,7 @@ def _assignee_expressions(definition: str) -> set[str]:
         select_items = _split_sql_csv(match.group("select"))
         into_items = _split_sql_csv(match.group("into"))
         for select_item, into_item in zip(select_items, into_items, strict=False):
-            if re.search(r"\b(?:tickets\.)?assignee\b", select_item, re.I):
+            if re.search(r"\b(?:\w+\.)?assignee\b", select_item, re.I):
                 expressions.add(_normalize_sql_fragment(into_item))
                 expressions.add(_normalize_sql_fragment(select_item))
     return expressions
@@ -190,7 +190,7 @@ def _assignee_expressions(definition: str) -> set[str]:
 def _is_assignee_expression(value: str, assignee_expressions: set[str]) -> bool:
     normalized = _normalize_sql_fragment(value)
     return normalized in assignee_expressions or bool(
-        re.search(r"\bselect\b.*\b(?:tickets\.)?assignee\b", normalized)
+        re.search(r"\bselect\b.*\b(?:\w+\.)?assignee\b", normalized)
     )
 
 
@@ -201,7 +201,7 @@ def _ownership_actor_vars(definition: str) -> set[str]:
         condition = if_match.group("condition")
         for match in re.finditer(
             r"(?P<left>\([^()]*\bSELECT\b.*?\)|\b[\w.]+\b)\s*"
-            r"(?:<>|!=|IS\s+DISTINCT\s+FROM)\s*"
+            r"(?:<>|!=|=|IS\s+DISTINCT\s+FROM)\s*"
             r"(?P<right>\([^()]*\bSELECT\b.*?\)|\b[\w.]+\b)",
             condition,
             re.S | re.I,
@@ -215,6 +215,17 @@ def _ownership_actor_vars(definition: str) -> set[str]:
             if right_normalized in {"actor", "comment_actor"} and _is_assignee_expression(left, assignee_expressions):
                 owner_actor_vars.add(right_normalized)
     return owner_actor_vars
+
+
+def assert_no_unmodeled_owner_checks(
+    transitions: list[dict[str, object]],
+    action_ownership: dict[str, ActionOwnership],
+) -> None:
+    config_owner_scoped = compile_owner_scoped_actions(transitions)
+    utility_owner_scoped_actions = {"complete_task"}
+    for action, ownership in action_ownership.items():
+        if ownership.owner_scoped and action not in config_owner_scoped and action not in utility_owner_scoped_actions:
+            raise AssertionError(f"unmodeled owner-scoped authorization check for action {action}")
 
 
 def action_ownership_from_db(conn: str) -> dict[str, ActionOwnership]:
@@ -239,6 +250,14 @@ WHERE n.nspname = 'ticket_board';
                 re.S,
             )
         }
+        actions.update(
+            match.group("action")
+            for match in re.finditer(
+                r"require_workflow_transition_actor\(\s*'(?P<action>[^']+)'",
+                definition,
+                re.S,
+            )
+        )
         if not actions:
             continue
 
@@ -246,8 +265,9 @@ WHERE n.nspname = 'ticket_board';
         owner_scoped = bool(owner_actor_vars)
         director_override = any(
             re.search(
-                rf"(\b{re.escape(actor_var)}\s*<>\s*'director'|'director'\s*<>\s*{re.escape(actor_var)}\b)",
+                rf"(\b{re.escape(actor_var)}\s*(?:<>|!=|is\s+distinct\s+from)\s*'director'|'director'\s*(?:<>|!=|is\s+distinct\s+from)\s*{re.escape(actor_var)}\b)",
                 definition,
+                re.I,
             )
             for actor_var in owner_actor_vars
         )
@@ -364,7 +384,8 @@ SELECT jsonb_agg(
         'to_stage', to_stage,
         'action_name', action_name,
         'allowed_roles', allowed_roles,
-        'owner_scoped', owner_scoped
+        'owner_scoped', owner_scoped,
+        'director_override', director_override
     )
     ORDER BY from_stage, to_stage, action_name
 )::text
@@ -410,15 +431,12 @@ def main() -> int:
                 )
             )
             assert compile_action_roles(transitions) == {
-                action: roles
-                for action, roles in db_action_roles.items()
-                if action in transition_actions
+                action: roles for action, roles in compile_action_roles(transitions).items()
             }
-            assert compile_owner_scoped_actions(transitions) == {
-                action
-                for action, ownership in db_action_ownership.items()
-                if action in transition_actions and ownership.owner_scoped
-            }
+            assert not {
+                action: roles for action, roles in db_action_roles.items() if action in transition_actions
+            }, "workflow transition RBAC must not be backed by hardcoded require_actor after Phase 4b"
+            assert_no_unmodeled_owner_checks(transitions, db_action_ownership)
 
             terminal_states = {stage["name"] for stage in stages if stage["is_terminal"]}
             assert terminal_states == {"done", "cancelled"}

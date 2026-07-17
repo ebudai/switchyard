@@ -21,6 +21,7 @@ from tests.ticket_board_workflow_config_equivalence_test import (  # noqa: E402
     ActionOwnership,
     action_ownership_from_db,
     action_roles_from_db,
+    assert_no_unmodeled_owner_checks,
     conninfo,
     function_def,
     free_port,
@@ -52,7 +53,8 @@ SELECT jsonb_agg(
         'to_stage', to_stage,
         'action_name', action_name,
         'allowed_roles', allowed_roles,
-        'owner_scoped', owner_scoped
+        'owner_scoped', owner_scoped,
+        'director_override', director_override
     )
     ORDER BY from_stage, to_stage, action_name
 )::text
@@ -74,10 +76,11 @@ SELECT ticket_board.{function_name}('{from_stage}', '{to_stage}');
 
 def build_transition_indexes(
     transitions: list[dict[str, object]],
-) -> tuple[dict[tuple[str, str], list[dict[str, object]]], dict[str, list[str]], dict[str, bool]]:
+) -> tuple[dict[tuple[str, str], list[dict[str, object]]], dict[str, list[str]], dict[str, bool], dict[str, bool]]:
     by_pair: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
     config_action_roles: dict[str, list[str]] = {}
     config_action_owner_scopes: dict[str, bool] = {}
+    config_action_director_overrides: dict[str, bool] = {}
     for transition in transitions:
         key = (str(transition["from_stage"]), str(transition["to_stage"]))
         by_pair[key].append(transition)
@@ -90,42 +93,45 @@ def build_transition_indexes(
         existing_scope = config_action_owner_scopes.setdefault(action, scoped)
         if existing_scope != scoped:
             raise AssertionError(f"conflicting owner_scoped values for {action}: {existing_scope} != {scoped}")
-    return by_pair, config_action_roles, config_action_owner_scopes
+        director_override = bool(transition["director_override"])
+        existing_override = config_action_director_overrides.setdefault(action, director_override)
+        if existing_override != director_override:
+            raise AssertionError(
+                f"conflicting director_override values for {action}: {existing_override} != {director_override}"
+            )
+    return by_pair, config_action_roles, config_action_owner_scopes, config_action_director_overrides
 
 
 def assert_matrix_matches(conn: str) -> int:
     stages = load_stages(conn)
     transitions = load_transitions(conn)
-    transitions_by_pair, config_action_roles, config_action_owner_scopes = build_transition_indexes(transitions)
+    (
+        transitions_by_pair,
+        config_action_roles,
+        config_action_owner_scopes,
+        config_action_director_overrides,
+    ) = build_transition_indexes(transitions)
     db_action_roles = action_roles_from_db(conn)
     db_action_ownership = action_ownership_from_db(conn)
+    assert_no_unmodeled_owner_checks(transitions, db_action_ownership)
     roles = list(CALLER_ROLES)
     checked = 0
 
     for action, config_roles in sorted(config_action_roles.items()):
         db_roles = db_action_roles.get(action)
-        if db_roles != config_roles:
-            raise AssertionError(f"role drift for action {action}: config={config_roles} hardcoded={db_roles}")
-        expected_ownership = db_action_ownership.get(action, ActionOwnership(False, False))
-        expected_owner_scoped = expected_ownership.owner_scoped
+        if db_roles is not None:
+            raise AssertionError(f"stale hardcoded require_actor remains for workflow action {action}: {db_roles}")
+        expected_owner_scoped = config_action_owner_scopes[action]
         config_owner_scoped = config_action_owner_scopes[action]
-        if config_owner_scoped != expected_owner_scoped:
-            raise AssertionError(
-                f"owner-scope drift for action {action}: config={config_owner_scoped} "
-                f"hardcoded={expected_owner_scoped}"
-            )
+        config_director_override = config_action_director_overrides[action]
         for role in roles:
             for actor_is_assignee in (False, True):
                 config_action_allowed = role in config_roles and (
                     not config_owner_scoped
                     or actor_is_assignee
-                    or role == "director"
+                    or (config_director_override and role == "director")
                 )
-                hardcoded_action_allowed = role in db_roles and (
-                    not expected_ownership.owner_scoped
-                    or actor_is_assignee
-                    or (expected_ownership.director_override and role == "director")
-                )
+                hardcoded_action_allowed = config_action_allowed
                 if config_action_allowed != hardcoded_action_allowed:
                     raise AssertionError(
                         f"action RBAC drift for {action} as {role} "
@@ -161,25 +167,16 @@ def assert_matrix_matches(conn: str) -> int:
                         and (
                             not transition["owner_scoped"]
                             or actor_is_assignee
-                            or role == "director"
+                            or (transition["director_override"] and role == "director")
                         )
                         for transition in pair_transitions
                     )
                     hardcoded_role_allowed = any(
-                        role in db_action_roles.get(str(transition["action_name"]), [])
+                        role in [str(config_role) for config_role in transition["allowed_roles"]]
                         and (
-                            not db_action_ownership.get(
-                                str(transition["action_name"]),
-                                ActionOwnership(False, False),
-                            ).owner_scoped
+                            not transition["owner_scoped"]
                             or actor_is_assignee
-                            or (
-                                db_action_ownership.get(
-                                    str(transition["action_name"]),
-                                    ActionOwnership(False, False),
-                                ).director_override
-                                and role == "director"
-                            )
+                            or (transition["director_override"] and role == "director")
                         )
                         for transition in pair_transitions
                     )
@@ -332,21 +329,113 @@ WHERE id = 'PGU-52199';
     assert failed, "removing a config transition must make that runtime transition illegal"
 
 
-def assert_owner_scope_matrix_catches_drift(conn: str) -> None:
+def assert_config_authoritative_controls_runtime_rbac(conn: str) -> None:
     psql(
         conn,
         """
+INSERT INTO ticket_board.tickets (
+    id,
+    title,
+    body,
+    state,
+    assignee,
+    created_text,
+    updated_text,
+    created_at,
+    updated_at,
+    source_json
+) VALUES
+(
+    'PGU-52801',
+    'RBAC role mutation proof',
+    '',
+    'backlog',
+    'ops',
+    '2026-07-17T00:00:00+00:00',
+    '2026-07-17T00:00:00+00:00',
+    clock_timestamp(),
+    clock_timestamp(),
+    '{"id":"PGU-52801","title":"RBAC role mutation proof","body":"","state":"backlog","assignee":"ops","comments":[],"created":"2026-07-17T00:00:00+00:00","updated":"2026-07-17T00:00:00+00:00"}'::jsonb
+);
+
 UPDATE ticket_board.workflow_transitions
-SET owner_scoped = false
-WHERE action_name = 'submit_to_inspection';
+SET allowed_roles = array_remove(allowed_roles, 'ops')
+WHERE action_name = 'start_work';
 """,
     )
     failed = False
     try:
-        assert_matrix_matches(conn)
-    except AssertionError as exc:
-        failed = "owner-scope drift for action submit_to_inspection" in str(exc)
-    assert failed, "removing owner scoping from submit_to_inspection must fail the matrix"
+        psql(
+            conn,
+            """
+SELECT set_config('ticket_board.caller_role', 'ops', false);
+SELECT ticket_board.start_work('PGU-52801');
+""",
+        )
+    except subprocess.CalledProcessError as exc:
+        failed = "role ops cannot call start_work" in exc.stderr
+    assert failed, "removing ops from start_work allowed_roles must block runtime start_work"
+
+    psql(
+        conn,
+        """
+UPDATE ticket_board.workflow_transitions
+SET allowed_roles = ARRAY['main', 'app', 'ops', 'perf', 'research']::text[]
+WHERE action_name = 'start_work';
+
+INSERT INTO ticket_board.tickets (
+    id,
+    title,
+    body,
+    state,
+    assignee,
+    created_text,
+    updated_text,
+    created_at,
+    updated_at,
+    source_json
+) VALUES
+(
+    'PGU-52802',
+    'RBAC owner mutation proof',
+    '',
+    'backlog',
+    'ops',
+    '2026-07-17T00:00:00+00:00',
+    '2026-07-17T00:00:00+00:00',
+    clock_timestamp(),
+    clock_timestamp(),
+    '{"id":"PGU-52802","title":"RBAC owner mutation proof","body":"","state":"backlog","assignee":"ops","comments":[],"created":"2026-07-17T00:00:00+00:00","updated":"2026-07-17T00:00:00+00:00"}'::jsonb
+);
+
+UPDATE ticket_board.workflow_transitions
+SET owner_scoped = false
+WHERE action_name = 'start_task';
+""",
+    )
+    psql(
+        conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'app', false);
+SELECT ticket_board.start_task('PGU-52802', '');
+""",
+    )
+    state = psql(
+        conn,
+        """
+SELECT state FROM ticket_board.tickets WHERE id = 'PGU-52802';
+""",
+    )
+    assert state == "analysis", "flipping start_task owner_scoped=false must allow non-owner runtime start_task"
+
+    psql(
+        conn,
+        """
+UPDATE ticket_board.workflow_transitions
+SET owner_scoped = true
+WHERE action_name = 'start_task';
+""",
+    )
 
 
 def assert_owner_scope_extraction_catches_named_assignee_drift(conn: str) -> None:
@@ -380,7 +469,7 @@ def assert_owner_scope_extraction_catches_named_assignee_drift(conn: str) -> Non
     try:
         assert_matrix_matches(conn)
     except AssertionError as exc:
-        failed = "owner-scope drift for action submit_to_audit" in str(exc)
+        failed = "unmodeled owner-scoped authorization check for action submit_to_audit" in str(exc)
     finally:
         psql(conn, original)
     assert failed, "adding a differently named assignee ownership check to submit_to_audit must fail the matrix"
@@ -409,10 +498,39 @@ def assert_owner_scope_extraction_catches_inline_subquery_drift(conn: str) -> No
     try:
         assert_matrix_matches(conn)
     except AssertionError as exc:
-        failed = "owner-scope drift for action submit_to_audit" in str(exc)
+        failed = "unmodeled owner-scoped authorization check for action submit_to_audit" in str(exc)
     finally:
         psql(conn, original)
     assert failed, "adding an inline-subquery assignee ownership check to submit_to_audit must fail the matrix"
+
+
+def assert_owner_scope_extraction_catches_aliased_subquery_drift(conn: str) -> None:
+    original = function_def(conn, "ticket_board.submit_to_audit(text,text)")
+    mutated = original.replace(
+        "    IF NOT FOUND THEN\n"
+        "        RAISE EXCEPTION 'ticket not found: %', id;\n"
+        "    END IF;",
+        "    IF NOT FOUND THEN\n"
+        "        RAISE EXCEPTION 'ticket not found: %', id;\n"
+        "    END IF;\n"
+        "    IF (SELECT tickets.assignee FROM ticket_board.tickets AS tickets WHERE tickets.id = submit_to_audit.id) IS DISTINCT FROM actor THEN\n"
+        "        RAISE EXCEPTION '% cannot call submit_to_audit for another assignee', actor\n"
+        "            USING ERRCODE = '42501';\n"
+        "    END IF;",
+        1,
+    )
+    if mutated == original or "AS tickets" not in mutated:
+        raise AssertionError("submit_to_audit aliased-subquery ownership mutation did not apply")
+
+    psql(conn, mutated)
+    failed = False
+    try:
+        assert_matrix_matches(conn)
+    except AssertionError as exc:
+        failed = "unmodeled owner-scoped authorization check for action submit_to_audit" in str(exc)
+    finally:
+        psql(conn, original)
+    assert failed, "adding an aliased-subquery assignee ownership check to submit_to_audit must fail the matrix"
 
 
 def assert_owner_scope_extraction_catches_operator_drift(conn: str, operator: str) -> None:
@@ -446,7 +564,7 @@ def assert_owner_scope_extraction_catches_operator_drift(conn: str, operator: st
     try:
         assert_matrix_matches(conn)
     except AssertionError as exc:
-        failed = "owner-scope drift for action submit_to_audit" in str(exc)
+        failed = "unmodeled owner-scoped authorization check for action submit_to_audit" in str(exc)
     finally:
         psql(conn, original)
     assert failed, f"adding a {operator} assignee ownership check to submit_to_audit must fail the matrix"
@@ -471,19 +589,13 @@ def main() -> int:
             assert checked == len(load_stages(admin_conn)) * len(load_stages(admin_conn)) * len(CALLER_ROLES) * 2
             assert_shadow_logs_drift(admin_conn)
             assert_rbac_shadow_logs_drift(admin_conn)
-            assert_owner_scope_matrix_catches_drift(admin_conn)
-            psql(
-                admin_conn,
-                """
-UPDATE ticket_board.workflow_transitions
-SET owner_scoped = true
-WHERE action_name = 'submit_to_inspection';
-""",
-            )
             assert_owner_scope_extraction_catches_named_assignee_drift(admin_conn)
             assert_owner_scope_extraction_catches_inline_subquery_drift(admin_conn)
+            assert_owner_scope_extraction_catches_aliased_subquery_drift(admin_conn)
             assert_owner_scope_extraction_catches_operator_drift(admin_conn, "!=")
             assert_owner_scope_extraction_catches_operator_drift(admin_conn, "IS DISTINCT FROM")
+            assert_owner_scope_extraction_catches_operator_drift(admin_conn, "=")
+            assert_config_authoritative_controls_runtime_rbac(admin_conn)
             assert_config_authoritative_blocks_runtime_transition(admin_conn)
         finally:
             subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], check=False, capture_output=True)

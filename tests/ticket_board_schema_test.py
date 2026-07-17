@@ -270,6 +270,14 @@ def main() -> int:
     assert "workflow transition shadow mismatch" in executable_schema_lower
     assert "workflow_transition_allowed_hardcoded(old.state, new.state)" in executable_schema_lower
     assert "workflow_transition_allowed_config(old.state, new.state)" in executable_schema_lower
+    assert "if not config_transition_allowed then" in executable_schema_lower
+    assert "if not hardcoded_transition_allowed then" not in executable_schema_lower
+    config_authoritative_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu522_workflow_config_authoritative.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "create or replace function ticket_board.enforce_ticket_workflow_update" in config_authoritative_migration
+    assert "if not config_transition_allowed then" in config_authoritative_migration
+    assert "if not hardcoded_transition_allowed then" not in config_authoritative_migration
     assert "add column if not exists parked boolean not null default false" in schema_lower
     assert "add column if not exists regression boolean not null default false" in schema_lower
     assert "{7,40}" in schema, "commit_hash check must allow historical short hashes"

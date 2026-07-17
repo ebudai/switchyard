@@ -867,7 +867,7 @@ BEGIN
             hardcoded_transition_allowed,
             config_transition_allowed
         );
-        IF NOT hardcoded_transition_allowed THEN
+        IF NOT config_transition_allowed THEN
             RAISE EXCEPTION 'illegal state transition: % -> %', OLD.state, NEW.state;
         END IF;
     END IF;

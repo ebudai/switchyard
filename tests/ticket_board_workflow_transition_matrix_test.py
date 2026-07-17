@@ -181,6 +181,54 @@ WHERE ticket_id = 'PGU-MATRIX';
     }
 
 
+def assert_config_authoritative_blocks_runtime_transition(conn: str) -> None:
+    psql(
+        conn,
+        """
+INSERT INTO ticket_board.tickets (
+    id,
+    title,
+    body,
+    state,
+    assignee,
+    created_text,
+    updated_text,
+    created_at,
+    updated_at,
+    source_json
+) VALUES (
+    'PGU-52199',
+    'Config authoritative mutation proof',
+    '',
+    'backlog',
+    'unassigned',
+    '2026-07-17T00:00:00+00:00',
+    '2026-07-17T00:00:00+00:00',
+    clock_timestamp(),
+    clock_timestamp(),
+    '{"id":"PGU-52199","title":"Config authoritative mutation proof","body":"","state":"backlog","assignee":"unassigned","comments":[],"created":"2026-07-17T00:00:00+00:00","updated":"2026-07-17T00:00:00+00:00"}'::jsonb
+);
+
+DELETE FROM ticket_board.workflow_transitions
+WHERE from_stage = 'backlog'
+  AND to_stage = 'analysis';
+""",
+    )
+    failed = False
+    try:
+        psql(
+            conn,
+            """
+UPDATE ticket_board.tickets
+SET state = 'analysis'
+WHERE id = 'PGU-52199';
+""",
+        )
+    except subprocess.CalledProcessError as exc:
+        failed = "illegal state transition: backlog -> analysis" in exc.stderr
+    assert failed, "removing a config transition must make that runtime transition illegal"
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="ticket-board-workflow-matrix.") as tmpdir:
         root = Path(tmpdir)
@@ -199,6 +247,7 @@ def main() -> int:
             checked = assert_matrix_matches(admin_conn)
             assert checked == len(load_stages(admin_conn)) * len(load_stages(admin_conn)) * len(CALLER_ROLES)
             assert_shadow_logs_drift(admin_conn)
+            assert_config_authoritative_blocks_runtime_transition(admin_conn)
         finally:
             subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], check=False, capture_output=True)
 

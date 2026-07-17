@@ -200,7 +200,8 @@ def _ownership_actor_vars(definition: str) -> set[str]:
     for if_match in re.finditer(r"\bIF\s+(?P<condition>.*?)\s+THEN\b", definition, re.S | re.I):
         condition = if_match.group("condition")
         for match in re.finditer(
-            r"(?P<left>\([^()]*\bSELECT\b.*?\)|\b[\w.]+\b)\s*<>\s*"
+            r"(?P<left>\([^()]*\bSELECT\b.*?\)|\b[\w.]+\b)\s*"
+            r"(?:<>|!=|IS\s+DISTINCT\s+FROM)\s*"
             r"(?P<right>\([^()]*\bSELECT\b.*?\)|\b[\w.]+\b)",
             condition,
             re.S | re.I,

@@ -415,6 +415,43 @@ def assert_owner_scope_extraction_catches_inline_subquery_drift(conn: str) -> No
     assert failed, "adding an inline-subquery assignee ownership check to submit_to_audit must fail the matrix"
 
 
+def assert_owner_scope_extraction_catches_operator_drift(conn: str, operator: str) -> None:
+    original = function_def(conn, "ticket_board.submit_to_audit(text,text)")
+    mutated = original.replace(
+        "ticket_commit_exempt boolean;\n    ticket_last_rejected_commit text;",
+        "ticket_commit_exempt boolean;\n    ticket_last_rejected_commit text;\n    ticket_assignee text;",
+    ).replace(
+        "SELECT tickets.commit_exempt, tickets.last_rejected_commit\n"
+        "    INTO ticket_commit_exempt, ticket_last_rejected_commit",
+        "SELECT tickets.commit_exempt, tickets.last_rejected_commit, tickets.assignee\n"
+        "    INTO ticket_commit_exempt, ticket_last_rejected_commit, ticket_assignee",
+    ).replace(
+        "    IF NOT FOUND THEN\n"
+        "        RAISE EXCEPTION 'ticket not found: %', id;\n"
+        "    END IF;",
+        "    IF NOT FOUND THEN\n"
+        "        RAISE EXCEPTION 'ticket not found: %', id;\n"
+        "    END IF;\n"
+        f"    IF ticket_assignee {operator} actor THEN\n"
+        "        RAISE EXCEPTION '% cannot call submit_to_audit for ticket assigned to %', actor, ticket_assignee\n"
+        "            USING ERRCODE = '42501';\n"
+        "    END IF;",
+        1,
+    )
+    if mutated == original or f"ticket_assignee {operator} actor" not in mutated:
+        raise AssertionError(f"submit_to_audit {operator} ownership mutation did not apply")
+
+    psql(conn, mutated)
+    failed = False
+    try:
+        assert_matrix_matches(conn)
+    except AssertionError as exc:
+        failed = "owner-scope drift for action submit_to_audit" in str(exc)
+    finally:
+        psql(conn, original)
+    assert failed, f"adding a {operator} assignee ownership check to submit_to_audit must fail the matrix"
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="ticket-board-workflow-matrix.") as tmpdir:
         root = Path(tmpdir)
@@ -445,6 +482,8 @@ WHERE action_name = 'submit_to_inspection';
             )
             assert_owner_scope_extraction_catches_named_assignee_drift(admin_conn)
             assert_owner_scope_extraction_catches_inline_subquery_drift(admin_conn)
+            assert_owner_scope_extraction_catches_operator_drift(admin_conn, "!=")
+            assert_owner_scope_extraction_catches_operator_drift(admin_conn, "IS DISTINCT FROM")
             assert_config_authoritative_blocks_runtime_transition(admin_conn)
         finally:
             subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], check=False, capture_output=True)

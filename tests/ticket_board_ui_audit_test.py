@@ -170,8 +170,13 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         page.locator("#createAttachDropZone [data-attach-set]").select_option("feedback")
         page.locator("#createAttachDropZone [data-attach-label]").fill("phone proof")
         page.locator("#createImageInput").set_input_files(str(upload_source))
+        page.locator("#createStatus", has_text="feedback upload set requires a feedback number").wait_for(timeout=5000)
+        assert page.locator("#createPreview .attachment-card").count() == 0
+
+        page.locator("#createAttachDropZone [data-attach-attempt]").fill("7")
+        page.locator("#createImageInput").set_input_files(str(upload_source))
         page.locator("#createStatus", has_text="Attached image to the new ticket.").wait_for(timeout=5000)
-        assert page.locator("#createPreview .attachment-card", has_text="phone-proof__upload_1.png").count() == 1
+        assert page.locator("#createPreview .attachment-card", has_text="feedback-007-phone-proof__upload_1.png").count() == 1
 
         page.locator("#titleInput").fill("Harness created file-upload ticket")
         page.locator("#bodyInput").fill("Created through Playwright file upload path.")
@@ -181,7 +186,7 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         page.locator("#createRegressionInput").check()
         page.locator("#createBtn").click()
         page.locator("#createStatus", has_text="Created PGU-513.").wait_for(timeout=5000)
-        wait_for_ticket_field(page, harness.url, "PGU-513", "ticket.screenshots.length === 1 && ticket.needs_eric_signoff && ticket.needs_inspection && ticket.regression && ticket.assignee === 'app'")
+        wait_for_ticket_field(page, harness.url, "PGU-513", "ticket.screenshots.length === 1 && ticket.screenshots[0].includes('feedback-007-phone-proof__upload_1.png') && ticket.needs_eric_signoff && ticket.needs_inspection && ticket.regression && ticket.assignee === 'app'")
 
         page.evaluate(create_clipboard_png_payload())
         page.locator("#createStatus", has_text="Pasted image attached to the new ticket.").wait_for(timeout=5000)

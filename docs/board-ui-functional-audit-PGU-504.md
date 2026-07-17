@@ -18,7 +18,7 @@ Added `tests/ticket_board_ui_audit_test.py` as the first broad functional sweep.
 
 The Playwright audit clicks real UI controls and verifies persisted state through the board API:
 
-- create-ticket form: title, body, assignee, Needs UAT, Needs inspection, Regression, file attachment, pasted image attachment
+- create-ticket form: title, body, assignee, Needs UAT, Needs inspection, Regression, numbered feedback file attachment, feedback missing-number error, pasted image attachment
 - visibility filters: Show Deferred, Show Done, Show Cancelled
 - detail modal: title edit, parent ticket edit, implementation save, audit notes save, commit hash save
 - detail toggles: Requires UAT, Needs inspection, Regression
@@ -39,6 +39,8 @@ Current live state:
 - `PGU-503` is `in_progress`, assigned to `ops`
 
 Result: `PGU-502` does not appear in the `PGU-503` blocker picker. That matches current product rules: terminal tickets (`done`, `cancelled`) are intentionally not selectable as blockers. The harness separately verifies the non-terminal case by adding and removing `PGU-502` as a blocker on `PGU-503` in the isolated in-memory test board.
+
+The reusable in-memory upload path mirrors the production PGU-502 attachment-set filename validation. The browser audit now checks that an unnumbered `Feedback` upload surfaces `feedback upload set requires a feedback number`, then verifies a numbered feedback upload persists with the `feedback-007-phone-proof__...` filename prefix.
 
 ## Findings Filed
 

@@ -350,11 +350,27 @@ class InMemoryTicketBoardApp:
         if normalized_set == "target":
             return "target"
         if normalized_set == "attempt":
-            attempt = int(str(attempt_number).strip())
+            try:
+                attempt = int(str(attempt_number).strip())
+            except ValueError as exc:
+                raise ValueError("attempt upload set requires an attempt number") from exc
+            if attempt <= 0 or attempt > 999:
+                raise ValueError("attempt upload set requires attempt number 1-999")
             prefix = f"attempt-{attempt:03d}"
-            return f"{prefix}-{label_slug}" if label_slug else prefix
-        if normalized_set == "feedback" and not label_slug:
-            return "feedback"
+            if label_slug:
+                prefix = f"{prefix}-{label_slug}"
+            return prefix
+        if normalized_set == "feedback":
+            try:
+                feedback = int(str(attempt_number).strip())
+            except ValueError as exc:
+                raise ValueError("feedback upload set requires a feedback number") from exc
+            if feedback <= 0 or feedback > 999:
+                raise ValueError("feedback upload set requires feedback number 1-999")
+            prefix = f"feedback-{feedback:03d}"
+            if label_slug:
+                prefix = f"{prefix}-{label_slug}"
+            return prefix
         return label_slug or normalized_set
 
     def _ticket_ref(self, ticket_id: str) -> dict[str, Any]:

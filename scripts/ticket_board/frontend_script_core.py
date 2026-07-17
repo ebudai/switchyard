@@ -20,6 +20,9 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       loadInFlight: null,
       loadQueued: false,
       loadSequence: 0,
+      loadedBuildId: String(window.PGU_TICKET_BOARD_BUILD_ID || ''),
+      serverBuildId: String(window.PGU_TICKET_BOARD_BUILD_ID || ''),
+      refreshRequired: false,
       pendingCreateScreenshots: [],
       mobileSectionOpen: {},
       lightboxEntry: null,
@@ -63,6 +66,8 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     const imageLightboxCloseBtn = document.getElementById('imageLightboxCloseBtn');
     const imageLightboxImageEl = document.getElementById('imageLightboxImage');
     const imageLightboxCaptionEl = document.getElementById('imageLightboxCaption');
+    const refreshRequiredOverlayEl = document.getElementById('refreshRequiredOverlay');
+    const refreshRequiredButtonEl = document.getElementById('refreshRequiredButton');
 
     function formatWhen(raw) {
       const date = new Date(raw);
@@ -73,6 +78,29 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       createStatus.textContent = text;
       createStatus.style.borderColor = isError ? 'rgba(253,164,175,0.35)' : 'var(--border)';
       createStatus.style.color = isError ? '#fecdd3' : 'var(--text)';
+    }
+
+    function normalizeBuildId(value) {
+      return String(value || '').trim();
+    }
+
+    function updateRefreshRequired(buildId) {
+      const serverBuildId = normalizeBuildId(buildId);
+      if (serverBuildId) {
+        state.serverBuildId = serverBuildId;
+      }
+      state.refreshRequired = !!(state.loadedBuildId && state.serverBuildId && state.loadedBuildId !== state.serverBuildId);
+      syncRefreshRequiredOverlay();
+    }
+
+    function syncRefreshRequiredOverlay() {
+      refreshRequiredOverlayEl.hidden = !state.refreshRequired;
+      if (typeof syncBodyModalState === 'function') {
+        syncBodyModalState();
+      }
+      if (state.refreshRequired) {
+        refreshRequiredButtonEl.focus();
+      }
     }
 
     function stateLabel(key) {
@@ -294,6 +322,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         patch.comment = { who: stateTransitionCallerRole(ticket), text: commentText.trim() };
       }
       await updateTicket(ticketId, patch, stateTransitionCallerRole(ticket));
+      clearPersistentCommentDraft(ticketId);
     }
 
     function cancelReason(text) {
@@ -318,7 +347,44 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
           text: trimmedText,
         },
       }, 'director');
+      clearPersistentCommentDraft(ticketId);
       setCreateStatus(`Cancelled ${ticketId}.`);
+    }
+
+    function commentDraftStorageKey(ticketId) {
+      return `pgu-ticket-board:comment-draft:${ticketId}`;
+    }
+
+    function readPersistentCommentDraft(ticketId) {
+      try {
+        return window.localStorage.getItem(commentDraftStorageKey(ticketId)) || '';
+      } catch (error) {
+        return '';
+      }
+    }
+
+    function writePersistentCommentDraft(ticketId, value) {
+      try {
+        const key = commentDraftStorageKey(ticketId);
+        const text = String(value || '');
+        if (text) {
+          window.localStorage.setItem(key, text);
+        } else {
+          window.localStorage.removeItem(key);
+        }
+      } catch (error) {
+        // localStorage can be unavailable in private or locked-down browsers; the in-memory draft still works.
+      }
+    }
+
+    function clearPersistentCommentDraft(ticketId) {
+      writePersistentCommentDraft(ticketId, '');
+      if (state.detailOpen && state.selectedId === ticketId) {
+        detailContentEl.querySelectorAll('[data-draft-key="commentText"]').forEach((element) => {
+          element.value = '';
+          element.dataset.serverValue = '';
+        });
+      }
     }
 
     function clearDetailDraft(ticketId = null) {
@@ -361,7 +427,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     }
 
     function syncBodyModalState() {
-      document.body.classList.toggle('detail-open', detailModalIsOpen() || imageLightboxIsOpen());
+      document.body.classList.toggle('detail-open', detailModalIsOpen() || imageLightboxIsOpen() || state.refreshRequired);
     }
 
     function syncDetailOverlay() {

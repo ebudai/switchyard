@@ -189,6 +189,7 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
       if (loadSequence !== state.loadSequence) {
         return;
       }
+      updateRefreshRequired(payload.build_id);
       state.tickets = payload.tickets;
       state.screenshots = payload.screenshots;
       state.errors = payload.errors;
@@ -555,6 +556,7 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
       }
       clearDetailDraft(ticketId);
       await updateTicket(ticketId, patch, trimmedWho);
+      clearPersistentCommentDraft(ticketId);
       setCreateStatus(nextState ? `Moved ${ticketId} to ${stateLabel(nextState)}.` : `Comment added to ${ticketId}.`);
     }
 
@@ -570,6 +572,7 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
       }
       clearDetailDraft(ticketId);
       await updateTicket(ticketId, patch, trimmedWho);
+      clearPersistentCommentDraft(ticketId);
       setCreateStatus(`Signed off ✓ ${ticketId} moved to Final Sign-Off.`);
     }
 
@@ -692,6 +695,11 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
       } catch (error) {
         setCreateStatus(error.message, true);
       }
+    });
+
+    refreshRequiredButtonEl.addEventListener('click', () => {
+      rememberDetailDraft();
+      window.location.reload();
     });
 
     function connectEvents() {

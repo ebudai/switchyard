@@ -93,6 +93,20 @@ EDIT_FIELD_NAMES = {
 }
 
 
+def board_build_id() -> str:
+    explicit = os.environ.get("PGU_TICKET_BOARD_BUILD_ID", "").strip()
+    if explicit:
+        return explicit
+    proc = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    value = proc.stdout.strip()
+    return value if proc.returncode == 0 and value else "unknown"
+
+
 @dataclass(frozen=True)
 class PeerCredentials:
     pid: int
@@ -806,7 +820,10 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/":
-            token_script = f"  <script>window.PGU_TICKET_BOARD_WRITE_TOKEN = {json.dumps(self.write_token)};</script>\n"
+            token_script = (
+                f"  <script>window.PGU_TICKET_BOARD_WRITE_TOKEN = {json.dumps(self.write_token)};"
+                f" window.PGU_TICKET_BOARD_BUILD_ID = {json.dumps(self.server.build_id)};</script>\n"
+            )
             body = HTML.replace("  <script>\n", token_script + "  <script>\n", 1).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -816,7 +833,9 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if parsed.path == "/api/board":
-            self.send_json(self.app.snapshot())
+            payload = self.app.snapshot()
+            payload["build_id"] = self.server.build_id
+            self.send_json(payload)
             return
         if parsed.path == "/events":
             self.serve_events()
@@ -946,6 +965,7 @@ class TicketBoardServer(ThreadingHTTPServer):
         self.director_notifier = director_notifier or DirectorNotifier()
         self._owns_director_notifier = director_notifier is None
         self.caller_registry = caller_registry
+        self.build_id = board_build_id()
         self.write_token = write_token or secrets.token_urlsafe(32)
         super().__init__(address, TicketBoardHandler)
 
@@ -977,6 +997,7 @@ class TicketBoardUnixServer(ThreadingUnixHTTPServer):
         self.events = events
         self.director_notifier = director_notifier
         self.caller_registry = caller_registry or CallerRegistry()
+        self.build_id = board_build_id()
         self.write_token = ""
         socket_path.parent.mkdir(parents=True, exist_ok=True)
         try:

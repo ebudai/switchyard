@@ -599,6 +599,34 @@ STYLE = """    :root {
       background: rgba(4, 6, 10, 0.84);
       padding: 24px;
     }
+    .refresh-required-overlay[hidden] { display: none; }
+    .refresh-required-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 40;
+      display: grid;
+      place-items: center;
+      background: rgba(4, 6, 10, 0.82);
+      padding: 24px;
+    }
+    .refresh-required-modal {
+      width: min(100%, 460px);
+      display: grid;
+      gap: 14px;
+      padding: 20px;
+      border: 1px solid rgba(125, 211, 252, 0.42);
+      border-radius: 8px;
+      background: rgba(15, 17, 21, 0.98);
+      box-shadow: 0 30px 90px rgba(0, 0, 0, 0.48);
+    }
+    .refresh-required-modal h2,
+    .refresh-required-modal p {
+      margin: 0;
+    }
+    .refresh-required-modal p {
+      color: var(--text);
+      line-height: 1.45;
+    }
     .image-lightbox {
       width: min(100%, 1220px);
       max-height: 100%;

@@ -326,6 +326,27 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         detail_field(modal, "Title").get_by_role("button", name="Save Title").click()
         wait_for_ticket_field(page, harness.url, "PGU-512", "ticket.title === 'Detail edit target renamed'")
         refresh_open_detail_from_server(page, "PGU-512")
+
+        comment_box = modal.get_by_placeholder("Add a comment or bounce-back note")
+        comment_box.fill("Draft survives deployed refresh")
+        harness.server.build_id = "pgu-523-new-build"
+        page.evaluate("""async () => { await requestBoardReload(); }""")
+        page.locator("#refreshRequiredOverlay").wait_for(timeout=5000)
+        page.locator("#refreshRequiredOverlay", has_text="A newer board version is deployed").wait_for(timeout=5000)
+        page.locator("#refreshRequiredButton").click()
+        page.wait_for_load_state("domcontentloaded")
+        page.locator(".column-title", has_text="Triage").wait_for(timeout=5000)
+        page.wait_for_function("() => window.PGU_TICKET_BOARD_BUILD_ID === 'pgu-523-new-build'", timeout=5000)
+        page.locator(".card", has=page.locator(".card-id", has_text="PGU-512")).click()
+        modal.wait_for(timeout=5000)
+        comment_box = modal.get_by_placeholder("Add a comment or bounce-back note")
+        page.wait_for_function(
+            "(element) => element.value === 'Draft survives deployed refresh'",
+            arg=comment_box.element_handle(timeout=5000),
+            timeout=5000,
+        )
+        comment_box.fill("")
+
         detail_field(modal, "Parent Ticket").locator("input").fill("PGU-502")
         detail_field(modal, "Parent Ticket").get_by_role("button", name="Save Parent Link").click()
         wait_for_ticket_field(page, harness.url, "PGU-512", "ticket.parent_id === 'PGU-502'")

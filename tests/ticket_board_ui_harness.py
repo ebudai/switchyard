@@ -131,6 +131,7 @@ class InMemoryTicketBoardApp:
         self.tickets: dict[str, dict[str, Any]] = {ticket["id"]: copy.deepcopy(ticket) for ticket in tickets}
         self.upload_count = 0
         self.action_log: list[tuple[str, str | None, dict[str, Any]]] = []
+        self.operation_log: list[tuple[str, str, str | None, dict[str, Any]]] = []
         self._refresh_blockers()
 
     def snapshot(self) -> dict[str, object]:
@@ -271,9 +272,11 @@ class InMemoryTicketBoardApp:
         return copy.deepcopy(ticket)
 
     def route_ticket(self, ticket_id: str, state: str, assignee: str, *, caller_role: str | None = None) -> dict[str, Any]:
+        self.operation_log.append(("route", str(ticket_id).strip().upper(), caller_role, {"state": state, "assignee": assignee}))
         return self._mutate_ticket(ticket_id, {"state": state, "assignee": assignee}, caller_role=caller_role)
 
     def release_draft(self, ticket_id: str, *, caller_role: str) -> dict[str, Any]:
+        self.operation_log.append(("release_draft", str(ticket_id).strip().upper(), caller_role, {}))
         return self._mutate_ticket(ticket_id, {"state": "analysis", "assignee": "unassigned"}, caller_role=caller_role)
 
     def force_move_ticket(

@@ -230,6 +230,22 @@ def main() -> int:
         r"regression\s+boolean\s+not null\s+default\s+false",
         schema_lower,
     ), "regression must be a default-false ticket metadata flag"
+    assert "create table if not exists ticket_board.workflow_stages" in schema_lower
+    assert "create table if not exists ticket_board.workflow_transitions" in schema_lower
+    assert "display_label text not null" in schema_lower
+    assert "owner_roles text[] not null default array[]::text[]" in schema_lower
+    assert "entry_gate_field text" in schema_lower
+    assert "gate_skip_to text references ticket_board.workflow_stages(name)" in schema_lower
+    assert "exit_signoff_field text" in schema_lower
+    assert "is_terminal boolean not null default false" in schema_lower
+    workflow_config_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu517_workflow_config_phase0.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "create table if not exists ticket_board.workflow_stages" in workflow_config_migration
+    assert "create table if not exists ticket_board.workflow_transitions" in workflow_config_migration
+    assert "('analysis', 'triage', 2, array['director']::text[]" in workflow_config_migration
+    assert "('eric_review', 'uat', 6, array['director']::text[]" in workflow_config_migration
+    assert "('draft', 'analysis', 'release_draft', array['director', 'eric']::text[])" in workflow_config_migration
     assert "add column if not exists parked boolean not null default false" in schema_lower
     assert "add column if not exists regression boolean not null default false" in schema_lower
     assert "{7,40}" in schema, "commit_hash check must allow historical short hashes"

@@ -233,8 +233,10 @@ def main() -> int:
     assert "create table if not exists ticket_board.workflow_stages" in schema_lower
     assert "create table if not exists ticket_board.workflow_transitions" in schema_lower
     assert "create table if not exists ticket_board.workflow_transition_shadow_log" in schema_lower
+    assert "create table if not exists ticket_board.workflow_transition_rbac_shadow_log" in schema_lower
     assert "display_label text not null" in schema_lower
     assert "owner_roles text[] not null default array[]::text[]" in schema_lower
+    assert "owner_scoped boolean not null default false" in schema_lower
     assert "entry_gate_field text" in schema_lower
     assert "gate_skip_to text references ticket_board.workflow_stages(name)" in schema_lower
     assert "exit_signoff_field text" in schema_lower
@@ -267,16 +269,30 @@ def main() -> int:
     assert "create or replace function ticket_board.workflow_transition_allowed_hardcoded" in executable_schema_lower
     assert "create or replace function ticket_board.workflow_transition_allowed_config" in executable_schema_lower
     assert "create or replace function ticket_board.log_workflow_transition_shadow_mismatch" in executable_schema_lower
+    assert "create or replace function ticket_board.workflow_transition_rbac_allowed_config" in executable_schema_lower
+    assert "create or replace function ticket_board.workflow_transition_rbac_owner_scoped_config" in executable_schema_lower
+    assert "create or replace function ticket_board.log_workflow_transition_rbac_shadow_mismatch" in executable_schema_lower
     assert "workflow transition shadow mismatch" in executable_schema_lower
+    assert "workflow transition rbac shadow mismatch" in executable_schema_lower
     assert "workflow_transition_allowed_hardcoded(old.state, new.state)" in executable_schema_lower
     assert "workflow_transition_allowed_config(old.state, new.state)" in executable_schema_lower
     rbac_sql = (ROOT / "scripts" / "ticket_board" / "rbac.sql").read_text(encoding="utf-8").lower()
     assert "revoke all on ticket_board.workflow_transition_shadow_log" in rbac_sql
     assert "grant select on ticket_board.workflow_transition_shadow_log" in rbac_sql
+    assert "revoke all on ticket_board.workflow_transition_rbac_shadow_log" in rbac_sql
+    assert "grant select on ticket_board.workflow_transition_rbac_shadow_log" in rbac_sql
     shadow_log_grants_migration = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "pgu521_zz_shadow_log_read_grants.sql"
     ).read_text(encoding="utf-8").lower()
     assert "grant select on ticket_board.workflow_transition_shadow_log" in shadow_log_grants_migration
+    rbac_shadow_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu527_workflow_rbac_shadow.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "add column if not exists owner_scoped" in rbac_shadow_migration
+    assert "create table if not exists ticket_board.workflow_transition_rbac_shadow_log" in rbac_shadow_migration
+    assert "create or replace function ticket_board.workflow_transition_rbac_allowed_config" in rbac_shadow_migration
+    assert "create or replace function ticket_board.log_workflow_transition_rbac_shadow_mismatch" in rbac_shadow_migration
+    assert "grant select on ticket_board.workflow_transition_rbac_shadow_log" in rbac_shadow_migration
     assert "if not config_transition_allowed then" in executable_schema_lower
     assert "if not hardcoded_transition_allowed then" not in executable_schema_lower
     config_authoritative_migration = (

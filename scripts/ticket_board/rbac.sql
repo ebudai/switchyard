@@ -44,6 +44,7 @@ REVOKE ALL ON ticket_board.schema_migrations FROM director, eric, ops, app, audi
 REVOKE ALL ON ticket_board.workflow_stages FROM director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
 REVOKE ALL ON ticket_board.workflow_transitions FROM director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
 REVOKE ALL ON ticket_board.workflow_transition_shadow_log FROM director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
+REVOKE ALL ON ticket_board.workflow_transition_rbac_shadow_log FROM director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
 REVOKE ALL ON SEQUENCE ticket_board.ticket_comments_id_seq FROM director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
 REVOKE ALL ON SEQUENCE ticket_board.ticket_notification_queue_id_seq FROM director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
 REVOKE ALL ON SEQUENCE ticket_board.notification_trace_id_seq FROM director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
@@ -53,6 +54,7 @@ GRANT SELECT ON ALL TABLES IN SCHEMA ticket_board TO director, eric, ops, app, a
 GRANT SELECT ON ticket_board.schema_migrations TO director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
 GRANT SELECT ON ticket_board.workflow_stages, ticket_board.workflow_transitions TO director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
 GRANT SELECT ON ticket_board.workflow_transition_shadow_log TO director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
+GRANT SELECT ON ticket_board.workflow_transition_rbac_shadow_log TO director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
 
 GRANT EXECUTE ON FUNCTION ticket_board.create_ticket(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.create_ticket(text, text, text) TO ticket_board_service;

@@ -22,6 +22,11 @@ from scripts.ticket_board.app import STATES, TicketBoardApp  # noqa: E402
 
 
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
+OWNER_SCOPED_ACTIONS = {
+    "request_commit_exempt",
+    "start_task",
+    "submit_to_inspection",
+}
 
 
 def run(args: list[str], *, input_text: str | None = None, capture: bool = True) -> subprocess.CompletedProcess[str]:
@@ -186,6 +191,20 @@ def compile_action_roles(transitions: list[dict[str, object]]) -> dict[str, list
     return dict(sorted(action_roles.items()))
 
 
+def compile_owner_scoped_actions(transitions: list[dict[str, object]]) -> set[str]:
+    owner_scoped: set[str] = set()
+    action_scopes: dict[str, bool] = {}
+    for transition in transitions:
+        action = str(transition["action_name"])
+        scoped = bool(transition["owner_scoped"])
+        existing = action_scopes.setdefault(action, scoped)
+        if existing != scoped:
+            raise AssertionError(f"conflicting owner_scoped values for {action}: {existing} != {scoped}")
+        if scoped:
+            owner_scoped.add(action)
+    return owner_scoped
+
+
 def load_workflow_config(conn: str) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     stages = json.loads(
         psql(
@@ -217,7 +236,8 @@ SELECT jsonb_agg(
         'from_stage', from_stage,
         'to_stage', to_stage,
         'action_name', action_name,
-        'allowed_roles', allowed_roles
+        'allowed_roles', allowed_roles,
+        'owner_scoped', owner_scoped
     )
     ORDER BY from_stage, to_stage, action_name
 )::text
@@ -266,6 +286,7 @@ def main() -> int:
                 for action, roles in db_action_roles.items()
                 if action in transition_actions
             }
+            assert compile_owner_scoped_actions(transitions) == OWNER_SCOPED_ACTIONS
 
             terminal_states = {stage["name"] for stage in stages if stage["is_terminal"]}
             assert terminal_states == {"done", "cancelled"}

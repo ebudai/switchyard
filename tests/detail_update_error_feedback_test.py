@@ -50,9 +50,9 @@ class RejectingDetailBoardApp:
                 "body": "",
                 "assignee": "ops",
                 "state": "analysis",
-                "blocked_by": [],
-                "blockers": [],
-                "blocked_reason": "",
+                "blocked_by": ["PGU-510"],
+                "blockers": [{"id": "PGU-510", "resolved": False}],
+                "blocked_reason": "Waiting on PGU-510.",
                 "implementation": "",
                 "audit_prompt": "",
                 "audit_signoff": False,
@@ -94,7 +94,11 @@ class RejectingDetailBoardApp:
 
     def update_ticket(self, ticket_id: str, patch: dict[str, Any], *, caller_role: str | None = None) -> dict[str, Any]:
         self.update_calls.append((ticket_id, patch, caller_role))
-        raise ValueError("title update rejected by test server")
+        if "title" in patch:
+            raise ValueError("title update rejected by test server")
+        if "blocked_by" in patch:
+            raise ValueError("remove blocker rejected by test server")
+        raise ValueError(f"unexpected update rejected by test server: {patch}")
 
 
 def title_input(page: object) -> object:
@@ -119,6 +123,14 @@ def run_browser_check(playwright: object, server_port: int, app: RejectingDetail
         )
         assert len(app.update_calls) == 1
         assert app.tickets[0]["title"] == "Original title"
+
+        page.get_by_role("button", name="Remove Blocker PGU-510").click()
+        page.wait_for_function(
+            "() => document.getElementById('createStatus')?.textContent.includes('remove blocker rejected by test server')",
+            timeout=5000,
+        )
+        assert len(app.update_calls) == 2
+        assert app.tickets[0]["blocked_by"] == ["PGU-510"]
     finally:
         browser.close()
 
@@ -129,8 +141,10 @@ def main() -> int:
     assert "setCreateStatus(error.message, true);" in HTML
     assert "await requestBoardReload();" in HTML
     assert "await updateDetailTicket({ title: titleEditInput.value });" in HTML
+    assert "await updateDetailTicket({\n              blocked_by: nextBlockedBy,\n            });" in HTML
     assert "await updateDetailTicketForToggle({ manually_controlled: checked }, 'director');" in HTML
     assert "await updateTicket(ticket.id, { title: titleEditInput.value }, detailCallerRole());" not in HTML
+    assert "await updateTicket(ticket.id, {\n              blocked_by: nextBlockedBy," not in HTML
 
     sync_playwright = load_playwright()
     with tempfile.TemporaryDirectory(prefix="detail-update-error-feedback.") as tmpdir:

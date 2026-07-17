@@ -419,9 +419,9 @@ SCRIPT_DETAIL = """    function selectedTicket() {
           removeBlockedByButton.textContent = `Remove Blocker ${blockerId}`;
           removeBlockedByButton.addEventListener('click', async () => {
             const nextBlockedBy = (ticket.blocked_by || []).filter((item) => item !== blockerId);
-            await updateTicket(ticket.id, {
+            await updateDetailTicket({
               blocked_by: nextBlockedBy,
-            }, detailCallerRole());
+            });
           });
           removeBlockedByActions.appendChild(removeBlockedByButton);
         });

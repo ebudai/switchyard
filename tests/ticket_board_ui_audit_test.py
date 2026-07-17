@@ -34,8 +34,95 @@ def refresh_open_detail_from_server(page: Any, ticket_id: str) -> None:
     )
 
 
-def refresh_board_from_server(page: Any) -> None:
-    page.evaluate("""async () => { await requestBoardReload(); }""")
+def install_update_ticket_tracker(page: Any) -> None:
+    page.evaluate(
+        """() => {
+          if (window.__pguUpdateTicketTrackerInstalled) {
+            return;
+          }
+          const originalUpdateTicket = updateTicket;
+          window.__pguLastUpdateTicket = null;
+          window.updateTicket = (...args) => {
+            const promise = originalUpdateTicket(...args);
+            window.__pguLastUpdateTicket = Promise.resolve(promise);
+            return promise;
+          };
+          window.__pguUpdateTicketTrackerInstalled = true;
+        }"""
+    )
+
+
+def reset_update_ticket_tracker(page: Any) -> None:
+    page.evaluate("""() => { window.__pguLastUpdateTicket = null; }""")
+
+
+def wait_for_last_update_ticket(page: Any) -> None:
+    page.evaluate(
+        """async () => {
+          const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+          for (let attempt = 0; attempt < 50 && !window.__pguLastUpdateTicket; attempt += 1) {
+            await sleep(20);
+          }
+          if (!window.__pguLastUpdateTicket) {
+            throw new Error('no updateTicket call was captured');
+          }
+          await window.__pguLastUpdateTicket;
+        }"""
+    )
+
+
+def add_blocker_with_picker(page: Any, blocked_by_field: Any, blocker_id: str) -> None:
+    blocked_by_input = blocked_by_field.locator("input")
+    add_button = blocked_by_field.get_by_role("button", name="Add Selected")
+    last_error = ""
+    for _ in range(5):
+        try:
+            blocked_by_field.locator("select").select_option(blocker_id)
+            page.wait_for_function(
+                "(button) => !button.disabled",
+                arg=add_button.element_handle(timeout=5000),
+                timeout=1000,
+            )
+            add_button.click()
+            page.wait_for_function(
+                "([input, blockerId]) => input.value.includes(blockerId)",
+                arg=[blocked_by_input.element_handle(timeout=5000), blocker_id],
+                timeout=1000,
+            )
+            return
+        except Exception as exc:  # noqa: BLE001 - include Playwright timeout/detach errors in retry diagnostics.
+            last_error = str(exc)
+    raise AssertionError(f"Add Selected did not add {blocker_id} to Blocked By input: {last_error}")
+
+
+def wait_for_blocker_card_render(page: Any, ticket_id: str, blocker_id: str, *, blocked: bool) -> None:
+    page.evaluate(
+        """async ([ticketId, blockerId, blocked]) => {
+          const expectedBadge = `blocked ${blockerId}`;
+          const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+          const findCard = () => Array.from(document.querySelectorAll('.card')).find((card) =>
+            Array.from(card.querySelectorAll('.card-id')).some((idEl) => idEl.textContent.trim() === ticketId)
+          );
+          const deadline = performance.now() + 5000;
+          let lastCardText = '';
+          let lastCardClass = '';
+          while (performance.now() < deadline) {
+            await requestBoardReload();
+            await loadBoard();
+            const card = findCard();
+            lastCardText = card ? card.innerText : '<missing>';
+            lastCardClass = card ? card.className : '<missing>';
+            const hasBlockedClass = !!card && card.classList.contains('card-blocked');
+            const hasBadge = !!card && card.innerText.includes(expectedBadge);
+            if (blocked ? (hasBlockedClass && hasBadge) : (!hasBlockedClass && !hasBadge)) {
+              return;
+            }
+            await sleep(100);
+          }
+          throw new Error(`Timed out waiting for ${ticketId} blocked=${blocked}; class=${lastCardClass}; text=${lastCardText}`);
+        }""",
+        [ticket_id, blocker_id, blocked],
+    )
 
 
 def get_ticket(page: Any, base_url: str, ticket_id: str) -> dict[str, Any]:
@@ -162,6 +249,7 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         page = browser.new_page(viewport={"width": 1440, "height": 1000})
         page.goto(harness.url, wait_until="domcontentloaded")
         page.locator(".column-title", has_text="Triage").wait_for(timeout=5000)
+        install_update_ticket_tracker(page)
 
         assert page.locator(".card", has_text="PGU-506").count() == 0
         page.locator("#showDoneInput").check()
@@ -225,20 +313,22 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         modal = page.locator(".detail-modal")
         modal.wait_for(timeout=5000)
         blocked_by = detail_field(modal, "Blocked By")
-        blocked_by.locator("select").select_option("PGU-502")
-        blocked_by.get_by_role("button", name="Add Selected").click()
+        blocked_by_input = blocked_by.locator("input")
+        add_blocker_with_picker(page, blocked_by, "PGU-502")
         detail_field(modal, "Blocked Reason").locator("textarea").fill("Waiting for PGU-502.")
+        reset_update_ticket_tracker(page)
         blocked_by.get_by_role("button", name="Save Blockers").click()
+        wait_for_last_update_ticket(page)
         wait_for_ticket_field(page, harness.url, "PGU-503", "ticket.blocked_by.includes('PGU-502') && ticket.blocked_reason === 'Waiting for PGU-502.'")
-        refresh_board_from_server(page)
-        page.locator(".card.card-blocked", has=page.locator(".card-id", has_text="PGU-503")).wait_for(timeout=5000)
-        page.locator(".card", has=page.locator(".card-id", has_text="PGU-503")).locator(".badge", has_text="blocked PGU-502").wait_for(timeout=5000)
+        wait_for_blocker_card_render(page, "PGU-503", "PGU-502", blocked=True)
 
-        blocked_by.locator("input").fill("")
+        blocked_by_input.fill("")
         detail_field(modal, "Blocked Reason").locator("textarea").fill("")
+        reset_update_ticket_tracker(page)
         blocked_by.get_by_role("button", name="Save Blockers").click()
+        wait_for_last_update_ticket(page)
         wait_for_ticket_field(page, harness.url, "PGU-503", "ticket.blocked_by.length === 0 && ticket.blocked_reason === ''")
-        refresh_board_from_server(page)
+        wait_for_blocker_card_render(page, "PGU-503", "PGU-502", blocked=False)
 
         page.locator("#detailCloseBtn").click()
         page.locator(".card", has=page.locator(".card-id", has_text="PGU-512")).click()

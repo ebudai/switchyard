@@ -86,9 +86,12 @@ side-state from most stages.
   not always part of the path.
 - `audit` and `eric_review`/`director_review` are review/sign-off stages owned
   by `audit`/`director` respectively.
-- `set-manually-controlled` mutes automated nudges for a ticket — only use it
-  on genuinely held/stalled tickets, never on one you're actively working (it
-  also blocks the assignee from routing/submitting, not just the nudges).
+- `set-manually-controlled` (director-only) mutes automated nudges/notifications
+  AND makes the ticket bypass workflow-transition enforcement entirely, so its
+  state can be moved freely outside the normal stage gates (a director-managed
+  escape hatch) — it does NOT block routing/submitting; ordinary RBAC still
+  applies. Use only on genuinely held/stalled/director-managed tickets, not
+  one moving through the normal pipeline.
 - The board auto-notifies assignees on relevant transitions — don't stack a
   manual ping on top of a transition that already notified.
 - Merge current `origin/main` before validating anything you're about to

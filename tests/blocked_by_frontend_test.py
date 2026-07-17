@@ -14,16 +14,24 @@ from scripts.ticket_board.frontend import HTML
 
 
 def main() -> int:
-    assert "function parseBlockedByInput(value)" in HTML
+    assert "function parseBlockedByInput(value)" not in HTML
     assert "function unresolvedBlockedBy(ticket)" in HTML
     assert "function availableBlockerTickets(ticket)" in HTML
+    assert "function compareTicketsNewestNumberFirst(left, right)" in HTML
+    assert ".sort(compareTicketsNewestNumberFirst);" in HTML
     assert "Blocked By" in HTML
-    assert "blockedByInput.placeholder = 'PGU-23, PGU-25';" in HTML
+    assert "blockedByInput" not in HTML
     assert "Choose a non-terminal ticket…" in HTML
     assert "Only non-terminal tickets are selectable as blockers." in HTML
     assert "!['done', 'cancelled'].includes(candidate.state)" in HTML
-    assert "blocked_by: parseBlockedByInput(blockedByInput.value)," in HTML
-    assert "blocked_reason: blockedReasonInput.value," in HTML
+    assert "addBlockedByButton.textContent = 'Add Blocker';" in HTML
+    assert "Add Selected" not in HTML
+    assert "Save Blockers" not in HTML
+    assert "const nextBlockedBy = Array.from(new Set([...(ticket.blocked_by || []), blockerId]));" in HTML
+    assert "const blockedReasonValue = blockedReasonInput.value.trim() || `Waiting on ${blockerId}.`;" in HTML
+    assert "await updateTicket(ticket.id, {" in HTML
+    assert "blocked_by: nextBlockedBy," in HTML
+    assert "blocked_reason: blockedReasonValue," in HTML
     assert "appendLinkedTicketText(body, text);" in HTML
     assert "appendLinkedTicketText(body, item.text);" in HTML
     assert "blocked_by" in HTML

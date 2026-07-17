@@ -351,11 +351,6 @@ SCRIPT_DETAIL = """    function selectedTicket() {
 
       const blockedBy = document.createElement('div');
       blockedBy.innerHTML = '<div class="field-label">Blocked By</div>';
-      const blockedByInput = document.createElement('input');
-      blockedByInput.type = 'text';
-      blockedByInput.value = formatBlockedByList(ticket.blocked_by);
-      blockedByInput.placeholder = 'PGU-23, PGU-25';
-      bindDetailDraftField(draftFields, blockedByInput, 'blockedBy', blockedByInput.value);
       const blockedByActions = document.createElement('div');
       blockedByActions.className = 'inline-actions';
       const blockerPickerLabel = document.createElement('div');
@@ -368,26 +363,23 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       });
       const addBlockedByButton = document.createElement('button');
       addBlockedByButton.type = 'button';
-      addBlockedByButton.textContent = 'Add Selected';
+      addBlockedByButton.textContent = 'Add Blocker';
       addBlockedByButton.disabled = blockerPicker.options.length <= 1;
-      addBlockedByButton.addEventListener('click', () => {
+      addBlockedByButton.addEventListener('click', async () => {
         const blockerId = blockerPicker.value.trim().toUpperCase();
         if (!blockerId) {
           return;
         }
-        const nextBlockedBy = Array.from(new Set([...parseBlockedByInput(blockedByInput.value), blockerId]));
-        blockedByInput.value = formatBlockedByList(nextBlockedBy);
-        persistDetailDraftField(ticket.id, 'blockedBy', blockedByInput.value);
-      });
-      const saveBlockedByButton = document.createElement('button');
-      saveBlockedByButton.textContent = 'Save Blockers';
-      saveBlockedByButton.addEventListener('click', async () => {
+        const nextBlockedBy = Array.from(new Set([...(ticket.blocked_by || []), blockerId]));
+        const blockedReasonValue = blockedReasonInput.value.trim() || `Waiting on ${blockerId}.`;
+        blockedReasonInput.value = blockedReasonValue;
+        persistDetailDraftField(ticket.id, 'blockedReason', blockedReasonValue);
         await updateTicket(ticket.id, {
-          blocked_by: parseBlockedByInput(blockedByInput.value),
-          blocked_reason: blockedReasonInput.value,
+          blocked_by: nextBlockedBy,
+          blocked_reason: blockedReasonValue,
         }, detailCallerRole());
       });
-      blockedByActions.append(blockerPicker, addBlockedByButton, saveBlockedByButton);
+      blockedByActions.append(blockerPicker, addBlockedByButton);
       const blockedByNote = document.createElement('div');
       blockedByNote.className = 'soft-note';
       blockedByNote.textContent = `${blockedBySummary(ticket)} Only non-terminal tickets are selectable as blockers.`;
@@ -397,7 +389,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       blockedByLinksLabel.className = 'field-preview-label';
       blockedByLinksLabel.textContent = 'Linked Tickets';
       blockedByLinks.append(blockedByLinksLabel, linkedTicketRow(visibleBlockedBy));
-      blockedBy.append(blockedByInput, blockerPickerLabel, blockedByActions, blockedByNote, blockedByLinks);
+      blockedBy.append(blockerPickerLabel, blockedByActions, blockedByNote, blockedByLinks);
 
       const blockedReason = document.createElement('div');
       blockedReason.innerHTML = '<div class="field-label">Blocked Reason</div>';

@@ -413,6 +413,9 @@ STYLE = """    :root {
       gap: 10px;
       align-items: start;
     }
+    .card-title-wrap {
+      min-width: 0;
+    }
     .card-id {
       color: var(--accent);
       font-size: 12px;

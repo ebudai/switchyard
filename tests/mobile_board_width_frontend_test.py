@@ -17,6 +17,8 @@ def main() -> int:
     assert "const mobileSectionMedia = window.matchMedia('(max-width: 900px)');" in HTML
     assert "boardEl.style.gridTemplateColumns = '1fr';" in HTML
     assert "boardEl.style.minWidth = '0';" in HTML
+    assert "titleWrap.className = 'card-title-wrap';" in HTML
+    assert ".card-title-wrap {\n      min-width: 0;\n    }" in HTML
     assert "@media (max-width: 640px) {" in HTML
     assert "grid-template-columns: minmax(0, 1fr);" in HTML
     assert "max-width: 100vw;" in HTML

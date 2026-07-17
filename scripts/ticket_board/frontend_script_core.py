@@ -1241,6 +1241,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       const top = document.createElement('div');
       top.className = 'card-top';
       const titleWrap = document.createElement('div');
+      titleWrap.className = 'card-title-wrap';
       const idEl = document.createElement('div');
       idEl.className = 'card-id';
       idEl.textContent = ticket.id;

@@ -1670,7 +1670,7 @@ def test_idle_reminder_repeat_escalation_delivers_to_director() -> None:
     assert conn.acked == [81]
 
 
-def test_eric_review_is_not_delivered() -> None:
+def test_eric_review_delivers_to_director_for_uat() -> None:
     sent: list[tuple[str, str]] = []
     listener = TicketBoardNotifyListener(
         conninfo="dbname=test",
@@ -1680,8 +1680,8 @@ def test_eric_review_is_not_delivered() -> None:
         poll_seconds=0,
     )
 
-    assert listener.deliver_payload(transition_payload("PGU-213", new_state="eric_review")) is False
-    assert sent == []
+    assert listener.deliver_payload(transition_payload("PGU-213", title="UAT gate", new_state="eric_review")) is True
+    assert sent == [("pgu-director:0.0", "PGU-213 -- UAT gate ready for Eric UAT")]
 
 
 def test_reconnect_relistens_after_connection_drop() -> None:
@@ -1825,7 +1825,7 @@ def main() -> int:
     test_stale_notification_for_cancelled_ticket_is_acked_not_delivered()
     test_terminal_transition_notification_is_delivered_to_prior_owner()
     test_idle_reminder_repeat_escalation_delivers_to_director()
-    test_eric_review_is_not_delivered()
+    test_eric_review_delivers_to_director_for_uat()
     test_reconnect_relistens_after_connection_drop()
     test_idle_listener_consumes_notifies_generator_before_polling_again()
     test_wait_timeout_uses_next_attempt_instead_of_poll_ceiling()

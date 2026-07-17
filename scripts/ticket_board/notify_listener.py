@@ -155,7 +155,7 @@ def target_for_transition(transition: Transition) -> str | None:
     if transition.new_state == "audit":
         return ROLE_TO_TARGET["audit"]
     if transition.new_state == "eric_review":
-        return None
+        return ROLE_TO_TARGET["director"]
     if transition.new_state == "director_review":
         return ROLE_TO_TARGET["director"]
     return None
@@ -181,6 +181,8 @@ def message_for_transition(transition: Transition) -> str | None:
         return f"{transition.ticket_id}{title_suffix} ready for inspection"
     if transition.new_state == "audit":
         return f"{transition.ticket_id}{title_suffix} ready for audit"
+    if transition.new_state == "eric_review":
+        return f"{transition.ticket_id}{title_suffix} ready for Eric UAT"
     if transition.new_state == "director_review":
         return f"{transition.ticket_id}{title_suffix} ready for your review"
     return None
@@ -968,6 +970,8 @@ WHERE id = %s
                 return "inspector"
             if state == "audit":
                 return "audit"
+            if state == "eric_review":
+                return "director"
             if state == "director_review":
                 return "director"
             return None

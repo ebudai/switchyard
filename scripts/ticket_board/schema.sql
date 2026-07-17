@@ -1426,6 +1426,7 @@ AS $$
         WHEN p_state = 'in_progress' THEN NULLIF(p_assignee, 'unassigned')
         WHEN p_state = 'inspection' THEN 'inspector'
         WHEN p_state = 'audit' THEN 'audit'
+        WHEN p_state = 'eric_review' THEN 'director'
         WHEN p_state = 'director_review' THEN 'director'
         ELSE NULL
     END;
@@ -1473,6 +1474,8 @@ AS $$
             THEN p_ticket_id || CASE WHEN p_title <> '' THEN ' -- ' || p_title ELSE '' END || ' ready for inspection'
         WHEN p_new_state = 'audit'
             THEN p_ticket_id || CASE WHEN p_title <> '' THEN ' -- ' || p_title ELSE '' END || ' ready for audit'
+        WHEN p_new_state = 'eric_review'
+            THEN p_ticket_id || CASE WHEN p_title <> '' THEN ' -- ' || p_title ELSE '' END || ' ready for Eric UAT'
         WHEN p_new_state = 'director_review'
             THEN p_ticket_id || CASE WHEN p_title <> '' THEN ' -- ' || p_title ELSE '' END || ' ready for your review'
         WHEN p_new_state = 'done'
@@ -2010,7 +2013,7 @@ BEGIN
         ticket_board.transition_notification_payload(t.id, ns.previous_state, t.state, t.assignee)
     FROM ticket_board.tickets t
     JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
-    WHERE t.state IN ('analysis', 'in_progress', 'inspection', 'audit', 'director_review')
+    WHERE t.state IN ('analysis', 'in_progress', 'inspection', 'audit', 'eric_review', 'director_review')
       AND NOT t.manually_controlled
       AND (ns.last_transition_notified_at IS NULL OR ns.last_transition_notified_at < ns.entered_current_state_at)
     ORDER BY ns.entered_current_state_at, t.ticket_number;

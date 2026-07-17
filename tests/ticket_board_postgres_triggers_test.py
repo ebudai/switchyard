@@ -902,6 +902,23 @@ WHERE id = 'PGU-8';
                 ).stdout
             )
             assert auto_eric == {"state": "eric_review", "assignee": "director", "audit_signoff": True}, auto_eric
+            auto_eric_notice = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object('target_role', target_role, 'message', message, 'new_state', payload->>'new_state')::text
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-8' AND kind = 'transition'
+ORDER BY id DESC
+LIMIT 1;
+""",
+                ).stdout
+            )
+            assert auto_eric_notice == {
+                "target_role": "director",
+                "message": "PGU-8 -- Auto Eric ready for Eric UAT",
+                "new_state": "eric_review",
+            }, auto_eric_notice
             psql(conninfo, "UPDATE ticket_board.tickets SET eric_signoff = true WHERE id = 'PGU-8';")
             eric_done = json.loads(
                 psql(
@@ -1900,7 +1917,6 @@ WHERE ticket_id = 'PGU-47100';
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
             non_transition_ids = {
                 "backlog": "PGU-29705",
-                "eric_review": "PGU-29706",
                 "done": "PGU-29707",
                 "cancelled": "PGU-29708",
             }
@@ -1917,7 +1933,7 @@ WHERE ticket_id = 'PGU-47100';
                 """
 SELECT count(*)
 FROM ticket_board.ticket_notification_queue
-WHERE ticket_id IN ('PGU-29705', 'PGU-29706', 'PGU-29707', 'PGU-29708');
+WHERE ticket_id IN ('PGU-29705', 'PGU-29707', 'PGU-29708');
 """,
             ).stdout.strip()
             assert non_transition_insert_count == "0"
@@ -1925,11 +1941,16 @@ WHERE ticket_id IN ('PGU-29705', 'PGU-29706', 'PGU-29707', 'PGU-29708');
                 conninfo,
                 """
 SELECT count(*)
-FROM (VALUES ('backlog'), ('eric_review'), ('done'), ('cancelled')) AS states(state)
+FROM (VALUES ('backlog'), ('done'), ('cancelled')) AS states(state)
 WHERE ticket_board.transition_target_role(states.state, 'ops') IS NOT NULL;
 """,
             ).stdout.strip()
             assert non_transition_targets == "0"
+            eric_review_target = psql(
+                conninfo,
+                "SELECT ticket_board.transition_target_role('eric_review', 'director');",
+            ).stdout.strip()
+            assert eric_review_target == "director"
 
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
             service_call(

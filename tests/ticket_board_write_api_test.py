@@ -624,12 +624,16 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     assert str(target_uploaded["image"]["name"]).startswith("target__upload_"), target_uploaded  # type: ignore[index]
     attempt_uploaded = upload_png(base_url, "set=attempt&attempt=7&label=UAT%20Rework")
     assert str(attempt_uploaded["image"]["name"]).startswith("attempt-007-uat-rework__upload_"), attempt_uploaded  # type: ignore[index]
+    named_upload = upload_png(base_url, "filename=Spiral%20Arm%20Draft.PNG")
+    assert str(named_upload["image"]["name"]) == "spiral-arm-draft.png", named_upload  # type: ignore[index]
+    named_upload_collision = upload_png(base_url, "filename=Spiral%20Arm%20Draft.PNG")
+    assert str(named_upload_collision["image"]["name"]) == "spiral-arm-draft-2.png", named_upload_collision  # type: ignore[index]
     feedback_without_number = upload_png(base_url, "set=feedback", expect=400)
     assert "feedback upload set requires a feedback number" in str(feedback_without_number), feedback_without_number
-    feedback_uploaded = upload_png(base_url, "set=feedback&attempt=2")
-    assert str(feedback_uploaded["image"]["name"]).startswith("feedback-002__upload_"), feedback_uploaded  # type: ignore[index]
-    labeled_feedback_uploaded = upload_png(base_url, "set=feedback&attempt=3&label=Eric%20Markup")
-    assert str(labeled_feedback_uploaded["image"]["name"]).startswith("feedback-003-eric-markup__upload_"), labeled_feedback_uploaded  # type: ignore[index]
+    feedback_uploaded = upload_png(base_url, "set=feedback&attempt=2&filename=Eric%20Markup.PNG")
+    assert str(feedback_uploaded["image"]["name"]) == "feedback-002__eric-markup.png", feedback_uploaded  # type: ignore[index]
+    labeled_feedback_uploaded = upload_png(base_url, "set=feedback&attempt=3&label=Eric%20Markup&filename=zoom%20notes.PNG")
+    assert str(labeled_feedback_uploaded["image"]["name"]) == "feedback-003-eric-markup__zoom-notes.png", labeled_feedback_uploaded  # type: ignore[index]
     pasted_create_payload = post_json(
         base_url,
         "/api/tickets/actions/create_ticket",

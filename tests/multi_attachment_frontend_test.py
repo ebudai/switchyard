@@ -24,8 +24,10 @@ def main() -> int:
     assert "data-attach-attempt" in HTML
     assert "data-attach-label" in HTML
     assert "function uploadSetQuery(setOptions = {})" in HTML
+    assert "params.set('filename', String(setOptions.filename));" in HTML
     assert "function readAttachmentSetOptions(root)" in HTML
     assert "function attachImageFiles(files, context, setOptions = {})" in HTML
+    assert "uploaded.push(await uploadImageBlob(imageFile, { ...setOptions, filename: imageFile.name || '' }));" in HTML
     assert "function wireImageDropZone(dropZone, context, getSetOptions = () => ({}))" in HTML
     assert "await attachImageFiles(detailImageInput.files, 'detail', readAttachmentSetOptions(attachmentUpload));" in HTML
     assert "wireImageDropZone(attachmentUpload, 'detail', () => readAttachmentSetOptions(attachmentUpload));" in HTML

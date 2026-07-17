@@ -83,6 +83,12 @@ STYLE = """    :root {
       gap: 14px;
       align-content: start;
     }
+    .panel-body > *,
+    .attach-panel,
+    .preview-card {
+      min-width: 0;
+      max-width: 100%;
+    }
     label {
       display: grid;
       gap: 6px;
@@ -166,7 +172,7 @@ STYLE = """    :root {
     }
     .attach-set-grid {
       display: grid;
-      grid-template-columns: minmax(120px, 0.8fr) minmax(90px, 0.5fr) minmax(160px, 1fr);
+      grid-template-columns: repeat(auto-fit, minmax(min(100%, 120px), 1fr));
       gap: 8px;
       align-items: end;
     }

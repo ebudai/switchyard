@@ -19,6 +19,9 @@ def main() -> int:
     assert "boardEl.style.minWidth = '0';" in HTML
     assert "titleWrap.className = 'card-title-wrap';" in HTML
     assert ".card-title-wrap {\n      min-width: 0;\n    }" in HTML
+    assert ".panel-body > *,\n    .attach-panel,\n    .preview-card {\n      min-width: 0;\n      max-width: 100%;\n    }" in HTML
+    assert "grid-template-columns: repeat(auto-fit, minmax(min(100%, 120px), 1fr));" in HTML
+    assert "grid-template-columns: minmax(120px, 0.8fr) minmax(90px, 0.5fr) minmax(160px, 1fr);" not in HTML
     assert "@media (max-width: 640px) {" in HTML
     assert "grid-template-columns: minmax(0, 1fr);" in HTML
     assert "max-width: 100vw;" in HTML

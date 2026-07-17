@@ -25,6 +25,10 @@ def main() -> int:
     assert "createRegressionInput.addEventListener('keydown', submitCreateOnEnter);" in SCRIPT_APP
     assert "toggleControl('Regression', ticket.regression" in SCRIPT_DETAIL
     assert "await updateTicket(ticket.id, { regression: checked }, detailCallerRole());" in SCRIPT_DETAIL
+    assert "toggleControl('Manual control', ticket.manually_controlled" in SCRIPT_DETAIL
+    assert "await updateTicket(ticket.id, { manually_controlled: checked }, 'director');" in SCRIPT_DETAIL
+    assert "Director-only: hold or release this ticket outside automatic workflow movement." in SCRIPT_DETAIL
+    assert "await updateTicketAction(ticketId, 'set_manually_controlled', { manually_controlled: patch.manually_controlled }, normalizedCaller);" in SCRIPT_APP
     assert "if (ticket.regression)" in SCRIPT_CORE
     assert "badges.appendChild(badge('regression', false));" in SCRIPT_CORE
     print("ticket_regression_frontend_test: ok")

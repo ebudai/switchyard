@@ -236,6 +236,11 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       toggles.appendChild(toggleControl('Regression', ticket.regression, async (checked) => {
         await updateTicket(ticket.id, { regression: checked }, detailCallerRole());
       }));
+      toggles.appendChild(toggleControl('Manual control', ticket.manually_controlled, async (checked) => {
+        await updateTicket(ticket.id, { manually_controlled: checked }, 'director');
+      }, {
+        title: 'Director-only: hold or release this ticket outside automatic workflow movement.',
+      }));
       if (ticket.needs_inspection) {
         toggles.appendChild(toggleControl('Inspector signoff', ticket.inspector_signoff, async (checked) => {
           await updateTicket(ticket.id, { inspector_signoff: checked }, 'inspector');

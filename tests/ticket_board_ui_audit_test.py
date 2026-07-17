@@ -176,7 +176,27 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         page.locator("#createAttachDropZone [data-attach-attempt]").fill("7")
         page.locator("#createImageInput").set_input_files(str(upload_source))
         page.locator("#createStatus", has_text="Attached image to the new ticket.").wait_for(timeout=5000)
-        assert page.locator("#createPreview .attachment-card", has_text="feedback-007-phone-proof__upload_1.png").count() == 1
+        assert page.locator("#createPreview .attachment-card", has_text="feedback-007-phone-proof__upload-source.png").count() == 1
+
+        page.locator("#createImageInput").set_input_files(str(upload_source))
+        page.locator("#createStatus", has_text="Attached image to the new ticket.").wait_for(timeout=5000)
+        assert page.locator("#createPreview .attachment-card", has_text="feedback-007-phone-proof__upload-source-2.png").count() == 1
+
+        page.evaluate(
+            """async () => {
+              const canvas = document.createElement('canvas');
+              canvas.width = 2;
+              canvas.height = 2;
+              const context = canvas.getContext('2d');
+              context.fillStyle = '#4d91d9';
+              context.fillRect(0, 0, 2, 2);
+              const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+              const file = new File([blob], '../Unsafe Proof!!.gif', { type: 'image/png' });
+              await attachImageFiles([file], 'create', readCreateAttachmentSetOptions());
+            }"""
+        )
+        page.locator("#createStatus", has_text="Attached image to the new ticket.").wait_for(timeout=5000)
+        assert page.locator("#createPreview .attachment-card", has_text="feedback-007-phone-proof__unsafe-proof.png").count() == 1
 
         page.locator("#titleInput").fill("Harness created file-upload ticket")
         page.locator("#bodyInput").fill("Created through Playwright file upload path.")
@@ -186,7 +206,7 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         page.locator("#createRegressionInput").check()
         page.locator("#createBtn").click()
         page.locator("#createStatus", has_text="Created PGU-513.").wait_for(timeout=5000)
-        wait_for_ticket_field(page, harness.url, "PGU-513", "ticket.screenshots.length === 1 && ticket.screenshots[0].includes('feedback-007-phone-proof__upload_1.png') && ticket.needs_eric_signoff && ticket.needs_inspection && ticket.regression && ticket.assignee === 'app'")
+        wait_for_ticket_field(page, harness.url, "PGU-513", "ticket.screenshots.length === 3 && ticket.screenshots.some((path) => path.includes('feedback-007-phone-proof__upload-source.png')) && ticket.screenshots.some((path) => path.includes('feedback-007-phone-proof__upload-source-2.png')) && ticket.screenshots.some((path) => path.includes('feedback-007-phone-proof__unsafe-proof.png')) && ticket.needs_eric_signoff && ticket.needs_inspection && ticket.regression && ticket.assignee === 'app'")
 
         page.evaluate(create_clipboard_png_payload())
         page.locator("#createStatus", has_text="Pasted image attached to the new ticket.").wait_for(timeout=5000)
@@ -254,9 +274,9 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         attach_panel = modal.locator(".detail-attach-panel")
         attach_panel.locator("[data-attach-set]").select_option("target")
         attach_panel.locator("input[type=file]").set_input_files(str(upload_source))
-        modal.locator(".attachment-card", has_text="upload_3.png").wait_for(timeout=5000)
-        wait_for_ticket_field(page, harness.url, "PGU-512", "ticket.screenshots.length === 1 && ticket.screenshots[0].includes('target__upload_3.png')")
-        modal.locator(".attachment-card-clickable", has_text="upload_3.png").click()
+        modal.locator(".attachment-card", has_text="upload-source.png").wait_for(timeout=5000)
+        wait_for_ticket_field(page, harness.url, "PGU-512", "ticket.screenshots.length === 1 && ticket.screenshots[0].includes('target__upload-source.png')")
+        modal.locator(".attachment-card-clickable", has_text="upload-source.png").click()
         page.locator("#imageLightboxOverlay").wait_for(timeout=5000)
         page.locator("#imageLightboxCloseBtn").click()
         page.locator("#imageLightboxOverlay").wait_for(state="hidden", timeout=5000)

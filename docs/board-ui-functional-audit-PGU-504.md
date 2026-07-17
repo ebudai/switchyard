@@ -40,7 +40,7 @@ Current live state:
 
 Result: `PGU-502` does not appear in the `PGU-503` blocker picker. That matches current product rules: terminal tickets (`done`, `cancelled`) are intentionally not selectable as blockers. The harness separately verifies the non-terminal case by adding and removing `PGU-502` as a blocker on `PGU-503` in the isolated in-memory test board.
 
-The reusable in-memory upload path mirrors the production PGU-502 attachment-set filename validation. The browser audit now checks that an unnumbered `Feedback` upload surfaces `feedback upload set requires a feedback number`, then verifies a numbered feedback upload persists with the `feedback-007-phone-proof__...` filename prefix.
+The reusable in-memory upload path mirrors the production PGU-502/PGU-503 attachment filename validation. The browser audit now checks that an unnumbered `Feedback` upload surfaces `feedback upload set requires a feedback number`, then verifies a numbered feedback upload preserves a sanitized original filename, de-duplicates a repeated filename with `-2`, and strips a traversal-style filename down to the sanitized basename under the `feedback-007-phone-proof__...` prefix.
 
 ## Findings Filed
 

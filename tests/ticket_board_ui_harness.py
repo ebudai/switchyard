@@ -20,7 +20,17 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.ticket_board.app import ASSIGNEES, CALLER_ROLES, STATES, format_timestamp, iso_now, ticket_number, upload_set_slug
+from scripts.ticket_board.app import (
+    ASSIGNEES,
+    CALLER_ROLES,
+    IMAGE_EXTENSIONS,
+    STATES,
+    format_timestamp,
+    iso_now,
+    ticket_number,
+    upload_set_slug,
+    uploaded_filename_slug,
+)
 from scripts.ticket_board.server import DirectorNotifier, TicketBoardServer
 
 
@@ -319,19 +329,24 @@ class InMemoryTicketBoardApp:
         upload_set: str = "",
         set_label: str = "",
         attempt_number: str = "",
+        original_filename: str = "",
     ) -> dict[str, str]:
         if not raw_bytes:
             raise ValueError("uploaded image is empty")
+        prefix = self._upload_filename_prefix(upload_set, set_label, attempt_number)
+        self.upload_count += 1
+        base_name = uploaded_filename_slug(original_filename) or f"upload_{self.upload_count}.png"
+        if prefix:
+            base_name = f"{prefix}__{base_name}"
+        path = self._dedupe_asset_path(base_name)
         with Image.open(BytesIO(raw_bytes)) as image:
             image.load()
-            output = image if image.mode in ("RGB", "RGBA", "L", "LA", "P") else image.convert("RGBA")
-            prefix = self._upload_filename_prefix(upload_set, set_label, attempt_number)
-            self.upload_count += 1
-            filename = f"upload_{self.upload_count}.png"
-            if prefix:
-                filename = f"{prefix}__{filename}"
-            path = self.asset_dir / filename
-            output.save(path, format="PNG")
+            output_format = self._image_save_format(path.suffix)
+            if output_format == "JPEG" and image.mode not in ("RGB", "L"):
+                output = image.convert("RGB")
+            else:
+                output = image if image.mode in ("RGB", "RGBA", "L", "LA", "P") else image.convert("RGBA")
+            output.save(path, format=output_format)
         return {"path": str(path.resolve()), "name": path.name, "modified": format_timestamp(path)}
 
     def resolve_image(self, raw_path: str) -> Path:
@@ -340,7 +355,29 @@ class InMemoryTicketBoardApp:
             raise FileNotFoundError(f"screenshot path escapes allowed asset roots: {path}")
         if not path.is_file():
             raise FileNotFoundError(f"screenshot not found: {path}")
+        if path.suffix.lower() not in IMAGE_EXTENSIONS:
+            raise FileNotFoundError(f"unsupported image type: {path.name}")
         return path
+
+    def _dedupe_asset_path(self, filename: str) -> Path:
+        candidate = self.asset_dir / filename
+        if not candidate.exists():
+            return candidate
+        suffix = candidate.suffix
+        stem = candidate.stem
+        for index in range(2, 10000):
+            candidate = self.asset_dir / f"{stem}-{index}{suffix}"
+            if not candidate.exists():
+                return candidate
+        raise ValueError(f"could not allocate unique upload filename for {filename}")
+
+    def _image_save_format(self, suffix: str) -> str:
+        normalized = suffix.lower()
+        if normalized in {".jpg", ".jpeg"}:
+            return "JPEG"
+        if normalized == ".webp":
+            return "WEBP"
+        return "PNG"
 
     def _upload_filename_prefix(self, upload_set: str, set_label: str, attempt_number: str) -> str:
         normalized_set = upload_set_slug(upload_set)

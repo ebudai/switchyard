@@ -62,6 +62,14 @@ Pane write API:
   `scripts/ticket-board-write file-bug --source-ticket-id PGU-123 ...`, and
   `scripts/ticket-board-write add-comment PGU-123 --text ...`.
 
+Read-only CLI:
+
+- Use `scripts/ticket-board-read PGU-123` to print one ticket as JSON.
+- Use `scripts/ticket-board-read ticket PGU-123` for the explicit ticket form.
+- Use `scripts/ticket-board-read board` to print the full `/api/board` snapshot.
+- The read client shares the write client's board URL and Unix-socket discovery,
+  but it only sends HTTP `GET` requests and never registers a caller or writes.
+
 Defaults:
 
 - Store path: `/home/agent/.claude/pgu-tickets`

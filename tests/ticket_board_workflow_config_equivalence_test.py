@@ -134,6 +134,88 @@ WHERE n.nspname = 'ticket_board';
     return dict(sorted(action_roles.items()))
 
 
+def _normalize_sql_fragment(fragment: str) -> str:
+    return re.sub(r"\s+", " ", fragment.strip()).lower()
+
+
+def _split_sql_csv(value: str) -> list[str]:
+    parts: list[str] = []
+    current: list[str] = []
+    depth = 0
+    in_quote = False
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char == "'":
+            current.append(char)
+            if index + 1 < len(value) and value[index + 1] == "'":
+                current.append(value[index + 1])
+                index += 2
+                continue
+            in_quote = not in_quote
+        elif not in_quote and char == "(":
+            depth += 1
+            current.append(char)
+        elif not in_quote and char == ")":
+            depth = max(depth - 1, 0)
+            current.append(char)
+        elif not in_quote and depth == 0 and char == ",":
+            parts.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+        index += 1
+    tail = "".join(current).strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _assignee_expressions(definition: str) -> set[str]:
+    expressions = {"(select tickets.assignee", "(select assignee", "tickets.assignee"}
+    for match in re.finditer(
+        r"SELECT\s+(?P<select>.*?)\s+INTO\s+(?P<into>.*?)\s+FROM\b",
+        definition,
+        re.S | re.I,
+    ):
+        select_items = _split_sql_csv(match.group("select"))
+        into_items = _split_sql_csv(match.group("into"))
+        for select_item, into_item in zip(select_items, into_items, strict=False):
+            if re.search(r"\b(?:tickets\.)?assignee\b", select_item, re.I):
+                expressions.add(_normalize_sql_fragment(into_item))
+                expressions.add(_normalize_sql_fragment(select_item))
+    return expressions
+
+
+def _is_assignee_expression(value: str, assignee_expressions: set[str]) -> bool:
+    normalized = _normalize_sql_fragment(value)
+    return normalized in assignee_expressions or bool(
+        re.search(r"\bselect\b.*\b(?:tickets\.)?assignee\b", normalized)
+    )
+
+
+def _ownership_actor_vars(definition: str) -> set[str]:
+    assignee_expressions = _assignee_expressions(definition)
+    owner_actor_vars: set[str] = set()
+    for if_match in re.finditer(r"\bIF\s+(?P<condition>.*?)\s+THEN\b", definition, re.S | re.I):
+        condition = if_match.group("condition")
+        for match in re.finditer(
+            r"(?P<left>\([^()]*\bSELECT\b.*?\)|\b[\w.]+\b)\s*<>\s*"
+            r"(?P<right>\([^()]*\bSELECT\b.*?\)|\b[\w.]+\b)",
+            condition,
+            re.S | re.I,
+        ):
+            left = match.group("left")
+            right = match.group("right")
+            left_normalized = _normalize_sql_fragment(left)
+            right_normalized = _normalize_sql_fragment(right)
+            if left_normalized in {"actor", "comment_actor"} and _is_assignee_expression(right, assignee_expressions):
+                owner_actor_vars.add(left_normalized)
+            if right_normalized in {"actor", "comment_actor"} and _is_assignee_expression(left, assignee_expressions):
+                owner_actor_vars.add(right_normalized)
+    return owner_actor_vars
+
+
 def action_ownership_from_db(conn: str) -> dict[str, ActionOwnership]:
     rows = json.loads(
         psql(
@@ -159,9 +241,7 @@ WHERE n.nspname = 'ticket_board';
         if not actions:
             continue
 
-        owner_actor_vars = set(
-            re.findall(r"\bticket_assignee\s*<>\s*(actor|comment_actor)\b", definition)
-        )
+        owner_actor_vars = _ownership_actor_vars(definition)
         owner_scoped = bool(owner_actor_vars)
         director_override = any(
             re.search(

@@ -349,16 +349,16 @@ WHERE action_name = 'submit_to_inspection';
     assert failed, "removing owner scoping from submit_to_inspection must fail the matrix"
 
 
-def assert_owner_scope_extraction_catches_function_body_drift(conn: str) -> None:
+def assert_owner_scope_extraction_catches_named_assignee_drift(conn: str) -> None:
     original = function_def(conn, "ticket_board.submit_to_audit(text,text)")
     mutated = original.replace(
         "ticket_commit_exempt boolean;\n    ticket_last_rejected_commit text;",
-        "ticket_commit_exempt boolean;\n    ticket_last_rejected_commit text;\n    ticket_assignee text;",
+        "ticket_commit_exempt boolean;\n    ticket_last_rejected_commit text;\n    v_assignee text;",
     ).replace(
         "SELECT tickets.commit_exempt, tickets.last_rejected_commit\n"
         "    INTO ticket_commit_exempt, ticket_last_rejected_commit",
         "SELECT tickets.commit_exempt, tickets.last_rejected_commit, tickets.assignee\n"
-        "    INTO ticket_commit_exempt, ticket_last_rejected_commit, ticket_assignee",
+        "    INTO ticket_commit_exempt, ticket_last_rejected_commit, v_assignee",
     ).replace(
         "    IF NOT FOUND THEN\n"
         "        RAISE EXCEPTION 'ticket not found: %', id;\n"
@@ -366,14 +366,14 @@ def assert_owner_scope_extraction_catches_function_body_drift(conn: str) -> None
         "    IF NOT FOUND THEN\n"
         "        RAISE EXCEPTION 'ticket not found: %', id;\n"
         "    END IF;\n"
-        "    IF ticket_assignee <> actor THEN\n"
-        "        RAISE EXCEPTION '% cannot call submit_to_audit for ticket assigned to %', actor, ticket_assignee\n"
+        "    IF v_assignee <> actor THEN\n"
+        "        RAISE EXCEPTION '% cannot call submit_to_audit for ticket assigned to %', actor, v_assignee\n"
         "            USING ERRCODE = '42501';\n"
         "    END IF;",
         1,
     )
-    if mutated == original or "ticket_assignee <> actor" not in mutated:
-        raise AssertionError("submit_to_audit ownership mutation did not apply")
+    if mutated == original or "v_assignee <> actor" not in mutated:
+        raise AssertionError("submit_to_audit named-assignee ownership mutation did not apply")
 
     psql(conn, mutated)
     failed = False
@@ -383,7 +383,36 @@ def assert_owner_scope_extraction_catches_function_body_drift(conn: str) -> None
         failed = "owner-scope drift for action submit_to_audit" in str(exc)
     finally:
         psql(conn, original)
-    assert failed, "adding an ownership check to submit_to_audit must fail the matrix"
+    assert failed, "adding a differently named assignee ownership check to submit_to_audit must fail the matrix"
+
+
+def assert_owner_scope_extraction_catches_inline_subquery_drift(conn: str) -> None:
+    original = function_def(conn, "ticket_board.submit_to_audit(text,text)")
+    mutated = original.replace(
+        "    IF NOT FOUND THEN\n"
+        "        RAISE EXCEPTION 'ticket not found: %', id;\n"
+        "    END IF;",
+        "    IF NOT FOUND THEN\n"
+        "        RAISE EXCEPTION 'ticket not found: %', id;\n"
+        "    END IF;\n"
+        "    IF (SELECT tickets.assignee FROM ticket_board.tickets WHERE tickets.id = submit_to_audit.id) <> actor THEN\n"
+        "        RAISE EXCEPTION '% cannot call submit_to_audit for another assignee', actor\n"
+        "            USING ERRCODE = '42501';\n"
+        "    END IF;",
+        1,
+    )
+    if mutated == original or "SELECT tickets.assignee" not in mutated:
+        raise AssertionError("submit_to_audit inline-subquery ownership mutation did not apply")
+
+    psql(conn, mutated)
+    failed = False
+    try:
+        assert_matrix_matches(conn)
+    except AssertionError as exc:
+        failed = "owner-scope drift for action submit_to_audit" in str(exc)
+    finally:
+        psql(conn, original)
+    assert failed, "adding an inline-subquery assignee ownership check to submit_to_audit must fail the matrix"
 
 
 def main() -> int:
@@ -414,7 +443,8 @@ SET owner_scoped = true
 WHERE action_name = 'submit_to_inspection';
 """,
             )
-            assert_owner_scope_extraction_catches_function_body_drift(admin_conn)
+            assert_owner_scope_extraction_catches_named_assignee_drift(admin_conn)
+            assert_owner_scope_extraction_catches_inline_subquery_drift(admin_conn)
             assert_config_authoritative_blocks_runtime_transition(admin_conn)
         finally:
             subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], check=False, capture_output=True)

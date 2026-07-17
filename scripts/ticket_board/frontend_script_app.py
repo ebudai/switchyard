@@ -435,7 +435,6 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
           consumedComment = true;
         } else if (
           nextState === 'analysis' &&
-          patch.comment &&
           ['eric_review', 'director_review', 'done'].includes(previousState)
         ) {
           await updateTicketAction(ticketId, 'eric_reopen', { reason: actionReason(patch) }, normalizedCaller);

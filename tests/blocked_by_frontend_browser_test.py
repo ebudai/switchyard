@@ -101,11 +101,17 @@ class BlockerBoardApp:
         self.update_calls.append((ticket_id, patch, caller_role))
         assert ticket_id == "PGU-503", ticket_id
         assert caller_role == "director", caller_role
-        assert patch == {"blocked_by": ["PGU-502"], "blocked_reason": "Waiting on PGU-502."}, patch
         ticket = next(item for item in self.tickets if item["id"] == ticket_id)
-        ticket["blocked_by"] = list(patch["blocked_by"])
-        ticket["blockers"] = [{"id": "PGU-502", "resolved": False}]
-        ticket["blocked_reason"] = patch["blocked_reason"]
+        if len(self.update_calls) == 1:
+            assert patch == {"blocked_by": ["PGU-502"], "blocked_reason": "Waiting on PGU-502."}, patch
+            ticket["blocked_by"] = list(patch["blocked_by"])
+            ticket["blockers"] = [{"id": "PGU-502", "resolved": False}]
+            ticket["blocked_reason"] = patch["blocked_reason"]
+        else:
+            assert patch == {"blocked_by": [], "blocked_reason": ""}, patch
+            ticket["blocked_by"] = []
+            ticket["blockers"] = []
+            ticket["blocked_reason"] = ""
         ticket["updated"] = iso_now()
         return ticket
 
@@ -138,6 +144,15 @@ def run_browser_check(playwright: object, server_port: int, app: BlockerBoardApp
             "() => document.querySelector('.detail-modal')?.textContent.includes('PGU-502')",
             timeout=5000,
         )
+
+        page.locator(".detail-modal").get_by_role("button", name="Remove Blocker PGU-502").click()
+        page.wait_for_function(
+            "() => !document.querySelector('.detail-modal')?.textContent.includes('Waiting on PGU-502.')",
+            timeout=5000,
+        )
+        assert len(app.update_calls) == 2
+        assert app.tickets[0]["blocked_by"] == []
+        assert app.tickets[0]["blocked_reason"] == ""
     finally:
         browser.close()
 

@@ -27,6 +27,8 @@ def main() -> int:
     assert "addBlockedByButton.textContent = 'Add Blocker';" in HTML
     assert "Add Selected" not in HTML
     assert "Save Blockers" not in HTML
+    assert "Remove Blocker ${blockerId}" in HTML
+    assert "const nextBlockedBy = (ticket.blocked_by || []).filter((item) => item !== blockerId);" in HTML
     assert "const nextBlockedBy = Array.from(new Set([...(ticket.blocked_by || []), blockerId]));" in HTML
     assert "const blockedReasonValue = blockedReasonInput.value.trim() || `Waiting on ${blockerId}.`;" in HTML
     assert "persistDetailDraftField(" not in HTML

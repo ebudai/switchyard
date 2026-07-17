@@ -23,7 +23,7 @@ The Playwright audit clicks real UI controls and verifies persisted state throug
 - detail modal: title edit, parent ticket edit, implementation save, audit notes save, commit hash save
 - detail toggles: Requires UAT, Needs inspection, Regression
 - comments: author/default path, urgent checkbox, Add Comment
-- blockers: picker, Add Selected, Save Blockers, blocked card rendering, blocker removal
+- blockers: picker, Add Blocker immediate persistence, Remove Blocker, blocked card rendering
 - attachments: detail file upload, target-set display, lightbox open/close, remove attachment
 - workflow actions: Advance to Implementation, Cancel Ticket, UAT Sign Off
 - serial-focus behavior: second app ticket is deferred while app is busy, then auto-promotes when the active app ticket completes
@@ -38,7 +38,7 @@ Current live state:
 - `PGU-502` is `done`
 - `PGU-503` is `in_progress`, assigned to `ops`
 
-Result: `PGU-502` does not appear in the `PGU-503` blocker picker. That matches current product rules: terminal tickets (`done`, `cancelled`) are intentionally not selectable as blockers. The harness separately verifies the non-terminal case by adding and removing `PGU-502` as a blocker on `PGU-503` in the isolated in-memory test board.
+Result: `PGU-502` does not appear in the `PGU-503` blocker picker. That matches current product rules: terminal tickets (`done`, `cancelled`) are intentionally not selectable as blockers. The harness separately verifies the current PGU-505 non-terminal blocker flow by adding `PGU-502` with the `Add Blocker` button, asserting immediate persistence/rendering, then removing it with `Remove Blocker PGU-502`.
 
 The reusable in-memory upload path mirrors the production PGU-502/PGU-503 attachment filename validation. The browser audit now checks that an unnumbered `Feedback` upload surfaces `feedback upload set requires a feedback number`, then verifies a numbered feedback upload preserves a sanitized original filename, de-duplicates a repeated filename with `-2`, and strips a traversal-style filename down to the sanitized basename under the `feedback-007-phone-proof__...` prefix.
 
@@ -56,8 +56,10 @@ Commands run:
 
 ```bash
 python3 -m py_compile tests/ticket_board_ui_harness.py tests/ticket_board_ui_audit_test.py
+python3 tests/blocked_by_frontend_test.py
+python3 tests/blocked_by_frontend_browser_test.py
 python3 tests/ticket_board_ui_audit_test.py
-for i in $(seq 1 25); do python3 tests/ticket_board_ui_audit_test.py || exit 1; done
+for i in $(seq 1 15); do python3 tests/ticket_board_ui_audit_test.py || exit 1; done
 ```
 
-Result: compile passed, the single audit run passed, and the audit test passed 25/25 consecutive runs after the blocker-card synchronization fix.
+Result: compile passed, the focused PGU-505 blocker tests passed, the single audit run passed, and the audit test passed 15/15 consecutive runs after merging current `origin/main`.

@@ -388,6 +388,24 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       blockedByLinksLabel.className = 'field-preview-label';
       blockedByLinksLabel.textContent = 'Linked Tickets';
       blockedByLinks.append(blockedByLinksLabel, linkedTicketRow(visibleBlockedBy));
+      if (visibleBlockedBy.length) {
+        const removeBlockedByActions = document.createElement('div');
+        removeBlockedByActions.className = 'inline-actions';
+        visibleBlockedBy.forEach((blockerId) => {
+          const removeBlockedByButton = document.createElement('button');
+          removeBlockedByButton.type = 'button';
+          removeBlockedByButton.textContent = `Remove Blocker ${blockerId}`;
+          removeBlockedByButton.addEventListener('click', async () => {
+            const nextBlockedBy = (ticket.blocked_by || []).filter((item) => item !== blockerId);
+            await updateTicket(ticket.id, {
+              blocked_by: nextBlockedBy,
+              blocked_reason: nextBlockedBy.length ? blockedReasonInput.value : '',
+            }, detailCallerRole());
+          });
+          removeBlockedByActions.appendChild(removeBlockedByButton);
+        });
+        blockedByLinks.appendChild(removeBlockedByActions);
+      }
       blockedBy.append(blockerPickerLabel, blockedByActions, blockedByNote, blockedByLinks);
 
       const blockedReason = document.createElement('div');

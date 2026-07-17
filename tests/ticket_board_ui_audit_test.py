@@ -72,8 +72,7 @@ def wait_for_last_update_ticket(page: Any) -> None:
 
 
 def add_blocker_with_picker(page: Any, blocked_by_field: Any, blocker_id: str) -> None:
-    blocked_by_input = blocked_by_field.locator("input")
-    add_button = blocked_by_field.get_by_role("button", name="Add Selected")
+    add_button = blocked_by_field.get_by_role("button", name="Add Blocker")
     last_error = ""
     for _ in range(5):
         try:
@@ -83,16 +82,13 @@ def add_blocker_with_picker(page: Any, blocked_by_field: Any, blocker_id: str) -
                 arg=add_button.element_handle(timeout=5000),
                 timeout=1000,
             )
+            reset_update_ticket_tracker(page)
             add_button.click()
-            page.wait_for_function(
-                "([input, blockerId]) => input.value.includes(blockerId)",
-                arg=[blocked_by_input.element_handle(timeout=5000), blocker_id],
-                timeout=1000,
-            )
+            wait_for_last_update_ticket(page)
             return
         except Exception as exc:  # noqa: BLE001 - include Playwright timeout/detach errors in retry diagnostics.
             last_error = str(exc)
-    raise AssertionError(f"Add Selected did not add {blocker_id} to Blocked By input: {last_error}")
+    raise AssertionError(f"Add Blocker did not persist {blocker_id}: {last_error}")
 
 
 def wait_for_blocker_card_render(page: Any, ticket_id: str, blocker_id: str, *, blocked: bool) -> None:
@@ -313,19 +309,12 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         modal = page.locator(".detail-modal")
         modal.wait_for(timeout=5000)
         blocked_by = detail_field(modal, "Blocked By")
-        blocked_by_input = blocked_by.locator("input")
         add_blocker_with_picker(page, blocked_by, "PGU-502")
-        detail_field(modal, "Blocked Reason").locator("textarea").fill("Waiting for PGU-502.")
-        reset_update_ticket_tracker(page)
-        blocked_by.get_by_role("button", name="Save Blockers").click()
-        wait_for_last_update_ticket(page)
-        wait_for_ticket_field(page, harness.url, "PGU-503", "ticket.blocked_by.includes('PGU-502') && ticket.blocked_reason === 'Waiting for PGU-502.'")
+        wait_for_ticket_field(page, harness.url, "PGU-503", "ticket.blocked_by.includes('PGU-502') && ticket.blocked_reason === 'Waiting on PGU-502.'")
         wait_for_blocker_card_render(page, "PGU-503", "PGU-502", blocked=True)
 
-        blocked_by_input.fill("")
-        detail_field(modal, "Blocked Reason").locator("textarea").fill("")
         reset_update_ticket_tracker(page)
-        blocked_by.get_by_role("button", name="Save Blockers").click()
+        blocked_by.get_by_role("button", name="Remove Blocker PGU-502").click()
         wait_for_last_update_ticket(page)
         wait_for_ticket_field(page, harness.url, "PGU-503", "ticket.blocked_by.length === 0 && ticket.blocked_reason === ''")
         wait_for_blocker_card_render(page, "PGU-503", "PGU-502", blocked=False)

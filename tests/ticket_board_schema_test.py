@@ -261,6 +261,12 @@ def main() -> int:
     assert "create or replace function ticket_board.unblock_transition_message" in executable_schema_lower
     assert "create or replace function ticket_board.enqueue_unblock_notification" in executable_schema_lower
     assert "create or replace function ticket_board.notify_unblocked_dependents" in executable_schema_lower
+    assert "if urgent or comment_actor in ('director', 'eric') then" in executable_schema_lower
+    manual_control_comment_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu519_manual_control_comment_notifications.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "create or replace function ticket_board.add_comment" in manual_control_comment_migration
+    assert "if urgent or comment_actor in ('director', 'eric') then" in manual_control_comment_migration
     assert "when p_state = 'backlog' then 'director'" not in executable_schema_lower
     assert "when p_state = 'analysis' and p_assignee = 'unassigned' then 'director'" not in executable_schema_lower
     assert "source_role := nullif(current_setting('ticket_board.notification_source_role', true), '')" in executable_schema_lower

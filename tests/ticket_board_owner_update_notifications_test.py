@@ -81,13 +81,14 @@ def insert_ticket(
     implementation: str = "",
     commit_hash: str = "",
     commit_exempt: bool = False,
+    manually_controlled: bool = False,
 ) -> None:
     source = ticket_source(ticket_id, title, body, state, assignee)
     psql(
         conninfo,
         f"""
 INSERT INTO ticket_board.tickets (
-    id, title, body, state, assignee, implementation, commit_hash, commit_exempt,
+    id, title, body, state, assignee, implementation, commit_hash, commit_exempt, manually_controlled,
     audit_signoff, needs_inspection, inspector_signoff, needs_eric_signoff, eric_signoff,
     created_text, updated_text, source_json
 ) VALUES (
@@ -99,6 +100,7 @@ INSERT INTO ticket_board.tickets (
     {sql_string(implementation)},
     {sql_string(commit_hash)},
     {'true' if commit_exempt else 'false'},
+    {'true' if manually_controlled else 'false'},
     false, false, false, false, false,
     '2026-07-13T00:00:00+00:00',
     '2026-07-13T00:00:00+00:00',
@@ -260,7 +262,17 @@ GRANT EXECUTE ON FUNCTION ticket_board.add_comment(text, text, boolean) TO ticke
                 "director",
                 "SELECT ticket_board.add_comment('PGU-35502', 'Please re-read this ticket.');",
             )
-            assert queued_notifications(conninfo, "PGU-35502") == [], queued_notifications(conninfo, "PGU-35502")
+            assert_single_ticket_update(
+                conninfo,
+                "PGU-35502",
+                target_role="app",
+                state="in_progress",
+                assignee="app",
+                actor="director",
+                summary="new comment",
+                title="Comment edit",
+            )
+            clear_notifications(conninfo, "PGU-35502")
             service_call(
                 conninfo,
                 "audit",
@@ -289,6 +301,31 @@ GRANT EXECUTE ON FUNCTION ticket_board.add_comment(text, text, boolean) TO ticke
                 "SELECT ticket_board.add_comment('PGU-35502', 'Inspector note should not interrupt mid-work.');",
             )
             assert queued_notifications(conninfo, "PGU-35502") == [], queued_notifications(conninfo, "PGU-35502")
+
+            insert_ticket(
+                conninfo,
+                "PGU-51901",
+                title="Manual comment signal",
+                state="in_progress",
+                assignee="research",
+                manually_controlled=True,
+            )
+            clear_notifications(conninfo, "PGU-51901")
+            service_call(
+                conninfo,
+                "eric",
+                "SELECT ticket_board.add_comment('PGU-51901', 'Eric comment must notify even during manual control.');",
+            )
+            assert_single_ticket_update(
+                conninfo,
+                "PGU-51901",
+                target_role="research",
+                state="in_progress",
+                assignee="research",
+                actor="eric",
+                summary="new comment",
+                title="Manual comment signal",
+            )
 
             insert_ticket(
                 conninfo,

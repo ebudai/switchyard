@@ -319,6 +319,31 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       }
     }
 
+    function markDetailDraftFieldsSaved(ticketId, savedFields) {
+      if (!state.detailOpen || state.selectedId !== ticketId || !savedFields || !Object.keys(savedFields).length) {
+        return;
+      }
+      Object.entries(savedFields).forEach(([key, value]) => {
+        const normalizedValue = value == null ? '' : String(value);
+        detailContentEl.querySelectorAll(`[data-draft-key="${key}"]`).forEach((element) => {
+          element.value = normalizedValue;
+          element.dataset.serverValue = normalizedValue;
+        });
+      });
+      if (state.detailDraft?.ticketId !== ticketId) {
+        return;
+      }
+      Object.keys(savedFields).forEach((key) => {
+        delete state.detailDraft.fields[key];
+        if (state.detailDraft.activeKey === key) {
+          state.detailDraft.activeKey = null;
+        }
+      });
+      if (!Object.keys(state.detailDraft.fields).length) {
+        state.detailDraft = null;
+      }
+    }
+
     function detailModalIsOpen() {
       return !!(state.detailOpen && selectedTicket());
     }

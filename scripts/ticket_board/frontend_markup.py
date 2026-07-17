@@ -152,4 +152,9 @@ MARKUP = """  <div class="layout">
       <div id="imageLightboxCaption" class="image-lightbox-caption"></div>
     </section>
   </div>
+
+  <div id="refreshUpdateBanner" class="refresh-update-banner" role="status" aria-live="polite" hidden>
+    <span>A newer board version is ready. Refreshing when this view is idle.</span>
+    <button id="refreshUpdateButton" class="ghost" type="button">Refresh now</button>
+  </div>
 """

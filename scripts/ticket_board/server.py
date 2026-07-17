@@ -7,6 +7,7 @@ import logging
 import mimetypes
 import os
 import queue
+import re
 import secrets
 import socket
 import socketserver
@@ -21,7 +22,7 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping
 
 from PIL import Image
 
@@ -91,6 +92,60 @@ EDIT_FIELD_NAMES = {
     "inspector_signoff",
     "eric_signoff",
 }
+
+RELEASE_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
+
+
+def build_id_from_release_path(module_path: Path) -> str:
+    parts = module_path.resolve().parts
+    for index, part in enumerate(parts[:-1]):
+        if part != "releases":
+            continue
+        candidate = parts[index + 1].strip()
+        if RELEASE_SHA_RE.fullmatch(candidate):
+            return candidate.lower()
+    return ""
+
+
+def build_id_from_file(module_path: Path) -> str:
+    for parent in module_path.resolve().parents:
+        for name in ("BUILD", "BUILD_ID", "VERSION", ".build-id"):
+            candidate_path = parent / name
+            if not candidate_path.is_file():
+                continue
+            try:
+                lines = candidate_path.read_text(encoding="utf-8", errors="replace").strip().splitlines()
+            except OSError:
+                continue
+            candidate = lines[0].strip() if lines else ""
+            if candidate:
+                return candidate
+    return ""
+
+
+def board_build_id(
+    *,
+    environ: Mapping[str, str] = os.environ,
+    repo_root: Path = REPO_ROOT,
+    module_path: Path = Path(__file__),
+) -> str:
+    explicit = environ.get("PGU_TICKET_BOARD_BUILD_ID", "").strip()
+    if explicit:
+        return explicit
+    proc = subprocess.run(
+        ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    value = proc.stdout.strip()
+    if proc.returncode == 0 and value:
+        return value
+    release_id = build_id_from_release_path(module_path)
+    if release_id:
+        return release_id
+    file_id = build_id_from_file(module_path)
+    return file_id or "unknown"
 
 
 @dataclass(frozen=True)
@@ -445,6 +500,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_no_cache_headers()
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -806,7 +862,10 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/":
-            token_script = f"  <script>window.PGU_TICKET_BOARD_WRITE_TOKEN = {json.dumps(self.write_token)};</script>\n"
+            token_script = (
+                f"  <script>window.PGU_TICKET_BOARD_WRITE_TOKEN = {json.dumps(self.write_token)};"
+                f" window.PGU_TICKET_BOARD_BUILD_ID = {json.dumps(self.server.build_id)};</script>\n"
+            )
             body = HTML.replace("  <script>\n", token_script + "  <script>\n", 1).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -816,7 +875,12 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if parsed.path == "/api/board":
-            self.send_json(self.app.snapshot())
+            payload = self.app.snapshot()
+            payload["build_id"] = self.server.build_id
+            self.send_json(payload)
+            return
+        if parsed.path == "/api/client-config":
+            self.send_json({"build_id": self.server.build_id, "write_token": self.write_token})
             return
         if parsed.path == "/events":
             self.serve_events()
@@ -870,6 +934,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             self.send_header("Connection", "keep-alive")
             self.send_header("X-Accel-Buffering", "no")
             self.end_headers()
+            self.wfile.write(f"event: version\ndata: {json.dumps({'build_id': self.server.build_id})}\n\n".encode("utf-8"))
             self.wfile.write(f"event: board\ndata: {json.dumps({'version': version})}\n\n".encode("utf-8"))
             self.wfile.flush()
             while True:
@@ -887,15 +952,16 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
         try:
-            self.require_http_write_token()
             length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            self.require_http_write_token()
             if parsed.path == "/api/upload":
                 content_type = self.headers.get("Content-Type", "")
                 if not content_type.startswith("image/"):
                     raise ValueError("upload requires an image/* Content-Type")
                 query = urllib.parse.parse_qs(parsed.query)
                 uploaded = self.app.save_uploaded_image(
-                    self.rfile.read(length),
+                    body,
                     upload_set=query.get("set", [""])[0],
                     set_label=query.get("label", [""])[0],
                     attempt_number=query.get("attempt", [""])[0],
@@ -903,7 +969,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 )
                 self.send_json({"image": uploaded}, HTTPStatus.CREATED)
                 return
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = json.loads(body or b"{}")
             if parsed.path == "/api/register-caller":
                 self.handle_register_caller(payload)
                 return
@@ -946,6 +1012,7 @@ class TicketBoardServer(ThreadingHTTPServer):
         self.director_notifier = director_notifier or DirectorNotifier()
         self._owns_director_notifier = director_notifier is None
         self.caller_registry = caller_registry
+        self.build_id = board_build_id()
         self.write_token = write_token or secrets.token_urlsafe(32)
         super().__init__(address, TicketBoardHandler)
 
@@ -977,6 +1044,7 @@ class TicketBoardUnixServer(ThreadingUnixHTTPServer):
         self.events = events
         self.director_notifier = director_notifier
         self.caller_registry = caller_registry or CallerRegistry()
+        self.build_id = board_build_id()
         self.write_token = ""
         socket_path.parent.mkdir(parents=True, exist_ok=True)
         try:

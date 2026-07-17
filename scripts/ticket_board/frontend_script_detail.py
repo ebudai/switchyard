@@ -29,6 +29,10 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       bindDetailDraftField(draftFields, commentWho, 'commentWho', commentWho.value);
       const commentText = document.createElement('textarea');
       commentText.placeholder = 'Add a comment or bounce-back note';
+      commentText.value = readPersistentCommentDraft(ticket.id);
+      commentText.addEventListener('input', () => {
+        writePersistentCommentDraft(ticket.id, commentText.value);
+      });
       bindDetailDraftField(draftFields, commentText, 'commentText', '');
       const commentUrgentLabel = document.createElement('label');
       commentUrgentLabel.className = 'urgent-comment-toggle';

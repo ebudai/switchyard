@@ -189,6 +189,7 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
       if (loadSequence !== state.loadSequence) {
         return;
       }
+      updateRefreshRequired(payload.build_id);
       state.tickets = payload.tickets;
       state.screenshots = payload.screenshots;
       state.errors = payload.errors;
@@ -212,6 +213,7 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
       renderBoard();
       renderDetail();
       syncImageLightbox();
+      restoreScrollPositionAfterRefresh();
     }
 
     async function requestBoardReload() {
@@ -288,16 +290,129 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
       return headers;
     }
 
-    async function postTicketAction(path, payload, callerRole) {
+    function pendingWriteStorageKey() {
+      return 'pgu-ticket-board:pending-write';
+    }
+
+    function pendingWriteMetadata(path) {
+      const match = /^\\/api\\/tickets\\/([^/]+)\\/actions\\/([^/]+)$/.exec(path);
+      if (!match) {
+        return { ticketId: '', operation: '' };
+      }
+      return {
+        ticketId: decodeURIComponent(match[1] || '').toUpperCase(),
+        operation: decodeURIComponent(match[2] || ''),
+      };
+    }
+
+    function storePendingWriteForRefresh(path, payload, callerRole) {
+      const metadata = pendingWriteMetadata(path);
+      try {
+        window.localStorage.setItem(pendingWriteStorageKey(), JSON.stringify({
+          path,
+          payload: payload || {},
+          callerRole,
+          ticketId: metadata.ticketId,
+          operation: metadata.operation,
+        }));
+      } catch (error) {
+        throw new Error('A newer board version is deployed; refresh before submitting.');
+      }
+    }
+
+    function clearPendingWriteForRefresh() {
+      try {
+        window.localStorage.removeItem(pendingWriteStorageKey());
+      } catch (error) {
+        // localStorage can be unavailable in private or locked-down browsers.
+      }
+    }
+
+    function readPendingWriteForRefresh() {
+      try {
+        const raw = window.localStorage.getItem(pendingWriteStorageKey()) || '';
+        return raw ? JSON.parse(raw) : null;
+      } catch (error) {
+        return null;
+      }
+    }
+
+    async function refreshClientConfig() {
+      const previousToken = String(window.PGU_TICKET_BOARD_WRITE_TOKEN || '');
+      const response = await fetch('/api/client-config', { cache: 'no-store' });
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+      const payload = await response.json();
+      const nextToken = String(payload.write_token || '');
+      if (nextToken) {
+        window.PGU_TICKET_BOARD_WRITE_TOKEN = nextToken;
+      }
+      updateRefreshRequired(payload.build_id);
+      return {
+        tokenChanged: !!nextToken && nextToken !== previousToken,
+        buildChanged: state.refreshRequired,
+      };
+    }
+
+    function reloadAndReplayWrite(path, payload, callerRole) {
+      storePendingWriteForRefresh(path, payload, callerRole);
+      performSmartRefresh();
+      return new Promise(() => {});
+    }
+
+    function isStaleWriteTokenError(status, text) {
+      return status === 403 || (/write[- ]token/i.test(text || '') && /(invalid|missing)/i.test(text || ''));
+    }
+
+    async function postTicketAction(path, payload, callerRole, options = {}) {
+      if (!options.skipFreshCheck) {
+        const config = await refreshClientConfig();
+        if (config.buildChanged && !config.tokenChanged) {
+          return reloadAndReplayWrite(path, payload, callerRole);
+        }
+      }
       const response = await fetch(path, {
         method: 'POST',
         headers: ticketWriteHeaders(callerRole),
         body: JSON.stringify(payload || {}),
       });
       if (!response.ok) {
-        throw new Error(await response.text());
+        const text = await response.text();
+        if (isStaleWriteTokenError(response.status, text) && !options.retriedToken) {
+          const config = await refreshClientConfig();
+          if (config.tokenChanged) {
+            return postTicketAction(path, payload, callerRole, { ...options, skipFreshCheck: true, retriedToken: true });
+          }
+        }
+        if (state.refreshRequired && !options.skipReloadReplay) {
+          return reloadAndReplayWrite(path, payload, callerRole);
+        }
+        throw new Error(text);
       }
       return response.json();
+    }
+
+    async function replayPendingWriteAfterRefresh() {
+      const pending = readPendingWriteForRefresh();
+      if (!pending || !pending.path) {
+        return;
+      }
+      clearPendingWriteForRefresh();
+      const result = await postTicketAction(
+        pending.path,
+        pending.payload || {},
+        pending.callerRole || '',
+        { skipFreshCheck: true, skipReloadReplay: true },
+      );
+      if (pending.operation === 'add_comment' && pending.ticketId) {
+        clearPersistentCommentDraft(pending.ticketId);
+        setCreateStatus(`Comment added to ${pending.ticketId}.`);
+      } else {
+        setCreateStatus('Submitted after refreshing to the newer board version.');
+      }
+      await requestBoardReload();
+      return result;
     }
 
     function ticketForWrite(ticketId) {
@@ -555,6 +670,7 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
       }
       clearDetailDraft(ticketId);
       await updateTicket(ticketId, patch, trimmedWho);
+      clearPersistentCommentDraft(ticketId);
       setCreateStatus(nextState ? `Moved ${ticketId} to ${stateLabel(nextState)}.` : `Comment added to ${ticketId}.`);
     }
 
@@ -570,6 +686,7 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
       }
       clearDetailDraft(ticketId);
       await updateTicket(ticketId, patch, trimmedWho);
+      clearPersistentCommentDraft(ticketId);
       setCreateStatus(`Signed off ✓ ${ticketId} moved to Final Sign-Off.`);
     }
 
@@ -694,6 +811,16 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
       }
     });
 
+    ['keydown', 'input', 'pointerdown', 'touchstart'].forEach((eventName) => {
+      document.addEventListener(eventName, markUserActivity, { capture: true, passive: true });
+    });
+
+    refreshUpdateButtonEl.addEventListener('click', () => {
+      if (state.refreshRequired) {
+        performSmartRefresh();
+      }
+    });
+
     function connectEvents() {
       if (!window.EventSource) {
         setCreateStatus('EventSource unavailable; live updates disabled.', true);
@@ -708,6 +835,14 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
       }
       const eventSource = new EventSource('/events');
       state.eventSource = eventSource;
+      eventSource.addEventListener('version', (event) => {
+        try {
+          const payload = JSON.parse(event.data || '{}');
+          updateRefreshRequired(payload.build_id);
+        } catch (error) {
+          void requestBoardReload();
+        }
+      });
       eventSource.addEventListener('board', () => {
         void requestBoardReload();
       });
@@ -727,7 +862,10 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
     async function boot() {
       try {
         await requestBoardReload();
-        setCreateStatus('Ready.');
+        const replayed = await replayPendingWriteAfterRefresh();
+        if (!replayed) {
+          setCreateStatus('Ready.');
+        }
       } catch (error) {
         setCreateStatus(error.message, true);
       }

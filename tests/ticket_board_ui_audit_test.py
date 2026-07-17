@@ -326,6 +326,127 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         detail_field(modal, "Title").get_by_role("button", name="Save Title").click()
         wait_for_ticket_field(page, harness.url, "PGU-512", "ticket.title === 'Detail edit target renamed'")
         refresh_open_detail_from_server(page, "PGU-512")
+
+        page.locator("#detailCloseBtn").click()
+        page.evaluate("""() => { window.PGU_TICKET_BOARD_REFRESH_IDLE_MS = 25; state.lastActivityAt = 0; }""")
+        harness.server.build_id = "pgu-525-idle-build"
+        page.evaluate("""async () => { await requestBoardReload(); }""")
+        page.wait_for_load_state("domcontentloaded")
+        page.locator(".column-title", has_text="Triage").wait_for(timeout=5000)
+        page.wait_for_function("() => window.PGU_TICKET_BOARD_BUILD_ID === 'pgu-525-idle-build'", timeout=5000)
+        page.locator("#refreshUpdateBanner").wait_for(state="hidden", timeout=5000)
+        page.evaluate("""() => { window.PGU_TICKET_BOARD_REFRESH_IDLE_MS = 25; state.lastActivityAt = 0; }""")
+
+        page.locator(".card", has=page.locator(".card-id", has_text="PGU-512")).click()
+        modal.wait_for(timeout=5000)
+        comment_box = modal.get_by_placeholder("Add a comment or bounce-back note")
+        comment_box.fill("Draft survives smart auto refresh")
+        harness.server.build_id = "pgu-525-typing-build"
+        page.evaluate("""async () => { await requestBoardReload(); }""")
+        page.locator("#refreshUpdateBanner", has_text="A newer board version is ready").wait_for(timeout=5000)
+        page.wait_for_timeout(150)
+        page.wait_for_function("() => window.PGU_TICKET_BOARD_BUILD_ID === 'pgu-525-idle-build'", timeout=5000)
+        page.locator("#detailCloseBtn").click()
+        page.wait_for_load_state("domcontentloaded")
+        page.locator(".column-title", has_text="Triage").wait_for(timeout=5000)
+        page.wait_for_function("() => window.PGU_TICKET_BOARD_BUILD_ID === 'pgu-525-typing-build'", timeout=5000)
+        page.evaluate("""() => { window.PGU_TICKET_BOARD_REFRESH_IDLE_MS = 25; state.lastActivityAt = 0; }""")
+        page.locator(".card", has=page.locator(".card-id", has_text="PGU-512")).click()
+        modal.wait_for(timeout=5000)
+        comment_box = modal.get_by_placeholder("Add a comment or bounce-back note")
+        page.wait_for_function(
+            "(element) => element.value === 'Draft survives smart auto refresh'",
+            arg=comment_box.element_handle(timeout=5000),
+            timeout=5000,
+        )
+        comment_box.fill("")
+
+        harness.server.build_id = "pgu-525-detail-open-build"
+        page.evaluate("""async () => { await requestBoardReload(); }""")
+        page.locator("#refreshUpdateBanner", has_text="A newer board version is ready").wait_for(timeout=5000)
+        page.wait_for_timeout(150)
+        page.wait_for_function("() => window.PGU_TICKET_BOARD_BUILD_ID === 'pgu-525-typing-build'", timeout=5000)
+        page.locator("#detailCloseBtn").click()
+        page.wait_for_load_state("domcontentloaded")
+        page.locator(".column-title", has_text="Triage").wait_for(timeout=5000)
+        page.wait_for_function("() => window.PGU_TICKET_BOARD_BUILD_ID === 'pgu-525-detail-open-build'", timeout=5000)
+        page.locator(".card", has=page.locator(".card-id", has_text="PGU-512")).click()
+        modal.wait_for(timeout=5000)
+        page.evaluate("""() => { window.PGU_TICKET_BOARD_REFRESH_IDLE_MS = 25; state.lastActivityAt = 0; }""")
+        comment_box = modal.get_by_placeholder("Add a comment or bounce-back note")
+        comment_box.fill("Submit survives reload replay")
+        page.evaluate("""() => { window.__pguNoReloadMarker = 'reload-replay'; }""")
+        harness.server.build_id = "pgu-525-replay-build"
+        modal.get_by_role("button", name="Add Comment").click()
+        page.wait_for_load_state("domcontentloaded")
+        page.locator(".column-title", has_text="Triage").wait_for(timeout=5000)
+        page.wait_for_function("() => window.PGU_TICKET_BOARD_BUILD_ID === 'pgu-525-replay-build'", timeout=5000)
+        page.wait_for_function("() => window.__pguNoReloadMarker === undefined", timeout=5000)
+        page.locator("#createStatus", has_text="Comment added to PGU-512.").wait_for(timeout=5000)
+        wait_for_ticket_field(page, harness.url, "PGU-512", "ticket.comments.some((comment) => comment.text === 'Submit survives reload replay')")
+        page.locator(".card", has=page.locator(".card-id", has_text="PGU-512")).click()
+        modal.wait_for(timeout=5000)
+        comment_box = modal.get_by_placeholder("Add a comment or bounce-back note")
+        page.wait_for_function(
+            "(element) => element.value === ''",
+            arg=comment_box.element_handle(timeout=5000),
+            timeout=5000,
+        )
+
+        token_route_state = {"rotated": False}
+
+        def rotate_before_first_add_comment(route: Any) -> None:
+            if not token_route_state["rotated"]:
+                token_route_state["rotated"] = True
+                harness.server.write_token = "pgu-525-reactive-token"
+            route.continue_()
+
+        page.route("**/api/tickets/PGU-512/actions/add_comment", rotate_before_first_add_comment)
+        add_comment_statuses: list[int] = []
+
+        def record_add_comment_response(response: Any) -> None:
+            if "/api/tickets/PGU-512/actions/add_comment" in response.url:
+                add_comment_statuses.append(response.status)
+
+        page.on("response", record_add_comment_response)
+        page.evaluate(
+            """() => {
+              const originalRefreshClientConfig = refreshClientConfig;
+              window.__pguRefreshClientConfigResults = [];
+              refreshClientConfig = async () => {
+                const result = await originalRefreshClientConfig();
+                window.__pguRefreshClientConfigResults.push({
+                  ...result,
+                  token: window.PGU_TICKET_BOARD_WRITE_TOKEN,
+                });
+                return result;
+              };
+            }"""
+        )
+        page.evaluate("""() => { setCreateStatus('Ready.'); }""")
+        page.evaluate("""() => { window.__pguNoReloadMarker = 'reactive-retry'; }""")
+        comment_box.fill("Submit survives reactive token retry")
+        modal.get_by_role("button", name="Add Comment").click()
+        page.locator("#createStatus", has_text="Comment added to PGU-512.").wait_for(timeout=5000)
+        wait_for_ticket_field(page, harness.url, "PGU-512", "ticket.comments.some((comment) => comment.text === 'Submit survives reactive token retry')")
+        page.wait_for_function("() => window.__pguNoReloadMarker === 'reactive-retry'", timeout=5000)
+        refresh_results = page.evaluate("() => window.__pguRefreshClientConfigResults || []")
+        page.unroute("**/api/tickets/PGU-512/actions/add_comment", rotate_before_first_add_comment)
+        page.remove_listener("response", record_add_comment_response)
+        assert token_route_state["rotated"]
+        assert 403 in add_comment_statuses, add_comment_statuses
+        assert any(result.get("tokenChanged") for result in refresh_results), refresh_results
+        comment_box = modal.get_by_placeholder("Add a comment or bounce-back note")
+        page.wait_for_function(
+            "(element) => element.value === ''",
+            arg=comment_box.element_handle(timeout=5000),
+            timeout=5000,
+        )
+
+        page.locator("#detailCloseBtn").click()
+        page.locator(".card", has=page.locator(".card-id", has_text="PGU-512")).click()
+        modal.wait_for(timeout=5000)
+
         detail_field(modal, "Parent Ticket").locator("input").fill("PGU-502")
         detail_field(modal, "Parent Ticket").get_by_role("button", name="Save Parent Link").click()
         wait_for_ticket_field(page, harness.url, "PGU-512", "ticket.parent_id === 'PGU-502'")

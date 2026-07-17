@@ -599,6 +599,29 @@ STYLE = """    :root {
       background: rgba(4, 6, 10, 0.84);
       padding: 24px;
     }
+    .refresh-update-banner[hidden] { display: none; }
+    .refresh-update-banner {
+      position: fixed;
+      z-index: 40;
+      right: 18px;
+      bottom: calc(18px + env(safe-area-inset-bottom));
+      width: min(420px, calc(100vw - 36px));
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 14px;
+      border: 1px solid rgba(125, 211, 252, 0.42);
+      border-radius: 8px;
+      background: rgba(15, 17, 21, 0.98);
+      color: var(--text);
+      box-shadow: 0 18px 54px rgba(0, 0, 0, 0.36);
+      font-size: 0.92rem;
+    }
+    .refresh-update-banner button {
+      flex: 0 0 auto;
+      white-space: nowrap;
+    }
     .image-lightbox {
       width: min(100%, 1220px);
       max-height: 100%;

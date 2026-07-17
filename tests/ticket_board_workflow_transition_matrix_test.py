@@ -17,10 +17,12 @@ if str(ROOT) not in sys.path:
 
 from scripts.ticket_board.app import CALLER_ROLES  # noqa: E402
 from tests.ticket_board_workflow_config_equivalence_test import (  # noqa: E402
-    OWNER_SCOPED_ACTIONS,
     SCHEMA_PATH,
+    ActionOwnership,
+    action_ownership_from_db,
     action_roles_from_db,
     conninfo,
+    function_def,
     free_port,
     psql,
     run,
@@ -96,6 +98,7 @@ def assert_matrix_matches(conn: str) -> int:
     transitions = load_transitions(conn)
     transitions_by_pair, config_action_roles, config_action_owner_scopes = build_transition_indexes(transitions)
     db_action_roles = action_roles_from_db(conn)
+    db_action_ownership = action_ownership_from_db(conn)
     roles = list(CALLER_ROLES)
     checked = 0
 
@@ -103,13 +106,32 @@ def assert_matrix_matches(conn: str) -> int:
         db_roles = db_action_roles.get(action)
         if db_roles != config_roles:
             raise AssertionError(f"role drift for action {action}: config={config_roles} hardcoded={db_roles}")
-        expected_owner_scoped = action in OWNER_SCOPED_ACTIONS
+        expected_ownership = db_action_ownership.get(action, ActionOwnership(False, False))
+        expected_owner_scoped = expected_ownership.owner_scoped
         config_owner_scoped = config_action_owner_scopes[action]
         if config_owner_scoped != expected_owner_scoped:
             raise AssertionError(
                 f"owner-scope drift for action {action}: config={config_owner_scoped} "
                 f"hardcoded={expected_owner_scoped}"
             )
+        for role in roles:
+            for actor_is_assignee in (False, True):
+                config_action_allowed = role in config_roles and (
+                    not config_owner_scoped
+                    or actor_is_assignee
+                    or role == "director"
+                )
+                hardcoded_action_allowed = role in db_roles and (
+                    not expected_ownership.owner_scoped
+                    or actor_is_assignee
+                    or (expected_ownership.director_override and role == "director")
+                )
+                if config_action_allowed != hardcoded_action_allowed:
+                    raise AssertionError(
+                        f"action RBAC drift for {action} as {role} "
+                        f"(actor_is_assignee={actor_is_assignee}): "
+                        f"config={config_action_allowed} hardcoded={hardcoded_action_allowed}"
+                    )
 
     for from_stage in stages:
         for to_stage in stages:
@@ -146,9 +168,18 @@ def assert_matrix_matches(conn: str) -> int:
                     hardcoded_role_allowed = any(
                         role in db_action_roles.get(str(transition["action_name"]), [])
                         and (
-                            str(transition["action_name"]) not in OWNER_SCOPED_ACTIONS
+                            not db_action_ownership.get(
+                                str(transition["action_name"]),
+                                ActionOwnership(False, False),
+                            ).owner_scoped
                             or actor_is_assignee
-                            or role == "director"
+                            or (
+                                db_action_ownership.get(
+                                    str(transition["action_name"]),
+                                    ActionOwnership(False, False),
+                                ).director_override
+                                and role == "director"
+                            )
                         )
                         for transition in pair_transitions
                     )
@@ -318,6 +349,43 @@ WHERE action_name = 'submit_to_inspection';
     assert failed, "removing owner scoping from submit_to_inspection must fail the matrix"
 
 
+def assert_owner_scope_extraction_catches_function_body_drift(conn: str) -> None:
+    original = function_def(conn, "ticket_board.submit_to_audit(text,text)")
+    mutated = original.replace(
+        "ticket_commit_exempt boolean;\n    ticket_last_rejected_commit text;",
+        "ticket_commit_exempt boolean;\n    ticket_last_rejected_commit text;\n    ticket_assignee text;",
+    ).replace(
+        "SELECT tickets.commit_exempt, tickets.last_rejected_commit\n"
+        "    INTO ticket_commit_exempt, ticket_last_rejected_commit",
+        "SELECT tickets.commit_exempt, tickets.last_rejected_commit, tickets.assignee\n"
+        "    INTO ticket_commit_exempt, ticket_last_rejected_commit, ticket_assignee",
+    ).replace(
+        "    IF NOT FOUND THEN\n"
+        "        RAISE EXCEPTION 'ticket not found: %', id;\n"
+        "    END IF;",
+        "    IF NOT FOUND THEN\n"
+        "        RAISE EXCEPTION 'ticket not found: %', id;\n"
+        "    END IF;\n"
+        "    IF ticket_assignee <> actor THEN\n"
+        "        RAISE EXCEPTION '% cannot call submit_to_audit for ticket assigned to %', actor, ticket_assignee\n"
+        "            USING ERRCODE = '42501';\n"
+        "    END IF;",
+        1,
+    )
+    if mutated == original or "ticket_assignee <> actor" not in mutated:
+        raise AssertionError("submit_to_audit ownership mutation did not apply")
+
+    psql(conn, mutated)
+    failed = False
+    try:
+        assert_matrix_matches(conn)
+    except AssertionError as exc:
+        failed = "owner-scope drift for action submit_to_audit" in str(exc)
+    finally:
+        psql(conn, original)
+    assert failed, "adding an ownership check to submit_to_audit must fail the matrix"
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="ticket-board-workflow-matrix.") as tmpdir:
         root = Path(tmpdir)
@@ -346,6 +414,7 @@ SET owner_scoped = true
 WHERE action_name = 'submit_to_inspection';
 """,
             )
+            assert_owner_scope_extraction_catches_function_body_drift(admin_conn)
             assert_config_authoritative_blocks_runtime_transition(admin_conn)
         finally:
             subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], check=False, capture_output=True)

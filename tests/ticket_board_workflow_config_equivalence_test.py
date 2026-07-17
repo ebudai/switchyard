@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -22,11 +23,12 @@ from scripts.ticket_board.app import STATES, TicketBoardApp  # noqa: E402
 
 
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
-OWNER_SCOPED_ACTIONS = {
-    "request_commit_exempt",
-    "start_task",
-    "submit_to_inspection",
-}
+
+
+@dataclass(frozen=True)
+class ActionOwnership:
+    owner_scoped: bool
+    director_override: bool
 
 
 def run(args: list[str], *, input_text: str | None = None, capture: bool = True) -> subprocess.CompletedProcess[str]:
@@ -130,6 +132,50 @@ WHERE n.nspname = 'ticket_board';
             if existing != roles:
                 raise AssertionError(f"conflicting require_actor roles for {action}: {existing} != {roles}")
     return dict(sorted(action_roles.items()))
+
+
+def action_ownership_from_db(conn: str) -> dict[str, ActionOwnership]:
+    rows = json.loads(
+        psql(
+            conn,
+            """
+SELECT jsonb_agg(pg_get_functiondef(p.oid) ORDER BY p.proname, p.oid)::text
+FROM pg_proc p
+JOIN pg_namespace n ON n.oid = p.pronamespace
+WHERE n.nspname = 'ticket_board';
+""",
+        )
+    )
+    action_ownership: dict[str, ActionOwnership] = {}
+    for definition in rows:
+        actions = {
+            match.group("action")
+            for match in re.finditer(
+                r"require_actor\(\s*ARRAY\[.*?\]\s*,\s*'(?P<action>[^']+)'\s*\)",
+                definition,
+                re.S,
+            )
+        }
+        if not actions:
+            continue
+
+        owner_actor_vars = set(
+            re.findall(r"\bticket_assignee\s*<>\s*(actor|comment_actor)\b", definition)
+        )
+        owner_scoped = bool(owner_actor_vars)
+        director_override = any(
+            re.search(
+                rf"(\b{re.escape(actor_var)}\s*<>\s*'director'|'director'\s*<>\s*{re.escape(actor_var)}\b)",
+                definition,
+            )
+            for actor_var in owner_actor_vars
+        )
+        ownership = ActionOwnership(owner_scoped=owner_scoped, director_override=director_override)
+        for action in actions:
+            existing = action_ownership.setdefault(action, ownership)
+            if existing != ownership:
+                raise AssertionError(f"conflicting ownership checks for {action}: {existing} != {ownership}")
+    return dict(sorted(action_ownership.items()))
 
 
 def assert_frontend_columns_are_dynamic() -> None:
@@ -267,6 +313,7 @@ def main() -> int:
             db_transition_whitelist = transition_whitelist_from_db(admin_conn)
             transition_actions = {str(transition["action_name"]) for transition in transitions}
             db_action_roles = action_roles_from_db(admin_conn)
+            db_action_ownership = action_ownership_from_db(admin_conn)
             app_columns = TicketBoardApp(database_url=admin_conn).workflow_columns()
 
             assert tuple(stage["name"] for stage in stages) == STATES
@@ -286,7 +333,11 @@ def main() -> int:
                 for action, roles in db_action_roles.items()
                 if action in transition_actions
             }
-            assert compile_owner_scoped_actions(transitions) == OWNER_SCOPED_ACTIONS
+            assert compile_owner_scoped_actions(transitions) == {
+                action
+                for action, ownership in db_action_ownership.items()
+                if action in transition_actions and ownership.owner_scoped
+            }
 
             terminal_states = {stage["name"] for stage in stages if stage["is_terminal"]}
             assert terminal_states == {"done", "cancelled"}

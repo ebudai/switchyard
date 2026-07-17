@@ -153,12 +153,8 @@ MARKUP = """  <div class="layout">
     </section>
   </div>
 
-  <div id="refreshRequiredOverlay" class="refresh-required-overlay" hidden>
-    <section class="refresh-required-modal" role="alertdialog" aria-modal="true" aria-labelledby="refreshRequiredTitle" aria-describedby="refreshRequiredBody">
-      <div class="subtle">Board update available</div>
-      <h2 id="refreshRequiredTitle">Refresh the board</h2>
-      <p id="refreshRequiredBody">A newer board version is deployed. Refresh to update before continuing.</p>
-      <button id="refreshRequiredButton" class="primary" type="button">Refresh</button>
-    </section>
+  <div id="refreshUpdateBanner" class="refresh-update-banner" role="status" aria-live="polite" hidden>
+    <span>A newer board version is ready. Refreshing when this view is idle.</span>
+    <button id="refreshUpdateButton" class="ghost" type="button">Refresh now</button>
   </div>
 """

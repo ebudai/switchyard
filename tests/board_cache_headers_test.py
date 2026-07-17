@@ -62,6 +62,14 @@ def main() -> int:
                 assert response.headers.get("Cache-Control") == "no-cache", response.headers
                 body = response.read().decode("utf-8")
                 assert "<!doctype html>" in body
+            server.build_id = "test-sse-build"
+            with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/events", timeout=5) as response:
+                assert response.status == 200
+                assert response.headers.get("Content-Type") == "text/event-stream; charset=utf-8", response.headers
+                assert response.headers.get("Cache-Control") == "no-cache", response.headers
+                lines = [response.readline().decode("utf-8").strip() for _ in range(4)]
+                assert "event: version" in lines, lines
+                assert any('"build_id": "test-sse-build"' in line for line in lines), lines
         finally:
             server.shutdown()
             server.server_close()

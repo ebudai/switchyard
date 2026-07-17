@@ -213,6 +213,7 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
       renderBoard();
       renderDetail();
       syncImageLightbox();
+      restoreScrollPositionAfterRefresh();
     }
 
     async function requestBoardReload() {
@@ -697,9 +698,14 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
       }
     });
 
-    refreshRequiredButtonEl.addEventListener('click', () => {
-      rememberDetailDraft();
-      window.location.reload();
+    ['keydown', 'input', 'pointerdown', 'touchstart'].forEach((eventName) => {
+      document.addEventListener(eventName, markUserActivity, { capture: true, passive: true });
+    });
+
+    refreshUpdateButtonEl.addEventListener('click', () => {
+      if (state.refreshRequired) {
+        performSmartRefresh();
+      }
     });
 
     function connectEvents() {
@@ -716,6 +722,14 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
       }
       const eventSource = new EventSource('/events');
       state.eventSource = eventSource;
+      eventSource.addEventListener('version', (event) => {
+        try {
+          const payload = JSON.parse(event.data || '{}');
+          updateRefreshRequired(payload.build_id);
+        } catch (error) {
+          void requestBoardReload();
+        }
+      });
       eventSource.addEventListener('board', () => {
         void requestBoardReload();
       });

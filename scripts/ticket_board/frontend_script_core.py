@@ -23,6 +23,10 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       loadedBuildId: String(window.PGU_TICKET_BOARD_BUILD_ID || ''),
       serverBuildId: String(window.PGU_TICKET_BOARD_BUILD_ID || ''),
       refreshRequired: false,
+      pendingRefreshBuildId: '',
+      autoRefreshTimer: null,
+      lastActivityAt: Date.now(),
+      autoRefreshHandledBuildIds: new Set(),
       pendingCreateScreenshots: [],
       mobileSectionOpen: {},
       lightboxEntry: null,
@@ -66,8 +70,8 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     const imageLightboxCloseBtn = document.getElementById('imageLightboxCloseBtn');
     const imageLightboxImageEl = document.getElementById('imageLightboxImage');
     const imageLightboxCaptionEl = document.getElementById('imageLightboxCaption');
-    const refreshRequiredOverlayEl = document.getElementById('refreshRequiredOverlay');
-    const refreshRequiredButtonEl = document.getElementById('refreshRequiredButton');
+    const refreshUpdateBannerEl = document.getElementById('refreshUpdateBanner');
+    const refreshUpdateButtonEl = document.getElementById('refreshUpdateButton');
 
     function formatWhen(raw) {
       const date = new Date(raw);
@@ -84,22 +88,153 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       return String(value || '').trim();
     }
 
+    function refreshIdleMs() {
+      const value = Number(window.PGU_TICKET_BOARD_REFRESH_IDLE_MS || 2500);
+      return Number.isFinite(value) && value >= 0 ? value : 2500;
+    }
+
+    function markUserActivity() {
+      state.lastActivityAt = Date.now();
+      scheduleAutoRefreshCheck();
+    }
+
+    function boardScrollElement() {
+      return document.querySelector('.board-scroll');
+    }
+
+    function scrollPositionStorageKey(buildId) {
+      return `pgu-ticket-board:scroll:${buildId || 'latest'}`;
+    }
+
+    function rememberScrollPositionForRefresh() {
+      const boardScroll = boardScrollElement();
+      const value = {
+        windowX: window.scrollX,
+        windowY: window.scrollY,
+        boardLeft: boardScroll ? boardScroll.scrollLeft : 0,
+        boardTop: boardScroll ? boardScroll.scrollTop : 0,
+      };
+      try {
+        window.sessionStorage.setItem(scrollPositionStorageKey(state.serverBuildId), JSON.stringify(value));
+      } catch (error) {
+        // sessionStorage can be unavailable in private or locked-down browsers; refresh still works.
+      }
+    }
+
+    function restoreScrollPositionAfterRefresh() {
+      let raw = '';
+      try {
+        raw = window.sessionStorage.getItem(scrollPositionStorageKey(state.loadedBuildId)) || '';
+        if (raw) {
+          window.sessionStorage.removeItem(scrollPositionStorageKey(state.loadedBuildId));
+        }
+      } catch (error) {
+        return;
+      }
+      if (!raw) {
+        return;
+      }
+      try {
+        const value = JSON.parse(raw);
+        window.scrollTo(Number(value.windowX) || 0, Number(value.windowY) || 0);
+        const boardScroll = boardScrollElement();
+        if (boardScroll) {
+          boardScroll.scrollLeft = Number(value.boardLeft) || 0;
+          boardScroll.scrollTop = Number(value.boardTop) || 0;
+        }
+      } catch (error) {
+        // Ignore malformed persisted scroll state from an older page.
+      }
+    }
+
+    function detailHasDirtyDraft() {
+      rememberDetailDraft();
+      return !!(state.detailDraft && Object.keys(state.detailDraft.fields || {}).length);
+    }
+
+    function createFormHasDraft() {
+      return !!(
+        titleInput.value.trim()
+        || bodyInput.value.trim()
+        || state.pendingCreateScreenshots.length
+      );
+    }
+
+    function refreshUnsafeReason() {
+      if (!state.refreshRequired) {
+        return '';
+      }
+      if (Date.now() - state.lastActivityAt < refreshIdleMs()) {
+        return 'waiting for idle';
+      }
+      if (createFormHasDraft()) {
+        return 'new ticket draft';
+      }
+      if (detailModalIsOpen()) {
+        return 'detail open';
+      }
+      if (imageLightboxIsOpen()) {
+        return 'attachment preview open';
+      }
+      if (detailHasDirtyDraft()) {
+        return 'unsaved detail edits';
+      }
+      return '';
+    }
+
+    function syncRefreshUpdateBanner(reason = '') {
+      refreshUpdateBannerEl.hidden = !(state.refreshRequired && reason);
+      if (typeof syncBodyModalState === 'function') {
+        syncBodyModalState();
+      }
+    }
+
+    function scheduleAutoRefreshCheck(delay = 250) {
+      if (!state.refreshRequired) {
+        return;
+      }
+      if (state.autoRefreshTimer) {
+        window.clearTimeout(state.autoRefreshTimer);
+      }
+      state.autoRefreshTimer = window.setTimeout(() => {
+        state.autoRefreshTimer = null;
+        maybeAutoRefresh();
+      }, delay);
+    }
+
+    function performSmartRefresh() {
+      rememberDetailDraft();
+      rememberScrollPositionForRefresh();
+      state.autoRefreshHandledBuildIds.add(state.pendingRefreshBuildId);
+      window.location.reload();
+    }
+
+    function maybeAutoRefresh() {
+      if (!state.refreshRequired || !state.pendingRefreshBuildId) {
+        return;
+      }
+      const reason = refreshUnsafeReason();
+      syncRefreshUpdateBanner(reason);
+      if (reason) {
+        scheduleAutoRefreshCheck(reason === 'waiting for idle' ? Math.max(100, refreshIdleMs()) : 500);
+        return;
+      }
+      performSmartRefresh();
+    }
+
     function updateRefreshRequired(buildId) {
       const serverBuildId = normalizeBuildId(buildId);
       if (serverBuildId) {
         state.serverBuildId = serverBuildId;
       }
-      state.refreshRequired = !!(state.loadedBuildId && state.serverBuildId && state.loadedBuildId !== state.serverBuildId);
-      syncRefreshRequiredOverlay();
-    }
-
-    function syncRefreshRequiredOverlay() {
-      refreshRequiredOverlayEl.hidden = !state.refreshRequired;
-      if (typeof syncBodyModalState === 'function') {
-        syncBodyModalState();
-      }
+      const changed = !!(state.loadedBuildId && state.serverBuildId && state.loadedBuildId !== state.serverBuildId);
+      const alreadyHandled = state.autoRefreshHandledBuildIds.has(state.serverBuildId);
+      state.refreshRequired = changed && !alreadyHandled;
+      state.pendingRefreshBuildId = state.refreshRequired ? state.serverBuildId : '';
       if (state.refreshRequired) {
-        refreshRequiredButtonEl.focus();
+        maybeAutoRefresh();
+      } else {
+        syncRefreshUpdateBanner('');
       }
     }
 
@@ -427,7 +562,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     }
 
     function syncBodyModalState() {
-      document.body.classList.toggle('detail-open', detailModalIsOpen() || imageLightboxIsOpen() || state.refreshRequired);
+      document.body.classList.toggle('detail-open', detailModalIsOpen() || imageLightboxIsOpen());
     }
 
     function syncDetailOverlay() {
@@ -472,6 +607,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       }
       state.lightboxEntry = null;
       syncImageLightbox();
+      scheduleAutoRefreshCheck();
     }
 
     function openDetail(ticketId) {
@@ -494,6 +630,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       state.detailOpen = false;
       renderBoard();
       renderDetail();
+      scheduleAutoRefreshCheck();
     }
 
     function rememberDetailDraft() {

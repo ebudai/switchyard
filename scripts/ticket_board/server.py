@@ -930,6 +930,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             self.send_header("Connection", "keep-alive")
             self.send_header("X-Accel-Buffering", "no")
             self.end_headers()
+            self.wfile.write(f"event: version\ndata: {json.dumps({'build_id': self.server.build_id})}\n\n".encode("utf-8"))
             self.wfile.write(f"event: board\ndata: {json.dumps({'version': version})}\n\n".encode("utf-8"))
             self.wfile.flush()
             while True:

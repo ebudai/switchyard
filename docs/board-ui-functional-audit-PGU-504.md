@@ -42,6 +42,8 @@ Result: `PGU-502` does not appear in the `PGU-503` blocker picker. That matches 
 
 The reusable in-memory upload path mirrors the production PGU-502/PGU-503 attachment filename validation. The browser audit now checks that an unnumbered `Feedback` upload surfaces `feedback upload set requires a feedback number`, then verifies a numbered feedback upload preserves a sanitized original filename, de-duplicates a repeated filename with `-2`, and strips a traversal-style filename down to the sanitized basename under the `feedback-007-phone-proof__...` prefix.
 
+The blocker-card assertion now synchronizes on the browser board refresh after the API has persisted the blocker update. The prior flake was a test race: the test polled `/api/tickets/PGU-503` independently and could assert on the DOM before the page's own async reload/render path had caught up.
+
 ## Findings Filed
 
 - `PGU-507` - Board detail draft restore can clear saved field values after live reload
@@ -55,6 +57,7 @@ Commands run:
 ```bash
 python3 -m py_compile tests/ticket_board_ui_harness.py tests/ticket_board_ui_audit_test.py
 python3 tests/ticket_board_ui_audit_test.py
+for i in $(seq 1 10); do python3 tests/ticket_board_ui_audit_test.py || exit 1; done
 ```
 
-Result: both passed.
+Result: compile passed, the single audit run passed, and the audit test passed 10/10 consecutive runs after the blocker-card synchronization fix.

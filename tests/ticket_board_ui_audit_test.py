@@ -34,6 +34,10 @@ def refresh_open_detail_from_server(page: Any, ticket_id: str) -> None:
     )
 
 
+def refresh_board_from_server(page: Any) -> None:
+    page.evaluate("""async () => { await requestBoardReload(); }""")
+
+
 def get_ticket(page: Any, base_url: str, ticket_id: str) -> dict[str, Any]:
     return page.evaluate(
         """async ([baseUrl, ticketId]) => {
@@ -226,6 +230,7 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         detail_field(modal, "Blocked Reason").locator("textarea").fill("Waiting for PGU-502.")
         blocked_by.get_by_role("button", name="Save Blockers").click()
         wait_for_ticket_field(page, harness.url, "PGU-503", "ticket.blocked_by.includes('PGU-502') && ticket.blocked_reason === 'Waiting for PGU-502.'")
+        refresh_board_from_server(page)
         page.locator(".card.card-blocked", has=page.locator(".card-id", has_text="PGU-503")).wait_for(timeout=5000)
         page.locator(".card", has=page.locator(".card-id", has_text="PGU-503")).locator(".badge", has_text="blocked PGU-502").wait_for(timeout=5000)
 
@@ -233,6 +238,7 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         detail_field(modal, "Blocked Reason").locator("textarea").fill("")
         blocked_by.get_by_role("button", name="Save Blockers").click()
         wait_for_ticket_field(page, harness.url, "PGU-503", "ticket.blocked_by.length === 0 && ticket.blocked_reason === ''")
+        refresh_board_from_server(page)
 
         page.locator("#detailCloseBtn").click()
         page.locator(".card", has=page.locator(".card-id", has_text="PGU-512")).click()

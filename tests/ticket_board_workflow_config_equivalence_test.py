@@ -23,54 +23,6 @@ from scripts.ticket_board.app import STATES  # noqa: E402
 
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
 
-EXPECTED_STATE_RANK_CASE = """        WHEN 'draft' THEN 0
-        WHEN 'backlog' THEN 1
-        WHEN 'analysis' THEN 2
-        WHEN 'in_progress' THEN 3
-        WHEN 'inspection' THEN 4
-        WHEN 'audit' THEN 5
-        WHEN 'eric_review' THEN 6
-        WHEN 'director_review' THEN 7
-        WHEN 'done' THEN 8
-        WHEN 'cancelled' THEN 9"""
-
-EXPECTED_TRANSITION_TARGET_ROLE_CASE = """        WHEN p_state = 'analysis' THEN 'director'
-        WHEN p_state = 'in_progress' THEN NULLIF(p_assignee, 'unassigned')
-        WHEN p_state = 'inspection' THEN 'inspector'
-        WHEN p_state = 'audit' THEN 'audit'
-        WHEN p_state = 'eric_review' THEN 'director'
-        WHEN p_state = 'director_review' THEN 'director'"""
-
-EXPECTED_TRANSITION_WHITELIST = """            (OLD.state = 'backlog' AND NEW.state IN ('analysis', 'in_progress', 'cancelled')) OR
-            (OLD.state = 'draft' AND NEW.state IN ('analysis', 'cancelled')) OR
-            (OLD.state = 'analysis' AND NEW.state IN ('in_progress', 'backlog', 'cancelled')) OR
-            (OLD.state = 'in_progress' AND NEW.state IN ('inspection', 'audit', 'analysis', 'backlog', 'cancelled')) OR
-            (OLD.state = 'inspection' AND NEW.state IN ('audit', 'in_progress', 'backlog', 'cancelled')) OR
-            (OLD.state = 'audit' AND NEW.state IN ('eric_review', 'director_review', 'in_progress', 'analysis', 'backlog', 'cancelled')) OR
-            (OLD.state = 'eric_review' AND NEW.state IN ('inspection', 'director_review', 'audit', 'analysis', 'backlog', 'cancelled')) OR
-            (OLD.state = 'director_review' AND NEW.state IN ('done', 'in_progress', 'analysis', 'backlog', 'cancelled')) OR
-            (OLD.state = 'done' AND NEW.state IN ('analysis', 'backlog')) OR
-            (OLD.state = 'cancelled' AND NEW.state IN ('analysis', 'backlog'))"""
-
-EXPECTED_ACTION_ROLES = {
-    "audit_kick_back": ["audit"],
-    "audit_sign_off": ["audit"],
-    "cancel": ["director"],
-    "defer": ["director"],
-    "eric_reopen": ["eric"],
-    "eric_sign_off": ["eric"],
-    "inspector_kick_back": ["inspector"],
-    "inspector_sign_off": ["inspector"],
-    "mark_done": ["director"],
-    "release_draft": ["director", "eric"],
-    "request_commit_exempt": ["main", "app", "ops", "perf", "research"],
-    "route": ["director"],
-    "start_task": ["director", "main", "app", "ops", "perf", "research", "audit", "inspector"],
-    "start_work": ["main", "app", "ops", "perf", "research"],
-    "submit_to_audit": ["main", "app", "ops", "perf", "research"],
-    "submit_to_inspection": ["main", "app", "ops", "perf", "research"],
-}
-
 
 def run(args: list[str], *, input_text: str | None = None, capture: bool = True) -> subprocess.CompletedProcess[str]:
     if capture:
@@ -99,6 +51,76 @@ def psql(conn: str, sql: str) -> str:
     return run(["psql", "-X", "-v", "ON_ERROR_STOP=1", "-tA", conn], input_text=sql).stdout.strip()
 
 
+def function_def(conn: str, signature: str) -> str:
+    return psql(conn, f"SELECT pg_get_functiondef('{signature}'::regprocedure);")
+
+
+def normalize_sql_body(body: str) -> str:
+    return "\n".join(line.rstrip() for line in body.strip("\n").splitlines())
+
+
+def state_rank_case_from_db(conn: str) -> str:
+    definition = function_def(conn, "ticket_board.state_rank(text)")
+    match = re.search(r"SELECT CASE p_state\n(?P<body>.*?)\n\s+ELSE NULL", definition, re.S)
+    if not match:
+        raise AssertionError(f"could not extract state_rank CASE body:\n{definition}")
+    return normalize_sql_body(match.group("body"))
+
+
+def transition_target_role_case_from_db(conn: str) -> str:
+    definition = function_def(conn, "ticket_board.transition_target_role(text,text)")
+    match = re.search(r"SELECT CASE\n(?P<body>.*?)\n\s+ELSE NULL", definition, re.S)
+    if not match:
+        raise AssertionError(f"could not extract transition_target_role CASE body:\n{definition}")
+    return normalize_sql_body(match.group("body"))
+
+
+def transition_whitelist_from_db(conn: str) -> list[tuple[str, list[str]]]:
+    definition = function_def(conn, "ticket_board.enforce_ticket_workflow_update()")
+    block_match = re.search(r"IF NOT \(\n(?P<body>.*?)\n\s+\) THEN", definition, re.S)
+    if not block_match:
+        raise AssertionError(f"could not extract enforce_ticket_workflow_update whitelist:\n{definition}")
+    whitelist: list[tuple[str, list[str]]] = []
+    for line in normalize_sql_body(block_match.group("body")).splitlines():
+        line_match = re.fullmatch(
+            r"\s*\(OLD\.state = '([^']+)' AND NEW\.state IN \((.*?)\)\)(?: OR)?",
+            line,
+        )
+        if not line_match:
+            raise AssertionError(f"could not parse transition whitelist line: {line!r}")
+        from_stage = line_match.group(1)
+        to_stages = re.findall(r"'([^']+)'", line_match.group(2))
+        whitelist.append((from_stage, to_stages))
+    return whitelist
+
+
+def action_roles_from_db(conn: str) -> dict[str, list[str]]:
+    rows = json.loads(
+        psql(
+            conn,
+            """
+SELECT jsonb_agg(pg_get_functiondef(p.oid) ORDER BY p.proname, p.oid)::text
+FROM pg_proc p
+JOIN pg_namespace n ON n.oid = p.pronamespace
+WHERE n.nspname = 'ticket_board';
+""",
+        )
+    )
+    action_roles: dict[str, list[str]] = {}
+    for definition in rows:
+        for match in re.finditer(
+            r"require_actor\(\s*ARRAY\[(?P<roles>.*?)\]\s*,\s*'(?P<action>[^']+)'\s*\)",
+            definition,
+            re.S,
+        ):
+            action = match.group("action")
+            roles = re.findall(r"'([^']+)'", match.group("roles"))
+            existing = action_roles.setdefault(action, roles)
+            if existing != roles:
+                raise AssertionError(f"conflicting require_actor roles for {action}: {existing} != {roles}")
+    return dict(sorted(action_roles.items()))
+
+
 def frontend_columns_literal() -> str:
     match = re.search(r"    const COLUMNS = \[\n(?P<body>.*?)\n    \];", frontend_script_core.SCRIPT_CORE, re.S)
     if not match:
@@ -125,33 +147,24 @@ def compile_transition_target_role(stages: list[dict[str, object]]) -> str:
     return "\n".join(lines)
 
 
-def compile_transition_whitelist(stages: list[dict[str, object]], transitions: list[dict[str, object]]) -> str:
+def compile_transition_whitelist(
+    stages: list[dict[str, object]],
+    transitions: list[dict[str, object]],
+    db_whitelist: list[tuple[str, list[str]]],
+) -> str:
     stage_rank = {str(stage["name"]): int(stage["rank"]) for stage in stages}
-    stage_order = ["backlog", "draft", "analysis", "in_progress", "inspection", "audit", "eric_review", "director_review", "done", "cancelled"]
-    transition_order = {
-        "backlog": ["analysis", "in_progress", "cancelled"],
-        "draft": ["analysis", "cancelled"],
-        "analysis": ["in_progress", "backlog", "cancelled"],
-        "in_progress": ["inspection", "audit", "analysis", "backlog", "cancelled"],
-        "inspection": ["audit", "in_progress", "backlog", "cancelled"],
-        "audit": ["eric_review", "director_review", "in_progress", "analysis", "backlog", "cancelled"],
-        "eric_review": ["inspection", "director_review", "audit", "analysis", "backlog", "cancelled"],
-        "director_review": ["done", "in_progress", "analysis", "backlog", "cancelled"],
-        "done": ["analysis", "backlog"],
-        "cancelled": ["analysis", "backlog"],
-    }
+    stage_order = [from_stage for from_stage, _to_stages in db_whitelist]
     grouped: dict[str, set[str]] = defaultdict(set)
     for transition in transitions:
         grouped[str(transition["from_stage"])].add(str(transition["to_stage"]))
     assert set(grouped) == set(stage_order), grouped
     assert set(stage_order) == set(stage_rank), stage_rank
     lines = []
-    for from_stage in stage_order:
+    for index, (from_stage, expected_to) in enumerate(db_whitelist):
         actual_to = grouped[from_stage]
-        expected_to = transition_order[from_stage]
         assert actual_to == set(expected_to), (from_stage, actual_to, expected_to)
         quoted = ", ".join(f"'{to_stage}'" for to_stage in expected_to)
-        suffix = " OR" if from_stage != stage_order[-1] else ""
+        suffix = " OR" if index < len(db_whitelist) - 1 else ""
         lines.append(f"            (OLD.state = '{from_stage}' AND NEW.state IN ({quoted})){suffix}")
     return "\n".join(lines)
 
@@ -225,13 +238,26 @@ def main() -> int:
             run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
             psql(admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
             stages, transitions = load_workflow_config(admin_conn)
+            db_transition_whitelist = transition_whitelist_from_db(admin_conn)
+            transition_actions = {str(transition["action_name"]) for transition in transitions}
+            db_action_roles = action_roles_from_db(admin_conn)
 
             assert tuple(stage["name"] for stage in stages) == STATES
             assert compile_columns(stages) == frontend_columns_literal()
-            assert compile_state_rank(stages) == EXPECTED_STATE_RANK_CASE
-            assert compile_transition_target_role(stages) == EXPECTED_TRANSITION_TARGET_ROLE_CASE
-            assert compile_transition_whitelist(stages, transitions) == EXPECTED_TRANSITION_WHITELIST
-            assert compile_action_roles(transitions) == EXPECTED_ACTION_ROLES
+            assert compile_state_rank(stages) == state_rank_case_from_db(admin_conn)
+            assert compile_transition_target_role(stages) == transition_target_role_case_from_db(admin_conn)
+            assert compile_transition_whitelist(stages, transitions, db_transition_whitelist) == normalize_sql_body(
+                "\n".join(
+                    f"            (OLD.state = '{from_stage}' AND NEW.state IN ({', '.join(repr(to_stage) for to_stage in to_stages)}))"
+                    f"{' OR' if index < len(db_transition_whitelist) - 1 else ''}"
+                    for index, (from_stage, to_stages) in enumerate(db_transition_whitelist)
+                )
+            )
+            assert compile_action_roles(transitions) == {
+                action: roles
+                for action, roles in db_action_roles.items()
+                if action in transition_actions
+            }
 
             terminal_states = {stage["name"] for stage in stages if stage["is_terminal"]}
             assert terminal_states == {"done", "cancelled"}

@@ -62,6 +62,27 @@ Pane write API:
   `scripts/ticket-board-write file-bug --source-ticket-id PGU-123 ...`, and
   `scripts/ticket-board-write add-comment PGU-123 --text ...`.
 
+Read-only CLI:
+
+- `scripts/ticket-board-read ticket PGU-123` prints one full ticket in a
+  human-readable form: state/assignee, key flags, blocker fields, body,
+  implementation, and full chronological comments. `scripts/ticket-board-read
+  PGU-123` is shorthand for the same command.
+- `scripts/ticket-board-read comments PGU-123` prints only the chronological
+  comment thread.
+- `scripts/ticket-board-read queue [role]` prints active/review work plus
+  backlog in serial-focus order, either grouped for all roles or limited to one
+  role.
+- `scripts/ticket-board-read board [--all]` prints one line per ticket grouped
+  by state; terminal tickets are hidden unless `--all` is set.
+- `scripts/ticket-board-read blockers PGU-123` prints `blocked_by`, `blockers`,
+  and `blocked_reason` for one ticket.
+- `scripts/ticket-board-read director` and `scripts/ticket-board-read mine`
+  print items needing director attention.
+- Add `--json` to any read subcommand for raw JSON output. The read client only
+  uses read-only HTTP `GET` endpoints; it does not import the write client,
+  register callers, open the write socket, or mutate board state.
+
 Defaults:
 
 - Store path: `/home/agent/.claude/pgu-tickets`

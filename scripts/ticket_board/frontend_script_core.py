@@ -542,15 +542,6 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       ];
     }
 
-    function parseBlockedByInput(value) {
-      return Array.from(new Set(
-        value
-          .split(/[^A-Za-z0-9-]+/)
-          .map((item) => item.trim().toUpperCase())
-          .filter((item) => item.length > 0),
-      ));
-    }
-
     function formatBlockedByList(blockedBy) {
       return (blockedBy || []).join(', ');
     }
@@ -583,7 +574,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       const currentId = String(ticket?.id || '').toUpperCase();
       return state.tickets
         .filter((candidate) => candidate.id !== currentId && !['done', 'cancelled'].includes(candidate.state))
-        .sort(compareTicketsOldestFirst);
+        .sort(compareTicketsNewestNumberFirst);
     }
 
     function buildOption(select, value, label) {
@@ -1030,6 +1021,10 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         return createdCompare;
       }
       return ticketNumber(left.id) - ticketNumber(right.id);
+    }
+
+    function compareTicketsNewestNumberFirst(left, right) {
+      return ticketNumber(right.id) - ticketNumber(left.id);
     }
 
     function compareTicketsWithActiveWorkFirst(left, right) {

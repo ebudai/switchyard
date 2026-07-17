@@ -46,6 +46,7 @@ class BlockerBoardApp:
         self.tickets: list[dict[str, Any]] = [
             self.ticket("PGU-503", "Target ticket", state="analysis", assignee="ops"),
             self.ticket("PGU-502", "Source blocker", state="analysis", assignee="app"),
+            self.ticket("PGU-501", "Second blocker", state="analysis", assignee="main"),
             self.ticket("PGU-504", "Newest candidate", state="done", assignee="main"),
         ]
 
@@ -101,11 +102,22 @@ class BlockerBoardApp:
         self.update_calls.append((ticket_id, patch, caller_role))
         assert ticket_id == "PGU-503", ticket_id
         assert caller_role == "director", caller_role
-        assert patch == {"blocked_by": ["PGU-502"], "blocked_reason": "Waiting on PGU-502."}, patch
         ticket = next(item for item in self.tickets if item["id"] == ticket_id)
-        ticket["blocked_by"] = list(patch["blocked_by"])
-        ticket["blockers"] = [{"id": "PGU-502", "resolved": False}]
-        ticket["blocked_reason"] = patch["blocked_reason"]
+        if len(self.update_calls) == 1:
+            assert patch == {"blocked_by": ["PGU-502"], "blocked_reason": "Waiting on PGU-502."}, patch
+            ticket["blocked_by"] = list(patch["blocked_by"])
+            ticket["blockers"] = [{"id": "PGU-502", "resolved": False}]
+            ticket["blocked_reason"] = patch["blocked_reason"]
+        elif len(self.update_calls) == 2:
+            assert patch == {"blocked_by": ["PGU-502", "PGU-501"], "blocked_reason": "Waiting on PGU-502."}, patch
+            ticket["blocked_by"] = list(patch["blocked_by"])
+            ticket["blockers"] = [{"id": "PGU-502", "resolved": False}, {"id": "PGU-501", "resolved": False}]
+            ticket["blocked_reason"] = patch["blocked_reason"]
+        else:
+            assert patch == {"blocked_by": ["PGU-501"], "blocked_reason": "Waiting on PGU-502."}, patch
+            ticket["blocked_by"] = list(patch["blocked_by"])
+            ticket["blockers"] = [{"id": "PGU-501", "resolved": False}]
+            ticket["blocked_reason"] = patch["blocked_reason"]
         ticket["updated"] = iso_now()
         return ticket
 
@@ -138,6 +150,29 @@ def run_browser_check(playwright: object, server_port: int, app: BlockerBoardApp
             "() => document.querySelector('.detail-modal')?.textContent.includes('PGU-502')",
             timeout=5000,
         )
+
+        blocker_picker.select_option("PGU-501")
+        page.locator(".detail-modal").get_by_role("button", name="Add Blocker").click()
+        page.wait_for_function(
+            "() => document.querySelector('.detail-modal')?.textContent.includes('Remove Blocker PGU-501')",
+            timeout=5000,
+        )
+        assert page_errors == []
+        assert len(app.update_calls) == 2
+        assert app.tickets[0]["blocked_by"] == ["PGU-502", "PGU-501"]
+        assert app.tickets[0]["blocked_reason"] == "Waiting on PGU-502."
+
+        page.get_by_role("textbox", name="Why this ticket is blocked").fill("")
+        page.locator(".detail-modal").get_by_role("button", name="Remove Blocker PGU-502").click()
+        page.wait_for_function(
+            "() => !document.querySelector('.detail-modal')?.textContent.includes('Remove Blocker PGU-502')"
+            " && document.querySelector('.detail-modal')?.textContent.includes('Remove Blocker PGU-501')",
+            timeout=5000,
+        )
+        assert page_errors == []
+        assert len(app.update_calls) == 3
+        assert app.tickets[0]["blocked_by"] == ["PGU-501"]
+        assert app.tickets[0]["blocked_reason"] == "Waiting on PGU-502."
     finally:
         browser.close()
 
@@ -146,6 +181,7 @@ def main() -> int:
     assert "persistDetailDraftField(" not in HTML
     assert "await updateTicket(ticket.id, {" in HTML
     assert "blocked_by: nextBlockedBy," in HTML
+    assert "blocked_reason: nextBlockedBy.length" not in HTML
     assert "blocked_reason: blockedReasonValue," in HTML
     sync_playwright = load_playwright()
     with tempfile.TemporaryDirectory(prefix="blocked-by-browser.") as tmpdir:

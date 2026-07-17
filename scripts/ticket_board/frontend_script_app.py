@@ -178,12 +178,17 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
     }
 
     async function loadBoard() {
+      const loadSequence = state.loadSequence + 1;
+      state.loadSequence = loadSequence;
       rememberDetailDraft();
       const response = await fetch('/api/board', { cache: 'no-store' });
       if (!response.ok) {
         throw new Error(await response.text());
       }
       const payload = await response.json();
+      if (loadSequence !== state.loadSequence) {
+        return;
+      }
       state.tickets = payload.tickets;
       state.screenshots = payload.screenshots;
       state.errors = payload.errors;

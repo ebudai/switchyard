@@ -29,6 +29,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       eventReconnectTimer: null,
       loadInFlight: null,
       loadQueued: false,
+      loadSequence: 0,
       pendingCreateScreenshots: [],
       mobileSectionOpen: {},
       lightboxEntry: null,

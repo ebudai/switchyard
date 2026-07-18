@@ -177,6 +177,11 @@ grep -q -- '--property StandardError=append:' "$LOGFILE" || {
     cat "$LOGFILE" >&2
     exit 1
 }
+grep -q -- '--assets /tmp/' "$LOGFILE" || {
+    echo "FAIL: canary did not use an explicit temporary assets directory" >&2
+    cat "$LOGFILE" >&2
+    exit 1
+}
 grep -q 'canary: mock canary boot log' "$TMPDIR_T/canary-fail.err" || {
     echo "FAIL: failed canary did not surface captured canary log output" >&2
     cat "$TMPDIR_T/canary-fail.err" >&2

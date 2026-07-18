@@ -487,6 +487,7 @@ start_canary_direct() {
     local socket_path="$3"
     local frame_dir="$4"
     local canary_log="$5"
+    local asset_dir="$6"
     (
         cd "$release_dir"
         PYTHONUNBUFFERED=1 \
@@ -496,7 +497,8 @@ start_canary_direct() {
                 --host "$BOARD_HOST" \
                 --port "$port" \
                 --unix-socket "$socket_path" \
-                --frames "$frame_dir"
+                --frames "$frame_dir" \
+                --assets "$asset_dir"
     ) >"$canary_log" 2>&1 &
     printf '%s\n' "$!"
 }
@@ -515,6 +517,7 @@ start_canary_systemd() {
     local unit_name="$5"
     local canary_user="$6"
     local canary_log="$7"
+    local asset_dir="$8"
     local session_check_status=0
     if [[ "$(id -u)" != "0" ]]; then
         polkit_graphical_session_available "$POLKIT_APPROVAL_USER" || session_check_status=$?
@@ -537,7 +540,8 @@ start_canary_systemd() {
             --host "$BOARD_HOST" \
             --port "$port" \
             --unix-socket "$socket_path" \
-            --frames "$frame_dir"
+            --frames "$frame_dir" \
+            --assets "$asset_dir"
 }
 
 stop_canary_systemd() {
@@ -549,7 +553,7 @@ run_release_canary() {
     local release_dir="$1"
     local scope="$2"
     local canary_user="$BOARD_CANARY_USER"
-    local port socket_root socket_path frame_dir unit_name current_user canary_log pid="" status=0
+    local port socket_root socket_path frame_dir asset_dir unit_name current_user canary_log pid="" status=0
     if [[ "${TICKET_BOARD_SKIP_CANARY:-}" == "1" ]]; then
         log "skipping deploy canary because TICKET_BOARD_SKIP_CANARY=1"
         return 0
@@ -562,17 +566,18 @@ run_release_canary() {
     socket_root="$(mktemp -d "${TMPDIR:-/tmp}/pgu-ticket-board-canary.XXXXXX")"
     socket_path="${BOARD_CANARY_SOCKET:-$socket_root/ticket-board.sock}"
     frame_dir="$socket_root/frames"
+    asset_dir="$socket_root/assets"
     canary_log="$socket_root/canary.log"
     unit_name="$BOARD_CANARY_UNIT_PREFIX-$$"
     chmod 1777 "$socket_root"
-    mkdir -p "$frame_dir"
-    chmod 1777 "$frame_dir"
+    mkdir -p "$frame_dir" "$asset_dir"
+    chmod 1777 "$frame_dir" "$asset_dir"
     log "starting deploy canary for $release_dir as $canary_user on port $port"
     current_user="$(id -un)"
     if [[ "$current_user" == "$canary_user" ]]; then
-        pid="$(start_canary_direct "$release_dir" "$port" "$socket_path" "$frame_dir" "$canary_log")"
+        pid="$(start_canary_direct "$release_dir" "$port" "$socket_path" "$frame_dir" "$canary_log" "$asset_dir")"
     else
-        start_canary_systemd "$release_dir" "$port" "$socket_path" "$frame_dir" "$unit_name" "$canary_user" "$canary_log" || status=$?
+        start_canary_systemd "$release_dir" "$port" "$socket_path" "$frame_dir" "$unit_name" "$canary_user" "$canary_log" "$asset_dir" || status=$?
     fi
     if (( status == 0 )); then
         smoke_check_url "http://$BOARD_HOST:$port$SMOKE_PATH" "$BOARD_CANARY_TIMEOUT_SECONDS" || status=$?

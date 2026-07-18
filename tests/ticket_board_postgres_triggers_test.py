@@ -2430,8 +2430,7 @@ WHERE ticket_id NOT IN ('PGU-20', 'PGU-21');
             )
             nudges = nudge_proc.stdout.strip()
             assert int(nudges) >= 1, nudges
-            assert "WARNING:  wedged-pane nudge backstop fired for PGU-20 targeting director (" in nudge_proc.stderr
-            assert "s since transition)" in nudge_proc.stderr
+            assert "WARNING:  wedged-pane nudge backstop fired for PGU-20 targeting director (" not in nudge_proc.stderr
             nudge_state = json.loads(
                 psql(
                     conninfo,
@@ -2442,42 +2441,21 @@ WHERE ticket_id = 'PGU-20';
 """,
                 ).stdout
             )
-            assert nudge_state == {"last_nudged": True, "nudge_count": 1}, nudge_state
-            nudge_queue = json.loads(
-                psql(
-                    conninfo,
-                    """
-SELECT jsonb_object_agg(kind || ':' || target_role, count)::text
-FROM (
-    SELECT payload->>'kind' AS kind, target_role, count(*) AS count
-    FROM ticket_board.ticket_notification_queue
-    WHERE ticket_id = 'PGU-20' AND kind = 'nudge'
-    GROUP BY payload->>'kind', target_role
-) q;
-""",
-                ).stdout
-            )
-            assert nudge_queue == {"nudge:director": 1}, nudge_queue
-            deduped_nudges = psql(
+            assert nudge_state == {"last_nudged": False, "nudge_count": 0}, nudge_state
+            nudge_queue_count = psql(
+                conninfo,
+                "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-20' AND kind = 'nudge';",
+            ).stdout.strip()
+            assert nudge_queue_count == "0", nudge_queue_count
+            psql(
                 conninfo,
                 "SELECT ticket_board.notify_due_nudges(clock_timestamp() + interval '20 minutes', interval '5 minutes', 3);",
-            ).stdout.strip()
-            assert int(deduped_nudges) >= 1, deduped_nudges
-            deduped_queue = json.loads(
-                psql(
-                    conninfo,
-                    """
-SELECT jsonb_object_agg(kind || ':' || target_role, count)::text
-FROM (
-    SELECT payload->>'kind' AS kind, target_role, count(*) AS count
-    FROM ticket_board.ticket_notification_queue
-    WHERE ticket_id = 'PGU-20' AND kind = 'nudge'
-    GROUP BY payload->>'kind', target_role
-) q;
-""",
-                ).stdout
             )
-            assert deduped_queue == {"nudge:director": 1}, deduped_queue
+            deduped_queue_count = psql(
+                conninfo,
+                "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-20' AND kind = 'nudge';",
+            ).stdout.strip()
+            assert deduped_queue_count == "0", deduped_queue_count
             inspection_nudge = json.loads(
                 psql(
                     conninfo,
@@ -2560,7 +2538,7 @@ SELECT ticket_board.notify_due_nudges(clock_timestamp(), interval '5 minutes', 3
                 conninfo,
                 "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-254' AND kind IN ('nudge', 'escalation');",
             ).stdout.strip()
-            assert in_progress_nudges == "1", in_progress_nudges
+            assert in_progress_nudges == "0", in_progress_nudges
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
             insert_ticket(conninfo, "PGU-2850", title="Open blocker for implementation", assignee="ops", state="analysis")
             insert_ticket(conninfo, "PGU-2852", title="Cleared blocker for implementation", assignee="ops", state="done")
@@ -2632,7 +2610,7 @@ WHERE t.id = 'PGU-2851';
 """,
                 ).stdout
             )
-            assert cleared_implementation_nudge == {"queued": 1, "last_nudged": True, "nudge_count": 1}, cleared_implementation_nudge
+            assert cleared_implementation_nudge == {"queued": 0, "last_nudged": False, "nudge_count": 0}, cleared_implementation_nudge
             psql(
                 conninfo,
                 """
@@ -2843,7 +2821,7 @@ FROM (
             assert delivery_suppression == {
                 "PGU-2821": {"queued": 0, "last_nudged": False, "nudge_count": 0},
                 "PGU-2822": {"queued": 0, "last_nudged": False, "nudge_count": 0},
-                "PGU-2823": {"queued": 1, "last_nudged": True, "nudge_count": 1},
+                "PGU-2823": {"queued": 0, "last_nudged": False, "nudge_count": 0},
                 "PGU-2824": {"queued": 0, "last_nudged": False, "nudge_count": 0},
             }, delivery_suppression
             psql(
@@ -3157,7 +3135,7 @@ WHERE ticket_id = 'PGU-3082';
 SELECT ticket_board.notify_due_nudges(clock_timestamp(), interval '5 minutes', 3);
 """,
             )
-            wedged_backstop = json.loads(
+            active_work_backstop = json.loads(
                 psql(
                     conninfo,
                     """
@@ -3179,12 +3157,12 @@ WHERE t.id = 'PGU-3082';
 """,
                 ).stdout
             )
-            assert wedged_backstop == {
+            assert active_work_backstop == {
                 "state": "in_progress",
-                "queued": 1,
-                "last_nudged": True,
-                "nudge_count": 1,
-            }, wedged_backstop
+                "queued": 0,
+                "last_nudged": False,
+                "nudge_count": 0,
+            }, active_work_backstop
             psql(
                 conninfo,
                 """

@@ -2631,7 +2631,7 @@ BEGIN
                 END AS priority
             FROM ticket_board.tickets t
             JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
-            WHERE t.state IN ('in_progress', 'inspection', 'audit', 'director_review')
+            WHERE t.state IN ('inspection', 'audit', 'director_review')
               AND NOT t.manually_controlled
               AND ticket_board.nudge_target_role(t.state, t.assignee) IS NOT NULL
               AND ns.entered_current_state_at <= p_now - p_cadence

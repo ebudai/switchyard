@@ -460,6 +460,12 @@ def main() -> int:
     assert "row_number() over" in active_inprogress_idle_filter_migration
     assert "notification_trace trace" in active_inprogress_idle_filter_migration
     assert "candidates.state <> 'in_progress' or candidates.in_progress_rank = 1" in active_inprogress_idle_filter_migration
+    inprogress_stuck_idle_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu541_inprogress_stuck_requires_pane_idle.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "create or replace function ticket_board.notify_due_nudges" in inprogress_stuck_idle_migration
+    assert "where t.state in ('inspection', 'audit', 'director_review')" in inprogress_stuck_idle_migration
+    assert "where t.state in ('in_progress', 'inspection', 'audit', 'director_review')" not in inprogress_stuck_idle_migration
     terminal_transition_notify_migration = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "pgu405_terminal_transition_assignee_notify.sql"
     ).read_text(encoding="utf-8").lower()
@@ -483,6 +489,8 @@ def main() -> int:
     assert "current_app_actor()" in executable_schema_lower
     assert "role % cannot call file_bug" in executable_schema_lower
     assert "candidates.state <> 'in_progress' or candidates.in_progress_rank = 1" in executable_schema_lower
+    assert "where t.state in ('inspection', 'audit', 'director_review')" in executable_schema_lower
+    assert "where t.state in ('in_progress', 'inspection', 'audit', 'director_review')" not in executable_schema_lower
     assert "target_role is null and p_new_state in ('done', 'cancelled')" in executable_schema_lower
     assert "transition_target_role(p_old_state, p_assignee)" in executable_schema_lower
     assert "when p_new_state = 'done'" in executable_schema_lower

@@ -395,6 +395,23 @@ class TicketBoardWriteClient:
             payload["target_assignee"] = target_assignee
         return self._ticket_action(ticket_id, "audit_kick_back", payload, caller_role=caller_role)
 
+    def director_dat_sign_off(self, ticket_id: str, *, text: str = "", caller_role: str | None = None) -> dict[str, Any]:
+        payload = {"text": text} if text else None
+        return self._ticket_action(ticket_id, "director_dat_sign_off", payload, caller_role=caller_role)
+
+    def director_dat_kick_back(
+        self,
+        ticket_id: str,
+        *,
+        reason: str,
+        target_assignee: str = "",
+        caller_role: str | None = None,
+    ) -> dict[str, Any]:
+        payload = {"reason": reason}
+        if target_assignee:
+            payload["target_assignee"] = target_assignee
+        return self._ticket_action(ticket_id, "director_dat_kick_back", payload, caller_role=caller_role)
+
     def inspector_sign_off(self, ticket_id: str, *, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "inspector_sign_off", caller_role=caller_role)
 
@@ -557,6 +574,15 @@ def _build_parser() -> argparse.ArgumentParser:
     audit_kick.add_argument("--reason", required=True)
     audit_kick.add_argument("--target-assignee", default="")
 
+    dat_sign = subparsers.add_parser("director-dat-sign-off")
+    dat_sign.add_argument("ticket_id")
+    dat_sign.add_argument("--text", default="")
+
+    dat_kick = subparsers.add_parser("director-dat-kick-back")
+    dat_kick.add_argument("ticket_id")
+    dat_kick.add_argument("--reason", required=True)
+    dat_kick.add_argument("--target-assignee", default="")
+
     for name in ("eric-reopen", "cancel"):
         sub = subparsers.add_parser(name)
         sub.add_argument("ticket_id")
@@ -643,6 +669,10 @@ def main(argv: list[str] | None = None) -> int:
             response = client.audit_sign_off(args.ticket_id, text=args.text)
         elif command == "audit_kick_back":
             response = client.audit_kick_back(args.ticket_id, reason=args.reason, target_assignee=args.target_assignee)
+        elif command == "director_dat_sign_off":
+            response = client.director_dat_sign_off(args.ticket_id, text=args.text)
+        elif command == "director_dat_kick_back":
+            response = client.director_dat_kick_back(args.ticket_id, reason=args.reason, target_assignee=args.target_assignee)
         elif command in {"eric_reopen", "cancel"}:
             response = getattr(client, command)(args.ticket_id, reason=args.reason)
         elif command == "inspector_kick_back":

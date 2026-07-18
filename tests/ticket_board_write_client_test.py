@@ -82,6 +82,15 @@ class RecordingHandler(BaseHTTPRequestHandler):
         elif operation == "audit_kick_back":
             ticket["state"] = "in_progress"
             ticket["assignee"] = payload.get("target_assignee", payload.get("assignee", "ops"))
+        elif operation == "director_dat_sign_off":
+            ticket["state"] = "eric_review"
+            if payload.get("text"):
+                ticket["comments"] = [{"who": caller, "text": payload.get("text", "")}]
+        elif operation == "director_dat_kick_back":
+            ticket["state"] = "in_progress"
+            ticket["assignee"] = payload.get("target_assignee", payload.get("assignee", "ops"))
+            if payload.get("reason"):
+                ticket["comments"] = [{"who": caller, "text": payload.get("reason", "")}]
         elif operation == "eric_sign_off":
             ticket["state"] = "director_review"
             if payload.get("text"):
@@ -127,6 +136,7 @@ def setup_git_repo(root: Path) -> tuple[Path, str, str]:
     repo = root / "repo"
     run_git(root, "init", "--bare", str(origin))
     run_git(root, "clone", str(origin), str(repo))
+    run_git(repo, "config", "core.hooksPath", "")
     run_git(repo, "config", "user.name", "PGU Test")
     run_git(repo, "config", "user.email", "pgu-test@example.com")
     (repo / "README.md").write_text("initial\n", encoding="utf-8")
@@ -172,6 +182,8 @@ def assert_action_requests(requests: list[tuple[str, str | None, dict[str, objec
     assert ("/api/tickets/PGU-123/actions/clear_awaiting_role", "ops") in pairs
     assert ("/api/tickets/PGU-102/actions/audit_sign_off", "audit") in pairs
     assert ("/api/tickets/PGU-103/actions/audit_kick_back", "audit") in pairs
+    assert ("/api/tickets/PGU-102/actions/director_dat_sign_off", "director") in pairs
+    assert ("/api/tickets/PGU-102/actions/director_dat_kick_back", "director") in pairs
     assert ("/api/tickets/PGU-104/actions/eric_sign_off", "eric") in pairs
     assert ("/api/tickets/PGU-105/actions/eric_reopen", "eric") in pairs
     assert ("/api/tickets/PGU-140/actions/release_draft", "eric") in pairs
@@ -217,6 +229,18 @@ def exercise_client(base_url: str, repo: Path, commit_hash: str) -> None:
         audit_signed = client.audit_sign_off("PGU-102", text="Audit verified.", caller_role="audit")
         assert audit_signed["ticket"]["state"] == "director_review"
         assert audit_signed["ticket"]["comments"][-1]["text"] == "Audit verified."
+        dat_signed = client.director_dat_sign_off("PGU-102", text="DAT accepted.", caller_role="director")
+        assert dat_signed["ticket"]["state"] == "eric_review"
+        assert dat_signed["ticket"]["comments"][-1]["text"] == "DAT accepted."
+        dat_kicked = client.director_dat_kick_back(
+            "PGU-102",
+            reason="Artifact visible.",
+            target_assignee="app",
+            caller_role="director",
+        )
+        assert dat_kicked["ticket"]["state"] == "in_progress"
+        assert dat_kicked["ticket"]["assignee"] == "app"
+        assert dat_kicked["ticket"]["comments"][-1]["text"] == "Artifact visible."
         audit_kicked = client.audit_kick_back("PGU-103", reason="Needs another pass.", target_assignee="ops", caller_role="audit")
         assert audit_kicked["ticket"]["state"] == "in_progress"
         assert audit_kicked["ticket"]["assignee"] == "ops"

@@ -29,6 +29,11 @@ CREATE TABLE IF NOT EXISTS ticket_board.workflow_transitions (
     PRIMARY KEY (from_stage, to_stage, action_name)
 );
 
+UPDATE ticket_board.workflow_stages
+SET rank = 106
+WHERE name = 'dat'
+  AND rank = 6;
+
 INSERT INTO ticket_board.workflow_stages (
     name,
     display_label,

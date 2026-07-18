@@ -14,8 +14,8 @@ from urllib import parse, request
 
 DEFAULT_BOARD_URL = os.environ.get("PGU_TICKET_BOARD_URL", "http://127.0.0.1:8770")
 TERMINAL_STATES = {"done", "cancelled"}
-ACTIVE_STATES = {"in_progress", "inspection", "audit", "director_review", "eric_review"}
-REVIEW_STATES = {"inspection", "audit", "director_review", "eric_review"}
+ACTIVE_STATES = {"in_progress", "inspection", "audit", "dat", "director_review", "eric_review"}
+REVIEW_STATES = {"inspection", "audit", "dat", "director_review", "eric_review"}
 
 
 class TicketBoardReadError(RuntimeError):
@@ -158,7 +158,7 @@ def queue_ticket_matches(ticket: dict[str, Any]) -> bool:
 
 
 def sort_queue_tickets(tickets: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    state_order = {"in_progress": 0, "inspection": 1, "audit": 2, "director_review": 3, "eric_review": 4, "backlog": 5}
+    state_order = {"in_progress": 0, "inspection": 1, "audit": 2, "dat": 3, "eric_review": 4, "director_review": 5, "backlog": 6}
     return sorted(tickets, key=lambda ticket: (state_order.get(str(ticket.get("state", "")), 99), ticket_number(str(ticket.get("id", "")))))
 
 

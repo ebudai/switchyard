@@ -64,6 +64,8 @@ OPERATION_ALLOWED_ROLES = {
     "inspector_kick_back": {"inspector"},
     "audit_sign_off": {"audit"},
     "audit_kick_back": {"audit"},
+    "director_dat_sign_off": {"director"},
+    "director_dat_kick_back": {"director"},
     "eric_sign_off": {"eric"},
     "eric_reopen": {"eric"},
     "mark_done": {"director"},
@@ -804,6 +806,18 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 raise ValueError("audit_sign_off requires a non-empty comment")
             patch = {"audit_signoff": True, "comment": {"who": caller, "text": comment_text}}
         elif operation == "audit_kick_back":
+            patch = {"state": "in_progress"}
+            comment_text = self.action_comment_text(payload)
+            if comment_text:
+                patch["comment"] = {"who": caller, "text": comment_text}
+            if payload.get("target_assignee") or payload.get("assignee"):
+                patch["assignee"] = str(payload.get("target_assignee", payload.get("assignee", "")))
+        elif operation == "director_dat_sign_off":
+            comment_text = self.action_comment_text(payload)
+            patch = {"state": "eric_review"}
+            if comment_text:
+                patch["comment"] = {"who": caller, "text": comment_text}
+        elif operation == "director_dat_kick_back":
             patch = {"state": "in_progress"}
             comment_text = self.action_comment_text(payload)
             if comment_text:

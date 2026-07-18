@@ -76,6 +76,8 @@ GRANT EXECUTE ON FUNCTION ticket_board.clear_awaiting_role(text) TO ticket_board
 GRANT EXECUTE ON FUNCTION ticket_board.audit_sign_off(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.audit_kick_back(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.audit_kick_back(text, text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.director_dat_sign_off(text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.director_dat_kick_back(text, text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.inspector_sign_off(text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.inspector_kick_back(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.inspector_kick_back(text, text, text) TO ticket_board_service;

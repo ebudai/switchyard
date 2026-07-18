@@ -316,7 +316,10 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         return 'audit';
       }
       if (ticket.state === 'audit') {
-        return ticket.needs_eric_signoff ? 'eric_review' : 'director_review';
+        return ticket.needs_eric_signoff ? 'dat' : 'director_review';
+      }
+      if (ticket.state === 'dat') {
+        return 'eric_review';
       }
       if (ticket.state === 'eric_review') {
         return 'director_review';
@@ -355,7 +358,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       }
       if (ticket.state === 'audit' && !ticket.audit_signoff) {
         return ticket.needs_eric_signoff
-          ? 'Set audit signoff before advancing to UAT.'
+          ? 'Set audit signoff before advancing to DAT.'
           : 'Set audit signoff before advancing to Final Sign-Off.';
       }
       if (ticket.state === 'eric_review' && ticket.needs_eric_signoff && !ticket.eric_signoff) {
@@ -828,7 +831,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     }
 
     function ticketAllowsKickback(ticket) {
-      return ['director_review', 'audit', 'eric_review'].includes(ticket.state);
+      return ['director_review', 'audit', 'dat', 'eric_review'].includes(ticket.state);
     }
 
     function ticketIsEricReview(ticket) {

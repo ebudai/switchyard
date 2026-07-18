@@ -14,16 +14,17 @@ from scripts.ticket_board.frontend import HTML
 
 
 def main() -> int:
-    assert "{ key: 'backlog', label: 'Backlog' }" in HTML
     assert "{ key: 'ready', label: 'Ready' }" not in HTML
-    assert "{ key: 'in_progress', label: 'Implementation' }" in HTML
-    assert "{ key: 'director_review', label: 'Final Sign-Off' }" in HTML
+    assert "stateLabel(key)" in HTML
+    assert "column.key === 'eric_review'" in HTML
     assert "function defaultAdvanceState(ticket)" in HTML
     assert "if (ticket.state === 'backlog') {" in HTML
     assert "return 'analysis';" in HTML
     assert "if (ticket.state === 'analysis') {" in HTML
     assert "return 'in_progress';" in HTML
-    assert "return ticket.needs_eric_signoff ? 'eric_review' : 'director_review';" in HTML
+    assert "return ticket.needs_eric_signoff ? 'dat' : 'director_review';" in HTML
+    assert "if (ticket.state === 'dat') {" in HTML
+    assert "return 'eric_review';" in HTML
     assert "if (ticket.state === 'eric_review') {" in HTML
     assert "return 'director_review';" in HTML
     assert "if (ticket.state === 'director_review') {" in HTML
@@ -38,7 +39,7 @@ def main() -> int:
     assert "Save implementation before advancing to Implementation." not in HTML
     assert "already has an in-progress ticket" not in HTML
     assert "Save audit prompt before advancing to audit." not in HTML
-    assert "Set audit signoff before advancing to UAT." in HTML
+    assert "Set audit signoff before advancing to DAT." in HTML
     assert "Set audit signoff before advancing to Final Sign-Off." in HTML
     assert "Record UAT sign-off before advancing to Final Sign-Off." in HTML
     assert "Save a verified commit hash or enable no-commit override before advancing to done." in HTML

@@ -67,13 +67,14 @@ STATE_RANK = {
     "in_progress": 3,
     "inspection": 4,
     "audit": 5,
-    "eric_review": 6,
-    "director_review": 7,
-    "done": 8,
-    "cancelled": 9,
+    "dat": 6,
+    "eric_review": 7,
+    "director_review": 8,
+    "done": 9,
+    "cancelled": 10,
 }
 TERMINAL_STATES = {"done", "cancelled"}
-NUDGE_ELIGIBLE_STATES = {"in_progress", "inspection", "audit", "director_review", "analysis", "backlog"}
+NUDGE_ELIGIBLE_STATES = {"in_progress", "inspection", "audit", "dat", "director_review", "analysis", "backlog"}
 WORKING_TIMER_RE = re.compile(r"Working\s*\(\s*(?:(?P<minutes>\d+)m\s*)?(?P<seconds>\d+)s\b")
 
 LOGGER = logging.getLogger(__name__)
@@ -154,6 +155,8 @@ def target_for_transition(transition: Transition) -> str | None:
         return ROLE_TO_TARGET["inspector"]
     if transition.new_state == "audit":
         return ROLE_TO_TARGET["audit"]
+    if transition.new_state == "dat":
+        return ROLE_TO_TARGET["director"]
     if transition.new_state == "eric_review":
         return ROLE_TO_TARGET["director"]
     if transition.new_state == "director_review":
@@ -181,6 +184,8 @@ def message_for_transition(transition: Transition) -> str | None:
         return f"{transition.ticket_id}{title_suffix} ready for inspection"
     if transition.new_state == "audit":
         return f"{transition.ticket_id}{title_suffix} ready for audit"
+    if transition.new_state == "dat":
+        return f"{transition.ticket_id}{title_suffix} ready for Director Acceptance Testing"
     if transition.new_state == "eric_review":
         return f"{transition.ticket_id}{title_suffix} ready for Eric UAT"
     if transition.new_state == "director_review":
@@ -970,6 +975,8 @@ WHERE id = %s
                 return "inspector"
             if state == "audit":
                 return "audit"
+            if state == "dat":
+                return "director"
             if state == "eric_review":
                 return "director"
             if state == "director_review":
@@ -981,8 +988,8 @@ WHERE id = %s
             return assignee if assignee != "unassigned" else None
         if state == "inspection":
             return "inspector"
-        if state in {"audit", "director_review", "analysis", "backlog"}:
-            return "director" if state in {"analysis", "backlog", "director_review"} else "audit"
+        if state in {"audit", "dat", "director_review", "analysis", "backlog"}:
+            return "director" if state in {"analysis", "backlog", "dat", "director_review"} else "audit"
         return None
 
     def _notification_is_current(self, conn: Any, ticket_id: str, target_role: str, payload: str) -> bool:

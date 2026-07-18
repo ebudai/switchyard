@@ -30,6 +30,7 @@ STATES = (
     "in_progress",
     "inspection",
     "audit",
+    "dat",
     "eric_review",
     "director_review",
     "done",
@@ -596,13 +597,13 @@ WITH notification_scope AS (
         scoped.ticket_number,
         CASE
             WHEN scoped.state = 'in_progress' THEN NULLIF(scoped.assignee, 'unassigned')
-            WHEN scoped.state IN ('analysis', 'director_review') THEN 'director'
+            WHEN scoped.state IN ('analysis', 'dat', 'director_review') THEN 'director'
             WHEN scoped.state = 'inspection' THEN 'inspector'
             WHEN scoped.state = 'audit' THEN 'audit'
             ELSE NULL
         END AS owner_role
     FROM ticket_board.tickets scoped
-    WHERE scoped.state IN ('analysis', 'in_progress', 'inspection', 'audit', 'director_review')
+    WHERE scoped.state IN ('analysis', 'in_progress', 'inspection', 'audit', 'dat', 'director_review')
 ),
 notification_candidates AS (
     SELECT
@@ -950,6 +951,10 @@ ORDER BY rank;
                         target_assignee = assignee if "assignee" in patch else ""
                         self._pg_call(conn, "SELECT ticket_board.audit_kick_back(%s, %s, %s);", (ticket_id, comment_text, target_assignee))
                         comment_text = ""
+                    elif state == "in_progress" and current["state"] == "dat":
+                        target_assignee = assignee if "assignee" in patch else ""
+                        self._pg_call(conn, "SELECT ticket_board.director_dat_kick_back(%s, %s, %s);", (ticket_id, comment_text, target_assignee))
+                        comment_text = ""
                     elif state == "analysis" and current["state"] == "draft":
                         self._pg_call(conn, "SELECT ticket_board.release_draft(%s);", (ticket_id,))
                     elif state == "analysis" and current["state"] in {"eric_review", "director_review", "done"}:
@@ -963,6 +968,9 @@ ORDER BY rank;
                         self._pg_call(conn, "SELECT ticket_board.submit_to_inspection(%s);", (ticket_id,))
                     elif state == "audit":
                         self._pg_call(conn, "SELECT ticket_board.submit_to_audit(%s, %s);", (ticket_id, commit_hash))
+                    elif state == "eric_review" and current["state"] == "dat":
+                        self._pg_call(conn, "SELECT ticket_board.director_dat_sign_off(%s, %s);", (ticket_id, comment_text))
+                        comment_text = ""
                     elif state == "done":
                         self._pg_call(conn, "SELECT ticket_board.mark_done(%s, %s);", (ticket_id, commit_hash))
                     elif state == "backlog":

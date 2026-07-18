@@ -44,9 +44,10 @@ Pane write API:
   the socket connection closes, and stale dead-PID registrations are dropped.
 - Ticket-scoped operations are `route`, `start_work`, `submit_to_inspection`,
   `submit_to_audit`,
-  `audit_sign_off`, `audit_kick_back`, `eric_sign_off`, `eric_reopen`,
-  `mark_done`, `defer`, `cancel`, `set_manually_controlled`, `set_blockers`,
-  `add_comment`, `edit_fields`, and `merge`.
+  `audit_sign_off`, `audit_kick_back`, `director_dat_sign_off`,
+  `director_dat_kick_back`, `eric_sign_off`, `eric_reopen`, `mark_done`,
+  `defer`, `cancel`, `set_manually_controlled`, `set_blockers`, `add_comment`,
+  `edit_fields`, and `merge`.
 - Python and shell tooling should use `scripts.ticket_board.write_client` or
   `scripts/ticket-board-write` instead of editing `PGU-N.json` directly. The
   client resolves its default caller role from `PGU_TICKET_BOARD_CALLER_ROLE`,
@@ -134,11 +135,12 @@ Ticket schema:
 Allowed values:
 
 - `assignee`: `main`, `app`, `perf`, `ops`, `audit`, `agent`, `director`, `unassigned`
-- `state`: `draft`, `backlog`, `analysis`, `in_progress`, `inspection`, `audit`, `eric_review`, `director_review`, `done`, `cancelled`
+- `state`: `draft`, `backlog`, `analysis`, `in_progress`, `inspection`, `audit`, `dat`, `eric_review`, `director_review`, `done`, `cancelled`
 
 Notes:
 
 - `eric_review` is reserved for tickets with `needs_eric_signoff: true` and is displayed in the UI as `UAT`
+- `dat` is Director Acceptance Testing, a director-owned gate for `needs_eric_signoff` tickets after audit and before UAT
 - `draft` is an opt-in pre-triage staging state for director/Eric prep; it stays unassigned and does not notify until released to `analysis`
 - `backlog` is for deferred or parked tickets; `analysis` is for active triage/spec work before a ticket is revived into Implementation (`in_progress`)
 - `blocked_by` is a list of ticket IDs the ticket is waiting on; `blockers` carries the same IDs with a persistent `resolved` flag, and unresolved blockers prevent forward promotion until the referenced blocker reaches `done` or `cancelled`
@@ -180,8 +182,8 @@ Notes:
 - `draft -> analysis` must use the `release_draft` operation and is restricted to director/Eric
 - `analysis -> in_progress` is the default handoff from triage/spec to Implementation
 - Any state can move to `backlog` to defer work; backlog tickets can be revived to `analysis`
-- The default review path is `in_progress -> audit -> UAT (internal state: eric_review) -> director_review -> done`, or `in_progress -> audit -> director_review -> done` when UAT is not required
-- Implementer focus is reserved from `in_progress` through review (`inspection`, `audit`, UAT, and director review); finishing/cancelling/parking the reserved ticket auto-activates that implementer's oldest unblocked queued backlog ticket
+- The default UAT-bound review path is `in_progress -> audit -> DAT (internal state: dat) -> UAT (internal state: eric_review) -> director_review -> done`; code-only tickets keep `in_progress -> audit -> director_review -> done`
+- Implementer focus is reserved from `in_progress` through review (`inspection`, `audit`, DAT, UAT, and director review); finishing/cancelling/parking the reserved ticket auto-activates that implementer's oldest unblocked queued backlog ticket
 - Director deferral parks the current ticket as `backlog` with `parked: true`; queued implementer backlog (`parked: false`) is intentionally excluded from idle-stall nudges until it becomes active
 - When a ticket is legitimately waiting on another pane, use `scripts/ticket-board-write await-role PGU-N --role perf|inspector|audit|...`; active awaiting markers suppress stall nudges, clear when that role acts on the ticket, and expire after the fallback timeout
 - Discretionary idle-stall/backstop nudges route to the director as coordination signals; primary transition/work-delivery notifications still route to the responsible pane

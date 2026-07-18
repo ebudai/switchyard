@@ -46,6 +46,7 @@ EXPECTED_STATES = {
     "in_progress",
     "inspection",
     "audit",
+    "dat",
     "eric_review",
     "director_review",
     "done",
@@ -81,6 +82,8 @@ EXPECTED_FUNCTION_API = {
     "ticket_board.inspector_kick_back",
     "ticket_board.audit_sign_off",
     "ticket_board.audit_kick_back",
+    "ticket_board.director_dat_sign_off",
+    "ticket_board.director_dat_kick_back",
     "ticket_board.eric_sign_off",
     "ticket_board.eric_reopen",
     "ticket_board.mark_done",
@@ -489,7 +492,7 @@ def main() -> int:
     assert "current_app_actor()" in executable_schema_lower
     assert "role % cannot call file_bug" in executable_schema_lower
     assert "candidates.state <> 'in_progress' or candidates.in_progress_rank = 1" in executable_schema_lower
-    assert "where t.state in ('inspection', 'audit', 'director_review')" in executable_schema_lower
+    assert "where t.state in ('inspection', 'audit', 'dat', 'director_review')" in executable_schema_lower
     assert "where t.state in ('in_progress', 'inspection', 'audit', 'director_review')" not in executable_schema_lower
     assert "target_role is null and p_new_state in ('done', 'cancelled')" in executable_schema_lower
     assert "transition_target_role(p_old_state, p_assignee)" in executable_schema_lower

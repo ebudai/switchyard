@@ -559,9 +559,21 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
         ) {
           await updateTicketAction(ticketId, 'eric_reopen', { reason: actionReason(patch) }, normalizedCaller);
           consumedComment = true;
-        } else if (['director_review', 'eric_review'].includes(nextState) && previousState === 'audit') {
+        } else if (['dat', 'director_review', 'eric_review'].includes(nextState) && previousState === 'audit') {
           await updateTicketAction(ticketId, 'audit_sign_off', { text: actionReason(patch) }, normalizedCaller);
           consumed.add('audit_signoff');
+          consumedComment = true;
+        } else if (nextState === 'eric_review' && previousState === 'dat') {
+          await updateTicketAction(ticketId, 'director_dat_sign_off', { text: actionReason(patch) }, normalizedCaller);
+          consumedComment = !!actionReason(patch);
+        } else if (nextState === 'in_progress' && previousState === 'dat') {
+          await updateTicketAction(
+            ticketId,
+            'director_dat_kick_back',
+            { reason: actionReason(patch), target_assignee: patch.assignee || ticket?.assignee || '' },
+            normalizedCaller,
+          );
+          consumed.add('assignee');
           consumedComment = true;
         } else if (nextState === 'director_review' && previousState === 'eric_review') {
           await updateTicketAction(ticketId, 'eric_sign_off', { text: actionReason(patch) }, normalizedCaller);

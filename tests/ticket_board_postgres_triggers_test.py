@@ -901,7 +901,7 @@ WHERE id = 'PGU-8';
 """,
                 ).stdout
             )
-            assert auto_eric == {"state": "eric_review", "assignee": "director", "audit_signoff": True}, auto_eric
+            assert auto_eric == {"state": "dat", "assignee": "director", "audit_signoff": True}, auto_eric
             auto_eric_notice = json.loads(
                 psql(
                     conninfo,
@@ -916,9 +916,21 @@ LIMIT 1;
             )
             assert auto_eric_notice == {
                 "target_role": "director",
-                "message": "PGU-8 -- Auto Eric ready for Eric UAT",
-                "new_state": "eric_review",
+                "message": "PGU-8 -- Auto Eric ready for Director Acceptance Testing",
+                "new_state": "dat",
             }, auto_eric_notice
+            service_call(conninfo, "director", "SELECT ticket_board.director_dat_sign_off('PGU-8', 'DAT accepted.');")
+            auto_uat = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object('state', state, 'assignee', assignee, 'audit_signoff', audit_signoff)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-8';
+""",
+                ).stdout
+            )
+            assert auto_uat == {"state": "eric_review", "assignee": "director", "audit_signoff": True}, auto_uat
             psql(conninfo, "UPDATE ticket_board.tickets SET eric_signoff = true WHERE id = 'PGU-8';")
             eric_done = json.loads(
                 psql(
@@ -1243,6 +1255,7 @@ SELECT ticket_board.complete_task('PGU-84', 'Trying to skip audit.');
                 "complete_task requires a backlog or analysis ticket",
             )
             service_call(conninfo, "audit", "SELECT ticket_board.audit_sign_off('PGU-84', 'Audit verified after reinspection.');")
+            service_call(conninfo, "director", "SELECT ticket_board.director_dat_sign_off('PGU-84', 'DAT accepted after reinspection.');")
             psql(conninfo, "UPDATE ticket_board.tickets SET eric_signoff = true, state = 'director_review' WHERE id = 'PGU-84';")
             psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-84';")
 
@@ -2620,7 +2633,7 @@ SET commit_exempt = true,
     manually_controlled = true,
     state = 'done'
 WHERE id NOT IN ('PGU-21', 'PGU-57')
-  AND state IN ('in_progress', 'inspection', 'audit', 'eric_review', 'director_review')
+              AND state IN ('in_progress', 'inspection', 'audit', 'dat', 'eric_review', 'director_review')
   AND (
       assignee IN ('app', 'ops')
       OR id IN (
@@ -2858,7 +2871,7 @@ WHERE state = 'in_progress'
   AND NOT ticket_board.ticket_has_unresolved_blockers(id);
 UPDATE ticket_board.tickets
 SET audit_signoff = true,
-    state = 'eric_review'
+    state = 'dat'
 WHERE state = 'audit'
   AND id <> 'PGU-21'
   AND NOT manually_controlled
@@ -2871,6 +2884,13 @@ WHERE state = 'audit'
   AND id <> 'PGU-21'
   AND NOT manually_controlled
   AND NOT needs_eric_signoff
+  AND NOT ticket_board.ticket_has_unresolved_blockers(id);
+UPDATE ticket_board.tickets
+SET state = 'eric_review'
+WHERE state = 'dat'
+  AND id <> 'PGU-21'
+  AND NOT manually_controlled
+  AND needs_eric_signoff
   AND NOT ticket_board.ticket_has_unresolved_blockers(id);
 UPDATE ticket_board.tickets
 SET audit_signoff = true,
@@ -2889,7 +2909,7 @@ WHERE state = 'director_review'
   AND NOT ticket_board.ticket_has_unresolved_blockers(id);
 UPDATE ticket_board.tickets
 SET manually_controlled = true
-WHERE state IN ('in_progress', 'inspection', 'audit', 'eric_review', 'director_review')
+WHERE state IN ('in_progress', 'inspection', 'audit', 'dat', 'eric_review', 'director_review')
   AND id <> 'PGU-21'
   AND ticket_board.ticket_has_unresolved_blockers(id);
 """,

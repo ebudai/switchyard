@@ -40,6 +40,7 @@ WORKFLOW_COLUMNS = [
     {"key": "in_progress", "label": "Implementation"},
     {"key": "inspection", "label": "Inspection"},
     {"key": "audit", "label": "Audit"},
+    {"key": "dat", "label": "DAT"},
     {"key": "eric_review", "label": "UAT"},
     {"key": "director_review", "label": "Final Sign-Off"},
     {"key": "done", "label": "Done"},

@@ -65,13 +65,20 @@ set -euo pipefail
 printf 'systemd-run:%s\n' "$*" >>"$TICKET_BOARD_HEALTH_GATE_LOG"
 socket_path=""
 previous=""
+canary_log=""
 for arg in "$@"; do
+    if [[ "$previous" == "--property" && "$arg" == StandardError=append:* ]]; then
+        canary_log="${arg#StandardError=append:}"
+    fi
     if [[ "$previous" == "--unix-socket" ]]; then
         socket_path="$arg"
         break
     fi
     previous="$arg"
 done
+if [[ -n "$canary_log" ]]; then
+    printf 'mock canary boot log\n' >>"$canary_log"
+fi
 if [[ -n "$socket_path" ]]; then
     socket_parent="$(dirname "$socket_path")"
     socket_parent_mode="$(stat -c %a "$socket_parent")"
@@ -163,6 +170,16 @@ rm -f "$FAIL_CANARY_FILE"
 grep -q 'systemd-run:.*--uid boardsvc' "$LOGFILE" || {
     echo "FAIL: canary did not run via systemd-run as boardsvc" >&2
     cat "$LOGFILE" >&2
+    exit 1
+}
+grep -q -- '--property StandardError=append:' "$LOGFILE" || {
+    echo "FAIL: canary did not route stderr to the canary log" >&2
+    cat "$LOGFILE" >&2
+    exit 1
+}
+grep -q 'canary: mock canary boot log' "$TMPDIR_T/canary-fail.err" || {
+    echo "FAIL: failed canary did not surface captured canary log output" >&2
+    cat "$TMPDIR_T/canary-fail.err" >&2
     exit 1
 }
 if grep -q 'systemctl:restart pgu-ticket-board.service' "$LOGFILE"; then

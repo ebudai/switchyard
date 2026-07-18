@@ -246,15 +246,29 @@ ensure_source_repo() {
 
 maybe_fetch_origin() {
     if git -C "$SOURCE_REPO" remote get-url origin >/dev/null 2>&1; then
-        git -C "$SOURCE_REPO" fetch origin >/dev/null 2>&1
+        local output
+        if ! output="$(git -C "$SOURCE_REPO" fetch origin 2>&1)"; then
+            [[ -z "$output" ]] || printf '%s\n' "$output" >&2
+            die "failed to fetch origin in $SOURCE_REPO; refusing stale deploy of $DEPLOY_REF"
+        fi
     fi
+}
+
+verify_release_sha() {
+    local release_dir="$1"
+    local expected_sha="$2"
+    local marker="$release_dir/.pgu-deploy-sha"
+    local actual_sha
+    [[ -f "$marker" ]] || die "release $release_dir is missing deploy sha marker"
+    actual_sha="$(<"$marker")"
+    [[ "$actual_sha" == "$expected_sha" ]] || die "release $release_dir sha marker mismatch: expected $expected_sha, got $actual_sha"
 }
 
 deploy_export_release() {
     local resolved_ref release_dir tmp_dir
     ensure_source_repo
     maybe_fetch_origin
-    resolved_ref="$(git -C "$SOURCE_REPO" rev-parse "$DEPLOY_REF")" || die "failed to resolve $DEPLOY_REF in $SOURCE_REPO"
+    resolved_ref="$(git -C "$SOURCE_REPO" rev-parse --verify "$DEPLOY_REF^{commit}")" || die "failed to resolve $DEPLOY_REF in $SOURCE_REPO"
     mkdir -p "$BOARD_RELEASES_DIR"
     release_dir="$BOARD_RELEASES_DIR/$resolved_ref"
     if [[ ! -d "$release_dir" ]]; then
@@ -262,14 +276,21 @@ deploy_export_release() {
         rm -rf "$tmp_dir"
         mkdir -p "$tmp_dir"
         git -C "$SOURCE_REPO" archive "$resolved_ref" | tar -x -C "$tmp_dir"
+        printf '%s\n' "$resolved_ref" >"$tmp_dir/.pgu-deploy-sha"
         mv "$tmp_dir" "$release_dir"
     fi
+    verify_release_sha "$release_dir" "$resolved_ref"
     printf '%s\t%s\n' "$resolved_ref" "$release_dir"
 }
 
 activate_release() {
     local release_dir="$1"
     ln -sfn "$release_dir" "$BOARD_CURRENT_LINK"
+}
+
+verify_current_release_sha() {
+    local expected_sha="$1"
+    verify_release_sha "$BOARD_CURRENT_LINK" "$expected_sha"
 }
 
 current_release_dir() {
@@ -282,6 +303,7 @@ deploy_export() {
     local deployed_sha release_dir
     IFS=$'\t' read -r deployed_sha release_dir < <(deploy_export_release)
     activate_release "$release_dir"
+    verify_current_release_sha "$deployed_sha"
     printf '%s\n' "$deployed_sha"
 }
 
@@ -492,6 +514,7 @@ start_canary_systemd() {
     local frame_dir="$4"
     local unit_name="$5"
     local canary_user="$6"
+    local canary_log="$7"
     local session_check_status=0
     if [[ "$(id -u)" != "0" ]]; then
         polkit_graphical_session_available "$POLKIT_APPROVAL_USER" || session_check_status=$?
@@ -505,6 +528,8 @@ start_canary_systemd() {
         --unit "$unit_name" \
         --uid "$canary_user" \
         --property "WorkingDirectory=$release_dir" \
+        --property "StandardOutput=append:$canary_log" \
+        --property "StandardError=append:$canary_log" \
         --setenv "PYTHONUNBUFFERED=1" \
         --setenv "PGU_TICKET_BOARD_SOCKET=$socket_path" \
         --setenv "TICKET_BOARD_DATABASE_URL=$BOARD_DATABASE_URL" \
@@ -547,18 +572,30 @@ run_release_canary() {
     if [[ "$current_user" == "$canary_user" ]]; then
         pid="$(start_canary_direct "$release_dir" "$port" "$socket_path" "$frame_dir" "$canary_log")"
     else
-        start_canary_systemd "$release_dir" "$port" "$socket_path" "$frame_dir" "$unit_name" "$canary_user"
+        start_canary_systemd "$release_dir" "$port" "$socket_path" "$frame_dir" "$unit_name" "$canary_user" "$canary_log" || status=$?
     fi
-    smoke_check_url "http://$BOARD_HOST:$port$SMOKE_PATH" "$BOARD_CANARY_TIMEOUT_SECONDS" || status=$?
+    if (( status == 0 )); then
+        smoke_check_url "http://$BOARD_HOST:$port$SMOKE_PATH" "$BOARD_CANARY_TIMEOUT_SECONDS" || status=$?
+    fi
     if [[ -n "$pid" ]]; then
         stop_canary_direct "$pid"
     else
+        if (( status != 0 )); then
+            systemctl_system status "$unit_name" --no-pager -l >&2 || true
+        fi
         stop_canary_systemd "$unit_name"
     fi
-    rm -rf "$socket_root"
     if (( status != 0 )); then
+        if [[ -s "$canary_log" ]]; then
+            log "canary log follows:"
+            sed 's/^/[ticket-board-service] canary: /' "$canary_log" >&2
+        else
+            log "canary log was empty at $canary_log"
+        fi
+        rm -rf "$socket_root"
         die "canary failed; leaving $BOARD_CURRENT_LINK unchanged"
     fi
+    rm -rf "$socket_root"
     log "canary-pass for $release_dir"
 }
 
@@ -676,6 +713,7 @@ deploy_restart_service() {
     apply_database_migrations_for_release "$release_dir"
     run_release_canary "$release_dir" "$scope"
     activate_release "$release_dir"
+    verify_current_release_sha "$deployed_sha"
     restart_live_service "$scope"
     if ! smoke_check_http; then
         rollback_live_service "$scope" "$previous_release"

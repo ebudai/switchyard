@@ -21,9 +21,14 @@ git -C "$SOURCE_REPO" commit -m "seed" >/dev/null
 
 BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
     "$REPO_ROOT/scripts/ticket-board-notify-listener-service.sh" deploy >/dev/null
+deployed_sha="$(git -C "$SOURCE_REPO" rev-parse --verify HEAD^{commit})"
 
 [[ -L "$DEPLOY_ROOT/current" ]] || {
     echo "FAIL: current deploy link missing" >&2
+    exit 1
+}
+[[ "$(cat "$DEPLOY_ROOT/current/.pgu-deploy-sha")" == "$deployed_sha" ]] || {
+    echo "FAIL: listener deploy did not write/activate the expected commit marker" >&2
     exit 1
 }
 [[ -x "$DEPLOY_ROOT/current/scripts/ticket-board-notify-listener" ]] || {
@@ -34,6 +39,32 @@ if [[ -d "$DEPLOY_ROOT/current/.git" ]]; then
     echo "FAIL: deploy root should be an export, not a git checkout" >&2
     exit 1
 fi
+
+printf 'stale\n' >"$DEPLOY_ROOT/releases/$deployed_sha/.pgu-deploy-sha"
+if BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
+    "$REPO_ROOT/scripts/ticket-board-notify-listener-service.sh" deploy >"$TMPDIR_T/marker.out" 2>"$TMPDIR_T/marker.err"; then
+    echo "FAIL: listener deploy should fail when an existing release has the wrong commit marker" >&2
+    exit 1
+fi
+grep -q 'sha marker mismatch' "$TMPDIR_T/marker.err" || {
+    echo "FAIL: listener stale release marker failure was not reported clearly" >&2
+    cat "$TMPDIR_T/marker.err" >&2
+    exit 1
+}
+printf '%s\n' "$deployed_sha" >"$DEPLOY_ROOT/releases/$deployed_sha/.pgu-deploy-sha"
+
+git -C "$SOURCE_REPO" remote add origin "$TMPDIR_T/missing-origin"
+if BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
+    "$REPO_ROOT/scripts/ticket-board-notify-listener-service.sh" deploy >"$TMPDIR_T/fetch.out" 2>"$TMPDIR_T/fetch.err"; then
+    echo "FAIL: listener deploy should fail loudly when git fetch origin fails" >&2
+    exit 1
+fi
+grep -q 'failed to fetch origin' "$TMPDIR_T/fetch.err" || {
+    echo "FAIL: listener fetch failure did not produce a clear stale-deploy error" >&2
+    cat "$TMPDIR_T/fetch.err" >&2
+    exit 1
+}
+git -C "$SOURCE_REPO" remote remove origin
 
 BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD \
     "$REPO_ROOT/scripts/ticket-board-notify-listener-service.sh" render-unit >"$UNIT_DIR/service.unit"

@@ -75,15 +75,34 @@ ensure_source_repo() {
 
 maybe_fetch_origin() {
     if git -C "$SOURCE_REPO" remote get-url origin >/dev/null 2>&1; then
-        git -C "$SOURCE_REPO" fetch origin >/dev/null 2>&1
+        local output
+        if ! output="$(git -C "$SOURCE_REPO" fetch origin 2>&1)"; then
+            [[ -z "$output" ]] || printf '%s\n' "$output" >&2
+            die "failed to fetch origin in $SOURCE_REPO; refusing stale deploy of $DEPLOY_REF"
+        fi
     fi
+}
+
+verify_release_sha() {
+    local release_dir="$1"
+    local expected_sha="$2"
+    local marker="$release_dir/.pgu-deploy-sha"
+    local actual_sha
+    [[ -f "$marker" ]] || die "release $release_dir is missing deploy sha marker"
+    actual_sha="$(<"$marker")"
+    [[ "$actual_sha" == "$expected_sha" ]] || die "release $release_dir sha marker mismatch: expected $expected_sha, got $actual_sha"
+}
+
+verify_current_release_sha() {
+    local expected_sha="$1"
+    verify_release_sha "$BOARD_CURRENT_LINK" "$expected_sha"
 }
 
 deploy_export() {
     local resolved_ref release_dir tmp_dir
     ensure_source_repo
     maybe_fetch_origin
-    resolved_ref="$(git -C "$SOURCE_REPO" rev-parse "$DEPLOY_REF")" || die "failed to resolve $DEPLOY_REF in $SOURCE_REPO"
+    resolved_ref="$(git -C "$SOURCE_REPO" rev-parse --verify "$DEPLOY_REF^{commit}")" || die "failed to resolve $DEPLOY_REF in $SOURCE_REPO"
     mkdir -p "$BOARD_RELEASES_DIR"
     release_dir="$BOARD_RELEASES_DIR/$resolved_ref"
     if [[ ! -d "$release_dir" ]]; then
@@ -91,9 +110,12 @@ deploy_export() {
         rm -rf "$tmp_dir"
         mkdir -p "$tmp_dir"
         git -C "$SOURCE_REPO" archive "$resolved_ref" | tar -x -C "$tmp_dir"
+        printf '%s\n' "$resolved_ref" >"$tmp_dir/.pgu-deploy-sha"
         mv "$tmp_dir" "$release_dir"
     fi
+    verify_release_sha "$release_dir" "$resolved_ref"
     ln -sfn "$release_dir" "$BOARD_CURRENT_LINK"
+    verify_current_release_sha "$resolved_ref"
     printf '%s\n' "$resolved_ref"
 }
 

@@ -639,6 +639,7 @@ class TicketBoardNotifyListener:
         self.delivered_count = 0
         self._traced_gate_defer_notifications: set[int] = set()
         self._seen_turn_end_idle_since_by_role: dict[str, str] = {}
+        self._consumed_present_idle_since_by_role: dict[str, str] = {}
 
     def _connector_kwargs(self) -> dict[str, int | bool]:
         return {
@@ -915,19 +916,28 @@ SELECT ticket_board.record_notification_trace(
         idle_since_by_role = self._idle_since_by_role(
             [role for role in sorted(ROLE_TO_TARGET) if role != "director"]
         )
+        stale_roles = set(self._consumed_present_idle_since_by_role) - set(idle_since_by_role)
+        for role in stale_roles:
+            self._consumed_present_idle_since_by_role.pop(role, None)
         now = datetime.now(timezone.utc)
         fresh_idle_since: dict[str, str] = {}
         for role, idle_since in idle_since_by_role.items():
             if role == "director":
                 continue
+            if self._consumed_present_idle_since_by_role.get(role) == idle_since:
+                continue
             try:
                 parsed = datetime.fromisoformat(idle_since)
             except ValueError:
+                self._consumed_present_idle_since_by_role.pop(role, None)
                 continue
             if parsed.tzinfo is None:
                 parsed = parsed.replace(tzinfo=timezone.utc)
             if (now - parsed).total_seconds() <= self.present_idle_freshness_seconds:
                 fresh_idle_since[role] = idle_since
+                self._consumed_present_idle_since_by_role[role] = idle_since
+            else:
+                self._consumed_present_idle_since_by_role.pop(role, None)
         return fresh_idle_since
 
     def process_idle_turn_end_nudges(self, conn: Any) -> int:

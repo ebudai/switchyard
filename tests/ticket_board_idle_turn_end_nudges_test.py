@@ -6,12 +6,25 @@ from __future__ import annotations
 import json
 import socket
 import subprocess
+import sys
 import tempfile
+import time
 from pathlib import Path
+
+import psycopg
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
+
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.ticket_board.notify_listener import (
+    PaneActivityGate,
+    PaneHookStateStore,
+    TicketBoardNotifyListener,
+)
 
 
 def run(args: list[str], *, capture: bool = True, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -634,6 +647,85 @@ SELECT jsonb_build_object(
                 "latest_kind": "escalation",
                 "latest_message": "app was reminded about PGU-3661 (in in_progress) and still hasn't advanced it -- may be stuck.",
             }, repeated_wave_row
+
+            psql(
+                conninfo,
+                """
+INSERT INTO ticket_board.tickets (
+    id, title, body, state, assignee, implementation, audit_signoff, created_text, updated_text, source_json
+) VALUES (
+    'PGU-9001', 'Present-idle same timestamp escalation guard', '', 'in_progress', 'ops', 'Working.', false,
+    '2026-07-13T00:00:00+00:00', '2026-07-13T00:00:00+00:00',
+    jsonb_build_object('id', 'PGU-9001', 'title', 'Present-idle same timestamp escalation guard', 'body', '', 'state', 'in_progress', 'assignee', 'ops', 'implementation', 'Working.', 'comments', '[]'::jsonb, 'created', '2026-07-13T00:00:00+00:00', 'updated', '2026-07-13T00:00:00+00:00')
+);
+UPDATE ticket_board.tickets
+SET manually_controlled = true
+WHERE id <> 'PGU-9001';
+UPDATE ticket_board.tickets
+SET state = 'in_progress'
+WHERE id = 'PGU-9001';
+UPDATE ticket_board.ticket_notification_state
+SET entered_current_state_at = clock_timestamp() - interval '10 minutes',
+    last_activity_at = clock_timestamp() - interval '10 minutes',
+    idle_reminder_count = 1
+WHERE ticket_id = 'PGU-9001';
+INSERT INTO ticket_board.notification_trace (
+    ts, ticket_id, target_role, kind, event, ticket_state_at_event, ticket_assignee_at_event,
+    pane_busy_determination, busy_reason
+) VALUES (
+    clock_timestamp() - interval '10 minutes', 'PGU-9001', 'ops', 'transition', 'send',
+    'in_progress', 'ops', 'idle', 'idle'
+);
+DELETE FROM ticket_board.ticket_notification_queue;
+""",
+            )
+            listener_conninfo = f"host={socket_dir} port={port} dbname={dbname} user=ticket_board_listener"
+
+            def cursor_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                return subprocess.CompletedProcess(args, 0, stdout="0 23 24\n")
+
+            def capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                return subprocess.CompletedProcess(args, 0, stdout="idle pane\n")
+
+            state_store = PaneHookStateStore(root / "pane-state")
+            state_store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=time.time())
+            gate = PaneActivityGate(
+                state_store=state_store,
+                cursor_position_runner=cursor_runner,
+                capture_pane_runner=capture_runner,
+            )
+            listener = TicketBoardNotifyListener(
+                conninfo="",
+                activity_gate=gate.is_working,
+                sender=lambda _target, _message: None,
+                present_idle_freshness_seconds=900,
+            )
+            with psycopg.connect(listener_conninfo, autocommit=True) as listener_conn:
+                first_present_idle = listener.process_idle_turn_end_nudges(listener_conn)
+                assert first_present_idle == 1, first_present_idle
+                first_escalation_id = listener_conn.execute(
+                    """
+SELECT id
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-9001'
+  AND kind = 'escalation'
+  AND target_role = 'director'
+ORDER BY id DESC
+LIMIT 1
+"""
+                ).fetchone()[0]
+                listener_conn.execute("SELECT ticket_board.ack_notification(%s::bigint)", (first_escalation_id,))
+
+                second_present_idle = listener.process_idle_turn_end_nudges(listener_conn)
+                assert second_present_idle == 0, second_present_idle
+                repeated_escalation_count = listener_conn.execute(
+                    """
+SELECT count(*)::int
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-9001'
+"""
+                ).fetchone()[0]
+                assert repeated_escalation_count == 0, repeated_escalation_count
         finally:
             run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], capture=False)
 

@@ -717,11 +717,11 @@ def test_listener_enqueues_idle_turn_end_nudges_on_each_turn_completion_idle() -
         assert second_idle_since == {"ops": "1970-01-01T00:01:44+00:00"}
 
 
-def test_listener_enqueues_idle_turn_end_nudge_for_present_fresh_idle_without_new_edge() -> None:
+def test_listener_enqueues_present_idle_fallback_once_per_idle_period() -> None:
     with TemporaryStateDir() as tmp_path:
         store, gate = hook_gate(tmp_path)
         now = time.time()
-        store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=now)
+        store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=now)
         conn = FakeConnection(idle_turn_end_result=1)
         listener = TicketBoardNotifyListener(
             conninfo="",
@@ -731,6 +731,11 @@ def test_listener_enqueues_idle_turn_end_nudge_for_present_fresh_idle_without_ne
         )
 
         assert listener.process_idle_turn_end_nudges(conn) == 1
+        assert listener.process_idle_turn_end_nudges(conn) == 0
+
+        store.write("pgu-ops:0.0", "busy", source="codex.UserPromptSubmit", now=now + 1)
+        assert listener.process_idle_turn_end_nudges(conn) == 0
+        store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=now + 2)
         assert listener.process_idle_turn_end_nudges(conn) == 1
 
     assert len(conn.idle_turn_end_calls) == 2
@@ -739,7 +744,7 @@ def test_listener_enqueues_idle_turn_end_nudge_for_present_fresh_idle_without_ne
     assert first_params is not None
     assert second_params is not None
     assert json.loads(str(first_params[0])) == {"ops": datetime.fromtimestamp(now, timezone.utc).isoformat()}
-    assert json.loads(str(second_params[0])) == {"ops": datetime.fromtimestamp(now, timezone.utc).isoformat()}
+    assert json.loads(str(second_params[0])) == {"ops": datetime.fromtimestamp(now + 2, timezone.utc).isoformat()}
 
 
 def test_present_idle_turn_end_fallback_does_not_probe_director() -> None:
@@ -1964,7 +1969,7 @@ def main() -> int:
     test_static_working_timer_does_not_suppress_idle_stall_nudge()
     test_cached_working_timer_increment_suppresses_next_idle_since_scan()
     test_listener_enqueues_idle_turn_end_nudges_on_each_turn_completion_idle()
-    test_listener_enqueues_idle_turn_end_nudge_for_present_fresh_idle_without_new_edge()
+    test_listener_enqueues_present_idle_fallback_once_per_idle_period()
     test_present_idle_turn_end_fallback_does_not_probe_director()
     test_external_hook_writer_records_state_file()
     test_display_message_renames_analysis_stage_copy_without_touching_titles()

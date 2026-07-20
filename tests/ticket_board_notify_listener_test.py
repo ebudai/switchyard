@@ -50,7 +50,7 @@ class FakeConnection:
         self,
         queue_rows: list[tuple[int, str, str, str, str, int]] | None = None,
         *,
-        ticket_rows: dict[str, tuple[str, str] | tuple[str, str, bool, bool]] | None = None,
+        ticket_rows: dict[str, tuple[str, str] | tuple[str, str, bool, bool] | tuple[str, str, bool, bool, bool]] | None = None,
         finish_current_blockers: dict[str, str] | None = None,
         in_progress_entries: dict[str, tuple[str, float | None]] | None = None,
         next_attempt_at: datetime | None = None,
@@ -78,8 +78,8 @@ class FakeConnection:
         self.notify_timeouts: list[float | None] = []
         self.closed = False
 
-    def _ticket_rows_for_queue(self, queue_rows: list[tuple[int, str, str, str, str, int]]) -> dict[str, tuple[str, str, bool, bool]]:
-        rows: dict[str, tuple[str, str, bool, bool]] = {}
+    def _ticket_rows_for_queue(self, queue_rows: list[tuple[int, str, str, str, str, int]]) -> dict[str, tuple[str, str, bool, bool, bool]]:
+        rows: dict[str, tuple[str, str, bool, bool, bool]] = {}
         for _notification_id, ticket_id, target_role, _message, payload, _attempts in queue_rows:
             try:
                 parsed = json.loads(payload)
@@ -91,7 +91,7 @@ class FakeConnection:
                 state = "audit" if target_role == "audit" else "director_review" if target_role == "director" else "in_progress"
             if not assignee:
                 assignee = "director" if target_role == "director" else target_role
-            rows[ticket_id] = (state, assignee, False, False)
+            rows[ticket_id] = (state, assignee, False, False, False)
         return rows
 
     def __enter__(self) -> FakeConnection:
@@ -136,6 +136,8 @@ class FakeConnection:
             row = self.ticket_rows.get(str(params[0]))
             if row is not None and len(row) == 2:
                 row = (row[0], row[1], False, False)
+            if row is not None and len(row) == 4:
+                row = (row[0], row[1], row[2], row[3], False)
             return FakeResult([] if row is None else [row])
         if "ack_notification" in statement_text:
             assert params is not None
@@ -1640,6 +1642,70 @@ def test_terminal_transition_notification_is_delivered_to_prior_owner() -> None:
     assert conn.acked == [9]
 
 
+def test_queued_idle_reminder_drops_after_ticket_becomes_manually_controlled() -> None:
+    sent: list[tuple[str, str]] = []
+    conn = FakeConnection(
+        [
+            queue_row(
+                90,
+                "PGU-549",
+                kind="idle_reminder",
+                state="analysis",
+                assignee="ops",
+                target_role="director",
+                message="PGU-549 is still in analysis and you haven't advanced it.",
+            )
+        ],
+        ticket_rows={"PGU-549": ("analysis", "ops", True, False, False)},
+    )
+    listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=lambda target, text: sent.append((target, text)),
+        activity_gate=lambda _target: False,
+        connector=lambda *args, **kwargs: conn,
+        poll_seconds=0,
+    )
+
+    assert listener.listen_once(max_notifications=1) == 0
+    assert sent == []
+    assert conn.acked == [90]
+    assert trace_events(conn) == ["listener_claim", "drop", "listener_ack"]
+
+
+def test_queued_transition_drops_after_ticket_becomes_parked_or_blocked() -> None:
+    for notification_id, ticket_row in (
+        (91, ("analysis", "ops", False, True, False)),
+        (92, ("analysis", "ops", False, False, True)),
+    ):
+        sent: list[tuple[str, str]] = []
+        conn = FakeConnection(
+            [
+                queue_row(
+                    notification_id,
+                    f"PGU-{notification_id}",
+                    kind="transition",
+                    state="analysis",
+                    assignee="ops",
+                    target_role="director",
+                    message=f"New ticket for you: PGU-{notification_id}",
+                )
+            ],
+            ticket_rows={f"PGU-{notification_id}": ticket_row},
+        )
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, text: sent.append((target, text)),
+            activity_gate=lambda _target: False,
+            connector=lambda *args, conn=conn, **kwargs: conn,
+            poll_seconds=0,
+        )
+
+        assert listener.listen_once(max_notifications=1) == 0
+        assert sent == []
+        assert conn.acked == [notification_id]
+        assert trace_events(conn) == ["listener_claim", "drop", "listener_ack"]
+
+
 def test_idle_reminder_repeat_escalation_delivers_to_director() -> None:
     sent: list[tuple[str, str]] = []
     message = "ops was reminded about PGU-366 (in in_progress) and still hasn't advanced it -- may be stuck."
@@ -1824,6 +1890,8 @@ def main() -> int:
     test_send_failure_uses_exponential_backoff()
     test_stale_notification_for_cancelled_ticket_is_acked_not_delivered()
     test_terminal_transition_notification_is_delivered_to_prior_owner()
+    test_queued_idle_reminder_drops_after_ticket_becomes_manually_controlled()
+    test_queued_transition_drops_after_ticket_becomes_parked_or_blocked()
     test_idle_reminder_repeat_escalation_delivers_to_director()
     test_eric_review_delivers_to_director_for_uat()
     test_reconnect_relistens_after_connection_drop()

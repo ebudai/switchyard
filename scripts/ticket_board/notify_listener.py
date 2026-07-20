@@ -941,13 +941,14 @@ SELECT ticket_board.notify_idle_stall_nudges(
             self.logger.info("Enqueued %s idle-stall ticket nudges", enqueued)
         return enqueued
 
-    def _current_ticket_state(self, conn: Any, ticket_id: str) -> tuple[str, str, bool, bool] | None:
+    def _current_ticket_state(self, conn: Any, ticket_id: str) -> tuple[str, str, bool, bool, bool] | None:
         result = conn.execute(
             """
 SELECT state,
        assignee,
        manually_controlled,
-       coalesce((to_jsonb(t)->>'parked')::boolean, false) AS parked
+       coalesce((to_jsonb(t)->>'parked')::boolean, false) AS parked,
+       ticket_board.ticket_has_unresolved_blockers(id) AS has_unresolved_blockers
 FROM ticket_board.tickets t
 WHERE id = %s
 """,
@@ -962,8 +963,9 @@ WHERE id = %s
                 self._decode_text(row["assignee"]),
                 bool(row["manually_controlled"]),
                 bool(row["parked"]),
+                bool(row["has_unresolved_blockers"]),
             )
-        return self._decode_text(row[0]), self._decode_text(row[1]), bool(row[2]), bool(row[3])
+        return self._decode_text(row[0]), self._decode_text(row[1]), bool(row[2]), bool(row[3]), bool(row[4])
 
     def _current_target_role(self, kind: str, state: str, assignee: str) -> str | None:
         if kind == "transition":
@@ -996,7 +998,7 @@ WHERE id = %s
         current = self._current_ticket_state(conn, ticket_id)
         if current is None:
             return False
-        current_state, current_assignee, manually_controlled, parked = current
+        current_state, current_assignee, manually_controlled, parked, has_unresolved_blockers = current
 
         try:
             parsed = json.loads(payload)
@@ -1035,7 +1037,12 @@ WHERE id = %s
                 and current_assignee != "unassigned"
                 and not manually_controlled
                 and not parked
+                and not has_unresolved_blockers
             )
+        if kind in {"transition", "idle_reminder", "nudge"} and (
+            manually_controlled or parked or has_unresolved_blockers
+        ):
+            return False
 
         current_target_role = self._current_target_role(kind, current_state, current_assignee)
         return current_target_role is None or current_target_role == target_role

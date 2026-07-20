@@ -42,10 +42,13 @@ DEFAULT_IDLE_STALL_NUDGE_CADENCE_SECONDS = 5 * 60.0
 DEFAULT_IDLE_STALL_ESCALATE_AFTER = 2
 IDLE_TURN_END_SOURCES = frozenset({"claude.Stop", "codex.Stop", "gemini.AfterAgent"})
 IMMEDIATE_DELIVERY_KINDS = frozenset({"ticket_update"})
+DEFAULT_PRESENT_IDLE_FRESHNESS_SECONDS = 15 * 60.0
 DEFAULT_PRE_SEND_RECHECK_DELAY_SECONDS = 0.5
 DEFAULT_DIRECTOR_COMPOSER_HOME_X = 2
 DEFAULT_WORKING_TIMER_SAMPLE_DELAY_SECONDS = 0.0
 DEFAULT_IDLE_WORKING_TIMER_SAMPLE_DELAY_SECONDS = 1.1
+DEFAULT_STALE_CODEX_BUSY_HOOK_SECONDS = 120.0
+MIN_RECOVERABLE_HOOK_EPOCH_SECONDS = 1_700_000_000.0
 DEFAULT_PANE_STATE_DIR = (
     Path(os.environ["PGU_TICKET_BOARD_PANE_STATE_DIR"]).expanduser()
     if os.environ.get("PGU_TICKET_BOARD_PANE_STATE_DIR")
@@ -325,6 +328,7 @@ class PaneActivityGate:
         director_composer_home_x: int = DEFAULT_DIRECTOR_COMPOSER_HOME_X,
         working_timer_sample_delay_seconds: float = DEFAULT_WORKING_TIMER_SAMPLE_DELAY_SECONDS,
         idle_working_timer_sample_delay_seconds: float = DEFAULT_IDLE_WORKING_TIMER_SAMPLE_DELAY_SECONDS,
+        stale_codex_busy_hook_seconds: float = DEFAULT_STALE_CODEX_BUSY_HOOK_SECONDS,
         monotonic: Callable[[], float] = time.monotonic,
         wall_time: Callable[[], float] = time.time,
         sleeper: Callable[[float], None] = time.sleep,
@@ -337,6 +341,7 @@ class PaneActivityGate:
         self.director_composer_home_x = director_composer_home_x
         self.working_timer_sample_delay_seconds = max(0.0, working_timer_sample_delay_seconds)
         self.idle_working_timer_sample_delay_seconds = max(0.0, idle_working_timer_sample_delay_seconds)
+        self.stale_codex_busy_hook_seconds = max(0.0, stale_codex_busy_hook_seconds)
         self.monotonic = monotonic
         self.wall_time = wall_time
         self.sleeper = sleeper
@@ -516,6 +521,30 @@ class PaneActivityGate:
             return ActivityTrace(True, "human_composing")
         return ActivityTrace(False, "hook_idle")
 
+    def _stale_codex_busy_trace(self, target: str, state: PaneHookState) -> ActivityTrace | None:
+        if state.state != "busy" or not state.source.startswith("codex."):
+            return None
+        if self.stale_codex_busy_hook_seconds <= 0:
+            return None
+        if state.updated_at < MIN_RECOVERABLE_HOOK_EPOCH_SECONDS:
+            return None
+        now = self.wall_time()
+        if now - state.updated_at < self.stale_codex_busy_hook_seconds:
+            return None
+        working_trace = self._working_timer_trace(target)
+        if working_trace is not None:
+            return working_trace
+        cursor_composing = self._target_cursor_state(target)
+        if cursor_composing is None:
+            return ActivityTrace(True, "cursor_state_unavailable")
+        if cursor_composing:
+            return ActivityTrace(True, "human_composing")
+        try:
+            self.state_store.write(target, "idle", source="listener.stale_codex_busy_recovery", now=now)
+        except OSError as exc:
+            LOGGER.warning("Failed to recover stale Codex busy hook state for %s: %s", target, exc)
+        return ActivityTrace(False, "stale_codex_busy_recovered")
+
     def anti_clobber_trace(self, target: str) -> ActivityTrace:
         state = self.state_store.read(target)
         if state is None:
@@ -554,6 +583,9 @@ class PaneActivityGate:
             if target == self.director_target:
                 self._reset_director_startup_hold()
             reason = "hook_blocked" if state.state == "blocked" else "hook_busy"
+            stale_trace = self._stale_codex_busy_trace(target, state)
+            if stale_trace is not None:
+                return self._record_trace(target, stale_trace)
             return self._record_trace(target, ActivityTrace(True, reason))
         if previous is not None and previous[0] != "idle" and target == self.director_target:
             self._reset_director_startup_hold()
@@ -580,6 +612,7 @@ class TicketBoardNotifyListener:
         idle_stall_grace_seconds: float = DEFAULT_IDLE_STALL_GRACE_SECONDS,
         idle_stall_nudge_cadence_seconds: float = DEFAULT_IDLE_STALL_NUDGE_CADENCE_SECONDS,
         idle_stall_escalate_after: int = DEFAULT_IDLE_STALL_ESCALATE_AFTER,
+        present_idle_freshness_seconds: float = DEFAULT_PRESENT_IDLE_FRESHNESS_SECONDS,
         pre_send_recheck_delay_seconds: float = 0.0,
         sleeper: Callable[[float], None] = time.sleep,
         stop_event: threading.Event | None = None,
@@ -598,6 +631,7 @@ class TicketBoardNotifyListener:
         self.idle_stall_grace_seconds = idle_stall_grace_seconds
         self.idle_stall_nudge_cadence_seconds = idle_stall_nudge_cadence_seconds
         self.idle_stall_escalate_after = idle_stall_escalate_after
+        self.present_idle_freshness_seconds = max(0.0, present_idle_freshness_seconds)
         self.pre_send_recheck_delay_seconds = max(0.0, pre_send_recheck_delay_seconds)
         self.sleeper = sleeper
         self.stop_event = stop_event or threading.Event()
@@ -841,13 +875,13 @@ SELECT ticket_board.record_notification_trace(
         due_timeout = max(0.0, seconds_until_due)
         return min(timeout, due_timeout) if timeout > 0 else due_timeout
 
-    def _idle_since_by_role(self) -> dict[str, str]:
+    def _idle_since_by_role(self, roles: list[str] | None = None) -> dict[str, str]:
         gate_owner = getattr(self.activity_gate, "__self__", None)
         idle_since_by_role = getattr(gate_owner, "idle_since_by_role", None)
         if not callable(idle_since_by_role):
             return {}
         try:
-            return dict(idle_since_by_role())
+            return dict(idle_since_by_role(roles)) if roles is not None else dict(idle_since_by_role())
         except Exception as exc:
             self.logger.warning("Failed to read pane idle hook state for stall nudges: %s", exc)
             return {}
@@ -875,8 +909,31 @@ SELECT ticket_board.record_notification_trace(
             self._seen_turn_end_idle_since_by_role.pop(role, None)
         return fresh_turn_end_idle_since
 
+    def _present_fresh_idle_since_by_role(self) -> dict[str, str]:
+        if self.present_idle_freshness_seconds <= 0:
+            return {}
+        idle_since_by_role = self._idle_since_by_role(
+            [role for role in sorted(ROLE_TO_TARGET) if role != "director"]
+        )
+        now = datetime.now(timezone.utc)
+        fresh_idle_since: dict[str, str] = {}
+        for role, idle_since in idle_since_by_role.items():
+            if role == "director":
+                continue
+            try:
+                parsed = datetime.fromisoformat(idle_since)
+            except ValueError:
+                continue
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            if (now - parsed).total_seconds() <= self.present_idle_freshness_seconds:
+                fresh_idle_since[role] = idle_since
+        return fresh_idle_since
+
     def process_idle_turn_end_nudges(self, conn: Any) -> int:
         idle_since = self._fresh_turn_end_idle_since_by_role()
+        if not idle_since:
+            idle_since = self._present_fresh_idle_since_by_role()
         if not idle_since:
             return 0
         try:

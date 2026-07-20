@@ -717,6 +717,53 @@ def test_listener_enqueues_idle_turn_end_nudges_on_each_turn_completion_idle() -
         assert second_idle_since == {"ops": "1970-01-01T00:01:44+00:00"}
 
 
+def test_listener_enqueues_idle_turn_end_nudge_for_present_fresh_idle_without_new_edge() -> None:
+    with TemporaryStateDir() as tmp_path:
+        store, gate = hook_gate(tmp_path)
+        now = time.time()
+        store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=now)
+        conn = FakeConnection(idle_turn_end_result=1)
+        listener = TicketBoardNotifyListener(
+            conninfo="",
+            activity_gate=gate.is_working,
+            sender=lambda _target, _message: None,
+            present_idle_freshness_seconds=900,
+        )
+
+        assert listener.process_idle_turn_end_nudges(conn) == 1
+        assert listener.process_idle_turn_end_nudges(conn) == 1
+
+    assert len(conn.idle_turn_end_calls) == 2
+    first_params = conn.idle_turn_end_calls[0]
+    second_params = conn.idle_turn_end_calls[1]
+    assert first_params is not None
+    assert second_params is not None
+    assert json.loads(str(first_params[0])) == {"ops": datetime.fromtimestamp(now, timezone.utc).isoformat()}
+    assert json.loads(str(second_params[0])) == {"ops": datetime.fromtimestamp(now, timezone.utc).isoformat()}
+
+
+def test_present_idle_turn_end_fallback_does_not_probe_director() -> None:
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            cursor_position_runner=constant_cursor_runner("5 23 24"),
+        )
+        store.write("pgu-director:0.0", "idle", source="claude.Notification.idle_prompt", now=time.time())
+        conn = FakeConnection(idle_turn_end_result=1)
+        listener = TicketBoardNotifyListener(
+            conninfo="",
+            activity_gate=gate.is_working,
+            sender=lambda _target, _message: None,
+            present_idle_freshness_seconds=900,
+        )
+
+        assert listener.process_idle_turn_end_nudges(conn) == 0
+
+    assert conn.idle_turn_end_calls == []
+    assert gate.last_trace("pgu-director:0.0") is None
+
+
 def test_external_hook_writer_records_state_file() -> None:
     with TemporaryStateDir() as tmp_path:
         subprocess.run(
@@ -792,6 +839,60 @@ def test_hook_busy_requeues_with_fixed_interval() -> None:
 
     assert sent == []
     assert delays == [f"{DEFAULT_BUSY_REQUEUE_SECONDS:g} seconds"] * 3
+
+
+def test_stale_codex_busy_state_recovers_and_delivers() -> None:
+    sent: list[tuple[str, str]] = []
+    now = [1_800_000_300.0]
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            cursor_position_runner=constant_cursor_runner("2 23 24"),
+            capture_pane_runner=sequenced_capture_runner(""),
+            stale_codex_busy_hook_seconds=120,
+            wall_time=lambda: now[0],
+        )
+        store.write("pgu-ops:0.0", "busy", source="codex.UserPromptSubmit", now=1_800_000_000.0)
+        conn = FakeConnection([queue_row(89, "PGU-558")])
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=gate.is_working,
+            connector=lambda *args, **kwargs: conn,
+            poll_seconds=0,
+        )
+
+        assert listener.listen_once(max_notifications=1) == 1
+        recovered = store.read("pgu-ops:0.0")
+
+    assert sent == [("pgu-ops:0.0", "New ticket for you: PGU-558 -- Queue")]
+    assert conn.requeued == []
+    assert conn.acked == [89]
+    assert recovered is not None
+    assert recovered.state == "idle"
+    assert recovered.source == "listener.stale_codex_busy_recovery"
+
+
+def test_stale_codex_busy_state_stays_busy_when_human_is_composing() -> None:
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            cursor_position_runner=constant_cursor_runner("5 23 24"),
+            capture_pane_runner=sequenced_capture_runner(""),
+            stale_codex_busy_hook_seconds=120,
+            wall_time=lambda: 1_800_000_300.0,
+        )
+        store.write("pgu-ops:0.0", "busy", source="codex.UserPromptSubmit", now=1_800_000_000.0)
+
+        assert gate.is_busy("pgu-ops:0.0") is True
+        state = store.read("pgu-ops:0.0")
+
+    assert gate.last_trace("pgu-ops:0.0").reason == "human_composing"  # type: ignore[union-attr]
+    assert state is not None
+    assert state.state == "busy"
+    assert state.source == "codex.UserPromptSubmit"
 
 
 def test_ticket_update_delivers_immediately_to_busy_worker_with_empty_composer() -> None:
@@ -1863,10 +1964,14 @@ def main() -> int:
     test_static_working_timer_does_not_suppress_idle_stall_nudge()
     test_cached_working_timer_increment_suppresses_next_idle_since_scan()
     test_listener_enqueues_idle_turn_end_nudges_on_each_turn_completion_idle()
+    test_listener_enqueues_idle_turn_end_nudge_for_present_fresh_idle_without_new_edge()
+    test_present_idle_turn_end_fallback_does_not_probe_director()
     test_external_hook_writer_records_state_file()
     test_display_message_renames_analysis_stage_copy_without_touching_titles()
     test_missing_hook_state_fails_safe_and_does_not_clobber()
     test_hook_busy_requeues_with_fixed_interval()
+    test_stale_codex_busy_state_recovers_and_delivers()
+    test_stale_codex_busy_state_stays_busy_when_human_is_composing()
     test_ticket_update_delivers_immediately_to_busy_worker_with_empty_composer()
     test_ticket_update_waits_for_worker_human_composing_to_clear()
     test_ticket_update_holds_busy_worker_with_advanced_cursor()

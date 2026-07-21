@@ -688,7 +688,7 @@ DELETE FROM ticket_board.ticket_notification_queue;
                 return subprocess.CompletedProcess(args, 0, stdout="idle pane\n")
 
             state_store = PaneHookStateStore(root / "pane-state")
-            state_store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=time.time())
+            state_store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=time.time() - 60 * 60)
             gate = PaneActivityGate(
                 state_store=state_store,
                 cursor_position_runner=cursor_runner,

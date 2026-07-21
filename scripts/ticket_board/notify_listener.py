@@ -40,9 +40,14 @@ DEFAULT_DIRECTOR_COMPOSING_TIMEOUT_SECONDS = 15 * 60.0
 DEFAULT_IDLE_STALL_GRACE_SECONDS = 45.0
 DEFAULT_IDLE_STALL_NUDGE_CADENCE_SECONDS = 5 * 60.0
 DEFAULT_IDLE_STALL_ESCALATE_AFTER = 2
-IDLE_TURN_END_SOURCES = frozenset({"claude.Stop", "codex.Stop", "gemini.AfterAgent", "gemini.PostInvocation", "gemini.Stop"})
+# Present-idle fallback is age-unbounded: an idle hook remains valid until the
+# pane reports busy/blocked again, and the live activity gate still runs before
+# any send.
+DEFAULT_PRESENT_IDLE_FRESHNESS_SECONDS = 0.0
+IDLE_TURN_END_SOURCES = frozenset(
+    {"claude.Stop", "codex.Stop", "gemini.AfterAgent", "gemini.PostInvocation", "gemini.Stop"}
+)
 IMMEDIATE_DELIVERY_KINDS = frozenset({"ticket_update"})
-DEFAULT_PRESENT_IDLE_FRESHNESS_SECONDS = 15 * 60.0
 DEFAULT_PRE_SEND_RECHECK_DELAY_SECONDS = 0.5
 DEFAULT_DIRECTOR_COMPOSER_HOME_X = 2
 DEFAULT_WORKING_TIMER_SAMPLE_DELAY_SECONDS = 0.0
@@ -631,6 +636,8 @@ class TicketBoardNotifyListener:
         self.idle_stall_grace_seconds = idle_stall_grace_seconds
         self.idle_stall_nudge_cadence_seconds = idle_stall_nudge_cadence_seconds
         self.idle_stall_escalate_after = idle_stall_escalate_after
+        # Deprecated compatibility knob: PGU-562 removed the present-idle age
+        # cutoff because the live activity gate is the delivery safety check.
         self.present_idle_freshness_seconds = max(0.0, present_idle_freshness_seconds)
         self.pre_send_recheck_delay_seconds = max(0.0, pre_send_recheck_delay_seconds)
         self.sleeper = sleeper
@@ -911,15 +918,12 @@ SELECT ticket_board.record_notification_trace(
         return fresh_turn_end_idle_since
 
     def _present_fresh_idle_since_by_role(self) -> dict[str, str]:
-        if self.present_idle_freshness_seconds <= 0:
-            return {}
         idle_since_by_role = self._idle_since_by_role(
             [role for role in sorted(ROLE_TO_TARGET) if role != "director"]
         )
         stale_roles = set(self._consumed_present_idle_since_by_role) - set(idle_since_by_role)
         for role in stale_roles:
             self._consumed_present_idle_since_by_role.pop(role, None)
-        now = datetime.now(timezone.utc)
         fresh_idle_since: dict[str, str] = {}
         for role, idle_since in idle_since_by_role.items():
             if role == "director":
@@ -927,22 +931,19 @@ SELECT ticket_board.record_notification_trace(
             if self._consumed_present_idle_since_by_role.get(role) == idle_since:
                 continue
             try:
-                parsed = datetime.fromisoformat(idle_since)
+                datetime.fromisoformat(idle_since)
             except ValueError:
                 self._consumed_present_idle_since_by_role.pop(role, None)
                 continue
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            if (now - parsed).total_seconds() <= self.present_idle_freshness_seconds:
-                fresh_idle_since[role] = idle_since
-                self._consumed_present_idle_since_by_role[role] = idle_since
-            else:
-                self._consumed_present_idle_since_by_role.pop(role, None)
+            fresh_idle_since[role] = idle_since
+            self._consumed_present_idle_since_by_role[role] = idle_since
         return fresh_idle_since
 
     def process_idle_turn_end_nudges(self, conn: Any) -> int:
         idle_since = self._fresh_turn_end_idle_since_by_role()
-        if not idle_since:
+        if idle_since:
+            self._consumed_present_idle_since_by_role.update(idle_since)
+        else:
             idle_since = self._present_fresh_idle_since_by_role()
         if not idle_since:
             return 0

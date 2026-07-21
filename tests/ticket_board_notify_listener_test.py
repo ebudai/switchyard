@@ -692,26 +692,30 @@ def test_listener_enqueues_idle_turn_end_nudges_on_each_turn_completion_idle() -
         )
 
         store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=100.0)
-        assert listener.process_idle_turn_end_nudges(conn) == 0
-        assert conn.idle_turn_end_calls == []
+        assert listener.process_idle_turn_end_nudges(conn) == 1
+        assert len(conn.idle_turn_end_calls) == 1
+        startup_params = conn.idle_turn_end_calls[0]
+        assert startup_params is not None
+        startup_idle_since = json.loads(str(startup_params[0]))
+        assert startup_idle_since == {"ops": "1970-01-01T00:01:40+00:00"}
 
         store.write("pgu-ops:0.0", "busy", source="codex.UserPromptSubmit", now=101.0)
         store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=102.0)
         assert listener.process_idle_turn_end_nudges(conn) == 1
-        assert len(conn.idle_turn_end_calls) == 1
-        first_params = conn.idle_turn_end_calls[0]
+        assert len(conn.idle_turn_end_calls) == 2
+        first_params = conn.idle_turn_end_calls[1]
         assert first_params is not None
         first_idle_since = json.loads(str(first_params[0]))
         assert first_idle_since == {"ops": "1970-01-01T00:01:42+00:00"}
 
         assert listener.process_idle_turn_end_nudges(conn) == 0
-        assert len(conn.idle_turn_end_calls) == 1
+        assert len(conn.idle_turn_end_calls) == 2
 
         store.write("pgu-ops:0.0", "busy", source="codex.UserPromptSubmit", now=103.0)
         store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=104.0)
         assert listener.process_idle_turn_end_nudges(conn) == 1
-        assert len(conn.idle_turn_end_calls) == 2
-        second_params = conn.idle_turn_end_calls[1]
+        assert len(conn.idle_turn_end_calls) == 3
+        second_params = conn.idle_turn_end_calls[2]
         assert second_params is not None
         second_idle_since = json.loads(str(second_params[0]))
         assert second_idle_since == {"ops": "1970-01-01T00:01:44+00:00"}
@@ -738,7 +742,7 @@ def test_gemini_renamed_idle_hooks_count_as_turn_end_idle() -> None:
 def test_listener_enqueues_present_idle_fallback_once_per_idle_period() -> None:
     with TemporaryStateDir() as tmp_path:
         store, gate = hook_gate(tmp_path)
-        now = time.time()
+        now = time.time() - 60 * 60
         store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=now)
         conn = FakeConnection(idle_turn_end_result=1)
         listener = TicketBoardNotifyListener(
@@ -751,7 +755,7 @@ def test_listener_enqueues_present_idle_fallback_once_per_idle_period() -> None:
         assert listener.process_idle_turn_end_nudges(conn) == 1
         assert listener.process_idle_turn_end_nudges(conn) == 0
 
-        store.write("pgu-ops:0.0", "busy", source="codex.UserPromptSubmit", now=now + 1)
+        store.write("pgu-ops:0.0", "busy", source="test.UserPromptSubmit", now=now + 1)
         assert listener.process_idle_turn_end_nudges(conn) == 0
         store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=now + 2)
         assert listener.process_idle_turn_end_nudges(conn) == 1

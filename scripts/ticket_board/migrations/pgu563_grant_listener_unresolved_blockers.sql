@@ -1,0 +1,11 @@
+-- PGU-563: restore notification delivery broken by a missing grant.
+--
+-- PGU-549 added ticket_has_unresolved_blockers() to the delivery-time currency
+-- check (_current_ticket_state / _notification_is_current) but never granted
+-- EXECUTE on it to the notify-listener role. As a result the listener role
+-- (ticket_board_listener) hit "permission denied for function
+-- ticket_has_unresolved_blockers" on EVERY delivery attempt; the error was
+-- caught by run_forever's (psycopg.Error, OSError) handler as a "disconnect",
+-- the notification was re-claimed, and NO notification was ever sent from the
+-- moment PGU-549 shipped. Grant the missing privilege. Idempotent.
+GRANT EXECUTE ON FUNCTION ticket_board.ticket_has_unresolved_blockers(text) TO ticket_board_listener;

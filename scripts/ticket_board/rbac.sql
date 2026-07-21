@@ -102,5 +102,10 @@ GRANT EXECUTE ON FUNCTION ticket_board.requeue_notification(bigint, interval, te
 GRANT EXECUTE ON FUNCTION ticket_board.record_notification_trace(text, bigint, text, text, text, text, text, text, jsonb) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.notify_idle_stall_nudges(jsonb, timestamptz, interval, interval, integer) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.notify_idle_turn_end_nudges(jsonb, timestamptz) TO ticket_board_listener;
+-- The delivery currency check (_notification_is_current -> _current_ticket_state)
+-- calls ticket_has_unresolved_blockers; the listener role must be able to run it,
+-- otherwise every delivery throws "permission denied for function" and no
+-- notification is ever sent. Added after PGU-549 introduced the call without a grant.
+GRANT EXECUTE ON FUNCTION ticket_board.ticket_has_unresolved_blockers(text) TO ticket_board_listener;
 
 COMMIT;

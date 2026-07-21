@@ -717,6 +717,24 @@ def test_listener_enqueues_idle_turn_end_nudges_on_each_turn_completion_idle() -
         assert second_idle_since == {"ops": "1970-01-01T00:01:44+00:00"}
 
 
+def test_gemini_renamed_idle_hooks_count_as_turn_end_idle() -> None:
+    with TemporaryStateDir() as tmp_path:
+        store, gate = hook_gate(tmp_path)
+
+        store.write("pgu-inspector:0.0", "idle", source="gemini.SessionStart", now=100.0)
+        assert gate.idle_since_by_role(["inspector"]) == {"inspector": "1970-01-01T00:01:40+00:00"}
+        assert gate.turn_end_idle_since_by_role(["inspector"]) == {}
+
+        store.write("pgu-inspector:0.0", "busy", source="gemini.PreInvocation", now=101.0)
+        assert gate.turn_end_idle_since_by_role(["inspector"]) == {}
+
+        store.write("pgu-inspector:0.0", "idle", source="gemini.PostInvocation", now=102.0)
+        assert gate.turn_end_idle_since_by_role(["inspector"]) == {"inspector": "1970-01-01T00:01:42+00:00"}
+
+        store.write("pgu-inspector:0.0", "idle", source="gemini.Stop", now=103.0)
+        assert gate.turn_end_idle_since_by_role(["inspector"]) == {"inspector": "1970-01-01T00:01:43+00:00"}
+
+
 def test_listener_enqueues_present_idle_fallback_once_per_idle_period() -> None:
     with TemporaryStateDir() as tmp_path:
         store, gate = hook_gate(tmp_path)
@@ -1969,6 +1987,7 @@ def main() -> int:
     test_static_working_timer_does_not_suppress_idle_stall_nudge()
     test_cached_working_timer_increment_suppresses_next_idle_since_scan()
     test_listener_enqueues_idle_turn_end_nudges_on_each_turn_completion_idle()
+    test_gemini_renamed_idle_hooks_count_as_turn_end_idle()
     test_listener_enqueues_present_idle_fallback_once_per_idle_period()
     test_present_idle_turn_end_fallback_does_not_probe_director()
     test_external_hook_writer_records_state_file()

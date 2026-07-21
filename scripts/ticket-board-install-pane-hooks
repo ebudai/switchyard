@@ -66,6 +66,10 @@ def _hook_entry(command: str, *, matcher: str = "") -> dict[str, Any]:
     return entry
 
 
+def _flat_command_hook(command: str) -> dict[str, Any]:
+    return {"type": "command", "command": command}
+
+
 def _merge_hook_entries(config: dict[str, Any], event: str, entries: list[dict[str, Any]]) -> None:
     hooks = config.setdefault("hooks", {})
     if not isinstance(hooks, dict):
@@ -74,6 +78,19 @@ def _merge_hook_entries(config: dict[str, Any], event: str, entries: list[dict[s
     if not isinstance(existing, list):
         raise SystemExit(f"existing hooks.{event} field must be a JSON list")
     hooks[event] = [entry for entry in existing if not _contains_managed_hook(entry)] + entries
+
+
+def _merge_agy_named_hook(config: dict[str, Any], name: str, events: dict[str, list[dict[str, Any]]]) -> None:
+    existing = config.get(name, {})
+    if not isinstance(existing, dict):
+        existing = {}
+    cleaned = {
+        key: value
+        for key, value in existing.items()
+        if key not in events and not _contains_managed_hook(value)
+    }
+    cleaned.update(events)
+    config[name] = cleaned
 
 
 def _install_hook_binary(source: Path, destination: Path) -> None:
@@ -126,13 +143,34 @@ def _install_codex_hooks(home: Path, hook_bin: Path) -> Path:
 
 
 def _install_gemini_hooks(home: Path, hook_bin: Path) -> Path:
-    path = home / ".gemini" / "antigravity-cli" / "settings.json"
+    # agy 1.0.8 moved hook discovery to the shared Gemini config tree.
+    # The old antigravity-cli/settings.json path is still used for other
+    # settings, but current agy logs report hooks loaded from hooks.json files.
+    path = home / ".gemini" / "config" / "hooks.json"
     config = _load_json(path)
     hook = str(hook_bin)
-    _merge_hook_entries(config, "SessionStart", [_hook_entry(f"{hook} idle --source gemini.SessionStart --record-session")])
-    _merge_hook_entries(config, "BeforeAgent", [_hook_entry(f"{hook} busy --source gemini.BeforeAgent")])
-    _merge_hook_entries(config, "AfterAgent", [_hook_entry(f"{hook} idle --source gemini.AfterAgent")])
-    _merge_hook_entries(config, "ToolPermission", [_hook_entry(f"{hook} blocked --source gemini.ToolPermission")])
+    if _contains_managed_hook(config.get("hooks")):
+        config.pop("hooks", None)
+    _merge_agy_named_hook(
+        config,
+        "pgu-ticket-board-pane-state",
+        {
+            "SessionStart": [
+                _flat_command_hook(
+                    f"{hook} idle --source gemini.SessionStart --record-session >/dev/null && printf '{{}}'"
+                )
+            ],
+            "PreInvocation": [
+                _flat_command_hook(f"{hook} busy --source gemini.PreInvocation >/dev/null && printf '{{}}'")
+            ],
+            "PostInvocation": [
+                _flat_command_hook(f"{hook} idle --source gemini.PostInvocation >/dev/null && printf '{{}}'")
+            ],
+            "Stop": [
+                _flat_command_hook(f"{hook} idle --source gemini.Stop >/dev/null && printf '{{}}'")
+            ],
+        },
+    )
     _write_json(path, config)
     return path
 

@@ -66,6 +66,29 @@ def test_installer_writes_durable_cli_hook_configs_idempotently() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
         home = Path(tmp) / "home"
         bin_path = home / ".local" / "bin" / HOOK_NAME
+        stale_gemini = home / ".gemini" / "config" / "hooks.json"
+        stale_gemini.parent.mkdir(parents=True)
+        stale_gemini.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "AfterAgent": [
+                            {
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": f"{HOOK_NAME} idle --source gemini.AfterAgent",
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    "other-hook": {"Stop": [{"type": "command", "command": "true"}]},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         for _ in range(2):
             subprocess.run(
                 [str(INSTALLER), "install", "--home", str(home), "--bin-path", str(bin_path)],
@@ -78,7 +101,7 @@ def test_installer_writes_durable_cli_hook_configs_idempotently() -> None:
         assert bin_path.stat().st_mode & 0o111
         claude = _load(home / ".claude" / "settings.json")
         codex = _load(home / ".codex" / "hooks.json")
-        gemini = _load(home / ".gemini" / "antigravity-cli" / "settings.json")
+        gemini = _load(home / ".gemini" / "config" / "hooks.json")
 
         all_commands = "\n".join(_commands([claude, codex, gemini]))
         for required in (
@@ -91,14 +114,18 @@ def test_installer_writes_durable_cli_hook_configs_idempotently() -> None:
             "codex.UserPromptSubmit",
             "codex.PermissionRequest",
             "gemini.SessionStart",
-            "gemini.BeforeAgent",
-            "gemini.AfterAgent",
+            "gemini.PreInvocation",
+            "gemini.PostInvocation",
+            "gemini.Stop",
             "--record-session",
         ):
             assert required in all_commands
         assert _managed_command_count(claude) == 4
         assert _managed_command_count(codex) == 4
         assert _managed_command_count(gemini) == 4
+        assert "pgu-ticket-board-pane-state" in gemini
+        assert "hooks" not in gemini
+        assert gemini["other-hook"] == {"Stop": [{"type": "command", "command": "true"}]}
 
         claude_commands = _managed_commands_by_source(claude)
         assert " idle --source claude.Stop" in claude_commands["claude.Stop"]

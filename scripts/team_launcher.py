@@ -109,6 +109,7 @@ class WorktreeProvisionResult:
 class LauncherCheckoutProbe:
     ahead: int = 0
     behind: int = 0
+    behind_exact: bool = True
     error: str = ""
 
     @property
@@ -678,7 +679,23 @@ def git_launcher_checkout_check_args(launcher_repo: Path) -> list[str]:
     return ["git", "-C", str(launcher_repo), "rev-parse", "--is-inside-work-tree"]
 
 
-def git_launcher_ahead_behind_args(config: ProjectConfig, launcher_repo: Path) -> list[str]:
+def git_launcher_head_args(launcher_repo: Path) -> list[str]:
+    return ["git", "-C", str(launcher_repo), "rev-parse", "HEAD"]
+
+
+def git_launcher_ls_remote_ref_args(config: ProjectConfig, launcher_repo: Path) -> list[str]:
+    return ["git", "-C", str(launcher_repo), "ls-remote", "--exit-code", config.worktree_remote, config.worktree_branch]
+
+
+def git_launcher_commit_exists_args(launcher_repo: Path, commit: str) -> list[str]:
+    return ["git", "-C", str(launcher_repo), "cat-file", "-e", f"{commit}^{{commit}}"]
+
+
+def git_launcher_ahead_behind_args(
+    config: ProjectConfig,
+    launcher_repo: Path,
+    compare_ref: str | None = None,
+) -> list[str]:
     return [
         "git",
         "-C",
@@ -686,7 +703,7 @@ def git_launcher_ahead_behind_args(config: ProjectConfig, launcher_repo: Path) -
         "rev-list",
         "--left-right",
         "--count",
-        f"HEAD...{worktree_ref(config)}",
+        f"HEAD...{compare_ref or worktree_ref(config)}",
     ]
 
 
@@ -745,6 +762,20 @@ def _parse_ahead_behind(output: str) -> tuple[int, int] | None:
         return None
 
 
+def _parse_ls_remote_head(output: str) -> str | None:
+    for line in output.splitlines():
+        parts = line.strip().split()
+        if parts:
+            return parts[0]
+    return None
+
+
+def _format_behind_count(count: int, *, exact: bool = True) -> str:
+    if exact:
+        return f"{count} commit(s)"
+    return f"at least {count} commit(s)"
+
+
 def _env_truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -763,16 +794,46 @@ def probe_launcher_checkout(
     )
     if check_proc.returncode != 0:
         return LauncherCheckoutProbe(error=f"launcher path is not a git checkout: {repo}")
-    fetch_proc = runner(git_fetch_launcher_ref_args(config, repo))
-    if fetch_proc.returncode != 0:
+    head_proc = runner(git_launcher_head_args(repo), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if head_proc.returncode != 0:
         return LauncherCheckoutProbe(
             error=(
-                f"failed to fetch launcher deploy ref {worktree_ref(config)} in {repo}: "
-                f"{_proc_failure_reason(fetch_proc, f'exit {fetch_proc.returncode}')}"
+                f"failed to read launcher checkout HEAD in {repo}: "
+                f"{_proc_failure_reason(head_proc, f'exit {head_proc.returncode}')}"
             )
         )
+    local_head = str(head_proc.stdout or "").strip()
+    remote_proc = runner(
+        git_launcher_ls_remote_ref_args(config, repo),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if remote_proc.returncode != 0:
+        return LauncherCheckoutProbe(
+            error=(
+                f"failed to inspect launcher deploy ref {worktree_ref(config)} without fetching in {repo}: "
+                f"{_proc_failure_reason(remote_proc, f'exit {remote_proc.returncode}')}"
+            )
+        )
+    remote_head = _parse_ls_remote_head(str(remote_proc.stdout or ""))
+    if not remote_head:
+        return LauncherCheckoutProbe(
+            error=f"could not parse launcher deploy ref {worktree_ref(config)} from ls-remote output"
+        )
+    if local_head == remote_head:
+        return LauncherCheckoutProbe(ahead=0, behind=0)
+    exists_proc = runner(
+        git_launcher_commit_exists_args(repo, remote_head),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if exists_proc.returncode != 0:
+        # The remote tip is not in the local object database. Avoid fetching in
+        # the hot-path status probe; the deploy path will fetch before merging.
+        return LauncherCheckoutProbe(ahead=0, behind=1, behind_exact=False)
     count_proc = runner(
-        git_launcher_ahead_behind_args(config, repo),
+        git_launcher_ahead_behind_args(config, repo, remote_head),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -823,6 +884,7 @@ def _auto_fast_forward_launcher_checkout(
     repo: Path,
     *,
     behind: int,
+    behind_exact: bool,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
 ) -> LauncherCheckoutProbe:
     branch_proc = runner(
@@ -836,7 +898,8 @@ def _auto_fast_forward_launcher_checkout(
         reason = branch or "detached HEAD"
         raise SystemExit(
             f"team-launcher: refusing to launch from stale checkout {repo}; "
-            f"it is {behind} commit(s) behind {worktree_ref(config)}, and automatic fast-forward "
+            f"it is {_format_behind_count(behind, exact=behind_exact)} behind {worktree_ref(config)}, "
+            "and automatic fast-forward "
             f"requires branch {config.worktree_branch!r} but found {reason!r}. "
             f"Run `scripts/team-launcher {config.project} deploy-launcher --launcher-repo {repo}` "
             "during an approved restart window, or rerun with --allow-stale-launcher in an emergency."
@@ -861,6 +924,15 @@ def _auto_fast_forward_launcher_checkout(
             "during an approved restart window, or rerun with --allow-stale-launcher in an emergency."
         )
     before = _short_head(repo, runner=runner)
+    fetch_proc = runner(git_fetch_launcher_ref_args(config, repo))
+    if fetch_proc.returncode != 0:
+        raise SystemExit(
+            f"team-launcher: refusing to launch from stale checkout {repo}; "
+            f"automatic fetch of {worktree_ref(config)} failed: "
+            f"{_proc_failure_reason(fetch_proc, f'exit {fetch_proc.returncode}')}. "
+            f"Run `scripts/team-launcher {config.project} deploy-launcher --launcher-repo {repo}` "
+            "during an approved restart window, or rerun with --allow-stale-launcher in an emergency."
+        )
     merge_proc = runner(git_fast_forward_launcher_ref_args(config, repo))
     if merge_proc.returncode != 0:
         raise SystemExit(
@@ -886,7 +958,7 @@ def _auto_fast_forward_launcher_checkout(
         )
     print(
         f"team-launcher: auto-fast-forwarded launcher checkout {repo} from {before} to {after}; "
-        f"was {behind} commit(s) behind {worktree_ref(config)}",
+        f"was {_format_behind_count(behind, exact=behind_exact)} behind {worktree_ref(config)}",
         file=sys.stderr,
     )
     return probe
@@ -914,7 +986,8 @@ def ensure_launcher_checkout_current(
         if allow_stale:
             print(
                 f"warning: team-launcher: OVERRIDE proceeding with stale launcher checkout {repo}; "
-                f"it is {probe.behind} commit(s) behind {worktree_ref(config)}",
+                f"it is {_format_behind_count(probe.behind, exact=probe.behind_exact)} "
+                f"behind {worktree_ref(config)}",
                 file=sys.stderr,
             )
             return
@@ -923,6 +996,7 @@ def ensure_launcher_checkout_current(
                 config,
                 repo,
                 behind=probe.behind,
+                behind_exact=probe.behind_exact,
                 runner=runner,
             )
             if post_deploy_probe.error or post_deploy_probe.behind:
@@ -931,7 +1005,8 @@ def ensure_launcher_checkout_current(
         else:
             raise SystemExit(
                 f"team-launcher: refusing to launch from stale checkout {repo}; "
-                f"it is {probe.behind} commit(s) behind {worktree_ref(config)}. "
+                f"it is {_format_behind_count(probe.behind, exact=probe.behind_exact)} "
+                f"behind {worktree_ref(config)}. "
                 f"Run `scripts/team-launcher {config.project} deploy-launcher --launcher-repo {repo}` "
                 "during an approved restart window, rerun with --allow-stale-launcher in an emergency, "
                 "or unset --no-launcher-self-deploy for automatic fast-forward."

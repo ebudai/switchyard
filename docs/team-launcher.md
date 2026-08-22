@@ -107,6 +107,12 @@ exists or when standing up a sandbox account directly:
 scripts/team-launcher porter provision-runtime --runtime-user otto-agent
 ```
 
+The normal `start`/`reload` launcher freshness check uses `git ls-remote` and
+local read-only comparisons, so it does not write fetched objects into the
+launcher checkout during the hot-path probe. If the remote tip is not already in
+the local object database the stale warning reports "at least 1 commit" behind;
+the exact count is available only when the object already exists locally.
+
 `deploy-launcher` is the explicit launcher deploy step. It fetches the
 configured ref in the launcher checkout, checks out the configured branch,
 fast-forwards it to the ref, and verifies it is no longer behind before a later

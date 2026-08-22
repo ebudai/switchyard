@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+REMOTE_HEAD = "0123456789abcdef0123456789abcdef01234567"
+LOCAL_HEAD = "fedcba9876543210fedcba9876543210fedcba98"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -37,8 +39,11 @@ from scripts.team_launcher import (
     git_fetch_worktree_ref_args,
     git_launcher_ahead_behind_args,
     git_launcher_checkout_check_args,
+    git_launcher_commit_exists_args,
     git_launcher_current_branch_args,
+    git_launcher_head_args,
     git_launcher_head_short_args,
+    git_launcher_ls_remote_ref_args,
     git_launcher_status_porcelain_args,
     git_shared_checkout_check_args,
     konsole_launch_args,
@@ -107,6 +112,12 @@ class FakeRunner:
         if len(args) >= 5 and args[:5] == ["git", "-C", args[2], "clean", "-fdx"]:
             return subprocess.CompletedProcess(args, 0)
         if len(args) >= 5 and args[:5] == ["git", "-C", args[2], "rev-parse", "--is-inside-work-tree"]:
+            return subprocess.CompletedProcess(args, 0)
+        if len(args) >= 5 and args[:5] == ["git", "-C", args[2], "rev-parse", "HEAD"]:
+            return subprocess.CompletedProcess(args, 0, stdout=f"{REMOTE_HEAD}\n")
+        if len(args) >= 6 and args[:6] == ["git", "-C", args[2], "ls-remote", "--exit-code"]:
+            return subprocess.CompletedProcess(args, 0, stdout=f"{REMOTE_HEAD}\trefs/heads/main\n")
+        if len(args) >= 5 and args[:5] == ["git", "-C", args[2], "cat-file", "-e"]:
             return subprocess.CompletedProcess(args, 0)
         if len(args) >= 6 and args[:6] == ["git", "-C", args[2], "rev-list", "--left-right", "--count"]:
             return subprocess.CompletedProcess(args, 0, stdout="0 0\n")
@@ -672,11 +683,19 @@ def test_start_auto_fast_forwards_stale_launcher_checkout_once_before_panes() ->
         config = load_project_config("pgu", config_path)
         fake = FakeRunner()
         counts = ["0 173\n", "0 0\n"]
+        fast_forwarded = False
         calls: list[list[str]] = []
 
         def runner(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            nonlocal fast_forwarded
             calls.append(args)
-            if args == git_launcher_ahead_behind_args(config, ROOT):
+            if args == git_launcher_head_args(ROOT):
+                return subprocess.CompletedProcess(args, 0, stdout=f"{REMOTE_HEAD if fast_forwarded else LOCAL_HEAD}\n")
+            if args == git_launcher_ls_remote_ref_args(config, ROOT):
+                return subprocess.CompletedProcess(args, 0, stdout=f"{REMOTE_HEAD}\trefs/heads/main\n")
+            if args == git_launcher_commit_exists_args(ROOT, REMOTE_HEAD):
+                return subprocess.CompletedProcess(args, 0)
+            if args == git_launcher_ahead_behind_args(config, ROOT, REMOTE_HEAD):
                 return subprocess.CompletedProcess(args, 0, stdout=counts.pop(0))
             if args == git_launcher_current_branch_args(ROOT):
                 return subprocess.CompletedProcess(args, 0, stdout="main\n")
@@ -684,6 +703,9 @@ def test_start_auto_fast_forwards_stale_launcher_checkout_once_before_panes() ->
                 return subprocess.CompletedProcess(args, 0, stdout="")
             if args == git_launcher_head_short_args(ROOT):
                 return subprocess.CompletedProcess(args, 0, stdout="abc1234\n" if counts else "def5678\n")
+            if args == git_fast_forward_launcher_ref_args(config, ROOT):
+                fast_forwarded = True
+                return subprocess.CompletedProcess(args, 0)
             return fake(args, **kwargs)
 
         stderr = StringIO()
@@ -717,7 +739,11 @@ def test_start_no_self_deploy_refuses_stale_launcher_checkout() -> None:
         calls.append(args)
         if args[:3] == ["git", "-C", str(ROOT)] and args[3:] == ["rev-parse", "--is-inside-work-tree"]:
             return subprocess.CompletedProcess(args, 0)
-        if args[:3] == ["git", "-C", str(ROOT)] and args[3:] == ["fetch", config.worktree_remote, config.worktree_branch]:
+        if args == git_launcher_head_args(ROOT):
+            return subprocess.CompletedProcess(args, 0, stdout=f"{LOCAL_HEAD}\n")
+        if args == git_launcher_ls_remote_ref_args(config, ROOT):
+            return subprocess.CompletedProcess(args, 0, stdout=f"{REMOTE_HEAD}\trefs/heads/main\n")
+        if args == git_launcher_commit_exists_args(ROOT, REMOTE_HEAD):
             return subprocess.CompletedProcess(args, 0)
         if args[:3] == ["git", "-C", str(ROOT)] and args[3:6] == ["rev-list", "--left-right", "--count"]:
             return subprocess.CompletedProcess(args, 0, stdout="0 173\n")
@@ -741,8 +767,10 @@ def test_start_no_self_deploy_refuses_stale_launcher_checkout() -> None:
     assert "deploy-launcher" in message
     assert calls == [
         git_launcher_checkout_check_args(ROOT),
-        git_fetch_launcher_ref_args(config, ROOT),
-        git_launcher_ahead_behind_args(config, ROOT),
+        git_launcher_head_args(ROOT),
+        git_launcher_ls_remote_ref_args(config, ROOT),
+        git_launcher_commit_exists_args(ROOT, REMOTE_HEAD),
+        git_launcher_ahead_behind_args(config, ROOT, REMOTE_HEAD),
     ]
 
 
@@ -754,9 +782,13 @@ def test_allow_stale_launcher_override_warns_and_continues_without_fast_forward(
         calls.append(args)
         if args == git_launcher_checkout_check_args(ROOT):
             return subprocess.CompletedProcess(args, 0)
-        if args == git_fetch_launcher_ref_args(config, ROOT):
+        if args == git_launcher_head_args(ROOT):
+            return subprocess.CompletedProcess(args, 0, stdout=f"{LOCAL_HEAD}\n")
+        if args == git_launcher_ls_remote_ref_args(config, ROOT):
+            return subprocess.CompletedProcess(args, 0, stdout=f"{REMOTE_HEAD}\trefs/heads/main\n")
+        if args == git_launcher_commit_exists_args(ROOT, REMOTE_HEAD):
             return subprocess.CompletedProcess(args, 0)
-        if args == git_launcher_ahead_behind_args(config, ROOT):
+        if args == git_launcher_ahead_behind_args(config, ROOT, REMOTE_HEAD):
             return subprocess.CompletedProcess(args, 0, stdout="0 12\n")
         raise AssertionError(f"unexpected call after override: {args}")
 
@@ -771,6 +803,46 @@ def test_allow_stale_launcher_override_warns_and_continues_without_fast_forward(
 
     assert "OVERRIDE proceeding with stale launcher checkout" in stderr.getvalue()
     assert git_fast_forward_launcher_ref_args(config, ROOT) not in calls
+    assert git_fetch_launcher_ref_args(config, ROOT) not in calls
+
+
+def test_launcher_status_probe_uses_ls_remote_without_writing_git_objects() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-git.") as tmp:
+        tmp_path = Path(tmp)
+        origin, launcher_repo = _make_origin_backed_repo(tmp_path)
+        updater = tmp_path / "updater"
+        _run_git(["git", "clone", str(origin), str(updater)])
+        _run_git(["git", "config", "user.email", "agent@example.invalid"], cwd=updater)
+        _run_git(["git", "config", "user.name", "PGU Agent"], cwd=updater)
+        (updater / "tracked.txt").write_text("remote update\n", encoding="utf-8")
+        _commit_all(updater, "remote update")
+        push_env = {**os.environ, "PGU_ALLOW_MAIN_PUSH": "director"}
+        subprocess.run(
+            ["git", "push", "origin", "main"],
+            cwd=updater,
+            check=True,
+            text=True,
+            capture_output=True,
+            env=push_env,
+        )
+        config_path = _write_minimal_shared_checkout_config(tmp_path, launcher_repo, ["ops"])
+        config = load_project_config("pgu", config_path)
+
+        def git_metadata_snapshot() -> dict[Path, bytes | None]:
+            git_dir = launcher_repo / ".git"
+            snapshot: dict[Path, bytes | None] = {}
+            for path in git_dir.rglob("*"):
+                relative = path.relative_to(git_dir)
+                snapshot[relative] = path.read_bytes() if path.is_file() else None
+            return snapshot
+
+        git_metadata_before = git_metadata_snapshot()
+
+        ahead, behind = team_launcher.launcher_checkout_status(config, launcher_repo=launcher_repo)
+
+        git_metadata_after = git_metadata_snapshot()
+        assert (ahead, behind) == (0, 1)
+        assert git_metadata_after == git_metadata_before
 
 
 def test_auto_fast_forward_launcher_checkout_with_real_git() -> None:
@@ -880,6 +952,10 @@ def test_deploy_launcher_checkout_updates_and_verifies_configured_ref() -> None:
 
     def runner(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         calls.append(args)
+        if args == git_launcher_head_args(launcher_repo):
+            return subprocess.CompletedProcess(args, 0, stdout=f"{REMOTE_HEAD}\n")
+        if args == git_launcher_ls_remote_ref_args(config, launcher_repo):
+            return subprocess.CompletedProcess(args, 0, stdout=f"{REMOTE_HEAD}\trefs/heads/main\n")
         if args[:3] == ["git", "-C", str(launcher_repo)] and args[3:6] == ["rev-list", "--left-right", "--count"]:
             return subprocess.CompletedProcess(args, 0, stdout="0 0\n")
         return subprocess.CompletedProcess(args, 0)
@@ -893,8 +969,8 @@ def test_deploy_launcher_checkout_updates_and_verifies_configured_ref() -> None:
         git_fast_forward_launcher_ref_args(config, launcher_repo),
         git_clean_launcher_checkout_args(launcher_repo),
         git_launcher_checkout_check_args(launcher_repo),
-        git_fetch_launcher_ref_args(config, launcher_repo),
-        git_launcher_ahead_behind_args(config, launcher_repo),
+        git_launcher_head_args(launcher_repo),
+        git_launcher_ls_remote_ref_args(config, launcher_repo),
     ]
 
 
@@ -1204,8 +1280,8 @@ def test_start_runs_research_detached_before_opening_visible_layout() -> None:
 
         assert runner.calls[:3] == [
             git_launcher_checkout_check_args(ROOT),
-            git_fetch_launcher_ref_args(config, ROOT),
-            git_launcher_ahead_behind_args(config, ROOT),
+            git_launcher_head_args(ROOT),
+            git_launcher_ls_remote_ref_args(config, ROOT),
         ]
         assert runner.calls[3] == git_fetch_worktree_ref_args(config)
         assert runner.calls[4] == git_shared_checkout_check_args(config)
@@ -1285,8 +1361,8 @@ def test_reload_fetches_without_refreshing_shared_checkout() -> None:
 
         assert runner.calls[:3] == [
             git_launcher_checkout_check_args(ROOT),
-            git_fetch_launcher_ref_args(config, ROOT),
-            git_launcher_ahead_behind_args(config, ROOT),
+            git_launcher_head_args(ROOT),
+            git_launcher_ls_remote_ref_args(config, ROOT),
         ]
         assert runner.calls[3] == git_fetch_worktree_ref_args(config)
         assert not any(call[:5] == ["git", "-C", call[2], "worktree", "add"] for call in runner.calls)
@@ -1843,6 +1919,7 @@ def main() -> int:
     test_start_auto_fast_forwards_stale_launcher_checkout_once_before_panes()
     test_start_no_self_deploy_refuses_stale_launcher_checkout()
     test_allow_stale_launcher_override_warns_and_continues_without_fast_forward()
+    test_launcher_status_probe_uses_ls_remote_without_writing_git_objects()
     test_auto_fast_forward_launcher_checkout_with_real_git()
     test_auto_fast_forward_launcher_checkout_refuses_tracked_modifications()
     test_undeterminable_launcher_checkout_warns_and_continues()

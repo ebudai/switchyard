@@ -794,6 +794,9 @@ def test_auto_fast_forward_launcher_checkout_with_real_git() -> None:
         )
         config_path = _write_minimal_shared_checkout_config(tmp_path, launcher_repo, ["ops"])
         config = load_project_config("pgu", config_path)
+        untracked_settings = launcher_repo / ".claude" / "settings.json"
+        untracked_settings.parent.mkdir()
+        untracked_settings.write_text("{}\n", encoding="utf-8")
 
         before = _run_git(["git", "rev-parse", "HEAD"], cwd=launcher_repo).stdout.strip()
         stderr = StringIO()
@@ -806,8 +809,49 @@ def test_auto_fast_forward_launcher_checkout_with_real_git() -> None:
         after = _run_git(["git", "rev-parse", "HEAD"], cwd=launcher_repo).stdout.strip()
 
         assert before != after
-        assert _run_git(["git", "status", "--porcelain"], cwd=launcher_repo).stdout == ""
+        assert _run_git(["git", "status", "--porcelain"], cwd=launcher_repo).stdout == "?? .claude/\n"
+        assert untracked_settings.read_text(encoding="utf-8") == "{}\n"
         assert "auto-fast-forwarded launcher checkout" in stderr.getvalue()
+
+
+def test_auto_fast_forward_launcher_checkout_refuses_tracked_modifications() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-git.") as tmp:
+        tmp_path = Path(tmp)
+        origin, launcher_repo = _make_origin_backed_repo(tmp_path)
+        updater = tmp_path / "updater"
+        _run_git(["git", "clone", str(origin), str(updater)])
+        _run_git(["git", "config", "user.email", "agent@example.invalid"], cwd=updater)
+        _run_git(["git", "config", "user.name", "PGU Agent"], cwd=updater)
+        (updater / "tracked.txt").write_text("upstream\n", encoding="utf-8")
+        _commit_all(updater, "upstream")
+        push_env = {**os.environ, "PGU_ALLOW_MAIN_PUSH": "director"}
+        subprocess.run(
+            ["git", "push", "origin", "main"],
+            cwd=updater,
+            check=True,
+            text=True,
+            capture_output=True,
+            env=push_env,
+        )
+        config_path = _write_minimal_shared_checkout_config(tmp_path, launcher_repo, ["ops"])
+        config = load_project_config("pgu", config_path)
+        before = _run_git(["git", "rev-parse", "HEAD"], cwd=launcher_repo).stdout.strip()
+        (launcher_repo / "tracked.txt").write_text("local edit\n", encoding="utf-8")
+
+        try:
+            team_launcher.ensure_launcher_checkout_current(
+                config,
+                launcher_repo=launcher_repo,
+                auto_deploy=True,
+            )
+            raise AssertionError("expected tracked local edit to block auto fast-forward")
+        except SystemExit as exc:
+            message = str(exc)
+        after = _run_git(["git", "rev-parse", "HEAD"], cwd=launcher_repo).stdout.strip()
+
+        assert before == after
+        assert "local changes are present" in message
+        assert (launcher_repo / "tracked.txt").read_text(encoding="utf-8") == "local edit\n"
 
 
 def test_undeterminable_launcher_checkout_warns_and_continues() -> None:
@@ -1800,6 +1844,7 @@ def main() -> int:
     test_start_no_self_deploy_refuses_stale_launcher_checkout()
     test_allow_stale_launcher_override_warns_and_continues_without_fast_forward()
     test_auto_fast_forward_launcher_checkout_with_real_git()
+    test_auto_fast_forward_launcher_checkout_refuses_tracked_modifications()
     test_undeterminable_launcher_checkout_warns_and_continues()
     test_deploy_launcher_checkout_updates_and_verifies_configured_ref()
     test_konsole_launch_uses_gui_user_display_environment()

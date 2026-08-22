@@ -709,7 +709,7 @@ def git_launcher_current_branch_args(launcher_repo: Path) -> list[str]:
 
 
 def git_launcher_status_porcelain_args(launcher_repo: Path) -> list[str]:
-    return ["git", "-C", str(launcher_repo), "status", "--porcelain"]
+    return ["git", "-C", str(launcher_repo), "status", "--porcelain", "--untracked-files=no"]
 
 
 def git_launcher_head_short_args(launcher_repo: Path) -> list[str]:

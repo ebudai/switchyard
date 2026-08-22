@@ -625,6 +625,37 @@ def test_advancing_working_timer_suppresses_idle_stall_nudge() -> None:
     assert gate.last_trace("pgu-ops:0.0").reason == "working_timer"  # type: ignore[union-attr]
 
 
+def test_resetting_working_timer_suppresses_idle_stall_nudge() -> None:
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            cursor_position_runner=constant_cursor_runner(),
+            capture_pane_runner=targeted_capture_runner(
+                "pgu-ops:0.0",
+                "Working (4s · esc to interrupt)\n",
+                "Working (2s · esc to interrupt)\n",
+            ),
+            idle_working_timer_sample_delay_seconds=1.1,
+            sleeper=lambda _seconds: None,
+        )
+        store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
+        conn = FakeConnection(idle_stall_result=1)
+        listener = TicketBoardNotifyListener(
+            conninfo="",
+            activity_gate=gate.is_working,
+            sender=lambda _target, _message: None,
+            idle_stall_grace_seconds=45,
+            idle_stall_nudge_cadence_seconds=300,
+            idle_stall_escalate_after=2,
+        )
+
+        assert listener.process_idle_stall_nudges(conn) == 0
+
+    assert conn.idle_stall_calls == []
+    assert gate.last_trace("pgu-ops:0.0").reason == "working_timer"  # type: ignore[union-attr]
+
+
 def test_static_working_timer_does_not_suppress_idle_stall_nudge() -> None:
     with TemporaryStateDir() as tmp_path:
         store = PaneHookStateStore(tmp_path)
@@ -899,6 +930,33 @@ def test_stale_codex_busy_state_recovers_and_delivers() -> None:
     assert recovered is not None
     assert recovered.state == "idle"
     assert recovered.source == "listener.stale_codex_busy_recovery"
+
+
+def test_stale_codex_busy_state_stays_busy_when_working_timer_resets() -> None:
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            cursor_position_runner=constant_cursor_runner("2 23 24"),
+            capture_pane_runner=targeted_capture_runner(
+                "pgu-ops:0.0",
+                "Working (4s · esc to interrupt)\n",
+                "Working (2s · esc to interrupt)\n",
+            ),
+            working_timer_sample_delay_seconds=1.1,
+            stale_codex_busy_hook_seconds=120,
+            wall_time=lambda: 1_800_000_300.0,
+            sleeper=lambda _seconds: None,
+        )
+        store.write("pgu-ops:0.0", "busy", source="codex.UserPromptSubmit", now=1_800_000_000.0)
+
+        assert gate.is_busy("pgu-ops:0.0") is True
+        state = store.read("pgu-ops:0.0")
+
+    assert gate.last_trace("pgu-ops:0.0").reason == "working_timer"  # type: ignore[union-attr]
+    assert state is not None
+    assert state.state == "busy"
+    assert state.source == "codex.UserPromptSubmit"
 
 
 def test_stale_codex_busy_state_stays_busy_when_human_is_composing() -> None:
@@ -1988,6 +2046,7 @@ def main() -> int:
     test_advanced_cursor_holds_immediately_without_second_read()
     test_listener_enqueues_idle_stall_nudges_from_hook_state()
     test_advancing_working_timer_suppresses_idle_stall_nudge()
+    test_resetting_working_timer_suppresses_idle_stall_nudge()
     test_static_working_timer_does_not_suppress_idle_stall_nudge()
     test_cached_working_timer_increment_suppresses_next_idle_since_scan()
     test_listener_enqueues_idle_turn_end_nudges_on_each_turn_completion_idle()
@@ -1999,6 +2058,7 @@ def main() -> int:
     test_missing_hook_state_fails_safe_and_does_not_clobber()
     test_hook_busy_requeues_with_fixed_interval()
     test_stale_codex_busy_state_recovers_and_delivers()
+    test_stale_codex_busy_state_stays_busy_when_working_timer_resets()
     test_stale_codex_busy_state_stays_busy_when_human_is_composing()
     test_ticket_update_delivers_immediately_to_busy_worker_with_empty_composer()
     test_ticket_update_waits_for_worker_human_composing_to_clear()

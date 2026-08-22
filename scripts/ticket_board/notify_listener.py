@@ -451,7 +451,8 @@ class PaneActivityGate:
             self._last_working_timer_by_target.pop(target, None)
             return None
         previous = self._last_working_timer_by_target.get(target)
-        if previous is not None and first > previous:
+        # Codex resets this timer between internal turn steps; any change is live work.
+        if previous is not None and first != previous:
             self._last_working_timer_by_target[target] = first
             return ActivityTrace(True, "working_timer")
         sample_delay = self.working_timer_sample_delay_seconds if sample_delay_seconds is None else sample_delay_seconds
@@ -460,7 +461,7 @@ class PaneActivityGate:
             second = self._captured_working_timer_seconds(target)
             if second is not None:
                 self._last_working_timer_by_target[target] = second
-                if second > first:
+                if second != first:
                     return ActivityTrace(True, "working_timer")
                 return None
         self._last_working_timer_by_target[target] = first

@@ -32,6 +32,7 @@ from scripts.team_launcher import (
     launch_project,
     live_command_matches_role,
     load_project_config,
+    pane_state_file_name,
     run_detached_role,
     run_role_pane,
     session_file_name,
@@ -225,6 +226,10 @@ def _session_payload(target: str, session_id: str, payload: dict[str, object]) -
             "payload": payload,
         }
     ) + "\n"
+
+
+def _read_pane_state(state_dir: Path, target: str) -> dict[str, object]:
+    return json.loads((state_dir / pane_state_file_name(target)).read_text(encoding="utf-8"))
 
 
 def _patch_process_snapshot(
@@ -544,7 +549,21 @@ def test_start_is_attach_or_start_and_never_duplicates_existing_session() -> Non
     role = next(role for role in config.roles if role.role == "ops")
     runner = FakeRunner(existing_sessions={"pgu-ops"})
 
-    assert run_role_pane(role, mode="start", session_dir=config.session_dir, runner=runner) == 0
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        pane_state_dir = Path(tmp) / "pane-state"
+
+        assert (
+            run_role_pane(
+                role,
+                mode="start",
+                session_dir=config.session_dir,
+                pane_state_dir=pane_state_dir,
+                runner=runner,
+            )
+            == 0
+        )
+
+        assert not (pane_state_dir / pane_state_file_name(role.target)).exists()
 
     assert runner.calls == [
         ["tmux", "has-session", "-t", "pgu-ops"],
@@ -559,8 +578,25 @@ def test_start_creates_missing_session_once_then_attaches() -> None:
 
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
         # No recorded session id -> start falls back to a fresh launch (no resume args).
-        session_dir = Path(tmp)
-        assert run_role_pane(role, mode="start", session_dir=session_dir, runner=runner) == 0
+        tmp_path = Path(tmp)
+        session_dir = tmp_path / "sessions"
+        pane_state_dir = tmp_path / "pane-state"
+        assert (
+            run_role_pane(
+                role,
+                mode="start",
+                session_dir=session_dir,
+                pane_state_dir=pane_state_dir,
+                runner=runner,
+            )
+            == 0
+        )
+
+        state = _read_pane_state(pane_state_dir, role.target)
+        assert state["target"] == role.target
+        assert state["state"] == "idle"
+        assert state["source"] == "team_launcher.start"
+        assert isinstance(state["updated_at"], float)
 
     assert runner.calls[0] == ["tmux", "has-session", "-t", "pgu-ops"]
     assert runner.calls[1][:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"]
@@ -573,6 +609,41 @@ def test_start_creates_missing_session_once_then_attaches() -> None:
     assert "--reasoning-effort" not in runner.calls[1][-1]
     assert " resume " not in f" {runner.calls[1][-1]} "
     assert runner.calls[2] == ["tmux", "attach", "-t", "pgu-ops"]
+
+
+def test_start_seeds_initial_idle_state_for_codex_agy_and_claude_panes() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    roles = {role.role: role for role in config.roles}
+    expected_cli_by_role = {
+        "ops": "codex",
+        "inspector": "agy",
+        "director": "claude",
+    }
+
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        tmp_path = Path(tmp)
+        for role_name, cli_name in expected_cli_by_role.items():
+            role = roles[role_name]
+            runner = FakeRunner()
+            assert (
+                run_role_pane(
+                    role,
+                    mode="start",
+                    session_dir=tmp_path / role_name / "sessions",
+                    pane_state_dir=tmp_path / role_name / "pane-state",
+                    runner=runner,
+                )
+                == 0
+            )
+            state = _read_pane_state(tmp_path / role_name / "pane-state", role.target)
+            assert state == {
+                "source": "team_launcher.start",
+                "state": "idle",
+                "target": role.target,
+                "updated_at": state["updated_at"],
+            }
+            assert isinstance(state["updated_at"], float)
+            assert f" {cli_name} " in f" {runner.calls[1][-1]} "
 
 
 def test_start_resumes_recorded_session_when_recreating_missing_pane() -> None:
@@ -589,7 +660,22 @@ def test_start_resumes_recorded_session_when_recreating_missing_pane() -> None:
         )
         runner = FakeRunner(current_commands={"pgu-ops:0.0": "codex"})
 
-        assert run_role_pane(role, mode="start", session_dir=session_dir, runner=runner) == 0
+        pane_state_dir = Path(tmp) / "pane-state"
+
+        assert (
+            run_role_pane(
+                role,
+                mode="start",
+                session_dir=session_dir,
+                pane_state_dir=pane_state_dir,
+                runner=runner,
+            )
+            == 0
+        )
+
+        state = _read_pane_state(pane_state_dir, role.target)
+        assert state["state"] == "idle"
+        assert state["source"] == "team_launcher.start"
 
     assert runner.calls[0] == ["tmux", "has-session", "-t", "pgu-ops"]
     assert runner.calls[1][:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"]
@@ -615,6 +701,7 @@ def test_start_runs_research_detached_before_opening_visible_layout() -> None:
                 script_path=ROOT / "scripts" / "team-launcher",
                 runner=runner,
                 layout_output=layout_output,
+                pane_state_dir=tmp_path / "pane-state",
             )
             == 0
         )
@@ -630,6 +717,9 @@ def test_start_runs_research_detached_before_opening_visible_layout() -> None:
         assert research_new_session[5:7] == ["-c", str(tmp_path / "repo")]
         assert "PGU_PANE_TARGET=pgu-research:0.0" in research_new_session[-1]
         assert "--model claude-sonnet-5" in research_new_session[-1]
+        state = _read_pane_state(tmp_path / "pane-state", "pgu-research:0.0")
+        assert state["state"] == "idle"
+        assert state["source"] == "team_launcher.start"
         layout = json.loads(layout_output.read_text(encoding="utf-8"))
         assert {leaf.get("WorkingDirectory") for leaf in team_launcher._layout_leaves(layout)} == {str(tmp_path / "repo")}
         assert runner.calls[-1] == konsole_launch_args(layout_output)
@@ -687,6 +777,7 @@ def test_reload_fetches_without_refreshing_shared_checkout() -> None:
                 script_path=ROOT / "scripts" / "team-launcher",
                 runner=runner,
                 layout_output=layout_output,
+                pane_state_dir=tmp_path / "pane-state",
             )
             == 0
         )
@@ -737,6 +828,7 @@ def test_reload_syncs_live_cli_and_model_from_process_argv_before_relaunch() -> 
                     script_path=ROOT / "scripts" / "team-launcher",
                     runner=runner,
                     layout_output=tmp_path / "layout.json",
+                    pane_state_dir=tmp_path / "pane-state",
                 )
                 == 0
             )
@@ -925,6 +1017,7 @@ def test_start_does_not_sync_live_cli_or_model() -> None:
                 script_path=ROOT / "scripts" / "team-launcher",
                 runner=runner,
                 layout_output=tmp_path / "layout.json",
+                pane_state_dir=tmp_path / "pane-state",
             )
             == 0
         )
@@ -942,7 +1035,17 @@ def test_detached_research_attach_checks_session_without_attaching() -> None:
     role = next(role for role in config.roles if role.role == "research")
     runner = FakeRunner(existing_sessions={"pgu-research"})
 
-    assert run_detached_role(role, mode="attach", session_dir=config.session_dir, runner=runner) == 0
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        assert (
+            run_detached_role(
+                role,
+                mode="attach",
+                session_dir=config.session_dir,
+                pane_state_dir=Path(tmp) / "pane-state",
+                runner=runner,
+            )
+            == 0
+        )
 
     assert runner.calls == [["tmux", "has-session", "-t", "pgu-research"]]
 
@@ -960,7 +1063,20 @@ def test_reload_uses_recorded_resume_uuid_when_recreating_session() -> None:
         runner = FakeRunner(existing_sessions={"pgu-ops"}, current_commands={"pgu-ops:0.0": "codex"})
 
         assert cli_command_for_role(role, session_dir=session_dir, resume=True)[3:6] == ["codex", "resume", session_id]
-        assert run_role_pane(role, mode="reload", session_dir=session_dir, runner=runner) == 0
+        pane_state_dir = Path(tmp) / "pane-state"
+        assert (
+            run_role_pane(
+                role,
+                mode="reload",
+                session_dir=session_dir,
+                pane_state_dir=pane_state_dir,
+                runner=runner,
+            )
+            == 0
+        )
+        state = _read_pane_state(pane_state_dir, role.target)
+        assert state["state"] == "idle"
+        assert state["source"] == "team_launcher.reload"
 
         assert runner.calls[0] == ["tmux", "has-session", "-t", "pgu-ops"]
         assert runner.calls[1] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_pid}"]
@@ -1014,7 +1130,16 @@ def test_reload_without_recorded_resume_id_logs_fresh_start() -> None:
 
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
         with redirect_stderr(stderr):
-            assert run_role_pane(role, mode="reload", session_dir=Path(tmp), runner=runner) == 0
+            assert (
+                run_role_pane(
+                    role,
+                    mode="reload",
+                    session_dir=Path(tmp) / "sessions",
+                    pane_state_dir=Path(tmp) / "pane-state",
+                    runner=runner,
+                )
+                == 0
+            )
 
     assert "team-launcher: no recorded session id for ops; starting fresh session" in stderr.getvalue()
     assert runner.calls[4][:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"]
@@ -1044,7 +1169,20 @@ def test_reload_logs_resume_fallback_when_cli_never_starts() -> None:
             )
 
             with redirect_stderr(stderr):
-                assert run_role_pane(role, mode="reload", session_dir=session_dir, runner=runner) == 0
+                pane_state_dir = Path(tmp) / "pane-state"
+                assert (
+                    run_role_pane(
+                        role,
+                        mode="reload",
+                        session_dir=session_dir,
+                        pane_state_dir=pane_state_dir,
+                        runner=runner,
+                    )
+                    == 0
+                )
+                state = _read_pane_state(pane_state_dir, role.target)
+                assert state["state"] == "idle"
+                assert state["source"] == "team_launcher.reload.fallback"
 
         assert f"team-launcher: resume failed for ops using session {session_id}; falling back to fresh session" in stderr.getvalue()
         assert "team-launcher: started fresh session for ops after resume fallback" in stderr.getvalue()
@@ -1062,7 +1200,17 @@ def test_reload_refuses_to_kill_session_when_live_command_mismatches_config() ->
     role = next(role for role in config.roles if role.role == "ops")
     runner = FakeRunner(existing_sessions={"pgu-ops"}, current_commands={"pgu-ops:0.0": "claude"})
 
-    assert run_role_pane(role, mode="reload", session_dir=config.session_dir, runner=runner) == 1
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        assert (
+            run_role_pane(
+                role,
+                mode="reload",
+                session_dir=config.session_dir,
+                pane_state_dir=Path(tmp) / "pane-state",
+                runner=runner,
+            )
+            == 1
+        )
 
     assert runner.calls == [
         ["tmux", "has-session", "-t", "pgu-ops"],
@@ -1076,13 +1224,18 @@ def test_reload_force_bypasses_live_command_guard() -> None:
     role = next(role for role in config.roles if role.role == "ops")
     runner = FakeRunner(existing_sessions={"pgu-ops"}, current_commands={"pgu-ops:0.0": "claude"})
 
-    assert run_role_pane(
-        role,
-        mode="reload",
-        session_dir=config.session_dir,
-        force_reload=True,
-        runner=runner,
-    ) == 0
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        assert (
+            run_role_pane(
+                role,
+                mode="reload",
+                session_dir=config.session_dir,
+                pane_state_dir=Path(tmp) / "pane-state",
+                force_reload=True,
+                runner=runner,
+            )
+            == 0
+        )
 
     assert runner.calls[0] == ["tmux", "has-session", "-t", "pgu-ops"]
     assert runner.calls[1] == ["tmux", "kill-session", "-t", "pgu-ops"]
@@ -1177,6 +1330,7 @@ def main() -> int:
     test_konsole_launch_falls_back_to_clear_error_when_gui_user_missing()
     test_start_is_attach_or_start_and_never_duplicates_existing_session()
     test_start_creates_missing_session_once_then_attaches()
+    test_start_seeds_initial_idle_state_for_codex_agy_and_claude_panes()
     test_start_resumes_recorded_session_when_recreating_missing_pane()
     test_start_runs_research_detached_before_opening_visible_layout()
     test_start_force_refreshes_dirty_shared_checkout_with_real_git()

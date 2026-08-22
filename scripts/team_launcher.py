@@ -17,6 +17,11 @@ from typing import Any, Callable, Sequence
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "team-launcher"
 DEFAULT_SESSION_DIR = Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-sessions")
+DEFAULT_PANE_STATE_DIR = (
+    Path(os.environ["PGU_TICKET_BOARD_PANE_STATE_DIR"]).expanduser()
+    if os.environ.get("PGU_TICKET_BOARD_PANE_STATE_DIR")
+    else Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-state")
+)
 CANONICAL_AGENT_BIN = "/home/agent/bin"
 DEFAULT_GUI_USER = "eric"
 GUI_USER_ENV = "PGU_TEAM_LAUNCHER_GUI_USER"
@@ -361,6 +366,28 @@ def _prepend_path(path_value: str, directory: str) -> str:
 def session_file_name(target: str) -> str:
     safe = "".join(ch if ch.isalnum() or ch in ".-" else "_" for ch in target)
     return f"{safe}.json"
+
+
+def pane_state_file_name(target: str) -> str:
+    return session_file_name(target)
+
+
+def seed_initial_pane_idle_state(
+    role: RoleConfig,
+    *,
+    pane_state_dir: Path,
+    source: str,
+    now: float | None = None,
+) -> Path:
+    path = pane_state_dir / pane_state_file_name(role.target)
+    payload = {
+        "target": role.target,
+        "state": "idle",
+        "updated_at": time.time() if now is None else now,
+        "source": source,
+    }
+    _write_json_atomic(path, payload)
+    return path
 
 
 def session_id_for_role(role: RoleConfig, session_dir: Path) -> str:
@@ -730,7 +757,9 @@ def _start_role_session(
     role: RoleConfig,
     *,
     session_dir: Path,
+    pane_state_dir: Path,
     prefer_resume: bool,
+    seed_source: str,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> int:
     session_id = session_id_for_role(role, session_dir) if prefer_resume else ""
@@ -744,8 +773,10 @@ def _start_role_session(
     if start_proc.returncode != 0:
         return int(start_proc.returncode)
     if not prefer_resume:
+        seed_initial_pane_idle_state(role, pane_state_dir=pane_state_dir, source=seed_source)
         return 0
     if _resume_launch_verified(role, runner=runner):
+        seed_initial_pane_idle_state(role, pane_state_dir=pane_state_dir, source=seed_source)
         return 0
     print(
         f"team-launcher: resume failed for {role.role} using session {session_id}; falling back to fresh session",
@@ -757,6 +788,7 @@ def _start_role_session(
     fresh_proc = runner(tmux_new_session_args(role, session_dir=session_dir, resume=False))
     if fresh_proc.returncode != 0:
         return int(fresh_proc.returncode)
+    seed_initial_pane_idle_state(role, pane_state_dir=pane_state_dir, source=f"{seed_source}.fallback")
     print(
         f"team-launcher: started fresh session for {role.role} after resume fallback",
         file=sys.stderr,
@@ -769,6 +801,7 @@ def run_role_pane(
     *,
     mode: str,
     session_dir: Path,
+    pane_state_dir: Path = DEFAULT_PANE_STATE_DIR,
     force_reload: bool = False,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> int:
@@ -790,13 +823,27 @@ def run_role_pane(
             kill_proc = runner(tmux_kill_session_args(role))
             if kill_proc.returncode != 0:
                 return int(kill_proc.returncode)
-        start_result = _start_role_session(role, session_dir=session_dir, prefer_resume=True, runner=runner)
+        start_result = _start_role_session(
+            role,
+            session_dir=session_dir,
+            pane_state_dir=pane_state_dir,
+            prefer_resume=True,
+            seed_source="team_launcher.reload",
+            runner=runner,
+        )
         if start_result != 0:
             return start_result
         return runner(tmux_attach_args(role)).returncode
     if mode in {"start", "attach-or-start"}:
         if not exists:
-            start_result = _start_role_session(role, session_dir=session_dir, prefer_resume=True, runner=runner)
+            start_result = _start_role_session(
+                role,
+                session_dir=session_dir,
+                pane_state_dir=pane_state_dir,
+                prefer_resume=True,
+                seed_source="team_launcher.start",
+                runner=runner,
+            )
             if start_result != 0:
                 return start_result
         return runner(tmux_attach_args(role)).returncode
@@ -808,6 +855,7 @@ def run_detached_role(
     *,
     mode: str,
     session_dir: Path,
+    pane_state_dir: Path = DEFAULT_PANE_STATE_DIR,
     force_reload: bool = False,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> int:
@@ -829,10 +877,24 @@ def run_detached_role(
             kill_proc = runner(tmux_kill_session_args(role))
             if kill_proc.returncode != 0:
                 return int(kill_proc.returncode)
-        return _start_role_session(role, session_dir=session_dir, prefer_resume=True, runner=runner)
+        return _start_role_session(
+            role,
+            session_dir=session_dir,
+            pane_state_dir=pane_state_dir,
+            prefer_resume=True,
+            seed_source="team_launcher.reload",
+            runner=runner,
+        )
     if mode in {"start", "attach-or-start"}:
         if not exists:
-            return _start_role_session(role, session_dir=session_dir, prefer_resume=True, runner=runner)
+            return _start_role_session(
+                role,
+                session_dir=session_dir,
+                pane_state_dir=pane_state_dir,
+                prefer_resume=True,
+                seed_source="team_launcher.start",
+                runner=runner,
+            )
         return 0
     raise SystemExit(f"unknown detached role mode: {mode}")
 
@@ -856,6 +918,7 @@ def pane_command(
     config_path: Path,
     mode: str,
     script_path: Path,
+    pane_state_dir: Path | None = None,
     force_reload: bool = False,
 ) -> str:
     args = [
@@ -869,6 +932,8 @@ def pane_command(
     ]
     if mode == "reload" and force_reload:
         args.append("--force")
+    if pane_state_dir is not None:
+        args.extend(["--pane-state-dir", str(pane_state_dir)])
     return _quote_command(args)
 
 
@@ -884,6 +949,7 @@ def materialize_layout(
     mode: str,
     script_path: Path,
     output_path: Path,
+    pane_state_dir: Path | None = None,
     force_reload: bool = False,
     failed_roles: dict[str, str] | None = None,
 ) -> Path:
@@ -908,6 +974,7 @@ def materialize_layout(
                 config_path=config_path,
                 mode=mode,
                 script_path=script_path,
+                pane_state_dir=pane_state_dir,
                 force_reload=force_reload,
             )
             leaf["WorkingDirectory"] = role.workdir
@@ -969,12 +1036,14 @@ def launch_project(
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     dry_run: bool = False,
     layout_output: Path | None = None,
+    pane_state_dir: Path | None = None,
     force_reload: bool = False,
 ) -> int:
     if mode == "start":
         mode = "attach-or-start"
     if mode not in {"attach", "attach-or-start", "reload"}:
         raise SystemExit(f"unknown launch mode: {mode}")
+    effective_pane_state_dir = pane_state_dir or DEFAULT_PANE_STATE_DIR
     output_path = layout_output or Path(tempfile.gettempdir()) / f"{config.project}-team-layout.json"
     failed_roles: dict[str, str] = {}
     if not dry_run:
@@ -989,6 +1058,7 @@ def launch_project(
         mode=mode,
         script_path=script_path,
         output_path=output_path,
+        pane_state_dir=pane_state_dir,
         force_reload=force_reload,
         failed_roles=failed_roles,
     )
@@ -1013,6 +1083,7 @@ def launch_project(
                         config_path=config_path,
                         mode=mode,
                         script_path=script_path,
+                        pane_state_dir=pane_state_dir,
                         force_reload=force_reload,
                     )
                 ),
@@ -1045,6 +1116,7 @@ def launch_project(
             role,
             mode=mode,
             session_dir=config.session_dir,
+            pane_state_dir=effective_pane_state_dir,
             force_reload=force_reload,
             runner=runner,
         )
@@ -1089,6 +1161,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path, help="project launcher config JSON")
     parser.add_argument("--layout-output", type=Path, help="write generated Konsole layout here")
     parser.add_argument("--script-path", type=Path, default=Path(__file__).resolve().with_name("team-launcher"))
+    parser.add_argument("--pane-state-dir", type=Path, help=f"write initial pane idle state here (default: {DEFAULT_PANE_STATE_DIR})")
     parser.add_argument("--dry-run", action="store_true", help="print launch plan without starting Konsole")
     parser.add_argument("--template-output", type=Path, help="bootstrap output path")
     parser.add_argument("--force", action="store_true", help="allow reload to kill/relaunch even if live command validation fails")
@@ -1106,9 +1179,22 @@ def main(argv: list[str] | None = None) -> int:
         if not args.pane_mode or not args.role:
             raise SystemExit("pane mode requires <start|attach|attach-or-start|reload> and <role>")
         role = _role_by_name(config, args.role)
+        pane_state_dir = args.pane_state_dir or DEFAULT_PANE_STATE_DIR
         if role.detached:
-            return run_detached_role(role, mode=args.pane_mode, session_dir=config.session_dir, force_reload=args.force)
-        return run_role_pane(role, mode=args.pane_mode, session_dir=config.session_dir, force_reload=args.force)
+            return run_detached_role(
+                role,
+                mode=args.pane_mode,
+                session_dir=config.session_dir,
+                pane_state_dir=pane_state_dir,
+                force_reload=args.force,
+            )
+        return run_role_pane(
+            role,
+            mode=args.pane_mode,
+            session_dir=config.session_dir,
+            pane_state_dir=pane_state_dir,
+            force_reload=args.force,
+        )
     return launch_project(
         config,
         config_path=config_path,
@@ -1116,6 +1202,7 @@ def main(argv: list[str] | None = None) -> int:
         script_path=args.script_path,
         dry_run=args.dry_run,
         layout_output=args.layout_output,
+        pane_state_dir=args.pane_state_dir,
         force_reload=args.force,
     )
 

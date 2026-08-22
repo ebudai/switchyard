@@ -18,11 +18,13 @@ PostgreSQL. Attachment files and captured frames remain filesystem-backed under
   the command plan by default and only changes the host with `--apply`.
 - `deploy/systemd/pgu-ticket-board.service.boardsvc`: proposed system service;
   copy to `/etc/systemd/system/pgu-ticket-board.service` during cutover.
+- `deploy/systemd/pgu-ticket-board-canary.service`: fixed system canary unit;
+  copy to `/etc/systemd/system/pgu-ticket-board-canary.service` during cutover.
 - `deploy/tmpfiles/pgu-ticket-board.conf`: boot-time recreation for the shared
   `/tmp/pgu-frames` inbox; install it to `/etc/tmpfiles.d/`.
 - `deploy/polkit/49-pgu-board-deploy.rules`: narrow deploy authorization for
-  `agent`; it permits live board start/stop/restart and transient
-  `pgu-ticket-board-canary-*` start/stop so `deploy-restart` can keep its canary
+  `agent`; it permits live board start/stop/restart and fixed
+  `pgu-ticket-board-canary.service` start/stop so `deploy-restart` can keep its canary
   health gate without blanket sudo.
 - This runbook: root command list, verification, and rollback.
 
@@ -41,6 +43,7 @@ sudo PG_DATABASE=pgu scripts/ticket-board-boardsvc-setup.sh --apply
 
 # 3. Install the reviewed system unit, tmpfiles entry, and deploy polkit rule.
 sudo install -m 0644 deploy/systemd/pgu-ticket-board.service.boardsvc /etc/systemd/system/pgu-ticket-board.service
+sudo install -m 0644 deploy/systemd/pgu-ticket-board-canary.service /etc/systemd/system/pgu-ticket-board-canary.service
 sudo install -m 0644 deploy/tmpfiles/pgu-ticket-board.conf /etc/tmpfiles.d/pgu-ticket-board.conf
 sudo install -m 0644 deploy/polkit/49-pgu-board-deploy.rules /etc/polkit-1/rules.d/49-pgu-board-deploy.rules
 sudo systemd-tmpfiles --create /etc/tmpfiles.d/pgu-ticket-board.conf

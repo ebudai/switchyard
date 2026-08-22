@@ -217,7 +217,8 @@ chmod +x "$MOCKDIR/systemctl"
 cat >"$MOCKDIR/systemd-run" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-printf 'systemd-run:%s\n' "$*" >>"$TICKET_BOARD_SERVICE_TEST_LOG"
+echo "systemd-run must not be used for the board deploy canary: $*" >&2
+exit 98
 EOF
 chmod +x "$MOCKDIR/systemd-run"
 
@@ -286,6 +287,16 @@ grep -q '^system:restart pgu-ticket-board.service$' "$LOGFILE" || {
     cat "$LOGFILE" >&2
     exit 1
 }
+grep -q '^system:stop pgu-ticket-board-canary.service$' "$LOGFILE" || {
+    echo "FAIL: deploy-restart did not stop the fixed canary unit" >&2
+    cat "$LOGFILE" >&2
+    exit 1
+}
+grep -q '^system:start pgu-ticket-board-canary.service$' "$LOGFILE" || {
+    echo "FAIL: deploy-restart did not start the fixed canary unit" >&2
+    cat "$LOGFILE" >&2
+    exit 1
+}
 if grep -q '^user:restart pgu-ticket-board.service$' "$LOGFILE"; then
     echo "FAIL: deploy-restart incorrectly restarted the shadow user unit" >&2
     cat "$LOGFILE" >&2
@@ -330,6 +341,11 @@ grep -q '^system:daemon-reload$' "$LOGFILE" || {
 }
 grep -q '^system:restart pgu-ticket-board.service$' "$LOGFILE" || {
     echo "FAIL: changed-unit deploy-restart did not restart the live system unit" >&2
+    cat "$LOGFILE" >&2
+    exit 1
+}
+grep -q '^system:start pgu-ticket-board-canary.service$' "$LOGFILE" || {
+    echo "FAIL: changed-unit deploy-restart did not start the fixed canary unit" >&2
     cat "$LOGFILE" >&2
     exit 1
 }

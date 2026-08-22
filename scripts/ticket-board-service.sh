@@ -17,7 +17,8 @@ readonly BOARD_CANARY_USER="${BOARD_CANARY_USER:-boardsvc}"
 readonly BOARD_CANARY_PORT="${BOARD_CANARY_PORT:-}"
 readonly BOARD_CANARY_TIMEOUT_SECONDS="${BOARD_CANARY_TIMEOUT_SECONDS:-$SMOKE_TIMEOUT_SECONDS}"
 readonly BOARD_CANARY_SOCKET="${BOARD_CANARY_SOCKET:-}"
-readonly BOARD_CANARY_UNIT_PREFIX="${BOARD_CANARY_UNIT_PREFIX:-pgu-ticket-board-canary}"
+readonly BOARD_CANARY_SERVICE_NAME="${BOARD_CANARY_SERVICE_NAME:-pgu-ticket-board-canary.service}"
+readonly BOARD_CANARY_ENV_FILE="${BOARD_CANARY_ENV_FILE:-$BOARD_ROOT/canary.env}"
 readonly PYTHON_BIN="${TICKET_BOARD_PYTHON:-/usr/bin/python3}"
 readonly FRAME_ROOT="${FRAME_ROOT:-/tmp/pgu-frames}"
 readonly LOG_PATH="${LOG_PATH:-/tmp/pgu-ticket-board.log}"
@@ -89,19 +90,23 @@ systemctl_user() {
 
 is_board_service_systemctl_action() {
     case "${1:-}" in
-        start|restart)
+        start)
+            [[ "$#" -eq 2 ]] || return 1
+            [[ "${2:-}" == "$SERVICE_NAME" ]] || [[ "${2:-}" == "$BOARD_CANARY_SERVICE_NAME" ]]
+            ;;
+        restart)
             [[ "${2:-}" == "$SERVICE_NAME" && "$#" -eq 2 ]]
             ;;
         stop)
             [[ "$#" -eq 2 ]] || return 1
-            [[ "${2:-}" == "$SERVICE_NAME" ]] || [[ "${2:-}" == pgu-ticket-board-canary-* && "${2:-}" != *"/"* ]]
+            [[ "${2:-}" == "$SERVICE_NAME" ]] || [[ "${2:-}" == "$BOARD_CANARY_SERVICE_NAME" ]]
             ;;
         status)
             if [[ "${2:-}" == "$SERVICE_NAME" ]]; then
                 [[ "$#" -eq 2 ]]
                 return
             fi
-            [[ "${2:-}" == pgu-ticket-board-canary-* && "${2:-}" != *"/"* ]] || return 1
+            [[ "${2:-}" == "$BOARD_CANARY_SERVICE_NAME" ]] || return 1
             [[ "$#" -eq 2 ]] || [[ "$#" -eq 4 && "${3:-}" == "--no-pager" && "${4:-}" == "-l" ]]
             ;;
         *)
@@ -174,34 +179,6 @@ run_systemctl_with_polkit_timeout() {
     fi
     if [[ "$output" == *"Interactive authentication required"* ]]; then
         die "systemctl $* could not reach an interactive polkit approval flow; run this from $POLKIT_APPROVAL_USER's active graphical session so the KDE prompt can appear"
-    fi
-    return "$status"
-}
-
-run_systemd_run_canary_with_polkit_timeout() {
-    local output status
-    local timeout_args=()
-    if command -v timeout >/dev/null 2>&1; then
-        timeout_args=(timeout --foreground "${POLKIT_TIMEOUT_SECONDS}s")
-    fi
-    if output="$("${timeout_args[@]}" systemd-run "$@" 2>&1)"; then
-        if [[ -n "$output" ]]; then
-            printf '%s\n' "$output"
-        fi
-        return 0
-    else
-        status=$?
-    fi
-    if [[ -n "$output" ]]; then
-        printf '%s\n' "$output" >&2
-    fi
-    if [[ "$status" == "124" ]]; then
-        log "systemd-run canary timed out waiting for polkit approval; install the board deploy polkit rule or run from $POLKIT_APPROVAL_USER's active graphical session"
-        return "$status"
-    fi
-    if [[ "$output" == *"Interactive authentication required"* || "$output" == *"Access denied"* || "$output" == *"authentication"* ]]; then
-        log "systemd-run canary requires the host board-deploy polkit rule for pgu-ticket-board-canary-* transient units"
-        return "$status"
     fi
     return "$status"
 }
@@ -549,6 +526,38 @@ stop_canary_direct() {
     wait "$pid" >/dev/null 2>&1 || true
 }
 
+systemd_env_value() {
+    local value="$1"
+    [[ "$value" != *$'\n'* ]] || die "canary environment values must not contain newlines"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    printf '"%s"' "$value"
+}
+
+write_canary_env_file() {
+    local release_dir="$1"
+    local port="$2"
+    local socket_path="$3"
+    local frame_dir="$4"
+    local canary_log="$5"
+    local asset_dir="$6"
+    local tmp_path
+    mkdir -p "$(dirname "$BOARD_CANARY_ENV_FILE")"
+    tmp_path="$(mktemp "$(dirname "$BOARD_CANARY_ENV_FILE")/.canary-env.XXXXXX")"
+    {
+        printf 'BOARD_CANARY_RELEASE_DIR=%s\n' "$(systemd_env_value "$release_dir")"
+        printf 'BOARD_CANARY_HOST=%s\n' "$(systemd_env_value "$BOARD_HOST")"
+        printf 'BOARD_CANARY_PORT=%s\n' "$(systemd_env_value "$port")"
+        printf 'BOARD_CANARY_SOCKET=%s\n' "$(systemd_env_value "$socket_path")"
+        printf 'BOARD_CANARY_FRAME_DIR=%s\n' "$(systemd_env_value "$frame_dir")"
+        printf 'BOARD_CANARY_ASSET_DIR=%s\n' "$(systemd_env_value "$asset_dir")"
+        printf 'BOARD_CANARY_LOG=%s\n' "$(systemd_env_value "$canary_log")"
+        printf 'BOARD_CANARY_DATABASE_URL=%s\n' "$(systemd_env_value "$BOARD_DATABASE_URL")"
+    } >"$tmp_path"
+    chmod 0644 "$tmp_path"
+    mv "$tmp_path" "$BOARD_CANARY_ENV_FILE"
+}
+
 start_canary_systemd() {
     local release_dir="$1"
     local port="$2"
@@ -558,23 +567,11 @@ start_canary_systemd() {
     local canary_user="$6"
     local canary_log="$7"
     local asset_dir="$8"
-    run_systemd_run_canary_with_polkit_timeout \
-        --quiet \
-        --collect \
-        --unit "$unit_name" \
-        --uid "$canary_user" \
-        --property "WorkingDirectory=$release_dir" \
-        --property "StandardOutput=append:$canary_log" \
-        --property "StandardError=append:$canary_log" \
-        --setenv "PYTHONUNBUFFERED=1" \
-        --setenv "PGU_TICKET_BOARD_SOCKET=$socket_path" \
-        --setenv "TICKET_BOARD_DATABASE_URL=$BOARD_DATABASE_URL" \
-        "$PYTHON_BIN" "$release_dir/scripts/ticket-board.py" \
-            --host "$BOARD_HOST" \
-            --port "$port" \
-            --unix-socket "$socket_path" \
-            --frames "$frame_dir" \
-            --assets "$asset_dir"
+    [[ "$unit_name" == "$BOARD_CANARY_SERVICE_NAME" ]] || die "system canary must use $BOARD_CANARY_SERVICE_NAME"
+    [[ "$canary_user" == "boardsvc" ]] || die "system canary uses static $BOARD_CANARY_SERVICE_NAME and cannot override BOARD_CANARY_USER"
+    write_canary_env_file "$release_dir" "$port" "$socket_path" "$frame_dir" "$canary_log" "$asset_dir"
+    systemctl_system stop "$unit_name" >/dev/null 2>&1 || true
+    systemctl_system start "$unit_name"
 }
 
 stop_canary_systemd() {
@@ -601,7 +598,7 @@ run_release_canary() {
     frame_dir="$socket_root/frames"
     asset_dir="$socket_root/assets"
     canary_log="$socket_root/canary.log"
-    unit_name="$BOARD_CANARY_UNIT_PREFIX-$$"
+    unit_name="$BOARD_CANARY_SERVICE_NAME"
     chmod 1777 "$socket_root"
     mkdir -p "$frame_dir" "$asset_dir"
     chmod 1777 "$frame_dir" "$asset_dir"

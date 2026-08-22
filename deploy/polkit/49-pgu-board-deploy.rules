@@ -1,5 +1,5 @@
 // Allow the agent team to deploy the PGU board without blanket sudo.
-// Scope is intentionally limited to the live board unit and deploy canaries.
+// Scope is intentionally limited to fixed, root-owned board service units.
 polkit.addRule(function(action, subject) {
     if (subject.user !== "agent") {
         return polkit.Result.NOT_HANDLED;
@@ -17,7 +17,7 @@ polkit.addRule(function(action, subject) {
         return polkit.Result.NOT_HANDLED;
     }
 
-    if (/^pgu-ticket-board-canary-[A-Za-z0-9_.@:-]+\.service$/.test(unit)) {
+    if (unit === "pgu-ticket-board-canary.service") {
         if (verb === "start" || verb === "stop") {
             return polkit.Result.YES;
         }

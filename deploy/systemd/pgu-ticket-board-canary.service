@@ -1,0 +1,20 @@
+[Unit]
+Description=PGU Ticket Board Deploy Canary
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=boardsvc
+WorkingDirectory=/home/agent/pgu-ticketboard-live
+EnvironmentFile=/home/agent/pgu-ticketboard-live/canary.env
+RuntimeDirectory=pgu-ticket-board-canary
+ExecStart=/bin/sh -eu -c 'PYTHONUNBUFFERED=1 PGU_TICKET_BOARD_SOCKET="$BOARD_CANARY_SOCKET" TICKET_BOARD_DATABASE_URL="$BOARD_CANARY_DATABASE_URL" exec /usr/bin/python3 "$BOARD_CANARY_RELEASE_DIR"/scripts/ticket-board.py --host "$BOARD_CANARY_HOST" --port "$BOARD_CANARY_PORT" --unix-socket "$BOARD_CANARY_SOCKET" --frames "$BOARD_CANARY_FRAME_DIR" --assets "$BOARD_CANARY_ASSET_DIR" >>"$BOARD_CANARY_LOG" 2>&1'
+Restart=no
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/tmp
+
+[Install]
+WantedBy=multi-user.target

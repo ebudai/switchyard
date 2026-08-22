@@ -56,31 +56,11 @@ printf 'systemctl:%s\n' "$*" >>"$TICKET_BOARD_HEALTH_GATE_LOG"
 if [[ "${1:-}" == "show" && "${2:-}" == "pgu-ticket-board.service" && "${3:-}" == "-p" && "${4:-}" == "FragmentPath" && "${5:-}" == "--value" ]]; then
     printf '%s\n' "$TICKET_BOARD_HEALTH_GATE_UNIT"
 fi
-EOF
-    chmod +x "$mockdir/systemctl"
-
-    cat >"$mockdir/systemd-run" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-printf 'systemd-run:%s\n' "$*" >>"$TICKET_BOARD_HEALTH_GATE_LOG"
-socket_path=""
-previous=""
-canary_log=""
-for arg in "$@"; do
-    if [[ "$previous" == "--property" && "$arg" == StandardError=append:* ]]; then
-        canary_log="${arg#StandardError=append:}"
-    fi
-    if [[ "$previous" == "--unix-socket" ]]; then
-        socket_path="$arg"
-        break
-    fi
-    previous="$arg"
-done
-if [[ -n "$canary_log" ]]; then
-    printf 'mock canary boot log\n' >>"$canary_log"
-fi
-if [[ -n "$socket_path" ]]; then
-    socket_parent="$(dirname "$socket_path")"
+if [[ "${1:-}" == "start" && "${2:-}" == "pgu-ticket-board-canary.service" ]]; then
+    # shellcheck source=/dev/null
+    source "$TICKET_BOARD_HEALTH_GATE_CANARY_ENV"
+    printf 'mock canary boot log\n' >>"$BOARD_CANARY_LOG"
+    socket_parent="$(dirname "$BOARD_CANARY_SOCKET")"
     socket_parent_mode="$(stat -c %a "$socket_parent")"
     socket_parent_other="${socket_parent_mode: -1}"
     case "$socket_parent_other" in
@@ -91,7 +71,23 @@ if [[ -n "$socket_path" ]]; then
             exit 1
             ;;
     esac
+    case "$BOARD_CANARY_ASSET_DIR" in
+        /tmp/*)
+            ;;
+        *)
+            echo "canary asset dir is not under /tmp: $BOARD_CANARY_ASSET_DIR" >&2
+            exit 1
+            ;;
+    esac
 fi
+EOF
+    chmod +x "$mockdir/systemctl"
+
+    cat >"$mockdir/systemd-run" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+echo "systemd-run must not be used for the board deploy canary: $*" >&2
+exit 98
 EOF
     chmod +x "$mockdir/systemd-run"
 
@@ -128,6 +124,7 @@ run_service() {
     TICKET_BOARD_FAIL_LIVE_SMOKE_ONCE="${TICKET_BOARD_FAIL_LIVE_SMOKE_ONCE:-}" \
     TICKET_BOARD_SYSTEM_UNIT_PATH="$SYSTEM_UNIT_PATH" \
     TICKET_BOARD_SYSTEM_UNIT_HASH_RECORD="$HASH_RECORD" \
+    TICKET_BOARD_HEALTH_GATE_CANARY_ENV="$deploy_root/canary.env" \
     TICKET_BOARD_SKIP_POST_DEPLOY_SOCKET_VERIFY="$skip_socket_verify" \
     TICKET_BOARD_SKIP_MIGRATIONS=1 \
     BOARD_CANARY_PORT=19001 \
@@ -167,19 +164,24 @@ rm -f "$FAIL_CANARY_FILE"
     echo "FAIL: failed canary changed the live current symlink" >&2
     exit 1
 }
-grep -q 'systemd-run:.*--uid boardsvc' "$LOGFILE" || {
-    echo "FAIL: canary did not run via systemd-run as boardsvc" >&2
+grep -q '^systemctl:start pgu-ticket-board-canary.service$' "$LOGFILE" || {
+    echo "FAIL: canary did not run through the fixed systemd service" >&2
     cat "$LOGFILE" >&2
     exit 1
 }
-grep -q -- '--property StandardError=append:' "$LOGFILE" || {
-    echo "FAIL: canary did not route stderr to the canary log" >&2
+grep -q '^systemctl:stop pgu-ticket-board-canary.service$' "$LOGFILE" || {
+    echo "FAIL: failed canary did not stop the fixed systemd service" >&2
     cat "$LOGFILE" >&2
     exit 1
 }
-grep -q -- '--assets /tmp/' "$LOGFILE" || {
-    echo "FAIL: canary did not use an explicit temporary assets directory" >&2
-    cat "$LOGFILE" >&2
+grep -q '^BOARD_CANARY_RELEASE_DIR=' "$DEPLOY_ROOT/canary.env" || {
+    echo "FAIL: deploy did not write the canary environment file" >&2
+    cat "$DEPLOY_ROOT/canary.env" >&2 || true
+    exit 1
+}
+grep -q '^BOARD_CANARY_ASSET_DIR="/tmp/' "$DEPLOY_ROOT/canary.env" || {
+    echo "FAIL: canary environment did not use an explicit temporary assets directory" >&2
+    cat "$DEPLOY_ROOT/canary.env" >&2
     exit 1
 }
 grep -q 'canary: mock canary boot log' "$TMPDIR_T/canary-fail.err" || {

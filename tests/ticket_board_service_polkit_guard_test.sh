@@ -35,8 +35,8 @@ chmod +x "$MOCKDIR/systemctl"
 cat >"$MOCKDIR/systemd-run" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-printf 'systemd-run %s\n' "$*" >>"$TICKET_BOARD_SERVICE_TEST_LOG"
-exit 0
+echo "systemd-run must not be used for the board deploy canary: $*" >&2
+exit 98
 EOF
 chmod +x "$MOCKDIR/systemd-run"
 
@@ -176,13 +176,13 @@ if grep -q 'skipping deploy canary' "$TMPDIR_T/err-canary"; then
     cat "$TMPDIR_T/err-canary" >&2 || true
     exit 1
 fi
-grep -q '^systemd-run .*--unit pgu-ticket-board-canary-' "$LOGFILE" || {
-    echo "FAIL: headless deploy-restart did not start the transient canary unit" >&2
+grep -q '^start pgu-ticket-board-canary.service$' "$LOGFILE" || {
+    echo "FAIL: headless deploy-restart did not start the fixed canary unit" >&2
     cat "$LOGFILE" >&2 || true
     exit 1
 }
-grep -q '^stop pgu-ticket-board-canary-' "$LOGFILE" || {
-    echo "FAIL: headless deploy-restart did not stop the transient canary unit" >&2
+grep -q '^stop pgu-ticket-board-canary.service$' "$LOGFILE" || {
+    echo "FAIL: headless deploy-restart did not stop the fixed canary unit" >&2
     cat "$LOGFILE" >&2 || true
     exit 1
 }
@@ -209,20 +209,32 @@ grep -q '^restart pgu-ticket-board.service$' "$LOGFILE" || {
         echo "FAIL: board-unit restart with extra args must not match the whitelist predicate" >&2
         exit 1
     fi
-    is_board_service_systemctl_action stop pgu-ticket-board-canary-12345 || {
+    is_board_service_systemctl_action start pgu-ticket-board-canary.service || {
+        echo "FAIL: exact canary start should match the whitelist predicate" >&2
+        exit 1
+    }
+    is_board_service_systemctl_action stop pgu-ticket-board-canary.service || {
         echo "FAIL: exact canary stop should match the whitelist predicate" >&2
         exit 1
     }
-    is_board_service_systemctl_action status pgu-ticket-board-canary-12345 --no-pager -l || {
+    is_board_service_systemctl_action status pgu-ticket-board-canary.service --no-pager -l || {
         echo "FAIL: exact canary status should match the whitelist predicate" >&2
         exit 1
     }
-    if is_board_service_systemctl_action restart pgu-ticket-board-canary-12345; then
+    if is_board_service_systemctl_action restart pgu-ticket-board-canary.service; then
         echo "FAIL: canary restart must not match the whitelist predicate" >&2
         exit 1
     fi
-    if is_board_service_systemctl_action stop pgu-ticket-board-canary-12345 --no-block; then
+    if is_board_service_systemctl_action stop pgu-ticket-board-canary.service --no-block; then
         echo "FAIL: canary stop with extra args must not match the whitelist predicate" >&2
+        exit 1
+    fi
+    if is_board_service_systemctl_action start pgu-ticket-board-canary-12345; then
+        echo "FAIL: dynamic canary instance starts must not match the whitelist predicate" >&2
+        exit 1
+    fi
+    if is_board_service_systemctl_action stop pgu-ticket-board-canary-12345; then
+        echo "FAIL: dynamic canary instance names must not match the whitelist predicate" >&2
         exit 1
     fi
     if is_board_service_systemctl_action daemon-reload; then
@@ -244,8 +256,8 @@ grep -q 'unit === "pgu-ticket-board.service"' "$POLKIT_RULE" || {
     echo "FAIL: polkit rule does not authorize the live board unit" >&2
     exit 1
 }
-grep -q 'pgu-ticket-board-canary-' "$POLKIT_RULE" || {
-    echo "FAIL: polkit rule does not authorize deploy canary units" >&2
+grep -q 'unit === "pgu-ticket-board-canary.service"' "$POLKIT_RULE" || {
+    echo "FAIL: polkit rule does not authorize the fixed deploy canary unit" >&2
     exit 1
 }
 grep -q 'verb === "restart"' "$POLKIT_RULE" || {
@@ -256,6 +268,38 @@ grep -q 'verb === "start" || verb === "stop"' "$POLKIT_RULE" || {
     echo "FAIL: polkit rule does not authorize canary start/stop only" >&2
     exit 1
 }
+if grep -Eq 'pgu-ticket-board-canary-|StartTransientUnit|systemd-run' "$POLKIT_RULE"; then
+    echo "FAIL: polkit rule must not authorize caller-defined transient canary units" >&2
+    exit 1
+fi
+python3 - "$POLKIT_RULE" <<'PY'
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+first_yes = text.find("polkit.Result.YES")
+guard_user = text.find('subject.user !== "agent"')
+guard_action = text.find('action.id !== "org.freedesktop.systemd1.manage-units"')
+unit_lookup = text.find('var unit = action.lookup("unit");')
+live_unit = text.find('unit === "pgu-ticket-board.service"')
+canary_unit = text.find('unit === "pgu-ticket-board-canary.service"')
+final_not_handled = text.rfind("return polkit.Result.NOT_HANDLED;")
+if min(first_yes, guard_user, guard_action, unit_lookup, live_unit, canary_unit, final_not_handled) < 0:
+    raise SystemExit("missing expected polkit decision structure")
+if not (guard_user < guard_action < unit_lookup < live_unit < canary_unit < final_not_handled):
+    raise SystemExit("polkit rule guards must precede exact fixed-unit checks")
+if first_yes < live_unit:
+    raise SystemExit("polkit grants before matching an exact fixed unit")
+if text.count("polkit.Result.YES") != 2:
+    raise SystemExit("polkit rule should contain exactly two positive grant sites")
+if "return polkit.Result.YES;" in text[:live_unit]:
+    raise SystemExit("blanket grant appears before fixed-unit checks")
+canary_block = text[canary_unit:final_not_handled]
+if 'verb === "restart"' in canary_block:
+    raise SystemExit("canary unit must not authorize restart")
+if 'verb === "start" || verb === "stop"' not in canary_block:
+    raise SystemExit("canary unit should authorize only start/stop")
+PY
 
 cat >"$MOCKDIR/systemctl" <<'EOF'
 #!/usr/bin/env bash

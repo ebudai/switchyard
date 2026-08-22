@@ -4,6 +4,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$REPO_ROOT/scripts/ticket-board-boardsvc-setup.sh"
 UNIT="$REPO_ROOT/deploy/systemd/pgu-ticket-board.service.boardsvc"
+CANARY_UNIT="$REPO_ROOT/deploy/systemd/pgu-ticket-board-canary.service"
 TMPFILES="$REPO_ROOT/deploy/tmpfiles/pgu-ticket-board.conf"
 POLKIT_RULE="$REPO_ROOT/deploy/polkit/49-pgu-board-deploy.rules"
 RUNBOOK="$REPO_ROOT/docs/ticket-board-boardsvc-peer-auth-runbook.md"
@@ -124,10 +125,34 @@ grep -q '^d /tmp/pgu-frames 1777 root root -$' "$TMPFILES" || {
     echo "FAIL: board deploy polkit rule is missing" >&2
     exit 1
 }
-grep -q 'pgu-ticket-board-canary-' "$POLKIT_RULE" || {
-    echo "FAIL: board deploy polkit rule does not cover deploy canary units" >&2
+grep -q 'unit === "pgu-ticket-board-canary.service"' "$POLKIT_RULE" || {
+    echo "FAIL: board deploy polkit rule does not cover the fixed deploy canary unit" >&2
     exit 1
 }
+if grep -q 'pgu-ticket-board-canary-' "$POLKIT_RULE"; then
+    echo "FAIL: board deploy polkit rule must not cover caller-defined transient canary units" >&2
+    exit 1
+fi
+[[ -f "$CANARY_UNIT" ]] || {
+    echo "FAIL: fixed deploy canary systemd unit is missing" >&2
+    exit 1
+}
+grep -q '^User=boardsvc$' "$CANARY_UNIT" || {
+    echo "FAIL: fixed canary unit does not run as boardsvc" >&2
+    exit 1
+}
+grep -q '^EnvironmentFile=/home/agent/pgu-ticketboard-live/canary.env$' "$CANARY_UNIT" || {
+    echo "FAIL: fixed canary unit does not read the deploy-written environment file" >&2
+    exit 1
+}
+grep -q '^ReadWritePaths=/tmp$' "$CANARY_UNIT" || {
+    echo "FAIL: fixed canary unit does not limit writable paths to /tmp" >&2
+    exit 1
+}
+if grep -Eq '%i|systemd-run|pgu-ticket-board-canary-' "$CANARY_UNIT"; then
+    echo "FAIL: fixed canary unit must not interpolate instance names or use transient units" >&2
+    exit 1
+fi
 
 grep -q 'parser.add_argument("--assets"' "$REPO_ROOT/scripts/ticket_board/cli.py" || {
     echo "FAIL: CLI does not expose an explicit assets directory" >&2

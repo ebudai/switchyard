@@ -170,10 +170,13 @@ install the reviewed rule
 `deploy/polkit/49-pgu-board-deploy.rules` as
 `/etc/polkit-1/rules.d/49-pgu-board-deploy.rules`. That rule allows only the
 `agent` user to restart/start/stop `pgu-ticket-board.service` and to
-start/stop transient `pgu-ticket-board-canary-*` units. This lets the team run
-the mandatory canary health gate and then restart the live board without Eric's
-active KDE session or blanket sudo. If that host rule is absent, `systemd-run`
-or `systemctl` fails with its normal authorization error.
+start/stop the fixed, root-owned `pgu-ticket-board-canary.service` unit. This
+lets the team run the mandatory canary health gate and then restart the live
+board without Eric's active KDE session or blanket sudo. The canary unit runs as
+`boardsvc`; `deploy-restart` only writes
+`/home/agent/pgu-ticketboard-live/canary.env` to point that fixed unit at the
+candidate release and scratch port/socket. If the host rule or canary unit is
+absent, `systemctl` fails with its normal authorization error.
 
 Other privileged system actions, including system unit installation and
 `daemon-reload`, still use the guarded interactive polkit path and may require

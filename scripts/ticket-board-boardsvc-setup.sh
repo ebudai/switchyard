@@ -37,6 +37,7 @@ sudo PG_DATABASE=$PG_DATABASE PG_IDENT_MAP=$PG_IDENT_MAP BOARD_ROOT=$BOARD_ROOT 
 # 2. Install the proposed system unit, tmpfiles entry, and deploy polkit rule
 #    after reviewing/editing PGDATABASE.
 sudo install -m 0644 deploy/systemd/pgu-ticket-board.service.boardsvc /etc/systemd/system/pgu-ticket-board.service
+sudo install -m 0644 deploy/systemd/pgu-ticket-board-canary.service /etc/systemd/system/pgu-ticket-board-canary.service
 sudo install -m 0644 deploy/tmpfiles/pgu-ticket-board.conf /etc/tmpfiles.d/pgu-ticket-board.conf
 sudo install -m 0644 deploy/polkit/49-pgu-board-deploy.rules /etc/polkit-1/rules.d/49-pgu-board-deploy.rules
 sudo systemd-tmpfiles --create /etc/tmpfiles.d/pgu-ticket-board.conf

@@ -535,12 +535,7 @@ class PaneActivityGate:
     def _stale_codex_session_start_idle_trace(self, target: str, state: PaneHookState) -> ActivityTrace | None:
         if state.state != "idle" or state.source != "codex.SessionStart":
             return None
-        if self.stale_codex_busy_hook_seconds <= 0:
-            return None
         if state.updated_at < MIN_RECOVERABLE_HOOK_EPOCH_SECONDS:
-            return None
-        now = self.wall_time()
-        if now - state.updated_at < self.stale_codex_busy_hook_seconds:
             return None
         return self._working_timer_trace(
             target,

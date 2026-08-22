@@ -1048,7 +1048,7 @@ def test_stale_codex_session_start_idle_stays_busy_when_working_timer_resets() -
             ),
             idle_working_timer_sample_delay_seconds=1.1,
             stale_codex_busy_hook_seconds=120,
-            wall_time=lambda: 1_800_000_236.0,
+            wall_time=lambda: 1_800_000_030.0,
             sleeper=lambda seconds: sleep_calls.append(seconds),
         )
         store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=1_800_000_000.0)
@@ -1064,7 +1064,28 @@ def test_stale_codex_session_start_idle_stays_busy_when_working_timer_resets() -
     assert state.source == "codex.SessionStart"
 
 
-def test_stale_codex_session_start_idle_delivers_when_working_timer_is_static() -> None:
+def test_codex_session_start_idle_without_timer_delivers_without_delay() -> None:
+    sleep_calls: list[float] = []
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            cursor_position_runner=constant_cursor_runner("2 23 24"),
+            capture_pane_runner=targeted_capture_runner("pgu-ops:0.0", ""),
+            idle_working_timer_sample_delay_seconds=1.1,
+            wall_time=lambda: 1_800_000_030.0,
+            sleeper=lambda seconds: sleep_calls.append(seconds),
+        )
+        store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=1_800_000_000.0)
+
+        assert gate.is_busy("pgu-ops:0.0") is False
+
+    assert sleep_calls == []
+    assert gate.last_trace("pgu-ops:0.0").reason == "hook_idle"  # type: ignore[union-attr]
+    assert gate._last_working_timer_by_target == {}
+
+
+def test_codex_session_start_idle_frozen_timer_samples_once_then_delivers() -> None:
     sleep_calls: list[float] = []
     with TemporaryStateDir() as tmp_path:
         store = PaneHookStateStore(tmp_path)
@@ -1078,11 +1099,12 @@ def test_stale_codex_session_start_idle_delivers_when_working_timer_is_static() 
             ),
             idle_working_timer_sample_delay_seconds=1.1,
             stale_codex_busy_hook_seconds=120,
-            wall_time=lambda: 1_800_000_236.0,
+            wall_time=lambda: 1_800_000_030.0,
             sleeper=lambda seconds: sleep_calls.append(seconds),
         )
         store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=1_800_000_000.0)
 
+        assert gate.is_busy("pgu-ops:0.0") is False
         assert gate.is_busy("pgu-ops:0.0") is False
 
     assert sleep_calls == [1.1]
@@ -1090,35 +1112,30 @@ def test_stale_codex_session_start_idle_delivers_when_working_timer_is_static() 
     assert gate._last_working_timer_by_target == {"pgu-ops:0.0": 7}
 
 
-def test_fresh_or_turn_end_idle_does_not_pay_working_timer_delay() -> None:
-    cases = [
-        ("codex.SessionStart", 1_800_000_060.0),
-        ("codex.Stop", 1_800_000_236.0),
-    ]
-    for source, now in cases:
-        sleep_calls: list[float] = []
-        with TemporaryStateDir() as tmp_path:
-            store = PaneHookStateStore(tmp_path)
-            gate = PaneActivityGate(
-                state_store=store,
-                cursor_position_runner=constant_cursor_runner("2 23 24"),
-                capture_pane_runner=targeted_capture_runner(
-                    "pgu-ops:0.0",
-                    "Working (18s · esc to interrupt)\n",
-                    "Working (2s · esc to interrupt)\n",
-                ),
-                idle_working_timer_sample_delay_seconds=1.1,
-                stale_codex_busy_hook_seconds=120,
-                wall_time=lambda now=now: now,
-                sleeper=lambda seconds: sleep_calls.append(seconds),
-            )
-            store.write("pgu-ops:0.0", "idle", source=source, now=1_800_000_000.0)
+def test_turn_end_idle_does_not_pay_working_timer_delay() -> None:
+    sleep_calls: list[float] = []
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            cursor_position_runner=constant_cursor_runner("2 23 24"),
+            capture_pane_runner=targeted_capture_runner(
+                "pgu-ops:0.0",
+                "Working (18s · esc to interrupt)\n",
+                "Working (2s · esc to interrupt)\n",
+            ),
+            idle_working_timer_sample_delay_seconds=1.1,
+            stale_codex_busy_hook_seconds=120,
+            wall_time=lambda: 1_800_000_236.0,
+            sleeper=lambda seconds: sleep_calls.append(seconds),
+        )
+        store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=1_800_000_000.0)
 
-            assert gate.is_busy("pgu-ops:0.0") is False
+        assert gate.is_busy("pgu-ops:0.0") is False
 
-        assert sleep_calls == []
-        assert gate.last_trace("pgu-ops:0.0").reason == "hook_idle"  # type: ignore[union-attr]
-        assert gate._last_working_timer_by_target == {}
+    assert sleep_calls == []
+    assert gate.last_trace("pgu-ops:0.0").reason == "hook_idle"  # type: ignore[union-attr]
+    assert gate._last_working_timer_by_target == {}
 
 
 def test_ticket_update_delivers_immediately_to_busy_worker_with_empty_composer() -> None:
@@ -2204,8 +2221,9 @@ def main() -> int:
     test_stale_codex_busy_state_recovers_on_cold_cache_when_working_timer_is_static()
     test_stale_codex_busy_state_stays_busy_when_human_is_composing()
     test_stale_codex_session_start_idle_stays_busy_when_working_timer_resets()
-    test_stale_codex_session_start_idle_delivers_when_working_timer_is_static()
-    test_fresh_or_turn_end_idle_does_not_pay_working_timer_delay()
+    test_codex_session_start_idle_without_timer_delivers_without_delay()
+    test_codex_session_start_idle_frozen_timer_samples_once_then_delivers()
+    test_turn_end_idle_does_not_pay_working_timer_delay()
     test_ticket_update_delivers_immediately_to_busy_worker_with_empty_composer()
     test_ticket_update_waits_for_worker_human_composing_to_clear()
     test_ticket_update_holds_busy_worker_with_advanced_cursor()

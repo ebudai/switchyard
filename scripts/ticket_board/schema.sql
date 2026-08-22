@@ -885,6 +885,11 @@ BEGIN
         NEW.assignee := 'director';
     END IF;
 
+    IF OLD.state IS DISTINCT FROM NEW.state
+       AND ticket_board.stage_default_assignee(NEW.state) IS NOT NULL THEN
+        NEW.assignee := ticket_board.stage_default_assignee(NEW.state);
+    END IF;
+
     IF NEW.state = 'done'
        AND OLD.state IN ('backlog', 'analysis')
        AND current_setting('ticket_board.utility_task_complete', true) = 'on'
@@ -1687,6 +1692,19 @@ AS $$
         WHEN p_state = 'dat' THEN 'director'
         WHEN p_state = 'eric_review' THEN 'director'
         WHEN p_state = 'director_review' THEN 'director'
+        ELSE NULL
+    END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.stage_default_assignee(p_state text)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT CASE
+        WHEN p_state = 'inspection' THEN 'inspector'
+        WHEN p_state = 'audit' THEN 'audit'
+        WHEN p_state IN ('dat', 'eric_review', 'director_review') THEN 'director'
         ELSE NULL
     END;
 $$;

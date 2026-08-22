@@ -201,6 +201,13 @@ def main() -> int:
     assert "implementation must be non-empty before a ticket can enter in_progress" not in schema
     assert "in_progress tickets require an implementer assignee" in schema
     assert "create or replace function ticket_board.ticket_is_implementer_assignee" in executable_schema_lower
+    assert "create or replace function ticket_board.stage_default_assignee" in executable_schema_lower
+    assert "ticket_board.stage_default_assignee(new.state)" in executable_schema_lower
+    stage_default_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu584_stage_default_assignee.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "create or replace function ticket_board.stage_default_assignee" in stage_default_migration
+    assert "tickets_zzzz_stage_default_assignee_update" in stage_default_migration
     assert "add constraint tickets_in_progress_assignee_check" not in schema_lower
     assert re.search(
         r"resolved\s+boolean\s+not null\s+default\s+false",

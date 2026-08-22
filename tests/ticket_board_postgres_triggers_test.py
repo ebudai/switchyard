@@ -779,7 +779,7 @@ WHERE id = 'PGU-4';
 """,
                 ).stdout
             )
-            assert reopened == {"state": "analysis", "assignee": "audit", "audit_signoff": False, "commit_hash": ""}, reopened
+            assert reopened == {"state": "analysis", "assignee": "director", "audit_signoff": False, "commit_hash": ""}, reopened
 
             insert_ticket(
                 conninfo,
@@ -813,6 +813,20 @@ WHERE id = 'PGU-40';
                 "commit_hash": "",
             }, director_implementation
             psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '4040404' WHERE id = 'PGU-40';")
+            director_audit_handoff = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'state', state,
+    'assignee', assignee
+)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-40';
+""",
+                ).stdout
+            )
+            assert director_audit_handoff == {"state": "audit", "assignee": "audit"}, director_audit_handoff
             psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-40';")
             psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-40';")
 
@@ -1249,7 +1263,7 @@ WHERE id = 'PGU-34004';
                 conninfo,
                 """
 SET ROLE ticket_board_service;
-SELECT set_config('ticket_board.caller_role', 'inspector', false);
+SELECT set_config('ticket_board.caller_role', 'audit', false);
 SELECT ticket_board.complete_task('PGU-84', 'Trying to skip audit.');
 """,
                 "complete_task requires a backlog or analysis ticket",
@@ -3211,7 +3225,7 @@ LIMIT 1;
             assert inspection_escalation == {
                 "kind": "escalation",
                 "target_role": "director",
-                "message": "PRIORITY PGU-21 -- Inspection notify appears stuck for perf; check/reassign",
+                "message": "PRIORITY PGU-21 -- Inspection notify appears stuck for inspector; check/reassign",
             }, inspection_escalation
             escalation_nudge_copies = psql(
                 conninfo,

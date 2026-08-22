@@ -506,6 +506,16 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
         implementation="Done.",
         audit_signoff=True,
     )
+    seed_ticket(
+        "PGU-136",
+        title="Director route coerces stage owner",
+        state="audit",
+        assignee="audit",
+        implementation="Done.",
+        audit_signoff=True,
+        needs_eric_signoff=True,
+        commit_hash=commit_hash,
+    )
 
 
 def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets: Path, admin_conn: str) -> None:
@@ -767,6 +777,14 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
         expect=400,
     )
     assert "in_progress tickets require an implementer assignee" in str(invalid_implementation_assignee), invalid_implementation_assignee
+    incoherent_audit_route = post_json(
+        base_url,
+        "/api/tickets/PGU-136/actions/route",
+        {"state": "dat", "assignee": "audit"},
+        caller="director",
+    )
+    assert incoherent_audit_route["ticket"]["state"] == "dat", incoherent_audit_route  # type: ignore[index]
+    assert incoherent_audit_route["ticket"]["assignee"] == "director", incoherent_audit_route  # type: ignore[index]
     normal_done_blocked = post_json(
         base_url,
         "/api/tickets/PGU-129/actions/route",
@@ -842,6 +860,7 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     assert "complete_task requires a backlog or analysis ticket" in str(in_progress_utility_complete), in_progress_utility_complete
     submitted = post_json(base_url, "/api/tickets/PGU-101/actions/submit_to_audit", {"commit_hash": commit_hash}, caller="ops")
     assert submitted["ticket"]["state"] == "audit", submitted  # type: ignore[index]
+    assert submitted["ticket"]["assignee"] == "audit", submitted  # type: ignore[index]
     assert submitted["ticket"]["commit_hash"] == commit_hash, submitted  # type: ignore[index]
     signed_off_submitted = post_json(
         base_url,
@@ -909,6 +928,7 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     assert submit_exempt_set["ticket"]["commit_exempt"] is True, submit_exempt_set  # type: ignore[index]
     exempt_submitted = post_json(base_url, "/api/tickets/PGU-120/actions/submit_to_audit", {}, caller="research")
     assert exempt_submitted["ticket"]["state"] == "audit", exempt_submitted  # type: ignore[index]
+    assert exempt_submitted["ticket"]["assignee"] == "audit", exempt_submitted  # type: ignore[index]
     assert exempt_submitted["ticket"]["commit_hash"] == "", exempt_submitted  # type: ignore[index]
     assert exempt_submitted["ticket"]["commit_exempt"] is True, exempt_submitted  # type: ignore[index]
 
@@ -1032,6 +1052,7 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
         caller="ops",
     )
     assert inspect_submitted["ticket"]["state"] == "inspection", inspect_submitted  # type: ignore[index]
+    assert inspect_submitted["ticket"]["assignee"] == "inspector", inspect_submitted  # type: ignore[index]
     assert inspect_submitted["ticket"]["inspector_signoff"] is False, inspect_submitted  # type: ignore[index]
 
     self_inspect_started = post_json(
@@ -1118,6 +1139,7 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     assert "inspector_signoff must be true" in str(inspection_skip), inspection_skip
     inspection_signed = post_json(base_url, "/api/tickets/PGU-117/actions/inspector_sign_off", {}, caller="inspector")
     assert inspection_signed["ticket"]["state"] == "audit", inspection_signed  # type: ignore[index]
+    assert inspection_signed["ticket"]["assignee"] == "audit", inspection_signed  # type: ignore[index]
     assert inspection_signed["ticket"]["inspector_signoff"] is True, inspection_signed  # type: ignore[index]
     inspection_audit_signed = post_json(
         base_url,
@@ -1169,9 +1191,11 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
         caller="ops",
     )
     assert inspector_resubmitted["ticket"]["state"] == "inspection", inspector_resubmitted  # type: ignore[index]
+    assert inspector_resubmitted["ticket"]["assignee"] == "inspector", inspector_resubmitted  # type: ignore[index]
     assert inspector_resubmitted["ticket"]["inspector_signoff"] is False, inspector_resubmitted  # type: ignore[index]
     inspector_resubmitted_signed = post_json(base_url, "/api/tickets/PGU-133/actions/inspector_sign_off", {}, caller="inspector")
     assert inspector_resubmitted_signed["ticket"]["state"] == "audit", inspector_resubmitted_signed  # type: ignore[index]
+    assert inspector_resubmitted_signed["ticket"]["assignee"] == "audit", inspector_resubmitted_signed  # type: ignore[index]
     inspector_resubmitted_audit = post_json(
         base_url,
         "/api/tickets/PGU-133/actions/audit_sign_off",
@@ -1205,6 +1229,7 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     assert "audit_sign_off requires a non-empty comment" in str(audit_signoff_empty_comment), audit_signoff_empty_comment
     audit_signed = post_json(base_url, "/api/tickets/PGU-102/actions/audit_sign_off", {"text": "Audit verified."}, caller="audit")
     assert audit_signed["ticket"]["state"] == "director_review", audit_signed  # type: ignore[index]
+    assert audit_signed["ticket"]["assignee"] == "director", audit_signed  # type: ignore[index]
     assert audit_signed["ticket"]["audit_signoff"] is True, audit_signed  # type: ignore[index]
     assert audit_signed["ticket"]["comments"][-1]["text"] == "Audit verified.", audit_signed  # type: ignore[index]
     audit_kicked = post_json(

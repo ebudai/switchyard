@@ -1,7 +1,7 @@
 {
   "layout": "pgu-konsole-layout.json",
   "project": "pgu",
-  "repository": "/home/agent/Projects/pgu",
+  "repository": "$HOME/Projects/pgu",
   "worktree_branch": "main",
   "worktree_remote": "origin",
   "roles": [

@@ -9,14 +9,14 @@
           "Command": "",
           "Lines": 43,
           "SessionRestoreId": 0,
-          "WorkingDirectory": "/home/agent/Projects/pgu"
+          "WorkingDirectory": ""
         },
         {
           "Columns": 109,
           "Command": "",
           "Lines": 43,
           "SessionRestoreId": 0,
-          "WorkingDirectory": "/home/agent/Projects/pgu"
+          "WorkingDirectory": ""
         }
       ]
     },
@@ -31,14 +31,14 @@
               "Command": "",
               "Lines": 43,
               "SessionRestoreId": 0,
-              "WorkingDirectory": "/home/agent/Projects/pgu"
+              "WorkingDirectory": ""
             },
             {
               "Columns": 105,
               "Command": "",
               "Lines": 43,
               "SessionRestoreId": 0,
-              "WorkingDirectory": "/home/agent/Projects/pgu"
+              "WorkingDirectory": ""
             }
           ]
         },
@@ -50,14 +50,14 @@
               "Command": "",
               "Lines": 43,
               "SessionRestoreId": 0,
-              "WorkingDirectory": "/home/agent/Projects/pgu"
+              "WorkingDirectory": ""
             },
             {
               "Columns": 105,
               "Command": "",
               "Lines": 43,
               "SessionRestoreId": 0,
-              "WorkingDirectory": "/home/agent/Projects/pgu"
+              "WorkingDirectory": ""
             }
           ]
         }

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
-import sys
 from pathlib import Path
 
 
@@ -23,76 +22,27 @@ def load_wrapper():
     return module
 
 
-def test_agent_user_does_not_self_elevate() -> None:
+def test_wrapper_delegates_directly_without_sudo_for_any_invoking_user() -> None:
     wrapper = load_wrapper()
+    import scripts.team_launcher as team_launcher
 
-    assert not wrapper.should_self_elevate("agent")
-
-
-def test_non_agent_user_self_elevates_with_sudo_agent_home() -> None:
-    wrapper = load_wrapper()
     calls: list[list[str]] = []
+    original_main = team_launcher.main
+    try:
+        team_launcher.main = lambda argv: calls.append(list(argv)) or 17
 
-    def fake_call(args: list[str]) -> int:
-        calls.append(args)
-        return 17
+        assert wrapper.run(["pgu", "start"]) == 17
+    finally:
+        team_launcher.main = original_main
 
-    wrapper.current_user_name = lambda: "eric"
-    wrapper.host_wayland_display = lambda: "/run/user/1000/wayland-0"
-    wrapper.subprocess.call = fake_call
-
-    assert wrapper.self_elevate_to_agent_if_needed(["pgu", "start"]) == 17
-    assert calls == [[
-        "sudo",
-        "-u",
-        "agent",
-        "-H",
-        "env",
-        "PGU_HOST_WAYLAND_DISPLAY=/run/user/1000/wayland-0",
-        sys.executable,
-        str(WRAPPER_PATH.resolve()),
-        "pgu",
-        "start",
-    ]]
-
-
-def test_unknown_user_self_elevates_safe() -> None:
-    wrapper = load_wrapper()
-
-    assert wrapper.should_self_elevate("")
-
-
-def test_host_wayland_display_absolutizes_relative_socket() -> None:
-    wrapper = load_wrapper()
-
-    assert wrapper.host_wayland_display({
-        "XDG_RUNTIME_DIR": "/run/user/1000",
-        "WAYLAND_DISPLAY": "wayland-0",
-    }) == "/run/user/1000/wayland-0"
-    assert wrapper.host_wayland_display({"WAYLAND_DISPLAY": "/run/user/1000/wayland-1"}) == "/run/user/1000/wayland-1"
-
-
-def test_agent_user_runs_launcher_without_sudo() -> None:
-    wrapper = load_wrapper()
-    calls: list[list[str]] = []
-
-    def fake_call(args: list[str]) -> int:
-        calls.append(args)
-        return 99
-
-    wrapper.current_user_name = lambda: "agent"
-    wrapper.subprocess.call = fake_call
-
-    assert wrapper.self_elevate_to_agent_if_needed(["pgu", "start"]) is None
-    assert calls == []
+    assert calls == [["pgu", "start"]]
+    assert not hasattr(wrapper, "TARGET_USER")
+    assert not hasattr(wrapper, "sudo_agent_command")
+    assert not hasattr(wrapper, "self_elevate_to_agent_if_needed")
 
 
 def main() -> int:
-    test_agent_user_does_not_self_elevate()
-    test_non_agent_user_self_elevates_with_sudo_agent_home()
-    test_unknown_user_self_elevates_safe()
-    test_host_wayland_display_absolutizes_relative_socket()
-    test_agent_user_runs_launcher_without_sudo()
+    test_wrapper_delegates_directly_without_sudo_for_any_invoking_user()
     print("team_launcher_wrapper_test: ok")
     return 0
 

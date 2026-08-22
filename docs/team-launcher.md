@@ -4,31 +4,33 @@
 config. The default PGU config is `config/team-launcher/pgu.json`. PGU starts
 six visible roles in a single Konsole layout window and starts `research` as a
 detached background tmux session. Each role pane starts in the shared checkout
-at `/home/agent/Projects/pgu`; feature work still happens in explicit
+at `$HOME/Projects/pgu`; feature work still happens in explicit
 per-ticket worktrees created outside the launcher.
 
-The executable wrapper self-runs as the `agent` user. If another host user runs
-`scripts/team-launcher`, the wrapper invokes `sudo -u agent -H` and passes the
-same launcher arguments through, so callers do not need to prefix the command
-manually.
+The executable wrapper runs as the user who invoked it. It does not re-exec
+through `sudo` or force a shared `agent` tmux/runtime directory. The launcher
+uses the invoking user's runtime paths by default, including
+`/run/user/<uid>/pgu-ticket-board/pane-sessions`, the matching pane-state
+directory, `$HOME/Projects/pgu`, and `$HOME/bin` prepended to pane CLI `PATH`.
 
-Before self-elevating, the wrapper captures the invoking desktop's Wayland
-socket as an absolute path in `PGU_HOST_WAYLAND_DISPLAY`. The `agent` launcher
-then opens the visible Konsole window with only the Konsole subprocess forced
-onto Wayland:
+When opening the visible Konsole window, the launcher uses
+`PGU_HOST_WAYLAND_DISPLAY` if it is set. Otherwise it resolves the display for
+`PGU_TEAM_LAUNCHER_GUI_USER`, or for the invoking user when that variable is
+unset:
 
 ```bash
 env QT_QPA_PLATFORM=wayland \
   QT_LOGGING_RULES=qt.qpa.wayland.warning=false \
-  WAYLAND_DISPLAY=/run/user/<eric-uid>/wayland-0 \
+  WAYLAND_DISPLAY=/run/user/<uid>/wayland-0 \
   konsole --layout ...
 ```
 
-This avoids changing the agent process's own `XDG_RUNTIME_DIR`, which tmux and
-the board services still need to keep pointing at the agent runtime. The
-commands inside the Konsole layout still call `scripts/team-launcher pane ...`,
-so the wrapper self-elevates those pane commands back to `agent` before tmux
-attach/start when needed.
+The commands inside the Konsole layout call `scripts/team-launcher pane ...`
+as the same user, so visible panes attach to that user's tmux sessions.
+Set `PGU_TEAM_LAUNCHER_BIN_DIR` to override the default `$HOME/bin` PATH
+prefix, and set `PGU_TEAM_LAUNCHER_GUI_USER` or
+`PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY` when the Konsole display should be resolved
+from a different local desktop account or socket name.
 
 ## Modes
 

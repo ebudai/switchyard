@@ -22,8 +22,7 @@ DEFAULT_PANE_STATE_DIR = (
     if os.environ.get("PGU_TICKET_BOARD_PANE_STATE_DIR")
     else Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-state")
 )
-CANONICAL_AGENT_BIN = "/home/agent/bin"
-DEFAULT_GUI_USER = "eric"
+USER_BIN_ENV = "PGU_TEAM_LAUNCHER_BIN_DIR"
 GUI_USER_ENV = "PGU_TEAM_LAUNCHER_GUI_USER"
 GUI_WAYLAND_ENV = "PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY"
 HOST_WAYLAND_ENV = "PGU_HOST_WAYLAND_DISPLAY"
@@ -112,10 +111,31 @@ def uid_for_user(user_name: str) -> int | None:
         return None
 
 
+def current_user_name() -> str:
+    try:
+        return pwd.getpwuid(os.geteuid()).pw_name
+    except KeyError:
+        return ""
+
+
+def default_user_bin() -> str:
+    configured = os.environ.get(USER_BIN_ENV, "").strip()
+    if configured:
+        return str(Path(configured).expanduser())
+    return str(Path.home() / "bin")
+
+
+def default_gui_user() -> str:
+    configured = os.environ.get(GUI_USER_ENV, "").strip()
+    if configured:
+        return configured
+    return current_user_name()
+
+
 def konsole_launch_args(layout_path: Path, *, gui_user: str | None = None) -> list[str]:
     wayland_display = str(os.environ.get(HOST_WAYLAND_ENV, "")).strip()
     if not wayland_display:
-        user = (gui_user if gui_user is not None else os.environ.get(GUI_USER_ENV, DEFAULT_GUI_USER)).strip()
+        user = (gui_user if gui_user is not None else default_gui_user()).strip()
         uid = uid_for_user(user) if user else None
         if uid is not None:
             wayland_display = f"/run/user/{uid}/{os.environ.get(GUI_WAYLAND_ENV, 'wayland-0')}"
@@ -467,7 +487,7 @@ def cli_command_for_role(role: RoleConfig, *, session_dir: Path, resume: bool = 
     command.extend(yolo_args_for_role(role))
     command.extend(role.extra_args)
     env = {"PGU_PANE_TARGET": role.target, **role.env}
-    env["PATH"] = _prepend_path(env.get("PATH") or os.environ.get("PATH", ""), CANONICAL_AGENT_BIN)
+    env["PATH"] = _prepend_path(env.get("PATH") or os.environ.get("PATH", ""), default_user_bin())
     return ["env", *_env_prefix(env), *command]
 
 

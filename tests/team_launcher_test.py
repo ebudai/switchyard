@@ -37,6 +37,9 @@ from scripts.team_launcher import (
     git_fetch_worktree_ref_args,
     git_launcher_ahead_behind_args,
     git_launcher_checkout_check_args,
+    git_launcher_current_branch_args,
+    git_launcher_head_short_args,
+    git_launcher_status_porcelain_args,
     git_shared_checkout_check_args,
     konsole_launch_args,
     launch_konsole_window,
@@ -662,7 +665,51 @@ def test_pgu_launch_commands_include_model_and_bypass_flags() -> None:
         assert "--yolo" not in command
 
 
-def test_start_refuses_stale_launcher_checkout_before_touching_role_worktrees() -> None:
+def test_start_auto_fast_forwards_stale_launcher_checkout_once_before_panes() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        tmp_path = Path(tmp)
+        config_path = _write_pgu_config_with_shared_checkout(tmp_path)
+        config = load_project_config("pgu", config_path)
+        fake = FakeRunner()
+        counts = ["0 173\n", "0 0\n"]
+        calls: list[list[str]] = []
+
+        def runner(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            calls.append(args)
+            if args == git_launcher_ahead_behind_args(config, ROOT):
+                return subprocess.CompletedProcess(args, 0, stdout=counts.pop(0))
+            if args == git_launcher_current_branch_args(ROOT):
+                return subprocess.CompletedProcess(args, 0, stdout="main\n")
+            if args == git_launcher_status_porcelain_args(ROOT):
+                return subprocess.CompletedProcess(args, 0, stdout="")
+            if args == git_launcher_head_short_args(ROOT):
+                return subprocess.CompletedProcess(args, 0, stdout="abc1234\n" if counts else "def5678\n")
+            return fake(args, **kwargs)
+
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            result = launch_project(
+                config,
+                config_path=config_path,
+                mode="start",
+                script_path=ROOT / "scripts" / "team-launcher",
+                runner=runner,
+                layout_output=tmp_path / "layout.json",
+                pane_state_dir=tmp_path / "pane-state",
+            )
+
+        assert result == 0
+        assert git_fast_forward_launcher_ref_args(config, ROOT) in calls
+        assert calls.count(git_fast_forward_launcher_ref_args(config, ROOT)) == 1
+        assert "auto-fast-forwarded launcher checkout" in stderr.getvalue()
+        assert "was 173 commit(s) behind origin/main" in stderr.getvalue()
+        layout = json.loads((tmp_path / "layout.json").read_text(encoding="utf-8"))
+        commands = _leaf_commands(layout)
+        assert commands
+        assert all("--skip-launcher-check" in command for command in commands if " pane " in command)
+
+
+def test_start_no_self_deploy_refuses_stale_launcher_checkout() -> None:
     config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
     calls: list[list[str]] = []
 
@@ -683,6 +730,7 @@ def test_start_refuses_stale_launcher_checkout_before_touching_role_worktrees() 
             mode="start",
             script_path=ROOT / "scripts" / "team-launcher",
             runner=runner,
+            no_launcher_self_deploy=True,
         )
         raise AssertionError("expected stale launcher checkout to abort")
     except SystemExit as exc:
@@ -696,6 +744,89 @@ def test_start_refuses_stale_launcher_checkout_before_touching_role_worktrees() 
         git_fetch_launcher_ref_args(config, ROOT),
         git_launcher_ahead_behind_args(config, ROOT),
     ]
+
+
+def test_allow_stale_launcher_override_warns_and_continues_without_fast_forward() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    calls: list[list[str]] = []
+
+    def runner(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        if args == git_launcher_checkout_check_args(ROOT):
+            return subprocess.CompletedProcess(args, 0)
+        if args == git_fetch_launcher_ref_args(config, ROOT):
+            return subprocess.CompletedProcess(args, 0)
+        if args == git_launcher_ahead_behind_args(config, ROOT):
+            return subprocess.CompletedProcess(args, 0, stdout="0 12\n")
+        raise AssertionError(f"unexpected call after override: {args}")
+
+    stderr = StringIO()
+    with redirect_stderr(stderr):
+        team_launcher.ensure_launcher_checkout_current(
+            config,
+            runner=runner,
+            auto_deploy=False,
+            allow_stale=True,
+        )
+
+    assert "OVERRIDE proceeding with stale launcher checkout" in stderr.getvalue()
+    assert git_fast_forward_launcher_ref_args(config, ROOT) not in calls
+
+
+def test_auto_fast_forward_launcher_checkout_with_real_git() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-git.") as tmp:
+        tmp_path = Path(tmp)
+        origin, launcher_repo = _make_origin_backed_repo(tmp_path)
+        updater = tmp_path / "updater"
+        _run_git(["git", "clone", str(origin), str(updater)])
+        _run_git(["git", "config", "user.email", "agent@example.invalid"], cwd=updater)
+        _run_git(["git", "config", "user.name", "PGU Agent"], cwd=updater)
+        (updater / "tracked.txt").write_text("updated\n", encoding="utf-8")
+        _commit_all(updater, "update")
+        push_env = {**os.environ, "PGU_ALLOW_MAIN_PUSH": "director"}
+        subprocess.run(
+            ["git", "push", "origin", "main"],
+            cwd=updater,
+            check=True,
+            text=True,
+            capture_output=True,
+            env=push_env,
+        )
+        config_path = _write_minimal_shared_checkout_config(tmp_path, launcher_repo, ["ops"])
+        config = load_project_config("pgu", config_path)
+
+        before = _run_git(["git", "rev-parse", "HEAD"], cwd=launcher_repo).stdout.strip()
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            team_launcher.ensure_launcher_checkout_current(
+                config,
+                launcher_repo=launcher_repo,
+                auto_deploy=True,
+            )
+        after = _run_git(["git", "rev-parse", "HEAD"], cwd=launcher_repo).stdout.strip()
+
+        assert before != after
+        assert _run_git(["git", "status", "--porcelain"], cwd=launcher_repo).stdout == ""
+        assert "auto-fast-forwarded launcher checkout" in stderr.getvalue()
+
+
+def test_undeterminable_launcher_checkout_warns_and_continues() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    calls: list[list[str]] = []
+
+    def runner(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        if args == git_launcher_checkout_check_args(ROOT):
+            return subprocess.CompletedProcess(args, 1)
+        raise AssertionError(f"unexpected call after undeterminable launcher check: {args}")
+
+    stderr = StringIO()
+    with redirect_stderr(stderr):
+        team_launcher.ensure_launcher_checkout_current(config, runner=runner, auto_deploy=True)
+
+    assert "cannot determine launcher checkout freshness" in stderr.getvalue()
+    assert "continuing" in stderr.getvalue()
+    assert calls == [git_launcher_checkout_check_args(ROOT)]
 
 
 def test_deploy_launcher_checkout_updates_and_verifies_configured_ref() -> None:
@@ -1665,7 +1796,11 @@ def main() -> int:
     test_yolo_config_translates_to_cli_specific_bypass_flags()
     test_effort_config_translates_to_cli_specific_args()
     test_pgu_launch_commands_include_model_and_bypass_flags()
-    test_start_refuses_stale_launcher_checkout_before_touching_role_worktrees()
+    test_start_auto_fast_forwards_stale_launcher_checkout_once_before_panes()
+    test_start_no_self_deploy_refuses_stale_launcher_checkout()
+    test_allow_stale_launcher_override_warns_and_continues_without_fast_forward()
+    test_auto_fast_forward_launcher_checkout_with_real_git()
+    test_undeterminable_launcher_checkout_warns_and_continues()
     test_deploy_launcher_checkout_updates_and_verifies_configured_ref()
     test_konsole_launch_uses_gui_user_display_environment()
     test_konsole_launch_can_fallback_to_gui_user_uid_without_host_var()

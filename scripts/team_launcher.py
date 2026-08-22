@@ -58,6 +58,8 @@ RESUME_STARTUP_TIMEOUT_SECONDS = 1.5
 RESUME_STARTUP_POLL_SECONDS = 0.1
 RUNTIME_READY_ATTEMPTS = 50
 RUNTIME_READY_POLL_SECONDS = 0.1
+ALLOW_STALE_LAUNCHER_ENV = "PGU_TEAM_LAUNCHER_ALLOW_STALE"
+NO_LAUNCHER_SELF_DEPLOY_ENV = "PGU_TEAM_LAUNCHER_NO_SELF_DEPLOY"
 
 
 @dataclass(frozen=True)
@@ -101,6 +103,17 @@ class WorktreeProvisionResult:
     @property
     def ok(self) -> bool:
         return not self.failed_roles
+
+
+@dataclass(frozen=True)
+class LauncherCheckoutProbe:
+    ahead: int = 0
+    behind: int = 0
+    error: str = ""
+
+    @property
+    def undeterminable(self) -> bool:
+        return bool(self.error)
 
 
 def _repo_root() -> Path:
@@ -691,6 +704,18 @@ def git_fast_forward_launcher_ref_args(config: ProjectConfig, launcher_repo: Pat
     return ["git", "-C", str(launcher_repo), "merge", "--ff-only", worktree_ref(config)]
 
 
+def git_launcher_current_branch_args(launcher_repo: Path) -> list[str]:
+    return ["git", "-C", str(launcher_repo), "symbolic-ref", "--quiet", "--short", "HEAD"]
+
+
+def git_launcher_status_porcelain_args(launcher_repo: Path) -> list[str]:
+    return ["git", "-C", str(launcher_repo), "status", "--porcelain"]
+
+
+def git_launcher_head_short_args(launcher_repo: Path) -> list[str]:
+    return ["git", "-C", str(launcher_repo), "rev-parse", "--short", "HEAD"]
+
+
 def git_clean_shared_checkout_args(config: ProjectConfig) -> list[str]:
     if config.repository is None:
         raise SystemExit("project config does not define repository")
@@ -720,12 +745,16 @@ def _parse_ahead_behind(output: str) -> tuple[int, int] | None:
         return None
 
 
-def launcher_checkout_status(
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def probe_launcher_checkout(
     config: ProjectConfig,
     *,
     launcher_repo: Path | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-) -> tuple[int, int]:
+) -> LauncherCheckoutProbe:
     repo = launcher_repo or _repo_root()
     check_proc = runner(
         git_launcher_checkout_check_args(repo),
@@ -733,12 +762,14 @@ def launcher_checkout_status(
         stderr=subprocess.DEVNULL,
     )
     if check_proc.returncode != 0:
-        raise SystemExit(f"team-launcher: launcher path is not a git checkout: {repo}")
+        return LauncherCheckoutProbe(error=f"launcher path is not a git checkout: {repo}")
     fetch_proc = runner(git_fetch_launcher_ref_args(config, repo))
     if fetch_proc.returncode != 0:
-        raise SystemExit(
-            f"team-launcher: failed to fetch launcher deploy ref {worktree_ref(config)} in {repo}: "
-            f"{_proc_failure_reason(fetch_proc, f'exit {fetch_proc.returncode}')}"
+        return LauncherCheckoutProbe(
+            error=(
+                f"failed to fetch launcher deploy ref {worktree_ref(config)} in {repo}: "
+                f"{_proc_failure_reason(fetch_proc, f'exit {fetch_proc.returncode}')}"
+            )
         )
     count_proc = runner(
         git_launcher_ahead_behind_args(config, repo),
@@ -747,17 +778,118 @@ def launcher_checkout_status(
         text=True,
     )
     if count_proc.returncode != 0:
-        raise SystemExit(
-            f"team-launcher: failed to compare launcher checkout {repo} with {worktree_ref(config)}: "
-            f"{_proc_failure_reason(count_proc, f'exit {count_proc.returncode}')}"
+        return LauncherCheckoutProbe(
+            error=(
+                f"failed to compare launcher checkout {repo} with {worktree_ref(config)}: "
+                f"{_proc_failure_reason(count_proc, f'exit {count_proc.returncode}')}"
+            )
         )
     counts = _parse_ahead_behind(str(count_proc.stdout or ""))
     if counts is None:
-        raise SystemExit(
-            f"team-launcher: could not parse launcher ahead/behind count for {repo}: "
-            f"{str(count_proc.stdout or '').strip()!r}"
+        return LauncherCheckoutProbe(
+            error=(
+                f"could not parse launcher ahead/behind count for {repo}: "
+                f"{str(count_proc.stdout or '').strip()!r}"
+            )
         )
-    return counts
+    ahead, behind = counts
+    return LauncherCheckoutProbe(ahead=ahead, behind=behind)
+
+
+def launcher_checkout_status(
+    config: ProjectConfig,
+    *,
+    launcher_repo: Path | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> tuple[int, int]:
+    repo = launcher_repo or _repo_root()
+    probe = probe_launcher_checkout(config, launcher_repo=repo, runner=runner)
+    if probe.error:
+        raise SystemExit(
+            f"team-launcher: cannot determine launcher checkout freshness for {repo}: {probe.error}"
+        )
+    return probe.ahead, probe.behind
+
+
+def _short_head(repo: Path, *, runner: Callable[..., subprocess.CompletedProcess[Any]]) -> str:
+    proc = runner(git_launcher_head_short_args(repo), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    if proc.returncode != 0:
+        return "unknown"
+    return str(proc.stdout or "").strip() or "unknown"
+
+
+def _auto_fast_forward_launcher_checkout(
+    config: ProjectConfig,
+    repo: Path,
+    *,
+    behind: int,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> LauncherCheckoutProbe:
+    branch_proc = runner(
+        git_launcher_current_branch_args(repo),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    branch = str(branch_proc.stdout or "").strip()
+    if branch_proc.returncode != 0 or branch != config.worktree_branch:
+        reason = branch or "detached HEAD"
+        raise SystemExit(
+            f"team-launcher: refusing to launch from stale checkout {repo}; "
+            f"it is {behind} commit(s) behind {worktree_ref(config)}, and automatic fast-forward "
+            f"requires branch {config.worktree_branch!r} but found {reason!r}. "
+            f"Run `scripts/team-launcher {config.project} deploy-launcher --launcher-repo {repo}` "
+            "during an approved restart window, or rerun with --allow-stale-launcher in an emergency."
+        )
+    status_proc = runner(
+        git_launcher_status_porcelain_args(repo),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if status_proc.returncode != 0:
+        raise SystemExit(
+            f"team-launcher: refusing to launch from stale checkout {repo}; "
+            f"could not inspect local changes before automatic fast-forward: "
+            f"{_proc_failure_reason(status_proc, f'exit {status_proc.returncode}')}"
+        )
+    if str(status_proc.stdout or "").strip():
+        raise SystemExit(
+            f"team-launcher: refusing to launch from stale checkout {repo}; "
+            "local changes are present, so automatic fast-forward is not safe. "
+            f"Run `scripts/team-launcher {config.project} deploy-launcher --launcher-repo {repo}` "
+            "during an approved restart window, or rerun with --allow-stale-launcher in an emergency."
+        )
+    before = _short_head(repo, runner=runner)
+    merge_proc = runner(git_fast_forward_launcher_ref_args(config, repo))
+    if merge_proc.returncode != 0:
+        raise SystemExit(
+            f"team-launcher: refusing to launch from stale checkout {repo}; "
+            f"automatic fast-forward to {worktree_ref(config)} failed: "
+            f"{_proc_failure_reason(merge_proc, f'exit {merge_proc.returncode}')}. "
+            f"Run `scripts/team-launcher {config.project} deploy-launcher --launcher-repo {repo}` "
+            "during an approved restart window, or rerun with --allow-stale-launcher in an emergency."
+        )
+    after = _short_head(repo, runner=runner)
+    probe = probe_launcher_checkout(config, launcher_repo=repo, runner=runner)
+    if probe.error:
+        print(
+            f"warning: team-launcher: auto-fast-forwarded launcher checkout {repo} "
+            f"from {before} to {after}, but freshness is now undeterminable: {probe.error}; continuing",
+            file=sys.stderr,
+        )
+        return probe
+    if probe.behind:
+        raise SystemExit(
+            f"team-launcher: launcher checkout {repo} is still {probe.behind} commit(s) "
+            f"behind {worktree_ref(config)} after automatic fast-forward"
+        )
+    print(
+        f"team-launcher: auto-fast-forwarded launcher checkout {repo} from {before} to {after}; "
+        f"was {behind} commit(s) behind {worktree_ref(config)}",
+        file=sys.stderr,
+    )
+    return probe
 
 
 def ensure_launcher_checkout_current(
@@ -765,19 +897,48 @@ def ensure_launcher_checkout_current(
     *,
     launcher_repo: Path | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    auto_deploy: bool = False,
+    allow_stale: bool = False,
 ) -> None:
     repo = launcher_repo or _repo_root()
-    ahead, behind = launcher_checkout_status(config, launcher_repo=repo, runner=runner)
-    if behind:
-        raise SystemExit(
-            f"team-launcher: refusing to launch from stale checkout {repo}; "
-            f"it is {behind} commit(s) behind {worktree_ref(config)}. "
-            f"Run `scripts/team-launcher {config.project} deploy-launcher --launcher-repo {repo}` "
-            "during an approved restart window, then retry."
-        )
-    if ahead:
+    allow_stale = allow_stale or _env_truthy(ALLOW_STALE_LAUNCHER_ENV)
+    probe = probe_launcher_checkout(config, launcher_repo=repo, runner=runner)
+    if probe.error:
         print(
-            f"warning: launcher checkout {repo} is {ahead} commit(s) ahead of {worktree_ref(config)}",
+            f"warning: team-launcher: cannot determine launcher checkout freshness for {repo}: "
+            f"{probe.error}; continuing",
+            file=sys.stderr,
+        )
+        return
+    if probe.behind:
+        if allow_stale:
+            print(
+                f"warning: team-launcher: OVERRIDE proceeding with stale launcher checkout {repo}; "
+                f"it is {probe.behind} commit(s) behind {worktree_ref(config)}",
+                file=sys.stderr,
+            )
+            return
+        if auto_deploy:
+            post_deploy_probe = _auto_fast_forward_launcher_checkout(
+                config,
+                repo,
+                behind=probe.behind,
+                runner=runner,
+            )
+            if post_deploy_probe.error or post_deploy_probe.behind:
+                return
+            probe = post_deploy_probe
+        else:
+            raise SystemExit(
+                f"team-launcher: refusing to launch from stale checkout {repo}; "
+                f"it is {probe.behind} commit(s) behind {worktree_ref(config)}. "
+                f"Run `scripts/team-launcher {config.project} deploy-launcher --launcher-repo {repo}` "
+                "during an approved restart window, rerun with --allow-stale-launcher in an emergency, "
+                "or unset --no-launcher-self-deploy for automatic fast-forward."
+            )
+    if probe.ahead:
+        print(
+            f"warning: launcher checkout {repo} is {probe.ahead} commit(s) ahead of {worktree_ref(config)}",
             file=sys.stderr,
         )
 
@@ -1215,6 +1376,7 @@ def pane_command(
     script_path: Path,
     pane_state_dir: Path | None = None,
     force_reload: bool = False,
+    skip_launcher_check: bool = False,
 ) -> str:
     args = [
         str(script_path),
@@ -1227,6 +1389,8 @@ def pane_command(
     ]
     if mode == "reload" and force_reload:
         args.append("--force")
+    if skip_launcher_check:
+        args.append("--skip-launcher-check")
     if pane_state_dir is not None:
         args.extend(["--pane-state-dir", str(pane_state_dir)])
     return _quote_command(args)
@@ -1271,6 +1435,7 @@ def materialize_layout(
                 script_path=script_path,
                 pane_state_dir=pane_state_dir,
                 force_reload=force_reload,
+                skip_launcher_check=True,
             )
             leaf["WorkingDirectory"] = role.workdir
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1333,6 +1498,8 @@ def launch_project(
     layout_output: Path | None = None,
     pane_state_dir: Path | None = None,
     force_reload: bool = False,
+    allow_stale_launcher: bool = False,
+    no_launcher_self_deploy: bool = False,
 ) -> int:
     if mode == "start":
         mode = "attach-or-start"
@@ -1342,7 +1509,12 @@ def launch_project(
     output_path = layout_output or Path(tempfile.gettempdir()) / f"{config.project}-team-layout.json"
     failed_roles: dict[str, str] = {}
     if not dry_run:
-        ensure_launcher_checkout_current(config, runner=runner)
+        ensure_launcher_checkout_current(
+            config,
+            runner=runner,
+            auto_deploy=not (no_launcher_self_deploy or _env_truthy(NO_LAUNCHER_SELF_DEPLOY_ENV)),
+            allow_stale=allow_stale_launcher,
+        )
         ensure_configured_runtime_user(config, runner=runner)
         if mode == "attach-or-start":
             failed_roles = ensure_project_worktrees(config, refresh=True, runner=runner).failed_roles
@@ -1383,6 +1555,7 @@ def launch_project(
                         script_path=script_path,
                         pane_state_dir=pane_state_dir,
                         force_reload=force_reload,
+                        skip_launcher_check=True,
                     )
                 ),
                 "worktree_error": failed_roles.get(role.role, ""),
@@ -1477,6 +1650,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--launcher-repo", type=Path, help="launcher checkout to update or verify (default: this script's repo)")
     parser.add_argument("--clean-launcher", action="store_true", help="run git clean -fdx after updating --launcher-repo")
     parser.add_argument("--force", action="store_true", help="allow reload to kill/relaunch even if live command validation fails")
+    parser.add_argument("--allow-stale-launcher", action="store_true", help="emergency override: warn but proceed when the launcher checkout is provably stale")
+    parser.add_argument("--no-launcher-self-deploy", action="store_true", help="restore refuse-only behavior instead of automatically fast-forwarding a stale launcher checkout")
+    parser.add_argument("--skip-launcher-check", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
@@ -1499,7 +1675,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "pane":
         if not args.pane_mode or not args.role:
             raise SystemExit("pane mode requires <start|attach|attach-or-start|reload> and <role>")
-        ensure_launcher_checkout_current(config, runner=subprocess.run)
+        if not args.skip_launcher_check:
+            ensure_launcher_checkout_current(
+                config,
+                runner=subprocess.run,
+                auto_deploy=False,
+                allow_stale=args.allow_stale_launcher,
+            )
         ensure_configured_runtime_user(config)
         role = _role_by_name(config, args.role)
         pane_state_dir = args.pane_state_dir or DEFAULT_PANE_STATE_DIR
@@ -1527,6 +1709,8 @@ def main(argv: list[str] | None = None) -> int:
         layout_output=args.layout_output,
         pane_state_dir=args.pane_state_dir,
         force_reload=args.force,
+        allow_stale_launcher=args.allow_stale_launcher,
+        no_launcher_self_deploy=args.no_launcher_self_deploy,
     )
 
 

@@ -691,6 +691,23 @@ def test_static_working_timer_does_not_suppress_idle_stall_nudge() -> None:
         assert gate.last_trace("pgu-ops:0.0").reason == "hook_idle"  # type: ignore[union-attr]
 
 
+def test_cached_static_working_timer_is_not_working_evidence() -> None:
+    with TemporaryStateDir() as tmp_path:
+        gate = PaneActivityGate(
+            state_store=PaneHookStateStore(tmp_path),
+            capture_pane_runner=targeted_capture_runner(
+                "pgu-ops:0.0",
+                "Working (7s · esc to interrupt)\n",
+            ),
+            working_timer_sample_delay_seconds=0.0,
+        )
+        gate._last_working_timer_by_target["pgu-ops:0.0"] = 7
+
+        assert gate._working_timer_trace("pgu-ops:0.0") is None
+
+    assert gate._last_working_timer_by_target == {"pgu-ops:0.0": 7}
+
+
 def test_cached_working_timer_increment_suppresses_next_idle_since_scan() -> None:
     with TemporaryStateDir() as tmp_path:
         store = PaneHookStateStore(tmp_path)
@@ -2085,6 +2102,7 @@ def main() -> int:
     test_advancing_working_timer_suppresses_idle_stall_nudge()
     test_resetting_working_timer_suppresses_idle_stall_nudge()
     test_static_working_timer_does_not_suppress_idle_stall_nudge()
+    test_cached_static_working_timer_is_not_working_evidence()
     test_cached_working_timer_increment_suppresses_next_idle_since_scan()
     test_listener_enqueues_idle_turn_end_nudges_on_each_turn_completion_idle()
     test_gemini_renamed_idle_hooks_count_as_turn_end_idle()

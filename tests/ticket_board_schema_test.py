@@ -202,7 +202,16 @@ def main() -> int:
     assert "in_progress tickets require an implementer assignee" in schema
     assert "create or replace function ticket_board.ticket_is_implementer_assignee" in executable_schema_lower
     assert "create or replace function ticket_board.stage_default_assignee" in executable_schema_lower
+    assert "create or replace function ticket_board.apply_stage_default_assignee_update" in executable_schema_lower
+    assert "tickets_zzzz_stage_default_assignee_update" in executable_schema_lower
     assert "ticket_board.stage_default_assignee(new.state)" in executable_schema_lower
+    enforce_update_function = re.search(
+        r"create or replace function ticket_board\.enforce_ticket_workflow_update\(\).*?\$\$(.*?)\$\$;",
+        executable_schema_lower,
+        re.S,
+    )
+    assert enforce_update_function
+    assert "stage_default_assignee" not in enforce_update_function.group(1)
     stage_default_migration = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "pgu584_stage_default_assignee.sql"
     ).read_text(encoding="utf-8").lower()

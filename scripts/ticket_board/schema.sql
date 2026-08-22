@@ -885,11 +885,6 @@ BEGIN
         NEW.assignee := 'director';
     END IF;
 
-    IF OLD.state IS DISTINCT FROM NEW.state
-       AND ticket_board.stage_default_assignee(NEW.state) IS NOT NULL THEN
-        NEW.assignee := ticket_board.stage_default_assignee(NEW.state);
-    END IF;
-
     IF NEW.state = 'done'
        AND OLD.state IN ('backlog', 'analysis')
        AND current_setting('ticket_board.utility_task_complete', true) = 'on'
@@ -1707,6 +1702,22 @@ AS $$
         WHEN p_state IN ('dat', 'eric_review', 'director_review') THEN 'director'
         ELSE NULL
     END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.apply_stage_default_assignee_update()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF OLD.state IS DISTINCT FROM NEW.state
+       AND current_setting('ticket_board.force_move', true) IS DISTINCT FROM 'on'
+       AND NOT coalesce(OLD.manually_controlled, false)
+       AND NOT coalesce(NEW.manually_controlled, false)
+       AND ticket_board.stage_default_assignee(NEW.state) IS NOT NULL THEN
+        NEW.assignee := ticket_board.stage_default_assignee(NEW.state);
+    END IF;
+    RETURN NEW;
+END;
 $$;
 
 CREATE OR REPLACE FUNCTION ticket_board.state_rank(p_state text)
@@ -3097,6 +3108,12 @@ CREATE TRIGGER tickets_enforce_workflow_update
 BEFORE UPDATE ON ticket_board.tickets
 FOR EACH ROW
 EXECUTE FUNCTION ticket_board.enforce_ticket_workflow_update();
+
+DROP TRIGGER IF EXISTS tickets_zzzz_stage_default_assignee_update ON ticket_board.tickets;
+CREATE TRIGGER tickets_zzzz_stage_default_assignee_update
+BEFORE UPDATE ON ticket_board.tickets
+FOR EACH ROW
+EXECUTE FUNCTION ticket_board.apply_stage_default_assignee_update();
 
 DROP TRIGGER IF EXISTS tickets_notify_state_transition ON ticket_board.tickets;
 DROP TRIGGER IF EXISTS tickets_zzz_notify_insert_transition ON ticket_board.tickets;

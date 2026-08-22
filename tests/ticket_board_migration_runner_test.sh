@@ -183,6 +183,63 @@ expected_transition_applied="schema.sql,270_ready_to_in_progress.sql,271_optiona
     exit 1
 }
 
+psql -X -v ON_ERROR_STOP=1 "$TRANSITION_CONN" <<'SQL' >/dev/null
+DELETE FROM ticket_board.ticket_notification_queue;
+INSERT INTO ticket_board.tickets (
+    id, title, body, state, assignee, implementation, manually_controlled,
+    created_text, updated_text, created_at, updated_at, source_json
+) VALUES
+    (
+        'PGU-58401', 'Stage assignee handoff', '', 'analysis', 'ops', 'Ready.', false,
+        '2026-08-22T00:00:00+00:00', '2026-08-22T00:00:00+00:00', clock_timestamp(), clock_timestamp(),
+        '{"id":"PGU-58401","title":"Stage assignee handoff","body":"","state":"analysis","assignee":"ops","implementation":"Ready.","comments":[],"created":"2026-08-22T00:00:00+00:00","updated":"2026-08-22T00:00:00+00:00"}'::jsonb
+    ),
+    (
+        'PGU-58402', 'Manual stage assignee handoff', '', 'analysis', 'ops', 'Ready.', true,
+        '2026-08-22T00:00:00+00:00', '2026-08-22T00:00:00+00:00', clock_timestamp(), clock_timestamp(),
+        '{"id":"PGU-58402","title":"Manual stage assignee handoff","body":"","state":"analysis","assignee":"ops","implementation":"Ready.","comments":[],"created":"2026-08-22T00:00:00+00:00","updated":"2026-08-22T00:00:00+00:00"}'::jsonb
+    ),
+    (
+        'PGU-58403', 'Force stage assignee handoff', '', 'analysis', 'ops', 'Ready.', false,
+        '2026-08-22T00:00:00+00:00', '2026-08-22T00:00:00+00:00', clock_timestamp(), clock_timestamp(),
+        '{"id":"PGU-58403","title":"Force stage assignee handoff","body":"","state":"analysis","assignee":"ops","implementation":"Ready.","comments":[],"created":"2026-08-22T00:00:00+00:00","updated":"2026-08-22T00:00:00+00:00"}'::jsonb
+    );
+UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '5840101' WHERE id = 'PGU-58401';
+UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '5840202' WHERE id = 'PGU-58402';
+BEGIN;
+SELECT set_config('ticket_board.force_move', 'on', true);
+UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '5840303' WHERE id = 'PGU-58403';
+COMMIT;
+SQL
+
+stage_handoff_result="$(
+    psql -X -v ON_ERROR_STOP=1 -tA "$TRANSITION_CONN" <<'SQL'
+SELECT jsonb_object_agg(
+    t.id,
+    jsonb_build_object(
+        'state', t.state,
+        'assignee', t.assignee,
+        'queue_target', (
+            SELECT q.target_role
+            FROM ticket_board.ticket_notification_queue q
+            WHERE q.ticket_id = t.id
+              AND q.payload->>'new_state' = 'audit'
+            ORDER BY q.id DESC
+            LIMIT 1
+        )
+    )
+    ORDER BY t.id
+)::text
+FROM ticket_board.tickets t
+WHERE t.id IN ('PGU-58401', 'PGU-58402', 'PGU-58403');
+SQL
+)"
+expected_stage_handoff_result='{"PGU-58401": {"state": "audit", "assignee": "audit", "queue_target": "audit"}, "PGU-58402": {"state": "audit", "assignee": "ops", "queue_target": null}, "PGU-58403": {"state": "audit", "assignee": "ops", "queue_target": "audit"}}'
+[[ "$stage_handoff_result" == "$expected_stage_handoff_result" ]] || {
+    echo "FAIL: migrated DB stage assignee handoff produced wrong state or notification target: $stage_handoff_result" >&2
+    exit 1
+}
+
 legacy_append_overload_count="$(
     psql -X -v ON_ERROR_STOP=1 -tA "$TRANSITION_CONN" <<'SQL'
 SELECT count(*)

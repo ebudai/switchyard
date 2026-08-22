@@ -56,6 +56,8 @@ DEFAULT_RESUME_SUBCOMMAND_BY_CLI = {
 }
 RESUME_STARTUP_TIMEOUT_SECONDS = 1.5
 RESUME_STARTUP_POLL_SECONDS = 0.1
+RUNTIME_READY_ATTEMPTS = 50
+RUNTIME_READY_POLL_SECONDS = 0.1
 
 
 @dataclass(frozen=True)
@@ -117,6 +119,83 @@ def current_user_name() -> str:
         return pwd.getpwuid(os.geteuid()).pw_name
     except KeyError:
         return ""
+
+
+def runtime_dir_for_uid(uid: int) -> Path:
+    return Path(f"/run/user/{uid}")
+
+
+def loginctl_enable_linger_args(user_name: str) -> list[str]:
+    return ["loginctl", "enable-linger", user_name]
+
+
+def ensure_user_linger_runtime(
+    user_name: str,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    runtime_exists: Callable[[Path], bool] | None = None,
+    sleeper: Callable[[float], None] = time.sleep,
+    attempts: int = RUNTIME_READY_ATTEMPTS,
+    poll_seconds: float = RUNTIME_READY_POLL_SECONDS,
+) -> Path:
+    user = user_name.strip()
+    if not user:
+        raise SystemExit("team-launcher: cannot provision runtime for an empty user name")
+    uid = uid_for_user(user)
+    if uid is None:
+        raise SystemExit(f"team-launcher: cannot provision runtime for unknown user {user!r}")
+    runtime_dir = runtime_dir_for_uid(uid)
+    exists = runtime_exists or (lambda path: path.is_dir())
+    result = runner(
+        loginctl_enable_linger_args(user),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if result.returncode != 0:
+        stderr = str(getattr(result, "stderr", "") or "").strip()
+        detail = f": {stderr}" if stderr else ""
+        raise SystemExit(
+            f"team-launcher: failed to enable linger for {user!r}{detail}; "
+            f"run `sudo loginctl enable-linger {user}` and retry"
+        )
+    for _ in range(max(1, attempts)):
+        if exists(runtime_dir):
+            return runtime_dir
+        sleeper(poll_seconds)
+    raise SystemExit(
+        f"team-launcher: linger is enabled for {user!r}, but {runtime_dir} is still missing; "
+        "start or restart that user's systemd user manager and retry"
+    )
+
+
+def session_dir_uses_user_runtime(session_dir: Path, user_name: str) -> bool:
+    uid = uid_for_user(user_name)
+    if uid is None:
+        return False
+    runtime_dir = runtime_dir_for_uid(uid).resolve(strict=False)
+    session_path = session_dir.resolve(strict=False)
+    return session_path == runtime_dir or runtime_dir in session_path.parents
+
+
+def ensure_configured_runtime_user(
+    config: ProjectConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    runtime_exists: Callable[[Path], bool] | None = None,
+    sleeper: Callable[[float], None] = time.sleep,
+    attempts: int = RUNTIME_READY_ATTEMPTS,
+) -> Path | None:
+    user = config.run_as_user or current_user_name()
+    if not user or not session_dir_uses_user_runtime(config.session_dir, user):
+        return None
+    return ensure_user_linger_runtime(
+        user,
+        runner=runner,
+        runtime_exists=runtime_exists,
+        sleeper=sleeper,
+        attempts=attempts,
+    )
 
 
 def default_user_bin() -> str:
@@ -1099,6 +1178,7 @@ def launch_project(
     output_path = layout_output or Path(tempfile.gettempdir()) / f"{config.project}-team-layout.json"
     failed_roles: dict[str, str] = {}
     if not dry_run:
+        ensure_configured_runtime_user(config, runner=runner)
         if mode == "attach-or-start":
             failed_roles = ensure_project_worktrees(config, refresh=True, runner=runner).failed_roles
         elif mode == "reload":
@@ -1192,6 +1272,17 @@ def write_template(project: str, output: Path) -> int:
     return 0
 
 
+def provision_runtime_command(user_name: str | None, config: ProjectConfig | None = None) -> int:
+    user = (user_name or "").strip()
+    if not user and config is not None:
+        user = config.run_as_user or current_user_name()
+    if not user:
+        user = current_user_name()
+    runtime_dir = ensure_user_linger_runtime(user)
+    print(f"runtime ready for {user}: {runtime_dir}")
+    return 0
+
+
 def _role_by_name(config: ProjectConfig, role_name: str) -> RoleConfig:
     for role in config.roles:
         if role.role == role_name:
@@ -1206,7 +1297,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "command",
         nargs="?",
         default="start",
-        choices=["start", "attach", "reload", "bootstrap", "pane"],
+        choices=["start", "attach", "reload", "bootstrap", "provision-runtime", "pane"],
         help="start is idempotent attach-or-start (resumes tracked session ids when relaunching a stopped pane); reload force-restarts running CLIs with tracked resume ids",
     )
     parser.add_argument("pane_mode", nargs="?", choices=["start", "attach", "attach-or-start", "reload"])
@@ -1217,6 +1308,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pane-state-dir", type=Path, help=f"write initial pane idle state here (default: {DEFAULT_PANE_STATE_DIR})")
     parser.add_argument("--dry-run", action="store_true", help="print launch plan without starting Konsole")
     parser.add_argument("--template-output", type=Path, help="bootstrap output path")
+    parser.add_argument("--runtime-user", help="local user whose lingering /run/user/<uid> runtime should be provisioned")
     parser.add_argument("--force", action="store_true", help="allow reload to kill/relaunch even if live command validation fails")
     return parser
 
@@ -1227,10 +1319,14 @@ def main(argv: list[str] | None = None) -> int:
         output = args.template_output or DEFAULT_CONFIG_DIR / f"{args.project}.json"
         return write_template(args.project, output)
     config_path = args.config or DEFAULT_CONFIG_DIR / f"{args.project}.json"
+    if args.command == "provision-runtime":
+        config = load_project_config(args.project, config_path) if config_path.exists() else None
+        return provision_runtime_command(args.runtime_user, config)
     config = load_project_config(args.project, config_path)
     if args.command == "pane":
         if not args.pane_mode or not args.role:
             raise SystemExit("pane mode requires <start|attach|attach-or-start|reload> and <role>")
+        ensure_configured_runtime_user(config)
         role = _role_by_name(config, args.role)
         pane_state_dir = args.pane_state_dir or DEFAULT_PANE_STATE_DIR
         if role.detached:

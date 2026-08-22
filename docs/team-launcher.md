@@ -15,6 +15,10 @@ production launch keeps the existing agent-owned tmux sessions, pane hook
 state, and shared checkout. Projects without `run_as_user` use the invoking
 user's runtime paths, including `/run/user/<uid>/pgu-ticket-board/pane-sessions`,
 the matching pane-state directory, and `$HOME/bin` prepended to pane CLI `PATH`.
+Real `start` and `reload` launches verify that the selected runtime user has
+linger enabled and a `/run/user/<uid>` directory before starting tmux panes. If
+host policy denies that setup, the launcher fails before touching panes and
+prints the `sudo loginctl enable-linger <user>` command an operator must run.
 
 When opening the visible Konsole window, the launcher uses
 `PGU_HOST_WAYLAND_DISPLAY` if it is set. Otherwise it resolves the display for
@@ -41,6 +45,7 @@ from a different local desktop account or socket name.
 scripts/team-launcher pgu start
 scripts/team-launcher pgu attach
 scripts/team-launcher pgu reload
+scripts/team-launcher pgu provision-runtime
 ```
 
 `start` is intentionally idempotent. Each visible Konsole pane runs the launcher
@@ -83,6 +88,16 @@ requires it to match the configured `live_commands` list, or the configured
 `cli` binary name when `live_commands` is omitted. A stale config fails safe and
 does not kill the pane. Use `--force` only when intentionally overriding that
 guard.
+
+`provision-runtime` is the non-launching project-user setup check. It enables
+linger for the configured `run_as_user`, or for the invoking user when the
+project has no dedicated runtime account, and waits for `/run/user/<uid>` to
+appear. Use `--runtime-user <user>` to provision a user before a project config
+exists or when standing up a sandbox account directly:
+
+```bash
+scripts/team-launcher porter provision-runtime --runtime-user otto-agent
+```
 
 Use `--dry-run` to render the Konsole layout and print the plan without opening
 Konsole:
@@ -154,6 +169,7 @@ Generate a starter config for another project:
 
 ```bash
 scripts/team-launcher porter bootstrap --template-output /tmp/porter.json
+scripts/team-launcher porter provision-runtime --runtime-user otto-agent
 ```
 
 The template intentionally contains no active roles. Add roles only after their

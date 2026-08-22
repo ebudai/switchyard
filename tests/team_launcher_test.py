@@ -23,7 +23,9 @@ import scripts.team_launcher as team_launcher
 from scripts.team_launcher import (
     cli_command_for_role,
     default_user_bin,
+    ensure_configured_runtime_user,
     ensure_project_worktrees,
+    ensure_user_linger_runtime,
     git_clean_shared_checkout_args,
     git_checkout_shared_ref_args,
     git_fetch_worktree_ref_args,
@@ -34,6 +36,7 @@ from scripts.team_launcher import (
     live_command_matches_role,
     load_project_config,
     pane_state_file_name,
+    provision_runtime_command,
     run_detached_role,
     run_role_pane,
     session_file_name,
@@ -420,6 +423,134 @@ def test_custom_config_without_run_as_user_tracks_invoking_home() -> None:
     assert config.run_as_user == ""
     assert config.repository == Path("/home/otto-agent/Projects/porter")
     assert config.roles[0].workdir == "/home/otto-agent/Projects/porter"
+
+
+def test_ensure_user_linger_runtime_enables_linger_and_waits_for_runtime_dir() -> None:
+    original_uid_for_user = team_launcher.uid_for_user
+    calls: list[list[str]] = []
+    checks: list[Path] = []
+    sleeps: list[float] = []
+
+    def runner(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    def runtime_exists(path: Path) -> bool:
+        checks.append(path)
+        return len(checks) == 3
+
+    try:
+        team_launcher.uid_for_user = lambda user_name: 1005 if user_name == "otto-agent" else None
+
+        runtime_dir = ensure_user_linger_runtime(
+            "otto-agent",
+            runner=runner,
+            runtime_exists=runtime_exists,
+            sleeper=sleeps.append,
+            attempts=5,
+            poll_seconds=0.25,
+        )
+    finally:
+        team_launcher.uid_for_user = original_uid_for_user
+
+    assert runtime_dir == Path("/run/user/1005")
+    assert calls == [["loginctl", "enable-linger", "otto-agent"]]
+    assert checks == [Path("/run/user/1005"), Path("/run/user/1005"), Path("/run/user/1005")]
+    assert sleeps == [0.25, 0.25]
+
+
+def test_ensure_user_linger_runtime_fails_loud_when_loginctl_is_denied() -> None:
+    original_uid_for_user = team_launcher.uid_for_user
+
+    def runner(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 1, stdout="", stderr="Access denied")
+
+    try:
+        team_launcher.uid_for_user = lambda user_name: 1005 if user_name == "otto-agent" else None
+
+        try:
+            ensure_user_linger_runtime(
+                "otto-agent",
+                runner=runner,
+                runtime_exists=lambda _path: False,
+                sleeper=lambda _seconds: None,
+                attempts=1,
+            )
+            raise AssertionError("expected SystemExit")
+        except SystemExit as exc:
+            message = str(exc)
+    finally:
+        team_launcher.uid_for_user = original_uid_for_user
+
+    assert "failed to enable linger for 'otto-agent': Access denied" in message
+    assert "sudo loginctl enable-linger otto-agent" in message
+
+
+def test_configured_runtime_check_skips_non_runtime_session_dir() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        config_path = _write_pgu_config_with_shared_checkout(Path(tmp))
+        config = load_project_config("pgu", config_path)
+
+        def runner(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            raise AssertionError(f"unexpected runtime provisioning call: {args}")
+
+        assert ensure_configured_runtime_user(config, runner=runner) is None
+
+
+def test_configured_runtime_check_uses_run_as_user_for_default_runtime_dir() -> None:
+    original_uid_for_user = team_launcher.uid_for_user
+    calls: list[list[str]] = []
+
+    def runner(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    try:
+        team_launcher.uid_for_user = lambda user_name: 1005 if user_name == "otto-agent" else None
+        with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+            config_path = _write_pgu_config_with_shared_checkout(Path(tmp))
+            raw = json.loads(config_path.read_text(encoding="utf-8"))
+            raw["run_as_user"] = "otto-agent"
+            raw["session_dir"] = "/run/user/1005/pgu-ticket-board/pane-sessions"
+            config_path.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            config = load_project_config("pgu", config_path)
+
+            runtime_dir = ensure_configured_runtime_user(
+                config,
+                runner=runner,
+                runtime_exists=lambda path: path == Path("/run/user/1005"),
+                sleeper=lambda _seconds: None,
+                attempts=1,
+            )
+    finally:
+        team_launcher.uid_for_user = original_uid_for_user
+
+    assert runtime_dir == Path("/run/user/1005")
+    assert calls == [["loginctl", "enable-linger", "otto-agent"]]
+
+
+def test_provision_runtime_command_uses_configured_project_user() -> None:
+    original_ensure = team_launcher.ensure_user_linger_runtime
+    calls: list[str] = []
+
+    def fake_ensure(user_name: str) -> Path:
+        calls.append(user_name)
+        return Path("/run/user/1005")
+
+    try:
+        team_launcher.ensure_user_linger_runtime = fake_ensure
+        with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+            config_path = _write_pgu_config_with_shared_checkout(Path(tmp))
+            raw = json.loads(config_path.read_text(encoding="utf-8"))
+            raw["run_as_user"] = "otto-agent"
+            config_path.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            config = load_project_config("pgu", config_path)
+
+            assert provision_runtime_command(None, config) == 0
+    finally:
+        team_launcher.ensure_user_linger_runtime = original_ensure
+
+    assert calls == ["otto-agent"]
 
 
 def test_yolo_config_translates_to_cli_specific_bypass_flags() -> None:
@@ -1436,6 +1567,11 @@ def main() -> int:
     test_pgu_config_keeps_live_agent_repository_with_foreign_home()
     test_custom_config_without_run_as_user_tracks_invoking_home()
     test_cli_command_prepends_invoking_user_bin()
+    test_ensure_user_linger_runtime_enables_linger_and_waits_for_runtime_dir()
+    test_ensure_user_linger_runtime_fails_loud_when_loginctl_is_denied()
+    test_configured_runtime_check_skips_non_runtime_session_dir()
+    test_configured_runtime_check_uses_run_as_user_for_default_runtime_dir()
+    test_provision_runtime_command_uses_configured_project_user()
     test_yolo_config_translates_to_cli_specific_bypass_flags()
     test_effort_config_translates_to_cli_specific_args()
     test_pgu_launch_commands_include_model_and_bypass_flags()

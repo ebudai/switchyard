@@ -659,7 +659,7 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     assert "ops cannot call release_draft" in str(draft_release_forbidden), draft_release_forbidden
     draft_released = post_json(base_url, f"/api/tickets/{draft_id}/actions/release_draft", {}, caller="eric")
     assert draft_released["ticket"]["state"] == "analysis", draft_released  # type: ignore[index]
-    assert draft_released["ticket"]["assignee"] == "unassigned", draft_released  # type: ignore[index]
+    assert draft_released["ticket"]["assignee"] == "director", draft_released  # type: ignore[index]
 
     draft_cancel_payload = post_json(
         base_url,
@@ -907,7 +907,7 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
         caller="perf",
     )
     assert exempt_requested["ticket"]["state"] == "analysis", exempt_requested  # type: ignore[index]
-    assert exempt_requested["ticket"]["assignee"] == "unassigned", exempt_requested  # type: ignore[index]
+    assert exempt_requested["ticket"]["assignee"] == "director", exempt_requested  # type: ignore[index]
     assert exempt_requested["ticket"]["commit_exempt"] is False, exempt_requested  # type: ignore[index]
     assert exempt_requested["ticket"]["comments"][-1]["who"] == "perf", exempt_requested  # type: ignore[index]
     assert "Commit exemption requested: No repository change was needed." == exempt_requested["ticket"]["comments"][-1]["text"], exempt_requested  # type: ignore[index]

@@ -1694,14 +1694,14 @@ $$;
 CREATE OR REPLACE FUNCTION ticket_board.stage_default_assignee(p_state text)
 RETURNS text
 LANGUAGE sql
-IMMUTABLE
+STABLE
 AS $$
     SELECT CASE
-        WHEN p_state = 'inspection' THEN 'inspector'
-        WHEN p_state = 'audit' THEN 'audit'
-        WHEN p_state IN ('dat', 'eric_review', 'director_review') THEN 'director'
+        WHEN cardinality(owner_roles) = 1 THEN owner_roles[1]
         ELSE NULL
-    END;
+    END
+    FROM ticket_board.workflow_stages
+    WHERE name = p_state;
 $$;
 
 CREATE OR REPLACE FUNCTION ticket_board.apply_stage_default_assignee_update()
@@ -1713,7 +1713,13 @@ BEGIN
        AND current_setting('ticket_board.force_move', true) IS DISTINCT FROM 'on'
        AND NOT coalesce(OLD.manually_controlled, false)
        AND NOT coalesce(NEW.manually_controlled, false)
-       AND ticket_board.stage_default_assignee(NEW.state) IS NOT NULL THEN
+       AND ticket_board.stage_default_assignee(NEW.state) IS NOT NULL
+       AND (
+           NEW.state <> 'analysis'
+           OR NEW.assignee IS NULL
+           OR btrim(NEW.assignee) = ''
+           OR NEW.assignee = 'unassigned'
+       ) THEN
         NEW.assignee := ticket_board.stage_default_assignee(NEW.state);
     END IF;
     RETURN NEW;

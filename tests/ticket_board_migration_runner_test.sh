@@ -177,9 +177,35 @@ SELECT string_agg(name, ',' ORDER BY seq)
 FROM ticket_board.schema_migrations;
 SQL
 )"
-expected_transition_applied="schema.sql,270_ready_to_in_progress.sql,271_optional_implementation.sql,272_resolved_blockers.sql,273_suppress_self_notifications.sql,274_unblock_notifications.sql,275_remove_dead_unblock_analysis_branch.sql,276_revert_backlog_unblock_notifications.sql,277_owner_update_notifications.sql,278_idle_turn_end_nudges.sql,279_idle_reminder_escalation.sql,280_reject_stale_resubmit.sql,281_idle_reminder_escalate_problem_clause.sql,282_http_director_create_notification_source.sql,283_idle_reminder_defers_to_primary.sql,284_add_regression_flag.sql,285_require_actor_caller_role_backstop.sql,286_allow_audit_file_bug.sql,287_active_inprogress_idle_filter.sql,pgu367_unresolved_blocked_by_source_json.sql,pgu405_terminal_transition_assignee_notify.sql,pgu437_idle_reminder_delivery_count.sql,pgu444_finish_current_locked_reconcile.sql,pgu450_in_progress_implementer_assignee.sql,pgu451_serial_implementer_focus.sql,pgu453_awaiting_role_nudge_suppression.sql,pgu455_director_discretionary_nudges.sql,pgu457_close_utility_tasks.sql,pgu458_pgu340_director_force_move.sql,pgu458_submit_to_inspection.sql,pgu471_coalesce_new_ticket_notifications.sql,pgu472_urgent_comment_notifications.sql,pgu474_hard_serial_focus_force_move.sql,pgu477_drop_legacy_append_ticket_comment.sql,pgu479_optional_kickback_comments.sql,pgu480_queued_backlog_nudge_suppression.sql,pgu494_create_ticket_needs_eric_signoff.sql,pgu497_eric_review_notifications.sql,pgu514_draft_stage.sql,pgu517_workflow_config_phase0.sql,pgu519_manual_control_comment_notifications.sql,pgu520_workflow_config_cosmetic_derivation.sql,pgu521_workflow_transition_shadow_mode.sql,pgu521_zz_shadow_log_read_grants.sql,pgu522_workflow_config_authoritative.sql,pgu527_workflow_rbac_shadow.sql,pgu528_workflow_rbac_config_authoritative.sql,pgu531_attachment_crop_metadata.sql,pgu541_inprogress_stuck_requires_pane_idle.sql,pgu544_dat_stage.sql,pgu563_grant_listener_unresolved_blockers.sql,pgu584_stage_default_assignee.sql,pgu999_runner_probe.sql"
+expected_transition_applied="schema.sql,270_ready_to_in_progress.sql,271_optional_implementation.sql,272_resolved_blockers.sql,273_suppress_self_notifications.sql,274_unblock_notifications.sql,275_remove_dead_unblock_analysis_branch.sql,276_revert_backlog_unblock_notifications.sql,277_owner_update_notifications.sql,278_idle_turn_end_nudges.sql,279_idle_reminder_escalation.sql,280_reject_stale_resubmit.sql,281_idle_reminder_escalate_problem_clause.sql,282_http_director_create_notification_source.sql,283_idle_reminder_defers_to_primary.sql,284_add_regression_flag.sql,285_require_actor_caller_role_backstop.sql,286_allow_audit_file_bug.sql,287_active_inprogress_idle_filter.sql,pgu367_unresolved_blocked_by_source_json.sql,pgu405_terminal_transition_assignee_notify.sql,pgu437_idle_reminder_delivery_count.sql,pgu444_finish_current_locked_reconcile.sql,pgu450_in_progress_implementer_assignee.sql,pgu451_serial_implementer_focus.sql,pgu453_awaiting_role_nudge_suppression.sql,pgu455_director_discretionary_nudges.sql,pgu457_close_utility_tasks.sql,pgu458_pgu340_director_force_move.sql,pgu458_submit_to_inspection.sql,pgu471_coalesce_new_ticket_notifications.sql,pgu472_urgent_comment_notifications.sql,pgu474_hard_serial_focus_force_move.sql,pgu477_drop_legacy_append_ticket_comment.sql,pgu479_optional_kickback_comments.sql,pgu480_queued_backlog_nudge_suppression.sql,pgu494_create_ticket_needs_eric_signoff.sql,pgu497_eric_review_notifications.sql,pgu514_draft_stage.sql,pgu517_workflow_config_phase0.sql,pgu519_manual_control_comment_notifications.sql,pgu520_workflow_config_cosmetic_derivation.sql,pgu521_workflow_transition_shadow_mode.sql,pgu521_zz_shadow_log_read_grants.sql,pgu522_workflow_config_authoritative.sql,pgu527_workflow_rbac_shadow.sql,pgu528_workflow_rbac_config_authoritative.sql,pgu531_attachment_crop_metadata.sql,pgu541_inprogress_stuck_requires_pane_idle.sql,pgu544_dat_stage.sql,pgu563_grant_listener_unresolved_blockers.sql,pgu584_stage_default_assignee.sql,pgu588_stage_default_assignee_from_workflow.sql,pgu999_runner_probe.sql"
 [[ "$transition_applied" == "$expected_transition_applied" ]] || {
     echo "FAIL: schema.sql backfill did not record legacy migration names correctly: $transition_applied" >&2
+    exit 1
+}
+
+stage_default_result="$(
+    psql -X -v ON_ERROR_STOP=1 -tA "$TRANSITION_CONN" <<'SQL'
+WITH expected(state_name, expected_assignee) AS (
+    VALUES
+        ('analysis', 'director'),
+        ('in_progress', NULL),
+        ('inspection', 'inspector'),
+        ('audit', 'audit'),
+        ('dat', 'director'),
+        ('eric_review', 'director'),
+        ('director_review', 'director'),
+        ('draft', NULL),
+        ('backlog', NULL),
+        ('done', NULL),
+        ('cancelled', NULL)
+)
+SELECT count(*) = 0
+FROM expected
+WHERE ticket_board.stage_default_assignee(state_name) IS DISTINCT FROM expected_assignee;
+SQL
+)"
+[[ "$stage_default_result" == "t" ]] || {
+    echo "FAIL: stage_default_assignee did not match workflow_stages single-owner data: $stage_default_result" >&2
     exit 1
 }
 
@@ -203,6 +229,11 @@ INSERT INTO ticket_board.tickets (
         'PGU-58403', 'Force stage assignee handoff', '', 'analysis', 'ops', 'Ready.', false,
         '2026-08-22T00:00:00+00:00', '2026-08-22T00:00:00+00:00', clock_timestamp(), clock_timestamp(),
         '{"id":"PGU-58403","title":"Force stage assignee handoff","body":"","state":"analysis","assignee":"ops","implementation":"Ready.","comments":[],"created":"2026-08-22T00:00:00+00:00","updated":"2026-08-22T00:00:00+00:00"}'::jsonb
+    ),
+    (
+        'PGU-58801', 'Analysis assignee handoff', '', 'backlog', 'unassigned', '', false,
+        '2026-08-22T00:00:00+00:00', '2026-08-22T00:00:00+00:00', clock_timestamp(), clock_timestamp(),
+        '{"id":"PGU-58801","title":"Analysis assignee handoff","body":"","state":"backlog","assignee":"unassigned","implementation":"","comments":[],"created":"2026-08-22T00:00:00+00:00","updated":"2026-08-22T00:00:00+00:00"}'::jsonb
     );
 UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '5840101' WHERE id = 'PGU-58401';
 UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '5840202' WHERE id = 'PGU-58402';
@@ -210,6 +241,7 @@ BEGIN;
 SELECT set_config('ticket_board.force_move', 'on', true);
 UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '5840303' WHERE id = 'PGU-58403';
 COMMIT;
+UPDATE ticket_board.tickets SET state = 'analysis' WHERE id = 'PGU-58801';
 SQL
 
 stage_handoff_result="$(
@@ -223,7 +255,7 @@ SELECT jsonb_object_agg(
             SELECT q.target_role
             FROM ticket_board.ticket_notification_queue q
             WHERE q.ticket_id = t.id
-              AND q.payload->>'new_state' = 'audit'
+              AND q.payload->>'new_state' = t.state
             ORDER BY q.id DESC
             LIMIT 1
         )
@@ -231,10 +263,10 @@ SELECT jsonb_object_agg(
     ORDER BY t.id
 )::text
 FROM ticket_board.tickets t
-WHERE t.id IN ('PGU-58401', 'PGU-58402', 'PGU-58403');
+WHERE t.id IN ('PGU-58401', 'PGU-58402', 'PGU-58403', 'PGU-58801');
 SQL
 )"
-expected_stage_handoff_result='{"PGU-58401": {"state": "audit", "assignee": "audit", "queue_target": "audit"}, "PGU-58402": {"state": "audit", "assignee": "ops", "queue_target": null}, "PGU-58403": {"state": "audit", "assignee": "ops", "queue_target": "audit"}}'
+expected_stage_handoff_result='{"PGU-58401": {"state": "audit", "assignee": "audit", "queue_target": "audit"}, "PGU-58402": {"state": "audit", "assignee": "ops", "queue_target": null}, "PGU-58403": {"state": "audit", "assignee": "ops", "queue_target": "audit"}, "PGU-58801": {"state": "analysis", "assignee": "director", "queue_target": "director"}}'
 [[ "$stage_handoff_result" == "$expected_stage_handoff_result" ]] || {
     echo "FAIL: migrated DB stage assignee handoff produced wrong state or notification target: $stage_handoff_result" >&2
     exit 1

@@ -297,7 +297,32 @@ COMMIT;
             psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-11';")
             psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-11';")
 
-            psql(conninfo, "UPDATE ticket_board.tickets SET implementation = '', state = 'in_progress' WHERE id = 'PGU-1';")
+            insert_ticket(conninfo, "PGU-12", title="Unassigned analysis handoff", assignee="unassigned", state="backlog")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'analysis' WHERE id = 'PGU-12';")
+            unassigned_analysis = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'state', t.state,
+    'assignee', t.assignee,
+    'queue_target', (
+        SELECT q.target_role
+        FROM ticket_board.ticket_notification_queue q
+        WHERE q.ticket_id = t.id
+          AND q.payload->>'new_state' = 'analysis'
+        ORDER BY q.id DESC
+        LIMIT 1
+    )
+)::text
+FROM ticket_board.tickets t
+WHERE t.id = 'PGU-12';
+""",
+                ).stdout
+            )
+            assert unassigned_analysis == {"state": "analysis", "assignee": "director", "queue_target": "director"}, unassigned_analysis
+
+            psql(conninfo, "UPDATE ticket_board.tickets SET implementation = '', assignee = 'app', state = 'in_progress' WHERE id = 'PGU-1';")
             handoff_notice = json.loads(
                 psql(
                     conninfo,
@@ -879,7 +904,7 @@ WHERE id = 'PGU-40';
             insert_ticket(conninfo, "PGU-6", title="Kickback", assignee="audit", state="audit", implementation="done")
             psql(conninfo, "UPDATE ticket_board.tickets SET state = 'analysis' WHERE id = 'PGU-6';")
             kickback_assignee = psql(conninfo, "SELECT assignee FROM ticket_board.tickets WHERE id = 'PGU-6';").stdout.strip()
-            assert kickback_assignee == "unassigned"
+            assert kickback_assignee == "director"
 
             insert_ticket(conninfo, "PGU-7", title="Auto director", assignee="audit", state="audit", implementation="done")
             psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true WHERE id = 'PGU-7';")

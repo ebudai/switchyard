@@ -127,7 +127,7 @@ def build_ticket_payload(*, path: str, line_count: int, line_limit: int, commit:
         "title": title,
         "body": body,
         "assignee": "unassigned",
-        "needs_eric_signoff": False,
+        "needs_user_signoff": False,
         "screenshot": None,
     }
 
@@ -137,7 +137,7 @@ def create_ticket(board_url: str, payload: dict[str, object]) -> str:
         title=str(payload["title"]),
         body=str(payload["body"]),
         assignee=str(payload.get("assignee", "unassigned")),
-        needs_eric_signoff=bool(payload.get("needs_eric_signoff", False)),
+        needs_user_signoff=bool(payload.get("needs_user_signoff", False)),
         screenshot=payload.get("screenshot"),  # type: ignore[arg-type]
     )
     ticket = parsed.get("ticket")

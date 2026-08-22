@@ -338,6 +338,82 @@ transition_value="$(psql -X -v ON_ERROR_STOP=1 -tA "$TRANSITION_CONN" -c "SELECT
     exit 1
 }
 
+LIVE_RENAME_DBNAME="pgu_migration_runner_live_rename_test"
+LIVE_RENAME_CONN="host=$SOCKET_DIR port=$PORT dbname=$LIVE_RENAME_DBNAME user=postgres"
+LIVE_RENAME_MIGRATIONS_DIR="$TMPDIR_T/live-rename-migrations"
+mkdir -p "$LIVE_RENAME_MIGRATIONS_DIR"
+createdb -h "$SOCKET_DIR" -p "$PORT" -U postgres "$LIVE_RENAME_DBNAME"
+if git -C "$REPO_ROOT" show origin/main:scripts/ticket_board/schema.sql >"$TMPDIR_T/origin-main-schema.sql"; then
+    psql -X -v ON_ERROR_STOP=1 "$LIVE_RENAME_CONN" -f "$TMPDIR_T/origin-main-schema.sql" >/dev/null
+    psql -X -v ON_ERROR_STOP=1 "$LIVE_RENAME_CONN" <<'SQL' >/dev/null
+INSERT INTO ticket_board.tickets (
+    id, title, body, state, assignee, implementation, audit_signoff,
+    needs_eric_signoff, eric_signoff, created_text, updated_text, created_at, updated_at, source_json
+) VALUES (
+    'PGU-42901', 'Live old UAT row', '', 'eric_review', 'director', 'Ready.', true,
+    true, true, '2026-08-22T00:00:00+00:00', '2026-08-22T00:00:00+00:00',
+    clock_timestamp(), clock_timestamp(),
+    '{"id":"PGU-42901","title":"Live old UAT row","body":"","state":"eric_review","assignee":"director","implementation":"Ready.","audit_signoff":true,"needs_eric_signoff":true,"eric_signoff":true,"comments":[],"created":"2026-08-22T00:00:00+00:00","updated":"2026-08-22T00:00:00+00:00"}'::jsonb
+);
+INSERT INTO ticket_board.ticket_comments (ticket_id, position, who, ts_text, ts, text, source_json)
+VALUES (
+    'PGU-42901',
+    0,
+    'eric',
+    '2026-08-22T00:01:00+00:00',
+    '2026-08-22T00:01:00+00:00'::timestamptz,
+    'Looks good.',
+    '{"who":"eric","ts":"2026-08-22T00:01:00+00:00","text":"Looks good."}'::jsonb
+);
+UPDATE ticket_board.ticket_notification_state
+SET current_state = 'eric_review',
+    previous_state = 'dat'
+WHERE ticket_id = 'PGU-42901';
+SQL
+    cp "$REPO_ROOT/scripts/ticket_board/schema.sql" "$TMPDIR_T/schema.sql"
+    cp "$REPO_ROOT/scripts/ticket_board/migrations/pgu589_depersonalize_user_role.sql" "$LIVE_RENAME_MIGRATIONS_DIR/"
+    TICKET_BOARD_ADMIN_DATABASE_URL="$LIVE_RENAME_CONN" TICKET_BOARD_MIGRATIONS_DIR="$LIVE_RENAME_MIGRATIONS_DIR" \
+        "$REPO_ROOT/scripts/ticket-board-migrate" >/dev/null
+    live_rename_result="$(
+        psql -X -v ON_ERROR_STOP=1 -tA "$LIVE_RENAME_CONN" <<'SQL'
+SELECT jsonb_build_object(
+    'state', t.state,
+    'needs_user_signoff', t.needs_user_signoff,
+    'user_signoff', t.user_signoff,
+    'source_state', t.source_json->>'state',
+    'source_needs_user_signoff', t.source_json->'needs_user_signoff',
+    'source_user_signoff', t.source_json->'user_signoff',
+    'comment_who', (SELECT c.who FROM ticket_board.ticket_comments c WHERE c.ticket_id = t.id ORDER BY c.position LIMIT 1),
+    'comment_source_who', (SELECT c.source_json->>'who' FROM ticket_board.ticket_comments c WHERE c.ticket_id = t.id ORDER BY c.position LIMIT 1),
+    'notification_state', (SELECT ns.current_state FROM ticket_board.ticket_notification_state ns WHERE ns.ticket_id = t.id),
+    'old_column_count', (
+        SELECT count(*)::int
+        FROM information_schema.columns
+        WHERE table_schema = 'ticket_board'
+          AND table_name = 'tickets'
+          AND column_name IN ('needs_eric_signoff', 'eric_signoff')
+    ),
+    'old_stage_count', (SELECT count(*)::int FROM ticket_board.workflow_stages WHERE name = 'eric_review'),
+    'new_stage_count', (SELECT count(*)::int FROM ticket_board.workflow_stages WHERE name = 'user_review'),
+    'old_function_exists', to_regprocedure('ticket_board.eric_sign_off(text,text)') IS NOT NULL,
+    'new_function_exists', to_regprocedure('ticket_board.user_sign_off(text,text)') IS NOT NULL,
+    'migration_recorded', EXISTS (
+        SELECT 1 FROM ticket_board.schema_migrations WHERE name = 'pgu589_depersonalize_user_role.sql'
+    )
+)::text
+FROM ticket_board.tickets t
+WHERE t.id = 'PGU-42901';
+SQL
+    )"
+    expected_live_rename_result='{"state": "user_review", "comment_who": "user", "source_state": "user_review", "user_signoff": true, "new_stage_count": 1, "old_stage_count": 0, "old_column_count": 0, "comment_source_who": "user", "migration_recorded": true, "needs_user_signoff": true, "notification_state": "user_review", "new_function_exists": true, "old_function_exists": false, "source_user_signoff": true, "source_needs_user_signoff": true}'
+    [[ "$live_rename_result" == "$expected_live_rename_result" ]] || {
+        echo "FAIL: pgu589 did not migrate old eric_review data cleanly: $live_rename_result" >&2
+        exit 1
+    }
+else
+    echo "ticket_board_migration_runner_test: skipped pgu589 old-schema regression, origin/main schema unavailable" >&2
+fi
+
 SOURCE_REPO="$TMPDIR_T/source"
 DEPLOY_ROOT="$TMPDIR_T/live"
 mkdir -p "$SOURCE_REPO/scripts/ticket_board/migrations"

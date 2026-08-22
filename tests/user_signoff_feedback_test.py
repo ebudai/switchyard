@@ -14,7 +14,7 @@ from scripts.ticket_board.frontend import HTML
 
 
 def main() -> int:
-    assert "function ericSignoffSummary(ticket)" in HTML
+    assert "function userSignoffSummary(ticket)" in HTML
     assert "if (ticket.state === 'director_review') {" in HTML
     assert "card.classList.add('card-signed-off');" in HTML
     assert "card-signoff-state" in HTML
@@ -24,8 +24,8 @@ def main() -> int:
     assert "UAT signed off. Waiting for Final Sign-Off." in HTML
     assert "Signed off ✓ Waiting for director completion." in HTML
     assert "UAT sign-off recorded. Waiting for director completion." in HTML
-    assert "ericBannerSubtitle.textContent = signoffRecorded ? 'Signed Off ✓' : 'Awaiting UAT sign-off';" in HTML
-    assert "ericSummaryHead.textContent = signoffRecorded ? 'Signed-off UAT Snapshot' : 'UAT Check Before Sign-off';" in HTML
+    assert "userBannerSubtitle.textContent = signoffRecorded ? 'Signed Off ✓' : 'Awaiting UAT sign-off';" in HTML
+    assert "userSummaryHead.textContent = signoffRecorded ? 'Signed-off UAT Snapshot' : 'UAT Check Before Sign-off';" in HTML
     print("user_signoff_feedback_test: ok")
     return 0
 

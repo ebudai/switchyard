@@ -14,7 +14,7 @@ from scripts.ticket_board.frontend import HTML
 
 
 def main() -> int:
-    assert "async function submitEricSignoff(ticketId, who, text)" in HTML
+    assert "async function submitUserSignoff(ticketId, who, text)" in HTML
     assert "const patch = { user_signoff: true };" in HTML
     assert "const patch = { user_signoff: true, state: 'done' };" not in HTML
     assert "setCreateStatus(`Signed off ✓ ${ticketId} moved to Final Sign-Off.`);" in HTML

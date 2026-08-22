@@ -289,7 +289,7 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         page.locator("#titleInput").fill("Harness created file-upload ticket")
         page.locator("#bodyInput").fill("Created through Playwright file upload path.")
         page.locator("#assigneeInput").select_option("app")
-        page.locator("#needsEricInput").check()
+        page.locator("#needsUserInput").check()
         page.locator("#needsInspectionInput").check()
         page.locator("#createRegressionInput").check()
         page.locator("#createBtn").click()

@@ -14,7 +14,7 @@ from scripts.ticket_board.frontend import HTML
 
 
 def main() -> int:
-    assert "function ticketIsEricReview(ticket)" in HTML
+    assert "function ticketIsUserReview(ticket)" in HTML
     assert "const commentWho = document.createElement('select');" in HTML
     assert "commentWho.setAttribute('aria-label', 'Comment author');" in HTML
     assert "state.callerRoles = payload.caller_roles || [];" in HTML
@@ -22,11 +22,11 @@ def main() -> int:
     assert "['director', 'main', 'app', 'ops', 'perf', 'audit', 'inspector', 'research', 'user'];" in HTML
     assert "commentAuthorRoles.forEach((role) => {" in HTML
     assert "buildOption(commentWho, role, roleLabel(role));" in HTML
-    assert "commentWho.value = ticketIsEricReview(ticket) ? 'user' : 'director';" in HTML
+    assert "commentWho.value = ticketIsUserReview(ticket) ? 'user' : 'director';" in HTML
     assert "commentWho.type = 'text';" not in HTML
     assert "commentWho.placeholder = 'who';" not in HTML
-    assert "ericBannerSignoffButton.type = 'button';" in HTML
-    assert "ericBannerSignoffButton.textContent = 'Sign Off';" in HTML
+    assert "userBannerSignoffButton.type = 'button';" in HTML
+    assert "userBannerSignoffButton.textContent = 'Sign Off';" in HTML
     assert "const patch = { user_signoff: true };" in HTML
     assert "const patch = { user_signoff: true, state: 'done' };" not in HTML
     assert "setCreateStatus(`Signed off ✓ ${ticketId} moved to Final Sign-Off.`);" in HTML

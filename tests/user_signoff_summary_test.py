@@ -17,8 +17,8 @@ def main() -> int:
     assert ".user-summary" in HTML
     assert "UAT Check Before Sign-off" in HTML
     assert "function checklistItemsFromText(text)" in HTML
-    assert "function ericReviewSummarySections(ticket)" in HTML
-    assert "function ericReviewStatusItems(ticket)" in HTML
+    assert "function userReviewSummarySections(ticket)" in HTML
+    assert "function userReviewStatusItems(ticket)" in HTML
     assert "Audit sign-off" in HTML
     assert "{ label: 'UAT sign-off', ok: !ticket.needs_user_signoff || !!ticket.user_signoff }" in HTML
     assert "Inspector sign-off" in HTML
@@ -26,7 +26,7 @@ def main() -> int:
     assert "['Implementation', ticket.implementation]" in HTML
     assert "['Body', ticket.body]" in HTML
     assert "['Audit Prompt', ticket.audit_prompt]" in HTML
-    assert "ericBanner.append(ericBannerSubtitle, ericBannerTitle, ericBannerNote, ericSummary, ericBannerActions);" in HTML
+    assert "userBanner.append(userBannerSubtitle, userBannerTitle, userBannerNote, userSummary, userBannerActions);" in HTML
     print("user_signoff_summary_test: ok")
     return 0
 

@@ -19,16 +19,16 @@ def main() -> int:
     assert "Signed Off ✓" in HTML
     assert "Review this ticket during UAT, then sign off when it looks right." in HTML
     assert "UAT sign-off recorded. Waiting for director completion." in HTML
-    assert "function ericReviewCheckText(ticket)" in HTML
+    assert "function userReviewCheckText(ticket)" in HTML
     assert "firstNonEmptyLine(ticket.implementation)" in HTML
     assert "firstNonEmptyLine(ticket.body)" in HTML
-    assert "ericBannerNote.textContent = signoffRecorded" in HTML
+    assert "userBannerNote.textContent = signoffRecorded" in HTML
     assert ".user-summary" in HTML
     assert ".user-banner-confirmed" in HTML
     assert ".user-signoff-confirmation" in HTML
-    assert "ericBannerSignoffButton.type = 'button';" in HTML
-    assert "ericBannerSignoffButton.textContent = 'Sign Off';" in HTML
-    assert "await submitEricSignoff(ticket.id, commentWho.value, commentText.value);" in HTML
+    assert "userBannerSignoffButton.type = 'button';" in HTML
+    assert "userBannerSignoffButton.textContent = 'Sign Off';" in HTML
+    assert "await submitUserSignoff(ticket.id, commentWho.value, commentText.value);" in HTML
     assert "Signed-off UAT Snapshot" in HTML
     print("user_review_banner_test: ok")
     return 0

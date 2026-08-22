@@ -260,7 +260,7 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
         initial_state: createDraftInput.checked ? 'draft' : (createBacklogInput.checked ? 'backlog' : 'analysis'),
         screenshot: state.pendingCreateScreenshots[0] || null,
         screenshots: state.pendingCreateScreenshots,
-        needs_user_signoff: needsEricInput.checked,
+        needs_user_signoff: needsUserInput.checked,
         needs_inspection: needsInspectionInput.checked,
         regression: createRegressionInput.checked,
       };
@@ -269,7 +269,7 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
       bodyInput.value = '';
       createDraftInput.checked = false;
       createBacklogInput.checked = false;
-      needsEricInput.checked = false;
+      needsUserInput.checked = false;
       needsInspectionInput.checked = false;
       createRegressionInput.checked = false;
       state.pendingCreateScreenshots = [];
@@ -686,7 +686,7 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
       setCreateStatus(nextState ? `Moved ${ticketId} to ${stateLabel(nextState)}.` : `Comment added to ${ticketId}.`);
     }
 
-    async function submitEricSignoff(ticketId, who, text) {
+    async function submitUserSignoff(ticketId, who, text) {
       const patch = { user_signoff: true };
       const trimmedWho = who.trim();
       const trimmedText = text.trim();

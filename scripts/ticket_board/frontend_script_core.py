@@ -45,7 +45,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     const bodyInput = document.getElementById('bodyInput');
     const createDraftInput = document.getElementById('createDraftInput');
     const createBacklogInput = document.getElementById('createBacklogInput');
-    const needsEricInput = document.getElementById('needsEricInput');
+    const needsUserInput = document.getElementById('needsUserInput');
     const needsInspectionInput = document.getElementById('needsInspectionInput');
     const createRegressionInput = document.getElementById('createRegressionInput');
     const showDeferredInput = document.getElementById('showDeferredInput');
@@ -390,7 +390,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       return '';
     }
 
-    function ericSignoffSummary(ticket) {
+    function userSignoffSummary(ticket) {
       if (!ticket.needs_user_signoff || !ticket.user_signoff) {
         return '';
       }
@@ -415,7 +415,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
 
     function alertStackForTicket(ticket) {
       const alerts = [];
-      const signoffSummary = ericSignoffSummary(ticket);
+      const signoffSummary = userSignoffSummary(ticket);
       if (signoffSummary) {
         alerts.push({ kind: 'ok', title: 'Signed Off', text: signoffSummary });
       }
@@ -834,7 +834,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       return ['director_review', 'audit', 'dat', 'user_review'].includes(ticket.state);
     }
 
-    function ticketIsEricReview(ticket) {
+    function ticketIsUserReview(ticket) {
       return ticket.state === 'user_review';
     }
 
@@ -848,7 +848,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         .find((line) => line.length > 0) || '';
     }
 
-    function ericReviewCheckText(ticket) {
+    function userReviewCheckText(ticket) {
       return firstNonEmptyLine(ticket.implementation)
         || firstNonEmptyLine(ticket.body)
         || 'Review this ticket during UAT, then sign off when it looks right.';
@@ -878,7 +878,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       return lines.slice(0, maxLines).join('\\n');
     }
 
-    function ericReviewSummarySections(ticket) {
+    function userReviewSummarySections(ticket) {
       const fields = [
         ['Implementation', ticket.implementation],
         ['Body', ticket.body],
@@ -899,7 +899,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         .filter((section) => !!section);
     }
 
-    function ericReviewStatusItems(ticket) {
+    function userReviewStatusItems(ticket) {
       return [
         { label: 'Audit sign-off', ok: !!ticket.audit_signoff },
         { label: 'Inspector sign-off', ok: !ticket.needs_inspection || !!ticket.inspector_signoff },
@@ -1630,7 +1630,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       if (manualBlockedSummary(ticket)) {
         card.classList.add('card-blocked');
       }
-      if (ericSignoffSummary(ticket)) {
+      if (userSignoffSummary(ticket)) {
         card.classList.add('card-signed-off');
       }
       if (ticket.active_work_highlight) {

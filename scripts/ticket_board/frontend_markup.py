@@ -69,7 +69,7 @@ MARKUP = """  <div class="layout">
             <div id="createPreviewGallery" class="attachment-gallery"></div>
           </div>
           <label class="check">
-            <input id="needsEricInput" type="checkbox">
+            <input id="needsUserInput" type="checkbox">
             Needs UAT
           </label>
           <label class="check">

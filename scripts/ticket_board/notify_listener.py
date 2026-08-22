@@ -537,7 +537,10 @@ class PaneActivityGate:
         now = self.wall_time()
         if now - state.updated_at < self.stale_codex_busy_hook_seconds:
             return None
-        working_trace = self._working_timer_trace(target)
+        working_trace = self._working_timer_trace(
+            target,
+            sample_delay_seconds=self.idle_working_timer_sample_delay_seconds,
+        )
         if working_trace is not None:
             return working_trace
         cursor_composing = self._target_cursor_state(target)

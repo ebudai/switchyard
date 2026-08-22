@@ -601,18 +601,27 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     backlog_created_payload = post_json(
         base_url,
         "/api/tickets/actions/create_ticket",
-        {"title": "API backlog create", "body": "Deferred work.", "initial_state": "backlog", "assignee": "ops"},
+        {"title": "API backlog create", "body": "Deferred work.", "initial_state": "backlog", "assignee": "research"},
         caller="director",
         expect=201,
     )
     backlog_created = backlog_created_payload["ticket"]  # type: ignore[index]
     assert backlog_created["state"] == "backlog", backlog_created  # type: ignore[index]
-    assert backlog_created["assignee"] == "unassigned", backlog_created  # type: ignore[index]
+    assert backlog_created["assignee"] == "research", backlog_created  # type: ignore[index]
+
+    draft_assignee_rejected = post_json(
+        base_url,
+        "/api/tickets/actions/create_ticket",
+        {"title": "API draft create", "body": "Staged work.", "initial_state": "draft", "assignee": "ops"},
+        caller="director",
+        expect=400,
+    )
+    assert "draft tickets cannot be created with an assignee" in str(draft_assignee_rejected), draft_assignee_rejected
 
     draft_created_payload = post_json(
         base_url,
         "/api/tickets/actions/create_ticket",
-        {"title": "API draft create", "body": "Staged work.", "initial_state": "draft", "assignee": "ops"},
+        {"title": "API draft create", "body": "Staged work.", "initial_state": "draft"},
         caller="director",
         expect=201,
     )

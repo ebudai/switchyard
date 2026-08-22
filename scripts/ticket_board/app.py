@@ -345,7 +345,9 @@ class TicketBoardApp:
         caller_role: str | None = None,
     ) -> dict[str, Any]:
         state = self._validate_create_state(state)
-        assignee = "unassigned" if state in {"draft", "backlog"} else assignee
+        assignee = self._validate_assignee(assignee)
+        if state == "draft" and assignee != "unassigned":
+            raise ValueError("draft tickets cannot be created with an assignee; release and route the draft instead")
         return self.create_ticket_record(
             title=title,
             body=body,
@@ -810,8 +812,8 @@ ORDER BY rank;
         assignee = self._validate_assignee(assignee)
         state = self._validate_state(state)
         create_state = self._validate_create_state(state)
-        if create_state in {"draft", "backlog"}:
-            assignee = "unassigned"
+        if create_state == "draft" and assignee != "unassigned":
+            raise ValueError("draft tickets cannot be created with an assignee; release and route the draft instead")
         attachment_patch: dict[str, Any] = {}
         if screenshots not in (None, [], ""):
             attachment_patch["screenshots"] = screenshots
@@ -864,7 +866,7 @@ ORDER BY rank;
                     self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps({"regression": True})))
                 if create_state != state:
                     raise ValueError(f"invalid create state: {state}; allowed: draft, analysis, backlog")
-                if create_state == "analysis" and assignee != "unassigned":
+                if create_state in {"analysis", "backlog"} and assignee != "unassigned":
                     self._pg_call(conn, "SELECT ticket_board.route(%s, %s, %s);", (ticket_id, state, assignee))
                 if attachment_patch:
                     current = self._pg_get_ticket(ticket_id, conn)

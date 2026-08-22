@@ -98,7 +98,12 @@ def build_plan(
     resolved_board_root = board_root or home / f"{project}-ticketboard-live"
     resolved_source_repo = source_repo or Path(__file__).resolve().parents[2]
     resolved_asset_dir = asset_dir or home / ".claude" / f"{project}-tickets-assets"
-    resolved_frame_dir = frame_dir or home / ".claude" / f"{project}-ticket-frames"
+    if frame_dir is not None:
+        resolved_frame_dir = frame_dir
+    elif project == "pgu":
+        resolved_frame_dir = Path("/tmp/pgu-frames")
+    else:
+        resolved_frame_dir = home / ".claude" / f"{project}-ticket-frames"
     resolved_database = database or ("pgu" if project == "pgu" else f"{ident}_ticket_board")
     resolved_port = port if port is not None else allocated_port(project)
     if not (1 <= resolved_port <= 65535):
@@ -204,6 +209,8 @@ WantedBy=default.target
 
 
 def render_tmpfiles(plan: ProjectBoardProvision) -> str:
+    if plan.project == "pgu" and plan.frame_dir == "/tmp/pgu-frames":
+        return "d /tmp/pgu-frames 1777 root root -\n"
     return f"d {plan.frame_dir} 0775 {plan.owner_user} {plan.owner_user} -\n"
 
 
@@ -241,15 +248,26 @@ def render_operator_commands(plan: ProjectBoardProvision) -> str:
     q_listener_unit = shell_quote(
         f"/home/{plan.owner_user}/.config/systemd/user/{plan.listener_unit}"
     )
+    if plan.project == "pgu" and plan.frame_dir == "/tmp/pgu-frames":
+        install_asset_frame = (
+            f"sudo install -d -m 0775 -o {shell_quote(plan.owner_user)} -g {shell_quote(plan.owner_user)} {q_asset}\n"
+            f"sudo install -d -m 1777 -o root -g root {q_frame}"
+        )
+        grant_asset_frame = f"sudo setfacl -R -m u:{plan.service_user}:rwx {q_asset}"
+    else:
+        install_asset_frame = (
+            f"sudo install -d -m 0775 -o {shell_quote(plan.owner_user)} -g {shell_quote(plan.owner_user)} {q_asset} {q_frame}"
+        )
+        grant_asset_frame = f"sudo setfacl -R -m u:{plan.service_user}:rwx {q_asset} {q_frame}"
     return f"""# Review generated artifacts first. These commands require host privileges.
 sudo install -d -m 0755 {q_board_root}
 sudo env SOURCE_REPO={q_source_repo} BOARD_ROOT={q_board_root} DEPLOY_REF=origin/main TICKET_BOARD_SKIP_MIGRATIONS=1 {q_deploy_script} deploy
 sudo setfacl -R -m u:{plan.service_user}:rx {q_board_root}
 sudo find {q_board_root} -type d -exec setfacl -m d:u:{plan.service_user}:rx {{}} +
-sudo install -d -m 0775 -o {shell_quote(plan.owner_user)} -g {shell_quote(plan.owner_user)} {q_asset} {q_frame}
+{install_asset_frame}
 sudo setfacl -m u:{plan.service_user}:--x {shell_quote('/home/' + plan.owner_user)}
 sudo setfacl -m u:{plan.service_user}:--x {shell_quote('/home/' + plan.owner_user + '/.claude')}
-sudo setfacl -R -m u:{plan.service_user}:rwx {q_asset} {q_frame}
+{grant_asset_frame}
 sudo install -m 0644 {shell_quote(plan.board_unit)} {q_board_unit}
 sudo install -m 0644 {shell_quote(plan.tmpfiles_name)} {q_tmpfiles}
 sudo systemd-tmpfiles --create {q_tmpfiles}

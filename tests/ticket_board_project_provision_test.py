@@ -65,6 +65,30 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "/run/pgu-ticket-board/ticket-board.sock" not in combined
 
 
+def test_pgu_project_render_matches_live_port_database_and_frame_dir() -> None:
+    plan = build_plan(project="pgu", owner_user="agent")
+    board_unit = render_board_unit(plan)
+    tmpfiles = render_tmpfiles(plan)
+    commands = render_operator_commands(plan)
+
+    assert plan.port == 8770
+    assert plan.database == "pgu"
+    assert plan.board_unit == "pgu-ticket-board.service"
+    assert plan.runtime_directory == "pgu-ticket-board"
+    assert plan.socket_path == "/run/pgu-ticket-board/ticket-board.sock"
+    assert plan.board_root == "/home/agent/pgu-ticketboard-live"
+    assert plan.asset_dir == "/home/agent/.claude/pgu-tickets-assets"
+    assert plan.frame_dir == "/tmp/pgu-frames"
+    assert "--port 8770" in board_unit
+    assert "--frames /tmp/pgu-frames" in board_unit
+    assert "--assets /home/agent/.claude/pgu-tickets-assets" in board_unit
+    assert "ReadWritePaths=/home/agent/.claude/pgu-tickets-assets /tmp/pgu-frames" in board_unit
+    assert tmpfiles == "d /tmp/pgu-frames 1777 root root -\n"
+    assert "sudo install -d -m 1777 -o root -g root '/tmp/pgu-frames'" in commands
+    assert "sudo install -d -m 0775 -o 'agent' -g 'agent' '/home/agent/.claude/pgu-tickets-assets' '/tmp/pgu-frames'" not in commands
+    assert "sudo setfacl -R -m u:boardsvc:rwx '/home/agent/.claude/pgu-tickets-assets' '/tmp/pgu-frames'" not in commands
+
+
 def test_database_sql_bootstraps_schema_compatible_roles_and_project_database() -> None:
     plan = build_plan(project="4xgame", owner_user="4xgame", port=8899)
     sql = render_database_sql(plan)
@@ -127,6 +151,7 @@ def test_cli_writes_reviewable_artifacts() -> None:
 
 def main() -> int:
     test_non_pgu_project_is_fully_parameterized()
+    test_pgu_project_render_matches_live_port_database_and_frame_dir()
     test_database_sql_bootstraps_schema_compatible_roles_and_project_database()
     test_custom_database_actor_roles_fail_loud_until_schema_supports_them()
     test_cli_writes_reviewable_artifacts()

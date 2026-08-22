@@ -27,6 +27,11 @@ The provisioner intentionally renders first. It does not mutate the live PGU
 board, restart panes, create databases, or install units unless an operator runs
 the generated commands during an approved window.
 
+The `pgu` project is intentionally special-cased to reproduce the deployed
+production board: database `pgu`, HTTP port `8770`, and frame inbox
+`/tmp/pgu-frames` with a root-owned `1777` tmpfiles entry. New projects keep
+their frame inboxes under the owner user's home directory.
+
 ## Current Schema Constraint
 
 Each project gets its own database. The database roles remain

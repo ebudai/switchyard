@@ -15,6 +15,3 @@ NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=read-only
 ReadWritePaths=/tmp
-
-[Install]
-WantedBy=multi-user.target

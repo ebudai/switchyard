@@ -294,6 +294,14 @@ if text.count("polkit.Result.YES") != 2:
     raise SystemExit("polkit rule should contain exactly two positive grant sites")
 if "return polkit.Result.YES;" in text[:live_unit]:
     raise SystemExit("blanket grant appears before fixed-unit checks")
+required_unit_checks = {
+    '    if (unit === "pgu-ticket-board.service") {',
+    '    if (unit === "pgu-ticket-board-canary.service") {',
+}
+lines = set(text.splitlines())
+missing_unit_checks = required_unit_checks - lines
+if missing_unit_checks:
+    raise SystemExit(f"unit checks must be exact literals: {sorted(missing_unit_checks)}")
 canary_block = text[canary_unit:final_not_handled]
 if 'verb === "restart"' in canary_block:
     raise SystemExit("canary unit must not authorize restart")

@@ -149,6 +149,14 @@ grep -q '^ReadWritePaths=/tmp$' "$CANARY_UNIT" || {
     echo "FAIL: fixed canary unit does not limit writable paths to /tmp" >&2
     exit 1
 }
+grep -q '^NoNewPrivileges=true$' "$CANARY_UNIT" || {
+    echo "FAIL: fixed canary unit does not pin NoNewPrivileges" >&2
+    exit 1
+}
+if grep -Eq '^\[Install\]$|^WantedBy=' "$CANARY_UNIT"; then
+    echo "FAIL: fixed canary unit must not be enable-able at boot" >&2
+    exit 1
+fi
 if grep -Eq '%i|systemd-run|pgu-ticket-board-canary-' "$CANARY_UNIT"; then
     echo "FAIL: fixed canary unit must not interpolate instance names or use transient units" >&2
     exit 1

@@ -3,7 +3,25 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMPFILES_SOURCE="$REPO_ROOT/deploy/tmpfiles/pgu-ticket-board.conf"
+SERVICE_SOURCE="$REPO_ROOT/deploy/systemd/pgu-ticket-board.service.boardsvc"
 RUNTIME="/run/user/$(id -u)"
+
+unit_frames_path="$(sed -n 's/.* --frames \([^ ]*\) .*/\1/p' "$SERVICE_SOURCE")"
+tmpfiles_frames_path="$(awk '$1 == "d" { print $2 }' "$TMPFILES_SOURCE")"
+[[ "$unit_frames_path" == "/tmp/pgu-frames" ]] || {
+    echo "FAIL: boardsvc unit does not pass the expected shared frame directory" >&2
+    exit 1
+}
+[[ "$tmpfiles_frames_path" == "$unit_frames_path" ]] || {
+    echo "FAIL: tmpfiles path does not match the boardsvc --frames path" >&2
+    echo "unit: $unit_frames_path" >&2
+    echo "tmpfiles: $tmpfiles_frames_path" >&2
+    exit 1
+}
+grep -q "^ReadWritePaths=.* $unit_frames_path\\($\\| \\)" "$SERVICE_SOURCE" || {
+    echo "FAIL: boardsvc unit ReadWritePaths does not include the frame directory" >&2
+    exit 1
+}
 
 if [[ ! -S "$RUNTIME/bus" ]]; then
     echo "ticket_board_boardsvc_tmpfiles_namespace_test: skipped, user systemd bus unavailable"
@@ -17,8 +35,8 @@ fi
 export XDG_RUNTIME_DIR="$RUNTIME"
 export DBUS_SESSION_BUS_ADDRESS="unix:path=$RUNTIME/bus"
 
-TEST_ROOT="$(mktemp -d /tmp/pgu-280-namespace.XXXXXX)"
-UNIT_NAME="pgu-280-namespace-${TEST_ROOT##*.}.service"
+TEST_ROOT="$(mktemp -d /tmp/pgu-560-namespace.XXXXXX)"
+UNIT_NAME="pgu-560-namespace-${TEST_ROOT##*.}.service"
 UNIT_PATH="$TEST_ROOT/$UNIT_NAME"
 TMPFILES_TEST="$TEST_ROOT/tmpfiles.conf"
 ASSETS_DIR="$TEST_ROOT/assets"

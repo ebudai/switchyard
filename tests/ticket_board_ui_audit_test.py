@@ -174,7 +174,7 @@ def seed_tickets() -> list[dict[str, Any]]:
         ticket_payload(
             "PGU-503",
             "Feedback upload naming follow-up",
-            body="Eric tried setting PGU-502 as a blocker here.",
+            body="User tried setting PGU-502 as a blocker here.",
             state="analysis",
             assignee="unassigned",
             created_offset_minutes=3,
@@ -190,10 +190,10 @@ def seed_tickets() -> list[dict[str, Any]]:
         ticket_payload(
             "PGU-507",
             "UAT sign-off target",
-            body="Requires Eric signoff.",
-            state="eric_review",
+            body="Requires User signoff.",
+            state="user_review",
             assignee="director",
-            needs_eric_signoff=True,
+            needs_user_signoff=True,
             audit_signoff=True,
             commit_exempt=True,
             created_offset_minutes=5,
@@ -294,7 +294,7 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         page.locator("#createRegressionInput").check()
         page.locator("#createBtn").click()
         page.locator("#createStatus", has_text="Created PGU-513.").wait_for(timeout=5000)
-        wait_for_ticket_field(page, harness.url, "PGU-513", "ticket.screenshots.length === 3 && ticket.screenshots.some((path) => path.includes('feedback-007-phone-proof__upload-source.png')) && ticket.screenshots.some((path) => path.includes('feedback-007-phone-proof__upload-source-2.png')) && ticket.screenshots.some((path) => path.includes('feedback-007-phone-proof__unsafe-proof.png')) && ticket.needs_eric_signoff && ticket.needs_inspection && ticket.regression && ticket.assignee === 'app'")
+        wait_for_ticket_field(page, harness.url, "PGU-513", "ticket.screenshots.length === 3 && ticket.screenshots.some((path) => path.includes('feedback-007-phone-proof__upload-source.png')) && ticket.screenshots.some((path) => path.includes('feedback-007-phone-proof__upload-source-2.png')) && ticket.screenshots.some((path) => path.includes('feedback-007-phone-proof__unsafe-proof.png')) && ticket.needs_user_signoff && ticket.needs_inspection && ticket.regression && ticket.assignee === 'app'")
 
         page.evaluate(create_clipboard_png_payload())
         page.locator("#createStatus", has_text="Pasted image attached to the new ticket.").wait_for(timeout=5000)
@@ -464,12 +464,12 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         wait_for_ticket_field(page, harness.url, "PGU-512", "ticket.commit_hash === 'deadbeef'")
         refresh_open_detail_from_server(page, "PGU-512")
         modal.get_by_label("Requires UAT").check()
-        wait_for_ticket_field(page, harness.url, "PGU-512", "ticket.needs_eric_signoff")
+        wait_for_ticket_field(page, harness.url, "PGU-512", "ticket.needs_user_signoff")
         modal.get_by_label("Needs inspection").check()
         wait_for_ticket_field(page, harness.url, "PGU-512", "ticket.needs_inspection")
         modal.get_by_label("Regression").check()
         wait_for_ticket_field(page, harness.url, "PGU-512", "ticket.regression")
-        wait_for_ticket_field(page, harness.url, "PGU-512", "ticket.needs_eric_signoff && ticket.needs_inspection && ticket.regression && ticket.implementation.includes('PGU-503') && ticket.audit_prompt.includes('PGU-503') && ticket.commit_hash === 'deadbeef'")
+        wait_for_ticket_field(page, harness.url, "PGU-512", "ticket.needs_user_signoff && ticket.needs_inspection && ticket.regression && ticket.implementation.includes('PGU-503') && ticket.audit_prompt.includes('PGU-503') && ticket.commit_hash === 'deadbeef'")
 
         comment_box = modal.get_by_placeholder("Add a comment or bounce-back note")
         comment_box.fill("Playwright comment on PGU-512")
@@ -493,7 +493,7 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         page.locator(".card", has=page.locator(".card-id", has_text="PGU-507")).click()
         modal.wait_for(timeout=5000)
         modal.get_by_role("button", name="Sign Off").click()
-        wait_for_ticket_field(page, harness.url, "PGU-507", "ticket.eric_signoff && ticket.state === 'director_review'")
+        wait_for_ticket_field(page, harness.url, "PGU-507", "ticket.user_signoff && ticket.state === 'director_review'")
         page.locator(".card.card-signed-off", has=page.locator(".card-id", has_text="PGU-507")).wait_for(timeout=5000)
 
         page.locator("#detailCloseBtn").click()

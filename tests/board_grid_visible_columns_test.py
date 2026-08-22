@@ -61,7 +61,7 @@ class StaticBoardApp:
         }
 
 
-def ticket_payload(ticket_id: str, title: str, *, state: str, needs_eric_signoff: bool = False) -> dict[str, object]:
+def ticket_payload(ticket_id: str, title: str, *, state: str, needs_user_signoff: bool = False) -> dict[str, object]:
     return {
         "id": ticket_id,
         "title": title,
@@ -75,8 +75,8 @@ def ticket_payload(ticket_id: str, title: str, *, state: str, needs_eric_signoff
         "audit_signoff": False,
         "needs_inspection": False,
         "inspector_signoff": False,
-        "needs_eric_signoff": needs_eric_signoff,
-        "eric_signoff": False,
+        "needs_user_signoff": needs_user_signoff,
+        "user_signoff": False,
         "commit_hash": "",
         "commit_exempt": False,
         "parent_id": "",
@@ -169,7 +169,7 @@ def main() -> int:
             ticket_payload("PGU-2", "Implementation task", state="in_progress"),
             ticket_payload("PGU-3", "Inspection task", state="inspection"),
             ticket_payload("PGU-4", "Audit task", state="audit"),
-            ticket_payload("PGU-5", "Eric task", state="eric_review", needs_eric_signoff=True),
+            ticket_payload("PGU-5", "User task", state="user_review", needs_user_signoff=True),
             ticket_payload("PGU-6", "Director task", state="director_review"),
             ticket_payload("PGU-7", "Backlog task", state="backlog"),
             ticket_payload("PGU-8", "Done task", state="done"),

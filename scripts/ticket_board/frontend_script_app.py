@@ -260,7 +260,7 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
         initial_state: createDraftInput.checked ? 'draft' : (createBacklogInput.checked ? 'backlog' : 'analysis'),
         screenshot: state.pendingCreateScreenshots[0] || null,
         screenshots: state.pendingCreateScreenshots,
-        needs_eric_signoff: needsEricInput.checked,
+        needs_user_signoff: needsEricInput.checked,
         needs_inspection: needsInspectionInput.checked,
         regression: createRegressionInput.checked,
       };
@@ -436,13 +436,13 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
         'implementation',
         'audit_prompt',
         'needs_inspection',
-        'needs_eric_signoff',
+        'needs_user_signoff',
         'commit_exempt',
         'regression',
         'commit_hash',
         'audit_signoff',
         'inspector_signoff',
-        'eric_signoff',
+        'user_signoff',
       ]);
       const metadata = {};
       Object.entries(patch).forEach(([key, value]) => {
@@ -555,15 +555,15 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
           await updateTicketAction(ticketId, 'release_draft', {}, normalizedCaller);
         } else if (
           nextState === 'analysis' &&
-          ['eric_review', 'director_review', 'done'].includes(previousState)
+          ['user_review', 'director_review', 'done'].includes(previousState)
         ) {
-          await updateTicketAction(ticketId, 'eric_reopen', { reason: actionReason(patch) }, normalizedCaller);
+          await updateTicketAction(ticketId, 'user_reopen', { reason: actionReason(patch) }, normalizedCaller);
           consumedComment = true;
-        } else if (['dat', 'director_review', 'eric_review'].includes(nextState) && previousState === 'audit') {
+        } else if (['dat', 'director_review', 'user_review'].includes(nextState) && previousState === 'audit') {
           await updateTicketAction(ticketId, 'audit_sign_off', { text: actionReason(patch) }, normalizedCaller);
           consumed.add('audit_signoff');
           consumedComment = true;
-        } else if (nextState === 'eric_review' && previousState === 'dat') {
+        } else if (nextState === 'user_review' && previousState === 'dat') {
           await updateTicketAction(ticketId, 'director_dat_sign_off', { text: actionReason(patch) }, normalizedCaller);
           consumedComment = !!actionReason(patch);
         } else if (nextState === 'in_progress' && previousState === 'dat') {
@@ -575,9 +575,9 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
           );
           consumed.add('assignee');
           consumedComment = true;
-        } else if (nextState === 'director_review' && previousState === 'eric_review') {
-          await updateTicketAction(ticketId, 'eric_sign_off', { text: actionReason(patch) }, normalizedCaller);
-          consumed.add('eric_signoff');
+        } else if (nextState === 'director_review' && previousState === 'user_review') {
+          await updateTicketAction(ticketId, 'user_sign_off', { text: actionReason(patch) }, normalizedCaller);
+          consumed.add('user_signoff');
           consumedComment = !!actionReason(patch);
         } else {
           await updateTicketAction(
@@ -627,9 +627,9 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
         await updateTicketAction(ticketId, 'inspector_sign_off', {}, normalizedCaller);
         consumed.add('inspector_signoff');
       }
-      if (patch.eric_signoff === true && !consumed.has('eric_signoff')) {
-        await updateTicketAction(ticketId, 'eric_sign_off', { text: actionReason(patch) }, normalizedCaller);
-        consumed.add('eric_signoff');
+      if (patch.user_signoff === true && !consumed.has('user_signoff')) {
+        await updateTicketAction(ticketId, 'user_sign_off', { text: actionReason(patch) }, normalizedCaller);
+        consumed.add('user_signoff');
         consumedComment = !!actionReason(patch);
       }
 
@@ -687,7 +687,7 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
     }
 
     async function submitEricSignoff(ticketId, who, text) {
-      const patch = { eric_signoff: true };
+      const patch = { user_signoff: true };
       const trimmedWho = who.trim();
       const trimmedText = text.trim();
       if (trimmedWho && trimmedText) {

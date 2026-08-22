@@ -31,8 +31,8 @@ export const TicketRowSchema = z.object({
   implementation: z.string(),
   audit_prompt: z.string(),
   audit_signoff: z.boolean(),
-  needs_eric_signoff: z.boolean(),
-  eric_signoff: z.boolean(),
+  needs_user_signoff: z.boolean(),
+  user_signoff: z.boolean(),
   manually_controlled: z.boolean(),
   commit_hash: z.string().nullable(),
   commit_exempt: z.boolean(),
@@ -50,7 +50,7 @@ export const CreateTicketBodySchema = z.object({
   title: z.string(),
   body: z.string().optional().default(""),
   assignee: AssigneeSchema.optional().default("unassigned"),
-  needs_eric_signoff: z.boolean().optional().default(false),
+  needs_user_signoff: z.boolean().optional().default(false),
   blocked_by: z.array(z.string()).optional().default([]),
   blocked_reason: z.string().optional().default(""),
 });
@@ -73,7 +73,7 @@ export const FileBugBodySchema = z.object({
   source_ticket_id: z.string().optional(),
   parent_id: z.string().optional(),
   assignee: AssigneeSchema.optional().default("unassigned"),
-  needs_eric_signoff: z.boolean().optional().default(false),
+  needs_user_signoff: z.boolean().optional().default(false),
   blocked_by: z.array(z.string()).optional().default([]),
   blocked_reason: z.string().optional().default(""),
 });
@@ -84,7 +84,7 @@ export const CommitHashBodySchema = z.object({
   commit_hash: z.string().optional().default(""),
 });
 
-// audit_kick_back / eric_reopen / cancel: server.py accepts either "reason"
+// audit_kick_back / user_reopen / cancel: server.py accepts either "reason"
 // or the legacy "text" key for the mandatory explanatory comment.
 export const ReasonBodySchema = z.object({
   reason: z.string().optional(),

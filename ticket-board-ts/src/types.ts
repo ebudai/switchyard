@@ -10,7 +10,7 @@ export const TICKET_STATES = [
   "ready",
   "in_progress",
   "audit",
-  "eric_review",
+  "user_review",
   "director_review",
   "done",
   "cancelled",
@@ -34,7 +34,7 @@ export type Assignee = (typeof ASSIGNEES)[number];
 
 export const CALLER_ROLES = [
   "director",
-  "eric",
+  "user",
   "main",
   "app",
   "ops",
@@ -66,8 +66,8 @@ export function legalNextStates(state: TicketState): readonly TicketState[] {
     case "in_progress":
       return ["audit", "ready", "analysis", "backlog", "cancelled"];
     case "audit":
-      return ["eric_review", "director_review", "analysis", "backlog", "cancelled"];
-    case "eric_review":
+      return ["user_review", "director_review", "analysis", "backlog", "cancelled"];
+    case "user_review":
       return ["director_review", "audit", "analysis", "backlog", "cancelled"];
     case "director_review":
       return ["done", "ready", "analysis", "backlog", "cancelled"];
@@ -115,8 +115,8 @@ export interface Ticket {
   implementation: string;
   audit_prompt: string;
   audit_signoff: boolean;
-  needs_eric_signoff: boolean;
-  eric_signoff: boolean;
+  needs_user_signoff: boolean;
+  user_signoff: boolean;
   manually_controlled: boolean;
   commit_hash: string;
   commit_exempt: boolean;

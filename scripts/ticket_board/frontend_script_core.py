@@ -316,12 +316,12 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         return 'audit';
       }
       if (ticket.state === 'audit') {
-        return ticket.needs_eric_signoff ? 'dat' : 'director_review';
+        return ticket.needs_user_signoff ? 'dat' : 'director_review';
       }
       if (ticket.state === 'dat') {
-        return 'eric_review';
+        return 'user_review';
       }
-      if (ticket.state === 'eric_review') {
+      if (ticket.state === 'user_review') {
         return 'director_review';
       }
       if (ticket.state === 'director_review') {
@@ -357,11 +357,11 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         return 'Record inspector signoff before advancing to audit.';
       }
       if (ticket.state === 'audit' && !ticket.audit_signoff) {
-        return ticket.needs_eric_signoff
+        return ticket.needs_user_signoff
           ? 'Set audit signoff before advancing to DAT.'
           : 'Set audit signoff before advancing to Final Sign-Off.';
       }
-      if (ticket.state === 'eric_review' && ticket.needs_eric_signoff && !ticket.eric_signoff) {
+      if (ticket.state === 'user_review' && ticket.needs_user_signoff && !ticket.user_signoff) {
         return 'Record UAT sign-off before advancing to Final Sign-Off.';
       }
       if (nextState === 'done' && !ticket.commit_exempt && !(ticket.commit_hash || '').trim()) {
@@ -391,10 +391,10 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     }
 
     function ericSignoffSummary(ticket) {
-      if (!ticket.needs_eric_signoff || !ticket.eric_signoff) {
+      if (!ticket.needs_user_signoff || !ticket.user_signoff) {
         return '';
       }
-      if (ticket.state === 'eric_review') {
+      if (ticket.state === 'user_review') {
         return 'UAT signed off. Waiting for Final Sign-Off.';
       }
       if (ticket.state === 'director_review') {
@@ -831,11 +831,11 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     }
 
     function ticketAllowsKickback(ticket) {
-      return ['director_review', 'audit', 'dat', 'eric_review'].includes(ticket.state);
+      return ['director_review', 'audit', 'dat', 'user_review'].includes(ticket.state);
     }
 
     function ticketIsEricReview(ticket) {
-      return ticket.state === 'eric_review';
+      return ticket.state === 'user_review';
     }
 
     function firstNonEmptyLine(text) {
@@ -903,7 +903,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       return [
         { label: 'Audit sign-off', ok: !!ticket.audit_signoff },
         { label: 'Inspector sign-off', ok: !ticket.needs_inspection || !!ticket.inspector_signoff },
-        { label: 'UAT sign-off', ok: !ticket.needs_eric_signoff || !!ticket.eric_signoff },
+        { label: 'UAT sign-off', ok: !ticket.needs_user_signoff || !!ticket.user_signoff },
         {
           label: 'Commit evidence',
           ok: !!ticket.commit_exempt || !!(ticket.commit_hash || '').trim(),
@@ -1490,7 +1490,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       return state.tickets
         .filter((ticket) => (
           ticket.state === columnKey
-          && (columnKey !== 'eric_review' || ticket.needs_eric_signoff)
+          && (columnKey !== 'user_review' || ticket.needs_user_signoff)
           && isTopLevelBoardTicket(ticket)
         ))
         .length;
@@ -1503,7 +1503,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       return state.tickets
         .filter((ticket) => (
           ticket.state === columnKey
-          && (columnKey !== 'eric_review' || ticket.needs_eric_signoff)
+          && (columnKey !== 'user_review' || ticket.needs_user_signoff)
           && isTopLevelBoardTicket(ticket)
         ))
         .sort(compareTicketsWithActiveWorkFirst);
@@ -1611,7 +1611,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         if (!tickets.length) {
           const empty = document.createElement('div');
           empty.className = 'empty';
-          empty.textContent = column.key === 'eric_review'
+          empty.textContent = column.key === 'user_review'
             ? 'Only tickets flagged for UAT appear here.'
             : 'No tickets in this state.';
           body.appendChild(empty);
@@ -1661,10 +1661,10 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         assigneeLine.appendChild(assigneeValue);
         titleWrap.appendChild(assigneeLine);
       }
-      if (ticket.needs_eric_signoff && ticket.state === 'eric_review') {
+      if (ticket.needs_user_signoff && ticket.state === 'user_review') {
         const signoffState = document.createElement('div');
-        signoffState.className = `card-signoff-state ${ticket.eric_signoff ? 'signed' : 'pending'}`;
-        signoffState.textContent = ticket.eric_signoff ? 'Signed Off ✓' : 'Awaiting Sign-off';
+        signoffState.className = `card-signoff-state ${ticket.user_signoff ? 'signed' : 'pending'}`;
+        signoffState.textContent = ticket.user_signoff ? 'Signed Off ✓' : 'Awaiting Sign-off';
         titleWrap.appendChild(signoffState);
       }
       top.appendChild(titleWrap);
@@ -1682,8 +1682,8 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
           false,
         ));
       }
-      if (ticket.needs_eric_signoff) {
-        badges.appendChild(badge(`eric ${ticket.eric_signoff ? '✓' : '✗'}`, ticket.eric_signoff));
+      if (ticket.needs_user_signoff) {
+        badges.appendChild(badge(`user ${ticket.user_signoff ? '✓' : '✗'}`, ticket.user_signoff));
       }
       if (doneChildren.length) {
         badges.appendChild(badge(

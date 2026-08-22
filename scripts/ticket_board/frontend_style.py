@@ -758,7 +758,7 @@ STYLE = """    :root {
       background: rgba(252, 211, 77, 0.1);
     }
     .detail-stage-audit,
-    .detail-stage-eric_review,
+    .detail-stage-user_review,
     .detail-stage-director_review {
       color: rgba(196, 181, 253, 0.96);
       border-color: rgba(196, 181, 253, 0.35);
@@ -801,7 +801,7 @@ STYLE = """    :root {
       display: grid;
       place-items: center;
     }
-    .eric-banner {
+    .user-banner {
       border: 1px solid rgba(125, 211, 252, 0.5);
       border-radius: 8px;
       padding: 14px;
@@ -809,28 +809,28 @@ STYLE = """    :root {
       display: grid;
       gap: 10px;
     }
-    .eric-banner-confirmed {
+    .user-banner-confirmed {
       border-color: rgba(134, 239, 172, 0.42);
       background: linear-gradient(180deg, rgba(134, 239, 172, 0.18), rgba(134, 239, 172, 0.08));
     }
-    .eric-banner-subtitle {
+    .user-banner-subtitle {
       font-size: 13px;
       font-weight: 700;
       color: var(--accent);
       text-transform: uppercase;
     }
-    .eric-banner-title {
+    .user-banner-title {
       font-size: 18px;
       font-weight: 700;
       color: #d8f3ff;
       line-height: 1.3;
     }
-    .eric-banner-note {
+    .user-banner-note {
       font-size: 14px;
       line-height: 1.45;
       color: var(--text);
     }
-    .eric-summary {
+    .user-summary {
       display: grid;
       gap: 10px;
       padding: 12px;
@@ -838,39 +838,39 @@ STYLE = """    :root {
       border: 1px solid rgba(255,255,255,0.12);
       background: rgba(15, 17, 21, 0.26);
     }
-    .eric-summary-head {
+    .user-summary-head {
       font-size: 12px;
       font-weight: 700;
       color: var(--accent);
       text-transform: uppercase;
     }
-    .eric-summary-statuses,
-    .eric-summary-sections {
+    .user-summary-statuses,
+    .user-summary-sections {
       display: grid;
       gap: 8px;
     }
-    .eric-summary-status {
+    .user-summary-status {
       display: flex;
       gap: 8px;
       align-items: baseline;
       font-size: 13px;
       line-height: 1.4;
     }
-    .eric-summary-status strong {
+    .user-summary-status strong {
       color: var(--text);
     }
-    .eric-summary-status-ok { color: var(--ok); }
-    .eric-summary-status-missing { color: var(--warn); }
-    .eric-summary-section {
+    .user-summary-status-ok { color: var(--ok); }
+    .user-summary-status-missing { color: var(--warn); }
+    .user-summary-section {
       display: grid;
       gap: 4px;
     }
-    .eric-summary-label {
+    .user-summary-label {
       font-size: 12px;
       color: var(--muted);
       text-transform: uppercase;
     }
-    .eric-summary-list {
+    .user-summary-list {
       margin: 0;
       padding-left: 18px;
       display: grid;
@@ -878,13 +878,13 @@ STYLE = """    :root {
       font-size: 13px;
       line-height: 1.45;
     }
-    .eric-summary-text {
+    .user-summary-text {
       font-size: 13px;
       line-height: 1.5;
       color: var(--text);
       white-space: pre-wrap;
     }
-    .eric-signoff-confirmation,
+    .user-signoff-confirmation,
     .signoff-state-chip {
       display: inline-flex;
       width: fit-content;
@@ -898,7 +898,7 @@ STYLE = """    :root {
       font-weight: 700;
       line-height: 1.35;
     }
-    .eric-signoff-confirmation {
+    .user-signoff-confirmation {
       width: 100%;
       justify-content: center;
       text-align: center;

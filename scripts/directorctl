@@ -470,7 +470,7 @@ cmd_ticket_create() {
     local audit_prompt=""
     local comment_who=""
     local comment_text=""
-    local needs_eric_signoff=0
+    local needs_user_signoff=0
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -530,8 +530,8 @@ cmd_ticket_create() {
                 comment_text="${2:-}"
                 shift 2
                 ;;
-            --needs-eric-signoff)
-                needs_eric_signoff=1
+            --needs-user-signoff)
+                needs_user_signoff=1
                 shift
                 ;;
             --help|-h)
@@ -553,7 +553,7 @@ options:
   --audit-prompt <text>    Initial audit_prompt field
   --comment-who <who>      Initial comment author (requires --comment-text)
   --comment-text <text>    Initial comment text (requires --comment-who)
-  --needs-eric-signoff     Set needs_eric_signoff=true
+  --needs-user-signoff     Set needs_user_signoff=true
 EOF
                 return 0
                 ;;
@@ -579,7 +579,7 @@ EOF
     local repo_root
     repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-    python3 - "$repo_root" "$store" "$frames" "$board_url" "$title" "$body" "$assignee" "$state" "$screenshot" "$blocked_by" "$blocked_reason" "$implementation" "$audit_prompt" "$comment_who" "$comment_text" "$needs_eric_signoff" <<'PY'
+    python3 - "$repo_root" "$store" "$frames" "$board_url" "$title" "$body" "$assignee" "$state" "$screenshot" "$blocked_by" "$blocked_reason" "$implementation" "$audit_prompt" "$comment_who" "$comment_text" "$needs_user_signoff" <<'PY'
 import json
 import re
 import sys
@@ -600,7 +600,7 @@ implementation = sys.argv[12]
 audit_prompt = sys.argv[13]
 comment_who = sys.argv[14]
 comment_text = sys.argv[15]
-needs_eric_signoff = sys.argv[16] == "1"
+needs_user_signoff = sys.argv[16] == "1"
 
 if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
@@ -628,7 +628,7 @@ ticket = TicketBoardWriteClient(board_url, "director").create_ticket(
     blocked_reason=blocked_reason,
     implementation=implementation,
     audit_prompt=audit_prompt,
-    needs_eric_signoff=needs_eric_signoff,
+    needs_user_signoff=needs_user_signoff,
     comment_text=comment_text,
 )["ticket"]
 print(json.dumps(ticket))

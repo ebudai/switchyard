@@ -4,7 +4,7 @@ DECLARE
 BEGIN
     FOREACH role_name IN ARRAY ARRAY[
         'director',
-        'eric',
+        'user',
         'ops',
         'app',
         'audit',

@@ -206,7 +206,7 @@ FROM (
             }, first_wave_rows
             for ticket_id in ("PGU-3543", "PGU-3544", "PGU-3545"):
                 assert "<" not in first_wave_rows[ticket_id]["message"], first_wave_rows
-                assert "Eric" not in first_wave_rows[ticket_id]["message"], first_wave_rows
+                assert "User" not in first_wave_rows[ticket_id]["message"], first_wave_rows
             first_wave_counts = json.loads(
                 psql(
                     conninfo,
@@ -256,7 +256,7 @@ LIMIT 1;
             assert analysis_wave_row == {
                 "notification_id": analysis_wave_row["notification_id"],
                 "target_role": "director",
-                "message": "PGU-3542 is waiting in your analysis queue. Advance it or hand it off. If you cannot move it forward, tell Eric what is wrong.",
+                "message": "PGU-3542 is waiting in your analysis queue. Advance it or hand it off. If you cannot move it forward, tell User what is wrong.",
                 "state": "analysis",
             }, analysis_wave_row
             assert "<" not in analysis_wave_row["message"], analysis_wave_row
@@ -365,7 +365,7 @@ LIMIT 1;
             assert delivered_primary_wave_row == {
                 "target_role": "director",
                 "kind": "idle_reminder",
-                "message": "PGU-3542 is still in analysis and you haven't advanced it. Advance it now (do the work or hand it off). If you genuinely CANNOT move it forward, tell Eric directly what is wrong. Do NOT do nothing.",
+                "message": "PGU-3542 is still in analysis and you haven't advanced it. Advance it now (do the work or hand it off). If you genuinely CANNOT move it forward, tell User directly what is wrong. Do NOT do nothing.",
                 "state": "analysis",
             }, delivered_primary_wave_row
 
@@ -421,7 +421,7 @@ LIMIT 1;
                 "state": "in_progress",
             }, advanced_wave_row
             assert "<" not in advanced_wave_row["message"], advanced_wave_row
-            assert "Eric" not in advanced_wave_row["message"], advanced_wave_row
+            assert "User" not in advanced_wave_row["message"], advanced_wave_row
 
             psql(
                 conninfo,
@@ -475,7 +475,7 @@ LIMIT 1;
             )
             assert director_review_row == {
                 "target_role": "director",
-                "message": "PGU-3547 is waiting in your director_review queue. Advance it or hand it off. If you cannot move it forward, tell Eric what is wrong.",
+                "message": "PGU-3547 is waiting in your director_review queue. Advance it or hand it off. If you cannot move it forward, tell User what is wrong.",
                 "state": "director_review",
             }, director_review_row
             assert "<" not in director_review_row["message"], director_review_row
@@ -541,7 +541,7 @@ LIMIT 1;
             assert second_director_review_row == {
                 "target_role": "director",
                 "kind": "idle_reminder",
-                "message": "PGU-3547 is still in director_review and you haven't advanced it. Advance it now (do the work or hand it off). If you genuinely CANNOT move it forward, tell Eric directly what is wrong. Do NOT do nothing.",
+                "message": "PGU-3547 is still in director_review and you haven't advanced it. Advance it now (do the work or hand it off). If you genuinely CANNOT move it forward, tell User directly what is wrong. Do NOT do nothing.",
             }, second_director_review_row
 
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")

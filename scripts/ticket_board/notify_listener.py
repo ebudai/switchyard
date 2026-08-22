@@ -76,7 +76,7 @@ STATE_RANK = {
     "inspection": 4,
     "audit": 5,
     "dat": 6,
-    "eric_review": 7,
+    "user_review": 7,
     "director_review": 8,
     "done": 9,
     "cancelled": 10,
@@ -165,7 +165,7 @@ def target_for_transition(transition: Transition) -> str | None:
         return ROLE_TO_TARGET["audit"]
     if transition.new_state == "dat":
         return ROLE_TO_TARGET["director"]
-    if transition.new_state == "eric_review":
+    if transition.new_state == "user_review":
         return ROLE_TO_TARGET["director"]
     if transition.new_state == "director_review":
         return ROLE_TO_TARGET["director"]
@@ -194,8 +194,8 @@ def message_for_transition(transition: Transition) -> str | None:
         return f"{transition.ticket_id}{title_suffix} ready for audit"
     if transition.new_state == "dat":
         return f"{transition.ticket_id}{title_suffix} ready for Director Acceptance Testing"
-    if transition.new_state == "eric_review":
-        return f"{transition.ticket_id}{title_suffix} ready for Eric UAT"
+    if transition.new_state == "user_review":
+        return f"{transition.ticket_id}{title_suffix} ready for User UAT"
     if transition.new_state == "director_review":
         return f"{transition.ticket_id}{title_suffix} ready for your review"
     return None
@@ -1066,7 +1066,7 @@ WHERE id = %s
                 return "audit"
             if state == "dat":
                 return "director"
-            if state == "eric_review":
+            if state == "user_review":
                 return "director"
             if state == "director_review":
                 return "director"

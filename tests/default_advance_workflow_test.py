@@ -16,16 +16,16 @@ from scripts.ticket_board.frontend import HTML
 def main() -> int:
     assert "{ key: 'ready', label: 'Ready' }" not in HTML
     assert "stateLabel(key)" in HTML
-    assert "column.key === 'eric_review'" in HTML
+    assert "column.key === 'user_review'" in HTML
     assert "function defaultAdvanceState(ticket)" in HTML
     assert "if (ticket.state === 'backlog') {" in HTML
     assert "return 'analysis';" in HTML
     assert "if (ticket.state === 'analysis') {" in HTML
     assert "return 'in_progress';" in HTML
-    assert "return ticket.needs_eric_signoff ? 'dat' : 'director_review';" in HTML
+    assert "return ticket.needs_user_signoff ? 'dat' : 'director_review';" in HTML
     assert "if (ticket.state === 'dat') {" in HTML
-    assert "return 'eric_review';" in HTML
-    assert "if (ticket.state === 'eric_review') {" in HTML
+    assert "return 'user_review';" in HTML
+    assert "if (ticket.state === 'user_review') {" in HTML
     assert "return 'director_review';" in HTML
     assert "if (ticket.state === 'director_review') {" in HTML
     assert "return 'done';" in HTML

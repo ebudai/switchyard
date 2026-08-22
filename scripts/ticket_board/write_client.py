@@ -263,7 +263,7 @@ class TicketBoardWriteClient:
         implementation: str = "",
         audit_prompt: str = "",
         needs_inspection: bool = False,
-        needs_eric_signoff: bool = False,
+        needs_user_signoff: bool = False,
         comment_text: str = "",
         caller_role: str | None = None,
     ) -> dict[str, Any]:
@@ -279,7 +279,7 @@ class TicketBoardWriteClient:
             "implementation": implementation,
             "audit_prompt": audit_prompt,
             "needs_inspection": needs_inspection,
-            "needs_eric_signoff": needs_eric_signoff,
+            "needs_user_signoff": needs_user_signoff,
         }
         if comment_text:
             payload["comment_text"] = comment_text
@@ -296,7 +296,7 @@ class TicketBoardWriteClient:
         assignee: str = "unassigned",
         blocked_by: list[str] | None = None,
         blocked_reason: str = "",
-        needs_eric_signoff: bool = False,
+        needs_user_signoff: bool = False,
         caller_role: str | None = None,
     ) -> dict[str, Any]:
         return self._post(
@@ -310,7 +310,7 @@ class TicketBoardWriteClient:
                 "assignee": assignee,
                 "blocked_by": blocked_by or [],
                 "blocked_reason": blocked_reason,
-                "needs_eric_signoff": needs_eric_signoff,
+                "needs_user_signoff": needs_user_signoff,
             },
             caller_role=caller_role,
         )
@@ -428,12 +428,12 @@ class TicketBoardWriteClient:
             payload["target_assignee"] = target_assignee
         return self._ticket_action(ticket_id, "inspector_kick_back", payload, caller_role=caller_role)
 
-    def eric_sign_off(self, ticket_id: str, *, text: str = "", caller_role: str | None = None) -> dict[str, Any]:
+    def user_sign_off(self, ticket_id: str, *, text: str = "", caller_role: str | None = None) -> dict[str, Any]:
         payload = {"text": text} if text else None
-        return self._ticket_action(ticket_id, "eric_sign_off", payload, caller_role=caller_role)
+        return self._ticket_action(ticket_id, "user_sign_off", payload, caller_role=caller_role)
 
-    def eric_reopen(self, ticket_id: str, *, reason: str, caller_role: str | None = None) -> dict[str, Any]:
-        return self._ticket_action(ticket_id, "eric_reopen", {"reason": reason}, caller_role=caller_role)
+    def user_reopen(self, ticket_id: str, *, reason: str, caller_role: str | None = None) -> dict[str, Any]:
+        return self._ticket_action(ticket_id, "user_reopen", {"reason": reason}, caller_role=caller_role)
 
     def mark_done(self, ticket_id: str, *, commit_hash: str = "", caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "mark_done", {"commit_hash": commit_hash}, caller_role=caller_role)
@@ -510,7 +510,7 @@ def _build_parser() -> argparse.ArgumentParser:
     create.add_argument("--audit-prompt", default="")
     create.add_argument("--comment-text", default="")
     create.add_argument("--needs-inspection", action="store_true")
-    create.add_argument("--needs-eric-signoff", action="store_true")
+    create.add_argument("--needs-user-signoff", action="store_true")
 
     file_bug = subparsers.add_parser("file-bug")
     file_bug.add_argument("--title", required=True)
@@ -535,7 +535,7 @@ def _build_parser() -> argparse.ArgumentParser:
     override_move.add_argument("--assignee", required=True)
     override_move.add_argument("--no-notify", action="store_true")
 
-    for name in ("start-work", "inspector-sign-off", "eric-sign-off", "release-draft", "defer"):
+    for name in ("start-work", "inspector-sign-off", "user-sign-off", "release-draft", "defer"):
         sub = subparsers.add_parser(name)
         sub.add_argument("ticket_id")
 
@@ -583,7 +583,7 @@ def _build_parser() -> argparse.ArgumentParser:
     dat_kick.add_argument("--reason", required=True)
     dat_kick.add_argument("--target-assignee", default="")
 
-    for name in ("eric-reopen", "cancel"):
+    for name in ("user-reopen", "cancel"):
         sub = subparsers.add_parser(name)
         sub.add_argument("ticket_id")
         sub.add_argument("--reason", required=True)
@@ -630,7 +630,7 @@ def main(argv: list[str] | None = None) -> int:
                 implementation=args.implementation,
                 audit_prompt=args.audit_prompt,
                 needs_inspection=args.needs_inspection,
-                needs_eric_signoff=args.needs_eric_signoff,
+                needs_user_signoff=args.needs_user_signoff,
                 comment_text=args.comment_text,
             )
         elif command == "file_bug":
@@ -673,7 +673,7 @@ def main(argv: list[str] | None = None) -> int:
             response = client.director_dat_sign_off(args.ticket_id, text=args.text)
         elif command == "director_dat_kick_back":
             response = client.director_dat_kick_back(args.ticket_id, reason=args.reason, target_assignee=args.target_assignee)
-        elif command in {"eric_reopen", "cancel"}:
+        elif command in {"user_reopen", "cancel"}:
             response = getattr(client, command)(args.ticket_id, reason=args.reason)
         elif command == "inspector_kick_back":
             response = client.inspector_kick_back(

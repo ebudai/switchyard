@@ -21,8 +21,8 @@ export type Operation =
   | "submit_to_audit"
   | "audit_sign_off"
   | "audit_kick_back"
-  | "eric_sign_off"
-  | "eric_reopen"
+  | "user_sign_off"
+  | "user_reopen"
   | "mark_done"
   | "defer"
   | "cancel"
@@ -35,15 +35,15 @@ export type Operation =
 const IMPLEMENTER_ROLES = ["main", "app", "ops", "perf", "research"] as const satisfies readonly CallerRole[];
 
 const OPERATION_ALLOWED_ROLES: Record<Operation, readonly CallerRole[]> = {
-  create_ticket: ["director", "eric"],
+  create_ticket: ["director", "user"],
   file_bug: IMPLEMENTER_ROLES,
   route: ["director"],
   start_work: IMPLEMENTER_ROLES,
   submit_to_audit: IMPLEMENTER_ROLES,
   audit_sign_off: ["audit"],
   audit_kick_back: ["audit"],
-  eric_sign_off: ["eric"],
-  eric_reopen: ["eric"],
+  user_sign_off: ["user"],
+  user_reopen: ["user"],
   mark_done: ["director"],
   defer: ["director"],
   cancel: ["director"],

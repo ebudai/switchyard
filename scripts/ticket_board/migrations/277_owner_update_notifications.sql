@@ -117,7 +117,7 @@ DECLARE
     current_assignee text;
 BEGIN
     actor := ticket_board.require_actor(ARRAY['director'], 'route');
-    IF new_state NOT IN ('backlog', 'analysis', 'in_progress', 'inspection', 'audit', 'eric_review', 'director_review', 'done', 'cancelled') THEN
+    IF new_state NOT IN ('backlog', 'analysis', 'in_progress', 'inspection', 'audit', 'user_review', 'director_review', 'done', 'cancelled') THEN
         RAISE EXCEPTION 'invalid state: %', new_state;
     END IF;
     IF assignee NOT IN ('unassigned', 'main', 'app', 'perf', 'ops', 'audit', 'inspector', 'agent', 'director', 'research') THEN
@@ -208,7 +208,7 @@ DECLARE
     actor text;
     comment_actor text;
 BEGIN
-    actor := ticket_board.require_actor(ARRAY['director', 'eric', 'main', 'app', 'ops', 'audit', 'inspector', 'perf', 'research'], 'add_comment');
+    actor := ticket_board.require_actor(ARRAY['director', 'user', 'main', 'app', 'ops', 'audit', 'inspector', 'perf', 'research'], 'add_comment');
     comment_actor := ticket_board.current_app_actor();
     PERFORM ticket_board.append_ticket_comment(id, comment_actor, text);
     PERFORM ticket_board.touch_ticket(id);
@@ -237,7 +237,7 @@ DECLARE
     screenshot_value text;
 BEGIN
     actor := ticket_board.require_actor(
-        ARRAY['director', 'eric', 'main', 'app', 'ops', 'audit', 'inspector', 'perf', 'research'],
+        ARRAY['director', 'user', 'main', 'app', 'ops', 'audit', 'inspector', 'perf', 'research'],
         'edit_fields'
     );
     IF patch IS NULL OR jsonb_typeof(patch) <> 'object' THEN
@@ -256,12 +256,12 @@ BEGIN
         'implementation',
         'audit_prompt',
         'needs_inspection',
-        'needs_eric_signoff',
+        'needs_user_signoff',
         'commit_exempt',
         'commit_hash',
         'audit_signoff',
         'inspector_signoff',
-        'eric_signoff'
+        'user_signoff'
     )
     ORDER BY key
     LIMIT 1;
@@ -274,8 +274,8 @@ BEGIN
     IF patch @> '{"inspector_signoff": true}'::jsonb THEN
         RAISE EXCEPTION 'inspector_signoff=true requires inspector_sign_off';
     END IF;
-    IF patch @> '{"eric_signoff": true}'::jsonb THEN
-        RAISE EXCEPTION 'eric_signoff=true requires eric_sign_off';
+    IF patch @> '{"user_signoff": true}'::jsonb THEN
+        RAISE EXCEPTION 'user_signoff=true requires user_sign_off';
     END IF;
     IF patch ? 'needs_inspection' AND ticket_board.current_app_actor() <> 'director' THEN
         RAISE EXCEPTION 'needs_inspection can only be edited by director' USING ERRCODE = '42501';
@@ -337,12 +337,12 @@ BEGIN
         implementation = CASE WHEN patch ? 'implementation' THEN coalesce(patch->>'implementation', '') ELSE implementation END,
         audit_prompt = CASE WHEN patch ? 'audit_prompt' THEN coalesce(patch->>'audit_prompt', '') ELSE audit_prompt END,
         needs_inspection = CASE WHEN patch ? 'needs_inspection' THEN (patch->>'needs_inspection')::boolean ELSE needs_inspection END,
-        needs_eric_signoff = CASE WHEN patch ? 'needs_eric_signoff' THEN (patch->>'needs_eric_signoff')::boolean ELSE needs_eric_signoff END,
+        needs_user_signoff = CASE WHEN patch ? 'needs_user_signoff' THEN (patch->>'needs_user_signoff')::boolean ELSE needs_user_signoff END,
         commit_exempt = CASE WHEN patch ? 'commit_exempt' THEN (patch->>'commit_exempt')::boolean ELSE commit_exempt END,
         commit_hash = CASE WHEN patch ? 'commit_hash' THEN btrim(coalesce(patch->>'commit_hash', '')) ELSE commit_hash END,
         audit_signoff = CASE WHEN patch ? 'audit_signoff' THEN (patch->>'audit_signoff')::boolean ELSE audit_signoff END,
         inspector_signoff = CASE WHEN patch ? 'inspector_signoff' THEN (patch->>'inspector_signoff')::boolean ELSE inspector_signoff END,
-        eric_signoff = CASE WHEN patch ? 'eric_signoff' THEN (patch->>'eric_signoff')::boolean ELSE eric_signoff END,
+        user_signoff = CASE WHEN patch ? 'user_signoff' THEN (patch->>'user_signoff')::boolean ELSE user_signoff END,
         screenshot = CASE WHEN patch ? 'screenshot' THEN nullif(patch->>'screenshot', '') ELSE screenshot END
     WHERE tickets.id = edit_fields.id;
 

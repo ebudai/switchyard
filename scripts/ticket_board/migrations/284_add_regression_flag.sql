@@ -73,8 +73,8 @@ BEGIN
         'audit_signoff', ticket_row.audit_signoff,
         'needs_inspection', ticket_row.needs_inspection,
         'inspector_signoff', ticket_row.inspector_signoff,
-        'needs_eric_signoff', ticket_row.needs_eric_signoff,
-        'eric_signoff', ticket_row.eric_signoff,
+        'needs_user_signoff', ticket_row.needs_user_signoff,
+        'user_signoff', ticket_row.user_signoff,
         'commit_hash', ticket_row.commit_hash,
         'commit_exempt', ticket_row.commit_exempt,
         'regression', ticket_row.regression,
@@ -110,7 +110,7 @@ DECLARE
     screenshot_value text;
 BEGIN
     actor := ticket_board.require_actor(
-        ARRAY['director', 'eric', 'main', 'app', 'ops', 'audit', 'inspector', 'perf', 'research'],
+        ARRAY['director', 'user', 'main', 'app', 'ops', 'audit', 'inspector', 'perf', 'research'],
         'edit_fields'
     );
     IF patch IS NULL OR jsonb_typeof(patch) <> 'object' THEN
@@ -129,13 +129,13 @@ BEGIN
         'implementation',
         'audit_prompt',
         'needs_inspection',
-        'needs_eric_signoff',
+        'needs_user_signoff',
         'commit_exempt',
         'regression',
         'commit_hash',
         'audit_signoff',
         'inspector_signoff',
-        'eric_signoff'
+        'user_signoff'
     )
     ORDER BY key
     LIMIT 1;
@@ -148,8 +148,8 @@ BEGIN
     IF patch @> '{"inspector_signoff": true}'::jsonb THEN
         RAISE EXCEPTION 'inspector_signoff=true requires inspector_sign_off';
     END IF;
-    IF patch @> '{"eric_signoff": true}'::jsonb THEN
-        RAISE EXCEPTION 'eric_signoff=true requires eric_sign_off';
+    IF patch @> '{"user_signoff": true}'::jsonb THEN
+        RAISE EXCEPTION 'user_signoff=true requires user_sign_off';
     END IF;
     IF patch ? 'needs_inspection' AND ticket_board.current_app_actor() <> 'director' THEN
         RAISE EXCEPTION 'needs_inspection can only be edited by director' USING ERRCODE = '42501';
@@ -211,13 +211,13 @@ BEGIN
         implementation = CASE WHEN patch ? 'implementation' THEN coalesce(patch->>'implementation', '') ELSE implementation END,
         audit_prompt = CASE WHEN patch ? 'audit_prompt' THEN coalesce(patch->>'audit_prompt', '') ELSE audit_prompt END,
         needs_inspection = CASE WHEN patch ? 'needs_inspection' THEN (patch->>'needs_inspection')::boolean ELSE needs_inspection END,
-        needs_eric_signoff = CASE WHEN patch ? 'needs_eric_signoff' THEN (patch->>'needs_eric_signoff')::boolean ELSE needs_eric_signoff END,
+        needs_user_signoff = CASE WHEN patch ? 'needs_user_signoff' THEN (patch->>'needs_user_signoff')::boolean ELSE needs_user_signoff END,
         commit_exempt = CASE WHEN patch ? 'commit_exempt' THEN (patch->>'commit_exempt')::boolean ELSE commit_exempt END,
         regression = CASE WHEN patch ? 'regression' THEN (patch->>'regression')::boolean ELSE regression END,
         commit_hash = CASE WHEN patch ? 'commit_hash' THEN btrim(coalesce(patch->>'commit_hash', '')) ELSE commit_hash END,
         audit_signoff = CASE WHEN patch ? 'audit_signoff' THEN (patch->>'audit_signoff')::boolean ELSE audit_signoff END,
         inspector_signoff = CASE WHEN patch ? 'inspector_signoff' THEN (patch->>'inspector_signoff')::boolean ELSE inspector_signoff END,
-        eric_signoff = CASE WHEN patch ? 'eric_signoff' THEN (patch->>'eric_signoff')::boolean ELSE eric_signoff END,
+        user_signoff = CASE WHEN patch ? 'user_signoff' THEN (patch->>'user_signoff')::boolean ELSE user_signoff END,
         screenshot = CASE WHEN patch ? 'screenshot' THEN nullif(patch->>'screenshot', '') ELSE screenshot END
     WHERE tickets.id = edit_fields.id;
 

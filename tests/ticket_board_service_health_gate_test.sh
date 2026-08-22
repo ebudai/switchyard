@@ -33,7 +33,7 @@ install_mocks() {
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ "${1:-}" == "list-sessions" && "${2:-}" == "--no-legend" ]]; then
-    printf '3 1000 eric seat0\n'
+    printf '3 1000 user seat0\n'
     exit 0
 fi
 if [[ "${1:-}" == "show-session" && "${3:-}" == "-p" && "${5:-}" == "--value" ]]; then

@@ -14,9 +14,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
 RBAC_PATH = ROOT / "scripts" / "ticket_board" / "rbac.sql"
 
-PANE_ROLES = ["director", "eric", "ops", "app", "audit", "inspector", "perf", "research", "main"]
+PANE_ROLES = ["director", "user", "ops", "app", "audit", "inspector", "perf", "research", "main"]
 EXPECTED_ROLES = PANE_ROLES + ["ticket_board_service", "ticket_board_listener"]
-ROLE_SQL_ARRAY = "ARRAY['director','eric','ops','app','audit','inspector','perf','research','main','ticket_board_service','ticket_board_listener']"
+ROLE_SQL_ARRAY = "ARRAY['director','user','ops','app','audit','inspector','perf','research','main','ticket_board_service','ticket_board_listener']"
 
 WRITE_FUNCTIONS = [
     "ticket_board.create_ticket(text,text)",
@@ -39,8 +39,8 @@ WRITE_FUNCTIONS = [
     "ticket_board.inspector_sign_off(text)",
     "ticket_board.inspector_kick_back(text,text)",
     "ticket_board.inspector_kick_back(text,text,text)",
-    "ticket_board.eric_sign_off(text,text)",
-    "ticket_board.eric_reopen(text,text)",
+    "ticket_board.user_sign_off(text,text)",
+    "ticket_board.user_reopen(text,text)",
     "ticket_board.mark_done(text,text)",
     "ticket_board.defer(text)",
     "ticket_board.cancel(text,text)",
@@ -110,10 +110,14 @@ def psql_error(conn: str, sql: str) -> str:
     return proc.stderr + proc.stdout
 
 
+def sql_ident(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
+
+
 def create_pane_roles(conn: str, *, exclude: set[str] | None = None) -> None:
     exclude = exclude or set()
     role_sql = "\n".join(
-        f"CREATE ROLE {role} LOGIN PASSWORD '{role}_preexisting_password';"
+        f"CREATE ROLE {sql_ident(role)} LOGIN PASSWORD '{role}_preexisting_password';"
         for role in PANE_ROLES
         if role not in exclude
     )
@@ -148,8 +152,8 @@ def insert_ticket(
     assignee: str = "unassigned",
     implementation: str = "",
     audit_signoff: bool = False,
-    needs_eric_signoff: bool = False,
-    eric_signoff: bool = False,
+    needs_user_signoff: bool = False,
+    user_signoff: bool = False,
     commit_hash: str = "",
     commit_exempt: bool = False,
     manually_controlled: bool = False,
@@ -160,12 +164,12 @@ def insert_ticket(
         f"""
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation, audit_signoff,
-    needs_eric_signoff, eric_signoff, commit_hash, commit_exempt,
+    needs_user_signoff, user_signoff, commit_hash, commit_exempt,
     manually_controlled, parked, created_text, updated_text, source_json
 ) VALUES (
     {sql_string(ticket_id)}, {sql_string(title)}, '', {sql_string(state)}, {sql_string(assignee)},
-    {sql_string(implementation)}, {str(audit_signoff).lower()}, {str(needs_eric_signoff).lower()},
-    {str(eric_signoff).lower()}, {sql_string(commit_hash)}, {str(commit_exempt).lower()},
+    {sql_string(implementation)}, {str(audit_signoff).lower()}, {str(needs_user_signoff).lower()},
+    {str(user_signoff).lower()}, {sql_string(commit_hash)}, {str(commit_exempt).lower()},
     {str(manually_controlled).lower()}, {str(parked).lower()}, '2026-07-10T00:00:00+00:00',
     '2026-07-10T00:00:00+00:00', '{ticket_source(ticket_id, title, state, assignee)}'::jsonb
 );
@@ -356,7 +360,7 @@ SELECT ticket_board.release_draft({sql_string(draft_created)});
     psql(
         service_conn,
         f"""
-SELECT set_config('ticket_board.caller_role', 'eric', false);
+SELECT set_config('ticket_board.caller_role', 'user', false);
 SELECT ticket_board.release_draft({sql_string(draft_created)});
 """,
     )
@@ -658,14 +662,14 @@ FROM ticket_board.tickets WHERE id = 'PGU-507';
     insert_ticket(
         admin_conn,
         "PGU-600",
-        title="Eric signoff",
-        state="eric_review",
+        title="User signoff",
+        state="user_review",
         assignee="director",
         implementation="Done.",
         audit_signoff=True,
-        needs_eric_signoff=True,
+        needs_user_signoff=True,
     )
-    psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'eric', false); SELECT ticket_board.eric_sign_off('PGU-600', 'Eric approves.');")
+    psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'user', false); SELECT ticket_board.user_sign_off('PGU-600', 'User approves.');")
     eric_signed = json.loads(
         psql(
             admin_conn,
@@ -673,7 +677,7 @@ FROM ticket_board.tickets WHERE id = 'PGU-507';
 SELECT jsonb_build_object(
     'state', t.state,
     'assignee', t.assignee,
-    'eric_signoff', t.eric_signoff,
+    'user_signoff', t.user_signoff,
     'comment', (SELECT text FROM ticket_board.ticket_comments WHERE ticket_id = t.id ORDER BY position DESC LIMIT 1)
 )::text
 FROM ticket_board.tickets t WHERE id = 'PGU-600';
@@ -683,22 +687,22 @@ FROM ticket_board.tickets t WHERE id = 'PGU-600';
     assert eric_signed == {
         "state": "director_review",
         "assignee": "director",
-        "eric_signoff": True,
-        "comment": "Eric approves.",
+        "user_signoff": True,
+        "comment": "User approves.",
     }, eric_signed
 
     insert_ticket(
         admin_conn,
         "PGU-601",
-        title="Eric reopen",
-        state="eric_review",
+        title="User reopen",
+        state="user_review",
         assignee="director",
         implementation="Done.",
         audit_signoff=True,
-        needs_eric_signoff=True,
+        needs_user_signoff=True,
     )
-    psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'eric', false); SELECT ticket_board.eric_reopen('PGU-601', 'Needs another pass.');")
-    eric_reopened = json.loads(
+    psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'user', false); SELECT ticket_board.user_reopen('PGU-601', 'Needs another pass.');")
+    user_reopened = json.loads(
         psql(
             admin_conn,
             """
@@ -710,7 +714,7 @@ FROM ticket_board.tickets t WHERE id = 'PGU-601';
 """,
         )
     )
-    assert eric_reopened == {"state": "analysis", "comment": "Needs another pass."}, eric_reopened
+    assert user_reopened == {"state": "analysis", "comment": "Needs another pass."}, user_reopened
 
     insert_ticket(
         admin_conn,
@@ -916,7 +920,7 @@ WHERE id IN ('PGU-912', 'PGU-913')
   AND state = 'director_review';
 UPDATE ticket_board.tickets
 SET manually_controlled = true
-WHERE state IN ('in_progress', 'inspection', 'audit', 'eric_review', 'director_review')
+WHERE state IN ('in_progress', 'inspection', 'audit', 'user_review', 'director_review')
   AND id NOT IN ('PGU-914');
 UPDATE ticket_board.tickets
 SET state = 'audit',
@@ -928,21 +932,21 @@ UPDATE ticket_board.tickets
 SET audit_signoff = true,
     state = 'director_review'
 WHERE state = 'audit'
-  AND NOT needs_eric_signoff
+  AND NOT needs_user_signoff
   AND NOT manually_controlled
   AND NOT ticket_board.ticket_has_unresolved_blockers(id);
 UPDATE ticket_board.tickets
 SET audit_signoff = true,
-    state = 'eric_review'
+    state = 'user_review'
 WHERE state = 'audit'
-  AND needs_eric_signoff
+  AND needs_user_signoff
   AND NOT manually_controlled
   AND NOT ticket_board.ticket_has_unresolved_blockers(id);
 UPDATE ticket_board.tickets
 SET audit_signoff = true,
-    eric_signoff = true,
+    user_signoff = true,
     state = 'director_review'
-WHERE state = 'eric_review'
+WHERE state = 'user_review'
   AND NOT manually_controlled
   AND NOT ticket_board.ticket_has_unresolved_blockers(id);
 UPDATE ticket_board.tickets

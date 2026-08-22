@@ -60,7 +60,7 @@ AS $$
     SELECT p_ticket_id
         || ' is waiting in your '
         || p_state
-        || ' queue. Advance it or hand it off. If you cannot move it forward, tell Eric what is wrong.';
+        || ' queue. Advance it or hand it off. If you cannot move it forward, tell User what is wrong.';
 $$;
 
 CREATE OR REPLACE FUNCTION ticket_board.idle_without_advancing_problem_message(
@@ -220,7 +220,7 @@ BEGIN
                 WHEN candidate.owner_role = 'director' AND candidate.idle_reminder_count >= 1 THEN ticket_board.idle_without_advancing_problem_message(
                     candidate.id,
                     candidate.state,
-                    'Eric'
+                    'User'
                 )
                 WHEN candidate.owner_role = 'director' THEN ticket_board.idle_without_advancing_director_message(
                     candidate.id,

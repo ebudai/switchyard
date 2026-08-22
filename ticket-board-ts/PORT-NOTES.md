@@ -143,7 +143,7 @@ were verified via `deno check` + direct `curl`/`psql` reads, not new tickets.
 M2 ports every remaining `POST /api/tickets/actions/<op>` and
 `POST /api/tickets/<id>/actions/<op>` from `server.py`'s
 `OPERATION_ALLOWED_ROLES`: `file_bug`, `start_work`, `submit_to_audit`,
-`audit_sign_off`, `audit_kick_back`, `eric_sign_off`, `eric_reopen`,
+`audit_sign_off`, `audit_kick_back`, `user_sign_off`, `user_reopen`,
 `mark_done`, `defer`, `cancel`, `set_manually_controlled`, `set_blockers`,
 `add_comment`, `edit_fields`, `merge` (M1 already had `create_ticket` +
 `route`). Out of scope, per the M2 brief: `GET /events` SSE, SO_PEERCRED
@@ -222,7 +222,7 @@ any implementer role start/submit any other implementer's ticket.
    `RAISE EXCEPTION`s are). The one place Python's HTTP layer (not `app.py`)
    *does* pre-validate before the DB gets a say is `edit_fields`'s
    invalid-field-name list (reports every invalid key, not just the DB's
-   first one) and the `audit_signoff=true`/`eric_signoff=true` rejection —
+   first one) and the `audit_signoff=true`/`user_signoff=true` rejection —
    both reproduced client-side in `ticket_store.ts: editFields` for exact
    error-text parity.
 
@@ -244,15 +244,15 @@ avoid colliding with the real `ops`-assigned in-progress ticket already on
 the live board — a good reminder that "point a scratch client at prod" means
 prod's actual concurrency invariants apply to you too):
 
-- **Non-eric lifecycle**: `create_ticket` → `edit_fields` (set
+- **Non-user lifecycle**: `create_ticket` → `edit_fields` (set
   `implementation`) → `route` (ready/research) → `start_work` (research) →
   `submit_to_audit` (research, commit_hash) → `audit_sign_off` (audit) →
   auto-advanced to `director_review` (confirmed) → `mark_done` (director) →
   `done`.
-- **Eric-signoff lifecycle**: same, but `edit_fields` also set
-  `needs_eric_signoff: true` first; after `audit_sign_off` the ticket
-  auto-advanced to `eric_review` (not `director_review`, confirmed) →
-  `eric_sign_off` (eric) → auto-advanced to `director_review` → `mark_done`
+- **User-signoff lifecycle**: same, but `edit_fields` also set
+  `needs_user_signoff: true` first; after `audit_sign_off` the ticket
+  auto-advanced to `user_review` (not `director_review`, confirmed) →
+  `user_sign_off` (user) → auto-advanced to `director_review` → `mark_done`
   → `done`.
 - **Kickback/misc**: `add_comment` (attribution to `research` confirmed via
   `current_app_actor()` + `set_config('ticket_board.caller_role', ...)`) →
@@ -318,8 +318,8 @@ dead code on `origin/main` (empty ticket dir in prod; see below).
 2. **`ticket_board.require_actor(p_allowed_roles, p_action)`'s first
    parameter is dead.** Every `SECURITY DEFINER` function (`create_ticket`,
    `route`, `cancel`, `audit_sign_off`, ...) calls
-   `require_actor(ARRAY['director', 'eric'], 'create_ticket')`-style, passing
-   a role array that reads as "only director/eric may call this." The
+   `require_actor(ARRAY['director', 'user'], 'create_ticket')`-style, passing
+   a role array that reads as "only director/user may call this." The
    function body never references `p_allowed_roles` — it only checks
    `current_actor_role() = 'ticket_board_service'`, which is true for every
    HTTP request alike (single DB service role). So **all per-operation
@@ -335,15 +335,15 @@ dead code on `origin/main` (empty ticket dir in prod; see below).
    from-scratch `auth.ts` forced tracing every call site to find out where
    the real check lives, which is how this surfaced.
 
-3. **`needs_eric_signoff=true` on plain create silently no-ops in a
+3. **`needs_user_signoff=true` on plain create silently no-ops in a
    naive port, but errors in Python.** `_pg_create_ticket_record` explicitly
    raises (`"postgres function API does not support initial signoff fields
-   yet"`) if `needs_eric_signoff`/`audit_signoff`/`eric_signoff` are truthy,
+   yet"`) if `needs_user_signoff`/`audit_signoff`/`user_signoff` are truthy,
    because `ticket_board.create_ticket(title, body)` has nowhere to put them
    — there's no DB function support for setting those on initial insert. My
-   first pass defined `needs_eric_signoff` on `CreateTicketInput` and never
+   first pass defined `needs_user_signoff` on `CreateTicketInput` and never
    read it, which would have silently created a ticket that doesn't need
-   Eric's signoff even though the caller asked for one. Fixed to reject with
+   User's signoff even though the caller asked for one. Fixed to reject with
    the same message Python uses (`src/ticket_store.ts: createTicket`). This
    is exactly the class of "quiet contract gap" a compiler doesn't save you
    from — only tracing the Python source path end-to-end did.
@@ -376,7 +376,7 @@ dead code on `origin/main` (empty ticket dir in prod; see below).
   matches `_pg_create_ticket_record`'s own restriction
   (`"postgres function API does not support attachment writes yet"`).
 - `file_bug`, `start_work`, `submit_to_audit`, `audit_sign_off`,
-  `eric_sign_off`, `mark_done`, `defer`, `cancel`, `merge`, `edit_fields`,
+  `user_sign_off`, `mark_done`, `defer`, `cancel`, `merge`, `edit_fields`,
   `add_comment`, `set_blockers`, `set_manually_controlled` were not ported in
   M1 — out of M1's bounded scope by design. `cancel` was exercised directly
   via `psql` (not through this service) to clean up the M1 scratch ticket.

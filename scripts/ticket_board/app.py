@@ -20,7 +20,7 @@ REPO_ROOT_DEFAULT = Path(__file__).resolve().parents[2]
 COMMIT_GIT_DIR_DEFAULT = Path("/data/git/pgu.git")
 POSTGRES_DSN_DEFAULT = os.environ.get("TICKET_BOARD_DATABASE_URL") or os.environ.get("DATABASE_URL", "")
 ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "inspector", "agent", "director", "research")
-CALLER_ROLES = ("director", "main", "app", "ops", "perf", "audit", "inspector", "research", "eric")
+CALLER_ROLES = ("director", "main", "app", "ops", "perf", "audit", "inspector", "research", "user")
 LEGACY_ASSIGNEE_ALIASES = {"ui": "app"}
 LEGACY_STATE_ALIASES = {"open": "analysis"}
 STATES = (
@@ -31,7 +31,7 @@ STATES = (
     "inspection",
     "audit",
     "dat",
-    "eric_review",
+    "user_review",
     "director_review",
     "done",
     "cancelled",
@@ -334,7 +334,7 @@ class TicketBoardApp:
         screenshot: str | None,
         screenshots: list[str] | None = None,
         assignee: str,
-        needs_eric_signoff: bool,
+        needs_user_signoff: bool,
         needs_inspection: bool = False,
         regression: bool = False,
         blocked_by: list[str] | None = None,
@@ -362,8 +362,8 @@ class TicketBoardApp:
             audit_signoff=False,
             needs_inspection=needs_inspection,
             inspector_signoff=False,
-            needs_eric_signoff=needs_eric_signoff,
-            eric_signoff=False,
+            needs_user_signoff=needs_user_signoff,
+            user_signoff=False,
             regression=regression,
             comments=[],
             blocked_reason=blocked_reason,
@@ -394,8 +394,8 @@ class TicketBoardApp:
         audit_signoff: bool,
         needs_inspection: bool = False,
         inspector_signoff: bool = False,
-        needs_eric_signoff: bool,
-        eric_signoff: bool,
+        needs_user_signoff: bool,
+        user_signoff: bool,
         regression: bool = False,
         comments: list[dict[str, Any]],
         parent_id: str = "",
@@ -420,8 +420,8 @@ class TicketBoardApp:
             audit_signoff=audit_signoff,
             needs_inspection=needs_inspection,
             inspector_signoff=inspector_signoff,
-            needs_eric_signoff=needs_eric_signoff,
-            eric_signoff=eric_signoff,
+            needs_user_signoff=needs_user_signoff,
+            user_signoff=user_signoff,
             regression=regression,
             comments=comments,
             parent_id=parent_id,
@@ -657,8 +657,8 @@ SELECT
     t.audit_signoff,
     t.needs_inspection,
     t.inspector_signoff,
-    t.needs_eric_signoff,
-    t.eric_signoff,
+    t.needs_user_signoff,
+    t.user_signoff,
     t.regression,
     t.manually_controlled,
     t.commit_hash,
@@ -757,8 +757,8 @@ ORDER BY rank;
             "audit_signoff": bool(row["audit_signoff"]),
             "needs_inspection": bool(row["needs_inspection"]),
             "inspector_signoff": bool(row["inspector_signoff"]),
-            "needs_eric_signoff": bool(row["needs_eric_signoff"]),
-            "eric_signoff": bool(row["eric_signoff"]),
+            "needs_user_signoff": bool(row["needs_user_signoff"]),
+            "user_signoff": bool(row["user_signoff"]),
             "regression": bool(row["regression"]),
             "manually_controlled": bool(row["manually_controlled"]),
             "commit_hash": str(row["commit_hash"] or ""),
@@ -795,8 +795,8 @@ ORDER BY rank;
         audit_signoff: bool,
         needs_inspection: bool = False,
         inspector_signoff: bool = False,
-        needs_eric_signoff: bool,
-        eric_signoff: bool,
+        needs_user_signoff: bool,
+        user_signoff: bool,
         regression: bool = False,
         comments: list[dict[str, Any]],
         parent_id: str = "",
@@ -823,7 +823,7 @@ ORDER BY rank;
         audit_prompt = self._require_plain_string(audit_prompt, "audit_prompt")
         if audit_prompt.strip():
             raise ValueError("postgres function API does not support audit_prompt writes yet")
-        if audit_signoff or inspector_signoff or eric_signoff:
+        if audit_signoff or inspector_signoff or user_signoff:
             raise ValueError("postgres function API does not support initial signoff fields yet")
         if commit_hash or commit_exempt:
             raise ValueError("postgres function API does not support initial commit fields yet")
@@ -852,12 +852,12 @@ ORDER BY rank;
                     ticket_id = self._pg_call_scalar(
                         conn,
                         "SELECT ticket_board.create_ticket(%s, %s, %s, %s, %s, %s) AS id;",
-                        (title, body.strip(), create_state, blocked_by, blocked_reason, needs_eric_signoff),
+                        (title, body.strip(), create_state, blocked_by, blocked_reason, needs_user_signoff),
                     )
                     if parent_id:
                         self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps({"parent_id": parent_id})))
-                if created_via_file_bug and needs_eric_signoff:
-                    self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps({"needs_eric_signoff": True})))
+                if created_via_file_bug and needs_user_signoff:
+                    self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps({"needs_user_signoff": True})))
                 if implementation:
                     self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps({"implementation": implementation})))
                 if needs_inspection:
@@ -936,10 +936,10 @@ ORDER BY rank;
                         raise ValueError("postgres function API only supports setting inspector_signoff true")
                     self._pg_call(conn, "SELECT ticket_board.inspector_sign_off(%s);", (ticket_id,))
                     inspector_signoff_handled = True
-                if "eric_signoff" in patch:
-                    if not bool(patch["eric_signoff"]):
-                        raise ValueError("postgres function API only supports setting eric_signoff true")
-                    self._pg_call(conn, "SELECT ticket_board.eric_sign_off(%s, %s);", (ticket_id, comment_text))
+                if "user_signoff" in patch:
+                    if not bool(patch["user_signoff"]):
+                        raise ValueError("postgres function API only supports setting user_signoff true")
+                    self._pg_call(conn, "SELECT ticket_board.user_sign_off(%s, %s);", (ticket_id, comment_text))
                     comment_text = ""
 
                 if "state" in patch:
@@ -959,8 +959,8 @@ ORDER BY rank;
                         comment_text = ""
                     elif state == "analysis" and current["state"] == "draft":
                         self._pg_call(conn, "SELECT ticket_board.release_draft(%s);", (ticket_id,))
-                    elif state == "analysis" and current["state"] in {"eric_review", "director_review", "done"}:
-                        self._pg_call(conn, "SELECT ticket_board.eric_reopen(%s, %s);", (ticket_id, comment_text))
+                    elif state == "analysis" and current["state"] in {"user_review", "director_review", "done"}:
+                        self._pg_call(conn, "SELECT ticket_board.user_reopen(%s, %s);", (ticket_id, comment_text))
                         comment_text = ""
                     elif state == "in_progress" and "assignee" in patch:
                         self._pg_call(conn, "SELECT ticket_board.route(%s, %s, %s);", (ticket_id, state, assignee))
@@ -970,7 +970,7 @@ ORDER BY rank;
                         self._pg_call(conn, "SELECT ticket_board.submit_to_inspection(%s);", (ticket_id,))
                     elif state == "audit":
                         self._pg_call(conn, "SELECT ticket_board.submit_to_audit(%s, %s);", (ticket_id, commit_hash))
-                    elif state == "eric_review" and current["state"] == "dat":
+                    elif state == "user_review" and current["state"] == "dat":
                         self._pg_call(conn, "SELECT ticket_board.director_dat_sign_off(%s, %s);", (ticket_id, comment_text))
                         comment_text = ""
                     elif state == "done":
@@ -1068,7 +1068,7 @@ ORDER BY rank;
             "implementation",
             "audit_prompt",
             "needs_inspection",
-            "needs_eric_signoff",
+            "needs_user_signoff",
             "commit_exempt",
             "regression",
             "commit_hash",
@@ -1079,9 +1079,9 @@ ORDER BY rank;
         if patch.get("audit_signoff") is False:
             editable = set(editable)
             editable.add("audit_signoff")
-        if patch.get("eric_signoff") is False:
+        if patch.get("user_signoff") is False:
             editable = set(editable)
-            editable.add("eric_signoff")
+            editable.add("user_signoff")
         if "state" in patch:
             editable = set(editable)
             editable.discard("commit_hash")

@@ -129,7 +129,7 @@ DECLARE
     current_assignee text;
 BEGIN
     actor := ticket_board.require_actor(ARRAY['director'], 'route');
-    IF new_state NOT IN ('draft', 'backlog', 'analysis', 'in_progress', 'inspection', 'audit', 'eric_review', 'director_review', 'done', 'cancelled') THEN
+    IF new_state NOT IN ('draft', 'backlog', 'analysis', 'in_progress', 'inspection', 'audit', 'user_review', 'director_review', 'done', 'cancelled') THEN
         RAISE EXCEPTION 'invalid state: %', new_state;
     END IF;
     IF assignee NOT IN ('unassigned', 'main', 'app', 'perf', 'ops', 'audit', 'inspector', 'agent', 'director', 'research') THEN
@@ -178,7 +178,7 @@ DECLARE
     actor text;
     current_state text;
 BEGIN
-    actor := ticket_board.require_actor(ARRAY['director', 'eric'], 'release_draft');
+    actor := ticket_board.require_actor(ARRAY['director', 'user'], 'release_draft');
     SELECT tickets.state
     INTO current_state
     FROM ticket_board.tickets
@@ -227,7 +227,7 @@ DECLARE
     serial_focus_queued boolean := false;
 BEGIN
     actor := ticket_board.require_actor(ARRAY['director'], 'force_move');
-    IF new_state NOT IN ('draft', 'backlog', 'analysis', 'in_progress', 'inspection', 'audit', 'eric_review', 'director_review', 'done', 'cancelled') THEN
+    IF new_state NOT IN ('draft', 'backlog', 'analysis', 'in_progress', 'inspection', 'audit', 'user_review', 'director_review', 'done', 'cancelled') THEN
         RAISE EXCEPTION 'invalid state: %', new_state;
     END IF;
     IF assignee NOT IN ('unassigned', 'main', 'app', 'perf', 'ops', 'audit', 'inspector', 'agent', 'director', 'research') THEN
@@ -827,7 +827,7 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION ticket_board.eric_sign_off(
+CREATE OR REPLACE FUNCTION ticket_board.user_sign_off(
     id text,
     comment_text text DEFAULT ''
 )
@@ -841,11 +841,11 @@ DECLARE
     actor text;
     comment_actor text;
 BEGIN
-    actor := ticket_board.require_actor(ARRAY['eric'], 'eric_sign_off');
+    actor := ticket_board.require_actor(ARRAY['user'], 'user_sign_off');
     comment_actor := ticket_board.current_app_actor();
     PERFORM ticket_board.log_workflow_transition_rbac_shadow_mismatch(
         id,
-        'eric_sign_off',
+        'user_sign_off',
         comment_actor,
         NULL,
         true
@@ -854,17 +854,17 @@ BEGIN
         PERFORM ticket_board.append_ticket_comment(id, comment_actor, comment_text);
     END IF;
     UPDATE ticket_board.tickets
-    SET eric_signoff = true
-    WHERE tickets.id = eric_sign_off.id
-      AND tickets.state = 'eric_review';
+    SET user_signoff = true
+    WHERE tickets.id = user_sign_off.id
+      AND tickets.state = 'user_review';
     IF NOT FOUND THEN
-        RAISE EXCEPTION 'eric_review ticket not found: %', id;
+        RAISE EXCEPTION 'user_review ticket not found: %', id;
     END IF;
     PERFORM ticket_board.touch_ticket(id);
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION ticket_board.eric_reopen(
+CREATE OR REPLACE FUNCTION ticket_board.user_reopen(
     id text,
     reason text
 )
@@ -878,11 +878,11 @@ DECLARE
     actor text;
     comment_actor text;
 BEGIN
-    actor := ticket_board.require_actor(ARRAY['eric'], 'eric_reopen');
+    actor := ticket_board.require_actor(ARRAY['user'], 'user_reopen');
     comment_actor := ticket_board.current_app_actor();
     PERFORM ticket_board.log_workflow_transition_rbac_shadow_mismatch(
         id,
-        'eric_reopen',
+        'user_reopen',
         comment_actor,
         NULL,
         true
@@ -892,8 +892,8 @@ BEGIN
     END IF;
     UPDATE ticket_board.tickets
     SET state = 'analysis'
-    WHERE tickets.id = eric_reopen.id
-      AND tickets.state IN ('eric_review', 'director_review', 'done');
+    WHERE tickets.id = user_reopen.id
+      AND tickets.state IN ('user_review', 'director_review', 'done');
     IF NOT FOUND THEN
         RAISE EXCEPTION 'reviewed ticket not found: %', id;
     END IF;
@@ -1017,7 +1017,7 @@ DECLARE
 BEGIN
     FOREACH role_name IN ARRAY ARRAY[
         'director',
-        'eric',
+        'user',
         'ops',
         'app',
         'audit',

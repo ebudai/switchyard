@@ -55,15 +55,15 @@ def main() -> int:
     assert_equal(
         journal.notification_pairs_for_message(
             "pgu-director:0.0",
-            "PGU-81 -- Tailscale Eric signed off; ready for director completion",
+            "PGU-81 -- Tailscale User signed off; ready for director completion",
         ),
-        ["PGU-81|eric_review"],
-        "signed-off Eric review notification should map to eric_review pair",
+        ["PGU-81|user_review"],
+        "signed-off User review notification should map to user_review pair",
     )
     assert_equal(
-        journal.notification_pairs_for_message("pgu-director:0.0", "For Eric: 2 tickets ready for your review: PGU-81,82"),
+        journal.notification_pairs_for_message("pgu-director:0.0", "For User: 2 tickets ready for your review: PGU-81,82"),
         [],
-        "Eric review digest should not claim ticket/state pairs",
+        "User review digest should not claim ticket/state pairs",
     )
 
     with tempfile.TemporaryDirectory(prefix="ticket-notification-journal.") as tmpdir:

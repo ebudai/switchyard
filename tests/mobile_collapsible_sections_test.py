@@ -60,7 +60,7 @@ class StaticBoardApp:
         }
 
 
-def ticket_payload(ticket_id: str, title: str, *, state: str, needs_eric_signoff: bool = False) -> dict[str, object]:
+def ticket_payload(ticket_id: str, title: str, *, state: str, needs_user_signoff: bool = False) -> dict[str, object]:
     return {
         "id": ticket_id,
         "title": title,
@@ -72,8 +72,8 @@ def ticket_payload(ticket_id: str, title: str, *, state: str, needs_eric_signoff
         "implementation": "ready to go",
         "audit_prompt": "",
         "audit_signoff": False,
-        "needs_eric_signoff": needs_eric_signoff,
-        "eric_signoff": False,
+        "needs_user_signoff": needs_user_signoff,
+        "user_signoff": False,
         "commit_hash": "",
         "commit_exempt": False,
         "parent_id": "",

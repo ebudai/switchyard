@@ -20,8 +20,8 @@ SELECT
     t.implementation,
     t.audit_prompt,
     t.audit_signoff,
-    t.needs_eric_signoff,
-    t.eric_signoff,
+    t.needs_user_signoff,
+    t.user_signoff,
     t.manually_controlled,
     t.commit_hash,
     t.commit_exempt,
@@ -74,8 +74,8 @@ async function rowToTicket(raw: TicketRow): Promise<Ticket> {
     implementation: raw.implementation,
     audit_prompt: raw.audit_prompt,
     audit_signoff: raw.audit_signoff,
-    needs_eric_signoff: raw.needs_eric_signoff,
-    eric_signoff: raw.eric_signoff,
+    needs_user_signoff: raw.needs_user_signoff,
+    user_signoff: raw.user_signoff,
     manually_controlled: raw.manually_controlled,
     commit_hash: raw.commit_hash ?? "",
     commit_exempt: raw.commit_exempt,
@@ -146,7 +146,7 @@ export interface CreateTicketInput {
   title: string;
   body: string;
   assignee: Assignee;
-  needs_eric_signoff: boolean;
+  needs_user_signoff: boolean;
   blocked_by: string[];
   blocked_reason: string;
 }
@@ -164,18 +164,18 @@ function requireNonEmpty(value: string, field: string): string {
 async function createTicketVia(
   sql: Sql,
   insert: (tx: SqlLike) => Promise<string>,
-  input: Pick<CreateTicketInput, "assignee" | "needs_eric_signoff" | "blocked_by" | "blocked_reason">,
+  input: Pick<CreateTicketInput, "assignee" | "needs_user_signoff" | "blocked_by" | "blocked_reason">,
 ): Promise<Ticket> {
   if (input.blocked_by.length > 0 && !input.blocked_reason.trim()) {
     throw new Error("blocked_reason must be non-empty when blocked_by is set");
   }
   // Ported behavior, not a new restriction: app.py's _pg_create_ticket_record
-  // explicitly raises on needs_eric_signoff=true because the underlying DB
+  // explicitly raises on needs_user_signoff=true because the underlying DB
   // insert functions (create_ticket/file_bug) have nowhere to put the flag
   // on initial insert. Matching that here (rather than silently dropping
   // the field) is exactly the kind of gap that's easy to lose in a port;
   // see PORT-NOTES.md.
-  if (input.needs_eric_signoff) {
+  if (input.needs_user_signoff) {
     throw new Error("postgres function API does not support initial signoff fields yet");
   }
   return await sql.begin(async (tx) => {
@@ -241,7 +241,7 @@ export async function routeTicket(
 // set_config(..., true) scopes the setting to the current transaction
 // (is_local=true), matching app.py's _pg_set_caller_role. Only needed
 // before calling DB functions whose body reads current_app_actor() to
-// attribute an appended comment (audit_kick_back, eric_reopen, cancel,
+// attribute an appended comment (audit_kick_back, user_reopen, cancel,
 // add_comment) -- everything else ignores it.
 async function setCallerRole(tx: SqlLike, callerRole: CallerRole): Promise<void> {
   await tx.unsafe("SELECT set_config('ticket_board.caller_role', $1, true);", [callerRole]);
@@ -290,7 +290,7 @@ export async function auditKickBack(
 
 export async function ericSignOff(sql: Sql, ticketId: string): Promise<Ticket> {
   return await sql.begin(async (tx) => {
-    await tx.unsafe("SELECT ticket_board.eric_sign_off($1);", [ticketId]);
+    await tx.unsafe("SELECT ticket_board.user_sign_off($1);", [ticketId]);
     return await getTicket(tx, ticketId);
   });
 }
@@ -299,7 +299,7 @@ export async function ericReopen(sql: Sql, ticketId: string, callerRole: CallerR
   const comment = requireComment(reason);
   return await sql.begin(async (tx) => {
     await setCallerRole(tx, callerRole);
-    await tx.unsafe("SELECT ticket_board.eric_reopen($1, $2);", [ticketId, comment]);
+    await tx.unsafe("SELECT ticket_board.user_reopen($1, $2);", [ticketId, comment]);
     return await getTicket(tx, ticketId);
   });
 }
@@ -369,11 +369,11 @@ const EDIT_FIELD_NAMES = new Set([
   "screenshot",
   "implementation",
   "audit_prompt",
-  "needs_eric_signoff",
+  "needs_user_signoff",
   "commit_exempt",
   "commit_hash",
   "audit_signoff",
-  "eric_signoff",
+  "user_signoff",
 ]);
 
 export async function editFields(sql: Sql, ticketId: string, patch: Record<string, unknown>): Promise<Ticket> {
@@ -384,8 +384,8 @@ export async function editFields(sql: Sql, ticketId: string, patch: Record<strin
   if (patch.audit_signoff === true) {
     throw new Error("audit_signoff=true requires audit_sign_off");
   }
-  if (patch.eric_signoff === true) {
-    throw new Error("eric_signoff=true requires eric_sign_off");
+  if (patch.user_signoff === true) {
+    throw new Error("user_signoff=true requires user_sign_off");
   }
   return await sql.begin(async (tx) => {
     // Pass `patch` as a plain object, NOT JSON.stringify(patch): postgres.js

@@ -46,9 +46,9 @@ IMPLEMENTER_ROLES = {"main", "app", "ops", "perf", "research"}
 CALLER_ROLES = set(APP_CALLER_ROLES)
 TASK_ROLES = IMPLEMENTER_ROLES | {"director", "audit", "inspector"}
 OPERATION_ALLOWED_ROLES = {
-    "create_ticket": {"director", "eric"},
+    "create_ticket": {"director", "user"},
     "file_bug": IMPLEMENTER_ROLES | {"audit"},
-    "release_draft": {"director", "eric"},
+    "release_draft": {"director", "user"},
     "route": {"director"},
     "force_move": {"director"},
     "override_move": {"director"},
@@ -66,8 +66,8 @@ OPERATION_ALLOWED_ROLES = {
     "audit_kick_back": {"audit"},
     "director_dat_sign_off": {"director"},
     "director_dat_kick_back": {"director"},
-    "eric_sign_off": {"eric"},
-    "eric_reopen": {"eric"},
+    "user_sign_off": {"user"},
+    "user_reopen": {"user"},
     "mark_done": {"director"},
     "defer": {"director"},
     "cancel": {"director"},
@@ -75,7 +75,7 @@ OPERATION_ALLOWED_ROLES = {
     "set_blockers": {"director"},
     "add_comment": CALLER_ROLES,
     "edit_fields": CALLER_ROLES,
-    "crop_attachment": {"director", "eric"},
+    "crop_attachment": {"director", "user"},
     "merge": {"director"},
 }
 EDIT_FIELD_NAMES = {
@@ -87,13 +87,13 @@ EDIT_FIELD_NAMES = {
     "implementation",
     "audit_prompt",
     "needs_inspection",
-    "needs_eric_signoff",
+    "needs_user_signoff",
     "commit_exempt",
     "regression",
     "commit_hash",
     "audit_signoff",
     "inspector_signoff",
-    "eric_signoff",
+    "user_signoff",
 }
 
 RELEASE_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
@@ -187,7 +187,7 @@ class CallerRegistry:
 
     def register(self, credentials: PeerCredentials, role: str) -> None:
         normalized_role = role.strip().lower()
-        if normalized_role not in CALLER_ROLES - {"eric"}:
+        if normalized_role not in CALLER_ROLES - {"user"}:
             raise ValueError(f"invalid local caller role: {role}")
         with self._lock:
             self._drop_stale_locked()
@@ -595,7 +595,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 bool(payload.get("audit_signoff", False)),
                 bool(payload.get("inspector_signoff", False)),
                 bool(payload.get("needs_inspection", False)),
-                bool(payload.get("eric_signoff", False)),
+                bool(payload.get("user_signoff", False)),
             )
         )
         if advanced_create and caller_role is None:
@@ -611,7 +611,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 screenshot=payload.get("screenshot"),  # type: ignore[arg-type]
                 screenshots=payload.get("screenshots"),  # type: ignore[arg-type]
                 assignee=str(payload.get("assignee", "unassigned")),
-                needs_eric_signoff=bool(payload.get("needs_eric_signoff", False)),
+                needs_user_signoff=bool(payload.get("needs_user_signoff", False)),
                 needs_inspection=bool(payload.get("needs_inspection", False)),
                 regression=regression,
                 blocked_by=payload.get("blocked_by"),  # type: ignore[arg-type]
@@ -638,8 +638,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             audit_signoff=bool(payload.get("audit_signoff", False)),
             needs_inspection=bool(payload.get("needs_inspection", False)),
             inspector_signoff=bool(payload.get("inspector_signoff", False)),
-            needs_eric_signoff=bool(payload.get("needs_eric_signoff", False)),
-            eric_signoff=bool(payload.get("eric_signoff", False)),
+            needs_user_signoff=bool(payload.get("needs_user_signoff", False)),
+            user_signoff=bool(payload.get("user_signoff", False)),
             regression=regression,
             comments=comments,
             blocked_reason=str(payload.get("blocked_reason", "")),
@@ -653,7 +653,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
 
     def notification_source_role(self, operation: str, caller_role: str | None) -> str | None:
         if operation == "create_ticket" and caller_role == "director" and self.caller_registry is None:
-            return "eric"
+            return "user"
         return None
 
     def action_comment_text(self, payload: dict[str, object]) -> str:
@@ -710,8 +710,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 audit_signoff=False,
                 needs_inspection=bool(payload.get("needs_inspection", False)),
                 inspector_signoff=False,
-                needs_eric_signoff=bool(payload.get("needs_eric_signoff", False)),
-                eric_signoff=False,
+                needs_user_signoff=bool(payload.get("needs_user_signoff", False)),
+                user_signoff=False,
                 regression=bool(payload.get("regression", False)),
                 comments=[],
                 parent_id=source_ticket_id,
@@ -814,7 +814,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 patch["assignee"] = str(payload.get("target_assignee", payload.get("assignee", "")))
         elif operation == "director_dat_sign_off":
             comment_text = self.action_comment_text(payload)
-            patch = {"state": "eric_review"}
+            patch = {"state": "user_review"}
             if comment_text:
                 patch["comment"] = {"who": caller, "text": comment_text}
         elif operation == "director_dat_kick_back":
@@ -824,12 +824,12 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 patch["comment"] = {"who": caller, "text": comment_text}
             if payload.get("target_assignee") or payload.get("assignee"):
                 patch["assignee"] = str(payload.get("target_assignee", payload.get("assignee", "")))
-        elif operation == "eric_sign_off":
+        elif operation == "user_sign_off":
             comment_text = self.action_comment_text(payload)
-            patch = {"eric_signoff": True}
+            patch = {"user_signoff": True}
             if comment_text:
                 patch["comment"] = {"who": caller, "text": comment_text}
-        elif operation == "eric_reopen":
+        elif operation == "user_reopen":
             patch = {"state": "analysis"}
             comment_text = self.action_comment_text(payload)
             if comment_text:
@@ -860,8 +860,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 raise ValueError("audit_signoff=true requires audit_sign_off")
             if payload.get("inspector_signoff") is True:
                 raise ValueError("inspector_signoff=true requires inspector_sign_off")
-            if payload.get("eric_signoff") is True:
-                raise ValueError("eric_signoff=true requires eric_sign_off")
+            if payload.get("user_signoff") is True:
+                raise ValueError("user_signoff=true requires user_sign_off")
             if "needs_inspection" in payload and caller != "director":
                 raise PermissionError("needs_inspection can only be edited by director")
             if "commit_exempt" in payload and caller != "director":

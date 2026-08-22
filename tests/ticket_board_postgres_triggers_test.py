@@ -80,8 +80,8 @@ def insert_ticket(
     audit_signoff: bool = False,
     needs_inspection: bool = False,
     inspector_signoff: bool = False,
-    needs_eric_signoff: bool = False,
-    eric_signoff: bool = False,
+    needs_user_signoff: bool = False,
+    user_signoff: bool = False,
     commit_hash: str = "",
     commit_exempt: bool = False,
     manually_controlled: bool = False,
@@ -91,8 +91,8 @@ def insert_ticket(
         "audit_signoff": "true" if audit_signoff else "false",
         "needs_inspection": "true" if needs_inspection else "false",
         "inspector_signoff": "true" if inspector_signoff else "false",
-        "needs_eric_signoff": "true" if needs_eric_signoff else "false",
-        "eric_signoff": "true" if eric_signoff else "false",
+        "needs_user_signoff": "true" if needs_user_signoff else "false",
+        "user_signoff": "true" if user_signoff else "false",
         "commit_exempt": "true" if commit_exempt else "false",
         "manually_controlled": "true" if manually_controlled else "false",
         "parked": "true" if parked else "false",
@@ -103,11 +103,11 @@ def insert_ticket(
         f"""
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, parent_id, implementation,
-    audit_signoff, needs_inspection, inspector_signoff, needs_eric_signoff, eric_signoff, commit_hash,
+    audit_signoff, needs_inspection, inspector_signoff, needs_user_signoff, user_signoff, commit_hash,
     commit_exempt, manually_controlled, parked, created_text, updated_text, source_json
 ) VALUES (
     '{ticket_id}', '{title}', '', '{state}', '{assignee}', '{parent_id}', '{implementation}',
-    {bools['audit_signoff']}, {bools['needs_inspection']}, {bools['inspector_signoff']}, {bools['needs_eric_signoff']}, {bools['eric_signoff']}, '{commit_hash}',
+    {bools['audit_signoff']}, {bools['needs_inspection']}, {bools['inspector_signoff']}, {bools['needs_user_signoff']}, {bools['user_signoff']}, '{commit_hash}',
     {bools['commit_exempt']}, {bools['manually_controlled']}, {bools['parked']}, '2026-07-10T00:00:00+00:00',
     '2026-07-10T00:00:00+00:00', '{source}'::jsonb
 );
@@ -923,11 +923,11 @@ WHERE id = 'PGU-7';
             insert_ticket(
                 conninfo,
                 "PGU-8",
-                title="Auto Eric",
+                title="Auto User",
                 assignee="audit",
                 state="audit",
                 implementation="done",
-                needs_eric_signoff=True,
+                needs_user_signoff=True,
             )
             psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true WHERE id = 'PGU-8';")
             auto_eric = json.loads(
@@ -955,7 +955,7 @@ LIMIT 1;
             )
             assert auto_eric_notice == {
                 "target_role": "director",
-                "message": "PGU-8 -- Auto Eric ready for Director Acceptance Testing",
+                "message": "PGU-8 -- Auto User ready for Director Acceptance Testing",
                 "new_state": "dat",
             }, auto_eric_notice
             service_call(conninfo, "director", "SELECT ticket_board.director_dat_sign_off('PGU-8', 'DAT accepted.');")
@@ -969,30 +969,30 @@ WHERE id = 'PGU-8';
 """,
                 ).stdout
             )
-            assert auto_uat == {"state": "eric_review", "assignee": "director", "audit_signoff": True}, auto_uat
-            psql(conninfo, "UPDATE ticket_board.tickets SET eric_signoff = true WHERE id = 'PGU-8';")
+            assert auto_uat == {"state": "user_review", "assignee": "director", "audit_signoff": True}, auto_uat
+            psql(conninfo, "UPDATE ticket_board.tickets SET user_signoff = true WHERE id = 'PGU-8';")
             eric_done = json.loads(
                 psql(
                     conninfo,
                     """
-SELECT jsonb_build_object('state', state, 'assignee', assignee, 'eric_signoff', eric_signoff)::text
+SELECT jsonb_build_object('state', state, 'assignee', assignee, 'user_signoff', user_signoff)::text
 FROM ticket_board.tickets
 WHERE id = 'PGU-8';
 """,
                 ).stdout
             )
-            assert eric_done == {"state": "director_review", "assignee": "director", "eric_signoff": True}, eric_done
+            assert eric_done == {"state": "director_review", "assignee": "director", "user_signoff": True}, eric_done
 
             insert_ticket(
                 conninfo,
                 "PGU-80",
-                title="Eric review to inspection",
+                title="User review to inspection",
                 assignee="director",
-                state="eric_review",
+                state="user_review",
                 implementation="visual pass",
                 audit_signoff=True,
                 inspector_signoff=True,
-                needs_eric_signoff=True,
+                needs_user_signoff=True,
                 needs_inspection=True,
                 commit_hash="abcdef8",
             )
@@ -1024,18 +1024,18 @@ WHERE id = 'PGU-80';
             insert_ticket(
                 conninfo,
                 "PGU-84",
-                title="Eric review reinspection RPC chain",
+                title="User review reinspection RPC chain",
                 assignee="ops",
                 state="analysis",
                 implementation="visual pass",
-                needs_eric_signoff=True,
+                needs_user_signoff=True,
                 needs_inspection=True,
             )
             service_call(conninfo, "ops", "SELECT ticket_board.start_work('PGU-84');")
             service_call(conninfo, "ops", "SELECT ticket_board.submit_to_audit('PGU-84', 'abcdef4');")
             service_call(conninfo, "inspector", "SELECT ticket_board.inspector_sign_off('PGU-84');")
             service_call(conninfo, "audit", "SELECT ticket_board.audit_sign_off('PGU-84', 'Audit verified.');")
-            service_call(conninfo, "director", "SELECT ticket_board.route('PGU-84', 'eric_review', 'director');")
+            service_call(conninfo, "director", "SELECT ticket_board.route('PGU-84', 'user_review', 'director');")
             service_call(conninfo, "director", "SELECT ticket_board.route('PGU-84', 'inspection', 'inspector');")
             reinspect_entry = json.loads(
                 psql(
@@ -1295,18 +1295,18 @@ SELECT ticket_board.complete_task('PGU-84', 'Trying to skip audit.');
             )
             service_call(conninfo, "audit", "SELECT ticket_board.audit_sign_off('PGU-84', 'Audit verified after reinspection.');")
             service_call(conninfo, "director", "SELECT ticket_board.director_dat_sign_off('PGU-84', 'DAT accepted after reinspection.');")
-            psql(conninfo, "UPDATE ticket_board.tickets SET eric_signoff = true, state = 'director_review' WHERE id = 'PGU-84';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET user_signoff = true, state = 'director_review' WHERE id = 'PGU-84';")
             psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-84';")
 
             insert_ticket(
                 conninfo,
                 "PGU-81",
-                title="Eric review inspection guard",
+                title="User review inspection guard",
                 assignee="director",
-                state="eric_review",
+                state="user_review",
                 implementation="visual pass",
                 audit_signoff=True,
-                needs_eric_signoff=True,
+                needs_user_signoff=True,
                 needs_inspection=False,
             )
             assert_error(
@@ -1323,29 +1323,29 @@ SELECT ticket_board.complete_task('PGU-84', 'Trying to skip audit.');
                 state="inspection",
                 implementation="visual pass",
                 needs_inspection=True,
-                needs_eric_signoff=True,
+                needs_user_signoff=True,
             )
             assert_error(
                 conninfo,
-                "UPDATE ticket_board.tickets SET state = 'eric_review' WHERE id = 'PGU-82';",
-                "illegal state transition: inspection -> eric_review",
+                "UPDATE ticket_board.tickets SET state = 'user_review' WHERE id = 'PGU-82';",
+                "illegal state transition: inspection -> user_review",
             )
 
             insert_ticket(
                 conninfo,
                 "PGU-83",
-                title="Eric review direct done unchanged",
+                title="User review direct done unchanged",
                 assignee="director",
-                state="eric_review",
+                state="user_review",
                 implementation="visual pass",
                 audit_signoff=True,
-                needs_eric_signoff=True,
-                eric_signoff=True,
+                needs_user_signoff=True,
+                user_signoff=True,
             )
             assert_error(
                 conninfo,
                 "UPDATE ticket_board.tickets SET state = 'done', commit_exempt = true WHERE id = 'PGU-83';",
-                "illegal state transition: eric_review -> done",
+                "illegal state transition: user_review -> done",
             )
 
             insert_ticket(
@@ -1353,12 +1353,12 @@ SELECT ticket_board.complete_task('PGU-84', 'Trying to skip audit.');
                 "PGU-9",
                 title="Reaudit",
                 assignee="director",
-                state="eric_review",
+                state="user_review",
                 implementation="done",
                 audit_signoff=True,
-                needs_eric_signoff=True,
+                needs_user_signoff=True,
             )
-            psql(conninfo, "UPDATE ticket_board.tickets SET needs_eric_signoff = false WHERE id = 'PGU-9';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET needs_user_signoff = false WHERE id = 'PGU-9';")
             reaudit = json.loads(
                 psql(
                     conninfo,
@@ -1366,8 +1366,8 @@ SELECT ticket_board.complete_task('PGU-84', 'Trying to skip audit.');
 SELECT jsonb_build_object(
     'state', state,
     'audit_signoff', audit_signoff,
-    'needs_eric_signoff', needs_eric_signoff,
-    'eric_signoff', eric_signoff
+    'needs_user_signoff', needs_user_signoff,
+    'user_signoff', user_signoff
 )::text
 FROM ticket_board.tickets
 WHERE id = 'PGU-9';
@@ -1377,8 +1377,8 @@ WHERE id = 'PGU-9';
             assert reaudit == {
                 "state": "audit",
                 "audit_signoff": False,
-                "needs_eric_signoff": False,
-                "eric_signoff": False,
+                "needs_user_signoff": False,
+                "user_signoff": False,
             }, reaudit
 
             insert_ticket(
@@ -1595,10 +1595,10 @@ WHERE ticket_id = 'PGU-29701';
                 conninfo,
                 f"""
 SELECT set_config('ticket_board.caller_role', 'director', false);
-SELECT set_config('ticket_board.notification_source_role', 'eric', false);
+SELECT set_config('ticket_board.notification_source_role', 'user', false);
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, parent_id, implementation,
-    audit_signoff, needs_inspection, inspector_signoff, needs_eric_signoff, eric_signoff, commit_hash,
+    audit_signoff, needs_inspection, inspector_signoff, needs_user_signoff, user_signoff, commit_hash,
     commit_exempt, manually_controlled, parked, created_text, updated_text, source_json
 ) VALUES (
     '{web_created_ticket_id}', 'Human web create notify', '', 'analysis', 'unassigned', '', '',
@@ -1650,7 +1650,7 @@ WHERE ticket_id = '{web_created_ticket_id}';
 SELECT set_config('ticket_board.caller_role', 'director', false);
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, parent_id, implementation,
-    audit_signoff, needs_inspection, inspector_signoff, needs_eric_signoff, eric_signoff, commit_hash,
+    audit_signoff, needs_inspection, inspector_signoff, needs_user_signoff, user_signoff, commit_hash,
     commit_exempt, manually_controlled, parked, created_text, updated_text, source_json
 ) VALUES (
     '{agent_created_ticket_id}', 'Director self-create suppress', '', 'analysis', 'unassigned', '', '',
@@ -1697,7 +1697,7 @@ WHERE ticket_id = 'PGU-29710';
                 f"""
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, parent_id, implementation,
-    audit_signoff, needs_inspection, inspector_signoff, needs_eric_signoff, eric_signoff, commit_hash,
+    audit_signoff, needs_inspection, inspector_signoff, needs_user_signoff, user_signoff, commit_hash,
     commit_exempt, manually_controlled, parked, created_text, updated_text, source_json
 ) VALUES (
     'PGU-29711', 'Invalid direct implementation insert', '', 'in_progress', 'director', '', '',
@@ -1998,11 +1998,11 @@ WHERE ticket_board.transition_target_role(states.state, 'ops') IS NOT NULL;
 """,
             ).stdout.strip()
             assert non_transition_targets == "0"
-            eric_review_target = psql(
+            user_review_target = psql(
                 conninfo,
-                "SELECT ticket_board.transition_target_role('eric_review', 'director');",
+                "SELECT ticket_board.transition_target_role('user_review', 'director');",
             ).stdout.strip()
-            assert eric_review_target == "director"
+            assert user_review_target == "director"
 
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
             service_call(
@@ -2024,8 +2024,8 @@ WHERE payload->>'title' = 'Director self-create analysis'
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
             service_call(
                 conninfo,
-                "eric",
-                "SELECT ticket_board.create_ticket('Eric-created analysis', 'Body', 'analysis');",
+                "user",
+                "SELECT ticket_board.create_ticket('User-created analysis', 'Body', 'analysis');",
             )
             eric_created_analysis_queue = json.loads(
                 psql(
@@ -2038,14 +2038,14 @@ SELECT jsonb_agg(jsonb_build_object(
     'new_state', payload->>'new_state'
 ) ORDER BY id)::text
 FROM ticket_board.ticket_notification_queue
-WHERE payload->>'title' = 'Eric-created analysis';
+WHERE payload->>'title' = 'User-created analysis';
 """,
                 ).stdout
             )
             assert eric_created_analysis_queue == [
                 {
                     "target_role": "director",
-                    "title": "Eric-created analysis",
+                    "title": "User-created analysis",
                     "old_state": None,
                     "new_state": "analysis",
                 }
@@ -2672,7 +2672,7 @@ SET commit_exempt = true,
     manually_controlled = true,
     state = 'done'
 WHERE id NOT IN ('PGU-21', 'PGU-57')
-              AND state IN ('in_progress', 'inspection', 'audit', 'dat', 'eric_review', 'director_review')
+              AND state IN ('in_progress', 'inspection', 'audit', 'dat', 'user_review', 'director_review')
   AND (
       assignee IN ('app', 'ops')
       OR id IN (
@@ -2914,7 +2914,7 @@ SET audit_signoff = true,
 WHERE state = 'audit'
   AND id <> 'PGU-21'
   AND NOT manually_controlled
-  AND needs_eric_signoff
+  AND needs_user_signoff
   AND NOT ticket_board.ticket_has_unresolved_blockers(id);
 UPDATE ticket_board.tickets
 SET audit_signoff = true,
@@ -2922,20 +2922,20 @@ SET audit_signoff = true,
 WHERE state = 'audit'
   AND id <> 'PGU-21'
   AND NOT manually_controlled
-  AND NOT needs_eric_signoff
+  AND NOT needs_user_signoff
   AND NOT ticket_board.ticket_has_unresolved_blockers(id);
 UPDATE ticket_board.tickets
-SET state = 'eric_review'
+SET state = 'user_review'
 WHERE state = 'dat'
   AND id <> 'PGU-21'
   AND NOT manually_controlled
-  AND needs_eric_signoff
+  AND needs_user_signoff
   AND NOT ticket_board.ticket_has_unresolved_blockers(id);
 UPDATE ticket_board.tickets
 SET audit_signoff = true,
-    eric_signoff = true,
+    user_signoff = true,
     state = 'director_review'
-WHERE state = 'eric_review'
+WHERE state = 'user_review'
   AND id <> 'PGU-21'
   AND NOT manually_controlled
   AND NOT ticket_board.ticket_has_unresolved_blockers(id);
@@ -2948,7 +2948,7 @@ WHERE state = 'director_review'
   AND NOT ticket_board.ticket_has_unresolved_blockers(id);
 UPDATE ticket_board.tickets
 SET manually_controlled = true
-WHERE state IN ('in_progress', 'inspection', 'audit', 'dat', 'eric_review', 'director_review')
+WHERE state IN ('in_progress', 'inspection', 'audit', 'dat', 'user_review', 'director_review')
   AND id <> 'PGU-21'
   AND ticket_board.ticket_has_unresolved_blockers(id);
 """,

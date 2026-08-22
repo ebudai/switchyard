@@ -30,7 +30,7 @@ from scripts.ticket_board.write_client import TicketBoardWriteClient
 
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
 RBAC_PATH = ROOT / "scripts" / "ticket_board" / "rbac.sql"
-PANE_ROLES = ["director", "eric", "ops", "app", "audit", "inspector", "perf", "research", "main"]
+PANE_ROLES = ["director", "user", "ops", "app", "audit", "inspector", "perf", "research", "main"]
 SERVICE_ROLE = "ticket_board_service"
 
 
@@ -85,8 +85,12 @@ def sql_string(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def sql_ident(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
+
+
 def create_roles(conn: str) -> None:
-    psql(conn, "\n".join(f"CREATE ROLE {role} LOGIN;" for role in PANE_ROLES))
+    psql(conn, "\n".join(f"CREATE ROLE {sql_ident(role)} LOGIN;" for role in PANE_ROLES))
 
 
 def ticket_source(ticket_id: str, title: str, state: str, assignee: str) -> str:
@@ -117,7 +121,7 @@ def seed_postgres_ticket(
         f"""
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation,
-    audit_signoff, needs_inspection, inspector_signoff, needs_eric_signoff, eric_signoff, commit_hash,
+    audit_signoff, needs_inspection, inspector_signoff, needs_user_signoff, user_signoff, commit_hash,
     commit_exempt, created_text, updated_text, source_json
 ) VALUES (
     {sql_string(ticket_id)}, {sql_string(title)}, '', {sql_string(state)}, {sql_string(assignee)}, {sql_string(implementation)},

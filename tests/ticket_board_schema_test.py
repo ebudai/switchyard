@@ -23,12 +23,12 @@ EXPECTED_JSON_FIELDS = {
     "commit_exempt",
     "commit_hash",
     "created",
-    "eric_signoff",
+    "user_signoff",
     "id",
     "implementation",
     "manually_controlled",
     "needs_inspection",
-    "needs_eric_signoff",
+    "needs_user_signoff",
     "parent_id",
     "regression",
     "screenshot",
@@ -47,7 +47,7 @@ EXPECTED_STATES = {
     "inspection",
     "audit",
     "dat",
-    "eric_review",
+    "user_review",
     "director_review",
     "done",
     "cancelled",
@@ -84,8 +84,8 @@ EXPECTED_FUNCTION_API = {
     "ticket_board.audit_kick_back",
     "ticket_board.director_dat_sign_off",
     "ticket_board.director_dat_kick_back",
-    "ticket_board.eric_sign_off",
-    "ticket_board.eric_reopen",
+    "ticket_board.user_sign_off",
+    "ticket_board.user_reopen",
     "ticket_board.mark_done",
     "ticket_board.defer",
     "ticket_board.cancel",
@@ -109,12 +109,12 @@ FIELD_TO_SCHEMA_TOKENS = {
     "commit_exempt": ["commit_exempt"],
     "commit_hash": ["commit_hash"],
     "created": ["created_text", "created_at"],
-    "eric_signoff": ["eric_signoff"],
+    "user_signoff": ["user_signoff"],
     "id": ["id", "ticket_number"],
     "implementation": ["implementation"],
     "manually_controlled": ["manually_controlled"],
     "needs_inspection": ["needs_inspection"],
-    "needs_eric_signoff": ["needs_eric_signoff"],
+    "needs_user_signoff": ["needs_user_signoff"],
     "parent_id": ["parent_id"],
     "regression": ["regression"],
     "screenshot": ["screenshot", "ticket_attachments"],
@@ -296,8 +296,8 @@ def main() -> int:
     assert "create table if not exists ticket_board.workflow_stages" in workflow_config_migration
     assert "create table if not exists ticket_board.workflow_transitions" in workflow_config_migration
     assert "('analysis', 'triage', 2, array['director']::text[]" in workflow_config_migration
-    assert "('eric_review', 'uat', 6, array['director']::text[]" in workflow_config_migration
-    assert "('draft', 'analysis', 'release_draft', array['director', 'eric']::text[])" in workflow_config_migration
+    assert "('user_review', 'uat', 6, array['director']::text[]" in workflow_config_migration
+    assert "('draft', 'analysis', 'release_draft', array['director', 'user']::text[])" in workflow_config_migration
     cosmetic_derivation_migration = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "pgu520_workflow_config_cosmetic_derivation.sql"
     ).read_text(encoding="utf-8").lower()
@@ -374,12 +374,12 @@ def main() -> int:
     assert "create or replace function ticket_board.unblock_transition_message" in executable_schema_lower
     assert "create or replace function ticket_board.enqueue_unblock_notification" in executable_schema_lower
     assert "create or replace function ticket_board.notify_unblocked_dependents" in executable_schema_lower
-    assert "if urgent or comment_actor in ('director', 'eric') then" in executable_schema_lower
+    assert "if urgent or comment_actor in ('director', 'user') then" in executable_schema_lower
     manual_control_comment_migration = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "pgu519_manual_control_comment_notifications.sql"
     ).read_text(encoding="utf-8").lower()
     assert "create or replace function ticket_board.add_comment" in manual_control_comment_migration
-    assert "if urgent or comment_actor in ('director', 'eric') then" in manual_control_comment_migration
+    assert "if urgent or comment_actor in ('director', 'user') then" in manual_control_comment_migration
     assert "when p_state = 'backlog' then 'director'" not in executable_schema_lower
     assert "when p_state = 'analysis' and p_assignee = 'unassigned' then 'director'" not in executable_schema_lower
     assert "source_role := nullif(current_setting('ticket_board.notification_source_role', true), '')" in executable_schema_lower
@@ -448,7 +448,7 @@ def main() -> int:
         ROOT / "scripts" / "ticket_board" / "migrations" / "281_idle_reminder_escalate_problem_clause.sql"
     ).read_text(encoding="utf-8").lower()
     assert "tell the director directly what is wrong" in idle_reminder_clause_migration
-    assert "tell eric directly what is wrong" in idle_reminder_clause_migration
+    assert "tell user directly what is wrong" in idle_reminder_clause_migration
     assert "<the next rung>" not in idle_reminder_clause_migration
     idle_reminder_primary_defer_migration = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "283_idle_reminder_defers_to_primary.sql"

@@ -71,8 +71,8 @@ class MemoryCreateApp:
             audit_signoff=False,
             needs_inspection=kwargs.get("needs_inspection", False),
             inspector_signoff=False,
-            needs_eric_signoff=kwargs.get("needs_eric_signoff", False),
-            eric_signoff=False,
+            needs_user_signoff=kwargs.get("needs_user_signoff", False),
+            user_signoff=False,
             comments=[],
             blocked_reason=kwargs.get("blocked_reason", ""),
             commit_hash="",
@@ -96,8 +96,8 @@ class MemoryCreateApp:
             "implementation": str(kwargs.get("implementation") or ""),
             "audit_prompt": str(kwargs.get("audit_prompt") or ""),
             "audit_signoff": bool(kwargs.get("audit_signoff")),
-            "needs_eric_signoff": bool(kwargs.get("needs_eric_signoff")),
-            "eric_signoff": bool(kwargs.get("eric_signoff")),
+            "needs_user_signoff": bool(kwargs.get("needs_user_signoff")),
+            "user_signoff": bool(kwargs.get("user_signoff")),
             "manually_controlled": False,
             "commit_hash": str(kwargs.get("commit_hash") or ""),
             "commit_exempt": bool(kwargs.get("commit_exempt")),
@@ -148,7 +148,7 @@ def post_create(
             "state": state,
             "blocked_by": blocked_by or [],
             "blocked_reason": blocked_reason,
-            "needs_eric_signoff": False,
+            "needs_user_signoff": False,
         }
     ).encode("utf-8")
     request = urllib.request.Request(

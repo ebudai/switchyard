@@ -382,7 +382,7 @@ def test_pgu_config_matches_director_supplied_live_role_assignments() -> None:
 def test_pgu_config_keeps_live_agent_repository_with_foreign_home() -> None:
     original_home = os.environ.get("HOME")
     try:
-        os.environ["HOME"] = "/home/eric"
+        os.environ["HOME"] = "/home/user"
         config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
     finally:
         if original_home is None:
@@ -947,7 +947,7 @@ def test_undeterminable_launcher_checkout_warns_and_continues() -> None:
 
 def test_deploy_launcher_checkout_updates_and_verifies_configured_ref() -> None:
     config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
-    launcher_repo = Path("/home/eric/Projects/pgu")
+    launcher_repo = Path("/home/user/Projects/pgu")
     calls: list[list[str]] = []
 
     def runner(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -981,7 +981,7 @@ def test_konsole_launch_uses_gui_user_display_environment() -> None:
         os.environ["PGU_HOST_WAYLAND_DISPLAY"] = "/run/user/1000/wayland-0"
         team_launcher.uid_for_user = lambda _user_name: None
 
-        assert konsole_launch_args(Path("/tmp/layout.json"), gui_user="eric") == [
+        assert konsole_launch_args(Path("/tmp/layout.json"), gui_user="user") == [
             "env",
             "QT_QPA_PLATFORM=wayland",
             "QT_LOGGING_RULES=qt.qpa.wayland.warning=false",
@@ -1004,9 +1004,9 @@ def test_konsole_launch_can_fallback_to_gui_user_uid_without_host_var() -> None:
     original_wayland_name = os.environ.get("PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY")
     try:
         os.environ["PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY"] = "wayland-test"
-        team_launcher.uid_for_user = lambda user_name: 4242 if user_name == "eric" else None
+        team_launcher.uid_for_user = lambda user_name: 4242 if user_name == "user" else None
 
-        assert konsole_launch_args(Path("/tmp/layout.json"), gui_user="eric") == [
+        assert konsole_launch_args(Path("/tmp/layout.json"), gui_user="user") == [
             "env",
             "QT_QPA_PLATFORM=wayland",
             "QT_LOGGING_RULES=qt.qpa.wayland.warning=false",

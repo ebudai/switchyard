@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS ticket_board.tickets (
             'in_progress',
             'inspection',
             'audit',
-            'eric_review',
+            'user_review',
             'director_review',
             'done',
             'cancelled'
@@ -73,8 +73,8 @@ CREATE TABLE IF NOT EXISTS ticket_board.tickets (
     audit_signoff boolean NOT NULL DEFAULT false,
     needs_inspection boolean NOT NULL DEFAULT false,
     inspector_signoff boolean NOT NULL DEFAULT false,
-    needs_eric_signoff boolean NOT NULL DEFAULT false,
-    eric_signoff boolean NOT NULL DEFAULT false,
+    needs_user_signoff boolean NOT NULL DEFAULT false,
+    user_signoff boolean NOT NULL DEFAULT false,
     manually_controlled boolean NOT NULL DEFAULT false,
     parked boolean NOT NULL DEFAULT false,
 
@@ -141,7 +141,7 @@ ALTER TABLE ticket_board.tickets
         'inspection',
         'audit',
         'dat',
-        'eric_review',
+        'user_review',
         'director_review',
         'done',
         'cancelled'
@@ -237,7 +237,7 @@ CREATE TABLE IF NOT EXISTS ticket_board.workflow_stages (
             'inspection',
             'audit',
             'dat',
-            'eric_review',
+            'user_review',
             'director_review',
             'done',
             'cancelled'
@@ -306,8 +306,8 @@ INSERT INTO ticket_board.workflow_stages (
     ('in_progress', 'Implementation', 3, ARRAY['main', 'app', 'ops', 'perf', 'research']::text[], NULL, NULL, NULL, false),
     ('inspection', 'Inspection', 4, ARRAY['inspector']::text[], 'needs_inspection', 'audit', 'inspector_signoff', false),
     ('audit', 'Audit', 5, ARRAY['audit']::text[], NULL, NULL, 'audit_signoff', false),
-    ('dat', 'DAT', 6, ARRAY['director']::text[], 'needs_eric_signoff', 'director_review', NULL, false),
-    ('eric_review', 'UAT', 7, ARRAY['director']::text[], 'needs_eric_signoff', 'director_review', 'eric_signoff', false),
+    ('dat', 'DAT', 6, ARRAY['director']::text[], 'needs_user_signoff', 'director_review', NULL, false),
+    ('user_review', 'UAT', 7, ARRAY['director']::text[], 'needs_user_signoff', 'director_review', 'user_signoff', false),
     ('director_review', 'Final Sign-Off', 8, ARRAY['director']::text[], NULL, NULL, NULL, false),
     ('done', 'Done', 9, ARRAY[]::text[], NULL, NULL, NULL, true),
     ('cancelled', 'Cancelled', 10, ARRAY[]::text[], NULL, NULL, NULL, true)
@@ -322,7 +322,7 @@ SET display_label = EXCLUDED.display_label,
 
 INSERT INTO ticket_board.workflow_transitions (from_stage, to_stage, action_name, allowed_roles, owner_scoped, director_override)
 VALUES
-    ('draft', 'analysis', 'release_draft', ARRAY['director', 'eric']::text[], false, false),
+    ('draft', 'analysis', 'release_draft', ARRAY['director', 'user']::text[], false, false),
     ('draft', 'cancelled', 'cancel', ARRAY['director']::text[], false, false),
     ('backlog', 'analysis', 'route', ARRAY['director']::text[], false, false),
     ('backlog', 'analysis', 'start_task', ARRAY['director', 'main', 'app', 'ops', 'perf', 'research', 'audit', 'inspector']::text[], true, true),
@@ -352,27 +352,27 @@ VALUES
     ('audit', 'analysis', 'route', ARRAY['director']::text[], false, false),
     ('audit', 'backlog', 'defer', ARRAY['director']::text[], false, false),
     ('audit', 'cancelled', 'cancel', ARRAY['director']::text[], false, false),
-    ('dat', 'eric_review', 'director_dat_sign_off', ARRAY['director']::text[], false, false),
+    ('dat', 'user_review', 'director_dat_sign_off', ARRAY['director']::text[], false, false),
     ('dat', 'in_progress', 'director_dat_kick_back', ARRAY['director']::text[], false, false),
     ('dat', 'analysis', 'director_dat_kick_back', ARRAY['director']::text[], false, false),
     ('dat', 'in_progress', 'route', ARRAY['director']::text[], false, false),
     ('dat', 'analysis', 'route', ARRAY['director']::text[], false, false),
     ('dat', 'backlog', 'defer', ARRAY['director']::text[], false, false),
     ('dat', 'cancelled', 'cancel', ARRAY['director']::text[], false, false),
-    ('eric_review', 'inspection', 'route', ARRAY['director']::text[], false, false),
-    ('eric_review', 'director_review', 'eric_sign_off', ARRAY['eric']::text[], false, false),
-    ('eric_review', 'audit', 'route', ARRAY['director']::text[], false, false),
-    ('eric_review', 'analysis', 'eric_reopen', ARRAY['eric']::text[], false, false),
-    ('eric_review', 'analysis', 'route', ARRAY['director']::text[], false, false),
-    ('eric_review', 'backlog', 'defer', ARRAY['director']::text[], false, false),
-    ('eric_review', 'cancelled', 'cancel', ARRAY['director']::text[], false, false),
+    ('user_review', 'inspection', 'route', ARRAY['director']::text[], false, false),
+    ('user_review', 'director_review', 'user_sign_off', ARRAY['user']::text[], false, false),
+    ('user_review', 'audit', 'route', ARRAY['director']::text[], false, false),
+    ('user_review', 'analysis', 'user_reopen', ARRAY['user']::text[], false, false),
+    ('user_review', 'analysis', 'route', ARRAY['director']::text[], false, false),
+    ('user_review', 'backlog', 'defer', ARRAY['director']::text[], false, false),
+    ('user_review', 'cancelled', 'cancel', ARRAY['director']::text[], false, false),
     ('director_review', 'done', 'mark_done', ARRAY['director']::text[], false, false),
     ('director_review', 'in_progress', 'route', ARRAY['director']::text[], false, false),
-    ('director_review', 'analysis', 'eric_reopen', ARRAY['eric']::text[], false, false),
+    ('director_review', 'analysis', 'user_reopen', ARRAY['user']::text[], false, false),
     ('director_review', 'analysis', 'route', ARRAY['director']::text[], false, false),
     ('director_review', 'backlog', 'defer', ARRAY['director']::text[], false, false),
     ('director_review', 'cancelled', 'cancel', ARRAY['director']::text[], false, false),
-    ('done', 'analysis', 'eric_reopen', ARRAY['eric']::text[], false, false),
+    ('done', 'analysis', 'user_reopen', ARRAY['user']::text[], false, false),
     ('done', 'analysis', 'route', ARRAY['director']::text[], false, false),
     ('done', 'backlog', 'defer', ARRAY['director']::text[], false, false),
     ('cancelled', 'analysis', 'route', ARRAY['director']::text[], false, false),
@@ -621,8 +621,8 @@ AS $$
         OR (p_old_state = 'in_progress' AND p_new_state IN ('inspection', 'audit'))
         OR (p_old_state = 'inspection' AND p_new_state = 'audit')
         OR (p_old_state = 'audit' AND p_new_state IN ('dat', 'director_review', 'done'))
-        OR (p_old_state = 'dat' AND p_new_state = 'eric_review')
-        OR (p_old_state = 'eric_review' AND p_new_state = 'director_review')
+        OR (p_old_state = 'dat' AND p_new_state = 'user_review')
+        OR (p_old_state = 'user_review' AND p_new_state = 'director_review')
         OR (p_old_state = 'director_review' AND p_new_state = 'done');
 $$;
 
@@ -640,8 +640,8 @@ AS $$
         OR (p_from_state = 'in_progress' AND p_to_state IN ('inspection', 'audit', 'analysis', 'backlog', 'cancelled'))
         OR (p_from_state = 'inspection' AND p_to_state IN ('audit', 'in_progress', 'backlog', 'cancelled'))
         OR (p_from_state = 'audit' AND p_to_state IN ('dat', 'director_review', 'in_progress', 'analysis', 'backlog', 'cancelled'))
-        OR (p_from_state = 'dat' AND p_to_state IN ('eric_review', 'in_progress', 'analysis', 'backlog', 'cancelled'))
-        OR (p_from_state = 'eric_review' AND p_to_state IN ('inspection', 'director_review', 'audit', 'analysis', 'backlog', 'cancelled'))
+        OR (p_from_state = 'dat' AND p_to_state IN ('user_review', 'in_progress', 'analysis', 'backlog', 'cancelled'))
+        OR (p_from_state = 'user_review' AND p_to_state IN ('inspection', 'director_review', 'audit', 'analysis', 'backlog', 'cancelled'))
         OR (p_from_state = 'director_review' AND p_to_state IN ('done', 'in_progress', 'analysis', 'backlog', 'cancelled'))
         OR (p_from_state = 'done' AND p_to_state IN ('analysis', 'backlog'))
         OR (p_from_state = 'cancelled' AND p_to_state IN ('analysis', 'backlog'));
@@ -724,7 +724,7 @@ STABLE
 AS $$
     SELECT CASE
         WHEN p_state = 'in_progress' AND ticket_board.ticket_is_implementer_assignee(p_assignee) THEN p_assignee
-        WHEN p_state IN ('inspection', 'audit', 'dat', 'eric_review', 'director_review') THEN (
+        WHEN p_state IN ('inspection', 'audit', 'dat', 'user_review', 'director_review') THEN (
             SELECT nullif(ns.last_implementer_assignee, '')
             FROM ticket_board.ticket_notification_state ns
             WHERE ns.ticket_id = p_ticket_id
@@ -748,11 +748,11 @@ AS $$
     WHERE ticket_board.ticket_is_implementer_assignee(p_implementer)
       AND (p_excluding_ticket_id IS NULL OR t.id <> p_excluding_ticket_id)
       AND NOT t.manually_controlled
-      AND t.state IN ('in_progress', 'inspection', 'audit', 'dat', 'eric_review', 'director_review')
+      AND t.state IN ('in_progress', 'inspection', 'audit', 'dat', 'user_review', 'director_review')
       AND (
           (t.state = 'in_progress' AND t.assignee = p_implementer)
           OR (
-              t.state IN ('inspection', 'audit', 'dat', 'eric_review', 'director_review')
+              t.state IN ('inspection', 'audit', 'dat', 'user_review', 'director_review')
               AND ns.last_implementer_assignee = p_implementer
           )
       )
@@ -855,12 +855,12 @@ BEGIN
         RETURN NEW;
     END IF;
 
-    IF NEW.state IN ('dat', 'eric_review') AND NOT NEW.needs_eric_signoff THEN
+    IF NEW.state IN ('dat', 'user_review') AND NOT NEW.needs_user_signoff THEN
         NEW.state := 'audit';
         NEW.audit_signoff := false;
     END IF;
-    IF NOT NEW.needs_eric_signoff THEN
-        NEW.eric_signoff := false;
+    IF NOT NEW.needs_user_signoff THEN
+        NEW.user_signoff := false;
     END IF;
     IF NOT NEW.needs_inspection THEN
         NEW.inspector_signoff := false;
@@ -876,12 +876,12 @@ BEGIN
     IF NEW.state = 'inspection' AND NOT NEW.needs_inspection THEN
         RAISE EXCEPTION 'needs_inspection must be true before a ticket can enter inspection';
     END IF;
-    IF NEW.state = 'eric_review' AND NEW.eric_signoff THEN
+    IF NEW.state = 'user_review' AND NEW.user_signoff THEN
         NEW.state := 'director_review';
         NEW.assignee := 'director';
     END IF;
     IF NEW.state = 'audit' AND NEW.audit_signoff THEN
-        NEW.state := CASE WHEN NEW.needs_eric_signoff THEN 'dat' ELSE 'director_review' END;
+        NEW.state := CASE WHEN NEW.needs_user_signoff THEN 'dat' ELSE 'director_review' END;
         NEW.assignee := 'director';
     END IF;
 
@@ -909,7 +909,7 @@ BEGIN
         END IF;
     END IF;
 
-    IF OLD.state IN ('inspection', 'audit', 'dat', 'eric_review', 'director_review', 'done', 'cancelled')
+    IF OLD.state IN ('inspection', 'audit', 'dat', 'user_review', 'director_review', 'done', 'cancelled')
        AND NEW.state IN ('backlog', 'analysis', 'in_progress') THEN
         NEW.inspector_signoff := false;
         NEW.audit_signoff := false;
@@ -967,23 +967,23 @@ BEGIN
     IF OLD.state = 'in_progress' AND NEW.state = 'audit' AND NEW.needs_inspection AND NOT NEW.inspector_signoff THEN
         RAISE EXCEPTION 'tickets requiring inspection must pass through inspection before audit';
     END IF;
-    IF OLD.state NOT IN ('audit', 'dat', 'eric_review', 'director_review') AND NEW.state = 'director_review' THEN
+    IF OLD.state NOT IN ('audit', 'dat', 'user_review', 'director_review') AND NEW.state = 'director_review' THEN
         RAISE EXCEPTION 'tickets must pass through audit before entering director_review';
     END IF;
-    IF OLD.state = 'audit' AND NEW.state = 'director_review' AND NEW.needs_eric_signoff THEN
-        RAISE EXCEPTION 'tickets requiring Eric signoff must pass through DAT and eric_review before entering director_review';
+    IF OLD.state = 'audit' AND NEW.state = 'director_review' AND NEW.needs_user_signoff THEN
+        RAISE EXCEPTION 'tickets requiring User signoff must pass through DAT and user_review before entering director_review';
     END IF;
-    IF OLD.state = 'audit' AND NEW.state IN ('dat', 'eric_review', 'director_review', 'done') AND NOT NEW.audit_signoff THEN
+    IF OLD.state = 'audit' AND NEW.state IN ('dat', 'user_review', 'director_review', 'done') AND NOT NEW.audit_signoff THEN
         RAISE EXCEPTION 'audit_signoff must be true before a ticket can leave audit';
     END IF;
-    IF OLD.state = 'dat' AND NEW.state = 'eric_review' AND NOT NEW.needs_eric_signoff THEN
+    IF OLD.state = 'dat' AND NEW.state = 'user_review' AND NOT NEW.needs_user_signoff THEN
         RAISE EXCEPTION 'DAT only applies to tickets requiring UAT';
     END IF;
-    IF OLD.state = 'eric_review'
+    IF OLD.state = 'user_review'
        AND NEW.state = 'director_review'
-       AND NEW.needs_eric_signoff
-       AND NOT NEW.eric_signoff THEN
-        RAISE EXCEPTION 'eric_signoff must be true before a ticket can leave eric_review';
+       AND NEW.needs_user_signoff
+       AND NOT NEW.user_signoff THEN
+        RAISE EXCEPTION 'user_signoff must be true before a ticket can leave user_review';
     END IF;
     IF NEW.state = 'done' AND OLD.state NOT IN ('done', 'director_review') THEN
         RAISE EXCEPTION 'tickets can only enter done from director_review';
@@ -1685,7 +1685,7 @@ AS $$
         WHEN p_state = 'inspection' THEN 'inspector'
         WHEN p_state = 'audit' THEN 'audit'
         WHEN p_state = 'dat' THEN 'director'
-        WHEN p_state = 'eric_review' THEN 'director'
+        WHEN p_state = 'user_review' THEN 'director'
         WHEN p_state = 'director_review' THEN 'director'
         ELSE NULL
     END;
@@ -1761,8 +1761,8 @@ AS $$
             THEN p_ticket_id || CASE WHEN p_title <> '' THEN ' -- ' || p_title ELSE '' END || ' ready for audit'
         WHEN p_new_state = 'dat'
             THEN p_ticket_id || CASE WHEN p_title <> '' THEN ' -- ' || p_title ELSE '' END || ' ready for Director Acceptance Testing'
-        WHEN p_new_state = 'eric_review'
-            THEN p_ticket_id || CASE WHEN p_title <> '' THEN ' -- ' || p_title ELSE '' END || ' ready for Eric UAT'
+        WHEN p_new_state = 'user_review'
+            THEN p_ticket_id || CASE WHEN p_title <> '' THEN ' -- ' || p_title ELSE '' END || ' ready for User UAT'
         WHEN p_new_state = 'director_review'
             THEN p_ticket_id || CASE WHEN p_title <> '' THEN ' -- ' || p_title ELSE '' END || ' ready for your review'
         WHEN p_new_state = 'done'
@@ -2300,7 +2300,7 @@ BEGIN
         ticket_board.transition_notification_payload(t.id, ns.previous_state, t.state, t.assignee)
     FROM ticket_board.tickets t
     JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
-    WHERE t.state IN ('analysis', 'in_progress', 'inspection', 'audit', 'dat', 'eric_review', 'director_review')
+    WHERE t.state IN ('analysis', 'in_progress', 'inspection', 'audit', 'dat', 'user_review', 'director_review')
       AND NOT t.manually_controlled
       AND (ns.last_transition_notified_at IS NULL OR ns.last_transition_notified_at < ns.entered_current_state_at)
     ORDER BY ns.entered_current_state_at, t.ticket_number;
@@ -2427,7 +2427,7 @@ AS $$
     SELECT p_ticket_id
         || ' is waiting in your '
         || p_state
-        || ' queue. Advance it or hand it off. If you cannot move it forward, tell Eric what is wrong.';
+        || ' queue. Advance it or hand it off. If you cannot move it forward, tell User what is wrong.';
 $$;
 
 CREATE OR REPLACE FUNCTION ticket_board.idle_without_advancing_problem_message(
@@ -2605,7 +2605,7 @@ BEGIN
                 WHEN candidate.owner_role = 'director' AND candidate.idle_reminder_count >= 1 THEN ticket_board.idle_without_advancing_problem_message(
                     candidate.id,
                     candidate.state,
-                    'Eric'
+                    'User'
                 )
                 WHEN candidate.owner_role = 'director' THEN ticket_board.idle_without_advancing_director_message(
                     candidate.id,
@@ -3424,7 +3424,7 @@ BEGIN
     IF actor IS NULL THEN
         RETURN ticket_board.current_actor_role();
     END IF;
-    IF actor NOT IN ('director', 'eric', 'main', 'app', 'ops', 'audit', 'inspector', 'perf', 'research') THEN
+    IF actor NOT IN ('director', 'user', 'main', 'app', 'ops', 'audit', 'inspector', 'perf', 'research') THEN
         RAISE EXCEPTION 'invalid ticket_board.caller_role: %', actor;
     END IF;
     RETURN actor;
@@ -3530,8 +3530,8 @@ BEGIN
         'audit_signoff', ticket_row.audit_signoff,
         'needs_inspection', ticket_row.needs_inspection,
         'inspector_signoff', ticket_row.inspector_signoff,
-        'needs_eric_signoff', ticket_row.needs_eric_signoff,
-        'eric_signoff', ticket_row.eric_signoff,
+        'needs_user_signoff', ticket_row.needs_user_signoff,
+        'user_signoff', ticket_row.user_signoff,
         'commit_hash', ticket_row.commit_hash,
         'commit_exempt', ticket_row.commit_exempt,
         'regression', ticket_row.regression,
@@ -3745,7 +3745,7 @@ CREATE OR REPLACE FUNCTION ticket_board.create_ticket(
     initial_state text,
     blocked_by text[],
     blocked_reason text,
-    needs_eric_signoff boolean
+    needs_user_signoff boolean
 )
 RETURNS text
 LANGUAGE plpgsql
@@ -3763,7 +3763,7 @@ DECLARE
     created_at_value timestamptz := clock_timestamp();
     created_text_value text := ticket_board.utc_text(created_at_value);
 BEGIN
-    actor := ticket_board.require_actor(ARRAY['director', 'eric'], 'create_ticket');
+    actor := ticket_board.require_actor(ARRAY['director', 'user'], 'create_ticket');
     IF btrim(coalesce(title, '')) = '' THEN
         RAISE EXCEPTION 'title must be non-empty';
     END IF;
@@ -3791,7 +3791,7 @@ BEGIN
         state,
         assignee,
         parked,
-        needs_eric_signoff,
+        needs_user_signoff,
         created_text,
         updated_text,
         created_at,
@@ -3805,7 +3805,7 @@ BEGIN
         normalized_state,
         normalized_assignee,
         normalized_parked,
-        coalesce(needs_eric_signoff, false),
+        coalesce(needs_user_signoff, false),
         created_text_value,
         created_text_value,
         created_at_value,
@@ -3817,7 +3817,7 @@ BEGIN
             'state', normalized_state,
             'assignee', normalized_assignee,
             'parked', normalized_parked,
-            'needs_eric_signoff', coalesce(needs_eric_signoff, false),
+            'needs_user_signoff', coalesce(needs_user_signoff, false),
             'comments', '[]'::jsonb,
             'created', created_text_value,
             'updated', created_text_value
@@ -3971,7 +3971,7 @@ DECLARE
     current_state text;
     current_assignee text;
 BEGIN
-    IF new_state NOT IN ('draft', 'backlog', 'analysis', 'in_progress', 'inspection', 'audit', 'dat', 'eric_review', 'director_review', 'done', 'cancelled') THEN
+    IF new_state NOT IN ('draft', 'backlog', 'analysis', 'in_progress', 'inspection', 'audit', 'dat', 'user_review', 'director_review', 'done', 'cancelled') THEN
         RAISE EXCEPTION 'invalid state: %', new_state;
     END IF;
     IF assignee NOT IN ('unassigned', 'main', 'app', 'perf', 'ops', 'audit', 'inspector', 'agent', 'director', 'research') THEN
@@ -4056,7 +4056,7 @@ DECLARE
     serial_focus_queued boolean := false;
 BEGIN
     actor := ticket_board.require_actor(ARRAY['director'], 'force_move');
-    IF new_state NOT IN ('draft', 'backlog', 'analysis', 'in_progress', 'inspection', 'audit', 'dat', 'eric_review', 'director_review', 'done', 'cancelled') THEN
+    IF new_state NOT IN ('draft', 'backlog', 'analysis', 'in_progress', 'inspection', 'audit', 'dat', 'user_review', 'director_review', 'done', 'cancelled') THEN
         RAISE EXCEPTION 'invalid state: %', new_state;
     END IF;
     IF assignee NOT IN ('unassigned', 'main', 'app', 'perf', 'ops', 'audit', 'inspector', 'agent', 'director', 'research') THEN
@@ -4482,11 +4482,11 @@ BEGIN
         PERFORM ticket_board.append_ticket_comment(id, comment_actor, comment_text);
     END IF;
     UPDATE ticket_board.tickets
-    SET state = 'eric_review',
+    SET state = 'user_review',
         assignee = 'director'
     WHERE tickets.id = director_dat_sign_off.id
       AND tickets.state = 'dat'
-      AND tickets.needs_eric_signoff;
+      AND tickets.needs_user_signoff;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'DAT ticket not found: %', id;
     END IF;
@@ -4521,7 +4521,7 @@ BEGIN
         assignee = resolved_assignee,
         audit_signoff = false,
         inspector_signoff = false,
-        eric_signoff = false,
+        user_signoff = false,
         last_rejected_commit = commit_hash
     WHERE tickets.id = director_dat_kick_back.id
       AND tickets.state = 'dat';
@@ -4620,7 +4620,7 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION ticket_board.eric_sign_off(
+CREATE OR REPLACE FUNCTION ticket_board.user_sign_off(
     id text,
     comment_text text DEFAULT ''
 )
@@ -4634,22 +4634,22 @@ DECLARE
     actor text;
     comment_actor text;
 BEGIN
-    comment_actor := ticket_board.require_workflow_transition_actor('eric_sign_off', id);
+    comment_actor := ticket_board.require_workflow_transition_actor('user_sign_off', id);
     IF btrim(coalesce(comment_text, '')) <> '' THEN
         PERFORM ticket_board.append_ticket_comment(id, comment_actor, comment_text);
     END IF;
     UPDATE ticket_board.tickets
-    SET eric_signoff = true
-    WHERE tickets.id = eric_sign_off.id
-      AND tickets.state = 'eric_review';
+    SET user_signoff = true
+    WHERE tickets.id = user_sign_off.id
+      AND tickets.state = 'user_review';
     IF NOT FOUND THEN
-        RAISE EXCEPTION 'eric_review ticket not found: %', id;
+        RAISE EXCEPTION 'user_review ticket not found: %', id;
     END IF;
     PERFORM ticket_board.touch_ticket(id);
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION ticket_board.eric_reopen(
+CREATE OR REPLACE FUNCTION ticket_board.user_reopen(
     id text,
     reason text
 )
@@ -4663,14 +4663,14 @@ DECLARE
     actor text;
     comment_actor text;
 BEGIN
-    comment_actor := ticket_board.require_workflow_transition_actor('eric_reopen', id);
+    comment_actor := ticket_board.require_workflow_transition_actor('user_reopen', id);
     IF btrim(coalesce(reason, '')) <> '' THEN
         PERFORM ticket_board.append_ticket_comment(id, comment_actor, reason);
     END IF;
     UPDATE ticket_board.tickets
     SET state = 'analysis'
-    WHERE tickets.id = eric_reopen.id
-      AND tickets.state IN ('eric_review', 'director_review', 'done');
+    WHERE tickets.id = user_reopen.id
+      AND tickets.state IN ('user_review', 'director_review', 'done');
     IF NOT FOUND THEN
         RAISE EXCEPTION 'reviewed ticket not found: %', id;
     END IF;
@@ -4853,11 +4853,11 @@ DECLARE
     actor text;
     comment_actor text;
 BEGIN
-    actor := ticket_board.require_actor(ARRAY['director', 'eric', 'main', 'app', 'ops', 'audit', 'inspector', 'perf', 'research'], 'add_comment');
+    actor := ticket_board.require_actor(ARRAY['director', 'user', 'main', 'app', 'ops', 'audit', 'inspector', 'perf', 'research'], 'add_comment');
     comment_actor := ticket_board.current_app_actor();
     PERFORM ticket_board.append_ticket_comment(id, comment_actor, text, urgent);
     PERFORM ticket_board.touch_ticket(id);
-    IF urgent OR comment_actor IN ('director', 'eric') THEN
+    IF urgent OR comment_actor IN ('director', 'user') THEN
         PERFORM ticket_board.notify_ticket_owner_in_place_change(id, 'new comment');
     END IF;
 END;
@@ -4897,7 +4897,7 @@ DECLARE
     screenshot_value text;
 BEGIN
     actor := ticket_board.require_actor(
-        ARRAY['director', 'eric', 'main', 'app', 'ops', 'audit', 'inspector', 'perf', 'research'],
+        ARRAY['director', 'user', 'main', 'app', 'ops', 'audit', 'inspector', 'perf', 'research'],
         'edit_fields'
     );
     IF patch IS NULL OR jsonb_typeof(patch) <> 'object' THEN
@@ -4916,13 +4916,13 @@ BEGIN
         'implementation',
         'audit_prompt',
         'needs_inspection',
-        'needs_eric_signoff',
+        'needs_user_signoff',
         'commit_exempt',
         'regression',
         'commit_hash',
         'audit_signoff',
         'inspector_signoff',
-        'eric_signoff'
+        'user_signoff'
     )
     ORDER BY key
     LIMIT 1;
@@ -4935,8 +4935,8 @@ BEGIN
     IF patch @> '{"inspector_signoff": true}'::jsonb THEN
         RAISE EXCEPTION 'inspector_signoff=true requires inspector_sign_off';
     END IF;
-    IF patch @> '{"eric_signoff": true}'::jsonb THEN
-        RAISE EXCEPTION 'eric_signoff=true requires eric_sign_off';
+    IF patch @> '{"user_signoff": true}'::jsonb THEN
+        RAISE EXCEPTION 'user_signoff=true requires user_sign_off';
     END IF;
     IF patch ? 'needs_inspection' AND ticket_board.current_app_actor() <> 'director' THEN
         RAISE EXCEPTION 'needs_inspection can only be edited by director' USING ERRCODE = '42501';
@@ -4998,13 +4998,13 @@ BEGIN
         implementation = CASE WHEN patch ? 'implementation' THEN coalesce(patch->>'implementation', '') ELSE implementation END,
         audit_prompt = CASE WHEN patch ? 'audit_prompt' THEN coalesce(patch->>'audit_prompt', '') ELSE audit_prompt END,
         needs_inspection = CASE WHEN patch ? 'needs_inspection' THEN (patch->>'needs_inspection')::boolean ELSE needs_inspection END,
-        needs_eric_signoff = CASE WHEN patch ? 'needs_eric_signoff' THEN (patch->>'needs_eric_signoff')::boolean ELSE needs_eric_signoff END,
+        needs_user_signoff = CASE WHEN patch ? 'needs_user_signoff' THEN (patch->>'needs_user_signoff')::boolean ELSE needs_user_signoff END,
         commit_exempt = CASE WHEN patch ? 'commit_exempt' THEN (patch->>'commit_exempt')::boolean ELSE commit_exempt END,
         regression = CASE WHEN patch ? 'regression' THEN (patch->>'regression')::boolean ELSE regression END,
         commit_hash = CASE WHEN patch ? 'commit_hash' THEN btrim(coalesce(patch->>'commit_hash', '')) ELSE commit_hash END,
         audit_signoff = CASE WHEN patch ? 'audit_signoff' THEN (patch->>'audit_signoff')::boolean ELSE audit_signoff END,
         inspector_signoff = CASE WHEN patch ? 'inspector_signoff' THEN (patch->>'inspector_signoff')::boolean ELSE inspector_signoff END,
-        eric_signoff = CASE WHEN patch ? 'eric_signoff' THEN (patch->>'eric_signoff')::boolean ELSE eric_signoff END,
+        user_signoff = CASE WHEN patch ? 'user_signoff' THEN (patch->>'user_signoff')::boolean ELSE user_signoff END,
         screenshot = CASE WHEN patch ? 'screenshot' THEN nullif(patch->>'screenshot', '') ELSE screenshot END
     WHERE tickets.id = edit_fields.id;
 

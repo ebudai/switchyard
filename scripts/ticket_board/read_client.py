@@ -14,8 +14,8 @@ from urllib import parse, request
 
 DEFAULT_BOARD_URL = os.environ.get("PGU_TICKET_BOARD_URL", "http://127.0.0.1:8770")
 TERMINAL_STATES = {"done", "cancelled"}
-ACTIVE_STATES = {"in_progress", "inspection", "audit", "dat", "director_review", "eric_review"}
-REVIEW_STATES = {"inspection", "audit", "dat", "director_review", "eric_review"}
+ACTIVE_STATES = {"in_progress", "inspection", "audit", "dat", "director_review", "user_review"}
+REVIEW_STATES = {"inspection", "audit", "dat", "director_review", "user_review"}
 
 
 class TicketBoardReadError(RuntimeError):
@@ -158,7 +158,7 @@ def queue_ticket_matches(ticket: dict[str, Any]) -> bool:
 
 
 def sort_queue_tickets(tickets: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    state_order = {"in_progress": 0, "inspection": 1, "audit": 2, "dat": 3, "eric_review": 4, "director_review": 5, "backlog": 6}
+    state_order = {"in_progress": 0, "inspection": 1, "audit": 2, "dat": 3, "user_review": 4, "director_review": 5, "backlog": 6}
     return sorted(tickets, key=lambda ticket: (state_order.get(str(ticket.get("state", "")), 99), ticket_number(str(ticket.get("id", "")))))
 
 
@@ -176,8 +176,8 @@ def format_ticket(ticket: dict[str, Any]) -> str:
         "Flags:",
         f"  needs_inspection: {bool(ticket.get('needs_inspection', False))}",
         f"  inspector_signoff: {bool(ticket.get('inspector_signoff', False))}",
-        f"  needs_eric_signoff: {bool(ticket.get('needs_eric_signoff', False))}",
-        f"  eric_signoff: {bool(ticket.get('eric_signoff', False))}",
+        f"  needs_user_signoff: {bool(ticket.get('needs_user_signoff', False))}",
+        f"  user_signoff: {bool(ticket.get('user_signoff', False))}",
         f"  audit_signoff: {bool(ticket.get('audit_signoff', False))}",
         f"  manually_controlled: {bool(ticket.get('manually_controlled', False))}",
         f"  regression: {bool(ticket.get('regression', False))}",

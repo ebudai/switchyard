@@ -15,7 +15,7 @@ from scripts.ticket_board.frontend import HTML
 
 def main() -> int:
     assert "<h1>PGU Ticket Board</h1>" in HTML
-    assert "States: analysis -> in_progress -> director_review -> audit -> eric_review -> done. Done is hidden by default." not in HTML
+    assert "States: analysis -> in_progress -> director_review -> audit -> user_review -> done. Done is hidden by default." not in HTML
     assert "Show Done" in HTML
     print("board_header_blurb_test: ok")
     return 0

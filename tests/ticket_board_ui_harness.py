@@ -41,7 +41,7 @@ WORKFLOW_COLUMNS = [
     {"key": "inspection", "label": "Inspection"},
     {"key": "audit", "label": "Audit"},
     {"key": "dat", "label": "DAT"},
-    {"key": "eric_review", "label": "UAT"},
+    {"key": "user_review", "label": "UAT"},
     {"key": "director_review", "label": "Final Sign-Off"},
     {"key": "done", "label": "Done"},
     {"key": "cancelled", "label": "Cancelled"},
@@ -90,8 +90,8 @@ def ticket_payload(
     audit_signoff: bool = False,
     needs_inspection: bool = False,
     inspector_signoff: bool = False,
-    needs_eric_signoff: bool = False,
-    eric_signoff: bool = False,
+    needs_user_signoff: bool = False,
+    user_signoff: bool = False,
     regression: bool = False,
     manually_controlled: bool = False,
     commit_hash: str = "",
@@ -114,8 +114,8 @@ def ticket_payload(
         "audit_signoff": audit_signoff,
         "needs_inspection": needs_inspection,
         "inspector_signoff": inspector_signoff,
-        "needs_eric_signoff": needs_eric_signoff,
-        "eric_signoff": eric_signoff,
+        "needs_user_signoff": needs_user_signoff,
+        "user_signoff": user_signoff,
         "manually_controlled": manually_controlled,
         "parked": state == "backlog",
         "commit_hash": commit_hash,
@@ -180,7 +180,7 @@ class InMemoryTicketBoardApp:
                     len(ticket.get("comments") or []),
                     len(ticket.get("screenshots") or []),
                     bool(ticket.get("audit_signoff")),
-                    bool(ticket.get("eric_signoff")),
+                    bool(ticket.get("user_signoff")),
                 )
             )
         return tuple(rows)
@@ -217,7 +217,7 @@ class InMemoryTicketBoardApp:
         screenshot: str | None,
         screenshots: list[str] | None = None,
         assignee: str,
-        needs_eric_signoff: bool,
+        needs_user_signoff: bool,
         needs_inspection: bool = False,
         regression: bool = False,
         blocked_by: list[str] | None = None,
@@ -240,8 +240,8 @@ class InMemoryTicketBoardApp:
             audit_signoff=False,
             needs_inspection=needs_inspection,
             inspector_signoff=False,
-            needs_eric_signoff=needs_eric_signoff,
-            eric_signoff=False,
+            needs_user_signoff=needs_user_signoff,
+            user_signoff=False,
             regression=regression,
             comments=[],
             blocked_reason=blocked_reason,
@@ -274,8 +274,8 @@ class InMemoryTicketBoardApp:
             audit_signoff=bool(kwargs.get("audit_signoff", False)),
             needs_inspection=bool(kwargs.get("needs_inspection", False)),
             inspector_signoff=bool(kwargs.get("inspector_signoff", False)),
-            needs_eric_signoff=bool(kwargs.get("needs_eric_signoff", False)),
-            eric_signoff=bool(kwargs.get("eric_signoff", False)),
+            needs_user_signoff=bool(kwargs.get("needs_user_signoff", False)),
+            user_signoff=bool(kwargs.get("user_signoff", False)),
             regression=bool(kwargs.get("regression", False)),
             commit_hash=str(kwargs.get("commit_hash", "")),
             commit_exempt=bool(kwargs.get("commit_exempt", False)),
@@ -512,13 +512,13 @@ class InMemoryTicketBoardApp:
             "implementation",
             "audit_prompt",
             "needs_inspection",
-            "needs_eric_signoff",
+            "needs_user_signoff",
             "commit_exempt",
             "regression",
             "commit_hash",
             "audit_signoff",
             "inspector_signoff",
-            "eric_signoff",
+            "user_signoff",
             "manually_controlled",
             "active_work_highlight",
             "awaiting_role",
@@ -549,7 +549,7 @@ class InMemoryTicketBoardApp:
         if ticket.get("blocked_by") and not str(ticket.get("blocked_reason", "")).strip():
             raise ValueError("blocked_reason must be non-empty when blocked_by is set")
 
-        if patch.get("eric_signoff") is True and ticket.get("state") == "eric_review":
+        if patch.get("user_signoff") is True and ticket.get("state") == "user_review":
             ticket["state"] = "director_review"
             ticket["assignee"] = "director"
 

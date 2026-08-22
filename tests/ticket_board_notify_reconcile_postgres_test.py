@@ -72,7 +72,7 @@ def create_pane_roles(conninfo: str) -> None:
         conninfo,
         """
 CREATE ROLE director LOGIN;
-CREATE ROLE eric LOGIN;
+CREATE ROLE "user" LOGIN;
 CREATE ROLE ops LOGIN;
 CREATE ROLE app LOGIN;
 CREATE ROLE audit LOGIN;

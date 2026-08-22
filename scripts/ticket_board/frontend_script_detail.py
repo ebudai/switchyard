@@ -21,11 +21,11 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       commentWho.setAttribute('aria-label', 'Comment author');
       const commentAuthorRoles = state.callerRoles.length
         ? state.callerRoles
-        : ['director', 'main', 'app', 'ops', 'perf', 'audit', 'inspector', 'research', 'eric'];
+        : ['director', 'main', 'app', 'ops', 'perf', 'audit', 'inspector', 'research', 'user'];
       commentAuthorRoles.forEach((role) => {
         buildOption(commentWho, role, roleLabel(role));
       });
-      commentWho.value = ticketIsEricReview(ticket) ? 'eric' : 'director';
+      commentWho.value = ticketIsEricReview(ticket) ? 'user' : 'director';
       bindDetailDraftField(draftFields, commentWho, 'commentWho', commentWho.value);
       const commentText = document.createElement('textarea');
       commentText.placeholder = 'Add a comment or bounce-back note';
@@ -61,50 +61,50 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       };
 
       if (ticketIsEricReview(ticket)) {
-        const signoffRecorded = !!ticket.eric_signoff;
+        const signoffRecorded = !!ticket.user_signoff;
         const ericBanner = document.createElement('div');
-        ericBanner.className = signoffRecorded ? 'eric-banner eric-banner-confirmed' : 'eric-banner';
+        ericBanner.className = signoffRecorded ? 'user-banner user-banner-confirmed' : 'user-banner';
         const ericBannerSubtitle = document.createElement('div');
-        ericBannerSubtitle.className = 'eric-banner-subtitle';
+        ericBannerSubtitle.className = 'user-banner-subtitle';
         ericBannerSubtitle.textContent = signoffRecorded ? 'Signed Off ✓' : 'Awaiting UAT sign-off';
         const ericBannerTitle = document.createElement('div');
-        ericBannerTitle.className = 'eric-banner-title';
+        ericBannerTitle.className = 'user-banner-title';
         ericBannerTitle.textContent = ticket.title;
         const ericBannerNote = document.createElement('div');
-        ericBannerNote.className = 'eric-banner-note';
+        ericBannerNote.className = 'user-banner-note';
         ericBannerNote.textContent = signoffRecorded
           ? 'UAT sign-off recorded. Waiting for director completion.'
           : ericReviewCheckText(ticket);
         const ericSummary = document.createElement('div');
-        ericSummary.className = 'eric-summary';
+        ericSummary.className = 'user-summary';
         const ericSummaryHead = document.createElement('div');
-        ericSummaryHead.className = 'eric-summary-head';
+        ericSummaryHead.className = 'user-summary-head';
         ericSummaryHead.textContent = signoffRecorded ? 'Signed-off UAT Snapshot' : 'UAT Check Before Sign-off';
         const ericSummaryStatuses = document.createElement('div');
-        ericSummaryStatuses.className = 'eric-summary-statuses';
+        ericSummaryStatuses.className = 'user-summary-statuses';
         ericReviewStatusItems(ticket).forEach((item) => {
           const row = document.createElement('div');
-          row.className = 'eric-summary-status';
+          row.className = 'user-summary-status';
           const strong = document.createElement('strong');
           strong.textContent = item.label;
           const value = document.createElement('span');
-          value.className = item.ok ? 'eric-summary-status-ok' : 'eric-summary-status-missing';
+          value.className = item.ok ? 'user-summary-status-ok' : 'user-summary-status-missing';
           value.textContent = item.ok ? (item.okText || 'ready') : (item.missingText || 'missing');
           row.append(strong, value);
           ericSummaryStatuses.appendChild(row);
         });
         const ericSummarySections = document.createElement('div');
-        ericSummarySections.className = 'eric-summary-sections';
+        ericSummarySections.className = 'user-summary-sections';
         ericReviewSummarySections(ticket).forEach((section) => {
           const sectionEl = document.createElement('div');
-          sectionEl.className = 'eric-summary-section';
+          sectionEl.className = 'user-summary-section';
           const label = document.createElement('div');
-          label.className = 'eric-summary-label';
+          label.className = 'user-summary-label';
           label.textContent = section.label;
           sectionEl.appendChild(label);
           if (section.checklist) {
             const list = document.createElement('ul');
-            list.className = 'eric-summary-list';
+            list.className = 'user-summary-list';
             section.checklist.forEach((item) => {
               const entry = document.createElement('li');
               entry.textContent = item;
@@ -113,7 +113,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
             sectionEl.appendChild(list);
           } else if (section.summary) {
             const text = document.createElement('div');
-            text.className = 'eric-summary-text';
+            text.className = 'user-summary-text';
             text.textContent = section.summary;
             sectionEl.appendChild(text);
           }
@@ -122,7 +122,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         ericSummary.append(ericSummaryHead, ericSummaryStatuses, ericSummarySections);
         if (signoffRecorded) {
           const confirmation = document.createElement('div');
-          confirmation.className = 'eric-signoff-confirmation';
+          confirmation.className = 'user-signoff-confirmation';
           confirmation.textContent = 'Signed off ✓ Waiting for director completion.';
           ericSummary.appendChild(confirmation);
         }
@@ -248,8 +248,8 @@ SCRIPT_DETAIL = """    function selectedTicket() {
 
       const toggles = document.createElement('div');
       toggles.className = 'tag-row';
-      toggles.appendChild(toggleControl('Requires UAT', ticket.needs_eric_signoff, async (checked) => {
-        await updateDetailTicketForToggle({ needs_eric_signoff: checked });
+      toggles.appendChild(toggleControl('Requires UAT', ticket.needs_user_signoff, async (checked) => {
+        await updateDetailTicketForToggle({ needs_user_signoff: checked });
       }));
       toggles.appendChild(toggleControl('Needs inspection', ticket.needs_inspection, async (checked) => {
         await updateDetailTicketForToggle({ needs_inspection: checked }, 'director');
@@ -274,15 +274,15 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         }
         await updateDetailTicketForToggle(patch, 'audit');
       }));
-      toggles.appendChild(toggleControl('UAT sign-off', ticket.eric_signoff, async (checked) => {
-        const patch = { eric_signoff: checked };
+      toggles.appendChild(toggleControl('UAT sign-off', ticket.user_signoff, async (checked) => {
+        const patch = { user_signoff: checked };
         if (checked && commentText.value.trim()) {
-          patch.comment = { who: 'eric', text: commentText.value.trim() };
+          patch.comment = { who: 'user', text: commentText.value.trim() };
         }
-        await updateDetailTicketForToggle(patch, 'eric');
+        await updateDetailTicketForToggle(patch, 'user');
       }, {
-        disabled: !ticket.needs_eric_signoff,
-        title: ticket.needs_eric_signoff ? '' : 'Ticket does not require UAT sign-off.',
+        disabled: !ticket.needs_user_signoff,
+        title: ticket.needs_user_signoff ? '' : 'Ticket does not require UAT sign-off.',
       }));
 
       const meta = document.createElement('div');

@@ -119,8 +119,8 @@ const TICKET_OPERATION_HANDLERS: Record<TicketOperation, TicketOpHandler> = {
     const payload = ReasonBodySchema.parse(body);
     return auditKickBack(sql, ticketId, caller, payload.reason ?? payload.text ?? "");
   },
-  eric_sign_off: (sql, ticketId) => ericSignOff(sql, ticketId),
-  eric_reopen: (sql, ticketId, caller, body) => {
+  user_sign_off: (sql, ticketId) => ericSignOff(sql, ticketId),
+  user_reopen: (sql, ticketId, caller, body) => {
     const payload = ReasonBodySchema.parse(body);
     return ericReopen(sql, ticketId, caller, payload.reason ?? payload.text ?? "");
   },

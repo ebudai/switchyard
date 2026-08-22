@@ -63,7 +63,7 @@ def test_wrapper_sudos_to_configured_run_as_user_when_different() -> None:
 
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-wrapper.") as tmp:
         config_path = _write_config(Path(tmp), run_as_user="agent")
-        wrapper.current_user_name = lambda: "eric"
+        wrapper.current_user_name = lambda: "user"
         wrapper.host_wayland_display = lambda: "/run/user/1000/wayland-0"
         wrapper.subprocess.call = fake_call
 

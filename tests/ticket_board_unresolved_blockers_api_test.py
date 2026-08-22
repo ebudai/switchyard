@@ -27,7 +27,7 @@ from scripts.ticket_board.app import TicketBoardApp
 
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
 RBAC_PATH = ROOT / "scripts" / "ticket_board" / "rbac.sql"
-PANE_ROLES = ["director", "eric", "ops", "app", "audit", "inspector", "perf", "research", "main"]
+PANE_ROLES = ["director", "user", "ops", "app", "audit", "inspector", "perf", "research", "main"]
 SERVICE_ROLE = "ticket_board_service"
 
 
@@ -97,8 +97,12 @@ INSERT INTO ticket_board.tickets (
     )
 
 
+def sql_ident(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
+
+
 def create_roles(conn: str) -> None:
-    psql(conn, "\n".join(f"CREATE ROLE {role} LOGIN;" for role in PANE_ROLES))
+    psql(conn, "\n".join(f"CREATE ROLE {sql_ident(role)} LOGIN;" for role in PANE_ROLES))
 
 
 def main() -> int:

@@ -83,7 +83,7 @@ class RecordingHandler(BaseHTTPRequestHandler):
             ticket["state"] = "in_progress"
             ticket["assignee"] = payload.get("target_assignee", payload.get("assignee", "ops"))
         elif operation == "director_dat_sign_off":
-            ticket["state"] = "eric_review"
+            ticket["state"] = "user_review"
             if payload.get("text"):
                 ticket["comments"] = [{"who": caller, "text": payload.get("text", "")}]
         elif operation == "director_dat_kick_back":
@@ -91,11 +91,11 @@ class RecordingHandler(BaseHTTPRequestHandler):
             ticket["assignee"] = payload.get("target_assignee", payload.get("assignee", "ops"))
             if payload.get("reason"):
                 ticket["comments"] = [{"who": caller, "text": payload.get("reason", "")}]
-        elif operation == "eric_sign_off":
+        elif operation == "user_sign_off":
             ticket["state"] = "director_review"
             if payload.get("text"):
                 ticket["comments"] = [{"who": caller, "text": payload.get("text", "")}]
-        elif operation == "eric_reopen":
+        elif operation == "user_reopen":
             ticket["state"] = "analysis"
         elif operation == "release_draft":
             ticket["state"] = "analysis"
@@ -184,9 +184,9 @@ def assert_action_requests(requests: list[tuple[str, str | None, dict[str, objec
     assert ("/api/tickets/PGU-103/actions/audit_kick_back", "audit") in pairs
     assert ("/api/tickets/PGU-102/actions/director_dat_sign_off", "director") in pairs
     assert ("/api/tickets/PGU-102/actions/director_dat_kick_back", "director") in pairs
-    assert ("/api/tickets/PGU-104/actions/eric_sign_off", "eric") in pairs
-    assert ("/api/tickets/PGU-105/actions/eric_reopen", "eric") in pairs
-    assert ("/api/tickets/PGU-140/actions/release_draft", "eric") in pairs
+    assert ("/api/tickets/PGU-104/actions/user_sign_off", "user") in pairs
+    assert ("/api/tickets/PGU-105/actions/user_reopen", "user") in pairs
+    assert ("/api/tickets/PGU-140/actions/release_draft", "user") in pairs
     assert ("/api/tickets/PGU-106/actions/mark_done", "director") in pairs
     assert ("/api/tickets/PGU-107/actions/defer", "director") in pairs
     assert ("/api/tickets/PGU-108/actions/cancel", "director") in pairs
@@ -230,7 +230,7 @@ def exercise_client(base_url: str, repo: Path, commit_hash: str) -> None:
         assert audit_signed["ticket"]["state"] == "director_review"
         assert audit_signed["ticket"]["comments"][-1]["text"] == "Audit verified."
         dat_signed = client.director_dat_sign_off("PGU-102", text="DAT accepted.", caller_role="director")
-        assert dat_signed["ticket"]["state"] == "eric_review"
+        assert dat_signed["ticket"]["state"] == "user_review"
         assert dat_signed["ticket"]["comments"][-1]["text"] == "DAT accepted."
         dat_kicked = client.director_dat_kick_back(
             "PGU-102",
@@ -244,11 +244,11 @@ def exercise_client(base_url: str, repo: Path, commit_hash: str) -> None:
         audit_kicked = client.audit_kick_back("PGU-103", reason="Needs another pass.", target_assignee="ops", caller_role="audit")
         assert audit_kicked["ticket"]["state"] == "in_progress"
         assert audit_kicked["ticket"]["assignee"] == "ops"
-        eric_signed = client.eric_sign_off("PGU-104", text="Eric approves.", caller_role="eric")
+        eric_signed = client.user_sign_off("PGU-104", text="User approves.", caller_role="user")
         assert eric_signed["ticket"]["state"] == "director_review"
-        assert eric_signed["ticket"]["comments"][-1]["text"] == "Eric approves."
-        assert client.eric_reopen("PGU-105", reason="Needs design revision.", caller_role="eric")["ticket"]["state"] == "analysis"
-        assert client.release_draft("PGU-140", caller_role="eric")["ticket"]["state"] == "analysis"
+        assert eric_signed["ticket"]["comments"][-1]["text"] == "User approves."
+        assert client.user_reopen("PGU-105", reason="Needs design revision.", caller_role="user")["ticket"]["state"] == "analysis"
+        assert client.release_draft("PGU-140", caller_role="user")["ticket"]["state"] == "analysis"
         assert client.mark_done("PGU-106", commit_hash=commit_hash)["ticket"]["state"] == "done"
         assert client.mark_done("PGU-114")["ticket"]["commit_hash"] == ""
         assert client.defer("PGU-107")["ticket"]["state"] == "backlog"

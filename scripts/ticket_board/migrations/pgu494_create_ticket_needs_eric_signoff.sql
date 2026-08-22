@@ -4,7 +4,7 @@ CREATE OR REPLACE FUNCTION ticket_board.create_ticket(
     initial_state text,
     blocked_by text[],
     blocked_reason text,
-    needs_eric_signoff boolean
+    needs_user_signoff boolean
 )
 RETURNS text
 LANGUAGE plpgsql
@@ -22,7 +22,7 @@ DECLARE
     created_at_value timestamptz := clock_timestamp();
     created_text_value text := ticket_board.utc_text(created_at_value);
 BEGIN
-    actor := ticket_board.require_actor(ARRAY['director', 'eric'], 'create_ticket');
+    actor := ticket_board.require_actor(ARRAY['director', 'user'], 'create_ticket');
     IF btrim(coalesce(title, '')) = '' THEN
         RAISE EXCEPTION 'title must be non-empty';
     END IF;
@@ -50,7 +50,7 @@ BEGIN
         state,
         assignee,
         parked,
-        needs_eric_signoff,
+        needs_user_signoff,
         created_text,
         updated_text,
         created_at,
@@ -64,7 +64,7 @@ BEGIN
         normalized_state,
         normalized_assignee,
         normalized_parked,
-        coalesce(needs_eric_signoff, false),
+        coalesce(needs_user_signoff, false),
         created_text_value,
         created_text_value,
         created_at_value,
@@ -76,7 +76,7 @@ BEGIN
             'state', normalized_state,
             'assignee', normalized_assignee,
             'parked', normalized_parked,
-            'needs_eric_signoff', coalesce(needs_eric_signoff, false),
+            'needs_user_signoff', coalesce(needs_user_signoff, false),
             'comments', '[]'::jsonb,
             'created', created_text_value,
             'updated', created_text_value

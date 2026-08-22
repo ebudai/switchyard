@@ -62,7 +62,7 @@ PANE
           cat <<'PANE'
 old output
 ──────────────────────────────────────────────────────────────────────────────────────────── Director ──
-❯ Eric is typing a message
+❯ User is typing a message
 ────────────────────────────────────────────────────────────────────────────────────────────────────────
 PANE
         else
@@ -220,7 +220,7 @@ fi
 reset_tmux_state director-typing
 typing_stdout="$TMPDIR_T/director-typing.stdout"
 typing_stderr="$TMPDIR_T/director-typing.stderr"
-if ! run_directorctl callback 'do not starve Eric escalation' >"$typing_stdout" 2>"$typing_stderr"; then
+if ! run_directorctl callback 'do not starve User escalation' >"$typing_stdout" 2>"$typing_stderr"; then
     echo "FAIL: bounded director typing callback did not eventually deliver" >&2
     cat "$typing_stderr" >&2
     exit 1
@@ -230,7 +230,7 @@ if ! grep -q -- "director still appears to be typing after 0 attempts; deliverin
     cat "$typing_stderr" >&2
     exit 1
 fi
-if ! grep -q -- "-l do not starve Eric escalation" "$TMUX_LOG"; then
+if ! grep -q -- "-l do not starve User escalation" "$TMUX_LOG"; then
     echo "FAIL: bounded director typing callback did not send payload" >&2
     cat "$TMUX_LOG" >&2
     exit 1

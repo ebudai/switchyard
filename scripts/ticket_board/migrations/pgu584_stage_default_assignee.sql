@@ -6,7 +6,7 @@ AS $$
     SELECT CASE
         WHEN p_state = 'inspection' THEN 'inspector'
         WHEN p_state = 'audit' THEN 'audit'
-        WHEN p_state IN ('dat', 'eric_review', 'director_review') THEN 'director'
+        WHEN p_state IN ('dat', 'user_review', 'director_review') THEN 'director'
         ELSE NULL
     END;
 $$;

@@ -136,12 +136,12 @@ BEGIN
         RETURN NEW;
     END IF;
 
-    IF NEW.state = 'eric_review' AND NOT NEW.needs_eric_signoff THEN
+    IF NEW.state = 'user_review' AND NOT NEW.needs_user_signoff THEN
         NEW.state := 'audit';
         NEW.audit_signoff := false;
     END IF;
-    IF NOT NEW.needs_eric_signoff THEN
-        NEW.eric_signoff := false;
+    IF NOT NEW.needs_user_signoff THEN
+        NEW.user_signoff := false;
     END IF;
     IF NOT NEW.needs_inspection THEN
         NEW.inspector_signoff := false;
@@ -157,12 +157,12 @@ BEGIN
     IF NEW.state = 'inspection' AND NOT NEW.needs_inspection THEN
         RAISE EXCEPTION 'needs_inspection must be true before a ticket can enter inspection';
     END IF;
-    IF NEW.state = 'eric_review' AND NEW.eric_signoff THEN
+    IF NEW.state = 'user_review' AND NEW.user_signoff THEN
         NEW.state := 'director_review';
         NEW.assignee := 'director';
     END IF;
     IF NEW.state = 'audit' AND NEW.audit_signoff THEN
-        NEW.state := CASE WHEN NEW.needs_eric_signoff THEN 'eric_review' ELSE 'director_review' END;
+        NEW.state := CASE WHEN NEW.needs_user_signoff THEN 'user_review' ELSE 'director_review' END;
         NEW.assignee := 'director';
     END IF;
 
@@ -172,8 +172,8 @@ BEGIN
             (OLD.state = 'analysis' AND NEW.state IN ('in_progress', 'backlog', 'cancelled')) OR
             (OLD.state = 'in_progress' AND NEW.state IN ('inspection', 'audit', 'analysis', 'backlog', 'cancelled')) OR
             (OLD.state = 'inspection' AND NEW.state IN ('audit', 'in_progress', 'backlog', 'cancelled')) OR
-            (OLD.state = 'audit' AND NEW.state IN ('eric_review', 'director_review', 'in_progress', 'analysis', 'backlog', 'cancelled')) OR
-            (OLD.state = 'eric_review' AND NEW.state IN ('inspection', 'director_review', 'audit', 'analysis', 'backlog', 'cancelled')) OR
+            (OLD.state = 'audit' AND NEW.state IN ('user_review', 'director_review', 'in_progress', 'analysis', 'backlog', 'cancelled')) OR
+            (OLD.state = 'user_review' AND NEW.state IN ('inspection', 'director_review', 'audit', 'analysis', 'backlog', 'cancelled')) OR
             (OLD.state = 'director_review' AND NEW.state IN ('done', 'in_progress', 'analysis', 'backlog', 'cancelled')) OR
             (OLD.state = 'done' AND NEW.state IN ('analysis', 'backlog')) OR
             (OLD.state = 'cancelled' AND NEW.state IN ('analysis', 'backlog'))
@@ -182,7 +182,7 @@ BEGIN
         END IF;
     END IF;
 
-    IF OLD.state IN ('inspection', 'audit', 'eric_review', 'director_review', 'done', 'cancelled')
+    IF OLD.state IN ('inspection', 'audit', 'user_review', 'director_review', 'done', 'cancelled')
        AND NEW.state IN ('backlog', 'analysis', 'in_progress') THEN
         NEW.inspector_signoff := false;
         NEW.audit_signoff := false;
@@ -242,20 +242,20 @@ BEGIN
     IF OLD.state = 'in_progress' AND NEW.state = 'audit' AND NEW.needs_inspection AND NOT NEW.inspector_signoff THEN
         RAISE EXCEPTION 'tickets requiring inspection must pass through inspection before audit';
     END IF;
-    IF OLD.state NOT IN ('audit', 'eric_review', 'director_review') AND NEW.state = 'director_review' THEN
+    IF OLD.state NOT IN ('audit', 'user_review', 'director_review') AND NEW.state = 'director_review' THEN
         RAISE EXCEPTION 'tickets must pass through audit before entering director_review';
     END IF;
-    IF OLD.state = 'audit' AND NEW.state = 'director_review' AND NEW.needs_eric_signoff THEN
-        RAISE EXCEPTION 'tickets requiring Eric signoff must pass through eric_review before entering director_review';
+    IF OLD.state = 'audit' AND NEW.state = 'director_review' AND NEW.needs_user_signoff THEN
+        RAISE EXCEPTION 'tickets requiring User signoff must pass through user_review before entering director_review';
     END IF;
-    IF OLD.state = 'audit' AND NEW.state IN ('eric_review', 'director_review', 'done') AND NOT NEW.audit_signoff THEN
+    IF OLD.state = 'audit' AND NEW.state IN ('user_review', 'director_review', 'done') AND NOT NEW.audit_signoff THEN
         RAISE EXCEPTION 'audit_signoff must be true before a ticket can leave audit';
     END IF;
-    IF OLD.state = 'eric_review'
+    IF OLD.state = 'user_review'
        AND NEW.state = 'director_review'
-       AND NEW.needs_eric_signoff
-       AND NOT NEW.eric_signoff THEN
-        RAISE EXCEPTION 'eric_signoff must be true before a ticket can leave eric_review';
+       AND NEW.needs_user_signoff
+       AND NOT NEW.user_signoff THEN
+        RAISE EXCEPTION 'user_signoff must be true before a ticket can leave user_review';
     END IF;
     IF NEW.state = 'done' AND OLD.state NOT IN ('done', 'director_review') THEN
         RAISE EXCEPTION 'tickets can only enter done from director_review';

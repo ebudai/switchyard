@@ -167,7 +167,7 @@ BEGIN
     IF actor IS NULL THEN
         RETURN ticket_board.current_actor_role();
     END IF;
-    IF actor NOT IN ('director', 'eric', 'main', 'app', 'ops', 'audit', 'inspector', 'perf', 'research') THEN
+    IF actor NOT IN ('director', 'user', 'main', 'app', 'ops', 'audit', 'inspector', 'perf', 'research') THEN
         RAISE EXCEPTION 'invalid ticket_board.caller_role: %', actor;
     END IF;
     RETURN actor;
@@ -273,8 +273,8 @@ BEGIN
         'audit_signoff', ticket_row.audit_signoff,
         'needs_inspection', ticket_row.needs_inspection,
         'inspector_signoff', ticket_row.inspector_signoff,
-        'needs_eric_signoff', ticket_row.needs_eric_signoff,
-        'eric_signoff', ticket_row.eric_signoff,
+        'needs_user_signoff', ticket_row.needs_user_signoff,
+        'user_signoff', ticket_row.user_signoff,
         'commit_hash', ticket_row.commit_hash,
         'commit_exempt', ticket_row.commit_exempt,
         'regression', ticket_row.regression,
@@ -488,7 +488,7 @@ CREATE OR REPLACE FUNCTION ticket_board.create_ticket(
     initial_state text,
     blocked_by text[],
     blocked_reason text,
-    needs_eric_signoff boolean
+    needs_user_signoff boolean
 )
 RETURNS text
 LANGUAGE plpgsql
@@ -506,7 +506,7 @@ DECLARE
     created_at_value timestamptz := clock_timestamp();
     created_text_value text := ticket_board.utc_text(created_at_value);
 BEGIN
-    actor := ticket_board.require_actor(ARRAY['director', 'eric'], 'create_ticket');
+    actor := ticket_board.require_actor(ARRAY['director', 'user'], 'create_ticket');
     IF btrim(coalesce(title, '')) = '' THEN
         RAISE EXCEPTION 'title must be non-empty';
     END IF;
@@ -534,7 +534,7 @@ BEGIN
         state,
         assignee,
         parked,
-        needs_eric_signoff,
+        needs_user_signoff,
         created_text,
         updated_text,
         created_at,
@@ -548,7 +548,7 @@ BEGIN
         normalized_state,
         normalized_assignee,
         normalized_parked,
-        coalesce(needs_eric_signoff, false),
+        coalesce(needs_user_signoff, false),
         created_text_value,
         created_text_value,
         created_at_value,
@@ -560,7 +560,7 @@ BEGIN
             'state', normalized_state,
             'assignee', normalized_assignee,
             'parked', normalized_parked,
-            'needs_eric_signoff', coalesce(needs_eric_signoff, false),
+            'needs_user_signoff', coalesce(needs_user_signoff, false),
             'comments', '[]'::jsonb,
             'created', created_text_value,
             'updated', created_text_value
@@ -714,7 +714,7 @@ DECLARE
     current_state text;
     current_assignee text;
 BEGIN
-    IF new_state NOT IN ('draft', 'backlog', 'analysis', 'in_progress', 'inspection', 'audit', 'eric_review', 'director_review', 'done', 'cancelled') THEN
+    IF new_state NOT IN ('draft', 'backlog', 'analysis', 'in_progress', 'inspection', 'audit', 'user_review', 'director_review', 'done', 'cancelled') THEN
         RAISE EXCEPTION 'invalid state: %', new_state;
     END IF;
     IF assignee NOT IN ('unassigned', 'main', 'app', 'perf', 'ops', 'audit', 'inspector', 'agent', 'director', 'research') THEN
@@ -799,7 +799,7 @@ DECLARE
     serial_focus_queued boolean := false;
 BEGIN
     actor := ticket_board.require_actor(ARRAY['director'], 'force_move');
-    IF new_state NOT IN ('draft', 'backlog', 'analysis', 'in_progress', 'inspection', 'audit', 'eric_review', 'director_review', 'done', 'cancelled') THEN
+    IF new_state NOT IN ('draft', 'backlog', 'analysis', 'in_progress', 'inspection', 'audit', 'user_review', 'director_review', 'done', 'cancelled') THEN
         RAISE EXCEPTION 'invalid state: %', new_state;
     END IF;
     IF assignee NOT IN ('unassigned', 'main', 'app', 'perf', 'ops', 'audit', 'inspector', 'agent', 'director', 'research') THEN
@@ -1295,7 +1295,7 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION ticket_board.eric_sign_off(
+CREATE OR REPLACE FUNCTION ticket_board.user_sign_off(
     id text,
     comment_text text DEFAULT ''
 )
@@ -1309,22 +1309,22 @@ DECLARE
     actor text;
     comment_actor text;
 BEGIN
-    comment_actor := ticket_board.require_workflow_transition_actor('eric_sign_off', id);
+    comment_actor := ticket_board.require_workflow_transition_actor('user_sign_off', id);
     IF btrim(coalesce(comment_text, '')) <> '' THEN
         PERFORM ticket_board.append_ticket_comment(id, comment_actor, comment_text);
     END IF;
     UPDATE ticket_board.tickets
-    SET eric_signoff = true
-    WHERE tickets.id = eric_sign_off.id
-      AND tickets.state = 'eric_review';
+    SET user_signoff = true
+    WHERE tickets.id = user_sign_off.id
+      AND tickets.state = 'user_review';
     IF NOT FOUND THEN
-        RAISE EXCEPTION 'eric_review ticket not found: %', id;
+        RAISE EXCEPTION 'user_review ticket not found: %', id;
     END IF;
     PERFORM ticket_board.touch_ticket(id);
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION ticket_board.eric_reopen(
+CREATE OR REPLACE FUNCTION ticket_board.user_reopen(
     id text,
     reason text
 )
@@ -1338,14 +1338,14 @@ DECLARE
     actor text;
     comment_actor text;
 BEGIN
-    comment_actor := ticket_board.require_workflow_transition_actor('eric_reopen', id);
+    comment_actor := ticket_board.require_workflow_transition_actor('user_reopen', id);
     IF btrim(coalesce(reason, '')) <> '' THEN
         PERFORM ticket_board.append_ticket_comment(id, comment_actor, reason);
     END IF;
     UPDATE ticket_board.tickets
     SET state = 'analysis'
-    WHERE tickets.id = eric_reopen.id
-      AND tickets.state IN ('eric_review', 'director_review', 'done');
+    WHERE tickets.id = user_reopen.id
+      AND tickets.state IN ('user_review', 'director_review', 'done');
     IF NOT FOUND THEN
         RAISE EXCEPTION 'reviewed ticket not found: %', id;
     END IF;

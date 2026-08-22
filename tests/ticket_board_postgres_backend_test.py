@@ -29,7 +29,7 @@ from scripts.ticket_board.app import TicketBoardApp
 
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
 RBAC_PATH = ROOT / "scripts" / "ticket_board" / "rbac.sql"
-PANE_ROLES = ["director", "eric", "ops", "app", "audit", "inspector", "perf", "research", "main"]
+PANE_ROLES = ["director", "user", "ops", "app", "audit", "inspector", "perf", "research", "main"]
 SERVICE_ROLE = "ticket_board_service"
 EXPECTED_COLUMNS = [
     {"key": "draft", "label": "Draft"},
@@ -39,7 +39,7 @@ EXPECTED_COLUMNS = [
     {"key": "inspection", "label": "Inspection"},
     {"key": "audit", "label": "Audit"},
     {"key": "dat", "label": "DAT"},
-    {"key": "eric_review", "label": "UAT"},
+    {"key": "user_review", "label": "UAT"},
     {"key": "director_review", "label": "Final Sign-Off"},
     {"key": "done", "label": "Done"},
     {"key": "cancelled", "label": "Cancelled"},
@@ -95,8 +95,12 @@ def psql_error(conn: str, sql: str) -> str:
     return proc.stderr + proc.stdout
 
 
+def sql_ident(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
+
+
 def create_roles(conn: str) -> None:
-    psql(conn, "\n".join(f"CREATE ROLE {role} LOGIN;" for role in PANE_ROLES))
+    psql(conn, "\n".join(f"CREATE ROLE {sql_ident(role)} LOGIN;" for role in PANE_ROLES))
 
 
 def ticket_source(ticket_id: str, title: str, state: str, assignee: str) -> str:
@@ -122,8 +126,8 @@ def insert_ticket(
     assignee: str,
     implementation: str = "Implemented.",
     audit_signoff: bool = False,
-    needs_eric_signoff: bool = False,
-    eric_signoff: bool = False,
+    needs_user_signoff: bool = False,
+    user_signoff: bool = False,
     commit_hash: str = "",
     regression: bool = False,
 ) -> None:
@@ -132,13 +136,13 @@ def insert_ticket(
         f"""
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation,
-    audit_signoff, needs_eric_signoff, eric_signoff, regression, commit_hash,
+    audit_signoff, needs_user_signoff, user_signoff, regression, commit_hash,
     created_text, updated_text, source_json
 ) VALUES (
     '{ticket_id}', '{title}', '', '{state}', '{assignee}', '{implementation}',
-    {str(audit_signoff).lower()}, {str(needs_eric_signoff).lower()},
-    {str(regression).lower()},
-    {str(eric_signoff).lower()}, '{commit_hash}',
+    {str(audit_signoff).lower()}, {str(needs_user_signoff).lower()},
+    {str(user_signoff).lower()},
+    {str(regression).lower()}, '{commit_hash}',
     '2026-07-10T00:00:00+00:00', '2026-07-10T00:00:00+00:00',
     '{ticket_source(ticket_id, title, state, assignee)}'::jsonb
 );
@@ -198,7 +202,7 @@ WHERE table_schema = 'ticket_board'
                 body="Created through TicketBoardApp.",
                 screenshot=None,
                 assignee="unassigned",
-                needs_eric_signoff=False,
+                needs_user_signoff=False,
             )
             assert created["id"] == "PGU-1", created
             assert created["state"] == "analysis", created
@@ -215,7 +219,7 @@ WHERE table_schema = 'ticket_board'
                 body="Created with spec text up front.",
                 screenshot=None,
                 assignee="unassigned",
-                needs_eric_signoff=False,
+                needs_user_signoff=False,
                 implementation="Use the ticket body and this implementation note.",
             )
             assert created_with_implementation["implementation"] == "Use the ticket body and this implementation note.", created_with_implementation
@@ -224,7 +228,7 @@ WHERE table_schema = 'ticket_board'
                 body="Tracks a regression.",
                 screenshot=None,
                 assignee="unassigned",
-                needs_eric_signoff=False,
+                needs_user_signoff=False,
                 regression=True,
             )
             assert created_regression["regression"] is True, created_regression
@@ -233,23 +237,23 @@ WHERE table_schema = 'ticket_board'
                 body="Created with UAT requirement up front.",
                 screenshot=None,
                 assignee="unassigned",
-                needs_eric_signoff=True,
+                needs_user_signoff=True,
             )
-            assert created_needs_uat["needs_eric_signoff"] is True, created_needs_uat
+            assert created_needs_uat["needs_user_signoff"] is True, created_needs_uat
             needs_uat_db_state = json.loads(
                 psql(
                     admin_conn,
                     f"""
 SELECT jsonb_build_object(
-    'needs_eric_signoff', needs_eric_signoff,
-    'source_needs_eric_signoff', source_json->'needs_eric_signoff'
+    'needs_user_signoff', needs_user_signoff,
+    'source_needs_user_signoff', source_json->'needs_user_signoff'
 )::text
 FROM ticket_board.tickets
 WHERE id = '{created_needs_uat["id"]}';
 """,
                 )
             )
-            assert needs_uat_db_state == {"needs_eric_signoff": True, "source_needs_eric_signoff": True}, needs_uat_db_state
+            assert needs_uat_db_state == {"needs_user_signoff": True, "source_needs_user_signoff": True}, needs_uat_db_state
             regression_db_state = json.loads(
                 psql(
                     admin_conn,
@@ -269,7 +273,7 @@ WHERE id = '{created_regression["id"]}';
                 body="Deferred future work.",
                 screenshot=None,
                 assignee="ops",
-                needs_eric_signoff=False,
+                needs_user_signoff=False,
                 state="backlog",
             )
             assert backlog_created["state"] == "backlog", backlog_created
@@ -332,7 +336,7 @@ WHERE t.id = '{backlog_created["id"]}';
                         body="Must reject pipeline state create.",
                         screenshot=None,
                         assignee="ops",
-                        needs_eric_signoff=False,
+                        needs_user_signoff=False,
                         state=disallowed_state,
                     )
                 except ValueError as exc:
@@ -347,7 +351,7 @@ WHERE t.id = '{backlog_created["id"]}';
                 body="Created with a pasted image path.",
                 screenshot=str(create_attachment),
                 assignee="unassigned",
-                needs_eric_signoff=False,
+                needs_user_signoff=False,
             )
             created_attachment_path = Path(created_with_attachment["screenshots"][0])
             assert created_attachment_path != create_attachment.resolve(), created_with_attachment
@@ -371,8 +375,8 @@ WHERE t.id = '{backlog_created["id"]}';
                 implementation="",
                 audit_prompt="",
                 audit_signoff=False,
-                needs_eric_signoff=False,
-                eric_signoff=False,
+                needs_user_signoff=False,
+                user_signoff=False,
                 comments=[],
                 parent_id="PGU-1",
             )
@@ -387,7 +391,7 @@ WHERE t.id = '{backlog_created["id"]}';
                 body="Needs PGU-1 first.",
                 screenshot=None,
                 assignee="unassigned",
-                needs_eric_signoff=False,
+                needs_user_signoff=False,
                 blocked_by=["PGU-1"],
                 blocked_reason="Waiting for PGU-1.",
             )
@@ -521,37 +525,37 @@ WHERE id = 'PGU-100';
             insert_ticket(
                 admin_conn,
                 "PGU-300",
-                title="Eric review",
-                state="eric_review",
+                title="User review",
+                state="user_review",
                 assignee="director",
                 audit_signoff=True,
-                needs_eric_signoff=True,
+                needs_user_signoff=True,
             )
             eric_signed = service_app.update_ticket(
                 "PGU-300",
-                {"eric_signoff": True, "comment": {"who": "eric", "text": "Eric approves."}},
-                caller_role="eric",
+                {"user_signoff": True, "comment": {"who": "user", "text": "User approves."}},
+                caller_role="user",
             )
             assert eric_signed["state"] == "director_review", eric_signed
-            assert eric_signed["eric_signoff"] is True, eric_signed
-            assert eric_signed["comments"][-1]["text"] == "Eric approves.", eric_signed
+            assert eric_signed["user_signoff"] is True, eric_signed
+            assert eric_signed["comments"][-1]["text"] == "User approves.", eric_signed
 
             insert_ticket(
                 admin_conn,
                 "PGU-301",
-                title="Eric reopen",
-                state="eric_review",
+                title="User reopen",
+                state="user_review",
                 assignee="director",
                 audit_signoff=True,
-                needs_eric_signoff=True,
+                needs_user_signoff=True,
             )
-            eric_reopened = service_app.update_ticket(
+            user_reopened = service_app.update_ticket(
                 "PGU-301",
-                {"state": "analysis", "comment": {"who": "eric", "text": "Needs design revision."}},
-                caller_role="eric",
+                {"state": "analysis", "comment": {"who": "user", "text": "Needs design revision."}},
+                caller_role="user",
             )
-            assert eric_reopened["state"] == "analysis", eric_reopened
-            assert eric_reopened["comments"][-1]["text"] == "Needs design revision.", eric_reopened
+            assert user_reopened["state"] == "analysis", user_reopened
+            assert user_reopened["comments"][-1]["text"] == "Needs design revision.", user_reopened
 
             deferred = service_app.update_ticket("PGU-1", {"state": "backlog"}, caller_role="director")
             assert deferred["state"] == "backlog", deferred

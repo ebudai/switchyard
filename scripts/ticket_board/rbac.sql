@@ -13,7 +13,7 @@ DO $$
 DECLARE
     role_name text;
 BEGIN
-    FOREACH role_name IN ARRAY ARRAY['director', 'eric', 'ops', 'app', 'audit', 'inspector', 'perf', 'research', 'main'] LOOP
+    FOREACH role_name IN ARRAY ARRAY['director', 'user', 'ops', 'app', 'audit', 'inspector', 'perf', 'research', 'main'] LOOP
         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
             EXECUTE format('CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION', role_name);
         END IF;
@@ -28,33 +28,33 @@ END;
 $$;
 
 REVOKE ALL ON SCHEMA ticket_board FROM PUBLIC;
-GRANT USAGE ON SCHEMA ticket_board TO director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
+GRANT USAGE ON SCHEMA ticket_board TO director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
 
 REVOKE ALL ON ALL TABLES IN SCHEMA ticket_board FROM PUBLIC;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA ticket_board FROM PUBLIC;
 REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA ticket_board FROM PUBLIC;
 
-REVOKE ALL ON ticket_board.tickets FROM director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
-REVOKE ALL ON ticket_board.ticket_blockers FROM director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
-REVOKE ALL ON ticket_board.ticket_comments FROM director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
-REVOKE ALL ON ticket_board.ticket_attachments FROM director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
-REVOKE ALL ON ticket_board.ticket_notification_queue FROM director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
-REVOKE ALL ON ticket_board.notification_trace FROM director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
-REVOKE ALL ON ticket_board.schema_migrations FROM director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
-REVOKE ALL ON ticket_board.workflow_stages FROM director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
-REVOKE ALL ON ticket_board.workflow_transitions FROM director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
-REVOKE ALL ON ticket_board.workflow_transition_shadow_log FROM director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
-REVOKE ALL ON ticket_board.workflow_transition_rbac_shadow_log FROM director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
-REVOKE ALL ON SEQUENCE ticket_board.ticket_comments_id_seq FROM director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
-REVOKE ALL ON SEQUENCE ticket_board.ticket_notification_queue_id_seq FROM director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
-REVOKE ALL ON SEQUENCE ticket_board.notification_trace_id_seq FROM director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
-REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA ticket_board FROM director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
+REVOKE ALL ON ticket_board.tickets FROM director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
+REVOKE ALL ON ticket_board.ticket_blockers FROM director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
+REVOKE ALL ON ticket_board.ticket_comments FROM director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
+REVOKE ALL ON ticket_board.ticket_attachments FROM director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
+REVOKE ALL ON ticket_board.ticket_notification_queue FROM director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
+REVOKE ALL ON ticket_board.notification_trace FROM director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
+REVOKE ALL ON ticket_board.schema_migrations FROM director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
+REVOKE ALL ON ticket_board.workflow_stages FROM director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
+REVOKE ALL ON ticket_board.workflow_transitions FROM director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
+REVOKE ALL ON ticket_board.workflow_transition_shadow_log FROM director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
+REVOKE ALL ON ticket_board.workflow_transition_rbac_shadow_log FROM director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
+REVOKE ALL ON SEQUENCE ticket_board.ticket_comments_id_seq FROM director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
+REVOKE ALL ON SEQUENCE ticket_board.ticket_notification_queue_id_seq FROM director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
+REVOKE ALL ON SEQUENCE ticket_board.notification_trace_id_seq FROM director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
+REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA ticket_board FROM director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
 
-GRANT SELECT ON ALL TABLES IN SCHEMA ticket_board TO director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
-GRANT SELECT ON ticket_board.schema_migrations TO director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
-GRANT SELECT ON ticket_board.workflow_stages, ticket_board.workflow_transitions TO director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
-GRANT SELECT ON ticket_board.workflow_transition_shadow_log TO director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
-GRANT SELECT ON ticket_board.workflow_transition_rbac_shadow_log TO director, eric, ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
+GRANT SELECT ON ALL TABLES IN SCHEMA ticket_board TO director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
+GRANT SELECT ON ticket_board.schema_migrations TO director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
+GRANT SELECT ON ticket_board.workflow_stages, ticket_board.workflow_transitions TO director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
+GRANT SELECT ON ticket_board.workflow_transition_shadow_log TO director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
+GRANT SELECT ON ticket_board.workflow_transition_rbac_shadow_log TO director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
 
 GRANT EXECUTE ON FUNCTION ticket_board.create_ticket(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.create_ticket(text, text, text) TO ticket_board_service;
@@ -81,8 +81,8 @@ GRANT EXECUTE ON FUNCTION ticket_board.director_dat_kick_back(text, text, text) 
 GRANT EXECUTE ON FUNCTION ticket_board.inspector_sign_off(text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.inspector_kick_back(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.inspector_kick_back(text, text, text) TO ticket_board_service;
-GRANT EXECUTE ON FUNCTION ticket_board.eric_sign_off(text, text) TO ticket_board_service;
-GRANT EXECUTE ON FUNCTION ticket_board.eric_reopen(text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.user_sign_off(text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.user_reopen(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.mark_done(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.defer(text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.cancel(text, text) TO ticket_board_service;

@@ -1,6 +1,6 @@
 # PGU Ticket Board
 
-Lightweight local ticket board for Eric and the director.
+Lightweight local ticket board for User and the director.
 
 Launch:
 
@@ -31,7 +31,7 @@ Pane write API:
   - `POST /api/tickets/<PGU-N>/actions/<operation>`
 - Browser HTTP operation requests must include the per-process
   `X-PGU-Write-Token` emitted into the served board page, plus
-  `X-PGU-Caller-Role` with one of `director`, `eric`, `main`, `app`, `ops`,
+  `X-PGU-Caller-Role` with one of `director`, `user`, `main`, `app`, `ops`,
   `audit`, `perf`, or `research`. Without the token, HTTP writes are rejected;
   read-only HTTP requests remain available.
 - Local pane tooling should write through the Unix-domain socket at
@@ -45,7 +45,7 @@ Pane write API:
 - Ticket-scoped operations are `route`, `start_work`, `submit_to_inspection`,
   `submit_to_audit`,
   `audit_sign_off`, `audit_kick_back`, `director_dat_sign_off`,
-  `director_dat_kick_back`, `eric_sign_off`, `eric_reopen`, `mark_done`,
+  `director_dat_kick_back`, `user_sign_off`, `user_reopen`, `mark_done`,
   `defer`, `cancel`, `set_manually_controlled`, `set_blockers`, `add_comment`,
   `edit_fields`, and `merge`.
 - Python and shell tooling should use `scripts.ticket_board.write_client` or
@@ -118,8 +118,8 @@ Ticket schema:
   "audit_signoff": false,
   "commit_hash": "0123456789abcdef0123456789abcdef01234567",
   "commit_exempt": false,
-  "needs_eric_signoff": true,
-  "eric_signoff": false,
+  "needs_user_signoff": true,
+  "user_signoff": false,
   "created": "2026-07-08T12:34:56+00:00",
   "updated": "2026-07-08T12:40:01+00:00",
   "comments": [
@@ -135,13 +135,13 @@ Ticket schema:
 Allowed values:
 
 - `assignee`: `main`, `app`, `perf`, `ops`, `audit`, `agent`, `director`, `unassigned`
-- `state`: `draft`, `backlog`, `analysis`, `in_progress`, `inspection`, `audit`, `dat`, `eric_review`, `director_review`, `done`, `cancelled`
+- `state`: `draft`, `backlog`, `analysis`, `in_progress`, `inspection`, `audit`, `dat`, `user_review`, `director_review`, `done`, `cancelled`
 
 Notes:
 
-- `eric_review` is reserved for tickets with `needs_eric_signoff: true` and is displayed in the UI as `UAT`
-- `dat` is Director Acceptance Testing, a director-owned gate for `needs_eric_signoff` tickets after audit and before UAT
-- `draft` is an opt-in pre-triage staging state for director/Eric prep; it stays unassigned and does not notify until released to `analysis`
+- `user_review` is reserved for tickets with `needs_user_signoff: true` and is displayed in the UI as `UAT`
+- `dat` is Director Acceptance Testing, a director-owned gate for `needs_user_signoff` tickets after audit and before UAT
+- `draft` is an opt-in pre-triage staging state for director/User prep; it stays unassigned and does not notify until released to `analysis`
 - `backlog` is for deferred or parked tickets; `analysis` is for active triage/spec work before a ticket is revived into Implementation (`in_progress`)
 - `blocked_by` is a list of ticket IDs the ticket is waiting on; `blockers` carries the same IDs with a persistent `resolved` flag, and unresolved blockers prevent forward promotion until the referenced blocker reaches `done` or `cancelled`
 - `implementation` is an optional director-authored implementation package/spec; ticket body/comments can carry the spec, and only assignee must be set before entering Implementation (`in_progress`)
@@ -179,10 +179,10 @@ Notes:
   structured attachment metadata with `source_path`, `source_name`, and the
   original-pixel crop rectangle.
 - New transitions into `done` require either a verified `commit_hash` or `commit_exempt: true`
-- `draft -> analysis` must use the `release_draft` operation and is restricted to director/Eric
+- `draft -> analysis` must use the `release_draft` operation and is restricted to director/User
 - `analysis -> in_progress` is the default handoff from triage/spec to Implementation
 - Any state can move to `backlog` to defer work; backlog tickets can be revived to `analysis`
-- The default UAT-bound review path is `in_progress -> audit -> DAT (internal state: dat) -> UAT (internal state: eric_review) -> director_review -> done`; code-only tickets keep `in_progress -> audit -> director_review -> done`
+- The default UAT-bound review path is `in_progress -> audit -> DAT (internal state: dat) -> UAT (internal state: user_review) -> director_review -> done`; code-only tickets keep `in_progress -> audit -> director_review -> done`
 - Implementer focus is reserved from `in_progress` through review (`inspection`, `audit`, DAT, UAT, and director review); finishing/cancelling/parking the reserved ticket auto-activates that implementer's oldest unblocked queued backlog ticket
 - Director deferral parks the current ticket as `backlog` with `parked: true`; queued implementer backlog (`parked: false`) is intentionally excluded from idle-stall nudges until it becomes active
 - When a ticket is legitimately waiting on another pane, use `scripts/ticket-board-write await-role PGU-N --role perf|inspector|audit|...`; active awaiting markers suppress stall nudges, clear when that role acts on the ticket, and expire after the fallback timeout

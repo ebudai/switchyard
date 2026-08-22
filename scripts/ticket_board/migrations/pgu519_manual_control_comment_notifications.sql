@@ -13,11 +13,11 @@ DECLARE
     actor text;
     comment_actor text;
 BEGIN
-    actor := ticket_board.require_actor(ARRAY['director', 'eric', 'main', 'app', 'ops', 'audit', 'inspector', 'perf', 'research'], 'add_comment');
+    actor := ticket_board.require_actor(ARRAY['director', 'user', 'main', 'app', 'ops', 'audit', 'inspector', 'perf', 'research'], 'add_comment');
     comment_actor := ticket_board.current_app_actor();
     PERFORM ticket_board.append_ticket_comment(id, comment_actor, text, urgent);
     PERFORM ticket_board.touch_ticket(id);
-    IF urgent OR comment_actor IN ('director', 'eric') THEN
+    IF urgent OR comment_actor IN ('director', 'user') THEN
         PERFORM ticket_board.notify_ticket_owner_in_place_change(id, 'new comment');
     END IF;
 END;

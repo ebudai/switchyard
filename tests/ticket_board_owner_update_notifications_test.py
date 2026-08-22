@@ -89,7 +89,7 @@ def insert_ticket(
         f"""
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation, commit_hash, commit_exempt, manually_controlled,
-    audit_signoff, needs_inspection, inspector_signoff, needs_eric_signoff, eric_signoff,
+    audit_signoff, needs_inspection, inspector_signoff, needs_user_signoff, user_signoff,
     created_text, updated_text, source_json
 ) VALUES (
     {sql_string(ticket_id)},
@@ -313,8 +313,8 @@ GRANT EXECUTE ON FUNCTION ticket_board.add_comment(text, text, boolean) TO ticke
             clear_notifications(conninfo, "PGU-51901")
             service_call(
                 conninfo,
-                "eric",
-                "SELECT ticket_board.add_comment('PGU-51901', 'Eric comment must notify even during manual control.');",
+                "user",
+                "SELECT ticket_board.add_comment('PGU-51901', 'User comment must notify even during manual control.');",
             )
             assert_single_ticket_update(
                 conninfo,
@@ -322,7 +322,7 @@ GRANT EXECUTE ON FUNCTION ticket_board.add_comment(text, text, boolean) TO ticke
                 target_role="research",
                 state="in_progress",
                 assignee="research",
-                actor="eric",
+                actor="user",
                 summary="new comment",
                 title="Manual comment signal",
             )

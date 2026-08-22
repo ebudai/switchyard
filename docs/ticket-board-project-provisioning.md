@@ -1,0 +1,40 @@
+# Per-Project Ticket Board Provisioning
+
+Render reviewable artifacts for a new project board:
+
+```bash
+scripts/ticket-board-provision-project \
+  --project stellaris \
+  --owner-user stellaris-agent \
+  --port 8871 \
+  --output-dir /tmp/stellaris-board-provision
+```
+
+The output directory contains:
+
+- `plan.json`: resolved project name, owner, port, database, unit names, socket,
+  asset paths, frame paths, and connection strings.
+- `<project>-ticket-board.service`: system board service unit with unique port,
+  runtime directory, Unix socket, database, and owner-home asset/frame paths.
+- `<project>-ticket-board-notify-listener.service`: owner user unit for the
+  LISTEN/notification shim, pointed at the same project database and pane-state
+  runtime namespace.
+- `<project>-ticket-board.conf`: tmpfiles entry for the project frame inbox.
+- `<project>-database.sql`: PostgreSQL database/role bootstrap.
+- `operator-commands.sh`: ordered privileged commands to review and run.
+
+The provisioner intentionally renders first. It does not mutate the live PGU
+board, restart panes, create databases, or install units unless an operator runs
+the generated commands during an approved window.
+
+## Current Schema Constraint
+
+Each project gets its own database. The database roles remain
+`ticket_board_service` and `ticket_board_listener` for now because
+`schema.sql` enforces those literal actors in `require_actor()` and
+`require_ticket_board_listener()`. The separation boundary is the database, not
+per-project DB role names. The generated RBAC path reuses `rbac.sql`, including
+the listener grant on `ticket_has_unresolved_blockers`.
+
+Changing to per-project DB role names is a separate schema change, not part of
+this provisioning step.

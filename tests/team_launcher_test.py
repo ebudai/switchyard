@@ -24,12 +24,19 @@ from scripts.ticket_board.notify_listener import PaneHookStateStore
 from scripts.team_launcher import (
     cli_command_for_role,
     default_user_bin,
+    deploy_launcher_checkout,
     ensure_configured_runtime_user,
     ensure_project_worktrees,
     ensure_user_linger_runtime,
+    git_checkout_launcher_branch_args,
+    git_clean_launcher_checkout_args,
     git_clean_shared_checkout_args,
+    git_fast_forward_launcher_ref_args,
+    git_fetch_launcher_ref_args,
     git_checkout_shared_ref_args,
     git_fetch_worktree_ref_args,
+    git_launcher_ahead_behind_args,
+    git_launcher_checkout_check_args,
     git_shared_checkout_check_args,
     konsole_launch_args,
     launch_konsole_window,
@@ -98,6 +105,8 @@ class FakeRunner:
             return subprocess.CompletedProcess(args, 0)
         if len(args) >= 5 and args[:5] == ["git", "-C", args[2], "rev-parse", "--is-inside-work-tree"]:
             return subprocess.CompletedProcess(args, 0)
+        if len(args) >= 6 and args[:6] == ["git", "-C", args[2], "rev-list", "--left-right", "--count"]:
+            return subprocess.CompletedProcess(args, 0, stdout="0 0\n")
         return subprocess.CompletedProcess(args, 0)
 
 
@@ -653,6 +662,67 @@ def test_pgu_launch_commands_include_model_and_bypass_flags() -> None:
         assert "--yolo" not in command
 
 
+def test_start_refuses_stale_launcher_checkout_before_touching_role_worktrees() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    calls: list[list[str]] = []
+
+    def runner(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        if args[:3] == ["git", "-C", str(ROOT)] and args[3:] == ["rev-parse", "--is-inside-work-tree"]:
+            return subprocess.CompletedProcess(args, 0)
+        if args[:3] == ["git", "-C", str(ROOT)] and args[3:] == ["fetch", config.worktree_remote, config.worktree_branch]:
+            return subprocess.CompletedProcess(args, 0)
+        if args[:3] == ["git", "-C", str(ROOT)] and args[3:6] == ["rev-list", "--left-right", "--count"]:
+            return subprocess.CompletedProcess(args, 0, stdout="0 173\n")
+        raise AssertionError(f"unexpected call after stale launcher refusal: {args}")
+
+    try:
+        launch_project(
+            config,
+            config_path=ROOT / "config" / "team-launcher" / "pgu.json",
+            mode="start",
+            script_path=ROOT / "scripts" / "team-launcher",
+            runner=runner,
+        )
+        raise AssertionError("expected stale launcher checkout to abort")
+    except SystemExit as exc:
+        message = str(exc)
+
+    assert "refusing to launch from stale checkout" in message
+    assert "173 commit(s) behind origin/main" in message
+    assert "deploy-launcher" in message
+    assert calls == [
+        git_launcher_checkout_check_args(ROOT),
+        git_fetch_launcher_ref_args(config, ROOT),
+        git_launcher_ahead_behind_args(config, ROOT),
+    ]
+
+
+def test_deploy_launcher_checkout_updates_and_verifies_configured_ref() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    launcher_repo = Path("/home/eric/Projects/pgu")
+    calls: list[list[str]] = []
+
+    def runner(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        if args[:3] == ["git", "-C", str(launcher_repo)] and args[3:6] == ["rev-list", "--left-right", "--count"]:
+            return subprocess.CompletedProcess(args, 0, stdout="0 0\n")
+        return subprocess.CompletedProcess(args, 0)
+
+    assert deploy_launcher_checkout(config, launcher_repo=launcher_repo, runner=runner, clean=True) == 0
+
+    assert calls == [
+        git_launcher_checkout_check_args(launcher_repo),
+        git_fetch_launcher_ref_args(config, launcher_repo),
+        git_checkout_launcher_branch_args(config, launcher_repo),
+        git_fast_forward_launcher_ref_args(config, launcher_repo),
+        git_clean_launcher_checkout_args(launcher_repo),
+        git_launcher_checkout_check_args(launcher_repo),
+        git_fetch_launcher_ref_args(config, launcher_repo),
+        git_launcher_ahead_behind_args(config, launcher_repo),
+    ]
+
+
 def test_konsole_launch_uses_gui_user_display_environment() -> None:
     original_uid_for_user = team_launcher.uid_for_user
     original_host_wayland = os.environ.get("PGU_HOST_WAYLAND_DISPLAY")
@@ -957,10 +1027,15 @@ def test_start_runs_research_detached_before_opening_visible_layout() -> None:
             == 0
         )
 
-        assert runner.calls[0] == git_fetch_worktree_ref_args(config)
-        assert runner.calls[1] == git_shared_checkout_check_args(config)
-        assert runner.calls[2] == git_checkout_shared_ref_args(config)
-        assert runner.calls[3] == git_clean_shared_checkout_args(config)
+        assert runner.calls[:3] == [
+            git_launcher_checkout_check_args(ROOT),
+            git_fetch_launcher_ref_args(config, ROOT),
+            git_launcher_ahead_behind_args(config, ROOT),
+        ]
+        assert runner.calls[3] == git_fetch_worktree_ref_args(config)
+        assert runner.calls[4] == git_shared_checkout_check_args(config)
+        assert runner.calls[5] == git_checkout_shared_ref_args(config)
+        assert runner.calls[6] == git_clean_shared_checkout_args(config)
         assert not any(call[:5] == ["git", "-C", call[2], "worktree", "add"] for call in runner.calls)
         research_has_session_index = runner.calls.index(["tmux", "has-session", "-t", "pgu-research"])
         research_new_session = runner.calls[research_has_session_index + 1]
@@ -1033,7 +1108,12 @@ def test_reload_fetches_without_refreshing_shared_checkout() -> None:
             == 0
         )
 
-        assert runner.calls[0] == git_fetch_worktree_ref_args(config)
+        assert runner.calls[:3] == [
+            git_launcher_checkout_check_args(ROOT),
+            git_fetch_launcher_ref_args(config, ROOT),
+            git_launcher_ahead_behind_args(config, ROOT),
+        ]
+        assert runner.calls[3] == git_fetch_worktree_ref_args(config)
         assert not any(call[:5] == ["git", "-C", call[2], "worktree", "add"] for call in runner.calls)
         assert git_checkout_shared_ref_args(config) not in runner.calls
         assert git_clean_shared_checkout_args(config) not in runner.calls
@@ -1585,6 +1665,8 @@ def main() -> int:
     test_yolo_config_translates_to_cli_specific_bypass_flags()
     test_effort_config_translates_to_cli_specific_args()
     test_pgu_launch_commands_include_model_and_bypass_flags()
+    test_start_refuses_stale_launcher_checkout_before_touching_role_worktrees()
+    test_deploy_launcher_checkout_updates_and_verifies_configured_ref()
     test_konsole_launch_uses_gui_user_display_environment()
     test_konsole_launch_can_fallback_to_gui_user_uid_without_host_var()
     test_konsole_launch_defaults_to_invoking_user_uid_without_host_var()

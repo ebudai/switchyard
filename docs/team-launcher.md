@@ -39,6 +39,13 @@ prefix, and set `PGU_TEAM_LAUNCHER_GUI_USER` or
 `PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY` when the Konsole display should be resolved
 from a different local desktop account or socket name.
 
+Before any real `start`, `reload`, or direct `pane` launch, the launcher checks
+the checkout containing `scripts/team-launcher` against the configured
+`worktree_remote`/`worktree_branch` ref. It refuses to start when that launcher
+checkout is behind the ref, because otherwise merged launcher/config fixes can
+silently fail to reach the live team. `--dry-run` does not perform this fetch or
+verification.
+
 ## Modes
 
 ```bash
@@ -46,6 +53,7 @@ scripts/team-launcher pgu start
 scripts/team-launcher pgu attach
 scripts/team-launcher pgu reload
 scripts/team-launcher pgu provision-runtime
+scripts/team-launcher pgu deploy-launcher --launcher-repo /home/eric/Projects/pgu
 ```
 
 `start` is intentionally idempotent. Each visible Konsole pane runs the launcher
@@ -98,6 +106,20 @@ exists or when standing up a sandbox account directly:
 ```bash
 scripts/team-launcher porter provision-runtime --runtime-user otto-agent
 ```
+
+`deploy-launcher` is the explicit launcher deploy step. It fetches the
+configured ref in the launcher checkout, checks out the configured branch,
+fast-forwards it to the ref, and verifies it is no longer behind before a later
+restart uses it:
+
+```bash
+scripts/team-launcher pgu deploy-launcher --launcher-repo /home/eric/Projects/pgu
+```
+
+Run it only during an approved restart window for that project. It updates the
+checkout that future launcher invocations will execute; it does not restart or
+reload any panes by itself. Add `--clean-launcher` only when intentionally
+discarding untracked files from that launcher checkout.
 
 Use `--dry-run` to render the Konsole layout and print the plan without opening
 Konsole:

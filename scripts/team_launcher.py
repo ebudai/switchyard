@@ -651,10 +651,30 @@ def git_fetch_worktree_ref_args(config: ProjectConfig) -> list[str]:
     return ["git", "-C", str(config.repository), "fetch", config.worktree_remote, config.worktree_branch]
 
 
+def git_fetch_launcher_ref_args(config: ProjectConfig, launcher_repo: Path) -> list[str]:
+    return ["git", "-C", str(launcher_repo), "fetch", config.worktree_remote, config.worktree_branch]
+
+
 def git_shared_checkout_check_args(config: ProjectConfig) -> list[str]:
     if config.repository is None:
         raise SystemExit("project config does not define repository")
     return ["git", "-C", str(config.repository), "rev-parse", "--is-inside-work-tree"]
+
+
+def git_launcher_checkout_check_args(launcher_repo: Path) -> list[str]:
+    return ["git", "-C", str(launcher_repo), "rev-parse", "--is-inside-work-tree"]
+
+
+def git_launcher_ahead_behind_args(config: ProjectConfig, launcher_repo: Path) -> list[str]:
+    return [
+        "git",
+        "-C",
+        str(launcher_repo),
+        "rev-list",
+        "--left-right",
+        "--count",
+        f"HEAD...{worktree_ref(config)}",
+    ]
 
 
 def git_checkout_shared_ref_args(config: ProjectConfig) -> list[str]:
@@ -663,10 +683,22 @@ def git_checkout_shared_ref_args(config: ProjectConfig) -> list[str]:
     return ["git", "-C", str(config.repository), "checkout", "--detach", "--force", worktree_ref(config)]
 
 
+def git_checkout_launcher_branch_args(config: ProjectConfig, launcher_repo: Path) -> list[str]:
+    return ["git", "-C", str(launcher_repo), "checkout", "--force", config.worktree_branch]
+
+
+def git_fast_forward_launcher_ref_args(config: ProjectConfig, launcher_repo: Path) -> list[str]:
+    return ["git", "-C", str(launcher_repo), "merge", "--ff-only", worktree_ref(config)]
+
+
 def git_clean_shared_checkout_args(config: ProjectConfig) -> list[str]:
     if config.repository is None:
         raise SystemExit("project config does not define repository")
     return ["git", "-C", str(config.repository), "clean", "-fdx"]
+
+
+def git_clean_launcher_checkout_args(launcher_repo: Path) -> list[str]:
+    return ["git", "-C", str(launcher_repo), "clean", "-fdx"]
 
 
 def _proc_failure_reason(proc: subprocess.CompletedProcess[Any], fallback: str) -> str:
@@ -676,6 +708,138 @@ def _proc_failure_reason(proc: subprocess.CompletedProcess[Any], fallback: str) 
     if isinstance(stderr, str) and stderr.strip():
         return stderr.strip().splitlines()[-1]
     return fallback
+
+
+def _parse_ahead_behind(output: str) -> tuple[int, int] | None:
+    parts = output.strip().split()
+    if len(parts) != 2:
+        return None
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+
+
+def launcher_checkout_status(
+    config: ProjectConfig,
+    *,
+    launcher_repo: Path | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> tuple[int, int]:
+    repo = launcher_repo or _repo_root()
+    check_proc = runner(
+        git_launcher_checkout_check_args(repo),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if check_proc.returncode != 0:
+        raise SystemExit(f"team-launcher: launcher path is not a git checkout: {repo}")
+    fetch_proc = runner(git_fetch_launcher_ref_args(config, repo))
+    if fetch_proc.returncode != 0:
+        raise SystemExit(
+            f"team-launcher: failed to fetch launcher deploy ref {worktree_ref(config)} in {repo}: "
+            f"{_proc_failure_reason(fetch_proc, f'exit {fetch_proc.returncode}')}"
+        )
+    count_proc = runner(
+        git_launcher_ahead_behind_args(config, repo),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if count_proc.returncode != 0:
+        raise SystemExit(
+            f"team-launcher: failed to compare launcher checkout {repo} with {worktree_ref(config)}: "
+            f"{_proc_failure_reason(count_proc, f'exit {count_proc.returncode}')}"
+        )
+    counts = _parse_ahead_behind(str(count_proc.stdout or ""))
+    if counts is None:
+        raise SystemExit(
+            f"team-launcher: could not parse launcher ahead/behind count for {repo}: "
+            f"{str(count_proc.stdout or '').strip()!r}"
+        )
+    return counts
+
+
+def ensure_launcher_checkout_current(
+    config: ProjectConfig,
+    *,
+    launcher_repo: Path | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> None:
+    repo = launcher_repo or _repo_root()
+    ahead, behind = launcher_checkout_status(config, launcher_repo=repo, runner=runner)
+    if behind:
+        raise SystemExit(
+            f"team-launcher: refusing to launch from stale checkout {repo}; "
+            f"it is {behind} commit(s) behind {worktree_ref(config)}. "
+            f"Run `scripts/team-launcher {config.project} deploy-launcher --launcher-repo {repo}` "
+            "during an approved restart window, then retry."
+        )
+    if ahead:
+        print(
+            f"warning: launcher checkout {repo} is {ahead} commit(s) ahead of {worktree_ref(config)}",
+            file=sys.stderr,
+        )
+
+
+def deploy_launcher_checkout(
+    config: ProjectConfig,
+    *,
+    launcher_repo: Path | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    clean: bool = False,
+) -> int:
+    repo = launcher_repo or _repo_root()
+    check_proc = runner(
+        git_launcher_checkout_check_args(repo),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if check_proc.returncode != 0:
+        print(f"team-launcher: launcher path is not a git checkout: {repo}", file=sys.stderr)
+        return int(check_proc.returncode)
+    fetch_proc = runner(git_fetch_launcher_ref_args(config, repo))
+    if fetch_proc.returncode != 0:
+        print(
+            f"team-launcher: failed to fetch {worktree_ref(config)} in {repo}: "
+            f"{_proc_failure_reason(fetch_proc, f'exit {fetch_proc.returncode}')}",
+            file=sys.stderr,
+        )
+        return int(fetch_proc.returncode)
+    checkout_proc = runner(git_checkout_launcher_branch_args(config, repo))
+    if checkout_proc.returncode != 0:
+        print(
+            f"team-launcher: failed to checkout launcher branch {config.worktree_branch} in {repo}: "
+            f"{_proc_failure_reason(checkout_proc, f'exit {checkout_proc.returncode}')}",
+            file=sys.stderr,
+        )
+        return int(checkout_proc.returncode)
+    merge_proc = runner(git_fast_forward_launcher_ref_args(config, repo))
+    if merge_proc.returncode != 0:
+        print(
+            f"team-launcher: failed to fast-forward launcher checkout {repo} to {worktree_ref(config)}: "
+            f"{_proc_failure_reason(merge_proc, f'exit {merge_proc.returncode}')}",
+            file=sys.stderr,
+        )
+        return int(merge_proc.returncode)
+    if clean:
+        clean_proc = runner(git_clean_launcher_checkout_args(repo))
+        if clean_proc.returncode != 0:
+            print(
+                f"team-launcher: failed to clean launcher checkout {repo}: "
+                f"{_proc_failure_reason(clean_proc, f'exit {clean_proc.returncode}')}",
+                file=sys.stderr,
+            )
+            return int(clean_proc.returncode)
+    ahead, behind = launcher_checkout_status(config, launcher_repo=repo, runner=runner)
+    if behind:
+        print(
+            f"team-launcher: launcher checkout {repo} is still {behind} commit(s) behind {worktree_ref(config)}",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"team-launcher: launcher checkout {repo} is current at {worktree_ref(config)}")
+    return 0
 
 
 def ensure_project_worktrees(
@@ -1178,6 +1342,7 @@ def launch_project(
     output_path = layout_output or Path(tempfile.gettempdir()) / f"{config.project}-team-layout.json"
     failed_roles: dict[str, str] = {}
     if not dry_run:
+        ensure_launcher_checkout_current(config, runner=runner)
         ensure_configured_runtime_user(config, runner=runner)
         if mode == "attach-or-start":
             failed_roles = ensure_project_worktrees(config, refresh=True, runner=runner).failed_roles
@@ -1297,7 +1462,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "command",
         nargs="?",
         default="start",
-        choices=["start", "attach", "reload", "bootstrap", "provision-runtime", "pane"],
+        choices=["start", "attach", "reload", "bootstrap", "provision-runtime", "deploy-launcher", "pane"],
         help="start is idempotent attach-or-start (resumes tracked session ids when relaunching a stopped pane); reload force-restarts running CLIs with tracked resume ids",
     )
     parser.add_argument("pane_mode", nargs="?", choices=["start", "attach", "attach-or-start", "reload"])
@@ -1309,6 +1474,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true", help="print launch plan without starting Konsole")
     parser.add_argument("--template-output", type=Path, help="bootstrap output path")
     parser.add_argument("--runtime-user", help="local user whose lingering /run/user/<uid> runtime should be provisioned")
+    parser.add_argument("--launcher-repo", type=Path, help="launcher checkout to update or verify (default: this script's repo)")
+    parser.add_argument("--clean-launcher", action="store_true", help="run git clean -fdx after updating --launcher-repo")
     parser.add_argument("--force", action="store_true", help="allow reload to kill/relaunch even if live command validation fails")
     return parser
 
@@ -1323,9 +1490,16 @@ def main(argv: list[str] | None = None) -> int:
         config = load_project_config(args.project, config_path) if config_path.exists() else None
         return provision_runtime_command(args.runtime_user, config)
     config = load_project_config(args.project, config_path)
+    if args.command == "deploy-launcher":
+        return deploy_launcher_checkout(
+            config,
+            launcher_repo=args.launcher_repo,
+            clean=args.clean_launcher,
+        )
     if args.command == "pane":
         if not args.pane_mode or not args.role:
             raise SystemExit("pane mode requires <start|attach|attach-or-start|reload> and <role>")
+        ensure_launcher_checkout_current(config, runner=subprocess.run)
         ensure_configured_runtime_user(config)
         role = _role_by_name(config, args.role)
         pane_state_dir = args.pane_state_dir or DEFAULT_PANE_STATE_DIR

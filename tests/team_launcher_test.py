@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import scripts.team_launcher as team_launcher
+from scripts.ticket_board.notify_listener import PaneHookStateStore
 from scripts.team_launcher import (
     cli_command_for_role,
     default_user_bin,
@@ -423,6 +424,14 @@ def test_custom_config_without_run_as_user_tracks_invoking_home() -> None:
     assert config.run_as_user == ""
     assert config.repository == Path("/home/otto-agent/Projects/porter")
     assert config.roles[0].workdir == "/home/otto-agent/Projects/porter"
+
+
+def test_pane_state_filename_matches_notify_listener_target_path() -> None:
+    target = "pgu-ops:0.0"
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        listener_path = PaneHookStateStore(Path(tmp))._target_path(target)
+
+    assert pane_state_file_name(target) == listener_path.name == "pgu-ops_0.0.json"
 
 
 def test_ensure_user_linger_runtime_enables_linger_and_waits_for_runtime_dir() -> None:
@@ -1567,6 +1576,7 @@ def main() -> int:
     test_pgu_config_keeps_live_agent_repository_with_foreign_home()
     test_custom_config_without_run_as_user_tracks_invoking_home()
     test_cli_command_prepends_invoking_user_bin()
+    test_pane_state_filename_matches_notify_listener_target_path()
     test_ensure_user_linger_runtime_enables_linger_and_waits_for_runtime_dir()
     test_ensure_user_linger_runtime_fails_loud_when_loginctl_is_denied()
     test_configured_runtime_check_skips_non_runtime_session_dir()

@@ -153,6 +153,45 @@ grep -q '^show pgu-ticket-board.service -p FragmentPath --value$' "$LOGFILE" || 
     exit 1
 }
 
+printf '#!/usr/bin/env python3\nprint("board v2 canary")\n' >"$SOURCE_REPO/scripts/ticket-board.py"
+git -C "$SOURCE_REPO" add scripts/ticket-board.py
+git -C "$SOURCE_REPO" commit -m "code-only canary" >/dev/null
+
+: >"$LOGFILE"
+if ! PATH="$MOCKDIR:/usr/bin:/bin" \
+    TICKET_BOARD_SERVICE_TEST_LOG="$LOGFILE" \
+    BOARD_ROOT="$DEPLOY_ROOT" \
+    SOURCE_REPO="$SOURCE_REPO" \
+    DEPLOY_REF=HEAD \
+    TICKET_BOARD_SKIP_MIGRATIONS=1 \
+    TICKET_BOARD_SYSTEM_UNIT_PATH="$SYSTEM_UNIT_PATH" \
+    "$REPO_ROOT/scripts/ticket-board-service.sh" deploy-restart >"$TMPDIR_T/out-canary" 2>"$TMPDIR_T/err-canary"; then
+    echo "FAIL: headless deploy-restart should run the canary through the board-deploy polkit rule" >&2
+    cat "$TMPDIR_T/err-canary" >&2 || true
+    exit 1
+fi
+
+if grep -q 'skipping deploy canary' "$TMPDIR_T/err-canary"; then
+    echo "FAIL: headless deploy-restart must not skip the canary" >&2
+    cat "$TMPDIR_T/err-canary" >&2 || true
+    exit 1
+fi
+grep -q '^systemd-run .*--unit pgu-ticket-board-canary-' "$LOGFILE" || {
+    echo "FAIL: headless deploy-restart did not start the transient canary unit" >&2
+    cat "$LOGFILE" >&2 || true
+    exit 1
+}
+grep -q '^stop pgu-ticket-board-canary-' "$LOGFILE" || {
+    echo "FAIL: headless deploy-restart did not stop the transient canary unit" >&2
+    cat "$LOGFILE" >&2 || true
+    exit 1
+}
+grep -q '^restart pgu-ticket-board.service$' "$LOGFILE" || {
+    echo "FAIL: headless deploy-restart did not restart the live board after canary pass" >&2
+    cat "$LOGFILE" >&2 || true
+    exit 1
+}
+
 (
     # Predicate-level regression guard: only exact board-unit actions may skip
     # the interactive polkit path.
@@ -170,11 +209,53 @@ grep -q '^show pgu-ticket-board.service -p FragmentPath --value$' "$LOGFILE" || 
         echo "FAIL: board-unit restart with extra args must not match the whitelist predicate" >&2
         exit 1
     fi
+    is_board_service_systemctl_action stop pgu-ticket-board-canary-12345 || {
+        echo "FAIL: exact canary stop should match the whitelist predicate" >&2
+        exit 1
+    }
+    is_board_service_systemctl_action status pgu-ticket-board-canary-12345 --no-pager -l || {
+        echo "FAIL: exact canary status should match the whitelist predicate" >&2
+        exit 1
+    }
+    if is_board_service_systemctl_action restart pgu-ticket-board-canary-12345; then
+        echo "FAIL: canary restart must not match the whitelist predicate" >&2
+        exit 1
+    fi
+    if is_board_service_systemctl_action stop pgu-ticket-board-canary-12345 --no-block; then
+        echo "FAIL: canary stop with extra args must not match the whitelist predicate" >&2
+        exit 1
+    fi
     if is_board_service_systemctl_action daemon-reload; then
         echo "FAIL: daemon-reload must not match the board-unit whitelist predicate" >&2
         exit 1
     fi
 )
+
+POLKIT_RULE="$REPO_ROOT/deploy/polkit/49-pgu-board-deploy.rules"
+[[ -f "$POLKIT_RULE" ]] || {
+    echo "FAIL: board deploy polkit rule artifact is missing" >&2
+    exit 1
+}
+grep -q 'subject.user !== "agent"' "$POLKIT_RULE" || {
+    echo "FAIL: polkit rule is not scoped to the agent user" >&2
+    exit 1
+}
+grep -q 'unit === "pgu-ticket-board.service"' "$POLKIT_RULE" || {
+    echo "FAIL: polkit rule does not authorize the live board unit" >&2
+    exit 1
+}
+grep -q 'pgu-ticket-board-canary-' "$POLKIT_RULE" || {
+    echo "FAIL: polkit rule does not authorize deploy canary units" >&2
+    exit 1
+}
+grep -q 'verb === "restart"' "$POLKIT_RULE" || {
+    echo "FAIL: polkit rule does not authorize live board restarts" >&2
+    exit 1
+}
+grep -q 'verb === "start" || verb === "stop"' "$POLKIT_RULE" || {
+    echo "FAIL: polkit rule does not authorize canary start/stop only" >&2
+    exit 1
+}
 
 cat >"$MOCKDIR/systemctl" <<'EOF'
 #!/usr/bin/env bash

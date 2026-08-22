@@ -5,6 +5,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$REPO_ROOT/scripts/ticket-board-boardsvc-setup.sh"
 UNIT="$REPO_ROOT/deploy/systemd/pgu-ticket-board.service.boardsvc"
 TMPFILES="$REPO_ROOT/deploy/tmpfiles/pgu-ticket-board.conf"
+POLKIT_RULE="$REPO_ROOT/deploy/polkit/49-pgu-board-deploy.rules"
 RUNBOOK="$REPO_ROOT/docs/ticket-board-boardsvc-peer-auth-runbook.md"
 
 [[ -x "$SCRIPT" ]] || {
@@ -39,6 +40,10 @@ grep -q 'setfacl -m "u:\$SERVICE_USER:--x" "\$asset_parent"' "$SCRIPT" || {
 }
 grep -q 'grant_write_acl "\$FRAME_ROOT"' "$SCRIPT" || {
     echo "FAIL: setup script does not grant shared frame directory write access" >&2
+    exit 1
+}
+grep -q '49-pgu-board-deploy.rules' "$SCRIPT" || {
+    echo "FAIL: setup command plan does not install the board deploy polkit rule" >&2
     exit 1
 }
 if grep -q 'pgu-tickets"' "$SCRIPT"; then
@@ -115,6 +120,14 @@ grep -q '^d /tmp/pgu-frames 1777 root root -$' "$TMPFILES" || {
     echo "FAIL: tmpfiles definition does not recreate the shared frame directory on boot" >&2
     exit 1
 }
+[[ -f "$POLKIT_RULE" ]] || {
+    echo "FAIL: board deploy polkit rule is missing" >&2
+    exit 1
+}
+grep -q 'pgu-ticket-board-canary-' "$POLKIT_RULE" || {
+    echo "FAIL: board deploy polkit rule does not cover deploy canary units" >&2
+    exit 1
+}
 
 grep -q 'parser.add_argument("--assets"' "$REPO_ROOT/scripts/ticket_board/cli.py" || {
     echo "FAIL: CLI does not expose an explicit assets directory" >&2
@@ -147,6 +160,10 @@ grep -q 'This package targets the PGU-198/PGU-209 single-writer board' "$RUNBOOK
 }
 grep -q 'tmpfiles' "$RUNBOOK" || {
     echo "FAIL: runbook does not document tmpfiles-based frame directory recreation" >&2
+    exit 1
+}
+grep -q '49-pgu-board-deploy.rules' "$RUNBOOK" || {
+    echo "FAIL: runbook does not document the board deploy polkit rule" >&2
     exit 1
 }
 grep -q 'Do not add an ACL for `/home/agent/.claude/pgu-tickets`' "$RUNBOOK" || {

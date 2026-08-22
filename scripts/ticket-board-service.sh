@@ -89,8 +89,20 @@ systemctl_user() {
 
 is_board_service_systemctl_action() {
     case "${1:-}" in
-        start|stop|restart|status)
+        start|restart)
             [[ "${2:-}" == "$SERVICE_NAME" && "$#" -eq 2 ]]
+            ;;
+        stop)
+            [[ "$#" -eq 2 ]] || return 1
+            [[ "${2:-}" == "$SERVICE_NAME" ]] || [[ "${2:-}" == pgu-ticket-board-canary-* && "${2:-}" != *"/"* ]]
+            ;;
+        status)
+            if [[ "${2:-}" == "$SERVICE_NAME" ]]; then
+                [[ "$#" -eq 2 ]]
+                return
+            fi
+            [[ "${2:-}" == pgu-ticket-board-canary-* && "${2:-}" != *"/"* ]] || return 1
+            [[ "$#" -eq 2 ]] || [[ "$#" -eq 4 && "${3:-}" == "--no-pager" && "${4:-}" == "-l" ]]
             ;;
         *)
             return 1
@@ -103,8 +115,8 @@ systemctl_system() {
         systemctl "$@"
         return
     fi
-    # Eric installs /etc/polkit-1/rules.d/49-pgu-board-restart.rules on the
-    # host to allow agent to manage this unit without an interactive KDE prompt.
+    # Eric installs deploy/polkit/49-pgu-board-deploy.rules on the host to let
+    # agent manage this unit without an interactive KDE prompt.
     if is_board_service_systemctl_action "$@"; then
         systemctl "$@"
         return
@@ -162,6 +174,34 @@ run_systemctl_with_polkit_timeout() {
     fi
     if [[ "$output" == *"Interactive authentication required"* ]]; then
         die "systemctl $* could not reach an interactive polkit approval flow; run this from $POLKIT_APPROVAL_USER's active graphical session so the KDE prompt can appear"
+    fi
+    return "$status"
+}
+
+run_systemd_run_canary_with_polkit_timeout() {
+    local output status
+    local timeout_args=()
+    if command -v timeout >/dev/null 2>&1; then
+        timeout_args=(timeout --foreground "${POLKIT_TIMEOUT_SECONDS}s")
+    fi
+    if output="$("${timeout_args[@]}" systemd-run "$@" 2>&1)"; then
+        if [[ -n "$output" ]]; then
+            printf '%s\n' "$output"
+        fi
+        return 0
+    else
+        status=$?
+    fi
+    if [[ -n "$output" ]]; then
+        printf '%s\n' "$output" >&2
+    fi
+    if [[ "$status" == "124" ]]; then
+        log "systemd-run canary timed out waiting for polkit approval; install the board deploy polkit rule or run from $POLKIT_APPROVAL_USER's active graphical session"
+        return "$status"
+    fi
+    if [[ "$output" == *"Interactive authentication required"* || "$output" == *"Access denied"* || "$output" == *"authentication"* ]]; then
+        log "systemd-run canary requires the host board-deploy polkit rule for pgu-ticket-board-canary-* transient units"
+        return "$status"
     fi
     return "$status"
 }
@@ -518,14 +558,7 @@ start_canary_systemd() {
     local canary_user="$6"
     local canary_log="$7"
     local asset_dir="$8"
-    local session_check_status=0
-    if [[ "$(id -u)" != "0" ]]; then
-        polkit_graphical_session_available "$POLKIT_APPROVAL_USER" || session_check_status=$?
-        if [[ "$session_check_status" == "1" ]]; then
-            die "system service action requires polkit approval from $POLKIT_APPROVAL_USER's active graphical session; run this from that session so the KDE prompt can appear"
-        fi
-    fi
-    systemd-run \
+    run_systemd_run_canary_with_polkit_timeout \
         --quiet \
         --collect \
         --unit "$unit_name" \

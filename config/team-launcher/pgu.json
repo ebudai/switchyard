@@ -14,7 +14,7 @@
         "claude"
       ],
       "effort": "high",
-      "model": "claude-opus-4-8",
+      "model": "claude-opus-5",
       "resume_mode": "flag",
       "resume_flag": "--resume",
       "role": "director",
@@ -31,7 +31,7 @@
         "codex"
       ],
       "effort": "high",
-      "model": "gpt-5.6-terra",
+      "model": "gpt-5.6-sol",
       "resume_mode": "subcommand",
       "resume_subcommand": "resume",
       "role": "main",
@@ -48,7 +48,7 @@
         "codex"
       ],
       "effort": "high",
-      "model": "gpt-5.4",
+      "model": "gpt-5.5",
       "resume_mode": "subcommand",
       "resume_subcommand": "resume",
       "role": "app",
@@ -66,7 +66,7 @@
         "claude"
       ],
       "effort": "high",
-      "model": "claude-sonnet-5",
+      "model": "claude-opus-5",
       "resume_mode": "flag",
       "resume_flag": "--resume",
       "role": "research",
@@ -99,7 +99,7 @@
         "claude"
       ],
       "effort": "high",
-      "model": "claude-sonnet-5",
+      "model": "claude-opus-5",
       "resume_mode": "flag",
       "resume_flag": "--resume",
       "role": "audit",
@@ -115,7 +115,7 @@
       "live_commands": [
         "agy"
       ],
-      "model": "Gemini 3.5 Flash (Medium)",
+      "model": "gemini-3.7-flash-high",
       "resume_mode": "flag",
       "resume_flag": "--conversation",
       "role": "inspector",

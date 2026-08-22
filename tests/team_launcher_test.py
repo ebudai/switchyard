@@ -323,7 +323,7 @@ def test_pgu_config_matches_director_supplied_live_role_assignments() -> None:
         assert role.workdir == str(expected_repository), role_name
     assert (roles["director"].cli, roles["director"].model, roles["director"].effort) == (
         ["claude"],
-        "claude-opus-4-8",
+        "claude-opus-5",
         "high",
     )
     assert (roles["director"].resume_mode, roles["director"].resume_flag) == ("flag", "--resume")
@@ -336,33 +336,33 @@ def test_pgu_config_matches_director_supplied_live_role_assignments() -> None:
     assert (roles["ops"].resume_mode, roles["ops"].resume_subcommand) == ("subcommand", "resume")
     assert (roles["main"].cli, roles["main"].model, roles["main"].effort, roles["main"].extra_args) == (
         ["codex"],
-        "gpt-5.6-terra",
+        "gpt-5.6-sol",
         "high",
         [],
     )
     assert (roles["main"].resume_mode, roles["main"].resume_subcommand) == ("subcommand", "resume")
     assert (roles["app"].cli, roles["app"].model, roles["app"].effort, roles["app"].extra_args) == (
         ["codex"],
-        "gpt-5.4",
+        "gpt-5.5",
         "high",
         [],
     )
     assert (roles["app"].resume_mode, roles["app"].resume_subcommand) == ("subcommand", "resume")
     assert (roles["research"].cli, roles["research"].model, roles["research"].effort) == (
         ["claude"],
-        "claude-sonnet-5",
+        "claude-opus-5",
         "high",
     )
     assert (roles["research"].resume_mode, roles["research"].resume_flag) == ("flag", "--resume")
     assert (roles["audit"].cli, roles["audit"].model, roles["audit"].effort) == (
         ["claude"],
-        "claude-sonnet-5",
+        "claude-opus-5",
         "high",
     )
     assert (roles["audit"].resume_mode, roles["audit"].resume_flag) == ("flag", "--resume")
     assert (roles["inspector"].cli, roles["inspector"].model, roles["inspector"].effort) == (
         ["agy"],
-        "Gemini 3.5 Flash (Medium)",
+        "gemini-3.7-flash-high",
         "",
     )
     assert (roles["inspector"].resume_mode, roles["inspector"].resume_flag) == ("flag", "--conversation")
@@ -620,11 +620,11 @@ def test_pgu_launch_commands_include_model_and_bypass_flags() -> None:
     config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
     roles = {role.role: role for role in config.roles}
     expected_by_role = {
-        "director": ["claude", "--model", "claude-opus-4-8", "--effort", "high", "--dangerously-skip-permissions"],
+        "director": ["claude", "--model", "claude-opus-5", "--effort", "high", "--dangerously-skip-permissions"],
         "main": [
             "codex",
             "--model",
-            "gpt-5.6-terra",
+            "gpt-5.6-sol",
             "-c",
             "reasoning_effort=high",
             "--dangerously-bypass-approvals-and-sandbox",
@@ -633,13 +633,13 @@ def test_pgu_launch_commands_include_model_and_bypass_flags() -> None:
         "app": [
             "codex",
             "--model",
-            "gpt-5.4",
+            "gpt-5.5",
             "-c",
             "reasoning_effort=high",
             "--dangerously-bypass-approvals-and-sandbox",
             "--dangerously-bypass-hook-trust",
         ],
-        "research": ["claude", "--model", "claude-sonnet-5", "--effort", "high", "--dangerously-skip-permissions"],
+        "research": ["claude", "--model", "claude-opus-5", "--effort", "high", "--dangerously-skip-permissions"],
         "ops": [
             "codex",
             "--model",
@@ -649,8 +649,8 @@ def test_pgu_launch_commands_include_model_and_bypass_flags() -> None:
             "--dangerously-bypass-approvals-and-sandbox",
             "--dangerously-bypass-hook-trust",
         ],
-        "audit": ["claude", "--model", "claude-sonnet-5", "--effort", "high", "--dangerously-skip-permissions"],
-        "inspector": ["agy", "--model", "Gemini 3.5 Flash (Medium)", "--dangerously-skip-permissions"],
+        "audit": ["claude", "--model", "claude-opus-5", "--effort", "high", "--dangerously-skip-permissions"],
+        "inspector": ["agy", "--model", "gemini-3.7-flash-high", "--dangerously-skip-permissions"],
     }
 
     for role_name, expected_tail in expected_by_role.items():
@@ -1217,7 +1217,7 @@ def test_start_runs_research_detached_before_opening_visible_layout() -> None:
         assert research_new_session[:5] == ["tmux", "new-session", "-d", "-s", "pgu-research"]
         assert research_new_session[5:7] == ["-c", str(tmp_path / "repo")]
         assert "PGU_PANE_TARGET=pgu-research:0.0" in research_new_session[-1]
-        assert "--model claude-sonnet-5" in research_new_session[-1]
+        assert "--model claude-opus-5" in research_new_session[-1]
         state = _read_pane_state(tmp_path / "pane-state", "pgu-research:0.0")
         assert state["state"] == "idle"
         assert state["source"] == "team_launcher.start"
@@ -1377,8 +1377,8 @@ def test_reload_sync_leaves_config_unchanged_when_live_matches() -> None:
             {1300: [1301]},
             {1300: {"fish", "claude"}, 1301: {"claude"}},
             {
-                1300: ["fish", "-c", "claude", "--model", "claude-sonnet-5", "--dangerously-skip-permissions"],
-                1301: ["claude", "--model", "claude-sonnet-5", "--dangerously-skip-permissions"],
+                1300: ["fish", "-c", "claude", "--model", "claude-opus-5", "--dangerously-skip-permissions"],
+                1301: ["claude", "--model", "claude-opus-5", "--dangerously-skip-permissions"],
             },
         )
         try:
@@ -1617,7 +1617,7 @@ def test_resume_commands_use_cli_specific_shapes_and_front_position() -> None:
 
         assert director_command[2].startswith(f"PATH={default_user_bin()}:")
         assert director_command[3:6] == ["claude", "--resume", session_id]
-        assert director_command[6:10] == ["--model", "claude-opus-4-8", "--effort", "high"]
+        assert director_command[6:10] == ["--model", "claude-opus-5", "--effort", "high"]
 
         assert ops_command[2].startswith(f"PATH={default_user_bin()}:")
         assert ops_command[3:6] == ["codex", "resume", session_id]
@@ -1625,7 +1625,7 @@ def test_resume_commands_use_cli_specific_shapes_and_front_position() -> None:
 
         assert inspector_command[2].startswith(f"PATH={default_user_bin()}:")
         assert inspector_command[3:6] == ["agy", "--conversation", session_id]
-        assert inspector_command[6:8] == ["--model", "Gemini 3.5 Flash (Medium)"]
+        assert inspector_command[6:8] == ["--model", "gemini-3.7-flash-high"]
 
 
 def test_reload_without_recorded_resume_id_logs_fresh_start() -> None:

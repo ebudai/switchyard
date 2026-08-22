@@ -3,15 +3,62 @@
 
 from __future__ import annotations
 
+import os
+import pwd
+import subprocess
 import sys
 from pathlib import Path
+
+HOST_WAYLAND_ENV = "PGU_HOST_WAYLAND_DISPLAY"
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+def current_user_name() -> str:
+    try:
+        return pwd.getpwuid(os.geteuid()).pw_name
+    except KeyError:
+        return ""
+
+
+def host_wayland_display(environ: dict[str, str] = os.environ) -> str:
+    wayland_display = str(environ.get("WAYLAND_DISPLAY", "")).strip()
+    if wayland_display.startswith("/"):
+        return wayland_display
+    runtime_dir = str(environ.get("XDG_RUNTIME_DIR", "")).strip()
+    if wayland_display and runtime_dir:
+        return str(Path(runtime_dir) / wayland_display)
+    if runtime_dir:
+        fallback = Path(runtime_dir) / "wayland-0"
+        if fallback.exists():
+            return str(fallback)
+    return ""
+
+
+def sudo_run_as_command(argv: list[str], target_user: str) -> list[str]:
+    command = ["sudo", "-u", target_user, "-H"]
+    display = host_wayland_display()
+    if display:
+        command.extend(["env", f"{HOST_WAYLAND_ENV}={display}"])
+    command.extend([sys.executable, str(Path(__file__).resolve()), *argv])
+    return command
+
+
+def self_elevate_if_configured(argv: list[str]) -> int | None:
+    from scripts.team_launcher import configured_run_as_user
+
+    target_user = configured_run_as_user(argv)
+    if not target_user or current_user_name() == target_user:
+        return None
+    return subprocess.call(sudo_run_as_command(argv, target_user))
+
+
 def run(argv: list[str]) -> int:
+    elevated_status = self_elevate_if_configured(argv)
+    if elevated_status is not None:
+        return elevated_status
     from scripts.team_launcher import main
 
     return main(argv)

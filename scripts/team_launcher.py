@@ -84,6 +84,7 @@ class ProjectConfig:
     project: str
     layout: Path
     session_dir: Path
+    run_as_user: str
     repository: Path | None
     worktree_base: Path | None
     worktree_remote: str
@@ -211,6 +212,35 @@ def _load_json(path: Path) -> dict[str, Any]:
     return parsed
 
 
+def _config_path_from_launcher_args(argv: Sequence[str]) -> Path | None:
+    if not argv:
+        return None
+    project = str(argv[0]).strip()
+    if not project or project.startswith("-"):
+        return None
+    command = str(argv[1]).strip() if len(argv) > 1 and not str(argv[1]).startswith("-") else "start"
+    if command == "bootstrap":
+        return None
+    for index, arg in enumerate(argv):
+        raw = str(arg)
+        if raw == "--config" and index + 1 < len(argv):
+            return Path(str(argv[index + 1]))
+        if raw.startswith("--config="):
+            return Path(raw.split("=", 1)[1])
+    return DEFAULT_CONFIG_DIR / f"{project}.json"
+
+
+def configured_run_as_user(argv: Sequence[str]) -> str:
+    path = _config_path_from_launcher_args(argv)
+    if path is None:
+        return ""
+    try:
+        config = _load_json(path)
+    except (OSError, json.JSONDecodeError):
+        return ""
+    return str(config.get("run_as_user") or "").strip()
+
+
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
@@ -302,6 +332,7 @@ def load_project_config(project: str, config_path: Path | None = None) -> Projec
     base = path.parent
     layout = _expand_path(str(config.get("layout") or f"{project}-konsole-layout.json"), base=base)
     session_dir = _expand_path(str(config.get("session_dir") or str(DEFAULT_SESSION_DIR)), base=base)
+    run_as_user = str(config.get("run_as_user") or "").strip()
     repository = None
     repository_raw = config.get("repository")
     if repository_raw is not None:
@@ -354,6 +385,7 @@ def load_project_config(project: str, config_path: Path | None = None) -> Projec
         project=config_project,
         layout=layout,
         session_dir=session_dir,
+        run_as_user=run_as_user,
         repository=repository,
         worktree_base=worktree_base,
         worktree_remote=worktree_remote,
@@ -1086,6 +1118,7 @@ def launch_project(
         "project": config.project,
         "mode": mode,
         "layout": str(output_path),
+        "run_as_user": config.run_as_user or current_user_name(),
         "worktree_ref": worktree_ref(config) if config.repository is not None else None,
         "roles": [
             {

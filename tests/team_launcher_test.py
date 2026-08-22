@@ -121,8 +121,8 @@ def _layout_shape(node: object) -> object:
 PANEL_CLOCKWISE_SLOT_ORDER = (0, 2, 3, 5, 4, 1)
 
 
-def _home_project_root() -> Path:
-    return Path.home() / "Projects" / "pgu"
+def _pgu_project_root() -> Path:
+    return Path("/home/agent/Projects/pgu")
 
 
 def test_pgu_layout_matches_reference_six_pane_geometry() -> None:
@@ -285,11 +285,12 @@ def test_dry_run_materializes_pgu_layout_with_six_visible_role_commands() -> Non
 def test_pgu_config_matches_director_supplied_live_role_assignments() -> None:
     config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
     roles = {role.role: role for role in config.roles}
-    expected_repository = _home_project_root()
+    expected_repository = Path("/home/agent/Projects/pgu")
 
     assert set(roles) == {"director", "main", "app", "research", "ops", "audit", "inspector"}
     assert all(role.yolo for role in roles.values())
     assert config.repository == expected_repository
+    assert config.run_as_user == "agent"
     assert config.worktree_base is None
     assert worktree_ref(config) == "origin/main"
     assert roles["research"].detached
@@ -351,10 +352,10 @@ def test_pgu_config_matches_director_supplied_live_role_assignments() -> None:
     assert (roles["inspector"].resume_mode, roles["inspector"].resume_flag) == ("flag", "--conversation")
 
 
-def test_pgu_config_repository_tracks_invoking_home() -> None:
+def test_pgu_config_keeps_live_agent_repository_with_foreign_home() -> None:
     original_home = os.environ.get("HOME")
     try:
-        os.environ["HOME"] = "/home/otto-agent"
+        os.environ["HOME"] = "/home/eric"
         config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
     finally:
         if original_home is None:
@@ -362,8 +363,9 @@ def test_pgu_config_repository_tracks_invoking_home() -> None:
         else:
             os.environ["HOME"] = original_home
 
-    assert config.repository == Path("/home/otto-agent/Projects/pgu")
-    assert {role.workdir for role in config.roles} == {"/home/otto-agent/Projects/pgu"}
+    assert config.run_as_user == "agent"
+    assert config.repository == Path("/home/agent/Projects/pgu")
+    assert {role.workdir for role in config.roles} == {"/home/agent/Projects/pgu"}
 
 
 def test_cli_command_prepends_invoking_user_bin() -> None:
@@ -384,6 +386,40 @@ def test_cli_command_prepends_invoking_user_bin() -> None:
             os.environ["PGU_TEAM_LAUNCHER_BIN_DIR"] = original_bin_dir
 
     assert command[2].startswith("PATH=/home/otto-agent/bin:")
+
+
+def test_custom_config_without_run_as_user_tracks_invoking_home() -> None:
+    original_home = os.environ.get("HOME")
+    try:
+        with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+            tmp_path = Path(tmp)
+            layout = {"KonsoleTabs": [{"Widgets": [{"Command": "", "WorkingDirectory": ""}]}]}
+            layout_path = tmp_path / "layout.json"
+            layout_path.write_text(json.dumps(layout), encoding="utf-8")
+            config_path = tmp_path / "porter.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "project": "porter",
+                        "layout": str(layout_path),
+                        "repository": "$HOME/Projects/porter",
+                        "roles": [{"role": "ops", "slot": 0, "cli": ["codex"]}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            os.environ["HOME"] = "/home/otto-agent"
+
+            config = load_project_config("porter", config_path)
+    finally:
+        if original_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = original_home
+
+    assert config.run_as_user == ""
+    assert config.repository == Path("/home/otto-agent/Projects/porter")
+    assert config.roles[0].workdir == "/home/otto-agent/Projects/porter"
 
 
 def test_yolo_config_translates_to_cli_specific_bypass_flags() -> None:
@@ -675,7 +711,7 @@ def test_start_creates_missing_session_once_then_attaches() -> None:
 
     assert runner.calls[0] == ["tmux", "has-session", "-t", "pgu-ops"]
     assert runner.calls[1][:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"]
-    assert runner.calls[1][5:7] == ["-c", str(_home_project_root())]
+    assert runner.calls[1][5:7] == ["-c", str(_pgu_project_root())]
     assert "PGU_PANE_TARGET=pgu-ops:0.0" in runner.calls[1][-1]
     assert "--model gpt-5.5" in runner.calls[1][-1]
     assert "-c reasoning_effort=high" in runner.calls[1][-1]
@@ -1053,7 +1089,7 @@ def test_dry_run_reports_shared_checkout_without_syncing_it() -> None:
         assert runner.calls == []
         plan = json.loads(layout_output.read_text(encoding="utf-8"))
         assert {leaf.get("WorkingDirectory") for leaf in team_launcher._layout_leaves(plan)} == {
-            str(_home_project_root())
+            str(_pgu_project_root())
         }
         layout = json.loads(layout_output.read_text(encoding="utf-8"))
         commands = _leaf_commands(layout)
@@ -1397,7 +1433,8 @@ def main() -> int:
     test_pgu_layout_matches_reference_six_pane_geometry()
     test_dry_run_materializes_pgu_layout_with_six_visible_role_commands()
     test_pgu_config_matches_director_supplied_live_role_assignments()
-    test_pgu_config_repository_tracks_invoking_home()
+    test_pgu_config_keeps_live_agent_repository_with_foreign_home()
+    test_custom_config_without_run_as_user_tracks_invoking_home()
     test_cli_command_prepends_invoking_user_bin()
     test_yolo_config_translates_to_cli_specific_bypass_flags()
     test_effort_config_translates_to_cli_specific_args()

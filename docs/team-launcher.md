@@ -4,14 +4,17 @@
 config. The default PGU config is `config/team-launcher/pgu.json`. PGU starts
 six visible roles in a single Konsole layout window and starts `research` as a
 detached background tmux session. Each role pane starts in the shared checkout
-at `$HOME/Projects/pgu`; feature work still happens in explicit
+at `/home/agent/Projects/pgu`; feature work still happens in explicit
 per-ticket worktrees created outside the launcher.
 
-The executable wrapper runs as the user who invoked it. It does not re-exec
-through `sudo` or force a shared `agent` tmux/runtime directory. The launcher
-uses the invoking user's runtime paths by default, including
-`/run/user/<uid>/pgu-ticket-board/pane-sessions`, the matching pane-state
-directory, `$HOME/Projects/pgu`, and `$HOME/bin` prepended to pane CLI `PATH`.
+The executable wrapper runs as the user who invoked it by default. A project
+may opt into a dedicated runtime account with `run_as_user`; when that key is
+set and the invoker is different, the wrapper re-execs through
+`sudo -u <run_as_user> -H`. The PGU config uses `run_as_user: agent` so Eric's
+production launch keeps the existing agent-owned tmux sessions, pane hook
+state, and shared checkout. Projects without `run_as_user` use the invoking
+user's runtime paths, including `/run/user/<uid>/pgu-ticket-board/pane-sessions`,
+the matching pane-state directory, and `$HOME/bin` prepended to pane CLI `PATH`.
 
 When opening the visible Konsole window, the launcher uses
 `PGU_HOST_WAYLAND_DISPLAY` if it is set. Otherwise it resolves the display for
@@ -95,6 +98,9 @@ Each project config contains:
 - `project`: project name, such as `pgu`.
 - `layout`: Konsole JSON layout path, relative to the config file if not
   absolute.
+- `run_as_user`: optional dedicated local user for this project. Omit it for
+  ordinary invoking-user teams; set it only when an existing deployment must
+  remain on a specific user-owned tmux/runtime namespace.
 - `session_dir`: optional directory containing per-pane resume session files.
 - `repository`: optional shared checkout used as the default pane cwd and the
   checkout refreshed by `start`.

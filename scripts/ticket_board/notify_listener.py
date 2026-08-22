@@ -525,7 +525,27 @@ class PaneActivityGate:
             return ActivityTrace(True, "cursor_state_unavailable")
         if cursor_composing:
             return ActivityTrace(True, "human_composing")
+        # Codex emits SessionStart on context compaction; a pane can keep working
+        # without a following UserPromptSubmit, leaving a stale idle hook behind.
+        stale_session_start_trace = self._stale_codex_session_start_idle_trace(target, state)
+        if stale_session_start_trace is not None:
+            return stale_session_start_trace
         return ActivityTrace(False, "hook_idle")
+
+    def _stale_codex_session_start_idle_trace(self, target: str, state: PaneHookState) -> ActivityTrace | None:
+        if state.state != "idle" or state.source != "codex.SessionStart":
+            return None
+        if self.stale_codex_busy_hook_seconds <= 0:
+            return None
+        if state.updated_at < MIN_RECOVERABLE_HOOK_EPOCH_SECONDS:
+            return None
+        now = self.wall_time()
+        if now - state.updated_at < self.stale_codex_busy_hook_seconds:
+            return None
+        return self._working_timer_trace(
+            target,
+            sample_delay_seconds=self.idle_working_timer_sample_delay_seconds,
+        )
 
     def _stale_codex_busy_trace(self, target: str, state: PaneHookState) -> ActivityTrace | None:
         if state.state != "busy" or not state.source.startswith("codex."):

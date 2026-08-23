@@ -82,6 +82,7 @@ DEFAULT_RESUME_SUBCOMMAND_BY_CLI = {
 AGY_CONVERSATION_ROOT = Path.home() / ".gemini" / "antigravity-cli"
 RESUME_STARTUP_TIMEOUT_SECONDS = 1.5
 RESUME_STARTUP_POLL_SECONDS = 0.1
+DETACHED_SESSION_STABILITY_SECONDS = 2.0
 RUNTIME_READY_ATTEMPTS = 50
 RUNTIME_READY_POLL_SECONDS = 0.1
 ALLOW_STALE_LAUNCHER_ENV = "TEAM_LAUNCHER_ALLOW_STALE"
@@ -640,6 +641,16 @@ def seed_initial_pane_idle_state(
     }
     _write_json_atomic(path, payload)
     return path
+
+
+def clear_pane_idle_state_for_role(role: RoleConfig, *, pane_state_dir: Path) -> None:
+    path = pane_state_dir / pane_state_file_name(role.target)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        print(f"team-launcher: failed to clear pane state for {role.role}: {exc}", file=sys.stderr)
 
 
 def session_id_for_role(role: RoleConfig, session_dir: Path) -> str:
@@ -1515,6 +1526,26 @@ def _resume_launch_verified(
     return live_command_matches_role(role, runner=runner)
 
 
+def _detached_launch_verified(
+    role: RoleConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> bool:
+    if not _resume_launch_verified(role, runner=runner):
+        return False
+    deadline = time.monotonic() + DETACHED_SESSION_STABILITY_SECONDS
+    while time.monotonic() < deadline:
+        if runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+            return False
+        if not live_command_matches_role(role, runner=runner):
+            return False
+        time.sleep(RESUME_STARTUP_POLL_SECONDS)
+    return (
+        runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+        and live_command_matches_role(role, runner=runner)
+    )
+
+
 def _start_role_session(
     role: RoleConfig,
     *,
@@ -1522,6 +1553,7 @@ def _start_role_session(
     pane_state_dir: Path,
     prefer_resume: bool,
     seed_source: str,
+    post_start_verifier: Callable[[], bool] | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> int:
     session_id = session_id_for_role(role, session_dir) if prefer_resume else ""
@@ -1542,22 +1574,38 @@ def _start_role_session(
     if start_proc.returncode != 0:
         return int(start_proc.returncode)
     if not prefer_resume:
+        if post_start_verifier is not None and not post_start_verifier():
+            clear_pane_idle_state_for_role(role, pane_state_dir=pane_state_dir)
+            print(
+                f"team-launcher: role {role.role} did not leave a live {role.tmux_session} session",
+                file=sys.stderr,
+            )
+            return 1
         seed_initial_pane_idle_state(role, pane_state_dir=pane_state_dir, source=seed_source)
         return 0
-    if _resume_launch_verified(role, runner=runner):
+    resume_verified = _resume_launch_verified(role, runner=runner)
+    if resume_verified and (post_start_verifier is None or post_start_verifier()):
         seed_initial_pane_idle_state(role, pane_state_dir=pane_state_dir, source=seed_source)
         return 0
     print(
         f"team-launcher: resume failed for {role.role} using session {session_id}; falling back to fresh session",
         file=sys.stderr,
     )
-    kill_proc = runner(tmux_kill_session_args(role))
-    if kill_proc.returncode != 0:
-        return int(kill_proc.returncode)
+    if runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+        kill_proc = runner(tmux_kill_session_args(role))
+        if kill_proc.returncode != 0:
+            return int(kill_proc.returncode)
     clear_session_record_for_role(role, session_dir)
     fresh_proc = runner(tmux_new_session_args(role, session_dir=session_dir, resume=False))
     if fresh_proc.returncode != 0:
         return int(fresh_proc.returncode)
+    if post_start_verifier is not None and not post_start_verifier():
+        clear_pane_idle_state_for_role(role, pane_state_dir=pane_state_dir)
+        print(
+            f"team-launcher: role {role.role} did not leave a live {role.tmux_session} session after resume fallback",
+            file=sys.stderr,
+        )
+        return 1
     seed_initial_pane_idle_state(role, pane_state_dir=pane_state_dir, source=f"{seed_source}.fallback")
     print(
         f"team-launcher: started fresh session for {role.role} after resume fallback",
@@ -1653,6 +1701,7 @@ def run_detached_role(
             pane_state_dir=pane_state_dir,
             prefer_resume=True,
             seed_source="team_launcher.reload",
+            post_start_verifier=lambda: _detached_launch_verified(role, runner=runner),
             runner=runner,
         )
     if mode in {"start", "attach-or-start"}:
@@ -1663,6 +1712,7 @@ def run_detached_role(
                 pane_state_dir=pane_state_dir,
                 prefer_resume=True,
                 seed_source="team_launcher.start",
+                post_start_verifier=lambda: _detached_launch_verified(role, runner=runner),
                 runner=runner,
             )
         return 0
@@ -1788,7 +1838,11 @@ def sync_reload_config_to_live_sessions(
         next_role = role
         if live_cli and live_cli != role.cli:
             raw_role["cli"] = live_cli
-            next_role = replace(next_role, cli=live_cli)
+            if not set(live_cli) <= set(role.live_commands):
+                raw_role["live_commands"] = live_cli
+                next_role = replace(next_role, cli=live_cli, live_commands=live_cli)
+            else:
+                next_role = replace(next_role, cli=live_cli)
             changed = True
         if live_model != role.model:
             raw_role["model"] = live_model

@@ -507,6 +507,13 @@ def main() -> int:
     ).read_text(encoding="utf-8").lower()
     assert "p_cadence interval default interval '30 minutes'" in idle_stall_cadence_migration
     assert "p_cadence interval default interval '30 minutes'" in executable_schema_lower
+    drop_orphaned_eric_functions_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu593_drop_orphaned_eric_functions.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "pg_get_function_identity_arguments(p.oid)" in drop_orphaned_eric_functions_migration
+    assert "drop function if exists %i.%i(%s)" in drop_orphaned_eric_functions_migration
+    assert "pg_get_functiondef(p.oid)" in drop_orphaned_eric_functions_migration
+    assert "like '%eric%'" in drop_orphaned_eric_functions_migration
     terminal_transition_notify_migration = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "pgu405_terminal_transition_assignee_notify.sql"
     ).read_text(encoding="utf-8").lower()

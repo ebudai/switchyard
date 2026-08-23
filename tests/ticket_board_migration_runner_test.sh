@@ -178,7 +178,7 @@ SELECT string_agg(name, ',' ORDER BY seq)
 FROM ticket_board.schema_migrations;
 SQL
 )"
-expected_transition_applied="schema.sql,270_ready_to_in_progress.sql,271_optional_implementation.sql,272_resolved_blockers.sql,273_suppress_self_notifications.sql,274_unblock_notifications.sql,275_remove_dead_unblock_analysis_branch.sql,276_revert_backlog_unblock_notifications.sql,277_owner_update_notifications.sql,278_idle_turn_end_nudges.sql,279_idle_reminder_escalation.sql,280_reject_stale_resubmit.sql,281_idle_reminder_escalate_problem_clause.sql,282_http_director_create_notification_source.sql,283_idle_reminder_defers_to_primary.sql,284_add_regression_flag.sql,285_require_actor_caller_role_backstop.sql,286_allow_audit_file_bug.sql,287_active_inprogress_idle_filter.sql,pgu367_unresolved_blocked_by_source_json.sql,pgu405_terminal_transition_assignee_notify.sql,pgu437_idle_reminder_delivery_count.sql,pgu444_finish_current_locked_reconcile.sql,pgu450_in_progress_implementer_assignee.sql,pgu451_serial_implementer_focus.sql,pgu453_awaiting_role_nudge_suppression.sql,pgu455_director_discretionary_nudges.sql,pgu457_close_utility_tasks.sql,pgu458_pgu340_director_force_move.sql,pgu458_submit_to_inspection.sql,pgu471_coalesce_new_ticket_notifications.sql,pgu472_urgent_comment_notifications.sql,pgu474_hard_serial_focus_force_move.sql,pgu477_drop_legacy_append_ticket_comment.sql,pgu479_optional_kickback_comments.sql,pgu480_queued_backlog_nudge_suppression.sql,pgu494_create_ticket_needs_eric_signoff.sql,pgu497_eric_review_notifications.sql,pgu514_draft_stage.sql,pgu517_workflow_config_phase0.sql,pgu519_manual_control_comment_notifications.sql,pgu520_workflow_config_cosmetic_derivation.sql,pgu521_workflow_transition_shadow_mode.sql,pgu521_zz_shadow_log_read_grants.sql,pgu522_workflow_config_authoritative.sql,pgu527_workflow_rbac_shadow.sql,pgu528_workflow_rbac_config_authoritative.sql,pgu531_attachment_crop_metadata.sql,pgu541_inprogress_stuck_requires_pane_idle.sql,pgu544_dat_stage.sql,pgu563_grant_listener_unresolved_blockers.sql,pgu584_stage_default_assignee.sql,pgu588_stage_default_assignee_from_workflow.sql,pgu589_depersonalize_user_role.sql,pgu591_idle_stall_nudge_cadence.sql,pgu999_runner_probe.sql"
+expected_transition_applied="schema.sql,270_ready_to_in_progress.sql,271_optional_implementation.sql,272_resolved_blockers.sql,273_suppress_self_notifications.sql,274_unblock_notifications.sql,275_remove_dead_unblock_analysis_branch.sql,276_revert_backlog_unblock_notifications.sql,277_owner_update_notifications.sql,278_idle_turn_end_nudges.sql,279_idle_reminder_escalation.sql,280_reject_stale_resubmit.sql,281_idle_reminder_escalate_problem_clause.sql,282_http_director_create_notification_source.sql,283_idle_reminder_defers_to_primary.sql,284_add_regression_flag.sql,285_require_actor_caller_role_backstop.sql,286_allow_audit_file_bug.sql,287_active_inprogress_idle_filter.sql,pgu367_unresolved_blocked_by_source_json.sql,pgu405_terminal_transition_assignee_notify.sql,pgu437_idle_reminder_delivery_count.sql,pgu444_finish_current_locked_reconcile.sql,pgu450_in_progress_implementer_assignee.sql,pgu451_serial_implementer_focus.sql,pgu453_awaiting_role_nudge_suppression.sql,pgu455_director_discretionary_nudges.sql,pgu457_close_utility_tasks.sql,pgu458_pgu340_director_force_move.sql,pgu458_submit_to_inspection.sql,pgu471_coalesce_new_ticket_notifications.sql,pgu472_urgent_comment_notifications.sql,pgu474_hard_serial_focus_force_move.sql,pgu477_drop_legacy_append_ticket_comment.sql,pgu479_optional_kickback_comments.sql,pgu480_queued_backlog_nudge_suppression.sql,pgu494_create_ticket_needs_eric_signoff.sql,pgu497_eric_review_notifications.sql,pgu514_draft_stage.sql,pgu517_workflow_config_phase0.sql,pgu519_manual_control_comment_notifications.sql,pgu520_workflow_config_cosmetic_derivation.sql,pgu521_workflow_transition_shadow_mode.sql,pgu521_zz_shadow_log_read_grants.sql,pgu522_workflow_config_authoritative.sql,pgu527_workflow_rbac_shadow.sql,pgu528_workflow_rbac_config_authoritative.sql,pgu531_attachment_crop_metadata.sql,pgu541_inprogress_stuck_requires_pane_idle.sql,pgu544_dat_stage.sql,pgu563_grant_listener_unresolved_blockers.sql,pgu584_stage_default_assignee.sql,pgu588_stage_default_assignee_from_workflow.sql,pgu589_depersonalize_user_role.sql,pgu591_idle_stall_nudge_cadence.sql,pgu593_drop_orphaned_eric_functions.sql,pgu999_runner_probe.sql"
 [[ "$transition_applied" == "$expected_transition_applied" ]] || {
     echo "FAIL: schema.sql backfill did not record legacy migration names correctly: $transition_applied" >&2
     exit 1
@@ -395,9 +395,24 @@ INSERT INTO ticket_board.ticket_notification_state (
     'director',
     'dat'
 );
+CREATE OR REPLACE FUNCTION ticket_board.eric_sign_off(id text)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+BEGIN
+    UPDATE ticket_board.tickets
+    SET eric_signoff = true,
+        state = 'director_review'
+    WHERE tickets.id = eric_sign_off.id
+      AND tickets.state = 'eric_review';
+END;
+$$;
 SQL
     cp "$REPO_ROOT/scripts/ticket_board/schema.sql" "$TMPDIR_T/schema.sql"
     cp "$REPO_ROOT/scripts/ticket_board/migrations/pgu589_depersonalize_user_role.sql" "$LIVE_RENAME_MIGRATIONS_DIR/"
+    cp "$REPO_ROOT/scripts/ticket_board/migrations/pgu593_drop_orphaned_eric_functions.sql" "$LIVE_RENAME_MIGRATIONS_DIR/"
     TICKET_BOARD_ADMIN_DATABASE_URL="$LIVE_RENAME_CONN" TICKET_BOARD_MIGRATIONS_DIR="$LIVE_RENAME_MIGRATIONS_DIR" \
         "$REPO_ROOT/scripts/ticket-board-migrate" >/dev/null
     live_rename_result="$(
@@ -422,16 +437,28 @@ SELECT jsonb_build_object(
     'old_stage_count', (SELECT count(*)::int FROM ticket_board.workflow_stages WHERE name = 'eric_review'),
     'new_stage_count', (SELECT count(*)::int FROM ticket_board.workflow_stages WHERE name = 'user_review'),
     'old_function_exists', to_regprocedure('ticket_board.eric_sign_off(text,text)') IS NOT NULL,
+    'old_one_arg_function_exists', to_regprocedure('ticket_board.eric_sign_off(text)') IS NOT NULL,
+    'old_function_body_count', (
+        SELECT count(*)::int
+        FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = 'ticket_board'
+          AND p.prokind = 'f'
+          AND pg_get_functiondef(p.oid) LIKE '%eric%'
+    ),
     'new_function_exists', to_regprocedure('ticket_board.user_sign_off(text,text)') IS NOT NULL,
     'migration_recorded', EXISTS (
         SELECT 1 FROM ticket_board.schema_migrations WHERE name = 'pgu589_depersonalize_user_role.sql'
+    ),
+    'drift_cleanup_recorded', EXISTS (
+        SELECT 1 FROM ticket_board.schema_migrations WHERE name = 'pgu593_drop_orphaned_eric_functions.sql'
     )
 )::text
 FROM ticket_board.tickets t
 WHERE t.id = 'PGU-42901';
 SQL
     )"
-    expected_live_rename_result='{"state": "user_review", "comment_who": "user", "source_state": "user_review", "user_signoff": true, "new_stage_count": 1, "old_stage_count": 0, "old_column_count": 0, "comment_source_who": "user", "migration_recorded": true, "needs_user_signoff": true, "notification_state": "user_review", "new_function_exists": true, "old_function_exists": false, "source_user_signoff": true, "source_needs_user_signoff": true}'
+    expected_live_rename_result='{"state": "user_review", "comment_who": "user", "source_state": "user_review", "user_signoff": true, "new_stage_count": 1, "old_stage_count": 0, "old_column_count": 0, "comment_source_who": "user", "migration_recorded": true, "needs_user_signoff": true, "notification_state": "user_review", "new_function_exists": true, "old_function_exists": false, "source_user_signoff": true, "drift_cleanup_recorded": true, "old_function_body_count": 0, "source_needs_user_signoff": true, "old_one_arg_function_exists": false}'
     [[ "$live_rename_result" == "$expected_live_rename_result" ]] || {
         echo "FAIL: pgu589 did not migrate old eric_review data cleanly: $live_rename_result" >&2
         exit 1

@@ -433,6 +433,8 @@ class PaneActivityGate:
         return session.rsplit("-", 1)[-1].strip().lower()
 
     def _runtime_for_source(self, source: str) -> str:
+        if source.startswith("team_launcher."):
+            return ""
         runtime = source.split(".", 1)[0].strip().lower()
         if runtime == "agy":
             return "gemini"
@@ -442,6 +444,10 @@ class PaneActivityGate:
         return self.role_runtimes.get(self._role_for_target(target), "")
 
     def _captured_working_timer_seconds(self, target: str) -> int | None:
+        _captured, seconds = self._captured_working_timer_probe(target)
+        return seconds
+
+    def _captured_working_timer_probe(self, target: str) -> tuple[bool, int | None]:
         try:
             proc = self.capture_pane_runner(
                 ["tmux", "capture-pane", "-p", "-J", "-t", target, "-S", "-8"],
@@ -451,13 +457,13 @@ class PaneActivityGate:
                 timeout=2.0,
             )
         except (OSError, subprocess.SubprocessError):
-            return None
+            return False, None
         latest: int | None = None
         for match in WORKING_TIMER_RE.finditer(proc.stdout):
             minutes = int(match.group("minutes") or "0")
             seconds = int(match.group("seconds"))
             latest = minutes * 60 + seconds
-        return latest
+        return True, latest
 
     def composer_snapshot(self, target: str) -> ComposerSnapshot:
         try:
@@ -495,20 +501,26 @@ class PaneActivityGate:
         return None
 
     def _working_timer_idle_probe_trace(self, target: str) -> ActivityTrace:
-        first = self._captured_working_timer_seconds(target)
-        if first is None:
+        first_ok, first = self._captured_working_timer_probe(target)
+        if not first_ok:
             self._last_working_timer_by_target.pop(target, None)
             return ActivityTrace(True, "working_timer_unobservable")
+        if first is None:
+            self._last_working_timer_by_target.pop(target, None)
+            return ActivityTrace(False, "working_timer_idle")
         previous = self._last_working_timer_by_target.get(target)
         if previous is not None and first != previous:
             self._last_working_timer_by_target[target] = first
             return ActivityTrace(True, "working_timer")
         if previous is None and self.idle_working_timer_sample_delay_seconds > 0:
             self.sleeper(self.idle_working_timer_sample_delay_seconds)
-            second = self._captured_working_timer_seconds(target)
-            if second is None:
+            second_ok, second = self._captured_working_timer_probe(target)
+            if not second_ok:
                 self._last_working_timer_by_target.pop(target, None)
                 return ActivityTrace(True, "working_timer_unobservable")
+            if second is None:
+                self._last_working_timer_by_target.pop(target, None)
+                return ActivityTrace(False, "working_timer_idle")
             self._last_working_timer_by_target[target] = second
             if second != first:
                 return ActivityTrace(True, "working_timer")

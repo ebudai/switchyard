@@ -263,8 +263,9 @@ For notification delivery, idle hook records are not all equally authoritative.
 Only turn-end sources from the pane's configured runtime can establish idle on
 their own. Session-lifecycle sources such as `SessionStart`, foreign-runtime
 sources inherited through `TMUX_PANE`, and other non-turn-end idle records must
-be corroborated by a working-timer probe. If the probe is inconclusive, the gate
-treats the pane as busy and records a specific trace reason instead of
+be corroborated by a working-timer probe. A successful probe with no visible
+`Working (Ns)` timer is idle evidence; a failed or otherwise inconclusive probe
+still treats the pane as busy and records a specific trace reason instead of
 collapsing the decision into `hook_idle`.
 
 Install the hook writer and persistent CLI hook config entries with:

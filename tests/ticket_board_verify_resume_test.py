@@ -7,9 +7,11 @@ import importlib.util
 import json
 import os
 import socketserver
+import subprocess
 import sys
 import tempfile
 import threading
+from contextlib import contextmanager
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
@@ -72,6 +74,33 @@ def write_json(path: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def make_launcher_repo(path: Path) -> Path:
+    path.mkdir(parents=True)
+    subprocess.run(["git", "-C", str(path), "init"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(
+        ["git", "-C", str(path), "config", "user.email", "test@example.invalid"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    subprocess.run(
+        ["git", "-C", str(path), "config", "user.name", "Test User"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    marker = path / "README"
+    marker.write_text("launcher\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(path), "add", "README"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(
+        ["git", "-C", str(path), "commit", "-m", "init"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return path
+
+
 def make_fixture(root: Path, *, boot_id: str, boot_time: int) -> dict[str, Path]:
     runtime_sessions = root / "run" / "ticket-board" / "pane-sessions"
     durable_sessions = root / "state" / "ticket-board" / "pane-sessions"
@@ -88,6 +117,7 @@ def make_fixture(root: Path, *, boot_id: str, boot_time: int) -> dict[str, Path]
     tmux_file.write_text("demo-ops\ndemo-inspector\n", encoding="utf-8")
     boot_id_file = root / "boot_id"
     boot_time_file = root / "boot_time"
+    launcher_repo = make_launcher_repo(root / "launcher")
     boot_id_file.write_text(boot_id, encoding="utf-8")
     boot_time_file.write_text(str(boot_time), encoding="utf-8")
     config = root / "config.json"
@@ -133,6 +163,7 @@ def make_fixture(root: Path, *, boot_id: str, boot_time: int) -> dict[str, Path]
         "boot_id_file": boot_id_file,
         "boot_time_file": boot_time_file,
         "config": config,
+        "launcher_repo": launcher_repo,
     }
 
 
@@ -162,6 +193,8 @@ def build_args(module, paths: dict[str, Path], url: str):
                 str(paths["pane_state"]),
                 "--current-release",
                 str(paths["current"]),
+                "--launcher-repo",
+                str(paths["launcher_repo"]),
                 "--frame-dir",
                 str(paths["frame_dir"]),
                 "--tmux-sessions-file",
@@ -175,8 +208,8 @@ def build_args(module, paths: dict[str, Path], url: str):
     )
 
 
-def test_snapshot_and_verify_pass_after_real_boot_id_change() -> None:
-    module = load_module()
+@contextmanager
+def collect_good_pair(module):
     with tempfile.TemporaryDirectory(prefix="resume-verify.") as tmp, ThreadedServer() as server:
         root = Path(tmp)
         paths = make_fixture(root, boot_id="before-boot", boot_time=1000)
@@ -193,36 +226,118 @@ def test_snapshot_and_verify_pass_after_real_boot_id_change() -> None:
             os.utime(item, (2010, 2010))
 
         after = module.collect_snapshot(args)
+        yield paths, before, after
+
+
+def failed_checks(module, before: dict[str, object], after: dict[str, object]) -> dict[str, str]:
+    checks = module.verify_snapshot(before, after)
+    return {check.name: check.detail for check in checks if not check.ok}
+
+
+def assert_check_fails(module, before: dict[str, object], after: dict[str, object], name: str) -> None:
+    failed = failed_checks(module, before, after)
+    assert name in failed, failed
+
+
+def test_snapshot_and_verify_pass_after_real_boot_id_change() -> None:
+    module = load_module()
+    with collect_good_pair(module) as (_paths, before, after):
         checks = module.verify_snapshot(before, after)
         assert all(check.ok for check in checks), [(check.name, check.detail) for check in checks if not check.ok]
 
 
+def test_real_reboot_observed_fails_without_boot_id_change() -> None:
+    module = load_module()
+    with collect_good_pair(module) as (_paths, before, after):
+        after["boot"]["boot_id"] = before["boot"]["boot_id"]
+        assert_check_fails(module, before, after, "real_reboot_observed")
+
+
+def test_runtime_session_tmpfs_check_fails_when_files_predate_boot() -> None:
+    module = load_module()
+    with collect_good_pair(module) as (_paths, before, after):
+        first_record = next(iter(after["runtime_sessions"]["files"].values()))
+        first_record["mtime"] = after["boot"]["boot_time"] - 1
+        assert_check_fails(module, before, after, "runtime_session_tmpfs_wiped_or_recreated")
+
+
+def test_durable_sessions_survive_fails_when_record_missing() -> None:
+    module = load_module()
+    with collect_good_pair(module) as (_paths, before, after):
+        after["durable_sessions"]["files"].pop("demo-ops_0.0.json")
+        assert_check_fails(module, before, after, "durable_sessions_survive")
+
+
+def test_roles_resume_recorded_sessions_fails_when_a_session_id_changes() -> None:
+    module = load_module()
+    with collect_good_pair(module) as (_paths, before, after):
+        after["durable_sessions"]["files"]["demo-ops_0.0.json"]["session_id"] = "cold-session"
+        assert_check_fails(module, before, after, "roles_resume_recorded_sessions")
+
+
+def test_codex_agy_pane_state_seeded_fails_when_hook_state_missing() -> None:
+    module = load_module()
+    with collect_good_pair(module) as (_paths, before, after):
+        after["pane_state"]["files"].pop("demo-inspector_0.0.json")
+        assert_check_fails(module, before, after, "codex_agy_pane_state_seeded")
+
+
+def test_codex_agy_pane_state_seeded_fails_when_state_predates_boot() -> None:
+    module = load_module()
+    with collect_good_pair(module) as (_paths, before, after):
+        first_record = next(iter(after["pane_state"]["files"].values()))
+        first_record["mtime"] = after["boot"]["boot_time"] - 1
+        assert_check_fails(module, before, after, "codex_agy_pane_state_seeded")
+
+
+def test_frame_dir_recreated_fails_when_frame_dir_is_missing() -> None:
+    module = load_module()
+    with collect_good_pair(module) as (_paths, before, after):
+        after["frame_dir"]["exists"] = False
+        assert_check_fails(module, before, after, "frame_dir_recreated")
+
+
+def test_board_build_matches_current_release_fails_on_build_mismatch() -> None:
+    module = load_module()
+    with collect_good_pair(module) as (_paths, before, after):
+        after["board"]["build_id"] = "different-release"
+        assert_check_fails(module, before, after, "board_build_matches_current_release")
+
+
+def test_tmux_sessions_restored_fails_when_configured_session_missing() -> None:
+    module = load_module()
+    with collect_good_pair(module) as (_paths, before, after):
+        after["tmux"]["sessions"] = ["demo-ops"]
+        assert_check_fails(module, before, after, "tmux_sessions_restored")
+
+
+def test_launcher_checkout_not_stale_fails_when_checkout_is_behind() -> None:
+    module = load_module()
+    with collect_good_pair(module) as (_paths, before, after):
+        after["launcher_checkout"]["behind"] = 2
+        assert_check_fails(module, before, after, "launcher_checkout_not_stale")
+
+
 def test_verify_fails_when_a_recorded_session_id_changes() -> None:
     module = load_module()
-    with tempfile.TemporaryDirectory(prefix="resume-verify.") as tmp, ThreadedServer() as server:
-        root = Path(tmp)
-        paths = make_fixture(root, boot_id="before-boot", boot_time=1000)
-        paths["snapshot"] = root / "snapshot.json"
-        args = build_args(module, paths, server.url)
-        before = module.collect_snapshot(args)
-
-        changed = paths["durable_sessions"] / "demo-ops_0.0.json"
-        write_json(changed, {"target": "demo-ops:0.0", "session_id": "cold-session"})
-        paths["boot_id_file"].write_text("after-boot", encoding="utf-8")
-        paths["boot_time_file"].write_text("2000", encoding="utf-8")
-        for item in paths["runtime_sessions"].glob("*.json"):
-            os.utime(item, (2010, 2010))
-        for item in paths["pane_state"].glob("*.json"):
-            os.utime(item, (2010, 2010))
-
-        after = module.collect_snapshot(args)
-        checks = module.verify_snapshot(before, after)
-        failed = {check.name: check.detail for check in checks if not check.ok}
+    with collect_good_pair(module) as (_paths, before, after):
+        after["durable_sessions"]["files"]["demo-ops_0.0.json"]["session_id"] = "cold-session"
+        failed = failed_checks(module, before, after)
         assert "durable_sessions_survive" in failed
         assert "roles_resume_recorded_sessions" in failed
 
 
 if __name__ == "__main__":
     test_snapshot_and_verify_pass_after_real_boot_id_change()
+    test_real_reboot_observed_fails_without_boot_id_change()
+    test_runtime_session_tmpfs_check_fails_when_files_predate_boot()
+    test_durable_sessions_survive_fails_when_record_missing()
+    test_roles_resume_recorded_sessions_fails_when_a_session_id_changes()
+    test_codex_agy_pane_state_seeded_fails_when_hook_state_missing()
+    test_codex_agy_pane_state_seeded_fails_when_state_predates_boot()
+    test_frame_dir_recreated_fails_when_frame_dir_is_missing()
+    test_board_build_matches_current_release_fails_on_build_mismatch()
+    test_tmux_sessions_restored_fails_when_configured_session_missing()
+    test_launcher_checkout_not_stale_fails_when_checkout_is_behind()
     test_verify_fails_when_a_recorded_session_id_changes()
     print("ticket_board_verify_resume_test: ok")

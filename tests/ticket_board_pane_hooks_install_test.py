@@ -34,14 +34,79 @@ SESSION_ENV_KEYS = (
     "GEMINI_SESSION_ID",
     "SESSION_ID",
 )
+HOOK_PATH_ENV_KEYS = (
+    "TICKET_BOARD_PANE_SESSION_DIR",
+    "PGU_TICKET_BOARD_PANE_SESSION_DIR",
+    "TICKET_BOARD_PANE_STATE_DIR",
+    "PGU_TICKET_BOARD_PANE_STATE_DIR",
+)
 
 
 def _hook_env(**extra: str) -> dict[str, str]:
     env = os.environ.copy()
-    for key in SESSION_ENV_KEYS:
+    for key in (*SESSION_ENV_KEYS, *HOOK_PATH_ENV_KEYS):
         env.pop(key, None)
     env.update(extra)
     return env
+
+
+def _candidate_live_session_dirs() -> list[Path]:
+    candidates: list[Path] = []
+    for key in ("TICKET_BOARD_PANE_SESSION_DIR", "PGU_TICKET_BOARD_PANE_SESSION_DIR"):
+        value = os.environ.get(key, "").strip()
+        if value:
+            candidates.append(Path(value).expanduser())
+    xdg_state_home = os.environ.get("XDG_STATE_HOME", "").strip()
+    state_home = Path(xdg_state_home).expanduser() if xdg_state_home else Path.home() / ".local" / "state"
+    candidates.append(state_home / "pgu-ticket-board" / "pane-sessions")
+    candidates.append(Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-sessions"))
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        resolved = str(candidate.resolve(strict=False))
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(candidate)
+    return unique
+
+
+def _snapshot_session_dir(path: Path) -> dict[str, bytes] | None:
+    try:
+        if not path.exists():
+            return None
+        if not path.is_dir():
+            return {}
+        snapshot: dict[str, bytes] = {}
+        for child in sorted(path.rglob("*")):
+            if child.is_file():
+                snapshot[str(child.relative_to(path))] = child.read_bytes()
+        return snapshot
+    except OSError:
+        return {}
+
+
+def _snapshot_live_session_dirs() -> dict[str, dict[str, bytes] | None]:
+    return {str(path): _snapshot_session_dir(path) for path in _candidate_live_session_dirs()}
+
+
+def _session_snapshot_diff(
+    before: dict[str, dict[str, bytes] | None],
+    after: dict[str, dict[str, bytes] | None],
+) -> list[str]:
+    changed: list[str] = []
+    for root in sorted(set(before) | set(after)):
+        before_files = before.get(root)
+        after_files = after.get(root)
+        if before_files is None or after_files is None:
+            if before_files != after_files:
+                changed.append(root)
+            continue
+        for name in sorted(set(before_files) | set(after_files)):
+            if before_files.get(name) != after_files.get(name):
+                changed.append(f"{root}/{name}")
+    return changed
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -150,6 +215,29 @@ def test_installer_writes_durable_cli_hook_configs_idempotently() -> None:
         assert " busy --source claude.Stop" not in claude_commands["claude.Stop"]
 
 
+def test_session_dir_snapshot_detects_same_count_content_mutation() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        session_dir = Path(tmp) / "sessions"
+        session_dir.mkdir()
+        session_path = session_dir / "pgu-ops_0.0.json"
+        session_path.write_text(
+            json.dumps({"target": "pgu-ops:0.0", "session_id": "real-session"}) + "\n",
+            encoding="utf-8",
+        )
+
+        before = _snapshot_session_dir(session_dir)
+        session_path.write_text(
+            json.dumps({"target": "pgu-ops:0.0", "session_id": "12345678-1234-5678-9abc-def012345679"}) + "\n",
+            encoding="utf-8",
+        )
+        after = _snapshot_session_dir(session_dir)
+
+        assert before is not None
+        assert after is not None
+        assert len(before) == len(after) == 1
+        assert before != after
+
+
 def test_installed_hook_writes_state_and_verify_state_checks_all_panes() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
         home = Path(tmp) / "home"
@@ -236,33 +324,43 @@ def test_session_start_hook_defaults_to_xdg_state_home_session_dir() -> None:
         home = Path(tmp) / "home"
         state_dir = Path(tmp) / "state"
         xdg_state_home = Path(tmp) / "xdg-state"
+        ambient_session_dir = Path(tmp) / "ambient-live-session-dir"
         session_dir = xdg_state_home / "pgu-ticket-board" / "pane-sessions"
         bin_path = home / ".local" / "bin" / HOOK_NAME
         subprocess.run([str(INSTALLER), "install", "--home", str(home), "--bin-path", str(bin_path)], check=True)
 
         session_id = "12345678-1234-5678-9abc-def012345679"
-        subprocess.run(
-            [
-                str(bin_path),
-                "idle",
-                "--target",
-                "pgu-ops:0.0",
-                "--source",
-                "codex.SessionStart",
-                "--state-dir",
-                str(state_dir),
-                "--record-session",
-            ],
-            input=json.dumps({"session_id": session_id}),
-            text=True,
-            check=True,
-            env=_hook_env(XDG_STATE_HOME=str(xdg_state_home)),
-        )
+        original_session_dir = os.environ.get("TICKET_BOARD_PANE_SESSION_DIR")
+        try:
+            os.environ["TICKET_BOARD_PANE_SESSION_DIR"] = str(ambient_session_dir)
+            subprocess.run(
+                [
+                    str(bin_path),
+                    "idle",
+                    "--target",
+                    "pgu-ops:0.0",
+                    "--source",
+                    "codex.SessionStart",
+                    "--state-dir",
+                    str(state_dir),
+                    "--record-session",
+                ],
+                input=json.dumps({"session_id": session_id}),
+                text=True,
+                check=True,
+                env=_hook_env(XDG_STATE_HOME=str(xdg_state_home)),
+            )
+        finally:
+            if original_session_dir is None:
+                os.environ.pop("TICKET_BOARD_PANE_SESSION_DIR", None)
+            else:
+                os.environ["TICKET_BOARD_PANE_SESSION_DIR"] = original_session_dir
 
         session = json.loads((session_dir / "pgu-ops_0.0.json").read_text(encoding="utf-8"))
         assert session["session_id"] == session_id
         assert oct(session_dir.stat().st_mode & 0o777) == "0o700"
         assert oct((session_dir / "pgu-ops_0.0.json").stat().st_mode & 0o777) == "0o600"
+        assert not (ambient_session_dir / "pgu-ops_0.0.json").exists()
 
 
 def test_hook_prefers_generic_target_and_session_envs() -> None:
@@ -611,19 +709,26 @@ def test_session_start_records_env_session_id_fallback() -> None:
 
 
 def main() -> int:
-    test_installer_writes_durable_cli_hook_configs_idempotently()
-    test_installed_hook_writes_state_and_verify_state_checks_all_panes()
-    test_session_start_hook_seeds_idle_state_and_records_resume_session()
-    test_session_start_hook_defaults_to_xdg_state_home_session_dir()
-    test_hook_prefers_generic_target_and_session_envs()
-    test_non_session_start_hook_records_resume_session_when_payload_has_id()
-    test_non_session_start_hook_with_existing_session_does_not_read_or_rewrite()
-    test_non_session_start_hook_without_session_id_only_writes_state()
-    test_state_write_is_not_blocked_by_hung_stdin_pipe()
-    test_hung_stdin_pipe_exits_after_bounded_read()
-    test_session_start_records_non_uuid_named_session_id()
-    test_session_start_always_updates_existing_session_file()
-    test_session_start_records_env_session_id_fallback()
+    live_session_snapshot = _snapshot_live_session_dirs()
+    try:
+        test_installer_writes_durable_cli_hook_configs_idempotently()
+        test_session_dir_snapshot_detects_same_count_content_mutation()
+        test_installed_hook_writes_state_and_verify_state_checks_all_panes()
+        test_session_start_hook_seeds_idle_state_and_records_resume_session()
+        test_session_start_hook_defaults_to_xdg_state_home_session_dir()
+        test_hook_prefers_generic_target_and_session_envs()
+        test_non_session_start_hook_records_resume_session_when_payload_has_id()
+        test_non_session_start_hook_with_existing_session_does_not_read_or_rewrite()
+        test_non_session_start_hook_without_session_id_only_writes_state()
+        test_state_write_is_not_blocked_by_hung_stdin_pipe()
+        test_hung_stdin_pipe_exits_after_bounded_read()
+        test_session_start_records_non_uuid_named_session_id()
+        test_session_start_always_updates_existing_session_file()
+        test_session_start_records_env_session_id_fallback()
+    finally:
+        after_snapshot = _snapshot_live_session_dirs()
+        changed = _session_snapshot_diff(live_session_snapshot, after_snapshot)
+        assert not changed, changed
     print("ticket_board_pane_hooks_install_test: ok")
     return 0
 

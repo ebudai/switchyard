@@ -93,6 +93,16 @@ TERMINAL_STATES = {"done", "cancelled"}
 NUDGE_ELIGIBLE_STATES = {"in_progress", "inspection", "audit", "dat", "director_review", "analysis", "backlog"}
 LOGGER = logging.getLogger(__name__)
 DEFAULT_DIRECTORCTL = "/home/agent/bin/directorctl"
+WORK_EVIDENCE_REASONS = frozenset(
+    {
+        "hook_busy",
+        "pane_content_changed",
+        "working_timer",
+        "human_composing",
+        "foreign_runtime_pane_content_changed",
+        "foreign_runtime_working_timer",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -755,6 +765,7 @@ class TicketBoardNotifyListener:
         self._traced_gate_defer_notifications: set[int] = set()
         self._seen_turn_end_idle_since_by_role: dict[str, str] = {}
         self._consumed_present_idle_since_by_role: dict[str, str] = {}
+        self._work_observed_at_by_role: dict[str, str] = {}
 
     def _connector_kwargs(self) -> dict[str, int | bool]:
         return {
@@ -1025,10 +1036,33 @@ SELECT ticket_board.record_notification_trace(
         if not callable(idle_since_by_role):
             return {}
         try:
-            return dict(idle_since_by_role(roles)) if roles is not None else dict(idle_since_by_role())
+            checked_roles = roles if roles is not None else sorted(ROLE_TO_TARGET)
+            idle_since = dict(idle_since_by_role(checked_roles))
+            self._record_work_observed_from_gate(checked_roles)
+            return idle_since
         except Exception as exc:
             self.logger.warning("Failed to read pane idle hook state for stall nudges: %s", exc)
             return {}
+
+    def _record_work_observed_from_gate(self, roles: list[str]) -> None:
+        gate_owner = getattr(self.activity_gate, "__self__", None)
+        last_trace = getattr(gate_owner, "last_trace", None)
+        if not callable(last_trace):
+            return
+        observed_at = datetime.now(timezone.utc).isoformat()
+        for role in roles:
+            target = ROLE_TO_TARGET.get(role)
+            if target is None:
+                continue
+            try:
+                trace = last_trace(target)
+            except Exception:
+                continue
+            if isinstance(trace, ActivityTrace) and trace.busy and trace.reason in WORK_EVIDENCE_REASONS:
+                self._work_observed_at_by_role[role] = observed_at
+
+    def _work_observed_at_for_roles(self, roles: list[str]) -> dict[str, str]:
+        return {role: self._work_observed_at_by_role[role] for role in roles if role in self._work_observed_at_by_role}
 
     def _turn_end_idle_since_by_role(self) -> dict[str, str]:
         gate_owner = getattr(self.activity_gate, "__self__", None)
@@ -1110,9 +1144,11 @@ SELECT ticket_board.notify_idle_turn_end_nudges(
 
     def process_idle_stall_nudges(self, conn: Any) -> int:
         idle_since = self._idle_since_by_role()
-        if not idle_since:
+        work_observed_at = self._work_observed_at_for_roles(sorted(ROLE_TO_TARGET))
+        if not idle_since and not work_observed_at:
             return 0
-        self._reset_busy_backoff_for_idle_roles(conn, idle_since)
+        if idle_since:
+            self._reset_busy_backoff_for_idle_roles(conn, idle_since)
         try:
             result = conn.execute(
                 """
@@ -1121,7 +1157,8 @@ SELECT ticket_board.notify_idle_stall_nudges(
     clock_timestamp(),
     %s::interval,
     %s::interval,
-    %s::integer
+    %s::integer,
+    %s::jsonb
 )
 """,
                 (
@@ -1129,6 +1166,7 @@ SELECT ticket_board.notify_idle_stall_nudges(
                     f"{self.idle_stall_grace_seconds:g} seconds",
                     f"{self.idle_stall_nudge_cadence_seconds:g} seconds",
                     self.idle_stall_escalate_after,
+                    json.dumps(work_observed_at, sort_keys=True),
                 ),
             )
             row = result.fetchone()

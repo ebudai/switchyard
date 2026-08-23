@@ -1264,6 +1264,7 @@ AS $$
 DECLARE
     activity_at timestamptz := coalesce(NEW.updated_at, NEW.row_updated_at, clock_timestamp());
     reset_idle_reminder boolean := false;
+    activation_reset boolean := false;
 BEGIN
     IF TG_OP = 'INSERT' THEN
         INSERT INTO ticket_board.ticket_notification_state (
@@ -1302,7 +1303,12 @@ BEGIN
         RETURN NULL;
     END IF;
 
-    reset_idle_reminder := OLD.state IS DISTINCT FROM NEW.state OR OLD.assignee IS DISTINCT FROM NEW.assignee;
+    activation_reset := (
+        (OLD.state = 'backlog' OR OLD.parked)
+        AND NOT NEW.parked
+        AND NEW.state IN ('analysis', 'in_progress', 'inspection', 'audit', 'dat', 'user_review', 'director_review')
+    );
+    reset_idle_reminder := OLD.state IS DISTINCT FROM NEW.state OR OLD.assignee IS DISTINCT FROM NEW.assignee OR activation_reset;
 
     INSERT INTO ticket_board.ticket_notification_state (
         ticket_id,
@@ -1345,20 +1351,20 @@ BEGIN
             ELSE ticket_board.ticket_notification_state.previous_state
         END,
         entered_current_state_at = CASE
-            WHEN OLD.state IS DISTINCT FROM NEW.state THEN EXCLUDED.entered_current_state_at
+            WHEN OLD.state IS DISTINCT FROM NEW.state OR activation_reset THEN EXCLUDED.entered_current_state_at
             ELSE ticket_board.ticket_notification_state.entered_current_state_at
         END,
         last_activity_at = EXCLUDED.last_activity_at,
         last_transition_notified_at = CASE
-            WHEN OLD.state IS DISTINCT FROM NEW.state THEN NULL
+            WHEN OLD.state IS DISTINCT FROM NEW.state OR activation_reset THEN NULL
             ELSE ticket_board.ticket_notification_state.last_transition_notified_at
         END,
         last_nudged_at = CASE
-            WHEN OLD.state IS DISTINCT FROM NEW.state THEN NULL
+            WHEN OLD.state IS DISTINCT FROM NEW.state OR activation_reset THEN NULL
             ELSE ticket_board.ticket_notification_state.last_nudged_at
         END,
         nudge_count = CASE
-            WHEN OLD.state IS DISTINCT FROM NEW.state THEN 0
+            WHEN OLD.state IS DISTINCT FROM NEW.state OR activation_reset THEN 0
             ELSE ticket_board.ticket_notification_state.nudge_count
         END,
         idle_reminder_count = CASE
@@ -2902,7 +2908,8 @@ CREATE OR REPLACE FUNCTION ticket_board.notify_idle_stall_nudges(
     p_now timestamptz DEFAULT clock_timestamp(),
     p_grace interval DEFAULT interval '45 seconds',
     p_cadence interval DEFAULT interval '30 minutes',
-    p_escalate_after integer DEFAULT 2
+    p_escalate_after integer DEFAULT 2,
+    p_work_observed_at_by_role jsonb DEFAULT '{}'::jsonb
 )
 RETURNS integer
 LANGUAGE plpgsql
@@ -2918,7 +2925,10 @@ DECLARE
 BEGIN
     PERFORM ticket_board.require_ticket_board_listener('notify_idle_stall_nudges');
 
-    IF p_idle_since_by_role IS NULL OR p_idle_since_by_role = '{}'::jsonb THEN
+    p_idle_since_by_role := coalesce(p_idle_since_by_role, '{}'::jsonb);
+    p_work_observed_at_by_role := coalesce(p_work_observed_at_by_role, '{}'::jsonb);
+
+    IF p_idle_since_by_role = '{}'::jsonb THEN
         RETURN 0;
     END IF;
 
@@ -2934,6 +2944,7 @@ BEGIN
             candidates.idle_since_at,
             candidates.last_nudged_at,
             candidates.nudge_count,
+            candidates.work_observed_at,
             candidates.dedupe_key,
             candidates.owner_role,
             candidates.target_role
@@ -2949,6 +2960,11 @@ BEGIN
                 (p_idle_since_by_role ->> ticket_board.nudge_target_role(t.state, t.assignee))::timestamptz AS idle_since_at,
                 ns.last_nudged_at,
                 ns.nudge_count,
+                CASE
+                    WHEN p_work_observed_at_by_role ? ticket_board.nudge_target_role(t.state, t.assignee)
+                        THEN (p_work_observed_at_by_role ->> ticket_board.nudge_target_role(t.state, t.assignee))::timestamptz
+                    ELSE NULL
+                END AS work_observed_at,
                 'nudge:' || t.id || ':director' AS dedupe_key,
                 ticket_board.nudge_target_role(t.state, t.assignee) AS owner_role,
                 'director' AS target_role,
@@ -3007,6 +3023,11 @@ BEGIN
                 (p_idle_since_by_role ->> 'director')::timestamptz AS idle_since_at,
                 ns.last_nudged_at,
                 ns.nudge_count,
+                CASE
+                    WHEN p_work_observed_at_by_role ? 'director'
+                        THEN (p_work_observed_at_by_role ->> 'director')::timestamptz
+                    ELSE NULL
+                END AS work_observed_at,
                 'nudge:' || t.id || ':director' AS dedupe_key,
                 'director' AS owner_role,
                 'director' AS target_role,
@@ -3061,7 +3082,8 @@ BEGIN
         target_role := candidate.target_role;
         IF candidate.nudge_count >= p_escalate_after
            AND candidate.last_nudged_at IS NOT NULL
-           AND candidate.last_activity_at <= candidate.last_nudged_at THEN
+           AND candidate.last_activity_at <= candidate.last_nudged_at
+           AND coalesce(candidate.work_observed_at, '-infinity'::timestamptz) <= candidate.last_nudged_at THEN
             target_role := 'director';
             payload := jsonb_build_object(
                 'kind', 'escalation',
@@ -3096,7 +3118,10 @@ BEGIN
         UPDATE ticket_board.ticket_notification_state
         SET last_nudged_at = p_now,
             nudge_count = CASE
-                WHEN candidate.last_activity_at > coalesce(candidate.last_nudged_at, '-infinity'::timestamptz) THEN 1
+                WHEN greatest(
+                    candidate.last_activity_at,
+                    coalesce(candidate.work_observed_at, '-infinity'::timestamptz)
+                ) > coalesce(candidate.last_nudged_at, '-infinity'::timestamptz) THEN 1
                 ELSE nudge_count + 1
             END
         WHERE ticket_id = candidate.id;

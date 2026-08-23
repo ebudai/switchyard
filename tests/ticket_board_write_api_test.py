@@ -790,7 +790,7 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
         caller="director",
         expect=400,
     )
-    assert "in_progress tickets require an implementer assignee" in str(invalid_implementation_assignee), invalid_implementation_assignee
+    assert "in_progress tickets require an implementation-stage owner assignee" in str(invalid_implementation_assignee), invalid_implementation_assignee
     incoherent_audit_route = post_json(
         base_url,
         "/api/tickets/PGU-136/actions/route",

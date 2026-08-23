@@ -101,7 +101,7 @@ GRANT EXECUTE ON FUNCTION ticket_board.ack_notification(bigint) TO ticket_board_
 GRANT EXECUTE ON FUNCTION ticket_board.requeue_notification(bigint, interval, text) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.reset_notification_backoff_for_idle_roles(jsonb, timestamptz) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.record_notification_trace(text, bigint, text, text, text, text, text, text, jsonb) TO ticket_board_listener;
-GRANT EXECUTE ON FUNCTION ticket_board.notify_idle_stall_nudges(jsonb, timestamptz, interval, interval, integer) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.notify_idle_stall_nudges(jsonb, timestamptz, interval, interval, integer, jsonb) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.notify_idle_turn_end_nudges(jsonb, timestamptz) TO ticket_board_listener;
 -- The delivery currency check (_notification_is_current -> _current_ticket_state)
 -- calls ticket_has_unresolved_blockers; the listener role must be able to run it,

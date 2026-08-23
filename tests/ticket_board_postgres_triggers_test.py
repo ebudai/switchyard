@@ -428,7 +428,7 @@ SET entered_current_state_at = clock_timestamp() - interval '20 minutes',
     nudge_count = 3
 WHERE ticket_id = 'PGU-45121';
 DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-45121';
-GRANT EXECUTE ON FUNCTION ticket_board.notify_idle_stall_nudges(jsonb, timestamptz, interval, interval, integer) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.notify_idle_stall_nudges(jsonb, timestamptz, interval, interval, integer, jsonb) TO ticket_board_listener;
 SET ROLE ticket_board_listener;
 WITH params AS (
     SELECT clock_timestamp() AS now_at
@@ -464,6 +464,25 @@ WHERE id IN ('PGU-45120', 'PGU-45121');
                 "PGU-45120": {"state": "backlog", "assignee": "research", "parked": True},
                 "PGU-45121": {"state": "in_progress", "assignee": "research", "parked": False},
             }, park_activated
+            activated_clock = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'fresh_state_clock', ns.entered_current_state_at > clock_timestamp() - interval '30 seconds',
+    'last_nudged_cleared', ns.last_nudged_at IS NULL,
+    'nudge_count', ns.nudge_count
+)::text
+FROM ticket_board.ticket_notification_state ns
+WHERE ns.ticket_id = 'PGU-45121';
+""",
+                ).stdout
+            )
+            assert activated_clock == {
+                "fresh_state_clock": True,
+                "last_nudged_cleared": True,
+                "nudge_count": 0,
+            }, activated_clock
             psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '4512121' WHERE id = 'PGU-45121';")
             psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-45121';")
             psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-45121';")
@@ -867,7 +886,7 @@ WHERE id = 'PGU-40';
             assert_error(
                 conninfo,
                 "UPDATE ticket_board.tickets SET state = 'in_progress', assignee = 'unassigned' WHERE id = 'PGU-41';",
-                "in_progress tickets require an implementer assignee",
+                "in_progress tickets require an implementation-stage owner assignee",
             )
             for invalid_index, invalid_assignee in enumerate(("audit", "inspector", "director", "agent"), start=1):
                 invalid_ticket_id = f"PGU-41{invalid_index}"
@@ -883,7 +902,7 @@ WHERE id = 'PGU-40';
                 assert_error(
                     conninfo,
                     f"UPDATE ticket_board.tickets SET state = 'in_progress', assignee = '{invalid_assignee}' WHERE id = '{invalid_ticket_id}';",
-                    "in_progress tickets require an implementer assignee",
+                    "in_progress tickets require an implementation-stage owner assignee",
                 )
             insert_ticket(
                 conninfo,
@@ -1706,12 +1725,12 @@ INSERT INTO ticket_board.tickets (
     '2026-07-10T00:00:00+00:00', '{invalid_direct_source}'::jsonb
 );
 """,
-                "in_progress tickets require an implementer assignee",
+                "in_progress tickets require an implementation-stage owner assignee",
             )
             assert_error(
                 conninfo,
                 "UPDATE ticket_board.tickets SET assignee = 'director' WHERE id = 'PGU-29710';",
-                "in_progress tickets require an implementer assignee",
+                "in_progress tickets require an implementation-stage owner assignee",
             )
             psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '2971010' WHERE id = 'PGU-29710';")
             psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-29710';")
@@ -3026,7 +3045,7 @@ BEGIN
     END IF;
 END;
 $$;
-GRANT EXECUTE ON FUNCTION ticket_board.notify_idle_stall_nudges(jsonb, timestamptz, interval, interval, integer) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.notify_idle_stall_nudges(jsonb, timestamptz, interval, interval, integer, jsonb) TO ticket_board_listener;
 SET ROLE ticket_board_listener;
 WITH params AS (
     SELECT clock_timestamp() AS now_at
@@ -3123,6 +3142,58 @@ FROM (
                     "nudge_count": 1,
                 },
             }, idle_stall_nudges
+            psql(
+                conninfo,
+                """
+DELETE FROM ticket_board.ticket_notification_queue;
+UPDATE ticket_board.ticket_notification_state
+SET entered_current_state_at = clock_timestamp() - interval '20 minutes',
+    last_activity_at = clock_timestamp() - interval '20 minutes',
+    last_nudged_at = clock_timestamp() - interval '10 minutes',
+    nudge_count = 2
+WHERE ticket_id = 'PGU-3084';
+SET ROLE ticket_board_listener;
+WITH params AS (
+    SELECT clock_timestamp() AS now_at
+)
+SELECT ticket_board.notify_idle_stall_nudges(
+    jsonb_build_object('inspector', (now_at - interval '2 minutes')::text),
+    now_at,
+    interval '45 seconds',
+    interval '5 minutes',
+    2,
+    jsonb_build_object('inspector', (now_at - interval '2 minutes')::text)
+)
+FROM params;
+RESET ROLE;
+""",
+            )
+            work_evidence_suppressed_escalation = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'queued', (
+        SELECT jsonb_object_agg(kind || ':' || target_role, count ORDER BY kind || ':' || target_role)
+        FROM (
+            SELECT kind, target_role, count(*)::int AS count
+            FROM ticket_board.ticket_notification_queue q
+            WHERE q.ticket_id = 'PGU-3084'
+              AND q.kind IN ('nudge', 'escalation')
+            GROUP BY kind, target_role
+        ) q_counts
+    ),
+    'nudge_count', ns.nudge_count
+)::text
+FROM ticket_board.ticket_notification_state ns
+WHERE ns.ticket_id = 'PGU-3084';
+""",
+                ).stdout
+            )
+            assert work_evidence_suppressed_escalation == {
+                "queued": {"nudge:director": 1},
+                "nudge_count": 1,
+            }, work_evidence_suppressed_escalation
             psql(
                 conninfo,
                 """

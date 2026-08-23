@@ -614,7 +614,8 @@ def test_listener_enqueues_idle_stall_nudges_from_hook_state() -> None:
         assert set(idle_since) == {"ops"}
         assert idle_since["ops"].startswith("1970-01-01T00:01:40")
         assert DEFAULT_IDLE_STALL_NUDGE_CADENCE_SECONDS == 30 * 60.0
-        assert params[1:] == ("45 seconds", "1800 seconds", 2)
+        assert params[1:4] == ("45 seconds", "1800 seconds", 2)
+        assert set(json.loads(str(params[4]))) == {"app"}
 
 
 def test_advancing_working_timer_suppresses_idle_stall_nudge() -> None:
@@ -632,7 +633,7 @@ def test_advancing_working_timer_suppresses_idle_stall_nudge() -> None:
             sleeper=lambda _seconds: None,
         )
         store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=100.0)
-        conn = FakeConnection(idle_stall_result=1)
+        conn = FakeConnection(idle_stall_result=0)
         listener = TicketBoardNotifyListener(
             conninfo="",
             activity_gate=gate.is_working,
@@ -644,7 +645,11 @@ def test_advancing_working_timer_suppresses_idle_stall_nudge() -> None:
 
         assert listener.process_idle_stall_nudges(conn) == 0
 
-    assert conn.idle_stall_calls == []
+    assert len(conn.idle_stall_calls) == 1
+    params = conn.idle_stall_calls[0]
+    assert params is not None
+    assert json.loads(str(params[0])) == {}
+    assert set(json.loads(str(params[4]))) == {"ops"}
     assert conn.reset_backoff_calls == []
 
 
@@ -689,7 +694,7 @@ def test_resetting_working_timer_suppresses_idle_stall_nudge() -> None:
             sleeper=lambda _seconds: None,
         )
         store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=100.0)
-        conn = FakeConnection(idle_stall_result=1)
+        conn = FakeConnection(idle_stall_result=0)
         listener = TicketBoardNotifyListener(
             conninfo="",
             activity_gate=gate.is_working,
@@ -701,7 +706,11 @@ def test_resetting_working_timer_suppresses_idle_stall_nudge() -> None:
 
         assert listener.process_idle_stall_nudges(conn) == 0
 
-    assert conn.idle_stall_calls == []
+    assert len(conn.idle_stall_calls) == 1
+    params = conn.idle_stall_calls[0]
+    assert params is not None
+    assert json.loads(str(params[0])) == {}
+    assert set(json.loads(str(params[4]))) == {"ops"}
     assert gate.last_trace("pgu-ops:0.0").reason == "pane_content_changed"  # type: ignore[union-attr]
 
 
@@ -737,6 +746,7 @@ def test_static_working_timer_does_not_suppress_idle_stall_nudge() -> None:
         assert params is not None
         idle_since = json.loads(str(params[0]))
         assert set(idle_since) == {"ops"}
+        assert json.loads(str(params[4])) == {}
         assert gate.last_trace("pgu-ops:0.0").reason == "working_timer_idle"  # type: ignore[union-attr]
 
 

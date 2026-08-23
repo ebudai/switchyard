@@ -58,7 +58,7 @@ LISTENER_FUNCTIONS = [
     "ticket_board.ack_notification(bigint)",
     "ticket_board.requeue_notification(bigint,interval,text)",
     "ticket_board.record_notification_trace(text,bigint,text,text,text,text,text,text,jsonb)",
-    "ticket_board.notify_idle_stall_nudges(jsonb,timestamp with time zone,interval,interval,integer)",
+    "ticket_board.notify_idle_stall_nudges(jsonb,timestamp with time zone,interval,interval,integer,jsonb)",
     "ticket_board.notify_idle_turn_end_nudges(jsonb,timestamp with time zone)",
 ]
 PRIVATE_LISTENER_FUNCTIONS = [

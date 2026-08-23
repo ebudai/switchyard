@@ -519,6 +519,14 @@ def main() -> int:
     ).read_text(encoding="utf-8").lower()
     assert "p_cadence interval default interval '30 minutes'" in idle_stall_cadence_migration
     assert "p_cadence interval default interval '30 minutes'" in executable_schema_lower
+    work_aware_idle_stall_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu636_work_aware_idle_stall_nudges.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "p_work_observed_at_by_role jsonb default '{}'::jsonb" in work_aware_idle_stall_migration
+    assert "coalesce(candidate.work_observed_at, '-infinity'::timestamptz) <= candidate.last_nudged_at" in work_aware_idle_stall_migration
+    assert "old.state = 'backlog' or old.parked" in work_aware_idle_stall_migration
+    assert "p_work_observed_at_by_role jsonb default '{}'::jsonb" in executable_schema_lower
+    assert "coalesce(candidate.work_observed_at, '-infinity'::timestamptz) <= candidate.last_nudged_at" in executable_schema_lower
     drop_orphaned_eric_functions_migration = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "pgu593_drop_orphaned_eric_functions.sql"
     ).read_text(encoding="utf-8").lower()

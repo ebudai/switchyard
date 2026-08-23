@@ -16,7 +16,8 @@ Environment=HOME=/home/agent
 Environment=PGHOST=/var/run/postgresql
 Environment=PGDATABASE=pgu
 Environment=PGUSER=ticket_board_service
-Environment=PGU_TICKET_BOARD_SOCKET=/run/pgu-ticket-board/ticket-board.sock
+Environment=TICKET_BOARD_PROJECT=pgu
+Environment=TICKET_BOARD_SOCKET=/run/pgu-ticket-board/ticket-board.sock
 Environment=TICKET_BOARD_DATABASE_URL=postgresql:///pgu?host=/var/run/postgresql&user=ticket_board_service
 NoNewPrivileges=true
 ProtectSystem=full

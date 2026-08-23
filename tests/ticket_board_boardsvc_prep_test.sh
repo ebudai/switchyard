@@ -68,7 +68,7 @@ grep -q -- '--unix-socket /run/pgu-ticket-board/ticket-board.sock' "$UNIT" || {
     echo "FAIL: proposed unit does not bind the pane socket in the runtime directory" >&2
     exit 1
 }
-grep -q '^Environment=PGU_TICKET_BOARD_SOCKET=/run/pgu-ticket-board/ticket-board.sock$' "$UNIT" || {
+grep -q '^Environment=TICKET_BOARD_SOCKET=/run/pgu-ticket-board/ticket-board.sock$' "$UNIT" || {
     echo "FAIL: proposed unit does not export the runtime socket path" >&2
     exit 1
 }

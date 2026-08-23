@@ -1,15 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly SERVICE_NAME="pgu-ticket-board.service"
+PROJECT_SLUG="${TICKET_BOARD_PROJECT:-${PGU_TICKET_BOARD_PROJECT:-pgu}}"
+PROJECT_DB_IDENT="${PROJECT_SLUG//-/_}"
+DEFAULT_DATABASE_NAME="$PROJECT_DB_IDENT"
+if [[ "$PROJECT_SLUG" != "pgu" ]]; then
+    DEFAULT_DATABASE_NAME="${PROJECT_DB_IDENT}_ticket_board"
+fi
+readonly PROJECT_SLUG PROJECT_DB_IDENT DEFAULT_DATABASE_NAME
+readonly SERVICE_NAME="${TICKET_BOARD_SERVICE_NAME:-$PROJECT_SLUG-ticket-board.service}"
 readonly SOURCE_REPO="${SOURCE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-readonly BOARD_ROOT="${BOARD_ROOT:-/home/agent/pgu-ticketboard-live}"
+readonly BOARD_ROOT="${BOARD_ROOT:-/home/agent/$PROJECT_SLUG-ticketboard-live}"
 readonly BOARD_RELEASES_DIR="$BOARD_ROOT/releases"
 readonly BOARD_CURRENT_LINK="$BOARD_ROOT/current"
 readonly BOARD_SCRIPT="${BOARD_SCRIPT:-$BOARD_CURRENT_LINK/scripts/ticket-board.py}"
 readonly BOARD_HOST="${BOARD_HOST:-127.0.0.1}"
 readonly BOARD_PORT="${BOARD_PORT:-8770}"
-readonly BOARD_UNIX_SOCKET="${BOARD_UNIX_SOCKET:-/run/pgu-ticket-board/ticket-board.sock}"
+readonly BOARD_UNIX_SOCKET="${BOARD_UNIX_SOCKET:-/run/$PROJECT_SLUG-ticket-board/ticket-board.sock}"
 readonly SMOKE_PATH="${BOARD_SMOKE_PATH:-/api/board}"
 readonly SMOKE_TIMEOUT_SECONDS="${BOARD_SMOKE_TIMEOUT_SECONDS:-10}"
 readonly BOARD_CANARY_USER_OVERRIDE="${BOARD_CANARY_USER:-}"
@@ -17,18 +24,25 @@ readonly BOARD_CANARY_USER="${BOARD_CANARY_USER:-boardsvc}"
 readonly BOARD_CANARY_PORT="${BOARD_CANARY_PORT:-}"
 readonly BOARD_CANARY_TIMEOUT_SECONDS="${BOARD_CANARY_TIMEOUT_SECONDS:-$SMOKE_TIMEOUT_SECONDS}"
 readonly BOARD_CANARY_SOCKET="${BOARD_CANARY_SOCKET:-}"
-readonly BOARD_CANARY_SERVICE_NAME="${BOARD_CANARY_SERVICE_NAME:-pgu-ticket-board-canary.service}"
+readonly BOARD_CANARY_SERVICE_NAME="${BOARD_CANARY_SERVICE_NAME:-$PROJECT_SLUG-ticket-board-canary.service}"
 readonly BOARD_CANARY_ENV_FILE="${BOARD_CANARY_ENV_FILE:-$BOARD_ROOT/canary.env}"
 readonly PYTHON_BIN="${TICKET_BOARD_PYTHON:-/usr/bin/python3}"
-readonly FRAME_ROOT="${FRAME_ROOT:-/tmp/pgu-frames}"
-readonly LOG_PATH="${LOG_PATH:-/tmp/pgu-ticket-board.log}"
+if [[ -z "${FRAME_ROOT:-}" ]]; then
+    if [[ "$PROJECT_SLUG" == "pgu" ]]; then
+        FRAME_ROOT="/tmp/pgu-frames"
+    else
+        FRAME_ROOT="$HOME/.claude/$PROJECT_SLUG-ticket-frames"
+    fi
+fi
+readonly FRAME_ROOT
+readonly LOG_PATH="${LOG_PATH:-/tmp/$PROJECT_SLUG-ticket-board.log}"
 readonly UNIT_DIR="${UNIT_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}"
 readonly UNIT_PATH="$UNIT_DIR/$SERVICE_NAME"
 readonly SYSTEM_UNIT_PATH="${TICKET_BOARD_SYSTEM_UNIT_PATH:-/etc/systemd/system/$SERVICE_NAME}"
 readonly SYSTEM_UNIT_HASH_RECORD="${TICKET_BOARD_SYSTEM_UNIT_HASH_RECORD:-$BOARD_ROOT/system-unit.sha256}"
 readonly DEPLOY_REF="${DEPLOY_REF:-origin/main}"
-readonly BOARD_DATABASE_URL="${TICKET_BOARD_DATABASE_URL:-postgresql:///pgu?host=/var/run/postgresql&user=ticket_board_service}"
-readonly BOARD_ADMIN_DATABASE_URL="${TICKET_BOARD_ADMIN_DATABASE_URL:-postgresql:///pgu?host=/var/run/postgresql&user=postgres}"
+readonly BOARD_DATABASE_URL="${TICKET_BOARD_DATABASE_URL:-postgresql:///$DEFAULT_DATABASE_NAME?host=/var/run/postgresql&user=ticket_board_service}"
+readonly BOARD_ADMIN_DATABASE_URL="${TICKET_BOARD_ADMIN_DATABASE_URL:-postgresql:///$DEFAULT_DATABASE_NAME?host=/var/run/postgresql&user=postgres}"
 readonly RBAC_SQL="${RBAC_SQL:-$BOARD_CURRENT_LINK/scripts/ticket_board/rbac.sql}"
 readonly MIGRATION_RUNNER="${TICKET_BOARD_MIGRATION_RUNNER:-$BOARD_CURRENT_LINK/scripts/ticket-board-migrate}"
 readonly SERVICE_SCOPE="${TICKET_BOARD_SERVICE_SCOPE:-auto}"
@@ -39,7 +53,7 @@ usage() {
     cat <<EOF
 Usage: scripts/ticket-board-service.sh <install|deploy|deploy-restart|ensure-migrations|ensure-roles|render-unit|start|stop|restart|status|logs>
 
-Manage the PGU ticket board service.
+Manage a ticket board service.
 
 Commands:
   install         Export $DEPLOY_REF into $BOARD_ROOT/current, write the unit, enable and start it
@@ -508,7 +522,8 @@ start_canary_direct() {
     (
         cd "$release_dir"
         PYTHONUNBUFFERED=1 \
-        PGU_TICKET_BOARD_SOCKET="$socket_path" \
+        TICKET_BOARD_PROJECT="$PROJECT_SLUG" \
+        TICKET_BOARD_SOCKET="$socket_path" \
         TICKET_BOARD_DATABASE_URL="$BOARD_DATABASE_URL" \
             "$PYTHON_BIN" "$release_dir/scripts/ticket-board.py" \
                 --host "$BOARD_HOST" \
@@ -593,7 +608,7 @@ run_release_canary() {
     fi
     [[ -x "$release_dir/scripts/ticket-board.py" ]] || die "missing board script in release: $release_dir/scripts/ticket-board.py"
     port="${BOARD_CANARY_PORT:-$(free_tcp_port)}"
-    socket_root="$(mktemp -d "${TMPDIR:-/tmp}/pgu-ticket-board-canary.XXXXXX")"
+    socket_root="$(mktemp -d "${TMPDIR:-/tmp}/$PROJECT_SLUG-ticket-board-canary.XXXXXX")"
     socket_path="${BOARD_CANARY_SOCKET:-$socket_root/ticket-board.sock}"
     frame_dir="$socket_root/frames"
     asset_dir="$socket_root/assets"
@@ -637,20 +652,21 @@ run_release_canary() {
 render_unit() {
     cat <<EOF
 [Unit]
-Description=PGU Ticket Board
+Description=$PROJECT_SLUG Ticket Board
 After=network.target
 
 [Service]
 Type=simple
 WorkingDirectory=$BOARD_CURRENT_LINK
-RuntimeDirectory=pgu-ticket-board
+RuntimeDirectory=$PROJECT_SLUG-ticket-board
 ExecStartPre=/bin/mkdir -p $FRAME_ROOT
 ExecStartPre=/bin/chmod 1777 $FRAME_ROOT
 ExecStart=/usr/bin/python3 $BOARD_SCRIPT --host $BOARD_HOST --port $BOARD_PORT --unix-socket $BOARD_UNIX_SOCKET --frames $FRAME_ROOT
 Restart=on-failure
 RestartSec=2
 Environment=PYTHONUNBUFFERED=1
-Environment=PGU_TICKET_BOARD_SOCKET=$BOARD_UNIX_SOCKET
+Environment=TICKET_BOARD_PROJECT=$PROJECT_SLUG
+Environment=TICKET_BOARD_SOCKET=$BOARD_UNIX_SOCKET
 Environment=TICKET_BOARD_DATABASE_URL=$BOARD_DATABASE_URL
 StandardOutput=append:$LOG_PATH
 StandardError=append:$LOG_PATH
@@ -661,7 +677,10 @@ EOF
 }
 
 render_system_unit() {
-    local production_unit="$BOARD_CURRENT_LINK/deploy/systemd/pgu-ticket-board.service.boardsvc"
+    local production_unit="$BOARD_CURRENT_LINK/deploy/systemd/$SERVICE_NAME.boardsvc"
+    if [[ ! -f "$production_unit" && "$PROJECT_SLUG" == "pgu" ]]; then
+        production_unit="$BOARD_CURRENT_LINK/deploy/systemd/pgu-ticket-board.service.boardsvc"
+    fi
     if [[ -f "$production_unit" ]]; then
         cat "$production_unit"
         return
@@ -708,7 +727,7 @@ install_system_unit_file() {
 
 install_system_unit_if_changed() {
     local rendered_unit
-    rendered_unit="$(mktemp "${TMPDIR:-/tmp}/pgu-ticket-board-unit.XXXXXX")"
+    rendered_unit="$(mktemp "${TMPDIR:-/tmp}/$PROJECT_SLUG-ticket-board-unit.XXXXXX")"
     render_system_unit >"$rendered_unit"
     if [[ -f "$SYSTEM_UNIT_PATH" ]] && cmp -s "$rendered_unit" "$SYSTEM_UNIT_PATH"; then
         rm -f "$rendered_unit"

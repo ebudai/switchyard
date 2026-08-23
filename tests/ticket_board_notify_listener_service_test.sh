@@ -89,7 +89,11 @@ grep -q '^Environment=TICKET_BOARD_NOTIFY_DATABASE_URL=postgresql:///pgu?host=/v
     echo "FAIL: listener unit did not bake the notify database URL" >&2
     exit 1
 }
-grep -q '^Environment=PGU_TICKET_BOARD_PANE_STATE_DIR=%t/pgu-ticket-board/pane-state$' "$UNIT_DIR/service.unit" || {
+grep -q '^Environment=TICKET_BOARD_PROJECT=pgu$' "$UNIT_DIR/service.unit" || {
+    echo "FAIL: unit did not set TICKET_BOARD_PROJECT" >&2
+    exit 1
+}
+grep -q '^Environment=TICKET_BOARD_PANE_STATE_DIR=%t/pgu-ticket-board/pane-state$' "$UNIT_DIR/service.unit" || {
     echo "FAIL: unit did not set the shared pane hook state directory" >&2
     exit 1
 }
@@ -149,6 +153,19 @@ BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD \
 
 grep -q '^Environment=TICKET_BOARD_DATABASE_URL=postgresql:///shared_board?host=/tmp/pgu-pg&user=ticket_board_listener$' "$UNIT_DIR/listener-shared-db.unit" || {
     echo "FAIL: listener unit did not honor caller-provided TICKET_BOARD_DATABASE_URL" >&2
+    exit 1
+}
+
+TICKET_BOARD_PROJECT=porter \
+BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD \
+    "$REPO_ROOT/scripts/ticket-board-notify-listener-service.sh" render-unit >"$UNIT_DIR/listener-porter.unit"
+
+grep -q '^Environment=PGDATABASE=porter_ticket_board$' "$UNIT_DIR/listener-porter.unit" || {
+    echo "FAIL: generic project listener unit did not parameterize PGDATABASE" >&2
+    exit 1
+}
+grep -q '^Environment=TICKET_BOARD_PANE_STATE_DIR=%t/porter-ticket-board/pane-state$' "$UNIT_DIR/listener-porter.unit" || {
+    echo "FAIL: generic project listener unit did not parameterize pane state directory" >&2
     exit 1
 }
 

@@ -25,7 +25,8 @@ User=boardsvc
 WorkingDirectory=/home/agent/pgu-ticketboard-live/current
 RuntimeDirectory=pgu-ticket-board
 ExecStart=/usr/bin/python3 /home/agent/pgu-ticketboard-live/current/scripts/ticket-board.py --host 127.0.0.1 --port 8770 --unix-socket /run/pgu-ticket-board/ticket-board.sock --frames /tmp/pgu-frames --assets /home/agent/.claude/pgu-tickets-assets
-Environment=PGU_TICKET_BOARD_SOCKET=/run/pgu-ticket-board/ticket-board.sock
+Environment=TICKET_BOARD_PROJECT=pgu
+Environment=TICKET_BOARD_SOCKET=/run/pgu-ticket-board/ticket-board.sock
 Environment=TICKET_BOARD_DATABASE_URL=postgresql:///pgu?host=/var/run/postgresql&user=ticket_board_service
 
 [Install]
@@ -118,8 +119,12 @@ if grep -q -- "$retired_backend_flag" "$UNIT_DIR/service.unit"; then
     echo "FAIL: rendered unit should not pass the removed backend selector option" >&2
     exit 1
 fi
-grep -q '^Environment=PGU_TICKET_BOARD_SOCKET=/run/pgu-ticket-board/ticket-board.sock$' "$UNIT_DIR/service.unit" || {
-    echo "FAIL: unit did not export PGU_TICKET_BOARD_SOCKET" >&2
+grep -q '^Environment=TICKET_BOARD_PROJECT=pgu$' "$UNIT_DIR/service.unit" || {
+    echo "FAIL: unit did not export TICKET_BOARD_PROJECT" >&2
+    exit 1
+}
+grep -q '^Environment=TICKET_BOARD_SOCKET=/run/pgu-ticket-board/ticket-board.sock$' "$UNIT_DIR/service.unit" || {
+    echo "FAIL: unit did not export TICKET_BOARD_SOCKET" >&2
     exit 1
 }
 grep -q '^Environment=TICKET_BOARD_DATABASE_URL=postgresql:///pgu?host=/var/run/postgresql&user=ticket_board_service$' "$UNIT_DIR/service.unit" || {
@@ -189,6 +194,23 @@ BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOAR
 
 grep -q '^Environment=TICKET_BOARD_DATABASE_URL=postgresql:///custom_board?host=/tmp/pgu-pg&user=ticket_board_service$' "$UNIT_DIR/service-custom-db.unit" || {
     echo "FAIL: unit did not bake caller-provided TICKET_BOARD_DATABASE_URL" >&2
+    exit 1
+}
+
+TICKET_BOARD_PROJECT=porter \
+BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
+    "$REPO_ROOT/scripts/ticket-board-service.sh" render-unit >"$UNIT_DIR/service-porter.unit"
+
+grep -q '^RuntimeDirectory=porter-ticket-board$' "$UNIT_DIR/service-porter.unit" || {
+    echo "FAIL: generic project unit did not parameterize RuntimeDirectory" >&2
+    exit 1
+}
+grep -q '^Environment=TICKET_BOARD_SOCKET=/run/porter-ticket-board/ticket-board.sock$' "$UNIT_DIR/service-porter.unit" || {
+    echo "FAIL: generic project unit did not parameterize socket env" >&2
+    exit 1
+}
+grep -q '^Environment=TICKET_BOARD_DATABASE_URL=postgresql:///porter_ticket_board?host=/var/run/postgresql&user=ticket_board_service$' "$UNIT_DIR/service-porter.unit" || {
+    echo "FAIL: generic project unit did not parameterize database URL" >&2
     exit 1
 }
 
@@ -269,6 +291,7 @@ TICKET_BOARD_SERVICE_TEST_LOG="$LOGFILE" \
 TICKET_BOARD_SYSTEM_UNIT_PATH="$SYSTEM_UNIT_PATH" \
 TICKET_BOARD_SYSTEM_UNIT_HASH_RECORD="$HASH_RECORD" \
 TICKET_BOARD_SKIP_POST_DEPLOY_SOCKET_VERIFY=1 \
+TICKET_BOARD_POLKIT_APPROVAL_USER=user \
 BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
     "$REPO_ROOT/scripts/ticket-board-service.sh" deploy-restart >/dev/null
 
@@ -321,6 +344,7 @@ TICKET_BOARD_SERVICE_TEST_LOG="$LOGFILE" \
 TICKET_BOARD_SYSTEM_UNIT_PATH="$SYSTEM_UNIT_PATH" \
 TICKET_BOARD_SYSTEM_UNIT_HASH_RECORD="$HASH_RECORD" \
 TICKET_BOARD_SKIP_POST_DEPLOY_SOCKET_VERIFY=1 \
+TICKET_BOARD_POLKIT_APPROVAL_USER=user \
 BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
     "$REPO_ROOT/scripts/ticket-board-service.sh" deploy-restart >/dev/null
 

@@ -1,18 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly SERVICE_NAME="pgu-ticket-board-notify-listener.service"
+PROJECT_SLUG="${TICKET_BOARD_PROJECT:-${PGU_TICKET_BOARD_PROJECT:-pgu}}"
+PROJECT_DB_IDENT="${PROJECT_SLUG//-/_}"
+DEFAULT_DATABASE_NAME="$PROJECT_DB_IDENT"
+if [[ "$PROJECT_SLUG" != "pgu" ]]; then
+    DEFAULT_DATABASE_NAME="${PROJECT_DB_IDENT}_ticket_board"
+fi
+readonly PROJECT_SLUG PROJECT_DB_IDENT DEFAULT_DATABASE_NAME
+readonly SERVICE_NAME="${TICKET_BOARD_NOTIFY_LISTENER_SERVICE_NAME:-$PROJECT_SLUG-ticket-board-notify-listener.service}"
 readonly SOURCE_REPO="${SOURCE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-readonly BOARD_ROOT="${BOARD_ROOT:-/home/agent/pgu-ticketboard-live}"
+readonly BOARD_ROOT="${BOARD_ROOT:-/home/agent/$PROJECT_SLUG-ticketboard-live}"
 readonly BOARD_RELEASES_DIR="$BOARD_ROOT/releases"
 readonly BOARD_CURRENT_LINK="$BOARD_ROOT/current"
 readonly LISTENER_SCRIPT="${LISTENER_SCRIPT:-$BOARD_CURRENT_LINK/scripts/ticket-board-notify-listener}"
-readonly LOG_PATH="${LOG_PATH:-/tmp/pgu-ticket-board-notify-listener.log}"
+readonly LOG_PATH="${LOG_PATH:-/tmp/$PROJECT_SLUG-ticket-board-notify-listener.log}"
 readonly UNIT_DIR="${UNIT_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}"
 readonly UNIT_PATH="$UNIT_DIR/$SERVICE_NAME"
 readonly DEPLOY_REF="${DEPLOY_REF:-origin/main}"
-readonly LISTENER_DATABASE_URL="${TICKET_BOARD_NOTIFY_DATABASE_URL:-${TICKET_BOARD_DATABASE_URL:-postgresql:///pgu?host=/var/run/postgresql&user=ticket_board_listener}}"
-readonly BOARD_ADMIN_DATABASE_URL="${TICKET_BOARD_ADMIN_DATABASE_URL:-postgresql:///pgu?host=/var/run/postgresql&user=postgres}"
+readonly LISTENER_DATABASE_URL="${TICKET_BOARD_NOTIFY_DATABASE_URL:-${TICKET_BOARD_DATABASE_URL:-postgresql:///$DEFAULT_DATABASE_NAME?host=/var/run/postgresql&user=ticket_board_listener}}"
+readonly BOARD_ADMIN_DATABASE_URL="${TICKET_BOARD_ADMIN_DATABASE_URL:-postgresql:///$DEFAULT_DATABASE_NAME?host=/var/run/postgresql&user=postgres}"
 readonly RBAC_SQL="${RBAC_SQL:-$BOARD_CURRENT_LINK/scripts/ticket_board/rbac.sql}"
 readonly MIGRATION_RUNNER="${TICKET_BOARD_MIGRATION_RUNNER:-$BOARD_CURRENT_LINK/scripts/ticket-board-migrate}"
 
@@ -20,7 +27,7 @@ usage() {
     cat <<EOF
 Usage: scripts/ticket-board-notify-listener-service.sh <install|deploy|deploy-restart|ensure-migrations|ensure-roles|render-unit|start|stop|restart|status|logs>
 
-Manage the PGU ticket-board PostgreSQL LISTEN shim as an agent user systemd service.
+Manage a ticket-board PostgreSQL LISTEN shim as a user systemd service.
 
 Commands:
   install         Export $DEPLOY_REF into $BOARD_ROOT/current, write the unit, enable and start it
@@ -144,7 +151,7 @@ ensure_database_roles() {
 render_unit() {
     cat <<EOF
 [Unit]
-Description=PGU Ticket Board Notify Listener
+Description=$PROJECT_SLUG Ticket Board Notify Listener
 After=network.target
 
 [Service]
@@ -155,12 +162,13 @@ Restart=always
 RestartSec=2
 Environment=PYTHONUNBUFFERED=1
 Environment=PGHOST=/var/run/postgresql
-Environment=PGDATABASE=pgu
+Environment=PGDATABASE=$DEFAULT_DATABASE_NAME
 Environment=PGUSER=ticket_board_listener
 Environment=TICKET_BOARD_DATABASE_URL=$LISTENER_DATABASE_URL
 Environment=TICKET_BOARD_NOTIFY_DATABASE_URL=$LISTENER_DATABASE_URL
-Environment=PGU_TICKET_BOARD_PANE_STATE_DIR=%t/pgu-ticket-board/pane-state
-EnvironmentFile=-%h/.config/pgu/ticket-board-notify-listener.env
+Environment=TICKET_BOARD_PROJECT=$PROJECT_SLUG
+Environment=TICKET_BOARD_PANE_STATE_DIR=%t/$PROJECT_SLUG-ticket-board/pane-state
+EnvironmentFile=-%h/.config/$PROJECT_SLUG/ticket-board-notify-listener.env
 StandardOutput=append:$LOG_PATH
 StandardError=append:$LOG_PATH
 

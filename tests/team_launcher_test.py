@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -65,6 +65,7 @@ from scripts.team_launcher import (
     launch_project,
     live_command_matches_role,
     load_project_config,
+    new_project_command,
     pane_state_file_name,
     provision_runtime_command,
     run_detached_role,
@@ -2411,6 +2412,220 @@ def test_bootstrap_template_does_not_guess_active_roles() -> None:
         assert template["board_url"] == "http://127.0.0.1:23682"
         assert template["board_socket"] == "/run/porter-ticket-board/ticket-board.sock"
         assert template["roles"] == []
+
+
+def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-new.") as tmp:
+        tmp_path = Path(tmp)
+        output_dir = tmp_path / "out"
+        runner = FakeRunner()
+        stdout = StringIO()
+
+        with redirect_stdout(stdout):
+            assert (
+                new_project_command(
+                    "porter",
+                    owner_user=current_user,
+                    source_repo=tmp_path / "repo",
+                    output_dir=output_dir,
+                    runner=runner,
+                    port_in_use=lambda _port: False,
+                    socket_exists=lambda _path: False,
+                )
+                == 0
+            )
+
+        rendered = stdout.getvalue()
+        config = json.loads((output_dir / "porter.json").read_text(encoding="utf-8"))
+        layout = json.loads((output_dir / "porter-konsole-layout.json").read_text(encoding="utf-8"))
+        plan = json.loads((output_dir / "plan.json").read_text(encoding="utf-8"))
+        commands = (output_dir / "operator-commands.sh").read_text(encoding="utf-8")
+        loaded_config = load_project_config("porter", output_dir / "porter.json")
+
+    assert plan["project"] == "porter"
+    assert plan["owner_user"] == current_user
+    assert plan["port"] == 23682
+    assert config["project"] == "porter"
+    assert config["run_as_user"] == current_user
+    assert config["board_url"] == "http://127.0.0.1:23682"
+    assert config["board_socket"] == "/run/porter-ticket-board/ticket-board.sock"
+    assert config["repository"] == str(tmp_path / "repo")
+    assert [role["role"] for role in config["roles"]] == ["director", "implementer", "audit"]
+    assert [role["tmux_session"] for role in config["roles"]] == ["porter-director", "porter-implementer", "porter-audit"]
+    assert len(team_launcher._layout_leaves(layout)) == 3
+    assert [role.role for role in loaded_config.roles] == ["director", "implementer", "audit"]
+    assert loaded_config.roles[1].target == "porter-implementer:0.0"
+    assert commands.splitlines()[:2] == ["#!/usr/bin/env bash", "set -euo pipefail"]
+    assert f"team-launcher: dry-run for porter; artifacts in {output_dir}" in rendered
+    assert "  sudo -v\n" in rendered
+    assert "  bash operator-commands.sh\n" in rendered
+    assert not any(call[:1] == ["sudo"] for call in runner.calls)
+
+
+def test_new_project_precheck_fails_before_sudo_when_repo_is_dirty() -> None:
+    current_user = team_launcher.current_user_name()
+
+    class DirtyRepoRunner(FakeRunner):
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if len(args) >= 5 and args[:4] == ["git", "-C", args[2], "status"]:
+                return subprocess.CompletedProcess(args, 0, stdout=" M scripts/team_launcher.py\n")
+            return super().__call__(args, **kwargs)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-new.") as tmp:
+        tmp_path = Path(tmp)
+        output_dir = tmp_path / "out"
+        runner = DirtyRepoRunner()
+        try:
+            new_project_command(
+                "porter",
+                owner_user=current_user,
+                source_repo=tmp_path / "repo",
+                output_dir=output_dir,
+                execute=True,
+                runner=runner,
+                port_in_use=lambda _port: False,
+                socket_exists=lambda _path: False,
+            )
+            raise AssertionError("expected dirty repo precheck failure")
+        except SystemExit as exc:
+            message = str(exc)
+        assert not output_dir.exists()
+
+    assert "deploy checkout" in message
+    assert "uncommitted changes" in message
+    assert not any(call[:1] == ["sudo"] for call in runner.calls)
+    assert not any(call[:1] == ["bash"] for call in runner.calls)
+
+
+def test_new_project_precheck_ignores_python_bytecode_created_by_cli_imports() -> None:
+    current_user = team_launcher.current_user_name()
+
+    class BytecodeOnlyRunner(FakeRunner):
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if len(args) >= 5 and args[:4] == ["git", "-C", args[2], "status"]:
+                return subprocess.CompletedProcess(
+                    args,
+                    0,
+                    stdout="?? scripts/__pycache__/\n?? scripts/ticket_board/__pycache__/project_provision.cpython-313.pyc\n",
+                )
+            return super().__call__(args, **kwargs)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-new.") as tmp:
+        tmp_path = Path(tmp)
+        runner = BytecodeOnlyRunner()
+
+        assert (
+            new_project_command(
+                "porter",
+                owner_user=current_user,
+                source_repo=tmp_path / "repo",
+                output_dir=tmp_path / "out",
+                runner=runner,
+                port_in_use=lambda _port: False,
+                socket_exists=lambda _path: False,
+            )
+            == 0
+        )
+
+
+def test_new_project_execute_warms_sudo_once_then_runs_generated_script() -> None:
+    current_user = team_launcher.current_user_name()
+
+    class RecordingRunner(FakeRunner):
+        def __init__(self) -> None:
+            super().__init__()
+            self.call_kwargs: list[dict[str, object]] = []
+
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.call_kwargs.append(dict(kwargs))
+            return super().__call__(args, **kwargs)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-new.") as tmp:
+        tmp_path = Path(tmp)
+        output_dir = tmp_path / "out"
+        runner = RecordingRunner()
+
+        assert (
+            new_project_command(
+                "porter",
+                owner_user=current_user,
+                source_repo=tmp_path / "repo",
+                output_dir=output_dir,
+                execute=True,
+                runner=runner,
+                port_in_use=lambda _port: False,
+                socket_exists=lambda _path: False,
+            )
+            == 0
+        )
+
+    sudo_index = next(index for index, call in enumerate(runner.calls) if call == ["sudo", "-v"])
+    bash_index = next(index for index, call in enumerate(runner.calls) if call[:1] == ["bash"])
+    assert sudo_index < bash_index
+    assert runner.calls[bash_index] == ["bash", str(output_dir / "operator-commands.sh")]
+    assert runner.call_kwargs[bash_index]["cwd"] == str(output_dir)
+
+
+def test_new_project_rerun_allows_existing_same_slug_resources() -> None:
+    current_user = team_launcher.current_user_name()
+
+    class ExistingUnitRunner(FakeRunner):
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if args[:3] == ["systemctl", "list-unit-files", "--no-legend"]:
+                return subprocess.CompletedProcess(args, 0, stdout="porter-ticket-board.service enabled\n")
+            if args[:2] == ["psql", "-XAt"]:
+                return subprocess.CompletedProcess(args, 0, stdout="1\n")
+            if len(args) >= 5 and args[:4] == ["git", "-C", args[2], "status"]:
+                return subprocess.CompletedProcess(args, 0, stdout="")
+            return subprocess.CompletedProcess(args, 0)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-new.") as tmp:
+        tmp_path = Path(tmp)
+        runner = ExistingUnitRunner()
+
+        assert (
+            new_project_command(
+                "porter",
+                owner_user=current_user,
+                source_repo=tmp_path / "repo",
+                output_dir=tmp_path / "out",
+                runner=runner,
+                port_in_use=lambda _port: True,
+                socket_exists=lambda _path: True,
+            )
+            == 0
+        )
+
+
+def test_new_project_rejects_port_collision_before_mutating() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-new.") as tmp:
+        tmp_path = Path(tmp)
+        output_dir = tmp_path / "out"
+        runner = FakeRunner()
+        try:
+            new_project_command(
+                "porter",
+                owner_user=current_user,
+                source_repo=tmp_path / "repo",
+                output_dir=output_dir,
+                execute=True,
+                runner=runner,
+                port_in_use=lambda _port: True,
+                socket_exists=lambda _path: False,
+            )
+            raise AssertionError("expected port collision precheck failure")
+        except SystemExit as exc:
+            message = str(exc)
+        assert not output_dir.exists()
+
+    assert "port 23682 is already in use" in message
+    assert not any(call[:1] == ["sudo"] for call in runner.calls)
+    assert not any(call[:1] == ["bash"] for call in runner.calls)
 
 
 def main() -> int:

@@ -8,6 +8,7 @@ import json
 import os
 import pwd
 import shlex
+import socket
 import subprocess
 import sys
 import tempfile
@@ -15,6 +16,8 @@ import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Sequence
+
+from scripts.ticket_board.project_provision import ProjectBoardProvision, build_plan, write_artifacts
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "team-launcher"
 DEFAULT_LEGACY_RUNTIME_SESSION_DIR = Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-sessions")
@@ -89,6 +92,11 @@ ALLOW_STALE_LAUNCHER_ENV = "TEAM_LAUNCHER_ALLOW_STALE"
 LEGACY_ALLOW_STALE_LAUNCHER_ENV = "PGU_TEAM_LAUNCHER_ALLOW_STALE"
 NO_LAUNCHER_SELF_DEPLOY_ENV = "TEAM_LAUNCHER_NO_SELF_DEPLOY"
 LEGACY_NO_LAUNCHER_SELF_DEPLOY_ENV = "PGU_TEAM_LAUNCHER_NO_SELF_DEPLOY"
+NEW_PROJECT_DEFAULT_ROLES = (
+    ("director", "claude"),
+    ("implementer", "codex"),
+    ("audit", "claude"),
+)
 
 
 @dataclass(frozen=True)
@@ -1984,6 +1992,258 @@ def write_template(project: str, output: Path) -> int:
     return 0
 
 
+def _default_new_project_owner(project: str) -> str:
+    return f"{project}-agent"
+
+
+def _new_project_artifact_dir(project: str) -> Path:
+    return Path(tempfile.mkdtemp(prefix=f"{project}-team-launcher-new."))
+
+
+def _new_project_session_dir(project: str, owner_user: str) -> str:
+    uid = uid_for_user(owner_user)
+    if uid is None:
+        return f"/run/user/<uid>/{project}-ticket-board/pane-sessions"
+    return f"/run/user/{uid}/{project}-ticket-board/pane-sessions"
+
+
+def _new_project_layout_payload(role_count: int) -> dict[str, Any]:
+    leaves = [
+        {
+            "Command": "",
+            "SessionRestoreId": index,
+            "WorkingDirectory": "",
+        }
+        for index in range(role_count)
+    ]
+    if role_count <= 1:
+        return leaves[0] if leaves else {"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}
+    return {
+        "Orientation": "Horizontal",
+        "Widgets": [
+            leaves[0],
+            {
+                "Orientation": "Vertical",
+                "Widgets": leaves[1:],
+            },
+        ],
+    }
+
+
+def _new_project_launcher_config_payload(plan: ProjectBoardProvision, *, source_repo: Path) -> dict[str, Any]:
+    layout_name = f"{plan.project}-konsole-layout.json"
+    roles = [
+        {
+            "cli": [cli],
+            "live_commands": [cli],
+            "role": role,
+            "slot": index,
+            "target": f"{plan.project}-{role}:0.0",
+            "tmux_session": f"{plan.project}-{role}",
+            "yolo": True,
+        }
+        for index, (role, cli) in enumerate(NEW_PROJECT_DEFAULT_ROLES)
+    ]
+    return {
+        "project": plan.project,
+        "layout": layout_name,
+        "repository": str(source_repo),
+        "run_as_user": plan.owner_user,
+        "worktree_branch": "main",
+        "worktree_remote": "origin",
+        "board_url": f"http://127.0.0.1:{plan.port}",
+        "board_socket": plan.socket_path,
+        "session_dir": _new_project_session_dir(plan.project, plan.owner_user),
+        "roles": roles,
+    }
+
+
+def write_new_project_launcher_artifacts(plan: ProjectBoardProvision, output_dir: Path, *, source_repo: Path) -> Path:
+    config_path = output_dir / f"{plan.project}.json"
+    layout_path = output_dir / f"{plan.project}-konsole-layout.json"
+    layout_path.write_text(
+        json.dumps(_new_project_layout_payload(len(NEW_PROJECT_DEFAULT_ROLES)), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    config_path.write_text(
+        json.dumps(_new_project_launcher_config_payload(plan, source_repo=source_repo), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def _path_exists(path: Path) -> bool:
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
+def _tcp_port_in_use(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+            return True
+    except OSError:
+        return False
+
+
+def _git_status_porcelain(repo: Path, *, runner: Callable[..., subprocess.CompletedProcess[Any]]) -> str:
+    try:
+        result = runner(
+            ["git", "-C", str(repo), "status", "--porcelain"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except OSError as exc:
+        raise SystemExit(f"team-launcher: cannot inspect deploy checkout {repo}: {exc}") from exc
+    if result.returncode != 0:
+        stderr = str(getattr(result, "stderr", "") or "").strip()
+        detail = f": {stderr}" if stderr else ""
+        raise SystemExit(f"team-launcher: cannot inspect deploy checkout {repo}{detail}")
+    lines = str(getattr(result, "stdout", "") or "").splitlines()
+    return "\n".join(line for line in lines if not _is_ignorable_python_cache_status(line))
+
+
+def _is_ignorable_python_cache_status(line: str) -> bool:
+    path = line[3:] if len(line) > 3 else line
+    if " -> " in path:
+        path = path.rsplit(" -> ", 1)[1]
+    parts = Path(path).parts
+    return "__pycache__" in parts or path.endswith((".pyc", ".pyo"))
+
+
+def _system_unit_file_exists(unit: str, *, runner: Callable[..., subprocess.CompletedProcess[Any]]) -> bool:
+    try:
+        result = runner(
+            ["systemctl", "list-unit-files", "--no-legend", unit],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except OSError:
+        return _path_exists(Path("/etc/systemd/system") / unit)
+    if result.returncode != 0:
+        return _path_exists(Path("/etc/systemd/system") / unit)
+    stdout = str(getattr(result, "stdout", "") or "").strip()
+    if stdout and not stdout.startswith("0 unit files listed"):
+        return True
+    return _path_exists(Path("/etc/systemd/system") / unit)
+
+
+def _database_exists(database: str, *, runner: Callable[..., subprocess.CompletedProcess[Any]]) -> bool:
+    escaped = database.replace("'", "''")
+    try:
+        result = runner(
+            [
+                "psql",
+                "-XAt",
+                "postgresql:///postgres?host=/var/run/postgresql",
+                "-c",
+                f"SELECT 1 FROM pg_database WHERE datname = '{escaped}'",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except OSError as exc:
+        raise SystemExit(f"team-launcher: cannot verify PostgreSQL database availability: {exc}") from exc
+    if result.returncode != 0:
+        stderr = str(getattr(result, "stderr", "") or "").strip()
+        detail = f": {stderr}" if stderr else ""
+        raise SystemExit(f"team-launcher: cannot verify PostgreSQL database availability{detail}")
+    return str(getattr(result, "stdout", "") or "").strip() == "1"
+
+
+def precheck_new_project(
+    plan: ProjectBoardProvision,
+    *,
+    source_repo: Path,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    port_in_use: Callable[[int], bool] = _tcp_port_in_use,
+    socket_exists: Callable[[Path], bool] = _path_exists,
+) -> None:
+    errors: list[str] = []
+    if uid_for_user(plan.owner_user) is None:
+        errors.append(f"target user {plan.owner_user!r} does not exist")
+    status = _git_status_porcelain(source_repo, runner=runner)
+    if status.strip():
+        errors.append(f"deploy checkout {source_repo} has uncommitted changes")
+    unit_exists = _system_unit_file_exists(plan.board_unit, runner=runner)
+    database_exists = _database_exists(plan.database, runner=runner)
+    socket_path = Path(plan.socket_path)
+    socket_is_present = socket_exists(socket_path)
+    port_is_live = port_in_use(plan.port)
+    if not unit_exists:
+        if database_exists:
+            errors.append(f"database {plan.database!r} already exists but {plan.board_unit} is not installed")
+        if socket_is_present:
+            errors.append(f"socket {plan.socket_path} already exists but {plan.board_unit} is not installed")
+        if port_is_live:
+            errors.append(f"port {plan.port} is already in use but {plan.board_unit} is not installed")
+    if errors:
+        raise SystemExit("team-launcher: new project precheck failed:\n- " + "\n- ".join(errors))
+
+
+def new_project_command(
+    project: str,
+    *,
+    owner_user: str | None = None,
+    port: int | None = None,
+    database: str | None = None,
+    source_repo: Path | None = None,
+    output_dir: Path | None = None,
+    execute: bool = False,
+    dry_run: bool = False,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    port_in_use: Callable[[int], bool] = _tcp_port_in_use,
+    socket_exists: Callable[[Path], bool] = _path_exists,
+) -> int:
+    if execute and dry_run:
+        raise SystemExit("team-launcher: --execute and --dry-run are mutually exclusive")
+    effective_source_repo = (source_repo or _repo_root()).expanduser().resolve(strict=False)
+    effective_owner = (owner_user or _default_new_project_owner(project)).strip()
+    plan = build_plan(
+        project=project,
+        owner_user=effective_owner,
+        port=port,
+        database=database,
+        source_repo=effective_source_repo,
+    )
+    precheck_new_project(
+        plan,
+        source_repo=effective_source_repo,
+        runner=runner,
+        port_in_use=port_in_use,
+        socket_exists=socket_exists,
+    )
+    artifact_dir = (output_dir or _new_project_artifact_dir(plan.project)).expanduser().resolve(strict=False)
+    write_artifacts(plan, artifact_dir)
+    config_path = write_new_project_launcher_artifacts(plan, artifact_dir, source_repo=effective_source_repo)
+    commands_path = artifact_dir / "operator-commands.sh"
+    if not execute:
+        print(f"team-launcher: dry-run for {plan.project}; artifacts in {artifact_dir}")
+        print(f"team-launcher: launcher config {config_path}")
+        print("team-launcher: execution plan:")
+        print(f"  cd {shlex.quote(str(artifact_dir))}")
+        print("  sudo -v")
+        print(f"  bash {shlex.quote(str(commands_path.name))}")
+        print()
+        print(commands_path.read_text(encoding="utf-8"), end="")
+        return 0
+    print(f"team-launcher: provisioning {plan.project}; artifacts in {artifact_dir}")
+    sudo_result = runner(["sudo", "-v"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if sudo_result.returncode != 0:
+        stderr = str(getattr(sudo_result, "stderr", "") or "").strip()
+        detail = f": {stderr}" if stderr else ""
+        raise SystemExit(f"team-launcher: sudo authentication failed{detail}")
+    result = runner(["bash", str(commands_path)], cwd=str(artifact_dir))
+    if result.returncode != 0:
+        raise SystemExit(f"team-launcher: provisioning failed with exit status {result.returncode}")
+    print(f"team-launcher: provisioned {plan.project}; launcher config {config_path}")
+    return 0
+
+
 def provision_runtime_command(user_name: str | None, config: ProjectConfig | None = None) -> int:
     user = (user_name or "").strip()
     if not user and config is not None:
@@ -2009,7 +2269,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "command",
         nargs="?",
         default="start",
-        choices=["start", "attach", "reload", "bootstrap", "provision-runtime", "deploy-launcher", "pane"],
+        choices=["start", "attach", "reload", "bootstrap", "new", "provision-runtime", "deploy-launcher", "pane"],
         help="start is idempotent attach-or-start (resumes tracked session ids when relaunching a stopped pane); reload force-restarts running CLIs with tracked resume ids",
     )
     parser.add_argument("pane_mode", nargs="?", choices=["start", "attach", "attach-or-start", "reload"])
@@ -2020,6 +2280,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pane-state-dir", type=Path, help=f"write initial pane idle state here (default: {DEFAULT_PANE_STATE_DIR})")
     parser.add_argument("--dry-run", action="store_true", help="print launch plan without starting Konsole")
     parser.add_argument("--template-output", type=Path, help="bootstrap output path")
+    parser.add_argument("--owner-user", help="new project owner Unix user (default: <project>-agent)")
+    parser.add_argument("--port", type=int, help="new project board port; omitted means deterministic allocation")
+    parser.add_argument("--database", help="new project PostgreSQL database; omitted means <project>_ticket_board")
+    parser.add_argument("--source-repo", type=Path, help="source checkout to deploy for new project provisioning")
+    parser.add_argument("--new-output-dir", type=Path, help="write new-project artifacts here")
+    parser.add_argument("--execute", action="store_true", help="execute new-project provisioning after precheck")
     parser.add_argument("--runtime-user", help="local user whose lingering /run/user/<uid> runtime should be provisioned")
     parser.add_argument("--launcher-repo", type=Path, help="launcher checkout to update or verify (default: this script's repo)")
     parser.add_argument("--clean-launcher", action="store_true", help="run git clean -fdx after updating --launcher-repo")
@@ -2035,6 +2301,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "bootstrap":
         output = args.template_output or DEFAULT_CONFIG_DIR / f"{args.project}.json"
         return write_template(args.project, output)
+    if args.command == "new":
+        return new_project_command(
+            args.project,
+            owner_user=args.owner_user,
+            port=args.port,
+            database=args.database,
+            source_repo=args.source_repo,
+            output_dir=args.new_output_dir,
+            execute=args.execute,
+            dry_run=args.dry_run,
+        )
     config_path = args.config or DEFAULT_CONFIG_DIR / f"{args.project}.json"
     if args.command == "provision-runtime":
         config = load_project_config(args.project, config_path) if config_path.exists() else None

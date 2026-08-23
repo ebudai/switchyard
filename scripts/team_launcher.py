@@ -673,7 +673,12 @@ def session_id_for_role(role: RoleConfig, session_dir: Path) -> str:
 def clear_session_record_for_role(role: RoleConfig, session_dir: Path) -> bool:
     path = session_dir / session_file_name(role.target)
     superseded_path = path.with_name(f"{path.name}.superseded")
+    previous_superseded_path = path.with_name(f"{path.name}.superseded.1")
+    if not path.exists():
+        return False
     try:
+        if superseded_path.exists():
+            superseded_path.replace(previous_superseded_path)
         path.replace(superseded_path)
     except FileNotFoundError:
         return False

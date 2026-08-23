@@ -1382,7 +1382,7 @@ def test_start_creates_missing_session_once_then_attaches() -> None:
     assert runner.calls[2] == ["tmux", "attach", "-t", "pgu-ops"]
 
 
-def test_clear_session_record_preserves_superseded_copy_and_replaces_old_sidecar() -> None:
+def test_clear_session_record_preserves_superseded_history_after_second_fallback() -> None:
     config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
     role = next(role for role in config.roles if role.role == "ops")
 
@@ -1390,6 +1390,7 @@ def test_clear_session_record_preserves_superseded_copy_and_replaces_old_sidecar
         session_dir = Path(tmp)
         live_path = session_dir / session_file_name(role.target)
         sidecar_path = live_path.with_name(f"{live_path.name}.superseded")
+        previous_sidecar_path = live_path.with_name(f"{live_path.name}.superseded.1")
         first_session_id = "11111111-1111-4111-8111-111111111111"
         second_session_id = "22222222-2222-4222-8222-222222222222"
         live_path.write_text(
@@ -1400,6 +1401,7 @@ def test_clear_session_record_preserves_superseded_copy_and_replaces_old_sidecar
         assert clear_session_record_for_role(role, session_dir) is True
         assert not live_path.exists()
         assert json.loads(sidecar_path.read_text(encoding="utf-8"))["session_id"] == first_session_id
+        assert not previous_sidecar_path.exists()
 
         live_path.write_text(
             json.dumps({"target": role.target, "session_id": second_session_id}) + "\n",
@@ -1409,7 +1411,15 @@ def test_clear_session_record_preserves_superseded_copy_and_replaces_old_sidecar
         assert clear_session_record_for_role(role, session_dir) is True
         assert not live_path.exists()
         assert json.loads(sidecar_path.read_text(encoding="utf-8"))["session_id"] == second_session_id
+        assert json.loads(previous_sidecar_path.read_text(encoding="utf-8"))["session_id"] == first_session_id
+        saved_session_ids = {
+            json.loads(path.read_text(encoding="utf-8"))["session_id"]
+            for path in (sidecar_path, previous_sidecar_path)
+        }
+        assert first_session_id in saved_session_ids
         assert clear_session_record_for_role(role, session_dir) is False
+        assert json.loads(sidecar_path.read_text(encoding="utf-8"))["session_id"] == second_session_id
+        assert json.loads(previous_sidecar_path.read_text(encoding="utf-8"))["session_id"] == first_session_id
 
 
 def test_start_seeds_initial_idle_state_for_codex_agy_and_claude_panes() -> None:

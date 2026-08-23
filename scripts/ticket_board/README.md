@@ -28,17 +28,19 @@ Pane write API:
   ticket JSON directly:
   - `POST /api/tickets/actions/create_ticket`
   - `POST /api/tickets/actions/file_bug`
-  - `POST /api/tickets/<PGU-N>/actions/<operation>`
+  - `POST /api/tickets/<TICKET-ID>/actions/<operation>`
 - Browser HTTP operation requests must include the per-process
-  `X-PGU-Write-Token` emitted into the served board page, plus
-  `X-PGU-Caller-Role` with one of `director`, `user`, `main`, `app`, `ops`,
-  `audit`, `perf`, or `research`. Without the token, HTTP writes are rejected;
-  read-only HTTP requests remain available.
+  `X-Ticket-Board-Write-Token` emitted into the served board page, plus
+  `X-Ticket-Board-Caller-Role` with one of `director`, `user`, `main`, `app`,
+  `ops`, `audit`, `inspector`, `perf`, or `research`. Without the token, HTTP
+  writes are rejected; read-only HTTP requests remain available.
+  `X-PGU-Write-Token` and `X-PGU-Caller-Role` are accepted only as legacy
+  compatibility aliases.
 - Local pane tooling should write through the Unix-domain socket at
   `/run/pgu-ticket-board/ticket-board.sock` when it exists. The write client registers the
   auto-resolved pane role on `/api/register-caller`; the board derives the
   caller role from the socket connection's OS-verified `SO_PEERCRED` PID and
-  ignores `X-PGU-Caller-Role` for socket writes.
+  ignores caller-role headers for socket writes.
 - The Unix-socket registration allows one live PID per pane role. Duplicate
   live registrations are rejected and logged; the registration is released when
   the socket connection closes, and stale dead-PID registrations are dropped.

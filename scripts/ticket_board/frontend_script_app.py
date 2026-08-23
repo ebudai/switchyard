@@ -24,7 +24,7 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
     async function uploadImageBlob(blob, setOptions = {}) {
       const headers = { 'Content-Type': blob.type || 'image/png' };
       if (window.PGU_TICKET_BOARD_WRITE_TOKEN) {
-        headers['X-PGU-Write-Token'] = window.PGU_TICKET_BOARD_WRITE_TOKEN;
+        headers['X-Ticket-Board-Write-Token'] = window.PGU_TICKET_BOARD_WRITE_TOKEN;
       }
       const response = await fetch(`/api/upload${uploadSetQuery(setOptions)}`, {
         method: 'POST',
@@ -281,11 +281,11 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
     function ticketWriteHeaders(callerRole = null) {
       const headers = { 'Content-Type': 'application/json' };
       if (window.PGU_TICKET_BOARD_WRITE_TOKEN) {
-        headers['X-PGU-Write-Token'] = window.PGU_TICKET_BOARD_WRITE_TOKEN;
+        headers['X-Ticket-Board-Write-Token'] = window.PGU_TICKET_BOARD_WRITE_TOKEN;
       }
       const normalizedCaller = callerRole ? callerRole.trim().toLowerCase() : '';
       if (normalizedCaller) {
-        headers['X-PGU-Caller-Role'] = normalizedCaller;
+        headers['X-Ticket-Board-Caller-Role'] = normalizedCaller;
       }
       return headers;
     }

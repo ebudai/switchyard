@@ -158,6 +158,17 @@ def main() -> int:
         assert field in schema, f"comment field {field!r} missing from schema"
 
     assert "source_json jsonb not null" in schema_lower, "tickets.source_json is required for lossless import"
+    assert "^[A-Z][A-Z0-9]*-[0-9]+$" in schema, "ticket id pattern should be prefix-agnostic"
+    assert "^PGU-[0-9]+$" not in schema, "schema must not constrain ticket ids to the PGU prefix"
+    assert "constraint tickets_ticket_number_check check (ticket_number > 0)" in schema_lower
+    assert "create or replace function ticket_board.ticket_prefix" in executable_schema_lower
+    assert "ticket_board.ticket_prefix() || '-' || next_number::text" in executable_schema_lower
+    project_prefix_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu597_project_ticket_prefix.sql"
+    ).read_text(encoding="utf-8")
+    assert "^[A-Z][A-Z0-9]*-[0-9]+$" in project_prefix_migration
+    assert "DROP COLUMN ticket_number" in project_prefix_migration
+    assert "DROP COLUMN ticket_number CASCADE" not in project_prefix_migration
     assert "create table if not exists ticket_board.schema_migrations" in schema_lower
     assert "create sequence if not exists ticket_board.schema_migrations_seq as bigint" in schema_lower
     assert "name text primary key" in schema_lower

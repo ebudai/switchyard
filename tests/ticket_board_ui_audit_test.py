@@ -139,8 +139,8 @@ def complete_task_from_browser(page: Any, ticket_id: str, caller_role: str, text
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              'X-PGU-Caller-Role': callerRole,
-              'X-PGU-Write-Token': window.PGU_TICKET_BOARD_WRITE_TOKEN,
+              'X-Ticket-Board-Caller-Role': callerRole,
+              'X-Ticket-Board-Write-Token': window.PGU_TICKET_BOARD_WRITE_TOKEN,
             },
             body: JSON.stringify({ text }),
           });

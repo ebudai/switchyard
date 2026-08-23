@@ -38,6 +38,31 @@ STATES = (
 )
 TERMINAL_STATES = {"done", "cancelled"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+TICKET_ID_PATTERN = re.compile(r"^[A-Z][A-Z0-9]*-[0-9]+$")
+TICKET_NUMBER_PATTERN = re.compile(r"^[A-Z][A-Z0-9]*-([0-9]+)$")
+
+
+def project_slug(environ: dict[str, str] | os._Environ[str] = os.environ) -> str:
+    return environ.get("TICKET_BOARD_PROJECT", "").strip() or environ.get("PGU_TICKET_BOARD_PROJECT", "").strip() or "pgu"
+
+
+def ticket_prefix_for_project(project: str | None = None, environ: dict[str, str] | os._Environ[str] = os.environ) -> str:
+    explicit = environ.get("TICKET_BOARD_TICKET_PREFIX", "").strip() or environ.get("PGU_TICKET_BOARD_TICKET_PREFIX", "").strip()
+    raw = explicit or (project if project is not None else project_slug(environ))
+    normalized = re.sub(r"[^A-Za-z0-9]+", "", raw).upper()
+    if not normalized:
+        normalized = "PGU"
+    if normalized[0].isdigit():
+        normalized = f"T{normalized}"
+    return normalized
+
+
+def valid_ticket_id(ticket_id: str) -> bool:
+    return bool(TICKET_ID_PATTERN.fullmatch(str(ticket_id).strip().upper()))
+
+
+def ticket_id_sentinel(prefix: str) -> str:
+    return f"{prefix}-0"
 
 
 def iso_now() -> str:
@@ -50,9 +75,10 @@ def format_timestamp(path: Path) -> str:
 
 def ticket_number(ticket_id: str) -> int:
     value = str(ticket_id).strip().upper()
-    if not value.startswith("PGU-") or not value[4:].isdigit():
+    match = TICKET_NUMBER_PATTERN.fullmatch(value)
+    if not match:
         return 0
-    return int(value[4:])
+    return int(match.group(1))
 
 
 def upload_set_slug(raw: str) -> str:
@@ -92,6 +118,7 @@ class TicketBoardApp:
         self.commit_git_dir = commit_git_dir.resolve()
         self.store_backend = "postgres"
         self.database_url = database_url
+        self.ticket_prefix = ticket_prefix_for_project()
         self.asset_dir.mkdir(parents=True, exist_ok=True)
 
     def snapshot(self) -> dict[str, object]:
@@ -544,6 +571,7 @@ class TicketBoardApp:
         conn = psycopg.connect(self.database_url or "", row_factory=dict_row)
         conn.autocommit = True
         conn.execute("SET client_encoding TO 'UTF8';")
+        conn.execute("SELECT set_config('ticket_board.ticket_prefix', %s, false);", (self.ticket_prefix,))
         conn.autocommit = False
         return conn
 
@@ -828,7 +856,7 @@ ORDER BY rank;
         if commit_hash or commit_exempt:
             raise ValueError("postgres function API does not support initial commit fields yet")
         normalized_comments = self._validate_comments(comments)
-        blocked_by = self._validate_blocked_by(blocked_by or [], "PGU-0")
+        blocked_by = self._validate_blocked_by(blocked_by or [], ticket_id_sentinel(self.ticket_prefix))
         blocked_reason = self._require_plain_string(blocked_reason, "blocked_reason")
         self._enforce_blocked_reason_rule(blocked_by, blocked_reason)
 
@@ -1135,7 +1163,7 @@ ORDER BY rank;
             blocker_id = item.strip().upper()
             if not blocker_id:
                 raise ValueError("blocked_by entries must not be empty")
-            if not blocker_id.startswith("PGU-") or not blocker_id[4:].isdigit():
+            if not valid_ticket_id(blocker_id):
                 raise ValueError(f"invalid blocked_by ticket id: {item}")
             if blocker_id == ticket_id:
                 raise ValueError("ticket cannot be blocked_by itself")

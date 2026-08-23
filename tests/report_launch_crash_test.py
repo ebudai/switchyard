@@ -28,7 +28,7 @@ class TicketHandler(BaseHTTPRequestHandler):
         payload = json.loads(self.rfile.read(length).decode("utf-8"))
         self.__class__.requests.append(payload)
         self.__class__.paths.append(self.path)
-        self.__class__.caller_roles.append(self.headers.get("X-PGU-Caller-Role"))
+        self.__class__.caller_roles.append(self.headers.get("X-Ticket-Board-Caller-Role"))
         ticket_id = f"PGU-{self.__class__.next_ticket_number}"
         self.__class__.next_ticket_number += 1
         body = json.dumps({"ticket": {"id": ticket_id}}).encode("utf-8")

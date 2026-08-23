@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -726,6 +727,25 @@ INSERT INTO ticket_board.notification_trace (
             after_send = service_app.get_ticket("PGU-415")
             assert after_send["active_work_highlight"] is True, after_send
             assert after_send["active_work_owner_role"] == "director", after_send
+
+            old_prefix = os.environ.get("TICKET_BOARD_TICKET_PREFIX")
+            try:
+                os.environ["TICKET_BOARD_TICKET_PREFIX"] = "OTTO"
+                otto_app = make_app(root, socket_dir, port, dbname, SERVICE_ROLE)
+                otto_created = otto_app.create_ticket(
+                    title="Project-prefixed create",
+                    body="Created through a non-PGU project prefix.",
+                    screenshot=None,
+                    assignee="unassigned",
+                    needs_user_signoff=False,
+                )
+            finally:
+                if old_prefix is None:
+                    os.environ.pop("TICKET_BOARD_TICKET_PREFIX", None)
+                else:
+                    os.environ["TICKET_BOARD_TICKET_PREFIX"] = old_prefix
+            assert otto_created["id"].startswith("OTTO-"), otto_created
+            assert psql(admin_conn, f"SELECT id FROM ticket_board.tickets WHERE id = '{otto_created['id']}';") == otto_created["id"]
         finally:
             subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 

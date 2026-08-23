@@ -35,8 +35,10 @@ DIRECTOR_TARGET = "pgu-director:0.0"
 DEFAULT_DIRECTORCTL = "/home/agent/bin/directorctl"
 DIRECTOR_NOTIFICATION_BATCH_WINDOW_SECONDS = 0.35
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CALLER_ROLE_HEADER = "X-PGU-Caller-Role"
-WRITE_TOKEN_HEADER = "X-PGU-Write-Token"
+CALLER_ROLE_HEADER = "X-Ticket-Board-Caller-Role"
+WRITE_TOKEN_HEADER = "X-Ticket-Board-Write-Token"
+LEGACY_CALLER_ROLE_HEADER = "X-PGU-Caller-Role"
+LEGACY_WRITE_TOKEN_HEADER = "X-PGU-Write-Token"
 SO_PEERCRED_FORMAT = "3i"
 PANE_SOCKET_MODE = 0o666
 IMAGE_CACHE_CONTROL = "public, max-age=31536000, immutable"
@@ -528,7 +530,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             if self._local_peer_credentials is None:
                 raise ValueError("local socket request missing peer credentials")
             return self.caller_registry.role_for_pid(self._local_peer_credentials.pid)
-        raw = self.headers.get(CALLER_ROLE_HEADER, "")
+        raw = self.headers.get(CALLER_ROLE_HEADER, "") or self.headers.get(LEGACY_CALLER_ROLE_HEADER, "")
         role = raw.strip().lower()
         if not role:
             raise ValueError(f"missing {CALLER_ROLE_HEADER}")
@@ -539,7 +541,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
     def require_http_write_token(self) -> None:
         if self.caller_registry is not None:
             return
-        raw = self.headers.get(WRITE_TOKEN_HEADER, "")
+        raw = self.headers.get(WRITE_TOKEN_HEADER, "") or self.headers.get(LEGACY_WRITE_TOKEN_HEADER, "")
         if not raw or not secrets.compare_digest(raw, self.write_token):
             raise PermissionError(f"missing or invalid {WRITE_TOKEN_HEADER}")
 

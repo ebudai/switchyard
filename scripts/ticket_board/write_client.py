@@ -15,7 +15,7 @@ from typing import Any, Mapping
 from urllib import error as urllib_error
 from urllib import parse, request
 
-CALLER_ROLE_HEADER = "X-PGU-Caller-Role"
+CALLER_ROLE_HEADER = "X-Ticket-Board-Caller-Role"
 
 
 def _env_first(*names: str) -> str:
@@ -517,7 +517,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--caller-role",
         default=caller_default,
         help=(
-            "Value for X-PGU-Caller-Role "
+            "Value for X-Ticket-Board-Caller-Role "
             f"(default: TICKET_BOARD_CALLER_ROLE, legacy PGU_TICKET_BOARD_CALLER_ROLE, "
             f"current project-role tmux session, else {DEFAULT_CALLER_ROLE}; "
             f"currently {caller_default})"

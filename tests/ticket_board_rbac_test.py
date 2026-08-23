@@ -870,7 +870,7 @@ WHERE id = {sql_string(filed)};
 
 
 def assert_structural_rules_still_apply(admin_conn: str, service_conn: str) -> None:
-    assert "source_ticket_id must look like PGU-N" in psql_error(
+    assert "source_ticket_id must look like PREFIX-N" in psql_error(
         service_conn,
         "SELECT ticket_board.file_bug('Bad source', 'Body', 'not-a-ticket');",
     )

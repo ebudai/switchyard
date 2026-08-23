@@ -30,8 +30,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS schema_migrations_seq_idx
 
 CREATE TABLE IF NOT EXISTS ticket_board.tickets (
     id text PRIMARY KEY
-        CHECK (id ~ '^PGU-[0-9]+$'),
-    ticket_number integer GENERATED ALWAYS AS ((substring(id from '^PGU-([0-9]+)$'))::integer) STORED,
+        CHECK (id ~ '^[A-Z][A-Z0-9]*-[0-9]+$'),
+    ticket_number integer GENERATED ALWAYS AS ((substring(id from '^[A-Z][A-Z0-9]*-([0-9]+)$'))::integer) STORED,
+    CONSTRAINT tickets_ticket_number_check CHECK (ticket_number > 0),
 
     title text NOT NULL,
     body text NOT NULL DEFAULT '',
@@ -65,7 +66,7 @@ CREATE TABLE IF NOT EXISTS ticket_board.tickets (
     -- Empty string is preserved because the JSON store uses "" rather than null
     -- for "no parent" on newer tickets, while older tickets omit parent_id.
     parent_id text NOT NULL DEFAULT ''
-        CHECK (parent_id = '' OR parent_id ~ '^PGU-[0-9]+$'),
+        CHECK (parent_id = '' OR parent_id ~ '^[A-Z][A-Z0-9]*-[0-9]+$'),
     blocked_reason text NOT NULL DEFAULT '',
 
     implementation text NOT NULL DEFAULT '',
@@ -175,7 +176,7 @@ CREATE INDEX IF NOT EXISTS tickets_source_json_gin
 CREATE TABLE IF NOT EXISTS ticket_board.ticket_blockers (
     ticket_id text NOT NULL REFERENCES ticket_board.tickets(id) ON DELETE CASCADE,
     blocker_ticket_id text NOT NULL
-        CHECK (blocker_ticket_id ~ '^PGU-[0-9]+$'),
+        CHECK (blocker_ticket_id ~ '^[A-Z][A-Z0-9]*-[0-9]+$'),
     position integer NOT NULL CHECK (position >= 0),
     resolved boolean NOT NULL DEFAULT false,
     PRIMARY KEY (ticket_id, blocker_ticket_id),
@@ -3441,6 +3442,32 @@ AS $$
     SELECT to_char(p_ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"');
 $$;
 
+CREATE OR REPLACE FUNCTION ticket_board.ticket_id_pattern()
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT '^[A-Z][A-Z0-9]*-[0-9]+$';
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.ticket_prefix()
+RETURNS text
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    raw_prefix text := upper(regexp_replace(coalesce(nullif(current_setting('ticket_board.ticket_prefix', true), ''), 'PGU'), '[^A-Z0-9]', '', 'g'));
+BEGIN
+    IF raw_prefix = '' THEN
+        raw_prefix := 'PGU';
+    END IF;
+    IF raw_prefix ~ '^[0-9]' THEN
+        raw_prefix := 'T' || raw_prefix;
+    END IF;
+    RETURN raw_prefix;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION ticket_board.next_ticket_id()
 RETURNS text
 LANGUAGE plpgsql
@@ -3455,7 +3482,7 @@ BEGIN
     SELECT COALESCE(max(ticket_number), 0) + 1
     INTO next_number
     FROM ticket_board.tickets;
-    RETURN 'PGU-' || next_number::text;
+    RETURN ticket_board.ticket_prefix() || '-' || next_number::text;
 END;
 $$;
 
@@ -3669,7 +3696,7 @@ BEGIN
     FROM unnest(coalesce(p_blocker_ids, ARRAY[]::text[])) AS raw_id
     WHERE raw_id IS NULL
        OR btrim(raw_id) = ''
-       OR upper(btrim(raw_id)) !~ '^PGU-[0-9]+$'
+       OR upper(btrim(raw_id)) !~ ticket_board.ticket_id_pattern()
        OR upper(btrim(raw_id)) = p_ticket_id
     LIMIT 1;
     IF invalid_id IS NOT NULL THEN
@@ -3905,8 +3932,8 @@ BEGIN
     IF btrim(coalesce(title, '')) = '' THEN
         RAISE EXCEPTION 'title must be non-empty';
     END IF;
-    IF source_id !~ '^PGU-[0-9]+$' THEN
-        RAISE EXCEPTION 'source_ticket_id must look like PGU-N';
+    IF source_id !~ ticket_board.ticket_id_pattern() THEN
+        RAISE EXCEPTION 'source_ticket_id must look like PREFIX-N';
     END IF;
     PERFORM 1 FROM ticket_board.tickets WHERE id = source_id;
     IF NOT FOUND THEN
@@ -4968,7 +4995,7 @@ BEGIN
     IF patch ? 'parent_id' THEN
         normalized_parent := upper(btrim(coalesce(patch->>'parent_id', '')));
         IF normalized_parent <> '' THEN
-            IF normalized_parent !~ '^PGU-[0-9]+$' THEN
+            IF normalized_parent !~ ticket_board.ticket_id_pattern() THEN
                 RAISE EXCEPTION 'invalid parent_id ticket id: %', patch->>'parent_id';
             END IF;
             IF normalized_parent = edit_fields.id THEN

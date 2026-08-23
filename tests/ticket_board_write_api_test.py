@@ -29,7 +29,7 @@ except ModuleNotFoundError:
     )
 
 from scripts.ticket_board.app import TicketBoardApp
-from scripts.ticket_board.server import CALLER_ROLE_HEADER, WRITE_TOKEN_HEADER, TicketBoardServer
+from scripts.ticket_board.server import CALLER_ROLE_HEADER, LEGACY_CALLER_ROLE_HEADER, LEGACY_WRITE_TOKEN_HEADER, WRITE_TOKEN_HEADER, TicketBoardServer
 
 
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
@@ -333,7 +333,8 @@ def assert_frontend_update_calls_send_caller_role() -> None:
 
 def assert_frontend_writes_send_auth_token() -> None:
     source = "\n".join(path.read_text(encoding="utf-8") for path in FRONTEND_SCRIPT_PATHS)
-    assert "X-PGU-Write-Token" in source
+    assert "X-Ticket-Board-Write-Token" in source
+    assert "X-Ticket-Board-Caller-Role" in source
     assert "window.PGU_TICKET_BOARD_WRITE_TOKEN" in source
 
 
@@ -532,7 +533,7 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
         token=None,
         expect=403,
     )
-    assert "missing or invalid X-PGU-Write-Token" in str(unauth_spoof), unauth_spoof
+    assert "missing or invalid X-Ticket-Board-Write-Token" in str(unauth_spoof), unauth_spoof
     wrong_token = post_json(
         base_url,
         "/api/tickets/PGU-100/actions/route",
@@ -541,9 +542,18 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
         token="wrong-token",
         expect=403,
     )
-    assert "missing or invalid X-PGU-Write-Token" in str(wrong_token), wrong_token
+    assert "missing or invalid X-Ticket-Board-Write-Token" in str(wrong_token), wrong_token
     missing = post_json(base_url, "/api/tickets/actions/create_ticket", {"title": "No caller", "body": ""}, expect=400)
-    assert "missing X-PGU-Caller-Role" in str(missing), missing
+    assert "missing X-Ticket-Board-Caller-Role" in str(missing), missing
+    legacy_headers = {"Content-Type": "application/json", LEGACY_CALLER_ROLE_HEADER: "director", LEGACY_WRITE_TOKEN_HEADER: TEST_WRITE_TOKEN}
+    legacy_request = urllib.request.Request(
+        base_url + "/api/tickets/actions/create_ticket",
+        data=json.dumps({"title": "Legacy headers accepted", "body": ""}).encode("utf-8"),
+        headers=legacy_headers,
+        method="POST",
+    )
+    with urllib.request.urlopen(legacy_request, timeout=5) as response:
+        assert response.status == 201
     forbidden = post_json(
         base_url,
         "/api/tickets/PGU-100/actions/route",

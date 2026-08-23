@@ -16,7 +16,15 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "team-launcher"
-DEFAULT_SESSION_DIR = Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-sessions")
+DEFAULT_LEGACY_RUNTIME_SESSION_DIR = Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-sessions")
+DEFAULT_SESSION_DIR = (
+    Path(os.environ["PGU_TICKET_BOARD_PANE_SESSION_DIR"]).expanduser()
+    if os.environ.get("PGU_TICKET_BOARD_PANE_SESSION_DIR")
+    else Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
+    / "pgu-ticket-board"
+    / "pane-sessions"
+)
+DEFAULT_INTERIM_SESSION_BACKUP_DIR = Path.home() / ".local" / "state" / "pgu-ticket-board" / "pane-sessions"
 DEFAULT_PANE_STATE_DIR = (
     Path(os.environ["PGU_TICKET_BOARD_PANE_STATE_DIR"]).expanduser()
     if os.environ.get("PGU_TICKET_BOARD_PANE_STATE_DIR")
@@ -350,6 +358,38 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     temp_path.replace(path)
 
 
+def _ensure_private_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    try:
+        path.chmod(0o700)
+    except OSError:
+        pass
+
+
+def _write_private_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    _ensure_private_dir(path.parent)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+        temp_path = Path(handle.name)
+    try:
+        temp_path.chmod(0o600)
+    except OSError:
+        pass
+    temp_path.replace(path)
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
 def _string_list(value: Any, *, field: str, role: str) -> list[str]:
     if value is None:
         return []
@@ -565,6 +605,78 @@ def _session_payload_model_for_role(role: RoleConfig, session_dir: Path) -> str:
     return str(payload.get("model") or "").strip()
 
 
+def _session_dir_has_records(session_dir: Path) -> bool:
+    try:
+        return any(path.is_file() and path.suffix == ".json" for path in session_dir.iterdir())
+    except OSError:
+        return False
+
+
+def _valid_session_record_payload(payload: object) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    target = str(payload.get("target") or "").strip()
+    session_id = str(payload.get("session_id") or "").strip()
+    if not target or not session_id:
+        return None
+    return dict(payload)
+
+
+def _default_session_seed_dirs(session_dir: Path) -> list[Path]:
+    candidates = [DEFAULT_LEGACY_RUNTIME_SESSION_DIR, DEFAULT_INTERIM_SESSION_BACKUP_DIR]
+    session_resolved = session_dir.expanduser().resolve(strict=False)
+    unique: list[Path] = []
+    seen: set[str] = {str(session_resolved)}
+    for candidate in candidates:
+        resolved = str(candidate.expanduser().resolve(strict=False))
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(candidate)
+    return unique
+
+
+def seed_session_dir_from_legacy_sources(
+    session_dir: Path,
+    *,
+    candidates: Sequence[Path] | None = None,
+) -> list[Path]:
+    target_dir = session_dir.expanduser()
+    if _session_dir_has_records(target_dir):
+        _ensure_private_dir(target_dir)
+        return []
+
+    copied: list[Path] = []
+    for source_dir in candidates if candidates is not None else _default_session_seed_dirs(target_dir):
+        source = source_dir.expanduser()
+        try:
+            source_records = sorted(path for path in source.iterdir() if path.is_file() and path.suffix == ".json")
+        except OSError:
+            continue
+        for source_path in source_records:
+            try:
+                payload = json.loads(source_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            valid = _valid_session_record_payload(payload)
+            if valid is None:
+                continue
+            target_path = target_dir / session_file_name(str(valid["target"]))
+            if target_path.exists():
+                continue
+            _write_private_json_atomic(target_path, valid)
+            copied.append(target_path)
+    if not copied:
+        _ensure_private_dir(target_dir)
+    return copied
+
+
+def seed_default_session_dir_from_legacy_sources(session_dir: Path) -> list[Path]:
+    if session_dir.expanduser().resolve(strict=False) != DEFAULT_SESSION_DIR.expanduser().resolve(strict=False):
+        return []
+    return seed_session_dir_from_legacy_sources(session_dir)
+
+
 def _command_name(value: str) -> str:
     return Path(value.strip()).name
 
@@ -611,7 +723,11 @@ def cli_command_for_role(role: RoleConfig, *, session_dir: Path, resume: bool = 
     command.extend(effort_args_for_role(role))
     command.extend(yolo_args_for_role(role))
     command.extend(role.extra_args)
-    env = {"PGU_PANE_TARGET": role.target, **role.env}
+    env = {
+        **role.env,
+        "PGU_PANE_TARGET": role.target,
+        "PGU_TICKET_BOARD_PANE_SESSION_DIR": str(session_dir.expanduser()),
+    }
     env["PATH"] = _prepend_path(env.get("PATH") or os.environ.get("PATH", ""), default_user_bin())
     return ["env", *_env_prefix(env), *command]
 
@@ -1591,6 +1707,7 @@ def launch_project(
             allow_stale=allow_stale_launcher,
         )
         ensure_configured_runtime_user(config, runner=runner)
+        seed_default_session_dir_from_legacy_sources(config.session_dir)
         if mode == "attach-or-start":
             failed_roles = ensure_project_worktrees(config, refresh=True, runner=runner).failed_roles
         elif mode == "reload":
@@ -1758,6 +1875,7 @@ def main(argv: list[str] | None = None) -> int:
                 allow_stale=args.allow_stale_launcher,
             )
         ensure_configured_runtime_user(config)
+        seed_default_session_dir_from_legacy_sources(config.session_dir)
         role = _role_by_name(config, args.role)
         pane_state_dir = args.pane_state_dir or DEFAULT_PANE_STATE_DIR
         if role.detached:

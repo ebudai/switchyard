@@ -55,6 +55,8 @@ from scripts.team_launcher import (
     provision_runtime_command,
     run_detached_role,
     run_role_pane,
+    seed_session_dir_from_legacy_sources,
+    session_id_for_role,
     session_file_name,
     worktree_ref,
     write_template,
@@ -265,6 +267,24 @@ def _read_pane_state(state_dir: Path, target: str) -> dict[str, object]:
     return json.loads((state_dir / pane_state_file_name(target)).read_text(encoding="utf-8"))
 
 
+def _env_entries(command: list[str]) -> list[str]:
+    assert command[0] == "env"
+    entries: list[str] = []
+    for token in command[1:]:
+        if "=" not in token:
+            break
+        entries.append(token)
+    return entries
+
+
+def _command_tail(command: list[str]) -> list[str]:
+    assert command[0] == "env"
+    for index, token in enumerate(command[1:], start=1):
+        if "=" not in token:
+            return command[index:]
+    return []
+
+
 def _patch_process_snapshot(
     parents_by_pid: dict[int, int],
     children_by_parent: dict[int, list[int]],
@@ -412,7 +432,19 @@ def test_cli_command_prepends_invoking_user_bin() -> None:
         if original_bin_dir is not None:
             os.environ["PGU_TEAM_LAUNCHER_BIN_DIR"] = original_bin_dir
 
-    assert command[2].startswith("PATH=/home/otto-agent/bin:")
+    assert any(entry.startswith("PATH=/home/otto-agent/bin:") for entry in _env_entries(command))
+
+
+def test_cli_command_exports_durable_session_dir_for_pane_hooks() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    role = next(role for role in config.roles if role.role == "ops")
+
+    command = cli_command_for_role(role, session_dir=config.session_dir)
+
+    entries = _env_entries(command)
+    assert entries[0] == "PGU_PANE_TARGET=pgu-ops:0.0"
+    assert f"PGU_TICKET_BOARD_PANE_SESSION_DIR={config.session_dir}" in entries
+    assert str(config.session_dir) == str(Path.home() / ".local" / "state" / "pgu-ticket-board" / "pane-sessions")
 
 
 def test_custom_config_without_run_as_user_tracks_invoking_home() -> None:
@@ -666,9 +698,11 @@ def test_pgu_launch_commands_include_model_and_bypass_flags() -> None:
 
     for role_name, expected_tail in expected_by_role.items():
         command = cli_command_for_role(roles[role_name], session_dir=config.session_dir)
-        assert command[:2] == ["env", f"PGU_PANE_TARGET=pgu-{role_name}:0.0"]
-        assert command[2].startswith(f"PATH={default_user_bin()}:"), (role_name, command)
-        assert command[3:] == expected_tail, (role_name, command)
+        entries = _env_entries(command)
+        assert entries[0] == f"PGU_PANE_TARGET=pgu-{role_name}:0.0"
+        assert f"PGU_TICKET_BOARD_PANE_SESSION_DIR={config.session_dir}" in entries
+        assert any(entry.startswith(f"PATH={default_user_bin()}:") for entry in entries), (role_name, command)
+        assert _command_tail(command) == expected_tail, (role_name, command)
         assert "--reasoning-effort" not in command
         assert "--continue" not in command
         assert "--last" not in command
@@ -1257,6 +1291,79 @@ def test_start_resumes_recorded_session_when_recreating_missing_pane() -> None:
     assert runner.calls[-1] == ["tmux", "attach", "-t", "pgu-ops"]
 
 
+def test_seed_session_dir_from_legacy_sources_copies_valid_records_once() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    roles = {role.role: role for role in config.roles}
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        tmp_path = Path(tmp)
+        durable = tmp_path / "durable"
+        legacy_runtime = tmp_path / "runtime" / "pane-sessions"
+        interim_backup = tmp_path / "backup" / "pane-sessions"
+        legacy_runtime.mkdir(parents=True)
+        interim_backup.mkdir(parents=True)
+        ops_id = "12345678-1234-5678-9abc-def012345678"
+        audit_id = "22345678-1234-5678-9abc-def012345678"
+        (legacy_runtime / session_file_name(roles["ops"].target)).write_text(
+            json.dumps({"target": roles["ops"].target, "session_id": ops_id, "payload": {"model": "gpt-5.5"}}) + "\n",
+            encoding="utf-8",
+        )
+        (interim_backup / session_file_name(roles["audit"].target)).write_text(
+            json.dumps({"target": roles["audit"].target, "session_id": audit_id}) + "\n",
+            encoding="utf-8",
+        )
+        (interim_backup / "bad.json").write_text(json.dumps({"target": roles["main"].target}) + "\n", encoding="utf-8")
+
+        copied = seed_session_dir_from_legacy_sources(durable, candidates=[legacy_runtime, interim_backup])
+
+        assert sorted(path.name for path in copied) == sorted(
+            [session_file_name(roles["ops"].target), session_file_name(roles["audit"].target)]
+        )
+        assert session_id_for_role(roles["ops"], durable) == ops_id
+        assert session_id_for_role(roles["audit"], durable) == audit_id
+        assert oct(durable.stat().st_mode & 0o777) == "0o700"
+        assert oct((durable / session_file_name(roles["ops"].target)).stat().st_mode & 0o777) == "0o600"
+
+        (legacy_runtime / session_file_name(roles["main"].target)).write_text(
+            json.dumps({"target": roles["main"].target, "session_id": "new-session"}) + "\n",
+            encoding="utf-8",
+        )
+        assert seed_session_dir_from_legacy_sources(durable, candidates=[legacy_runtime]) == []
+        assert session_id_for_role(roles["main"], durable) == ""
+
+
+def test_start_resumes_from_durable_session_dir_after_runtime_tmpfs_is_cleared() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    role = next(role for role in config.roles if role.role == "ops")
+    runner = FakeRunner(current_commands={"pgu-ops:0.0": "codex"})
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        tmp_path = Path(tmp)
+        durable = tmp_path / "state-home" / "pgu-ticket-board" / "pane-sessions"
+        runtime_tmpfs = tmp_path / "run" / "pane-sessions"
+        durable.mkdir(parents=True)
+        runtime_tmpfs.mkdir(parents=True)
+        session_id = "32345678-1234-5678-9abc-def012345678"
+        (durable / session_file_name(role.target)).write_text(
+            json.dumps({"target": role.target, "session_id": session_id}) + "\n",
+            encoding="utf-8",
+        )
+        shutil.rmtree(runtime_tmpfs)
+
+        assert (
+            run_role_pane(
+                role,
+                mode="start",
+                session_dir=durable,
+                pane_state_dir=tmp_path / "pane-state",
+                runner=runner,
+            )
+            == 0
+        )
+
+    assert runner.calls[1][:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"]
+    assert f"PGU_TICKET_BOARD_PANE_SESSION_DIR={durable}" in runner.calls[1][-1]
+    assert f"codex resume {session_id}" in runner.calls[1][-1]
+
+
 def test_start_runs_research_detached_before_opening_visible_layout() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
         tmp_path = Path(tmp)
@@ -1644,7 +1751,11 @@ def test_reload_uses_recorded_resume_uuid_when_recreating_session() -> None:
         )
         runner = FakeRunner(existing_sessions={"pgu-ops"}, current_commands={"pgu-ops:0.0": "codex"})
 
-        assert cli_command_for_role(role, session_dir=session_dir, resume=True)[3:6] == ["codex", "resume", session_id]
+        assert _command_tail(cli_command_for_role(role, session_dir=session_dir, resume=True))[:3] == [
+            "codex",
+            "resume",
+            session_id,
+        ]
         pane_state_dir = Path(tmp) / "pane-state"
         assert (
             run_role_pane(
@@ -1691,17 +1802,17 @@ def test_resume_commands_use_cli_specific_shapes_and_front_position() -> None:
         ops_command = cli_command_for_role(roles["ops"], session_dir=session_dir, resume=True)
         inspector_command = cli_command_for_role(roles["inspector"], session_dir=session_dir, resume=True)
 
-        assert director_command[2].startswith(f"PATH={default_user_bin()}:")
-        assert director_command[3:6] == ["claude", "--resume", session_id]
-        assert director_command[6:10] == ["--model", "claude-opus-5", "--effort", "high"]
+        assert any(entry.startswith(f"PATH={default_user_bin()}:") for entry in _env_entries(director_command))
+        assert _command_tail(director_command)[:3] == ["claude", "--resume", session_id]
+        assert _command_tail(director_command)[3:7] == ["--model", "claude-opus-5", "--effort", "high"]
 
-        assert ops_command[2].startswith(f"PATH={default_user_bin()}:")
-        assert ops_command[3:6] == ["codex", "resume", session_id]
-        assert ops_command[6:10] == ["--model", "gpt-5.5", "-c", "reasoning_effort=high"]
+        assert any(entry.startswith(f"PATH={default_user_bin()}:") for entry in _env_entries(ops_command))
+        assert _command_tail(ops_command)[:3] == ["codex", "resume", session_id]
+        assert _command_tail(ops_command)[3:7] == ["--model", "gpt-5.5", "-c", "reasoning_effort=high"]
 
-        assert inspector_command[2].startswith(f"PATH={default_user_bin()}:")
-        assert inspector_command[3:6] == ["agy", "--conversation", session_id]
-        assert inspector_command[6:8] == ["--model", "gemini-3.7-flash-high"]
+        assert any(entry.startswith(f"PATH={default_user_bin()}:") for entry in _env_entries(inspector_command))
+        assert _command_tail(inspector_command)[:3] == ["agy", "--conversation", session_id]
+        assert _command_tail(inspector_command)[3:5] == ["--model", "gemini-3.7-flash-high"]
 
 
 def test_reload_without_recorded_resume_id_logs_fresh_start() -> None:
@@ -1907,6 +2018,7 @@ def main() -> int:
     test_pgu_config_keeps_live_agent_repository_with_foreign_home()
     test_custom_config_without_run_as_user_tracks_invoking_home()
     test_cli_command_prepends_invoking_user_bin()
+    test_cli_command_exports_durable_session_dir_for_pane_hooks()
     test_pane_state_filename_matches_notify_listener_target_path()
     test_ensure_user_linger_runtime_enables_linger_and_waits_for_runtime_dir()
     test_ensure_user_linger_runtime_fails_loud_when_loginctl_is_denied()
@@ -1932,6 +2044,8 @@ def main() -> int:
     test_start_creates_missing_session_once_then_attaches()
     test_start_seeds_initial_idle_state_for_codex_agy_and_claude_panes()
     test_start_resumes_recorded_session_when_recreating_missing_pane()
+    test_seed_session_dir_from_legacy_sources_copies_valid_records_once()
+    test_start_resumes_from_durable_session_dir_after_runtime_tmpfs_is_cleared()
     test_start_runs_research_detached_before_opening_visible_layout()
     test_start_force_refreshes_dirty_shared_checkout_with_real_git()
     test_bad_shared_checkout_blocks_all_roles_with_real_git()

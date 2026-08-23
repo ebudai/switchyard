@@ -21,7 +21,9 @@ DEFAULT_PANE_STATE_DIR = (
 DEFAULT_PANE_SESSION_DIR = (
     Path(os.environ["PGU_TICKET_BOARD_PANE_SESSION_DIR"]).expanduser()
     if os.environ.get("PGU_TICKET_BOARD_PANE_SESSION_DIR")
-    else Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-sessions")
+    else Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
+    / "pgu-ticket-board"
+    / "pane-sessions"
 )
 SESSION_ID_KEYS = {
     "session_id",
@@ -182,6 +184,10 @@ def _write_session(
         return None
     target_dir = Path(session_dir).expanduser()
     target_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        target_dir.chmod(0o700)
+    except OSError:
+        pass
     stored_payload = payload if isinstance(payload, (dict, list)) else None
     session_payload = {
         "target": target,
@@ -193,7 +199,15 @@ def _write_session(
     path = _target_path(target_dir, target)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(session_payload, sort_keys=True) + "\n", encoding="utf-8")
+    try:
+        tmp.chmod(0o600)
+    except OSError:
+        pass
     tmp.replace(path)
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
     return path
 
 

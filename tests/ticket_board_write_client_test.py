@@ -364,6 +364,49 @@ def assert_generic_socket_env_precedes_legacy(root: Path) -> None:
             os.environ["PGU_TICKET_BOARD_SOCKET"] = old_env_socket
 
 
+def assert_project_caller_role_resolution_from_tmux_session() -> None:
+    original_run = write_client_module.subprocess.run
+    seen: list[list[str]] = []
+
+    def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="otto-implementer\n", stderr="")
+
+    try:
+        write_client_module.subprocess.run = fake_run
+        mapped = write_client_module.default_caller_role(
+            {
+                "TMUX_PANE": "%42",
+                "TICKET_BOARD_CALLER_ROLE_MAP": json.dumps(
+                    {
+                        "otto-director": "director",
+                        "otto-implementer": "implementer",
+                    }
+                ),
+            }
+        )
+    finally:
+        write_client_module.subprocess.run = original_run
+
+    assert mapped == "implementer"
+    assert seen == [["tmux", "display-message", "-p", "-t", "%42", "#{session_name}"]]
+
+
+def assert_project_prefix_caller_role_resolution_from_tmux_session() -> None:
+    original_run = write_client_module.subprocess.run
+
+    def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout="otto-audit\n", stderr="")
+
+    try:
+        write_client_module.subprocess.run = fake_run
+        resolved = write_client_module.default_caller_role({"TMUX_PANE": "%99", "TICKET_BOARD_PROJECT": "otto"})
+    finally:
+        write_client_module.subprocess.run = original_run
+
+    assert resolved == "audit"
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="ticket-board-write-client.") as tmpdir:
         root = Path(tmpdir)
@@ -377,6 +420,8 @@ def main() -> int:
             assert_submit_rejects_unpushed_commit(base_url, repo, local_only_hash, server.requests)
             assert_socket_discovery_prefers_runtime_then_legacy(root)
             assert_generic_socket_env_precedes_legacy(root)
+            assert_project_caller_role_resolution_from_tmux_session()
+            assert_project_prefix_caller_role_resolution_from_tmux_session()
             assert_auto_socket_connect_failure_falls_back_to_tcp(base_url, root / "blocked.sock")
             assert_action_requests(server.requests)
             assert ("/api/tickets/PGU-120/actions/start_work", "ops") in request_pairs(server.requests)

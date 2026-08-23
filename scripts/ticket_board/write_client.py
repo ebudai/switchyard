@@ -101,6 +101,25 @@ def _env_first_from(environ: Mapping[str, str], *names: str) -> str:
     return ""
 
 
+def _caller_role_map_from_env(environ: Mapping[str, str]) -> dict[str, str]:
+    raw = _env_first_from(environ, "TICKET_BOARD_CALLER_ROLE_MAP", "PGU_TICKET_BOARD_CALLER_ROLE_MAP")
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    result: dict[str, str] = {}
+    for session_name, role in parsed.items():
+        normalized_session = str(session_name).strip()
+        normalized_role = str(role).strip().lower()
+        if normalized_session and normalized_role:
+            result[normalized_session] = normalized_role
+    return result
+
+
 def _caller_role_from_tmux_session(environ: Mapping[str, str] = os.environ) -> str | None:
     pane_id = environ.get("TMUX_PANE", "").strip()
     if not pane_id:
@@ -118,6 +137,9 @@ def _caller_role_from_tmux_session(environ: Mapping[str, str] = os.environ) -> s
     if proc.returncode != 0:
         return None
     session_name = proc.stdout.strip()
+    mapped_role = _caller_role_map_from_env(environ).get(session_name)
+    if mapped_role:
+        return mapped_role
     explicit_project = _env_first_from(environ, "TICKET_BOARD_PROJECT", "PGU_TICKET_BOARD_PROJECT")
     if explicit_project and session_name.startswith(f"{explicit_project}-"):
         role = session_name.removeprefix(f"{explicit_project}-").strip().lower()

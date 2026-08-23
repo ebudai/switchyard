@@ -188,6 +188,11 @@ Each project config contains:
   ordinary invoking-user teams; set it only when an existing deployment must
   remain on a specific user-owned tmux/runtime namespace.
 - `session_dir`: optional directory containing per-pane resume session files.
+- `board_url`: optional project ticket-board HTTP URL. Defaults to
+  `http://127.0.0.1:8770` for PGU, and otherwise to the same deterministic
+  per-project port used by the ticket-board provisioner.
+- `board_socket`: optional project ticket-board Unix write socket. Defaults to
+  `/run/<project>-ticket-board/ticket-board.sock`.
 - `repository`: optional shared checkout used as the default pane cwd and the
   checkout refreshed by `start`.
 - `worktree_base`: legacy optional setting retained for existing configs. It is
@@ -228,6 +233,12 @@ Each role entry contains:
   before destructive reload.
 - `env`: optional environment variables for the CLI process.
 
+The launcher injects the board wiring into every role process:
+`TICKET_BOARD_PROJECT`, `TICKET_BOARD_URL`, `TICKET_BOARD_SOCKET`,
+`TICKET_BOARD_CALLER_ROLE`, and `TICKET_BOARD_CALLER_ROLE_MAP`. These generated
+values override stale per-role entries so every pane writes to the configured
+project board through the write client instead of falling back to PGU defaults.
+
 Do not put guessed/default roles into a real project config. If a role is not
 currently active or its CLI/model assignment is unknown, omit it until the
 assignment is verified. The PGU config intentionally omits `perf` because that
@@ -243,6 +254,7 @@ scripts/team-launcher porter bootstrap --template-output /tmp/porter.json
 scripts/team-launcher porter provision-runtime --runtime-user otto-agent
 ```
 
-The template intentionally contains no active roles. Add roles only after their
-live CLI/model assignments are known; copy or adapt the PGU layout/config when
-standing up a full multi-role team.
+The template intentionally contains no active roles, but it does include the
+derived `board_url` and `board_socket` for the project. Add roles only after
+their live CLI/model assignments are known; copy or adapt the PGU layout/config
+when standing up a full multi-role team.

@@ -358,6 +358,8 @@ def test_pgu_config_matches_director_supplied_live_role_assignments() -> None:
     assert set(roles) == {"director", "main", "app", "research", "ops", "audit", "inspector"}
     assert all(role.yolo for role in roles.values())
     assert config.repository == expected_repository
+    assert config.board_url == "http://127.0.0.1:8770"
+    assert config.board_socket == "/run/pgu-ticket-board/ticket-board.sock"
     assert config.run_as_user == "agent"
     assert config.worktree_base is None
     assert worktree_ref(config) == "origin/main"
@@ -523,8 +525,50 @@ def test_custom_config_without_run_as_user_tracks_invoking_home() -> None:
             os.environ["HOME"] = original_home
 
     assert config.run_as_user == ""
+    assert config.board_url == "http://127.0.0.1:23682"
+    assert config.board_socket == "/run/porter-ticket-board/ticket-board.sock"
     assert config.repository == Path("/home/otto-agent/Projects/porter")
     assert config.roles[0].workdir == "/home/otto-agent/Projects/porter"
+
+
+def test_custom_project_pane_env_is_wired_to_project_board_and_role_map() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        tmp_path = Path(tmp)
+        layout = {"KonsoleTabs": [{"Widgets": [{"Command": "", "WorkingDirectory": ""}]}]}
+        layout_path = tmp_path / "layout.json"
+        layout_path.write_text(json.dumps(layout), encoding="utf-8")
+        config_path = tmp_path / "otto.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "otto",
+                    "layout": str(layout_path),
+                    "repository": "/home/otto-agent/Projects/otto",
+                    "roles": [
+                        {"role": "director", "slot": 0, "tmux_session": "otto-director", "cli": ["claude"]},
+                        {"role": "implementer", "slot": 1, "tmux_session": "otto-implementer", "cli": ["codex"]},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        config = load_project_config("otto", config_path)
+        role = next(role for role in config.roles if role.role == "implementer")
+        command = cli_command_for_role(role, session_dir=config.session_dir)
+
+    entries = _env_entries(command)
+    role_map = json.loads(next(entry.split("=", 1)[1] for entry in entries if entry.startswith("TICKET_BOARD_CALLER_ROLE_MAP=")))
+    assert config.board_url == "http://127.0.0.1:20740"
+    assert config.board_socket == "/run/otto-ticket-board/ticket-board.sock"
+    assert f"TICKET_BOARD_PANE_TARGET={role.target}" in entries
+    assert "TICKET_BOARD_PROJECT=otto" in entries
+    assert "TICKET_BOARD_URL=http://127.0.0.1:20740" in entries
+    assert "TICKET_BOARD_SOCKET=/run/otto-ticket-board/ticket-board.sock" in entries
+    assert "TICKET_BOARD_CALLER_ROLE=implementer" in entries
+    assert role_map == {"otto-director": "director", "otto-implementer": "implementer"}
+    assert not any(entry.startswith("PGU_TICKET_BOARD_SOCKET=") for entry in entries)
+    assert not any(entry.startswith("PGU_TICKET_BOARD_URL=") for entry in entries)
 
 
 def test_pane_state_filename_matches_notify_listener_target_path() -> None:
@@ -2170,6 +2214,8 @@ def test_bootstrap_template_does_not_guess_active_roles() -> None:
 
         template = json.loads(output.read_text(encoding="utf-8"))
         assert template["project"] == "porter"
+        assert template["board_url"] == "http://127.0.0.1:23682"
+        assert template["board_socket"] == "/run/porter-ticket-board/ticket-board.sock"
         assert template["roles"] == []
 
 

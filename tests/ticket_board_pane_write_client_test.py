@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import socketserver
 import subprocess
 import sys
 import tempfile
@@ -19,6 +20,7 @@ if str(ROOT) not in sys.path:
 
 from scripts.ticket_board.server import CALLER_ROLE_HEADER
 from scripts.ticket_board.write_client import TicketBoardWriteClient, default_caller_role
+from scripts.team_launcher import cli_command_for_role, load_project_config
 
 
 class RecordingHandler(BaseHTTPRequestHandler):
@@ -68,6 +70,52 @@ class RecordingServer(ThreadingHTTPServer):
     def __init__(self) -> None:
         self.requests: list[tuple[str, str | None, dict[str, object]]] = []
         super().__init__(("127.0.0.1", 0), RecordingHandler)
+
+
+class UnixRecordingHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+    def do_POST(self) -> None:  # noqa: N802
+        length = int(self.headers.get("Content-Length", "0"))
+        payload = json.loads(self.rfile.read(length) or b"{}")
+        caller = self.headers.get(CALLER_ROLE_HEADER)
+        self.server.requests.append((self.path, caller, payload))  # type: ignore[attr-defined]
+        if self.path == "/api/register-caller":
+            body = json.dumps({"ok": True}).encode("utf-8")
+        else:
+            body = json.dumps(
+                {
+                    "ticket": {
+                        "id": "OTTO-NEW",
+                        "title": payload.get("title", "fixture"),
+                        "state": payload.get("state", "analysis"),
+                        "assignee": payload.get("assignee", caller or "unassigned"),
+                        "comments": [],
+                    }
+                }
+            ).encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class ThreadingUnixRecordingServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+
+    def __init__(self, socket_path: Path) -> None:
+        self.requests: list[tuple[str, str | None, dict[str, object]]] = []
+        self.socket_path = socket_path
+        socket_path.unlink(missing_ok=True)
+        super().__init__(str(socket_path), UnixRecordingHandler)
+
+    def server_close(self) -> None:
+        super().server_close()
+        self.socket_path.unlink(missing_ok=True)
 
 
 def run_git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -131,6 +179,17 @@ def run_cli_error(base_url: str, caller_role: str, cwd: Path, *args: str) -> str
     return proc.stderr or proc.stdout
 
 
+def command_env(command: list[str]) -> dict[str, str]:
+    assert command[0] == "env"
+    result: dict[str, str] = {}
+    for token in command[1:]:
+        if "=" not in token:
+            break
+        key, value = token.split("=", 1)
+        result[key] = value
+    return result
+
+
 def exercise_pane_cli(base_url: str, repo: Path, commit_hash: str, local_only_hash: str) -> None:
     assert default_caller_role({"TICKET_BOARD_CALLER_ROLE": " ops ", "PGU_TICKET_BOARD_CALLER_ROLE": " app "}) == "ops"
     assert default_caller_role({"PGU_TICKET_BOARD_CALLER_ROLE": " app "}) == "app"
@@ -170,6 +229,70 @@ def exercise_pane_cli(base_url: str, repo: Path, commit_hash: str, local_only_ha
     assert commented["comments"][-1]["who"] == "ops", commented
 
 
+def assert_second_project_pane_cli_uses_project_socket(root: Path) -> None:
+    socket_path = root / "otto.sock"
+    layout_path = root / "otto-layout.json"
+    layout_path.write_text(json.dumps({"KonsoleTabs": [{"Widgets": [{"Command": "", "WorkingDirectory": ""}]}]}), encoding="utf-8")
+    config_path = root / "otto.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "project": "otto",
+                "layout": str(layout_path),
+                "repository": str(root),
+                "board_url": "http://127.0.0.1:20740",
+                "board_socket": str(socket_path),
+                "roles": [{"role": "implementer", "slot": 0, "tmux_session": "otto-implementer", "cli": ["codex"]}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = load_project_config("otto", config_path)
+    role = config.roles[0]
+    pane_env = command_env(cli_command_for_role(role, session_dir=root / "sessions"))
+
+    server = ThreadingUnixRecordingServer(socket_path)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        env = os.environ.copy()
+        for key in list(env):
+            if key.startswith("PGU_TICKET_BOARD_") or key.startswith("TICKET_BOARD_"):
+                env.pop(key)
+        env.update(pane_env)
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts" / "ticket-board-write"),
+                "create-ticket",
+                "--title",
+                "Otto pane write",
+                "--body",
+                "Created from an otto pane environment.",
+                "--assignee",
+                "implementer",
+            ],
+            cwd=root,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise AssertionError(proc.stderr or proc.stdout)
+        parsed = json.loads(proc.stdout)
+        assert parsed["id"] == "OTTO-NEW", parsed
+        assert ("/api/register-caller", None, {"role": "implementer"}) in server.requests
+        assert any(
+            path == "/api/tickets/actions/create_ticket" and caller == "implementer"
+            for path, caller, _payload in server.requests
+        ), server.requests
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
 def assert_pane_requests(requests: list[tuple[str, str | None, dict[str, object]]]) -> None:
     pairs = [(path, caller_role) for path, caller_role, _ in requests]
     assert ("/api/tickets/PGU-2100/actions/start_work", "main") in pairs
@@ -190,12 +313,14 @@ def assert_pane_requests(requests: list[tuple[str, str | None, dict[str, object]
 
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="ticket-board-pane-write-client.") as tmpdir:
-        repo, pushed_hash, local_only_hash = setup_git_repo(Path(tmpdir))
+        root = Path(tmpdir)
+        repo, pushed_hash, local_only_hash = setup_git_repo(root)
         server = RecordingServer()
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
             exercise_pane_cli(f"http://127.0.0.1:{server.server_port}", repo, pushed_hash, local_only_hash)
+            assert_second_project_pane_cli_uses_project_socket(root)
             assert_pane_requests(server.requests)
         finally:
             server.shutdown()

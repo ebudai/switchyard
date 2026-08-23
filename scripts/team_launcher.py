@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import pwd
@@ -115,6 +116,8 @@ class ProjectConfig:
     project: str
     layout: Path
     session_dir: Path
+    board_url: str
+    board_socket: str
     run_as_user: str
     repository: Path | None
     worktree_base: Path | None
@@ -146,6 +149,21 @@ class LauncherCheckoutProbe:
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+def _allocated_board_port(project: str, *, base: int = 18_770, span: int = 10_000) -> int:
+    if project == "pgu":
+        return 8770
+    digest = hashlib.blake2s(project.encode("utf-8"), digest_size=2).digest()
+    return base + (int.from_bytes(digest, "big") % span)
+
+
+def _default_board_url(project: str) -> str:
+    return f"http://127.0.0.1:{_allocated_board_port(project)}"
+
+
+def _default_board_socket(project: str) -> str:
+    return f"/run/{project}-ticket-board/ticket-board.sock"
 
 
 def uid_for_user(user_name: str) -> int | None:
@@ -473,6 +491,30 @@ def _role_from_json(project: str, raw: dict[str, Any], *, base: Path, default_wo
     )
 
 
+def _role_board_env(config: ProjectConfig, role: RoleConfig, session_role_map: dict[str, str]) -> dict[str, str]:
+    return {
+        "TICKET_BOARD_PROJECT": config.project,
+        "TICKET_BOARD_URL": config.board_url,
+        "TICKET_BOARD_SOCKET": config.board_socket,
+        "TICKET_BOARD_CALLER_ROLE": role.role,
+        "TICKET_BOARD_CALLER_ROLE_MAP": json.dumps(session_role_map, sort_keys=True, separators=(",", ":")),
+    }
+
+
+def _with_project_board_env(config: ProjectConfig, roles: list[RoleConfig]) -> list[RoleConfig]:
+    session_role_map = {role.tmux_session: role.role for role in roles}
+    return [
+        replace(
+            role,
+            env={
+                **role.env,
+                **_role_board_env(config, role, session_role_map),
+            },
+        )
+        for role in roles
+    ]
+
+
 def load_project_config(project: str, config_path: Path | None = None) -> ProjectConfig:
     path = config_path or DEFAULT_CONFIG_DIR / f"{project}.json"
     config = _load_json(path)
@@ -485,6 +527,8 @@ def load_project_config(project: str, config_path: Path | None = None) -> Projec
     base = path.parent
     layout = _expand_path(str(config.get("layout") or f"{project}-konsole-layout.json"), base=base)
     session_dir = _expand_path(str(config.get("session_dir") or str(DEFAULT_SESSION_DIR)), base=base)
+    board_url = str(config.get("board_url") or _default_board_url(project)).strip()
+    board_socket = str(config.get("board_socket") or _default_board_socket(project)).strip()
     run_as_user = str(config.get("run_as_user") or "").strip()
     repository = None
     repository_raw = config.get("repository")
@@ -534,10 +578,12 @@ def load_project_config(project: str, config_path: Path | None = None) -> Projec
             duplicate_non_shared.append(f"{previous_role}/{role.role}:{normalized_workdir}")
     if duplicate_non_shared:
         raise SystemExit(f"{path} contains duplicate non-shared role workdir assignments: {', '.join(duplicate_non_shared)}")
-    return ProjectConfig(
+    parsed_config = ProjectConfig(
         project=config_project,
         layout=layout,
         session_dir=session_dir,
+        board_url=board_url,
+        board_socket=board_socket,
         run_as_user=run_as_user,
         repository=repository,
         worktree_base=worktree_base,
@@ -545,6 +591,7 @@ def load_project_config(project: str, config_path: Path | None = None) -> Projec
         worktree_branch=worktree_branch,
         roles=roles,
     )
+    return replace(parsed_config, roles=_with_project_board_env(parsed_config, roles))
 
 
 def _normalized_path(path: Path) -> str:
@@ -1859,6 +1906,8 @@ def write_template(project: str, output: Path) -> int:
     payload = {
         "project": project,
         "layout": layout_name,
+        "board_url": _default_board_url(project),
+        "board_socket": _default_board_socket(project),
         "session_dir": str(DEFAULT_SESSION_DIR),
         "roles": [],
     }

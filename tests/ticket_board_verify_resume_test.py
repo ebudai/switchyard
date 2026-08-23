@@ -115,6 +115,28 @@ def make_fixture(root: Path, *, boot_id: str, boot_time: int) -> dict[str, Path]
     frame_dir.mkdir()
     tmux_file = root / "tmux.txt"
     tmux_file.write_text("demo-ops\ndemo-inspector\n", encoding="utf-8")
+    tmux_panes_file = root / "tmux-panes.json"
+    tmux_panes_file.write_text(
+        json.dumps(
+            {
+                "panes": {
+                    "demo-ops:0.0": {
+                        "target": "demo-ops:0.0",
+                        "pane_pid": 1200,
+                        "argvs": [["bash"], ["codex", "resume", "ops-session", "--model", "gpt-test"]],
+                    },
+                    "demo-inspector:0.0": {
+                        "target": "demo-inspector:0.0",
+                        "pane_pid": 1300,
+                        "argvs": [["bash"], ["agy", "--conversation", "inspector-session"]],
+                    },
+                }
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     boot_id_file = root / "boot_id"
     boot_time_file = root / "boot_time"
     launcher_repo = make_launcher_repo(root / "launcher")
@@ -160,6 +182,7 @@ def make_fixture(root: Path, *, boot_id: str, boot_time: int) -> dict[str, Path]
         "current": current_link,
         "frame_dir": frame_dir,
         "tmux_file": tmux_file,
+        "tmux_panes_file": tmux_panes_file,
         "boot_id_file": boot_id_file,
         "boot_time_file": boot_time_file,
         "config": config,
@@ -199,6 +222,8 @@ def build_args(module, paths: dict[str, Path], url: str):
                 str(paths["frame_dir"]),
                 "--tmux-sessions-file",
                 str(paths["tmux_file"]),
+                "--tmux-panes-file",
+                str(paths["tmux_panes_file"]),
                 "--boot-id-file",
                 str(paths["boot_id_file"]),
                 "--boot-time-file",
@@ -261,7 +286,9 @@ def test_legacy_runtime_session_files_are_not_required_after_reboot() -> None:
         failed = {check.name: check.detail for check in checks if not check.ok}
         assert "runtime_session_tmpfs_wiped_or_recreated" not in {check.name for check in checks}
         assert "durable_sessions_survive" not in failed
-        assert "roles_resume_recorded_sessions" not in failed
+        assert "durable_session_records_retained" not in failed
+        assert "pane_resume_attempt_passed_to_cli" not in failed
+        assert "roles_resume_recorded_sessions" not in {check.name for check in checks}
 
 
 def test_durable_sessions_survive_fails_when_record_missing() -> None:
@@ -271,11 +298,29 @@ def test_durable_sessions_survive_fails_when_record_missing() -> None:
         assert_check_fails(module, before, after, "durable_sessions_survive")
 
 
-def test_roles_resume_recorded_sessions_fails_when_a_session_id_changes() -> None:
+def test_durable_session_records_retained_fails_when_a_session_id_changes() -> None:
     module = load_module()
     with collect_good_pair(module) as (_paths, before, after):
         after["durable_sessions"]["files"]["demo-ops_0.0.json"]["session_id"] = "cold-session"
-        assert_check_fails(module, before, after, "roles_resume_recorded_sessions")
+        assert_check_fails(module, before, after, "durable_session_records_retained")
+
+
+def test_pane_resume_attempt_passed_to_cli_fails_when_argv_lacks_recorded_id() -> None:
+    module = load_module()
+    with collect_good_pair(module) as (_paths, before, after):
+        after["tmux"]["panes"]["demo-inspector:0.0"]["argvs"] = [["agy", "--conversation", "fresh-session"]]
+        assert_check_fails(module, before, after, "pane_resume_attempt_passed_to_cli")
+
+
+def test_pane_resume_attempt_passed_to_cli_states_attempt_not_outcome() -> None:
+    module = load_module()
+    with collect_good_pair(module) as (_paths, before, after):
+        checks = module.verify_snapshot(before, after)
+        details = {check.name: check.detail for check in checks}
+        assert "roles_resume_recorded_sessions" not in details
+        detail = details["pane_resume_attempt_passed_to_cli"]
+        assert "attempt only" in detail
+        assert "not CLI context retention/outcome" in detail
 
 
 def test_codex_agy_pane_state_seeded_fails_when_hook_state_missing() -> None:
@@ -327,7 +372,7 @@ def test_verify_fails_when_a_recorded_session_id_changes() -> None:
         after["durable_sessions"]["files"]["demo-ops_0.0.json"]["session_id"] = "cold-session"
         failed = failed_checks(module, before, after)
         assert "durable_sessions_survive" in failed
-        assert "roles_resume_recorded_sessions" in failed
+        assert "durable_session_records_retained" in failed
 
 
 if __name__ == "__main__":
@@ -335,7 +380,9 @@ if __name__ == "__main__":
     test_real_reboot_observed_fails_without_boot_id_change()
     test_legacy_runtime_session_files_are_not_required_after_reboot()
     test_durable_sessions_survive_fails_when_record_missing()
-    test_roles_resume_recorded_sessions_fails_when_a_session_id_changes()
+    test_durable_session_records_retained_fails_when_a_session_id_changes()
+    test_pane_resume_attempt_passed_to_cli_fails_when_argv_lacks_recorded_id()
+    test_pane_resume_attempt_passed_to_cli_states_attempt_not_outcome()
     test_codex_agy_pane_state_seeded_fails_when_hook_state_missing()
     test_codex_agy_pane_state_seeded_fails_when_state_predates_boot()
     test_frame_dir_recreated_fails_when_frame_dir_is_missing()

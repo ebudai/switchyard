@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import pwd
+import shlex
 import stat
 import subprocess
 import sys
@@ -19,6 +20,20 @@ from typing import Any
 
 
 DEFAULT_ROLES = ("director", "main", "app", "perf", "research", "ops", "audit", "inspector")
+DEFAULT_RESUME_MODE_BY_CLI = {
+    "agy": "flag",
+    "claude": "flag",
+    "codex": "subcommand",
+    "gemini": "flag",
+}
+DEFAULT_RESUME_FLAG_BY_CLI = {
+    "agy": "--conversation",
+    "claude": "--resume",
+    "gemini": "--conversation",
+}
+DEFAULT_RESUME_SUBCOMMAND_BY_CLI = {
+    "codex": "resume",
+}
 
 
 @dataclass(frozen=True)
@@ -94,6 +109,10 @@ def _safe_json_load(path: Path) -> Any:
         return None
 
 
+def _command_name(command: str) -> str:
+    return Path(command).name.strip()
+
+
 def _target_file_name(target: str) -> str:
     safe = "".join(ch if ch.isalnum() or ch in ".-" else "_" for ch in target)
     return f"{safe}.json"
@@ -114,11 +133,32 @@ def _load_roles(config_path: Path, project: str) -> list[dict[str, str]]:
             if isinstance(cli_items, list) and cli_items:
                 cli = str(cli_items[0]).strip()
             if role:
-                roles.append({"role": role, "target": target, "tmux_session": session, "cli": cli})
+                cli_name = _command_name(cli)
+                roles.append(
+                    {
+                        "role": role,
+                        "target": target,
+                        "tmux_session": session,
+                        "cli": cli,
+                        "resume_mode": str(item.get("resume_mode") or DEFAULT_RESUME_MODE_BY_CLI.get(cli_name, "flag")).strip(),
+                        "resume_flag": str(item.get("resume_flag") or DEFAULT_RESUME_FLAG_BY_CLI.get(cli_name, "--resume")).strip(),
+                        "resume_subcommand": str(
+                            item.get("resume_subcommand") or DEFAULT_RESUME_SUBCOMMAND_BY_CLI.get(cli_name, "resume")
+                        ).strip(),
+                    }
+                )
     if roles:
         return roles
     return [
-        {"role": role, "target": f"{project}-{role}:0.0", "tmux_session": f"{project}-{role}", "cli": ""}
+        {
+            "role": role,
+            "target": f"{project}-{role}:0.0",
+            "tmux_session": f"{project}-{role}",
+            "cli": "",
+            "resume_mode": "flag",
+            "resume_flag": "--resume",
+            "resume_subcommand": "resume",
+        }
         for role in DEFAULT_ROLES
     ]
 
@@ -199,6 +239,98 @@ def _tmux_sessions(timeout: float, sessions_file: Path | None) -> dict[str, Any]
         return {"ok": False, "sessions": [], "error": str(exc)}
     sessions = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
     return {"ok": proc.returncode == 0, "sessions": sessions, "error": proc.stderr.strip()}
+
+
+def _process_snapshot(timeout: float) -> tuple[dict[int, list[int]], dict[int, list[str]]]:
+    try:
+        proc = subprocess.run(
+            ["ps", "-eo", "pid=,ppid=,comm=,args="],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}, {}
+    if proc.returncode != 0:
+        return {}, {}
+    children: dict[int, list[int]] = {}
+    argv_by_pid: dict[int, list[str]] = {}
+    for line in proc.stdout.splitlines():
+        parts = line.strip().split(None, 3)
+        if len(parts) != 4:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+        except ValueError:
+            continue
+        try:
+            argv = shlex.split(parts[3])
+        except ValueError:
+            argv = []
+        children.setdefault(ppid, []).append(pid)
+        argv_by_pid[pid] = argv
+    return children, argv_by_pid
+
+
+def _process_tree_argvs(pane_pid: int, timeout: float) -> list[list[str]]:
+    if pane_pid <= 0:
+        return []
+    children_by_parent, argv_by_pid = _process_snapshot(timeout)
+    stack = [pane_pid]
+    seen: set[int] = set()
+    records: list[list[str]] = []
+    while stack:
+        pid = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        argv = argv_by_pid.get(pid, [])
+        if argv:
+            records.append(list(argv))
+        stack.extend(children_by_parent.get(pid, []))
+    return records
+
+
+def _tmux_panes(timeout: float, roles: list[dict[str, str]], panes_file: Path | None) -> dict[str, Any]:
+    if panes_file is not None:
+        parsed = _safe_json_load(panes_file)
+        if not isinstance(parsed, dict):
+            return {"ok": False, "panes": {}, "error": f"failed to read tmux panes JSON: {panes_file}"}
+        panes = parsed.get("panes", parsed)
+        if not isinstance(panes, dict):
+            return {"ok": False, "panes": {}, "error": f"tmux panes JSON must be an object: {panes_file}"}
+        return {"ok": True, "panes": panes, "error": ""}
+
+    panes: dict[str, Any] = {}
+    errors: list[str] = []
+    for role in roles:
+        target = str(role.get("target") or "")
+        if not target:
+            continue
+        try:
+            proc = subprocess.run(
+                ["tmux", "display-message", "-p", "-t", target, "#{pane_pid}"],
+                check=False,
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            errors.append(f"{target}: {exc}")
+            continue
+        try:
+            pane_pid = int(proc.stdout.strip()) if proc.returncode == 0 else 0
+        except ValueError:
+            pane_pid = 0
+        panes[target] = {
+            "target": target,
+            "pane_pid": pane_pid,
+            "argvs": _process_tree_argvs(pane_pid, timeout) if pane_pid else [],
+            "error": "" if pane_pid else proc.stderr.strip(),
+        }
+    return {"ok": not errors, "panes": panes, "error": "; ".join(errors)}
 
 
 def _git_output(args: list[str], timeout: float) -> tuple[bool, str]:
@@ -322,6 +454,15 @@ def collect_snapshot(args: argparse.Namespace) -> dict[str, Any]:
     roles = _load_roles(args.config, args.project)
     release = _stat_path(args.current_release)
     board = _read_board(args.board_url, args.http_timeout)
+    tmux_sessions = _tmux_sessions(args.command_timeout, args.tmux_sessions_file)
+    tmux_panes = _tmux_panes(args.command_timeout, roles, args.tmux_panes_file)
+    tmux_errors = [str(item.get("error") or "") for item in (tmux_sessions, tmux_panes) if str(item.get("error") or "")]
+    tmux = {
+        "ok": bool(tmux_sessions.get("ok")) and bool(tmux_panes.get("ok")),
+        "sessions": tmux_sessions.get("sessions", []),
+        "panes": tmux_panes.get("panes", {}),
+        "error": "; ".join(tmux_errors),
+    }
     return {
         "schema_version": 1,
         "created_at": time.time(),
@@ -346,7 +487,7 @@ def collect_snapshot(args: argparse.Namespace) -> dict[str, Any]:
         "current_release_id": _current_release_id(args.current_release),
         "launcher_checkout": _launcher_checkout(args.launcher_repo, args.command_timeout),
         "board": board,
-        "tmux": _tmux_sessions(args.command_timeout, args.tmux_sessions_file),
+        "tmux": tmux,
         "frame_dir": _stat_path(args.frame_dir),
     }
 
@@ -374,6 +515,49 @@ def _session_id_for_target(section: dict[str, Any], target: str) -> str:
 def _pane_state_for_target(section: dict[str, Any], target: str) -> str:
     record = _records_by_target(section).get(target, {})
     return str(record.get("state") or "").strip()
+
+
+def _tmux_pane_for_target(tmux: dict[str, Any], target: str) -> dict[str, Any]:
+    panes = tmux.get("panes") if isinstance(tmux, dict) else None
+    if not isinstance(panes, dict):
+        return {}
+    pane = panes.get(target)
+    return pane if isinstance(pane, dict) else {}
+
+
+def _argv_contains_sequence(argv: list[str], expected: list[str]) -> bool:
+    if not expected or len(argv) < len(expected):
+        return False
+    for index in range(0, len(argv) - len(expected) + 1):
+        if argv[index : index + len(expected)] == expected:
+            return True
+    return False
+
+
+def _resume_args_for_role(role: dict[str, Any], session_id: str) -> list[str]:
+    if not session_id:
+        return []
+    mode = str(role.get("resume_mode") or "").strip()
+    if mode == "flag":
+        flag = str(role.get("resume_flag") or "").strip()
+        return [flag, session_id] if flag else []
+    if mode == "subcommand":
+        subcommand = str(role.get("resume_subcommand") or "").strip()
+        return [subcommand, session_id] if subcommand else []
+    return []
+
+
+def _resume_attempt_present(role: dict[str, Any], session_id: str, pane: dict[str, Any]) -> bool:
+    expected = _resume_args_for_role(role, session_id)
+    if not expected:
+        return False
+    argvs = pane.get("argvs")
+    if not isinstance(argvs, list):
+        return False
+    for argv in argvs:
+        if isinstance(argv, list) and _argv_contains_sequence([str(token) for token in argv], expected):
+            return True
+    return False
 
 
 def _files_recreated_after_boot(section: dict[str, Any], boot_time: float | None, *, label: str) -> tuple[bool, str]:
@@ -434,7 +618,7 @@ def verify_snapshot(before: dict[str, Any], after: dict[str, Any]) -> list[Check
     )
 
     roles = before.get("roles") if isinstance(before.get("roles"), list) else []
-    resume_failures: list[str] = []
+    retained_failures: list[str] = []
     for item in roles:
         if not isinstance(item, dict):
             continue
@@ -446,12 +630,47 @@ def verify_snapshot(before: dict[str, Any], after: dict[str, Any]) -> list[Check
             continue
         actual = _session_id_for_target(after_durable, target)
         if actual != expected:
-            resume_failures.append(f"{target}: expected {expected or 'missing'}, got {actual or 'missing'}")
+            retained_failures.append(f"{target}: expected {expected or 'missing'}, got {actual or 'missing'}")
     checks.append(
         Check(
-            "roles_resume_recorded_sessions",
-            not resume_failures,
-            "all recorded roles retained their session ids" if not resume_failures else "; ".join(resume_failures),
+            "durable_session_records_retained",
+            not retained_failures,
+            (
+                "recorded role session ids retained; record continuity only, does not prove pane resume outcome"
+                if not retained_failures
+                else "; ".join(retained_failures)
+            ),
+        )
+    )
+
+    after_tmux = after.get("tmux", {}) if isinstance(after.get("tmux"), dict) else {}
+    attempt_failures: list[str] = []
+    attempt_checked = 0
+    for item in roles:
+        if not isinstance(item, dict):
+            continue
+        target = str(item.get("target") or "")
+        if not target:
+            continue
+        expected = _session_id_for_target(before_durable, target)
+        if not expected:
+            continue
+        attempt_checked += 1
+        pane = _tmux_pane_for_target(after_tmux, target)
+        if not pane:
+            attempt_failures.append(f"{target}: no live pane argv captured")
+        elif not _resume_attempt_present(item, expected, pane):
+            attempt_failures.append(f"{target}: recorded session id not present in live pane resume argv")
+    checks.append(
+        Check(
+            "pane_resume_attempt_passed_to_cli",
+            attempt_checked > 0 and not attempt_failures,
+            (
+                f"{attempt_checked} pane(s) passed recorded session ids to their CLI; verifies launch attempt only, "
+                "not CLI context retention/outcome"
+                if attempt_checked > 0 and not attempt_failures
+                else f"checked={attempt_checked}; failures={attempt_failures or 'none'}"
+            ),
         )
     )
 
@@ -585,6 +804,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pane-state-dir", type=Path, default=None, help="tmpfs pane hook state dir")
     parser.add_argument("--frame-dir", type=Path, default=None, help="frame inbox dir")
     parser.add_argument("--tmux-sessions-file", type=Path, default=None, help="test-only tmux session list file")
+    parser.add_argument("--tmux-panes-file", type=Path, default=None, help="test-only tmux pane argv JSON file")
     parser.add_argument("--boot-id-file", type=Path, default=Path("/proc/sys/kernel/random/boot_id"))
     parser.add_argument("--boot-time-file", type=Path, default=Path("/proc/stat"))
     parser.add_argument("--http-timeout", type=float, default=2.0)

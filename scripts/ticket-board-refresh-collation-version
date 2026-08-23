@@ -2,6 +2,7 @@
 set -euo pipefail
 
 HOST="/run/postgresql"
+PORT=""
 USER_NAME="postgres"
 EXECUTE=0
 PLAN_ONLY=0
@@ -21,6 +22,7 @@ write unless --execute is passed.
 Options:
   --database NAME              database to repair; repeatable
   --host PATH                  PostgreSQL socket directory (default: /run/postgresql)
+  --port PORT                  PostgreSQL port (default: libpq default)
   --user NAME                  PostgreSQL admin role (default: postgres)
   --expected-ticket-count N    require ticket_board.tickets count before/after
   --plan-only                  do not connect; only print planned SQL
@@ -49,7 +51,11 @@ sql_ident() {
 
 conninfo() {
     local database="$1"
-    printf 'postgresql:///%s?host=%s&user=%s' "$database" "$HOST" "$USER_NAME"
+    local port_arg=""
+    if [[ -n "$PORT" ]]; then
+        port_arg="&port=$PORT"
+    fi
+    printf 'postgresql:///%s?host=%s&user=%s%s' "$database" "$HOST" "$USER_NAME" "$port_arg"
 }
 
 psql_db() {
@@ -60,11 +66,16 @@ psql_db() {
 
 ticket_count_or_empty() {
     local database="$1"
+    local relation
+    relation="$(psql_db "$database" -tA <<'SQL'
+SELECT coalesce(to_regclass('ticket_board.tickets')::text, '');
+SQL
+)"
+    if [[ -z "$relation" ]]; then
+        return 0
+    fi
     psql_db "$database" -tA <<'SQL'
-SELECT CASE
-    WHEN to_regclass('ticket_board.tickets') IS NULL THEN ''
-    ELSE (SELECT count(*)::text FROM ticket_board.tickets)
-END;
+SELECT count(*)::text FROM ticket_board.tickets;
 SQL
 }
 
@@ -132,6 +143,12 @@ while [[ $# -gt 0 ]]; do
         --host)
             [[ $# -ge 2 ]] || die "--host requires a value"
             HOST="$2"
+            shift 2
+            ;;
+        --port)
+            [[ $# -ge 2 ]] || die "--port requires a value"
+            [[ "$2" =~ ^[0-9]+$ ]] || die "--port must be numeric"
+            PORT="$2"
             shift 2
             ;;
         --user)

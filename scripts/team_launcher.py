@@ -23,6 +23,8 @@ DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "team-laun
 DEFAULT_LEGACY_RUNTIME_SESSION_DIR = Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-sessions")
 GENERIC_DEFAULT_STATE_DIR_NAME = "ticket-board"
 LIVE_PGU_STATE_DIR_NAME = "pgu-ticket-board"
+REMOVED_CONFIG_FREE_COMMANDS = frozenset({"bootstrap"})
+BOOTSTRAP_REPLACEMENT_COMMAND = "team-launcher <project> new --dry-run --new-output-dir <dir>"
 
 
 def _env_first(*names: str) -> str:
@@ -367,7 +369,7 @@ def _config_path_from_launcher_args(argv: Sequence[str]) -> Path | None:
     if not project or project.startswith("-"):
         return None
     command = str(argv[1]).strip() if len(argv) > 1 and not str(argv[1]).startswith("-") else "start"
-    if command == "bootstrap":
+    if command in REMOVED_CONFIG_FREE_COMMANDS:
         return None
     for index, arg in enumerate(argv):
         raw = str(arg)
@@ -1976,22 +1978,6 @@ def launch_project(
     return launch_konsole_window(output_path, project=config.project, runner=runner)
 
 
-def write_template(project: str, output: Path) -> int:
-    layout_name = f"{project}-konsole-layout.json"
-    payload = {
-        "project": project,
-        "layout": layout_name,
-        "board_url": _default_board_url(project),
-        "board_socket": _default_board_socket(project),
-        "session_dir": str(DEFAULT_SESSION_DIR),
-        "roles": [],
-    }
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(f"wrote {output}")
-    return 0
-
-
 def _default_new_project_owner(project: str) -> str:
     return f"{project}-agent"
 
@@ -2269,7 +2255,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "command",
         nargs="?",
         default="start",
-        choices=["start", "attach", "reload", "bootstrap", "new", "provision-runtime", "deploy-launcher", "pane"],
+        choices=["start", "attach", "reload", "new", "provision-runtime", "deploy-launcher", "pane"],
         help="start is idempotent attach-or-start (resumes tracked session ids when relaunching a stopped pane); reload force-restarts running CLIs with tracked resume ids",
     )
     parser.add_argument("pane_mode", nargs="?", choices=["start", "attach", "attach-or-start", "reload"])
@@ -2279,7 +2265,6 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--script-path", type=Path, default=Path(__file__).resolve().with_name("team-launcher"))
     parser.add_argument("--pane-state-dir", type=Path, help=f"write initial pane idle state here (default: {DEFAULT_PANE_STATE_DIR})")
     parser.add_argument("--dry-run", action="store_true", help="print launch plan without starting Konsole")
-    parser.add_argument("--template-output", type=Path, help="bootstrap output path")
     parser.add_argument("--owner-user", help="new project owner Unix user (default: <project>-agent)")
     parser.add_argument("--port", type=int, help="new project board port; omitted means deterministic allocation")
     parser.add_argument("--database", help="new project PostgreSQL database; omitted means <project>_ticket_board")
@@ -2296,11 +2281,19 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _reject_removed_commands(argv: Sequence[str]) -> None:
+    if len(argv) > 1 and str(argv[1]).strip() in REMOVED_CONFIG_FREE_COMMANDS:
+        project = str(argv[0]).strip() or "<project>"
+        replacement = BOOTSTRAP_REPLACEMENT_COMMAND.replace("<project>", project)
+        raise SystemExit(
+            f"team-launcher: {argv[1]} has been removed; use `{replacement}` to create a launchable project config"
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    _reject_removed_commands(argv)
     args = _build_parser().parse_args(argv)
-    if args.command == "bootstrap":
-        output = args.template_output or DEFAULT_CONFIG_DIR / f"{args.project}.json"
-        return write_template(args.project, output)
     if args.command == "new":
         return new_project_command(
             args.project,

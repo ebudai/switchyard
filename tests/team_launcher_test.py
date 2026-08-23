@@ -74,7 +74,6 @@ from scripts.team_launcher import (
     session_id_for_role,
     session_file_name,
     worktree_ref,
-    write_template,
 )
 
 LIVE_SESSION_DIR = team_launcher.DEFAULT_SESSION_DIR
@@ -2401,17 +2400,15 @@ def test_reload_guard_matches_cli_child_under_shell_in_real_tmux() -> None:
             subprocess.run(["tmux", "kill-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def test_bootstrap_template_does_not_guess_active_roles() -> None:
-    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
-        output = Path(tmp) / "porter.json"
+def test_removed_bootstrap_command_names_new_as_replacement() -> None:
+    try:
+        team_launcher.main(["porter", "bootstrap"])
+        raise AssertionError("expected removed command failure")
+    except SystemExit as exc:
+        message = str(exc)
 
-        assert write_template("porter", output) == 0
-
-        template = json.loads(output.read_text(encoding="utf-8"))
-        assert template["project"] == "porter"
-        assert template["board_url"] == "http://127.0.0.1:23682"
-        assert template["board_socket"] == "/run/porter-ticket-board/ticket-board.sock"
-        assert template["roles"] == []
+    assert "bootstrap has been removed" in message
+    assert "team-launcher porter new --dry-run --new-output-dir <dir>" in message
 
 
 def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
@@ -2442,6 +2439,24 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
         plan = json.loads((output_dir / "plan.json").read_text(encoding="utf-8"))
         commands = (output_dir / "operator-commands.sh").read_text(encoding="utf-8")
         loaded_config = load_project_config("porter", output_dir / "porter.json")
+        launch_output = tmp_path / "launch-layout.json"
+        launch_stdout = StringIO()
+
+        with redirect_stdout(launch_stdout):
+            assert (
+                launch_project(
+                    loaded_config,
+                    config_path=output_dir / "porter.json",
+                    mode="start",
+                    script_path=ROOT / "scripts" / "team-launcher",
+                    runner=runner,
+                    dry_run=True,
+                    layout_output=launch_output,
+                )
+                == 0
+            )
+        launch_plan = json.loads(launch_stdout.getvalue())
+        launch_output_exists = launch_output.exists()
 
     assert plan["project"] == "porter"
     assert plan["owner_user"] == current_user
@@ -2461,6 +2476,14 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
     assert "  sudo -v\n" in rendered
     assert "  bash operator-commands.sh\n" in rendered
     assert not any(call[:1] == ["sudo"] for call in runner.calls)
+    assert launch_plan["project"] == "porter"
+    assert launch_plan["mode"] == "attach-or-start"
+    assert [role["target"] for role in launch_plan["roles"]] == [
+        "porter-director:0.0",
+        "porter-implementer:0.0",
+        "porter-audit:0.0",
+    ]
+    assert launch_output_exists
 
 
 def test_new_project_precheck_fails_before_sudo_when_repo_is_dirty() -> None:

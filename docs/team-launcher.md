@@ -249,16 +249,19 @@ assignment is verified. The PGU config intentionally omits `perf` because that
 pane is not currently running. PGU keeps `research` configured but detached so
 the visible launch window remains a six-pane operator layout.
 
-## Bootstrap
+## New Project
 
-Generate a starter config for another project:
+Generate a complete project config and provisioning plan for another project:
 
 ```bash
-scripts/team-launcher porter bootstrap --template-output /tmp/porter.json
-scripts/team-launcher porter provision-runtime --runtime-user otto-agent
+scripts/team-launcher porter new \
+  --owner-user otto-agent \
+  --source-repo /home/agent/Projects/pgu \
+  --new-output-dir /tmp/porter \
+  --dry-run
 ```
 
-The template intentionally contains no active roles, but it does include the
-derived `board_url` and `board_socket` for the project. Add roles only after
-their live CLI/model assignments are known; copy or adapt the PGU layout/config
-when standing up a full multi-role team.
+The dry run writes a launchable config, Konsole layout, board provisioning SQL,
+systemd units, and `operator-commands.sh` without running privileged steps. Review
+the generated artifacts, then rerun with `--execute` when the project should be
+provisioned.

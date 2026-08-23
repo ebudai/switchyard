@@ -11,7 +11,7 @@ BEGIN
         JOIN pg_namespace n ON n.oid = p.pronamespace
         WHERE n.nspname = 'ticket_board'
           AND p.prokind = 'f'
-          AND lower(pg_get_functiondef(p.oid)) LIKE '%eric%'
+          AND lower(pg_get_functiondef(p.oid)) ~ '(eric_signoff|eric_review|eric_sign_off|eric_reopen|needs_eric)'
     LOOP
         EXECUTE format(
             'DROP FUNCTION IF EXISTS %I.%I(%s)',

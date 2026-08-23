@@ -513,7 +513,8 @@ def main() -> int:
     assert "pg_get_function_identity_arguments(p.oid)" in drop_orphaned_eric_functions_migration
     assert "drop function if exists %i.%i(%s)" in drop_orphaned_eric_functions_migration
     assert "pg_get_functiondef(p.oid)" in drop_orphaned_eric_functions_migration
-    assert "like '%eric%'" in drop_orphaned_eric_functions_migration
+    assert "~ '(eric_signoff|eric_review|eric_sign_off|eric_reopen|needs_eric)'" in drop_orphaned_eric_functions_migration
+    assert "like '%eric%'" not in drop_orphaned_eric_functions_migration
     terminal_transition_notify_migration = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "pgu405_terminal_transition_assignee_notify.sql"
     ).read_text(encoding="utf-8").lower()

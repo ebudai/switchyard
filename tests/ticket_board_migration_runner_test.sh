@@ -409,6 +409,13 @@ BEGIN
       AND tickets.state = 'eric_review';
 END;
 $$;
+CREATE OR REPLACE FUNCTION ticket_board.numeric_survivor(value numeric)
+RETURNS numeric
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT value;
+$$;
 SQL
     cp "$REPO_ROOT/scripts/ticket_board/schema.sql" "$TMPDIR_T/schema.sql"
     cp "$REPO_ROOT/scripts/ticket_board/migrations/pgu589_depersonalize_user_role.sql" "$LIVE_RENAME_MIGRATIONS_DIR/"
@@ -438,14 +445,15 @@ SELECT jsonb_build_object(
     'new_stage_count', (SELECT count(*)::int FROM ticket_board.workflow_stages WHERE name = 'user_review'),
     'old_function_exists', to_regprocedure('ticket_board.eric_sign_off(text,text)') IS NOT NULL,
     'old_one_arg_function_exists', to_regprocedure('ticket_board.eric_sign_off(text)') IS NOT NULL,
-    'old_function_body_count', (
+    'old_identifier_body_count', (
         SELECT count(*)::int
         FROM pg_proc p
         JOIN pg_namespace n ON n.oid = p.pronamespace
         WHERE n.nspname = 'ticket_board'
           AND p.prokind = 'f'
-          AND pg_get_functiondef(p.oid) LIKE '%eric%'
+          AND lower(pg_get_functiondef(p.oid)) ~ '(eric_signoff|eric_review|eric_sign_off|eric_reopen|needs_eric)'
     ),
+    'numeric_survivor_exists', to_regprocedure('ticket_board.numeric_survivor(numeric)') IS NOT NULL,
     'new_function_exists', to_regprocedure('ticket_board.user_sign_off(text,text)') IS NOT NULL,
     'migration_recorded', EXISTS (
         SELECT 1 FROM ticket_board.schema_migrations WHERE name = 'pgu589_depersonalize_user_role.sql'
@@ -458,7 +466,7 @@ FROM ticket_board.tickets t
 WHERE t.id = 'PGU-42901';
 SQL
     )"
-    expected_live_rename_result='{"state": "user_review", "comment_who": "user", "source_state": "user_review", "user_signoff": true, "new_stage_count": 1, "old_stage_count": 0, "old_column_count": 0, "comment_source_who": "user", "migration_recorded": true, "needs_user_signoff": true, "notification_state": "user_review", "new_function_exists": true, "old_function_exists": false, "source_user_signoff": true, "drift_cleanup_recorded": true, "old_function_body_count": 0, "source_needs_user_signoff": true, "old_one_arg_function_exists": false}'
+    expected_live_rename_result='{"state": "user_review", "comment_who": "user", "source_state": "user_review", "user_signoff": true, "new_stage_count": 1, "old_stage_count": 0, "old_column_count": 0, "comment_source_who": "user", "migration_recorded": true, "needs_user_signoff": true, "notification_state": "user_review", "new_function_exists": true, "old_function_exists": false, "source_user_signoff": true, "drift_cleanup_recorded": true, "numeric_survivor_exists": true, "old_identifier_body_count": 0, "source_needs_user_signoff": true, "old_one_arg_function_exists": false}'
     [[ "$live_rename_result" == "$expected_live_rename_result" ]] || {
         echo "FAIL: pgu589 did not migrate old eric_review data cleanly: $live_rename_result" >&2
         exit 1

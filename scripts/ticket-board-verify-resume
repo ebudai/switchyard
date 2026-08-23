@@ -1,0 +1,668 @@
+#!/usr/bin/env python3
+"""Snapshot and verify ticket-board resume state across a real reboot."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import pwd
+import stat
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+
+DEFAULT_ROLES = ("director", "main", "app", "perf", "research", "ops", "audit", "inspector")
+
+
+@dataclass(frozen=True)
+class Check:
+    name: str
+    ok: bool
+    detail: str
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _state_root_name(project: str) -> str:
+    return "pgu-ticket-board" if project == "pgu" else f"{project}-ticket-board"
+
+
+def _uid_for_user(user: str) -> int:
+    try:
+        return int(pwd.getpwnam(user).pw_uid)
+    except KeyError as exc:
+        raise SystemExit(f"unknown user: {user}") from exc
+
+
+def _current_user() -> str:
+    try:
+        return pwd.getpwuid(os.geteuid()).pw_name
+    except KeyError:
+        return os.environ.get("USER", "")
+
+
+def _default_owner(project: str) -> str:
+    if project == "pgu":
+        return "agent"
+    return _current_user()
+
+
+def _default_board_root(project: str, owner: str) -> Path:
+    return Path("/home") / owner / f"{project}-ticketboard-live"
+
+
+def _default_frame_dir(project: str, owner: str) -> Path:
+    if project == "pgu":
+        return Path("/tmp/pgu-frames")
+    return Path("/home") / owner / ".claude" / f"{project}-ticket-frames"
+
+
+def _default_board_url(project: str) -> str:
+    if project == "pgu":
+        return "http://127.0.0.1:8770"
+    return f"http://127.0.0.1:{_allocated_port(project)}"
+
+
+def _default_snapshot_path(project: str, owner: str) -> Path:
+    return Path("/home") / owner / ".local" / "state" / _state_root_name(project) / "reboot-resume-snapshot.json"
+
+
+def _default_config_path(project: str) -> Path:
+    return _repo_root() / "config" / "team-launcher" / f"{project}.json"
+
+
+def _allocated_port(project: str, *, base: int = 18_770, span: int = 10_000) -> int:
+    import hashlib
+
+    digest = hashlib.sha256(project.encode("utf-8")).digest()
+    return base + (int.from_bytes(digest[:4], "big") % span)
+
+
+def _safe_json_load(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _target_file_name(target: str) -> str:
+    safe = "".join(ch if ch.isalnum() or ch in ".-" else "_" for ch in target)
+    return f"{safe}.json"
+
+
+def _load_roles(config_path: Path, project: str) -> list[dict[str, str]]:
+    parsed = _safe_json_load(config_path)
+    roles: list[dict[str, str]] = []
+    if isinstance(parsed, dict) and isinstance(parsed.get("roles"), list):
+        for item in parsed["roles"]:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "").strip()
+            target = str(item.get("target") or "").strip() or f"{project}-{role}:0.0"
+            session = str(item.get("tmux_session") or "").strip() or target.split(":", 1)[0]
+            cli_items = item.get("cli")
+            cli = ""
+            if isinstance(cli_items, list) and cli_items:
+                cli = str(cli_items[0]).strip()
+            if role:
+                roles.append({"role": role, "target": target, "tmux_session": session, "cli": cli})
+    if roles:
+        return roles
+    return [
+        {"role": role, "target": f"{project}-{role}:0.0", "tmux_session": f"{project}-{role}", "cli": ""}
+        for role in DEFAULT_ROLES
+    ]
+
+
+def _file_record(path: Path) -> dict[str, Any]:
+    parsed = _safe_json_load(path)
+    try:
+        st = path.stat()
+        mtime = st.st_mtime
+        mode = stat.S_IMODE(st.st_mode)
+    except OSError:
+        mtime = None
+        mode = None
+    return {
+        "path": str(path),
+        "name": path.name,
+        "exists": path.exists(),
+        "mtime": mtime,
+        "mode": None if mode is None else oct(mode),
+        "json": parsed,
+        "target": str(parsed.get("target") or "") if isinstance(parsed, dict) else "",
+        "session_id": str(parsed.get("session_id") or "") if isinstance(parsed, dict) else "",
+        "state": str(parsed.get("state") or "") if isinstance(parsed, dict) else "",
+    }
+
+
+def _dir_records(path: Path) -> dict[str, Any]:
+    records: dict[str, Any] = {"path": str(path), "exists": path.is_dir(), "files": {}}
+    if not path.is_dir():
+        return records
+    for item in sorted(path.iterdir()):
+        if item.is_file() and item.suffix == ".json":
+            records["files"][item.name] = _file_record(item)
+    return records
+
+
+def _read_board(url: str, timeout: float) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "url": f"{url.rstrip('/')}/api/board",
+        "ok": False,
+        "status": None,
+        "build_id": "",
+        "ticket_count": None,
+        "error": "",
+    }
+    try:
+        with urllib.request.urlopen(result["url"], timeout=timeout) as response:
+            result["status"] = int(response.status)
+            payload = json.load(response)
+    except (OSError, ValueError, urllib.error.URLError) as exc:
+        result["error"] = str(exc)
+        return result
+    result["ok"] = result["status"] == 200
+    if isinstance(payload, dict):
+        result["build_id"] = str(payload.get("build_id") or "").strip()
+        tickets = payload.get("tickets")
+        if isinstance(tickets, list):
+            result["ticket_count"] = len(tickets)
+    return result
+
+
+def _tmux_sessions(timeout: float, sessions_file: Path | None) -> dict[str, Any]:
+    if sessions_file is not None:
+        try:
+            lines = sessions_file.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            return {"ok": False, "sessions": [], "error": str(exc)}
+        return {"ok": True, "sessions": [line.strip() for line in lines if line.strip()], "error": ""}
+    try:
+        proc = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"ok": False, "sessions": [], "error": str(exc)}
+    sessions = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    return {"ok": proc.returncode == 0, "sessions": sessions, "error": proc.stderr.strip()}
+
+
+def _git_output(args: list[str], timeout: float) -> tuple[bool, str]:
+    try:
+        proc = subprocess.run(args, check=False, text=True, capture_output=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
+    output = proc.stdout.strip() if proc.returncode == 0 else proc.stderr.strip()
+    return proc.returncode == 0, output
+
+
+def _launcher_checkout(repo: Path, timeout: float) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "path": str(repo),
+        "ok": False,
+        "head": "",
+        "branch": "",
+        "upstream": "",
+        "ahead": None,
+        "behind": None,
+        "error": "",
+    }
+    ok, head = _git_output(["git", "-C", str(repo), "rev-parse", "--short", "HEAD"], timeout)
+    if not ok:
+        result["error"] = head
+        return result
+    result["ok"] = True
+    result["head"] = head
+    branch_ok, branch = _git_output(["git", "-C", str(repo), "symbolic-ref", "--quiet", "--short", "HEAD"], timeout)
+    result["branch"] = branch if branch_ok else ""
+    upstream_ok, upstream = _git_output(["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], timeout)
+    result["upstream"] = upstream if upstream_ok else ""
+    if upstream_ok:
+        counts_ok, counts = _git_output(["git", "-C", str(repo), "rev-list", "--left-right", "--count", f"HEAD...{upstream}"], timeout)
+        parts = counts.split()
+        if counts_ok and len(parts) == 2:
+            try:
+                result["ahead"] = int(parts[0])
+                result["behind"] = int(parts[1])
+            except ValueError:
+                result["error"] = f"cannot parse ahead/behind counts: {counts}"
+        elif counts:
+            result["error"] = counts
+    return result
+
+
+def _stat_path(path: Path) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "path": str(path),
+        "exists": False,
+        "owner": "",
+        "group": "",
+        "mode": "",
+        "mtime": None,
+        "is_symlink": path.is_symlink(),
+        "target": "",
+        "error": "",
+    }
+    try:
+        st = path.stat()
+    except OSError as exc:
+        result["error"] = str(exc)
+        if path.is_symlink():
+            try:
+                result["target"] = str(path.resolve(strict=False))
+            except OSError:
+                pass
+        return result
+    result["exists"] = True
+    result["mode"] = oct(stat.S_IMODE(st.st_mode))
+    result["mtime"] = st.st_mtime
+    try:
+        result["owner"] = pwd.getpwuid(st.st_uid).pw_name
+    except KeyError:
+        result["owner"] = str(st.st_uid)
+    try:
+        import grp
+
+        result["group"] = grp.getgrgid(st.st_gid).gr_name
+    except (ImportError, KeyError):
+        result["group"] = str(st.st_gid)
+    if path.is_symlink() or path.exists():
+        try:
+            result["target"] = str(path.resolve(strict=False))
+        except OSError:
+            result["target"] = ""
+    return result
+
+
+def _read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _current_release_id(current_release: Path) -> str:
+    target = _stat_path(current_release).get("target", "")
+    if not target:
+        return ""
+    return Path(str(target)).name
+
+
+def _boot_info(boot_id_file: Path, boot_time_file: Path) -> dict[str, Any]:
+    boot_time = _read_text(boot_time_file)
+    if not boot_time:
+        boot_time = "0"
+    try:
+        parsed_boot_time: float | None = float(boot_time)
+    except ValueError:
+        parsed_boot_time = None
+    return {
+        "boot_id": _read_text(boot_id_file),
+        "boot_time": parsed_boot_time,
+        "boot_id_file": str(boot_id_file),
+        "boot_time_file": str(boot_time_file),
+    }
+
+
+def collect_snapshot(args: argparse.Namespace) -> dict[str, Any]:
+    roles = _load_roles(args.config, args.project)
+    release = _stat_path(args.current_release)
+    board = _read_board(args.board_url, args.http_timeout)
+    return {
+        "schema_version": 1,
+        "created_at": time.time(),
+        "project": args.project,
+        "owner_user": args.owner_user,
+        "runtime_user": args.runtime_user,
+        "uid": args.uid,
+        "roles": roles,
+        "paths": {
+            "runtime_session_dir": str(args.runtime_session_dir),
+            "durable_session_dir": str(args.durable_session_dir),
+            "pane_state_dir": str(args.pane_state_dir),
+            "current_release": str(args.current_release),
+            "frame_dir": str(args.frame_dir),
+            "config": str(args.config),
+        },
+        "boot": _boot_info(args.boot_id_file, args.boot_time_file),
+        "runtime_sessions": _dir_records(args.runtime_session_dir),
+        "durable_sessions": _dir_records(args.durable_session_dir),
+        "pane_state": _dir_records(args.pane_state_dir),
+        "current_release": release,
+        "current_release_id": _current_release_id(args.current_release),
+        "launcher_checkout": _launcher_checkout(args.launcher_repo, args.command_timeout),
+        "board": board,
+        "tmux": _tmux_sessions(args.command_timeout, args.tmux_sessions_file),
+        "frame_dir": _stat_path(args.frame_dir),
+    }
+
+
+def _records_by_target(section: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    files = section.get("files") if isinstance(section, dict) else None
+    if not isinstance(files, dict):
+        return result
+    for name, record in files.items():
+        if not isinstance(record, dict):
+            continue
+        target = str(record.get("target") or "")
+        if not target:
+            target = name[:-5] if name.endswith(".json") else name
+        result[target] = record
+    return result
+
+
+def _session_id_for_target(section: dict[str, Any], target: str) -> str:
+    record = _records_by_target(section).get(target, {})
+    return str(record.get("session_id") or "").strip()
+
+
+def _pane_state_for_target(section: dict[str, Any], target: str) -> str:
+    record = _records_by_target(section).get(target, {})
+    return str(record.get("state") or "").strip()
+
+
+def _runtime_files_recreated_after_boot(section: dict[str, Any], boot_time: float | None) -> tuple[bool, str]:
+    files = section.get("files") if isinstance(section, dict) else None
+    if not isinstance(files, dict) or not files:
+        return True, "runtime directory is empty"
+    if boot_time is None:
+        return False, "cannot parse boot time; cannot prove runtime files were recreated after boot"
+    stale: list[str] = []
+    for name, record in files.items():
+        if not isinstance(record, dict):
+            continue
+        mtime = record.get("mtime")
+        if not isinstance(mtime, (int, float)) or float(mtime) < boot_time:
+            stale.append(name)
+    if stale:
+        return False, f"runtime files predate boot: {', '.join(stale)}"
+    return True, f"{len(files)} runtime file(s) present, all recreated after boot"
+
+
+def verify_snapshot(before: dict[str, Any], after: dict[str, Any]) -> list[Check]:
+    checks: list[Check] = []
+    before_boot = before.get("boot", {}) if isinstance(before.get("boot"), dict) else {}
+    after_boot = after.get("boot", {}) if isinstance(after.get("boot"), dict) else {}
+    before_boot_id = str(before_boot.get("boot_id") or "")
+    after_boot_id = str(after_boot.get("boot_id") or "")
+    checks.append(
+        Check(
+            "real_reboot_observed",
+            bool(before_boot_id and after_boot_id and before_boot_id != after_boot_id),
+            f"before={before_boot_id or 'missing'} after={after_boot_id or 'missing'}",
+        )
+    )
+
+    after_runtime_ok, after_runtime_detail = _runtime_files_recreated_after_boot(
+        after.get("runtime_sessions", {}),
+        after_boot.get("boot_time") if isinstance(after_boot.get("boot_time"), (int, float)) else None,
+    )
+    checks.append(Check("runtime_session_tmpfs_wiped_or_recreated", after_runtime_ok, after_runtime_detail))
+
+    before_durable = before.get("durable_sessions", {})
+    after_durable = after.get("durable_sessions", {})
+    before_targets = _records_by_target(before_durable)
+    after_targets = _records_by_target(after_durable)
+    missing_durable: list[str] = []
+    changed_durable: list[str] = []
+    for target, before_record in sorted(before_targets.items()):
+        before_sid = str(before_record.get("session_id") or "").strip()
+        if not before_sid:
+            continue
+        after_sid = str(after_targets.get(target, {}).get("session_id") or "").strip()
+        if not after_sid:
+            missing_durable.append(target)
+        elif after_sid != before_sid:
+            changed_durable.append(f"{target}: {before_sid} -> {after_sid}")
+    checks.append(
+        Check(
+            "durable_sessions_survive",
+            not missing_durable and not changed_durable and bool(before_targets),
+            "ok"
+            if not missing_durable and not changed_durable and before_targets
+            else f"missing={missing_durable or 'none'} changed={changed_durable or 'none'}",
+        )
+    )
+
+    roles = before.get("roles") if isinstance(before.get("roles"), list) else []
+    resume_failures: list[str] = []
+    for item in roles:
+        if not isinstance(item, dict):
+            continue
+        target = str(item.get("target") or "")
+        if not target:
+            continue
+        expected = _session_id_for_target(before_durable, target)
+        if not expected:
+            continue
+        actual = _session_id_for_target(after_durable, target)
+        if actual != expected:
+            resume_failures.append(f"{target}: expected {expected or 'missing'}, got {actual or 'missing'}")
+    checks.append(
+        Check(
+            "roles_resume_recorded_sessions",
+            not resume_failures,
+            "all recorded roles retained their session ids" if not resume_failures else "; ".join(resume_failures),
+        )
+    )
+
+    after_state = after.get("pane_state", {})
+    state_failures: list[str] = []
+    pane_state_files_ok, pane_state_files_detail = _runtime_files_recreated_after_boot(
+        after_state,
+        after_boot.get("boot_time") if isinstance(after_boot.get("boot_time"), (int, float)) else None,
+    )
+    for item in roles:
+        if not isinstance(item, dict):
+            continue
+        cli = str(item.get("cli") or "")
+        if cli not in {"codex", "agy"}:
+            continue
+        target = str(item.get("target") or "")
+        state = _pane_state_for_target(after_state, target)
+        if state not in {"idle", "busy", "blocked"}:
+            state_failures.append(f"{target}: missing hook state")
+    checks.append(
+        Check(
+            "codex_agy_pane_state_seeded",
+            pane_state_files_ok and not state_failures,
+            (
+                f"codex/agy pane-state files present; {pane_state_files_detail}"
+                if pane_state_files_ok and not state_failures
+                else "; ".join([pane_state_files_detail, *state_failures])
+            ),
+        )
+    )
+
+    frame = after.get("frame_dir", {}) if isinstance(after.get("frame_dir"), dict) else {}
+    project = str(before.get("project") or "")
+    if project == "pgu" and str(frame.get("path") or "") == "/tmp/pgu-frames":
+        frame_ok = bool(frame.get("exists")) and frame.get("owner") == "root" and frame.get("group") == "root" and frame.get("mode") == "0o1777"
+        frame_detail = f"owner={frame.get('owner') or 'missing'} group={frame.get('group') or 'missing'} mode={frame.get('mode') or 'missing'}"
+    else:
+        frame_ok = bool(frame.get("exists"))
+        frame_detail = f"path={frame.get('path') or 'missing'} mode={frame.get('mode') or 'missing'}"
+    checks.append(Check("frame_dir_recreated", frame_ok, frame_detail))
+
+    current_release_id = str(after.get("current_release_id") or "")
+    board = after.get("board", {}) if isinstance(after.get("board"), dict) else {}
+    build_id = str(board.get("build_id") or "")
+    board_ok = bool(board.get("ok")) and bool(build_id) and build_id == current_release_id
+    checks.append(
+        Check(
+            "board_build_matches_current_release",
+            board_ok,
+            f"board_ok={bool(board.get('ok'))} build_id={build_id or 'missing'} current={current_release_id or 'missing'}",
+        )
+    )
+
+    tmux = after.get("tmux", {}) if isinstance(after.get("tmux"), dict) else {}
+    sessions = set(tmux.get("sessions") if isinstance(tmux.get("sessions"), list) else [])
+    missing_sessions = [
+        str(item.get("tmux_session"))
+        for item in roles
+        if isinstance(item, dict) and str(item.get("tmux_session") or "") and str(item.get("tmux_session")) not in sessions
+    ]
+    checks.append(
+        Check(
+            "tmux_sessions_restored",
+            bool(tmux.get("ok")) and not missing_sessions,
+            "all configured tmux sessions present" if not missing_sessions else f"missing={missing_sessions}",
+        )
+    )
+    before_launcher = before.get("launcher_checkout", {}) if isinstance(before.get("launcher_checkout"), dict) else {}
+    after_launcher = after.get("launcher_checkout", {}) if isinstance(after.get("launcher_checkout"), dict) else {}
+    after_behind = after_launcher.get("behind")
+    before_behind = before_launcher.get("behind")
+    launcher_ok = bool(after_launcher.get("ok")) and (after_behind == 0 or after_behind is None)
+    if after_behind == 0 and isinstance(before_behind, int) and before_behind > 0:
+        launcher_detail = f"self-deploy observed: behind {before_behind} -> 0 at {after_launcher.get('head') or 'missing'}"
+    elif after_behind == 0:
+        launcher_detail = f"launcher checkout current at {after_launcher.get('head') or 'missing'}"
+    elif after_behind is None:
+        launcher_detail = f"freshness undeterminable at {after_launcher.get('head') or 'missing'}: {after_launcher.get('error') or 'no upstream'}"
+    else:
+        launcher_detail = f"launcher checkout still behind by {after_behind} commit(s)"
+    checks.append(Check("launcher_checkout_not_stale", launcher_ok, launcher_detail))
+    return checks
+
+
+def _print_snapshot_summary(snapshot: dict[str, Any], path: Path) -> None:
+    print(f"SNAPSHOT {path}")
+    print(f"project={snapshot['project']} owner={snapshot['owner_user']} runtime_user={snapshot['runtime_user']} uid={snapshot['uid']}")
+    print(f"boot_id={snapshot['boot']['boot_id'] or 'missing'}")
+    print(f"durable_sessions={len(snapshot['durable_sessions']['files'])} runtime_sessions={len(snapshot['runtime_sessions']['files'])}")
+    print(f"pane_state_files={len(snapshot['pane_state']['files'])}")
+    print(f"board_ok={snapshot['board']['ok']} build_id={snapshot['board']['build_id'] or 'missing'} tickets={snapshot['board']['ticket_count']}")
+    print(f"current={snapshot['current_release_id'] or 'missing'} frame_dir={snapshot['frame_dir']['mode'] or 'missing'}")
+    launcher = snapshot["launcher_checkout"]
+    print(f"launcher_head={launcher['head'] or 'missing'} behind={launcher['behind']} error={launcher['error'] or 'none'}")
+
+
+def _print_verify_report(checks: list[Check], after_path: Path | None) -> None:
+    if after_path is not None:
+        print(f"VERIFY snapshot={after_path}")
+    for check in checks:
+        print(f"{'PASS' if check.ok else 'FAIL'} {check.name}: {check.detail}")
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--snapshot", nargs="?", const="", help="write a pre-reboot snapshot JSON to PATH")
+    mode.add_argument("--verify", metavar="PATH", help="verify against a pre-reboot snapshot JSON")
+    parser.add_argument("--project", default="pgu", help="project slug (default: pgu)")
+    parser.add_argument("--owner-user", default="", help="project owner user (default: agent for pgu, current user otherwise)")
+    parser.add_argument("--runtime-user", default="", help="runtime user for /run/user/<uid> paths (default: owner user)")
+    parser.add_argument("--uid", type=int, default=None, help="runtime uid override")
+    parser.add_argument("--config", type=Path, default=None, help="team-launcher config JSON")
+    parser.add_argument("--board-url", default="", help="board base URL")
+    parser.add_argument("--board-root", type=Path, default=None, help="board live root")
+    parser.add_argument("--current-release", type=Path, default=None, help="current release symlink")
+    parser.add_argument("--launcher-repo", type=Path, default=_repo_root(), help="team-launcher checkout to inspect")
+    parser.add_argument("--runtime-session-dir", type=Path, default=None, help="tmpfs pane session dir")
+    parser.add_argument("--durable-session-dir", type=Path, default=None, help="durable pane session dir")
+    parser.add_argument("--pane-state-dir", type=Path, default=None, help="tmpfs pane hook state dir")
+    parser.add_argument("--frame-dir", type=Path, default=None, help="frame inbox dir")
+    parser.add_argument("--tmux-sessions-file", type=Path, default=None, help="test-only tmux session list file")
+    parser.add_argument("--boot-id-file", type=Path, default=Path("/proc/sys/kernel/random/boot_id"))
+    parser.add_argument("--boot-time-file", type=Path, default=Path("/proc/stat"))
+    parser.add_argument("--http-timeout", type=float, default=2.0)
+    parser.add_argument("--command-timeout", type=float, default=2.0)
+    return parser
+
+
+def _normalize_boot_time_arg(path: Path) -> Path:
+    if path == Path("/proc/stat"):
+        return path
+    return path
+
+
+def _patch_boot_time_reader() -> None:
+    global _read_text
+    original = _read_text
+
+    def read_text(path: Path) -> str:
+        if path == Path("/proc/stat"):
+            try:
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    if line.startswith("btime "):
+                        return line.split()[1]
+            except OSError:
+                return ""
+            return ""
+        return original(path)
+
+    _read_text = read_text
+
+
+def _resolve_args(args: argparse.Namespace) -> argparse.Namespace:
+    args.project = args.project.strip()
+    args.owner_user = args.owner_user.strip() or _default_owner(args.project)
+    args.runtime_user = args.runtime_user.strip() or args.owner_user
+    args.uid = args.uid if args.uid is not None else _uid_for_user(args.runtime_user)
+    state_root = _state_root_name(args.project)
+    board_root = args.board_root or _default_board_root(args.project, args.owner_user)
+    args.config = args.config or _default_config_path(args.project)
+    args.board_url = args.board_url.strip() or _default_board_url(args.project)
+    args.current_release = args.current_release or board_root / "current"
+    args.runtime_session_dir = args.runtime_session_dir or Path(f"/run/user/{args.uid}") / state_root / "pane-sessions"
+    args.durable_session_dir = (
+        args.durable_session_dir
+        or Path("/home") / args.owner_user / ".local" / "state" / state_root / "pane-sessions"
+    )
+    args.pane_state_dir = args.pane_state_dir or Path(f"/run/user/{args.uid}") / state_root / "pane-state"
+    args.frame_dir = args.frame_dir or _default_frame_dir(args.project, args.owner_user)
+    args.launcher_repo = args.launcher_repo.expanduser()
+    args.boot_time_file = _normalize_boot_time_arg(args.boot_time_file)
+    return args
+
+
+def main(argv: list[str] | None = None) -> int:
+    _patch_boot_time_reader()
+    args = _resolve_args(_build_parser().parse_args(argv))
+    if args.snapshot is not None:
+        path = Path(args.snapshot) if args.snapshot else _default_snapshot_path(args.project, args.owner_user)
+        if path.resolve(strict=False).is_relative_to(Path("/run")):
+            print(f"snapshot path must be durable and outside /run: {path}", file=sys.stderr)
+            return 2
+        snapshot = collect_snapshot(args)
+        _write_json(path, snapshot)
+        _print_snapshot_summary(snapshot, path)
+        return 0
+
+    before_path = Path(args.verify)
+    before = _safe_json_load(before_path)
+    if not isinstance(before, dict):
+        print(f"failed to read snapshot JSON: {before_path}", file=sys.stderr)
+        return 2
+    after = collect_snapshot(args)
+    checks = verify_snapshot(before, after)
+    _print_verify_report(checks, before_path)
+    return 0 if all(check.ok for check in checks) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

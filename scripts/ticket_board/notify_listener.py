@@ -47,6 +47,17 @@ DEFAULT_PRESENT_IDLE_FRESHNESS_SECONDS = 0.0
 IDLE_TURN_END_SOURCES = frozenset(
     {"claude.Stop", "codex.Stop", "gemini.AfterAgent", "gemini.PostInvocation", "gemini.Stop"}
 )
+TRUSTED_IDLE_SOURCES = IDLE_TURN_END_SOURCES | frozenset({"claude.Notification.idle_prompt", "listener.stale_codex_busy_recovery"})
+DEFAULT_ROLE_RUNTIMES = {
+    "director": "claude",
+    "main": "codex",
+    "app": "codex",
+    "perf": "codex",
+    "research": "claude",
+    "ops": "codex",
+    "audit": "claude",
+    "inspector": "gemini",
+}
 IMMEDIATE_DELIVERY_KINDS = frozenset({"ticket_update"})
 DEFAULT_PRE_SEND_RECHECK_DELAY_SECONDS = 0.5
 DEFAULT_DIRECTOR_COMPOSER_HOME_X = 2
@@ -331,6 +342,7 @@ class PaneActivityGate:
         working_timer_sample_delay_seconds: float = DEFAULT_WORKING_TIMER_SAMPLE_DELAY_SECONDS,
         idle_working_timer_sample_delay_seconds: float = DEFAULT_IDLE_WORKING_TIMER_SAMPLE_DELAY_SECONDS,
         stale_codex_busy_hook_seconds: float = DEFAULT_STALE_CODEX_BUSY_HOOK_SECONDS,
+        role_runtimes: dict[str, str] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         wall_time: Callable[[], float] = time.time,
         sleeper: Callable[[float], None] = time.sleep,
@@ -344,6 +356,11 @@ class PaneActivityGate:
         self.working_timer_sample_delay_seconds = max(0.0, working_timer_sample_delay_seconds)
         self.idle_working_timer_sample_delay_seconds = max(0.0, idle_working_timer_sample_delay_seconds)
         self.stale_codex_busy_hook_seconds = max(0.0, stale_codex_busy_hook_seconds)
+        self.role_runtimes = {
+            str(role).strip().lower(): str(runtime).strip().lower()
+            for role, runtime in (role_runtimes or DEFAULT_ROLE_RUNTIMES).items()
+            if str(role).strip() and str(runtime).strip()
+        }
         self.monotonic = monotonic
         self.wall_time = wall_time
         self.sleeper = sleeper
@@ -411,6 +428,19 @@ class PaneActivityGate:
     def _tmux_session_for_target(self, target: str) -> str:
         return target.split(":", 1)[0]
 
+    def _role_for_target(self, target: str) -> str:
+        session = self._tmux_session_for_target(target)
+        return session.rsplit("-", 1)[-1].strip().lower()
+
+    def _runtime_for_source(self, source: str) -> str:
+        runtime = source.split(".", 1)[0].strip().lower()
+        if runtime == "agy":
+            return "gemini"
+        return runtime
+
+    def _expected_runtime_for_target(self, target: str) -> str:
+        return self.role_runtimes.get(self._role_for_target(target), "")
+
     def _captured_working_timer_seconds(self, target: str) -> int | None:
         try:
             proc = self.capture_pane_runner(
@@ -463,6 +493,28 @@ class PaneActivityGate:
                 return None
         self._last_working_timer_by_target[target] = first
         return None
+
+    def _working_timer_idle_probe_trace(self, target: str) -> ActivityTrace:
+        first = self._captured_working_timer_seconds(target)
+        if first is None:
+            self._last_working_timer_by_target.pop(target, None)
+            return ActivityTrace(True, "working_timer_unobservable")
+        previous = self._last_working_timer_by_target.get(target)
+        if previous is not None and first != previous:
+            self._last_working_timer_by_target[target] = first
+            return ActivityTrace(True, "working_timer")
+        if previous is None and self.idle_working_timer_sample_delay_seconds > 0:
+            self.sleeper(self.idle_working_timer_sample_delay_seconds)
+            second = self._captured_working_timer_seconds(target)
+            if second is None:
+                self._last_working_timer_by_target.pop(target, None)
+                return ActivityTrace(True, "working_timer_unobservable")
+            self._last_working_timer_by_target[target] = second
+            if second != first:
+                return ActivityTrace(True, "working_timer")
+            return ActivityTrace(False, "working_timer_idle")
+        self._last_working_timer_by_target[target] = first
+        return ActivityTrace(False, "working_timer_idle")
 
     def _target_cursor_state(self, target: str) -> bool | None:
         try:
@@ -522,22 +574,33 @@ class PaneActivityGate:
             return ActivityTrace(True, "cursor_state_unavailable")
         if cursor_composing:
             return ActivityTrace(True, "human_composing")
-        # Codex emits SessionStart on context compaction; a pane can keep working
-        # without a following UserPromptSubmit, leaving a stale idle hook behind.
-        stale_session_start_trace = self._stale_codex_session_start_idle_trace(target, state)
-        if stale_session_start_trace is not None:
-            return stale_session_start_trace
+        untrusted_idle_trace = self._untrusted_idle_source_trace(target, state)
+        if untrusted_idle_trace is not None:
+            return untrusted_idle_trace
         return ActivityTrace(False, "hook_idle")
 
-    def _stale_codex_session_start_idle_trace(self, target: str, state: PaneHookState) -> ActivityTrace | None:
-        if state.state != "idle" or state.source != "codex.SessionStart":
+    def _untrusted_idle_source_trace(self, target: str, state: PaneHookState) -> ActivityTrace | None:
+        if state.state != "idle":
             return None
-        if state.updated_at < MIN_RECOVERABLE_HOOK_EPOCH_SECONDS:
+        if state.source.startswith("listener."):
             return None
-        return self._working_timer_trace(
-            target,
-            sample_delay_seconds=self.idle_working_timer_sample_delay_seconds,
-        )
+        source_runtime = self._runtime_for_source(state.source)
+        expected_runtime = self._expected_runtime_for_target(target)
+        if source_runtime and expected_runtime and source_runtime != expected_runtime:
+            probe_trace = self._working_timer_idle_probe_trace(target)
+            if probe_trace.reason == "working_timer":
+                return probe_trace
+            if probe_trace.busy:
+                return ActivityTrace(True, f"foreign_runtime_{probe_trace.reason}")
+            return ActivityTrace(False, "foreign_runtime_working_timer_idle")
+        if state.source in TRUSTED_IDLE_SOURCES:
+            return None
+        probe_trace = self._working_timer_idle_probe_trace(target)
+        if probe_trace.reason == "working_timer":
+            return probe_trace
+        if probe_trace.busy:
+            return probe_trace
+        return ActivityTrace(False, "working_timer_idle")
 
     def _stale_codex_busy_trace(self, target: str, state: PaneHookState) -> ActivityTrace | None:
         if state.state != "busy" or not state.source.startswith("codex."):

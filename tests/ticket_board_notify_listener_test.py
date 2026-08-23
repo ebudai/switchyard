@@ -742,30 +742,26 @@ def test_listener_enqueues_idle_turn_end_nudges_on_each_turn_completion_idle() -
         )
 
         store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=100.0)
-        assert listener.process_idle_turn_end_nudges(conn) == 1
-        assert len(conn.idle_turn_end_calls) == 1
-        startup_params = conn.idle_turn_end_calls[0]
-        assert startup_params is not None
-        startup_idle_since = json.loads(str(startup_params[0]))
-        assert startup_idle_since == {"ops": "1970-01-01T00:01:40+00:00"}
+        assert listener.process_idle_turn_end_nudges(conn) == 0
+        assert conn.idle_turn_end_calls == []
 
         store.write("pgu-ops:0.0", "busy", source="codex.UserPromptSubmit", now=101.0)
         store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=102.0)
         assert listener.process_idle_turn_end_nudges(conn) == 1
-        assert len(conn.idle_turn_end_calls) == 2
-        first_params = conn.idle_turn_end_calls[1]
+        assert len(conn.idle_turn_end_calls) == 1
+        first_params = conn.idle_turn_end_calls[0]
         assert first_params is not None
         first_idle_since = json.loads(str(first_params[0]))
         assert first_idle_since == {"ops": "1970-01-01T00:01:42+00:00"}
 
         assert listener.process_idle_turn_end_nudges(conn) == 0
-        assert len(conn.idle_turn_end_calls) == 2
+        assert len(conn.idle_turn_end_calls) == 1
 
         store.write("pgu-ops:0.0", "busy", source="codex.UserPromptSubmit", now=103.0)
         store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=104.0)
         assert listener.process_idle_turn_end_nudges(conn) == 1
-        assert len(conn.idle_turn_end_calls) == 3
-        second_params = conn.idle_turn_end_calls[2]
+        assert len(conn.idle_turn_end_calls) == 2
+        second_params = conn.idle_turn_end_calls[1]
         assert second_params is not None
         second_idle_since = json.loads(str(second_params[0]))
         assert second_idle_since == {"ops": "1970-01-01T00:01:44+00:00"}
@@ -776,7 +772,7 @@ def test_gemini_renamed_idle_hooks_count_as_turn_end_idle() -> None:
         store, gate = hook_gate(tmp_path)
 
         store.write("pgu-inspector:0.0", "idle", source="gemini.SessionStart", now=100.0)
-        assert gate.idle_since_by_role(["inspector"]) == {"inspector": "1970-01-01T00:01:40+00:00"}
+        assert gate.idle_since_by_role(["inspector"]) == {}
         assert gate.turn_end_idle_since_by_role(["inspector"]) == {}
 
         store.write("pgu-inspector:0.0", "busy", source="gemini.PreInvocation", now=101.0)
@@ -791,7 +787,16 @@ def test_gemini_renamed_idle_hooks_count_as_turn_end_idle() -> None:
 
 def test_listener_enqueues_present_idle_fallback_once_per_idle_period() -> None:
     with TemporaryStateDir() as tmp_path:
-        store, gate = hook_gate(tmp_path)
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            cursor_position_runner=constant_cursor_runner(),
+            capture_pane_runner=targeted_capture_runner(
+                "pgu-ops:0.0",
+                "Working (7s · esc to interrupt)\n",
+            ),
+            sleeper=lambda _seconds: None,
+        )
         now = time.time() - 60 * 60
         store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=now)
         conn = FakeConnection(idle_turn_end_result=1)
@@ -1066,7 +1071,7 @@ def test_stale_codex_session_start_idle_stays_busy_when_working_timer_resets() -
     assert state.source == "codex.SessionStart"
 
 
-def test_codex_session_start_idle_without_timer_delivers_without_delay() -> None:
+def test_codex_session_start_idle_without_timer_is_inconclusive_and_withheld() -> None:
     sleep_calls: list[float] = []
     with TemporaryStateDir() as tmp_path:
         store = PaneHookStateStore(tmp_path)
@@ -1080,10 +1085,10 @@ def test_codex_session_start_idle_without_timer_delivers_without_delay() -> None
         )
         store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=1_800_000_000.0)
 
-        assert gate.is_busy("pgu-ops:0.0") is False
+        assert gate.is_busy("pgu-ops:0.0") is True
 
     assert sleep_calls == []
-    assert gate.last_trace("pgu-ops:0.0").reason == "hook_idle"  # type: ignore[union-attr]
+    assert gate.last_trace("pgu-ops:0.0").reason == "working_timer_unobservable"  # type: ignore[union-attr]
     assert gate._last_working_timer_by_target == {}
 
 
@@ -1110,8 +1115,48 @@ def test_codex_session_start_idle_frozen_timer_samples_once_then_delivers() -> N
         assert gate.is_busy("pgu-ops:0.0") is False
 
     assert sleep_calls == [1.1]
-    assert gate.last_trace("pgu-ops:0.0").reason == "hook_idle"  # type: ignore[union-attr]
+    assert gate.last_trace("pgu-ops:0.0").reason == "working_timer_idle"  # type: ignore[union-attr]
     assert gate._last_working_timer_by_target == {"pgu-ops:0.0": 7}
+
+
+def test_foreign_runtime_idle_with_advancing_working_timer_is_busy() -> None:
+    sleep_calls: list[float] = []
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            cursor_position_runner=constant_cursor_runner("2 23 24"),
+            capture_pane_runner=targeted_capture_runner(
+                "pgu-ops:0.0",
+                "Working (22s · esc to interrupt)\n",
+                "Working (23s · esc to interrupt)\n",
+            ),
+            idle_working_timer_sample_delay_seconds=1.1,
+            sleeper=lambda seconds: sleep_calls.append(seconds),
+        )
+        store.write("pgu-ops:0.0", "idle", source="gemini.Stop", now=1_800_000_000.0)
+
+        assert gate.is_busy("pgu-ops:0.0") is True
+
+    assert sleep_calls == [1.1]
+    assert gate.last_trace("pgu-ops:0.0").reason == "working_timer"  # type: ignore[union-attr]
+
+
+def test_foreign_runtime_idle_without_timer_is_inconclusive_and_withheld() -> None:
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            cursor_position_runner=constant_cursor_runner("2 23 24"),
+            capture_pane_runner=targeted_capture_runner("pgu-ops:0.0", ""),
+            idle_working_timer_sample_delay_seconds=1.1,
+            sleeper=lambda _seconds: None,
+        )
+        store.write("pgu-ops:0.0", "idle", source="gemini.Stop", now=1_800_000_000.0)
+
+        assert gate.is_busy("pgu-ops:0.0") is True
+
+    assert gate.last_trace("pgu-ops:0.0").reason == "foreign_runtime_working_timer_unobservable"  # type: ignore[union-attr]
 
 
 def test_turn_end_idle_does_not_pay_working_timer_delay() -> None:

@@ -685,7 +685,7 @@ DELETE FROM ticket_board.ticket_notification_queue;
                 return subprocess.CompletedProcess(args, 0, stdout="0 23 24\n")
 
             def capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-                return subprocess.CompletedProcess(args, 0, stdout="idle pane\n")
+                return subprocess.CompletedProcess(args, 0, stdout="Working (7s · esc to interrupt)\n")
 
             state_store = PaneHookStateStore(root / "pane-state")
             state_store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=time.time() - 60 * 60)

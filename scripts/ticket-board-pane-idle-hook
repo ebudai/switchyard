@@ -246,11 +246,6 @@ def _session_id_from_file(path: Path) -> str:
     return str(parsed.get("session_id") or "").strip()
 
 
-def _is_session_start_source(source: str) -> bool:
-    normalized = source.strip().lower()
-    return normalized == "sessionstart" or normalized.endswith(".sessionstart")
-
-
 def _should_write_session(
     *,
     target: str,
@@ -259,6 +254,7 @@ def _should_write_session(
     source: str,
     launched_session_id: str,
     record_session: bool,
+    explicit_session_id: bool,
 ) -> bool:
     if not incoming_session_id:
         return False
@@ -266,14 +262,24 @@ def _should_write_session(
         return True
     if incoming_session_id == existing_session_id:
         return record_session
-    if _is_session_start_source(source) and launched_session_id and incoming_session_id != launched_session_id:
+    if explicit_session_id:
+        return True
+    if launched_session_id:
+        if incoming_session_id == launched_session_id:
+            return True
         print(
-            "ticket-board-pane-idle-hook: ignoring foreign SessionStart for "
+            "ticket-board-pane-idle-hook: ignoring foreign session id for "
             f"{target}: incoming session {incoming_session_id!r} does not match launched session {launched_session_id!r}",
             file=sys.stderr,
         )
         return False
-    return True
+    print(
+        "ticket-board-pane-idle-hook: ignoring foreign session id for "
+        f"{target}: incoming session {incoming_session_id!r} from {source or 'unknown'} would replace "
+        f"existing session {existing_session_id!r}",
+        file=sys.stderr,
+    )
+    return False
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -314,6 +320,7 @@ def main(argv: list[str] | None = None) -> int:
         source=args.source,
         launched_session_id=launched_session_id,
         record_session=args.record_session,
+        explicit_session_id=bool(args.session_id.strip()),
     ):
         _write_session(args.session_dir, target, session_id, source=args.source, payload=payload)
     return 0

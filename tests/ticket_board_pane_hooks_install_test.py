@@ -35,8 +35,32 @@ PANE_TARGETS = (
     "pgu-audit:0.0",
     "pgu-inspector:0.0",
 )
+REAL_INSPECTOR_SESSION_ID = "98759ea4-3597-4d25-933d-7b5059a0db61"
+TRANSIENT_AGY_SESSION_ID = "ebd87947-ab41-4bcd-a487-109fa5750566"
+
+
 def _hook_env(**extra: str) -> dict[str, str]:
     return stripped_ticket_board_pane_env(**extra)
+
+
+def _inspector_session_record() -> dict[str, Any]:
+    return {
+        "target": "pgu-inspector:0.0",
+        "session_id": REAL_INSPECTOR_SESSION_ID,
+        "source": "gemini.SessionStart",
+        "payload": {"session_id": REAL_INSPECTOR_SESSION_ID, "cwd": "/home/agent/Projects/pgu"},
+    }
+
+
+def _transient_agy_payload() -> str:
+    return json.dumps(
+        {
+            "event": "SessionStart",
+            "conversationId": TRANSIENT_AGY_SESSION_ID,
+            "artifactDirectoryPath": "/tmp/transient-artifacts",
+            "transcriptPath": "/tmp/transient-transcript.jsonl",
+        }
+    )
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -369,7 +393,7 @@ def test_non_session_start_hook_records_resume_session_when_payload_has_id() -> 
         assert session["payload"]["event"] == "UserPromptSubmit"
 
 
-def test_non_session_start_hook_updates_existing_session_when_payload_has_new_id() -> None:
+def test_non_session_start_hook_updates_existing_session_when_payload_matches_launched_id() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
         home = Path(tmp) / "home"
         state_dir = Path(tmp) / "state"
@@ -400,7 +424,7 @@ def test_non_session_start_hook_updates_existing_session_when_payload_has_new_id
             input=json.dumps({"event": "Stop", "session_id": "new_session"}),
             text=True,
             check=True,
-            env=_hook_env(),
+            env=_hook_env(TICKET_BOARD_PANE_SESSION_ID="new_session"),
         )
 
         session = json.loads(session_path.read_text(encoding="utf-8"))
@@ -655,12 +679,7 @@ def test_foreign_session_start_cannot_clobber_launched_pane_session_record() -> 
         subprocess.run([str(INSTALLER), "install", "--home", str(home), "--bin-path", str(bin_path)], check=True)
         session_dir.mkdir(parents=True)
         session_path = session_dir / "pgu-inspector_0.0.json"
-        original_record = {
-            "target": "pgu-inspector:0.0",
-            "session_id": "98759ea4-3597-4d25-933d-7b5059a0db61",
-            "source": "gemini.SessionStart",
-            "payload": {"session_id": "98759ea4-3597-4d25-933d-7b5059a0db61", "cwd": "/home/agent/Projects/pgu"},
-        }
+        original_record = _inspector_session_record()
         session_path.write_text(json.dumps(original_record, sort_keys=True) + "\n", encoding="utf-8")
 
         proc = subprocess.run(
@@ -677,18 +696,11 @@ def test_foreign_session_start_cannot_clobber_launched_pane_session_record() -> 
                 str(session_dir),
                 "--record-session",
             ],
-            input=json.dumps(
-                {
-                    "event": "SessionStart",
-                    "conversationId": "ebd87947-ab41-4bcd-a487-109fa5750566",
-                    "artifactDirectoryPath": "/tmp/transient-artifacts",
-                    "transcriptPath": "/tmp/transient-transcript.jsonl",
-                }
-            ),
+            input=_transient_agy_payload(),
             text=True,
             capture_output=True,
             check=True,
-            env=_hook_env(TICKET_BOARD_PANE_SESSION_ID="98759ea4-3597-4d25-933d-7b5059a0db61"),
+            env=_hook_env(TICKET_BOARD_PANE_SESSION_ID=REAL_INSPECTOR_SESSION_ID),
         )
 
         state = json.loads((state_dir / "pgu-inspector_0.0.json").read_text(encoding="utf-8"))
@@ -697,7 +709,125 @@ def test_foreign_session_start_cannot_clobber_launched_pane_session_record() -> 
         assert state["state"] == "idle"
         assert state["source"] == "gemini.SessionStart"
         assert session == original_record
-        assert "ignoring foreign SessionStart" in proc.stderr
+        assert "ignoring foreign session id" in proc.stderr
+
+
+def test_foreign_agy_turn_events_cannot_clobber_launched_pane_session_record() -> None:
+    for source, state in [
+        ("gemini.PreInvocation", "busy"),
+        ("gemini.PostInvocation", "idle"),
+        ("gemini.Stop", "idle"),
+    ]:
+        with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+            home = Path(tmp) / "home"
+            state_dir = Path(tmp) / "state"
+            session_dir = Path(tmp) / "sessions"
+            bin_path = home / ".local" / "bin" / HOOK_NAME
+            subprocess.run([str(INSTALLER), "install", "--home", str(home), "--bin-path", str(bin_path)], check=True)
+            session_dir.mkdir(parents=True)
+            session_path = session_dir / "pgu-inspector_0.0.json"
+            original_record = _inspector_session_record()
+            session_path.write_text(json.dumps(original_record, sort_keys=True) + "\n", encoding="utf-8")
+
+            proc = subprocess.run(
+                [
+                    str(bin_path),
+                    state,
+                    "--target",
+                    "pgu-inspector:0.0",
+                    "--source",
+                    source,
+                    "--state-dir",
+                    str(state_dir),
+                    "--session-dir",
+                    str(session_dir),
+                    "--stdin-timeout",
+                    "0",
+                ],
+                input=_transient_agy_payload(),
+                text=True,
+                capture_output=True,
+                check=True,
+                env=_hook_env(TICKET_BOARD_PANE_SESSION_ID=REAL_INSPECTOR_SESSION_ID),
+            )
+
+            state_record = json.loads((state_dir / "pgu-inspector_0.0.json").read_text(encoding="utf-8"))
+            session = json.loads(session_path.read_text(encoding="utf-8"))
+            assert state_record["state"] == state
+            assert state_record["source"] == source
+            assert session == original_record
+            assert "ignoring foreign session id" in proc.stderr
+
+
+def test_foreign_session_start_without_launched_id_cannot_clobber_existing_record() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        home = Path(tmp) / "home"
+        state_dir = Path(tmp) / "state"
+        session_dir = Path(tmp) / "sessions"
+        bin_path = home / ".local" / "bin" / HOOK_NAME
+        subprocess.run([str(INSTALLER), "install", "--home", str(home), "--bin-path", str(bin_path)], check=True)
+        session_dir.mkdir(parents=True)
+        session_path = session_dir / "pgu-inspector_0.0.json"
+        original_record = _inspector_session_record()
+        session_path.write_text(json.dumps(original_record, sort_keys=True) + "\n", encoding="utf-8")
+
+        proc = subprocess.run(
+            [
+                str(bin_path),
+                "idle",
+                "--target",
+                "pgu-inspector:0.0",
+                "--source",
+                "gemini.SessionStart",
+                "--state-dir",
+                str(state_dir),
+                "--session-dir",
+                str(session_dir),
+                "--record-session",
+            ],
+            input=_transient_agy_payload(),
+            text=True,
+            capture_output=True,
+            check=True,
+            env=_hook_env(),
+        )
+
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+        assert session == original_record
+        assert "would replace existing session" in proc.stderr
+
+
+def test_first_session_event_claims_record_after_fresh_launch_clear() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        home = Path(tmp) / "home"
+        state_dir = Path(tmp) / "state"
+        session_dir = Path(tmp) / "sessions"
+        bin_path = home / ".local" / "bin" / HOOK_NAME
+        subprocess.run([str(INSTALLER), "install", "--home", str(home), "--bin-path", str(bin_path)], check=True)
+
+        subprocess.run(
+            [
+                str(bin_path),
+                "idle",
+                "--target",
+                "pgu-inspector:0.0",
+                "--source",
+                "gemini.SessionStart",
+                "--state-dir",
+                str(state_dir),
+                "--session-dir",
+                str(session_dir),
+                "--record-session",
+            ],
+            input=_transient_agy_payload(),
+            text=True,
+            check=True,
+            env=_hook_env(),
+        )
+
+        session = json.loads((session_dir / "pgu-inspector_0.0.json").read_text(encoding="utf-8"))
+        assert session["session_id"] == TRANSIENT_AGY_SESSION_ID
+        assert session["source"] == "gemini.SessionStart"
 
 
 def test_session_start_records_env_session_id_fallback() -> None:

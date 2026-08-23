@@ -649,6 +649,15 @@ def session_id_for_role(role: RoleConfig, session_dir: Path) -> str:
     return str(parsed.get("session_id") or "").strip()
 
 
+def clear_session_record_for_role(role: RoleConfig, session_dir: Path) -> bool:
+    path = session_dir / session_file_name(role.target)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    return True
+
+
 def _session_record_for_role(role: RoleConfig, session_dir: Path) -> dict[str, Any] | None:
     path = session_dir / session_file_name(role.target)
     try:
@@ -1526,6 +1535,8 @@ def _start_role_session(
         if not preflight_ok:
             print(preflight_message, file=sys.stderr)
             prefer_resume = False
+    if not prefer_resume:
+        clear_session_record_for_role(role, session_dir)
     start_proc = runner(tmux_new_session_args(role, session_dir=session_dir, resume=prefer_resume))
     if start_proc.returncode != 0:
         return int(start_proc.returncode)
@@ -1542,6 +1553,7 @@ def _start_role_session(
     kill_proc = runner(tmux_kill_session_args(role))
     if kill_proc.returncode != 0:
         return int(kill_proc.returncode)
+    clear_session_record_for_role(role, session_dir)
     fresh_proc = runner(tmux_new_session_args(role, session_dir=session_dir, resume=False))
     if fresh_proc.returncode != 0:
         return int(fresh_proc.returncode)

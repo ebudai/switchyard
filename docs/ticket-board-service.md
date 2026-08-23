@@ -246,17 +246,18 @@ Session ids are stored under `$TICKET_BOARD_PANE_SESSION_DIR` (default:
 `~/.local/state/pgu-ticket-board/pane-sessions`) using the same per-pane file
 naming as hook state. This durable directory is the maintained source of truth;
 `/run/user/<uid>/pgu-ticket-board/pane-sessions` is legacy seed input only and
-is not repopulated after boot. `SessionStart` records the latest session id
-only when no record exists, when it matches the launcher-provided
-`TICKET_BOARD_PANE_SESSION_ID`, or when it has no launcher-provided id to check.
-A transient CLI launched inside a pane inherits `TMUX_PANE`, but its
-`SessionStart` cannot replace that pane's durable resume id with a different
-conversation id. Other hook invocations also refresh the durable record when
-their payload or environment carries a new session id, allowing compaction or a
-fresh pane turn to update resume state without a manual step. Payloads without a
-session id still update pane state and do not create or rewrite a session file.
-The launcher uses these files to pass resume ids when recreating panes without
-losing context.
+is not repopulated after boot. A hook can create the record when none exists,
+but replacing an existing session id is guarded for every source:
+`SessionStart`, `PreInvocation`, `PostInvocation`, `Stop`, and equivalents. A
+different incoming id is accepted only when it matches the launcher-provided
+`TICKET_BOARD_PANE_SESSION_ID` or when the hook invocation passed `--session-id`
+explicitly. A transient CLI launched inside a pane inherits `TMUX_PANE`, but it
+cannot replace that pane's durable resume id with a different conversation id.
+Before the launcher deliberately starts a pane fresh instead of resuming, it
+clears that pane's old session record; the newly launched CLI can then claim the
+empty record first. Payloads without a session id still update pane state and do
+not create or rewrite a session file. The launcher uses these files to pass
+resume ids when recreating panes without losing context.
 
 Install the hook writer and persistent CLI hook config entries with:
 

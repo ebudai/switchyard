@@ -2004,6 +2004,7 @@ def test_reload_logs_resume_fallback_when_cli_never_starts() -> None:
                 state = _read_pane_state(pane_state_dir, role.target)
                 assert state["state"] == "idle"
                 assert state["source"] == "team_launcher.reload.fallback"
+                assert not (session_dir / session_file_name(role.target)).exists()
 
         assert f"team-launcher: resume failed for ops using session {session_id}; falling back to fresh session" in stderr.getvalue()
         assert "team-launcher: started fresh session for ops after resume fallback" in stderr.getvalue()
@@ -2045,6 +2046,7 @@ def test_agy_reload_skips_missing_local_conversation_store_instead_of_silent_fal
                     )
                     == 0
                 )
+                assert not (session_dir / session_file_name(role.target)).exists()
         finally:
             team_launcher.AGY_CONVERSATION_ROOT = original_root
 
@@ -2100,11 +2102,12 @@ def test_reload_refuses_to_kill_session_when_live_command_mismatches_config() ->
     runner = FakeRunner(existing_sessions={"pgu-ops"}, current_commands={"pgu-ops:0.0": "claude"})
 
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        session_dir = Path(tmp) / "sessions"
         assert (
             run_role_pane(
                 role,
                 mode="reload",
-                session_dir=config.session_dir,
+                session_dir=session_dir,
                 pane_state_dir=Path(tmp) / "pane-state",
                 runner=runner,
             )
@@ -2124,11 +2127,12 @@ def test_reload_force_bypasses_live_command_guard() -> None:
     runner = FakeRunner(existing_sessions={"pgu-ops"}, current_commands={"pgu-ops:0.0": "claude"})
 
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        session_dir = Path(tmp) / "sessions"
         assert (
             run_role_pane(
                 role,
                 mode="reload",
-                session_dir=config.session_dir,
+                session_dir=session_dir,
                 pane_state_dir=Path(tmp) / "pane-state",
                 force_reload=True,
                 runner=runner,

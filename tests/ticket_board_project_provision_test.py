@@ -140,6 +140,46 @@ def test_operator_commands_create_owned_parents_before_systemd_paths() -> None:
     assert commands.index(config_parents) < commands.index(listener_install)
 
 
+def test_operator_commands_wait_for_linger_user_bus_before_user_systemctl() -> None:
+    plan = build_plan(project="otto", owner_user="otto-agent", port=8873)
+    commands = render_operator_commands(plan)
+
+    enable_linger = "sudo loginctl enable-linger 'otto-agent'"
+    owner_uid = 'owner_uid="$(id -u \'otto-agent\')"'
+    owner_runtime = 'owner_runtime_dir="/run/user/$owner_uid"'
+    owner_bus = 'owner_bus="$owner_runtime_dir/bus"'
+    poll_socket = '[ -S "$owner_bus" ] && break'
+    timeout_error = (
+        'echo "ERROR: user bus for otto-agent did not appear at $owner_bus '
+        'within 30s after enable-linger" >&2'
+    )
+    daemon_reload = (
+        "sudo -u 'otto-agent' env XDG_RUNTIME_DIR=\"$owner_runtime_dir\" "
+        "DBUS_SESSION_BUS_ADDRESS=\"unix:path=$owner_bus\" "
+        "systemctl --user daemon-reload"
+    )
+    enable_listener = (
+        "sudo -u 'otto-agent' env XDG_RUNTIME_DIR=\"$owner_runtime_dir\" "
+        "DBUS_SESSION_BUS_ADDRESS=\"unix:path=$owner_bus\" "
+        "systemctl --user enable --now otto-ticket-board-notify-listener.service"
+    )
+
+    assert enable_linger in commands
+    assert owner_uid in commands
+    assert owner_runtime in commands
+    assert owner_bus in commands
+    assert "for _ in $(seq 1 300); do" in commands
+    assert poll_socket in commands
+    assert timeout_error in commands
+    assert daemon_reload in commands
+    assert enable_listener in commands
+    assert "/run/user/$(id -u 'otto-agent')" not in commands
+    assert commands.index(enable_linger) < commands.index(owner_uid)
+    assert commands.index(owner_bus) < commands.index(daemon_reload)
+    assert commands.index(timeout_error) < commands.index(daemon_reload)
+    assert commands.index(daemon_reload) < commands.index(enable_listener)
+
+
 def test_owned_readwrite_path_layout_passes_systemd_verify() -> None:
     systemd_analyze = shutil.which("systemd-analyze")
     if systemd_analyze is None:

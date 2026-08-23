@@ -548,6 +548,7 @@ def render_operator_commands(plan: ProjectBoardProvision) -> str:
             include_target=True,
         ),
     )
+    q_owner_user = shell_quote(plan.owner_user)
     return f"""#!/usr/bin/env bash
 set -euo pipefail
 
@@ -571,10 +572,21 @@ sudo psql -X -v ON_ERROR_STOP=1 {shell_quote(plan.admin_database_url)} -f {shell
 sudo systemctl daemon-reload
 sudo systemctl enable --now {plan.board_unit}
 {install_listener_unit_parent}
-sudo install -m 0644 -o {shell_quote(plan.owner_user)} -g {shell_quote(plan.owner_user)} {shell_quote(plan.listener_unit)} {q_listener_unit}
-sudo loginctl enable-linger {shell_quote(plan.owner_user)}
-sudo -u {shell_quote(plan.owner_user)} env XDG_RUNTIME_DIR=/run/user/$(id -u {shell_quote(plan.owner_user)}) systemctl --user daemon-reload
-sudo -u {shell_quote(plan.owner_user)} env XDG_RUNTIME_DIR=/run/user/$(id -u {shell_quote(plan.owner_user)}) systemctl --user enable --now {plan.listener_unit}
+sudo install -m 0644 -o {q_owner_user} -g {q_owner_user} {shell_quote(plan.listener_unit)} {q_listener_unit}
+sudo loginctl enable-linger {q_owner_user}
+owner_uid="$(id -u {q_owner_user})"
+owner_runtime_dir="/run/user/$owner_uid"
+owner_bus="$owner_runtime_dir/bus"
+for _ in $(seq 1 300); do
+    [ -S "$owner_bus" ] && break
+    sleep 0.1
+done
+if [ ! -S "$owner_bus" ]; then
+    echo "ERROR: user bus for {plan.owner_user} did not appear at $owner_bus within 30s after enable-linger" >&2
+    exit 1
+fi
+sudo -u {q_owner_user} env XDG_RUNTIME_DIR="$owner_runtime_dir" DBUS_SESSION_BUS_ADDRESS="unix:path=$owner_bus" systemctl --user daemon-reload
+sudo -u {q_owner_user} env XDG_RUNTIME_DIR="$owner_runtime_dir" DBUS_SESSION_BUS_ADDRESS="unix:path=$owner_bus" systemctl --user enable --now {plan.listener_unit}
 curl -fsS http://127.0.0.1:{plan.port}/api/board >/dev/null
 """
 

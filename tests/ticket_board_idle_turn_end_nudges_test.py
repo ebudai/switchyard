@@ -20,6 +20,7 @@ SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from ticket_board_live_pane_guard import LivePaneShelloutGuard
 from scripts.ticket_board.notify_listener import (
     PaneActivityGate,
     PaneHookStateStore,
@@ -50,7 +51,7 @@ def psql(conninfo: str, sql: str) -> str:
     return run(["psql", "-X", "-v", "ON_ERROR_STOP=1", "-tA", conninfo], input_text=sql).stdout.strip()
 
 
-def main() -> int:
+def _main_body() -> int:
     with tempfile.TemporaryDirectory(prefix="ticket-board-idle-turn-end.") as tmpdir:
         root = Path(tmpdir)
         data_dir = root / "pgdata"
@@ -731,6 +732,16 @@ WHERE ticket_id = 'PGU-9001'
 
     print("ticket_board_idle_turn_end_nudges_test: ok")
     return 0
+
+
+def main() -> int:
+    guard = LivePaneShelloutGuard(patch_bound_run_defaults=(PaneActivityGate.__init__,))
+    with guard:
+        guard.current_test = "ticket_board_idle_turn_end_nudges_test"
+        result = _main_body()
+        guard.current_test = ""
+    guard.assert_no_escapes()
+    return result
 
 
 if __name__ == "__main__":

@@ -26,6 +26,11 @@ from ticket_board_pane_env import (
     snapshot_paths,
     strip_ticket_board_pane_env,
 )
+from ticket_board_live_pane_guard import (
+    LivePaneShelloutGuard,
+    assert_capture_pane_guard_blocks_without_shelling_out,
+    run_module_tests_with_live_pane_guard,
+)
 
 LIVE_PANE_STATE_PATHS = candidate_live_pane_state_paths()
 strip_ticket_board_pane_env(os.environ)
@@ -43,7 +48,6 @@ from scripts.ticket_board.notify_listener import (
     delivery_failure_reason,
     display_message,
 )
-from standalone_test_runner import run_module_tests
 
 
 @dataclass(frozen=True)
@@ -2689,6 +2693,28 @@ def test_default_directorctl_path_is_canonical_runtime() -> None:
     assert DEFAULT_DIRECTORCTL == "/home/agent/bin/directorctl"
 
 
+def test_live_pane_shellout_guard_rejects_capture_pane_without_calling_tmux() -> None:
+    assert_capture_pane_guard_blocks_without_shelling_out(
+        "test_live_pane_shellout_guard_rejects_capture_pane_without_calling_tmux"
+    )
+
+
+def test_live_pane_shellout_guard_rejects_real_gate_default_capture_runner() -> None:
+    test_name = "test_live_pane_shellout_guard_rejects_real_gate_default_capture_runner"
+    guard = LivePaneShelloutGuard(patch_bound_run_defaults=(RealPaneActivityGate.__init__,))
+    guard.current_test = test_name
+    try:
+        with guard:
+            RealPaneActivityGate().composer_snapshot("pgu-ops:0.0")
+    except AssertionError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("real gate default capture runner reached no live-pane guard")
+
+    assert test_name in message
+    assert guard.escapes == [["tmux", "capture-pane", "-p", "-J", "-t", "pgu-ops:0.0"]], guard.escapes
+
+
 class TemporaryStateDir:
     def __enter__(self) -> Path:
         import tempfile
@@ -2724,7 +2750,10 @@ def test_pane_state_live_guard_detects_added_modified_and_deleted_records() -> N
 def main() -> int:
     live_snapshot = snapshot_paths(LIVE_PANE_STATE_PATHS)
     try:
-        run_module_tests(globals())
+        run_module_tests_with_live_pane_guard(
+            globals(),
+            patch_bound_run_defaults=(RealPaneActivityGate.__init__,),
+        )
     finally:
         changed = snapshot_diff(live_snapshot, snapshot_paths(LIVE_PANE_STATE_PATHS))
         assert not changed, changed

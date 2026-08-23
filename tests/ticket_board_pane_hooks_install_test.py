@@ -14,6 +14,7 @@ from typing import Any
 
 from ticket_board_pane_env import (
     candidate_live_pane_paths,
+    candidate_live_pane_state_paths,
     snapshot_diff,
     snapshot_path,
     snapshot_paths,
@@ -192,6 +193,37 @@ def test_session_dir_snapshot_detects_same_count_content_mutation() -> None:
         assert before != after
 
 
+def test_pane_state_snapshot_detects_modified_deleted_and_added_records() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        state_dir = Path(tmp) / "pane-state"
+        state_dir.mkdir()
+        ops_path = state_dir / "pgu-ops_0.0.json"
+        audit_path = state_dir / "pgu-audit_0.0.json"
+        ops_path.write_text(json.dumps({"target": "pgu-ops:0.0", "state": "idle"}) + "\n", encoding="utf-8")
+
+        before_modify = snapshot_paths([state_dir])
+        ops_path.write_text(json.dumps({"target": "pgu-ops:0.0", "state": "busy"}) + "\n", encoding="utf-8")
+        assert snapshot_diff(before_modify, snapshot_paths([state_dir])) == [f"{state_dir}/pgu-ops_0.0.json"]
+
+        ops_path.write_text(json.dumps({"target": "pgu-ops:0.0", "state": "idle"}) + "\n", encoding="utf-8")
+        before_delete = snapshot_paths([state_dir])
+        ops_path.unlink()
+        assert snapshot_diff(before_delete, snapshot_paths([state_dir])) == [f"{state_dir}/pgu-ops_0.0.json"]
+
+        ops_path.write_text(json.dumps({"target": "pgu-ops:0.0", "state": "idle"}) + "\n", encoding="utf-8")
+        before_add = snapshot_paths([state_dir])
+        audit_path.write_text(json.dumps({"target": "pgu-audit:0.0", "state": "idle"}) + "\n", encoding="utf-8")
+        assert snapshot_diff(before_add, snapshot_paths([state_dir])) == [f"{state_dir}/pgu-audit_0.0.json"]
+
+
+def test_live_pane_state_candidates_are_explicit_runtime_paths_not_xdg_state_home() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        env = _hook_env(HOME=str(Path(tmp) / "home"), XDG_STATE_HOME=str(Path(tmp) / "xdg-state"))
+        candidates = candidate_live_pane_state_paths(env)
+
+    assert candidates == [Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-state")]
+
+
 def test_installed_hook_writes_state_and_verify_state_checks_all_panes() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
         home = Path(tmp) / "home"
@@ -302,7 +334,7 @@ def test_session_start_hook_defaults_to_xdg_state_home_session_dir() -> None:
                 input=json.dumps({"session_id": session_id}),
                 text=True,
                 check=True,
-                env=_hook_env(XDG_STATE_HOME=str(xdg_state_home)),
+                env=_hook_env(HOME=str(home), XDG_STATE_HOME=str(xdg_state_home)),
             )
         finally:
             if original_session_dir is None:

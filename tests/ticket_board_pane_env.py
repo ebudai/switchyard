@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 from typing import Mapping
@@ -52,23 +53,7 @@ def stripped_ticket_board_pane_env(**extra: str) -> dict[str, str]:
     return env
 
 
-def candidate_live_pane_paths(environ: Mapping[str, str] | None = None) -> list[Path]:
-    env = environ or os.environ
-    candidates: list[Path] = []
-    for key in ("TICKET_BOARD_PANE_SESSION_DIR", "PGU_TICKET_BOARD_PANE_SESSION_DIR"):
-        value = env.get(key, "").strip()
-        if value:
-            candidates.append(Path(value).expanduser())
-    for key in ("TICKET_BOARD_PANE_STATE_DIR", "PGU_TICKET_BOARD_PANE_STATE_DIR"):
-        value = env.get(key, "").strip()
-        if value:
-            candidates.append(Path(value).expanduser())
-    xdg_state_home = env.get("XDG_STATE_HOME", "").strip()
-    state_home = Path(xdg_state_home).expanduser() if xdg_state_home else Path.home() / ".local" / "state"
-    candidates.append(state_home / "pgu-ticket-board" / "pane-sessions")
-    candidates.append(Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-sessions"))
-    candidates.append(Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-state"))
-
+def _unique_paths(candidates: list[Path]) -> list[Path]:
     unique: list[Path] = []
     seen: set[str] = set()
     for candidate in candidates:
@@ -80,28 +65,59 @@ def candidate_live_pane_paths(environ: Mapping[str, str] | None = None) -> list[
     return unique
 
 
-def snapshot_path(path: Path) -> dict[str, bytes] | None:
+def candidate_live_pane_session_paths(environ: Mapping[str, str] | None = None) -> list[Path]:
+    env = environ or os.environ
+    candidates: list[Path] = []
+    for key in ("TICKET_BOARD_PANE_SESSION_DIR", "PGU_TICKET_BOARD_PANE_SESSION_DIR"):
+        value = env.get(key, "").strip()
+        if value:
+            candidates.append(Path(value).expanduser())
+    xdg_state_home = env.get("XDG_STATE_HOME", "").strip()
+    state_home = Path(xdg_state_home).expanduser() if xdg_state_home else Path.home() / ".local" / "state"
+    candidates.append(state_home / "pgu-ticket-board" / "pane-sessions")
+    candidates.append(Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-sessions"))
+    return _unique_paths(candidates)
+
+
+def candidate_live_pane_state_paths(environ: Mapping[str, str] | None = None) -> list[Path]:
+    env = environ or os.environ
+    candidates: list[Path] = []
+    for key in ("TICKET_BOARD_PANE_STATE_DIR", "PGU_TICKET_BOARD_PANE_STATE_DIR"):
+        value = env.get(key, "").strip()
+        if value:
+            candidates.append(Path(value).expanduser())
+    candidates.append(Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-state"))
+    return _unique_paths(candidates)
+
+
+def candidate_live_pane_paths(environ: Mapping[str, str] | None = None) -> list[Path]:
+    return _unique_paths(
+        [*candidate_live_pane_session_paths(environ), *candidate_live_pane_state_paths(environ)]
+    )
+
+
+def snapshot_path(path: Path) -> dict[str, str] | None:
     try:
         if not path.exists():
             return None
         if not path.is_dir():
             return {}
-        snapshot: dict[str, bytes] = {}
+        snapshot: dict[str, str] = {}
         for child in sorted(path.rglob("*")):
             if child.is_file():
-                snapshot[str(child.relative_to(path))] = child.read_bytes()
+                snapshot[str(child.relative_to(path))] = hashlib.sha256(child.read_bytes()).hexdigest()
         return snapshot
     except OSError:
         return {}
 
 
-def snapshot_paths(paths: list[Path]) -> dict[str, dict[str, bytes] | None]:
+def snapshot_paths(paths: list[Path]) -> dict[str, dict[str, str] | None]:
     return {str(path): snapshot_path(path) for path in paths}
 
 
 def snapshot_diff(
-    before: dict[str, dict[str, bytes] | None],
-    after: dict[str, dict[str, bytes] | None],
+    before: dict[str, dict[str, str] | None],
+    after: dict[str, dict[str, str] | None],
 ) -> list[str]:
     changed: list[str] = []
     for root in sorted(set(before) | set(after)):

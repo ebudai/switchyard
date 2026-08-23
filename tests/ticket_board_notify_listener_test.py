@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -18,6 +19,16 @@ import psycopg
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from ticket_board_pane_env import (
+    candidate_live_pane_state_paths,
+    snapshot_diff,
+    snapshot_paths,
+    strip_ticket_board_pane_env,
+)
+
+LIVE_PANE_STATE_PATHS = candidate_live_pane_state_paths()
+strip_ticket_board_pane_env(os.environ)
 
 from scripts.ticket_board.notify_listener import (
     DEFAULT_DIRECTORCTL,
@@ -2689,8 +2700,34 @@ class TemporaryStateDir:
         self._tmp.cleanup()
 
 
+def test_pane_state_live_guard_detects_added_modified_and_deleted_records() -> None:
+    with TemporaryStateDir() as tmp_path:
+        ops_path = tmp_path / "pgu-ops_0.0.json"
+        audit_path = tmp_path / "pgu-audit_0.0.json"
+        ops_path.write_text(json.dumps({"target": "pgu-ops:0.0", "state": "idle"}) + "\n", encoding="utf-8")
+
+        before_modify = snapshot_paths([tmp_path])
+        ops_path.write_text(json.dumps({"target": "pgu-ops:0.0", "state": "busy"}) + "\n", encoding="utf-8")
+        assert snapshot_diff(before_modify, snapshot_paths([tmp_path])) == [f"{tmp_path}/pgu-ops_0.0.json"]
+
+        ops_path.write_text(json.dumps({"target": "pgu-ops:0.0", "state": "idle"}) + "\n", encoding="utf-8")
+        before_delete = snapshot_paths([tmp_path])
+        ops_path.unlink()
+        assert snapshot_diff(before_delete, snapshot_paths([tmp_path])) == [f"{tmp_path}/pgu-ops_0.0.json"]
+
+        ops_path.write_text(json.dumps({"target": "pgu-ops:0.0", "state": "idle"}) + "\n", encoding="utf-8")
+        before_add = snapshot_paths([tmp_path])
+        audit_path.write_text(json.dumps({"target": "pgu-audit:0.0", "state": "idle"}) + "\n", encoding="utf-8")
+        assert snapshot_diff(before_add, snapshot_paths([tmp_path])) == [f"{tmp_path}/pgu-audit_0.0.json"]
+
+
 def main() -> int:
-    run_module_tests(globals())
+    live_snapshot = snapshot_paths(LIVE_PANE_STATE_PATHS)
+    try:
+        run_module_tests(globals())
+    finally:
+        changed = snapshot_diff(live_snapshot, snapshot_paths(LIVE_PANE_STATE_PATHS))
+        assert not changed, changed
     print("ticket_board_notify_listener_test: ok")
     return 0
 

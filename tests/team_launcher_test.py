@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -74,6 +75,9 @@ from scripts.team_launcher import (
     worktree_ref,
     write_template,
 )
+
+LIVE_SESSION_DIR = team_launcher.DEFAULT_SESSION_DIR
+EXPECTED_LIVE_SESSION_RECORDS = 7
 
 
 class FakeRunner:
@@ -278,6 +282,17 @@ def _session_payload(target: str, session_id: str, payload: dict[str, object]) -
 
 def _read_pane_state(state_dir: Path, target: str) -> dict[str, object]:
     return json.loads((state_dir / pane_state_file_name(target)).read_text(encoding="utf-8"))
+
+
+def _live_session_record_fingerprint() -> dict[str, str]:
+    files = sorted(path for path in LIVE_SESSION_DIR.glob("*.json") if path.is_file())
+    return {path.name: hashlib.md5(path.read_bytes()).hexdigest() for path in files}
+
+
+def _assert_live_session_records_unchanged(before: dict[str, str], after: dict[str, str]) -> None:
+    assert len(before) == EXPECTED_LIVE_SESSION_RECORDS, before
+    assert len(after) == EXPECTED_LIVE_SESSION_RECORDS, after
+    assert after == before
 
 
 def test_ticket_board_pane_env_is_stripped_before_launcher_import() -> None:
@@ -1282,13 +1297,14 @@ def test_start_is_attach_or_start_and_never_duplicates_existing_session() -> Non
     runner = FakeRunner(existing_sessions={"pgu-ops"})
 
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        session_dir = Path(tmp) / "sessions"
         pane_state_dir = Path(tmp) / "pane-state"
 
         assert (
             run_role_pane(
                 role,
                 mode="start",
-                session_dir=config.session_dir,
+                session_dir=session_dir,
                 pane_state_dir=pane_state_dir,
                 runner=runner,
             )
@@ -1884,11 +1900,12 @@ def test_detached_research_attach_checks_session_without_attaching() -> None:
     runner = FakeRunner(existing_sessions={"pgu-research"})
 
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        session_dir = Path(tmp) / "sessions"
         assert (
             run_detached_role(
                 role,
                 mode="attach",
-                session_dir=config.session_dir,
+                session_dir=session_dir,
                 pane_state_dir=Path(tmp) / "pane-state",
                 runner=runner,
             )
@@ -2264,6 +2281,7 @@ def test_bootstrap_template_does_not_guess_active_roles() -> None:
 
 def main() -> int:
     live_snapshot = snapshot_paths(LIVE_PANE_PATHS)
+    live_session_fingerprint = _live_session_record_fingerprint()
     try:
         run_module_tests(
             globals(),
@@ -2272,6 +2290,7 @@ def main() -> int:
     finally:
         changed = snapshot_diff(live_snapshot, snapshot_paths(LIVE_PANE_PATHS))
         assert not changed, changed
+        _assert_live_session_records_unchanged(live_session_fingerprint, _live_session_record_fingerprint())
     print("team_launcher_test: ok")
     return 0
 

@@ -118,6 +118,28 @@ reboot or hard interruption, treat agy/gemini inspector context as unproven
 until the pane itself is asked a context-retention question. Claude `--resume`
 and Codex `resume <id>` did not show this failure in the same reboot.
 
+The PGU-613 follow-up diagnostics separated three cases:
+
+- A clean throwaway agy 1.1.19 print-mode conversation resumed with
+  `--conversation <id>` and the model returned a sentinel from the previous
+  turn.
+- A deliberately unknown id exited 0 after printing a warning, then ran with
+  `conversationID=""` and created a new conversation.
+- The failed PGU-602 inspector id had both
+  `conversations/<id>.db` and `brain/<id>` present, the database contained
+  step rows, the brain directory contained transcript files, and the 07:04 log
+  showed `GetConversationDetail`, `Resuming conversation`, `Streaming
+  conversation`, and `Full redraw completed`; despite that, the model answered
+  `NO PRIOR CONTEXT`.
+
+So the launcher can guard against missing-store silent fallback, but the real
+inspector failure is a lower-level agy context propagation failure after a
+successful local resume. When reproducing agy/gemini resume behavior from inside
+a team pane, isolate the hook environment or the hook can write this pane's live
+state through tmux's inherited `TMUX_PANE`: run with `env -u TMUX -u TMUX_PANE`
+and set `TICKET_BOARD_PANE_TARGET`, `TICKET_BOARD_PANE_STATE_DIR`, and
+`TICKET_BOARD_PANE_SESSION_DIR` to disposable values.
+
 `provision-runtime` is the non-launching project-user setup check. It enables
 linger for the configured `run_as_user`, or for the invoking user when the
 project has no dedicated runtime account, and waits for `/run/user/<uid>` to

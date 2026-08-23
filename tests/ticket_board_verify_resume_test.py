@@ -11,8 +11,9 @@ import subprocess
 import sys
 import tempfile
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 from importlib.machinery import SourceFileLoader
+from io import StringIO
 from pathlib import Path
 
 
@@ -359,6 +360,85 @@ def test_tmux_sessions_restored_fails_when_configured_session_missing() -> None:
         assert_check_fails(module, before, after, "tmux_sessions_restored")
 
 
+def test_check_live_reports_and_clears_missing_configured_session_without_snapshot() -> None:
+    module = load_module()
+    with tempfile.TemporaryDirectory(prefix="resume-live-check.") as tmp:
+        root = Path(tmp)
+        paths = make_fixture(root, boot_id="same-boot", boot_time=1000)
+        paths["tmux_file"].write_text("demo-ops\n", encoding="utf-8")
+        argv = [
+            "--check-live",
+            "--project",
+            "demo",
+            "--owner-user",
+            "agent",
+            "--runtime-user",
+            "agent",
+            "--uid",
+            "1001",
+            "--config",
+            str(paths["config"]),
+            "--board-url",
+            "http://127.0.0.1:9",
+            "--runtime-session-dir",
+            str(paths["runtime_sessions"]),
+            "--durable-session-dir",
+            str(paths["durable_sessions"]),
+            "--pane-state-dir",
+            str(paths["pane_state"]),
+            "--current-release",
+            str(paths["current"]),
+            "--launcher-repo",
+            str(paths["launcher_repo"]),
+            "--frame-dir",
+            str(paths["frame_dir"]),
+            "--tmux-sessions-file",
+            str(paths["tmux_file"]),
+            "--tmux-panes-file",
+            str(paths["tmux_panes_file"]),
+            "--boot-id-file",
+            str(paths["boot_id_file"]),
+            "--boot-time-file",
+            str(paths["boot_time_file"]),
+        ]
+
+        failed_output = StringIO()
+        with redirect_stdout(failed_output):
+            failed_rc = module.main(argv)
+        assert failed_rc == 1
+        assert "FAIL live_tmux_sessions_present" in failed_output.getvalue()
+        assert "role inspector session demo-inspector" in failed_output.getvalue()
+
+        paths["tmux_file"].write_text("demo-ops\ndemo-inspector\n", encoding="utf-8")
+        restored_output = StringIO()
+        with redirect_stdout(restored_output):
+            restored_rc = module.main(argv)
+        assert restored_rc == 0
+        assert "PASS live_tmux_sessions_present: all configured tmux sessions present" in restored_output.getvalue()
+        assert "role inspector session demo-inspector" not in restored_output.getvalue()
+
+
+def test_check_live_ignores_pane_capture_failures_when_sessions_exist() -> None:
+    module = load_module()
+    checks = module.verify_live_sessions(
+        {
+            "roles": [
+                {"role": "ops", "tmux_session": "demo-ops"},
+                {"role": "inspector", "tmux_session": "demo-inspector"},
+            ],
+            "tmux": {
+                "ok": False,
+                "sessions_ok": True,
+                "sessions": ["demo-ops", "demo-inspector"],
+                "panes_ok": False,
+                "panes_error": "demo-inspector: can't find pane",
+            },
+        }
+    )
+
+    assert all(check.ok for check in checks), [(check.name, check.detail) for check in checks]
+
+
 def test_launcher_checkout_not_stale_fails_when_checkout_is_behind() -> None:
     module = load_module()
     with collect_good_pair(module) as (_paths, before, after):
@@ -388,6 +468,8 @@ if __name__ == "__main__":
     test_frame_dir_recreated_fails_when_frame_dir_is_missing()
     test_board_build_matches_current_release_fails_on_build_mismatch()
     test_tmux_sessions_restored_fails_when_configured_session_missing()
+    test_check_live_reports_and_clears_missing_configured_session_without_snapshot()
+    test_check_live_ignores_pane_capture_failures_when_sessions_exist()
     test_launcher_checkout_not_stale_fails_when_checkout_is_behind()
     test_verify_fails_when_a_recorded_session_id_changes()
     print("ticket_board_verify_resume_test: ok")

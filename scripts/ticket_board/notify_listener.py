@@ -289,6 +289,32 @@ def parse_directorctl_diagnostic(output: str | None) -> dict[str, Any]:
     return {}
 
 
+def delivery_failure_reason(exc: BaseException, target: str) -> str:
+    output_parts: list[str] = [str(exc)]
+    if isinstance(exc, subprocess.CalledProcessError):
+        for value in (exc.stderr, exc.stdout):
+            if isinstance(value, bytes):
+                output_parts.append(value.decode("utf-8", errors="replace"))
+            elif isinstance(value, str):
+                output_parts.append(value)
+    output = "\n".join(part for part in output_parts if part).lower()
+    target_session = target.split(":", 1)[0].lower()
+    missing_target_markers = (
+        "can't find pane",
+        "can't find window",
+        "can't find session",
+        "can't find client",
+        "no such session",
+        "session not found",
+        "can't establish current session",
+    )
+    if any(marker in output for marker in missing_target_markers):
+        return "tmux_target_missing"
+    if target_session and target_session in output and "not found" in output:
+        return "tmux_target_missing"
+    return str(exc)
+
+
 class PaneHookStateStore:
     def __init__(self, state_dir: str | Path = DEFAULT_PANE_STATE_DIR) -> None:
         self.state_dir = Path(state_dir).expanduser()
@@ -1437,7 +1463,15 @@ WHERE id = %s
                 if isinstance(exc, subprocess.CalledProcessError):
                     stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout
                     directorctl_diagnostic = parse_directorctl_diagnostic(stdout if isinstance(stdout, str) else None)
-                self.logger.warning("Failed to deliver queued ticket notification through directorctl: %s", exc)
+                failure_reason = delivery_failure_reason(exc, target)
+                if failure_reason == "tmux_target_missing":
+                    self.logger.error(
+                        "Ticket notification target %s does not exist; role %s is undeliverable until its tmux session is restored",
+                        target,
+                        target_role,
+                    )
+                else:
+                    self.logger.warning("Failed to deliver queued ticket notification through directorctl: %s", exc)
                 composer_after = self._composer_snapshot(target)
                 self._trace_notification(
                     conn,
@@ -1447,7 +1481,7 @@ WHERE id = %s
                     kind=kind,
                     event="send_failed",
                     pane_busy=pane_busy,
-                    busy_reason=str(exc),
+                    busy_reason=failure_reason,
                     region_digest=activity_trace.region_digest,
                     detail=self._delivery_diagnostic_detail(
                         target=target,
@@ -1457,11 +1491,11 @@ WHERE id = %s
                         before=composer_before,
                         after=composer_after,
                         decision="send_failed",
-                        reason=str(exc),
+                        reason=failure_reason,
                         directorctl_diagnostic=directorctl_diagnostic,
                     ),
                 )
-                self._requeue_notification(conn, notification_id, attempts, str(exc))
+                self._requeue_notification(conn, notification_id, attempts, failure_reason)
                 continue
             composer_after = self._composer_snapshot(target)
             self._trace_notification(

@@ -459,6 +459,10 @@ def collect_snapshot(args: argparse.Namespace) -> dict[str, Any]:
     tmux_errors = [str(item.get("error") or "") for item in (tmux_sessions, tmux_panes) if str(item.get("error") or "")]
     tmux = {
         "ok": bool(tmux_sessions.get("ok")) and bool(tmux_panes.get("ok")),
+        "sessions_ok": bool(tmux_sessions.get("ok")),
+        "sessions_error": str(tmux_sessions.get("error") or ""),
+        "panes_ok": bool(tmux_panes.get("ok")),
+        "panes_error": str(tmux_panes.get("error") or ""),
         "sessions": tmux_sessions.get("sessions", []),
         "panes": tmux_panes.get("panes", {}),
         "error": "; ".join(tmux_errors),
@@ -523,6 +527,39 @@ def _tmux_pane_for_target(tmux: dict[str, Any], target: str) -> dict[str, Any]:
         return {}
     pane = panes.get(target)
     return pane if isinstance(pane, dict) else {}
+
+
+def _missing_tmux_sessions(roles: list[Any], tmux: dict[str, Any]) -> list[str]:
+    sessions = set(tmux.get("sessions") if isinstance(tmux.get("sessions"), list) else [])
+    missing: list[str] = []
+    for item in roles:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "unknown").strip() or "unknown"
+        session = str(item.get("tmux_session") or "").strip()
+        if session and session not in sessions:
+            missing.append(f"role {role} session {session}")
+    return missing
+
+
+def verify_live_sessions(snapshot: dict[str, Any]) -> list[Check]:
+    roles = snapshot.get("roles") if isinstance(snapshot.get("roles"), list) else []
+    tmux = snapshot.get("tmux", {}) if isinstance(snapshot.get("tmux"), dict) else {}
+    missing_sessions = _missing_tmux_sessions(roles, tmux)
+    tmux_ok = bool(tmux.get("sessions_ok", tmux.get("ok")))
+    if not tmux_ok:
+        detail = f"tmux session listing failed: {tmux.get('sessions_error') or tmux.get('error') or 'unknown error'}"
+    elif missing_sessions:
+        detail = f"missing={missing_sessions}"
+    else:
+        detail = "all configured tmux sessions present"
+    return [
+        Check(
+            "live_tmux_sessions_present",
+            tmux_ok and not missing_sessions,
+            detail,
+        )
+    ]
 
 
 def _argv_contains_sequence(argv: list[str], expected: list[str]) -> bool:
@@ -726,12 +763,7 @@ def verify_snapshot(before: dict[str, Any], after: dict[str, Any]) -> list[Check
     )
 
     tmux = after.get("tmux", {}) if isinstance(after.get("tmux"), dict) else {}
-    sessions = set(tmux.get("sessions") if isinstance(tmux.get("sessions"), list) else [])
-    missing_sessions = [
-        str(item.get("tmux_session"))
-        for item in roles
-        if isinstance(item, dict) and str(item.get("tmux_session") or "") and str(item.get("tmux_session")) not in sessions
-    ]
+    missing_sessions = _missing_tmux_sessions(roles, tmux)
     checks.append(
         Check(
             "tmux_sessions_restored",
@@ -790,6 +822,7 @@ def _build_parser() -> argparse.ArgumentParser:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--snapshot", nargs="?", const="", help="write a pre-reboot snapshot JSON to PATH")
     mode.add_argument("--verify", metavar="PATH", help="verify against a pre-reboot snapshot JSON")
+    mode.add_argument("--check-live", action="store_true", help="check that every configured role has a live tmux session now")
     parser.add_argument("--project", default="pgu", help="project slug (default: pgu)")
     parser.add_argument("--owner-user", default="", help="project owner user (default: agent for pgu, current user otherwise)")
     parser.add_argument("--runtime-user", default="", help="runtime user for /run/user/<uid> paths (default: owner user)")
@@ -870,6 +903,12 @@ def main(argv: list[str] | None = None) -> int:
         _write_json(path, snapshot)
         _print_snapshot_summary(snapshot, path)
         return 0
+
+    if args.check_live:
+        snapshot = collect_snapshot(args)
+        checks = verify_live_sessions(snapshot)
+        _print_verify_report(checks, None)
+        return 0 if all(check.ok for check in checks) else 1
 
     before_path = Path(args.verify)
     before = _safe_json_load(before_path)

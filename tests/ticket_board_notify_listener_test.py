@@ -28,6 +28,7 @@ from scripts.ticket_board.notify_listener import (
     PaneActivityGate as RealPaneActivityGate,
     PaneHookStateStore,
     TicketBoardNotifyListener,
+    delivery_failure_reason,
     display_message,
 )
 from standalone_test_runner import run_module_tests
@@ -2334,6 +2335,34 @@ def test_send_failure_uses_exponential_backoff() -> None:
     assert conn.requeued[0][1][1] == "40 seconds"
     assert conn.acked == []
     assert trace_events(conn) == ["listener_claim", "send_failed"]
+
+
+def test_send_failure_marks_missing_tmux_target_as_structural_fault() -> None:
+    conn = FakeConnection([queue_row(17, "PGU-637", attempts=2, assignee="research", target_role="research")])
+    error = subprocess.CalledProcessError(
+        1,
+        ["/home/agent/bin/directorctl", "send", "pgu-research:0.0", "message"],
+        stderr="can't find pane: pgu-research:0.0\n",
+    )
+
+    def sender(_target: str, _message: str) -> None:
+        raise error
+
+    listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=sender,
+        activity_gate=lambda _target: False,
+        connector=lambda *args, **kwargs: conn,
+        poll_seconds=0,
+    )
+
+    assert listener.listen_once(max_notifications=1) == 0
+    assert delivery_failure_reason(error, "pgu-research:0.0") == "tmux_target_missing"
+    assert trace_events(conn) == ["listener_claim", "send_failed"]
+    assert conn.traces[1][6] == "tmux_target_missing"
+    detail = json.loads(conn.traces[1][8])
+    assert detail["decision_reason"] == "tmux_target_missing"
+    assert conn.requeued == [(17, (17, "10 seconds", "tmux_target_missing"))]
 
 
 def test_stale_notification_for_cancelled_ticket_is_acked_not_delivered() -> None:

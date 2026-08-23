@@ -12,6 +12,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "ticket-board-refresh-collation-version"
 
+from standalone_test_runner import run_module_tests
+
 
 def run(args: list[str], *, input_text: str | None = None, capture: bool = True) -> subprocess.CompletedProcess[str]:
     if capture:
@@ -133,9 +135,7 @@ INSERT INTO ticket_board.tickets (id) VALUES ('TEST-1'), ('TEST-2');
 
 
 def main() -> int:
-    test_plan_only_prints_locking_repair_sql_without_connecting()
-    test_default_mode_is_dry_run()
-    test_execute_handles_database_without_ticket_board_schema()
+    run_module_tests(globals())
     print("ticket_board_collation_maintenance_test: ok")
     return 0
 

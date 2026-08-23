@@ -19,6 +19,7 @@ from ticket_board_pane_env import (
     snapshot_paths,
     stripped_ticket_board_pane_env,
 )
+from standalone_test_runner import run_module_tests
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "scripts" / "ticket-board-install-pane-hooks"
@@ -641,20 +642,7 @@ def main() -> int:
     live_pane_paths = candidate_live_pane_paths()
     live_session_snapshot = snapshot_paths(live_pane_paths)
     try:
-        test_installer_writes_durable_cli_hook_configs_idempotently()
-        test_session_dir_snapshot_detects_same_count_content_mutation()
-        test_installed_hook_writes_state_and_verify_state_checks_all_panes()
-        test_session_start_hook_seeds_idle_state_and_records_resume_session()
-        test_session_start_hook_defaults_to_xdg_state_home_session_dir()
-        test_hook_prefers_generic_target_and_session_envs()
-        test_non_session_start_hook_records_resume_session_when_payload_has_id()
-        test_non_session_start_hook_with_existing_session_does_not_read_or_rewrite()
-        test_non_session_start_hook_without_session_id_only_writes_state()
-        test_state_write_is_not_blocked_by_hung_stdin_pipe()
-        test_hung_stdin_pipe_exits_after_bounded_read()
-        test_session_start_records_non_uuid_named_session_id()
-        test_session_start_always_updates_existing_session_file()
-        test_session_start_records_env_session_id_fallback()
+        run_module_tests(globals())
     finally:
         after_snapshot = snapshot_paths(live_pane_paths)
         changed = snapshot_diff(live_session_snapshot, after_snapshot)

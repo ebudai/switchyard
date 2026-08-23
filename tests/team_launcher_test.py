@@ -28,6 +28,7 @@ from ticket_board_pane_env import (
     snapshot_paths,
     strip_ticket_board_pane_env,
 )
+from standalone_test_runner import run_module_tests
 
 LIVE_PANE_PATHS = candidate_live_pane_paths()
 strip_ticket_board_pane_env(os.environ)
@@ -1135,10 +1136,12 @@ def test_konsole_launch_falls_back_to_clear_error_when_gui_user_missing() -> Non
 
 
 def test_launch_konsole_window_detaches_real_spawn_and_returns_status_line() -> None:
-    original_host_wayland = os.environ.get("PGU_HOST_WAYLAND_DISPLAY")
+    original_host_wayland = os.environ.get("HOST_WAYLAND_DISPLAY")
+    original_legacy_host_wayland = os.environ.get("PGU_HOST_WAYLAND_DISPLAY")
     original_popen = team_launcher.subprocess.Popen
     original_sleep = team_launcher.time.sleep
     original_stdout = sys.stdout
+    expected_args: list[str]
     stdout = StringIO()
     popen_calls: list[dict[str, object]] = []
 
@@ -1151,10 +1154,12 @@ def test_launch_konsole_window_detaches_real_spawn_and_returns_status_line() -> 
             return None
 
     try:
-        os.environ["PGU_HOST_WAYLAND_DISPLAY"] = "/run/user/1000/wayland-0"
+        os.environ["HOST_WAYLAND_DISPLAY"] = "/run/user/1000/wayland-0"
+        os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
         team_launcher.subprocess.Popen = FakePopen
         team_launcher.time.sleep = lambda _seconds: None
         sys.stdout = stdout
+        expected_args = konsole_launch_args(Path("/tmp/layout.json"))
 
         assert launch_konsole_window(Path("/tmp/layout.json"), project="pgu") == 0
     finally:
@@ -1162,13 +1167,17 @@ def test_launch_konsole_window_detaches_real_spawn_and_returns_status_line() -> 
         team_launcher.time.sleep = original_sleep
         sys.stdout = original_stdout
         if original_host_wayland is None:
+            os.environ.pop("HOST_WAYLAND_DISPLAY", None)
+        else:
+            os.environ["HOST_WAYLAND_DISPLAY"] = original_host_wayland
+        if original_legacy_host_wayland is None:
             os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
         else:
-            os.environ["PGU_HOST_WAYLAND_DISPLAY"] = original_host_wayland
+            os.environ["PGU_HOST_WAYLAND_DISPLAY"] = original_legacy_host_wayland
 
     assert len(popen_calls) == 1
     call = popen_calls[0]
-    assert call["args"] == konsole_launch_args(Path("/tmp/layout.json"))
+    assert call["args"] == expected_args
     kwargs = call["kwargs"]
     assert kwargs["stdin"] is subprocess.DEVNULL
     assert kwargs["start_new_session"] is True
@@ -2044,60 +2053,10 @@ def test_bootstrap_template_does_not_guess_active_roles() -> None:
 def main() -> int:
     live_snapshot = snapshot_paths(LIVE_PANE_PATHS)
     try:
-        test_ticket_board_pane_env_is_stripped_before_launcher_import()
-        test_pgu_layout_matches_reference_six_pane_geometry()
-        test_dry_run_materializes_pgu_layout_with_six_visible_role_commands()
-        test_pgu_config_matches_director_supplied_live_role_assignments()
-        test_pgu_config_keeps_live_agent_repository_with_foreign_home()
-        test_custom_config_without_run_as_user_tracks_invoking_home()
-        test_cli_command_prepends_invoking_user_bin()
-        test_cli_command_exports_durable_session_dir_for_pane_hooks()
-        test_pane_state_filename_matches_notify_listener_target_path()
-        test_ensure_user_linger_runtime_enables_linger_and_waits_for_runtime_dir()
-        test_ensure_user_linger_runtime_fails_loud_when_loginctl_is_denied()
-        test_configured_runtime_check_skips_non_runtime_session_dir()
-        test_configured_runtime_check_uses_run_as_user_for_default_runtime_dir()
-        test_provision_runtime_command_uses_configured_project_user()
-        test_yolo_config_translates_to_cli_specific_bypass_flags()
-        test_effort_config_translates_to_cli_specific_args()
-        test_pgu_launch_commands_include_model_and_bypass_flags()
-        test_start_auto_fast_forwards_stale_launcher_checkout_once_before_panes()
-        test_start_no_self_deploy_refuses_stale_launcher_checkout()
-        test_allow_stale_launcher_override_warns_and_continues_without_fast_forward()
-        test_launcher_status_probe_uses_ls_remote_without_writing_git_objects()
-        test_auto_fast_forward_launcher_checkout_with_real_git()
-        test_auto_fast_forward_launcher_checkout_refuses_tracked_modifications()
-        test_undeterminable_launcher_checkout_warns_and_continues()
-        test_deploy_launcher_checkout_updates_and_verifies_configured_ref()
-        test_konsole_launch_uses_gui_user_display_environment()
-        test_konsole_launch_can_fallback_to_gui_user_uid_without_host_var()
-        test_konsole_launch_defaults_to_invoking_user_uid_without_host_var()
-        test_konsole_launch_falls_back_to_clear_error_when_gui_user_missing()
-        test_start_is_attach_or_start_and_never_duplicates_existing_session()
-        test_start_creates_missing_session_once_then_attaches()
-        test_start_seeds_initial_idle_state_for_codex_agy_and_claude_panes()
-        test_start_resumes_recorded_session_when_recreating_missing_pane()
-        test_seed_session_dir_from_legacy_sources_copies_valid_records_once()
-        test_start_resumes_from_durable_session_dir_after_runtime_tmpfs_is_cleared()
-        test_start_runs_research_detached_before_opening_visible_layout()
-        test_start_force_refreshes_dirty_shared_checkout_with_real_git()
-        test_bad_shared_checkout_blocks_all_roles_with_real_git()
-        test_reload_fetches_without_refreshing_shared_checkout()
-        test_reload_syncs_live_cli_and_model_from_process_argv_before_relaunch()
-        test_reload_sync_leaves_config_unchanged_when_live_matches()
-        test_reload_sync_leaves_config_unchanged_when_role_not_running()
-        test_reload_sync_leaves_config_unchanged_when_model_is_unparseable()
-        test_dry_run_reports_shared_checkout_without_syncing_it()
-        test_start_does_not_sync_live_cli_or_model()
-        test_detached_research_attach_checks_session_without_attaching()
-        test_reload_uses_recorded_resume_uuid_when_recreating_session()
-        test_resume_commands_use_cli_specific_shapes_and_front_position()
-        test_reload_without_recorded_resume_id_logs_fresh_start()
-        test_reload_logs_resume_fallback_when_cli_never_starts()
-        test_reload_refuses_to_kill_session_when_live_command_mismatches_config()
-        test_reload_force_bypasses_live_command_guard()
-        test_reload_guard_matches_cli_child_under_shell_in_real_tmux()
-        test_bootstrap_template_does_not_guess_active_roles()
+        run_module_tests(
+            globals(),
+            first=("test_ticket_board_pane_env_is_stripped_before_launcher_import",),
+        )
     finally:
         changed = snapshot_diff(live_snapshot, snapshot_paths(LIVE_PANE_PATHS))
         assert not changed, changed

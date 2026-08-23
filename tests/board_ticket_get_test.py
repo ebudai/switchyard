@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 
 from scripts.ticket_board.app import ASSIGNEES, STATES, iso_now
 from scripts.ticket_board.server import TicketBoardServer
+from standalone_test_runner import run_module_tests
 
 
 class QuietNotifier:
@@ -183,10 +184,7 @@ def test_get_ticket_does_not_treat_action_paths_as_ticket_reads() -> None:
 
 
 def main() -> int:
-    test_get_ticket_returns_ticket_json()
-    test_get_ticket_normalizes_lowercase_ids()
-    test_get_ticket_returns_404_for_unknown_ticket()
-    test_get_ticket_does_not_treat_action_paths_as_ticket_reads()
+    run_module_tests(globals())
     print("board_ticket_get_test: ok")
     return 0
 

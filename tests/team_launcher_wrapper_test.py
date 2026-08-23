@@ -13,6 +13,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 WRAPPER_PATH = ROOT / "scripts" / "team-launcher"
 
+from standalone_test_runner import run_module_tests
+
 
 def load_wrapper():
     loader = importlib.machinery.SourceFileLoader("team_launcher_wrapper", str(WRAPPER_PATH))
@@ -108,9 +110,7 @@ def test_wrapper_does_not_sudo_when_already_run_as_user() -> None:
 
 
 def main() -> int:
-    test_wrapper_delegates_directly_without_sudo_when_run_as_user_unset()
-    test_wrapper_sudos_to_configured_run_as_user_when_different()
-    test_wrapper_does_not_sudo_when_already_run_as_user()
+    run_module_tests(globals())
     print("team_launcher_wrapper_test: ok")
     return 0
 

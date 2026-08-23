@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
 
 from scripts.ticket_board.app import ASSIGNEES, STATES, iso_now
 from scripts.ticket_board.server import CALLER_ROLE_HEADER, WRITE_TOKEN_HEADER, DirectorNotifier, TicketBoardServer
+from standalone_test_runner import run_module_tests
 
 
 class FakeNotifier:
@@ -312,12 +313,7 @@ def test_director_notifier_batches_quick_creates() -> None:
 
 
 def main() -> int:
-    test_server_human_web_director_create_notifies_director()
-    test_server_non_director_file_bug_notifies_director()
-    test_server_backlog_create_does_not_notify_director()
-    test_server_blocked_create_does_not_notify_director()
-    test_server_create_does_not_notify_when_ticket_is_not_persisted()
-    test_director_notifier_batches_quick_creates()
+    run_module_tests(globals())
     print("board_director_notification_test: ok")
     return 0
 

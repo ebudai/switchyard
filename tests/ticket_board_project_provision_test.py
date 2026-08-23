@@ -26,6 +26,7 @@ from scripts.ticket_board.project_provision import (
     render_tmpfiles,
     render_workflow_sql,
 )
+from standalone_test_runner import run_module_tests
 
 
 def test_non_pgu_project_is_fully_parameterized() -> None:
@@ -351,15 +352,7 @@ def test_cli_writes_reviewable_artifacts() -> None:
 
 
 def main() -> int:
-    test_non_pgu_project_is_fully_parameterized()
-    test_operator_commands_create_owned_parents_before_systemd_paths()
-    test_operator_commands_wait_for_linger_user_bus_before_user_systemctl()
-    test_owned_readwrite_path_layout_passes_systemd_verify()
-    test_pgu_project_render_matches_live_port_database_and_frame_dir()
-    test_database_sql_bootstraps_schema_compatible_roles_and_project_database()
-    test_custom_database_actor_roles_fail_loud_until_schema_supports_them()
-    test_board_role_environment_drives_python_gate()
-    test_cli_writes_reviewable_artifacts()
+    run_module_tests(globals())
     print("ticket_board_project_provision_test: ok")
     return 0
 

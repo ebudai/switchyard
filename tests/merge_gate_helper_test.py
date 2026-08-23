@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -12,6 +13,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / "scripts" / "merge-gate-helper"
 
+from standalone_test_runner import run_module_tests
+
 
 def run(args: list[str], *, cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, cwd=cwd, check=check, text=True, capture_output=True)
@@ -19,6 +22,18 @@ def run(args: list[str], *, cwd: Path | None = None, check: bool = True) -> subp
 
 def git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     return run(["git", *args], cwd=repo, check=check)
+
+
+def push_main_fixture(repo: Path) -> None:
+    original = os.environ.get("PGU_ALLOW_MAIN_PUSH")
+    try:
+        os.environ["PGU_ALLOW_MAIN_PUSH"] = "director"
+        git(repo, "push", "origin", "main")
+    finally:
+        if original is None:
+            os.environ.pop("PGU_ALLOW_MAIN_PUSH", None)
+        else:
+            os.environ["PGU_ALLOW_MAIN_PUSH"] = original
 
 
 def commit_all(repo: Path, message: str) -> str:
@@ -150,7 +165,7 @@ def test_conflicting_branch_reports_conflict() -> None:
         git(repo, "checkout", "main")
         write_fixture(repo, value=3)
         commit_all(repo, "main change")
-        git(repo, "push", "origin", "main")
+        push_main_fixture(repo)
         code, payload = run_gate(repo, "feature/conflict")
         assert code == 2, payload
         assert payload["verdict"] == "CONFLICT", payload
@@ -195,7 +210,7 @@ def test_infers_team_launcher_test() -> None:
             encoding="utf-8",
         )  # pragma: no cover - fixture string construction, not test logic.
         commit_all(repo, "add launcher")
-        git(repo, "push", "origin", "main")
+        push_main_fixture(repo)
         create_branch(repo, "feature/launcher")
         (repo / "scripts" / "team_launcher.py").write_text("def value():\n    return 2\n", encoding="utf-8")
         commit_all(repo, "change launcher")
@@ -215,7 +230,7 @@ def test_infers_directorctl_tests() -> None:
             encoding="utf-8",
         )  # pragma: no cover - fixture string construction, not test logic.
         commit_all(repo, "add directorctl")
-        git(repo, "push", "origin", "main")
+        push_main_fixture(repo)
         create_branch(repo, "feature/directorctl")
         (repo / "scripts" / "directorctl").write_text("#!/usr/bin/env python3\ndef value():\n    return 2\n", encoding="utf-8")
         commit_all(repo, "change directorctl")
@@ -225,16 +240,7 @@ def test_infers_directorctl_tests() -> None:
 
 
 def main() -> int:
-    test_ready_to_push_when_changed_line_is_executed()
-    test_gate_does_not_mutate_caller_repo_identity()
-    test_clean_merge_test_failure_is_not_ready()
-    test_uncovered_changed_line_is_sent_back()
-    test_explicit_no_cover_pragma_exempts_changed_line()
-    test_conflicting_branch_reports_conflict()
-    test_non_python_change_reports_coverage_not_available()
-    test_python_change_with_only_shell_test_reports_coverage_not_available()
-    test_infers_team_launcher_test()
-    test_infers_directorctl_tests()
+    run_module_tests(globals())
     print("merge_gate_helper_test: ok")
     return 0
 

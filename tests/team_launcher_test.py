@@ -845,7 +845,7 @@ def test_start_auto_fast_forwards_stale_launcher_checkout_once_before_panes() ->
         tmp_path = Path(tmp)
         config_path = _write_pgu_config_with_shared_checkout(tmp_path)
         config = load_project_config("pgu", config_path)
-        fake = FakeRunner()
+        fake = FakeRunner(current_commands={"pgu-research:0.0": "claude"})
         counts = ["0 173\n", "0 0\n"]
         fast_forwarded = False
         calls: list[list[str]] = []
@@ -1565,7 +1565,7 @@ def test_start_runs_research_detached_before_opening_visible_layout() -> None:
         tmp_path = Path(tmp)
         config_path = _write_pgu_config_with_shared_checkout(tmp_path)
         config = load_project_config("pgu", config_path)
-        runner = FakeRunner()
+        runner = FakeRunner(current_commands={"pgu-research:0.0": "claude"})
         layout_output = tmp_path / "layout.json"
 
         assert (
@@ -1605,6 +1605,114 @@ def test_start_runs_research_detached_before_opening_visible_layout() -> None:
         assert {leaf.get("WorkingDirectory") for leaf in team_launcher._layout_leaves(layout)} == {str(tmp_path / "repo")}
         assert runner.calls[-1] == konsole_launch_args(layout_output)
         assert ["tmux", "attach", "-t", "pgu-research"] not in runner.calls
+
+
+def test_detached_research_start_fails_visible_when_session_disappears() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    role = next(role for role in config.roles if role.role == "research")
+
+    class VanishingDetachedRunner:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        def __call__(self, args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if args[:2] == ["tmux", "has-session"]:
+                return subprocess.CompletedProcess(args, 1)
+            if args[:2] == ["tmux", "new-session"]:
+                return subprocess.CompletedProcess(args, 0)
+            if args[:3] == ["tmux", "display-message", "-p"]:
+                return subprocess.CompletedProcess(args, 1, stdout="")
+            return subprocess.CompletedProcess(args, 0)
+
+    runner = VanishingDetachedRunner()
+    stderr = StringIO()
+
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        tmp_path = Path(tmp)
+        pane_state_dir = tmp_path / "pane-state"
+        with redirect_stderr(stderr):
+            assert (
+                run_detached_role(
+                    role,
+                    mode="start",
+                    session_dir=tmp_path / "sessions",
+                    pane_state_dir=pane_state_dir,
+                    runner=runner,
+                )
+                == 1
+            )
+
+        assert not (pane_state_dir / pane_state_file_name(role.target)).exists()
+
+    assert any(call[:5] == ["tmux", "new-session", "-d", "-s", "pgu-research"] for call in runner.calls)
+    assert "role research did not leave a live pgu-research session" in stderr.getvalue()
+
+
+def test_detached_research_resume_falls_back_when_failed_session_is_already_gone() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    role = next(role for role in config.roles if role.role == "research")
+    stderr = StringIO()
+
+    class ResumeGoneThenFreshRunner:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+            self.fresh_live = False
+
+        def __call__(self, args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if args[:2] == ["tmux", "has-session"]:
+                return subprocess.CompletedProcess(args, 0 if self.fresh_live else 1)
+            if args[:2] == ["tmux", "new-session"]:
+                self.fresh_live = "--resume " not in str(args[-1])
+                return subprocess.CompletedProcess(args, 0)
+            if args[:3] == ["tmux", "display-message", "-p"]:
+                if args[-1] == "#{pane_pid}":
+                    return subprocess.CompletedProcess(args, 1, stdout="")
+                if self.fresh_live:
+                    return subprocess.CompletedProcess(args, 0, stdout="claude\n")
+                return subprocess.CompletedProcess(args, 1, stdout="")
+            if args[:2] == ["tmux", "kill-session"]:
+                raise AssertionError("missing failed resume session should not be killed before fallback")
+            return subprocess.CompletedProcess(args, 0)
+
+    original_stability = team_launcher.DETACHED_SESSION_STABILITY_SECONDS
+    try:
+        team_launcher.DETACHED_SESSION_STABILITY_SECONDS = 0.0
+        with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+            tmp_path = Path(tmp)
+            session_dir = tmp_path / "sessions"
+            session_dir.mkdir()
+            session_id = "12345678-1234-5678-9abc-def012345678"
+            (session_dir / session_file_name(role.target)).write_text(
+                json.dumps({"target": role.target, "session_id": session_id}) + "\n",
+                encoding="utf-8",
+            )
+            pane_state_dir = tmp_path / "pane-state"
+            runner = ResumeGoneThenFreshRunner()
+            with redirect_stderr(stderr):
+                assert (
+                    run_detached_role(
+                        role,
+                        mode="start",
+                        session_dir=session_dir,
+                        pane_state_dir=pane_state_dir,
+                        runner=runner,
+                    )
+                    == 0
+                )
+            state = _read_pane_state(pane_state_dir, role.target)
+            assert state["state"] == "idle"
+            assert state["source"] == "team_launcher.start.fallback"
+    finally:
+        team_launcher.DETACHED_SESSION_STABILITY_SECONDS = original_stability
+
+    assert f"team-launcher: resume failed for research using session {session_id}; falling back to fresh session" in stderr.getvalue()
+    assert "team-launcher: started fresh session for research after resume fallback" in stderr.getvalue()
+    new_sessions = [call for call in runner.calls if call[:5] == ["tmux", "new-session", "-d", "-s", "pgu-research"]]
+    assert len(new_sessions) == 2
+    assert "--resume" in new_sessions[0][-1]
+    assert "--resume" not in new_sessions[1][-1]
 
 
 def test_start_force_refreshes_dirty_shared_checkout_with_real_git() -> None:
@@ -1647,7 +1755,7 @@ def test_reload_fetches_without_refreshing_shared_checkout() -> None:
         tmp_path = Path(tmp)
         config_path = _write_pgu_config_with_shared_checkout(tmp_path)
         config = load_project_config("pgu", config_path)
-        runner = FakeRunner()
+        runner = FakeRunner(current_commands={"pgu-research:0.0": "claude"})
         layout_output = tmp_path / "layout.json"
 
         assert (
@@ -1681,6 +1789,7 @@ def test_reload_syncs_live_cli_and_model_from_process_argv_before_relaunch() -> 
         raw_config = json.loads(config_path.read_text(encoding="utf-8"))
         research_raw = next(role for role in raw_config["roles"] if role["role"] == "research")
         research_raw["cli"] = ["codex"]
+        research_raw["live_commands"] = ["codex"]
         research_raw["model"] = "gpt-5.5"
         config_path.write_text(json.dumps(raw_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -1724,6 +1833,7 @@ def test_reload_syncs_live_cli_and_model_from_process_argv_before_relaunch() -> 
         synced = json.loads(config_path.read_text(encoding="utf-8"))
         synced_research = next(role for role in synced["roles"] if role["role"] == "research")
         assert synced_research["cli"] == ["claude"]
+        assert synced_research["live_commands"] == ["claude"]
         assert synced_research["model"] == "claude-sonnet-5"
         assert synced_research["detached"] is True
         assert synced_research["target"] == "pgu-research:0.0"
@@ -1777,6 +1887,7 @@ def test_reload_sync_leaves_config_unchanged_when_role_not_running() -> None:
         raw_config = json.loads(config_path.read_text(encoding="utf-8"))
         research_raw = next(role for role in raw_config["roles"] if role["role"] == "research")
         research_raw["cli"] = ["codex"]
+        research_raw["live_commands"] = ["codex"]
         research_raw["model"] = "gpt-5.5"
         config_path.write_text(json.dumps(raw_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -1878,6 +1989,7 @@ def test_start_does_not_sync_live_cli_or_model() -> None:
         raw_config = json.loads(config_path.read_text(encoding="utf-8"))
         research_raw = next(role for role in raw_config["roles"] if role["role"] == "research")
         research_raw["cli"] = ["codex"]
+        research_raw["live_commands"] = ["codex"]
         research_raw["model"] = "gpt-5.5"
         config_path.write_text(json.dumps(raw_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 

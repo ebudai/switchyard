@@ -353,6 +353,7 @@ def test_cli_writes_reviewable_artifacts() -> None:
 def main() -> int:
     test_non_pgu_project_is_fully_parameterized()
     test_operator_commands_create_owned_parents_before_systemd_paths()
+    test_operator_commands_wait_for_linger_user_bus_before_user_systemctl()
     test_owned_readwrite_path_layout_passes_systemd_verify()
     test_pgu_project_render_matches_live_port_database_and_frame_dir()
     test_database_sql_bootstraps_schema_compatible_roles_and_project_database()

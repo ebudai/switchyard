@@ -272,7 +272,7 @@ WHERE id = '{created_regression["id"]}';
                 title="Postgres backlog create",
                 body="Deferred future work.",
                 screenshot=None,
-                assignee="ops",
+                assignee="unassigned",
                 needs_user_signoff=False,
                 state="backlog",
             )

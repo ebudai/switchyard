@@ -178,7 +178,7 @@ SELECT string_agg(name, ',' ORDER BY seq)
 FROM ticket_board.schema_migrations;
 SQL
 )"
-expected_transition_applied="schema.sql,270_ready_to_in_progress.sql,271_optional_implementation.sql,272_resolved_blockers.sql,273_suppress_self_notifications.sql,274_unblock_notifications.sql,275_remove_dead_unblock_analysis_branch.sql,276_revert_backlog_unblock_notifications.sql,277_owner_update_notifications.sql,278_idle_turn_end_nudges.sql,279_idle_reminder_escalation.sql,280_reject_stale_resubmit.sql,281_idle_reminder_escalate_problem_clause.sql,282_http_director_create_notification_source.sql,283_idle_reminder_defers_to_primary.sql,284_add_regression_flag.sql,285_require_actor_caller_role_backstop.sql,286_allow_audit_file_bug.sql,287_active_inprogress_idle_filter.sql,pgu367_unresolved_blocked_by_source_json.sql,pgu405_terminal_transition_assignee_notify.sql,pgu437_idle_reminder_delivery_count.sql,pgu444_finish_current_locked_reconcile.sql,pgu450_in_progress_implementer_assignee.sql,pgu451_serial_implementer_focus.sql,pgu453_awaiting_role_nudge_suppression.sql,pgu455_director_discretionary_nudges.sql,pgu457_close_utility_tasks.sql,pgu458_pgu340_director_force_move.sql,pgu458_submit_to_inspection.sql,pgu471_coalesce_new_ticket_notifications.sql,pgu472_urgent_comment_notifications.sql,pgu474_hard_serial_focus_force_move.sql,pgu477_drop_legacy_append_ticket_comment.sql,pgu479_optional_kickback_comments.sql,pgu480_queued_backlog_nudge_suppression.sql,pgu494_create_ticket_needs_eric_signoff.sql,pgu497_eric_review_notifications.sql,pgu514_draft_stage.sql,pgu517_workflow_config_phase0.sql,pgu519_manual_control_comment_notifications.sql,pgu520_workflow_config_cosmetic_derivation.sql,pgu521_workflow_transition_shadow_mode.sql,pgu521_zz_shadow_log_read_grants.sql,pgu522_workflow_config_authoritative.sql,pgu527_workflow_rbac_shadow.sql,pgu528_workflow_rbac_config_authoritative.sql,pgu531_attachment_crop_metadata.sql,pgu541_inprogress_stuck_requires_pane_idle.sql,pgu544_dat_stage.sql,pgu563_grant_listener_unresolved_blockers.sql,pgu584_stage_default_assignee.sql,pgu588_stage_default_assignee_from_workflow.sql,pgu589_depersonalize_user_role.sql,pgu999_runner_probe.sql"
+expected_transition_applied="schema.sql,270_ready_to_in_progress.sql,271_optional_implementation.sql,272_resolved_blockers.sql,273_suppress_self_notifications.sql,274_unblock_notifications.sql,275_remove_dead_unblock_analysis_branch.sql,276_revert_backlog_unblock_notifications.sql,277_owner_update_notifications.sql,278_idle_turn_end_nudges.sql,279_idle_reminder_escalation.sql,280_reject_stale_resubmit.sql,281_idle_reminder_escalate_problem_clause.sql,282_http_director_create_notification_source.sql,283_idle_reminder_defers_to_primary.sql,284_add_regression_flag.sql,285_require_actor_caller_role_backstop.sql,286_allow_audit_file_bug.sql,287_active_inprogress_idle_filter.sql,pgu367_unresolved_blocked_by_source_json.sql,pgu405_terminal_transition_assignee_notify.sql,pgu437_idle_reminder_delivery_count.sql,pgu444_finish_current_locked_reconcile.sql,pgu450_in_progress_implementer_assignee.sql,pgu451_serial_implementer_focus.sql,pgu453_awaiting_role_nudge_suppression.sql,pgu455_director_discretionary_nudges.sql,pgu457_close_utility_tasks.sql,pgu458_pgu340_director_force_move.sql,pgu458_submit_to_inspection.sql,pgu471_coalesce_new_ticket_notifications.sql,pgu472_urgent_comment_notifications.sql,pgu474_hard_serial_focus_force_move.sql,pgu477_drop_legacy_append_ticket_comment.sql,pgu479_optional_kickback_comments.sql,pgu480_queued_backlog_nudge_suppression.sql,pgu494_create_ticket_needs_eric_signoff.sql,pgu497_eric_review_notifications.sql,pgu514_draft_stage.sql,pgu517_workflow_config_phase0.sql,pgu519_manual_control_comment_notifications.sql,pgu520_workflow_config_cosmetic_derivation.sql,pgu521_workflow_transition_shadow_mode.sql,pgu521_zz_shadow_log_read_grants.sql,pgu522_workflow_config_authoritative.sql,pgu527_workflow_rbac_shadow.sql,pgu528_workflow_rbac_config_authoritative.sql,pgu531_attachment_crop_metadata.sql,pgu541_inprogress_stuck_requires_pane_idle.sql,pgu544_dat_stage.sql,pgu563_grant_listener_unresolved_blockers.sql,pgu584_stage_default_assignee.sql,pgu588_stage_default_assignee_from_workflow.sql,pgu589_depersonalize_user_role.sql,pgu591_idle_stall_nudge_cadence.sql,pgu999_runner_probe.sql"
 [[ "$transition_applied" == "$expected_transition_applied" ]] || {
     echo "FAIL: schema.sql backfill did not record legacy migration names correctly: $transition_applied" >&2
     exit 1
@@ -346,6 +346,24 @@ createdb -h "$SOCKET_DIR" -p "$PORT" -U postgres "$LIVE_RENAME_DBNAME"
 if git -C "$REPO_ROOT" show origin/main:scripts/ticket_board/schema.sql >"$TMPDIR_T/origin-main-schema.sql"; then
     psql -X -v ON_ERROR_STOP=1 "$LIVE_RENAME_CONN" -f "$TMPDIR_T/origin-main-schema.sql" >/dev/null
     psql -X -v ON_ERROR_STOP=1 "$LIVE_RENAME_CONN" <<'SQL' >/dev/null
+ALTER TABLE ticket_board.tickets RENAME COLUMN needs_user_signoff TO needs_eric_signoff;
+ALTER TABLE ticket_board.tickets RENAME COLUMN user_signoff TO eric_signoff;
+ALTER TABLE ticket_board.tickets DROP CONSTRAINT IF EXISTS tickets_state_check;
+ALTER TABLE ticket_board.tickets
+    ADD CONSTRAINT tickets_state_check CHECK (state IN (
+        'draft',
+        'backlog',
+        'analysis',
+        'in_progress',
+        'inspection',
+        'audit',
+        'dat',
+        'eric_review',
+        'director_review',
+        'done',
+        'cancelled'
+    ));
+ALTER TABLE ticket_board.tickets DISABLE TRIGGER ALL;
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation, audit_signoff,
     needs_eric_signoff, eric_signoff, created_text, updated_text, created_at, updated_at, source_json
@@ -355,6 +373,7 @@ INSERT INTO ticket_board.tickets (
     clock_timestamp(), clock_timestamp(),
     '{"id":"PGU-42901","title":"Live old UAT row","body":"","state":"eric_review","assignee":"director","implementation":"Ready.","audit_signoff":true,"needs_eric_signoff":true,"eric_signoff":true,"comments":[],"created":"2026-08-22T00:00:00+00:00","updated":"2026-08-22T00:00:00+00:00"}'::jsonb
 );
+ALTER TABLE ticket_board.tickets ENABLE TRIGGER ALL;
 INSERT INTO ticket_board.ticket_comments (ticket_id, position, who, ts_text, ts, text, source_json)
 VALUES (
     'PGU-42901',
@@ -365,10 +384,17 @@ VALUES (
     'Looks good.',
     '{"who":"eric","ts":"2026-08-22T00:01:00+00:00","text":"Looks good."}'::jsonb
 );
-UPDATE ticket_board.ticket_notification_state
-SET current_state = 'eric_review',
-    previous_state = 'dat'
-WHERE ticket_id = 'PGU-42901';
+INSERT INTO ticket_board.ticket_notification_state (
+    ticket_id,
+    current_state,
+    current_assignee,
+    previous_state
+) VALUES (
+    'PGU-42901',
+    'eric_review',
+    'director',
+    'dat'
+);
 SQL
     cp "$REPO_ROOT/scripts/ticket_board/schema.sql" "$TMPDIR_T/schema.sql"
     cp "$REPO_ROOT/scripts/ticket_board/migrations/pgu589_depersonalize_user_role.sql" "$LIVE_RENAME_MIGRATIONS_DIR/"

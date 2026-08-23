@@ -2837,7 +2837,7 @@ CREATE OR REPLACE FUNCTION ticket_board.notify_idle_stall_nudges(
     p_idle_since_by_role jsonb,
     p_now timestamptz DEFAULT clock_timestamp(),
     p_grace interval DEFAULT interval '45 seconds',
-    p_cadence interval DEFAULT interval '5 minutes',
+    p_cadence interval DEFAULT interval '30 minutes',
     p_escalate_after integer DEFAULT 2
 )
 RETURNS integer

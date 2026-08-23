@@ -116,9 +116,9 @@ UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-206';
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation, created_text, updated_text, source_json
 ) VALUES (
-    'PGU-207', 'Durable reconcile', '', 'analysis', 'ops', 'Ready.',
+    'PGU-207', 'Durable reconcile', '', 'analysis', 'app', 'Ready.',
     '2026-07-11T00:00:00+00:00', '2026-07-11T00:00:00+00:00',
-    '{ticket_source("PGU-207", "Durable reconcile", "analysis", "ops")}'::jsonb
+    '{ticket_source("PGU-207", "Durable reconcile", "analysis", "app")}'::jsonb
 );
 UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-207';
 """,
@@ -149,7 +149,7 @@ FOR UPDATE
                 lock_conn.rollback()
 
             assert delivered == 1
-            assert sent == [("pgu-ops:0.0", "New ticket for you: PGU-207 -- Durable reconcile")]
+            assert sent == [("pgu-app:0.0", "New ticket for you: PGU-207 -- Durable reconcile")]
             after = psql(
                 listener_conninfo,
                 "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-207';",
@@ -220,9 +220,9 @@ WHERE ticket_id = 'PGU-226' AND kind = 'transition';
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation, created_text, updated_text, source_json
 ) VALUES (
-    'PGU-227', 'Stale picked-up nudge', '', 'in_progress', 'ops', 'Ready.',
+    'PGU-227', 'Stale picked-up nudge', '', 'in_progress', 'research', 'Ready.',
     '2026-07-11T00:00:00+00:00', '2026-07-11T00:00:00+00:00',
-    '{ticket_source("PGU-227", "Stale picked-up nudge", "in_progress", "ops")}'::jsonb
+    '{ticket_source("PGU-227", "Stale picked-up nudge", "in_progress", "research")}'::jsonb
 );
 SELECT ticket_board.enqueue_notification(
     'PGU-227',
@@ -267,9 +267,9 @@ DELETE FROM ticket_board.ticket_notification_queue;
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation, created_text, updated_text, source_json
 ) VALUES (
-    'PGU-228', 'Still stuck escalation', '', 'in_progress', 'ops', 'Ready.',
+    'PGU-228', 'Still stuck escalation', '', 'audit', 'audit', 'Ready.',
     '2026-07-11T00:00:00+00:00', '2026-07-11T00:00:00+00:00',
-    '{ticket_source("PGU-228", "Still stuck escalation", "in_progress", "ops")}'::jsonb
+    '{ticket_source("PGU-228", "Still stuck escalation", "audit", "audit")}'::jsonb
 );
 UPDATE ticket_board.ticket_notification_state
 SET last_nudged_at = clock_timestamp() + interval '1 hour'
@@ -302,7 +302,7 @@ WHERE ticket_id = 'PGU-228'
             assert escalation_row == {
                 "kind": "escalation",
                 "target_role": "director",
-                "message": "PRIORITY PGU-228 -- Still stuck escalation appears stuck for ops; check/reassign",
+                "message": "PRIORITY PGU-228 -- Still stuck escalation appears stuck for audit; check/reassign",
                 "payload_kind": "escalation",
             }, escalation_row
             psql(
@@ -325,7 +325,7 @@ WHERE ticket_id = 'PGU-228'
             assert sent == [
                 (
                     "pgu-director:0.0",
-                    "PRIORITY PGU-228 -- Still stuck escalation appears stuck for ops; check/reassign",
+                    "PRIORITY PGU-228 -- Still stuck escalation appears stuck for audit; check/reassign",
                 )
             ]
             escalation_queue = psql(

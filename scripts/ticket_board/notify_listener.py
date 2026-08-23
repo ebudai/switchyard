@@ -38,7 +38,7 @@ DEFAULT_REQUEUE_MAX_SECONDS = 60.0
 DEFAULT_BUSY_REQUEUE_SECONDS = 1.0
 DEFAULT_DIRECTOR_COMPOSING_TIMEOUT_SECONDS = 15 * 60.0
 DEFAULT_IDLE_STALL_GRACE_SECONDS = 45.0
-DEFAULT_IDLE_STALL_NUDGE_CADENCE_SECONDS = 5 * 60.0
+DEFAULT_IDLE_STALL_NUDGE_CADENCE_SECONDS = 30 * 60.0
 DEFAULT_IDLE_STALL_ESCALATE_AFTER = 2
 # Present-idle fallback is age-unbounded: an idle hook remains valid until the
 # pane reports busy/blocked again, and the live activity gate still runs before

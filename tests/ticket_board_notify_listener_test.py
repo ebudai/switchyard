@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:
 from scripts.ticket_board.notify_listener import (
     DEFAULT_BUSY_REQUEUE_SECONDS,
     DEFAULT_DIRECTORCTL,
+    DEFAULT_IDLE_STALL_NUDGE_CADENCE_SECONDS,
     DirectorctlSender,
     PaneActivityGate,
     PaneHookStateStore,
@@ -579,7 +580,6 @@ def test_listener_enqueues_idle_stall_nudges_from_hook_state() -> None:
             activity_gate=gate.is_working,
             sender=lambda _target, _message: None,
             idle_stall_grace_seconds=45,
-            idle_stall_nudge_cadence_seconds=300,
             idle_stall_escalate_after=2,
         )
 
@@ -591,7 +591,8 @@ def test_listener_enqueues_idle_stall_nudges_from_hook_state() -> None:
         idle_since = json.loads(str(params[0]))
         assert set(idle_since) == {"ops"}
         assert idle_since["ops"].startswith("1970-01-01T00:01:40")
-        assert params[1:] == ("45 seconds", "300 seconds", 2)
+        assert DEFAULT_IDLE_STALL_NUDGE_CADENCE_SECONDS == 30 * 60.0
+        assert params[1:] == ("45 seconds", "1800 seconds", 2)
 
 
 def test_advancing_working_timer_suppresses_idle_stall_nudge() -> None:

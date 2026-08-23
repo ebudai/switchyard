@@ -502,6 +502,11 @@ def main() -> int:
     assert "create or replace function ticket_board.notify_due_nudges" in inprogress_stuck_idle_migration
     assert "where t.state in ('inspection', 'audit', 'director_review')" in inprogress_stuck_idle_migration
     assert "where t.state in ('in_progress', 'inspection', 'audit', 'director_review')" not in inprogress_stuck_idle_migration
+    idle_stall_cadence_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu591_idle_stall_nudge_cadence.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "p_cadence interval default interval '30 minutes'" in idle_stall_cadence_migration
+    assert "p_cadence interval default interval '30 minutes'" in executable_schema_lower
     terminal_transition_notify_migration = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "pgu405_terminal_transition_assignee_notify.sql"
     ).read_text(encoding="utf-8").lower()

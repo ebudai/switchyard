@@ -155,14 +155,17 @@ That command:
 6. only after the canary passes, repoints
    `/home/agent/pgu-ticketboard-live/current`
 7. restarts the live board unit
-8. when the live unit is system-scoped, stops/disables any shadow `--user`
+8. waits for `GET /api/board` to return HTTP 200
+9. asserts that the live `/api/board` response reports the deployed release SHA
+   in `build_id`
+10. when the live unit is system-scoped, stops/disables any shadow `--user`
    board unit so it cannot crash-loop on port `8770`
-9. waits for `GET /api/board` to return HTTP 200
 
 If the canary fails, `deploy-restart` exits nonzero without touching the live
 `current` symlink or restarting the service. If the post-restart live smoke
-check fails, it repoints `current` back to the previous release, restarts the
-service again, verifies the old release is healthy, and exits nonzero.
+check or live build-id check fails, it repoints `current` back to the previous
+release, restarts the service again, verifies the old release is healthy, and
+exits nonzero.
 
 If `/etc/systemd/system/pgu-ticket-board.service` exists, `deploy-restart`
 targets that system unit with plain `systemctl`, not `sudo`. The host should

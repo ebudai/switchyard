@@ -399,6 +399,44 @@ smoke_check_http() {
     smoke_check_url "http://$BOARD_HOST:$BOARD_PORT$SMOKE_PATH" "$SMOKE_TIMEOUT_SECONDS"
 }
 
+verify_live_build_id() {
+    local expected_sha="$1"
+    local url="http://$BOARD_HOST:$BOARD_PORT/api/board"
+    if python3 - "$url" "$SMOKE_TIMEOUT_SECONDS" "$expected_sha" <<'PY'
+import json
+import sys
+import time
+import urllib.error
+import urllib.request
+
+url = sys.argv[1]
+deadline = time.monotonic() + float(sys.argv[2])
+expected = sys.argv[3]
+last_error = "not attempted"
+while time.monotonic() < deadline:
+    try:
+        with urllib.request.urlopen(url, timeout=1.0) as response:
+            if response.status != 200:
+                last_error = f"HTTP {response.status}"
+                continue
+            payload = json.load(response)
+        actual = str(payload.get("build_id", "")).strip()
+        if actual == expected:
+            sys.exit(0)
+        last_error = f"build_id {actual!r} != expected {expected!r}"
+    except (OSError, ValueError, urllib.error.URLError) as exc:
+        last_error = str(exc)
+    time.sleep(0.25)
+print(f"ticket-board live build-id check failed for {url}: {last_error}", file=sys.stderr)
+sys.exit(1)
+PY
+    then
+        log "live build-id verification passed for $expected_sha"
+        return 0
+    fi
+    return 1
+}
+
 verify_local_socket_available() {
     local socket_dir
     if [[ "${TICKET_BOARD_SKIP_POST_DEPLOY_SOCKET_VERIFY:-}" == "1" ]]; then
@@ -746,6 +784,10 @@ deploy_restart_service() {
     verify_current_release_sha "$deployed_sha"
     restart_live_service "$scope"
     if ! smoke_check_http; then
+        rollback_live_service "$scope" "$previous_release"
+        exit 1
+    fi
+    if ! verify_live_build_id "$deployed_sha"; then
         rollback_live_service "$scope" "$previous_release"
         exit 1
     fi

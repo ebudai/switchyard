@@ -97,7 +97,17 @@ EOF
 set -euo pipefail
 if [[ "${1:-}" == "-" ]]; then
     url="${2:-}"
+    expected_build_id="${4:-}"
     cat >/dev/null
+    if [[ -n "$expected_build_id" ]]; then
+        printf 'build-id:%s:%s\n' "$url" "$expected_build_id" >>"$TICKET_BOARD_HEALTH_GATE_LOG"
+        actual_build_id="${TICKET_BOARD_HEALTH_GATE_LIVE_BUILD_ID:-$expected_build_id}"
+        if [[ "$actual_build_id" != "$expected_build_id" ]]; then
+            echo "ticket-board live build-id check failed for $url: build_id '$actual_build_id' != expected '$expected_build_id'" >&2
+            exit 1
+        fi
+        exit 0
+    fi
     printf 'smoke:%s\n' "$url" >>"$TICKET_BOARD_HEALTH_GATE_LOG"
     if [[ -f "${TICKET_BOARD_FAIL_CANARY_SMOKE_FILE:-}" && "$url" == *:19001/* ]]; then
         exit 1
@@ -126,6 +136,7 @@ run_service() {
     TICKET_BOARD_SYSTEM_UNIT_PATH="$SYSTEM_UNIT_PATH" \
     TICKET_BOARD_SYSTEM_UNIT_HASH_RECORD="$HASH_RECORD" \
     TICKET_BOARD_HEALTH_GATE_CANARY_ENV="$deploy_root/canary.env" \
+    TICKET_BOARD_HEALTH_GATE_LIVE_BUILD_ID="${TICKET_BOARD_HEALTH_GATE_LIVE_BUILD_ID:-}" \
     TICKET_BOARD_SKIP_POST_DEPLOY_SOCKET_VERIFY="$skip_socket_verify" \
     TICKET_BOARD_SKIP_MIGRATIONS=1 \
     BOARD_CANARY_PORT=19001 \
@@ -207,6 +218,37 @@ new_current="$(readlink -f "$DEPLOY_ROOT/current")"
 }
 grep -q 'systemctl:restart pgu-ticket-board.service' "$LOGFILE" || {
     echo "FAIL: healthy deploy did not restart the live service" >&2
+    cat "$LOGFILE" >&2
+    exit 1
+}
+grep -q "build-id:http://127.0.0.1:8770/api/board:$(basename "$new_current")" "$LOGFILE" || {
+    echo "FAIL: healthy deploy did not verify the live board build id" >&2
+    cat "$LOGFILE" >&2
+    exit 1
+}
+
+printf '#!/usr/bin/env python3\nprint("stale-process board")\n' >"$SOURCE_REPO/scripts/ticket-board.py"
+git -C "$SOURCE_REPO" add scripts/ticket-board.py
+git -C "$SOURCE_REPO" commit -m "stale-process release" >/dev/null
+: >"$LOGFILE"
+export TICKET_BOARD_HEALTH_GATE_LIVE_BUILD_ID="$(basename "$new_current")"
+if run_service "$SOURCE_REPO" "$DEPLOY_ROOT" deploy-restart >"$TMPDIR_T/stale-process.out" 2>"$TMPDIR_T/stale-process.err"; then
+    echo "FAIL: deploy-restart should fail when the live board still reports the previous build id" >&2
+    exit 1
+fi
+unset TICKET_BOARD_HEALTH_GATE_LIVE_BUILD_ID
+grep -q 'live build-id check failed' "$TMPDIR_T/stale-process.err" || {
+    echo "FAIL: stale live process failure did not report the build-id mismatch" >&2
+    cat "$TMPDIR_T/stale-process.err" >&2
+    exit 1
+}
+[[ "$(readlink -f "$DEPLOY_ROOT/current")" == "$new_current" ]] || {
+    echo "FAIL: stale live process failure did not roll back current" >&2
+    exit 1
+}
+restart_count="$(grep -c 'systemctl:restart pgu-ticket-board.service' "$LOGFILE" || true)"
+[[ "$restart_count" == "2" ]] || {
+    echo "FAIL: stale live process rollback should restart once for deploy and once after restoring previous release, saw $restart_count" >&2
     cat "$LOGFILE" >&2
     exit 1
 }

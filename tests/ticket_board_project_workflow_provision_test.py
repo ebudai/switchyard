@@ -26,7 +26,7 @@ EXPECTED_STAGES = [
         "name": "in_progress",
         "display_label": "Implementation",
         "rank": 2,
-        "owner_roles": ["main", "app", "ops", "perf", "research"],
+        "owner_roles": ["builder"],
     },
     {"name": "audit", "display_label": "Audit", "rank": 3, "owner_roles": ["audit"]},
     {"name": "director_review", "display_label": "Final Sign-Off", "rank": 4, "owner_roles": ["director"]},
@@ -95,7 +95,7 @@ def main() -> int:
             run(["pg_ctl", "-D", str(data_dir), "-o", f"-k {socket_dir} -p {port} -h ''", "-w", "start"], capture=False)
             run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
             psql(admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
-            psql(admin_conn, render_workflow_sql(build_plan(project="otto", owner_user="otto-agent")))
+            psql(admin_conn, render_workflow_sql(build_plan(project="otto", owner_user="otto-agent", implementer_roles=["builder"])))
             psql(admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
 
             stages = json.loads(
@@ -114,6 +114,8 @@ FROM ticket_board.workflow_stages;
             )
             assert stages == EXPECTED_STAGES, stages
             assert psql(admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions;") == "7"
+            assert psql(admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('builder');") == "t"
+            assert psql(admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('ops');") == "f"
             reachable = json.loads(
                 psql(
                     admin_conn,
@@ -147,10 +149,10 @@ SELECT ticket_board.create_ticket('Provisioned workflow ticket', 'Body', 'draft'
             service_call(service_conn, "director", f"SELECT ticket_board.release_draft('{ticket_id}');")
             assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "analysis:director"
 
-            service_call(service_conn, "director", f"SELECT ticket_board.route('{ticket_id}', 'in_progress', 'ops');")
-            assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "in_progress:ops"
+            service_call(service_conn, "director", f"SELECT ticket_board.route('{ticket_id}', 'in_progress', 'builder');")
+            assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "in_progress:builder"
 
-            service_call(service_conn, "ops", f"SELECT ticket_board.submit_to_audit('{ticket_id}', 'abcdef1');")
+            service_call(service_conn, "builder", f"SELECT ticket_board.submit_to_audit('{ticket_id}', 'abcdef1');")
             assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "audit:audit"
 
             service_call(service_conn, "audit", f"SELECT ticket_board.audit_sign_off('{ticket_id}', 'Audit verified.');")

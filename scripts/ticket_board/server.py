@@ -44,8 +44,19 @@ PANE_SOCKET_MODE = 0o666
 IMAGE_CACHE_CONTROL = "public, max-age=31536000, immutable"
 THUMBNAIL_MAX_SIZE = 512
 THUMBNAIL_QUALITY = 80
-IMPLEMENTER_ROLES = {"main", "app", "ops", "perf", "research"}
 CALLER_ROLES = set(APP_CALLER_ROLES)
+DEFAULT_IMPLEMENTER_ROLES = ("main", "app", "ops", "perf", "research")
+
+
+def _role_set_from_env(name: str, default: tuple[str, ...]) -> set[str]:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return set(default)
+    roles = {item.strip().lower() for item in raw.split(",") if item.strip()}
+    return roles or set(default)
+
+
+IMPLEMENTER_ROLES = _role_set_from_env("TICKET_BOARD_IMPLEMENTER_ROLES", DEFAULT_IMPLEMENTER_ROLES)
 TASK_ROLES = IMPLEMENTER_ROLES | {"director", "audit", "inspector"}
 OPERATION_ALLOWED_ROLES = {
     "create_ticket": {"director", "user"},

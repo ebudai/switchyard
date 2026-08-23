@@ -24,6 +24,9 @@ The output directory contains:
 - `<project>-workflow.sql`: per-project workflow seed. For new non-`pgu`
   projects this replaces the default PGU workflow data with the five visible
   stages `Draft`, `Triage`, `Implementation`, `Audit`, and `Final Sign-Off`.
+  The default implementation-stage owner is the generic caller role
+  `implementer`; pass `--implementer-role <role>` more than once to seed a
+  project-specific implementer set instead.
 - `operator-commands.sh`: ordered privileged commands to review and run.
 
 The provisioner intentionally renders first. It does not mutate the live PGU
@@ -48,3 +51,9 @@ the listener grant on `ticket_has_unresolved_blockers`.
 
 Changing to per-project DB role names is a separate schema change, not part of
 this provisioning step.
+
+Workflow authority role names are still `director`, `audit`, and `user`.
+Provisioning customizes the implementation-stage owner roles because those are
+project/team specific; the board service exports the generated assignee,
+caller-role, and implementer-role lists to keep the HTTP gate and PostgreSQL
+workflow data aligned.

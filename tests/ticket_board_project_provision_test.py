@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -42,6 +43,9 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert plan.service_role == "ticket_board_service"
     assert plan.listener_role == "ticket_board_listener"
     assert plan.workflow_seed == "default-five-stage"
+    assert plan.implementer_roles == ("implementer",)
+    assert plan.assignee_roles == ("unassigned", "implementer", "audit", "director")
+    assert plan.caller_roles == ("director", "implementer", "audit", "user")
 
     combined = "\n".join(
         [
@@ -58,6 +62,9 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "127.0.0.1 --port 8871" in combined
     assert "PGDATABASE=stellaris_ticket_board" in combined
     assert "TICKET_BOARD_SOCKET=/run/stellaris-ticket-board/ticket-board.sock" in combined
+    assert "TICKET_BOARD_IMPLEMENTER_ROLES=implementer" in combined
+    assert "TICKET_BOARD_ASSIGNEES=unassigned,implementer,audit,director" in combined
+    assert "TICKET_BOARD_CALLER_ROLES=director,implementer,audit,user" in combined
     assert "TICKET_BOARD_PANE_STATE_DIR=%t/stellaris-ticket-board/pane-state" in combined
     assert "PGU_TICKET_BOARD_SOCKET=" not in combined
     assert "PGU_TICKET_BOARD_PANE_STATE_DIR=" not in combined
@@ -71,7 +78,8 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert combined.index("-f 'stellaris-workflow.sql'") < combined.index("ticket_board/rbac.sql")
     assert "Seed the default five-stage workflow for stellaris" in combined
     assert "('analysis', 'Triage', 1, ARRAY['director']::text[]" in combined
-    assert "('in_progress', 'Implementation', 2, ARRAY['main', 'app', 'ops', 'perf', 'research']::text[]" in combined
+    assert "('in_progress', 'Implementation', 2, ARRAY['implementer']::text[]" in combined
+    assert "ADD CONSTRAINT tickets_assignee_check CHECK (assignee IN ('unassigned', 'implementer', 'audit', 'director'))" in combined
     assert "('audit', 'director_review', 'audit_sign_off', ARRAY['audit']::text[]" in combined
     assert "('backlog'," not in render_workflow_sql(plan)
     assert "('inspection'," not in render_workflow_sql(plan)
@@ -101,6 +109,7 @@ def test_pgu_project_render_matches_live_port_database_and_frame_dir() -> None:
     assert plan.asset_dir == "/home/agent/.claude/pgu-tickets-assets"
     assert plan.frame_dir == "/tmp/pgu-frames"
     assert plan.workflow_seed == "pgu-full"
+    assert plan.implementer_roles == ("main", "app", "ops", "perf", "research")
     assert "--port 8770" in board_unit
     assert "--frames /tmp/pgu-frames" in board_unit
     assert "--assets /home/agent/.claude/pgu-tickets-assets" in board_unit
@@ -136,6 +145,29 @@ def test_custom_database_actor_roles_fail_loud_until_schema_supports_them() -> N
 
     assert "custom database service/listener roles are not supported yet" in message
     assert "ticket_board_service" in message
+
+
+def test_board_role_environment_drives_python_gate() -> None:
+    script = """
+from scripts.ticket_board import app
+from scripts.ticket_board import server
+
+assert app.ASSIGNEES == ('unassigned', 'builder', 'audit', 'director')
+assert app.CALLER_ROLES == ('director', 'builder', 'audit', 'user')
+assert server.IMPLEMENTER_ROLES == {'builder'}
+assert server.OPERATION_ALLOWED_ROLES['start_work'] == {'builder'}
+assert server.OPERATION_ALLOWED_ROLES['submit_to_audit'] == {'builder'}
+assert 'builder' in server.OPERATION_ALLOWED_ROLES['file_bug']
+assert 'ops' not in server.OPERATION_ALLOWED_ROLES['start_work']
+"""
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(ROOT),
+        "TICKET_BOARD_ASSIGNEES": "unassigned,builder,audit,director",
+        "TICKET_BOARD_CALLER_ROLES": "director,builder,audit,user",
+        "TICKET_BOARD_IMPLEMENTER_ROLES": "builder",
+    }
+    subprocess.run([sys.executable, "-c", script], check=True, env=env)
 
 
 def test_cli_writes_reviewable_artifacts() -> None:
@@ -182,6 +214,8 @@ def test_cli_writes_reviewable_artifacts() -> None:
                 "porter",
                 "--owner-user",
                 "otto-agent",
+                "--implementer-role",
+                "builder",
                 "--render",
                 "workflow-sql",
             ],
@@ -191,6 +225,7 @@ def test_cli_writes_reviewable_artifacts() -> None:
             stderr=subprocess.PIPE,
         )
         assert "Seed the default five-stage workflow for porter" in workflow_result.stdout
+        assert "ARRAY['builder']::text[]" in workflow_result.stdout
 
 
 def main() -> int:
@@ -198,6 +233,7 @@ def main() -> int:
     test_pgu_project_render_matches_live_port_database_and_frame_dir()
     test_database_sql_bootstraps_schema_compatible_roles_and_project_database()
     test_custom_database_actor_roles_fail_loud_until_schema_supports_them()
+    test_board_role_environment_drives_python_gate()
     test_cli_writes_reviewable_artifacts()
     print("ticket_board_project_provision_test: ok")
     return 0

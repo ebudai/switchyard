@@ -19,8 +19,26 @@ FRAME_DIR_DEFAULT = Path("/tmp/pgu-frames")
 REPO_ROOT_DEFAULT = Path(__file__).resolve().parents[2]
 COMMIT_GIT_DIR_DEFAULT = Path("/data/git/pgu.git")
 POSTGRES_DSN_DEFAULT = os.environ.get("TICKET_BOARD_DATABASE_URL") or os.environ.get("DATABASE_URL", "")
-ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "inspector", "agent", "director", "research")
-CALLER_ROLES = ("director", "main", "app", "ops", "perf", "audit", "inspector", "research", "user")
+DEFAULT_ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "inspector", "agent", "director", "research")
+DEFAULT_CALLER_ROLES = ("director", "main", "app", "ops", "perf", "audit", "inspector", "research", "user")
+
+
+def _role_list_from_env(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    roles: list[str] = []
+    for item in raw.split(","):
+        role = item.strip().lower()
+        if not role:
+            continue
+        if role not in roles:
+            roles.append(role)
+    return tuple(roles) or default
+
+
+ASSIGNEES = _role_list_from_env("TICKET_BOARD_ASSIGNEES", DEFAULT_ASSIGNEES)
+CALLER_ROLES = _role_list_from_env("TICKET_BOARD_CALLER_ROLES", DEFAULT_CALLER_ROLES)
 LEGACY_ASSIGNEE_ALIASES = {"ui": "app"}
 LEGACY_STATE_ALIASES = {"open": "analysis"}
 STATES = (

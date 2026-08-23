@@ -14,7 +14,11 @@ from typing import Sequence
 
 PROJECT_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 USER_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$")
+ROLE_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 DEFAULT_IMPLEMENTER_ROLES = ("main", "app", "ops", "perf", "research")
+DEFAULT_PROJECT_IMPLEMENTER_ROLES = ("implementer",)
+DEFAULT_PGU_ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "inspector", "agent", "director", "research")
+DEFAULT_PGU_CALLER_ROLES = ("director", "main", "app", "ops", "perf", "audit", "inspector", "research", "user")
 
 
 @dataclass(frozen=True)
@@ -43,6 +47,9 @@ class ProjectBoardProvision:
     listener_database_url: str
     admin_database_url: str
     workflow_seed: str
+    implementer_roles: tuple[str, ...]
+    assignee_roles: tuple[str, ...]
+    caller_roles: tuple[str, ...]
 
 
 def _validate_project(value: str) -> str:
@@ -57,6 +64,21 @@ def _validate_user(value: str) -> str:
     if not USER_RE.fullmatch(user):
         raise SystemExit("owner user must look like a local Unix account name")
     return user
+
+
+def _validate_role(value: str) -> str:
+    role = value.strip().lower()
+    if not ROLE_RE.fullmatch(role):
+        raise SystemExit("role names must match ^[a-z][a-z0-9_-]{0,63}$")
+    return role
+
+
+def _dedupe(values: Sequence[str]) -> tuple[str, ...]:
+    result: list[str] = []
+    for value in values:
+        if value not in result:
+            result.append(value)
+    return tuple(result)
 
 
 def _identifier_from_project(project: str) -> str:
@@ -84,6 +106,7 @@ def build_plan(
     source_repo: Path | None = None,
     asset_dir: Path | None = None,
     frame_dir: Path | None = None,
+    implementer_roles: Sequence[str] | None = None,
 ) -> ProjectBoardProvision:
     project = _validate_project(project)
     owner_user = _validate_user(owner_user)
@@ -94,6 +117,19 @@ def build_plan(
             "custom database service/listener roles are not supported yet; "
             "the current schema enforces ticket_board_service and ticket_board_listener"
         )
+    if implementer_roles is None:
+        resolved_implementer_roles = DEFAULT_IMPLEMENTER_ROLES if project == "pgu" else DEFAULT_PROJECT_IMPLEMENTER_ROLES
+    else:
+        resolved_implementer_roles = tuple(_validate_role(role) for role in implementer_roles)
+        if not resolved_implementer_roles:
+            raise SystemExit("at least one implementer role is required")
+    resolved_implementer_roles = _dedupe(resolved_implementer_roles)
+    if project == "pgu":
+        assignee_roles = DEFAULT_PGU_ASSIGNEES
+        caller_roles = DEFAULT_PGU_CALLER_ROLES
+    else:
+        assignee_roles = _dedupe(("unassigned", *resolved_implementer_roles, "audit", "director"))
+        caller_roles = _dedupe(("director", *resolved_implementer_roles, "audit", "user"))
     ident = _identifier_from_project(project)
     unit_prefix = f"{project}-ticket-board"
     runtime_directory = unit_prefix
@@ -141,6 +177,9 @@ def build_plan(
         ),
         admin_database_url=f"postgresql:///{resolved_database}?host=/var/run/postgresql&user=postgres",
         workflow_seed="pgu-full" if project == "pgu" else "default-five-stage",
+        implementer_roles=resolved_implementer_roles,
+        assignee_roles=assignee_roles,
+        caller_roles=caller_roles,
     )
 
 
@@ -158,6 +197,10 @@ def sql_literal(value: str) -> str:
 
 def sql_text_array(values: Sequence[str]) -> str:
     return "ARRAY[" + ", ".join(sql_literal(value) for value in values) + "]::text[]"
+
+
+def env_list(values: Sequence[str]) -> str:
+    return ",".join(values)
 
 
 def render_board_unit(plan: ProjectBoardProvision) -> str:
@@ -181,6 +224,9 @@ Environment=PGDATABASE={plan.database}
 Environment=PGUSER={plan.service_role}
 Environment=TICKET_BOARD_SOCKET={plan.socket_path}
 Environment=TICKET_BOARD_DATABASE_URL={plan.board_database_url}
+Environment=TICKET_BOARD_IMPLEMENTER_ROLES={env_list(plan.implementer_roles)}
+Environment=TICKET_BOARD_ASSIGNEES={env_list(plan.assignee_roles)}
+Environment=TICKET_BOARD_CALLER_ROLES={env_list(plan.caller_roles)}
 NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=read-only
@@ -281,6 +327,40 @@ COMMENT ON DATABASE {db_ident} IS 'ticket board database for project {plan.proje
 """
 
 
+def render_project_role_constraint_sql(plan: ProjectBoardProvision) -> str:
+    notification_roles = tuple(role for role in plan.assignee_roles if role not in {"unassigned", "agent", "user"})
+    return f"""
+ALTER TABLE ticket_board.tickets
+    DROP CONSTRAINT IF EXISTS tickets_assignee_check;
+ALTER TABLE ticket_board.tickets
+    ADD CONSTRAINT tickets_assignee_check CHECK (assignee IN ({", ".join(sql_literal(role) for role in plan.assignee_roles)}));
+
+ALTER TABLE ticket_board.ticket_notification_state
+    DROP CONSTRAINT IF EXISTS ticket_notification_state_awaiting_role_check;
+ALTER TABLE ticket_board.ticket_notification_state
+    ADD CONSTRAINT ticket_notification_state_awaiting_role_check
+    CHECK (
+        awaiting_role = ''
+        OR awaiting_role IN ({", ".join(sql_literal(role) for role in notification_roles)})
+    );
+
+ALTER TABLE ticket_board.ticket_notification_state
+    DROP CONSTRAINT IF EXISTS ticket_notification_state_last_implementer_assignee_check;
+ALTER TABLE ticket_board.ticket_notification_state
+    ADD CONSTRAINT ticket_notification_state_last_implementer_assignee_check
+    CHECK (
+        last_implementer_assignee = ''
+        OR last_implementer_assignee IN ({", ".join(sql_literal(role) for role in plan.implementer_roles)})
+    );
+
+ALTER TABLE ticket_board.ticket_notification_queue
+    DROP CONSTRAINT IF EXISTS ticket_notification_queue_target_role_check;
+ALTER TABLE ticket_board.ticket_notification_queue
+    ADD CONSTRAINT ticket_notification_queue_target_role_check
+    CHECK (target_role IN ({", ".join(sql_literal(role) for role in notification_roles)}));
+"""
+
+
 def render_workflow_sql(plan: ProjectBoardProvision) -> str:
     if plan.workflow_seed == "pgu-full":
         return f"""-- {plan.project} keeps the full workflow seeded by schema.sql.
@@ -290,16 +370,16 @@ def render_workflow_sql(plan: ProjectBoardProvision) -> str:
     stages = [
         ("draft", "Draft", 0, (), None, None, None, False),
         ("analysis", "Triage", 1, ("director",), None, None, None, False),
-        ("in_progress", "Implementation", 2, DEFAULT_IMPLEMENTER_ROLES, None, None, None, False),
+        ("in_progress", "Implementation", 2, plan.implementer_roles, None, None, None, False),
         ("audit", "Audit", 3, ("audit",), None, None, "audit_signoff", False),
         ("director_review", "Final Sign-Off", 4, ("director",), None, None, None, False),
     ]
     transitions = [
         ("draft", "analysis", "release_draft", ("director", "user"), False, False),
         ("analysis", "in_progress", "route", ("director",), False, False),
-        ("analysis", "in_progress", "start_work", DEFAULT_IMPLEMENTER_ROLES, False, False),
+        ("analysis", "in_progress", "start_work", plan.implementer_roles, False, False),
         ("in_progress", "audit", "route", ("director",), False, False),
-        ("in_progress", "audit", "submit_to_audit", DEFAULT_IMPLEMENTER_ROLES, False, False),
+        ("in_progress", "audit", "submit_to_audit", plan.implementer_roles, False, False),
         ("audit", "director_review", "route", ("director",), False, False),
         ("audit", "director_review", "audit_sign_off", ("audit",), False, False),
     ]
@@ -346,6 +426,7 @@ BEGIN
     END IF;
 END;
 $$;
+{render_project_role_constraint_sql(plan)}
 
 DELETE FROM ticket_board.workflow_transitions;
 UPDATE ticket_board.workflow_stages SET gate_skip_to = NULL WHERE gate_skip_to IS NOT NULL;
@@ -466,6 +547,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-repo", type=Path, help="source checkout to export into the board release root")
     parser.add_argument("--asset-dir", type=Path, help="durable attachment directory")
     parser.add_argument("--frame-dir", type=Path, help="frame inbox directory")
+    parser.add_argument(
+        "--implementer-role",
+        action="append",
+        dest="implementer_roles",
+        help="implementation-stage owner role; repeat for multiple implementers",
+    )
     parser.add_argument("--output-dir", type=Path, help="write all artifacts to this directory")
     parser.add_argument("--json", action="store_true", help="print plan JSON")
     parser.add_argument(
@@ -490,6 +577,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         source_repo=args.source_repo,
         asset_dir=args.asset_dir,
         frame_dir=args.frame_dir,
+        implementer_roles=args.implementer_roles,
     )
     if args.output_dir:
         write_artifacts(plan, args.output_dir)

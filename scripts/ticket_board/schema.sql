@@ -709,9 +709,32 @@ $$;
 CREATE OR REPLACE FUNCTION ticket_board.ticket_is_implementer_assignee(p_assignee text)
 RETURNS boolean
 LANGUAGE sql
-IMMUTABLE
+STABLE
 AS $$
-    SELECT p_assignee IN ('main', 'app', 'perf', 'ops', 'research');
+    SELECT EXISTS (
+        SELECT 1
+        FROM ticket_board.workflow_stages ws
+        WHERE ws.name = 'in_progress'
+          AND btrim(lower(coalesce(p_assignee, ''))) = ANY(ws.owner_roles)
+    );
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.ticket_valid_assignee(p_assignee text)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $$
+    WITH normalized AS (
+        SELECT btrim(lower(coalesce(p_assignee, ''))) AS role
+    )
+    SELECT role = 'unassigned'
+        OR role = 'agent'
+        OR EXISTS (
+            SELECT 1
+            FROM ticket_board.workflow_stages ws
+            WHERE role = ANY(ws.owner_roles)
+        )
+    FROM normalized;
 $$;
 
 CREATE OR REPLACE FUNCTION ticket_board.ticket_reserved_implementer(
@@ -778,7 +801,7 @@ DECLARE
 BEGIN
     IF normalized_target <> '' THEN
         IF NOT ticket_board.ticket_is_implementer_assignee(normalized_target) THEN
-            RAISE EXCEPTION 'kickback target assignee must be an implementer (main, app, ops, perf, or research)';
+            RAISE EXCEPTION 'kickback target assignee must be an implementation-stage owner';
         END IF;
         RETURN normalized_target;
     END IF;
@@ -813,7 +836,7 @@ BEGIN
         NEW.parked := false;
     END IF;
     IF NEW.state = 'in_progress' AND NOT ticket_board.ticket_is_implementer_assignee(NEW.assignee) THEN
-        RAISE EXCEPTION 'in_progress tickets require an implementer assignee (main, app, ops, perf, or research)';
+        RAISE EXCEPTION 'in_progress tickets require an implementation-stage owner assignee';
     END IF;
     IF NEW.state = 'in_progress'
        AND ticket_board.ticket_is_implementer_assignee(NEW.assignee)
@@ -849,7 +872,7 @@ BEGIN
     END IF;
 
     IF NEW.state = 'in_progress' AND NOT ticket_board.ticket_is_implementer_assignee(NEW.assignee) THEN
-        RAISE EXCEPTION 'in_progress tickets require an implementer assignee (main, app, ops, perf, or research)';
+        RAISE EXCEPTION 'in_progress tickets require an implementation-stage owner assignee';
     END IF;
 
     IF coalesce(OLD.manually_controlled, false) OR coalesce(NEW.manually_controlled, false) THEN
@@ -3254,7 +3277,11 @@ BEGIN
     caller_role := nullif(current_setting('ticket_board.caller_role', true), '');
     IF caller_role IS NOT NULL
        AND cardinality(coalesce(p_allowed_roles, ARRAY[]::text[])) > 0
-       AND caller_role <> ALL(p_allowed_roles) THEN
+       AND caller_role <> ALL(p_allowed_roles)
+       AND NOT (
+           p_allowed_roles && ARRAY['main', 'app', 'ops', 'perf', 'research']::text[]
+           AND ticket_board.ticket_is_implementer_assignee(caller_role)
+       ) THEN
         RAISE EXCEPTION 'role % cannot call %', caller_role, p_action
             USING ERRCODE = '42501';
     END IF;
@@ -3425,7 +3452,17 @@ BEGIN
     IF actor IS NULL THEN
         RETURN ticket_board.current_actor_role();
     END IF;
-    IF actor NOT IN ('director', 'user', 'main', 'app', 'ops', 'audit', 'inspector', 'perf', 'research') THEN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM (
+            SELECT unnest(wt.allowed_roles) AS role
+            FROM ticket_board.workflow_transitions wt
+            UNION
+            SELECT unnest(ws.owner_roles) AS role
+            FROM ticket_board.workflow_stages ws
+        ) AS valid_roles
+        WHERE valid_roles.role = actor
+    ) THEN
         RAISE EXCEPTION 'invalid ticket_board.caller_role: %', actor;
     END IF;
     RETURN actor;
@@ -3925,7 +3962,9 @@ BEGIN
         PERFORM ticket_board.require_actor(ARRAY['main', 'app', 'ops', 'perf', 'research', 'audit'], 'file_bug');
         actor := ticket_board.current_app_actor();
     END IF;
-    IF actor NOT IN ('ticket_board_service', 'main', 'app', 'ops', 'perf', 'research', 'audit') THEN
+    IF actor <> 'ticket_board_service'
+       AND actor <> 'audit'
+       AND NOT ticket_board.ticket_is_implementer_assignee(actor) THEN
         RAISE EXCEPTION 'role % cannot call file_bug', actor
             USING ERRCODE = '42501';
     END IF;
@@ -4001,7 +4040,7 @@ BEGIN
     IF new_state NOT IN ('draft', 'backlog', 'analysis', 'in_progress', 'inspection', 'audit', 'dat', 'user_review', 'director_review', 'done', 'cancelled') THEN
         RAISE EXCEPTION 'invalid state: %', new_state;
     END IF;
-    IF assignee NOT IN ('unassigned', 'main', 'app', 'perf', 'ops', 'audit', 'inspector', 'agent', 'director', 'research') THEN
+    IF NOT ticket_board.ticket_valid_assignee(assignee) THEN
         RAISE EXCEPTION 'invalid assignee: %', assignee;
     END IF;
 
@@ -4086,7 +4125,7 @@ BEGIN
     IF new_state NOT IN ('draft', 'backlog', 'analysis', 'in_progress', 'inspection', 'audit', 'dat', 'user_review', 'director_review', 'done', 'cancelled') THEN
         RAISE EXCEPTION 'invalid state: %', new_state;
     END IF;
-    IF assignee NOT IN ('unassigned', 'main', 'app', 'perf', 'ops', 'audit', 'inspector', 'agent', 'director', 'research') THEN
+    IF NOT ticket_board.ticket_valid_assignee(assignee) THEN
         RAISE EXCEPTION 'invalid assignee: %', assignee;
     END IF;
 

@@ -36,6 +36,10 @@ DEFAULT_DIRECTORCTL_SEND_TIMEOUT_SECONDS = 10.0
 DEFAULT_REQUEUE_BASE_SECONDS = 5.0
 DEFAULT_REQUEUE_MAX_SECONDS = 300.0
 DEFAULT_BUSY_REQUEUE_SECONDS = 1.0
+# These strings are persisted in ticket_notification_queue.last_error and must
+# match schema.sql reset predicates.
+PANE_BUSY_REQUEUE_ERROR = "pane busy"
+FINISH_CURRENT_REQUEUE_ERROR = "finish current"
 DEFAULT_DIRECTOR_COMPOSING_TIMEOUT_SECONDS = 15 * 60.0
 DEFAULT_IDLE_STALL_GRACE_SECONDS = 45.0
 DEFAULT_IDLE_STALL_NUDGE_CADENCE_SECONDS = 30 * 60.0
@@ -1410,8 +1414,7 @@ WHERE id = %s
                     conn,
                     notification_id,
                     attempts,
-                    "finish current",
-                    delay_seconds=self.busy_requeue_seconds,
+                    FINISH_CURRENT_REQUEUE_ERROR,
                 )
                 continue
             pane_busy, activity_trace = self._activity_state_for_notification(kind, target)
@@ -1444,7 +1447,7 @@ WHERE id = %s
                     conn,
                     notification_id,
                     attempts,
-                    "pane busy",
+                    PANE_BUSY_REQUEUE_ERROR,
                 )
                 continue
             if self.pre_send_recheck_delay_seconds > 0:
@@ -1489,7 +1492,7 @@ WHERE id = %s
                     conn,
                     notification_id,
                     attempts,
-                    "pane busy",
+                    PANE_BUSY_REQUEUE_ERROR,
                 )
                 continue
             directorctl_diagnostic: dict[str, Any] = {}

@@ -25,6 +25,7 @@ from scripts.ticket_board.notify_listener import (
     DEFAULT_REQUEUE_BASE_SECONDS,
     DEFAULT_REQUEUE_MAX_SECONDS,
     DirectorctlSender,
+    FINISH_CURRENT_REQUEUE_ERROR,
     PaneActivityGate as RealPaneActivityGate,
     PaneHookStateStore,
     TicketBoardNotifyListener,
@@ -984,7 +985,33 @@ def test_hook_busy_requeues_with_exponential_backoff() -> None:
     ]
 
 
+def test_backoff_sequence_is_pinned_to_five_minute_cap() -> None:
+    listener = TicketBoardNotifyListener(conninfo="", poll_seconds=0)
+
+    assert [listener._backoff_seconds(attempts) for attempts in range(1, 9)] == [
+        5.0,
+        10.0,
+        20.0,
+        40.0,
+        80.0,
+        160.0,
+        300.0,
+        300.0,
+    ]
+
+
 def test_busy_backoff_attempts_stay_below_ten_in_five_minutes() -> None:
+    elapsed = 0.0
+    attempts = 0
+    listener = TicketBoardNotifyListener(conninfo="", poll_seconds=0)
+    while elapsed < 5 * 60:
+        attempts += 1
+        elapsed += listener._backoff_seconds(attempts)
+
+    assert attempts < 10
+
+
+def test_finish_current_backoff_attempts_stay_below_ten_in_five_minutes() -> None:
     elapsed = 0.0
     attempts = 0
     listener = TicketBoardNotifyListener(conninfo="", poll_seconds=0)
@@ -1635,8 +1662,39 @@ def test_new_assignment_waits_behind_existing_in_progress_ticket() -> None:
     assert conn.acked == []
     assert len(conn.requeued) == 1
     assert conn.requeued[0][0] == 43
-    assert conn.requeued[0][1][2] == "finish current"
+    assert conn.requeued[0][1][1] == f"{DEFAULT_REQUEUE_BASE_SECONDS:g} seconds"
+    assert conn.requeued[0][1][2] == FINISH_CURRENT_REQUEUE_ERROR
     assert trace_events(conn) == ["listener_claim", "finish_current_defer"]
+
+
+def test_finish_current_requeues_with_exponential_backoff() -> None:
+    sent: list[tuple[str, str]] = []
+    delays: list[str] = []
+    with TemporaryStateDir() as tmp_path:
+        store, gate = hook_gate(tmp_path)
+        store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
+        for attempts in (1, 2, 4, 9):
+            conn = FakeConnection(
+                [queue_row(43, "PGU-324", state="in_progress", assignee="ops", attempts=attempts)],
+                finish_current_blockers={"ops": "PGU-321"},
+            )
+            listener = TicketBoardNotifyListener(
+                conninfo="dbname=test",
+                sender=lambda target, message: sent.append((target, message)),
+                activity_gate=gate.is_working,
+                connector=lambda *args, conn=conn, **kwargs: conn,
+                poll_seconds=0,
+            )
+            assert listener.listen_once(max_notifications=1) == 0
+            delays.append(conn.requeued[0][1][1])
+
+    assert sent == []
+    assert delays == [
+        f"{DEFAULT_REQUEUE_BASE_SECONDS:g} seconds",
+        f"{DEFAULT_REQUEUE_BASE_SECONDS * 2:g} seconds",
+        f"{DEFAULT_REQUEUE_BASE_SECONDS * 8:g} seconds",
+        f"{DEFAULT_REQUEUE_MAX_SECONDS:g} seconds",
+    ]
 
 
 def test_two_in_progress_tickets_do_not_mutually_finish_current_deadlock() -> None:
@@ -1667,7 +1725,7 @@ def test_two_in_progress_tickets_do_not_mutually_finish_current_deadlock() -> No
     assert sent == [("pgu-ops:0.0", "New ticket for you: PGU-334 -- Queue")]
     assert conn.acked == [623]
     assert [row[0] for row in conn.requeued] == [625]
-    assert conn.requeued[0][1][2] == "finish current"
+    assert conn.requeued[0][1][2] == FINISH_CURRENT_REQUEUE_ERROR
     assert trace_events(conn) == [
         "listener_claim",
         "finish_current_defer",

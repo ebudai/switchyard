@@ -386,6 +386,90 @@ LIMIT 1;
             psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-2';")
             psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-2';")
 
+            insert_ticket(conninfo, "PGU-63000", title="Current implementation", assignee="ops", state="in_progress", implementation="active")
+            insert_ticket(conninfo, "PGU-63001", title="Deferred implementation", assignee="ops", state="backlog", implementation="queued")
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id IN ('PGU-63000', 'PGU-63001');")
+            psql(
+                conninfo,
+                """
+INSERT INTO ticket_board.ticket_notification_queue (
+    ticket_id, kind, target_role, message, payload, dedupe_key,
+    attempts, next_attempt_at, claimed_at, last_error, created_at, updated_at
+) VALUES (
+    'PGU-63001',
+    'transition',
+    'ops',
+    'New ticket for you: PGU-63001 -- Deferred implementation',
+    jsonb_build_object(
+        'kind', 'transition',
+        'id', 'PGU-63001',
+        'title', 'Deferred implementation',
+        'new_state', 'in_progress',
+        'assignee', 'ops',
+        'target_role', 'ops'
+    ),
+    'pgu630-finish-current',
+    12,
+    clock_timestamp() + interval '5 minutes',
+    clock_timestamp(),
+    'finish current',
+    clock_timestamp() - interval '2 hours',
+    clock_timestamp()
+);
+SET ROLE ticket_board_listener;
+SELECT ticket_board.requeue_notification(
+    (
+        SELECT id
+        FROM ticket_board.ticket_notification_queue
+        WHERE dedupe_key = 'pgu630-finish-current'
+    ),
+    interval '5 minutes',
+    'finish current'
+);
+SELECT ticket_board.requeue_notification(
+    (
+        SELECT id
+        FROM ticket_board.ticket_notification_queue
+        WHERE dedupe_key = 'pgu630-finish-current'
+    ),
+    interval '5 minutes',
+    'finish current'
+);
+RESET ROLE;
+""",
+            )
+            retry_loud_count = psql(
+                conninfo,
+                """
+SELECT count(*)
+FROM ticket_board.notification_trace nt
+JOIN ticket_board.ticket_notification_queue q ON q.id = nt.notification_id
+WHERE q.dedupe_key = 'pgu630-finish-current'
+  AND nt.event = 'retry_loud';
+""",
+            ).stdout.strip()
+            assert retry_loud_count == "1", retry_loud_count
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '6300000' WHERE id = 'PGU-63000';")
+            finish_current_reset = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'last_error', last_error,
+    'claimed_at_cleared', claimed_at IS NULL,
+    'due_now', next_attempt_at <= clock_timestamp()
+)::text
+FROM ticket_board.ticket_notification_queue
+WHERE dedupe_key = 'pgu630-finish-current';
+""",
+                ).stdout
+            )
+            assert finish_current_reset == {"last_error": None, "claimed_at_cleared": True, "due_now": True}, finish_current_reset
+            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue WHERE dedupe_key = 'pgu630-finish-current';")
+            psql(conninfo, "DELETE FROM ticket_board.tickets WHERE id = 'PGU-63001';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-63000';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-63000';")
+
             insert_ticket(conninfo, "PGU-45120", title="Park releases current", assignee="research", state="analysis", implementation="active")
             psql(conninfo, "UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-45120';")
             insert_ticket(conninfo, "PGU-45121", title="Queued behind parked ticket", assignee="research", state="analysis", implementation="queued")
@@ -3517,12 +3601,13 @@ WHERE tgname IN (
     'tickets_notification_state_update',
     'tickets_zz_auto_advance_analysis',
     'tickets_zzz_notify_transition',
+    'tickets_zzzzx_reset_finish_current_notifications',
     'ticket_comments_notification_activity'
 )
   AND NOT tgisinternal;
 """,
             ).stdout.strip()
-            assert trigger_count == "7"
+            assert trigger_count == "8"
         finally:
             subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], check=False)
 

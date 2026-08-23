@@ -20,7 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.ticket_board import write_client as write_client_module
-from scripts.ticket_board.server import CALLER_ROLE_HEADER
+from scripts.ticket_board.server import CALLER_ROLE_HEADER, LEGACY_CALLER_ROLE_HEADER
 from scripts.ticket_board.write_client import TicketBoardWriteClient
 
 
@@ -34,7 +34,8 @@ class RecordingHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         payload = json.loads(self.rfile.read(length) or b"{}")
         caller = self.headers.get(CALLER_ROLE_HEADER)
-        self.server.requests.append((self.path, caller, payload))  # type: ignore[attr-defined]
+        legacy_caller = self.headers.get(LEGACY_CALLER_ROLE_HEADER)
+        self.server.requests.append((self.path, caller, legacy_caller, payload))  # type: ignore[attr-defined]
         ticket_id = "PGU-NEW"
         operation = self.path.rsplit("/", 1)[-1]
         if self.path.startswith("/api/tickets/PGU-") and "/actions/" in self.path:
@@ -119,12 +120,12 @@ class RecordingHandler(BaseHTTPRequestHandler):
 
 class RecordingServer(ThreadingHTTPServer):
     def __init__(self) -> None:
-        self.requests: list[tuple[str, str | None, dict[str, object]]] = []
+        self.requests: list[tuple[str, str | None, str | None, dict[str, object]]] = []
         super().__init__(("127.0.0.1", 0), RecordingHandler)
 
 
-def request_pairs(requests: list[tuple[str, str | None, dict[str, object]]]) -> list[tuple[str, str | None]]:
-    return [(path, caller_role) for path, caller_role, _ in requests]
+def request_pairs(requests: list[tuple[str, str | None, str | None, dict[str, object]]]) -> list[tuple[str, str | None]]:
+    return [(path, caller_role) for path, caller_role, _, _ in requests]
 
 
 def run_git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -161,11 +162,12 @@ def pushd(path: Path):
         os.chdir(previous)
 
 
-def assert_action_requests(requests: list[tuple[str, str | None, dict[str, object]]]) -> None:
+def assert_action_requests(requests: list[tuple[str, str | None, str | None, dict[str, object]]]) -> None:
     assert requests, "client should send requests"
     pairs = request_pairs(requests)
-    for path, caller_role in pairs:
+    for path, caller_role, legacy_caller_role, _ in requests:
         assert caller_role, (path, caller_role)
+        assert legacy_caller_role == caller_role, (path, caller_role, legacy_caller_role)
         assert "/actions/" in path, (path, caller_role)
     assert ("/api/tickets/actions/create_ticket", "director") in pairs
     assert ("/api/tickets/actions/file_bug", "ops") in pairs
@@ -263,7 +265,7 @@ def assert_submit_rejects_unpushed_commit(
     base_url: str,
     repo: Path,
     local_only_hash: str,
-    requests: list[tuple[str, str | None, dict[str, object]]],
+    requests: list[tuple[str, str | None, str | None, dict[str, object]]],
 ) -> None:
     with pushd(repo):
         client = TicketBoardWriteClient(base_url, "director")
@@ -378,7 +380,7 @@ def main() -> int:
             assert_auto_socket_connect_failure_falls_back_to_tcp(base_url, root / "blocked.sock")
             assert_action_requests(server.requests)
             assert ("/api/tickets/PGU-120/actions/start_work", "ops") in request_pairs(server.requests)
-            assert all(path != "/api/tickets/PGU-122/actions/submit_to_audit" for path, _, _ in server.requests)
+            assert all(path != "/api/tickets/PGU-122/actions/submit_to_audit" for path, _, _, _ in server.requests)
         finally:
             server.shutdown()
             server.server_close()

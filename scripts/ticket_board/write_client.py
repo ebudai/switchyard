@@ -16,6 +16,7 @@ from urllib import error as urllib_error
 from urllib import parse, request
 
 CALLER_ROLE_HEADER = "X-Ticket-Board-Caller-Role"
+LEGACY_CALLER_ROLE_HEADER = "X-PGU-Caller-Role"
 
 
 def _env_first(*names: str) -> str:
@@ -177,7 +178,7 @@ class TicketBoardWriteClient:
         req = request.Request(
             f"{self.api_url}{path}",
             data=body,
-            headers={"Content-Type": "application/json", CALLER_ROLE_HEADER: role},
+            headers={"Content-Type": "application/json", CALLER_ROLE_HEADER: role, LEGACY_CALLER_ROLE_HEADER: role},
             method="POST",
         )
         try:

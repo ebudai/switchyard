@@ -530,6 +530,9 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             if self._local_peer_credentials is None:
                 raise ValueError("local socket request missing peer credentials")
             return self.caller_registry.role_for_pid(self._local_peer_credentials.pid)
+        # Keep the legacy name while clients transition. A server-side alias only
+        # protects old clients on a new board; clients must dual-send to support
+        # new tooling talking to an older deployed board.
         raw = self.headers.get(CALLER_ROLE_HEADER, "") or self.headers.get(LEGACY_CALLER_ROLE_HEADER, "")
         role = raw.strip().lower()
         if not role:

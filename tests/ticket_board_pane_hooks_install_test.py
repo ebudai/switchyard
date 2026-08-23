@@ -418,6 +418,29 @@ def test_session_start_resume_injection_is_scoped_to_resume_sources_and_active_t
                 env=_hook_env(TICKET_BOARD_URL=board_url),
             )
         with _board_with_tickets(
+            [{"id": "PGU-557", "title": "Resume compacted work", "state": "in_progress", "assignee": "main"}]
+        ) as board_url:
+            resume = subprocess.run(
+                [
+                    str(ROOT / "scripts" / HOOK_NAME),
+                    "idle",
+                    "--target",
+                    "pgu-main:0.0",
+                    "--source",
+                    "claude.SessionStart",
+                    "--state-dir",
+                    str(state_dir),
+                    "--session-dir",
+                    str(session_dir),
+                    "--record-session",
+                ],
+                input=json.dumps({"source": "resume", "session_id": "resume-session"}),
+                text=True,
+                capture_output=True,
+                check=True,
+                env=_hook_env(TICKET_BOARD_URL=board_url),
+            )
+        with _board_with_tickets(
             [{"id": "PGU-557", "title": "Not active", "state": "audit", "assignee": "main"}]
         ) as board_url:
             no_ticket = subprocess.run(
@@ -442,6 +465,10 @@ def test_session_start_resume_injection_is_scoped_to_resume_sources_and_active_t
             )
 
     assert startup.stdout == ""
+    resume_context = json.loads(resume.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "Your session just resumed." in resume_context
+    assert "Your context was just compacted." not in resume_context
+    assert "ACTIVE work: PGU-557 -- Resume compacted work" in resume_context
     assert no_ticket.stdout == ""
 
 

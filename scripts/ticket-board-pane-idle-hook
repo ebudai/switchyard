@@ -353,13 +353,14 @@ def _active_in_progress_ticket_for_role(
     return sorted(matches, key=lambda ticket: _ticket_number(str(ticket.get("id", ""))))[0]
 
 
-def _resume_context_for_ticket(ticket: dict[str, object], *, board_url: str) -> str:
+def _resume_context_for_ticket(ticket: dict[str, object], *, board_url: str, source: str) -> str:
     ticket_id = str(ticket.get("id", "")).strip().upper()
     title = str(ticket.get("title", "")).strip()
     ticket_url = f"{_board_root_url(board_url)}/api/tickets/{ticket_id}"
     title_suffix = f" -- {title}" if title else ""
+    opening = "Your context was just compacted." if source == "compact" else "Your session just resumed."
     return (
-        f"Your context was just compacted. You have ACTIVE work: {ticket_id}{title_suffix} "
+        f"{opening} You have ACTIVE work: {ticket_id}{title_suffix} "
         f"(in_progress, assigned to you). Re-read it: curl {ticket_url} . "
         "Resume where you left off; do NOT wait for a new prompt."
     )
@@ -371,7 +372,8 @@ def _session_start_additional_context_output(
     payload: object,
     environ: dict[str, str],
 ) -> dict[str, object] | None:
-    if _session_start_source(payload) not in SESSION_START_RESUME_SOURCES:
+    session_start_source = _session_start_source(payload)
+    if session_start_source not in SESSION_START_RESUME_SOURCES:
         return None
     role = _role_for_target(target)
     if not role:
@@ -383,7 +385,7 @@ def _session_start_additional_context_output(
     return {
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": _resume_context_for_ticket(ticket, board_url=board_url),
+            "additionalContext": _resume_context_for_ticket(ticket, board_url=board_url, source=session_start_source),
         }
     }
 

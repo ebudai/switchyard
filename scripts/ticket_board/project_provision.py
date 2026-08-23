@@ -8,7 +8,7 @@ import json
 import re
 import sys
 from dataclasses import asdict, dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Sequence
 
 
@@ -201,6 +201,31 @@ def sql_text_array(values: Sequence[str]) -> str:
 
 def env_list(values: Sequence[str]) -> str:
     return ",".join(values)
+
+
+def owned_ancestor_dirs(owner_user: str, target: str, *, include_target: bool) -> tuple[str, ...]:
+    home = PurePosixPath("/home") / owner_user
+    path = PurePosixPath(target)
+    try:
+        path.relative_to(home)
+    except ValueError:
+        return ()
+    end = path if include_target else path.parent
+    if end == home:
+        return ()
+    relative_parts = end.relative_to(home).parts
+    return tuple(str(home.joinpath(*relative_parts[:index])) for index in range(1, len(relative_parts) + 1))
+
+
+def owned_directory_command(plan: ProjectBoardProvision, dirs: Sequence[str], *, mode: str = "0755") -> str:
+    unique_dirs = _dedupe(tuple(dirs))
+    if not unique_dirs:
+        return ""
+    quoted_dirs = " ".join(shell_quote(value) for value in unique_dirs)
+    return (
+        f"sudo install -d -m {mode} -o {shell_quote(plan.owner_user)} "
+        f"-g {shell_quote(plan.owner_user)} {quoted_dirs}"
+    )
 
 
 def render_board_unit(plan: ProjectBoardProvision) -> str:
@@ -481,17 +506,42 @@ def render_operator_commands(plan: ProjectBoardProvision) -> str:
             f"sudo psql -X -v ON_ERROR_STOP=1 {shell_quote(plan.admin_database_url)} "
             f"-f {shell_quote(plan.project + '-workflow.sql')}\n"
         )
+    install_asset_frame_parent = owned_directory_command(
+        plan,
+        (
+            *owned_ancestor_dirs(plan.owner_user, plan.asset_dir, include_target=False),
+            *owned_ancestor_dirs(plan.owner_user, plan.frame_dir, include_target=False),
+        ),
+    )
     if plan.project == "pgu" and plan.frame_dir == "/tmp/pgu-frames":
-        install_asset_frame = (
-            f"sudo install -d -m 0775 -o {shell_quote(plan.owner_user)} -g {shell_quote(plan.owner_user)} {q_asset}\n"
-            f"sudo install -d -m 1777 -o root -g root {q_frame}"
+        install_asset_frame = "\n".join(
+            line
+            for line in (
+                install_asset_frame_parent,
+                f"sudo install -d -m 0775 -o {shell_quote(plan.owner_user)} -g {shell_quote(plan.owner_user)} {q_asset}",
+                f"sudo install -d -m 1777 -o root -g root {q_frame}",
+            )
+            if line
         )
         grant_asset_frame = f"sudo setfacl -R -m u:{plan.service_user}:rwx {q_asset}"
     else:
-        install_asset_frame = (
-            f"sudo install -d -m 0775 -o {shell_quote(plan.owner_user)} -g {shell_quote(plan.owner_user)} {q_asset} {q_frame}"
+        install_asset_frame = "\n".join(
+            line
+            for line in (
+                install_asset_frame_parent,
+                f"sudo install -d -m 0775 -o {shell_quote(plan.owner_user)} -g {shell_quote(plan.owner_user)} {q_asset} {q_frame}",
+            )
+            if line
         )
         grant_asset_frame = f"sudo setfacl -R -m u:{plan.service_user}:rwx {q_asset} {q_frame}"
+    install_listener_unit_parent = owned_directory_command(
+        plan,
+        owned_ancestor_dirs(
+            plan.owner_user,
+            f"/home/{plan.owner_user}/.config/systemd/user",
+            include_target=True,
+        ),
+    )
     return f"""#!/usr/bin/env bash
 set -euo pipefail
 
@@ -514,7 +564,7 @@ sudo TICKET_BOARD_ADMIN_DATABASE_URL={shell_quote(plan.admin_database_url)} {she
 sudo psql -X -v ON_ERROR_STOP=1 {shell_quote(plan.admin_database_url)} -f {shell_quote(plan.board_current + '/scripts/ticket_board/rbac.sql')}
 sudo systemctl daemon-reload
 sudo systemctl enable --now {plan.board_unit}
-sudo install -d -m 0755 -o {shell_quote(plan.owner_user)} -g {shell_quote(plan.owner_user)} {shell_quote('/home/' + plan.owner_user + '/.config/systemd/user')}
+{install_listener_unit_parent}
 sudo install -m 0644 -o {shell_quote(plan.owner_user)} -g {shell_quote(plan.owner_user)} {shell_quote(plan.listener_unit)} {q_listener_unit}
 sudo loginctl enable-linger {shell_quote(plan.owner_user)}
 sudo -u {shell_quote(plan.owner_user)} env XDG_RUNTIME_DIR=/run/user/$(id -u {shell_quote(plan.owner_user)}) systemctl --user daemon-reload

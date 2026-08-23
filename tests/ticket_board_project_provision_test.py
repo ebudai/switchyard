@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import json
 import os
+import pwd
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -98,6 +100,67 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "/home/agent/.claude/pgu-tickets-assets" not in combined
     assert "RuntimeDirectory=pgu-ticket-board" not in combined
     assert "/run/pgu-ticket-board/ticket-board.sock" not in combined
+
+
+def test_operator_commands_create_owned_parents_before_systemd_paths() -> None:
+    plan = build_plan(project="otto", owner_user="otto-agent", port=8873)
+    commands = render_operator_commands(plan)
+    claude_parent = "sudo install -d -m 0755 -o 'otto-agent' -g 'otto-agent' '/home/otto-agent/.claude'"
+    asset_frame_leaf = (
+        "sudo install -d -m 0775 -o 'otto-agent' -g 'otto-agent' "
+        "'/home/otto-agent/.claude/otto-tickets-assets' "
+        "'/home/otto-agent/.claude/otto-ticket-frames'"
+    )
+    config_parents = (
+        "sudo install -d -m 0755 -o 'otto-agent' -g 'otto-agent' "
+        "'/home/otto-agent/.config' "
+        "'/home/otto-agent/.config/systemd' "
+        "'/home/otto-agent/.config/systemd/user'"
+    )
+    listener_install = (
+        "sudo install -m 0644 -o 'otto-agent' -g 'otto-agent' "
+        "'otto-ticket-board-notify-listener.service' "
+        "'/home/otto-agent/.config/systemd/user/otto-ticket-board-notify-listener.service'"
+    )
+
+    assert claude_parent in commands
+    assert asset_frame_leaf in commands
+    assert commands.index(claude_parent) < commands.index(asset_frame_leaf)
+    assert config_parents in commands
+    assert listener_install in commands
+    assert commands.index(config_parents) < commands.index(listener_install)
+
+
+def test_owned_readwrite_path_layout_passes_systemd_verify() -> None:
+    systemd_analyze = shutil.which("systemd-analyze")
+    if systemd_analyze is None:
+        return
+
+    current_user = pwd.getpwuid(os.getuid()).pw_name
+    with tempfile.TemporaryDirectory(prefix="pgu-provision-systemd-path.") as tmp:
+        root = Path(tmp) / "home" / current_user
+        asset_dir = root / ".claude" / "otto-tickets-assets"
+        frame_dir = root / ".claude" / "otto-ticket-frames"
+        asset_dir.mkdir(parents=True)
+        frame_dir.mkdir(parents=True)
+        unit = Path(tmp) / "otto-ticket-board.service"
+        unit.write_text(
+            "\n".join(
+                [
+                    "[Unit]",
+                    "Description=Path ownership verification",
+                    "",
+                    "[Service]",
+                    "Type=oneshot",
+                    f"User={current_user}",
+                    "ExecStart=/bin/true",
+                    f"ReadWritePaths={asset_dir} {frame_dir}",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        subprocess.run([systemd_analyze, "verify", str(unit)], check=True)
 
 
 def test_pgu_project_render_matches_live_port_database_and_frame_dir() -> None:
@@ -240,6 +303,8 @@ def test_cli_writes_reviewable_artifacts() -> None:
 
 def main() -> int:
     test_non_pgu_project_is_fully_parameterized()
+    test_operator_commands_create_owned_parents_before_systemd_paths()
+    test_owned_readwrite_path_layout_passes_systemd_verify()
     test_pgu_project_render_matches_live_port_database_and_frame_dir()
     test_database_sql_bootstraps_schema_compatible_roles_and_project_database()
     test_custom_database_actor_roles_fail_loud_until_schema_supports_them()

@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+HOST="/run/postgresql"
+USER_NAME="postgres"
+EXECUTE=0
+PLAN_ONLY=0
+EXPECTED_TICKET_COUNT=""
+DATABASES=()
+
+usage() {
+    cat <<'EOF'
+Usage: scripts/ticket-board-refresh-collation-version [options]
+
+Safely plan or execute PostgreSQL collation-version repair for ticket-board
+databases after an OS libc collation update.
+
+By default this prints a plan for the postgres and pgu databases. It does not
+write unless --execute is passed.
+
+Options:
+  --database NAME              database to repair; repeatable
+  --host PATH                  PostgreSQL socket directory (default: /run/postgresql)
+  --user NAME                  PostgreSQL admin role (default: postgres)
+  --expected-ticket-count N    require ticket_board.tickets count before/after
+  --plan-only                  do not connect; only print planned SQL
+  --execute                    run REINDEX DATABASE and ALTER DATABASE ... REFRESH
+  -h, --help                   show this help
+
+Typical maintenance-window command:
+  sudo -u postgres scripts/ticket-board-refresh-collation-version --execute --expected-ticket-count 574
+EOF
+}
+
+die() {
+    printf '[ticket-board-refresh-collation-version] ERROR: %s\n' "$*" >&2
+    exit 1
+}
+
+log() {
+    printf '[ticket-board-refresh-collation-version] %s\n' "$*" >&2
+}
+
+sql_ident() {
+    local value="$1"
+    [[ "$value" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "unsafe database identifier: $value"
+    printf '"%s"' "${value//\"/\"\"}"
+}
+
+conninfo() {
+    local database="$1"
+    printf 'postgresql:///%s?host=%s&user=%s' "$database" "$HOST" "$USER_NAME"
+}
+
+psql_db() {
+    local database="$1"
+    shift
+    psql -X -v ON_ERROR_STOP=1 "$(conninfo "$database")" "$@"
+}
+
+ticket_count_or_empty() {
+    local database="$1"
+    psql_db "$database" -tA <<'SQL'
+SELECT CASE
+    WHEN to_regclass('ticket_board.tickets') IS NULL THEN ''
+    ELSE (SELECT count(*)::text FROM ticket_board.tickets)
+END;
+SQL
+}
+
+print_collation_status() {
+    local values=""
+    local database
+    for database in "${DATABASES[@]}"; do
+        values+="('$database'),"
+    done
+    values="${values%,}"
+    psql_db "postgres" <<SQL
+WITH target(datname) AS (
+    VALUES $values
+)
+SELECT d.datname,
+       d.datcollversion AS recorded_version,
+       pg_database_collation_actual_version(d.oid) AS actual_version
+FROM pg_database d
+JOIN target ON target.datname = d.datname
+ORDER BY d.datname;
+SQL
+}
+
+plan_database() {
+    local database="$1"
+    local ident
+    ident="$(sql_ident "$database")"
+    printf 'Database %s:\n' "$database"
+    printf '  REINDEX DATABASE %s;\n' "$ident"
+    printf '  ALTER DATABASE %s REFRESH COLLATION VERSION;\n' "$ident"
+}
+
+repair_database() {
+    local database="$1"
+    local ident before_count after_count
+    ident="$(sql_ident "$database")"
+    before_count="$(ticket_count_or_empty "$database")"
+    if [[ -n "$EXPECTED_TICKET_COUNT" && -n "$before_count" && "$before_count" != "$EXPECTED_TICKET_COUNT" ]]; then
+        die "$database ticket count before repair was $before_count, expected $EXPECTED_TICKET_COUNT"
+    fi
+
+    log "repairing $database; this takes locks while REINDEX DATABASE runs"
+    psql_db "$database" -c "REINDEX DATABASE $ident;"
+    psql_db "$database" -c "ALTER DATABASE $ident REFRESH COLLATION VERSION;"
+
+    after_count="$(ticket_count_or_empty "$database")"
+    if [[ -n "$before_count" && "$after_count" != "$before_count" ]]; then
+        die "$database ticket count changed during repair: before=$before_count after=$after_count"
+    fi
+    if [[ -n "$EXPECTED_TICKET_COUNT" && -n "$after_count" && "$after_count" != "$EXPECTED_TICKET_COUNT" ]]; then
+        die "$database ticket count after repair was $after_count, expected $EXPECTED_TICKET_COUNT"
+    fi
+    if [[ -n "$after_count" ]]; then
+        log "$database ticket count preserved at $after_count"
+    fi
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --database)
+            [[ $# -ge 2 ]] || die "--database requires a value"
+            DATABASES+=("$2")
+            shift 2
+            ;;
+        --host)
+            [[ $# -ge 2 ]] || die "--host requires a value"
+            HOST="$2"
+            shift 2
+            ;;
+        --user)
+            [[ $# -ge 2 ]] || die "--user requires a value"
+            USER_NAME="$2"
+            shift 2
+            ;;
+        --expected-ticket-count)
+            [[ $# -ge 2 ]] || die "--expected-ticket-count requires a value"
+            [[ "$2" =~ ^[0-9]+$ ]] || die "--expected-ticket-count must be numeric"
+            EXPECTED_TICKET_COUNT="$2"
+            shift 2
+            ;;
+        --plan-only)
+            PLAN_ONLY=1
+            shift
+            ;;
+        --execute)
+            EXECUTE=1
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            die "unknown argument: $1"
+            ;;
+    esac
+done
+
+if [[ ${#DATABASES[@]} -eq 0 ]]; then
+    DATABASES=(postgres pgu)
+fi
+for database in "${DATABASES[@]}"; do
+    sql_ident "$database" >/dev/null
+done
+
+if [[ "$PLAN_ONLY" == "1" ]]; then
+    for database in "${DATABASES[@]}"; do
+        plan_database "$database"
+    done
+    exit 0
+fi
+
+log "collation status before repair"
+print_collation_status
+
+if [[ "$EXECUTE" != "1" ]]; then
+    log "dry run only; pass --execute during a maintenance window to run the repair"
+    for database in "${DATABASES[@]}"; do
+        plan_database "$database"
+    done
+    exit 0
+fi
+
+for database in "${DATABASES[@]}"; do
+    repair_database "$database"
+done
+
+log "collation status after repair"
+print_collation_status

@@ -14,6 +14,9 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from urllib import error as urllib_error
+from urllib import request
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -21,6 +24,8 @@ if str(ROOT) not in sys.path:
 from scripts.ticket_board.server import CALLER_ROLE_HEADER
 from scripts.ticket_board.write_client import TicketBoardWriteClient, default_caller_role
 from scripts.team_launcher import cli_command_for_role, load_project_config
+
+LIVE_BOARD_URL = "http://127.0.0.1:8770"
 
 
 class RecordingHandler(BaseHTTPRequestHandler):
@@ -145,8 +150,42 @@ def setup_git_repo(root: Path) -> tuple[Path, str, str]:
     return repo, pushed_hash, local_only_hash
 
 
+def strip_board_endpoint_env(env: dict[str, str]) -> None:
+    for key in list(env):
+        if key.startswith("PGU_TICKET_BOARD_") or key.startswith("TICKET_BOARD_"):
+            env.pop(key)
+
+
+def dead_board_env(root: Path) -> dict[str, str]:
+    return {
+        "TICKET_BOARD_SOCKET": str(root / "missing-ticket-board.sock"),
+        "PGU_TICKET_BOARD_SOCKET": str(root / "missing-legacy-ticket-board.sock"),
+        "TICKET_BOARD_URL": "http://127.0.0.1:1",
+        "PGU_TICKET_BOARD_URL": "http://127.0.0.1:1",
+    }
+
+
+def live_board_ticket_count() -> int | None:
+    try:
+        with request.urlopen(f"{LIVE_BOARD_URL}/api/board", timeout=2.0) as response:
+            body = response.read().decode("utf-8", errors="replace")
+    except (OSError, urllib_error.URLError):
+        return None
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    tickets = parsed.get("tickets")
+    if not isinstance(tickets, list):
+        return None
+    return len(tickets)
+
+
 def run_cli(base_url: str, caller_role: str, cwd: Path, *args: str) -> dict[str, object]:
     env = os.environ.copy()
+    strip_board_endpoint_env(env)
     env["TICKET_BOARD_CALLER_ROLE"] = caller_role
     proc = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "ticket-board-write"), "--board-url", base_url, *args],
@@ -165,6 +204,7 @@ def run_cli(base_url: str, caller_role: str, cwd: Path, *args: str) -> dict[str,
 
 def run_cli_error(base_url: str, caller_role: str, cwd: Path, *args: str) -> str:
     env = os.environ.copy()
+    strip_board_endpoint_env(env)
     env["TICKET_BOARD_CALLER_ROLE"] = caller_role
     proc = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "ticket-board-write"), "--board-url", base_url, *args],
@@ -256,9 +296,8 @@ def assert_second_project_pane_cli_uses_project_socket(root: Path) -> None:
     thread.start()
     try:
         env = os.environ.copy()
-        for key in list(env):
-            if key.startswith("PGU_TICKET_BOARD_") or key.startswith("TICKET_BOARD_"):
-                env.pop(key)
+        strip_board_endpoint_env(env)
+        env.update(dead_board_env(root))
         env.update(pane_env)
         proc = subprocess.run(
             [
@@ -293,6 +332,55 @@ def assert_second_project_pane_cli_uses_project_socket(root: Path) -> None:
         thread.join(timeout=2)
 
 
+def assert_second_project_socket_regression_fails_without_live_board(root: Path) -> None:
+    layout_path = root / "broken-otto-layout.json"
+    layout_path.write_text(json.dumps({"KonsoleTabs": [{"Widgets": [{"Command": "", "WorkingDirectory": ""}]}]}), encoding="utf-8")
+    config_path = root / "broken-otto.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "project": "otto",
+                "layout": str(layout_path),
+                "repository": str(root),
+                "board_url": "http://127.0.0.1:20740",
+                "board_socket": str(root / "otto.sock"),
+                "roles": [{"role": "implementer", "slot": 0, "tmux_session": "otto-implementer", "cli": ["codex"]}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = load_project_config("otto", config_path)
+    pane_env = command_env(cli_command_for_role(config.roles[0], session_dir=root / "sessions"))
+    pane_env.pop("TICKET_BOARD_SOCKET", None)
+
+    env = os.environ.copy()
+    strip_board_endpoint_env(env)
+    env.update(dead_board_env(root))
+    env.update(pane_env)
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "ticket-board-write"),
+            "create-ticket",
+            "--title",
+            "Otto pane write",
+            "--body",
+            "Created from a broken otto pane environment.",
+            "--assignee",
+            "implementer",
+        ],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    combined = f"{proc.stdout}\n{proc.stderr}"
+    assert proc.returncode != 0, proc.stdout
+    assert "invalid local caller role: implementer" not in combined, combined
+    assert "FileNotFoundError" in combined, combined
+
+
 def assert_pane_requests(requests: list[tuple[str, str | None, dict[str, object]]]) -> None:
     pairs = [(path, caller_role) for path, caller_role, _ in requests]
     assert ("/api/tickets/PGU-2100/actions/start_work", "main") in pairs
@@ -312,6 +400,7 @@ def assert_pane_requests(requests: list[tuple[str, str | None, dict[str, object]
 
 
 def main() -> int:
+    live_count_before = live_board_ticket_count()
     with tempfile.TemporaryDirectory(prefix="ticket-board-pane-write-client.") as tmpdir:
         root = Path(tmpdir)
         repo, pushed_hash, local_only_hash = setup_git_repo(root)
@@ -321,11 +410,14 @@ def main() -> int:
         try:
             exercise_pane_cli(f"http://127.0.0.1:{server.server_port}", repo, pushed_hash, local_only_hash)
             assert_second_project_pane_cli_uses_project_socket(root)
+            assert_second_project_socket_regression_fails_without_live_board(root)
             assert_pane_requests(server.requests)
         finally:
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+    live_count_after = live_board_ticket_count()
+    assert live_count_after == live_count_before, (live_count_before, live_count_after)
     print("ticket_board_pane_write_client_test: ok")
     return 0
 

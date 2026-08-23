@@ -121,6 +121,41 @@ INSERT INTO ticket_board.tickets (
     '{ticket_source("PGU-207", "Durable reconcile", "analysis", "app")}'::jsonb
 );
 UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-207';
+DELETE FROM ticket_board.ticket_notification_queue;
+UPDATE ticket_board.ticket_notification_state
+SET last_activity_at = clock_timestamp() - interval '1 hour',
+    entered_current_state_at = clock_timestamp() - interval '1 hour',
+    last_nudged_at = clock_timestamp() - interval '40 minutes',
+    nudge_count = 3
+WHERE ticket_id IN ('PGU-206', 'PGU-207');
+""",
+            )
+            nudged = psql(
+                listener_conninfo,
+                """
+SELECT ticket_board.notify_idle_stall_nudges(
+    jsonb_build_object(
+        'ops', (clock_timestamp() - interval '1 hour')::text,
+        'app', (clock_timestamp() - interval '1 hour')::text
+    ),
+    clock_timestamp(),
+    interval '45 seconds',
+    interval '30 minutes',
+    2
+);
+""",
+            )
+            assert nudged == "2", nudged
+            psql(
+                admin_conninfo,
+                """
+UPDATE ticket_board.ticket_notification_queue
+SET next_attempt_at = CASE ticket_id
+    WHEN 'PGU-206' THEN clock_timestamp() - interval '10 seconds'
+    WHEN 'PGU-207' THEN clock_timestamp()
+    ELSE next_attempt_at
+END
+WHERE ticket_id IN ('PGU-206', 'PGU-207');
 """,
             )
             before = psql(
@@ -149,7 +184,12 @@ FOR UPDATE
                 lock_conn.rollback()
 
             assert delivered == 1
-            assert sent == [("pgu-app:0.0", "New ticket for you: PGU-207 -- Durable reconcile")]
+            assert sent == [
+                (
+                    "pgu-director:0.0",
+                    "PRIORITY PGU-207 -- Durable reconcile appears stuck for app; check/reassign",
+                )
+            ]
             after = psql(
                 listener_conninfo,
                 "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-207';",

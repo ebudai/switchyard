@@ -607,7 +607,7 @@ def test_session_start_records_non_uuid_named_session_id() -> None:
         assert session["session_id"] == session_id
 
 
-def test_session_start_always_updates_existing_session_file() -> None:
+def test_session_start_updates_existing_record_when_it_matches_launched_session() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
         home = Path(tmp) / "home"
         state_dir = Path(tmp) / "state"
@@ -638,12 +638,66 @@ def test_session_start_always_updates_existing_session_file() -> None:
             input=json.dumps({"session_id": "new_session"}),
             text=True,
             check=True,
-            env=_hook_env(),
+            env=_hook_env(TICKET_BOARD_PANE_SESSION_ID="new_session"),
         )
 
         session = json.loads(session_path.read_text(encoding="utf-8"))
         assert session["session_id"] == "new_session"
         assert session["source"] == "codex.SessionStart"
+
+
+def test_foreign_session_start_cannot_clobber_launched_pane_session_record() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        home = Path(tmp) / "home"
+        state_dir = Path(tmp) / "state"
+        session_dir = Path(tmp) / "sessions"
+        bin_path = home / ".local" / "bin" / HOOK_NAME
+        subprocess.run([str(INSTALLER), "install", "--home", str(home), "--bin-path", str(bin_path)], check=True)
+        session_dir.mkdir(parents=True)
+        session_path = session_dir / "pgu-inspector_0.0.json"
+        original_record = {
+            "target": "pgu-inspector:0.0",
+            "session_id": "98759ea4-3597-4d25-933d-7b5059a0db61",
+            "source": "gemini.SessionStart",
+            "payload": {"session_id": "98759ea4-3597-4d25-933d-7b5059a0db61", "cwd": "/home/agent/Projects/pgu"},
+        }
+        session_path.write_text(json.dumps(original_record, sort_keys=True) + "\n", encoding="utf-8")
+
+        proc = subprocess.run(
+            [
+                str(bin_path),
+                "idle",
+                "--target",
+                "pgu-inspector:0.0",
+                "--source",
+                "gemini.SessionStart",
+                "--state-dir",
+                str(state_dir),
+                "--session-dir",
+                str(session_dir),
+                "--record-session",
+            ],
+            input=json.dumps(
+                {
+                    "event": "SessionStart",
+                    "conversationId": "ebd87947-ab41-4bcd-a487-109fa5750566",
+                    "artifactDirectoryPath": "/tmp/transient-artifacts",
+                    "transcriptPath": "/tmp/transient-transcript.jsonl",
+                }
+            ),
+            text=True,
+            capture_output=True,
+            check=True,
+            env=_hook_env(TICKET_BOARD_PANE_SESSION_ID="98759ea4-3597-4d25-933d-7b5059a0db61"),
+        )
+
+        state = json.loads((state_dir / "pgu-inspector_0.0.json").read_text(encoding="utf-8"))
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+        assert state["target"] == "pgu-inspector:0.0"
+        assert state["state"] == "idle"
+        assert state["source"] == "gemini.SessionStart"
+        assert session == original_record
+        assert "ignoring foreign SessionStart" in proc.stderr
 
 
 def test_session_start_records_env_session_id_fallback() -> None:

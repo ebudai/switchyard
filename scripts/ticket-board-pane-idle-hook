@@ -159,9 +159,17 @@ def _walk_json_values(value: object) -> list[tuple[str, str]]:
     return found
 
 
-def _extract_session_id(payload: object, environ: dict[str, str], explicit_session_id: str = "") -> str:
-    if explicit_session_id.strip():
-        return explicit_session_id.strip()
+def _extract_payload_session_id(payload: object) -> str:
+    for key, value in _walk_json_values(payload):
+        if value and key in SESSION_ID_KEYS:
+            return value
+    for _key, value in _walk_json_values(payload):
+        if UUID_RE.match(value):
+            return value
+    return ""
+
+
+def _env_session_id(environ: dict[str, str]) -> str:
     for key in (
         "TICKET_BOARD_PANE_SESSION_ID",
         "PGU_PANE_SESSION_ID",
@@ -173,12 +181,18 @@ def _extract_session_id(payload: object, environ: dict[str, str], explicit_sessi
         value = environ.get(key, "").strip()
         if value:
             return value
-    for key, value in _walk_json_values(payload):
-        if value and key in SESSION_ID_KEYS:
-            return value
-    for _key, value in _walk_json_values(payload):
-        if UUID_RE.match(value):
-            return value
+    return ""
+
+
+def _extract_session_id(payload: object, environ: dict[str, str], explicit_session_id: str = "") -> str:
+    if explicit_session_id.strip():
+        return explicit_session_id.strip()
+    payload_session_id = _extract_payload_session_id(payload)
+    if payload_session_id:
+        return payload_session_id
+    env_session_id = _env_session_id(environ)
+    if env_session_id:
+        return env_session_id
     return ""
 
 
@@ -232,6 +246,36 @@ def _session_id_from_file(path: Path) -> str:
     return str(parsed.get("session_id") or "").strip()
 
 
+def _is_session_start_source(source: str) -> bool:
+    normalized = source.strip().lower()
+    return normalized == "sessionstart" or normalized.endswith(".sessionstart")
+
+
+def _should_write_session(
+    *,
+    target: str,
+    existing_session_id: str,
+    incoming_session_id: str,
+    source: str,
+    launched_session_id: str,
+    record_session: bool,
+) -> bool:
+    if not incoming_session_id:
+        return False
+    if not existing_session_id:
+        return True
+    if incoming_session_id == existing_session_id:
+        return record_session
+    if _is_session_start_source(source) and launched_session_id and incoming_session_id != launched_session_id:
+        print(
+            "ticket-board-pane-idle-hook: ignoring foreign SessionStart for "
+            f"{target}: incoming session {incoming_session_id!r} does not match launched session {launched_session_id!r}",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Record a ticket-board pane idle/busy state for notification delivery.")
     parser.add_argument("state", choices=["idle", "busy", "blocked"], help="pane lifecycle state to record")
@@ -262,7 +306,15 @@ def main(argv: list[str] | None = None) -> int:
     should_wait_for_session_payload = args.record_session or not existing_session_id
     payload = _read_stdin_json(timeout=args.stdin_timeout if should_wait_for_session_payload else 0.0)
     session_id = _extract_session_id(payload, os.environ, args.session_id)
-    if session_id and (args.record_session or not existing_session_id or session_id != existing_session_id):
+    launched_session_id = args.session_id.strip() or _env_session_id(os.environ)
+    if _should_write_session(
+        target=target,
+        existing_session_id=existing_session_id,
+        incoming_session_id=session_id,
+        source=args.source,
+        launched_session_id=launched_session_id,
+        record_session=args.record_session,
+    ):
         _write_session(args.session_dir, target, session_id, source=args.source, payload=payload)
     return 0
 

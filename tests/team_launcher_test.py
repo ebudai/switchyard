@@ -1972,6 +1972,84 @@ def test_reload_logs_resume_fallback_when_cli_never_starts() -> None:
         team_launcher.RESUME_STARTUP_POLL_SECONDS = original_poll
 
 
+def test_agy_reload_skips_missing_local_conversation_store_instead_of_silent_fallback() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    role = next(role for role in config.roles if role.role == "inspector")
+    runner = FakeRunner(existing_sessions={"pgu-inspector"}, current_commands={"pgu-inspector:0.0": "agy"})
+    stderr = StringIO()
+    original_root = team_launcher.AGY_CONVERSATION_ROOT
+
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        tmp_path = Path(tmp)
+        session_dir = tmp_path / "sessions"
+        session_id = "12345678-1234-5678-9abc-def012345678"
+        (session_dir / session_file_name(role.target)).parent.mkdir(parents=True, exist_ok=True)
+        (session_dir / session_file_name(role.target)).write_text(
+            json.dumps({"target": role.target, "session_id": session_id}) + "\n",
+            encoding="utf-8",
+        )
+        team_launcher.AGY_CONVERSATION_ROOT = tmp_path / "empty-agy-store"
+        try:
+            with redirect_stderr(stderr):
+                assert (
+                    run_role_pane(
+                        role,
+                        mode="reload",
+                        session_dir=session_dir,
+                        pane_state_dir=tmp_path / "pane-state",
+                        runner=runner,
+                    )
+                    == 0
+                )
+        finally:
+            team_launcher.AGY_CONVERSATION_ROOT = original_root
+
+    assert "recorded agy/gemini conversation" in stderr.getvalue()
+    assert "silently falls back" in stderr.getvalue()
+    new_sessions = [call for call in runner.calls if call[:5] == ["tmux", "new-session", "-d", "-s", "pgu-inspector"]]
+    assert len(new_sessions) == 1
+    assert "--conversation" not in new_sessions[0][-1]
+    assert session_id not in new_sessions[0][-1]
+
+
+def test_agy_reload_uses_recorded_id_when_local_conversation_store_exists() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    role = next(role for role in config.roles if role.role == "inspector")
+    runner = FakeRunner(existing_sessions={"pgu-inspector"}, current_commands={"pgu-inspector:0.0": "agy"})
+    original_root = team_launcher.AGY_CONVERSATION_ROOT
+
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        tmp_path = Path(tmp)
+        session_dir = tmp_path / "sessions"
+        session_id = "12345678-1234-5678-9abc-def012345678"
+        (session_dir / session_file_name(role.target)).parent.mkdir(parents=True, exist_ok=True)
+        (session_dir / session_file_name(role.target)).write_text(
+            json.dumps({"target": role.target, "session_id": session_id}) + "\n",
+            encoding="utf-8",
+        )
+        agy_root = tmp_path / "agy-store"
+        (agy_root / "conversations").mkdir(parents=True)
+        (agy_root / "conversations" / f"{session_id}.db").write_text("sqlite placeholder\n", encoding="utf-8")
+        team_launcher.AGY_CONVERSATION_ROOT = agy_root
+        try:
+            assert (
+                run_role_pane(
+                    role,
+                    mode="reload",
+                    session_dir=session_dir,
+                    pane_state_dir=tmp_path / "pane-state",
+                    runner=runner,
+                )
+                == 0
+            )
+        finally:
+            team_launcher.AGY_CONVERSATION_ROOT = original_root
+
+    new_sessions = [call for call in runner.calls if call[:5] == ["tmux", "new-session", "-d", "-s", "pgu-inspector"]]
+    assert len(new_sessions) == 1
+    assert f"agy --conversation {session_id}" in new_sessions[0][-1]
+
+
 def test_reload_refuses_to_kill_session_when_live_command_mismatches_config() -> None:
     config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
     role = next(role for role in config.roles if role.role == "ops")

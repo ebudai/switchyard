@@ -101,6 +101,23 @@ requires it to match the configured `live_commands` list, or the configured
 does not kill the pane. Use `--force` only when intentionally overriding that
 guard.
 
+Antigravity/Gemini resume has an additional limitation. On Antigravity CLI
+1.1.19, `agy --conversation <id>` is the correct flag and a cleanly-created
+throwaway conversation resumed successfully in print-mode testing. An unknown
+conversation id, however, only prints a warning, exits 0, and starts a fresh
+conversation. To avoid treating that silent fallback as a resumed inspector, the
+launcher preflights `agy`/`gemini` `--conversation` resumes against the local
+Antigravity store (`~/.gemini/antigravity-cli/conversations/<id>.db` or
+`brain/<id>`). If the store entry is missing, it starts fresh with an explicit
+warning instead of passing a doomed `--conversation` flag.
+
+That preflight does not prove model context survived. The PGU-602 reboot showed
+an inspector conversation where agy found the conversation, logged a successful
+resume and redraw, but the model still reported no prior context. After a real
+reboot or hard interruption, treat agy/gemini inspector context as unproven
+until the pane itself is asked a context-retention question. Claude `--resume`
+and Codex `resume <id>` did not show this failure in the same reboot.
+
 `provision-runtime` is the non-launching project-user setup check. It enables
 linger for the configured `run_as_user`, or for the invoking user when the
 project has no dedicated runtime account, and waits for `/run/user/<uid>` to

@@ -78,6 +78,7 @@ DEFAULT_RESUME_FLAG_BY_CLI = {
 DEFAULT_RESUME_SUBCOMMAND_BY_CLI = {
     "codex": "resume",
 }
+AGY_CONVERSATION_ROOT = Path.home() / ".gemini" / "antigravity-cli"
 RESUME_STARTUP_TIMEOUT_SECONDS = 1.5
 RESUME_STARTUP_POLL_SECONDS = 0.1
 RUNTIME_READY_ATTEMPTS = 50
@@ -732,6 +733,33 @@ def _resume_args_for_role(role: RoleConfig, session_id: str) -> list[str]:
     if role.resume_mode == "subcommand":
         return [role.resume_subcommand, session_id]
     raise SystemExit(f"role {role.role} uses unsupported resume_mode {role.resume_mode!r}")
+
+
+def _uses_agy_conversation_resume(role: RoleConfig) -> bool:
+    cli_name = _command_name(role.cli[0]) if role.cli else ""
+    return cli_name in {"agy", "gemini"} and role.resume_mode == "flag" and role.resume_flag == "--conversation"
+
+
+def agy_conversation_store_exists(session_id: str, *, root: Path | None = None) -> bool:
+    if not session_id:
+        return False
+    root = root or AGY_CONVERSATION_ROOT
+    return (root / "conversations" / f"{session_id}.db").is_file() or (root / "brain" / session_id).is_dir()
+
+
+def _resume_preflight_allows_attempt(role: RoleConfig, session_id: str) -> tuple[bool, str]:
+    if not _uses_agy_conversation_resume(role):
+        return True, ""
+    if agy_conversation_store_exists(session_id):
+        return True, ""
+    return (
+        False,
+        (
+            f"team-launcher: recorded agy/gemini conversation {session_id} for {role.role} "
+            "is not present in the local Antigravity store; starting fresh instead of relying "
+            "on agy --conversation, which silently falls back when the id is missing"
+        ),
+    )
 
 
 def cli_command_for_role(role: RoleConfig, *, session_dir: Path, resume: bool = False) -> list[str]:
@@ -1446,6 +1474,11 @@ def _start_role_session(
             file=sys.stderr,
         )
         prefer_resume = False
+    if prefer_resume:
+        preflight_ok, preflight_message = _resume_preflight_allows_attempt(role, session_id)
+        if not preflight_ok:
+            print(preflight_message, file=sys.stderr)
+            prefer_resume = False
     start_proc = runner(tmux_new_session_args(role, session_dir=session_dir, resume=prefer_resume))
     if start_proc.returncode != 0:
         return int(start_proc.returncode)

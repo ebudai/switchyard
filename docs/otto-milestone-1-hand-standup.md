@@ -1,444 +1,319 @@
-# Otto Milestone 1 Hand Standup Record
+# Otto Milestone 2 Standup Runbook
 
 Date: 2026-08-22
 
-Ticket: PGU-590
+Tickets: PGU-590, PGU-601
 
-Goal: stand up a second project named `otto` by hand, recording every manual
-step and every break. The run did not reach a running otto team. That is useful:
-the current tooling still requires privileged host setup and still carries PGU
-workflow and identity assumptions that prevent a clean five-stage otto board.
+Goal: stand up the second project board named `otto` for real, using the
+Milestone 1 findings and the fixes that landed in PGU-597, PGU-598, and
+PGU-599.
 
-## Inputs
+This document replaces the Milestone 1 failure log with the working install
+guide. The remaining split is intentional:
+
+- Team/ops prepares and reviews artifacts without root.
+- Eric runs the single privileged command block.
+- Team verifies isolation, workflow traversal, and notifications.
+
+## Current Design
 
 - Project: `otto`
 - Project user: `otto-agent`
-- UID: `1005`
-- Minimal team shape attempted: `director`, one implementer, `audit`
-- Implementer role used in the scratch launcher plan: `ops`
+- Minimal board roles: `director`, `implementer`, `audit`, plus `user` for
+  draft release compatibility.
+- Database: `otto_ticket_board`
+- HTTP port: `20740`
+- System board unit: `otto-ticket-board.service`
+- User notification unit: `otto-ticket-board-notify-listener.service`
+- Unix write socket: `/run/otto-ticket-board/ticket-board.sock`
+- Asset directory: `/home/otto-agent/.claude/otto-tickets-assets`
+- Frame inbox: `/home/otto-agent/.claude/otto-ticket-frames`
 
-`ops` was used because the current board schema does not have a generic
-`implementer` role. Allowed implementer roles are still `main`, `app`, `ops`,
-`perf`, and `research`.
+The database still uses the internal state keys supported by the shared board
+schema:
 
-## Command Log
+| Visible Stage | Internal Key |
+| --- | --- |
+| Draft | `draft` |
+| Triage | `analysis` |
+| Implementation | `in_progress` |
+| Audit | `audit` |
+| Final Sign-Off | `director_review` |
 
-All commands below were run from `/home/agent/wt-590` unless noted.
+PGU-598 seeds those five visible stages for non-`pgu` projects. PGU-599 makes
+the implementation-stage owner role data-driven, so `implementer` is no longer
+forced to masquerade as `ops`.
 
-### 1. Verify prerequisite branch state
+## Preconditions
 
-```bash
-scripts/ticket-board-read PGU-590
-scripts/ticket-board-read PGU-589
-git fetch origin
-git rev-parse --short origin/main
-git log --oneline --decorate -5 origin/main
-```
-
-Result:
-
-- PGU-590 was already `in_progress/ops`.
-- PGU-589 was `done/director`.
-- `origin/main` was `89f46a6`, which includes PGU-589.
-
-### 2. Create isolated worktree
-
-```bash
-git worktree add -b feature/pgu-590-otto-milestone-hand-standup /home/agent/wt-590 origin/main
-```
-
-Result:
-
-```text
-Preparing worktree (new branch 'feature/pgu-590-otto-milestone-hand-standup')
-branch 'feature/pgu-590-otto-milestone-hand-standup' set up to track 'origin/main'.
-HEAD is now at 89f46a6 PGU-589 generate per-project polkit deploy rule
-```
-
-### 3. Inspect provisioner and workflow source
+These commits must be in the checkout Eric uses to run the block:
 
 ```bash
-sed -n '1,620p' scripts/ticket_board/project_provision.py
-sed -n '293,390p' scripts/ticket_board/schema.sql
-sed -n '1,260p' config/team-launcher/pgu.json
-sed -n '1,260p' docs/team-launcher.md
-rg -n "workflow_stages|workflow_transitions|five-stage|triage|final sign|project workflow|seed workflow|stage_default" scripts tests docs -g '!**/__pycache__/**'
+git log --oneline -5 origin/main
 ```
 
-Findings:
+Required commits:
 
-- `ticket-board-provision-project` renders per-project unit names, socket path,
-  database name, asset path, frame path, tmpfiles, polkit rule, DB bootstrap SQL,
-  and operator commands.
-- There is no per-project workflow seed selector.
-- `schema.sql` seeds the live PGU workflow, not the requested five-stage default.
+- `6d9cd4c` or later for project ticket prefixes and generic ticket headers.
+- `70f2f0e` or later for per-project workflow seeding.
+- `608ae70` or later for the generic implementation role.
 
-### 4. Render otto provisioning artifacts
-
-```bash
-scripts/ticket-board-provision-project --project otto --owner-user otto-agent --json
-mkdir -p /home/agent/wt-590/.manual/otto-provision
-scripts/ticket-board-provision-project --project otto --owner-user otto-agent --output-dir /home/agent/wt-590/.manual/otto-provision
-ls -l .manual/otto-provision
-```
-
-Plan rendered:
-
-```json
-{
-  "admin_database_url": "postgresql:///otto_ticket_board?host=/var/run/postgresql&user=postgres",
-  "asset_dir": "/home/otto-agent/.claude/otto-tickets-assets",
-  "board_current": "/home/otto-agent/otto-ticketboard-live/current",
-  "board_database_url": "postgresql:///otto_ticket_board?host=/var/run/postgresql&user=ticket_board_service",
-  "board_root": "/home/otto-agent/otto-ticketboard-live",
-  "board_unit": "otto-ticket-board.service",
-  "database": "otto_ticket_board",
-  "frame_dir": "/home/otto-agent/.claude/otto-ticket-frames",
-  "listener_unit": "otto-ticket-board-notify-listener.service",
-  "owner_user": "otto-agent",
-  "polkit_name": "49-otto-ticket-board-deploy.rules",
-  "port": 20740,
-  "runtime_directory": "otto-ticket-board",
-  "socket_path": "/run/otto-ticket-board/ticket-board.sock"
-}
-```
-
-Generated files:
-
-```text
-49-otto-ticket-board-deploy.rules
-operator-commands.sh
-otto-database.sql
-otto-ticket-board-notify-listener.service
-otto-ticket-board.conf
-otto-ticket-board.service
-plan.json
-```
-
-### 5. Verify host user/access
+Confirm the user exists and remains private:
 
 ```bash
 id otto-agent
 getent passwd otto-agent
-ls -ld /home/otto-agent /home/otto-agent/Projects 2>&1
-find /home/otto-agent -maxdepth 2 -type d -name .git 2>&1 | head -20; echo rc=${PIPESTATUS[0]}
+ls -ld /home/otto-agent
 ```
 
-Result:
+Expected: `/home/otto-agent` may be `0700`; that is correct. The team should
+not try to write into it directly.
 
-```text
-uid=1005(otto-agent) gid=1005(otto-agent) groups=1005(otto-agent),990(kvm),942(adbusers)
-otto-agent:x:1005:1005::/home/otto-agent:/bin/bash
-drwx------ 1 otto-agent otto-agent 234 Aug 22 17:34 /home/otto-agent
-ls: cannot access '/home/otto-agent/Projects': Permission denied
-find: '/home/otto-agent': Permission denied
-rc=1
-```
+## Team Prep
 
-Break:
-
-- `agent` cannot create or inspect `/home/otto-agent/Projects/otto`.
-- The checkout step requires either logging in as `otto-agent` or root-mediated
-  directory creation/clone.
-
-### 6. Check root/polkit availability
+Run this from the merged checkout, as the normal team user:
 
 ```bash
-sudo -n true; echo sudo_rc=$?
-scripts/team-launcher otto provision-runtime --runtime-user otto-agent; echo rc=$?
-cd /home/agent/wt-590/.manual/otto-provision
-sudo install -d -m 0755 '/home/otto-agent/otto-ticketboard-live'; echo rc=$?
+cd /home/agent/Projects/pgu
+git fetch origin main
+git status --short
+mkdir -p /tmp/otto-board-provision
+rm -f /tmp/otto-board-provision/*
+scripts/ticket-board-provision-project \
+  --project otto \
+  --owner-user otto-agent \
+  --output-dir /tmp/otto-board-provision
+sed -n '1,260p' /tmp/otto-board-provision/plan.json
+sed -n '1,260p' /tmp/otto-board-provision/operator-commands.sh
+sed -n '1,220p' /tmp/otto-board-provision/otto-workflow.sql
 ```
 
-Results:
+Review points:
 
-```text
-sudo: a password is required
-sudo_rc=1
-```
+- `plan.json` has `port: 20740`, database `otto_ticket_board`, and socket
+  `/run/otto-ticket-board/ticket-board.sock`.
+- `implementer_roles` is `["implementer"]`.
+- `assignee_roles` is `["unassigned", "implementer", "audit", "director"]`.
+- `caller_roles` is `["director", "implementer", "audit", "user"]`.
+- `otto-workflow.sql` contains exactly five rows in `workflow_stages` and seven
+  rows in `workflow_transitions`.
+- The generated system unit exports `TICKET_BOARD_IMPLEMENTER_ROLES`,
+  `TICKET_BOARD_ASSIGNEES`, and `TICKET_BOARD_CALLER_ROLES` matching those
+  role lists.
 
-```text
-team-launcher: failed to enable linger for 'otto-agent': Could not enable linger: Access denied as the requested operation requires interactive authentication. However, interactive authentication has not been enabled by the calling program.; run `sudo loginctl enable-linger otto-agent` and retry
-rc=1
-```
+## Eric Privileged Block
 
-```text
-sudo: a terminal is required to read the password; either use the -S option to read from standard input or configure an askpass helper
-sudo: a password is required
-rc=1
-```
-
-Break:
-
-- The agent pane cannot perform the required root steps.
-- The generated runbook is correct in shape, but it is not executable by the
-  current ops pane without Eric/root involvement.
-
-Root-required steps from the generated runbook:
+Run this as Eric from a shell with sudo access. It regenerates artifacts from
+the current checkout, then runs the reviewed operator commands from that
+artifact directory.
 
 ```bash
-sudo install -d -m 0755 '/home/otto-agent/otto-ticketboard-live'
-sudo env TICKET_BOARD_PROJECT='otto' SOURCE_REPO='/home/agent/wt-590' BOARD_ROOT='/home/otto-agent/otto-ticketboard-live' DEPLOY_REF=origin/main TICKET_BOARD_SKIP_MIGRATIONS=1 '/home/agent/wt-590/scripts/ticket-board-service.sh' deploy
-sudo setfacl -R -m u:boardsvc:rx '/home/otto-agent/otto-ticketboard-live'
-sudo find '/home/otto-agent/otto-ticketboard-live' -type d -exec setfacl -m d:u:boardsvc:rx {} +
-sudo install -d -m 0775 -o 'otto-agent' -g 'otto-agent' '/home/otto-agent/.claude/otto-tickets-assets' '/home/otto-agent/.claude/otto-ticket-frames'
-sudo setfacl -m u:boardsvc:--x '/home/otto-agent'
-sudo setfacl -m u:boardsvc:--x '/home/otto-agent/.claude'
-sudo setfacl -R -m u:boardsvc:rwx '/home/otto-agent/.claude/otto-tickets-assets' '/home/otto-agent/.claude/otto-ticket-frames'
-sudo install -m 0644 'otto-ticket-board.service' '/etc/systemd/system/otto-ticket-board.service'
-sudo install -m 0644 'otto-ticket-board.conf' '/etc/tmpfiles.d/otto-ticket-board.conf'
-sudo install -m 0644 '49-otto-ticket-board-deploy.rules' '/etc/polkit-1/rules.d/49-otto-ticket-board-deploy.rules'
-sudo systemd-tmpfiles --create '/etc/tmpfiles.d/otto-ticket-board.conf'
-sudo -u postgres psql -X -v ON_ERROR_STOP=1 -f 'otto-database.sql'
-sudo TICKET_BOARD_ADMIN_DATABASE_URL='postgresql:///otto_ticket_board?host=/var/run/postgresql&user=postgres' '/home/otto-agent/otto-ticketboard-live/current/scripts/ticket-board-migrate'
-sudo psql -X -v ON_ERROR_STOP=1 'postgresql:///otto_ticket_board?host=/var/run/postgresql&user=postgres' -f '/home/otto-agent/otto-ticketboard-live/current/scripts/ticket_board/rbac.sql'
-sudo systemctl daemon-reload
-sudo systemctl enable --now otto-ticket-board.service
-sudo install -d -m 0755 -o 'otto-agent' -g 'otto-agent' '/home/otto-agent/.config/systemd/user'
-sudo install -m 0644 -o 'otto-agent' -g 'otto-agent' 'otto-ticket-board-notify-listener.service' '/home/otto-agent/.config/systemd/user/otto-ticket-board-notify-listener.service'
-sudo loginctl enable-linger 'otto-agent'
-sudo -u 'otto-agent' env XDG_RUNTIME_DIR=/run/user/$(id -u 'otto-agent') systemctl --user daemon-reload
-sudo -u 'otto-agent' env XDG_RUNTIME_DIR=/run/user/$(id -u 'otto-agent') systemctl --user enable --now otto-ticket-board-notify-listener.service
+set -euo pipefail
+
+cd /home/agent/Projects/pgu
+git fetch origin main
+git checkout main
+git merge --ff-only origin/main
+
+PROVISION_DIR="$(mktemp -d /tmp/otto-board-provision.XXXXXX)"
+
+scripts/ticket-board-provision-project \
+  --project otto \
+  --owner-user otto-agent \
+  --output-dir "$PROVISION_DIR"
+
+cd "$PROVISION_DIR"
+bash operator-commands.sh
+```
+
+The generated `operator-commands.sh` performs the privileged work:
+
+- creates `/home/otto-agent/otto-ticketboard-live`;
+- deploys the board release from the current source checkout;
+- grants `boardsvc` read/execute access to the release and read/write access to
+  otto assets/frame directories;
+- installs the systemd, tmpfiles, and polkit artifacts;
+- creates `otto_ticket_board`;
+- runs migrations;
+- applies `otto-workflow.sql`;
+- applies `rbac.sql`;
+- starts `otto-ticket-board.service`;
+- installs and starts the `otto-agent` user notification listener;
+- verifies `http://127.0.0.1:20740/api/board`.
+
+## Post-Install Verification
+
+Run these after Eric's block returns successfully.
+
+```bash
+curl -fsS http://127.0.0.1:8770/api/board >/dev/null
 curl -fsS http://127.0.0.1:20740/api/board >/dev/null
+
+psql -X -v ON_ERROR_STOP=1 \
+  'postgresql:///otto_ticket_board?host=/var/run/postgresql&user=ticket_board_service' \
+  -c "SELECT current_user, current_database();"
+
+psql -X -v ON_ERROR_STOP=1 \
+  'postgresql:///otto_ticket_board?host=/var/run/postgresql&user=ticket_board_service' \
+  -c "SELECT name, display_label, rank, owner_roles FROM ticket_board.workflow_stages ORDER BY rank;
+      SELECT from_stage, to_stage, action_name, allowed_roles
+      FROM ticket_board.workflow_transitions
+      ORDER BY from_stage, to_stage, action_name;"
 ```
 
-Root is needed for:
+Expected workflow stages:
 
-- creating directories under another user's `0700` home;
-- granting `boardsvc` ACL traversal and write access;
-- installing systemd, tmpfiles, and polkit files under `/etc`;
-- creating the PostgreSQL database and applying schema/RBAC as `postgres`;
-- `systemctl daemon-reload` and enabling the system unit;
-- enabling linger and installing/starting the owner user's listener unit.
+```text
+draft           Draft           {}
+analysis        Triage          {director}
+in_progress     Implementation  {implementer}
+audit           Audit           {audit}
+director_review Final Sign-Off  {director}
+```
 
-### 7. Check whether a non-root database path exists
+Expected isolation:
+
+- PGU remains on port `8770`; otto is on `20740`.
+- PGU database is `pgu`; otto database is `otto_ticket_board`.
+- PGU socket is `/run/pgu-ticket-board/ticket-board.sock`; otto socket is
+  `/run/otto-ticket-board/ticket-board.sock`.
+- PGU units and otto units have distinct names.
+
+## Workflow Proof
+
+Use the otto board write socket/URL. The created ticket id should use the
+project prefix `OTTO`.
 
 ```bash
-psql -X -v ON_ERROR_STOP=1 'postgresql:///postgres?host=/var/run/postgresql' -c 'SELECT current_user, current_database();'; echo rc=$?
-createdb -h /var/run/postgresql otto_ticket_board_probe; echo rc=$?
-psql -X -v ON_ERROR_STOP=1 'postgresql:///otto_ticket_board?host=/var/run/postgresql&user=ticket_board_service' -c 'SELECT 1'; echo rc=$?
+export TICKET_BOARD_URL=http://127.0.0.1:20740
+export TICKET_BOARD_SOCKET=/run/otto-ticket-board/ticket-board.sock
+
+scripts/ticket-board-write create-ticket \
+  --caller-role director \
+  --title "Otto workflow proof" \
+  --body "PGU-601 proof ticket." \
+  --state analysis \
+  --assignee director
+
+# Replace OTTO-N with the created ticket id.
+scripts/ticket-board-write route OTTO-N \
+  --caller-role director \
+  --state in_progress \
+  --assignee implementer
+
+scripts/ticket-board-write submit-to-audit OTTO-N \
+  --caller-role implementer \
+  --commit-hash 608ae70
+
+scripts/ticket-board-write audit-sign-off OTTO-N \
+  --caller-role audit \
+  --text "Audit accepts the otto workflow proof."
+
+scripts/ticket-board-read --board-url http://127.0.0.1:20740 OTTO-N
 ```
 
-Results:
+The final read should show state `director_review` and assignee `director`.
 
-```text
-current_user | current_database
--------------+-----------------
-agent        | postgres
-rc=0
-```
-
-```text
-createdb: error: database creation failed: ERROR:  permission denied to create database
-rc=1
-```
-
-```text
-psql: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" failed: FATAL:  database "otto_ticket_board" does not exist
-rc=2
-```
-
-Break:
-
-- `agent` can connect to the default `postgres` database but cannot create an
-  otto database.
-- `otto_ticket_board` does not exist yet.
-
-### 8. Verify workflow seed against live schema
+Notification proof:
 
 ```bash
-psql -X -v ON_ERROR_STOP=1 'postgresql://ticket_board_service@/pgu?host=/run/postgresql' -c "SELECT current_user, current_database(); SELECT name, display_label, rank, owner_roles FROM ticket_board.workflow_stages ORDER BY rank; SELECT from_stage, to_stage, action_name, allowed_roles, owner_scoped, director_override FROM ticket_board.workflow_transitions WHERE from_stage IN ('draft','analysis','in_progress','audit','director_review') ORDER BY from_stage, to_stage, action_name LIMIT 40;"
+psql -X -v ON_ERROR_STOP=1 \
+  'postgresql:///otto_ticket_board?host=/var/run/postgresql&user=ticket_board_service' \
+  -c "SELECT ticket_id, target_role, kind, event, ticket_state_at_event, ticket_assignee_at_event
+      FROM ticket_board.notification_trace
+      WHERE ticket_id = 'OTTO-N'
+      ORDER BY ts, id;"
 ```
 
-Result:
+Expected trace has sends or queued delivery attempts for:
 
-```text
-draft           | Draft          | 0  | {}
-backlog         | Backlog        | 1  | {}
-analysis        | Triage         | 2  | {director}
-in_progress     | Implementation | 3  | {main,app,ops,perf,research}
-inspection      | Inspection     | 4  | {inspector}
-audit           | Audit          | 5  | {audit}
-dat             | DAT            | 6  | {director}
-user_review     | UAT            | 7  | {director}
-director_review | Final Sign-Off | 8  | {director}
-done            | Done           | 9  | {}
-cancelled       | Cancelled      | 10 | {}
-```
+- `director` when the ticket enters triage/final sign-off;
+- `implementer` when the ticket enters implementation;
+- `audit` when the ticket enters audit.
 
-Follow-up query:
+## Launcher Notes
 
-```bash
-psql -X -v ON_ERROR_STOP=1 'postgresql://ticket_board_service@/pgu?host=/run/postgresql' -c "SELECT false AS has_generic_five_stage WHERE EXISTS (SELECT 1 FROM ticket_board.workflow_stages WHERE name IN ('triage','implementation','final_signoff')); SELECT count(*) AS stage_count FROM ticket_board.workflow_stages; SELECT name FROM ticket_board.workflow_stages ORDER BY rank;"
-```
+Do not launch otto panes from the `agent` user. A real otto team launch should
+be invoked as `otto-agent`, after the privileged block has enabled linger and
+created `/run/user/1005`.
 
-Result:
-
-```text
-has_generic_five_stage
-----------------------
-(0 rows)
-
-stage_count
------------
-11
-
-draft
-backlog
-analysis
-in_progress
-inspection
-audit
-dat
-user_review
-director_review
-done
-cancelled
-```
-
-Break:
-
-- The requested five-stage default is not seedable through the provisioner.
-- The schema also hard-checks stage names, so replacing PGU's workflow with
-  `draft -> triage -> implementation -> audit -> final_signoff` is not just data
-  insertion. It needs schema/function/API support for project-specific stages or
-  a canonical generic state vocabulary.
-
-### 9. Build and dry-run minimal launcher plan
-
-Scratch config used:
+Minimal otto launcher config shape:
 
 ```json
 {
-  "layout": "otto-konsole-layout.json",
   "project": "otto",
   "repository": "/home/otto-agent/Projects/otto",
-  "session_dir": "/home/otto-agent/.local/state/otto-ticket-board/pane-sessions",
   "worktree_branch": "main",
   "worktree_remote": "origin",
-  "roles": ["director", "ops", "audit"]
-}
-```
-
-The actual scratch JSON included full CLI/model/env fields. Each role had:
-
-- `TICKET_BOARD_PROJECT=otto`
-- `TICKET_BOARD_SOCKET=/run/otto-ticket-board/ticket-board.sock`
-- `TICKET_BOARD_URL=http://127.0.0.1:20740`
-- `TICKET_BOARD_CALLER_ROLE=<role>`
-
-Command:
-
-```bash
-scripts/team-launcher otto start --config /home/agent/wt-590/.manual/otto-launcher/otto.json --dry-run --layout-output /home/agent/wt-590/.manual/otto-launcher/rendered-layout.json
-```
-
-Result:
-
-```json
-{
-  "mode": "attach-or-start",
-  "project": "otto",
-  "run_as_user": "agent",
-  "worktree_ref": "origin/main",
   "roles": [
     {
       "role": "director",
-      "target": "otto-director:0.0",
+      "slot": 0,
       "tmux_session": "otto-director",
-      "workdir": "/home/otto-agent/Projects/otto"
+      "target": "otto-director:0.0",
+      "cli": ["claude"],
+      "live_commands": ["claude"],
+      "resume_mode": "flag",
+      "resume_flag": "--resume",
+      "yolo": true,
+      "env": {
+        "TICKET_BOARD_PROJECT": "otto",
+        "TICKET_BOARD_URL": "http://127.0.0.1:20740",
+        "TICKET_BOARD_SOCKET": "/run/otto-ticket-board/ticket-board.sock",
+        "TICKET_BOARD_CALLER_ROLE": "director"
+      }
     },
     {
-      "role": "ops",
-      "target": "otto-ops:0.0",
-      "tmux_session": "otto-ops",
-      "workdir": "/home/otto-agent/Projects/otto"
+      "role": "implementer",
+      "slot": 1,
+      "tmux_session": "otto-implementer",
+      "target": "otto-implementer:0.0",
+      "cli": ["codex"],
+      "live_commands": ["codex"],
+      "resume_mode": "subcommand",
+      "resume_subcommand": "resume",
+      "yolo": true,
+      "env": {
+        "TICKET_BOARD_PROJECT": "otto",
+        "TICKET_BOARD_URL": "http://127.0.0.1:20740",
+        "TICKET_BOARD_SOCKET": "/run/otto-ticket-board/ticket-board.sock",
+        "TICKET_BOARD_CALLER_ROLE": "implementer"
+      }
     },
     {
       "role": "audit",
-      "target": "otto-audit:0.0",
+      "slot": 2,
       "tmux_session": "otto-audit",
-      "workdir": "/home/otto-agent/Projects/otto"
+      "target": "otto-audit:0.0",
+      "cli": ["claude"],
+      "live_commands": ["claude"],
+      "resume_mode": "flag",
+      "resume_flag": "--resume",
+      "yolo": true,
+      "env": {
+        "TICKET_BOARD_PROJECT": "otto",
+        "TICKET_BOARD_URL": "http://127.0.0.1:20740",
+        "TICKET_BOARD_SOCKET": "/run/otto-ticket-board/ticket-board.sock",
+        "TICKET_BOARD_CALLER_ROLE": "audit"
+      }
     }
   ]
 }
 ```
 
-Break:
-
-- The launcher dry-run is structurally valid.
-- Because the command was invoked by `agent`, it reports `run_as_user: agent`.
-  The scratch config intentionally omits `run_as_user`; a real otto launch must
-  be invoked as `otto-agent` so runtime dirs, tmux sessions, and session state
-  are owned by `otto-agent`.
-- Adding `run_as_user: otto-agent` would make the wrapper immediately call
-  `sudo -u otto-agent -H`, which this pane cannot satisfy.
-- The implementer is still called `ops`; a generic `implementer` pane cannot
-  move tickets through the current write API because the schema/RBAC/action
-  matrix do not define it.
-
-### 10. Reboot/resume proof
-
-Not attempted.
-
-Reason:
-
-- The board was not stood up.
-- PGU-590 explicitly says not to reboot without timing agreed with Eric.
-- No reboot coordination was present in this run.
-
-## PGU/User Assumptions That Leaked
-
-- Ticket IDs are still constrained to `PGU-N`:
-  `tickets.id CHECK (id ~ '^PGU-[0-9]+$')`.
-- Parent IDs are still constrained to `PGU-N`.
-- The write client still sends `X-PGU-Caller-Role`.
-- The default socket fallback is still `/run/pgu-ticket-board/ticket-board.sock`.
-- The README still describes PGU defaults and PGU ticket JSON naming.
-- Board roles are still PGU team roles: `main`, `app`, `ops`, `perf`,
-  `research`, `audit`, `inspector`, `director`, `user`.
-- The workflow has PGU-specific optional gates: `inspection`, `dat`,
-  `user_review`.
-- The source schema header still says `PGU ticket-board PostgreSQL schema`.
-- Team launcher docs still mention PGU-specific runtime fallback directories,
-  although generic env names now exist.
-
-## Manual Fixes Required Before Otto Can Run
-
-1. Decide whether `otto` should really use `/home/otto-agent/Projects/otto`.
-2. As root or `otto-agent`, create the otto checkout.
-3. Run the generated provisioning runbook from `.manual/otto-provision` or a
-   regenerated equivalent.
-4. Add project-specific workflow seeding support, or define that all projects
-   use the current internal state names while only labels are generic.
-5. Add/allow a generic implementer role, or document that the minimal generic
-   team must still pick one of `main/app/ops/perf/research`.
-6. Launch as `otto-agent`, not `agent`, after linger/runtime is enabled.
-7. Only after the otto board and panes are live, create a proof ticket and move
-   it through implementation -> audit -> final sign-off while checking delivery.
-8. Coordinate a reboot window with Eric, then verify session resume.
-
-## Automation Gaps for the Package
-
-- Privileged setup is not encapsulated into a single audited root helper.
-- Provisioning renders commands, but does not execute/checkpoint them with
-  resumable status.
-- The provisioner cannot initialize a project-specific workflow.
-- The schema cannot currently represent the requested five-stage state names.
-- Role provisioning is not generic enough for "implementer/auditor/director".
-- The launcher bootstrap template emits an empty roles list and retains the live
-  PGU session-dir default; a new project needs hand-authored role/env entries.
-- There is no "validate this project can be launched as its intended user"
-  preflight that checks home permissions, repo path access, linger, runtime dir,
-  socket path, and board DB existence in one report.
+This config is a shape reference, not a committed active config. Use verified
+CLI/model choices before starting a real pane set.
 
 ## Status
 
-PGU-590 did not produce a running otto board or team. It produced the intended
-measurement record and identified the first hard blockers:
+PGU-590 stopped at these hard blockers:
 
 - no non-interactive root path from the ops pane;
-- no access to `otto-agent` home from `agent`;
+- no access to `/home/otto-agent` from `agent`;
 - no `otto_ticket_board` database;
-- no project-specific five-stage workflow seed;
+- no project-specific workflow seed;
 - no generic implementer role.
+
+As of PGU-601, the last three are fixed in code. The remaining required action
+is Eric running the privileged block above, then the team running the workflow
+and notification proof.

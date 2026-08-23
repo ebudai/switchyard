@@ -53,3 +53,28 @@ Acceptance order after Eric runs the block:
 
 Passing requires the pane to name the injected ticket without being given the
 ticket id in the prompt.
+
+## Sandbox Runtime Proofs
+
+Claude was proven by the director in a sandbox: a `SessionStart` hook emitting
+`hookSpecificOutput.additionalContext` completed normally and the model used the
+injected ticket id, while the no-hook control replied `NO PRIOR CONTEXT`.
+
+Codex was proven in a disposable `CODEX_HOME` with copied auth/config and a
+stub `SessionStart` hook. The invocation used `codex exec --ephemeral` with
+`TMUX` and `TMUX_PANE` cleared, so it did not touch live pane config, live hook
+state, or live sessions.
+
+Results:
+
+1. Tolerance: with the hook emitting `hookSpecificOutput.additionalContext`,
+   Codex exited with rc=0 and replied `TOLERANCE_OK`; the hook marker confirmed
+   `SessionStart` ran.
+2. Consumption: with the hook injecting a hidden token, Codex replied
+   `CODEX_HOOK_CONTEXT_OK`.
+3. Control: with the same invocation shape and no hook, Codex replied
+   `NO PRIOR CONTEXT`.
+
+This proves Codex tolerates and consumes `additionalContext` in sandbox. It does
+not replace the controlled live rollout above; Eric still owns the live hook
+install, inspector restart, and live acceptance check.

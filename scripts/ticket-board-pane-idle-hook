@@ -112,12 +112,14 @@ def _read_stdin_json(timeout: float = 0.1) -> object:
         fd = sys.stdin.fileno()
     except (OSError, ValueError):
         return None
+    first_poll = True
     while True:
         remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        if remaining <= 0 and not first_poll:
             break
+        first_poll = False
         try:
-            readable, _, _ = select.select([fd], [], [], remaining)
+            readable, _, _ = select.select([fd], [], [], max(0.0, remaining))
         except (OSError, ValueError):
             return None
         if not readable:
@@ -220,6 +222,16 @@ def _write_session(
     return path
 
 
+def _session_id_from_file(path: Path) -> str:
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(parsed, dict):
+        return ""
+    return str(parsed.get("session_id") or "").strip()
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Record a ticket-board pane idle/busy state for notification delivery.")
     parser.add_argument("state", choices=["idle", "busy", "blocked"], help="pane lifecycle state to record")
@@ -246,9 +258,11 @@ def main(argv: list[str] | None = None) -> int:
     target = _resolve_target(args.target.strip(), os.environ)
     _write_state(args.state_dir, target, args.state, source=args.source)
     session_path = _target_path(Path(args.session_dir).expanduser(), target)
-    if args.record_session or not session_path.exists():
-        payload = _read_stdin_json(timeout=args.stdin_timeout)
-        session_id = _extract_session_id(payload, os.environ, args.session_id)
+    existing_session_id = _session_id_from_file(session_path)
+    should_wait_for_session_payload = args.record_session or not existing_session_id
+    payload = _read_stdin_json(timeout=args.stdin_timeout if should_wait_for_session_payload else 0.0)
+    session_id = _extract_session_id(payload, os.environ, args.session_id)
+    if session_id and (args.record_session or not existing_session_id or session_id != existing_session_id):
         _write_session(args.session_dir, target, session_id, source=args.source, payload=payload)
     return 0
 

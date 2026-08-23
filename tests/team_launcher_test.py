@@ -471,6 +471,26 @@ def test_cli_command_exports_durable_session_dir_for_pane_hooks() -> None:
     assert f"TICKET_BOARD_PANE_SESSION_DIR={config.session_dir}" in entries
     assert f"PGU_TICKET_BOARD_PANE_SESSION_DIR={config.session_dir}" in entries
     assert str(config.session_dir) == str(Path.home() / ".local" / "state" / "pgu-ticket-board" / "pane-sessions")
+    assert not any(entry.startswith("TICKET_BOARD_PANE_SESSION_ID=") for entry in entries)
+
+
+def test_cli_command_exports_known_resume_session_id_for_hooks() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    role = next(role for role in config.roles if role.role == "ops")
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        session_dir = Path(tmp)
+        session_id = "12345678-1234-5678-9abc-def012345678"
+        (session_dir / session_file_name(role.target)).write_text(
+            json.dumps({"target": role.target, "session_id": session_id}) + "\n",
+            encoding="utf-8",
+        )
+
+        command = cli_command_for_role(role, session_dir=session_dir, resume=True)
+
+    entries = _env_entries(command)
+    assert f"TICKET_BOARD_PANE_SESSION_ID={session_id}" in entries
+    assert f"PGU_PANE_SESSION_ID={session_id}" in entries
+    assert _command_tail(command)[:3] == ["codex", "resume", session_id]
 
 
 def test_custom_config_without_run_as_user_tracks_invoking_home() -> None:
@@ -1038,9 +1058,11 @@ def test_deploy_launcher_checkout_updates_and_verifies_configured_ref() -> None:
 
 def test_konsole_launch_uses_gui_user_display_environment() -> None:
     original_uid_for_user = team_launcher.uid_for_user
-    original_host_wayland = os.environ.get("PGU_HOST_WAYLAND_DISPLAY")
+    original_host_wayland = os.environ.get("HOST_WAYLAND_DISPLAY")
+    original_legacy_host_wayland = os.environ.get("PGU_HOST_WAYLAND_DISPLAY")
     try:
-        os.environ["PGU_HOST_WAYLAND_DISPLAY"] = "/run/user/1000/wayland-0"
+        os.environ["HOST_WAYLAND_DISPLAY"] = "/run/user/1000/wayland-0"
+        os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
         team_launcher.uid_for_user = lambda _user_name: None
 
         assert konsole_launch_args(Path("/tmp/layout.json"), gui_user="user") == [
@@ -1055,17 +1077,24 @@ def test_konsole_launch_uses_gui_user_display_environment() -> None:
     finally:
         team_launcher.uid_for_user = original_uid_for_user
         if original_host_wayland is None:
+            os.environ.pop("HOST_WAYLAND_DISPLAY", None)
+        else:
+            os.environ["HOST_WAYLAND_DISPLAY"] = original_host_wayland
+        if original_legacy_host_wayland is None:
             os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
         else:
-            os.environ["PGU_HOST_WAYLAND_DISPLAY"] = original_host_wayland
+            os.environ["PGU_HOST_WAYLAND_DISPLAY"] = original_legacy_host_wayland
 
 
 def test_konsole_launch_can_fallback_to_gui_user_uid_without_host_var() -> None:
     original_uid_for_user = team_launcher.uid_for_user
-    original_host_wayland = os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
-    original_wayland_name = os.environ.get("PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY")
+    original_host_wayland = os.environ.pop("HOST_WAYLAND_DISPLAY", None)
+    original_legacy_host_wayland = os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
+    original_wayland_name = os.environ.get("TEAM_LAUNCHER_WAYLAND_DISPLAY")
+    original_legacy_wayland_name = os.environ.pop("PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY", None)
     try:
-        os.environ["PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY"] = "wayland-test"
+        os.environ["TEAM_LAUNCHER_WAYLAND_DISPLAY"] = "wayland-test"
+        os.environ.pop("PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY", None)
         team_launcher.uid_for_user = lambda user_name: 4242 if user_name == "user" else None
 
         assert konsole_launch_args(Path("/tmp/layout.json"), gui_user="user") == [
@@ -1080,21 +1109,28 @@ def test_konsole_launch_can_fallback_to_gui_user_uid_without_host_var() -> None:
     finally:
         team_launcher.uid_for_user = original_uid_for_user
         if original_host_wayland is not None:
-            os.environ["PGU_HOST_WAYLAND_DISPLAY"] = original_host_wayland
+            os.environ["HOST_WAYLAND_DISPLAY"] = original_host_wayland
+        if original_legacy_host_wayland is not None:
+            os.environ["PGU_HOST_WAYLAND_DISPLAY"] = original_legacy_host_wayland
         if original_wayland_name is None:
-            os.environ.pop("PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY", None)
+            os.environ.pop("TEAM_LAUNCHER_WAYLAND_DISPLAY", None)
         else:
-            os.environ["PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY"] = original_wayland_name
+            os.environ["TEAM_LAUNCHER_WAYLAND_DISPLAY"] = original_wayland_name
+        if original_legacy_wayland_name is not None:
+            os.environ["PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY"] = original_legacy_wayland_name
 
 
 def test_konsole_launch_defaults_to_invoking_user_uid_without_host_var() -> None:
     original_uid_for_user = team_launcher.uid_for_user
     original_current_user_name = team_launcher.current_user_name
-    original_host_wayland = os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
-    original_gui_user = os.environ.pop("PGU_TEAM_LAUNCHER_GUI_USER", None)
-    original_wayland_name = os.environ.get("PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY")
+    original_host_wayland = os.environ.pop("HOST_WAYLAND_DISPLAY", None)
+    original_legacy_host_wayland = os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
+    original_gui_user = os.environ.pop("TEAM_LAUNCHER_GUI_USER", None)
+    original_legacy_gui_user = os.environ.pop("PGU_TEAM_LAUNCHER_GUI_USER", None)
+    original_wayland_name = os.environ.get("TEAM_LAUNCHER_WAYLAND_DISPLAY")
+    original_legacy_wayland_name = os.environ.pop("PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY", None)
     try:
-        os.environ["PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY"] = "wayland-test"
+        os.environ["TEAM_LAUNCHER_WAYLAND_DISPLAY"] = "wayland-test"
         team_launcher.current_user_name = lambda: "otto-agent"
         team_launcher.uid_for_user = lambda user_name: 4242 if user_name == "otto-agent" else None
 
@@ -1111,18 +1147,25 @@ def test_konsole_launch_defaults_to_invoking_user_uid_without_host_var() -> None
         team_launcher.uid_for_user = original_uid_for_user
         team_launcher.current_user_name = original_current_user_name
         if original_host_wayland is not None:
-            os.environ["PGU_HOST_WAYLAND_DISPLAY"] = original_host_wayland
+            os.environ["HOST_WAYLAND_DISPLAY"] = original_host_wayland
+        if original_legacy_host_wayland is not None:
+            os.environ["PGU_HOST_WAYLAND_DISPLAY"] = original_legacy_host_wayland
         if original_gui_user is not None:
-            os.environ["PGU_TEAM_LAUNCHER_GUI_USER"] = original_gui_user
+            os.environ["TEAM_LAUNCHER_GUI_USER"] = original_gui_user
+        if original_legacy_gui_user is not None:
+            os.environ["PGU_TEAM_LAUNCHER_GUI_USER"] = original_legacy_gui_user
         if original_wayland_name is None:
-            os.environ.pop("PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY", None)
+            os.environ.pop("TEAM_LAUNCHER_WAYLAND_DISPLAY", None)
         else:
-            os.environ["PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY"] = original_wayland_name
+            os.environ["TEAM_LAUNCHER_WAYLAND_DISPLAY"] = original_wayland_name
+        if original_legacy_wayland_name is not None:
+            os.environ["PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY"] = original_legacy_wayland_name
 
 
 def test_konsole_launch_falls_back_to_clear_error_when_gui_user_missing() -> None:
     original_uid_for_user = team_launcher.uid_for_user
-    original_host_wayland = os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
+    original_host_wayland = os.environ.pop("HOST_WAYLAND_DISPLAY", None)
+    original_legacy_host_wayland = os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
     try:
         team_launcher.uid_for_user = lambda _user_name: None
 
@@ -1132,7 +1175,9 @@ def test_konsole_launch_falls_back_to_clear_error_when_gui_user_missing() -> Non
     finally:
         team_launcher.uid_for_user = original_uid_for_user
         if original_host_wayland is not None:
-            os.environ["PGU_HOST_WAYLAND_DISPLAY"] = original_host_wayland
+            os.environ["HOST_WAYLAND_DISPLAY"] = original_host_wayland
+        if original_legacy_host_wayland is not None:
+            os.environ["PGU_HOST_WAYLAND_DISPLAY"] = original_legacy_host_wayland
 
 
 def test_launch_konsole_window_detaches_real_spawn_and_returns_status_line() -> None:

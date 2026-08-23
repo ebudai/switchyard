@@ -13,8 +13,9 @@ set and the invoker is different, the wrapper re-execs through
 `sudo -u <run_as_user> -H`. The PGU config uses `run_as_user: agent` so Eric's
 production launch keeps the existing agent-owned tmux sessions, pane hook
 state, and shared checkout. Projects without `run_as_user` use the invoking
-user's runtime paths, including `/run/user/<uid>/pgu-ticket-board/pane-sessions`,
-the matching pane-state directory, and `$HOME/bin` prepended to pane CLI `PATH`.
+user's runtime pane-state directory and `$HOME/bin` prepended to pane CLI
+`PATH`. Resume session records are durable state under the runtime user's home,
+not `/run`.
 Real `start` and `reload` launches verify that the selected runtime user has
 linger enabled and a `/run/user/<uid>` directory before starting tmux panes. If
 host policy denies that setup, the launcher fails before touching panes and
@@ -87,8 +88,11 @@ detached instead of attaching to a pane. `reload` fetches the configured
 worktree ref for freshness, but does not checkout or clean the shared checkout
 before recreating sessions; this preserves files in resumed panes. Resume ids
 are read from
-`/run/user/<uid>/pgu-ticket-board/pane-sessions/<target>.json` by default. The
-SessionStart hook installer writes those files.
+`~/.local/state/pgu-ticket-board/pane-sessions/<target>.json` by default. The
+SessionStart hook installer writes those durable files, and the launcher exports
+a known resume id to the CLI hook environment when recreating a pane. The old
+`/run/user/<uid>/pgu-ticket-board/pane-sessions` location is only a one-time
+migration source for older records; it is not repopulated after boot.
 
 Reload is guarded because it is destructive. Before killing an existing tmux
 session, the launcher reads `#{pane_current_command}` for that role target and

@@ -369,7 +369,47 @@ def test_non_session_start_hook_records_resume_session_when_payload_has_id() -> 
         assert session["payload"]["event"] == "UserPromptSubmit"
 
 
-def test_non_session_start_hook_with_existing_session_does_not_read_or_rewrite() -> None:
+def test_non_session_start_hook_updates_existing_session_when_payload_has_new_id() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        home = Path(tmp) / "home"
+        state_dir = Path(tmp) / "state"
+        session_dir = Path(tmp) / "sessions"
+        bin_path = home / ".local" / "bin" / HOOK_NAME
+        subprocess.run([str(INSTALLER), "install", "--home", str(home), "--bin-path", str(bin_path)], check=True)
+        session_dir.mkdir(parents=True)
+        session_path = session_dir / "pgu-ops_0.0.json"
+        session_path.write_text(
+            json.dumps({"target": "pgu-ops:0.0", "session_id": "old_session", "source": "codex.SessionStart"})
+            + "\n",
+            encoding="utf-8",
+        )
+
+        subprocess.run(
+            [
+                str(bin_path),
+                "idle",
+                "--target",
+                "pgu-ops:0.0",
+                "--source",
+                "codex.Stop",
+                "--state-dir",
+                str(state_dir),
+                "--session-dir",
+                str(session_dir),
+            ],
+            input=json.dumps({"event": "Stop", "session_id": "new_session"}),
+            text=True,
+            check=True,
+            env=_hook_env(),
+        )
+
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+        assert session["session_id"] == "new_session"
+        assert session["source"] == "codex.Stop"
+        assert session["payload"]["event"] == "Stop"
+
+
+def test_non_session_start_hook_with_existing_session_does_not_block_or_rewrite_without_payload() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
         home = Path(tmp) / "home"
         state_dir = Path(tmp) / "state"

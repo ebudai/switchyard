@@ -747,9 +747,13 @@ def cli_command_for_role(role: RoleConfig, *, session_dir: Path, resume: bool = 
         "TICKET_BOARD_PANE_TARGET": role.target,
         "TICKET_BOARD_PANE_SESSION_DIR": str(session_dir.expanduser()),
     }
+    if session_id:
+        env["TICKET_BOARD_PANE_SESSION_ID"] = session_id
     if role.target.startswith("pgu-"):
         env.setdefault("PGU_PANE_TARGET", role.target)
         env.setdefault("PGU_TICKET_BOARD_PANE_SESSION_DIR", str(session_dir.expanduser()))
+        if session_id:
+            env.setdefault("PGU_PANE_SESSION_ID", session_id)
     env["PATH"] = _prepend_path(env.get("PATH") or os.environ.get("PATH", ""), default_user_bin())
     return ["env", *_env_prefix(env), *command]
 

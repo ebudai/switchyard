@@ -253,12 +253,15 @@ def test_real_reboot_observed_fails_without_boot_id_change() -> None:
         assert_check_fails(module, before, after, "real_reboot_observed")
 
 
-def test_runtime_session_tmpfs_check_fails_when_files_predate_boot() -> None:
+def test_legacy_runtime_session_files_are_not_required_after_reboot() -> None:
     module = load_module()
     with collect_good_pair(module) as (_paths, before, after):
-        first_record = next(iter(after["runtime_sessions"]["files"].values()))
-        first_record["mtime"] = after["boot"]["boot_time"] - 1
-        assert_check_fails(module, before, after, "runtime_session_tmpfs_wiped_or_recreated")
+        after["runtime_sessions"]["files"] = {}
+        checks = module.verify_snapshot(before, after)
+        failed = {check.name: check.detail for check in checks if not check.ok}
+        assert "runtime_session_tmpfs_wiped_or_recreated" not in {check.name for check in checks}
+        assert "durable_sessions_survive" not in failed
+        assert "roles_resume_recorded_sessions" not in failed
 
 
 def test_durable_sessions_survive_fails_when_record_missing() -> None:
@@ -330,7 +333,7 @@ def test_verify_fails_when_a_recorded_session_id_changes() -> None:
 if __name__ == "__main__":
     test_snapshot_and_verify_pass_after_real_boot_id_change()
     test_real_reboot_observed_fails_without_boot_id_change()
-    test_runtime_session_tmpfs_check_fails_when_files_predate_boot()
+    test_legacy_runtime_session_files_are_not_required_after_reboot()
     test_durable_sessions_survive_fails_when_record_missing()
     test_roles_resume_recorded_sessions_fails_when_a_session_id_changes()
     test_codex_agy_pane_state_seeded_fails_when_hook_state_missing()

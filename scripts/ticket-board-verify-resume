@@ -376,12 +376,12 @@ def _pane_state_for_target(section: dict[str, Any], target: str) -> str:
     return str(record.get("state") or "").strip()
 
 
-def _runtime_files_recreated_after_boot(section: dict[str, Any], boot_time: float | None) -> tuple[bool, str]:
+def _files_recreated_after_boot(section: dict[str, Any], boot_time: float | None, *, label: str) -> tuple[bool, str]:
     files = section.get("files") if isinstance(section, dict) else None
     if not isinstance(files, dict) or not files:
-        return True, "runtime directory is empty"
+        return True, f"{label} directory is empty"
     if boot_time is None:
-        return False, "cannot parse boot time; cannot prove runtime files were recreated after boot"
+        return False, f"cannot parse boot time; cannot prove {label} files were recreated after boot"
     stale: list[str] = []
     for name, record in files.items():
         if not isinstance(record, dict):
@@ -390,8 +390,8 @@ def _runtime_files_recreated_after_boot(section: dict[str, Any], boot_time: floa
         if not isinstance(mtime, (int, float)) or float(mtime) < boot_time:
             stale.append(name)
     if stale:
-        return False, f"runtime files predate boot: {', '.join(stale)}"
-    return True, f"{len(files)} runtime file(s) present, all recreated after boot"
+        return False, f"{label} files predate boot: {', '.join(stale)}"
+    return True, f"{len(files)} {label} file(s) present, all recreated after boot"
 
 
 def verify_snapshot(before: dict[str, Any], after: dict[str, Any]) -> list[Check]:
@@ -407,12 +407,6 @@ def verify_snapshot(before: dict[str, Any], after: dict[str, Any]) -> list[Check
             f"before={before_boot_id or 'missing'} after={after_boot_id or 'missing'}",
         )
     )
-
-    after_runtime_ok, after_runtime_detail = _runtime_files_recreated_after_boot(
-        after.get("runtime_sessions", {}),
-        after_boot.get("boot_time") if isinstance(after_boot.get("boot_time"), (int, float)) else None,
-    )
-    checks.append(Check("runtime_session_tmpfs_wiped_or_recreated", after_runtime_ok, after_runtime_detail))
 
     before_durable = before.get("durable_sessions", {})
     after_durable = after.get("durable_sessions", {})
@@ -463,9 +457,10 @@ def verify_snapshot(before: dict[str, Any], after: dict[str, Any]) -> list[Check
 
     after_state = after.get("pane_state", {})
     state_failures: list[str] = []
-    pane_state_files_ok, pane_state_files_detail = _runtime_files_recreated_after_boot(
+    pane_state_files_ok, pane_state_files_detail = _files_recreated_after_boot(
         after_state,
         after_boot.get("boot_time") if isinstance(after_boot.get("boot_time"), (int, float)) else None,
+        label="pane-state",
     )
     for item in roles:
         if not isinstance(item, dict):
@@ -546,7 +541,10 @@ def _print_snapshot_summary(snapshot: dict[str, Any], path: Path) -> None:
     print(f"SNAPSHOT {path}")
     print(f"project={snapshot['project']} owner={snapshot['owner_user']} runtime_user={snapshot['runtime_user']} uid={snapshot['uid']}")
     print(f"boot_id={snapshot['boot']['boot_id'] or 'missing'}")
-    print(f"durable_sessions={len(snapshot['durable_sessions']['files'])} runtime_sessions={len(snapshot['runtime_sessions']['files'])}")
+    print(
+        f"durable_sessions={len(snapshot['durable_sessions']['files'])} "
+        f"legacy_runtime_sessions={len(snapshot['runtime_sessions']['files'])}"
+    )
     print(f"pane_state_files={len(snapshot['pane_state']['files'])}")
     print(f"board_ok={snapshot['board']['ok']} build_id={snapshot['board']['build_id'] or 'missing'} tickets={snapshot['board']['ticket_count']}")
     print(f"current={snapshot['current_release_id'] or 'missing'} frame_dir={snapshot['frame_dir']['mode'] or 'missing'}")
@@ -582,7 +580,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--board-root", type=Path, default=None, help="board live root")
     parser.add_argument("--current-release", type=Path, default=None, help="current release symlink")
     parser.add_argument("--launcher-repo", type=Path, default=_repo_root(), help="team-launcher checkout to inspect")
-    parser.add_argument("--runtime-session-dir", type=Path, default=None, help="tmpfs pane session dir")
+    parser.add_argument("--runtime-session-dir", type=Path, default=None, help="legacy tmpfs pane session dir to snapshot")
     parser.add_argument("--durable-session-dir", type=Path, default=None, help="durable pane session dir")
     parser.add_argument("--pane-state-dir", type=Path, default=None, help="tmpfs pane hook state dir")
     parser.add_argument("--frame-dir", type=Path, default=None, help="frame inbox dir")

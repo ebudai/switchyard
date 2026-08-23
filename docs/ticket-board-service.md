@@ -242,14 +242,16 @@ are:
   id; `AfterAgent` writes `idle`; `BeforeAgent` writes `busy`. Do not use Gemini
   `Notification` for idle because it is alert/permission-oriented.
 
-Session ids are stored under `$PGU_TICKET_BOARD_PANE_SESSION_DIR` (default:
-`/run/user/<agent-uid>/pgu-ticket-board/pane-sessions`) using the same per-pane
-file naming as hook state. `SessionStart` always records the latest session id.
-Other hook invocations record a session id only when that pane has no session
-file yet, allowing already-running panes to populate resume ids from normal turn
-traffic without ongoing rewrite churn. Payloads without a session id still
-update pane state and do not create a session file. The launcher can use these
-files to pass `--resume` when reloading a pane without losing context.
+Session ids are stored under `$TICKET_BOARD_PANE_SESSION_DIR` (default:
+`~/.local/state/pgu-ticket-board/pane-sessions`) using the same per-pane file
+naming as hook state. This durable directory is the maintained source of truth;
+`/run/user/<uid>/pgu-ticket-board/pane-sessions` is legacy seed input only and
+is not repopulated after boot. `SessionStart` always records the latest session
+id. Other hook invocations also refresh the durable record when their payload or
+environment carries a new session id, allowing compaction or a fresh pane turn
+to update resume state without a manual step. Payloads without a session id
+still update pane state and do not create or rewrite a session file. The launcher
+uses these files to pass resume ids when recreating panes without losing context.
 
 Install the hook writer and persistent CLI hook config entries with:
 

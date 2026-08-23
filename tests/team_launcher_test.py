@@ -37,6 +37,7 @@ import scripts.team_launcher as team_launcher
 from scripts.ticket_board.notify_listener import PaneHookStateStore
 from scripts.team_launcher import (
     cli_command_for_role,
+    clear_session_record_for_role,
     default_user_bin,
     deploy_launcher_checkout,
     ensure_configured_runtime_user,
@@ -1343,6 +1344,36 @@ def test_start_creates_missing_session_once_then_attaches() -> None:
     assert runner.calls[2] == ["tmux", "attach", "-t", "pgu-ops"]
 
 
+def test_clear_session_record_preserves_superseded_copy_and_replaces_old_sidecar() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    role = next(role for role in config.roles if role.role == "ops")
+
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        session_dir = Path(tmp)
+        live_path = session_dir / session_file_name(role.target)
+        sidecar_path = live_path.with_name(f"{live_path.name}.superseded")
+        first_session_id = "11111111-1111-4111-8111-111111111111"
+        second_session_id = "22222222-2222-4222-8222-222222222222"
+        live_path.write_text(
+            json.dumps({"target": role.target, "session_id": first_session_id}) + "\n",
+            encoding="utf-8",
+        )
+
+        assert clear_session_record_for_role(role, session_dir) is True
+        assert not live_path.exists()
+        assert json.loads(sidecar_path.read_text(encoding="utf-8"))["session_id"] == first_session_id
+
+        live_path.write_text(
+            json.dumps({"target": role.target, "session_id": second_session_id}) + "\n",
+            encoding="utf-8",
+        )
+
+        assert clear_session_record_for_role(role, session_dir) is True
+        assert not live_path.exists()
+        assert json.loads(sidecar_path.read_text(encoding="utf-8"))["session_id"] == second_session_id
+        assert clear_session_record_for_role(role, session_dir) is False
+
+
 def test_start_seeds_initial_idle_state_for_codex_agy_and_claude_panes() -> None:
     config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
     roles = {role.role: role for role in config.roles}
@@ -1984,6 +2015,9 @@ def test_reload_logs_resume_fallback_when_cli_never_starts() -> None:
                 json.dumps({"target": role.target, "session_id": session_id}) + "\n",
                 encoding="utf-8",
             )
+            sidecar_path = (session_dir / session_file_name(role.target)).with_name(
+                f"{session_file_name(role.target)}.superseded"
+            )
             runner = FakeRunner(
                 existing_sessions={"pgu-ops"},
                 current_commands={"pgu-ops:0.0": ["codex", "fish", "fish", "fish"]},
@@ -2005,6 +2039,7 @@ def test_reload_logs_resume_fallback_when_cli_never_starts() -> None:
                 assert state["state"] == "idle"
                 assert state["source"] == "team_launcher.reload.fallback"
                 assert not (session_dir / session_file_name(role.target)).exists()
+                assert json.loads(sidecar_path.read_text(encoding="utf-8"))["session_id"] == session_id
 
         assert f"team-launcher: resume failed for ops using session {session_id}; falling back to fresh session" in stderr.getvalue()
         assert "team-launcher: started fresh session for ops after resume fallback" in stderr.getvalue()
@@ -2033,6 +2068,9 @@ def test_agy_reload_skips_missing_local_conversation_store_instead_of_silent_fal
             json.dumps({"target": role.target, "session_id": session_id}) + "\n",
             encoding="utf-8",
         )
+        sidecar_path = (session_dir / session_file_name(role.target)).with_name(
+            f"{session_file_name(role.target)}.superseded"
+        )
         team_launcher.AGY_CONVERSATION_ROOT = tmp_path / "empty-agy-store"
         try:
             with redirect_stderr(stderr):
@@ -2047,6 +2085,7 @@ def test_agy_reload_skips_missing_local_conversation_store_instead_of_silent_fal
                     == 0
                 )
                 assert not (session_dir / session_file_name(role.target)).exists()
+                assert json.loads(sidecar_path.read_text(encoding="utf-8"))["session_id"] == session_id
         finally:
             team_launcher.AGY_CONVERSATION_ROOT = original_root
 

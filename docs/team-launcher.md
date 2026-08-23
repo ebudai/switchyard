@@ -93,6 +93,10 @@ SessionStart hook installer writes those durable files, and the launcher exports
 a known resume id to the CLI hook environment when recreating a pane. The old
 `/run/user/<uid>/pgu-ticket-board/pane-sessions` location is only a one-time
 migration source for older records; it is not repopulated after boot.
+When the launcher must start a role fresh, it removes the live resume record
+from the first-writer-wins path by renaming it to `<target>.json.superseded`
+instead of deleting it. The new pane can still claim the live filename, while
+the previous conversation id remains available for recovery and diagnosis.
 
 Reload is guarded because it is destructive. Before killing an existing tmux
 session, the launcher reads `#{pane_current_command}` for that role target and

@@ -28,6 +28,8 @@ EOF
 
 print_root_commands() {
     cat <<EOF
+set -euo pipefail
+
 # 1. Create $SERVICE_USER, add peer auth for $SERVICE_ROLE, reload PostgreSQL,
 #    and grant deploy/assets/frames ACL access.
 sudo PG_DATABASE=$PG_DATABASE PG_IDENT_MAP=$PG_IDENT_MAP BOARD_ROOT=$BOARD_ROOT \\

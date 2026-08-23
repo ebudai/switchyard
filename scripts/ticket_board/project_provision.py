@@ -492,7 +492,10 @@ def render_operator_commands(plan: ProjectBoardProvision) -> str:
             f"sudo install -d -m 0775 -o {shell_quote(plan.owner_user)} -g {shell_quote(plan.owner_user)} {q_asset} {q_frame}"
         )
         grant_asset_frame = f"sudo setfacl -R -m u:{plan.service_user}:rwx {q_asset} {q_frame}"
-    return f"""# Review generated artifacts first. These commands require host privileges.
+    return f"""#!/usr/bin/env bash
+set -euo pipefail
+
+# Review generated artifacts first. These commands require host privileges.
 sudo install -d -m 0755 {q_board_root}
 sudo env TICKET_BOARD_PROJECT={shell_quote(plan.project)} SOURCE_REPO={q_source_repo} BOARD_ROOT={q_board_root} DEPLOY_REF=origin/main TICKET_BOARD_SKIP_MIGRATIONS=1 {q_deploy_script} deploy
 sudo setfacl -R -m u:{plan.service_user}:rx {q_board_root}

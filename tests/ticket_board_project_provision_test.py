@@ -70,6 +70,10 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "PGU_TICKET_BOARD_PANE_STATE_DIR=" not in combined
     assert "ReadWritePaths=/home/stellaris-agent/.claude/stellaris-tickets-assets /home/stellaris-agent/.claude/stellaris-ticket-frames" in combined
     assert f"SOURCE_REPO='{ROOT}'" in combined
+    assert render_operator_commands(plan).splitlines()[:2] == [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+    ]
     assert "BOARD_ROOT='/home/stellaris-agent/stellaris-ticketboard-live'" in combined
     assert "TICKET_BOARD_PROJECT='stellaris'" in combined
     assert "TICKET_BOARD_SKIP_MIGRATIONS=1" in combined
@@ -207,6 +211,10 @@ def test_cli_writes_reviewable_artifacts() -> None:
         assert (output_dir / "porter-database.sql").exists()
         assert (output_dir / "porter-workflow.sql").exists()
         assert (output_dir / "operator-commands.sh").exists()
+        assert (output_dir / "operator-commands.sh").read_text(encoding="utf-8").splitlines()[:2] == [
+            "#!/usr/bin/env bash",
+            "set -euo pipefail",
+        ]
 
         workflow_result = subprocess.run(
             [

@@ -8,6 +8,8 @@ CANARY_UNIT="$REPO_ROOT/deploy/systemd/pgu-ticket-board-canary.service"
 TMPFILES="$REPO_ROOT/deploy/tmpfiles/pgu-ticket-board.conf"
 POLKIT_RULE="$REPO_ROOT/deploy/polkit/49-pgu-board-deploy.rules"
 RUNBOOK="$REPO_ROOT/docs/ticket-board-boardsvc-peer-auth-runbook.md"
+TMPDIR_T="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR_T"' EXIT
 
 [[ -x "$SCRIPT" ]] || {
     echo "FAIL: setup script is missing or not executable" >&2
@@ -45,6 +47,11 @@ grep -q 'grant_write_acl "\$FRAME_ROOT"' "$SCRIPT" || {
 }
 grep -q '49-pgu-board-deploy.rules' "$SCRIPT" || {
     echo "FAIL: setup command plan does not install the board deploy polkit rule" >&2
+    exit 1
+}
+"$SCRIPT" --print-root-commands >"$TMPDIR_T/root-commands.out"
+grep -q '^set -euo pipefail$' "$TMPDIR_T/root-commands.out" || {
+    echo "FAIL: printed root commands must stop on the first failed step" >&2
     exit 1
 }
 if grep -q 'pgu-tickets"' "$SCRIPT"; then

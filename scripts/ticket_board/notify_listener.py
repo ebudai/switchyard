@@ -155,6 +155,32 @@ class WorkingProbe:
     seconds: int | None = None
 
 
+def _is_status_separator_line(line: str) -> bool:
+    stripped = line.strip()
+    return stripped.count("─") >= 8
+
+
+def working_status_region_from_pane_text(pane_text: str, *, max_non_empty_lines: int = 8) -> str:
+    lines: list[str] = []
+    for line in reversed(pane_text.splitlines()):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        lines.append(stripped)
+        if len(lines) >= max_non_empty_lines:
+            break
+    lines.reverse()
+    for index, line in enumerate(lines):
+        if _is_status_separator_line(line):
+            return "\n".join(lines[index:])
+    return lines[-1] if lines else ""
+
+
+def working_probe_text_from_pane_text(pane_text: str) -> str:
+    return working_status_region_from_pane_text(pane_text)
+
+
+
 def parse_transition_payload(payload: str) -> Transition:
     parsed = json.loads(payload)
     if not isinstance(parsed, dict):
@@ -462,20 +488,21 @@ class PaneActivityGate:
 
     def _parse_working_probe(self, target: str, pane_text: str) -> WorkingProbe:
         runtime = self._expected_runtime_for_target(target)
+        probe_text = working_probe_text_from_pane_text(pane_text)
         if runtime == "codex":
             latest: int | None = None
-            for match in CODEX_WORKING_TIMER_RE.finditer(pane_text):
+            for match in CODEX_WORKING_TIMER_RE.finditer(probe_text):
                 minutes = int(match.group("minutes") or "0")
                 seconds = int(match.group("seconds"))
                 latest = minutes * 60 + seconds
             return WorkingProbe(True, True, latest is not None, latest)
         if runtime == "claude":
             latest: int | None = None
-            for match in CLAUDE_WORKING_TIMER_RE.finditer(pane_text):
+            for match in CLAUDE_WORKING_TIMER_RE.finditer(probe_text):
                 minutes = int(match.group("minutes") or "0")
                 seconds = int(match.group("seconds"))
                 latest = minutes * 60 + seconds
-            working = latest is not None or CLAUDE_INTERRUPT_RE.search(pane_text) is not None
+            working = latest is not None or CLAUDE_INTERRUPT_RE.search(probe_text) is not None
             return WorkingProbe(True, True, working, latest)
         if runtime in KNOWN_RUNTIMES_WITHOUT_WORKING_PROBE:
             return WorkingProbe(True, True, False)

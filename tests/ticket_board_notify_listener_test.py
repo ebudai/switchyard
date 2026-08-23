@@ -1156,6 +1156,64 @@ def test_codex_session_start_idle_without_timer_delivers() -> None:
     assert gate._last_working_timer_by_target == {}
 
 
+def test_codex_probe_ignores_pgu626_timer_prose_above_idle_prompt() -> None:
+    pgu626_text_before = """\
+PGU-626 -- Working-timer probe parses pane PROSE as a timer.
+The idle pane was displaying analysis of PGU-618 itself:
+    "...WORKING_TIMER_RE matches Working (23s cleanly."
+    "Working (3s) -> Working (4s) across 1.2s."
+>
+"""
+    pgu626_text_after = pgu626_text_before.replace("Working (4s)", "Working (5s)")
+    sleep_calls: list[float] = []
+
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            cursor_position_runner=constant_cursor_runner("2 23 24"),
+            capture_pane_runner=targeted_capture_runner("pgu-ops:0.0", pgu626_text_before, pgu626_text_after),
+            idle_working_timer_sample_delay_seconds=1.1,
+            sleeper=lambda seconds: sleep_calls.append(seconds),
+        )
+        store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=1_800_000_000.0)
+
+        assert gate.is_busy("pgu-ops:0.0") is False
+
+    assert sleep_calls == []
+    assert gate.last_trace("pgu-ops:0.0").reason == "working_timer_idle"  # type: ignore[union-attr]
+    assert gate._last_working_timer_by_target == {}
+
+
+def test_codex_probe_detects_working_timer_in_real_footer_region() -> None:
+    codex_layout_before = """\
+Some ordinary output above the footer.
+────────────────────────────────────────────────────────────────────────────────
+• Working (1s • esc to interrupt)
+› Ask Codex to do anything
+  gpt-5.5 high · ~/Projects/pgu
+"""
+    codex_layout_after = codex_layout_before.replace("Working (1s", "Working (2s")
+    sleep_calls: list[float] = []
+
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            cursor_position_runner=constant_cursor_runner("2 23 24"),
+            capture_pane_runner=targeted_capture_runner("pgu-ops:0.0", codex_layout_before, codex_layout_after),
+            idle_working_timer_sample_delay_seconds=1.1,
+            sleeper=lambda seconds: sleep_calls.append(seconds),
+        )
+        store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=1_800_000_000.0)
+
+        assert gate.is_busy("pgu-ops:0.0") is True
+
+    assert sleep_calls == [1.1]
+    assert gate.last_trace("pgu-ops:0.0").reason == "working_timer"  # type: ignore[union-attr]
+    assert gate._last_working_timer_by_target == {"pgu-ops:0.0": 2}
+
+
 def test_claude_session_start_idle_with_working_render_stays_busy() -> None:
     with TemporaryStateDir() as tmp_path:
         store = PaneHookStateStore(tmp_path)
@@ -1195,6 +1253,32 @@ def test_claude_interrupt_hint_without_elapsed_stays_busy() -> None:
         assert gate.is_busy("pgu-director:0.0") is True
 
     assert gate.last_trace("pgu-director:0.0").reason == "working_timer"  # type: ignore[union-attr]
+    assert gate._last_working_timer_by_target == {}
+
+
+def test_claude_probe_ignores_pgu626_interrupt_prose_above_idle_prompt() -> None:
+    pgu626_text = """\
+PGU-626 -- Working-timer probe parses pane PROSE as a timer.
+Fix options include matching only when the pattern co-occurs with the interrupt hint:
+    Press esc to interrupt
+That sentence is ticket prose, not the CLI status line.
+>
+"""
+
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            cursor_position_runner=constant_cursor_runner("2 23 24"),
+            capture_pane_runner=targeted_capture_runner("pgu-director:0.0", pgu626_text),
+            idle_working_timer_sample_delay_seconds=1.1,
+            sleeper=lambda _seconds: None,
+        )
+        store.write("pgu-director:0.0", "idle", source="claude.SessionStart", now=1_800_000_000.0)
+
+        assert gate.is_busy("pgu-director:0.0") is False
+
+    assert gate.last_trace("pgu-director:0.0").reason == "working_timer_idle"  # type: ignore[union-attr]
     assert gate._last_working_timer_by_target == {}
 
 

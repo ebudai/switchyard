@@ -475,7 +475,9 @@ def test_pre_send_recheck_waits_and_holds_when_cursor_advances_on_second_read() 
     assert sleep_calls == [0.5]
     assert conn.requeued == [(85, (85, f"{DEFAULT_REQUEUE_BASE_SECONDS:g} seconds", "pane busy"))]
     assert conn.traces[1][6] == "human_composing"
-    assert json.loads(conn.traces[1][8])["phase"] == "pre_send_recheck"
+    detail = json.loads(conn.traces[1][8])
+    assert detail["decision_reason"] == "human_composing"
+    assert detail["anti_clobber"]["reason"] == "human_composing"
 
 
 def test_pre_send_recheck_delivers_when_cursor_stays_home() -> None:
@@ -628,7 +630,7 @@ def test_advancing_working_timer_suppresses_idle_stall_nudge() -> None:
             idle_working_timer_sample_delay_seconds=1.1,
             sleeper=lambda _seconds: None,
         )
-        store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
+        store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=100.0)
         conn = FakeConnection(idle_stall_result=1)
         listener = TicketBoardNotifyListener(
             conninfo="",
@@ -685,7 +687,7 @@ def test_resetting_working_timer_suppresses_idle_stall_nudge() -> None:
             idle_working_timer_sample_delay_seconds=1.1,
             sleeper=lambda _seconds: None,
         )
-        store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
+        store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=100.0)
         conn = FakeConnection(idle_stall_result=1)
         listener = TicketBoardNotifyListener(
             conninfo="",
@@ -699,7 +701,7 @@ def test_resetting_working_timer_suppresses_idle_stall_nudge() -> None:
         assert listener.process_idle_stall_nudges(conn) == 0
 
     assert conn.idle_stall_calls == []
-    assert gate.last_trace("pgu-ops:0.0").reason == "working_timer"  # type: ignore[union-attr]
+    assert gate.last_trace("pgu-ops:0.0").reason == "pane_content_changed"  # type: ignore[union-attr]
 
 
 def test_static_working_timer_does_not_suppress_idle_stall_nudge() -> None:
@@ -716,7 +718,7 @@ def test_static_working_timer_does_not_suppress_idle_stall_nudge() -> None:
             idle_working_timer_sample_delay_seconds=1.1,
             sleeper=lambda _seconds: None,
         )
-        store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
+        store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=100.0)
         conn = FakeConnection(idle_stall_result=1)
         listener = TicketBoardNotifyListener(
             conninfo="",
@@ -734,7 +736,7 @@ def test_static_working_timer_does_not_suppress_idle_stall_nudge() -> None:
         assert params is not None
         idle_since = json.loads(str(params[0]))
         assert set(idle_since) == {"ops"}
-        assert gate.last_trace("pgu-ops:0.0").reason == "hook_idle"  # type: ignore[union-attr]
+        assert gate.last_trace("pgu-ops:0.0").reason == "working_timer_idle"  # type: ignore[union-attr]
 
 
 def test_cached_static_working_timer_is_not_working_evidence() -> None:
@@ -754,25 +756,20 @@ def test_cached_static_working_timer_is_not_working_evidence() -> None:
     assert gate._last_working_timer_by_target == {"pgu-ops:0.0": 7}
 
 
-def test_cached_working_timer_increment_suppresses_next_idle_since_scan() -> None:
+def test_changed_pane_content_suppresses_idle_since_scan() -> None:
     with TemporaryStateDir() as tmp_path:
         store = PaneHookStateStore(tmp_path)
         gate = PaneActivityGate(
             state_store=store,
             cursor_position_runner=constant_cursor_runner(),
-            capture_pane_runner=sequenced_capture_runner(
-                "Working (12s · esc to interrupt)\n",
-                "Working (12s · esc to interrupt)\n",
-                "Working (18s · esc to interrupt)\n",
-            ),
+            capture_pane_runner=sequenced_capture_runner("stable screen\n", "changed screen\n"),
             idle_working_timer_sample_delay_seconds=1.1,
             sleeper=lambda _seconds: None,
         )
-        store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
+        store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=100.0)
 
-        assert set(gate.idle_since_by_role(["ops"])) == {"ops"}
         assert gate.idle_since_by_role(["ops"]) == {}
-        assert gate.last_trace("pgu-ops:0.0").reason == "working_timer"  # type: ignore[union-attr]
+        assert gate.last_trace("pgu-ops:0.0").reason == "pane_content_changed"  # type: ignore[union-attr]
 
 
 def test_listener_enqueues_idle_turn_end_nudges_on_each_turn_completion_idle() -> None:
@@ -1045,8 +1042,8 @@ def test_stale_codex_busy_state_stays_busy_on_cold_cache_when_working_timer_rese
         state = store.read("pgu-ops:0.0")
 
     assert sleep_calls == [1.1]
-    assert gate.last_trace("pgu-ops:0.0").reason == "working_timer"  # type: ignore[union-attr]
-    assert gate._last_working_timer_by_target == {"pgu-ops:0.0": 2}
+    assert gate.last_trace("pgu-ops:0.0").reason == "pane_content_changed"  # type: ignore[union-attr]
+    assert gate._last_working_timer_by_target == {}
     assert state is not None
     assert state.state == "busy"
     assert state.source == "codex.UserPromptSubmit"
@@ -1078,7 +1075,7 @@ def test_stale_codex_busy_state_recovers_on_cold_cache_when_working_timer_is_sta
 
     assert sleep_calls == [1.1]
     assert gate.last_trace("pgu-ops:0.0").reason == "stale_codex_busy_recovered"  # type: ignore[union-attr]
-    assert gate._last_working_timer_by_target == {"pgu-ops:0.0": 7}
+    assert gate._last_working_timer_by_target == {}
     assert state is not None
     assert state.state == "idle"
     assert state.source == "listener.stale_codex_busy_recovery"
@@ -1128,8 +1125,8 @@ def test_stale_codex_session_start_idle_stays_busy_when_working_timer_resets() -
         state = store.read("pgu-ops:0.0")
 
     assert sleep_calls == [1.1]
-    assert gate.last_trace("pgu-ops:0.0").reason == "working_timer"  # type: ignore[union-attr]
-    assert gate._last_working_timer_by_target == {"pgu-ops:0.0": 2}
+    assert gate.last_trace("pgu-ops:0.0").reason == "pane_content_changed"  # type: ignore[union-attr]
+    assert gate._last_working_timer_by_target == {}
     assert state is not None
     assert state.state == "idle"
     assert state.source == "codex.SessionStart"
@@ -1151,7 +1148,7 @@ def test_codex_session_start_idle_without_timer_delivers() -> None:
 
         assert gate.is_busy("pgu-ops:0.0") is False
 
-    assert sleep_calls == []
+    assert sleep_calls == [1.1]
     assert gate.last_trace("pgu-ops:0.0").reason == "working_timer_idle"  # type: ignore[union-attr]
     assert gate._last_working_timer_by_target == {}
 
@@ -1164,7 +1161,6 @@ The idle pane was displaying analysis of PGU-618 itself:
     "Working (3s) -> Working (4s) across 1.2s."
 >
 """
-    pgu626_text_after = pgu626_text_before.replace("Working (4s)", "Working (5s)")
     sleep_calls: list[float] = []
 
     with TemporaryStateDir() as tmp_path:
@@ -1172,7 +1168,7 @@ The idle pane was displaying analysis of PGU-618 itself:
         gate = PaneActivityGate(
             state_store=store,
             cursor_position_runner=constant_cursor_runner("2 23 24"),
-            capture_pane_runner=targeted_capture_runner("pgu-ops:0.0", pgu626_text_before, pgu626_text_after),
+            capture_pane_runner=targeted_capture_runner("pgu-ops:0.0", pgu626_text_before, pgu626_text_before),
             idle_working_timer_sample_delay_seconds=1.1,
             sleeper=lambda seconds: sleep_calls.append(seconds),
         )
@@ -1180,7 +1176,7 @@ The idle pane was displaying analysis of PGU-618 itself:
 
         assert gate.is_busy("pgu-ops:0.0") is False
 
-    assert sleep_calls == []
+    assert sleep_calls == [1.1]
     assert gate.last_trace("pgu-ops:0.0").reason == "working_timer_idle"  # type: ignore[union-attr]
     assert gate._last_working_timer_by_target == {}
 
@@ -1210,8 +1206,8 @@ Some ordinary output above the footer.
         assert gate.is_busy("pgu-ops:0.0") is True
 
     assert sleep_calls == [1.1]
-    assert gate.last_trace("pgu-ops:0.0").reason == "working_timer"  # type: ignore[union-attr]
-    assert gate._last_working_timer_by_target == {"pgu-ops:0.0": 2}
+    assert gate.last_trace("pgu-ops:0.0").reason == "pane_content_changed"  # type: ignore[union-attr]
+    assert gate._last_working_timer_by_target == {}
 
 
 def test_claude_session_start_idle_with_working_render_stays_busy() -> None:
@@ -1223,6 +1219,7 @@ def test_claude_session_start_idle_with_working_render_stays_busy() -> None:
             capture_pane_runner=targeted_capture_runner(
                 "pgu-audit:0.0",
                 "✶ Harmonizing… (2m 22s · ↓ 8.6k tokens)\n",
+                "✻ Harmonizing… (2m 23s · ↓ 8.6k tokens)\n",
             ),
             idle_working_timer_sample_delay_seconds=1.1,
             sleeper=lambda _seconds: None,
@@ -1231,11 +1228,11 @@ def test_claude_session_start_idle_with_working_render_stays_busy() -> None:
 
         assert gate.is_busy("pgu-audit:0.0") is True
 
-    assert gate.last_trace("pgu-audit:0.0").reason == "working_timer"  # type: ignore[union-attr]
-    assert gate._last_working_timer_by_target == {"pgu-audit:0.0": 142}
+    assert gate.last_trace("pgu-audit:0.0").reason == "pane_content_changed"  # type: ignore[union-attr]
+    assert gate._last_working_timer_by_target == {}
 
 
-def test_claude_interrupt_hint_without_elapsed_stays_busy() -> None:
+def test_static_claude_interrupt_hint_is_not_working_evidence() -> None:
     with TemporaryStateDir() as tmp_path:
         store = PaneHookStateStore(tmp_path)
         gate = PaneActivityGate(
@@ -1250,9 +1247,9 @@ def test_claude_interrupt_hint_without_elapsed_stays_busy() -> None:
         )
         store.write("pgu-director:0.0", "idle", source="claude.SessionStart", now=1_800_000_000.0)
 
-        assert gate.is_busy("pgu-director:0.0") is True
+        assert gate.is_busy("pgu-director:0.0") is False
 
-    assert gate.last_trace("pgu-director:0.0").reason == "working_timer"  # type: ignore[union-attr]
+    assert gate.last_trace("pgu-director:0.0").reason == "working_timer_idle"  # type: ignore[union-attr]
     assert gate._last_working_timer_by_target == {}
 
 
@@ -1299,7 +1296,7 @@ def test_idle_probe_capture_failure_is_inconclusive_and_withheld() -> None:
     assert gate._last_working_timer_by_target == {}
 
 
-def test_unknown_runtime_idle_probe_is_inconclusive_and_withheld() -> None:
+def test_unknown_runtime_idle_probe_uses_content_hash_when_capture_succeeds() -> None:
     with TemporaryStateDir() as tmp_path:
         store = PaneHookStateStore(tmp_path)
         gate = PaneActivityGate(
@@ -1311,9 +1308,9 @@ def test_unknown_runtime_idle_probe_is_inconclusive_and_withheld() -> None:
         )
         store.write("pgu-main:0.0", "idle", source="newcli.SessionStart", now=1_800_000_000.0)
 
-        assert gate.is_busy("pgu-main:0.0") is True
+        assert gate.is_busy("pgu-main:0.0") is False
 
-    assert gate.last_trace("pgu-main:0.0").reason == "working_timer_unobservable"  # type: ignore[union-attr]
+    assert gate.last_trace("pgu-main:0.0").reason == "working_timer_idle"  # type: ignore[union-attr]
     assert gate._last_working_timer_by_target == {}
 
 
@@ -1339,9 +1336,9 @@ def test_codex_session_start_idle_frozen_timer_samples_once_then_delivers() -> N
         assert gate.is_busy("pgu-ops:0.0") is False
         assert gate.is_busy("pgu-ops:0.0") is False
 
-    assert sleep_calls == [1.1]
+    assert sleep_calls == [1.1, 1.1]
     assert gate.last_trace("pgu-ops:0.0").reason == "working_timer_idle"  # type: ignore[union-attr]
-    assert gate._last_working_timer_by_target == {"pgu-ops:0.0": 7}
+    assert gate._last_working_timer_by_target == {}
 
 
 def test_foreign_runtime_idle_with_advancing_working_timer_is_busy() -> None:
@@ -1364,7 +1361,7 @@ def test_foreign_runtime_idle_with_advancing_working_timer_is_busy() -> None:
         assert gate.is_busy("pgu-ops:0.0") is True
 
     assert sleep_calls == [1.1]
-    assert gate.last_trace("pgu-ops:0.0").reason == "working_timer"  # type: ignore[union-attr]
+    assert gate.last_trace("pgu-ops:0.0").reason == "foreign_runtime_pane_content_changed"  # type: ignore[union-attr]
 
 
 def test_foreign_runtime_idle_without_timer_delivers() -> None:
@@ -1399,12 +1396,12 @@ def test_team_launcher_start_idle_without_timer_delivers() -> None:
 
         assert gate.is_busy("pgu-main:0.0") is False
 
-    assert sleep_calls == []
+    assert sleep_calls == [1.1]
     assert gate.last_trace("pgu-main:0.0").reason == "working_timer_idle"  # type: ignore[union-attr]
     assert gate._last_working_timer_by_target == {}
 
 
-def test_turn_end_idle_does_not_pay_working_timer_delay() -> None:
+def test_stale_turn_end_idle_uses_content_hash_probe() -> None:
     sleep_calls: list[float] = []
     with TemporaryStateDir() as tmp_path:
         store = PaneHookStateStore(tmp_path)
@@ -1423,10 +1420,10 @@ def test_turn_end_idle_does_not_pay_working_timer_delay() -> None:
         )
         store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=1_800_000_000.0)
 
-        assert gate.is_busy("pgu-ops:0.0") is False
+        assert gate.is_busy("pgu-ops:0.0") is True
 
-    assert sleep_calls == []
-    assert gate.last_trace("pgu-ops:0.0").reason == "hook_idle"  # type: ignore[union-attr]
+    assert sleep_calls == [1.1]
+    assert gate.last_trace("pgu-ops:0.0").reason == "pane_content_changed"  # type: ignore[union-attr]
     assert gate._last_working_timer_by_target == {}
 
 
@@ -2014,7 +2011,9 @@ def test_director_pre_send_recheck_blocks_typing_that_starts_after_initial_idle_
     assert sent == []
     assert len(conn.requeued) == 1
     assert conn.traces[1][6] == "human_composing"
-    assert json.loads(conn.traces[1][8])["phase"] == "pre_send_recheck"
+    detail = json.loads(conn.traces[1][8])
+    assert detail["decision_reason"] == "human_composing"
+    assert detail["anti_clobber"]["reason"] == "human_composing"
 
 
 def test_director_pre_send_recheck_blocks_claude_working_probe_after_initial_idle_check() -> None:
@@ -2025,9 +2024,8 @@ def test_director_pre_send_recheck_blocks_claude_working_probe_after_initial_idl
         "",
         "",
         "",
-        "",
-        "Press esc to interrupt\n",
-        "",
+        "✶ Harmonizing… (2m 22s · ↓ 8.6k tokens)\n",
+        "✻ Harmonizing… (2m 23s · ↓ 8.6k tokens)\n",
     )
 
     with TemporaryStateDir() as tmp_path:
@@ -2056,11 +2054,13 @@ def test_director_pre_send_recheck_blocks_claude_working_probe_after_initial_idl
 
     assert sent == []
     assert len(conn.requeued) == 1
-    assert conn.traces[1][6] == "working_timer"
-    assert json.loads(conn.traces[1][8])["phase"] == "pre_send_recheck"
+    assert conn.traces[1][6] == "pane_content_changed"
+    detail = json.loads(conn.traces[1][8])
+    assert detail["decision_reason"] == "pane_content_changed"
+    assert detail["anti_clobber"]["reason"] == "pane_content_changed"
 
 
-def director_delivery_case(source: str, pane_text: str) -> tuple[list[tuple[str, str]], FakeConnection]:
+def director_delivery_case(source: str, *pane_texts: str) -> tuple[list[tuple[str, str]], FakeConnection]:
     sent: list[tuple[str, str]] = []
     cursor_runner = sequenced_cursor_runner("2 23 24", "2 23 24", "2 23 24")
 
@@ -2069,7 +2069,7 @@ def director_delivery_case(source: str, pane_text: str) -> tuple[list[tuple[str,
         gate = PaneActivityGate(
             state_store=store,
             cursor_position_runner=cursor_runner,
-            capture_pane_runner=targeted_capture_runner("pgu-director:0.0", pane_text),
+            capture_pane_runner=targeted_capture_runner("pgu-director:0.0", *pane_texts),
             idle_working_timer_sample_delay_seconds=0.0,
             wall_time=lambda: 0.0,
         )
@@ -2092,32 +2092,35 @@ def director_delivery_case(source: str, pane_text: str) -> tuple[list[tuple[str,
 
 def test_director_delivery_matrix_for_trusted_and_untrusted_claude_idle_sources() -> None:
     trusted_idle_sent, trusted_idle_conn = director_delivery_case("claude.Notification.idle_prompt", "")
-    trusted_working_sent, trusted_working_conn = director_delivery_case(
+    trusted_static_interrupt_sent, trusted_static_interrupt_conn = director_delivery_case(
         "claude.Notification.idle_prompt",
         "Press esc to interrupt\n",
     )
     untrusted_idle_sent, untrusted_idle_conn = director_delivery_case("claude.SessionStart", "")
-    untrusted_working_sent, untrusted_working_conn = director_delivery_case(
+    untrusted_changed_sent, untrusted_changed_conn = director_delivery_case(
         "claude.SessionStart",
-        "Press esc to interrupt\n",
+        "",
+        "",
+        "",
+        "✶ Harmonizing… (2m 22s · ↓ 8.6k tokens)\n",
+        "✻ Harmonizing… (2m 23s · ↓ 8.6k tokens)\n",
     )
 
     assert trusted_idle_sent == [("pgu-director:0.0", "PGU-360 -- Director notification")]
     assert trace_events(trusted_idle_conn) == ["listener_claim", "send", "listener_ack"]
     assert trusted_idle_conn.traces[1][6] == "hook_idle"
 
-    assert trusted_working_sent == []
-    assert len(trusted_working_conn.requeued) == 1
-    assert trusted_working_conn.traces[1][6] == "working_timer"
-    assert json.loads(trusted_working_conn.traces[1][8])["phase"] == "pre_send_recheck"
+    assert trusted_static_interrupt_sent == [("pgu-director:0.0", "PGU-360 -- Director notification")]
+    assert trace_events(trusted_static_interrupt_conn) == ["listener_claim", "send", "listener_ack"]
+    assert trusted_static_interrupt_conn.traces[1][6] == "hook_idle"
 
     assert untrusted_idle_sent == [("pgu-director:0.0", "PGU-360 -- Director notification")]
     assert trace_events(untrusted_idle_conn) == ["listener_claim", "send", "listener_ack"]
     assert untrusted_idle_conn.traces[1][6] == "working_timer_idle"
 
-    assert untrusted_working_sent == []
-    assert len(untrusted_working_conn.requeued) == 1
-    assert untrusted_working_conn.traces[1][6] == "working_timer"
+    assert untrusted_changed_sent == []
+    assert len(untrusted_changed_conn.requeued) == 1
+    assert untrusted_changed_conn.traces[1][6] == "pane_content_changed"
 
 
 def test_idle_nudge_enumeration_does_not_touch_director_composing_latch() -> None:

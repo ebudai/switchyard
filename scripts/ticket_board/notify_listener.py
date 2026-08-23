@@ -58,12 +58,11 @@ DEFAULT_ROLE_RUNTIMES = {
     "audit": "claude",
     "inspector": "gemini",
 }
-KNOWN_RUNTIMES_WITHOUT_WORKING_PROBE = frozenset({"gemini"})
 IMMEDIATE_DELIVERY_KINDS = frozenset({"ticket_update"})
 DEFAULT_PRE_SEND_RECHECK_DELAY_SECONDS = 0.5
 DEFAULT_DIRECTOR_COMPOSER_HOME_X = 2
 DEFAULT_WORKING_TIMER_SAMPLE_DELAY_SECONDS = 0.0
-DEFAULT_IDLE_WORKING_TIMER_SAMPLE_DELAY_SECONDS = 1.1
+DEFAULT_IDLE_WORKING_TIMER_SAMPLE_DELAY_SECONDS = 1.2
 DEFAULT_STALE_CODEX_BUSY_HOOK_SECONDS = 120.0
 MIN_RECOVERABLE_HOOK_EPOCH_SECONDS = 1_700_000_000.0
 DEFAULT_PANE_STATE_DIR = (
@@ -92,10 +91,6 @@ STATE_RANK = {
 }
 TERMINAL_STATES = {"done", "cancelled"}
 NUDGE_ELIGIBLE_STATES = {"in_progress", "inspection", "audit", "dat", "director_review", "analysis", "backlog"}
-CODEX_WORKING_TIMER_RE = re.compile(r"Working\s*\(\s*(?:(?P<minutes>\d+)m\s*)?(?P<seconds>\d+)s\b")
-CLAUDE_WORKING_TIMER_RE = re.compile(r"\b[A-Za-z][A-Za-z -]*…\s*\(\s*(?:(?P<minutes>\d+)m\s*)?(?P<seconds>\d+)s\b")
-CLAUDE_INTERRUPT_RE = re.compile(r"\besc to interrupt\b", re.IGNORECASE)
-
 LOGGER = logging.getLogger(__name__)
 DEFAULT_DIRECTORCTL = "/home/agent/bin/directorctl"
 
@@ -151,33 +146,11 @@ class PaneHookState:
 class WorkingProbe:
     captured: bool
     observable: bool
-    working: bool
-    seconds: int | None = None
+    digest: str = ""
 
 
-def _is_status_separator_line(line: str) -> bool:
-    stripped = line.strip()
-    return stripped.count("─") >= 8
-
-
-def working_status_region_from_pane_text(pane_text: str, *, max_non_empty_lines: int = 8) -> str:
-    lines: list[str] = []
-    for line in reversed(pane_text.splitlines()):
-        stripped = line.strip()
-        if not stripped:
-            continue
-        lines.append(stripped)
-        if len(lines) >= max_non_empty_lines:
-            break
-    lines.reverse()
-    for index, line in enumerate(lines):
-        if _is_status_separator_line(line):
-            return "\n".join(lines[index:])
-    return lines[-1] if lines else ""
-
-
-def working_probe_text_from_pane_text(pane_text: str) -> str:
-    return working_status_region_from_pane_text(pane_text)
+def pane_content_digest(pane_text: str) -> str:
+    return hashlib.sha256(pane_text.encode("utf-8")).hexdigest()
 
 
 
@@ -442,13 +415,6 @@ class PaneActivityGate:
                 continue
             if target == self.director_target and self.is_busy(target):
                 continue
-            working_trace = self._working_timer_trace(
-                target,
-                sample_delay_seconds=self.idle_working_timer_sample_delay_seconds,
-            )
-            if working_trace is not None:
-                self._record_trace(target, working_trace)
-                continue
             if target != self.director_target and self.is_busy(target):
                 continue
             state = self.state_store.read(target)
@@ -482,47 +448,18 @@ class PaneActivityGate:
     def _expected_runtime_for_target(self, target: str) -> str:
         return self.role_runtimes.get(self._role_for_target(target), "")
 
-    def _captured_working_timer_seconds(self, target: str) -> int | None:
-        probe = self._captured_working_timer_probe(target)
-        return probe.seconds if probe.captured and probe.observable and probe.working else None
-
-    def _parse_working_probe(self, target: str, pane_text: str) -> WorkingProbe:
-        runtime = self._expected_runtime_for_target(target)
-        probe_text = working_probe_text_from_pane_text(pane_text)
-        if runtime == "codex":
-            latest: int | None = None
-            for match in CODEX_WORKING_TIMER_RE.finditer(probe_text):
-                minutes = int(match.group("minutes") or "0")
-                seconds = int(match.group("seconds"))
-                latest = minutes * 60 + seconds
-            return WorkingProbe(True, True, latest is not None, latest)
-        if runtime == "claude":
-            latest: int | None = None
-            for match in CLAUDE_WORKING_TIMER_RE.finditer(probe_text):
-                minutes = int(match.group("minutes") or "0")
-                seconds = int(match.group("seconds"))
-                latest = minutes * 60 + seconds
-            working = latest is not None or CLAUDE_INTERRUPT_RE.search(probe_text) is not None
-            return WorkingProbe(True, True, working, latest)
-        if runtime in KNOWN_RUNTIMES_WITHOUT_WORKING_PROBE:
-            return WorkingProbe(True, True, False)
-        return WorkingProbe(True, False, False)
-
-    def _working_signal_is_busy_without_timer_advance(self, target: str) -> bool:
-        return self._expected_runtime_for_target(target) == "claude"
-
     def _captured_working_timer_probe(self, target: str) -> WorkingProbe:
         try:
             proc = self.capture_pane_runner(
-                ["tmux", "capture-pane", "-p", "-J", "-t", target, "-S", "-8"],
+                ["tmux", "capture-pane", "-p", "-J", "-t", target],
                 check=True,
                 text=True,
                 capture_output=True,
                 timeout=2.0,
             )
         except (OSError, subprocess.SubprocessError):
-            return WorkingProbe(False, False, False)
-        return self._parse_working_probe(target, proc.stdout)
+            return WorkingProbe(False, False)
+        return WorkingProbe(True, True, pane_content_digest(proc.stdout))
 
     def composer_snapshot(self, target: str) -> ComposerSnapshot:
         try:
@@ -539,74 +476,30 @@ class PaneActivityGate:
 
     def _working_timer_trace(self, target: str, *, sample_delay_seconds: float | None = None) -> ActivityTrace | None:
         first = self._captured_working_timer_probe(target)
-        if not first.captured or not first.observable or not first.working:
-            self._last_working_timer_by_target.pop(target, None)
-            return None
-        if self._working_signal_is_busy_without_timer_advance(target):
-            if first.seconds is not None:
-                self._last_working_timer_by_target[target] = first.seconds
-            else:
-                self._last_working_timer_by_target.pop(target, None)
-            return ActivityTrace(True, "working_timer")
-        if first.seconds is None:
-            self._last_working_timer_by_target.pop(target, None)
-            return None
-        previous = self._last_working_timer_by_target.get(target)
-        # Codex resets this timer between internal turn steps; any change is live work.
-        if previous is not None and first.seconds != previous:
-            self._last_working_timer_by_target[target] = first.seconds
-            return ActivityTrace(True, "working_timer")
+        if not first.captured or not first.observable:
+            return ActivityTrace(True, "working_timer_unobservable")
         sample_delay = self.working_timer_sample_delay_seconds if sample_delay_seconds is None else sample_delay_seconds
-        if previous is None and sample_delay > 0:
+        if sample_delay > 0:
             self.sleeper(sample_delay)
-            second = self._captured_working_timer_probe(target)
-            if second.captured and second.observable and second.working and second.seconds is not None:
-                self._last_working_timer_by_target[target] = second.seconds
-                if second.seconds != first.seconds:
-                    return ActivityTrace(True, "working_timer")
-                return None
-        self._last_working_timer_by_target[target] = first.seconds
+        second = self._captured_working_timer_probe(target)
+        if not second.captured or not second.observable:
+            return ActivityTrace(True, "working_timer_unobservable")
+        if second.digest != first.digest:
+            return ActivityTrace(True, "pane_content_changed", region_digest=second.digest)
         return None
 
     def _working_timer_idle_probe_trace(self, target: str) -> ActivityTrace:
         first = self._captured_working_timer_probe(target)
         if not first.captured or not first.observable:
-            self._last_working_timer_by_target.pop(target, None)
             return ActivityTrace(True, "working_timer_unobservable")
-        if not first.working:
-            self._last_working_timer_by_target.pop(target, None)
-            return ActivityTrace(False, "working_timer_idle")
-        if self._working_signal_is_busy_without_timer_advance(target):
-            if first.seconds is not None:
-                self._last_working_timer_by_target[target] = first.seconds
-            else:
-                self._last_working_timer_by_target.pop(target, None)
-            return ActivityTrace(True, "working_timer")
-        if first.seconds is None:
-            self._last_working_timer_by_target.pop(target, None)
-            return ActivityTrace(True, "working_timer_unobservable")
-        previous = self._last_working_timer_by_target.get(target)
-        if previous is not None and first.seconds != previous:
-            self._last_working_timer_by_target[target] = first.seconds
-            return ActivityTrace(True, "working_timer")
-        if previous is None and self.idle_working_timer_sample_delay_seconds > 0:
+        if self.idle_working_timer_sample_delay_seconds > 0:
             self.sleeper(self.idle_working_timer_sample_delay_seconds)
-            second = self._captured_working_timer_probe(target)
-            if not second.captured or not second.observable:
-                self._last_working_timer_by_target.pop(target, None)
-                return ActivityTrace(True, "working_timer_unobservable")
-            if not second.working:
-                self._last_working_timer_by_target.pop(target, None)
-                return ActivityTrace(False, "working_timer_idle")
-            if second.seconds is None:
-                self._last_working_timer_by_target.pop(target, None)
-                return ActivityTrace(True, "working_timer_unobservable")
-            self._last_working_timer_by_target[target] = second.seconds
-            if second.seconds != first.seconds:
-                return ActivityTrace(True, "working_timer")
-            return ActivityTrace(False, "working_timer_idle")
-        self._last_working_timer_by_target[target] = first.seconds
-        return ActivityTrace(False, "working_timer_idle")
+        second = self._captured_working_timer_probe(target)
+        if not second.captured or not second.observable:
+            return ActivityTrace(True, "working_timer_unobservable")
+        if second.digest != first.digest:
+            return ActivityTrace(True, "pane_content_changed", region_digest=second.digest)
+        return ActivityTrace(False, "working_timer_idle", region_digest=second.digest)
 
     def _target_cursor_state(self, target: str) -> bool | None:
         try:
@@ -657,11 +550,7 @@ class PaneActivityGate:
         return None
 
     def _trusted_idle_source_trace(self, target: str, state: PaneHookState) -> ActivityTrace | None:
-        if state.state != "idle" or state.source not in TRUSTED_IDLE_SOURCES:
-            return None
-        if self._expected_runtime_for_target(target) != "claude":
-            return None
-        return self._working_timer_trace(target, sample_delay_seconds=0.0)
+        return None
 
     def _idle_cursor_trace(self, target: str, state: PaneHookState, *, check_trusted_working: bool = False) -> ActivityTrace:
         cursor_composing = self._target_cursor_state(target)
@@ -691,19 +580,21 @@ class PaneActivityGate:
         expected_runtime = self._expected_runtime_for_target(target)
         if source_runtime and expected_runtime and source_runtime != expected_runtime:
             probe_trace = self._working_timer_idle_probe_trace(target)
-            if probe_trace.reason == "working_timer":
-                return probe_trace
             if probe_trace.busy:
                 return ActivityTrace(True, f"foreign_runtime_{probe_trace.reason}")
             return ActivityTrace(False, "foreign_runtime_working_timer_idle")
         if state.source in TRUSTED_IDLE_SOURCES:
+            if (
+                state.updated_at >= MIN_RECOVERABLE_HOOK_EPOCH_SECONDS
+                and self.stale_codex_busy_hook_seconds > 0
+                and self.wall_time() - state.updated_at >= self.stale_codex_busy_hook_seconds
+            ):
+                return self._working_timer_idle_probe_trace(target)
             return None
         probe_trace = self._working_timer_idle_probe_trace(target)
-        if probe_trace.reason == "working_timer":
-            return probe_trace
         if probe_trace.busy:
             return probe_trace
-        return ActivityTrace(False, "working_timer_idle")
+        return probe_trace
 
     def _stale_codex_busy_trace(self, target: str, state: PaneHookState) -> ActivityTrace | None:
         if state.state != "busy" or not state.source.startswith("codex."):

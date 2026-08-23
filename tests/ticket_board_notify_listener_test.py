@@ -25,7 +25,7 @@ from scripts.ticket_board.notify_listener import (
     DEFAULT_REQUEUE_BASE_SECONDS,
     DEFAULT_REQUEUE_MAX_SECONDS,
     DirectorctlSender,
-    PaneActivityGate,
+    PaneActivityGate as RealPaneActivityGate,
     PaneHookStateStore,
     TicketBoardNotifyListener,
     display_message,
@@ -324,6 +324,11 @@ def targeted_capture_runner(target: str, *outputs: str) -> Any:
 
 def failing_capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
     raise subprocess.SubprocessError("capture failed")
+
+
+def PaneActivityGate(*args: Any, **kwargs: Any) -> RealPaneActivityGate:
+    kwargs.setdefault("capture_pane_runner", sequenced_capture_runner("ordinary idle content\n> \n"))
+    return RealPaneActivityGate(*args, **kwargs)
 
 
 def hook_gate(tmp_path: Path) -> tuple[PaneHookStateStore, PaneActivityGate]:
@@ -1151,6 +1156,48 @@ def test_codex_session_start_idle_without_timer_delivers() -> None:
     assert gate._last_working_timer_by_target == {}
 
 
+def test_claude_session_start_idle_with_working_render_stays_busy() -> None:
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            cursor_position_runner=constant_cursor_runner("2 23 24"),
+            capture_pane_runner=targeted_capture_runner(
+                "pgu-audit:0.0",
+                "✶ Harmonizing… (2m 22s · ↓ 8.6k tokens)\n",
+            ),
+            idle_working_timer_sample_delay_seconds=1.1,
+            sleeper=lambda _seconds: None,
+        )
+        store.write("pgu-audit:0.0", "idle", source="claude.SessionStart", now=1_800_000_000.0)
+
+        assert gate.is_busy("pgu-audit:0.0") is True
+
+    assert gate.last_trace("pgu-audit:0.0").reason == "working_timer"  # type: ignore[union-attr]
+    assert gate._last_working_timer_by_target == {"pgu-audit:0.0": 142}
+
+
+def test_claude_interrupt_hint_without_elapsed_stays_busy() -> None:
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            cursor_position_runner=constant_cursor_runner("2 23 24"),
+            capture_pane_runner=targeted_capture_runner(
+                "pgu-director:0.0",
+                "Press esc to interrupt\n",
+            ),
+            idle_working_timer_sample_delay_seconds=1.1,
+            sleeper=lambda _seconds: None,
+        )
+        store.write("pgu-director:0.0", "idle", source="claude.SessionStart", now=1_800_000_000.0)
+
+        assert gate.is_busy("pgu-director:0.0") is True
+
+    assert gate.last_trace("pgu-director:0.0").reason == "working_timer"  # type: ignore[union-attr]
+    assert gate._last_working_timer_by_target == {}
+
+
 def test_idle_probe_capture_failure_is_inconclusive_and_withheld() -> None:
     with TemporaryStateDir() as tmp_path:
         store = PaneHookStateStore(tmp_path)
@@ -1165,6 +1212,24 @@ def test_idle_probe_capture_failure_is_inconclusive_and_withheld() -> None:
         assert gate.is_busy("pgu-ops:0.0") is True
 
     assert gate.last_trace("pgu-ops:0.0").reason == "working_timer_unobservable"  # type: ignore[union-attr]
+    assert gate._last_working_timer_by_target == {}
+
+
+def test_unknown_runtime_idle_probe_is_inconclusive_and_withheld() -> None:
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            cursor_position_runner=constant_cursor_runner("2 23 24"),
+            capture_pane_runner=targeted_capture_runner("pgu-main:0.0", ""),
+            idle_working_timer_sample_delay_seconds=1.1,
+            role_runtimes={"main": "newcli"},
+        )
+        store.write("pgu-main:0.0", "idle", source="newcli.SessionStart", now=1_800_000_000.0)
+
+        assert gate.is_busy("pgu-main:0.0") is True
+
+    assert gate.last_trace("pgu-main:0.0").reason == "working_timer_unobservable"  # type: ignore[union-attr]
     assert gate._last_working_timer_by_target == {}
 
 
@@ -1843,6 +1908,7 @@ def test_director_pre_send_recheck_blocks_typing_that_starts_after_initial_idle_
             state_store=store,
             client_activity_runner=client_activity_runner,
             cursor_position_runner=cursor_runner,
+            capture_pane_runner=targeted_capture_runner("pgu-director:0.0", "Press esc to interrupt\n"),
             director_composing_timeout_seconds=60.0,
             wall_time=lambda: wall[0],
         )
@@ -1865,6 +1931,109 @@ def test_director_pre_send_recheck_blocks_typing_that_starts_after_initial_idle_
     assert len(conn.requeued) == 1
     assert conn.traces[1][6] == "human_composing"
     assert json.loads(conn.traces[1][8])["phase"] == "pre_send_recheck"
+
+
+def test_director_pre_send_recheck_blocks_claude_working_probe_after_initial_idle_check() -> None:
+    sent: list[tuple[str, str]] = []
+    cursor_runner = sequenced_cursor_runner("2 23 24", "2 23 24")
+    capture_runner = targeted_capture_runner(
+        "pgu-director:0.0",
+        "",
+        "",
+        "",
+        "",
+        "Press esc to interrupt\n",
+        "",
+    )
+
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            cursor_position_runner=cursor_runner,
+            capture_pane_runner=capture_runner,
+            idle_working_timer_sample_delay_seconds=0.0,
+            wall_time=lambda: 0.0,
+        )
+        store.write("pgu-director:0.0", "idle", source="claude.SessionStart", now=10.0)
+
+        conn = FakeConnection(
+            [queue_row(76, "PGU-359", target_role="director", message="PGU-359 -- Director notification")]
+        )
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=gate.is_working,
+            connector=lambda *args, **kwargs: conn,
+            poll_seconds=0,
+        )
+
+        assert listener.listen_once(max_notifications=1) == 0
+
+    assert sent == []
+    assert len(conn.requeued) == 1
+    assert conn.traces[1][6] == "working_timer"
+    assert json.loads(conn.traces[1][8])["phase"] == "pre_send_recheck"
+
+
+def director_delivery_case(source: str, pane_text: str) -> tuple[list[tuple[str, str]], FakeConnection]:
+    sent: list[tuple[str, str]] = []
+    cursor_runner = sequenced_cursor_runner("2 23 24", "2 23 24", "2 23 24")
+
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            cursor_position_runner=cursor_runner,
+            capture_pane_runner=targeted_capture_runner("pgu-director:0.0", pane_text),
+            idle_working_timer_sample_delay_seconds=0.0,
+            wall_time=lambda: 0.0,
+        )
+        store.write("pgu-director:0.0", "idle", source=source, now=10.0)
+
+        conn = FakeConnection(
+            [queue_row(77, "PGU-360", target_role="director", message="PGU-360 -- Director notification")]
+        )
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=gate.is_working,
+            connector=lambda *args, **kwargs: conn,
+            poll_seconds=0,
+        )
+
+        listener.listen_once(max_notifications=1)
+        return sent, conn
+
+
+def test_director_delivery_matrix_for_trusted_and_untrusted_claude_idle_sources() -> None:
+    trusted_idle_sent, trusted_idle_conn = director_delivery_case("claude.Notification.idle_prompt", "")
+    trusted_working_sent, trusted_working_conn = director_delivery_case(
+        "claude.Notification.idle_prompt",
+        "Press esc to interrupt\n",
+    )
+    untrusted_idle_sent, untrusted_idle_conn = director_delivery_case("claude.SessionStart", "")
+    untrusted_working_sent, untrusted_working_conn = director_delivery_case(
+        "claude.SessionStart",
+        "Press esc to interrupt\n",
+    )
+
+    assert trusted_idle_sent == [("pgu-director:0.0", "PGU-360 -- Director notification")]
+    assert trace_events(trusted_idle_conn) == ["listener_claim", "send", "listener_ack"]
+    assert trusted_idle_conn.traces[1][6] == "hook_idle"
+
+    assert trusted_working_sent == []
+    assert len(trusted_working_conn.requeued) == 1
+    assert trusted_working_conn.traces[1][6] == "working_timer"
+    assert json.loads(trusted_working_conn.traces[1][8])["phase"] == "pre_send_recheck"
+
+    assert untrusted_idle_sent == [("pgu-director:0.0", "PGU-360 -- Director notification")]
+    assert trace_events(untrusted_idle_conn) == ["listener_claim", "send", "listener_ack"]
+    assert untrusted_idle_conn.traces[1][6] == "working_timer_idle"
+
+    assert untrusted_working_sent == []
+    assert len(untrusted_working_conn.requeued) == 1
+    assert untrusted_working_conn.traces[1][6] == "working_timer"
 
 
 def test_idle_nudge_enumeration_does_not_touch_director_composing_latch() -> None:

@@ -58,6 +58,7 @@ DEFAULT_ROLE_RUNTIMES = {
     "audit": "claude",
     "inspector": "gemini",
 }
+KNOWN_RUNTIMES_WITHOUT_WORKING_PROBE = frozenset({"gemini"})
 IMMEDIATE_DELIVERY_KINDS = frozenset({"ticket_update"})
 DEFAULT_PRE_SEND_RECHECK_DELAY_SECONDS = 0.5
 DEFAULT_DIRECTOR_COMPOSER_HOME_X = 2
@@ -91,7 +92,9 @@ STATE_RANK = {
 }
 TERMINAL_STATES = {"done", "cancelled"}
 NUDGE_ELIGIBLE_STATES = {"in_progress", "inspection", "audit", "dat", "director_review", "analysis", "backlog"}
-WORKING_TIMER_RE = re.compile(r"Working\s*\(\s*(?:(?P<minutes>\d+)m\s*)?(?P<seconds>\d+)s\b")
+CODEX_WORKING_TIMER_RE = re.compile(r"Working\s*\(\s*(?:(?P<minutes>\d+)m\s*)?(?P<seconds>\d+)s\b")
+CLAUDE_WORKING_TIMER_RE = re.compile(r"\b[A-Za-z][A-Za-z -]*…\s*\(\s*(?:(?P<minutes>\d+)m\s*)?(?P<seconds>\d+)s\b")
+CLAUDE_INTERRUPT_RE = re.compile(r"\besc to interrupt\b", re.IGNORECASE)
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_DIRECTORCTL = "/home/agent/bin/directorctl"
@@ -142,6 +145,14 @@ class PaneHookState:
     state: str
     updated_at: float
     source: str = ""
+
+
+@dataclass(frozen=True)
+class WorkingProbe:
+    captured: bool
+    observable: bool
+    working: bool
+    seconds: int | None = None
 
 
 def parse_transition_payload(payload: str) -> Transition:
@@ -403,6 +414,8 @@ class PaneActivityGate:
             target = ROLE_TO_TARGET.get(role)
             if target is None:
                 continue
+            if target == self.director_target and self.is_busy(target):
+                continue
             working_trace = self._working_timer_trace(
                 target,
                 sample_delay_seconds=self.idle_working_timer_sample_delay_seconds,
@@ -410,7 +423,7 @@ class PaneActivityGate:
             if working_trace is not None:
                 self._record_trace(target, working_trace)
                 continue
-            if self.is_busy(target):
+            if target != self.director_target and self.is_busy(target):
                 continue
             state = self.state_store.read(target)
             if state is None or state.state != "idle":
@@ -444,10 +457,34 @@ class PaneActivityGate:
         return self.role_runtimes.get(self._role_for_target(target), "")
 
     def _captured_working_timer_seconds(self, target: str) -> int | None:
-        _captured, seconds = self._captured_working_timer_probe(target)
-        return seconds
+        probe = self._captured_working_timer_probe(target)
+        return probe.seconds if probe.captured and probe.observable and probe.working else None
 
-    def _captured_working_timer_probe(self, target: str) -> tuple[bool, int | None]:
+    def _parse_working_probe(self, target: str, pane_text: str) -> WorkingProbe:
+        runtime = self._expected_runtime_for_target(target)
+        if runtime == "codex":
+            latest: int | None = None
+            for match in CODEX_WORKING_TIMER_RE.finditer(pane_text):
+                minutes = int(match.group("minutes") or "0")
+                seconds = int(match.group("seconds"))
+                latest = minutes * 60 + seconds
+            return WorkingProbe(True, True, latest is not None, latest)
+        if runtime == "claude":
+            latest: int | None = None
+            for match in CLAUDE_WORKING_TIMER_RE.finditer(pane_text):
+                minutes = int(match.group("minutes") or "0")
+                seconds = int(match.group("seconds"))
+                latest = minutes * 60 + seconds
+            working = latest is not None or CLAUDE_INTERRUPT_RE.search(pane_text) is not None
+            return WorkingProbe(True, True, working, latest)
+        if runtime in KNOWN_RUNTIMES_WITHOUT_WORKING_PROBE:
+            return WorkingProbe(True, True, False)
+        return WorkingProbe(True, False, False)
+
+    def _working_signal_is_busy_without_timer_advance(self, target: str) -> bool:
+        return self._expected_runtime_for_target(target) == "claude"
+
+    def _captured_working_timer_probe(self, target: str) -> WorkingProbe:
         try:
             proc = self.capture_pane_runner(
                 ["tmux", "capture-pane", "-p", "-J", "-t", target, "-S", "-8"],
@@ -457,13 +494,8 @@ class PaneActivityGate:
                 timeout=2.0,
             )
         except (OSError, subprocess.SubprocessError):
-            return False, None
-        latest: int | None = None
-        for match in WORKING_TIMER_RE.finditer(proc.stdout):
-            minutes = int(match.group("minutes") or "0")
-            seconds = int(match.group("seconds"))
-            latest = minutes * 60 + seconds
-        return True, latest
+            return WorkingProbe(False, False, False)
+        return self._parse_working_probe(target, proc.stdout)
 
     def composer_snapshot(self, target: str) -> ComposerSnapshot:
         try:
@@ -479,53 +511,74 @@ class PaneActivityGate:
         return composer_snapshot_from_pane_text(proc.stdout)
 
     def _working_timer_trace(self, target: str, *, sample_delay_seconds: float | None = None) -> ActivityTrace | None:
-        first = self._captured_working_timer_seconds(target)
-        if first is None:
+        first = self._captured_working_timer_probe(target)
+        if not first.captured or not first.observable or not first.working:
+            self._last_working_timer_by_target.pop(target, None)
+            return None
+        if self._working_signal_is_busy_without_timer_advance(target):
+            if first.seconds is not None:
+                self._last_working_timer_by_target[target] = first.seconds
+            else:
+                self._last_working_timer_by_target.pop(target, None)
+            return ActivityTrace(True, "working_timer")
+        if first.seconds is None:
             self._last_working_timer_by_target.pop(target, None)
             return None
         previous = self._last_working_timer_by_target.get(target)
         # Codex resets this timer between internal turn steps; any change is live work.
-        if previous is not None and first != previous:
-            self._last_working_timer_by_target[target] = first
+        if previous is not None and first.seconds != previous:
+            self._last_working_timer_by_target[target] = first.seconds
             return ActivityTrace(True, "working_timer")
         sample_delay = self.working_timer_sample_delay_seconds if sample_delay_seconds is None else sample_delay_seconds
         if previous is None and sample_delay > 0:
             self.sleeper(sample_delay)
-            second = self._captured_working_timer_seconds(target)
-            if second is not None:
-                self._last_working_timer_by_target[target] = second
-                if second != first:
+            second = self._captured_working_timer_probe(target)
+            if second.captured and second.observable and second.working and second.seconds is not None:
+                self._last_working_timer_by_target[target] = second.seconds
+                if second.seconds != first.seconds:
                     return ActivityTrace(True, "working_timer")
                 return None
-        self._last_working_timer_by_target[target] = first
+        self._last_working_timer_by_target[target] = first.seconds
         return None
 
     def _working_timer_idle_probe_trace(self, target: str) -> ActivityTrace:
-        first_ok, first = self._captured_working_timer_probe(target)
-        if not first_ok:
+        first = self._captured_working_timer_probe(target)
+        if not first.captured or not first.observable:
             self._last_working_timer_by_target.pop(target, None)
             return ActivityTrace(True, "working_timer_unobservable")
-        if first is None:
+        if not first.working:
             self._last_working_timer_by_target.pop(target, None)
             return ActivityTrace(False, "working_timer_idle")
+        if self._working_signal_is_busy_without_timer_advance(target):
+            if first.seconds is not None:
+                self._last_working_timer_by_target[target] = first.seconds
+            else:
+                self._last_working_timer_by_target.pop(target, None)
+            return ActivityTrace(True, "working_timer")
+        if first.seconds is None:
+            self._last_working_timer_by_target.pop(target, None)
+            return ActivityTrace(True, "working_timer_unobservable")
         previous = self._last_working_timer_by_target.get(target)
-        if previous is not None and first != previous:
-            self._last_working_timer_by_target[target] = first
+        if previous is not None and first.seconds != previous:
+            self._last_working_timer_by_target[target] = first.seconds
             return ActivityTrace(True, "working_timer")
         if previous is None and self.idle_working_timer_sample_delay_seconds > 0:
             self.sleeper(self.idle_working_timer_sample_delay_seconds)
-            second_ok, second = self._captured_working_timer_probe(target)
-            if not second_ok:
+            second = self._captured_working_timer_probe(target)
+            if not second.captured or not second.observable:
                 self._last_working_timer_by_target.pop(target, None)
                 return ActivityTrace(True, "working_timer_unobservable")
-            if second is None:
+            if not second.working:
                 self._last_working_timer_by_target.pop(target, None)
                 return ActivityTrace(False, "working_timer_idle")
-            self._last_working_timer_by_target[target] = second
-            if second != first:
+            if second.seconds is None:
+                self._last_working_timer_by_target.pop(target, None)
+                return ActivityTrace(True, "working_timer_unobservable")
+            self._last_working_timer_by_target[target] = second.seconds
+            if second.seconds != first.seconds:
                 return ActivityTrace(True, "working_timer")
             return ActivityTrace(False, "working_timer_idle")
-        self._last_working_timer_by_target[target] = first
+        self._last_working_timer_by_target[target] = first.seconds
         return ActivityTrace(False, "working_timer_idle")
 
     def _target_cursor_state(self, target: str) -> bool | None:
@@ -576,7 +629,14 @@ class PaneActivityGate:
         self._reset_director_startup_hold(clear_released=False)
         return None
 
-    def _idle_cursor_trace(self, target: str, state: PaneHookState) -> ActivityTrace:
+    def _trusted_idle_source_trace(self, target: str, state: PaneHookState) -> ActivityTrace | None:
+        if state.state != "idle" or state.source not in TRUSTED_IDLE_SOURCES:
+            return None
+        if self._expected_runtime_for_target(target) != "claude":
+            return None
+        return self._working_timer_trace(target, sample_delay_seconds=0.0)
+
+    def _idle_cursor_trace(self, target: str, state: PaneHookState, *, check_trusted_working: bool = False) -> ActivityTrace:
         cursor_composing = self._target_cursor_state(target)
         if target == self.director_target:
             startup_trace = self._director_startup_hold_trace(state)
@@ -589,6 +649,10 @@ class PaneActivityGate:
         untrusted_idle_trace = self._untrusted_idle_source_trace(target, state)
         if untrusted_idle_trace is not None:
             return untrusted_idle_trace
+        if check_trusted_working:
+            trusted_idle_trace = self._trusted_idle_source_trace(target, state)
+            if trusted_idle_trace is not None:
+                return trusted_idle_trace
         return ActivityTrace(False, "hook_idle")
 
     def _untrusted_idle_source_trace(self, target: str, state: PaneHookState) -> ActivityTrace | None:
@@ -642,6 +706,12 @@ class PaneActivityGate:
         return ActivityTrace(False, "stale_codex_busy_recovered")
 
     def anti_clobber_trace(self, target: str) -> ActivityTrace:
+        return self._anti_clobber_trace(target, check_trusted_working=False)
+
+    def pre_send_anti_clobber_trace(self, target: str) -> ActivityTrace:
+        return self._anti_clobber_trace(target, check_trusted_working=True)
+
+    def _anti_clobber_trace(self, target: str, *, check_trusted_working: bool) -> ActivityTrace:
         state = self.state_store.read(target)
         if state is None:
             if target == self.director_target:
@@ -661,10 +731,13 @@ class PaneActivityGate:
             return ActivityTrace(False, "hook_idle")
         if previous is not None and previous[0] != "idle" and target == self.director_target:
             self._reset_director_startup_hold()
-        return self._idle_cursor_trace(target, state)
+        return self._idle_cursor_trace(target, state, check_trusted_working=check_trusted_working)
 
     def anti_clobber_busy(self, target: str) -> bool:
         return self._record_trace(target, self.anti_clobber_trace(target))
+
+    def pre_send_anti_clobber_busy(self, target: str) -> bool:
+        return self._record_trace(target, self.pre_send_anti_clobber_trace(target))
 
     def is_busy(self, target: str) -> bool:
         state = self.state_store.read(target)
@@ -832,8 +905,13 @@ FROM ticket_board.claim_notification()
                 return snapshot
         return ComposerSnapshot(False, error="snapshot_unavailable")
 
-    def _activity_state_for_notification(self, kind: str, target: str) -> tuple[bool, ActivityTrace]:
+    def _activity_state_for_notification(self, kind: str, target: str, *, pre_send_recheck: bool = False) -> tuple[bool, ActivityTrace]:
         gate_owner = getattr(self.activity_gate, "__self__", None)
+        if pre_send_recheck:
+            pre_send_busy = getattr(gate_owner, "pre_send_anti_clobber_busy", None)
+            if callable(pre_send_busy):
+                pane_busy = bool(pre_send_busy(target))
+                return pane_busy, self._activity_trace(target, pane_busy)
         if kind in IMMEDIATE_DELIVERY_KINDS:
             anti_clobber_busy = getattr(gate_owner, "anti_clobber_busy", None)
             if callable(anti_clobber_busy):
@@ -1391,7 +1469,7 @@ WHERE id = %s
                 self.sleeper(self.pre_send_recheck_delay_seconds)
                 if self.stop_event.is_set():
                     break
-            pane_busy, activity_trace = self._activity_state_for_notification(kind, target)
+            pane_busy, activity_trace = self._activity_state_for_notification(kind, target, pre_send_recheck=True)
             composer_before = self._composer_snapshot(target)
             if self._should_defer_for_activity(activity_trace):
                 self.logger.info(

@@ -77,7 +77,6 @@ from scripts.team_launcher import (
 )
 
 LIVE_SESSION_DIR = team_launcher.DEFAULT_SESSION_DIR
-EXPECTED_LIVE_SESSION_RECORDS = 7
 
 
 class FakeRunner:
@@ -290,9 +289,32 @@ def _live_session_record_fingerprint() -> dict[str, str]:
 
 
 def _assert_live_session_records_unchanged(before: dict[str, str], after: dict[str, str]) -> None:
-    assert len(before) == EXPECTED_LIVE_SESSION_RECORDS, before
-    assert len(after) == EXPECTED_LIVE_SESSION_RECORDS, after
+    assert len(after) == len(before), {"before": before, "after": after}
     assert after == before
+
+
+def test_live_session_record_guard_detects_modified_and_deleted_records() -> None:
+    before = {
+        "pgu-ops_0.0.json": "ops-md5",
+        "pgu-research_0.0.json": "research-md5",
+    }
+
+    _assert_live_session_records_unchanged(before, dict(before))
+    try:
+        _assert_live_session_records_unchanged(
+            before,
+            {"pgu-ops_0.0.json": "changed-md5", "pgu-research_0.0.json": "research-md5"},
+        )
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("live session guard did not detect a modified record")
+    try:
+        _assert_live_session_records_unchanged(before, {"pgu-ops_0.0.json": "ops-md5"})
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("live session guard did not detect a deleted record")
 
 
 def test_ticket_board_pane_env_is_stripped_before_launcher_import() -> None:

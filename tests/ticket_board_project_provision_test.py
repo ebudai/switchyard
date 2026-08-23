@@ -19,6 +19,7 @@ from scripts.ticket_board.project_provision import (
     render_database_sql,
     render_listener_unit,
     render_operator_commands,
+    render_polkit_rule,
     render_tmpfiles,
 )
 
@@ -28,6 +29,7 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
 
     assert plan.board_unit == "stellaris-ticket-board.service"
     assert plan.listener_unit == "stellaris-ticket-board-notify-listener.service"
+    assert plan.polkit_name == "49-stellaris-ticket-board-deploy.rules"
     assert plan.runtime_directory == "stellaris-ticket-board"
     assert plan.socket_path == "/run/stellaris-ticket-board/ticket-board.sock"
     assert plan.port == 8871
@@ -45,6 +47,7 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
             render_board_unit(plan),
             render_listener_unit(plan),
             render_tmpfiles(plan),
+            render_polkit_rule(plan),
             render_database_sql(plan),
             render_operator_commands(plan),
         ]
@@ -58,7 +61,11 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "ReadWritePaths=/home/stellaris-agent/.claude/stellaris-tickets-assets /home/stellaris-agent/.claude/stellaris-ticket-frames" in combined
     assert f"SOURCE_REPO='{ROOT}'" in combined
     assert "BOARD_ROOT='/home/stellaris-agent/stellaris-ticketboard-live'" in combined
+    assert "TICKET_BOARD_PROJECT='stellaris'" in combined
     assert "TICKET_BOARD_SKIP_MIGRATIONS=1" in combined
+    assert 'unit === "stellaris-ticket-board.service"' in combined
+    assert 'unit === "stellaris-ticket-board-canary.service"' in combined
+    assert 'subject.user !== "stellaris-agent"' in combined
     assert "setfacl -R -m u:boardsvc:rx '/home/stellaris-agent/stellaris-ticketboard-live'" in combined
     assert "ticket_has_unresolved_blockers" not in combined
     assert "/tmp/pgu-frames" not in combined
@@ -147,6 +154,7 @@ def test_cli_writes_reviewable_artifacts() -> None:
         assert (output_dir / "porter-ticket-board.service").exists()
         assert (output_dir / "porter-ticket-board-notify-listener.service").exists()
         assert (output_dir / "porter-ticket-board.conf").exists()
+        assert (output_dir / "49-porter-ticket-board-deploy.rules").exists()
         assert (output_dir / "porter-database.sql").exists()
         assert (output_dir / "operator-commands.sh").exists()
 

@@ -12,6 +12,7 @@ MOCKDIR="$TMPDIR_T/mockbin"
 LOGFILE="$TMPDIR_T/systemctl.log"
 mkdir -p "$MOCKDIR" "$(dirname "$SYSTEM_UNIT_PATH")"
 : >"$LOGFILE"
+export TICKET_BOARD_POLKIT_APPROVAL_USER=user
 
 git init "$SOURCE_REPO" >/dev/null
 git -C "$SOURCE_REPO" config user.name Test

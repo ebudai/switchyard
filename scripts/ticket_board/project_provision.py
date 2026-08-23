@@ -24,6 +24,7 @@ class ProjectBoardProvision:
     board_unit: str
     listener_unit: str
     tmpfiles_name: str
+    polkit_name: str
     runtime_directory: str
     socket_path: str
     port: int
@@ -116,6 +117,7 @@ def build_plan(
         board_unit=f"{unit_prefix}.service",
         listener_unit=f"{unit_prefix}-notify-listener.service",
         tmpfiles_name=f"{unit_prefix}.conf",
+        polkit_name=f"49-{unit_prefix}-deploy.rules",
         runtime_directory=runtime_directory,
         socket_path=f"/run/{runtime_directory}/ticket-board.sock",
         port=resolved_port,
@@ -214,6 +216,37 @@ def render_tmpfiles(plan: ProjectBoardProvision) -> str:
     return f"d {plan.frame_dir} 0775 {plan.owner_user} {plan.owner_user} -\n"
 
 
+def render_polkit_rule(plan: ProjectBoardProvision) -> str:
+    return f"""// Allow {plan.owner_user} to deploy the {plan.project} board without blanket sudo.
+// Scope is intentionally limited to fixed, root-owned board service units.
+polkit.addRule(function(action, subject) {{
+    if (subject.user !== "{plan.owner_user}") {{
+        return polkit.Result.NOT_HANDLED;
+    }}
+    if (action.id !== "org.freedesktop.systemd1.manage-units") {{
+        return polkit.Result.NOT_HANDLED;
+    }}
+
+    var unit = action.lookup("unit");
+    var verb = action.lookup("verb");
+    if (unit === "{plan.board_unit}") {{
+        if (verb === "start" || verb === "stop" || verb === "restart") {{
+            return polkit.Result.YES;
+        }}
+        return polkit.Result.NOT_HANDLED;
+    }}
+
+    if (unit === "{plan.project}-ticket-board-canary.service") {{
+        if (verb === "start" || verb === "stop") {{
+            return polkit.Result.YES;
+        }}
+    }}
+
+    return polkit.Result.NOT_HANDLED;
+}});
+"""
+
+
 def render_database_sql(plan: ProjectBoardProvision) -> str:
     db_ident = sql_identifier(plan.database)
     return f"""-- Bootstrap database container for {plan.project}.
@@ -245,6 +278,7 @@ def render_operator_commands(plan: ProjectBoardProvision) -> str:
     q_deploy_script = shell_quote(f"{plan.source_repo}/scripts/ticket-board-service.sh")
     q_board_unit = shell_quote(f"/etc/systemd/system/{plan.board_unit}")
     q_tmpfiles = shell_quote(f"/etc/tmpfiles.d/{plan.tmpfiles_name}")
+    q_polkit = shell_quote(f"/etc/polkit-1/rules.d/{plan.polkit_name}")
     q_listener_unit = shell_quote(
         f"/home/{plan.owner_user}/.config/systemd/user/{plan.listener_unit}"
     )
@@ -261,7 +295,7 @@ def render_operator_commands(plan: ProjectBoardProvision) -> str:
         grant_asset_frame = f"sudo setfacl -R -m u:{plan.service_user}:rwx {q_asset} {q_frame}"
     return f"""# Review generated artifacts first. These commands require host privileges.
 sudo install -d -m 0755 {q_board_root}
-sudo env SOURCE_REPO={q_source_repo} BOARD_ROOT={q_board_root} DEPLOY_REF=origin/main TICKET_BOARD_SKIP_MIGRATIONS=1 {q_deploy_script} deploy
+sudo env TICKET_BOARD_PROJECT={shell_quote(plan.project)} SOURCE_REPO={q_source_repo} BOARD_ROOT={q_board_root} DEPLOY_REF=origin/main TICKET_BOARD_SKIP_MIGRATIONS=1 {q_deploy_script} deploy
 sudo setfacl -R -m u:{plan.service_user}:rx {q_board_root}
 sudo find {q_board_root} -type d -exec setfacl -m d:u:{plan.service_user}:rx {{}} +
 {install_asset_frame}
@@ -270,6 +304,7 @@ sudo setfacl -m u:{plan.service_user}:--x {shell_quote('/home/' + plan.owner_use
 {grant_asset_frame}
 sudo install -m 0644 {shell_quote(plan.board_unit)} {q_board_unit}
 sudo install -m 0644 {shell_quote(plan.tmpfiles_name)} {q_tmpfiles}
+sudo install -m 0644 {shell_quote(plan.polkit_name)} {q_polkit}
 sudo systemd-tmpfiles --create {q_tmpfiles}
 sudo -u postgres psql -X -v ON_ERROR_STOP=1 -f {shell_quote(plan.project + '-database.sql')}
 sudo TICKET_BOARD_ADMIN_DATABASE_URL={shell_quote(plan.admin_database_url)} {shell_quote(plan.board_current + '/scripts/ticket-board-migrate')}
@@ -292,6 +327,7 @@ def write_artifacts(plan: ProjectBoardProvision, output_dir: Path) -> None:
         plan.board_unit: render_board_unit(plan),
         plan.listener_unit: render_listener_unit(plan),
         plan.tmpfiles_name: render_tmpfiles(plan),
+        plan.polkit_name: render_polkit_rule(plan),
         f"{plan.project}-database.sql": render_database_sql(plan),
         "operator-commands.sh": render_operator_commands(plan),
     }
@@ -319,7 +355,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", help="print plan JSON")
     parser.add_argument(
         "--render",
-        choices=["board-unit", "listener-unit", "tmpfiles", "database-sql", "commands"],
+        choices=["board-unit", "listener-unit", "tmpfiles", "polkit", "database-sql", "commands"],
         help="print one rendered artifact",
     )
     return parser
@@ -350,6 +386,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "board-unit": render_board_unit,
             "listener-unit": render_listener_unit,
             "tmpfiles": render_tmpfiles,
+            "polkit": render_polkit_rule,
             "database-sql": render_database_sql,
             "commands": render_operator_commands,
         }

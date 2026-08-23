@@ -4,6 +4,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMPDIR_T="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_T"' EXIT
+export TICKET_BOARD_POLKIT_APPROVAL_USER=user
 
 make_source_repo() {
     local source_repo="$1"

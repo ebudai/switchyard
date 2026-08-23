@@ -20,9 +20,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.ticket_board.notify_listener import (
-    DEFAULT_BUSY_REQUEUE_SECONDS,
     DEFAULT_DIRECTORCTL,
     DEFAULT_IDLE_STALL_NUDGE_CADENCE_SECONDS,
+    DEFAULT_REQUEUE_BASE_SECONDS,
+    DEFAULT_REQUEUE_MAX_SECONDS,
     DirectorctlSender,
     PaneActivityGate,
     PaneHookStateStore,
@@ -75,6 +76,7 @@ class FakeConnection:
         self.acked: list[int] = []
         self.requeued: list[tuple[int, tuple[Any, ...] | None]] = []
         self.traces: list[tuple[Any, ...] | None] = []
+        self.reset_backoff_calls: list[tuple[Any, ...] | None] = []
         self.idle_turn_end_calls: list[tuple[Any, ...] | None] = []
         self.idle_stall_calls: list[tuple[Any, ...] | None] = []
         self.notify_timeouts: list[float | None] = []
@@ -147,6 +149,9 @@ class FakeConnection:
         if "requeue_notification" in statement_text:
             assert params is not None
             self.requeued.append((int(params[0]), params))
+        if "reset_notification_backoff_for_idle_roles" in statement_text:
+            self.reset_backoff_calls.append(params)
+            return FakeResult([(0,)])
         return FakeResult([])
 
     def _ticket_number(self, ticket_id: str) -> int:
@@ -463,7 +468,7 @@ def test_pre_send_recheck_waits_and_holds_when_cursor_advances_on_second_read() 
 
     assert sent == []
     assert sleep_calls == [0.5]
-    assert conn.requeued == [(85, (85, "1 seconds", "pane busy"))]
+    assert conn.requeued == [(85, (85, f"{DEFAULT_REQUEUE_BASE_SECONDS:g} seconds", "pane busy"))]
     assert conn.traces[1][6] == "human_composing"
     assert json.loads(conn.traces[1][8])["phase"] == "pre_send_recheck"
 
@@ -570,7 +575,7 @@ def test_advanced_cursor_holds_immediately_without_second_read() -> None:
 
     assert sent == []
     assert sleep_calls == []
-    assert conn.requeued == [(87, (87, "1 seconds", "pane busy"))]
+    assert conn.requeued == [(87, (87, f"{DEFAULT_REQUEUE_BASE_SECONDS:g} seconds", "pane busy"))]
     assert conn.traces[1][6] == "human_composing"
 
 
@@ -590,6 +595,10 @@ def test_listener_enqueues_idle_stall_nudges_from_hook_state() -> None:
 
         assert listener.process_idle_stall_nudges(conn) == 1
 
+        assert len(conn.reset_backoff_calls) == 1
+        reset_params = conn.reset_backoff_calls[0]
+        assert reset_params is not None
+        assert json.loads(str(reset_params[0])) == {"ops": "1970-01-01T00:01:40+00:00"}
         assert len(conn.idle_stall_calls) == 1
         params = conn.idle_stall_calls[0]
         assert params is not None
@@ -628,7 +637,33 @@ def test_advancing_working_timer_suppresses_idle_stall_nudge() -> None:
         assert listener.process_idle_stall_nudges(conn) == 0
 
     assert conn.idle_stall_calls == []
-    assert gate.last_trace("pgu-ops:0.0").reason == "working_timer"  # type: ignore[union-attr]
+    assert conn.reset_backoff_calls == []
+
+
+def test_idle_role_resets_busy_backoff_before_claiming_due_notifications() -> None:
+    sent: list[tuple[str, str]] = []
+    with TemporaryStateDir() as tmp_path:
+        store, gate = hook_gate(tmp_path)
+        store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
+        conn = FakeConnection([queue_row(32, "PGU-627", target_role="ops", attempts=20)])
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=gate.is_working,
+            connector=lambda *args, **kwargs: conn,
+            poll_seconds=0,
+        )
+
+        assert listener.listen_once(max_notifications=1) == 1
+
+    assert sent == [("pgu-ops:0.0", "New ticket for you: PGU-627 -- Queue")]
+    assert conn.requeued == []
+    assert conn.acked == [32]
+    executed_sql = [str(statement) for statement, _params in conn.executed]
+    reset_index = next(index for index, statement in enumerate(executed_sql) if "reset_notification_backoff_for_idle_roles" in statement)
+    claim_index = next(index for index, statement in enumerate(executed_sql) if "claim_notification" in statement)
+    assert reset_index < claim_index
+    assert gate.last_trace("pgu-ops:0.0").reason == "hook_idle"  # type: ignore[union-attr]
 
 
 def test_resetting_working_timer_suppresses_idle_stall_nudge() -> None:
@@ -904,13 +939,13 @@ def test_missing_hook_state_fails_safe_and_does_not_clobber() -> None:
         assert listener.listen_once(max_notifications=1) == 0
 
     assert sent == []
-    assert conn.requeued[0][1][1] == f"{DEFAULT_BUSY_REQUEUE_SECONDS:g} seconds"
+    assert conn.requeued[0][1][1] == f"{DEFAULT_REQUEUE_BASE_SECONDS:g} seconds"
     assert conn.acked == []
     assert conn.traces[1][5] == "busy"
     assert conn.traces[1][6] == "no_hook_state"
 
 
-def test_hook_busy_requeues_with_fixed_interval() -> None:
+def test_hook_busy_requeues_with_exponential_backoff() -> None:
     sent: list[tuple[str, str]] = []
     delays: list[str] = []
     with TemporaryStateDir() as tmp_path:
@@ -929,7 +964,22 @@ def test_hook_busy_requeues_with_fixed_interval() -> None:
             delays.append(conn.requeued[0][1][1])
 
     assert sent == []
-    assert delays == [f"{DEFAULT_BUSY_REQUEUE_SECONDS:g} seconds"] * 3
+    assert delays == [
+        f"{DEFAULT_REQUEUE_BASE_SECONDS:g} seconds",
+        f"{DEFAULT_REQUEUE_BASE_SECONDS * 2:g} seconds",
+        f"{DEFAULT_REQUEUE_MAX_SECONDS:g} seconds",
+    ]
+
+
+def test_busy_backoff_attempts_stay_below_ten_in_five_minutes() -> None:
+    elapsed = 0.0
+    attempts = 0
+    listener = TicketBoardNotifyListener(conninfo="", poll_seconds=0)
+    while elapsed < 5 * 60:
+        attempts += 1
+        elapsed += listener._backoff_seconds(attempts)
+
+    assert attempts < 10
 
 
 def test_stale_codex_busy_state_recovers_and_delivers() -> None:
@@ -1306,7 +1356,7 @@ def test_ticket_update_waits_for_worker_human_composing_to_clear() -> None:
         )
         assert held_listener.process_due_notifications(held_conn, max_notifications=1) == 0
         assert sent == []
-        assert held_conn.requeued == [(83, (83, "1 seconds", "pane busy"))]
+        assert held_conn.requeued == [(83, (83, f"{DEFAULT_REQUEUE_BASE_SECONDS:g} seconds", "pane busy"))]
         assert held_conn.traces[1][6] == "human_composing"
 
         cursor[0] = "2 23 24"
@@ -1375,7 +1425,7 @@ def test_ticket_update_holds_busy_worker_with_advanced_cursor() -> None:
         assert listener.process_due_notifications(conn, max_notifications=1) == 0
 
     assert sent == []
-    assert conn.requeued == [(88, (88, "1 seconds", "pane busy"))]
+    assert conn.requeued == [(88, (88, f"{DEFAULT_REQUEUE_BASE_SECONDS:g} seconds", "pane busy"))]
     assert conn.traces[1][6] == "human_composing"
 
 

@@ -34,7 +34,7 @@ DEFAULT_KEEPALIVES_INTERVAL_SECONDS = 10
 DEFAULT_KEEPALIVES_COUNT = 3
 DEFAULT_DIRECTORCTL_SEND_TIMEOUT_SECONDS = 10.0
 DEFAULT_REQUEUE_BASE_SECONDS = 5.0
-DEFAULT_REQUEUE_MAX_SECONDS = 60.0
+DEFAULT_REQUEUE_MAX_SECONDS = 300.0
 DEFAULT_BUSY_REQUEUE_SECONDS = 1.0
 DEFAULT_DIRECTOR_COMPOSING_TIMEOUT_SECONDS = 15 * 60.0
 DEFAULT_IDLE_STALL_GRACE_SECONDS = 45.0
@@ -947,6 +947,29 @@ SELECT ticket_board.record_notification_trace(
             (notification_id, f"{delay_seconds:g} seconds", error[:500]),
         )
 
+    def _reset_busy_backoff_for_idle_roles(self, conn: Any, idle_since_by_role: dict[str, str]) -> int:
+        if not idle_since_by_role:
+            return 0
+        try:
+            result = conn.execute(
+                "SELECT ticket_board.reset_notification_backoff_for_idle_roles(%s::jsonb)",
+                (json.dumps(idle_since_by_role, sort_keys=True),),
+            )
+            row = result.fetchone()
+        except Exception as exc:
+            self.logger.warning("Failed to reset busy notification backoff for idle panes: %s", exc)
+            return 0
+        if row is None:
+            return 0
+        value = row[0] if not isinstance(row, dict) else next(iter(row.values()))
+        try:
+            reset_count = int(value)
+        except (TypeError, ValueError):
+            return 0
+        if reset_count:
+            self.logger.info("Reset busy notification backoff for %s idle-pane rows", reset_count)
+        return reset_count
+
     def _next_notification_attempt_at(self, conn: Any) -> datetime | None:
         try:
             result = conn.execute("SELECT ticket_board.next_notification_attempt()")
@@ -1067,6 +1090,7 @@ SELECT ticket_board.notify_idle_turn_end_nudges(
         idle_since = self._idle_since_by_role()
         if not idle_since:
             return 0
+        self._reset_busy_backoff_for_idle_roles(conn, idle_since)
         try:
             result = conn.execute(
                 """
@@ -1361,7 +1385,6 @@ WHERE id = %s
                     notification_id,
                     attempts,
                     "pane busy",
-                    delay_seconds=self.busy_requeue_seconds,
                 )
                 continue
             if self.pre_send_recheck_delay_seconds > 0:
@@ -1407,7 +1430,6 @@ WHERE id = %s
                     notification_id,
                     attempts,
                     "pane busy",
-                    delay_seconds=self.busy_requeue_seconds,
                 )
                 continue
             directorctl_diagnostic: dict[str, Any] = {}

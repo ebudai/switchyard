@@ -197,6 +197,10 @@ run_systemctl_with_polkit_timeout() {
     return "$status"
 }
 
+git_source() {
+    git -c "safe.directory=$SOURCE_REPO" -C "$SOURCE_REPO" "$@"
+}
+
 system_unit_fragment_path() {
     systemctl show "$SERVICE_NAME" -p FragmentPath --value 2>/dev/null || true
 }
@@ -270,13 +274,18 @@ quiesce_user_shadow_unit() {
 }
 
 ensure_source_repo() {
-    git -C "$SOURCE_REPO" rev-parse --show-toplevel >/dev/null 2>&1 || die "missing source repo: $SOURCE_REPO"
+    [[ -d "$SOURCE_REPO" ]] || die "missing source repo path: $SOURCE_REPO"
+    local output
+    if ! output="$(git_source rev-parse --show-toplevel 2>&1)"; then
+        [[ -z "$output" ]] || printf '%s\n' "$output" >&2
+        die "source repo is not a readable git checkout: $SOURCE_REPO"
+    fi
 }
 
 maybe_fetch_origin() {
-    if git -C "$SOURCE_REPO" remote get-url origin >/dev/null 2>&1; then
+    if git_source remote get-url origin >/dev/null 2>&1; then
         local output
-        if ! output="$(git -C "$SOURCE_REPO" fetch origin 2>&1)"; then
+        if ! output="$(git_source fetch origin 2>&1)"; then
             [[ -z "$output" ]] || printf '%s\n' "$output" >&2
             die "failed to fetch origin in $SOURCE_REPO; refusing stale deploy of $DEPLOY_REF"
         fi
@@ -297,14 +306,14 @@ deploy_export_release() {
     local resolved_ref release_dir tmp_dir
     ensure_source_repo
     maybe_fetch_origin
-    resolved_ref="$(git -C "$SOURCE_REPO" rev-parse --verify "$DEPLOY_REF^{commit}")" || die "failed to resolve $DEPLOY_REF in $SOURCE_REPO"
+    resolved_ref="$(git_source rev-parse --verify "$DEPLOY_REF^{commit}")" || die "failed to resolve $DEPLOY_REF in $SOURCE_REPO"
     mkdir -p "$BOARD_RELEASES_DIR"
     release_dir="$BOARD_RELEASES_DIR/$resolved_ref"
     if [[ ! -d "$release_dir" ]]; then
         tmp_dir="$BOARD_RELEASES_DIR/.tmp-$resolved_ref.$$"
         rm -rf "$tmp_dir"
         mkdir -p "$tmp_dir"
-        git -C "$SOURCE_REPO" archive "$resolved_ref" | tar -x -C "$tmp_dir"
+        git_source archive "$resolved_ref" | tar -x -C "$tmp_dir"
         printf '%s\n' "$resolved_ref" >"$tmp_dir/.pgu-deploy-sha"
         mv "$tmp_dir" "$release_dir"
     fi

@@ -66,6 +66,47 @@ grep -q 'failed to fetch origin' "$TMPDIR_T/fetch.err" || {
 }
 git -C "$SOURCE_REPO" remote remove origin
 
+printf '#!/usr/bin/env python3\nprint("listener safe directory")\n' >"$SOURCE_REPO/scripts/ticket-board-notify-listener"
+git -C "$SOURCE_REPO" add scripts/ticket-board-notify-listener
+git -C "$SOURCE_REPO" commit -m "safe-directory listener deploy" >/dev/null
+SAFE_GIT_DIR="$TMPDIR_T/safe-git-bin"
+mkdir -p "$SAFE_GIT_DIR"
+REAL_GIT="$(command -v git)"
+cat >"$SAFE_GIT_DIR/git" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+required="safe.directory=$SOURCE_REPO_SAFE_DIRECTORY"
+for arg in "$@"; do
+    if [[ "$arg" == "$required" ]]; then
+        exec "$REAL_GIT" "$@"
+    fi
+done
+echo "fatal: detected dubious ownership in repository at '$SOURCE_REPO_SAFE_DIRECTORY'" >&2
+exit 128
+EOF
+chmod +x "$SAFE_GIT_DIR/git"
+PATH="$SAFE_GIT_DIR:/usr/bin:/bin" \
+REAL_GIT="$REAL_GIT" \
+SOURCE_REPO_SAFE_DIRECTORY="$SOURCE_REPO" \
+BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
+    "$REPO_ROOT/scripts/ticket-board-notify-listener-service.sh" deploy >/dev/null
+safe_deployed_sha="$(git -C "$SOURCE_REPO" rev-parse --verify HEAD^{commit})"
+[[ "$(cat "$DEPLOY_ROOT/current/.pgu-deploy-sha")" == "$safe_deployed_sha" ]] || {
+    echo "FAIL: listener deploy did not succeed through the safe.directory-scoped git wrapper" >&2
+    exit 1
+}
+
+if BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$TMPDIR_T/absent-source" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
+    "$REPO_ROOT/scripts/ticket-board-notify-listener-service.sh" deploy >"$TMPDIR_T/missing-source.out" 2>"$TMPDIR_T/missing-source.err"; then
+    echo "FAIL: listener deploy should fail when SOURCE_REPO path is absent" >&2
+    exit 1
+fi
+grep -q 'missing source repo path' "$TMPDIR_T/missing-source.err" || {
+    echo "FAIL: listener missing SOURCE_REPO path error was not distinct from git readability failures" >&2
+    cat "$TMPDIR_T/missing-source.err" >&2
+    exit 1
+}
+
 BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD \
     "$REPO_ROOT/scripts/ticket-board-notify-listener-service.sh" render-unit >"$UNIT_DIR/service.unit"
 

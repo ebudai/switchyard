@@ -221,19 +221,17 @@ system_unit_hash() {
     sha256sum "$unit_path" | awk '{print $1}'
 }
 
-system_unit_reload_required() {
-    local current_hash recorded_hash=""
-    current_hash="$(system_unit_hash)" || return 1
-    [[ -f "$SYSTEM_UNIT_HASH_RECORD" ]] || return 1
-    recorded_hash="$(<"$SYSTEM_UNIT_HASH_RECORD")"
-    [[ "$current_hash" != "$recorded_hash" ]]
-}
-
 record_system_unit_hash() {
     local current_hash
     current_hash="$(system_unit_hash)" || return 0
     mkdir -p "$(dirname "$SYSTEM_UNIT_HASH_RECORD")"
     printf '%s\n' "$current_hash" >"$SYSTEM_UNIT_HASH_RECORD"
+}
+
+system_unit_needs_daemon_reload() {
+    local needs_reload
+    needs_reload="$(systemctl show "$SERVICE_NAME" -p NeedDaemonReload --value 2>/dev/null || true)"
+    [[ "$needs_reload" == "yes" ]]
 }
 
 system_service_installed() {
@@ -676,10 +674,11 @@ WantedBy=default.target
 EOF
 }
 
-render_system_unit() {
-    local production_unit="$BOARD_CURRENT_LINK/deploy/systemd/$SERVICE_NAME.boardsvc"
+render_system_unit_for_release() {
+    local release_dir="$1"
+    local production_unit="$release_dir/deploy/systemd/$SERVICE_NAME.boardsvc"
     if [[ ! -f "$production_unit" && "$PROJECT_SLUG" == "pgu" ]]; then
-        production_unit="$BOARD_CURRENT_LINK/deploy/systemd/pgu-ticket-board.service.boardsvc"
+        production_unit="$release_dir/deploy/systemd/pgu-ticket-board.service.boardsvc"
     fi
     if [[ -f "$production_unit" ]]; then
         cat "$production_unit"
@@ -688,55 +687,29 @@ render_system_unit() {
     render_unit
 }
 
+render_system_unit() {
+    render_system_unit_for_release "$BOARD_CURRENT_LINK"
+}
+
 write_unit() {
     mkdir -p "$UNIT_DIR"
     render_unit >"$UNIT_PATH"
 }
 
-install_system_unit_file() {
-    local source_path="$1"
-    local destination_path="$2"
-    local destination_dir
-    destination_dir="$(dirname "$destination_path")"
-    if [[ "$(id -u)" == "0" ]]; then
-        install -D -m 0644 "$source_path" "$destination_path"
-        return
-    fi
-    if [[ -d "$destination_dir" && -w "$destination_dir" && ( ! -e "$destination_path" || -w "$destination_path" ) ]]; then
-        install -D -m 0644 "$source_path" "$destination_path"
-        return
-    fi
-    polkit_graphical_session_available "$POLKIT_APPROVAL_USER" || die "system unit install requires polkit approval from $POLKIT_APPROVAL_USER's active graphical session; run this from that session so the KDE prompt can appear"
-    command -v pkexec >/dev/null 2>&1 || die "system unit install requires pkexec because $destination_path is not writable"
-    local output status timeout_args=()
-    if command -v timeout >/dev/null 2>&1; then
-        timeout_args=(timeout --foreground "${POLKIT_TIMEOUT_SECONDS}s")
-    fi
-    if output="$("${timeout_args[@]}" pkexec /usr/bin/install -D -m 0644 "$source_path" "$destination_path" 2>&1)"; then
-        [[ -z "$output" ]] || printf '%s\n' "$output"
-        return
-    else
-        status=$?
-    fi
-    [[ -z "$output" ]] || printf '%s\n' "$output" >&2
-    if [[ "$status" == "124" ]]; then
-        die "installing $destination_path timed out waiting for polkit approval"
-    fi
-    return "$status"
-}
-
-install_system_unit_if_changed() {
-    local rendered_unit
+assert_system_unit_reload_not_required_for_release() {
+    local release_dir="$1"
+    local rendered_unit installed_unit
+    installed_unit="$(system_unit_file_path)" || die "system service scope resolved to system, but no installed $SERVICE_NAME unit file was found"
     rendered_unit="$(mktemp "${TMPDIR:-/tmp}/$PROJECT_SLUG-ticket-board-unit.XXXXXX")"
-    render_system_unit >"$rendered_unit"
-    if [[ -f "$SYSTEM_UNIT_PATH" ]] && cmp -s "$rendered_unit" "$SYSTEM_UNIT_PATH"; then
+    render_system_unit_for_release "$release_dir" >"$rendered_unit"
+    if ! cmp -s "$rendered_unit" "$installed_unit"; then
         rm -f "$rendered_unit"
-        return 1
+        die "candidate system unit for $release_dir differs from installed $installed_unit; daemon-reload is required but is intentionally outside the board deploy polkit grant. Ask an operator to install the candidate unit from that release and run systemctl daemon-reload, then rerun deploy-restart."
     fi
-    install_system_unit_file "$rendered_unit" "$SYSTEM_UNIT_PATH"
     rm -f "$rendered_unit"
-    log "installed updated system unit at $SYSTEM_UNIT_PATH"
-    return 0
+    if system_unit_needs_daemon_reload; then
+        die "systemd reports NeedDaemonReload=yes for $SERVICE_NAME; daemon-reload is required but is intentionally outside the board deploy polkit grant. Ask an operator to run systemctl daemon-reload, then rerun deploy-restart."
+    fi
 }
 
 install_service() {
@@ -764,6 +737,9 @@ deploy_restart_service() {
     IFS=$'\t' read -r deployed_sha release_dir < <(deploy_export_release)
     previous_release="$(current_release_dir || true)"
     scope="$(resolved_service_scope)"
+    if [[ "$scope" == "system" ]]; then
+        assert_system_unit_reload_not_required_for_release "$release_dir"
+    fi
     apply_database_migrations_for_release "$release_dir"
     run_release_canary "$release_dir" "$scope"
     activate_release "$release_dir"
@@ -785,14 +761,8 @@ deploy_restart_service() {
 restart_live_service() {
     local scope="$1"
     if [[ "$scope" == "system" ]]; then
-        local unit_installed=0
         quiesce_user_shadow_unit
-        if install_system_unit_if_changed; then
-            unit_installed=1
-        fi
-        if (( unit_installed )) || system_unit_reload_required; then
-            systemctl_system daemon-reload
-        fi
+        assert_system_unit_reload_not_required_for_release "$BOARD_CURRENT_LINK"
         record_system_unit_hash
         systemctl_system restart "$SERVICE_NAME"
     else
@@ -849,7 +819,8 @@ main() {
         start|restart)
             if [[ "$(resolved_service_scope)" == "system" ]]; then
                 quiesce_user_shadow_unit
-                systemctl_system daemon-reload
+                assert_system_unit_reload_not_required_for_release "$BOARD_CURRENT_LINK"
+                record_system_unit_hash
                 systemctl_system "$1" "$SERVICE_NAME"
             else
                 ensure_user_manager

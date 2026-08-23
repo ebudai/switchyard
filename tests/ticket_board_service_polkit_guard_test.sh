@@ -23,7 +23,8 @@ chmod +x "$SOURCE_REPO/scripts/ticket-board.py"
 git -C "$SOURCE_REPO" add scripts/ticket-board.py
 git -C "$SOURCE_REPO" commit -m "seed" >/dev/null
 
-touch "$SYSTEM_UNIT_PATH"
+BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
+    "$REPO_ROOT/scripts/ticket-board-service.sh" render-unit >"$SYSTEM_UNIT_PATH"
 
 cat >"$MOCKDIR/systemctl" <<'EOF'
 #!/usr/bin/env bash

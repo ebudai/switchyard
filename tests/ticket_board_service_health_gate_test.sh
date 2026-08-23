@@ -150,6 +150,8 @@ install_mocks "$MOCKDIR"
 make_source_repo "$SOURCE_REPO"
 
 run_service "$SOURCE_REPO" "$DEPLOY_ROOT" deploy >/dev/null
+BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
+    "$REPO_ROOT/scripts/ticket-board-service.sh" render-unit >"$SYSTEM_UNIT_PATH"
 old_current="$(readlink -f "$DEPLOY_ROOT/current")"
 commit_new_release "$SOURCE_REPO"
 
@@ -237,6 +239,9 @@ git -C "$SOURCE_REPO" add scripts/ticket-board.py
 git -C "$SOURCE_REPO" commit -m "socketless release" >/dev/null
 : >"$LOGFILE"
 export TICKET_BOARD_SKIP_POST_DEPLOY_SOCKET_VERIFY=0
+BOARD_UNIX_SOCKET="$TMPDIR_T/missing-runtime/ticket-board.sock" \
+BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
+    "$REPO_ROOT/scripts/ticket-board-service.sh" render-unit >"$SYSTEM_UNIT_PATH"
 if BOARD_UNIX_SOCKET="$TMPDIR_T/missing-runtime/ticket-board.sock" run_service "$SOURCE_REPO" "$DEPLOY_ROOT" deploy-restart >"$TMPDIR_T/socket-verify.out" 2>"$TMPDIR_T/socket-verify.err"; then
     echo "FAIL: deploy-restart should exit nonzero after rolling back failed socket verification" >&2
     exit 1

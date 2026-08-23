@@ -179,13 +179,13 @@ candidate release and scratch port/socket. If the host rule or canary unit is
 absent, `systemctl` fails with its normal authorization error.
 
 Other privileged system actions, including system unit installation and
-`daemon-reload`, still use the guarded interactive polkit path and may require
-Eric's active graphical session unless separately authorized by host
-configuration.
-
-For that system-unit path, code-only deploys skip `daemon-reload` unless the
-installed unit file hash changed since the last deploy, so the common restart
-flow produces one polkit approval instead of two.
+`daemon-reload`, are intentionally outside that rule. For the system-unit path,
+`deploy-restart` compares the candidate release unit with the installed unit
+before it applies migrations, runs the canary, or repoints `current`. If the
+unit content differs, or if systemd reports `NeedDaemonReload=yes`, the deploy
+fails loudly and tells the operator to install the candidate unit and run
+`systemctl daemon-reload`. Code-only deploys keep using the whitelisted restart
+path without attempting a global daemon reload.
 
 Plain `restart` only restarts the currently deployed SHA. It does **not** update
 code.

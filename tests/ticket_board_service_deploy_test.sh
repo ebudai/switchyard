@@ -233,6 +233,9 @@ printf 'system:%s\n' "$*" >>"$TICKET_BOARD_SERVICE_TEST_LOG"
 if [[ "${1:-}" == "show" && "${2:-}" == "pgu-ticket-board.service" && "${3:-}" == "-p" && "${4:-}" == "FragmentPath" && "${5:-}" == "--value" ]]; then
     printf '%s\n' "$TICKET_BOARD_SYSTEM_UNIT_PATH"
 fi
+if [[ "${1:-}" == "show" && "${2:-}" == "pgu-ticket-board.service" && "${3:-}" == "-p" && "${4:-}" == "NeedDaemonReload" && "${5:-}" == "--value" ]]; then
+    printf '%s\n' "${TICKET_BOARD_TEST_NEED_DAEMON_RELOAD:-no}"
+fi
 EOF
 chmod +x "$MOCKDIR/systemctl"
 
@@ -335,43 +338,85 @@ fi
     exit 1
 }
 
+current_release_before_reload_required="$(readlink -f "$DEPLOY_ROOT/current")"
+: >"$LOGFILE"
+
+if PATH="$MOCKDIR:/usr/bin:/bin" \
+    TICKET_BOARD_SERVICE_TEST_LOG="$LOGFILE" \
+    TICKET_BOARD_SYSTEM_UNIT_PATH="$SYSTEM_UNIT_PATH" \
+    TICKET_BOARD_SYSTEM_UNIT_HASH_RECORD="$HASH_RECORD" \
+    TICKET_BOARD_SKIP_POST_DEPLOY_SOCKET_VERIFY=1 \
+    TICKET_BOARD_TEST_NEED_DAEMON_RELOAD=yes \
+    TICKET_BOARD_POLKIT_APPROVAL_USER=user \
+    BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
+        "$REPO_ROOT/scripts/ticket-board-service.sh" deploy-restart >"$TMPDIR_T/reload-required.out" 2>"$TMPDIR_T/reload-required.err"; then
+    echo "FAIL: deploy-restart should fail loudly when systemd reports NeedDaemonReload=yes" >&2
+    exit 1
+fi
+grep -q 'NeedDaemonReload=yes' "$TMPDIR_T/reload-required.err" || {
+    echo "FAIL: daemon-reload-required failure did not explain the systemd state" >&2
+    cat "$TMPDIR_T/reload-required.err" >&2
+    exit 1
+}
+if grep -q '^system:daemon-reload$' "$LOGFILE"; then
+    echo "FAIL: deploy-restart must not attempt daemon-reload outside the board-unit polkit grant" >&2
+    cat "$LOGFILE" >&2
+    exit 1
+fi
+if grep -q '^system:restart pgu-ticket-board.service$' "$LOGFILE"; then
+    echo "FAIL: deploy-restart should not restart while daemon-reload is required" >&2
+    cat "$LOGFILE" >&2
+    exit 1
+fi
+if grep -q '^system:start pgu-ticket-board-canary.service$' "$LOGFILE"; then
+    echo "FAIL: deploy-restart should fail before canary when daemon-reload is required" >&2
+    cat "$LOGFILE" >&2
+    exit 1
+fi
+[[ "$(readlink -f "$DEPLOY_ROOT/current")" == "$current_release_before_reload_required" ]] || {
+    echo "FAIL: deploy-restart should not change current when daemon-reload is required" >&2
+    exit 1
+}
+
 printf 'stale unit\n' >"$SYSTEM_UNIT_PATH"
 printf 'stale-unit-hash\n' >"$HASH_RECORD"
 : >"$LOGFILE"
 
-PATH="$MOCKDIR:/usr/bin:/bin" \
-TICKET_BOARD_SERVICE_TEST_LOG="$LOGFILE" \
-TICKET_BOARD_SYSTEM_UNIT_PATH="$SYSTEM_UNIT_PATH" \
-TICKET_BOARD_SYSTEM_UNIT_HASH_RECORD="$HASH_RECORD" \
-TICKET_BOARD_SKIP_POST_DEPLOY_SOCKET_VERIFY=1 \
-TICKET_BOARD_POLKIT_APPROVAL_USER=user \
-BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
-    "$REPO_ROOT/scripts/ticket-board-service.sh" deploy-restart >/dev/null
-
-grep -q '^RuntimeDirectory=pgu-ticket-board$' "$SYSTEM_UNIT_PATH" || {
-    echo "FAIL: deploy-restart did not install the rendered system unit" >&2
+if PATH="$MOCKDIR:/usr/bin:/bin" \
+    TICKET_BOARD_SERVICE_TEST_LOG="$LOGFILE" \
+    TICKET_BOARD_SYSTEM_UNIT_PATH="$SYSTEM_UNIT_PATH" \
+    TICKET_BOARD_SYSTEM_UNIT_HASH_RECORD="$HASH_RECORD" \
+    TICKET_BOARD_SKIP_POST_DEPLOY_SOCKET_VERIFY=1 \
+    TICKET_BOARD_POLKIT_APPROVAL_USER=user \
+    BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
+        "$REPO_ROOT/scripts/ticket-board-service.sh" deploy-restart >"$TMPDIR_T/unit-changed.out" 2>"$TMPDIR_T/unit-changed.err"; then
+    echo "FAIL: deploy-restart should fail loudly when the candidate system unit differs" >&2
+    exit 1
+fi
+grep -q 'candidate system unit .* differs from installed' "$TMPDIR_T/unit-changed.err" || {
+    echo "FAIL: changed-unit failure did not explain that daemon-reload is operator-owned" >&2
+    cat "$TMPDIR_T/unit-changed.err" >&2
+    exit 1
+}
+grep -qx 'stale unit' "$SYSTEM_UNIT_PATH" || {
+    echo "FAIL: deploy-restart should not install a changed unit it cannot reload" >&2
     cat "$SYSTEM_UNIT_PATH" >&2
     exit 1
 }
-grep -q '^User=boardsvc$' "$SYSTEM_UNIT_PATH" || {
-    echo "FAIL: deploy-restart did not install the release boardsvc system unit" >&2
-    cat "$SYSTEM_UNIT_PATH" >&2
-    exit 1
-}
-grep -q '^system:daemon-reload$' "$LOGFILE" || {
-    echo "FAIL: deploy-restart should reload systemd when the unit hash changes" >&2
+if grep -q '^system:daemon-reload$' "$LOGFILE"; then
+    echo "FAIL: changed-unit deploy-restart must not attempt daemon-reload" >&2
     cat "$LOGFILE" >&2
     exit 1
-}
-grep -q '^system:restart pgu-ticket-board.service$' "$LOGFILE" || {
-    echo "FAIL: changed-unit deploy-restart did not restart the live system unit" >&2
+fi
+if grep -q '^system:restart pgu-ticket-board.service$' "$LOGFILE"; then
+    echo "FAIL: changed-unit deploy-restart should not restart with a stale systemd definition" >&2
     cat "$LOGFILE" >&2
     exit 1
-}
-grep -q '^system:start pgu-ticket-board-canary.service$' "$LOGFILE" || {
-    echo "FAIL: changed-unit deploy-restart did not start the fixed canary unit" >&2
+fi
+if grep -q '^system:start pgu-ticket-board-canary.service$' "$LOGFILE"; then
+    echo "FAIL: changed-unit deploy-restart should fail before canary" >&2
     cat "$LOGFILE" >&2
     exit 1
-}
+fi
 
 echo "ticket_board_service_deploy_test: ok"

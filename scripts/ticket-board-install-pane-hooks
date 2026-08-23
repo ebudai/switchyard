@@ -164,7 +164,8 @@ def _install_gemini_hooks(home: Path, hook_bin: Path) -> Path:
         {
             "SessionStart": [
                 _flat_command_hook(
-                    f"{hook} idle --source gemini.SessionStart --record-session >/dev/null && printf '{{}}'"
+                    f"out=\"$({hook} idle --source gemini.SessionStart --record-session)\" && "
+                    "if [ -n \"$out\" ]; then printf '%s' \"$out\"; else printf '{}'; fi"
                 )
             ],
             "PreInvocation": [

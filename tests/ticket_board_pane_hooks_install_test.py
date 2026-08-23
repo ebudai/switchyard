@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import subprocess
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +41,41 @@ PANE_TARGETS = (
 )
 REAL_INSPECTOR_SESSION_ID = "98759ea4-3597-4d25-933d-7b5059a0db61"
 TRANSIENT_AGY_SESSION_ID = "ebd87947-ab41-4bcd-a487-109fa5750566"
+
+
+class _BoardHandler(BaseHTTPRequestHandler):
+    tickets: list[dict[str, object]] = []
+
+    def do_GET(self) -> None:
+        if self.path == "/api/board":
+            body = json.dumps({"tickets": self.tickets}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+
+@contextmanager
+def _board_with_tickets(tickets: list[dict[str, object]]) -> Any:
+    previous_tickets = _BoardHandler.tickets
+    _BoardHandler.tickets = tickets
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _BoardHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+        _BoardHandler.tickets = previous_tickets
 
 
 def _hook_env(**extra: str) -> dict[str, str]:
@@ -168,6 +206,9 @@ def test_installer_writes_durable_cli_hook_configs_idempotently() -> None:
         claude_commands = _managed_commands_by_source(claude)
         assert " idle --source claude.Stop" in claude_commands["claude.Stop"]
         assert " busy --source claude.Stop" not in claude_commands["claude.Stop"]
+        gemini_commands = _managed_commands_by_source(gemini)
+        assert "gemini.SessionStart --record-session)" in gemini_commands["gemini.SessionStart"]
+        assert ">/dev/null" not in gemini_commands["gemini.SessionStart"]
 
 
 def test_session_dir_snapshot_detects_same_count_content_mutation() -> None:
@@ -303,6 +344,105 @@ def test_session_start_hook_seeds_idle_state_and_records_resume_session() -> Non
         assert session["session_id"] == session_id
         assert session["source"] == "codex.SessionStart"
         assert session["payload"]["cwd"] == "/home/agent/Projects/pgu"
+
+
+def test_compact_session_start_injects_assigned_in_progress_ticket_context() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        state_dir = Path(tmp) / "state"
+        session_dir = Path(tmp) / "sessions"
+        with _board_with_tickets(
+            [
+                {"id": "PGU-557", "title": "Resume compacted work", "state": "in_progress", "assignee": "main"},
+                {"id": "PGU-556", "title": "Other role", "state": "in_progress", "assignee": "ops"},
+            ]
+        ) as board_url:
+            proc = subprocess.run(
+                [
+                    str(ROOT / "scripts" / HOOK_NAME),
+                    "idle",
+                    "--target",
+                    "pgu-main:0.0",
+                    "--source",
+                    "claude.SessionStart",
+                    "--state-dir",
+                    str(state_dir),
+                    "--session-dir",
+                    str(session_dir),
+                    "--record-session",
+                ],
+                input=json.dumps({"source": "compact", "session_id": "compact-session-1"}),
+                text=True,
+                capture_output=True,
+                check=True,
+                env=_hook_env(TICKET_BOARD_URL=board_url),
+            )
+
+        output = json.loads(proc.stdout)
+        context = output["hookSpecificOutput"]["additionalContext"]
+        assert output["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+        assert "Your context was just compacted." in context
+        assert "ACTIVE work: PGU-557 -- Resume compacted work" in context
+        assert f"curl {board_url}/api/tickets/PGU-557" in context
+        assert "do NOT wait for a new prompt" in context
+        state = json.loads((state_dir / "pgu-main_0.0.json").read_text(encoding="utf-8"))
+        assert state["state"] == "idle"
+        session = json.loads((session_dir / "pgu-main_0.0.json").read_text(encoding="utf-8"))
+        assert session["session_id"] == "compact-session-1"
+
+
+def test_session_start_resume_injection_is_scoped_to_resume_sources_and_active_ticket() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        state_dir = Path(tmp) / "state"
+        session_dir = Path(tmp) / "sessions"
+        with _board_with_tickets(
+            [{"id": "PGU-557", "title": "Resume compacted work", "state": "in_progress", "assignee": "main"}]
+        ) as board_url:
+            startup = subprocess.run(
+                [
+                    str(ROOT / "scripts" / HOOK_NAME),
+                    "idle",
+                    "--target",
+                    "pgu-main:0.0",
+                    "--source",
+                    "claude.SessionStart",
+                    "--state-dir",
+                    str(state_dir),
+                    "--session-dir",
+                    str(session_dir),
+                    "--record-session",
+                ],
+                input=json.dumps({"source": "startup", "session_id": "startup-session"}),
+                text=True,
+                capture_output=True,
+                check=True,
+                env=_hook_env(TICKET_BOARD_URL=board_url),
+            )
+        with _board_with_tickets(
+            [{"id": "PGU-557", "title": "Not active", "state": "audit", "assignee": "main"}]
+        ) as board_url:
+            no_ticket = subprocess.run(
+                [
+                    str(ROOT / "scripts" / HOOK_NAME),
+                    "idle",
+                    "--target",
+                    "pgu-main:0.0",
+                    "--source",
+                    "claude.SessionStart",
+                    "--state-dir",
+                    str(state_dir),
+                    "--session-dir",
+                    str(session_dir),
+                    "--record-session",
+                ],
+                input=json.dumps({"source": "resume", "session_id": "resume-session"}),
+                text=True,
+                capture_output=True,
+                check=True,
+                env=_hook_env(TICKET_BOARD_URL=board_url),
+            )
+
+    assert startup.stdout == ""
+    assert no_ticket.stdout == ""
 
 
 def test_session_start_hook_defaults_to_xdg_state_home_session_dir() -> None:

@@ -12,6 +12,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from urllib import error as urllib_error
+from urllib import request
 
 def _env_first(environ: dict[str, str], *names: str) -> str:
     for name in names:
@@ -47,6 +49,20 @@ SESSION_ID_KEYS = {
 UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
+SESSION_START_RESUME_SOURCES = {"compact", "resume"}
+
+
+def _default_board_url(environ: dict[str, str]) -> str:
+    return _env_first(environ, "TICKET_BOARD_URL", "PGU_TICKET_BOARD_URL") or "http://127.0.0.1:8770"
+
+
+def _board_root_url(board_url: str) -> str:
+    normalized = board_url.rstrip("/")
+    if normalized.endswith("/api/tickets"):
+        return normalized.removesuffix("/api/tickets")
+    if normalized.endswith("/api"):
+        return normalized.removesuffix("/api")
+    return normalized
 
 
 def _target_from_tmux_pane(environ: dict[str, str]) -> str | None:
@@ -157,6 +173,18 @@ def _walk_json_values(value: object) -> list[tuple[str, str]]:
     elif isinstance(value, str):
         found.append(("", value.strip()))
     return found
+
+
+def _payload_string(payload: object, *names: str) -> str:
+    wanted = {name.replace("-", "_").replace(".", "_").lower() for name in names}
+    for key, value in _walk_json_values(payload):
+        if key in wanted and value:
+            return value
+    return ""
+
+
+def _session_start_source(payload: object) -> str:
+    return _payload_string(payload, "source", "reason", "resume_source", "session_start_source").strip().lower()
 
 
 def _extract_payload_session_id(payload: object) -> str:
@@ -282,6 +310,84 @@ def _should_write_session(
     return False
 
 
+def _role_for_target(target: str) -> str:
+    session = target.split(":", 1)[0]
+    return session.rsplit("-", 1)[-1].strip().lower()
+
+
+def _ticket_number(ticket_id: str) -> int:
+    match = re.search(r"(\d+)$", ticket_id)
+    return int(match.group(1)) if match else -1
+
+
+def _active_in_progress_ticket_for_role(
+    role: str,
+    *,
+    board_url: str,
+    timeout: float = 2.0,
+) -> dict[str, object] | None:
+    url = f"{_board_root_url(board_url)}/api/board"
+    try:
+        with request.urlopen(url, timeout=timeout) as response:
+            response_body = response.read().decode("utf-8", errors="replace")
+    except (OSError, urllib_error.URLError):
+        return None
+    try:
+        parsed = json.loads(response_body)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    tickets = parsed.get("tickets")
+    if not isinstance(tickets, list):
+        return None
+    matches = [
+        ticket
+        for ticket in tickets
+        if isinstance(ticket, dict)
+        and str(ticket.get("state", "")).strip() == "in_progress"
+        and str(ticket.get("assignee", "")).strip().lower() == role
+    ]
+    if not matches:
+        return None
+    return sorted(matches, key=lambda ticket: _ticket_number(str(ticket.get("id", ""))))[0]
+
+
+def _resume_context_for_ticket(ticket: dict[str, object], *, board_url: str) -> str:
+    ticket_id = str(ticket.get("id", "")).strip().upper()
+    title = str(ticket.get("title", "")).strip()
+    ticket_url = f"{_board_root_url(board_url)}/api/tickets/{ticket_id}"
+    title_suffix = f" -- {title}" if title else ""
+    return (
+        f"Your context was just compacted. You have ACTIVE work: {ticket_id}{title_suffix} "
+        f"(in_progress, assigned to you). Re-read it: curl {ticket_url} . "
+        "Resume where you left off; do NOT wait for a new prompt."
+    )
+
+
+def _session_start_additional_context_output(
+    *,
+    target: str,
+    payload: object,
+    environ: dict[str, str],
+) -> dict[str, object] | None:
+    if _session_start_source(payload) not in SESSION_START_RESUME_SOURCES:
+        return None
+    role = _role_for_target(target)
+    if not role:
+        return None
+    board_url = _default_board_url(environ)
+    ticket = _active_in_progress_ticket_for_role(role, board_url=board_url)
+    if ticket is None:
+        return None
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": _resume_context_for_ticket(ticket, board_url=board_url),
+        }
+    }
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Record a ticket-board pane idle/busy state for notification delivery.")
     parser.add_argument("state", choices=["idle", "busy", "blocked"], help="pane lifecycle state to record")
@@ -323,6 +429,10 @@ def main(argv: list[str] | None = None) -> int:
         explicit_session_id=bool(args.session_id.strip()),
     ):
         _write_session(args.session_dir, target, session_id, source=args.source, payload=payload)
+    if args.state == "idle" and args.source.endswith(".SessionStart"):
+        output = _session_start_additional_context_output(target=target, payload=payload, environ=os.environ)
+        if output is not None:
+            print(json.dumps(output, sort_keys=True))
     return 0
 
 

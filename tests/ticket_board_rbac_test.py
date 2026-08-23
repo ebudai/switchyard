@@ -374,7 +374,9 @@ WHERE id = {sql_string(draft_created)};
 """,
         )
     )
-    assert released_draft == {"state": "analysis", "assignee": "unassigned"}, released_draft
+    assert released_draft == {"state": "analysis", "assignee": "director"}, released_draft
+    assert psql(admin_conn, "SELECT ticket_board.stage_default_assignee('analysis');") == "director"
+    assert psql(admin_conn, "SELECT coalesce(ticket_board.stage_default_assignee('in_progress'), '<none>');") == "<none>"
     blocked_created = psql(
         service_conn,
         f"SELECT ticket_board.create_ticket('Service blocked create', 'Body', 'analysis', ARRAY[{sql_string(created)}], 'Waiting on source.');",
@@ -980,7 +982,7 @@ FROM ticket_board.tickets t WHERE id = 'PGU-914';
     )
     assert requested == {
         "state": "analysis",
-        "assignee": "unassigned",
+        "assignee": "director",
         "commit_exempt": False,
         "comment": "Commit exemption requested: No repo change.",
     }, requested
@@ -1003,7 +1005,7 @@ FROM ticket_board.tickets t WHERE id = 'PGU-914';
     assert psql(admin_conn, "SELECT state FROM ticket_board.tickets WHERE id = 'PGU-901';") == "in_progress"
 
     insert_ticket(admin_conn, "PGU-905", title="Unassigned start still illegal", state="analysis", assignee="unassigned", implementation="")
-    assert "in_progress tickets require an implementer assignee" in psql_error(
+    assert "in_progress tickets require an implementation-stage owner assignee" in psql_error(
         service_conn,
         "SELECT set_config('ticket_board.caller_role', 'ops', false); SELECT ticket_board.start_work('PGU-905');",
     )

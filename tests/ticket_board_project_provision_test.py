@@ -86,6 +86,8 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert 'unit === "stellaris-ticket-board.service"' in combined
     assert 'unit === "stellaris-ticket-board-canary.service"' in combined
     assert 'subject.user !== "stellaris-agent"' in combined
+    assert "Do NOT add org.freedesktop.systemd1.manage-unit-files here" in combined
+    assert "reload-daemon cannot be scoped to a unit" in combined
     assert "setfacl -R -m u:boardsvc:rx '/home/stellaris-agent/stellaris-ticketboard-live'" in combined
     assert "ticket_has_unresolved_blockers" not in combined
     assert "/tmp/pgu-frames" not in combined

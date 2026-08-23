@@ -26,6 +26,11 @@ PostgreSQL. Attachment files and captured frames remain filesystem-backed under
   `agent`; it permits live board start/stop/restart and fixed
   `pgu-ticket-board-canary.service` start/stop so `deploy-restart` can keep its canary
   health gate without blanket sudo.
+  Do not broaden this to `org.freedesktop.systemd1.manage-unit-files`: on this
+  host that polkit action implies both `reload-daemon` and `manage-units`, so
+  the rule would silently become global daemon-reload plus unrestricted unit
+  management while still looking project-specific. `reload-daemon` has no
+  per-unit detail for polkit to inspect, so there is no narrow reload grant.
 - This runbook: root command list, verification, and rollback.
 
 ## Root Commands

@@ -175,7 +175,16 @@ install the reviewed rule
 `agent` user to restart/start/stop `pgu-ticket-board.service` and to
 start/stop the fixed, root-owned `pgu-ticket-board-canary.service` unit. This
 lets the team run the mandatory canary health gate and then restart the live
-board without Eric's active KDE session or blanket sudo. The canary unit runs as
+board without Eric's active KDE session or blanket sudo.
+
+Do not add `org.freedesktop.systemd1.manage-unit-files` to that rule to support
+enable/disable. On this host, `manage-unit-files` implies both `reload-daemon`
+and `manage-units`, which would silently expand the narrow grant into global
+daemon-reload plus unrestricted unit management. `reload-daemon` cannot be
+scoped per unit because polkit receives no unit detail for that action; an
+operator must perform daemon reloads outside this deploy grant.
+
+The canary unit runs as
 `boardsvc`; `deploy-restart` only writes
 `/home/agent/pgu-ticketboard-live/canary.env` to point that fixed unit at the
 candidate release and scratch port/socket. If the host rule or canary unit is

@@ -276,6 +276,11 @@ def render_tmpfiles(plan: ProjectBoardProvision) -> str:
 def render_polkit_rule(plan: ProjectBoardProvision) -> str:
     return f"""// Allow {plan.owner_user} to deploy the {plan.project} board without blanket sudo.
 // Scope is intentionally limited to fixed, root-owned board service units.
+// Do NOT add org.freedesktop.systemd1.manage-unit-files here. On systemd
+// policy, that action can imply both reload-daemon and manage-units, which
+// turns this narrow per-unit grant into global daemon-reload plus unrestricted
+// unit management. reload-daemon cannot be scoped to a unit; it carries no unit
+// detail for polkit to inspect.
 polkit.addRule(function(action, subject) {{
     if (subject.user !== "{plan.owner_user}") {{
         return polkit.Result.NOT_HANDLED;

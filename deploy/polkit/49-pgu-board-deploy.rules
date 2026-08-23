@@ -1,5 +1,10 @@
 // Allow the agent team to deploy the PGU board without blanket sudo.
 // Scope is intentionally limited to fixed, root-owned board service units.
+// Do NOT add org.freedesktop.systemd1.manage-unit-files here. On this host,
+// that action implies both reload-daemon and manage-units, which would turn
+// this narrow per-unit grant into global daemon-reload plus unrestricted unit
+// management. reload-daemon cannot be scoped to a unit; it carries no unit
+// detail for polkit to inspect.
 polkit.addRule(function(action, subject) {
     if (subject.user !== "agent") {
         return polkit.Result.NOT_HANDLED;

@@ -386,6 +386,122 @@ LIMIT 1;
             psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-2';")
             psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-2';")
 
+            insert_ticket(conninfo, "PGU-63800", title="Release current for activation reset", assignee="perf", state="in_progress", implementation="active")
+            insert_ticket(conninfo, "PGU-63801", title="Queued activation reset", assignee="perf", state="backlog", implementation="queued")
+            psql(
+                conninfo,
+                """
+UPDATE ticket_board.ticket_notification_state
+SET entered_current_state_at = clock_timestamp() - interval '3 hours',
+    last_activity_at = clock_timestamp() - interval '3 hours',
+    last_nudged_at = clock_timestamp() - interval '2 hours',
+    nudge_count = 4
+WHERE ticket_id = 'PGU-63801';
+DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id IN ('PGU-63800', 'PGU-63801');
+""",
+            )
+            service_call(conninfo, "director", "SELECT ticket_board.defer('PGU-63800');")
+            queued_activation_clock = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'state', t.state,
+    'parked', t.parked,
+    'fresh_state_clock', ns.entered_current_state_at > clock_timestamp() - interval '30 seconds',
+    'last_nudged_cleared', ns.last_nudged_at IS NULL,
+    'nudge_count', ns.nudge_count
+)::text
+FROM ticket_board.tickets t
+JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
+WHERE t.id = 'PGU-63801';
+""",
+                ).stdout
+            )
+            assert queued_activation_clock == {
+                "state": "in_progress",
+                "parked": False,
+                "fresh_state_clock": True,
+                "last_nudged_cleared": True,
+                "nudge_count": 0,
+            }, queued_activation_clock
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '6380101' WHERE id = 'PGU-63801';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-63801';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-63801';")
+            psql(conninfo, "DELETE FROM ticket_board.tickets WHERE id = 'PGU-63800';")
+
+            insert_ticket(conninfo, "PGU-63802", title="Parked active reset", assignee="perf", state="in_progress", implementation="held", parked=True)
+            psql(
+                conninfo,
+                """
+UPDATE ticket_board.ticket_notification_state
+SET entered_current_state_at = clock_timestamp() - interval '3 hours',
+    last_activity_at = clock_timestamp() - interval '3 hours',
+    last_nudged_at = clock_timestamp() - interval '2 hours',
+    nudge_count = 5
+WHERE ticket_id = 'PGU-63802';
+UPDATE ticket_board.tickets SET parked = false WHERE id = 'PGU-63802';
+""",
+            )
+            parked_active_reset = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'state', t.state,
+    'parked', t.parked,
+    'fresh_state_clock', ns.entered_current_state_at > clock_timestamp() - interval '30 seconds',
+    'last_nudged_cleared', ns.last_nudged_at IS NULL,
+    'nudge_count', ns.nudge_count
+)::text
+FROM ticket_board.tickets t
+JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
+WHERE t.id = 'PGU-63802';
+""",
+                ).stdout
+            )
+            assert parked_active_reset == {
+                "state": "in_progress",
+                "parked": False,
+                "fresh_state_clock": True,
+                "last_nudged_cleared": True,
+                "nudge_count": 0,
+            }, parked_active_reset
+            psql(
+                conninfo,
+                """
+UPDATE ticket_board.ticket_notification_state
+SET entered_current_state_at = clock_timestamp() - interval '3 hours',
+    last_activity_at = clock_timestamp() - interval '3 hours',
+    last_nudged_at = clock_timestamp() - interval '2 hours',
+    nudge_count = 6
+WHERE ticket_id = 'PGU-63802';
+UPDATE ticket_board.tickets SET implementation = 'ordinary edit' WHERE id = 'PGU-63802';
+""",
+            )
+            ordinary_active_edit = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'state_clock_retained', ns.entered_current_state_at < clock_timestamp() - interval '2 hours',
+    'last_nudged_retained', ns.last_nudged_at IS NOT NULL,
+    'nudge_count', ns.nudge_count
+)::text
+FROM ticket_board.ticket_notification_state ns
+WHERE ns.ticket_id = 'PGU-63802';
+""",
+                ).stdout
+            )
+            assert ordinary_active_edit == {
+                "state_clock_retained": True,
+                "last_nudged_retained": True,
+                "nudge_count": 6,
+            }, ordinary_active_edit
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '6380202' WHERE id = 'PGU-63802';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-63802';")
+            psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-63802';")
+
             insert_ticket(conninfo, "PGU-63000", title="Current implementation", assignee="ops", state="in_progress", implementation="active")
             insert_ticket(conninfo, "PGU-63001", title="Deferred implementation", assignee="ops", state="backlog", implementation="queued")
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id IN ('PGU-63000', 'PGU-63001');")

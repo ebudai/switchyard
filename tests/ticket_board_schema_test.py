@@ -144,6 +144,16 @@ def queue_notification_kinds(schema_lower: str) -> set[str]:
     }
 
 
+def extract_function(sql: str, function_name: str) -> str:
+    match = re.search(
+        rf"CREATE OR REPLACE FUNCTION ticket_board\.{re.escape(function_name)}\s*\(.*?\n\$\$;",
+        sql,
+        re.DOTALL,
+    )
+    assert match, f"function ticket_board.{function_name} missing"
+    return match.group(0).strip()
+
+
 def main() -> int:
     schema = SCHEMA_PATH.read_text(encoding="utf-8")
     schema_lower = schema.lower()
@@ -519,14 +529,20 @@ def main() -> int:
     ).read_text(encoding="utf-8").lower()
     assert "p_cadence interval default interval '30 minutes'" in idle_stall_cadence_migration
     assert "p_cadence interval default interval '30 minutes'" in executable_schema_lower
-    work_aware_idle_stall_migration = (
+    work_aware_idle_stall_migration_text = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "pgu636_work_aware_idle_stall_nudges.sql"
-    ).read_text(encoding="utf-8").lower()
+    ).read_text(encoding="utf-8")
+    work_aware_idle_stall_migration = work_aware_idle_stall_migration_text.lower()
     assert "p_work_observed_at_by_role jsonb default '{}'::jsonb" in work_aware_idle_stall_migration
     assert "coalesce(candidate.work_observed_at, '-infinity'::timestamptz) <= candidate.last_nudged_at" in work_aware_idle_stall_migration
     assert "old.state = 'backlog' or old.parked" in work_aware_idle_stall_migration
     assert "p_work_observed_at_by_role jsonb default '{}'::jsonb" in executable_schema_lower
     assert "coalesce(candidate.work_observed_at, '-infinity'::timestamptz) <= candidate.last_nudged_at" in executable_schema_lower
+    for function_name in ("upsert_ticket_notification_state", "notify_idle_stall_nudges"):
+        assert extract_function(schema, function_name) == extract_function(
+            work_aware_idle_stall_migration_text,
+            function_name,
+        )
     drop_orphaned_eric_functions_migration = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "pgu593_drop_orphaned_eric_functions.sql"
     ).read_text(encoding="utf-8").lower()

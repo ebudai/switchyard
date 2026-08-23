@@ -34,6 +34,7 @@ DEFAULT_RESUME_FLAG_BY_CLI = {
 DEFAULT_RESUME_SUBCOMMAND_BY_CLI = {
     "codex": "resume",
 }
+SNAPSHOT_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,11 @@ class Check:
     name: str
     ok: bool
     detail: str
+    status: str = ""
+
+    @property
+    def label(self) -> str:
+        return self.status or ("PASS" if self.ok else "FAIL")
 
 
 def _repo_root() -> Path:
@@ -468,7 +474,7 @@ def collect_snapshot(args: argparse.Namespace) -> dict[str, Any]:
         "error": "; ".join(tmux_errors),
     }
     return {
-        "schema_version": 1,
+        "schema_version": SNAPSHOT_SCHEMA_VERSION,
         "created_at": time.time(),
         "project": args.project,
         "owner_user": args.owner_user,
@@ -527,6 +533,17 @@ def _tmux_pane_for_target(tmux: dict[str, Any], target: str) -> dict[str, Any]:
         return {}
     pane = panes.get(target)
     return pane if isinstance(pane, dict) else {}
+
+
+def _snapshot_has_resume_argv_capture(snapshot: dict[str, Any]) -> bool:
+    tmux = snapshot.get("tmux") if isinstance(snapshot.get("tmux"), dict) else {}
+    return isinstance(tmux.get("panes"), dict)
+
+
+def _undeterminable_check(name: str, detail: str) -> Check:
+    # Undeterminable means the input cannot answer this property; it should be visible
+    # in the report but non-failing for exit-code purposes, matching PGU-577.
+    return Check(name, True, detail, status="UNDETERMINABLE")
 
 
 def _missing_tmux_sessions(roles: list[Any], tmux: dict[str, Any]) -> list[str]:
@@ -680,36 +697,44 @@ def verify_snapshot(before: dict[str, Any], after: dict[str, Any]) -> list[Check
         )
     )
 
-    after_tmux = after.get("tmux", {}) if isinstance(after.get("tmux"), dict) else {}
-    attempt_failures: list[str] = []
-    attempt_checked = 0
-    for item in roles:
-        if not isinstance(item, dict):
-            continue
-        target = str(item.get("target") or "")
-        if not target:
-            continue
-        expected = _session_id_for_target(before_durable, target)
-        if not expected:
-            continue
-        attempt_checked += 1
-        pane = _tmux_pane_for_target(after_tmux, target)
-        if not pane:
-            attempt_failures.append(f"{target}: no live pane argv captured")
-        elif not _resume_attempt_present(item, expected, pane):
-            attempt_failures.append(f"{target}: recorded session id not present in live pane resume argv")
-    checks.append(
-        Check(
-            "pane_resume_attempt_passed_to_cli",
-            attempt_checked > 0 and not attempt_failures,
-            (
-                f"{attempt_checked} pane(s) passed recorded session ids to their CLI; verifies launch attempt only, "
-                "not CLI context retention/outcome"
-                if attempt_checked > 0 and not attempt_failures
-                else f"checked={attempt_checked}; failures={attempt_failures or 'none'}"
-            ),
+    if not _snapshot_has_resume_argv_capture(before):
+        checks.append(
+            _undeterminable_check(
+                "pane_resume_attempt_passed_to_cli",
+                "snapshot predates argv capture; cannot verify resume attempt",
+            )
         )
-    )
+    else:
+        after_tmux = after.get("tmux", {}) if isinstance(after.get("tmux"), dict) else {}
+        attempt_failures: list[str] = []
+        attempt_checked = 0
+        for item in roles:
+            if not isinstance(item, dict):
+                continue
+            target = str(item.get("target") or "")
+            if not target:
+                continue
+            expected = _session_id_for_target(before_durable, target)
+            if not expected:
+                continue
+            attempt_checked += 1
+            pane = _tmux_pane_for_target(after_tmux, target)
+            if not pane:
+                attempt_failures.append(f"{target}: no live pane argv captured")
+            elif not _resume_attempt_present(item, expected, pane):
+                attempt_failures.append(f"{target}: recorded session id not present in live pane resume argv")
+        checks.append(
+            Check(
+                "pane_resume_attempt_passed_to_cli",
+                attempt_checked > 0 and not attempt_failures,
+                (
+                    f"{attempt_checked} pane(s) passed recorded session ids to their CLI; verifies launch attempt only, "
+                    "not CLI context retention/outcome"
+                    if attempt_checked > 0 and not attempt_failures
+                    else f"checked={attempt_checked}; failures={attempt_failures or 'none'}"
+                ),
+            )
+        )
 
     after_state = after.get("pane_state", {})
     state_failures: list[str] = []
@@ -807,7 +832,7 @@ def _print_verify_report(checks: list[Check], after_path: Path | None) -> None:
     if after_path is not None:
         print(f"VERIFY snapshot={after_path}")
     for check in checks:
-        print(f"{'PASS' if check.ok else 'FAIL'} {check.name}: {check.detail}")
+        print(f"{check.label} {check.name}: {check.detail}")
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:

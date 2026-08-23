@@ -313,6 +313,89 @@ def test_pane_resume_attempt_passed_to_cli_fails_when_argv_lacks_recorded_id() -
         assert_check_fails(module, before, after, "pane_resume_attempt_passed_to_cli")
 
 
+def test_pane_resume_attempt_passed_to_cli_is_undeterminable_without_argv_capture() -> None:
+    module = load_module()
+    with collect_good_pair(module) as (_paths, before, after):
+        before["tmux"].pop("panes")
+        checks = module.verify_snapshot(before, after)
+        by_name = {check.name: check for check in checks}
+        check = by_name["pane_resume_attempt_passed_to_cli"]
+        assert check.ok
+        assert check.label == "UNDETERMINABLE"
+        assert "snapshot predates argv capture" in check.detail
+        assert "cannot verify resume attempt" in check.detail
+
+
+def test_verify_exits_zero_and_reports_undeterminable_for_snapshot_without_argv_capture() -> None:
+    module = load_module()
+    with tempfile.TemporaryDirectory(prefix="resume-verify.") as tmp, ThreadedServer() as server:
+        root = Path(tmp)
+        paths = make_fixture(root, boot_id="before-boot", boot_time=1000)
+        paths["snapshot"] = root / "snapshot.json"
+        args = build_args(module, paths, server.url)
+        before = module.collect_snapshot(args)
+        before["tmux"] = {
+            "ok": before["tmux"]["ok"],
+            "error": before["tmux"]["error"],
+            "sessions": before["tmux"]["sessions"],
+        }
+        module._write_json(paths["snapshot"], before)
+
+        paths["boot_id_file"].write_text("after-boot", encoding="utf-8")
+        paths["boot_time_file"].write_text("2000", encoding="utf-8")
+        for item in paths["runtime_sessions"].glob("*.json"):
+            os.utime(item, (2010, 2010))
+        for item in paths["pane_state"].glob("*.json"):
+            os.utime(item, (2010, 2010))
+
+        output = StringIO()
+        with redirect_stdout(output):
+            rc = module.main(
+                [
+                    "--verify",
+                    str(paths["snapshot"]),
+                    "--project",
+                    "demo",
+                    "--owner-user",
+                    "agent",
+                    "--runtime-user",
+                    "agent",
+                    "--uid",
+                    "1001",
+                    "--config",
+                    str(paths["config"]),
+                    "--board-url",
+                    server.url,
+                    "--runtime-session-dir",
+                    str(paths["runtime_sessions"]),
+                    "--durable-session-dir",
+                    str(paths["durable_sessions"]),
+                    "--pane-state-dir",
+                    str(paths["pane_state"]),
+                    "--current-release",
+                    str(paths["current"]),
+                    "--launcher-repo",
+                    str(paths["launcher_repo"]),
+                    "--frame-dir",
+                    str(paths["frame_dir"]),
+                    "--tmux-sessions-file",
+                    str(paths["tmux_file"]),
+                    "--tmux-panes-file",
+                    str(paths["tmux_panes_file"]),
+                    "--boot-id-file",
+                    str(paths["boot_id_file"]),
+                    "--boot-time-file",
+                    str(paths["boot_time_file"]),
+                ]
+            )
+
+    report = output.getvalue()
+    assert rc == 0
+    assert "UNDETERMINABLE pane_resume_attempt_passed_to_cli" in report
+    assert "snapshot predates argv capture; cannot verify resume attempt" in report
+    assert "FAIL pane_resume_attempt_passed_to_cli" not in report
+
+
 def test_pane_resume_attempt_passed_to_cli_states_attempt_not_outcome() -> None:
     module = load_module()
     with collect_good_pair(module) as (_paths, before, after):
@@ -462,6 +545,8 @@ if __name__ == "__main__":
     test_durable_sessions_survive_fails_when_record_missing()
     test_durable_session_records_retained_fails_when_a_session_id_changes()
     test_pane_resume_attempt_passed_to_cli_fails_when_argv_lacks_recorded_id()
+    test_pane_resume_attempt_passed_to_cli_is_undeterminable_without_argv_capture()
+    test_verify_exits_zero_and_reports_undeterminable_for_snapshot_without_argv_capture()
     test_pane_resume_attempt_passed_to_cli_states_attempt_not_outcome()
     test_codex_agy_pane_state_seeded_fails_when_hook_state_missing()
     test_codex_agy_pane_state_seeded_fails_when_state_predates_boot()

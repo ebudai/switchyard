@@ -12,6 +12,14 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ticket_board_pane_env import (
+    candidate_live_pane_paths,
+    snapshot_diff,
+    snapshot_path,
+    snapshot_paths,
+    stripped_ticket_board_pane_env,
+)
+
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "scripts" / "ticket-board-install-pane-hooks"
 HOOK_NAME = "ticket-board-pane-idle-hook"
@@ -26,87 +34,8 @@ PANE_TARGETS = (
     "pgu-audit:0.0",
     "pgu-inspector:0.0",
 )
-SESSION_ENV_KEYS = (
-    "TICKET_BOARD_PANE_SESSION_ID",
-    "PGU_PANE_SESSION_ID",
-    "CLAUDE_SESSION_ID",
-    "CODEX_SESSION_ID",
-    "GEMINI_SESSION_ID",
-    "SESSION_ID",
-)
-HOOK_PATH_ENV_KEYS = (
-    "TICKET_BOARD_PANE_SESSION_DIR",
-    "PGU_TICKET_BOARD_PANE_SESSION_DIR",
-    "TICKET_BOARD_PANE_STATE_DIR",
-    "PGU_TICKET_BOARD_PANE_STATE_DIR",
-)
-
-
 def _hook_env(**extra: str) -> dict[str, str]:
-    env = os.environ.copy()
-    for key in (*SESSION_ENV_KEYS, *HOOK_PATH_ENV_KEYS):
-        env.pop(key, None)
-    env.update(extra)
-    return env
-
-
-def _candidate_live_session_dirs() -> list[Path]:
-    candidates: list[Path] = []
-    for key in ("TICKET_BOARD_PANE_SESSION_DIR", "PGU_TICKET_BOARD_PANE_SESSION_DIR"):
-        value = os.environ.get(key, "").strip()
-        if value:
-            candidates.append(Path(value).expanduser())
-    xdg_state_home = os.environ.get("XDG_STATE_HOME", "").strip()
-    state_home = Path(xdg_state_home).expanduser() if xdg_state_home else Path.home() / ".local" / "state"
-    candidates.append(state_home / "pgu-ticket-board" / "pane-sessions")
-    candidates.append(Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-sessions"))
-
-    unique: list[Path] = []
-    seen: set[str] = set()
-    for candidate in candidates:
-        resolved = str(candidate.resolve(strict=False))
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        unique.append(candidate)
-    return unique
-
-
-def _snapshot_session_dir(path: Path) -> dict[str, bytes] | None:
-    try:
-        if not path.exists():
-            return None
-        if not path.is_dir():
-            return {}
-        snapshot: dict[str, bytes] = {}
-        for child in sorted(path.rglob("*")):
-            if child.is_file():
-                snapshot[str(child.relative_to(path))] = child.read_bytes()
-        return snapshot
-    except OSError:
-        return {}
-
-
-def _snapshot_live_session_dirs() -> dict[str, dict[str, bytes] | None]:
-    return {str(path): _snapshot_session_dir(path) for path in _candidate_live_session_dirs()}
-
-
-def _session_snapshot_diff(
-    before: dict[str, dict[str, bytes] | None],
-    after: dict[str, dict[str, bytes] | None],
-) -> list[str]:
-    changed: list[str] = []
-    for root in sorted(set(before) | set(after)):
-        before_files = before.get(root)
-        after_files = after.get(root)
-        if before_files is None or after_files is None:
-            if before_files != after_files:
-                changed.append(root)
-            continue
-        for name in sorted(set(before_files) | set(after_files)):
-            if before_files.get(name) != after_files.get(name):
-                changed.append(f"{root}/{name}")
-    return changed
+    return stripped_ticket_board_pane_env(**extra)
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -225,12 +154,12 @@ def test_session_dir_snapshot_detects_same_count_content_mutation() -> None:
             encoding="utf-8",
         )
 
-        before = _snapshot_session_dir(session_dir)
+        before = snapshot_path(session_dir)
         session_path.write_text(
             json.dumps({"target": "pgu-ops:0.0", "session_id": "12345678-1234-5678-9abc-def012345679"}) + "\n",
             encoding="utf-8",
         )
-        after = _snapshot_session_dir(session_dir)
+        after = snapshot_path(session_dir)
 
         assert before is not None
         assert after is not None
@@ -709,7 +638,8 @@ def test_session_start_records_env_session_id_fallback() -> None:
 
 
 def main() -> int:
-    live_session_snapshot = _snapshot_live_session_dirs()
+    live_pane_paths = candidate_live_pane_paths()
+    live_session_snapshot = snapshot_paths(live_pane_paths)
     try:
         test_installer_writes_durable_cli_hook_configs_idempotently()
         test_session_dir_snapshot_detects_same_count_content_mutation()
@@ -726,8 +656,8 @@ def main() -> int:
         test_session_start_always_updates_existing_session_file()
         test_session_start_records_env_session_id_fallback()
     finally:
-        after_snapshot = _snapshot_live_session_dirs()
-        changed = _session_snapshot_diff(live_session_snapshot, after_snapshot)
+        after_snapshot = snapshot_paths(live_pane_paths)
+        changed = snapshot_diff(live_session_snapshot, after_snapshot)
         assert not changed, changed
     print("ticket_board_pane_hooks_install_test: ok")
     return 0

@@ -506,6 +506,12 @@ def render_operator_commands(plan: ProjectBoardProvision) -> str:
             f"sudo psql -X -v ON_ERROR_STOP=1 {shell_quote(plan.admin_database_url)} "
             f"-f {shell_quote(plan.project + '-workflow.sql')}\n"
         )
+    install_board_root = owned_directory_command(
+        plan,
+        owned_ancestor_dirs(plan.owner_user, plan.board_root, include_target=True),
+    )
+    if not install_board_root:
+        install_board_root = f"sudo install -d -m 0755 {q_board_root}"
     install_asset_frame_parent = owned_directory_command(
         plan,
         (
@@ -546,7 +552,7 @@ def render_operator_commands(plan: ProjectBoardProvision) -> str:
 set -euo pipefail
 
 # Review generated artifacts first. These commands require host privileges.
-sudo install -d -m 0755 {q_board_root}
+{install_board_root}
 sudo env TICKET_BOARD_PROJECT={shell_quote(plan.project)} SOURCE_REPO={q_source_repo} BOARD_ROOT={q_board_root} DEPLOY_REF=origin/main TICKET_BOARD_SKIP_MIGRATIONS=1 {q_deploy_script} deploy
 sudo setfacl -R -m u:{plan.service_user}:rx {q_board_root}
 sudo find {q_board_root} -type d -exec setfacl -m d:u:{plan.service_user}:rx {{}} +

@@ -105,6 +105,12 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
 def test_operator_commands_create_owned_parents_before_systemd_paths() -> None:
     plan = build_plan(project="otto", owner_user="otto-agent", port=8873)
     commands = render_operator_commands(plan)
+    board_root = "sudo install -d -m 0755 -o 'otto-agent' -g 'otto-agent' '/home/otto-agent/otto-ticketboard-live'"
+    deploy = (
+        "sudo env TICKET_BOARD_PROJECT='otto' "
+        f"SOURCE_REPO='{ROOT}' "
+        "BOARD_ROOT='/home/otto-agent/otto-ticketboard-live'"
+    )
     claude_parent = "sudo install -d -m 0755 -o 'otto-agent' -g 'otto-agent' '/home/otto-agent/.claude'"
     asset_frame_leaf = (
         "sudo install -d -m 0775 -o 'otto-agent' -g 'otto-agent' "
@@ -123,6 +129,9 @@ def test_operator_commands_create_owned_parents_before_systemd_paths() -> None:
         "'/home/otto-agent/.config/systemd/user/otto-ticket-board-notify-listener.service'"
     )
 
+    assert board_root in commands
+    assert "sudo install -d -m 0755 '/home/otto-agent/otto-ticketboard-live'" not in commands
+    assert commands.index(board_root) < commands.index(deploy)
     assert claude_parent in commands
     assert asset_frame_leaf in commands
     assert commands.index(claude_parent) < commands.index(asset_frame_leaf)

@@ -21,6 +21,9 @@ The output directory contains:
   runtime namespace.
 - `<project>-ticket-board.conf`: tmpfiles entry for the project frame inbox.
 - `<project>-database.sql`: PostgreSQL database/role bootstrap.
+- `<project>-workflow.sql`: per-project workflow seed. For new non-`pgu`
+  projects this replaces the default PGU workflow data with the five visible
+  stages `Draft`, `Triage`, `Implementation`, `Audit`, and `Final Sign-Off`.
 - `operator-commands.sh`: ordered privileged commands to review and run.
 
 The provisioner intentionally renders first. It does not mutate the live PGU
@@ -29,8 +32,10 @@ the generated commands during an approved window.
 
 The `pgu` project is intentionally special-cased to reproduce the deployed
 production board: database `pgu`, HTTP port `8770`, and frame inbox
-`/tmp/pgu-frames` with a root-owned `1777` tmpfiles entry. New projects keep
-their frame inboxes under the owner user's home directory.
+`/tmp/pgu-frames` with a root-owned `1777` tmpfiles entry. It also keeps the
+full workflow seeded by `schema.sql`. New projects keep their frame inboxes
+under the owner user's home directory and apply `<project>-workflow.sql` after
+migrations and before `rbac.sql`.
 
 ## Current Schema Constraint
 

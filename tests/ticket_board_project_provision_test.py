@@ -21,6 +21,7 @@ from scripts.ticket_board.project_provision import (
     render_operator_commands,
     render_polkit_rule,
     render_tmpfiles,
+    render_workflow_sql,
 )
 
 
@@ -40,6 +41,7 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert plan.frame_dir == "/home/stellaris-agent/.claude/stellaris-ticket-frames"
     assert plan.service_role == "ticket_board_service"
     assert plan.listener_role == "ticket_board_listener"
+    assert plan.workflow_seed == "default-five-stage"
 
     combined = "\n".join(
         [
@@ -49,6 +51,7 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
             render_tmpfiles(plan),
             render_polkit_rule(plan),
             render_database_sql(plan),
+            render_workflow_sql(plan),
             render_operator_commands(plan),
         ]
     )
@@ -63,6 +66,15 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "BOARD_ROOT='/home/stellaris-agent/stellaris-ticketboard-live'" in combined
     assert "TICKET_BOARD_PROJECT='stellaris'" in combined
     assert "TICKET_BOARD_SKIP_MIGRATIONS=1" in combined
+    assert "sudo psql -X -v ON_ERROR_STOP=1 'postgresql:///stellaris_ticket_board?host=/var/run/postgresql&user=postgres' -f 'stellaris-workflow.sql'" in combined
+    assert combined.index("scripts/ticket-board-migrate") < combined.index("-f 'stellaris-workflow.sql'")
+    assert combined.index("-f 'stellaris-workflow.sql'") < combined.index("ticket_board/rbac.sql")
+    assert "Seed the default five-stage workflow for stellaris" in combined
+    assert "('analysis', 'Triage', 1, ARRAY['director']::text[]" in combined
+    assert "('in_progress', 'Implementation', 2, ARRAY['main', 'app', 'ops', 'perf', 'research']::text[]" in combined
+    assert "('audit', 'director_review', 'audit_sign_off', ARRAY['audit']::text[]" in combined
+    assert "('backlog'," not in render_workflow_sql(plan)
+    assert "('inspection'," not in render_workflow_sql(plan)
     assert 'unit === "stellaris-ticket-board.service"' in combined
     assert 'unit === "stellaris-ticket-board-canary.service"' in combined
     assert 'subject.user !== "stellaris-agent"' in combined
@@ -88,12 +100,15 @@ def test_pgu_project_render_matches_live_port_database_and_frame_dir() -> None:
     assert plan.board_root == "/home/agent/pgu-ticketboard-live"
     assert plan.asset_dir == "/home/agent/.claude/pgu-tickets-assets"
     assert plan.frame_dir == "/tmp/pgu-frames"
+    assert plan.workflow_seed == "pgu-full"
     assert "--port 8770" in board_unit
     assert "--frames /tmp/pgu-frames" in board_unit
     assert "--assets /home/agent/.claude/pgu-tickets-assets" in board_unit
     assert "ReadWritePaths=/home/agent/.claude/pgu-tickets-assets /tmp/pgu-frames" in board_unit
     assert tmpfiles == "d /tmp/pgu-frames 1777 root root -\n"
     assert "sudo install -d -m 1777 -o root -g root '/tmp/pgu-frames'" in commands
+    assert "-workflow.sql" not in commands
+    assert "keeps the full workflow seeded by schema.sql" in render_workflow_sql(plan)
     assert "sudo install -d -m 0775 -o 'agent' -g 'agent' '/home/agent/.claude/pgu-tickets-assets' '/tmp/pgu-frames'" not in commands
     assert "sudo setfacl -R -m u:boardsvc:rwx '/home/agent/.claude/pgu-tickets-assets' '/tmp/pgu-frames'" not in commands
 
@@ -156,7 +171,26 @@ def test_cli_writes_reviewable_artifacts() -> None:
         assert (output_dir / "porter-ticket-board.conf").exists()
         assert (output_dir / "49-porter-ticket-board-deploy.rules").exists()
         assert (output_dir / "porter-database.sql").exists()
+        assert (output_dir / "porter-workflow.sql").exists()
         assert (output_dir / "operator-commands.sh").exists()
+
+        workflow_result = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts" / "ticket-board-provision-project"),
+                "--project",
+                "porter",
+                "--owner-user",
+                "otto-agent",
+                "--render",
+                "workflow-sql",
+            ],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert "Seed the default five-stage workflow for porter" in workflow_result.stdout
 
 
 def main() -> int:

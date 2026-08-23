@@ -14,6 +14,7 @@ from typing import Sequence
 
 PROJECT_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 USER_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$")
+DEFAULT_IMPLEMENTER_ROLES = ("main", "app", "ops", "perf", "research")
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,7 @@ class ProjectBoardProvision:
     board_database_url: str
     listener_database_url: str
     admin_database_url: str
+    workflow_seed: str
 
 
 def _validate_project(value: str) -> str:
@@ -138,6 +140,7 @@ def build_plan(
             f"postgresql:///{resolved_database}?host=/var/run/postgresql&user={listener_role}"
         ),
         admin_database_url=f"postgresql:///{resolved_database}?host=/var/run/postgresql&user=postgres",
+        workflow_seed="pgu-full" if project == "pgu" else "default-five-stage",
     )
 
 
@@ -147,6 +150,14 @@ def shell_quote(value: str) -> str:
 
 def sql_identifier(value: str) -> str:
     return '"' + value.replace('"', '""') + '"'
+
+
+def sql_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def sql_text_array(values: Sequence[str]) -> str:
+    return "ARRAY[" + ", ".join(sql_literal(value) for value in values) + "]::text[]"
 
 
 def render_board_unit(plan: ProjectBoardProvision) -> str:
@@ -270,6 +281,102 @@ COMMENT ON DATABASE {db_ident} IS 'ticket board database for project {plan.proje
 """
 
 
+def render_workflow_sql(plan: ProjectBoardProvision) -> str:
+    if plan.workflow_seed == "pgu-full":
+        return f"""-- {plan.project} keeps the full workflow seeded by schema.sql.
+-- No per-project workflow override is applied.
+"""
+
+    stages = [
+        ("draft", "Draft", 0, (), None, None, None, False),
+        ("analysis", "Triage", 1, ("director",), None, None, None, False),
+        ("in_progress", "Implementation", 2, DEFAULT_IMPLEMENTER_ROLES, None, None, None, False),
+        ("audit", "Audit", 3, ("audit",), None, None, "audit_signoff", False),
+        ("director_review", "Final Sign-Off", 4, ("director",), None, None, None, False),
+    ]
+    transitions = [
+        ("draft", "analysis", "release_draft", ("director", "user"), False, False),
+        ("analysis", "in_progress", "route", ("director",), False, False),
+        ("analysis", "in_progress", "start_work", DEFAULT_IMPLEMENTER_ROLES, False, False),
+        ("in_progress", "audit", "route", ("director",), False, False),
+        ("in_progress", "audit", "submit_to_audit", DEFAULT_IMPLEMENTER_ROLES, False, False),
+        ("audit", "director_review", "route", ("director",), False, False),
+        ("audit", "director_review", "audit_sign_off", ("audit",), False, False),
+    ]
+    stage_rows = ",\n".join(
+        "    ("
+        + ", ".join(
+            [
+                sql_literal(name),
+                sql_literal(label),
+                str(rank),
+                sql_text_array(owner_roles),
+                "NULL" if entry_gate_field is None else sql_literal(entry_gate_field),
+                "NULL" if gate_skip_to is None else sql_literal(gate_skip_to),
+                "NULL" if exit_signoff_field is None else sql_literal(exit_signoff_field),
+                "true" if is_terminal else "false",
+            ]
+        )
+        + ")"
+        for name, label, rank, owner_roles, entry_gate_field, gate_skip_to, exit_signoff_field, is_terminal in stages
+    )
+    transition_rows = ",\n".join(
+        "    ("
+        + ", ".join(
+            [
+                sql_literal(from_stage),
+                sql_literal(to_stage),
+                sql_literal(action_name),
+                sql_text_array(allowed_roles),
+                "true" if owner_scoped else "false",
+                "true" if director_override else "false",
+            ]
+        )
+        + ")"
+        for from_stage, to_stage, action_name, allowed_roles, owner_scoped, director_override in transitions
+    )
+    return f"""-- Seed the default five-stage workflow for {plan.project}.
+-- Run after schema.sql/migrations and before rbac.sql on a newly provisioned board.
+BEGIN;
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM ticket_board.tickets) THEN
+        RAISE EXCEPTION 'project workflow seed must run before tickets exist';
+    END IF;
+END;
+$$;
+
+DELETE FROM ticket_board.workflow_transitions;
+UPDATE ticket_board.workflow_stages SET gate_skip_to = NULL WHERE gate_skip_to IS NOT NULL;
+DELETE FROM ticket_board.workflow_stages;
+
+INSERT INTO ticket_board.workflow_stages (
+    name,
+    display_label,
+    rank,
+    owner_roles,
+    entry_gate_field,
+    gate_skip_to,
+    exit_signoff_field,
+    is_terminal
+) VALUES
+{stage_rows};
+
+INSERT INTO ticket_board.workflow_transitions (
+    from_stage,
+    to_stage,
+    action_name,
+    allowed_roles,
+    owner_scoped,
+    director_override
+) VALUES
+{transition_rows};
+
+COMMIT;
+"""
+
+
 def render_operator_commands(plan: ProjectBoardProvision) -> str:
     q_asset = shell_quote(plan.asset_dir)
     q_frame = shell_quote(plan.frame_dir)
@@ -282,6 +389,12 @@ def render_operator_commands(plan: ProjectBoardProvision) -> str:
     q_listener_unit = shell_quote(
         f"/home/{plan.owner_user}/.config/systemd/user/{plan.listener_unit}"
     )
+    workflow_seed_command = ""
+    if plan.workflow_seed != "pgu-full":
+        workflow_seed_command = (
+            f"sudo psql -X -v ON_ERROR_STOP=1 {shell_quote(plan.admin_database_url)} "
+            f"-f {shell_quote(plan.project + '-workflow.sql')}\n"
+        )
     if plan.project == "pgu" and plan.frame_dir == "/tmp/pgu-frames":
         install_asset_frame = (
             f"sudo install -d -m 0775 -o {shell_quote(plan.owner_user)} -g {shell_quote(plan.owner_user)} {q_asset}\n"
@@ -308,6 +421,7 @@ sudo install -m 0644 {shell_quote(plan.polkit_name)} {q_polkit}
 sudo systemd-tmpfiles --create {q_tmpfiles}
 sudo -u postgres psql -X -v ON_ERROR_STOP=1 -f {shell_quote(plan.project + '-database.sql')}
 sudo TICKET_BOARD_ADMIN_DATABASE_URL={shell_quote(plan.admin_database_url)} {shell_quote(plan.board_current + '/scripts/ticket-board-migrate')}
+{workflow_seed_command.rstrip()}
 sudo psql -X -v ON_ERROR_STOP=1 {shell_quote(plan.admin_database_url)} -f {shell_quote(plan.board_current + '/scripts/ticket_board/rbac.sql')}
 sudo systemctl daemon-reload
 sudo systemctl enable --now {plan.board_unit}
@@ -329,6 +443,7 @@ def write_artifacts(plan: ProjectBoardProvision, output_dir: Path) -> None:
         plan.tmpfiles_name: render_tmpfiles(plan),
         plan.polkit_name: render_polkit_rule(plan),
         f"{plan.project}-database.sql": render_database_sql(plan),
+        f"{plan.project}-workflow.sql": render_workflow_sql(plan),
         "operator-commands.sh": render_operator_commands(plan),
     }
     for name, text in files.items():
@@ -355,7 +470,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", help="print plan JSON")
     parser.add_argument(
         "--render",
-        choices=["board-unit", "listener-unit", "tmpfiles", "polkit", "database-sql", "commands"],
+        choices=["board-unit", "listener-unit", "tmpfiles", "polkit", "database-sql", "workflow-sql", "commands"],
         help="print one rendered artifact",
     )
     return parser
@@ -388,6 +503,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "tmpfiles": render_tmpfiles,
             "polkit": render_polkit_rule,
             "database-sql": render_database_sql,
+            "workflow-sql": render_workflow_sql,
             "commands": render_operator_commands,
         }
         sys.stdout.write(renderers[args.render](plan))

@@ -13,14 +13,22 @@ import sys
 import time
 from pathlib import Path
 
+def _env_first(environ: dict[str, str], *names: str) -> str:
+    for name in names:
+        value = environ.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
 DEFAULT_PANE_STATE_DIR = (
-    Path(os.environ["PGU_TICKET_BOARD_PANE_STATE_DIR"]).expanduser()
-    if os.environ.get("PGU_TICKET_BOARD_PANE_STATE_DIR")
+    Path(_env_first(os.environ, "TICKET_BOARD_PANE_STATE_DIR", "PGU_TICKET_BOARD_PANE_STATE_DIR")).expanduser()
+    if _env_first(os.environ, "TICKET_BOARD_PANE_STATE_DIR", "PGU_TICKET_BOARD_PANE_STATE_DIR")
     else Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-state")
 )
 DEFAULT_PANE_SESSION_DIR = (
-    Path(os.environ["PGU_TICKET_BOARD_PANE_SESSION_DIR"]).expanduser()
-    if os.environ.get("PGU_TICKET_BOARD_PANE_SESSION_DIR")
+    Path(_env_first(os.environ, "TICKET_BOARD_PANE_SESSION_DIR", "PGU_TICKET_BOARD_PANE_SESSION_DIR")).expanduser()
+    if _env_first(os.environ, "TICKET_BOARD_PANE_SESSION_DIR", "PGU_TICKET_BOARD_PANE_SESSION_DIR")
     else Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
     / "pgu-ticket-board"
     / "pane-sessions"
@@ -62,13 +70,13 @@ def _target_from_tmux_pane(environ: dict[str, str]) -> str | None:
 def _resolve_target(raw_target: str, environ: dict[str, str]) -> str:
     if raw_target:
         return raw_target
-    env_target = environ.get("PGU_PANE_TARGET", "").strip()
+    env_target = _env_first(environ, "TICKET_BOARD_PANE_TARGET", "PGU_PANE_TARGET")
     if env_target:
         return env_target
     tmux_target = _target_from_tmux_pane(environ)
     if tmux_target:
         return tmux_target
-    raise SystemExit("ticket-board-pane-idle-hook: missing --target, PGU_PANE_TARGET, and TMUX_PANE")
+    raise SystemExit("ticket-board-pane-idle-hook: missing --target, TICKET_BOARD_PANE_TARGET, and TMUX_PANE")
 
 
 def _target_path(state_dir: Path, target: str) -> Path:
@@ -153,6 +161,7 @@ def _extract_session_id(payload: object, environ: dict[str, str], explicit_sessi
     if explicit_session_id.strip():
         return explicit_session_id.strip()
     for key in (
+        "TICKET_BOARD_PANE_SESSION_ID",
         "PGU_PANE_SESSION_ID",
         "CLAUDE_SESSION_ID",
         "CODEX_SESSION_ID",
@@ -212,9 +221,9 @@ def _write_session(
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Record a PGU pane idle/busy state for ticket notification delivery.")
+    parser = argparse.ArgumentParser(description="Record a ticket-board pane idle/busy state for notification delivery.")
     parser.add_argument("state", choices=["idle", "busy", "blocked"], help="pane lifecycle state to record")
-    parser.add_argument("--target", default="", help="tmux target, for example pgu-ops:0.0")
+    parser.add_argument("--target", default="", help="tmux target, for example project-ops:0.0")
     parser.add_argument("--source", default="", help="hook source label stored for diagnostics")
     parser.add_argument("--state-dir", default=str(DEFAULT_PANE_STATE_DIR), help=f"state directory (default: {DEFAULT_PANE_STATE_DIR})")
     parser.add_argument(

@@ -17,23 +17,39 @@ from typing import Any, Callable, Sequence
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "team-launcher"
 DEFAULT_LEGACY_RUNTIME_SESSION_DIR = Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-sessions")
+GENERIC_DEFAULT_STATE_DIR_NAME = "ticket-board"
+LIVE_PGU_STATE_DIR_NAME = "pgu-ticket-board"
+
+
+def _env_first(*names: str) -> str:
+    for name in names:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
 DEFAULT_SESSION_DIR = (
-    Path(os.environ["PGU_TICKET_BOARD_PANE_SESSION_DIR"]).expanduser()
-    if os.environ.get("PGU_TICKET_BOARD_PANE_SESSION_DIR")
+    Path(_env_first("TICKET_BOARD_PANE_SESSION_DIR", "PGU_TICKET_BOARD_PANE_SESSION_DIR")).expanduser()
+    if _env_first("TICKET_BOARD_PANE_SESSION_DIR", "PGU_TICKET_BOARD_PANE_SESSION_DIR")
     else Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
-    / "pgu-ticket-board"
+    / LIVE_PGU_STATE_DIR_NAME
     / "pane-sessions"
 )
 DEFAULT_INTERIM_SESSION_BACKUP_DIR = Path.home() / ".local" / "state" / "pgu-ticket-board" / "pane-sessions"
 DEFAULT_PANE_STATE_DIR = (
-    Path(os.environ["PGU_TICKET_BOARD_PANE_STATE_DIR"]).expanduser()
-    if os.environ.get("PGU_TICKET_BOARD_PANE_STATE_DIR")
+    Path(_env_first("TICKET_BOARD_PANE_STATE_DIR", "PGU_TICKET_BOARD_PANE_STATE_DIR")).expanduser()
+    if _env_first("TICKET_BOARD_PANE_STATE_DIR", "PGU_TICKET_BOARD_PANE_STATE_DIR")
     else Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-state")
 )
-USER_BIN_ENV = "PGU_TEAM_LAUNCHER_BIN_DIR"
-GUI_USER_ENV = "PGU_TEAM_LAUNCHER_GUI_USER"
-GUI_WAYLAND_ENV = "PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY"
-HOST_WAYLAND_ENV = "PGU_HOST_WAYLAND_DISPLAY"
+USER_BIN_ENV = "TEAM_LAUNCHER_BIN_DIR"
+LEGACY_USER_BIN_ENV = "PGU_TEAM_LAUNCHER_BIN_DIR"
+GUI_USER_ENV = "TEAM_LAUNCHER_GUI_USER"
+LEGACY_GUI_USER_ENV = "PGU_TEAM_LAUNCHER_GUI_USER"
+GUI_WAYLAND_ENV = "TEAM_LAUNCHER_WAYLAND_DISPLAY"
+LEGACY_GUI_WAYLAND_ENV = "PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY"
+HOST_WAYLAND_ENV = "HOST_WAYLAND_DISPLAY"
+LEGACY_HOST_WAYLAND_ENV = "PGU_HOST_WAYLAND_DISPLAY"
 KONSOLE_QT_LOGGING_RULES = "qt.qpa.wayland.warning=false"
 YOLO_ARGS_BY_CLI = {
     "agy": ["--dangerously-skip-permissions"],
@@ -66,8 +82,10 @@ RESUME_STARTUP_TIMEOUT_SECONDS = 1.5
 RESUME_STARTUP_POLL_SECONDS = 0.1
 RUNTIME_READY_ATTEMPTS = 50
 RUNTIME_READY_POLL_SECONDS = 0.1
-ALLOW_STALE_LAUNCHER_ENV = "PGU_TEAM_LAUNCHER_ALLOW_STALE"
-NO_LAUNCHER_SELF_DEPLOY_ENV = "PGU_TEAM_LAUNCHER_NO_SELF_DEPLOY"
+ALLOW_STALE_LAUNCHER_ENV = "TEAM_LAUNCHER_ALLOW_STALE"
+LEGACY_ALLOW_STALE_LAUNCHER_ENV = "PGU_TEAM_LAUNCHER_ALLOW_STALE"
+NO_LAUNCHER_SELF_DEPLOY_ENV = "TEAM_LAUNCHER_NO_SELF_DEPLOY"
+LEGACY_NO_LAUNCHER_SELF_DEPLOY_ENV = "PGU_TEAM_LAUNCHER_NO_SELF_DEPLOY"
 
 
 @dataclass(frozen=True)
@@ -221,26 +239,27 @@ def ensure_configured_runtime_user(
 
 
 def default_user_bin() -> str:
-    configured = os.environ.get(USER_BIN_ENV, "").strip()
+    configured = _env_first(USER_BIN_ENV, LEGACY_USER_BIN_ENV)
     if configured:
         return str(Path(configured).expanduser())
     return str(Path.home() / "bin")
 
 
 def default_gui_user() -> str:
-    configured = os.environ.get(GUI_USER_ENV, "").strip()
+    configured = _env_first(GUI_USER_ENV, LEGACY_GUI_USER_ENV)
     if configured:
         return configured
     return current_user_name()
 
 
 def konsole_launch_args(layout_path: Path, *, gui_user: str | None = None) -> list[str]:
-    wayland_display = str(os.environ.get(HOST_WAYLAND_ENV, "")).strip()
+    wayland_display = _env_first(HOST_WAYLAND_ENV, LEGACY_HOST_WAYLAND_ENV)
     if not wayland_display:
         user = (gui_user if gui_user is not None else default_gui_user()).strip()
         uid = uid_for_user(user) if user else None
         if uid is not None:
-            wayland_display = f"/run/user/{uid}/{os.environ.get(GUI_WAYLAND_ENV, 'wayland-0')}"
+            wayland_name = _env_first(GUI_WAYLAND_ENV, LEGACY_GUI_WAYLAND_ENV) or "wayland-0"
+            wayland_display = f"/run/user/{uid}/{wayland_name}"
     if not wayland_display:
         return [
             "sh",
@@ -538,7 +557,7 @@ def _quote_command(args: Sequence[str]) -> str:
 def _env_prefix(env: dict[str, str]) -> list[str]:
     return [
         f"{key}={value}"
-        for key, value in sorted(env.items(), key=lambda item: (item[0] != "PGU_PANE_TARGET", item[0]))
+        for key, value in sorted(env.items(), key=lambda item: (item[0] != "TICKET_BOARD_PANE_TARGET", item[0]))
     ]
 
 
@@ -725,9 +744,12 @@ def cli_command_for_role(role: RoleConfig, *, session_dir: Path, resume: bool = 
     command.extend(role.extra_args)
     env = {
         **role.env,
-        "PGU_PANE_TARGET": role.target,
-        "PGU_TICKET_BOARD_PANE_SESSION_DIR": str(session_dir.expanduser()),
+        "TICKET_BOARD_PANE_TARGET": role.target,
+        "TICKET_BOARD_PANE_SESSION_DIR": str(session_dir.expanduser()),
     }
+    if role.target.startswith("pgu-"):
+        env.setdefault("PGU_PANE_TARGET", role.target)
+        env.setdefault("PGU_TICKET_BOARD_PANE_SESSION_DIR", str(session_dir.expanduser()))
     env["PATH"] = _prepend_path(env.get("PATH") or os.environ.get("PATH", ""), default_user_bin())
     return ["env", *_env_prefix(env), *command]
 
@@ -894,6 +916,10 @@ def _format_behind_count(count: int, *, exact: bool = True) -> str:
 
 def _env_truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_truthy_any(*names: str) -> bool:
+    return any(_env_truthy(name) for name in names)
 
 
 def probe_launcher_checkout(
@@ -1089,7 +1115,7 @@ def ensure_launcher_checkout_current(
     allow_stale: bool = False,
 ) -> None:
     repo = launcher_repo or _repo_root()
-    allow_stale = allow_stale or _env_truthy(ALLOW_STALE_LAUNCHER_ENV)
+    allow_stale = allow_stale or _env_truthy_any(ALLOW_STALE_LAUNCHER_ENV, LEGACY_ALLOW_STALE_LAUNCHER_ENV)
     probe = probe_launcher_checkout(config, launcher_repo=repo, runner=runner)
     if probe.error:
         print(
@@ -1703,7 +1729,10 @@ def launch_project(
         ensure_launcher_checkout_current(
             config,
             runner=runner,
-            auto_deploy=not (no_launcher_self_deploy or _env_truthy(NO_LAUNCHER_SELF_DEPLOY_ENV)),
+            auto_deploy=not (
+                no_launcher_self_deploy
+                or _env_truthy_any(NO_LAUNCHER_SELF_DEPLOY_ENV, LEGACY_NO_LAUNCHER_SELF_DEPLOY_ENV)
+            ),
             allow_stale=allow_stale_launcher,
         )
         ensure_configured_runtime_user(config, runner=runner)

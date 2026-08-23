@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import sys
 import threading
@@ -17,11 +18,15 @@ from .app import (
 )
 from .server import CallerRegistry, DirectorNotifier, TicketBoardEventHub, TicketBoardServer, TicketBoardUnixServer
 
-DEFAULT_UNIX_SOCKET = "/run/pgu-ticket-board/ticket-board.sock"
+DEFAULT_UNIX_SOCKET = (
+    os.environ.get("TICKET_BOARD_SOCKET", "").strip()
+    or os.environ.get("PGU_TICKET_BOARD_SOCKET", "").strip()
+    or "/run/pgu-ticket-board/ticket-board.sock"
+)
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='Serve a lightweight local "Jira but easier" ticket board for PGU.')
+    parser = argparse.ArgumentParser(description='Serve a lightweight local "Jira but easier" ticket board.')
     parser.add_argument(
         "--database",
         default=POSTGRES_DSN_DEFAULT,

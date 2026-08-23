@@ -12,21 +12,28 @@ import sys
 from pathlib import Path
 from typing import Any
 
-HOOK_BASENAME = "pgu-ticket-board-pane-idle-hook"
+HOOK_BASENAME = "ticket-board-pane-idle-hook"
+LEGACY_HOOK_BASENAME = "pgu-ticket-board-pane-idle-hook"
 DEFAULT_PANE_STATE_DIR = (
-    Path(os.environ["PGU_TICKET_BOARD_PANE_STATE_DIR"]).expanduser()
+    Path(os.environ["TICKET_BOARD_PANE_STATE_DIR"]).expanduser()
+    if os.environ.get("TICKET_BOARD_PANE_STATE_DIR")
+    else Path(os.environ["PGU_TICKET_BOARD_PANE_STATE_DIR"]).expanduser()
     if os.environ.get("PGU_TICKET_BOARD_PANE_STATE_DIR")
     else Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-state")
 )
-PANE_TARGETS = (
-    "pgu-director:0.0",
-    "pgu-main:0.0",
-    "pgu-app:0.0",
-    "pgu-perf:0.0",
-    "pgu-research:0.0",
-    "pgu-ops:0.0",
-    "pgu-audit:0.0",
-    "pgu-inspector:0.0",
+DEFAULT_PROJECT = os.environ.get("TICKET_BOARD_PROJECT", "").strip() or os.environ.get("PGU_TICKET_BOARD_PROJECT", "").strip() or "pgu"
+PANE_TARGETS = tuple(
+    f"{DEFAULT_PROJECT}-{role}:0.0"
+    for role in (
+        "director",
+        "main",
+        "app",
+        "perf",
+        "research",
+        "ops",
+        "audit",
+        "inspector",
+    )
 )
 
 
@@ -56,7 +63,7 @@ def _contains_managed_hook(value: Any) -> bool:
         return any(_contains_managed_hook(child) for child in value.values())
     if isinstance(value, list):
         return any(_contains_managed_hook(child) for child in value)
-    return isinstance(value, str) and HOOK_BASENAME in value
+    return isinstance(value, str) and (HOOK_BASENAME in value or LEGACY_HOOK_BASENAME in value)
 
 
 def _hook_entry(command: str, *, matcher: str = "") -> dict[str, Any]:
@@ -153,7 +160,7 @@ def _install_gemini_hooks(home: Path, hook_bin: Path) -> Path:
         config.pop("hooks", None)
     _merge_agy_named_hook(
         config,
-        "pgu-ticket-board-pane-state",
+        "ticket-board-pane-state",
         {
             "SessionStart": [
                 _flat_command_hook(
@@ -204,7 +211,7 @@ def install(args: argparse.Namespace) -> int:
     print(f"installed {hook_bin}")
     for path in written:
         print(f"wrote {path}")
-    print("restart every pane CLI before restarting pgu-ticket-board-notify-listener.service")
+    print("restart every pane CLI before restarting the ticket-board notify-listener service")
     return 0
 
 
@@ -223,7 +230,7 @@ def verify_state(args: argparse.Namespace) -> int:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Install and verify PGU ticket-board pane idle hooks.")
+    parser = argparse.ArgumentParser(description="Install and verify ticket-board pane idle hooks.")
     subparsers = parser.add_subparsers(dest="command", required=True)
     install_parser = subparsers.add_parser("install", help="install CLI hook binary and persistent hook configs")
     install_parser.add_argument("--home", default=str(Path.home()), help="home directory whose CLI configs will be edited")

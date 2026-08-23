@@ -33,7 +33,7 @@ PANE
 esac
 EOF
 chmod +x "$TMPDIR_T/tmux"
-PGU_DIRECTORCTL_INSTALL_PATH="$CANONICAL_DIRECTORCTL" "$REPO_ROOT/scripts/install-directorctl" >/dev/null
+DIRECTORCTL_INSTALL_PATH="$CANONICAL_DIRECTORCTL" "$REPO_ROOT/scripts/install-directorctl" >/dev/null
 
 LONG_CALLBACK=$'New tickets for you: PGU-86 -- soft file-size limit exceeded: main.cpp (1438 lines); PGU-87 -- soft file-size limit exceeded: renderer.h (1300 lines); PGU-88 -- soft file-size limit exceeded: galaxy_system.h (1378 lines)'
 

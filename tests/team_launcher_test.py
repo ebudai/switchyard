@@ -417,6 +417,7 @@ def test_pgu_config_keeps_live_agent_repository_with_foreign_home() -> None:
 
 def test_cli_command_prepends_invoking_user_bin() -> None:
     original_home = os.environ.get("HOME")
+    original_generic_bin_dir = os.environ.pop("TEAM_LAUNCHER_BIN_DIR", None)
     original_bin_dir = os.environ.pop("PGU_TEAM_LAUNCHER_BIN_DIR", None)
     try:
         os.environ["HOME"] = "/home/otto-agent"
@@ -429,6 +430,8 @@ def test_cli_command_prepends_invoking_user_bin() -> None:
             os.environ.pop("HOME", None)
         else:
             os.environ["HOME"] = original_home
+        if original_generic_bin_dir is not None:
+            os.environ["TEAM_LAUNCHER_BIN_DIR"] = original_generic_bin_dir
         if original_bin_dir is not None:
             os.environ["PGU_TEAM_LAUNCHER_BIN_DIR"] = original_bin_dir
 
@@ -442,7 +445,9 @@ def test_cli_command_exports_durable_session_dir_for_pane_hooks() -> None:
     command = cli_command_for_role(role, session_dir=config.session_dir)
 
     entries = _env_entries(command)
-    assert entries[0] == "PGU_PANE_TARGET=pgu-ops:0.0"
+    assert entries[0] == "TICKET_BOARD_PANE_TARGET=pgu-ops:0.0"
+    assert "PGU_PANE_TARGET=pgu-ops:0.0" in entries
+    assert f"TICKET_BOARD_PANE_SESSION_DIR={config.session_dir}" in entries
     assert f"PGU_TICKET_BOARD_PANE_SESSION_DIR={config.session_dir}" in entries
     assert str(config.session_dir) == str(Path.home() / ".local" / "state" / "pgu-ticket-board" / "pane-sessions")
 
@@ -699,7 +704,9 @@ def test_pgu_launch_commands_include_model_and_bypass_flags() -> None:
     for role_name, expected_tail in expected_by_role.items():
         command = cli_command_for_role(roles[role_name], session_dir=config.session_dir)
         entries = _env_entries(command)
-        assert entries[0] == f"PGU_PANE_TARGET=pgu-{role_name}:0.0"
+        assert entries[0] == f"TICKET_BOARD_PANE_TARGET=pgu-{role_name}:0.0"
+        assert f"PGU_PANE_TARGET=pgu-{role_name}:0.0" in entries
+        assert f"TICKET_BOARD_PANE_SESSION_DIR={config.session_dir}" in entries
         assert f"PGU_TICKET_BOARD_PANE_SESSION_DIR={config.session_dir}" in entries
         assert any(entry.startswith(f"PATH={default_user_bin()}:") for entry in entries), (role_name, command)
         assert _command_tail(command) == expected_tail, (role_name, command)
@@ -1207,6 +1214,7 @@ def test_start_creates_missing_session_once_then_attaches() -> None:
     assert runner.calls[0] == ["tmux", "has-session", "-t", "pgu-ops"]
     assert runner.calls[1][:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"]
     assert runner.calls[1][5:7] == ["-c", str(_pgu_project_root())]
+    assert "TICKET_BOARD_PANE_TARGET=pgu-ops:0.0" in runner.calls[1][-1]
     assert "PGU_PANE_TARGET=pgu-ops:0.0" in runner.calls[1][-1]
     assert "--model gpt-5.5" in runner.calls[1][-1]
     assert "-c reasoning_effort=high" in runner.calls[1][-1]
@@ -1360,6 +1368,7 @@ def test_start_resumes_from_durable_session_dir_after_runtime_tmpfs_is_cleared()
         )
 
     assert runner.calls[1][:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"]
+    assert f"TICKET_BOARD_PANE_SESSION_DIR={durable}" in runner.calls[1][-1]
     assert f"PGU_TICKET_BOARD_PANE_SESSION_DIR={durable}" in runner.calls[1][-1]
     assert f"codex resume {session_id}" in runner.calls[1][-1]
 
@@ -1399,6 +1408,7 @@ def test_start_runs_research_detached_before_opening_visible_layout() -> None:
         research_new_session = runner.calls[research_has_session_index + 1]
         assert research_new_session[:5] == ["tmux", "new-session", "-d", "-s", "pgu-research"]
         assert research_new_session[5:7] == ["-c", str(tmp_path / "repo")]
+        assert "TICKET_BOARD_PANE_TARGET=pgu-research:0.0" in research_new_session[-1]
         assert "PGU_PANE_TARGET=pgu-research:0.0" in research_new_session[-1]
         assert "--model claude-opus-5" in research_new_session[-1]
         state = _read_pane_state(tmp_path / "pane-state", "pgu-research:0.0")

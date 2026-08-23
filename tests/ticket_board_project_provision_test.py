@@ -51,8 +51,10 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     )
     assert "127.0.0.1 --port 8871" in combined
     assert "PGDATABASE=stellaris_ticket_board" in combined
-    assert "PGU_TICKET_BOARD_SOCKET=/run/stellaris-ticket-board/ticket-board.sock" in combined
-    assert "PGU_TICKET_BOARD_PANE_STATE_DIR=%t/stellaris-ticket-board/pane-state" in combined
+    assert "TICKET_BOARD_SOCKET=/run/stellaris-ticket-board/ticket-board.sock" in combined
+    assert "TICKET_BOARD_PANE_STATE_DIR=%t/stellaris-ticket-board/pane-state" in combined
+    assert "PGU_TICKET_BOARD_SOCKET=" not in combined
+    assert "PGU_TICKET_BOARD_PANE_STATE_DIR=" not in combined
     assert "ReadWritePaths=/home/stellaris-agent/.claude/stellaris-tickets-assets /home/stellaris-agent/.claude/stellaris-ticket-frames" in combined
     assert f"SOURCE_REPO='{ROOT}'" in combined
     assert "BOARD_ROOT='/home/stellaris-agent/stellaris-ticketboard-live'" in combined

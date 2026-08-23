@@ -55,19 +55,16 @@ DEFAULT_IDLE_WORKING_TIMER_SAMPLE_DELAY_SECONDS = 1.1
 DEFAULT_STALE_CODEX_BUSY_HOOK_SECONDS = 120.0
 MIN_RECOVERABLE_HOOK_EPOCH_SECONDS = 1_700_000_000.0
 DEFAULT_PANE_STATE_DIR = (
-    Path(os.environ["PGU_TICKET_BOARD_PANE_STATE_DIR"]).expanduser()
+    Path(os.environ["TICKET_BOARD_PANE_STATE_DIR"]).expanduser()
+    if os.environ.get("TICKET_BOARD_PANE_STATE_DIR")
+    else Path(os.environ["PGU_TICKET_BOARD_PANE_STATE_DIR"]).expanduser()
     if os.environ.get("PGU_TICKET_BOARD_PANE_STATE_DIR")
     else Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-state")
 )
+DEFAULT_PROJECT = os.environ.get("TICKET_BOARD_PROJECT", "").strip() or os.environ.get("PGU_TICKET_BOARD_PROJECT", "").strip() or "pgu"
 ROLE_TO_TARGET = {
-    "director": "pgu-director:0.0",
-    "main": "pgu-main:0.0",
-    "app": "pgu-app:0.0",
-    "perf": "pgu-perf:0.0",
-    "research": "pgu-research:0.0",
-    "ops": "pgu-ops:0.0",
-    "audit": "pgu-audit:0.0",
-    "inspector": "pgu-inspector:0.0",
+    role: f"{DEFAULT_PROJECT}-{role}:0.0"
+    for role in ("director", "main", "app", "perf", "research", "ops", "audit", "inspector")
 }
 STATE_RANK = {
     "backlog": 0,
@@ -242,8 +239,8 @@ class DirectorctlSender:
 
     def __call__(self, target: str, message: str) -> dict[str, Any]:
         env = os.environ.copy()
-        env["PGU_DIRECTORCTL_DIRECTOR_TYPING_MAX_ATTEMPTS"] = str(self.director_typing_max_attempts)
-        env["PGU_DIRECTORCTL_DIAGNOSTICS"] = "1"
+        env["DIRECTORCTL_DIRECTOR_TYPING_MAX_ATTEMPTS"] = str(self.director_typing_max_attempts)
+        env["DIRECTORCTL_DIAGNOSTICS"] = "1"
         proc = subprocess.run(
             [self.directorctl_bin, "send", target, message],
             check=True,

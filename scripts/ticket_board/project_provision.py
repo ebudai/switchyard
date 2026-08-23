@@ -166,7 +166,7 @@ Environment=HOME=/home/{plan.owner_user}
 Environment=PGHOST=/var/run/postgresql
 Environment=PGDATABASE={plan.database}
 Environment=PGUSER={plan.service_role}
-Environment=PGU_TICKET_BOARD_SOCKET={plan.socket_path}
+Environment=TICKET_BOARD_SOCKET={plan.socket_path}
 Environment=TICKET_BOARD_DATABASE_URL={plan.board_database_url}
 NoNewPrivileges=true
 ProtectSystem=full
@@ -198,7 +198,7 @@ Environment=PGDATABASE={plan.database}
 Environment=PGUSER={plan.listener_role}
 Environment=TICKET_BOARD_DATABASE_URL={plan.listener_database_url}
 Environment=TICKET_BOARD_NOTIFY_DATABASE_URL={plan.listener_database_url}
-Environment=PGU_TICKET_BOARD_PANE_STATE_DIR=%t/{plan.runtime_directory}/pane-state
+Environment=TICKET_BOARD_PANE_STATE_DIR=%t/{plan.runtime_directory}/pane-state
 EnvironmentFile=-%h/.config/{plan.project}/ticket-board-notify-listener.env
 StandardOutput=append:{plan.listener_log}
 StandardError=append:{plan.listener_log}

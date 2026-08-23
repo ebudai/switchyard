@@ -1,4 +1,4 @@
-"""Read-only HTTP client for the PGU ticket board API."""
+"""Read-only HTTP client for the ticket-board API."""
 
 from __future__ import annotations
 
@@ -12,7 +12,11 @@ from typing import Any, Iterable
 from urllib import error as urllib_error
 from urllib import parse, request
 
-DEFAULT_BOARD_URL = os.environ.get("PGU_TICKET_BOARD_URL", "http://127.0.0.1:8770")
+DEFAULT_BOARD_URL = (
+    os.environ.get("TICKET_BOARD_URL", "").strip()
+    or os.environ.get("PGU_TICKET_BOARD_URL", "").strip()
+    or "http://127.0.0.1:8770"
+)
 TERMINAL_STATES = {"done", "cancelled"}
 ACTIVE_STATES = {"in_progress", "inspection", "audit", "dat", "director_review", "user_review"}
 REVIEW_STATES = {"inspection", "audit", "dat", "director_review", "user_review"}

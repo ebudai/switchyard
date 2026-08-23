@@ -20,14 +20,14 @@ printf 'seed\n' >"$repo/README.md"
 git -C "$repo" add README.md
 git -C "$repo" commit -m "seed" >/dev/null
 
-PGU_UPDATE_HOOK_SERVER_HOOKS_DIR="$server_hooks" \
-PGU_UPDATE_HOOK_LOCAL_REPO_ROOT="$repo" \
-PGU_UPDATE_HOOK_REPO_ROOT="$REPO_ROOT" \
-PGU_FILE_SIZE_LINE_LIMIT=5 \
+UPDATE_HOOK_SERVER_HOOKS_DIR="$server_hooks" \
+UPDATE_HOOK_LOCAL_REPO_ROOT="$repo" \
+UPDATE_HOOK_REPO_ROOT="$REPO_ROOT" \
+FILE_SIZE_LINE_LIMIT=5 \
 "$INSTALLER" >/dev/null
 
 pre_commit_hook="$(git -C "$repo" rev-parse --git-path hooks)/pre-commit"
-warning_helper="$(git -C "$repo" rev-parse --git-path hooks)/pgu-warn-file-size-limit.py"
+warning_helper="$(git -C "$repo" rev-parse --git-path hooks)/warn-file-size-limit.py"
 if [[ "$pre_commit_hook" != /* ]]; then
     pre_commit_hook="$repo/$pre_commit_hook"
 fi

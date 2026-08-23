@@ -1,4 +1,4 @@
-"""HTTP write client for the PGU ticket board action API."""
+"""HTTP write client for the ticket-board action API."""
 
 from __future__ import annotations
 
@@ -16,8 +16,21 @@ from urllib import error as urllib_error
 from urllib import parse, request
 
 CALLER_ROLE_HEADER = "X-PGU-Caller-Role"
-DEFAULT_BOARD_URL = os.environ.get("PGU_TICKET_BOARD_URL", "http://127.0.0.1:8770")
-DEFAULT_BOARD_SOCKET = os.environ.get("PGU_TICKET_BOARD_SOCKET", "/run/pgu-ticket-board/ticket-board.sock")
+
+
+def _env_first(*names: str) -> str:
+    for name in names:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+DEFAULT_BOARD_URL = _env_first("TICKET_BOARD_URL", "PGU_TICKET_BOARD_URL") or "http://127.0.0.1:8770"
+DEFAULT_BOARD_SOCKET = (
+    _env_first("TICKET_BOARD_SOCKET", "PGU_TICKET_BOARD_SOCKET")
+    or "/run/pgu-ticket-board/ticket-board.sock"
+)
 LEGACY_BOARD_SOCKET = "/tmp/pgu-ticket-board.sock"
 DEFAULT_CALLER_ROLE = "director"
 PANE_SESSION_CALLER_ROLES = {
@@ -63,7 +76,7 @@ def _normalize_api_path(board_url: str) -> str:
 
 
 def _default_socket_path(board_url: str, environ: Mapping[str, str] = os.environ) -> str | None:
-    explicit = environ.get("PGU_TICKET_BOARD_SOCKET", "").strip()
+    explicit = _env_first_from(environ, "TICKET_BOARD_SOCKET", "PGU_TICKET_BOARD_SOCKET")
     if explicit:
         return explicit
     if board_url != DEFAULT_BOARD_URL:
@@ -76,7 +89,15 @@ def _default_socket_path(board_url: str, environ: Mapping[str, str] = os.environ
 
 
 def _has_explicit_socket_path(socket_path: str | None, environ: Mapping[str, str] = os.environ) -> bool:
-    return bool(socket_path or environ.get("PGU_TICKET_BOARD_SOCKET", "").strip())
+    return bool(socket_path or _env_first_from(environ, "TICKET_BOARD_SOCKET", "PGU_TICKET_BOARD_SOCKET"))
+
+
+def _env_first_from(environ: Mapping[str, str], *names: str) -> str:
+    for name in names:
+        value = environ.get(name, "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _caller_role_from_tmux_session(environ: Mapping[str, str] = os.environ) -> str | None:
@@ -95,11 +116,16 @@ def _caller_role_from_tmux_session(environ: Mapping[str, str] = os.environ) -> s
         return None
     if proc.returncode != 0:
         return None
-    return PANE_SESSION_CALLER_ROLES.get(proc.stdout.strip())
+    session_name = proc.stdout.strip()
+    explicit_project = _env_first_from(environ, "TICKET_BOARD_PROJECT", "PGU_TICKET_BOARD_PROJECT")
+    if explicit_project and session_name.startswith(f"{explicit_project}-"):
+        role = session_name.removeprefix(f"{explicit_project}-").strip().lower()
+        return role or None
+    return PANE_SESSION_CALLER_ROLES.get(session_name)
 
 
 def default_caller_role(environ: Mapping[str, str] = os.environ) -> str:
-    explicit = environ.get("PGU_TICKET_BOARD_CALLER_ROLE", "").strip().lower()
+    explicit = _env_first_from(environ, "TICKET_BOARD_CALLER_ROLE", "PGU_TICKET_BOARD_CALLER_ROLE").lower()
     if explicit:
         return explicit
     return _caller_role_from_tmux_session(environ) or DEFAULT_CALLER_ROLE
@@ -482,7 +508,8 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="socket_path",
         default=None,
         help=(
-            "Unix-domain board socket for local pane writes. Defaults to PGU_TICKET_BOARD_SOCKET, "
+            "Unix-domain board socket for local pane writes. Defaults to TICKET_BOARD_SOCKET "
+            "(or legacy PGU_TICKET_BOARD_SOCKET), "
             f"or {DEFAULT_BOARD_SOCKET} when it exists and --board-url is the default."
         ),
     )
@@ -491,7 +518,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=caller_default,
         help=(
             "Value for X-PGU-Caller-Role "
-            f"(default: PGU_TICKET_BOARD_CALLER_ROLE, current pgu-* tmux session, else {DEFAULT_CALLER_ROLE}; "
+            f"(default: TICKET_BOARD_CALLER_ROLE, legacy PGU_TICKET_BOARD_CALLER_ROLE, "
+            f"current project-role tmux session, else {DEFAULT_CALLER_ROLE}; "
             f"currently {caller_default})"
         ),
     )

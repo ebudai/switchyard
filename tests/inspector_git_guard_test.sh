@@ -19,9 +19,9 @@ mkdir -p "$home_dir"
 
 HOME="$home_dir" \
 GIT_CONFIG_GLOBAL="$global_config" \
-PGU_GLOBAL_GIT_HOOKS_DIR="$hooks_dir" \
-PGU_INSPECTOR_GIT_GUARD_REPO_ROOT="$REPO_ROOT" \
-PGU_FILE_SIZE_LINE_LIMIT=5 \
+GLOBAL_GIT_HOOKS_DIR="$hooks_dir" \
+INSPECTOR_GIT_GUARD_REPO_ROOT="$REPO_ROOT" \
+FILE_SIZE_LINE_LIMIT=5 \
     "$INSTALLER" >/dev/null
 
 [[ "$(GIT_CONFIG_GLOBAL="$global_config" git config --global --get core.hooksPath)" == "$hooks_dir" ]] || {
@@ -40,12 +40,12 @@ git -C "$repo" config user.email test@example.com
 git -C "$repo" remote add origin "$remote"
 printf 'seed\n' >"$repo/README.md"
 git -C "$repo" add README.md
-HOME="$home_dir" GIT_CONFIG_GLOBAL="$global_config" PGU_PANE_TARGET=pgu-ops:0.0 \
+HOME="$home_dir" GIT_CONFIG_GLOBAL="$global_config" TICKET_BOARD_PANE_TARGET=pgu-ops:0.0 \
     git -C "$repo" commit -m "seed" >/dev/null
 
 printf 'inspector edit\n' >"$repo/inspector.txt"
 git -C "$repo" add inspector.txt
-if HOME="$home_dir" GIT_CONFIG_GLOBAL="$global_config" PGU_PANE_TARGET=pgu-inspector:0.0 \
+if HOME="$home_dir" GIT_CONFIG_GLOBAL="$global_config" TICKET_BOARD_PANE_TARGET=pgu-inspector:0.0 \
     git -C "$repo" commit -m "inspector commit" >"$tmpdir/inspector-commit.out" 2>"$tmpdir/inspector-commit.err"; then
     echo "FAIL: inspector pre-commit was allowed" >&2
     exit 1
@@ -56,10 +56,10 @@ grep -q 'Inspector role cannot commit or push code' "$tmpdir/inspector-commit.er
     exit 1
 }
 
-HOME="$home_dir" GIT_CONFIG_GLOBAL="$global_config" PGU_PANE_TARGET=pgu-ops:0.0 \
+HOME="$home_dir" GIT_CONFIG_GLOBAL="$global_config" TICKET_BOARD_PANE_TARGET=pgu-ops:0.0 \
     git -C "$repo" commit -m "normal commit" >/dev/null
 
-if HOME="$home_dir" GIT_CONFIG_GLOBAL="$global_config" PGU_PANE_TARGET=pgu-inspector:0.0 \
+if HOME="$home_dir" GIT_CONFIG_GLOBAL="$global_config" TICKET_BOARD_PANE_TARGET=pgu-inspector:0.0 \
     git -C "$repo" push origin HEAD:refs/heads/inspector-test >"$tmpdir/inspector-push.out" 2>"$tmpdir/inspector-push.err"; then
     echo "FAIL: inspector pre-push was allowed" >&2
     exit 1
@@ -70,14 +70,14 @@ grep -q 'Inspector role cannot commit or push code' "$tmpdir/inspector-push.err"
     exit 1
 }
 
-HOME="$home_dir" GIT_CONFIG_GLOBAL="$global_config" PGU_PANE_TARGET=pgu-ops:0.0 \
+HOME="$home_dir" GIT_CONFIG_GLOBAL="$global_config" TICKET_BOARD_PANE_TARGET=pgu-ops:0.0 \
     git -C "$repo" push origin HEAD:refs/heads/normal-test >/dev/null
 
 printf 'next\n' >"$repo/next.txt"
 git -C "$repo" add next.txt
-HOME="$home_dir" GIT_CONFIG_GLOBAL="$global_config" PGU_PANE_TARGET=pgu-ops:0.0 \
+HOME="$home_dir" GIT_CONFIG_GLOBAL="$global_config" TICKET_BOARD_PANE_TARGET=pgu-ops:0.0 \
     git -C "$repo" commit -m "next" >/dev/null
-if HOME="$home_dir" GIT_CONFIG_GLOBAL="$global_config" PGU_PANE_TARGET=pgu-ops:0.0 \
+if HOME="$home_dir" GIT_CONFIG_GLOBAL="$global_config" TICKET_BOARD_PANE_TARGET=pgu-ops:0.0 \
     git -C "$repo" push origin HEAD:refs/heads/main >"$tmpdir/main-push.out" 2>"$tmpdir/main-push.err"; then
     echo "FAIL: normal pane should still be blocked from direct main push" >&2
     exit 1

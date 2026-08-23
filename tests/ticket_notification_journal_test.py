@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import importlib.util
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -64,6 +65,21 @@ def main() -> int:
         journal.notification_pairs_for_message("pgu-director:0.0", "For User: 2 tickets ready for your review: PGU-81,82"),
         [],
         "User review digest should not claim ticket/state pairs",
+        )
+
+    old_project = os.environ.get("TICKET_BOARD_PROJECT")
+    try:
+        os.environ["TICKET_BOARD_PROJECT"] = "porter"
+        porter_journal = load_module()
+    finally:
+        if old_project is None:
+            os.environ.pop("TICKET_BOARD_PROJECT", None)
+        else:
+            os.environ["TICKET_BOARD_PROJECT"] = old_project
+    assert_equal(
+        porter_journal.notification_pairs_for_message("porter-director:0.0", "New ticket for you: PORTER-81 -- Tailscale"),
+        ["PORTER-81|analysis"],
+        "project-specific director target and ticket prefix should map to analysis pair",
     )
 
     with tempfile.TemporaryDirectory(prefix="ticket-notification-journal.") as tmpdir:

@@ -9,7 +9,7 @@ TMUX_LOG="$TMPDIR_T/tmux.log"
 CAPTURE_COUNT="$TMPDIR_T/capture-count"
 CANONICAL_DIRECTORCTL="$TMPDIR_T/bin/directorctl"
 printf '0\n' >"$CAPTURE_COUNT"
-PGU_DIRECTORCTL_INSTALL_PATH="$CANONICAL_DIRECTORCTL" "$REPO_ROOT/scripts/install-directorctl" >/dev/null
+DIRECTORCTL_INSTALL_PATH="$CANONICAL_DIRECTORCTL" "$REPO_ROOT/scripts/install-directorctl" >/dev/null
 
 cat >"$TMPDIR_T/tmux" <<'EOF'
 #!/usr/bin/env bash
@@ -67,7 +67,7 @@ env = os.environ.copy()
 env["PATH"] = f"{tmpdir}:{env['PATH']}"
 env["TMUX_LOG_PATH"] = str(tmux_log)
 env["TMUX_CAPTURE_COUNT_PATH"] = sys.argv[4]
-env["PGU_DIRECTORCTL_ENTER_DELAY"] = "0"
+env["DIRECTORCTL_ENTER_DELAY"] = "0"
 
 import subprocess
 
@@ -78,7 +78,7 @@ def run_with_env(args, **kwargs):
     merged["PATH"] = env["PATH"]
     merged["TMUX_LOG_PATH"] = env["TMUX_LOG_PATH"]
     merged["TMUX_CAPTURE_COUNT_PATH"] = env["TMUX_CAPTURE_COUNT_PATH"]
-    merged["PGU_DIRECTORCTL_ENTER_DELAY"] = env["PGU_DIRECTORCTL_ENTER_DELAY"]
+    merged["DIRECTORCTL_ENTER_DELAY"] = env["DIRECTORCTL_ENTER_DELAY"]
     kwargs["env"] = merged
     return original_run(args, **kwargs)
 
@@ -112,8 +112,8 @@ diagnostic_output="$(
   PATH="$TMPDIR_T:$PATH" \
   TMUX_LOG_PATH="$TMUX_LOG" \
   TMUX_CAPTURE_COUNT_PATH="$CAPTURE_COUNT" \
-  PGU_DIRECTORCTL_ENTER_DELAY=0 \
-  PGU_DIRECTORCTL_DIAGNOSTICS=1 \
+  DIRECTORCTL_ENTER_DELAY=0 \
+  DIRECTORCTL_DIAGNOSTICS=1 \
   "$CANONICAL_DIRECTORCTL" send pgu-ops:0.0 "PGU-482 diagnostic smoke"
 )"
 if ! grep -q 'directorctl: diagnostic ' <<<"$diagnostic_output"; then
@@ -181,7 +181,7 @@ env = os.environ.copy()
 env["PATH"] = f"{tmpdir}:{env['PATH']}"
 env["TMUX_LOG_PATH"] = str(tmux_log)
 env["TMUX_CAPTURE_COUNT_PATH"] = sys.argv[4]
-env["PGU_DIRECTORCTL_ENTER_DELAY"] = "0"
+env["DIRECTORCTL_ENTER_DELAY"] = "0"
 
 import subprocess
 
@@ -192,7 +192,7 @@ def run_with_env(args, **kwargs):
     merged["PATH"] = env["PATH"]
     merged["TMUX_LOG_PATH"] = env["TMUX_LOG_PATH"]
     merged["TMUX_CAPTURE_COUNT_PATH"] = env["TMUX_CAPTURE_COUNT_PATH"]
-    merged["PGU_DIRECTORCTL_ENTER_DELAY"] = env["PGU_DIRECTORCTL_ENTER_DELAY"]
+    merged["DIRECTORCTL_ENTER_DELAY"] = env["DIRECTORCTL_ENTER_DELAY"]
     kwargs["env"] = merged
     return original_run(args, **kwargs)
 

@@ -284,6 +284,7 @@ def assert_auto_socket_connect_failure_falls_back_to_tcp(base_url: str, socket_p
     old_default_url = write_client_module.DEFAULT_BOARD_URL
     old_default_socket = write_client_module.DEFAULT_BOARD_SOCKET
     old_env_socket = os.environ.pop("PGU_TICKET_BOARD_SOCKET", None)
+    old_generic_env_socket = os.environ.pop("TICKET_BOARD_SOCKET", None)
     try:
         write_client_module.DEFAULT_BOARD_URL = base_url
         write_client_module.DEFAULT_BOARD_SOCKET = str(socket_path)
@@ -307,6 +308,8 @@ def assert_auto_socket_connect_failure_falls_back_to_tcp(base_url: str, socket_p
         write_client_module.DEFAULT_BOARD_SOCKET = old_default_socket
         if old_env_socket is not None:
             os.environ["PGU_TICKET_BOARD_SOCKET"] = old_env_socket
+        if old_generic_env_socket is not None:
+            os.environ["TICKET_BOARD_SOCKET"] = old_generic_env_socket
         socket_path.unlink(missing_ok=True)
 
 
@@ -318,6 +321,7 @@ def assert_socket_discovery_prefers_runtime_then_legacy(root: Path) -> None:
     old_default_socket = write_client_module.DEFAULT_BOARD_SOCKET
     old_legacy_socket = write_client_module.LEGACY_BOARD_SOCKET
     old_env_socket = os.environ.pop("PGU_TICKET_BOARD_SOCKET", None)
+    old_generic_env_socket = os.environ.pop("TICKET_BOARD_SOCKET", None)
     try:
         write_client_module.DEFAULT_BOARD_URL = "http://127.0.0.1:8770"
         write_client_module.DEFAULT_BOARD_SOCKET = str(runtime_socket)
@@ -333,6 +337,29 @@ def assert_socket_discovery_prefers_runtime_then_legacy(root: Path) -> None:
         write_client_module.LEGACY_BOARD_SOCKET = old_legacy_socket
         if old_env_socket is not None:
             os.environ["PGU_TICKET_BOARD_SOCKET"] = old_env_socket
+        if old_generic_env_socket is not None:
+            os.environ["TICKET_BOARD_SOCKET"] = old_generic_env_socket
+
+
+def assert_generic_socket_env_precedes_legacy(root: Path) -> None:
+    generic_socket = root / "generic.sock"
+    legacy_socket = root / "legacy.sock"
+    old_generic_env_socket = os.environ.get("TICKET_BOARD_SOCKET")
+    old_env_socket = os.environ.get("PGU_TICKET_BOARD_SOCKET")
+    try:
+        os.environ["TICKET_BOARD_SOCKET"] = str(generic_socket)
+        os.environ["PGU_TICKET_BOARD_SOCKET"] = str(legacy_socket)
+        assert write_client_module._default_socket_path(write_client_module.DEFAULT_BOARD_URL) == str(generic_socket)
+        assert write_client_module._has_explicit_socket_path(None)
+    finally:
+        if old_generic_env_socket is None:
+            os.environ.pop("TICKET_BOARD_SOCKET", None)
+        else:
+            os.environ["TICKET_BOARD_SOCKET"] = old_generic_env_socket
+        if old_env_socket is None:
+            os.environ.pop("PGU_TICKET_BOARD_SOCKET", None)
+        else:
+            os.environ["PGU_TICKET_BOARD_SOCKET"] = old_env_socket
 
 
 def main() -> int:
@@ -347,6 +374,7 @@ def main() -> int:
             exercise_client(base_url, repo, pushed_hash)
             assert_submit_rejects_unpushed_commit(base_url, repo, local_only_hash, server.requests)
             assert_socket_discovery_prefers_runtime_then_legacy(root)
+            assert_generic_socket_env_precedes_legacy(root)
             assert_auto_socket_connect_failure_falls_back_to_tcp(base_url, root / "blocked.sock")
             assert_action_requests(server.requests)
             assert ("/api/tickets/PGU-120/actions/start_work", "ops") in request_pairs(server.requests)

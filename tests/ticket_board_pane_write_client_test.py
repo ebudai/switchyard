@@ -71,7 +71,11 @@ class RecordingServer(ThreadingHTTPServer):
 
 
 def run_git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["git", *args], cwd=cwd, text=True, capture_output=True, check=True)
+    env = os.environ.copy()
+    if args and args[0] == "push":
+        env["ALLOW_MAIN_PUSH"] = "director"
+        env["PGU_ALLOW_MAIN_PUSH"] = "director"
+    return subprocess.run(["git", *args], cwd=cwd, text=True, capture_output=True, check=True, env=env)
 
 
 def setup_git_repo(root: Path) -> tuple[Path, str, str]:
@@ -95,7 +99,7 @@ def setup_git_repo(root: Path) -> tuple[Path, str, str]:
 
 def run_cli(base_url: str, caller_role: str, cwd: Path, *args: str) -> dict[str, object]:
     env = os.environ.copy()
-    env["PGU_TICKET_BOARD_CALLER_ROLE"] = caller_role
+    env["TICKET_BOARD_CALLER_ROLE"] = caller_role
     proc = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "ticket-board-write"), "--board-url", base_url, *args],
         cwd=cwd,
@@ -113,7 +117,7 @@ def run_cli(base_url: str, caller_role: str, cwd: Path, *args: str) -> dict[str,
 
 def run_cli_error(base_url: str, caller_role: str, cwd: Path, *args: str) -> str:
     env = os.environ.copy()
-    env["PGU_TICKET_BOARD_CALLER_ROLE"] = caller_role
+    env["TICKET_BOARD_CALLER_ROLE"] = caller_role
     proc = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "ticket-board-write"), "--board-url", base_url, *args],
         cwd=cwd,
@@ -128,6 +132,7 @@ def run_cli_error(base_url: str, caller_role: str, cwd: Path, *args: str) -> str
 
 
 def exercise_pane_cli(base_url: str, repo: Path, commit_hash: str, local_only_hash: str) -> None:
+    assert default_caller_role({"TICKET_BOARD_CALLER_ROLE": " ops ", "PGU_TICKET_BOARD_CALLER_ROLE": " app "}) == "ops"
     assert default_caller_role({"PGU_TICKET_BOARD_CALLER_ROLE": " app "}) == "app"
     assert TicketBoardWriteClient(base_url, "director").for_caller("ops").caller_role == "ops"
 

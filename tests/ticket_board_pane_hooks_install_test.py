@@ -14,7 +14,8 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "scripts" / "ticket-board-install-pane-hooks"
-HOOK_NAME = "pgu-ticket-board-pane-idle-hook"
+HOOK_NAME = "ticket-board-pane-idle-hook"
+LEGACY_HOOK_NAME = "pgu-ticket-board-pane-idle-hook"
 PANE_TARGETS = (
     "pgu-director:0.0",
     "pgu-main:0.0",
@@ -25,7 +26,14 @@ PANE_TARGETS = (
     "pgu-audit:0.0",
     "pgu-inspector:0.0",
 )
-SESSION_ENV_KEYS = ("PGU_PANE_SESSION_ID", "CLAUDE_SESSION_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID", "SESSION_ID")
+SESSION_ENV_KEYS = (
+    "TICKET_BOARD_PANE_SESSION_ID",
+    "PGU_PANE_SESSION_ID",
+    "CLAUDE_SESSION_ID",
+    "CODEX_SESSION_ID",
+    "GEMINI_SESSION_ID",
+    "SESSION_ID",
+)
 
 
 def _hook_env(**extra: str) -> dict[str, str]:
@@ -86,7 +94,7 @@ def test_installer_writes_durable_cli_hook_configs_idempotently() -> None:
                                 "hooks": [
                                     {
                                         "type": "command",
-                                        "command": f"{HOOK_NAME} idle --source gemini.AfterAgent",
+                                        "command": f"{LEGACY_HOOK_NAME} idle --source gemini.AfterAgent",
                                     }
                                 ]
                             }
@@ -132,7 +140,8 @@ def test_installer_writes_durable_cli_hook_configs_idempotently() -> None:
         assert _managed_command_count(claude) == 4
         assert _managed_command_count(codex) == 4
         assert _managed_command_count(gemini) == 4
-        assert "pgu-ticket-board-pane-state" in gemini
+        assert "ticket-board-pane-state" in gemini
+        assert "pgu-ticket-board-pane-state" not in gemini
         assert "hooks" not in gemini
         assert gemini["other-hook"] == {"Stop": [{"type": "command", "command": "true"}]}
 
@@ -254,6 +263,42 @@ def test_session_start_hook_defaults_to_xdg_state_home_session_dir() -> None:
         assert session["session_id"] == session_id
         assert oct(session_dir.stat().st_mode & 0o777) == "0o700"
         assert oct((session_dir / "pgu-ops_0.0.json").stat().st_mode & 0o777) == "0o600"
+
+
+def test_hook_prefers_generic_target_and_session_envs() -> None:
+    with tempfile.TemporaryDirectory(prefix="ticket-pane-hooks.") as tmp:
+        home = Path(tmp) / "home"
+        state_dir = Path(tmp) / "state"
+        session_dir = Path(tmp) / "sessions"
+        bin_path = home / ".local" / "bin" / HOOK_NAME
+        subprocess.run([str(INSTALLER), "install", "--home", str(home), "--bin-path", str(bin_path)], check=True)
+
+        session_id = "12345678-1234-5678-9abc-def012345680"
+        subprocess.run(
+            [
+                str(bin_path),
+                "idle",
+                "--source",
+                "codex.Stop",
+                "--state-dir",
+                str(state_dir),
+                "--session-dir",
+                str(session_dir),
+                "--record-session",
+            ],
+            check=True,
+            env=_hook_env(
+                TICKET_BOARD_PANE_TARGET="porter-ops:0.0",
+                PGU_PANE_TARGET="pgu-ops:0.0",
+                TICKET_BOARD_PANE_SESSION_ID=session_id,
+                PGU_PANE_SESSION_ID="12345678-1234-5678-9abc-def012345681",
+            ),
+        )
+
+        state = json.loads((state_dir / "porter-ops_0.0.json").read_text(encoding="utf-8"))
+        session = json.loads((session_dir / "porter-ops_0.0.json").read_text(encoding="utf-8"))
+        assert state["target"] == "porter-ops:0.0"
+        assert session["session_id"] == session_id
 
 
 def test_non_session_start_hook_records_resume_session_when_payload_has_id() -> None:
@@ -570,6 +615,7 @@ def main() -> int:
     test_installed_hook_writes_state_and_verify_state_checks_all_panes()
     test_session_start_hook_seeds_idle_state_and_records_resume_session()
     test_session_start_hook_defaults_to_xdg_state_home_session_dir()
+    test_hook_prefers_generic_target_and_session_envs()
     test_non_session_start_hook_records_resume_session_when_payload_has_id()
     test_non_session_start_hook_with_existing_session_does_not_read_or_rewrite()
     test_non_session_start_hook_without_session_id_only_writes_state()

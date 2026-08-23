@@ -75,7 +75,7 @@ def test_wrapper_sudos_to_configured_run_as_user_when_different() -> None:
         "agent",
         "-H",
         "env",
-        "PGU_HOST_WAYLAND_DISPLAY=/run/user/1000/wayland-0",
+        "HOST_WAYLAND_DISPLAY=/run/user/1000/wayland-0",
         wrapper.sys.executable,
         str(WRAPPER_PATH.resolve()),
         "porter",

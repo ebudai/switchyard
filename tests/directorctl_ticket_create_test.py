@@ -102,7 +102,7 @@ def main() -> int:
         subprocess.run(
             [str(ROOT / "scripts" / "install-directorctl")],
             check=True,
-            env={**os.environ, "PGU_DIRECTORCTL_INSTALL_PATH": directorctl},
+            env={**os.environ, "DIRECTORCTL_INSTALL_PATH": directorctl},
             stdout=subprocess.DEVNULL,
         )
         server = CreateServer()

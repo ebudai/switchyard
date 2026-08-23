@@ -9,7 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-HOST_WAYLAND_ENV = "PGU_HOST_WAYLAND_DISPLAY"
+HOST_WAYLAND_ENV = "HOST_WAYLAND_DISPLAY"
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:

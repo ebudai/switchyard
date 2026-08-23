@@ -10,9 +10,10 @@ import time
 
 
 DEFAULT_JOURNAL_PATH = "/tmp/pgu-ticket-notification-journal.jsonl"
-DIRECTOR_TARGET = "pgu-director:0.0"
-AUDIT_TARGET = "pgu-audit:0.0"
-TICKET_ID_RE = re.compile(r"(PGU-\d+)")
+DEFAULT_PROJECT = os.environ.get("TICKET_BOARD_PROJECT", "").strip() or os.environ.get("PGU_TICKET_BOARD_PROJECT", "").strip() or "pgu"
+DIRECTOR_TARGET = f"{DEFAULT_PROJECT}-director:0.0"
+AUDIT_TARGET = f"{DEFAULT_PROJECT}-audit:0.0"
+TICKET_ID_RE = re.compile(r"([A-Z][A-Z0-9]*-\d+)")
 LEGACY_STATE_ALIASES = {"open": "analysis"}
 
 

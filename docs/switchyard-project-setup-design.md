@@ -257,11 +257,9 @@ only outputs are the design document and the artifact.
 
 ## Open questions
 
-1. ~~Project repo path~~ **DECIDED (Eric, 2026-08-24): derived.** `/home/<agent>/Projects/<slug>`.
-   No prompt, no flag.
-2. **Reshape** -- changing stages or roles on a project that already exists, with tickets in flight.
-   Open question is whether it needs to be a command at all: the director already applies shape at
-   project start (adding panes, updating `owner_roles`), and reshape is that same apply-shape
-   operation run later. If apply-shape handles in-flight tickets from the outset -- for every ticket
-   in an affected stage, where does it go, refusing rather than guessing -- then "reshape" is just
-   calling it again, and the naming question disappears.
+None. Both are closed (Eric, 2026-08-24):
+
+1. **Project repo path: derived.** `/home/<agent>/Projects/<slug>`. No prompt, no flag.
+2. **Reshape: does not exist.** The director handles changing stages and roles on a live project.
+   There is no separate command and no `clone`/`fork`.
+

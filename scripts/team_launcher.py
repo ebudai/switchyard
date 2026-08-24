@@ -24,7 +24,9 @@ DEFAULT_LEGACY_RUNTIME_SESSION_DIR = Path(f"/run/user/{os.getuid()}/pgu-ticket-b
 GENERIC_DEFAULT_STATE_DIR_NAME = "ticket-board"
 LIVE_PGU_STATE_DIR_NAME = "pgu-ticket-board"
 REMOVED_CONFIG_FREE_COMMANDS = frozenset({"bootstrap"})
-BOOTSTRAP_REPLACEMENT_COMMAND = "team-launcher <project> new --dry-run --new-output-dir <dir>"
+BOOTSTRAP_REPLACEMENT_COMMAND = (
+    "team-launcher <project> new --repository <project-checkout> --dry-run --new-output-dir <dir>"
+)
 
 
 def _env_first(*names: str) -> str:
@@ -2021,7 +2023,7 @@ def _new_project_layout_payload(role_count: int) -> dict[str, Any]:
     }
 
 
-def _new_project_launcher_config_payload(plan: ProjectBoardProvision, *, source_repo: Path) -> dict[str, Any]:
+def _new_project_launcher_config_payload(plan: ProjectBoardProvision, *, repository: Path) -> dict[str, Any]:
     layout_name = f"{plan.project}-konsole-layout.json"
     roles = [
         {
@@ -2038,7 +2040,7 @@ def _new_project_launcher_config_payload(plan: ProjectBoardProvision, *, source_
     return {
         "project": plan.project,
         "layout": layout_name,
-        "repository": str(source_repo),
+        "repository": str(repository),
         "run_as_user": plan.owner_user,
         "worktree_branch": "main",
         "worktree_remote": "origin",
@@ -2049,7 +2051,7 @@ def _new_project_launcher_config_payload(plan: ProjectBoardProvision, *, source_
     }
 
 
-def write_new_project_launcher_artifacts(plan: ProjectBoardProvision, output_dir: Path, *, source_repo: Path) -> Path:
+def write_new_project_launcher_artifacts(plan: ProjectBoardProvision, output_dir: Path, *, repository: Path) -> Path:
     config_path = output_dir / f"{plan.project}.json"
     layout_path = output_dir / f"{plan.project}-konsole-layout.json"
     layout_path.write_text(
@@ -2057,7 +2059,7 @@ def write_new_project_launcher_artifacts(plan: ProjectBoardProvision, output_dir
         encoding="utf-8",
     )
     config_path.write_text(
-        json.dumps(_new_project_launcher_config_payload(plan, source_repo=source_repo), indent=2, sort_keys=True) + "\n",
+        json.dumps(_new_project_launcher_config_payload(plan, repository=repository), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     return config_path
@@ -2150,6 +2152,7 @@ def precheck_new_project(
     plan: ProjectBoardProvision,
     *,
     source_repo: Path,
+    repository: Path,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     port_in_use: Callable[[int], bool] = _tcp_port_in_use,
     socket_exists: Callable[[Path], bool] = _path_exists,
@@ -2157,6 +2160,8 @@ def precheck_new_project(
     errors: list[str] = []
     if uid_for_user(plan.owner_user) is None:
         errors.append(f"target user {plan.owner_user!r} does not exist")
+    if not _path_exists(repository):
+        errors.append(f"project repository {repository} does not exist")
     status = _git_status_porcelain(source_repo, runner=runner)
     if status.strip():
         errors.append(f"deploy checkout {source_repo} has uncommitted changes")
@@ -2183,6 +2188,7 @@ def new_project_command(
     port: int | None = None,
     database: str | None = None,
     source_repo: Path | None = None,
+    repository: Path | None = None,
     output_dir: Path | None = None,
     execute: bool = False,
     dry_run: bool = False,
@@ -2193,6 +2199,9 @@ def new_project_command(
     if execute and dry_run:
         raise SystemExit("team-launcher: --execute and --dry-run are mutually exclusive")
     effective_source_repo = (source_repo or _repo_root()).expanduser().resolve(strict=False)
+    if repository is None:
+        raise SystemExit("team-launcher: new project requires --repository for the project's working checkout")
+    effective_repository = repository.expanduser().resolve(strict=False)
     effective_owner = (owner_user or _default_new_project_owner(project)).strip()
     plan = build_plan(
         project=project,
@@ -2204,13 +2213,14 @@ def new_project_command(
     precheck_new_project(
         plan,
         source_repo=effective_source_repo,
+        repository=effective_repository,
         runner=runner,
         port_in_use=port_in_use,
         socket_exists=socket_exists,
     )
     artifact_dir = (output_dir or _new_project_artifact_dir(plan.project)).expanduser().resolve(strict=False)
     write_artifacts(plan, artifact_dir)
-    config_path = write_new_project_launcher_artifacts(plan, artifact_dir, source_repo=effective_source_repo)
+    config_path = write_new_project_launcher_artifacts(plan, artifact_dir, repository=effective_repository)
     commands_path = artifact_dir / "operator-commands.sh"
     if not execute:
         print(f"team-launcher: dry-run for {plan.project}; artifacts in {artifact_dir}")
@@ -2274,6 +2284,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, help="new project board port; omitted means deterministic allocation")
     parser.add_argument("--database", help="new project PostgreSQL database; omitted means <project>_ticket_board")
     parser.add_argument("--source-repo", type=Path, help="source checkout to deploy for new project provisioning")
+    parser.add_argument("--repository", type=Path, help="project working checkout opened by generated panes")
     parser.add_argument("--new-output-dir", type=Path, help="write new-project artifacts here")
     parser.add_argument("--execute", action="store_true", help="execute new-project provisioning after precheck")
     parser.add_argument("--runtime-user", help="local user whose lingering /run/user/<uid> runtime should be provisioned")
@@ -2306,6 +2317,7 @@ def main(argv: list[str] | None = None) -> int:
             port=args.port,
             database=args.database,
             source_repo=args.source_repo,
+            repository=args.repository,
             output_dir=args.new_output_dir,
             execute=args.execute,
             dry_run=args.dry_run,

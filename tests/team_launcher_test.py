@@ -2418,7 +2418,7 @@ def test_removed_bootstrap_command_names_new_as_replacement() -> None:
         message = str(exc)
 
     assert "bootstrap has been removed" in message
-    assert "team-launcher porter new --dry-run --new-output-dir <dir>" in message
+    assert "team-launcher porter new --repository <project-checkout> --dry-run --new-output-dir <dir>" in message
 
 
 def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
@@ -2426,6 +2426,10 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-new.") as tmp:
         tmp_path = Path(tmp)
         output_dir = tmp_path / "out"
+        source_repo = tmp_path / "source-repo"
+        project_repo = tmp_path / "project-repo"
+        source_repo.mkdir()
+        project_repo.mkdir()
         runner = FakeRunner()
         stdout = StringIO()
 
@@ -2434,7 +2438,8 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
                 new_project_command(
                     "porter",
                     owner_user=current_user,
-                    source_repo=tmp_path / "repo",
+                    source_repo=source_repo,
+                    repository=project_repo,
                     output_dir=output_dir,
                     runner=runner,
                     port_in_use=lambda _port: False,
@@ -2475,12 +2480,14 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
     assert config["run_as_user"] == current_user
     assert config["board_url"] == "http://127.0.0.1:23682"
     assert config["board_socket"] == "/run/porter-ticket-board/ticket-board.sock"
-    assert config["repository"] == str(tmp_path / "repo")
+    assert config["repository"] == str(project_repo)
+    assert config["repository"] != str(source_repo)
     assert [role["role"] for role in config["roles"]] == ["director", "implementer", "audit"]
     assert [role["tmux_session"] for role in config["roles"]] == ["porter-director", "porter-implementer", "porter-audit"]
     assert len(team_launcher._layout_leaves(layout)) == 3
     assert [role.role for role in loaded_config.roles] == ["director", "implementer", "audit"]
     assert loaded_config.roles[1].target == "porter-implementer:0.0"
+    assert all(role.workdir == str(project_repo) for role in loaded_config.roles)
     assert commands.splitlines()[:2] == ["#!/usr/bin/env bash", "set -euo pipefail"]
     assert f"team-launcher: dry-run for porter; artifacts in {output_dir}" in rendered
     assert "  sudo -v\n" in rendered
@@ -2493,7 +2500,61 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
         "porter-implementer:0.0",
         "porter-audit:0.0",
     ]
+    assert [role["workdir"] for role in launch_plan["roles"]] == [str(project_repo)] * 3
     assert launch_output_exists
+
+
+def test_new_project_requires_project_repository() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-new.") as tmp:
+        tmp_path = Path(tmp)
+        output_dir = tmp_path / "out"
+        runner = FakeRunner()
+        try:
+            new_project_command(
+                "porter",
+                owner_user=current_user,
+                source_repo=tmp_path / "source-repo",
+                output_dir=output_dir,
+                runner=runner,
+                port_in_use=lambda _port: False,
+                socket_exists=lambda _path: False,
+            )
+            raise AssertionError("expected missing repository failure")
+        except SystemExit as exc:
+            message = str(exc)
+
+    assert "--repository" in message
+    assert not output_dir.exists()
+    assert not runner.calls
+
+
+def test_new_project_precheck_fails_when_project_repository_is_absent() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-new.") as tmp:
+        tmp_path = Path(tmp)
+        output_dir = tmp_path / "out"
+        runner = FakeRunner()
+        try:
+            new_project_command(
+                "porter",
+                owner_user=current_user,
+                source_repo=tmp_path / "source-repo",
+                repository=tmp_path / "missing-project-repo",
+                output_dir=output_dir,
+                runner=runner,
+                port_in_use=lambda _port: False,
+                socket_exists=lambda _path: False,
+            )
+            raise AssertionError("expected absent repository precheck failure")
+        except SystemExit as exc:
+            message = str(exc)
+
+    assert "project repository" in message
+    assert "does not exist" in message
+    assert not output_dir.exists()
+    assert not any(call[:1] == ["sudo"] for call in runner.calls)
+    assert not any(call[:1] == ["bash"] for call in runner.calls)
 
 
 def test_new_project_precheck_fails_before_sudo_when_repo_is_dirty() -> None:
@@ -2509,12 +2570,15 @@ def test_new_project_precheck_fails_before_sudo_when_repo_is_dirty() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-new.") as tmp:
         tmp_path = Path(tmp)
         output_dir = tmp_path / "out"
+        project_repo = tmp_path / "project-repo"
+        project_repo.mkdir()
         runner = DirtyRepoRunner()
         try:
             new_project_command(
                 "porter",
                 owner_user=current_user,
                 source_repo=tmp_path / "repo",
+                repository=project_repo,
                 output_dir=output_dir,
                 execute=True,
                 runner=runner,
@@ -2548,6 +2612,8 @@ def test_new_project_precheck_ignores_python_bytecode_created_by_cli_imports() -
 
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-new.") as tmp:
         tmp_path = Path(tmp)
+        project_repo = tmp_path / "project-repo"
+        project_repo.mkdir()
         runner = BytecodeOnlyRunner()
 
         assert (
@@ -2555,6 +2621,7 @@ def test_new_project_precheck_ignores_python_bytecode_created_by_cli_imports() -
                 "porter",
                 owner_user=current_user,
                 source_repo=tmp_path / "repo",
+                repository=project_repo,
                 output_dir=tmp_path / "out",
                 runner=runner,
                 port_in_use=lambda _port: False,
@@ -2579,6 +2646,8 @@ def test_new_project_execute_warms_sudo_once_then_runs_generated_script() -> Non
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-new.") as tmp:
         tmp_path = Path(tmp)
         output_dir = tmp_path / "out"
+        project_repo = tmp_path / "project-repo"
+        project_repo.mkdir()
         runner = RecordingRunner()
 
         assert (
@@ -2586,6 +2655,7 @@ def test_new_project_execute_warms_sudo_once_then_runs_generated_script() -> Non
                 "porter",
                 owner_user=current_user,
                 source_repo=tmp_path / "repo",
+                repository=project_repo,
                 output_dir=output_dir,
                 execute=True,
                 runner=runner,
@@ -2618,6 +2688,8 @@ def test_new_project_rerun_allows_existing_same_slug_resources() -> None:
 
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-new.") as tmp:
         tmp_path = Path(tmp)
+        project_repo = tmp_path / "project-repo"
+        project_repo.mkdir()
         runner = ExistingUnitRunner()
 
         assert (
@@ -2625,6 +2697,7 @@ def test_new_project_rerun_allows_existing_same_slug_resources() -> None:
                 "porter",
                 owner_user=current_user,
                 source_repo=tmp_path / "repo",
+                repository=project_repo,
                 output_dir=tmp_path / "out",
                 runner=runner,
                 port_in_use=lambda _port: True,
@@ -2639,12 +2712,15 @@ def test_new_project_rejects_port_collision_before_mutating() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-new.") as tmp:
         tmp_path = Path(tmp)
         output_dir = tmp_path / "out"
+        project_repo = tmp_path / "project-repo"
+        project_repo.mkdir()
         runner = FakeRunner()
         try:
             new_project_command(
                 "porter",
                 owner_user=current_user,
                 source_repo=tmp_path / "repo",
+                repository=project_repo,
                 output_dir=output_dir,
                 execute=True,
                 runner=runner,

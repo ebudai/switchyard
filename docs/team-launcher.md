@@ -257,6 +257,7 @@ Generate a complete project config and provisioning plan for another project:
 scripts/team-launcher porter new \
   --owner-user otto-agent \
   --source-repo /home/agent/Projects/pgu \
+  --repository /home/otto-agent/Projects/porter \
   --new-output-dir /tmp/porter \
   --dry-run
 ```
@@ -265,3 +266,7 @@ The dry run writes a launchable config, Konsole layout, board provisioning SQL,
 systemd units, and `operator-commands.sh` without running privileged steps. Review
 the generated artifacts, then rerun with `--execute` when the project should be
 provisioned.
+
+`--source-repo` is the checkout that exports the board and launcher tooling for
+provisioning. `--repository` is the project checkout opened by the generated
+team panes, and it must already exist.

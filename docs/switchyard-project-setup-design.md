@@ -143,6 +143,35 @@ So reshape needs migration semantics, not just an editor: for every ticket in an
 where does it go? That is why it is a separate command rather than a flag on `new`, and why it
 should refuse rather than guess.
 
-## Open question
+## The command surface (Eric, 2026-08-24)
 
-Naming for the reshape command.
+**`switchyard <slug> <command>` and nothing more.** Rename the script from `team-launcher` to
+`switchyard`. A user supplies a slug and a command; everything else is derived. Long invocations are
+a non-starter for distribution -- "normal people look at that and then look elsewhere".
+
+Derivations:
+
+| Was a flag | Derived from |
+|---|---|
+| `--owner-user` | `<slug>-agent`, created by `new` |
+| `--source-repo` | where switchyard itself is installed |
+| `--new-output-dir` | a temp dir |
+| port / database / socket | already deterministic from slug |
+| ticket prefix | slug, uppercased |
+
+`new` also **creates the user**, which means switchyard is run by a person and sudoes internally --
+not run by an agent account as it is today.
+
+### Dry-run becomes a confirmation, not a flag
+
+`--execute` should not survive as a flag, but the safety property behind it must: print the plan,
+then `Proceed? [y/N]`. Short command, review preserved before anything privileged runs, and `--yes`
+for CI and scripted installs.
+
+## Open questions
+
+1. **Project repo path.** Full derivation gives `/home/<slug>-agent/Projects/<slug>`. Eric wanted
+   otto's code at `Projects/scheduler` -- a name that differs from the slug. Is the derived path the
+   default with renaming handled post-design/by the director, or does the repo name need to survive
+   as an answerable question? UNDECIDED -- Eric is considering.
+2. Naming for the reshape command.

@@ -158,8 +158,8 @@ def test_operator_commands_wait_for_linger_user_bus_before_user_systemctl() -> N
     owner_bus = 'owner_bus="$owner_runtime_dir/bus"'
     poll_socket = '[ -S "$owner_bus" ] && break'
     timeout_error = (
-        'echo "ERROR: user bus for otto-agent did not appear at $owner_bus '
-        'within 30s after enable-linger" >&2'
+        "ERROR: user bus for otto-agent did not appear at $owner_bus "
+        "within 30s after enable-linger"
     )
     daemon_reload = (
         "sudo -u 'otto-agent' env XDG_RUNTIME_DIR=\"$owner_runtime_dir\" "
@@ -186,6 +186,18 @@ def test_operator_commands_wait_for_linger_user_bus_before_user_systemctl() -> N
     assert commands.index(owner_bus) < commands.index(daemon_reload)
     assert commands.index(timeout_error) < commands.index(daemon_reload)
     assert commands.index(daemon_reload) < commands.index(enable_listener)
+
+
+def test_operator_commands_can_verify_existing_owner_linger_without_modifying_it() -> None:
+    plan = build_plan(project="otto", owner_user="otto-agent", port=8873)
+    commands = render_operator_commands(plan, enable_owner_linger=False)
+
+    assert "sudo loginctl enable-linger 'otto-agent'" not in commands
+    assert "sudo loginctl show-user 'otto-agent' -p Linger --value 2>/dev/null | grep -qx yes" in commands
+    assert "switchyard refuses to modify an existing owner user" in commands
+    assert "enable linger or start that user" in commands
+    assert "systemd manager" in commands
+    assert commands.index("loginctl show-user") < commands.index("owner_uid=")
 
 
 def test_owned_readwrite_path_layout_passes_systemd_verify() -> None:

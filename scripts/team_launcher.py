@@ -2616,6 +2616,7 @@ def new_project_command(
     port_in_use: Callable[[int], bool] = _tcp_port_in_use,
     socket_exists: Callable[[Path], bool] = _path_exists,
     require_owner_user: bool | None = None,
+    enable_owner_linger: bool = True,
 ) -> int:
     if execute and dry_run:
         raise SystemExit("team-launcher: --execute and --dry-run are mutually exclusive")
@@ -2666,7 +2667,7 @@ def new_project_command(
         require_owner_user=execute if require_owner_user is None else require_owner_user,
     )
     artifact_dir = (output_dir or _new_project_artifact_dir(plan.project)).expanduser().resolve(strict=False)
-    write_artifacts(plan, artifact_dir)
+    write_artifacts(plan, artifact_dir, enable_owner_linger=enable_owner_linger)
     config_path = write_new_project_launcher_artifacts(
         plan,
         artifact_dir,
@@ -2708,6 +2709,12 @@ class SwitchyardProjectEntry:
     slug: str
     name: str
     config_path: Path
+
+
+@dataclass(frozen=True)
+class OwnerUserProvisionResult:
+    created: bool
+    linger_enabled: bool
 
 
 def _slug_from_project_name(name: str) -> str:
@@ -2807,12 +2814,34 @@ def _chown_switchyard_project_files(
 
 
 def _owner_project_install_args(owner_user: str, project_dir: Path, *, shell: str = "fish") -> list[list[str]]:
-    shell_path = shutil.which(shell) or f"/usr/bin/{shell}"
+    shell_path = shell if "/" in shell else (shutil.which(shell) or f"/usr/bin/{shell}")
     return [
         ["id", "-u", owner_user],
         ["useradd", "-m", "-s", shell_path, owner_user],
         ["install", "-d", "-m", "0755", "-o", owner_user, "-g", owner_user, str(project_dir)],
     ]
+
+
+def _enable_owner_linger_args(owner_user: str) -> list[str]:
+    return ["loginctl", "enable-linger", owner_user]
+
+
+def _owner_linger_show_args(owner_user: str) -> list[str]:
+    return ["loginctl", "show-user", owner_user, "-p", "Linger", "--value"]
+
+
+def _owner_linger_is_enabled(
+    owner_user: str,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> bool:
+    result = runner(
+        _owner_linger_show_args(owner_user),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return result.returncode == 0 and str(getattr(result, "stdout", "") or "").strip() == "yes"
 
 
 def _group_ids_for_user(user_name: str) -> set[int]:
@@ -2892,21 +2921,34 @@ def _ensure_owner_user_and_project_dir(
     *,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
     shell: str = "fish",
-) -> None:
+) -> OwnerUserProvisionResult:
     existed = project_dir.exists()
     _precheck_project_path_before_mutating(owner_user, project_dir)
     id_args, useradd_args, install_args = _owner_project_install_args(owner_user, project_dir, shell=shell)
     id_result = runner(id_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    created_user = False
+    linger_enabled = False
     if id_result.returncode != 0:
         useradd_result = runner(useradd_args)
         if useradd_result.returncode != 0:
             raise SystemExit(f"switchyard: failed to create user {owner_user!r}")
+        created_user = True
+        linger_result = runner(_enable_owner_linger_args(owner_user))
+        if linger_result.returncode != 0:
+            raise SystemExit(f"switchyard: failed to enable linger for created user {owner_user!r}")
+        linger_enabled = True
+    elif not _owner_linger_is_enabled(owner_user, runner=runner):
+        raise SystemExit(
+            f"switchyard: existing user {owner_user!r} does not have linger enabled; "
+            "switchyard refuses to modify an existing owner user"
+        )
     if not existed:
         install_result = runner(install_args)
         if install_result.returncode != 0:
             raise SystemExit(f"switchyard: failed to create project directory {project_dir}")
         project_dir.mkdir(parents=True, exist_ok=True)
     _verify_project_path_writable_by_owner(owner_user, project_dir, runner=runner)
+    return OwnerUserProvisionResult(created=created_user, linger_enabled=linger_enabled)
 
 
 def _designer_launch_args(
@@ -3079,6 +3121,7 @@ def switchyard_new_command(
         resolved_slug = artifact.project
         resolved_project_name = artifact.project_name
         owner_user = artifact.owner_user
+        owner_shell = str(artifact.capability_grants.get("shell") or PROJECT_DESIGN_DEFAULT_CAPABILITY_GRANTS["shell"])
         project_dir = _resolve_project_path(project_path or artifact.repository)
     else:
         resolved_project_name = (project_name or _prompt_text("Project name", input_func=input_func)).strip()
@@ -3090,6 +3133,7 @@ def switchyard_new_command(
         )
         raw_agent = agent_name or _prompt_text("Agent name", default=resolved_slug, input_func=input_func)
         owner_user = _agent_owner_user(raw_agent)
+        owner_shell = str(PROJECT_DESIGN_DEFAULT_CAPABILITY_GRANTS["shell"])
         default_project_dir = _project_dir(home_base, owner_user, resolved_project_name)
         project_dir = _resolve_project_path(
             project_path
@@ -3111,8 +3155,17 @@ def switchyard_new_command(
     artifact_path = (from_artifact or (_switchyard_dir(project_dir) / f"{resolved_slug}.project.json")).expanduser().resolve(strict=False)
     design_document = project_dir / SWITCHYARD_DESIGN_FILE_NAME
     director_onboarding = _switchyard_dir(project_dir) / SWITCHYARD_DIRECTOR_ONBOARDING_FILE_NAME
+    owner_result = _ensure_owner_user_and_project_dir(
+        owner_user,
+        project_dir,
+        runner=runner,
+        shell=owner_shell,
+    )
+    if owner_result.created:
+        print_func(f"switchyard: created user {owner_user} with shell {owner_shell}; linger enabled")
+    else:
+        print_func(f"switchyard: using existing user {owner_user} (not modifying)")
     if from_artifact is None:
-        _ensure_owner_user_and_project_dir(owner_user, project_dir, runner=runner)
         _write_switchyard_onboarding_files(
             project_name=resolved_project_name,
             slug=resolved_slug,
@@ -3139,7 +3192,6 @@ def switchyard_new_command(
         )
         print_func(f"switchyard: verified designer session cwd at {session_dir}")
     else:
-        project_dir.mkdir(parents=True, exist_ok=True)
         _write_switchyard_onboarding_files(
             project_name=resolved_project_name,
             slug=resolved_slug,
@@ -3165,6 +3217,7 @@ def switchyard_new_command(
         port_in_use=port_in_use,
         socket_exists=socket_exists,
         require_owner_user=False,
+        enable_owner_linger=False,
     )
     if result != 0:
         return result

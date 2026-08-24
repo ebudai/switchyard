@@ -3066,6 +3066,192 @@ def test_switchyard_new_custom_project_path_sets_designer_cwd_and_pane_workdirs(
         }
 
 
+def test_switchyard_new_creates_absent_zeta_owner_with_linger_and_designer_session() -> None:
+    class ZetaRunner(FakeRunner):
+        def __init__(self, home_base: Path) -> None:
+            super().__init__()
+            self.home_base = home_base
+
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if args == ["id", "-u", "zeta-agent"]:
+                return subprocess.CompletedProcess(args, 1)
+            if args[:1] == ["useradd"]:
+                return subprocess.CompletedProcess(args, 0)
+            if args == ["loginctl", "enable-linger", "zeta-agent"]:
+                return subprocess.CompletedProcess(args, 0)
+            if args[:1] == ["install"]:
+                return subprocess.CompletedProcess(args, 0)
+            if args[:5] == ["sudo", "-u", "zeta-agent", "-H", "env"] and args[-1] == "claude":
+                cwd = Path(str(kwargs["cwd"]))
+                env_values = {
+                    item.split("=", 1)[0]: item.split("=", 1)[1]
+                    for item in args
+                    if item.startswith("SWITCHYARD_") and "=" in item
+                }
+                artifact_path = Path(env_values["SWITCHYARD_PROJECT_ARTIFACT"])
+                design_doc = Path(env_values["SWITCHYARD_PROJECT_DESIGN"])
+                design_doc.write_text("# Zeta System\n\nDesigned.\n", encoding="utf-8")
+                artifact_path.parent.mkdir(parents=True, exist_ok=True)
+                artifact_path.write_text(
+                    json.dumps(
+                        {
+                            "schema": "switchyard.project.v1",
+                            "design_document": str(design_doc),
+                            "project": {
+                                "slug": "zeta",
+                                "name": "Zeta System",
+                                "ticket_prefix": "ZETA",
+                                "owner_user": "zeta-agent",
+                                "repository": str(cwd),
+                                "roles": ["ops"],
+                            },
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                session_dir = team_launcher._claude_project_session_dir(self.home_base / "zeta-agent", cwd)
+                session_dir.mkdir(parents=True, exist_ok=True)
+                (session_dir / "session.jsonl").write_text("{}\n", encoding="utf-8")
+                return subprocess.CompletedProcess(args, 0)
+            return super().__call__(args, **kwargs)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new.") as tmp:
+        tmp_path = Path(tmp)
+        home_base = tmp_path / "home"
+        output_dir = tmp_path / "out"
+        source_repo = tmp_path / "source-repo"
+        source_repo.mkdir()
+        runner = ZetaRunner(home_base)
+        stdout = StringIO()
+
+        with redirect_stdout(stdout):
+            assert (
+                switchyard_new_command(
+                    slug="zeta",
+                    agent_name="zeta",
+                    project_name="Zeta System",
+                    source_repo=source_repo,
+                    output_dir=output_dir,
+                    yes=True,
+                    home_base=home_base,
+                    euid_getter=lambda: 0,
+                    runner=runner,
+                    pane_state_dir=tmp_path / "pane-state",
+                    input_func=lambda _prompt: "",
+                    port_in_use=lambda _port: False,
+                    socket_exists=lambda _path: False,
+                )
+                == 0
+            )
+
+        project_dir = home_base / "zeta-agent" / "Projects" / "zeta-system"
+        session_dir = home_base / "zeta-agent" / ".claude" / "projects" / team_launcher._claude_project_key(project_dir)
+        expected_useradd = team_launcher._owner_project_install_args("zeta-agent", project_dir)[1]
+        commands = (output_dir / "operator-commands.sh").read_text(encoding="utf-8")
+        session_dir_created = session_dir.is_dir()
+
+    assert expected_useradd in runner.calls
+    assert "-G" not in expected_useradd
+    assert ["loginctl", "enable-linger", "zeta-agent"] in runner.calls
+    assert session_dir_created
+    assert f"switchyard: created user zeta-agent with shell fish; linger enabled" in stdout.getvalue()
+    assert "sudo loginctl enable-linger 'zeta-agent'" not in commands
+    assert "loginctl show-user 'zeta-agent' -p Linger --value" in commands
+
+
+def test_switchyard_new_reuses_existing_owner_without_account_mutation() -> None:
+    class ExistingOwnerRunner(FakeRunner):
+        def __init__(self) -> None:
+            super().__init__()
+            self.owner_marker = {
+                "shell": "/usr/local/bin/project-shell",
+                "groups": ("project-extra",),
+            }
+
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if args == ["id", "-u", "marked-agent"]:
+                return subprocess.CompletedProcess(args, 0, stdout="4242\n")
+            if args == ["loginctl", "show-user", "marked-agent", "-p", "Linger", "--value"]:
+                return subprocess.CompletedProcess(args, 0, stdout="yes\n")
+            if args[:1] in (["useradd"], ["usermod"], ["chsh"]):
+                raise AssertionError(f"existing owner must not be modified: {args}")
+            if args == ["loginctl", "enable-linger", "marked-agent"]:
+                raise AssertionError(f"existing owner linger must not be changed during account bootstrap: {args}")
+            if args[:1] == ["install"]:
+                return subprocess.CompletedProcess(args, 0)
+            return super().__call__(args, **kwargs)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-existing.") as tmp:
+        tmp_path = Path(tmp)
+        project_dir = tmp_path / "home" / "marked-agent" / "Projects" / "marked"
+        source_repo = tmp_path / "source-repo"
+        output_dir = tmp_path / "out"
+        source_repo.mkdir()
+        artifact_path = tmp_path / "marked.project.json"
+        design_document = tmp_path / "MARKED_DESIGN.md"
+        artifact_path.write_text(
+            json.dumps(
+                {
+                    "schema": "switchyard.project.v1",
+                    "design_document": str(design_document),
+                    "project": {
+                        "slug": "marked",
+                        "name": "Marked Project",
+                        "ticket_prefix": "MARK",
+                        "owner_user": "marked-agent",
+                        "repository": str(project_dir),
+                        "capability_grants": {
+                            "board_service_traversal": True,
+                            "supplementary_groups": ["project-extra"],
+                            "linger": True,
+                            "shell": "/usr/local/bin/project-shell",
+                        },
+                    },
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        runner = ExistingOwnerRunner()
+        marker_before = dict(runner.owner_marker)
+        stdout = StringIO()
+
+        with redirect_stdout(stdout):
+            assert (
+                switchyard_new_command(
+                    from_artifact=artifact_path,
+                    source_repo=source_repo,
+                    output_dir=output_dir,
+                    yes=True,
+                    home_base=tmp_path / "home",
+                    euid_getter=lambda: 0,
+                    runner=runner,
+                    pane_state_dir=tmp_path / "pane-state",
+                    port_in_use=lambda _port: False,
+                    socket_exists=lambda _path: False,
+                )
+                == 0
+            )
+
+        commands = (output_dir / "operator-commands.sh").read_text(encoding="utf-8")
+
+    assert runner.owner_marker == marker_before
+    assert not any(call[:1] == ["useradd"] for call in runner.calls)
+    assert not any(call[:1] in (["usermod"], ["chsh"]) for call in runner.calls)
+    assert ["loginctl", "show-user", "marked-agent", "-p", "Linger", "--value"] in runner.calls
+    assert ["loginctl", "enable-linger", "marked-agent"] not in runner.calls
+    assert f"switchyard: using existing user marked-agent (not modifying)" in stdout.getvalue()
+    assert "sudo loginctl enable-linger 'marked-agent'" not in commands
+    assert "loginctl show-user 'marked-agent' -p Linger --value" in commands
+
+
 def test_switchyard_new_unwritable_existing_project_path_refuses_before_mutating() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new.") as tmp:
         tmp_path = Path(tmp)

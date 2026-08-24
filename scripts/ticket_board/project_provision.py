@@ -513,7 +513,7 @@ COMMIT;
 """
 
 
-def render_operator_commands(plan: ProjectBoardProvision) -> str:
+def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger: bool = True) -> str:
     q_asset = shell_quote(plan.asset_dir)
     q_frame = shell_quote(plan.frame_dir)
     q_board_root = shell_quote(plan.board_root)
@@ -574,6 +574,19 @@ def render_operator_commands(plan: ProjectBoardProvision) -> str:
         ),
     )
     q_owner_user = shell_quote(plan.owner_user)
+    if enable_owner_linger:
+        owner_linger_step = f"sudo loginctl enable-linger {q_owner_user}"
+        owner_bus_error = (
+            f"ERROR: user bus for {plan.owner_user} did not appear at $owner_bus within 30s after enable-linger"
+        )
+    else:
+        owner_linger_step = (
+            f"sudo loginctl show-user {q_owner_user} -p Linger --value 2>/dev/null | grep -qx yes || "
+            f"{{ echo \"ERROR: linger is not enabled for {plan.owner_user}; switchyard refuses to modify an existing owner user\" >&2; exit 1; }}"
+        )
+        owner_bus_error = (
+            f"ERROR: user bus for {plan.owner_user} did not appear at $owner_bus; enable linger or start that user's systemd manager"
+        )
     return f"""#!/usr/bin/env bash
 set -euo pipefail
 
@@ -598,7 +611,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now {plan.board_unit}
 {install_listener_unit_parent}
 sudo install -m 0644 -o {q_owner_user} -g {q_owner_user} {shell_quote(plan.listener_unit)} {q_listener_unit}
-sudo loginctl enable-linger {q_owner_user}
+{owner_linger_step}
 owner_uid="$(id -u {q_owner_user})"
 owner_runtime_dir="/run/user/$owner_uid"
 owner_bus="$owner_runtime_dir/bus"
@@ -607,7 +620,7 @@ for _ in $(seq 1 300); do
     sleep 0.1
 done
 if [ ! -S "$owner_bus" ]; then
-    echo "ERROR: user bus for {plan.owner_user} did not appear at $owner_bus within 30s after enable-linger" >&2
+    echo {shell_quote(owner_bus_error)} >&2
     exit 1
 fi
 sudo -u {q_owner_user} env XDG_RUNTIME_DIR="$owner_runtime_dir" DBUS_SESSION_BUS_ADDRESS="unix:path=$owner_bus" systemctl --user daemon-reload
@@ -616,7 +629,7 @@ curl -fsS http://127.0.0.1:{plan.port}/api/board >/dev/null
 """
 
 
-def write_artifacts(plan: ProjectBoardProvision, output_dir: Path) -> None:
+def write_artifacts(plan: ProjectBoardProvision, output_dir: Path, *, enable_owner_linger: bool = True) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     files = {
         "plan.json": json.dumps(asdict(plan), indent=2, sort_keys=True) + "\n",
@@ -626,7 +639,7 @@ def write_artifacts(plan: ProjectBoardProvision, output_dir: Path) -> None:
         plan.polkit_name: render_polkit_rule(plan),
         f"{plan.project}-database.sql": render_database_sql(plan),
         f"{plan.project}-workflow.sql": render_workflow_sql(plan),
-        "operator-commands.sh": render_operator_commands(plan),
+        "operator-commands.sh": render_operator_commands(plan, enable_owner_linger=enable_owner_linger),
     }
     for name, text in files.items():
         path = output_dir / name

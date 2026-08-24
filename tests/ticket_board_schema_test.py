@@ -328,6 +328,13 @@ def main() -> int:
     assert "when p_state = 'user_review' then null" in user_assignee_migration
     assert "set state = 'user_review',\n        assignee = 'user'" in user_assignee_migration
     assert "set assignee = 'user',\n        manually_controlled = false" in user_assignee_migration
+    user_assignee_write_paths_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu652_user_assignee_write_paths.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "create or replace function ticket_board.route" in user_assignee_write_paths_migration
+    assert "create or replace function ticket_board.force_move" in user_assignee_write_paths_migration
+    assert user_assignee_write_paths_migration.count("ticket_board.ticket_valid_assignee(assignee)") == 2
+    assert "assignee not in (" not in user_assignee_write_paths_migration
     cosmetic_derivation_migration = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "pgu520_workflow_config_cosmetic_derivation.sql"
     ).read_text(encoding="utf-8").lower()

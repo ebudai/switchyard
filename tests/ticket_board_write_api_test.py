@@ -521,6 +521,22 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
         needs_user_signoff=True,
         commit_hash=commit_hash,
     )
+    seed_ticket(
+        "PGU-141",
+        title="Route to user assignee",
+        state="analysis",
+        assignee="app",
+        implementation="Ready for UAT.",
+        needs_user_signoff=True,
+    )
+    seed_ticket(
+        "PGU-142",
+        title="Force move to user assignee",
+        state="analysis",
+        assignee="unassigned",
+        implementation="Ready for override.",
+        needs_user_signoff=True,
+    )
 
 
 def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets: Path, admin_conn: str) -> None:
@@ -799,6 +815,61 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     )
     assert incoherent_audit_route["ticket"]["state"] == "dat", incoherent_audit_route  # type: ignore[index]
     assert incoherent_audit_route["ticket"]["assignee"] == "director", incoherent_audit_route  # type: ignore[index]
+
+    uat_started = post_json(base_url, "/api/tickets/PGU-141/actions/start_work", {}, caller="app")
+    assert uat_started["ticket"]["state"] == "in_progress", uat_started  # type: ignore[index]
+    assert uat_started["ticket"]["assignee"] == "app", uat_started  # type: ignore[index]
+    uat_submitted = post_json(
+        base_url,
+        "/api/tickets/PGU-141/actions/submit_to_audit",
+        {"commit_hash": commit_hash},
+        caller="app",
+    )
+    assert uat_submitted["ticket"]["state"] == "audit", uat_submitted  # type: ignore[index]
+    assert psql(admin_conn, "SELECT coalesce(ticket_board.ticket_current_reserved_ticket('app'), '<none>');") == "PGU-141"
+    uat_audit = post_json(
+        base_url,
+        "/api/tickets/PGU-141/actions/audit_sign_off",
+        {"text": "Audit verified for UAT."},
+        caller="audit",
+    )
+    assert uat_audit["ticket"]["state"] == "dat", uat_audit  # type: ignore[index]
+    assert uat_audit["ticket"]["assignee"] == "director", uat_audit  # type: ignore[index]
+    uat_routed = post_json(
+        base_url,
+        "/api/tickets/PGU-141/actions/route",
+        {"state": "user_review", "assignee": "user"},
+        caller="director",
+    )
+    assert uat_routed["ticket"]["state"] == "user_review", uat_routed  # type: ignore[index]
+    assert uat_routed["ticket"]["assignee"] == "user", uat_routed  # type: ignore[index]
+    uat_reservation = json.loads(
+        psql(
+            admin_conn,
+            """
+SELECT jsonb_build_object(
+    'app_reserved_ticket', coalesce(ticket_board.ticket_current_reserved_ticket('app'), '<none>'),
+    'reserved_from_ticket', coalesce(ticket_board.ticket_reserved_implementer(id, state, assignee), '<none>')
+)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-141';
+""",
+        )
+    )
+    assert uat_reservation == {
+        "app_reserved_ticket": "<none>",
+        "reserved_from_ticket": "<none>",
+    }, uat_reservation
+
+    force_moved_user = post_json(
+        base_url,
+        "/api/tickets/PGU-142/actions/force_move",
+        {"state": "user_review", "assignee": "user", "suppress_notification": True},
+        caller="director",
+    )
+    assert force_moved_user["ticket"]["state"] == "user_review", force_moved_user  # type: ignore[index]
+    assert force_moved_user["ticket"]["assignee"] == "user", force_moved_user  # type: ignore[index]
+
     normal_done_blocked = post_json(
         base_url,
         "/api/tickets/PGU-129/actions/route",

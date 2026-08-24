@@ -3347,11 +3347,70 @@ def test_new_project_from_handwritten_artifact_uses_same_provision_path() -> Non
 
     assert plan["project"] == "atlas"
     assert plan["ticket_prefix"] == "ATL"
+    assert plan["board_service_traversal"] is True
     assert config["ticket_prefix"] == "ATL"
     assert config["worktree_branch"] == "mainline"
     assert config["worktree_base"] == f"/home/{current_user}/atlas-worktrees"
     assert "Environment=TICKET_BOARD_TICKET_PREFIX=ATL" in board_unit
     assert not any(call[:1] == ["sudo"] for call in runner.calls)
+
+
+def test_new_project_artifact_board_service_traversal_false_omits_owner_home_acls() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-design.") as tmp:
+        tmp_path = Path(tmp)
+        source_repo = tmp_path / "source-repo"
+        project_repo = tmp_path / "project-repo"
+        provision_dir = tmp_path / "provision"
+        source_repo.mkdir()
+        project_repo.mkdir()
+        artifact_path = tmp_path / "atlas.project.json"
+        artifact_path.write_text(
+            json.dumps(
+                {
+                    "schema": "switchyard.project.v1",
+                    "design_document": "atlas-design.md",
+                    "project": {
+                        "slug": "atlas",
+                        "ticket_prefix": "ATL",
+                        "owner_user": current_user,
+                        "repository": str(project_repo),
+                        "capability_grants": {
+                            "board_service_traversal": False,
+                            "supplementary_groups": [],
+                            "linger": True,
+                            "shell": "bash",
+                        },
+                    },
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        assert (
+            new_project_command(
+                "atlas",
+                from_artifact=artifact_path,
+                source_repo=source_repo,
+                output_dir=provision_dir,
+                runner=FakeRunner(),
+                port_in_use=lambda _port: False,
+                socket_exists=lambda _path: False,
+            )
+            == 0
+        )
+        plan = json.loads((provision_dir / "plan.json").read_text(encoding="utf-8"))
+        commands = (provision_dir / "operator-commands.sh").read_text(encoding="utf-8")
+
+    assert plan["board_service_traversal"] is False
+    assert "sudo setfacl -m u:boardsvc:--x" not in commands
+    assert "sudo setfacl -R -m u:boardsvc:rwx" not in commands
+    assert "sudo setfacl -R -m u:boardsvc:rx" not in commands
+    assert "board_service_traversal=false" in commands
+    assert "board health check will fail" in commands
 
 
 def test_project_artifact_accepts_designer_chosen_roles() -> None:

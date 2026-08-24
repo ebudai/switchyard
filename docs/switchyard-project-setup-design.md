@@ -115,6 +115,11 @@ So the real questions are a short list of capability grants:
 | Linger enabled? | Required for the user-level notify-listener |
 | Shell | fish/bash; affects any operator block written for that user |
 
+If board-service traversal is declined, `new` does not grant `boardsvc` ACLs on the owner home,
+board release, assets, or frame directories. The operator must then choose paths already accessible
+to `boardsvc` or pre-grant access outside switchyard; otherwise the board service health check fails
+instead of silently changing the owner's home ACLs.
+
 ## Known gap this surfaced
 
 `ticket_prefix` defaults to `'PGU'` and the provisioner never sets it, so **otto's board would

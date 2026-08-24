@@ -54,6 +54,7 @@ class ProjectBoardProvision:
     implementer_roles: tuple[str, ...]
     assignee_roles: tuple[str, ...]
     caller_roles: tuple[str, ...]
+    board_service_traversal: bool
 
 
 def _validate_project(value: str) -> str:
@@ -123,6 +124,7 @@ def build_plan(
     frame_dir: Path | None = None,
     implementer_roles: Sequence[str] | None = None,
     ticket_prefix: str | None = None,
+    board_service_traversal: bool = True,
 ) -> ProjectBoardProvision:
     project = _validate_project(project)
     owner_user = _validate_user(owner_user)
@@ -201,6 +203,7 @@ def build_plan(
         implementer_roles=resolved_implementer_roles,
         assignee_roles=assignee_roles,
         caller_roles=caller_roles,
+        board_service_traversal=board_service_traversal,
     )
 
 
@@ -572,8 +575,32 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
             f"/home/{plan.owner_user}/.config/systemd/user",
             include_target=True,
         ),
-    )
+        )
     q_owner_user = shell_quote(plan.owner_user)
+    if plan.board_service_traversal:
+        grant_board_root = "\n".join(
+            [
+                f"sudo setfacl -R -m u:{plan.service_user}:rx {q_board_root}",
+                f"sudo find {q_board_root} -type d -exec setfacl -m d:u:{plan.service_user}:rx {{}} +",
+            ]
+        )
+        grant_home_traversal = "\n".join(
+            [
+                f"sudo setfacl -m u:{plan.service_user}:--x {shell_quote('/home/' + plan.owner_user)}",
+                f"sudo setfacl -m u:{plan.service_user}:--x {shell_quote('/home/' + plan.owner_user + '/.claude')}",
+            ]
+        )
+        effective_grant_asset_frame = grant_asset_frame
+    else:
+        grant_board_root = (
+            f"# board_service_traversal=false: not granting {plan.service_user} ACLs on "
+            "the owner home, board release, assets, or frames."
+        )
+        grant_home_traversal = (
+            f"# {plan.service_user} must already be able to traverse/read/write configured board paths, "
+            "or the board health check will fail."
+        )
+        effective_grant_asset_frame = ""
     if enable_owner_linger:
         owner_linger_step = f"sudo loginctl enable-linger {q_owner_user}"
         owner_bus_error = (
@@ -593,12 +620,10 @@ set -euo pipefail
 # Review generated artifacts first. These commands require host privileges.
 {install_board_root}
 sudo env TICKET_BOARD_PROJECT={shell_quote(plan.project)} SOURCE_REPO={q_source_repo} BOARD_ROOT={q_board_root} DEPLOY_REF=origin/main TICKET_BOARD_SKIP_MIGRATIONS=1 {q_deploy_script} deploy
-sudo setfacl -R -m u:{plan.service_user}:rx {q_board_root}
-sudo find {q_board_root} -type d -exec setfacl -m d:u:{plan.service_user}:rx {{}} +
+{grant_board_root}
 {install_asset_frame}
-sudo setfacl -m u:{plan.service_user}:--x {shell_quote('/home/' + plan.owner_user)}
-sudo setfacl -m u:{plan.service_user}:--x {shell_quote('/home/' + plan.owner_user + '/.claude')}
-{grant_asset_frame}
+{grant_home_traversal}
+{effective_grant_asset_frame}
 sudo install -m 0644 {shell_quote(plan.board_unit)} {q_board_unit}
 sudo install -m 0644 {shell_quote(plan.tmpfiles_name)} {q_tmpfiles}
 sudo install -m 0644 {shell_quote(plan.polkit_name)} {q_polkit}
@@ -663,6 +688,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--asset-dir", type=Path, help="durable attachment directory")
     parser.add_argument("--frame-dir", type=Path, help="frame inbox directory")
     parser.add_argument(
+        "--board-service-traversal",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="grant boardsvc ACL traversal/read/write access for owner-home board paths",
+    )
+    parser.add_argument(
         "--implementer-role",
         action="append",
         dest="implementer_roles",
@@ -694,6 +725,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         asset_dir=args.asset_dir,
         frame_dir=args.frame_dir,
         implementer_roles=args.implementer_roles,
+        board_service_traversal=args.board_service_traversal,
     )
     if args.output_dir:
         write_artifacts(plan, args.output_dir)

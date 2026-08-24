@@ -200,6 +200,37 @@ def test_operator_commands_can_verify_existing_owner_linger_without_modifying_it
     assert commands.index("loginctl show-user") < commands.index("owner_uid=")
 
 
+def test_board_service_traversal_capability_controls_owner_home_acls() -> None:
+    grant_plan = build_plan(
+        project="zeta",
+        owner_user="zeta-agent",
+        port=8874,
+        board_service_traversal=True,
+    )
+    deny_plan = build_plan(
+        project="zeta",
+        owner_user="zeta-agent",
+        port=8874,
+        board_service_traversal=False,
+    )
+
+    grant_commands = render_operator_commands(grant_plan)
+    deny_commands = render_operator_commands(deny_plan)
+
+    assert grant_plan.board_service_traversal is True
+    assert deny_plan.board_service_traversal is False
+    assert "sudo setfacl -m u:boardsvc:--x '/home/zeta-agent'" in grant_commands
+    assert "sudo setfacl -m u:boardsvc:--x '/home/zeta-agent/.claude'" in grant_commands
+    assert "sudo setfacl -R -m u:boardsvc:rx '/home/zeta-agent/zeta-ticketboard-live'" in grant_commands
+    assert "sudo setfacl -R -m u:boardsvc:rwx '/home/zeta-agent/.claude/zeta-tickets-assets'" in grant_commands
+    assert "sudo setfacl -m u:boardsvc:--x '/home/zeta-agent'" not in deny_commands
+    assert "sudo setfacl -m u:boardsvc:--x '/home/zeta-agent/.claude'" not in deny_commands
+    assert "sudo setfacl -R -m u:boardsvc:rx '/home/zeta-agent/zeta-ticketboard-live'" not in deny_commands
+    assert "sudo setfacl -R -m u:boardsvc:rwx '/home/zeta-agent/.claude/zeta-tickets-assets'" not in deny_commands
+    assert "board_service_traversal=false" in deny_commands
+    assert "board health check will fail" in deny_commands
+
+
 def test_owned_readwrite_path_layout_passes_systemd_verify() -> None:
     systemd_analyze = shutil.which("systemd-analyze")
     if systemd_analyze is None:

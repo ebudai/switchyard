@@ -2634,6 +2634,7 @@ def new_project_command(
         project_name = design_artifact.project_name
         design_document = design_artifact.design_document
         implementer_roles = design_artifact.implementer_roles
+        board_service_traversal = bool(design_artifact.capability_grants.get("board_service_traversal", True))
     else:
         if repository is None:
             raise SystemExit("team-launcher: new project requires --repository for the project's working checkout")
@@ -2646,6 +2647,7 @@ def new_project_command(
         project_name = project
         design_document = None
         implementer_roles = DEFAULT_PROJECT_IMPLEMENTER_ROLES
+        board_service_traversal = True
     if worktree_policy not in WORKTREE_POLICIES:
         raise SystemExit(f"team-launcher: worktree policy must be one of {sorted(WORKTREE_POLICIES)}")
     plan = build_plan(
@@ -2656,6 +2658,7 @@ def new_project_command(
         source_repo=effective_source_repo,
         ticket_prefix=ticket_prefix,
         implementer_roles=implementer_roles,
+        board_service_traversal=board_service_traversal,
     )
     precheck_new_project(
         plan,

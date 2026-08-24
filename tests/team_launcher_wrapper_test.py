@@ -12,6 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WRAPPER_PATH = ROOT / "scripts" / "team-launcher"
+SWITCHYARD_WRAPPER_PATH = ROOT / "scripts" / "switchyard"
 
 from standalone_test_runner import run_module_tests
 
@@ -21,6 +22,16 @@ def load_wrapper():
     spec = importlib.util.spec_from_loader(loader.name, loader)
     if spec is None:
         raise RuntimeError(f"failed to load {WRAPPER_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def load_switchyard_wrapper():
+    loader = importlib.machinery.SourceFileLoader("switchyard_wrapper", str(SWITCHYARD_WRAPPER_PATH))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    if spec is None:
+        raise RuntimeError(f"failed to load {SWITCHYARD_WRAPPER_PATH}")
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
     return module
@@ -107,6 +118,20 @@ def test_wrapper_does_not_sudo_when_already_run_as_user() -> None:
 
     assert calls == [["porter", "start", "--config", str(config_path)]]
     assert sudo_calls == []
+
+
+def test_switchyard_wrapper_delegates_to_switchyard_main() -> None:
+    wrapper = load_switchyard_wrapper()
+
+    calls: list[list[str]] = []
+    original_main = wrapper.switchyard_main
+    try:
+        wrapper.switchyard_main = lambda argv: calls.append(list(argv)) or 29
+        assert wrapper.switchyard_main(["My", "Project"]) == 29
+    finally:
+        wrapper.switchyard_main = original_main
+
+    assert calls == [["My", "Project"]]
 
 
 def main() -> int:

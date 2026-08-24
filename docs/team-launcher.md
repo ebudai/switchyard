@@ -1,11 +1,18 @@
-# Team Launcher
+# Switchyard Launcher
 
-`scripts/team-launcher` starts, attaches, or reloads a project team from a JSON
-config. The default PGU config is `config/team-launcher/pgu.json`. PGU starts
-six visible roles in a single Konsole layout window and starts `research` as a
+`./switchyard` is the public project entrypoint. With no arguments it prints
+`new...` followed by configured projects. `./switchyard new` starts new-project
+setup, and `./switchyard My Project Name` joins all arguments, matches an
+existing project case-insensitively by display name or slug, and runs today's
+idempotent start/resume behavior.
+
+`scripts/team-launcher` remains the compatibility wrapper used by existing PGU
+pane commands. It starts, attaches, or reloads a project team from a JSON config.
+The default PGU config is `config/team-launcher/pgu.json`. PGU starts six
+visible roles in a single Konsole layout window and starts `research` as a
 detached background tmux session. Each role pane starts in the shared checkout
-at `/home/agent/Projects/pgu`; feature work still happens in explicit
-per-ticket worktrees created outside the launcher.
+at `/home/agent/Projects/pgu`; feature work still happens in explicit per-ticket
+worktrees created outside the launcher.
 
 The executable wrapper runs as the user who invoked it by default. A project
 may opt into a dedicated runtime account with `run_as_user`; when that key is
@@ -251,43 +258,33 @@ the visible launch window remains a six-pane operator layout.
 
 ## New Project
 
-For a new project, first write the design document and post-design project
-artifact:
+Run new-project setup through the zero-parameter surface:
 
 ```bash
-scripts/team-launcher porter design \
-  --design-output-dir /tmp/porter-design \
-  --repository /home/otto-agent/Projects/porter \
-  --owner-user otto-agent \
-  --ticket-prefix PORT
+sudo ./switchyard new
 ```
 
-`design` does not create users, start panes, touch tmux, provision a board, or
-run privileged commands. It writes `<slug>-design.md` plus
-`<slug>.project.json`. The artifact records the post-design answers: code
-location, remote, default branch, worktree policy, slug, ticket prefix, owner
-user and capability grants, push policy, and project gates. It deliberately
-does not ask for stages or extra implementer roles; new projects start with the
-default five-stage workflow and are specialized later by the live director.
+`new` prompts for slug, agent name, and project name, shows the derived path
+`/home/<agent>-agent/Projects/<slug>`, then asks for confirmation before writing.
+If it is not run with sudo/root privileges, it fails before creating files or
+users. The project name `new` is reserved for the command; a project literally
+named "New" must be opened by its slug from the project list.
 
-Then generate a complete project config and provisioning plan from that
-reviewed artifact:
+After confirmation, `new` creates `<agent>-agent`, creates the derived project
+directory, launches a standalone designer CLI as that user from that exact
+directory, and immediately verifies the Claude session directory under
+`~/.claude/projects/<escaped-cwd>/`. The designer writes the design document and
+the `switchyard.project.v1` artifact. That artifact may include the implementer
+roles selected with the user; it still must not preconfigure workflow stages or
+transitions.
+
+The same provision path consumes generated and hand-written artifacts:
 
 ```bash
-scripts/team-launcher porter new \
-  --from /tmp/porter-design/porter.project.json \
-  --source-repo /home/agent/Projects/pgu \
-  --new-output-dir /tmp/porter \
-  --dry-run
+sudo ./switchyard new --from /path/to/porter.project.json --yes
 ```
 
-The dry run writes a launchable config, Konsole layout, board provisioning SQL,
-systemd units, and `operator-commands.sh` without running privileged steps. Review
-the generated artifacts, then rerun with `--execute` when the project should be
-provisioned.
-
-`--source-repo` is the checkout that exports the board and launcher tooling for
-provisioning. The artifact's `repository` is the project checkout opened by the
-generated team panes, and it must already exist. Dry-run rendering can happen
-before the owner user exists; `--execute` still requires the owner user to
-exist until user creation is implemented in `new`.
+The artifact's `repository` is the project checkout opened by the generated team
+panes. The generated director role receives onboarding paths in its environment;
+the director owns the unprivileged half after the board exists: seed the board,
+launch panes, onboard the team, and reshape stages or roles later if needed.

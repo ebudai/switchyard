@@ -81,6 +81,9 @@ from scripts.team_launcher import (
     seed_session_dir_from_legacy_sources,
     session_id_for_role,
     session_file_name,
+    switchyard_main,
+    switchyard_menu_command,
+    switchyard_new_command,
     worktree_ref,
 )
 
@@ -2430,7 +2433,7 @@ def test_removed_bootstrap_command_names_new_as_replacement() -> None:
         message = str(exc)
 
     assert "bootstrap has been removed" in message
-    assert "team-launcher porter new --repository <project-checkout> --dry-run --new-output-dir <dir>" in message
+    assert "switchyard new" in message
 
 
 def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
@@ -2497,23 +2500,21 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
     assert config["board_socket"] == "/run/porter-ticket-board/ticket-board.sock"
     assert config["repository"] == str(project_repo)
     assert config["repository"] != str(source_repo)
-    assert [role["role"] for role in config["roles"]] == ["designer", "director", "audit", "ops"]
+    assert [role["role"] for role in config["roles"]] == ["director", "audit", "ops"]
     assert [role["tmux_session"] for role in config["roles"]] == [
-        "porter-designer",
         "porter-director",
         "porter-audit",
         "porter-ops",
     ]
     assert {role["role"]: role["cli"] for role in config["roles"]} == {
-        "designer": ["claude"],
         "director": ["claude"],
         "audit": ["claude"],
         "ops": ["codex"],
     }
-    assert len(team_launcher._layout_leaves(layout)) == 4
-    assert [role.role for role in loaded_config.roles] == ["designer", "director", "audit", "ops"]
-    assert loaded_config.roles[0].target == "porter-designer:0.0"
-    assert loaded_config.roles[3].target == "porter-ops:0.0"
+    assert len(team_launcher._layout_leaves(layout)) == 3
+    assert [role.role for role in loaded_config.roles] == ["director", "audit", "ops"]
+    assert loaded_config.roles[0].target == "porter-director:0.0"
+    assert loaded_config.roles[2].target == "porter-ops:0.0"
     assert all(role.workdir == str(project_repo) for role in loaded_config.roles)
     assert {role.env["TICKET_BOARD_TICKET_PREFIX"] for role in loaded_config.roles} == {"PORTER"}
     assert commands.splitlines()[:2] == ["#!/usr/bin/env bash", "set -euo pipefail"]
@@ -2526,12 +2527,11 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
     assert launch_plan["project"] == "porter"
     assert launch_plan["mode"] == "attach-or-start"
     assert [role["target"] for role in launch_plan["roles"]] == [
-        "porter-designer:0.0",
         "porter-director:0.0",
         "porter-audit:0.0",
         "porter-ops:0.0",
     ]
-    assert [role["workdir"] for role in launch_plan["roles"]] == [str(project_repo)] * 4
+    assert [role["workdir"] for role in launch_plan["roles"]] == [str(project_repo)] * 3
     assert launch_output_exists
 
 
@@ -2670,6 +2670,242 @@ def test_design_cli_writes_project_artifact_noninteractively() -> None:
     assert artifact.owner_user == "pgu647-missing-agent"
 
 
+def test_switchyard_menu_lists_new_first_then_projects() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-menu.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        (tmp_path / "porter.json").write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "project_name": "Porter System",
+                    "layout": str(layout),
+                    "roles": [{"role": "director", "slot": 0, "cli": ["claude"]}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        lines: list[str] = []
+
+        assert switchyard_menu_command(config_dir=tmp_path, print_func=lines.append) == 0
+
+    assert lines == ["new...", "Porter System (porter)"]
+
+
+def test_switchyard_project_name_argv_joins_and_resumes_matching_project() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-open.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "project_name": "My Project Name",
+                    "layout": str(layout),
+                    "roles": [{"role": "director", "slot": 0, "cli": ["claude"]}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        calls: list[dict[str, object]] = []
+        original_config_dir = team_launcher.DEFAULT_CONFIG_DIR
+        original_launch_project = team_launcher.launch_project
+        try:
+            team_launcher.DEFAULT_CONFIG_DIR = tmp_path
+
+            def fake_launch_project(config: team_launcher.ProjectConfig, **kwargs: object) -> int:
+                calls.append({"project": config.project, **kwargs})
+                return 0
+
+            team_launcher.launch_project = fake_launch_project
+            assert switchyard_main(["my", "project", "name"]) == 0
+        finally:
+            team_launcher.DEFAULT_CONFIG_DIR = original_config_dir
+            team_launcher.launch_project = original_launch_project
+
+    assert calls
+    assert calls[0]["project"] == "porter"
+    assert calls[0]["config_path"] == config_path
+    assert calls[0]["mode"] == "start"
+
+
+def test_switchyard_new_without_sudo_fails_before_writing() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new.") as tmp:
+        tmp_path = Path(tmp)
+        home_base = tmp_path / "home"
+        output_dir = tmp_path / "out"
+        calls: list[list[str]] = []
+
+        try:
+            switchyard_new_command(
+                slug="porter",
+                agent_name="otto",
+                project_name="Porter System",
+                output_dir=output_dir,
+                yes=True,
+                home_base=home_base,
+                euid_getter=lambda: 1000,
+                runner=lambda args, **_kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0),
+            )
+            raise AssertionError("expected sudo precheck failure")
+        except SystemExit as exc:
+            message = str(exc)
+
+    assert "requires sudo" in message
+    assert not output_dir.exists()
+    assert not (home_base / "otto-agent" / "Projects" / "porter").exists()
+    assert calls == []
+
+
+def test_switchyard_designer_session_cwd_guard_accepts_expected_session_dir() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-session-cwd.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        project_dir = owner_home / "Projects" / "porter"
+        session_dir = team_launcher._claude_project_session_dir(owner_home, project_dir)
+
+        assert (
+            team_launcher._verify_designer_session_cwd(
+                owner_home=owner_home,
+                project_dir=project_dir,
+                exists=lambda path: path == session_dir,
+            )
+            == session_dir
+        )
+
+
+def test_switchyard_designer_session_cwd_guard_rejects_missing_session_dir() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-session-cwd.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        project_dir = owner_home / "Projects" / "porter"
+        session_dir = team_launcher._claude_project_session_dir(owner_home, project_dir)
+
+        try:
+            team_launcher._verify_designer_session_cwd(
+                owner_home=owner_home,
+                project_dir=project_dir,
+                exists=lambda _path: False,
+            )
+            raise AssertionError("expected missing designer session cwd failure")
+        except SystemExit as exc:
+            message = str(exc)
+
+    assert str(session_dir) in message
+    assert str(project_dir) in message
+    assert "would not resume" in message
+
+
+def test_switchyard_new_launches_designer_from_derived_cwd_and_starts_director() -> None:
+    class NewProjectRunner(FakeRunner):
+        def __init__(self, home_base: Path) -> None:
+            super().__init__()
+            self.home_base = home_base
+            self.call_kwargs: list[dict[str, object]] = []
+            self.designer_cwd = ""
+
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.call_kwargs.append(dict(kwargs))
+            self.calls.append(args)
+            if args[:2] == ["id", "-u"]:
+                return subprocess.CompletedProcess(args, 1)
+            if args[:1] == ["useradd"]:
+                return subprocess.CompletedProcess(args, 0)
+            if args[:1] == ["install"]:
+                return subprocess.CompletedProcess(args, 0)
+            if args[:5] == ["sudo", "-u", "otto-agent", "-H", "env"] and args[-1] == "claude":
+                cwd = Path(str(kwargs["cwd"]))
+                self.designer_cwd = str(cwd)
+                env_values = {
+                    item.split("=", 1)[0]: item.split("=", 1)[1]
+                    for item in args
+                    if item.startswith("SWITCHYARD_") and "=" in item
+                }
+                artifact_path = Path(env_values["SWITCHYARD_PROJECT_ARTIFACT"])
+                design_doc = Path(env_values["SWITCHYARD_PROJECT_DESIGN"])
+                design_doc.write_text("# Porter System\n\nDesigned.\n", encoding="utf-8")
+                artifact_path.parent.mkdir(parents=True, exist_ok=True)
+                artifact_path.write_text(
+                    json.dumps(
+                        {
+                            "schema": "switchyard.project.v1",
+                            "design_document": str(design_doc),
+                            "project": {
+                                "slug": "porter",
+                                "name": "Porter System",
+                                "ticket_prefix": "PORT",
+                                "owner_user": "otto-agent",
+                                "repository": str(cwd),
+                                "roles": ["ops", "app"],
+                            },
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                session_dir = team_launcher._claude_project_session_dir(self.home_base / "otto-agent", cwd)
+                session_dir.mkdir(parents=True, exist_ok=True)
+                (session_dir / "session.jsonl").write_text("{}\n", encoding="utf-8")
+                return subprocess.CompletedProcess(args, 0)
+            return super().__call__(args, **kwargs)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new.") as tmp:
+        tmp_path = Path(tmp)
+        home_base = tmp_path / "home"
+        output_dir = tmp_path / "out"
+        pane_state_dir = tmp_path / "pane-state"
+        source_repo = tmp_path / "source-repo"
+        source_repo.mkdir()
+        runner = NewProjectRunner(home_base)
+        stdout = StringIO()
+
+        with redirect_stdout(stdout):
+            assert (
+                switchyard_new_command(
+                    slug="porter",
+                    agent_name="otto",
+                    project_name="Porter System",
+                    source_repo=source_repo,
+                    output_dir=output_dir,
+                    yes=True,
+                    home_base=home_base,
+                    euid_getter=lambda: 0,
+                    runner=runner,
+                    pane_state_dir=pane_state_dir,
+                    port_in_use=lambda _port: False,
+                    socket_exists=lambda _path: False,
+                )
+                == 0
+            )
+
+        project_dir = home_base / "otto-agent" / "Projects" / "porter"
+        designer_call_index = next(
+            index for index, call in enumerate(runner.calls) if call[:5] == ["sudo", "-u", "otto-agent", "-H", "env"] and call[-1] == "claude"
+        )
+        chown_call_index = next(index for index, call in enumerate(runner.calls) if call[:2] == ["chown", "-R"])
+        config = json.loads((output_dir / "porter.json").read_text(encoding="utf-8"))
+        plan = json.loads((output_dir / "plan.json").read_text(encoding="utf-8"))
+        director_env = next(role["env"] for role in config["roles"] if role["role"] == "director")
+        session_dir = home_base / "otto-agent" / ".claude" / "projects" / team_launcher._claude_project_key(project_dir)
+
+        assert runner.designer_cwd == str(project_dir)
+        assert chown_call_index < designer_call_index
+        assert session_dir.is_dir()
+        assert plan["implementer_roles"] == ["ops", "app"]
+        assert [role["role"] for role in config["roles"]] == ["director", "audit", "ops", "app"]
+        assert director_env["SWITCHYARD_PROJECT_DESIGN"] == str(project_dir / "PROJECT_DESIGN.md")
+        assert director_env["SWITCHYARD_DIRECTOR_ONBOARDING"].endswith("DIRECTOR_ONBOARDING.md")
+        assert any(call[:2] == ["tmux", "new-session"] and "porter-director" in call for call in runner.calls)
+        assert "switchyard: verified designer session cwd" in stdout.getvalue()
+
+
 def test_new_project_from_handwritten_artifact_uses_same_provision_path() -> None:
     current_user = team_launcher.current_user_name()
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-design.") as tmp:
@@ -2740,7 +2976,55 @@ def test_new_project_from_handwritten_artifact_uses_same_provision_path() -> Non
     assert not any(call[:1] == ["sudo"] for call in runner.calls)
 
 
-def test_project_artifact_rejects_stage_and_role_configuration() -> None:
+def test_project_artifact_accepts_designer_chosen_roles() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-design.") as tmp:
+        tmp_path = Path(tmp)
+        project_repo = tmp_path / "project-repo"
+        source_repo = tmp_path / "source-repo"
+        project_repo.mkdir()
+        source_repo.mkdir()
+        artifact_path = tmp_path / "atlas.project.json"
+        artifact_path.write_text(
+            json.dumps(
+                {
+                    "schema": "switchyard.project.v1",
+                    "design_document": "atlas-design.md",
+                    "project": {
+                        "slug": "atlas",
+                        "name": "Atlas Project",
+                        "ticket_prefix": "ATL",
+                        "owner_user": current_user,
+                        "repository": str(project_repo),
+                        "roles": ["ops", "app"],
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        assert (
+            new_project_command(
+                "atlas",
+                from_artifact=artifact_path,
+                source_repo=source_repo,
+                output_dir=tmp_path / "out",
+                runner=FakeRunner(),
+                port_in_use=lambda _port: False,
+                socket_exists=lambda _path: False,
+            )
+            == 0
+        )
+
+        plan = json.loads((tmp_path / "out" / "plan.json").read_text(encoding="utf-8"))
+        config = json.loads((tmp_path / "out" / "atlas.json").read_text(encoding="utf-8"))
+
+    assert plan["implementer_roles"] == ["ops", "app"]
+    assert [role["role"] for role in config["roles"]] == ["director", "audit", "ops", "app"]
+
+
+def test_project_artifact_rejects_stage_configuration() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-design.") as tmp:
         tmp_path = Path(tmp)
         project_repo = tmp_path / "project-repo"
@@ -2758,7 +3042,7 @@ def test_project_artifact_rejects_stage_and_role_configuration() -> None:
                         "ticket_prefix": "BAD",
                         "owner_user": team_launcher.current_user_name(),
                         "repository": str(project_repo),
-                        "roles": ["director", "ops"],
+                        "stages": ["analysis", "implementation"],
                     },
                 }
             )
@@ -2776,12 +3060,12 @@ def test_project_artifact_rejects_stage_and_role_configuration() -> None:
                 port_in_use=lambda _port: False,
                 socket_exists=lambda _path: False,
             )
-            raise AssertionError("expected artifact role-shaping rejection")
+            raise AssertionError("expected artifact stage-shaping rejection")
         except SystemExit as exc:
             message = str(exc)
 
     assert "must not preconfigure stages or roles" in message
-    assert "project.roles" in message
+    assert "project.stages" in message
 
 
 def test_new_project_requires_project_repository() -> None:

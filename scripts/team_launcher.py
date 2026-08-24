@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import pwd
+import shutil
 import shlex
 import socket
 import subprocess
@@ -18,6 +19,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from scripts.ticket_board.project_provision import (
+    DEFAULT_PROJECT_IMPLEMENTER_ROLES,
     ProjectBoardProvision,
     build_plan,
     validate_ticket_prefix,
@@ -25,13 +27,13 @@ from scripts.ticket_board.project_provision import (
 )
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "team-launcher"
+SWITCHYARD_NAME = "switchyard"
+TEAM_LAUNCHER_NAME = "team-launcher"
 DEFAULT_LEGACY_RUNTIME_SESSION_DIR = Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-sessions")
 GENERIC_DEFAULT_STATE_DIR_NAME = "ticket-board"
 LIVE_PGU_STATE_DIR_NAME = "pgu-ticket-board"
 REMOVED_CONFIG_FREE_COMMANDS = frozenset({"bootstrap"})
-BOOTSTRAP_REPLACEMENT_COMMAND = (
-    "team-launcher <project> new --repository <project-checkout> --dry-run --new-output-dir <dir>"
-)
+BOOTSTRAP_REPLACEMENT_COMMAND = "switchyard new"
 PROJECT_DESIGN_ARTIFACT_SCHEMA = "switchyard.project.v1"
 PROJECT_DESIGN_DEFAULT_GATES = {
     "audit_signoff": True,
@@ -46,16 +48,18 @@ PROJECT_DESIGN_DEFAULT_CAPABILITY_GRANTS = {
 }
 PROJECT_DESIGN_FORBIDDEN_KEYS = frozenset(
     {
-        "roles",
         "stages",
         "workflow",
         "workflow_stages",
         "workflow_transitions",
-        "implementer_roles",
         "extra_implementer_roles",
     }
 )
 WORKTREE_POLICIES = frozenset({"shared", "isolated"})
+SWITCHYARD_PROJECT_DIR_NAME = ".switchyard"
+SWITCHYARD_DESIGN_FILE_NAME = "PROJECT_DESIGN.md"
+SWITCHYARD_DESIGN_ONBOARDING_FILE_NAME = "DESIGNER_ONBOARDING.md"
+SWITCHYARD_DIRECTOR_ONBOARDING_FILE_NAME = "DIRECTOR_ONBOARDING.md"
 
 
 def _env_first(*names: str) -> str:
@@ -125,11 +129,9 @@ ALLOW_STALE_LAUNCHER_ENV = "TEAM_LAUNCHER_ALLOW_STALE"
 LEGACY_ALLOW_STALE_LAUNCHER_ENV = "PGU_TEAM_LAUNCHER_ALLOW_STALE"
 NO_LAUNCHER_SELF_DEPLOY_ENV = "TEAM_LAUNCHER_NO_SELF_DEPLOY"
 LEGACY_NO_LAUNCHER_SELF_DEPLOY_ENV = "PGU_TEAM_LAUNCHER_NO_SELF_DEPLOY"
-NEW_PROJECT_DEFAULT_ROLES = (
-    ("designer", "claude"),
+NEW_PROJECT_BASE_ROLES = (
     ("director", "claude"),
     ("audit", "claude"),
-    ("ops", "codex"),
 )
 
 
@@ -182,6 +184,7 @@ class WorktreeProvisionResult:
 @dataclass(frozen=True)
 class ProjectDesignArtifact:
     project: str
+    project_name: str
     ticket_prefix: str
     owner_user: str
     repository: Path
@@ -189,6 +192,7 @@ class ProjectDesignArtifact:
     default_branch: str
     worktree_policy: str
     design_document: Path
+    implementer_roles: tuple[str, ...]
     push_policy: str
     gates: dict[str, bool]
     capability_grants: dict[str, object]
@@ -428,6 +432,32 @@ def _artifact_string(raw: dict[str, Any], key: str, *, path: Path, default: str 
     return value
 
 
+def _artifact_optional_string(raw: dict[str, Any], key: str, *, path: Path, default: str = "") -> str:
+    value = raw.get(key, default)
+    if value is None:
+        return default
+    if not isinstance(value, str):
+        raise SystemExit(f"{path} field {key!r} must be a JSON string")
+    return value.strip() or default
+
+
+def _artifact_role_list(raw: Any, *, path: Path, field: str, defaults: Sequence[str]) -> tuple[str, ...]:
+    if raw is None:
+        return tuple(defaults)
+    if not isinstance(raw, list) or not all(isinstance(item, str) and item.strip() for item in raw):
+        raise SystemExit(f"{path} field {field!r} must be a JSON string list")
+    result: list[str] = []
+    for item in raw:
+        role = item.strip().lower()
+        if role in {"designer", "director", "audit", "user", "unassigned"}:
+            raise SystemExit(f"{path} field {field!r} contains reserved role {role!r}")
+        if role not in result:
+            result.append(role)
+    if not result:
+        raise SystemExit(f"{path} field {field!r} must contain at least one implementer role")
+    return tuple(result)
+
+
 def _artifact_bool_mapping(raw: Any, *, path: Path, field: str, defaults: dict[str, bool]) -> dict[str, bool]:
     if raw is None:
         return dict(defaults)
@@ -492,6 +522,7 @@ def load_project_design_artifact(path: Path, *, expected_project: str | None = N
     slug = _artifact_string(project_raw, "slug", path=artifact_path).lower()
     if expected_project is not None and slug != expected_project:
         raise SystemExit(f"{artifact_path} project slug {slug!r} does not match requested project {expected_project!r}")
+    project_name = _artifact_optional_string(project_raw, "name", path=artifact_path, default=slug)
     ticket_prefix = validate_ticket_prefix(_artifact_string(project_raw, "ticket_prefix", path=artifact_path))
     owner_user = _artifact_string(project_raw, "owner_user", path=artifact_path)
     repository = _expand_path(_artifact_string(project_raw, "repository", path=artifact_path), base=artifact_path.parent)
@@ -501,11 +532,18 @@ def load_project_design_artifact(path: Path, *, expected_project: str | None = N
     if worktree_policy not in WORKTREE_POLICIES:
         raise SystemExit(f"{artifact_path} field 'project.worktree_policy' must be one of {sorted(WORKTREE_POLICIES)}")
     design_document = _expand_path(_artifact_string(raw, "design_document", path=artifact_path), base=artifact_path.parent)
+    implementer_roles = _artifact_role_list(
+        project_raw.get("roles", project_raw.get("implementer_roles")),
+        path=artifact_path,
+        field="project.roles",
+        defaults=DEFAULT_PROJECT_IMPLEMENTER_ROLES,
+    )
     push_policy = _artifact_string(project_raw, "push_policy", path=artifact_path, default="director-main-only")
     gates = _artifact_bool_mapping(project_raw.get("gates"), path=artifact_path, field="project.gates", defaults=PROJECT_DESIGN_DEFAULT_GATES)
     capability_grants = _artifact_capability_grants(project_raw.get("capability_grants"), path=artifact_path)
     return ProjectDesignArtifact(
         project=slug,
+        project_name=project_name,
         ticket_prefix=ticket_prefix,
         owner_user=owner_user,
         repository=repository,
@@ -513,6 +551,7 @@ def load_project_design_artifact(path: Path, *, expected_project: str | None = N
         default_branch=default_branch,
         worktree_policy=worktree_policy,
         design_document=design_document,
+        implementer_roles=implementer_roles,
         push_policy=push_policy,
         gates=gates,
         capability_grants=capability_grants,
@@ -525,12 +564,14 @@ def project_design_artifact_payload(artifact: ProjectDesignArtifact) -> dict[str
         "design_document": str(artifact.design_document),
         "project": {
             "slug": artifact.project,
+            "name": artifact.project_name,
             "ticket_prefix": artifact.ticket_prefix,
             "owner_user": artifact.owner_user,
             "repository": str(artifact.repository),
             "remote": artifact.remote,
             "default_branch": artifact.default_branch,
             "worktree_policy": artifact.worktree_policy,
+            "roles": list(artifact.implementer_roles),
             "push_policy": artifact.push_policy,
             "gates": artifact.gates,
             "capability_grants": artifact.capability_grants,
@@ -2219,6 +2260,7 @@ def design_project_command(
     output_dir: Path | None = None,
     artifact_path: Path | None = None,
     design_document: Path | None = None,
+    project_name: str | None = None,
     design_title: str | None = None,
     design_body: str | None = None,
     repository: Path | None = None,
@@ -2227,6 +2269,7 @@ def design_project_command(
     worktree_policy: str | None = None,
     owner_user: str | None = None,
     ticket_prefix: str | None = None,
+    implementer_roles: Sequence[str] | None = None,
     push_policy: str | None = None,
     audit_signoff: bool | None = None,
     needs_inspection: bool | None = None,
@@ -2246,6 +2289,7 @@ def design_project_command(
     ).expanduser().resolve(strict=False)
 
     title = design_title if design_title is not None else _prompt_text("Design document title", default=f"{project_slug} design", input_func=input_func)
+    resolved_project_name = (project_name or title or project_slug).strip()
     body = design_body if design_body is not None else _prompt_text("Design summary", input_func=input_func)
     repo = repository or Path(_prompt_text("Code location", input_func=input_func))
     resolved_remote = remote or _prompt_text("Remote", default="origin", input_func=input_func)
@@ -2283,6 +2327,7 @@ def design_project_command(
     }
     artifact = ProjectDesignArtifact(
         project=project_slug,
+        project_name=resolved_project_name,
         ticket_prefix=resolved_prefix,
         owner_user=resolved_owner,
         repository=repo.expanduser().resolve(strict=False),
@@ -2290,6 +2335,7 @@ def design_project_command(
         default_branch=resolved_branch,
         worktree_policy=resolved_policy,
         design_document=target_design_document,
+        implementer_roles=tuple(implementer_roles or DEFAULT_PROJECT_IMPLEMENTER_ROLES),
         push_policy=resolved_push_policy,
         gates=gates,
         capability_grants=grants,
@@ -2340,14 +2386,29 @@ def _new_project_launcher_config_payload(
     plan: ProjectBoardProvision,
     *,
     repository: Path,
+    project_name: str | None = None,
+    design_document: Path | None = None,
+    director_onboarding: Path | None = None,
+    implementer_roles: Sequence[str] = DEFAULT_PROJECT_IMPLEMENTER_ROLES,
     remote: str = "origin",
     default_branch: str = "main",
     worktree_policy: str = "shared",
 ) -> dict[str, Any]:
     layout_name = f"{plan.project}-konsole-layout.json"
+    role_defs = [*NEW_PROJECT_BASE_ROLES, *((role, "codex") for role in implementer_roles)]
     roles = [
         {
             "cli": [cli],
+            **(
+                {
+                    "env": {
+                        "SWITCHYARD_DIRECTOR_ONBOARDING": str(director_onboarding),
+                        "SWITCHYARD_PROJECT_DESIGN": str(design_document),
+                    }
+                }
+                if role == "director" and director_onboarding is not None and design_document is not None
+                else {}
+            ),
             "live_commands": [cli],
             "role": role,
             "slot": index,
@@ -2355,10 +2416,11 @@ def _new_project_launcher_config_payload(
             "tmux_session": f"{plan.project}-{role}",
             "yolo": True,
         }
-        for index, (role, cli) in enumerate(NEW_PROJECT_DEFAULT_ROLES)
+        for index, (role, cli) in enumerate(role_defs)
     ]
     return {
         "project": plan.project,
+        **({"project_name": project_name} if project_name else {}),
         "ticket_prefix": plan.ticket_prefix,
         "layout": layout_name,
         "repository": str(repository),
@@ -2382,14 +2444,19 @@ def write_new_project_launcher_artifacts(
     output_dir: Path,
     *,
     repository: Path,
+    project_name: str | None = None,
+    design_document: Path | None = None,
+    director_onboarding: Path | None = None,
+    implementer_roles: Sequence[str] = DEFAULT_PROJECT_IMPLEMENTER_ROLES,
     remote: str = "origin",
     default_branch: str = "main",
     worktree_policy: str = "shared",
 ) -> Path:
+    role_count = len(NEW_PROJECT_BASE_ROLES) + len(tuple(implementer_roles))
     config_path = output_dir / f"{plan.project}.json"
     layout_path = output_dir / f"{plan.project}-konsole-layout.json"
     layout_path.write_text(
-        json.dumps(_new_project_layout_payload(len(NEW_PROJECT_DEFAULT_ROLES)), indent=2, sort_keys=True) + "\n",
+        json.dumps(_new_project_layout_payload(role_count), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     config_path.write_text(
@@ -2397,6 +2464,10 @@ def write_new_project_launcher_artifacts(
             _new_project_launcher_config_payload(
                 plan,
                 repository=repository,
+                project_name=project_name,
+                design_document=design_document,
+                director_onboarding=director_onboarding,
+                implementer_roles=implementer_roles,
                 remote=remote,
                 default_branch=default_branch,
                 worktree_policy=worktree_policy,
@@ -2537,11 +2608,13 @@ def new_project_command(
     source_repo: Path | None = None,
     repository: Path | None = None,
     output_dir: Path | None = None,
+    director_onboarding: Path | None = None,
     execute: bool = False,
     dry_run: bool = False,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     port_in_use: Callable[[int], bool] = _tcp_port_in_use,
     socket_exists: Callable[[Path], bool] = _path_exists,
+    require_owner_user: bool | None = None,
 ) -> int:
     if execute and dry_run:
         raise SystemExit("team-launcher: --execute and --dry-run are mutually exclusive")
@@ -2556,6 +2629,9 @@ def new_project_command(
         default_branch = design_artifact.default_branch
         worktree_policy = design_artifact.worktree_policy
         ticket_prefix = design_artifact.ticket_prefix
+        project_name = design_artifact.project_name
+        design_document = design_artifact.design_document
+        implementer_roles = design_artifact.implementer_roles
     else:
         if repository is None:
             raise SystemExit("team-launcher: new project requires --repository for the project's working checkout")
@@ -2565,6 +2641,9 @@ def new_project_command(
         default_branch = "main"
         worktree_policy = "shared"
         ticket_prefix = None
+        project_name = project
+        design_document = None
+        implementer_roles = DEFAULT_PROJECT_IMPLEMENTER_ROLES
     if worktree_policy not in WORKTREE_POLICIES:
         raise SystemExit(f"team-launcher: worktree policy must be one of {sorted(WORKTREE_POLICIES)}")
     plan = build_plan(
@@ -2574,6 +2653,7 @@ def new_project_command(
         database=database,
         source_repo=effective_source_repo,
         ticket_prefix=ticket_prefix,
+        implementer_roles=implementer_roles,
     )
     precheck_new_project(
         plan,
@@ -2582,7 +2662,7 @@ def new_project_command(
         runner=runner,
         port_in_use=port_in_use,
         socket_exists=socket_exists,
-        require_owner_user=execute,
+        require_owner_user=execute if require_owner_user is None else require_owner_user,
     )
     artifact_dir = (output_dir or _new_project_artifact_dir(plan.project)).expanduser().resolve(strict=False)
     write_artifacts(plan, artifact_dir)
@@ -2590,6 +2670,10 @@ def new_project_command(
         plan,
         artifact_dir,
         repository=effective_repository,
+        project_name=project_name,
+        design_document=design_document,
+        director_onboarding=director_onboarding,
+        implementer_roles=implementer_roles,
         remote=remote,
         default_branch=default_branch,
         worktree_policy=worktree_policy,
@@ -2615,6 +2699,399 @@ def new_project_command(
     if result.returncode != 0:
         raise SystemExit(f"team-launcher: provisioning failed with exit status {result.returncode}")
     print(f"team-launcher: provisioned {plan.project}; launcher config {config_path}")
+    return 0
+
+
+@dataclass(frozen=True)
+class SwitchyardProjectEntry:
+    slug: str
+    name: str
+    config_path: Path
+
+
+def _slug_from_project_name(name: str) -> str:
+    slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in name.strip())
+    slug = "-".join(part for part in slug.split("-") if part)
+    if not slug:
+        raise SystemExit("switchyard: project slug cannot be empty")
+    return slug
+
+
+def _agent_owner_user(agent_name: str) -> str:
+    agent = agent_name.strip()
+    if not agent:
+        raise SystemExit("switchyard: agent name cannot be empty")
+    return agent if agent.endswith("-agent") else f"{agent}-agent"
+
+
+def _project_dir(home_base: Path, owner_user: str, slug: str) -> Path:
+    return home_base / owner_user / "Projects" / slug
+
+
+def _switchyard_dir(project_dir: Path) -> Path:
+    return project_dir / SWITCHYARD_PROJECT_DIR_NAME
+
+
+def _claude_project_key(cwd: Path) -> str:
+    return str(cwd.expanduser().resolve(strict=False)).replace("/", "-")
+
+
+def _claude_project_session_dir(owner_home: Path, cwd: Path) -> Path:
+    return owner_home / ".claude" / "projects" / _claude_project_key(cwd)
+
+
+def _write_switchyard_onboarding_files(
+    *,
+    project_name: str,
+    slug: str,
+    owner_user: str,
+    project_dir: Path,
+    artifact_path: Path,
+    design_document: Path,
+    director_onboarding: Path,
+) -> None:
+    switchyard_dir = _switchyard_dir(project_dir)
+    switchyard_dir.mkdir(parents=True, exist_ok=True)
+    designer_onboarding = switchyard_dir / SWITCHYARD_DESIGN_ONBOARDING_FILE_NAME
+    designer_onboarding.write_text(
+        "\n".join(
+            [
+                f"# {project_name} Switchyard Design Session",
+                "",
+                f"Working directory: {project_dir}",
+                f"Project slug: {slug}",
+                f"Owner user: {owner_user}",
+                f"Design document: {design_document}",
+                f"Project artifact: {artifact_path}",
+                "",
+                "Create the design document, then write the project artifact using schema switchyard.project.v1.",
+                "The artifact may include project.roles for the implementer roles selected with the user.",
+                "Do not create workflow stages or workflow transitions in the artifact; the director handles that live.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    director_onboarding.write_text(
+        "\n".join(
+            [
+                f"# {project_name} Director Onboarding",
+                "",
+                f"Project directory: {project_dir}",
+                f"Design document: {design_document}",
+                f"Project artifact: {artifact_path}",
+                "",
+                "You own the unprivileged half: seed the board, launch the panes, onboard the team,",
+                "and reshape stages or roles later through the live board if the user asks.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def _chown_switchyard_project_files(
+    *,
+    owner_user: str,
+    project_dir: Path,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> None:
+    result = runner(["chown", "-R", f"{owner_user}:{owner_user}", str(_switchyard_dir(project_dir))])
+    if result.returncode != 0:
+        raise SystemExit(f"switchyard: failed to assign {_switchyard_dir(project_dir)} to {owner_user}")
+
+
+def _owner_project_install_args(owner_user: str, project_dir: Path, *, shell: str = "fish") -> list[list[str]]:
+    home = project_dir.parents[1]
+    shell_path = shutil.which(shell) or f"/usr/bin/{shell}"
+    return [
+        ["id", "-u", owner_user],
+        ["useradd", "-m", "-s", shell_path, owner_user],
+        ["install", "-d", "-m", "0755", "-o", owner_user, "-g", owner_user, str(home / "Projects"), str(project_dir)],
+    ]
+
+
+def _ensure_owner_user_and_project_dir(
+    owner_user: str,
+    project_dir: Path,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    shell: str = "fish",
+) -> None:
+    id_args, useradd_args, install_args = _owner_project_install_args(owner_user, project_dir, shell=shell)
+    id_result = runner(id_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if id_result.returncode != 0:
+        useradd_result = runner(useradd_args)
+        if useradd_result.returncode != 0:
+            raise SystemExit(f"switchyard: failed to create user {owner_user!r}")
+    install_result = runner(install_args)
+    if install_result.returncode != 0:
+        raise SystemExit(f"switchyard: failed to create project directory {project_dir}")
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _designer_launch_args(
+    *,
+    owner_user: str,
+    slug: str,
+    project_name: str,
+    project_dir: Path,
+    artifact_path: Path,
+    design_document: Path,
+    designer_cli: str = "claude",
+) -> list[str]:
+    return [
+        "sudo",
+        "-u",
+        owner_user,
+        "-H",
+        "env",
+        f"SWITCHYARD_PROJECT_SLUG={slug}",
+        f"SWITCHYARD_PROJECT_NAME={project_name}",
+        f"SWITCHYARD_PROJECT_ARTIFACT={artifact_path}",
+        f"SWITCHYARD_PROJECT_DESIGN={design_document}",
+        f"SWITCHYARD_DESIGNER_ONBOARDING={_switchyard_dir(project_dir) / SWITCHYARD_DESIGN_ONBOARDING_FILE_NAME}",
+        designer_cli,
+    ]
+
+
+def _launch_designer(
+    *,
+    owner_user: str,
+    slug: str,
+    project_name: str,
+    project_dir: Path,
+    artifact_path: Path,
+    design_document: Path,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    designer_cli: str = "claude",
+) -> None:
+    result = runner(
+        _designer_launch_args(
+            owner_user=owner_user,
+            slug=slug,
+            project_name=project_name,
+            project_dir=project_dir,
+            artifact_path=artifact_path,
+            design_document=design_document,
+            designer_cli=designer_cli,
+        ),
+        cwd=str(project_dir),
+    )
+    if result.returncode != 0:
+        raise SystemExit(f"switchyard: designer exited with status {result.returncode}")
+
+
+def _verify_designer_session_cwd(
+    *,
+    owner_home: Path,
+    project_dir: Path,
+    exists: Callable[[Path], bool] | None = None,
+) -> Path:
+    session_dir = _claude_project_session_dir(owner_home, project_dir)
+    if not (exists or _path_exists)(session_dir):
+        raise SystemExit(
+            "switchyard: designer session was not recorded under "
+            f"{session_dir}; refusing to continue because the session would not resume from {project_dir}"
+        )
+    return session_dir
+
+
+def _project_entries(config_dir: Path | None = None) -> list[SwitchyardProjectEntry]:
+    config_dir = config_dir or DEFAULT_CONFIG_DIR
+    entries: list[SwitchyardProjectEntry] = []
+    try:
+        paths = sorted(path for path in config_dir.iterdir() if path.is_file() and path.suffix == ".json")
+    except OSError:
+        return []
+    for path in paths:
+        try:
+            raw = _load_json(path)
+        except (OSError, json.JSONDecodeError, SystemExit):
+            continue
+        roles_raw = raw.get("roles")
+        if not isinstance(roles_raw, list) or not roles_raw:
+            continue
+        slug = str(raw.get("project") or path.stem).strip()
+        if not slug:
+            continue
+        name = str(raw.get("project_name") or raw.get("name") or slug).strip() or slug
+        entries.append(SwitchyardProjectEntry(slug=slug, name=name, config_path=path))
+    return entries
+
+
+def switchyard_menu_command(
+    *,
+    config_dir: Path | None = None,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    print_func("new...")
+    for entry in _project_entries(config_dir):
+        suffix = f" ({entry.slug})" if entry.name.casefold() != entry.slug.casefold() else ""
+        print_func(f"{entry.name}{suffix}")
+    return 0
+
+
+def _resolve_switchyard_project(selection: str, *, config_dir: Path | None = None) -> SwitchyardProjectEntry:
+    wanted = selection.strip().casefold()
+    if not wanted:
+        raise SystemExit("switchyard: project name cannot be empty")
+    entries = _project_entries(config_dir)
+    exact = [
+        entry
+        for entry in entries
+        if entry.name.casefold() == wanted or entry.slug.casefold() == wanted
+    ]
+    if len(exact) == 1:
+        return exact[0]
+    if len(exact) > 1:
+        raise SystemExit(f"switchyard: project selector {selection!r} is ambiguous")
+    fallback = [entry for entry in entries if _slug_from_project_name(entry.name).casefold() == wanted]
+    if len(fallback) == 1:
+        return fallback[0]
+    raise SystemExit(f"switchyard: unknown project {selection!r}")
+
+
+def _confirm_switchyard_new(
+    *,
+    slug: str,
+    owner_user: str,
+    project_name: str,
+    project_dir: Path,
+    yes: bool,
+    input_func: Callable[[str], str],
+    print_func: Callable[[str], None],
+) -> None:
+    print_func(f"switchyard: project name: {project_name}")
+    print_func(f"switchyard: slug: {slug}")
+    print_func(f"switchyard: owner user: {owner_user}")
+    print_func(f"switchyard: derived path: {project_dir}")
+    if yes:
+        return
+    answer = input_func("Proceed? [y/N]: ").strip().lower()
+    if answer not in {"y", "yes"}:
+        raise SystemExit("switchyard: cancelled")
+
+
+def switchyard_new_command(
+    *,
+    slug: str | None = None,
+    agent_name: str | None = None,
+    project_name: str | None = None,
+    from_artifact: Path | None = None,
+    source_repo: Path | None = None,
+    output_dir: Path | None = None,
+    port: int | None = None,
+    database: str | None = None,
+    yes: bool = False,
+    home_base: Path = Path("/home"),
+    euid_getter: Callable[[], int] = os.geteuid,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    port_in_use: Callable[[int], bool] = _tcp_port_in_use,
+    socket_exists: Callable[[Path], bool] = _path_exists,
+    session_dir_exists: Callable[[Path], bool] | None = None,
+    pane_state_dir: Path | None = None,
+    input_func: Callable[[str], str] = input,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    if from_artifact is not None:
+        artifact = load_project_design_artifact(from_artifact)
+        resolved_slug = artifact.project
+        resolved_project_name = artifact.project_name
+        owner_user = artifact.owner_user
+        project_dir = artifact.repository
+    else:
+        resolved_slug = _slug_from_project_name(slug or _prompt_text("Slug", input_func=input_func))
+        raw_agent = agent_name or _prompt_text("Agent name", default=resolved_slug, input_func=input_func)
+        owner_user = _agent_owner_user(raw_agent)
+        resolved_project_name = (project_name or _prompt_text("Project name", default=resolved_slug, input_func=input_func)).strip()
+        project_dir = _project_dir(home_base, owner_user, resolved_slug)
+    _confirm_switchyard_new(
+        slug=resolved_slug,
+        owner_user=owner_user,
+        project_name=resolved_project_name,
+        project_dir=project_dir,
+        yes=yes,
+        input_func=input_func,
+        print_func=print_func,
+    )
+    if euid_getter() != 0:
+        raise SystemExit("switchyard: new requires sudo; re-run as `sudo ./switchyard new`")
+
+    owner_home = home_base / owner_user
+    artifact_path = (from_artifact or (_switchyard_dir(project_dir) / f"{resolved_slug}.project.json")).expanduser().resolve(strict=False)
+    design_document = project_dir / SWITCHYARD_DESIGN_FILE_NAME
+    director_onboarding = _switchyard_dir(project_dir) / SWITCHYARD_DIRECTOR_ONBOARDING_FILE_NAME
+    if from_artifact is None:
+        _ensure_owner_user_and_project_dir(owner_user, project_dir, runner=runner)
+        _write_switchyard_onboarding_files(
+            project_name=resolved_project_name,
+            slug=resolved_slug,
+            owner_user=owner_user,
+            project_dir=project_dir,
+            artifact_path=artifact_path,
+            design_document=design_document,
+            director_onboarding=director_onboarding,
+        )
+        _chown_switchyard_project_files(owner_user=owner_user, project_dir=project_dir, runner=runner)
+        _launch_designer(
+            owner_user=owner_user,
+            slug=resolved_slug,
+            project_name=resolved_project_name,
+            project_dir=project_dir,
+            artifact_path=artifact_path,
+            design_document=design_document,
+            runner=runner,
+        )
+        session_dir = _verify_designer_session_cwd(
+            owner_home=owner_home,
+            project_dir=project_dir,
+            exists=session_dir_exists,
+        )
+        print_func(f"switchyard: verified designer session cwd at {session_dir}")
+    else:
+        project_dir.mkdir(parents=True, exist_ok=True)
+        _write_switchyard_onboarding_files(
+            project_name=resolved_project_name,
+            slug=resolved_slug,
+            owner_user=owner_user,
+            project_dir=project_dir,
+            artifact_path=artifact_path,
+            design_document=load_project_design_artifact(artifact_path).design_document,
+            director_onboarding=director_onboarding,
+        )
+        _chown_switchyard_project_files(owner_user=owner_user, project_dir=project_dir, runner=runner)
+
+    provision_dir = (output_dir or (_switchyard_dir(project_dir) / "provision")).expanduser().resolve(strict=False)
+    result = new_project_command(
+        resolved_slug,
+        from_artifact=artifact_path,
+        source_repo=source_repo,
+        output_dir=provision_dir,
+        director_onboarding=director_onboarding,
+        port=port,
+        database=database,
+        execute=True,
+        runner=runner,
+        port_in_use=port_in_use,
+        socket_exists=socket_exists,
+        require_owner_user=False,
+    )
+    if result != 0:
+        return result
+    config_path = provision_dir / f"{resolved_slug}.json"
+    config = load_project_config(resolved_slug, config_path)
+    director = _role_by_name(config, "director")
+    director_result = run_role_pane(
+        director,
+        mode="start",
+        session_dir=config.session_dir,
+        pane_state_dir=pane_state_dir or DEFAULT_PANE_STATE_DIR,
+        runner=runner,
+    )
+    if director_result != 0:
+        return director_result
+    print_func(f"switchyard: director started for {resolved_slug}")
     return 0
 
 
@@ -2686,6 +3163,48 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-launcher-self-deploy", action="store_true", help="restore refuse-only behavior instead of automatically fast-forwarding a stale launcher checkout")
     parser.add_argument("--skip-launcher-check", action="store_true", help=argparse.SUPPRESS)
     return parser
+
+
+def _build_switchyard_new_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="switchyard new", description="Create a Switchyard project.")
+    parser.add_argument("--slug", help="project slug; prompted when omitted")
+    parser.add_argument("--agent-name", help="base agent name; -agent is appended unless already present")
+    parser.add_argument("--project-name", help="human project name; prompted when omitted")
+    parser.add_argument("--from", dest="from_artifact", type=Path, help="project artifact emitted by the design session")
+    parser.add_argument("--source-repo", type=Path, help="switchyard source checkout to deploy")
+    parser.add_argument("--output-dir", type=Path, help="write provisioning artifacts here")
+    parser.add_argument("--port", type=int, help="HTTP port; omitted means deterministic allocation")
+    parser.add_argument("--database", help="PostgreSQL database; omitted means <slug>_ticket_board")
+    parser.add_argument("--yes", action="store_true", help="proceed without the confirmation prompt")
+    return parser
+
+
+def switchyard_main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv:
+        return switchyard_menu_command()
+    if argv[0].casefold() == "new":
+        args = _build_switchyard_new_parser().parse_args(argv[1:])
+        return switchyard_new_command(
+            slug=args.slug,
+            agent_name=args.agent_name,
+            project_name=args.project_name,
+            from_artifact=args.from_artifact,
+            source_repo=args.source_repo,
+            output_dir=args.output_dir,
+            port=args.port,
+            database=args.database,
+            yes=args.yes,
+        )
+    selection = " ".join(argv)
+    entry = _resolve_switchyard_project(selection)
+    config = load_project_config(entry.slug, entry.config_path)
+    return launch_project(
+        config,
+        config_path=entry.config_path,
+        mode="start",
+        script_path=Path(__file__).resolve().with_name(SWITCHYARD_NAME),
+    )
 
 
 def _reject_removed_commands(argv: Sequence[str]) -> None:

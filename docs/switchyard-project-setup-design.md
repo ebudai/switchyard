@@ -21,15 +21,31 @@ to remove.
 
 ## Shape: three phases
 
-### 1. `design` — produce the artifact
+### 1. `design` — the design document, then the configure questions
 
 New projects only. No tmux, no panes, no board, no privileged steps; it can run before the target
-user exists. Interactive by default; its output is a reviewable file, e.g. `otto.project.json`,
-plus the project's initial design document.
+user exists. Two sub-steps, in order:
 
-It covers **identity, code, policy and the owning user**. It does **not** ask about stages or
-extra roles — those ship as the working five-stage default and are decided later, once the
-director is live (see phase 3).
+**1a. Write the project's design document.** What is being built. This is the part that wants
+thinking time, and it is why the phase exists separately from `new` — it needs no infrastructure.
+
+**1b. Post-design questions.** Once the design is *done enough*, ask the configuration questions
+and emit a reviewable artifact, e.g. `otto.project.json`. These come after 1a deliberately: several
+of them are only answerable once you know what the project is.
+
+Post-design questions cover:
+
+| Question | Notes |
+|---|---|
+| **Code location** | Where the project's own repo lives. Answerable only once the design exists |
+| Remote, default branch | Push target; whether implementers use isolated worktrees |
+| Slug | Drives port, database, socket, unit names |
+| Ticket prefix | Defaults to `PGU` today if unset — see Known gap |
+| Owner user + capability grants | See User creation |
+| Policy | Push rules; which gates apply |
+
+It does **not** ask about stages or extra roles — those ship as the working five-stage default and
+are decided later, once the director is live (see phase 3).
 
 ### 2. `new --from otto.project.json` — provision
 

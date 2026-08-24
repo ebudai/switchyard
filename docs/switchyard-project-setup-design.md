@@ -259,7 +259,20 @@ only outputs are the design document and the artifact.
 
 None. Both are closed (Eric, 2026-08-24):
 
-1. **Project repo path: derived.** `/home/<agent>/Projects/<slug>`. No prompt, no flag.
+1. **Project repo path: derived from the PROJECT NAME**, not the slug:
+   `/home/<agent>/Projects/<slugified project name>`. Corrected after the first live run -- with slug
+   `otto` the path came out `Projects/otto`, which is wrong. The slug is a short machine identifier;
+   the directory should be human-meaningful.
+
+   | Name | Example | Job |
+   |---|---|---|
+   | project name | `Otto Scheduler` | what you type; what `./switchyard <name>` matches |
+   | slug | `otto` | port, database, socket, unit names, ticket prefix |
+   | agent | `otto-agent` | the owning user |
+   | project dir | `/home/otto-agent/Projects/otto-scheduler` | derived from the NAME |
+
+   This is also why prompt order matters: the derived path cannot be shown until the name is known,
+   so the name must be asked FIRST and the slug derived from it.
 2. **Reshape: does not exist.** The director handles changing stages and roles on a live project.
    There is no separate command and no `clone`/`fork`.
 

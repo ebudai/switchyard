@@ -193,8 +193,30 @@ it is not (today's `start` semantics).
 that genuinely differ; otto's slug is `otto` and its code lives in `scheduler`. Then it starts the
 design session.
 
-**The design session decides implementer roles with the user**, and ends by spawning the director
-with the onboarding docs, the design, and what it needs to set up and launch the pane window.
+**`design` is dropped as a separate command.** `new` sets things up far enough for the designer to
+start, and launches it. The designer runs as a normal CLI with **no tmux session**. It decides the
+implementer roles with the user, and when the design is done the director is spawned with the
+onboarding docs, the design, and what it needs to set up and launch the pane window.
+
+### Why the ordering is forced: claude scopes sessions by cwd
+
+Claude Code stores sessions under a directory derived from the working directory:
+
+    cwd /home/agent/Projects/pgu   ->  ~/.claude/projects/-home-agent-Projects-pgu/<session>.jsonl
+    cwd /home/otto-agent           ->  ~/.claude/projects/-home-otto-agent/
+
+Verified on this host. A resume from a different cwd looks in a different directory and does not
+find the session. So the designer **must** be launched from the project's final working directory,
+or its session can never be resumed -- and resume is a hard requirement of this epic.
+
+That forces the sequence, and nothing here is a preference:
+
+1. prompt for slug, agent name, project name
+2. create `<agent-name>-agent` (privileged -- switchyard, not the director)
+3. create the derived project directory in that user's home
+4. launch the designer **as that user, in that directory**
+
+Steps 2 and 3 cannot move after step 4.
 
 Details that follow from the unquoted form:
 
@@ -223,8 +245,6 @@ only outputs are the design document and the artifact.
 
 ## Open questions
 
-1. **Project repo path.** Full derivation gives `/home/<slug>-agent/Projects/<slug>`. Eric wanted
-   otto's code at `Projects/scheduler` -- a name that differs from the slug. Is the derived path the
-   default with renaming handled post-design/by the director, or does the repo name need to survive
-   as an answerable question? UNDECIDED -- Eric is considering.
+1. ~~Project repo path~~ **DECIDED (Eric, 2026-08-24): derived.** `/home/<agent>/Projects/<slug>`.
+   No prompt, no flag.
 2. Naming for the reshape command.

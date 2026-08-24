@@ -159,8 +159,17 @@ Derivations:
 | port / database / socket | already deterministic from slug |
 | ticket prefix | slug, uppercased |
 
-`new` also **creates the user**, which means switchyard is run by a person and sudoes internally --
-not run by an agent account as it is today.
+`new` also **creates the user**, which means switchyard is run by a person, not by an agent account
+as it is today.
+
+It does **not** sudo internally. If `new` is invoked without the privilege to create a user, it
+fails the precheck with a plain error telling the operator to re-run under sudo. That avoids
+partial-privilege states -- no half-provisioned project where the user exists but the units do not --
+and keeps the failure at the precheck, before anything is written.
+
+Implication to honour: run entirely under sudo, everything it creates is root-owned by default.
+The generated block already handles this (`install -o '<user>' -g '<user>'`); whatever replaces it
+must keep that property, or the project user ends up unable to write its own board root.
 
 ### Dry-run becomes a confirmation, not a flag
 

@@ -23,8 +23,13 @@ to remove.
 
 ### 1. `design` — produce the artifact
 
-No tmux, no panes, no board, no privileged steps. It can run before the target user exists.
-Interactive by default; its only output is a reviewable file, e.g. `otto.project.json`.
+New projects only. No tmux, no panes, no board, no privileged steps; it can run before the target
+user exists. Interactive by default; its output is a reviewable file, e.g. `otto.project.json`,
+plus the project's initial design document.
+
+It covers **identity, code, policy and the owning user**. It does **not** ask about stages or
+extra roles — those ship as the working five-stage default and are decided later, once the
+director is live (see phase 3).
 
 ### 2. `new --from otto.project.json` — provision
 
@@ -34,9 +39,13 @@ one-command rollback.
 
 ### 3. Specialize — the director shapes the project
 
-After the team launches, the designer writes the spec, then the director proposes the project's
-real shape: which implementer roles, which stages. An explicit *apply-shape* step updates the
-database rows **and** adds panes.
+After the team launches, the designer writes the spec. Then the **director and the user decide
+together** what the stages and extra implementer roles should be — a discussion, not a proposal
+the human rubber-stamps. An explicit *apply-shape* step then updates the database rows **and**
+adds panes.
+
+This is why `design` does not ask: the questions are better answered against a real spec, with the
+director in the conversation, than as prompts before anything exists.
 
 ### Why an artifact, rather than choosing wizard-or-flags
 
@@ -95,11 +104,29 @@ So the real questions are a short list of capability grants:
 `ticket_prefix` defaults to `'PGU'` and the provisioner never sets it, so **otto's board would
 number its own tickets `PGU-1, PGU-2…`**. The prefix belongs in the design artifact.
 
-## Open questions for Eric
+## Decisions (Eric, 2026-08-24)
 
-1. Does `design` also cover **stage** customisation, or only identity/roles/policy — with stages
-   left to the board panel? Stages are the most structural and the least suited to a prompt.
-2. Should `design` be able to target an **existing** project (re-run to change shape), or is it
-   strictly first-run?
-3. For implementer roles: does the director *propose* and a human approve, or does the director
-   apply directly?
+1. **Stages are not part of `design`.** Ship the defaults; the director and the user decide stages
+   and extra roles once the director is live.
+2. **`design` is for new projects only.** Reshaping an existing project is a separate command.
+3. **Extra implementer roles: same as (1)** — decided in discussion between director and user.
+
+## Reshaping an existing project
+
+A separate command, deliberately. Working name TBD -- `clone`/`fork` read as "copy a project",
+which is not what this does; `reshape` or `configure` says it plainly.
+
+The hard part is not editing rows, it is **in-flight tickets**:
+
+- a stage that is removed or renamed may have tickets sitting in it
+- `workflow_stages.owner_roles` may reference a role being dropped, which is exactly the defect
+  PGU-644 just fixed at provisioning time -- the same hazard exists at reshape time
+- transitions referencing a removed stage leave tickets unable to move
+
+So reshape needs migration semantics, not just an editor: for every ticket in an affected stage,
+where does it go? That is why it is a separate command rather than a flag on `new`, and why it
+should refuse rather than guess.
+
+## Open question
+
+Naming for the reshape command.

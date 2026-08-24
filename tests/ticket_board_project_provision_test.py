@@ -46,9 +46,10 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert plan.service_role == "ticket_board_service"
     assert plan.listener_role == "ticket_board_listener"
     assert plan.workflow_seed == "default-five-stage"
-    assert plan.implementer_roles == ("implementer",)
-    assert plan.assignee_roles == ("unassigned", "implementer", "audit", "director")
-    assert plan.caller_roles == ("director", "implementer", "audit", "user")
+    assert plan.draft_roles == ("designer",)
+    assert plan.implementer_roles == ("ops",)
+    assert plan.assignee_roles == ("unassigned", "designer", "ops", "audit", "director")
+    assert plan.caller_roles == ("director", "designer", "ops", "audit", "user")
 
     combined = "\n".join(
         [
@@ -65,9 +66,10 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "127.0.0.1 --port 8871" in combined
     assert "PGDATABASE=stellaris_ticket_board" in combined
     assert "TICKET_BOARD_SOCKET=/run/stellaris-ticket-board/ticket-board.sock" in combined
-    assert "TICKET_BOARD_IMPLEMENTER_ROLES=implementer" in combined
-    assert "TICKET_BOARD_ASSIGNEES=unassigned,implementer,audit,director" in combined
-    assert "TICKET_BOARD_CALLER_ROLES=director,implementer,audit,user" in combined
+    assert "TICKET_BOARD_DRAFT_ROLES=designer" in combined
+    assert "TICKET_BOARD_IMPLEMENTER_ROLES=ops" in combined
+    assert "TICKET_BOARD_ASSIGNEES=unassigned,designer,ops,audit,director" in combined
+    assert "TICKET_BOARD_CALLER_ROLES=director,designer,ops,audit,user" in combined
     assert "TICKET_BOARD_PANE_STATE_DIR=%t/stellaris-ticket-board/pane-state" in combined
     assert "PGU_TICKET_BOARD_SOCKET=" not in combined
     assert "PGU_TICKET_BOARD_PANE_STATE_DIR=" not in combined
@@ -84,9 +86,11 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert combined.index("scripts/ticket-board-migrate") < combined.index("-f 'stellaris-workflow.sql'")
     assert combined.index("-f 'stellaris-workflow.sql'") < combined.index("ticket_board/rbac.sql")
     assert "Seed the default five-stage workflow for stellaris" in combined
+    assert "('draft', 'Draft', 0, ARRAY['designer']::text[]" in combined
     assert "('analysis', 'Triage', 1, ARRAY['director']::text[]" in combined
-    assert "('in_progress', 'Implementation', 2, ARRAY['implementer']::text[]" in combined
-    assert "ADD CONSTRAINT tickets_assignee_check CHECK (assignee IN ('unassigned', 'implementer', 'audit', 'director'))" in combined
+    assert "('in_progress', 'Implementation', 2, ARRAY['ops']::text[]" in combined
+    assert "('draft', 'analysis', 'release_draft', ARRAY['designer', 'director', 'user']::text[]" in combined
+    assert "ADD CONSTRAINT tickets_assignee_check CHECK (assignee IN ('unassigned', 'designer', 'ops', 'audit', 'director'))" in combined
     assert "('audit', 'director_review', 'audit_sign_off', ARRAY['audit']::text[]" in combined
     assert "('backlog'," not in render_workflow_sql(plan)
     assert "('inspection'," not in render_workflow_sql(plan)
@@ -271,9 +275,11 @@ def test_board_role_environment_drives_python_gate() -> None:
 from scripts.ticket_board import app
 from scripts.ticket_board import server
 
-assert app.ASSIGNEES == ('unassigned', 'builder', 'audit', 'director')
-assert app.CALLER_ROLES == ('director', 'builder', 'audit', 'user')
+assert app.ASSIGNEES == ('unassigned', 'designer', 'builder', 'audit', 'director')
+assert app.CALLER_ROLES == ('director', 'designer', 'builder', 'audit', 'user')
+assert server.DRAFT_ROLES == {'designer'}
 assert server.IMPLEMENTER_ROLES == {'builder'}
+assert server.OPERATION_ALLOWED_ROLES['release_draft'] == {'designer', 'director', 'user'}
 assert server.OPERATION_ALLOWED_ROLES['start_work'] == {'builder'}
 assert server.OPERATION_ALLOWED_ROLES['submit_to_audit'] == {'builder'}
 assert 'builder' in server.OPERATION_ALLOWED_ROLES['file_bug']
@@ -282,8 +288,9 @@ assert 'ops' not in server.OPERATION_ALLOWED_ROLES['start_work']
     env = {
         **os.environ,
         "PYTHONPATH": str(ROOT),
-        "TICKET_BOARD_ASSIGNEES": "unassigned,builder,audit,director",
-        "TICKET_BOARD_CALLER_ROLES": "director,builder,audit,user",
+        "TICKET_BOARD_ASSIGNEES": "unassigned,designer,builder,audit,director",
+        "TICKET_BOARD_CALLER_ROLES": "director,designer,builder,audit,user",
+        "TICKET_BOARD_DRAFT_ROLES": "designer",
         "TICKET_BOARD_IMPLEMENTER_ROLES": "builder",
     }
     subprocess.run([sys.executable, "-c", script], check=True, env=env)

@@ -57,11 +57,12 @@ def _role_set_from_env(name: str, default: tuple[str, ...]) -> set[str]:
 
 
 IMPLEMENTER_ROLES = _role_set_from_env("TICKET_BOARD_IMPLEMENTER_ROLES", DEFAULT_IMPLEMENTER_ROLES)
+DRAFT_ROLES = _role_set_from_env("TICKET_BOARD_DRAFT_ROLES", ())
 TASK_ROLES = IMPLEMENTER_ROLES | {"director", "audit", "inspector"}
 OPERATION_ALLOWED_ROLES = {
     "create_ticket": {"director", "user"},
     "file_bug": IMPLEMENTER_ROLES | {"audit"},
-    "release_draft": {"director", "user"},
+    "release_draft": DRAFT_ROLES | {"director", "user"},
     "route": {"director"},
     "force_move": {"director"},
     "override_move": {"director"},

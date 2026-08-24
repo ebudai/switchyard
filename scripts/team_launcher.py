@@ -97,9 +97,10 @@ LEGACY_ALLOW_STALE_LAUNCHER_ENV = "PGU_TEAM_LAUNCHER_ALLOW_STALE"
 NO_LAUNCHER_SELF_DEPLOY_ENV = "TEAM_LAUNCHER_NO_SELF_DEPLOY"
 LEGACY_NO_LAUNCHER_SELF_DEPLOY_ENV = "PGU_TEAM_LAUNCHER_NO_SELF_DEPLOY"
 NEW_PROJECT_DEFAULT_ROLES = (
+    ("designer", "claude"),
     ("director", "claude"),
-    ("implementer", "codex"),
     ("audit", "claude"),
+    ("ops", "codex"),
 )
 
 

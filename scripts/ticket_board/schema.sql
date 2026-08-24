@@ -832,7 +832,7 @@ LANGUAGE plpgsql
 AS $$
 BEGIN
     IF NEW.state = 'draft' THEN
-        NEW.assignee := 'unassigned';
+        NEW.assignee := coalesce(ticket_board.stage_default_assignee('draft'), 'unassigned');
         NEW.parked := false;
     END IF;
     IF NEW.state = 'in_progress' AND NOT ticket_board.ticket_is_implementer_assignee(NEW.assignee) THEN
@@ -859,7 +859,9 @@ DECLARE
     shadow_actor text;
 BEGIN
     IF NEW.state = 'draft' THEN
-        NEW.assignee := 'unassigned';
+        IF OLD.state IS DISTINCT FROM NEW.state THEN
+            NEW.assignee := 'unassigned';
+        END IF;
         NEW.parked := false;
     END IF;
 

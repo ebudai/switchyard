@@ -181,7 +181,7 @@ Notes:
   structured attachment metadata with `source_path`, `source_name`, and the
   original-pixel crop rectangle.
 - New transitions into `done` require either a verified `commit_hash` or `commit_exempt: true`
-- `draft -> analysis` must use the `release_draft` operation and is restricted to director/User
+- `draft -> analysis` must use the `release_draft` operation and is restricted to director/User plus configured draft-owner roles
 - `analysis -> in_progress` is the default handoff from triage/spec to Implementation
 - Any state can move to `backlog` to defer work; backlog tickets can be revived to `analysis`
 - The default UAT-bound review path is `in_progress -> audit -> DAT (internal state: dat) -> UAT (internal state: user_review) -> director_review -> done`; code-only tickets keep `in_progress -> audit -> director_review -> done`

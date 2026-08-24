@@ -19,7 +19,7 @@ guide. The remaining split is intentional:
 
 - Project: `otto`
 - Project user: `otto-agent`
-- Minimal board roles: `director`, `implementer`, `audit`, plus `user` for
+- Minimal board roles: `designer`, `director`, `audit`, `ops`, plus `user` for
   draft release compatibility.
 - Database: `otto_ticket_board`
 - HTTP port: `20740`
@@ -41,8 +41,9 @@ schema:
 | Final Sign-Off | `director_review` |
 
 PGU-598 seeds those five visible stages for non-`pgu` projects. PGU-599 makes
-the implementation-stage owner role data-driven, so `implementer` is no longer
-forced to masquerade as `ops`.
+the implementation-stage owner role data-driven, and PGU-644 makes the turnkey
+defaults `designer`, `director`, `audit`, and `ops`. A project that needs
+programmer-specific implementation roles adds them explicitly.
 
 ## Preconditions
 
@@ -92,14 +93,15 @@ Review points:
 
 - `plan.json` has `port: 20740`, database `otto_ticket_board`, and socket
   `/run/otto-ticket-board/ticket-board.sock`.
-- `implementer_roles` is `["implementer"]`.
-- `assignee_roles` is `["unassigned", "implementer", "audit", "director"]`.
-- `caller_roles` is `["director", "implementer", "audit", "user"]`.
+- `draft_roles` is `["designer"]`.
+- `implementer_roles` is `["ops"]`.
+- `assignee_roles` is `["unassigned", "designer", "ops", "audit", "director"]`.
+- `caller_roles` is `["director", "designer", "ops", "audit", "user"]`.
 - `otto-workflow.sql` contains exactly five rows in `workflow_stages` and seven
   rows in `workflow_transitions`.
-- The generated system unit exports `TICKET_BOARD_IMPLEMENTER_ROLES`,
-  `TICKET_BOARD_ASSIGNEES`, and `TICKET_BOARD_CALLER_ROLES` matching those
-  role lists.
+- The generated system unit exports `TICKET_BOARD_DRAFT_ROLES`,
+  `TICKET_BOARD_IMPLEMENTER_ROLES`, `TICKET_BOARD_ASSIGNEES`, and
+  `TICKET_BOARD_CALLER_ROLES` matching those role lists.
 
 ## Eric Privileged Block
 
@@ -164,9 +166,9 @@ psql -X -v ON_ERROR_STOP=1 \
 Expected workflow stages:
 
 ```text
-draft           Draft           {}
+draft           Draft           {designer}
 analysis        Triage          {director}
-in_progress     Implementation  {implementer}
+in_progress     Implementation  {ops}
 audit           Audit           {audit}
 director_review Final Sign-Off  {director}
 ```
@@ -189,20 +191,22 @@ export TICKET_BOARD_URL=http://127.0.0.1:20740
 export TICKET_BOARD_SOCKET=/run/otto-ticket-board/ticket-board.sock
 
 scripts/ticket-board-write create-ticket \
-  --caller-role director \
+  --caller-role user \
   --title "Otto workflow proof" \
   --body "PGU-601 proof ticket." \
-  --state analysis \
-  --assignee director
+  --state draft
 
 # Replace OTTO-N with the created ticket id.
+scripts/ticket-board-write release-draft OTTO-N \
+  --caller-role designer
+
 scripts/ticket-board-write route OTTO-N \
   --caller-role director \
   --state in_progress \
-  --assignee implementer
+  --assignee ops
 
 scripts/ticket-board-write submit-to-audit OTTO-N \
-  --caller-role implementer \
+  --caller-role ops \
   --commit-hash 608ae70
 
 scripts/ticket-board-write audit-sign-off OTTO-N \
@@ -228,7 +232,8 @@ psql -X -v ON_ERROR_STOP=1 \
 Expected trace has sends or queued delivery attempts for:
 
 - `director` when the ticket enters triage/final sign-off;
-- `implementer` when the ticket enters implementation;
+- `designer` when a draft ticket is created;
+- `ops` when the ticket enters implementation;
 - `audit` when the ticket enters audit.
 
 ## Launcher Notes
@@ -247,8 +252,25 @@ Minimal otto launcher config shape:
   "worktree_remote": "origin",
   "roles": [
     {
-      "role": "director",
+      "role": "designer",
       "slot": 0,
+      "tmux_session": "otto-designer",
+      "target": "otto-designer:0.0",
+      "cli": ["claude"],
+      "live_commands": ["claude"],
+      "resume_mode": "flag",
+      "resume_flag": "--resume",
+      "yolo": true,
+      "env": {
+        "TICKET_BOARD_PROJECT": "otto",
+        "TICKET_BOARD_URL": "http://127.0.0.1:20740",
+        "TICKET_BOARD_SOCKET": "/run/otto-ticket-board/ticket-board.sock",
+        "TICKET_BOARD_CALLER_ROLE": "designer"
+      }
+    },
+    {
+      "role": "director",
+      "slot": 1,
       "tmux_session": "otto-director",
       "target": "otto-director:0.0",
       "cli": ["claude"],
@@ -261,23 +283,6 @@ Minimal otto launcher config shape:
         "TICKET_BOARD_URL": "http://127.0.0.1:20740",
         "TICKET_BOARD_SOCKET": "/run/otto-ticket-board/ticket-board.sock",
         "TICKET_BOARD_CALLER_ROLE": "director"
-      }
-    },
-    {
-      "role": "implementer",
-      "slot": 1,
-      "tmux_session": "otto-implementer",
-      "target": "otto-implementer:0.0",
-      "cli": ["codex"],
-      "live_commands": ["codex"],
-      "resume_mode": "subcommand",
-      "resume_subcommand": "resume",
-      "yolo": true,
-      "env": {
-        "TICKET_BOARD_PROJECT": "otto",
-        "TICKET_BOARD_URL": "http://127.0.0.1:20740",
-        "TICKET_BOARD_SOCKET": "/run/otto-ticket-board/ticket-board.sock",
-        "TICKET_BOARD_CALLER_ROLE": "implementer"
       }
     },
     {
@@ -295,6 +300,23 @@ Minimal otto launcher config shape:
         "TICKET_BOARD_URL": "http://127.0.0.1:20740",
         "TICKET_BOARD_SOCKET": "/run/otto-ticket-board/ticket-board.sock",
         "TICKET_BOARD_CALLER_ROLE": "audit"
+      }
+    },
+    {
+      "role": "ops",
+      "slot": 3,
+      "tmux_session": "otto-ops",
+      "target": "otto-ops:0.0",
+      "cli": ["codex"],
+      "live_commands": ["codex"],
+      "resume_mode": "subcommand",
+      "resume_subcommand": "resume",
+      "yolo": true,
+      "env": {
+        "TICKET_BOARD_PROJECT": "otto",
+        "TICKET_BOARD_URL": "http://127.0.0.1:20740",
+        "TICKET_BOARD_SOCKET": "/run/otto-ticket-board/ticket-board.sock",
+        "TICKET_BOARD_CALLER_ROLE": "ops"
       }
     }
   ]

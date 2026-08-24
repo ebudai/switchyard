@@ -2482,11 +2482,23 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
     assert config["board_socket"] == "/run/porter-ticket-board/ticket-board.sock"
     assert config["repository"] == str(project_repo)
     assert config["repository"] != str(source_repo)
-    assert [role["role"] for role in config["roles"]] == ["director", "implementer", "audit"]
-    assert [role["tmux_session"] for role in config["roles"]] == ["porter-director", "porter-implementer", "porter-audit"]
-    assert len(team_launcher._layout_leaves(layout)) == 3
-    assert [role.role for role in loaded_config.roles] == ["director", "implementer", "audit"]
-    assert loaded_config.roles[1].target == "porter-implementer:0.0"
+    assert [role["role"] for role in config["roles"]] == ["designer", "director", "audit", "ops"]
+    assert [role["tmux_session"] for role in config["roles"]] == [
+        "porter-designer",
+        "porter-director",
+        "porter-audit",
+        "porter-ops",
+    ]
+    assert {role["role"]: role["cli"] for role in config["roles"]} == {
+        "designer": ["claude"],
+        "director": ["claude"],
+        "audit": ["claude"],
+        "ops": ["codex"],
+    }
+    assert len(team_launcher._layout_leaves(layout)) == 4
+    assert [role.role for role in loaded_config.roles] == ["designer", "director", "audit", "ops"]
+    assert loaded_config.roles[0].target == "porter-designer:0.0"
+    assert loaded_config.roles[3].target == "porter-ops:0.0"
     assert all(role.workdir == str(project_repo) for role in loaded_config.roles)
     assert commands.splitlines()[:2] == ["#!/usr/bin/env bash", "set -euo pipefail"]
     assert f"team-launcher: dry-run for porter; artifacts in {output_dir}" in rendered
@@ -2496,11 +2508,12 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
     assert launch_plan["project"] == "porter"
     assert launch_plan["mode"] == "attach-or-start"
     assert [role["target"] for role in launch_plan["roles"]] == [
+        "porter-designer:0.0",
         "porter-director:0.0",
-        "porter-implementer:0.0",
         "porter-audit:0.0",
+        "porter-ops:0.0",
     ]
-    assert [role["workdir"] for role in launch_plan["roles"]] == [str(project_repo)] * 3
+    assert [role["workdir"] for role in launch_plan["roles"]] == [str(project_repo)] * 4
     assert launch_output_exists
 
 

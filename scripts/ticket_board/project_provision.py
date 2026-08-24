@@ -16,7 +16,8 @@ PROJECT_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 USER_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$")
 ROLE_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 DEFAULT_IMPLEMENTER_ROLES = ("main", "app", "ops", "perf", "research")
-DEFAULT_PROJECT_IMPLEMENTER_ROLES = ("implementer",)
+DEFAULT_PROJECT_DRAFT_ROLES = ("designer",)
+DEFAULT_PROJECT_IMPLEMENTER_ROLES = ("ops",)
 DEFAULT_PGU_ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "inspector", "agent", "director", "research")
 DEFAULT_PGU_CALLER_ROLES = ("director", "main", "app", "ops", "perf", "audit", "inspector", "research", "user")
 
@@ -47,6 +48,7 @@ class ProjectBoardProvision:
     listener_database_url: str
     admin_database_url: str
     workflow_seed: str
+    draft_roles: tuple[str, ...]
     implementer_roles: tuple[str, ...]
     assignee_roles: tuple[str, ...]
     caller_roles: tuple[str, ...]
@@ -125,11 +127,13 @@ def build_plan(
             raise SystemExit("at least one implementer role is required")
     resolved_implementer_roles = _dedupe(resolved_implementer_roles)
     if project == "pgu":
+        draft_roles: tuple[str, ...] = ()
         assignee_roles = DEFAULT_PGU_ASSIGNEES
         caller_roles = DEFAULT_PGU_CALLER_ROLES
     else:
-        assignee_roles = _dedupe(("unassigned", *resolved_implementer_roles, "audit", "director"))
-        caller_roles = _dedupe(("director", *resolved_implementer_roles, "audit", "user"))
+        draft_roles = DEFAULT_PROJECT_DRAFT_ROLES
+        assignee_roles = _dedupe(("unassigned", *draft_roles, *resolved_implementer_roles, "audit", "director"))
+        caller_roles = _dedupe(("director", *draft_roles, *resolved_implementer_roles, "audit", "user"))
     ident = _identifier_from_project(project)
     unit_prefix = f"{project}-ticket-board"
     runtime_directory = unit_prefix
@@ -177,6 +181,7 @@ def build_plan(
         ),
         admin_database_url=f"postgresql:///{resolved_database}?host=/var/run/postgresql&user=postgres",
         workflow_seed="pgu-full" if project == "pgu" else "default-five-stage",
+        draft_roles=draft_roles,
         implementer_roles=resolved_implementer_roles,
         assignee_roles=assignee_roles,
         caller_roles=caller_roles,
@@ -249,6 +254,7 @@ Environment=PGDATABASE={plan.database}
 Environment=PGUSER={plan.service_role}
 Environment=TICKET_BOARD_SOCKET={plan.socket_path}
 Environment=TICKET_BOARD_DATABASE_URL={plan.board_database_url}
+Environment=TICKET_BOARD_DRAFT_ROLES={env_list(plan.draft_roles)}
 Environment=TICKET_BOARD_IMPLEMENTER_ROLES={env_list(plan.implementer_roles)}
 Environment=TICKET_BOARD_ASSIGNEES={env_list(plan.assignee_roles)}
 Environment=TICKET_BOARD_CALLER_ROLES={env_list(plan.caller_roles)}
@@ -398,14 +404,14 @@ def render_workflow_sql(plan: ProjectBoardProvision) -> str:
 """
 
     stages = [
-        ("draft", "Draft", 0, (), None, None, None, False),
+        ("draft", "Draft", 0, plan.draft_roles, None, None, None, False),
         ("analysis", "Triage", 1, ("director",), None, None, None, False),
         ("in_progress", "Implementation", 2, plan.implementer_roles, None, None, None, False),
         ("audit", "Audit", 3, ("audit",), None, None, "audit_signoff", False),
         ("director_review", "Final Sign-Off", 4, ("director",), None, None, None, False),
     ]
     transitions = [
-        ("draft", "analysis", "release_draft", ("director", "user"), False, False),
+        ("draft", "analysis", "release_draft", _dedupe((*plan.draft_roles, "director", "user")), False, False),
         ("analysis", "in_progress", "route", ("director",), False, False),
         ("analysis", "in_progress", "start_work", plan.implementer_roles, False, False),
         ("in_progress", "audit", "route", ("director",), False, False),

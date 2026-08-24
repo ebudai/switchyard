@@ -189,9 +189,19 @@ The listing is the whole navigation surface -- it is both discovery and **resume
 question a new user hits on day two. Selecting a project attaches if it is running and resumes if
 it is not (today's `start` semantics).
 
-`new` prompts for **slug**, **agent name** (`-agent` appended) and **project name** -- three names
-that genuinely differ; otto's slug is `otto` and its code lives in `scheduler`. Then it starts the
-design session.
+`new` prompts for **project name**, **slug**, **agent name** (`-agent` appended), and
+**project path**. The first answer is the human name; the later answers are derived from it but
+editable:
+
+    Project name: Otto Scheduler
+    Slug         [otto-scheduler]:
+    Agent name   [otto-scheduler]:
+    Project path [/home/otto-scheduler-agent/Projects/otto-scheduler]:
+
+The default project path follows the project name, not the slug. Editing the slug to a shorter
+machine token such as `otto` still keeps the default path at `Projects/otto-scheduler`. The path is
+also editable for existing checkouts or shared locations, but it must be readable and writable by
+the project agent user. Then `new` starts the design session.
 
 **`design` is dropped as a separate command.** `new` sets things up far enough for the designer to
 start, and launches it. The designer runs as a normal CLI with **no tmux session**. It decides the
@@ -211,7 +221,7 @@ or its session can never be resumed -- and resume is a hard requirement of this 
 
 That forces the sequence, and nothing here is a preference:
 
-1. prompt for slug, agent name, project name
+1. prompt for project name, slug, agent name, project path
 2. create `<agent-name>-agent` (privileged -- switchyard, not the director)
 3. create the derived project directory in that user's home
 4. launch the designer **as that user, in that directory**
@@ -224,8 +234,8 @@ the director, which is usually Claude Opus carrying the most context on the team
 
 So the derived path must be right the FIRST time. Two things follow:
 
-- **show the derived path in the prompt** before creating anything, so the user sees
-  `/home/otto-agent/Projects/otto` and can object while objecting is still free
+- **show the project path in the prompt** before creating anything, so the user sees
+  `/home/otto-agent/Projects/otto-scheduler` and can object or override it while objecting is still free
 - **verify the cwd immediately after launching**, not weeks later. Confirm the session landed in
   `~/.claude/projects/<escaped-cwd>/` for the intended directory. Discovering this at the first
   reboot is how PGU-613 happened -- a resume that reports success while the model has nothing.
@@ -275,4 +285,3 @@ None. Both are closed (Eric, 2026-08-24):
    so the name must be asked FIRST and the slug derived from it.
 2. **Reshape: does not exist.** The director handles changing stages and roles on a live project.
    There is no separate command and no `clone`/`fork`.
-

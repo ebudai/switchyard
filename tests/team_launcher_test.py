@@ -2751,6 +2751,7 @@ def test_switchyard_new_without_sudo_fails_before_writing() -> None:
                 home_base=home_base,
                 euid_getter=lambda: 1000,
                 runner=lambda args, **_kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0),
+                input_func=lambda _prompt: "",
             )
             raise AssertionError("expected sudo precheck failure")
         except SystemExit as exc:
@@ -2758,8 +2759,72 @@ def test_switchyard_new_without_sudo_fails_before_writing() -> None:
 
     assert "requires sudo" in message
     assert not output_dir.exists()
-    assert not (home_base / "otto-agent" / "Projects" / "porter").exists()
+    assert not (home_base / "otto-agent" / "Projects" / "porter-system").exists()
     assert calls == []
+
+
+def test_switchyard_new_prompts_name_first_and_derives_defaults() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new.") as tmp:
+        tmp_path = Path(tmp)
+        home_base = tmp_path / "home"
+        prompts: list[str] = []
+        output: list[str] = []
+        answers = iter(["Otto Scheduler", "", "", ""])
+
+        def input_func(prompt: str) -> str:
+            prompts.append(prompt)
+            return next(answers)
+
+        try:
+            switchyard_new_command(
+                yes=True,
+                home_base=home_base,
+                euid_getter=lambda: 1000,
+                runner=lambda args, **_kwargs: subprocess.CompletedProcess(args, 0),
+                input_func=input_func,
+                print_func=output.append,
+            )
+            raise AssertionError("expected sudo precheck failure")
+        except SystemExit as exc:
+            message = str(exc)
+
+    expected_path = home_base / "otto-scheduler-agent" / "Projects" / "otto-scheduler"
+    assert "requires sudo" in message
+    assert prompts == [
+        "Project name: ",
+        "Slug [otto-scheduler]: ",
+        "Agent name [otto-scheduler]: ",
+        f"Project path [{expected_path}]: ",
+    ]
+    assert f"switchyard: project path: {expected_path}" in output
+
+
+def test_switchyard_new_edited_slug_does_not_change_name_derived_default_path() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new.") as tmp:
+        tmp_path = Path(tmp)
+        home_base = tmp_path / "home"
+        output: list[str] = []
+
+        try:
+            switchyard_new_command(
+                project_name="Otto Scheduler",
+                slug="otto",
+                agent_name="otto",
+                yes=True,
+                home_base=home_base,
+                euid_getter=lambda: 1000,
+                runner=lambda args, **_kwargs: subprocess.CompletedProcess(args, 0),
+                input_func=lambda _prompt: "",
+                print_func=output.append,
+            )
+            raise AssertionError("expected sudo precheck failure")
+        except SystemExit as exc:
+            message = str(exc)
+
+    expected_path = home_base / "otto-agent" / "Projects" / "otto-scheduler"
+    assert "requires sudo" in message
+    assert "switchyard: slug: otto" in output
+    assert f"switchyard: project path: {expected_path}" in output
 
 
 def test_switchyard_designer_session_cwd_guard_accepts_expected_session_dir() -> None:
@@ -2879,13 +2944,14 @@ def test_switchyard_new_launches_designer_from_derived_cwd_and_starts_director()
                     euid_getter=lambda: 0,
                     runner=runner,
                     pane_state_dir=pane_state_dir,
+                    input_func=lambda _prompt: "",
                     port_in_use=lambda _port: False,
                     socket_exists=lambda _path: False,
                 )
                 == 0
             )
 
-        project_dir = home_base / "otto-agent" / "Projects" / "porter"
+        project_dir = home_base / "otto-agent" / "Projects" / "porter-system"
         designer_call_index = next(
             index for index, call in enumerate(runner.calls) if call[:5] == ["sudo", "-u", "otto-agent", "-H", "env"] and call[-1] == "claude"
         )
@@ -2904,6 +2970,132 @@ def test_switchyard_new_launches_designer_from_derived_cwd_and_starts_director()
         assert director_env["SWITCHYARD_DIRECTOR_ONBOARDING"].endswith("DIRECTOR_ONBOARDING.md")
         assert any(call[:2] == ["tmux", "new-session"] and "porter-director" in call for call in runner.calls)
         assert "switchyard: verified designer session cwd" in stdout.getvalue()
+
+
+def test_switchyard_new_custom_project_path_sets_designer_cwd_and_pane_workdirs() -> None:
+    class NewProjectRunner(FakeRunner):
+        def __init__(self, home_base: Path) -> None:
+            super().__init__()
+            self.home_base = home_base
+            self.designer_cwd = ""
+
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if args[:2] == ["id", "-u"]:
+                return subprocess.CompletedProcess(args, 1)
+            if args[:1] == ["useradd"]:
+                return subprocess.CompletedProcess(args, 0)
+            if args[:1] == ["install"]:
+                return subprocess.CompletedProcess(args, 0)
+            if args[:5] == ["sudo", "-u", "otto-agent", "-H", "env"] and args[-1] == "claude":
+                cwd = Path(str(kwargs["cwd"]))
+                self.designer_cwd = str(cwd)
+                env_values = {
+                    item.split("=", 1)[0]: item.split("=", 1)[1]
+                    for item in args
+                    if item.startswith("SWITCHYARD_") and "=" in item
+                }
+                artifact_path = Path(env_values["SWITCHYARD_PROJECT_ARTIFACT"])
+                design_doc = Path(env_values["SWITCHYARD_PROJECT_DESIGN"])
+                design_doc.write_text("# Otto Scheduler\n\nDesigned.\n", encoding="utf-8")
+                artifact_path.parent.mkdir(parents=True, exist_ok=True)
+                artifact_path.write_text(
+                    json.dumps(
+                        {
+                            "schema": "switchyard.project.v1",
+                            "design_document": str(design_doc),
+                            "project": {
+                                "slug": "otto",
+                                "name": "Otto Scheduler",
+                                "ticket_prefix": "OTTO",
+                                "owner_user": "otto-agent",
+                                "repository": str(cwd),
+                                "roles": ["ops"],
+                            },
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                session_dir = team_launcher._claude_project_session_dir(self.home_base / "otto-agent", cwd)
+                session_dir.mkdir(parents=True, exist_ok=True)
+                (session_dir / "session.jsonl").write_text("{}\n", encoding="utf-8")
+                return subprocess.CompletedProcess(args, 0)
+            return super().__call__(args, **kwargs)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new.") as tmp:
+        tmp_path = Path(tmp)
+        home_base = tmp_path / "home"
+        custom_path = tmp_path / "external" / "otto-scheduler"
+        output_dir = tmp_path / "out"
+        source_repo = tmp_path / "source-repo"
+        source_repo.mkdir()
+        runner = NewProjectRunner(home_base)
+
+        assert (
+            switchyard_new_command(
+                project_name="Otto Scheduler",
+                slug="otto",
+                agent_name="otto",
+                project_path=custom_path,
+                source_repo=source_repo,
+                output_dir=output_dir,
+                yes=True,
+                home_base=home_base,
+                euid_getter=lambda: 0,
+                runner=runner,
+                pane_state_dir=tmp_path / "pane-state",
+                port_in_use=lambda _port: False,
+                socket_exists=lambda _path: False,
+            )
+            == 0
+        )
+
+        config = load_project_config("otto", output_dir / "otto.json")
+        install_call = next(call for call in runner.calls if call[:1] == ["install"])
+
+        assert custom_path.is_dir()
+        assert runner.designer_cwd == str(custom_path)
+        assert install_call[-1] == str(custom_path)
+        assert {role.role: role.workdir for role in config.roles} == {
+            "director": str(custom_path),
+            "audit": str(custom_path),
+            "ops": str(custom_path),
+        }
+
+
+def test_switchyard_new_unwritable_existing_project_path_refuses_before_mutating() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new.") as tmp:
+        tmp_path = Path(tmp)
+        project_path = tmp_path / "unwritable"
+        project_path.mkdir()
+        project_path.chmod(0o500)
+        output_dir = tmp_path / "out"
+        calls: list[list[str]] = []
+        try:
+            try:
+                switchyard_new_command(
+                    project_name="Otto Scheduler",
+                    slug="otto",
+                    agent_name="otto",
+                    project_path=project_path,
+                    output_dir=output_dir,
+                    yes=True,
+                    euid_getter=lambda: 0,
+                    runner=lambda args, **_kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0),
+                )
+                raise AssertionError("expected unwritable path failure")
+            except SystemExit as exc:
+                message = str(exc)
+        finally:
+            project_path.chmod(0o700)
+
+    assert "not readable and writable by otto-agent" in message
+    assert calls == []
+    assert not output_dir.exists()
+    assert not (project_path / ".switchyard").exists()
 
 
 def test_new_project_from_handwritten_artifact_uses_same_provision_path() -> None:

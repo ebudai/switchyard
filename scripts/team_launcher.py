@@ -10,6 +10,7 @@ import pwd
 import shutil
 import shlex
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -2724,8 +2725,12 @@ def _agent_owner_user(agent_name: str) -> str:
     return agent if agent.endswith("-agent") else f"{agent}-agent"
 
 
-def _project_dir(home_base: Path, owner_user: str, slug: str) -> Path:
-    return home_base / owner_user / "Projects" / slug
+def _project_dir(home_base: Path, owner_user: str, project_name: str) -> Path:
+    return home_base / owner_user / "Projects" / _slug_from_project_name(project_name)
+
+
+def _resolve_project_path(raw_path: Path | str) -> Path:
+    return Path(os.path.expandvars(str(raw_path))).expanduser().resolve(strict=False)
 
 
 def _switchyard_dir(project_dir: Path) -> Path:
@@ -2802,13 +2807,83 @@ def _chown_switchyard_project_files(
 
 
 def _owner_project_install_args(owner_user: str, project_dir: Path, *, shell: str = "fish") -> list[list[str]]:
-    home = project_dir.parents[1]
     shell_path = shutil.which(shell) or f"/usr/bin/{shell}"
     return [
         ["id", "-u", owner_user],
         ["useradd", "-m", "-s", shell_path, owner_user],
-        ["install", "-d", "-m", "0755", "-o", owner_user, "-g", owner_user, str(home / "Projects"), str(project_dir)],
+        ["install", "-d", "-m", "0755", "-o", owner_user, "-g", owner_user, str(project_dir)],
     ]
+
+
+def _group_ids_for_user(user_name: str) -> set[int]:
+    try:
+        user = pwd.getpwnam(user_name)
+    except KeyError:
+        return set()
+    gids = {int(user.pw_gid)}
+    try:
+        import grp
+    except ImportError:
+        return gids
+    for group in grp.getgrall():
+        if user_name in group.gr_mem:
+            gids.add(int(group.gr_gid))
+    return gids
+
+
+def _existing_project_path_is_usable(project_dir: Path, owner_user: str) -> bool:
+    try:
+        info = project_dir.stat()
+    except OSError:
+        return False
+    if not stat.S_ISDIR(info.st_mode):
+        return False
+    uid = uid_for_user(owner_user)
+    if uid is not None and int(info.st_uid) == uid:
+        mask = stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
+    elif uid is not None and int(info.st_gid) in _group_ids_for_user(owner_user):
+        mask = stat.S_IRGRP | stat.S_IWGRP | stat.S_IXGRP
+    else:
+        mask = stat.S_IROTH | stat.S_IWOTH | stat.S_IXOTH
+    return (info.st_mode & mask) == mask
+
+
+def _precheck_project_path_before_mutating(owner_user: str, project_dir: Path) -> None:
+    if not project_dir.exists():
+        return
+    if not project_dir.is_dir():
+        raise SystemExit(f"switchyard: project path {project_dir} already exists but is not a directory")
+    if not _existing_project_path_is_usable(project_dir, owner_user):
+        raise SystemExit(
+            f"switchyard: project path {project_dir} already exists but is not readable and writable "
+            f"by {owner_user}; choose a writable path or fix ownership/permissions first"
+        )
+
+
+def _verify_project_path_writable_by_owner(
+    owner_user: str,
+    project_dir: Path,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> None:
+    quoted_path = shlex.quote(str(project_dir))
+    result = runner(
+        [
+            "sudo",
+            "-u",
+            owner_user,
+            "sh",
+            "-lc",
+            f"test -d {quoted_path} && test -r {quoted_path} && test -w {quoted_path} && test -x {quoted_path}",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if result.returncode != 0:
+        raise SystemExit(
+            f"switchyard: project path {project_dir} is not readable and writable by {owner_user}; "
+            "choose a writable path or fix ownership/permissions first"
+        )
 
 
 def _ensure_owner_user_and_project_dir(
@@ -2818,16 +2893,20 @@ def _ensure_owner_user_and_project_dir(
     runner: Callable[..., subprocess.CompletedProcess[Any]],
     shell: str = "fish",
 ) -> None:
+    existed = project_dir.exists()
+    _precheck_project_path_before_mutating(owner_user, project_dir)
     id_args, useradd_args, install_args = _owner_project_install_args(owner_user, project_dir, shell=shell)
     id_result = runner(id_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if id_result.returncode != 0:
         useradd_result = runner(useradd_args)
         if useradd_result.returncode != 0:
             raise SystemExit(f"switchyard: failed to create user {owner_user!r}")
-    install_result = runner(install_args)
-    if install_result.returncode != 0:
-        raise SystemExit(f"switchyard: failed to create project directory {project_dir}")
-    project_dir.mkdir(parents=True, exist_ok=True)
+    if not existed:
+        install_result = runner(install_args)
+        if install_result.returncode != 0:
+            raise SystemExit(f"switchyard: failed to create project directory {project_dir}")
+        project_dir.mkdir(parents=True, exist_ok=True)
+    _verify_project_path_writable_by_owner(owner_user, project_dir, runner=runner)
 
 
 def _designer_launch_args(
@@ -2965,7 +3044,7 @@ def _confirm_switchyard_new(
     print_func(f"switchyard: project name: {project_name}")
     print_func(f"switchyard: slug: {slug}")
     print_func(f"switchyard: owner user: {owner_user}")
-    print_func(f"switchyard: derived path: {project_dir}")
+    print_func(f"switchyard: project path: {project_dir}")
     if yes:
         return
     answer = input_func("Proceed? [y/N]: ").strip().lower()
@@ -2978,6 +3057,7 @@ def switchyard_new_command(
     slug: str | None = None,
     agent_name: str | None = None,
     project_name: str | None = None,
+    project_path: Path | None = None,
     from_artifact: Path | None = None,
     source_repo: Path | None = None,
     output_dir: Path | None = None,
@@ -2999,13 +3079,22 @@ def switchyard_new_command(
         resolved_slug = artifact.project
         resolved_project_name = artifact.project_name
         owner_user = artifact.owner_user
-        project_dir = artifact.repository
+        project_dir = _resolve_project_path(project_path or artifact.repository)
     else:
-        resolved_slug = _slug_from_project_name(slug or _prompt_text("Slug", input_func=input_func))
+        resolved_project_name = (project_name or _prompt_text("Project name", input_func=input_func)).strip()
+        if not resolved_project_name:
+            raise SystemExit("switchyard: project name cannot be empty")
+        default_slug = _slug_from_project_name(resolved_project_name)
+        resolved_slug = _slug_from_project_name(
+            slug or _prompt_text("Slug", default=default_slug, input_func=input_func)
+        )
         raw_agent = agent_name or _prompt_text("Agent name", default=resolved_slug, input_func=input_func)
         owner_user = _agent_owner_user(raw_agent)
-        resolved_project_name = (project_name or _prompt_text("Project name", default=resolved_slug, input_func=input_func)).strip()
-        project_dir = _project_dir(home_base, owner_user, resolved_slug)
+        default_project_dir = _project_dir(home_base, owner_user, resolved_project_name)
+        project_dir = _resolve_project_path(
+            project_path
+            or _prompt_text("Project path", default=str(default_project_dir), input_func=input_func)
+        )
     _confirm_switchyard_new(
         slug=resolved_slug,
         owner_user=owner_user,
@@ -3170,6 +3259,7 @@ def _build_switchyard_new_parser() -> argparse.ArgumentParser:
     parser.add_argument("--slug", help="project slug; prompted when omitted")
     parser.add_argument("--agent-name", help="base agent name; -agent is appended unless already present")
     parser.add_argument("--project-name", help="human project name; prompted when omitted")
+    parser.add_argument("--project-path", type=Path, help="project working directory; prompted when omitted")
     parser.add_argument("--from", dest="from_artifact", type=Path, help="project artifact emitted by the design session")
     parser.add_argument("--source-repo", type=Path, help="switchyard source checkout to deploy")
     parser.add_argument("--output-dir", type=Path, help="write provisioning artifacts here")
@@ -3189,6 +3279,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             slug=args.slug,
             agent_name=args.agent_name,
             project_name=args.project_name,
+            project_path=args.project_path,
             from_artifact=args.from_artifact,
             source_repo=args.source_repo,
             output_dir=args.output_dir,

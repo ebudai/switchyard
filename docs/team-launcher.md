@@ -264,11 +264,24 @@ Run new-project setup through the zero-parameter surface:
 sudo ./switchyard new
 ```
 
-`new` prompts for slug, agent name, and project name, shows the derived path
-`/home/<agent>-agent/Projects/<slug>`, then asks for confirmation before writing.
-If it is not run with sudo/root privileges, it fails before creating files or
-users. The project name `new` is reserved for the command; a project literally
-named "New" must be opened by its slug from the project list.
+`new` prompts for project name first, then derived-but-editable slug, agent
+name, and project path:
+
+```text
+Project name: Otto Scheduler
+Slug [otto-scheduler]:
+Agent name [otto-scheduler]:
+Project path [/home/otto-scheduler-agent/Projects/otto-scheduler]:
+```
+
+The default project path follows the project name, not the machine slug; editing
+the slug to `otto` still defaults to `Projects/otto-scheduler`. The path itself
+is editable for existing checkouts or shared locations. If an existing path is
+not readable and writable by the project agent user, `new` refuses before
+creating users or files. If `new` is not run with sudo/root privileges, it fails
+before creating files or users. The project name `new` is reserved for the
+command; a project literally named "New" must be opened by its slug from the
+project list.
 
 After confirmation, `new` creates `<agent>-agent`, creates the derived project
 directory, launches a standalone designer CLI as that user from that exact

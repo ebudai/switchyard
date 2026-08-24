@@ -227,7 +227,7 @@ WITH expected(state_name, expected_assignee) AS (
         ('inspection', 'inspector'),
         ('audit', 'audit'),
         ('dat', 'director'),
-        ('user_review', 'director'),
+        ('user_review', 'user'),
         ('director_review', 'director'),
         ('draft', NULL),
         ('backlog', NULL),
@@ -332,7 +332,7 @@ psql -X -v ON_ERROR_STOP=1 "$TRANSITION_CONN" <<'SQL' >/dev/null
 INSERT INTO ticket_board.tickets (id, title, body, state, assignee, created_text, updated_text, created_at, updated_at, source_json)
 VALUES
     ('PGU-47701', 'Force move append regression', '', 'analysis', 'unassigned', '2026-07-16T00:00:00+00:00', '2026-07-16T00:00:00+00:00', clock_timestamp(), clock_timestamp(), '{"id":"PGU-47701","title":"Force move append regression","body":"","state":"analysis","assignee":"unassigned","comments":[],"created":"2026-07-16T00:00:00+00:00","updated":"2026-07-16T00:00:00+00:00"}'::jsonb),
-    ('PGU-47702', 'User reopen append regression', '', 'user_review', 'director', '2026-07-16T00:00:00+00:00', '2026-07-16T00:00:00+00:00', clock_timestamp(), clock_timestamp(), '{"id":"PGU-47702","title":"User reopen append regression","body":"","state":"user_review","assignee":"director","comments":[],"created":"2026-07-16T00:00:00+00:00","updated":"2026-07-16T00:00:00+00:00"}'::jsonb),
+    ('PGU-47702', 'User reopen append regression', '', 'user_review', 'user', '2026-07-16T00:00:00+00:00', '2026-07-16T00:00:00+00:00', clock_timestamp(), clock_timestamp(), '{"id":"PGU-47702","title":"User reopen append regression","body":"","state":"user_review","assignee":"user","comments":[],"created":"2026-07-16T00:00:00+00:00","updated":"2026-07-16T00:00:00+00:00"}'::jsonb),
     ('PGU-47703', 'Audit kickback append regression', '', 'audit', 'audit', '2026-07-16T00:00:00+00:00', '2026-07-16T00:00:00+00:00', clock_timestamp(), clock_timestamp(), '{"id":"PGU-47703","title":"Audit kickback append regression","body":"","state":"audit","assignee":"audit","comments":[],"created":"2026-07-16T00:00:00+00:00","updated":"2026-07-16T00:00:00+00:00"}'::jsonb);
 
 SET ROLE ticket_board_service;
@@ -360,7 +360,7 @@ FROM ticket_board.tickets t
 WHERE t.id IN ('PGU-47701', 'PGU-47702', 'PGU-47703');
 SQL
 )"
-expected_append_action_result='{"PGU-47701": {"state": "done", "assignee": "director", "comments": 1}, "PGU-47702": {"state": "analysis", "assignee": "director", "comments": 1}, "PGU-47703": {"state": "in_progress", "assignee": "main", "comments": 1}}'
+expected_append_action_result='{"PGU-47701": {"state": "done", "assignee": "director", "comments": 1}, "PGU-47702": {"state": "analysis", "assignee": "user", "comments": 1}, "PGU-47703": {"state": "in_progress", "assignee": "main", "comments": 1}}'
 [[ "$append_action_result" == "$expected_append_action_result" ]] || {
     echo "FAIL: migrated DB append actions failed or produced wrong state: $append_action_result" >&2
     exit 1

@@ -198,7 +198,7 @@ def target_for_transition(transition: Transition) -> str | None:
     if transition.new_state == "dat":
         return ROLE_TO_TARGET["director"]
     if transition.new_state == "user_review":
-        return ROLE_TO_TARGET["director"]
+        return None
     if transition.new_state == "director_review":
         return ROLE_TO_TARGET["director"]
     return None
@@ -1227,7 +1227,7 @@ WHERE id = %s
             if state == "dat":
                 return "director"
             if state == "user_review":
-                return "director"
+                return None
             if state == "director_review":
                 return "director"
             return None

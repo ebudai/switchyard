@@ -19,7 +19,7 @@ TICKET_PREFIX_RE = re.compile(r"^[A-Z][A-Z0-9]*$")
 DEFAULT_IMPLEMENTER_ROLES = ("main", "app", "ops", "perf", "research")
 DEFAULT_PROJECT_DRAFT_ROLES = ("designer",)
 DEFAULT_PROJECT_IMPLEMENTER_ROLES = ("ops",)
-DEFAULT_PGU_ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "inspector", "agent", "director", "research")
+DEFAULT_PGU_ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "inspector", "agent", "director", "research", "user")
 DEFAULT_PGU_CALLER_ROLES = ("director", "main", "app", "ops", "perf", "audit", "inspector", "research", "user")
 
 
@@ -147,7 +147,7 @@ def build_plan(
         caller_roles = DEFAULT_PGU_CALLER_ROLES
     else:
         draft_roles = DEFAULT_PROJECT_DRAFT_ROLES
-        assignee_roles = _dedupe(("unassigned", *draft_roles, *resolved_implementer_roles, "audit", "director"))
+        assignee_roles = _dedupe(("unassigned", *draft_roles, *resolved_implementer_roles, "audit", "director", "user"))
         caller_roles = _dedupe(("director", *draft_roles, *resolved_implementer_roles, "audit", "user"))
     ident = _identifier_from_project(project)
     unit_prefix = f"{project}-ticket-board"

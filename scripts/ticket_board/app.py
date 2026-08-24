@@ -19,7 +19,7 @@ FRAME_DIR_DEFAULT = Path("/tmp/pgu-frames")
 REPO_ROOT_DEFAULT = Path(__file__).resolve().parents[2]
 COMMIT_GIT_DIR_DEFAULT = Path("/data/git/pgu.git")
 POSTGRES_DSN_DEFAULT = os.environ.get("TICKET_BOARD_DATABASE_URL") or os.environ.get("DATABASE_URL", "")
-DEFAULT_ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "inspector", "agent", "director", "research")
+DEFAULT_ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "inspector", "agent", "director", "research", "user")
 DEFAULT_CALLER_ROLES = ("director", "main", "app", "ops", "perf", "audit", "inspector", "research", "user")
 
 

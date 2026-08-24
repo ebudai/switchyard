@@ -49,7 +49,7 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert plan.workflow_seed == "default-five-stage"
     assert plan.draft_roles == ("designer",)
     assert plan.implementer_roles == ("ops",)
-    assert plan.assignee_roles == ("unassigned", "designer", "ops", "audit", "director")
+    assert plan.assignee_roles == ("unassigned", "designer", "ops", "audit", "director", "user")
     assert plan.caller_roles == ("director", "designer", "ops", "audit", "user")
 
     combined = "\n".join(
@@ -71,7 +71,7 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "TICKET_BOARD_SOCKET=/run/stellaris-ticket-board/ticket-board.sock" in combined
     assert "TICKET_BOARD_DRAFT_ROLES=designer" in combined
     assert "TICKET_BOARD_IMPLEMENTER_ROLES=ops" in combined
-    assert "TICKET_BOARD_ASSIGNEES=unassigned,designer,ops,audit,director" in combined
+    assert "TICKET_BOARD_ASSIGNEES=unassigned,designer,ops,audit,director,user" in combined
     assert "TICKET_BOARD_CALLER_ROLES=director,designer,ops,audit,user" in combined
     assert "TICKET_BOARD_PANE_STATE_DIR=%t/stellaris-ticket-board/pane-state" in combined
     assert "PGU_TICKET_BOARD_SOCKET=" not in combined
@@ -93,7 +93,7 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "('analysis', 'Triage', 1, ARRAY['director']::text[]" in combined
     assert "('in_progress', 'Implementation', 2, ARRAY['ops']::text[]" in combined
     assert "('draft', 'analysis', 'release_draft', ARRAY['designer', 'director', 'user']::text[]" in combined
-    assert "ADD CONSTRAINT tickets_assignee_check CHECK (assignee IN ('unassigned', 'designer', 'ops', 'audit', 'director'))" in combined
+    assert "ADD CONSTRAINT tickets_assignee_check CHECK (assignee IN ('unassigned', 'designer', 'ops', 'audit', 'director', 'user'))" in combined
     assert "('audit', 'director_review', 'audit_sign_off', ARRAY['audit']::text[]" in combined
     assert "('backlog'," not in render_workflow_sql(plan)
     assert "('inspection'," not in render_workflow_sql(plan)
@@ -288,7 +288,7 @@ def test_board_role_environment_drives_python_gate() -> None:
 from scripts.ticket_board import app
 from scripts.ticket_board import server
 
-assert app.ASSIGNEES == ('unassigned', 'designer', 'builder', 'audit', 'director')
+assert app.ASSIGNEES == ('unassigned', 'designer', 'builder', 'audit', 'director', 'user')
 assert app.CALLER_ROLES == ('director', 'designer', 'builder', 'audit', 'user')
 assert server.DRAFT_ROLES == {'designer'}
 assert server.IMPLEMENTER_ROLES == {'builder'}
@@ -301,7 +301,7 @@ assert 'ops' not in server.OPERATION_ALLOWED_ROLES['start_work']
     env = {
         **os.environ,
         "PYTHONPATH": str(ROOT),
-        "TICKET_BOARD_ASSIGNEES": "unassigned,designer,builder,audit,director",
+        "TICKET_BOARD_ASSIGNEES": "unassigned,designer,builder,audit,director,user",
         "TICKET_BOARD_CALLER_ROLES": "director,designer,builder,audit,user",
         "TICKET_BOARD_DRAFT_ROLES": "designer",
         "TICKET_BOARD_IMPLEMENTER_ROLES": "builder",

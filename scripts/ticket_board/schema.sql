@@ -60,7 +60,8 @@ CREATE TABLE IF NOT EXISTS ticket_board.tickets (
             'inspector',
             'agent',
             'director',
-            'research'
+            'research',
+            'user'
         )),
 
     -- Empty string is preserved because the JSON store uses "" rather than null
@@ -160,7 +161,8 @@ ALTER TABLE ticket_board.tickets
         'inspector',
         'agent',
         'director',
-        'research'
+        'research',
+        'user'
     ));
 ALTER TABLE ticket_board.tickets
     DROP CONSTRAINT IF EXISTS tickets_in_progress_assignee_check;
@@ -308,7 +310,7 @@ INSERT INTO ticket_board.workflow_stages (
     ('inspection', 'Inspection', 4, ARRAY['inspector']::text[], 'needs_inspection', 'audit', 'inspector_signoff', false),
     ('audit', 'Audit', 5, ARRAY['audit']::text[], NULL, NULL, 'audit_signoff', false),
     ('dat', 'DAT', 6, ARRAY['director']::text[], 'needs_user_signoff', 'director_review', NULL, false),
-    ('user_review', 'UAT', 7, ARRAY['director']::text[], 'needs_user_signoff', 'director_review', 'user_signoff', false),
+    ('user_review', 'UAT', 7, ARRAY['user']::text[], 'needs_user_signoff', 'director_review', 'user_signoff', false),
     ('director_review', 'Final Sign-Off', 8, ARRAY['director']::text[], NULL, NULL, NULL, false),
     ('done', 'Done', 9, ARRAY[]::text[], NULL, NULL, NULL, true),
     ('cancelled', 'Cancelled', 10, ARRAY[]::text[], NULL, NULL, NULL, true)
@@ -748,6 +750,7 @@ STABLE
 AS $$
     SELECT CASE
         WHEN p_state = 'in_progress' AND ticket_board.ticket_is_implementer_assignee(p_assignee) THEN p_assignee
+        WHEN p_state = 'user_review' AND p_assignee = 'user' THEN NULL
         WHEN p_state IN ('inspection', 'audit', 'dat', 'user_review', 'director_review') THEN (
             SELECT nullif(ns.last_implementer_assignee, '')
             FROM ticket_board.ticket_notification_state ns
@@ -778,6 +781,7 @@ AS $$
           OR (
               t.state IN ('inspection', 'audit', 'dat', 'user_review', 'director_review')
               AND ns.last_implementer_assignee = p_implementer
+              AND NOT (t.state = 'user_review' AND t.assignee = 'user')
           )
       )
     ORDER BY ns.entered_current_state_at, t.ticket_number
@@ -1717,7 +1721,7 @@ AS $$
         WHEN p_state = 'inspection' THEN 'inspector'
         WHEN p_state = 'audit' THEN 'audit'
         WHEN p_state = 'dat' THEN 'director'
-        WHEN p_state = 'user_review' THEN 'director'
+        WHEN p_state = 'user_review' THEN NULL
         WHEN p_state = 'director_review' THEN 'director'
         ELSE NULL
     END;
@@ -4700,7 +4704,7 @@ BEGIN
     END IF;
     UPDATE ticket_board.tickets
     SET state = 'user_review',
-        assignee = 'director'
+        assignee = 'user'
     WHERE tickets.id = director_dat_sign_off.id
       AND tickets.state = 'dat'
       AND tickets.needs_user_signoff;

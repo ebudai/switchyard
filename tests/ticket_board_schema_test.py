@@ -63,6 +63,7 @@ EXPECTED_ASSIGNEES = {
     "agent",
     "director",
     "research",
+    "user",
 }
 EXPECTED_FUNCTION_API = {
     "ticket_board.create_ticket",
@@ -320,6 +321,13 @@ def main() -> int:
     assert "('analysis', 'triage', 2, array['director']::text[]" in workflow_config_migration
     assert "('user_review', 'uat', 6, array['director']::text[]" in workflow_config_migration
     assert "('draft', 'analysis', 'release_draft', array['director', 'user']::text[])" in workflow_config_migration
+    user_assignee_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu649_user_assignee_uat.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "array['user']::text[]" in user_assignee_migration
+    assert "when p_state = 'user_review' then null" in user_assignee_migration
+    assert "set state = 'user_review',\n        assignee = 'user'" in user_assignee_migration
+    assert "set assignee = 'user',\n        manually_controlled = false" in user_assignee_migration
     cosmetic_derivation_migration = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "pgu520_workflow_config_cosmetic_derivation.sql"
     ).read_text(encoding="utf-8").lower()

@@ -1188,7 +1188,18 @@ WHERE id = 'PGU-8';
 """,
                 ).stdout
             )
-            assert auto_uat == {"state": "user_review", "assignee": "director", "audit_signoff": True}, auto_uat
+            assert auto_uat == {"state": "user_review", "assignee": "user", "audit_signoff": True}, auto_uat
+            auto_uat_notice_count = psql(
+                conninfo,
+                """
+SELECT count(*)::int
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-8'
+  AND kind = 'transition'
+  AND payload->>'new_state' = 'user_review';
+""",
+            ).stdout.strip()
+            assert auto_uat_notice_count == "0", auto_uat_notice_count
             psql(conninfo, "UPDATE ticket_board.tickets SET user_signoff = true WHERE id = 'PGU-8';")
             eric_done = json.loads(
                 psql(
@@ -1255,6 +1266,27 @@ WHERE id = 'PGU-80';
             service_call(conninfo, "inspector", "SELECT ticket_board.inspector_sign_off('PGU-84');")
             service_call(conninfo, "audit", "SELECT ticket_board.audit_sign_off('PGU-84', 'Audit verified.');")
             service_call(conninfo, "director", "SELECT ticket_board.route('PGU-84', 'user_review', 'director');")
+            user_review_releases_ops = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'state', state,
+    'assignee', assignee,
+    'current_reserved_is_uat', coalesce(ticket_board.ticket_current_reserved_ticket('ops'), '') = id,
+    'reserved_from_ticket', coalesce(ticket_board.ticket_reserved_implementer(id, state, assignee), '<none>')
+)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-84';
+""",
+                ).stdout
+            )
+            assert user_review_releases_ops == {
+                "state": "user_review",
+                "assignee": "user",
+                "current_reserved_is_uat": False,
+                "reserved_from_ticket": "<none>",
+            }, user_review_releases_ops
             service_call(conninfo, "director", "SELECT ticket_board.route('PGU-84', 'inspection', 'inspector');")
             reinspect_entry = json.loads(
                 psql(
@@ -2219,9 +2251,9 @@ WHERE ticket_board.transition_target_role(states.state, 'ops') IS NOT NULL;
             assert non_transition_targets == "0"
             user_review_target = psql(
                 conninfo,
-                "SELECT ticket_board.transition_target_role('user_review', 'director');",
+                "SELECT coalesce(ticket_board.transition_target_role('user_review', 'user'), '<none>');",
             ).stdout.strip()
-            assert user_review_target == "director"
+            assert user_review_target == "<none>"
 
             psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
             service_call(

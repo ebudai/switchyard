@@ -2595,7 +2595,7 @@ def test_idle_reminder_repeat_escalation_delivers_to_director() -> None:
     assert conn.acked == [81]
 
 
-def test_user_review_delivers_to_director_for_uat() -> None:
+def test_user_review_does_not_deliver_to_a_pane_for_uat() -> None:
     sent: list[tuple[str, str]] = []
     listener = TicketBoardNotifyListener(
         conninfo="dbname=test",
@@ -2605,8 +2605,8 @@ def test_user_review_delivers_to_director_for_uat() -> None:
         poll_seconds=0,
     )
 
-    assert listener.deliver_payload(transition_payload("PGU-213", title="UAT gate", new_state="user_review")) is True
-    assert sent == [("pgu-director:0.0", "PGU-213 -- UAT gate ready for User UAT")]
+    assert listener.deliver_payload(transition_payload("PGU-213", title="UAT gate", new_state="user_review")) is False
+    assert sent == []
 
 
 def test_reconnect_relistens_after_connection_drop() -> None:

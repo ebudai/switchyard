@@ -377,6 +377,9 @@ WHERE id = {sql_string(draft_created)};
     assert released_draft == {"state": "analysis", "assignee": "director"}, released_draft
     assert psql(admin_conn, "SELECT ticket_board.stage_default_assignee('analysis');") == "director"
     assert psql(admin_conn, "SELECT coalesce(ticket_board.stage_default_assignee('in_progress'), '<none>');") == "<none>"
+    assert psql(admin_conn, "SELECT ticket_board.stage_default_assignee('user_review');") == "user"
+    assert psql(admin_conn, "SELECT ticket_board.ticket_valid_assignee('user');") == "t"
+    assert psql(admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('user');") == "f"
     blocked_created = psql(
         service_conn,
         f"SELECT ticket_board.create_ticket('Service blocked create', 'Body', 'analysis', ARRAY[{sql_string(created)}], 'Waiting on source.');",

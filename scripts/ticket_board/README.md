@@ -136,7 +136,7 @@ Ticket schema:
 
 Allowed values:
 
-- `assignee`: `main`, `app`, `perf`, `ops`, `audit`, `agent`, `director`, `unassigned`
+- `assignee`: `main`, `app`, `perf`, `ops`, `audit`, `agent`, `director`, `research`, `user`, `unassigned`
 - `state`: `draft`, `backlog`, `analysis`, `in_progress`, `inspection`, `audit`, `dat`, `user_review`, `director_review`, `done`, `cancelled`
 
 Notes:
@@ -184,8 +184,8 @@ Notes:
 - `draft -> analysis` must use the `release_draft` operation and is restricted to director/User plus configured draft-owner roles
 - `analysis -> in_progress` is the default handoff from triage/spec to Implementation
 - Any state can move to `backlog` to defer work; backlog tickets can be revived to `analysis`
-- The default UAT-bound review path is `in_progress -> audit -> DAT (internal state: dat) -> UAT (internal state: user_review) -> director_review -> done`; code-only tickets keep `in_progress -> audit -> director_review -> done`
-- Implementer focus is reserved from `in_progress` through review (`inspection`, `audit`, DAT, UAT, and director review); finishing/cancelling/parking the reserved ticket auto-activates that implementer's oldest unblocked queued backlog ticket
+- The default UAT-bound review path is `in_progress -> audit -> DAT (internal state: dat) -> UAT (internal state: user_review, assignee=user) -> director_review -> done`; code-only tickets keep `in_progress -> audit -> director_review -> done`
+- Implementer focus is reserved from `in_progress` through agent/director review (`inspection`, `audit`, DAT, and director review). UAT tickets assigned to `user` do not hold an implementer reservation. Finishing/cancelling/parking a reserved ticket auto-activates that implementer's oldest unblocked queued backlog ticket
 - Director deferral parks the current ticket as `backlog` with `parked: true`; queued implementer backlog (`parked: false`) is intentionally excluded from idle-stall nudges until it becomes active
 - When a ticket is legitimately waiting on another pane, use `scripts/ticket-board-write await-role PGU-N --role perf|inspector|audit|...`; active awaiting markers suppress stall nudges, clear when that role acts on the ticket, and expire after the fallback timeout
 - Discretionary idle-stall/backstop nudges route to the director as coordination signals; primary transition/work-delivery notifications still route to the responsible pane

@@ -33,6 +33,7 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     plan = build_plan(project="stellaris", owner_user="stellaris-agent", port=8871)
 
     assert plan.board_unit == "stellaris-ticket-board.service"
+    assert plan.ticket_prefix == "STELLARIS"
     assert plan.listener_unit == "stellaris-ticket-board-notify-listener.service"
     assert plan.polkit_name == "49-stellaris-ticket-board-deploy.rules"
     assert plan.runtime_directory == "stellaris-ticket-board"
@@ -64,6 +65,8 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
         ]
     )
     assert "127.0.0.1 --port 8871" in combined
+    assert "TICKET_BOARD_PROJECT=stellaris" in combined
+    assert "TICKET_BOARD_TICKET_PREFIX=STELLARIS" in combined
     assert "PGDATABASE=stellaris_ticket_board" in combined
     assert "TICKET_BOARD_SOCKET=/run/stellaris-ticket-board/ticket-board.sock" in combined
     assert "TICKET_BOARD_DRAFT_ROLES=designer" in combined
@@ -225,6 +228,7 @@ def test_pgu_project_render_matches_live_port_database_and_frame_dir() -> None:
 
     assert plan.port == 8770
     assert plan.database == "pgu"
+    assert plan.ticket_prefix == "PGU"
     assert plan.board_unit == "pgu-ticket-board.service"
     assert plan.runtime_directory == "pgu-ticket-board"
     assert plan.socket_path == "/run/pgu-ticket-board/ticket-board.sock"
@@ -253,6 +257,15 @@ def test_database_sql_bootstraps_schema_compatible_roles_and_project_database() 
     assert "CREATE ROLE ticket_board_listener" in sql
     assert "CREATE DATABASE %I', '4xgame_ticket_board'" in sql
     assert 'COMMENT ON DATABASE "4xgame_ticket_board"' in sql
+
+
+def test_custom_ticket_prefix_is_rendered_into_board_service_environment() -> None:
+    plan = build_plan(project="otto", owner_user="otto-agent", ticket_prefix="ot")
+    board_unit = render_board_unit(plan)
+
+    assert plan.ticket_prefix == "OT"
+    assert "Environment=TICKET_BOARD_PROJECT=otto" in board_unit
+    assert "Environment=TICKET_BOARD_TICKET_PREFIX=OT" in board_unit
 
 
 def test_custom_database_actor_roles_fail_loud_until_schema_supports_them() -> None:
@@ -309,6 +322,8 @@ def test_cli_writes_reviewable_artifacts() -> None:
                 "otto-agent",
                 "--port",
                 "8872",
+                "--ticket-prefix",
+                "PRT",
                 "--output-dir",
                 str(output_dir),
             ],
@@ -321,6 +336,7 @@ def test_cli_writes_reviewable_artifacts() -> None:
         assert f"wrote {output_dir}" in result.stdout
         plan = json.loads((output_dir / "plan.json").read_text(encoding="utf-8"))
         assert plan["port"] == 8872
+        assert plan["ticket_prefix"] == "PRT"
         assert plan["database"] == "porter_ticket_board"
         assert plan["source_repo"] == str(ROOT)
         assert plan["socket_path"] == "/run/porter-ticket-board/ticket-board.sock"

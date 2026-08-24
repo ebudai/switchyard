@@ -70,7 +70,9 @@ from scripts.team_launcher import (
     launch_konsole_window,
     launch_project,
     live_command_matches_role,
+    design_project_command,
     load_project_config,
+    load_project_design_artifact,
     new_project_command,
     pane_state_file_name,
     provision_runtime_command,
@@ -348,6 +350,10 @@ def _command_tail(command: list[str]) -> list[str]:
         if "=" not in token:
             return command[index:]
     return []
+
+
+def _no_input(prompt: str) -> str:
+    raise AssertionError(f"unexpected prompt: {prompt}")
 
 
 def _patch_process_snapshot(
@@ -2458,6 +2464,7 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
         config = json.loads((output_dir / "porter.json").read_text(encoding="utf-8"))
         layout = json.loads((output_dir / "porter-konsole-layout.json").read_text(encoding="utf-8"))
         plan = json.loads((output_dir / "plan.json").read_text(encoding="utf-8"))
+        board_unit = (output_dir / "porter-ticket-board.service").read_text(encoding="utf-8")
         commands = (output_dir / "operator-commands.sh").read_text(encoding="utf-8")
         loaded_config = load_project_config("porter", output_dir / "porter.json")
         launch_output = tmp_path / "launch-layout.json"
@@ -2480,9 +2487,11 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
         launch_output_exists = launch_output.exists()
 
     assert plan["project"] == "porter"
+    assert plan["ticket_prefix"] == "PORTER"
     assert plan["owner_user"] == current_user
     assert plan["port"] == 23682
     assert config["project"] == "porter"
+    assert config["ticket_prefix"] == "PORTER"
     assert config["run_as_user"] == current_user
     assert config["board_url"] == "http://127.0.0.1:23682"
     assert config["board_socket"] == "/run/porter-ticket-board/ticket-board.sock"
@@ -2506,7 +2515,10 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
     assert loaded_config.roles[0].target == "porter-designer:0.0"
     assert loaded_config.roles[3].target == "porter-ops:0.0"
     assert all(role.workdir == str(project_repo) for role in loaded_config.roles)
+    assert {role.env["TICKET_BOARD_TICKET_PREFIX"] for role in loaded_config.roles} == {"PORTER"}
     assert commands.splitlines()[:2] == ["#!/usr/bin/env bash", "set -euo pipefail"]
+    assert "Environment=TICKET_BOARD_PROJECT=porter" in board_unit
+    assert "Environment=TICKET_BOARD_TICKET_PREFIX=PORTER" in board_unit
     assert f"team-launcher: dry-run for porter; artifacts in {output_dir}" in rendered
     assert "  sudo -v\n" in rendered
     assert "  bash operator-commands.sh\n" in rendered
@@ -2521,6 +2533,255 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
     ]
     assert [role["workdir"] for role in launch_plan["roles"]] == [str(project_repo)] * 4
     assert launch_output_exists
+
+
+def test_design_writes_artifact_that_new_from_consumes_for_missing_owner_user() -> None:
+    missing_owner = "pgu647-missing-agent"
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-design.") as tmp:
+        tmp_path = Path(tmp)
+        design_dir = tmp_path / "design"
+        provision_dir = tmp_path / "provision"
+        source_repo = tmp_path / "source-repo"
+        project_repo = tmp_path / "project-repo"
+        source_repo.mkdir()
+        project_repo.mkdir()
+        design_stdout = StringIO()
+        provision_stdout = StringIO()
+        runner = FakeRunner()
+
+        with redirect_stdout(design_stdout):
+            assert (
+                design_project_command(
+                    "porter",
+                    output_dir=design_dir,
+                    design_title="Porter",
+                    design_body="A small coordination tool.",
+                    repository=project_repo,
+                    remote="upstream",
+                    default_branch="trunk",
+                    worktree_policy="shared",
+                    owner_user=missing_owner,
+                    ticket_prefix="PORT",
+                    push_policy="director-main-only",
+                    audit_signoff=True,
+                    needs_inspection=False,
+                    needs_user_signoff=False,
+                    board_service_traversal=True,
+                    supplementary_groups=[],
+                    linger=True,
+                    owner_shell="fish",
+                    input_func=_no_input,
+                )
+                == 0
+            )
+        artifact_path = design_dir / "porter.project.json"
+        design_doc = design_dir / "porter-design.md"
+        artifact = load_project_design_artifact(artifact_path, expected_project="porter")
+
+        with redirect_stdout(provision_stdout):
+            assert (
+                new_project_command(
+                    "porter",
+                    from_artifact=artifact_path,
+                    source_repo=source_repo,
+                    output_dir=provision_dir,
+                    dry_run=True,
+                    runner=runner,
+                    port_in_use=lambda _port: False,
+                    socket_exists=lambda _path: False,
+                )
+                == 0
+            )
+
+        plan = json.loads((provision_dir / "plan.json").read_text(encoding="utf-8"))
+        config = json.loads((provision_dir / "porter.json").read_text(encoding="utf-8"))
+        board_unit = (provision_dir / "porter-ticket-board.service").read_text(encoding="utf-8")
+        design_doc_text = design_doc.read_text(encoding="utf-8")
+
+    assert "team-launcher: wrote design document" in design_stdout.getvalue()
+    assert "team-launcher: dry-run for porter" in provision_stdout.getvalue()
+    assert design_doc_text.startswith("# Porter\n\nA small coordination tool.\n")
+    assert artifact.owner_user == missing_owner
+    assert artifact.repository == project_repo
+    assert artifact.ticket_prefix == "PORT"
+    assert plan["owner_user"] == missing_owner
+    assert plan["ticket_prefix"] == "PORT"
+    assert config["ticket_prefix"] == "PORT"
+    assert config["repository"] == str(project_repo)
+    assert config["worktree_remote"] == "upstream"
+    assert config["worktree_branch"] == "trunk"
+    assert "worktree_base" not in config
+    assert "Environment=TICKET_BOARD_PROJECT=porter" in board_unit
+    assert "Environment=TICKET_BOARD_TICKET_PREFIX=PORT" in board_unit
+    assert not any(call[:1] == ["sudo"] for call in runner.calls)
+
+
+def test_design_cli_writes_project_artifact_noninteractively() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-design.") as tmp:
+        tmp_path = Path(tmp)
+        project_repo = tmp_path / "project-repo"
+        project_repo.mkdir()
+        stdout = StringIO()
+
+        with redirect_stdout(stdout):
+            assert (
+                team_launcher.main(
+                    [
+                        "porter",
+                        "design",
+                        "--design-output-dir",
+                        str(tmp_path / "design"),
+                        "--design-title",
+                        "Porter",
+                        "--design-body",
+                        "CLI design body.",
+                        "--repository",
+                        str(project_repo),
+                        "--owner-user",
+                        "pgu647-missing-agent",
+                        "--ticket-prefix",
+                        "PORT",
+                        "--remote",
+                        "origin",
+                        "--default-branch",
+                        "main",
+                        "--worktree-policy",
+                        "shared",
+                        "--push-policy",
+                        "director-main-only",
+                        "--audit-signoff",
+                        "--no-needs-inspection",
+                        "--no-needs-user-signoff",
+                        "--board-service-traversal",
+                        "--supplementary-group",
+                        "kvm",
+                        "--linger",
+                        "--owner-shell",
+                        "fish",
+                    ]
+                )
+                == 0
+            )
+
+        artifact = load_project_design_artifact(tmp_path / "design" / "porter.project.json", expected_project="porter")
+
+    assert "team-launcher: wrote project artifact" in stdout.getvalue()
+    assert artifact.ticket_prefix == "PORT"
+    assert artifact.owner_user == "pgu647-missing-agent"
+
+
+def test_new_project_from_handwritten_artifact_uses_same_provision_path() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-design.") as tmp:
+        tmp_path = Path(tmp)
+        source_repo = tmp_path / "source-repo"
+        project_repo = tmp_path / "project-repo"
+        provision_dir = tmp_path / "provision"
+        source_repo.mkdir()
+        project_repo.mkdir()
+        artifact_path = tmp_path / "atlas.project.json"
+        artifact_path.write_text(
+            json.dumps(
+                {
+                    "schema": "switchyard.project.v1",
+                    "design_document": "atlas-design.md",
+                    "project": {
+                        "slug": "atlas",
+                        "ticket_prefix": "ATL",
+                        "owner_user": current_user,
+                        "repository": str(project_repo),
+                        "remote": "origin",
+                        "default_branch": "mainline",
+                        "worktree_policy": "isolated",
+                        "push_policy": "director-main-only",
+                        "gates": {
+                            "audit_signoff": True,
+                            "needs_inspection": False,
+                            "needs_user_signoff": True,
+                        },
+                        "capability_grants": {
+                            "board_service_traversal": True,
+                            "supplementary_groups": ["kvm"],
+                            "linger": True,
+                            "shell": "bash",
+                        },
+                    },
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        runner = FakeRunner()
+
+        assert (
+            new_project_command(
+                "atlas",
+                from_artifact=artifact_path,
+                source_repo=source_repo,
+                output_dir=provision_dir,
+                runner=runner,
+                port_in_use=lambda _port: False,
+                socket_exists=lambda _path: False,
+            )
+            == 0
+        )
+        plan = json.loads((provision_dir / "plan.json").read_text(encoding="utf-8"))
+        config = json.loads((provision_dir / "atlas.json").read_text(encoding="utf-8"))
+        board_unit = (provision_dir / "atlas-ticket-board.service").read_text(encoding="utf-8")
+
+    assert plan["project"] == "atlas"
+    assert plan["ticket_prefix"] == "ATL"
+    assert config["ticket_prefix"] == "ATL"
+    assert config["worktree_branch"] == "mainline"
+    assert config["worktree_base"] == f"/home/{current_user}/atlas-worktrees"
+    assert "Environment=TICKET_BOARD_TICKET_PREFIX=ATL" in board_unit
+    assert not any(call[:1] == ["sudo"] for call in runner.calls)
+
+
+def test_project_artifact_rejects_stage_and_role_configuration() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-design.") as tmp:
+        tmp_path = Path(tmp)
+        project_repo = tmp_path / "project-repo"
+        source_repo = tmp_path / "source-repo"
+        project_repo.mkdir()
+        source_repo.mkdir()
+        artifact_path = tmp_path / "bad.project.json"
+        artifact_path.write_text(
+            json.dumps(
+                {
+                    "schema": "switchyard.project.v1",
+                    "design_document": "bad-design.md",
+                    "project": {
+                        "slug": "bad",
+                        "ticket_prefix": "BAD",
+                        "owner_user": team_launcher.current_user_name(),
+                        "repository": str(project_repo),
+                        "roles": ["director", "ops"],
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        try:
+            new_project_command(
+                "bad",
+                from_artifact=artifact_path,
+                source_repo=source_repo,
+                output_dir=tmp_path / "out",
+                runner=FakeRunner(),
+                port_in_use=lambda _port: False,
+                socket_exists=lambda _path: False,
+            )
+            raise AssertionError("expected artifact role-shaping rejection")
+        except SystemExit as exc:
+            message = str(exc)
+
+    assert "must not preconfigure stages or roles" in message
+    assert "project.roles" in message
 
 
 def test_new_project_requires_project_repository() -> None:

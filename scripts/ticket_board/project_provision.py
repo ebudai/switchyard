@@ -15,6 +15,7 @@ from typing import Sequence
 PROJECT_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 USER_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$")
 ROLE_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+TICKET_PREFIX_RE = re.compile(r"^[A-Z][A-Z0-9]*$")
 DEFAULT_IMPLEMENTER_ROLES = ("main", "app", "ops", "perf", "research")
 DEFAULT_PROJECT_DRAFT_ROLES = ("designer",)
 DEFAULT_PROJECT_IMPLEMENTER_ROLES = ("ops",)
@@ -25,6 +26,7 @@ DEFAULT_PGU_CALLER_ROLES = ("director", "main", "app", "ops", "perf", "audit", "
 @dataclass(frozen=True)
 class ProjectBoardProvision:
     project: str
+    ticket_prefix: str
     owner_user: str
     service_user: str
     board_unit: str
@@ -75,6 +77,17 @@ def _validate_role(value: str) -> str:
     return role
 
 
+def validate_ticket_prefix(value: str) -> str:
+    prefix = re.sub(r"[^A-Za-z0-9]+", "", value.strip()).upper()
+    if not prefix:
+        raise SystemExit("ticket prefix must contain at least one ASCII letter or digit")
+    if prefix[0].isdigit():
+        prefix = f"T{prefix}"
+    if not TICKET_PREFIX_RE.fullmatch(prefix):
+        raise SystemExit("ticket prefix must normalize to ^[A-Z][A-Z0-9]*$")
+    return prefix
+
+
 def _dedupe(values: Sequence[str]) -> tuple[str, ...]:
     result: list[str] = []
     for value in values:
@@ -109,9 +122,11 @@ def build_plan(
     asset_dir: Path | None = None,
     frame_dir: Path | None = None,
     implementer_roles: Sequence[str] | None = None,
+    ticket_prefix: str | None = None,
 ) -> ProjectBoardProvision:
     project = _validate_project(project)
     owner_user = _validate_user(owner_user)
+    resolved_ticket_prefix = validate_ticket_prefix(ticket_prefix or project)
     if service_user:
         _validate_user(service_user)
     if service_role != "ticket_board_service" or listener_role != "ticket_board_listener":
@@ -154,6 +169,7 @@ def build_plan(
     board_current = resolved_board_root / "current"
     return ProjectBoardProvision(
         project=project,
+        ticket_prefix=resolved_ticket_prefix,
         owner_user=owner_user,
         service_user=service_user,
         board_unit=f"{unit_prefix}.service",
@@ -249,6 +265,8 @@ Restart=on-failure
 RestartSec=2
 Environment=PYTHONUNBUFFERED=1
 Environment=HOME=/home/{plan.owner_user}
+Environment=TICKET_BOARD_PROJECT={plan.project}
+Environment=TICKET_BOARD_TICKET_PREFIX={plan.ticket_prefix}
 Environment=PGHOST=/var/run/postgresql
 Environment=PGDATABASE={plan.database}
 Environment=PGUSER={plan.service_role}
@@ -283,6 +301,7 @@ ExecStart=/usr/bin/python3 {plan.board_current}/scripts/ticket-board-notify-list
 Restart=always
 RestartSec=2
 Environment=PYTHONUNBUFFERED=1
+Environment=TICKET_BOARD_PROJECT={plan.project}
 Environment=PGHOST=/var/run/postgresql
 Environment=PGDATABASE={plan.database}
 Environment=PGUSER={plan.listener_role}
@@ -622,6 +641,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--owner-user", required=True, help="Unix user that owns this project/team")
     parser.add_argument("--port", type=int, help="HTTP port; omitted means deterministic allocation")
     parser.add_argument("--database", help="PostgreSQL database name; omitted means <project>_ticket_board")
+    parser.add_argument("--ticket-prefix", help="ticket id prefix; omitted means normalized project slug")
     parser.add_argument("--service-user", default="boardsvc", help="systemd User for the board service")
     parser.add_argument("--service-role", default="ticket_board_service", help="database writer role")
     parser.add_argument("--listener-role", default="ticket_board_listener", help="database listener role")
@@ -652,6 +672,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         owner_user=args.owner_user,
         port=args.port,
         database=args.database,
+        ticket_prefix=args.ticket_prefix,
         service_user=args.service_user,
         service_role=args.service_role,
         listener_role=args.listener_role,

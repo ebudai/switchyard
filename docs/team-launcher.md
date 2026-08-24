@@ -251,13 +251,32 @@ the visible launch window remains a six-pane operator layout.
 
 ## New Project
 
-Generate a complete project config and provisioning plan for another project:
+For a new project, first write the design document and post-design project
+artifact:
+
+```bash
+scripts/team-launcher porter design \
+  --design-output-dir /tmp/porter-design \
+  --repository /home/otto-agent/Projects/porter \
+  --owner-user otto-agent \
+  --ticket-prefix PORT
+```
+
+`design` does not create users, start panes, touch tmux, provision a board, or
+run privileged commands. It writes `<slug>-design.md` plus
+`<slug>.project.json`. The artifact records the post-design answers: code
+location, remote, default branch, worktree policy, slug, ticket prefix, owner
+user and capability grants, push policy, and project gates. It deliberately
+does not ask for stages or extra implementer roles; new projects start with the
+default five-stage workflow and are specialized later by the live director.
+
+Then generate a complete project config and provisioning plan from that
+reviewed artifact:
 
 ```bash
 scripts/team-launcher porter new \
-  --owner-user otto-agent \
+  --from /tmp/porter-design/porter.project.json \
   --source-repo /home/agent/Projects/pgu \
-  --repository /home/otto-agent/Projects/porter \
   --new-output-dir /tmp/porter \
   --dry-run
 ```
@@ -268,5 +287,7 @@ the generated artifacts, then rerun with `--execute` when the project should be
 provisioned.
 
 `--source-repo` is the checkout that exports the board and launcher tooling for
-provisioning. `--repository` is the project checkout opened by the generated
-team panes, and it must already exist.
+provisioning. The artifact's `repository` is the project checkout opened by the
+generated team panes, and it must already exist. Dry-run rendering can happen
+before the owner user exists; `--execute` still requires the owner user to
+exist until user creation is implemented in `new`.

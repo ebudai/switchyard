@@ -17,7 +17,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from scripts.ticket_board.project_provision import ProjectBoardProvision, build_plan, write_artifacts
+from scripts.ticket_board.project_provision import (
+    ProjectBoardProvision,
+    build_plan,
+    validate_ticket_prefix,
+    write_artifacts,
+)
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "team-launcher"
 DEFAULT_LEGACY_RUNTIME_SESSION_DIR = Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-sessions")
@@ -27,6 +32,30 @@ REMOVED_CONFIG_FREE_COMMANDS = frozenset({"bootstrap"})
 BOOTSTRAP_REPLACEMENT_COMMAND = (
     "team-launcher <project> new --repository <project-checkout> --dry-run --new-output-dir <dir>"
 )
+PROJECT_DESIGN_ARTIFACT_SCHEMA = "switchyard.project.v1"
+PROJECT_DESIGN_DEFAULT_GATES = {
+    "audit_signoff": True,
+    "needs_inspection": False,
+    "needs_user_signoff": False,
+}
+PROJECT_DESIGN_DEFAULT_CAPABILITY_GRANTS = {
+    "board_service_traversal": True,
+    "supplementary_groups": [],
+    "linger": True,
+    "shell": "fish",
+}
+PROJECT_DESIGN_FORBIDDEN_KEYS = frozenset(
+    {
+        "roles",
+        "stages",
+        "workflow",
+        "workflow_stages",
+        "workflow_transitions",
+        "implementer_roles",
+        "extra_implementer_roles",
+    }
+)
+WORKTREE_POLICIES = frozenset({"shared", "isolated"})
 
 
 def _env_first(*names: str) -> str:
@@ -128,6 +157,7 @@ class RoleConfig:
 @dataclass(frozen=True)
 class ProjectConfig:
     project: str
+    ticket_prefix: str
     layout: Path
     session_dir: Path
     board_url: str
@@ -147,6 +177,21 @@ class WorktreeProvisionResult:
     @property
     def ok(self) -> bool:
         return not self.failed_roles
+
+
+@dataclass(frozen=True)
+class ProjectDesignArtifact:
+    project: str
+    ticket_prefix: str
+    owner_user: str
+    repository: Path
+    remote: str
+    default_branch: str
+    worktree_policy: str
+    design_document: Path
+    push_policy: str
+    gates: dict[str, bool]
+    capability_grants: dict[str, object]
 
 
 @dataclass(frozen=True)
@@ -365,6 +410,134 @@ def _load_json(path: Path) -> dict[str, Any]:
     return parsed
 
 
+def _artifact_forbidden_keys(raw: dict[str, Any]) -> list[str]:
+    found = [key for key in raw if key in PROJECT_DESIGN_FORBIDDEN_KEYS]
+    project_raw = raw.get("project")
+    if isinstance(project_raw, dict):
+        found.extend(f"project.{key}" for key in project_raw if key in PROJECT_DESIGN_FORBIDDEN_KEYS)
+    return sorted(found)
+
+
+def _artifact_string(raw: dict[str, Any], key: str, *, path: Path, default: str = "") -> str:
+    value = raw.get(key, default)
+    if not isinstance(value, str):
+        raise SystemExit(f"{path} field {key!r} must be a JSON string")
+    value = value.strip()
+    if not value:
+        raise SystemExit(f"{path} field {key!r} must be non-empty")
+    return value
+
+
+def _artifact_bool_mapping(raw: Any, *, path: Path, field: str, defaults: dict[str, bool]) -> dict[str, bool]:
+    if raw is None:
+        return dict(defaults)
+    if not isinstance(raw, dict):
+        raise SystemExit(f"{path} field {field!r} must be a JSON object")
+    result = dict(defaults)
+    for key, value in raw.items():
+        if key not in defaults:
+            raise SystemExit(f"{path} field {field!r} contains unknown key {key!r}")
+        if not isinstance(value, bool):
+            raise SystemExit(f"{path} field {field}.{key} must be a JSON boolean")
+        result[key] = value
+    return result
+
+
+def _artifact_capability_grants(raw: Any, *, path: Path) -> dict[str, object]:
+    if raw is None:
+        return dict(PROJECT_DESIGN_DEFAULT_CAPABILITY_GRANTS)
+    if not isinstance(raw, dict):
+        raise SystemExit(f"{path} field 'capability_grants' must be a JSON object")
+    result = dict(PROJECT_DESIGN_DEFAULT_CAPABILITY_GRANTS)
+    allowed = set(result)
+    for key, value in raw.items():
+        if key not in allowed:
+            raise SystemExit(f"{path} field 'capability_grants' contains unknown key {key!r}")
+        if key == "supplementary_groups":
+            if not isinstance(value, list) or not all(isinstance(item, str) and item.strip() for item in value):
+                raise SystemExit(f"{path} field 'capability_grants.supplementary_groups' must be a JSON string list")
+            result[key] = [item.strip() for item in value]
+        elif key == "shell":
+            if not isinstance(value, str) or not value.strip():
+                raise SystemExit(f"{path} field 'capability_grants.shell' must be a non-empty JSON string")
+            result[key] = value.strip()
+        elif not isinstance(value, bool):
+            raise SystemExit(f"{path} field 'capability_grants.{key}' must be a JSON boolean")
+        else:
+            result[key] = value
+    return result
+
+
+def load_project_design_artifact(path: Path, *, expected_project: str | None = None) -> ProjectDesignArtifact:
+    artifact_path = path.expanduser().resolve(strict=False)
+    raw = _load_json(artifact_path)
+    forbidden = _artifact_forbidden_keys(raw)
+    if forbidden:
+        raise SystemExit(
+            f"{artifact_path} must not preconfigure stages or roles for new projects: {', '.join(forbidden)}"
+        )
+    schema = _artifact_string(raw, "schema", path=artifact_path)
+    if schema != PROJECT_DESIGN_ARTIFACT_SCHEMA:
+        raise SystemExit(
+            f"{artifact_path} schema must be {PROJECT_DESIGN_ARTIFACT_SCHEMA!r}, got {schema!r}"
+        )
+    project_raw = raw.get("project")
+    if not isinstance(project_raw, dict):
+        raise SystemExit(f"{artifact_path} field 'project' must be a JSON object")
+    forbidden = _artifact_forbidden_keys(project_raw)
+    if forbidden:
+        raise SystemExit(
+            f"{artifact_path} must not preconfigure stages or roles for new projects: {', '.join(forbidden)}"
+        )
+    slug = _artifact_string(project_raw, "slug", path=artifact_path).lower()
+    if expected_project is not None and slug != expected_project:
+        raise SystemExit(f"{artifact_path} project slug {slug!r} does not match requested project {expected_project!r}")
+    ticket_prefix = validate_ticket_prefix(_artifact_string(project_raw, "ticket_prefix", path=artifact_path))
+    owner_user = _artifact_string(project_raw, "owner_user", path=artifact_path)
+    repository = _expand_path(_artifact_string(project_raw, "repository", path=artifact_path), base=artifact_path.parent)
+    remote = _artifact_string(project_raw, "remote", path=artifact_path, default="origin")
+    default_branch = _artifact_string(project_raw, "default_branch", path=artifact_path, default="main")
+    worktree_policy = _artifact_string(project_raw, "worktree_policy", path=artifact_path, default="shared")
+    if worktree_policy not in WORKTREE_POLICIES:
+        raise SystemExit(f"{artifact_path} field 'project.worktree_policy' must be one of {sorted(WORKTREE_POLICIES)}")
+    design_document = _expand_path(_artifact_string(raw, "design_document", path=artifact_path), base=artifact_path.parent)
+    push_policy = _artifact_string(project_raw, "push_policy", path=artifact_path, default="director-main-only")
+    gates = _artifact_bool_mapping(project_raw.get("gates"), path=artifact_path, field="project.gates", defaults=PROJECT_DESIGN_DEFAULT_GATES)
+    capability_grants = _artifact_capability_grants(project_raw.get("capability_grants"), path=artifact_path)
+    return ProjectDesignArtifact(
+        project=slug,
+        ticket_prefix=ticket_prefix,
+        owner_user=owner_user,
+        repository=repository,
+        remote=remote,
+        default_branch=default_branch,
+        worktree_policy=worktree_policy,
+        design_document=design_document,
+        push_policy=push_policy,
+        gates=gates,
+        capability_grants=capability_grants,
+    )
+
+
+def project_design_artifact_payload(artifact: ProjectDesignArtifact) -> dict[str, Any]:
+    return {
+        "schema": PROJECT_DESIGN_ARTIFACT_SCHEMA,
+        "design_document": str(artifact.design_document),
+        "project": {
+            "slug": artifact.project,
+            "ticket_prefix": artifact.ticket_prefix,
+            "owner_user": artifact.owner_user,
+            "repository": str(artifact.repository),
+            "remote": artifact.remote,
+            "default_branch": artifact.default_branch,
+            "worktree_policy": artifact.worktree_policy,
+            "push_policy": artifact.push_policy,
+            "gates": artifact.gates,
+            "capability_grants": artifact.capability_grants,
+        },
+    }
+
+
 def _config_path_from_launcher_args(argv: Sequence[str]) -> Path | None:
     if not argv:
         return None
@@ -508,6 +681,7 @@ def _role_from_json(project: str, raw: dict[str, Any], *, base: Path, default_wo
 def _role_board_env(config: ProjectConfig, role: RoleConfig, session_role_map: dict[str, str]) -> dict[str, str]:
     return {
         "TICKET_BOARD_PROJECT": config.project,
+        "TICKET_BOARD_TICKET_PREFIX": config.ticket_prefix,
         "TICKET_BOARD_URL": config.board_url,
         "TICKET_BOARD_SOCKET": config.board_socket,
         "TICKET_BOARD_CALLER_ROLE": role.role,
@@ -541,6 +715,7 @@ def load_project_config(project: str, config_path: Path | None = None) -> Projec
     base = path.parent
     layout = _expand_path(str(config.get("layout") or f"{project}-konsole-layout.json"), base=base)
     session_dir = _expand_path(str(config.get("session_dir") or str(DEFAULT_SESSION_DIR)), base=base)
+    ticket_prefix = validate_ticket_prefix(str(config.get("ticket_prefix") or project))
     board_url = str(config.get("board_url") or _default_board_url(project)).strip()
     board_socket = str(config.get("board_socket") or _default_board_socket(project)).strip()
     run_as_user = str(config.get("run_as_user") or "").strip()
@@ -594,6 +769,7 @@ def load_project_config(project: str, config_path: Path | None = None) -> Projec
         raise SystemExit(f"{path} contains duplicate non-shared role workdir assignments: {', '.join(duplicate_non_shared)}")
     parsed_config = ProjectConfig(
         project=config_project,
+        ticket_prefix=ticket_prefix,
         layout=layout,
         session_dir=session_dir,
         board_url=board_url,
@@ -1990,6 +2166,142 @@ def _default_new_project_owner(project: str) -> str:
     return f"{project}-agent"
 
 
+def _prompt_text(
+    label: str,
+    *,
+    default: str = "",
+    input_func: Callable[[str], str] = input,
+) -> str:
+    suffix = f" [{default}]" if default else ""
+    value = input_func(f"{label}{suffix}: ").strip()
+    return value or default
+
+
+def _prompt_bool(
+    label: str,
+    *,
+    default: bool,
+    input_func: Callable[[str], str] = input,
+) -> bool:
+    default_text = "Y/n" if default else "y/N"
+    while True:
+        raw = input_func(f"{label} [{default_text}]: ").strip().lower()
+        if not raw:
+            return default
+        if raw in {"y", "yes", "true", "1"}:
+            return True
+        if raw in {"n", "no", "false", "0"}:
+            return False
+        print("answer yes or no")
+
+
+def _comma_list(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _default_project_artifact_path(project: str, output_dir: Path) -> Path:
+    return output_dir / f"{project}.project.json"
+
+
+def _default_project_design_document_path(project: str, output_dir: Path) -> Path:
+    return output_dir / f"{project}-design.md"
+
+
+def _project_design_markdown(project: str, *, title: str, body: str) -> str:
+    heading = title.strip() or f"{project} design"
+    body_text = body.strip() or "TBD."
+    return f"# {heading}\n\n{body_text}\n"
+
+
+def design_project_command(
+    project: str,
+    *,
+    output_dir: Path | None = None,
+    artifact_path: Path | None = None,
+    design_document: Path | None = None,
+    design_title: str | None = None,
+    design_body: str | None = None,
+    repository: Path | None = None,
+    remote: str | None = None,
+    default_branch: str | None = None,
+    worktree_policy: str | None = None,
+    owner_user: str | None = None,
+    ticket_prefix: str | None = None,
+    push_policy: str | None = None,
+    audit_signoff: bool | None = None,
+    needs_inspection: bool | None = None,
+    needs_user_signoff: bool | None = None,
+    board_service_traversal: bool | None = None,
+    supplementary_groups: Sequence[str] | None = None,
+    linger: bool | None = None,
+    owner_shell: str | None = None,
+    input_func: Callable[[str], str] = input,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    project_slug = project.strip().lower()
+    base_dir = (output_dir or Path.cwd()).expanduser().resolve(strict=False)
+    target_artifact = (artifact_path or _default_project_artifact_path(project_slug, base_dir)).expanduser().resolve(strict=False)
+    target_design_document = (
+        design_document or _default_project_design_document_path(project_slug, target_artifact.parent)
+    ).expanduser().resolve(strict=False)
+
+    title = design_title if design_title is not None else _prompt_text("Design document title", default=f"{project_slug} design", input_func=input_func)
+    body = design_body if design_body is not None else _prompt_text("Design summary", input_func=input_func)
+    repo = repository or Path(_prompt_text("Code location", input_func=input_func))
+    resolved_remote = remote or _prompt_text("Remote", default="origin", input_func=input_func)
+    resolved_branch = default_branch or _prompt_text("Default branch", default="main", input_func=input_func)
+    resolved_policy = worktree_policy or _prompt_text("Worktree policy (shared/isolated)", default="shared", input_func=input_func)
+    if resolved_policy not in WORKTREE_POLICIES:
+        raise SystemExit(f"worktree policy must be one of {sorted(WORKTREE_POLICIES)}")
+    resolved_owner = owner_user or _prompt_text("Owner user", default=_default_new_project_owner(project_slug), input_func=input_func)
+    resolved_prefix = validate_ticket_prefix(
+        ticket_prefix or _prompt_text("Ticket prefix", default=project_slug.upper(), input_func=input_func)
+    )
+    resolved_push_policy = push_policy or _prompt_text("Push policy", default="director-main-only", input_func=input_func)
+    gates = {
+        "audit_signoff": audit_signoff
+        if audit_signoff is not None
+        else _prompt_bool("Require audit signoff gate", default=PROJECT_DESIGN_DEFAULT_GATES["audit_signoff"], input_func=input_func),
+        "needs_inspection": needs_inspection
+        if needs_inspection is not None
+        else _prompt_bool("Enable inspection gate by default", default=PROJECT_DESIGN_DEFAULT_GATES["needs_inspection"], input_func=input_func),
+        "needs_user_signoff": needs_user_signoff
+        if needs_user_signoff is not None
+        else _prompt_bool("Enable user signoff gate by default", default=PROJECT_DESIGN_DEFAULT_GATES["needs_user_signoff"], input_func=input_func),
+    }
+    grants = {
+        "board_service_traversal": board_service_traversal
+        if board_service_traversal is not None
+        else _prompt_bool("Grant board-service traversal into the owner home", default=True, input_func=input_func),
+        "supplementary_groups": list(supplementary_groups)
+        if supplementary_groups is not None
+        else _comma_list(_prompt_text("Supplementary groups (comma-separated, blank for none)", input_func=input_func)),
+        "linger": linger
+        if linger is not None
+        else _prompt_bool("Enable linger for the owner user", default=True, input_func=input_func),
+        "shell": owner_shell or _prompt_text("Owner shell", default="fish", input_func=input_func),
+    }
+    artifact = ProjectDesignArtifact(
+        project=project_slug,
+        ticket_prefix=resolved_prefix,
+        owner_user=resolved_owner,
+        repository=repo.expanduser().resolve(strict=False),
+        remote=resolved_remote,
+        default_branch=resolved_branch,
+        worktree_policy=resolved_policy,
+        design_document=target_design_document,
+        push_policy=resolved_push_policy,
+        gates=gates,
+        capability_grants=grants,
+    )
+    target_design_document.parent.mkdir(parents=True, exist_ok=True)
+    target_design_document.write_text(_project_design_markdown(project_slug, title=title, body=body), encoding="utf-8")
+    _write_json_atomic(target_artifact, project_design_artifact_payload(artifact))
+    print_func(f"team-launcher: wrote design document {target_design_document}")
+    print_func(f"team-launcher: wrote project artifact {target_artifact}")
+    return 0
+
+
 def _new_project_artifact_dir(project: str) -> Path:
     return Path(tempfile.mkdtemp(prefix=f"{project}-team-launcher-new."))
 
@@ -2024,7 +2336,14 @@ def _new_project_layout_payload(role_count: int) -> dict[str, Any]:
     }
 
 
-def _new_project_launcher_config_payload(plan: ProjectBoardProvision, *, repository: Path) -> dict[str, Any]:
+def _new_project_launcher_config_payload(
+    plan: ProjectBoardProvision,
+    *,
+    repository: Path,
+    remote: str = "origin",
+    default_branch: str = "main",
+    worktree_policy: str = "shared",
+) -> dict[str, Any]:
     layout_name = f"{plan.project}-konsole-layout.json"
     roles = [
         {
@@ -2040,11 +2359,17 @@ def _new_project_launcher_config_payload(plan: ProjectBoardProvision, *, reposit
     ]
     return {
         "project": plan.project,
+        "ticket_prefix": plan.ticket_prefix,
         "layout": layout_name,
         "repository": str(repository),
         "run_as_user": plan.owner_user,
-        "worktree_branch": "main",
-        "worktree_remote": "origin",
+        "worktree_branch": default_branch,
+        "worktree_remote": remote,
+        **(
+            {"worktree_base": str(Path("/home") / plan.owner_user / f"{plan.project}-worktrees")}
+            if worktree_policy == "isolated"
+            else {}
+        ),
         "board_url": f"http://127.0.0.1:{plan.port}",
         "board_socket": plan.socket_path,
         "session_dir": _new_project_session_dir(plan.project, plan.owner_user),
@@ -2052,7 +2377,15 @@ def _new_project_launcher_config_payload(plan: ProjectBoardProvision, *, reposit
     }
 
 
-def write_new_project_launcher_artifacts(plan: ProjectBoardProvision, output_dir: Path, *, repository: Path) -> Path:
+def write_new_project_launcher_artifacts(
+    plan: ProjectBoardProvision,
+    output_dir: Path,
+    *,
+    repository: Path,
+    remote: str = "origin",
+    default_branch: str = "main",
+    worktree_policy: str = "shared",
+) -> Path:
     config_path = output_dir / f"{plan.project}.json"
     layout_path = output_dir / f"{plan.project}-konsole-layout.json"
     layout_path.write_text(
@@ -2060,7 +2393,18 @@ def write_new_project_launcher_artifacts(plan: ProjectBoardProvision, output_dir
         encoding="utf-8",
     )
     config_path.write_text(
-        json.dumps(_new_project_launcher_config_payload(plan, repository=repository), indent=2, sort_keys=True) + "\n",
+        json.dumps(
+            _new_project_launcher_config_payload(
+                plan,
+                repository=repository,
+                remote=remote,
+                default_branch=default_branch,
+                worktree_policy=worktree_policy,
+            ),
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
         encoding="utf-8",
     )
     return config_path
@@ -2157,9 +2501,10 @@ def precheck_new_project(
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     port_in_use: Callable[[int], bool] = _tcp_port_in_use,
     socket_exists: Callable[[Path], bool] = _path_exists,
+    require_owner_user: bool = True,
 ) -> None:
     errors: list[str] = []
-    if uid_for_user(plan.owner_user) is None:
+    if require_owner_user and uid_for_user(plan.owner_user) is None:
         errors.append(f"target user {plan.owner_user!r} does not exist")
     if not _path_exists(repository):
         errors.append(f"project repository {repository} does not exist")
@@ -2185,6 +2530,7 @@ def precheck_new_project(
 def new_project_command(
     project: str,
     *,
+    from_artifact: Path | None = None,
     owner_user: str | None = None,
     port: int | None = None,
     database: str | None = None,
@@ -2200,16 +2546,34 @@ def new_project_command(
     if execute and dry_run:
         raise SystemExit("team-launcher: --execute and --dry-run are mutually exclusive")
     effective_source_repo = (source_repo or _repo_root()).expanduser().resolve(strict=False)
-    if repository is None:
-        raise SystemExit("team-launcher: new project requires --repository for the project's working checkout")
-    effective_repository = repository.expanduser().resolve(strict=False)
-    effective_owner = (owner_user or _default_new_project_owner(project)).strip()
+    design_artifact = load_project_design_artifact(from_artifact, expected_project=project) if from_artifact else None
+    if design_artifact is not None:
+        if owner_user is not None or repository is not None:
+            raise SystemExit("team-launcher: --from owns owner/repository answers; do not also pass --owner-user or --repository")
+        effective_owner = design_artifact.owner_user
+        effective_repository = design_artifact.repository.expanduser().resolve(strict=False)
+        remote = design_artifact.remote
+        default_branch = design_artifact.default_branch
+        worktree_policy = design_artifact.worktree_policy
+        ticket_prefix = design_artifact.ticket_prefix
+    else:
+        if repository is None:
+            raise SystemExit("team-launcher: new project requires --repository for the project's working checkout")
+        effective_owner = (owner_user or _default_new_project_owner(project)).strip()
+        effective_repository = repository.expanduser().resolve(strict=False)
+        remote = "origin"
+        default_branch = "main"
+        worktree_policy = "shared"
+        ticket_prefix = None
+    if worktree_policy not in WORKTREE_POLICIES:
+        raise SystemExit(f"team-launcher: worktree policy must be one of {sorted(WORKTREE_POLICIES)}")
     plan = build_plan(
         project=project,
         owner_user=effective_owner,
         port=port,
         database=database,
         source_repo=effective_source_repo,
+        ticket_prefix=ticket_prefix,
     )
     precheck_new_project(
         plan,
@@ -2218,10 +2582,18 @@ def new_project_command(
         runner=runner,
         port_in_use=port_in_use,
         socket_exists=socket_exists,
+        require_owner_user=execute,
     )
     artifact_dir = (output_dir or _new_project_artifact_dir(plan.project)).expanduser().resolve(strict=False)
     write_artifacts(plan, artifact_dir)
-    config_path = write_new_project_launcher_artifacts(plan, artifact_dir, repository=effective_repository)
+    config_path = write_new_project_launcher_artifacts(
+        plan,
+        artifact_dir,
+        repository=effective_repository,
+        remote=remote,
+        default_branch=default_branch,
+        worktree_policy=worktree_policy,
+    )
     commands_path = artifact_dir / "operator-commands.sh"
     if not execute:
         print(f"team-launcher: dry-run for {plan.project}; artifacts in {artifact_dir}")
@@ -2271,7 +2643,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "command",
         nargs="?",
         default="start",
-        choices=["start", "attach", "reload", "new", "provision-runtime", "deploy-launcher", "pane"],
+        choices=["start", "attach", "reload", "design", "new", "provision-runtime", "deploy-launcher", "pane"],
         help="start is idempotent attach-or-start (resumes tracked session ids when relaunching a stopped pane); reload force-restarts running CLIs with tracked resume ids",
     )
     parser.add_argument("pane_mode", nargs="?", choices=["start", "attach", "attach-or-start", "reload"])
@@ -2286,7 +2658,25 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--database", help="new project PostgreSQL database; omitted means <project>_ticket_board")
     parser.add_argument("--source-repo", type=Path, help="source checkout to deploy for new project provisioning")
     parser.add_argument("--repository", type=Path, help="project working checkout opened by generated panes")
+    parser.add_argument("--from", dest="from_artifact", type=Path, help="project artifact emitted by the design command")
     parser.add_argument("--new-output-dir", type=Path, help="write new-project artifacts here")
+    parser.add_argument("--design-output-dir", type=Path, help="write design document and project artifact here")
+    parser.add_argument("--project-artifact", type=Path, help="write project artifact here during design")
+    parser.add_argument("--design-document", type=Path, help="write project design document here during design")
+    parser.add_argument("--design-title", help="project design document title")
+    parser.add_argument("--design-body", help="project design document body")
+    parser.add_argument("--remote", help="project git remote name for generated launcher config")
+    parser.add_argument("--default-branch", help="project default branch for generated launcher config")
+    parser.add_argument("--worktree-policy", choices=sorted(WORKTREE_POLICIES), help="shared or isolated role worktrees")
+    parser.add_argument("--ticket-prefix", help="ticket id prefix for the new board, e.g. OTTO")
+    parser.add_argument("--push-policy", help="reviewable push policy label recorded in the design artifact")
+    parser.add_argument("--audit-signoff", action=argparse.BooleanOptionalAction, default=None, help="record whether audit signoff is a project gate")
+    parser.add_argument("--needs-inspection", action=argparse.BooleanOptionalAction, default=None, help="record whether inspection is a project gate")
+    parser.add_argument("--needs-user-signoff", action=argparse.BooleanOptionalAction, default=None, help="record whether user signoff is a project gate")
+    parser.add_argument("--board-service-traversal", action=argparse.BooleanOptionalAction, default=None, help="record whether boardsvc may traverse the owner home")
+    parser.add_argument("--supplementary-group", action="append", dest="supplementary_groups", help="owner-user supplementary group to record; repeat as needed")
+    parser.add_argument("--linger", action=argparse.BooleanOptionalAction, default=None, help="record whether linger should be enabled")
+    parser.add_argument("--owner-shell", help="owner user's shell to record")
     parser.add_argument("--execute", action="store_true", help="execute new-project provisioning after precheck")
     parser.add_argument("--runtime-user", help="local user whose lingering /run/user/<uid> runtime should be provisioned")
     parser.add_argument("--launcher-repo", type=Path, help="launcher checkout to update or verify (default: this script's repo)")
@@ -2311,9 +2701,33 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     _reject_removed_commands(argv)
     args = _build_parser().parse_args(argv)
+    if args.command == "design":
+        return design_project_command(
+            args.project,
+            output_dir=args.design_output_dir,
+            artifact_path=args.project_artifact,
+            design_document=args.design_document,
+            design_title=args.design_title,
+            design_body=args.design_body,
+            repository=args.repository,
+            remote=args.remote,
+            default_branch=args.default_branch,
+            worktree_policy=args.worktree_policy,
+            owner_user=args.owner_user,
+            ticket_prefix=args.ticket_prefix,
+            push_policy=args.push_policy,
+            audit_signoff=args.audit_signoff,
+            needs_inspection=args.needs_inspection,
+            needs_user_signoff=args.needs_user_signoff,
+            board_service_traversal=args.board_service_traversal,
+            supplementary_groups=args.supplementary_groups,
+            linger=args.linger,
+            owner_shell=args.owner_shell,
+        )
     if args.command == "new":
         return new_project_command(
             args.project,
+            from_artifact=args.from_artifact,
             owner_user=args.owner_user,
             port=args.port,
             database=args.database,

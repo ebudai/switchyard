@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 from typing import Mapping
@@ -27,6 +28,17 @@ HOOK_TARGET_ENV_KEYS = (
 )
 STATE_HOME_ENV_KEYS = ("XDG_STATE_HOME",)
 TICKET_BOARD_PANE_ENV_KEYS = (*SESSION_ENV_KEYS, *HOOK_PATH_ENV_KEYS, *HOOK_TARGET_ENV_KEYS, *STATE_HOME_ENV_KEYS)
+PANE_STATE_SOURCE_PREFIXES_BY_TARGET = {
+    "pgu-director:0.0": ("claude.", "team_launcher."),
+    "pgu-main:0.0": ("codex.", "listener.", "team_launcher."),
+    "pgu-app:0.0": ("codex.", "listener.", "team_launcher."),
+    "pgu-perf:0.0": ("codex.", "listener.", "team_launcher."),
+    "pgu-research:0.0": ("claude.", "team_launcher."),
+    "pgu-ops:0.0": ("codex.", "listener.", "team_launcher."),
+    "pgu-audit:0.0": ("claude.", "team_launcher."),
+    "pgu-inspector:0.0": ("gemini.", "team_launcher."),
+}
+PANE_STATE_STATES = frozenset({"idle", "busy", "blocked"})
 
 
 def strip_ticket_board_pane_env(environ: dict[str, str], *, keep: tuple[str, ...] = ()) -> dict[str, str]:
@@ -115,6 +127,21 @@ def snapshot_paths(paths: list[Path]) -> dict[str, dict[str, str] | None]:
     return {str(path): snapshot_path(path) for path in paths}
 
 
+def snapshot_path_file_set(path: Path) -> set[str] | None:
+    try:
+        if not path.exists():
+            return None
+        if not path.is_dir():
+            return set()
+        return {str(child.relative_to(path)) for child in path.rglob("*") if child.is_file()}
+    except OSError:
+        return set()
+
+
+def snapshot_paths_file_set(paths: list[Path]) -> dict[str, set[str] | None]:
+    return {str(path): snapshot_path_file_set(path) for path in paths}
+
+
 def snapshot_diff(
     before: dict[str, dict[str, str] | None],
     after: dict[str, dict[str, str] | None],
@@ -131,3 +158,77 @@ def snapshot_diff(
             if before_files.get(name) != after_files.get(name):
                 changed.append(f"{root}/{name}")
     return changed
+
+
+def snapshot_file_set_diff(
+    before: dict[str, set[str] | None],
+    after: dict[str, set[str] | None],
+) -> list[str]:
+    changed: list[str] = []
+    for root in sorted(set(before) | set(after)):
+        before_files = before.get(root)
+        after_files = after.get(root)
+        if before_files is None or after_files is None:
+            if before_files != after_files:
+                changed.append(root)
+            continue
+        for name in sorted(before_files.symmetric_difference(after_files)):
+            changed.append(f"{root}/{name}")
+    return changed
+
+
+def pane_state_target_from_file_name(name: str) -> str | None:
+    if not name.endswith(".json"):
+        return None
+    stem = name.removesuffix(".json")
+    session, separator, pane = stem.rpartition("_")
+    if not separator or not session or not pane:
+        return None
+    return f"{session}:{pane}"
+
+
+def pane_state_record_anomalies(paths: list[Path]) -> list[str]:
+    anomalies: list[str] = []
+    for root in paths:
+        try:
+            candidates = sorted(path for path in root.rglob("*.json") if path.is_file())
+        except OSError:
+            continue
+        for path in candidates:
+            expected_target = pane_state_target_from_file_name(path.name)
+            detail = _pane_state_record_anomaly_detail(path, expected_target)
+            if detail:
+                anomalies.append(f"{path}: {detail}")
+    return anomalies
+
+
+def pane_state_record_anomaly_diff(before: list[str], after: list[str]) -> list[str]:
+    return sorted(set(after) - set(before))
+
+
+def _pane_state_record_anomaly_detail(path: Path, expected_target: str | None) -> str:
+    if expected_target is None:
+        return "invalid pane-state filename"
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return f"invalid pane-state json ({exc})"
+    if not isinstance(record, dict):
+        return "pane-state record is not an object"
+
+    target = str(record.get("target", ""))
+    if target != expected_target:
+        return f"target {target!r} does not match filename target {expected_target!r}"
+
+    source = str(record.get("source", ""))
+    allowed_prefixes = PANE_STATE_SOURCE_PREFIXES_BY_TARGET.get(target)
+    if allowed_prefixes is None:
+        return f"target {target!r} is not a configured live pgu pane"
+    if not source.startswith(allowed_prefixes):
+        return f"source {source!r} is not valid for {target!r}"
+
+    state = str(record.get("state", ""))
+    if state not in PANE_STATE_STATES:
+        return f"state {state!r} is not valid"
+
+    return ""

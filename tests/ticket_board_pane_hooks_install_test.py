@@ -16,10 +16,14 @@ from pathlib import Path
 from typing import Any
 
 from ticket_board_pane_env import (
-    candidate_live_pane_paths,
+    candidate_live_pane_session_paths,
     candidate_live_pane_state_paths,
+    pane_state_record_anomalies,
+    pane_state_record_anomaly_diff,
     snapshot_diff,
+    snapshot_file_set_diff,
     snapshot_path,
+    snapshot_paths_file_set,
     snapshot_paths,
     stripped_ticket_board_pane_env,
 )
@@ -234,7 +238,7 @@ def test_session_dir_snapshot_detects_same_count_content_mutation() -> None:
         assert before != after
 
 
-def test_pane_state_snapshot_detects_modified_deleted_and_added_records() -> None:
+def test_pane_state_snapshot_ignores_content_churn_but_detects_file_set_changes() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
         state_dir = Path(tmp) / "pane-state"
         state_dir.mkdir()
@@ -242,19 +246,21 @@ def test_pane_state_snapshot_detects_modified_deleted_and_added_records() -> Non
         audit_path = state_dir / "pgu-audit_0.0.json"
         ops_path.write_text(json.dumps({"target": "pgu-ops:0.0", "state": "idle"}) + "\n", encoding="utf-8")
 
-        before_modify = snapshot_paths([state_dir])
+        content_before_modify = snapshot_paths([state_dir])
+        before_modify = snapshot_paths_file_set([state_dir])
         ops_path.write_text(json.dumps({"target": "pgu-ops:0.0", "state": "busy"}) + "\n", encoding="utf-8")
-        assert snapshot_diff(before_modify, snapshot_paths([state_dir])) == [f"{state_dir}/pgu-ops_0.0.json"]
+        assert snapshot_diff(content_before_modify, snapshot_paths([state_dir])) == [f"{state_dir}/pgu-ops_0.0.json"]
+        assert snapshot_file_set_diff(before_modify, snapshot_paths_file_set([state_dir])) == []
 
         ops_path.write_text(json.dumps({"target": "pgu-ops:0.0", "state": "idle"}) + "\n", encoding="utf-8")
-        before_delete = snapshot_paths([state_dir])
+        before_delete = snapshot_paths_file_set([state_dir])
         ops_path.unlink()
-        assert snapshot_diff(before_delete, snapshot_paths([state_dir])) == [f"{state_dir}/pgu-ops_0.0.json"]
+        assert snapshot_file_set_diff(before_delete, snapshot_paths_file_set([state_dir])) == [f"{state_dir}/pgu-ops_0.0.json"]
 
         ops_path.write_text(json.dumps({"target": "pgu-ops:0.0", "state": "idle"}) + "\n", encoding="utf-8")
-        before_add = snapshot_paths([state_dir])
+        before_add = snapshot_paths_file_set([state_dir])
         audit_path.write_text(json.dumps({"target": "pgu-audit:0.0", "state": "idle"}) + "\n", encoding="utf-8")
-        assert snapshot_diff(before_add, snapshot_paths([state_dir])) == [f"{state_dir}/pgu-audit_0.0.json"]
+        assert snapshot_file_set_diff(before_add, snapshot_paths_file_set([state_dir])) == [f"{state_dir}/pgu-audit_0.0.json"]
 
 
 def test_live_pane_state_candidates_are_explicit_runtime_paths_not_xdg_state_home() -> None:
@@ -1062,13 +1068,22 @@ def test_session_start_records_env_session_id_fallback() -> None:
 
 
 def main() -> int:
-    live_pane_paths = candidate_live_pane_paths()
-    live_session_snapshot = snapshot_paths(live_pane_paths)
+    live_session_paths = candidate_live_pane_session_paths()
+    live_pane_state_paths = candidate_live_pane_state_paths()
+    live_session_snapshot = snapshot_paths(live_session_paths)
+    live_pane_state_snapshot = snapshot_paths_file_set(live_pane_state_paths)
+    live_pane_state_anomalies = pane_state_record_anomalies(live_pane_state_paths)
     try:
         run_module_tests(globals())
     finally:
-        after_snapshot = snapshot_paths(live_pane_paths)
-        changed = snapshot_diff(live_session_snapshot, after_snapshot)
+        changed = [
+            *snapshot_diff(live_session_snapshot, snapshot_paths(live_session_paths)),
+            *snapshot_file_set_diff(live_pane_state_snapshot, snapshot_paths_file_set(live_pane_state_paths)),
+            *pane_state_record_anomaly_diff(
+                live_pane_state_anomalies,
+                pane_state_record_anomalies(live_pane_state_paths),
+            ),
+        ]
         assert not changed, changed
     print("ticket_board_pane_hooks_install_test: ok")
     return 0

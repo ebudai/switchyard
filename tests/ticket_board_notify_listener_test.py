@@ -22,7 +22,11 @@ if str(ROOT) not in sys.path:
 
 from ticket_board_pane_env import (
     candidate_live_pane_state_paths,
+    pane_state_record_anomalies,
+    pane_state_record_anomaly_diff,
     snapshot_diff,
+    snapshot_file_set_diff,
+    snapshot_paths_file_set,
     snapshot_paths,
     strip_ticket_board_pane_env,
 )
@@ -2726,36 +2730,58 @@ class TemporaryStateDir:
         self._tmp.cleanup()
 
 
-def test_pane_state_live_guard_detects_added_modified_and_deleted_records() -> None:
+def test_pane_state_live_guard_ignores_content_churn_but_detects_file_set_changes() -> None:
     with TemporaryStateDir() as tmp_path:
         ops_path = tmp_path / "pgu-ops_0.0.json"
         audit_path = tmp_path / "pgu-audit_0.0.json"
         ops_path.write_text(json.dumps({"target": "pgu-ops:0.0", "state": "idle"}) + "\n", encoding="utf-8")
 
-        before_modify = snapshot_paths([tmp_path])
+        content_before_modify = snapshot_paths([tmp_path])
+        before_modify = snapshot_paths_file_set([tmp_path])
         ops_path.write_text(json.dumps({"target": "pgu-ops:0.0", "state": "busy"}) + "\n", encoding="utf-8")
-        assert snapshot_diff(before_modify, snapshot_paths([tmp_path])) == [f"{tmp_path}/pgu-ops_0.0.json"]
+        assert snapshot_diff(content_before_modify, snapshot_paths([tmp_path])) == [f"{tmp_path}/pgu-ops_0.0.json"]
+        assert snapshot_file_set_diff(before_modify, snapshot_paths_file_set([tmp_path])) == []
 
         ops_path.write_text(json.dumps({"target": "pgu-ops:0.0", "state": "idle"}) + "\n", encoding="utf-8")
-        before_delete = snapshot_paths([tmp_path])
+        before_delete = snapshot_paths_file_set([tmp_path])
         ops_path.unlink()
-        assert snapshot_diff(before_delete, snapshot_paths([tmp_path])) == [f"{tmp_path}/pgu-ops_0.0.json"]
+        assert snapshot_file_set_diff(before_delete, snapshot_paths_file_set([tmp_path])) == [f"{tmp_path}/pgu-ops_0.0.json"]
 
         ops_path.write_text(json.dumps({"target": "pgu-ops:0.0", "state": "idle"}) + "\n", encoding="utf-8")
-        before_add = snapshot_paths([tmp_path])
+        before_add = snapshot_paths_file_set([tmp_path])
         audit_path.write_text(json.dumps({"target": "pgu-audit:0.0", "state": "idle"}) + "\n", encoding="utf-8")
-        assert snapshot_diff(before_add, snapshot_paths([tmp_path])) == [f"{tmp_path}/pgu-audit_0.0.json"]
+        assert snapshot_file_set_diff(before_add, snapshot_paths_file_set([tmp_path])) == [f"{tmp_path}/pgu-audit_0.0.json"]
+
+
+def test_pane_state_live_guard_detects_foreign_and_source_mismatched_records() -> None:
+    with TemporaryStateDir() as tmp_path:
+        ops_path = tmp_path / "pgu-ops_0.0.json"
+        ops_path.write_text(json.dumps({"target": "pgu-ops:0.0", "state": "idle", "source": "codex.Stop"}) + "\n", encoding="utf-8")
+        before = pane_state_record_anomalies([tmp_path])
+
+        ops_path.write_text(json.dumps({"target": "pgu-ops:0.0", "state": "idle", "source": "gemini.Stop"}) + "\n", encoding="utf-8")
+        changed = pane_state_record_anomaly_diff(before, pane_state_record_anomalies([tmp_path]))
+        assert changed == [f"{ops_path}: source 'gemini.Stop' is not valid for 'pgu-ops:0.0'"]
+
+        foreign_path = tmp_path / "pgu-probe_0.0.json"
+        foreign_path.write_text(json.dumps({"target": "pgu-probe:0.0", "state": "idle", "source": "codex.Stop"}) + "\n", encoding="utf-8")
+        changed = pane_state_record_anomaly_diff(before, pane_state_record_anomalies([tmp_path]))
+        assert f"{foreign_path}: target 'pgu-probe:0.0' is not a configured live pgu pane" in changed
 
 
 def main() -> int:
-    live_snapshot = snapshot_paths(LIVE_PANE_STATE_PATHS)
+    live_snapshot = snapshot_paths_file_set(LIVE_PANE_STATE_PATHS)
+    live_anomalies = pane_state_record_anomalies(LIVE_PANE_STATE_PATHS)
     try:
         run_module_tests_with_live_pane_guard(
             globals(),
             patch_bound_run_defaults=(RealPaneActivityGate.__init__,),
         )
     finally:
-        changed = snapshot_diff(live_snapshot, snapshot_paths(LIVE_PANE_STATE_PATHS))
+        changed = [
+            *snapshot_file_set_diff(live_snapshot, snapshot_paths_file_set(LIVE_PANE_STATE_PATHS)),
+            *pane_state_record_anomaly_diff(live_anomalies, pane_state_record_anomalies(LIVE_PANE_STATE_PATHS)),
+        ]
         assert not changed, changed
     print("ticket_board_notify_listener_test: ok")
     return 0

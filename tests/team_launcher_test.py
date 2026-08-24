@@ -24,14 +24,20 @@ if str(ROOT) not in sys.path:
 
 from ticket_board_pane_env import (
     TICKET_BOARD_PANE_ENV_KEYS,
-    candidate_live_pane_paths,
+    candidate_live_pane_session_paths,
+    candidate_live_pane_state_paths,
+    pane_state_record_anomalies,
+    pane_state_record_anomaly_diff,
     snapshot_diff,
+    snapshot_file_set_diff,
+    snapshot_paths_file_set,
     snapshot_paths,
     strip_ticket_board_pane_env,
 )
 from standalone_test_runner import run_module_tests
 
-LIVE_PANE_PATHS = candidate_live_pane_paths()
+LIVE_PANE_SESSION_PATHS = candidate_live_pane_session_paths()
+LIVE_PANE_STATE_PATHS = candidate_live_pane_state_paths()
 strip_ticket_board_pane_env(os.environ)
 
 import scripts.team_launcher as team_launcher
@@ -2751,7 +2757,9 @@ def test_new_project_rejects_port_collision_before_mutating() -> None:
 
 
 def main() -> int:
-    live_snapshot = snapshot_paths(LIVE_PANE_PATHS)
+    live_session_snapshot = snapshot_paths(LIVE_PANE_SESSION_PATHS)
+    live_pane_state_snapshot = snapshot_paths_file_set(LIVE_PANE_STATE_PATHS)
+    live_pane_state_anomalies = pane_state_record_anomalies(LIVE_PANE_STATE_PATHS)
     live_session_fingerprint = _live_session_record_fingerprint()
     try:
         run_module_tests(
@@ -2759,7 +2767,14 @@ def main() -> int:
             first=("test_ticket_board_pane_env_is_stripped_before_launcher_import",),
         )
     finally:
-        changed = snapshot_diff(live_snapshot, snapshot_paths(LIVE_PANE_PATHS))
+        changed = [
+            *snapshot_diff(live_session_snapshot, snapshot_paths(LIVE_PANE_SESSION_PATHS)),
+            *snapshot_file_set_diff(live_pane_state_snapshot, snapshot_paths_file_set(LIVE_PANE_STATE_PATHS)),
+            *pane_state_record_anomaly_diff(
+                live_pane_state_anomalies,
+                pane_state_record_anomalies(LIVE_PANE_STATE_PATHS),
+            ),
+        ]
         assert not changed, changed
         _assert_live_session_records_unchanged(live_session_fingerprint, _live_session_record_fingerprint())
     print("team_launcher_test: ok")

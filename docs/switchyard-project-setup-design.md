@@ -177,6 +177,50 @@ must keep that property, or the project user ends up unable to write its own boa
 then `Proceed? [y/N]`. Short command, review preserved before anything privileged runs, and `--yes`
 for CI and scripted installs.
 
+## Revised entry surface (Eric, 2026-08-24)
+
+Supersedes the `switchyard <slug> <command>` sketch above. Zero parameters is the default path.
+
+    ./switchyard                    menu: `new...` on the first line, then all projects
+    ./switchyard new                straight into new-project setup
+    ./switchyard My Project Name    straight into that project
+
+The listing is the whole navigation surface -- it is both discovery and **resume**, which is the
+question a new user hits on day two. Selecting a project attaches if it is running and resumes if
+it is not (today's `start` semantics).
+
+`new` prompts for **slug**, **agent name** (`-agent` appended) and **project name** -- three names
+that genuinely differ; otto's slug is `otto` and its code lives in `scheduler`. Then it starts the
+design session.
+
+**The design session decides implementer roles with the user**, and ends by spawning the director
+with the onboarding docs, the design, and what it needs to set up and launch the pane window.
+
+Details that follow from the unquoted form:
+
+- join all argv into the project name; do not require quoting
+- match case-insensitively, fall back to slug
+- `new` is a reserved word -- decide what a project named "New" does
+- the window follows the role count; pgu has 7 panes, a default project has 4 plus implementers
+
+### Two constraints this shape has to respect
+
+**Roles in design relaxes a guard we just added.** PGU-647 makes `new` REJECT artifacts carrying
+`project.roles` or `project.stages`, enforcing the earlier decision that roles are settled after
+the director is live. Deciding them in the design session is better -- with a person, against a
+real spec -- but the rejection must be relaxed deliberately, not discovered as a bug.
+
+**The director cannot do the privileged half.** Creating `<slug>-agent` and installing units needs
+root, and agents deliberately have no sudo. Split it:
+
+- **switchyard**, run by a person, fails with a clear error if not under sudo: creates the user and
+  the board
+- **the director**, unprivileged: seeds the board, launches panes, onboards
+
+**The design session is not a pane.** It decides roles before the board exists, so it cannot be a
+normal pane with hooks and a board connection. A standalone agent in the project directory whose
+only outputs are the design document and the artifact.
+
 ## Open questions
 
 1. **Project repo path.** Full derivation gives `/home/<slug>-agent/Projects/<slug>`. Eric wanted

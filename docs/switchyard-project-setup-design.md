@@ -218,6 +218,18 @@ That forces the sequence, and nothing here is a preference:
 
 Steps 2 and 3 cannot move after step 4.
 
+**The cwd is effectively permanent.** Sessions must resume across days, and a session's cwd cannot
+change -- moving it means handing off to a fresh instance and losing the accumulated context. For
+the director, which is usually Claude Opus carrying the most context on the team, that is expensive.
+
+So the derived path must be right the FIRST time. Two things follow:
+
+- **show the derived path in the prompt** before creating anything, so the user sees
+  `/home/otto-agent/Projects/otto` and can object while objecting is still free
+- **verify the cwd immediately after launching**, not weeks later. Confirm the session landed in
+  `~/.claude/projects/<escaped-cwd>/` for the intended directory. Discovering this at the first
+  reboot is how PGU-613 happened -- a resume that reports success while the model has nothing.
+
 Details that follow from the unquoted form:
 
 - join all argv into the project name; do not require quoting
@@ -247,4 +259,9 @@ only outputs are the design document and the artifact.
 
 1. ~~Project repo path~~ **DECIDED (Eric, 2026-08-24): derived.** `/home/<agent>/Projects/<slug>`.
    No prompt, no flag.
-2. Naming for the reshape command.
+2. **Reshape** -- changing stages or roles on a project that already exists, with tickets in flight.
+   Open question is whether it needs to be a command at all: the director already applies shape at
+   project start (adding panes, updating `owner_roles`), and reshape is that same apply-shape
+   operation run later. If apply-shape handles in-flight tickets from the outset -- for every ticket
+   in an affected stage, where does it go, refusing rather than guessing -- then "reshape" is just
+   calling it again, and the naming question disappears.

@@ -2672,6 +2672,9 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
     assert "('cancelled', 'Cancelled', 10, ARRAY[]::text[], NULL, NULL, NULL, true)" in workflow_sql
     assert "('director_review', 'done', 'mark_done', ARRAY['director']::text[]" in workflow_sql
     assert "('director_review', 'cancelled', 'cancel', ARRAY['director']::text[]" in workflow_sql
+    assert "('done', 'analysis', 'route', ARRAY['director']::text[]" in workflow_sql
+    assert "('done', 'analysis', 'user_reopen', ARRAY['user']::text[]" in workflow_sql
+    assert "('cancelled', 'analysis', 'route', ARRAY['director']::text[]" in workflow_sql
     assert len(team_launcher._layout_leaves(layout)) == 6
     assert [role.role for role in loaded_config.roles] == ["designer", "director", "audit", "ops", "app", "main"]
     assert loaded_config.roles[0].target == "porter-designer:0.0"

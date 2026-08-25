@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -19,6 +20,7 @@ from scripts.ticket_board.project_provision import build_plan, render_workflow_s
 
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
 RBAC_PATH = ROOT / "scripts" / "ticket_board" / "rbac.sql"
+MIGRATION_RUNNER = ROOT / "scripts" / "ticket-board-migrate"
 EXPECTED_STAGES = [
     {"name": "draft", "display_label": "Draft", "rank": 0, "owner_roles": ["designer"], "is_terminal": False},
     {"name": "analysis", "display_label": "Triage", "rank": 1, "owner_roles": ["director"], "is_terminal": False},
@@ -78,18 +80,51 @@ def psql(conn: str, sql: str) -> str:
     return proc.stdout.strip()
 
 
-def service_call(conn: str, caller_role: str, sql: str) -> str:
-    return psql(
-        conn,
-        f"""
-SELECT set_config('ticket_board.caller_role', '{caller_role}', false);
-{sql}
-""",
-    ).splitlines()[-1]
-
-
-def service_call_fails(conn: str, caller_role: str, sql: str) -> str:
+def run_migrations(conn: str) -> None:
     proc = subprocess.run(
+        [str(MIGRATION_RUNNER)],
+        env={**os.environ, "TICKET_BOARD_ADMIN_DATABASE_URL": conn},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise AssertionError(proc.stderr or proc.stdout)
+
+
+def bootstrap_database_roles(conn: str) -> None:
+    psql(
+        conn,
+        """
+DO $$
+DECLARE
+    role_name text;
+BEGIN
+    FOREACH role_name IN ARRAY ARRAY[
+        'ticket_board_service',
+        'ticket_board_listener',
+        'director',
+        'user',
+        'ops',
+        'app',
+        'audit',
+        'inspector',
+        'perf',
+        'research',
+        'main'
+    ] LOOP
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
+            EXECUTE format('CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION', role_name);
+        END IF;
+    END LOOP;
+END;
+$$;
+""",
+    )
+
+
+def psql_call(conn: str, caller_role: str, sql: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
         ["psql", "-X", "-v", "ON_ERROR_STOP=1", "-tA", conn],
         input=f"""
 SELECT set_config('ticket_board.caller_role', '{caller_role}', false);
@@ -99,6 +134,25 @@ SELECT set_config('ticket_board.caller_role', '{caller_role}', false);
         capture_output=True,
         check=False,
     )
+
+
+def service_call(conn: str, caller_role: str, sql: str) -> str:
+    proc = psql_call(conn, caller_role, sql)
+    if proc.returncode != 0:
+        raise AssertionError(proc.stderr or proc.stdout)
+    return proc.stdout.strip().splitlines()[-1]
+
+
+def service_call_without_shadow_warning(conn: str, caller_role: str, sql: str) -> str:
+    proc = psql_call(conn, caller_role, sql)
+    if proc.returncode != 0:
+        raise AssertionError(proc.stderr or proc.stdout)
+    assert "shadow mismatch" not in proc.stderr, proc.stderr
+    return proc.stdout.strip().splitlines()[-1]
+
+
+def service_call_fails(conn: str, caller_role: str, sql: str) -> str:
+    proc = psql_call(conn, caller_role, sql)
     if proc.returncode == 0:
         raise AssertionError(f"expected service call to fail, got stdout:\n{proc.stdout}")
     return proc.stderr
@@ -119,7 +173,9 @@ def main() -> int:
         try:
             run(["pg_ctl", "-D", str(data_dir), "-o", f"-k {socket_dir} -p {port} -h ''", "-w", "start"], capture=False)
             run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
+            bootstrap_database_roles(admin_conn)
             psql(admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
+            run_migrations(admin_conn)
             psql(admin_conn, render_workflow_sql(build_plan(project="otto", owner_user="otto-agent")))
             psql(admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
 
@@ -139,7 +195,8 @@ FROM ticket_board.workflow_stages;
                 )
             )
             assert stages == EXPECTED_STAGES, stages
-            assert psql(admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions;") == "13"
+            assert psql(admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions;") == "16"
+            assert psql(admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions WHERE from_stage IN ('done', 'cancelled');") == "3"
             assert psql(admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('main');") == "t"
             assert psql(admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('app');") == "t"
             assert psql(admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('ops');") == "f"
@@ -208,6 +265,25 @@ SELECT ticket_board.create_ticket('Provisioned workflow ticket', 'Body', 'draft'
             service_call(service_conn, "director", f"SELECT ticket_board.mark_done('{ticket_id}', 'abcdef1');")
             assert psql(admin_conn, f"SELECT state FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "done"
 
+            service_call_without_shadow_warning(service_conn, "director", f"SELECT ticket_board.route('{ticket_id}', 'analysis', 'director');")
+            assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "analysis:director"
+
+            user_reopen_id = service_call(
+                service_conn,
+                "director",
+                """
+SELECT set_config('ticket_board.ticket_prefix', 'OTTO', false);
+SELECT ticket_board.create_ticket('Provisioned workflow user reopen', 'Body', 'draft');
+""",
+            )
+            service_call(service_conn, "designer", f"SELECT ticket_board.release_draft('{user_reopen_id}');")
+            service_call(service_conn, "director", f"SELECT ticket_board.route('{user_reopen_id}', 'in_progress', 'main');")
+            service_call(service_conn, "main", f"SELECT ticket_board.submit_to_audit('{user_reopen_id}', 'abcdef2');")
+            service_call(service_conn, "audit", f"SELECT ticket_board.audit_sign_off('{user_reopen_id}', 'Audit verified.');")
+            service_call(service_conn, "director", f"SELECT ticket_board.mark_done('{user_reopen_id}', 'abcdef2');")
+            service_call_without_shadow_warning(service_conn, "user", f"SELECT ticket_board.user_reopen('{user_reopen_id}', 'Needs another pass.');")
+            assert psql(admin_conn, f"SELECT state FROM ticket_board.tickets WHERE id = '{user_reopen_id}';") == "analysis"
+
             cancel_id = service_call(
                 service_conn,
                 "director",
@@ -216,7 +292,7 @@ SELECT set_config('ticket_board.ticket_prefix', 'OTTO', false);
 SELECT ticket_board.create_ticket('Provisioned workflow cancellation', 'Body', 'draft');
 """,
             )
-            assert cancel_id == "OTTO-2", cancel_id
+            assert cancel_id == "OTTO-3", cancel_id
             service_call(service_conn, "designer", f"SELECT ticket_board.release_draft('{cancel_id}');")
             service_call(service_conn, "director", f"SELECT ticket_board.route('{cancel_id}', 'in_progress', 'main');")
             assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{cancel_id}';") == "in_progress:main"
@@ -224,6 +300,8 @@ SELECT ticket_board.create_ticket('Provisioned workflow cancellation', 'Body', '
             assert "role main cannot call cancel" in cancel_error, cancel_error
             service_call(service_conn, "director", f"SELECT ticket_board.cancel('{cancel_id}', 'director cancelled.');")
             assert psql(admin_conn, f"SELECT state FROM ticket_board.tickets WHERE id = '{cancel_id}';") == "cancelled"
+            service_call_without_shadow_warning(service_conn, "director", f"SELECT ticket_board.route('{cancel_id}', 'analysis', 'director');")
+            assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{cancel_id}';") == "analysis:director"
         finally:
             subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 

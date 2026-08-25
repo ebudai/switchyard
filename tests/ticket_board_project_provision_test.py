@@ -103,6 +103,9 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "('audit', 'director_review', 'audit_sign_off', ARRAY['audit']::text[]" in combined
     assert "('director_review', 'done', 'mark_done', ARRAY['director']::text[]" in combined
     assert "('director_review', 'cancelled', 'cancel', ARRAY['director']::text[]" in combined
+    assert "('done', 'analysis', 'route', ARRAY['director']::text[]" in combined
+    assert "('done', 'analysis', 'user_reopen', ARRAY['user']::text[]" in combined
+    assert "('cancelled', 'analysis', 'route', ARRAY['director']::text[]" in combined
     assert "('backlog'," not in render_workflow_sql(plan)
     assert "('inspection'," not in render_workflow_sql(plan)
     assert 'unit === "stellaris-ticket-board.service"' in combined

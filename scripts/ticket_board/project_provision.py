@@ -456,6 +456,9 @@ def render_workflow_sql(plan: ProjectBoardProvision) -> str:
         ("audit", "cancelled", "cancel", ("director",), False, False),
         ("director_review", "done", "mark_done", ("director",), False, False),
         ("director_review", "cancelled", "cancel", ("director",), False, False),
+        ("done", "analysis", "route", ("director",), False, False),
+        ("done", "analysis", "user_reopen", ("user",), False, False),
+        ("cancelled", "analysis", "route", ("director",), False, False),
     ]
     stage_rows = ",\n".join(
         "    ("

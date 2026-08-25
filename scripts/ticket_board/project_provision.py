@@ -18,7 +18,8 @@ ROLE_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 TICKET_PREFIX_RE = re.compile(r"^[A-Z][A-Z0-9]*$")
 DEFAULT_IMPLEMENTER_ROLES = ("main", "app", "ops", "perf", "research")
 DEFAULT_PROJECT_DRAFT_ROLES = ("designer",)
-DEFAULT_PROJECT_IMPLEMENTER_ROLES = ("ops",)
+DEFAULT_PROJECT_SUPPORT_ROLES = ("ops",)
+DEFAULT_PROJECT_IMPLEMENTER_ROLES = ("app", "main")
 DEFAULT_PGU_ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "inspector", "agent", "director", "research", "user")
 DEFAULT_PGU_CALLER_ROLES = ("director", "main", "app", "ops", "perf", "audit", "inspector", "research", "user")
 
@@ -149,8 +150,10 @@ def build_plan(
         caller_roles = DEFAULT_PGU_CALLER_ROLES
     else:
         draft_roles = DEFAULT_PROJECT_DRAFT_ROLES
-        assignee_roles = _dedupe(("unassigned", *draft_roles, *resolved_implementer_roles, "audit", "director", "user"))
-        caller_roles = _dedupe(("director", *draft_roles, *resolved_implementer_roles, "audit", "user"))
+        assignee_roles = _dedupe(
+            ("unassigned", *draft_roles, *DEFAULT_PROJECT_SUPPORT_ROLES, *resolved_implementer_roles, "audit", "director", "user")
+        )
+        caller_roles = _dedupe(("director", *draft_roles, *DEFAULT_PROJECT_SUPPORT_ROLES, *resolved_implementer_roles, "audit", "user"))
     ident = _identifier_from_project(project)
     unit_prefix = f"{project}-ticket-board"
     runtime_directory = unit_prefix
@@ -425,10 +428,15 @@ def render_workflow_sql(plan: ProjectBoardProvision) -> str:
 -- No per-project workflow override is applied.
 """
 
+    implementation_owner_roles = (
+        ("main", *(role for role in plan.implementer_roles if role != "main"))
+        if "main" in plan.implementer_roles
+        else plan.implementer_roles
+    )
     stages = [
         ("draft", "Draft", 0, plan.draft_roles, None, None, None, False),
         ("analysis", "Triage", 1, ("director",), None, None, None, False),
-        ("in_progress", "Implementation", 2, plan.implementer_roles, None, None, None, False),
+        ("in_progress", "Implementation", 2, implementation_owner_roles, None, None, None, False),
         ("audit", "Audit", 3, ("audit",), None, None, "audit_signoff", False),
         ("director_review", "Final Sign-Off", 4, ("director",), None, None, None, False),
     ]

@@ -48,9 +48,9 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert plan.listener_role == "ticket_board_listener"
     assert plan.workflow_seed == "default-five-stage"
     assert plan.draft_roles == ("designer",)
-    assert plan.implementer_roles == ("ops",)
-    assert plan.assignee_roles == ("unassigned", "designer", "ops", "audit", "director", "user")
-    assert plan.caller_roles == ("director", "designer", "ops", "audit", "user")
+    assert plan.implementer_roles == ("app", "main")
+    assert plan.assignee_roles == ("unassigned", "designer", "ops", "app", "main", "audit", "director", "user")
+    assert plan.caller_roles == ("director", "designer", "ops", "app", "main", "audit", "user")
 
     combined = "\n".join(
         [
@@ -70,9 +70,9 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "PGDATABASE=stellaris_ticket_board" in combined
     assert "TICKET_BOARD_SOCKET=/run/stellaris-ticket-board/ticket-board.sock" in combined
     assert "TICKET_BOARD_DRAFT_ROLES=designer" in combined
-    assert "TICKET_BOARD_IMPLEMENTER_ROLES=ops" in combined
-    assert "TICKET_BOARD_ASSIGNEES=unassigned,designer,ops,audit,director,user" in combined
-    assert "TICKET_BOARD_CALLER_ROLES=director,designer,ops,audit,user" in combined
+    assert "TICKET_BOARD_IMPLEMENTER_ROLES=app,main" in combined
+    assert "TICKET_BOARD_ASSIGNEES=unassigned,designer,ops,app,main,audit,director,user" in combined
+    assert "TICKET_BOARD_CALLER_ROLES=director,designer,ops,app,main,audit,user" in combined
     assert "TICKET_BOARD_PANE_STATE_DIR=%t/stellaris-ticket-board/pane-state" in combined
     assert "PGU_TICKET_BOARD_SOCKET=" not in combined
     assert "PGU_TICKET_BOARD_PANE_STATE_DIR=" not in combined
@@ -91,9 +91,12 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "Seed the default five-stage workflow for stellaris" in combined
     assert "('draft', 'Draft', 0, ARRAY['designer']::text[]" in combined
     assert "('analysis', 'Triage', 1, ARRAY['director']::text[]" in combined
-    assert "('in_progress', 'Implementation', 2, ARRAY['ops']::text[]" in combined
+    assert "('in_progress', 'Implementation', 2, ARRAY['main', 'app']::text[]" in combined
     assert "('draft', 'analysis', 'release_draft', ARRAY['designer', 'director', 'user']::text[]" in combined
-    assert "ADD CONSTRAINT tickets_assignee_check CHECK (assignee IN ('unassigned', 'designer', 'ops', 'audit', 'director', 'user'))" in combined
+    assert (
+        "ADD CONSTRAINT tickets_assignee_check CHECK "
+        "(assignee IN ('unassigned', 'designer', 'ops', 'app', 'main', 'audit', 'director', 'user'))"
+    ) in combined
     assert "('audit', 'director_review', 'audit_sign_off', ARRAY['audit']::text[]" in combined
     assert "('backlog'," not in render_workflow_sql(plan)
     assert "('inspection'," not in render_workflow_sql(plan)

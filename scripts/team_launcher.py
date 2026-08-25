@@ -131,8 +131,10 @@ LEGACY_ALLOW_STALE_LAUNCHER_ENV = "PGU_TEAM_LAUNCHER_ALLOW_STALE"
 NO_LAUNCHER_SELF_DEPLOY_ENV = "TEAM_LAUNCHER_NO_SELF_DEPLOY"
 LEGACY_NO_LAUNCHER_SELF_DEPLOY_ENV = "PGU_TEAM_LAUNCHER_NO_SELF_DEPLOY"
 NEW_PROJECT_BASE_ROLES = (
+    ("designer", "claude"),
     ("director", "claude"),
     ("audit", "claude"),
+    ("ops", "codex"),
 )
 
 
@@ -2388,6 +2390,7 @@ def _new_project_launcher_config_payload(
     *,
     repository: Path,
     project_name: str | None = None,
+    artifact_path: Path | None = None,
     design_document: Path | None = None,
     director_onboarding: Path | None = None,
     implementer_roles: Sequence[str] = DEFAULT_PROJECT_IMPLEMENTER_ROLES,
@@ -2396,19 +2399,21 @@ def _new_project_launcher_config_payload(
     worktree_policy: str = "shared",
 ) -> dict[str, Any]:
     layout_name = f"{plan.project}-konsole-layout.json"
-    role_defs = [*NEW_PROJECT_BASE_ROLES, *((role, "codex") for role in implementer_roles)]
+    role_defs = _dedupe_role_defs([*NEW_PROJECT_BASE_ROLES, *((role, "codex") for role in implementer_roles)])
     roles = [
         {
             "cli": [cli],
             **(
                 {
-                    "env": {
-                        "SWITCHYARD_DIRECTOR_ONBOARDING": str(director_onboarding),
-                        "SWITCHYARD_PROJECT_DESIGN": str(design_document),
-                    }
+                    "env": _new_project_role_env(
+                        role,
+                        plan,
+                        project_name=project_name,
+                        artifact_path=artifact_path,
+                        design_document=design_document,
+                        director_onboarding=director_onboarding,
+                    )
                 }
-                if role == "director" and director_onboarding is not None and design_document is not None
-                else {}
             ),
             "live_commands": [cli],
             "role": role,
@@ -2440,12 +2445,57 @@ def _new_project_launcher_config_payload(
     }
 
 
+def _dedupe_role_defs(role_defs: Sequence[tuple[str, str]]) -> list[tuple[str, str]]:
+    result: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for role, cli in role_defs:
+        if role in seen:
+            continue
+        seen.add(role)
+        result.append((role, cli))
+    return result
+
+
+def _new_project_role_env(
+    role: str,
+    plan: ProjectBoardProvision,
+    *,
+    project_name: str | None = None,
+    artifact_path: Path | None = None,
+    design_document: Path | None = None,
+    director_onboarding: Path | None = None,
+) -> dict[str, str]:
+    env: dict[str, str] = {}
+    if role == "designer" and design_document is not None:
+        project_dir = design_document.parent
+        env.update(
+            {
+                "SWITCHYARD_PROJECT_SLUG": plan.project,
+                "SWITCHYARD_PROJECT_NAME": project_name or plan.project,
+                "SWITCHYARD_PROJECT_ARTIFACT": str(artifact_path or (_switchyard_dir(project_dir) / f"{plan.project}.project.json")),
+                "SWITCHYARD_PROJECT_DESIGN": str(design_document),
+                "SWITCHYARD_DESIGNER_ONBOARDING": str(
+                    _switchyard_dir(project_dir) / SWITCHYARD_DESIGN_ONBOARDING_FILE_NAME
+                ),
+            }
+        )
+    if role == "director" and director_onboarding is not None and design_document is not None:
+        env.update(
+            {
+                "SWITCHYARD_DIRECTOR_ONBOARDING": str(director_onboarding),
+                "SWITCHYARD_PROJECT_DESIGN": str(design_document),
+            }
+        )
+    return env
+
+
 def write_new_project_launcher_artifacts(
     plan: ProjectBoardProvision,
     output_dir: Path,
     *,
     repository: Path,
     project_name: str | None = None,
+    artifact_path: Path | None = None,
     design_document: Path | None = None,
     director_onboarding: Path | None = None,
     implementer_roles: Sequence[str] = DEFAULT_PROJECT_IMPLEMENTER_ROLES,
@@ -2453,7 +2503,7 @@ def write_new_project_launcher_artifacts(
     default_branch: str = "main",
     worktree_policy: str = "shared",
 ) -> Path:
-    role_count = len(NEW_PROJECT_BASE_ROLES) + len(tuple(implementer_roles))
+    role_count = len(_dedupe_role_defs([*NEW_PROJECT_BASE_ROLES, *((role, "codex") for role in implementer_roles)]))
     config_path = output_dir / f"{plan.project}.json"
     layout_path = output_dir / f"{plan.project}-konsole-layout.json"
     layout_path.write_text(
@@ -2466,6 +2516,7 @@ def write_new_project_launcher_artifacts(
                 plan,
                 repository=repository,
                 project_name=project_name,
+                artifact_path=artifact_path,
                 design_document=design_document,
                 director_onboarding=director_onboarding,
                 implementer_roles=implementer_roles,
@@ -2676,6 +2727,7 @@ def new_project_command(
         artifact_dir,
         repository=effective_repository,
         project_name=project_name,
+        artifact_path=from_artifact,
         design_document=design_document,
         director_onboarding=director_onboarding,
         implementer_roles=implementer_roles,
@@ -2779,9 +2831,9 @@ def _write_switchyard_onboarding_files(
                 f"Design document: {design_document}",
                 f"Project artifact: {artifact_path}",
                 "",
-                "Create the design document, then write the project artifact using schema switchyard.project.v1.",
-                "The artifact may include project.roles for the implementer roles selected with the user.",
-                "Do not create workflow stages or workflow transitions in the artifact; the director handles that live.",
+                "Create or refine the design document with the user.",
+                "The board and full pane window already exist; use tickets for follow-up implementation work.",
+                "Do not create workflow stages or workflow transitions in the artifact.",
                 "",
             ]
         ),
@@ -2796,13 +2848,47 @@ def _write_switchyard_onboarding_files(
                 f"Design document: {design_document}",
                 f"Project artifact: {artifact_path}",
                 "",
-                "You own the unprivileged half: seed the board, launch the panes, onboard the team,",
-                "and reshape stages or roles later through the live board if the user asks.",
+                "The privileged provisioning and full pane window were started by switchyard new.",
+                "Use the live board to onboard the team and reshape stages or roles later if the user asks.",
                 "",
             ]
         ),
         encoding="utf-8",
     )
+
+
+def _write_initial_switchyard_project_artifact(
+    *,
+    project_name: str,
+    slug: str,
+    owner_user: str,
+    project_dir: Path,
+    artifact_path: Path,
+    design_document: Path,
+    owner_shell: str,
+) -> None:
+    artifact = ProjectDesignArtifact(
+        project=slug,
+        project_name=project_name,
+        ticket_prefix=validate_ticket_prefix(slug),
+        owner_user=owner_user,
+        repository=project_dir,
+        remote="origin",
+        default_branch="main",
+        worktree_policy="shared",
+        design_document=design_document,
+        implementer_roles=DEFAULT_PROJECT_IMPLEMENTER_ROLES,
+        push_policy="director-main-only",
+        gates=dict(PROJECT_DESIGN_DEFAULT_GATES),
+        capability_grants={
+            **PROJECT_DESIGN_DEFAULT_CAPABILITY_GRANTS,
+            "shell": owner_shell,
+        },
+    )
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    if not design_document.exists():
+        design_document.write_text(_project_design_markdown(slug, title=project_name, body="Design in progress."), encoding="utf-8")
+    _write_json_atomic(artifact_path, project_design_artifact_payload(artifact))
 
 
 def _chown_switchyard_project_files(
@@ -2814,6 +2900,17 @@ def _chown_switchyard_project_files(
     result = runner(["chown", "-R", f"{owner_user}:{owner_user}", str(_switchyard_dir(project_dir))])
     if result.returncode != 0:
         raise SystemExit(f"switchyard: failed to assign {_switchyard_dir(project_dir)} to {owner_user}")
+
+
+def _chown_project_file(
+    *,
+    owner_user: str,
+    path: Path,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> None:
+    result = runner(["chown", f"{owner_user}:{owner_user}", str(path)])
+    if result.returncode != 0:
+        raise SystemExit(f"switchyard: failed to assign {path} to {owner_user}")
 
 
 def _owner_project_install_args(owner_user: str, project_dir: Path, *, shell: str = "fish") -> list[list[str]]:
@@ -3158,7 +3255,6 @@ def switchyard_new_command(
     if euid_getter() != 0:
         raise SystemExit("switchyard: new requires sudo; re-run as `sudo ./switchyard new`")
 
-    owner_home = home_base / owner_user
     artifact_path = (from_artifact or (_switchyard_dir(project_dir) / f"{resolved_slug}.project.json")).expanduser().resolve(strict=False)
     design_document = project_dir / SWITCHYARD_DESIGN_FILE_NAME
     director_onboarding = _switchyard_dir(project_dir) / SWITCHYARD_DIRECTOR_ONBOARDING_FILE_NAME
@@ -3182,30 +3278,27 @@ def switchyard_new_command(
             design_document=design_document,
             director_onboarding=director_onboarding,
         )
-        _chown_switchyard_project_files(owner_user=owner_user, project_dir=project_dir, runner=runner)
-        _launch_designer(
-            owner_user=owner_user,
-            slug=resolved_slug,
+        _write_initial_switchyard_project_artifact(
             project_name=resolved_project_name,
+            slug=resolved_slug,
+            owner_user=owner_user,
             project_dir=project_dir,
             artifact_path=artifact_path,
             design_document=design_document,
-            runner=runner,
+            owner_shell=owner_shell,
         )
-        session_dir = _verify_designer_session_cwd(
-            owner_home=owner_home,
-            project_dir=project_dir,
-            exists=session_dir_exists,
-        )
-        print_func(f"switchyard: verified designer session cwd at {session_dir}")
+        _chown_switchyard_project_files(owner_user=owner_user, project_dir=project_dir, runner=runner)
+        if design_document.exists():
+            _chown_project_file(owner_user=owner_user, path=design_document, runner=runner)
     else:
+        artifact = load_project_design_artifact(artifact_path)
         _write_switchyard_onboarding_files(
             project_name=resolved_project_name,
             slug=resolved_slug,
             owner_user=owner_user,
             project_dir=project_dir,
             artifact_path=artifact_path,
-            design_document=load_project_design_artifact(artifact_path).design_document,
+            design_document=artifact.design_document,
             director_onboarding=director_onboarding,
         )
         _chown_switchyard_project_files(owner_user=owner_user, project_dir=project_dir, runner=runner)
@@ -3230,17 +3323,18 @@ def switchyard_new_command(
         return result
     config_path = provision_dir / f"{resolved_slug}.json"
     config = load_project_config(resolved_slug, config_path)
-    director = _role_by_name(config, "director")
-    director_result = run_role_pane(
-        director,
+    launch_result = launch_project(
+        config,
+        config_path=config_path,
         mode="start",
-        session_dir=config.session_dir,
+        script_path=Path(__file__).resolve().with_name(SWITCHYARD_NAME),
         pane_state_dir=pane_state_dir or DEFAULT_PANE_STATE_DIR,
         runner=runner,
     )
-    if director_result != 0:
-        return director_result
-    print_func(f"switchyard: director started for {resolved_slug}")
+    if launch_result != 0:
+        return launch_result
+    print_func(f"switchyard: full pane window started for {resolved_slug}")
+    print_func("switchyard: maximize the designer pane during design with Konsole Ctrl+Shift+E; restore it when done")
     return 0
 
 

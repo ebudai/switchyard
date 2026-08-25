@@ -26,7 +26,7 @@ EXPECTED_STAGES = [
         "name": "in_progress",
         "display_label": "Implementation",
         "rank": 2,
-        "owner_roles": ["ops"],
+        "owner_roles": ["main", "app"],
     },
     {"name": "audit", "display_label": "Audit", "rank": 3, "owner_roles": ["audit"]},
     {"name": "director_review", "display_label": "Final Sign-Off", "rank": 4, "owner_roles": ["director"]},
@@ -114,7 +114,9 @@ FROM ticket_board.workflow_stages;
             )
             assert stages == EXPECTED_STAGES, stages
             assert psql(admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions;") == "7"
-            assert psql(admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('ops');") == "t"
+            assert psql(admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('main');") == "t"
+            assert psql(admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('app');") == "t"
+            assert psql(admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('ops');") == "f"
             assert psql(admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('designer');") == "f"
             reachable = json.loads(
                 psql(
@@ -149,10 +151,10 @@ SELECT ticket_board.create_ticket('Provisioned workflow ticket', 'Body', 'draft'
             service_call(service_conn, "designer", f"SELECT ticket_board.release_draft('{ticket_id}');")
             assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "analysis:director"
 
-            service_call(service_conn, "director", f"SELECT ticket_board.route('{ticket_id}', 'in_progress', 'ops');")
-            assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "in_progress:ops"
+            service_call(service_conn, "director", f"SELECT ticket_board.route('{ticket_id}', 'in_progress', 'main');")
+            assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "in_progress:main"
 
-            service_call(service_conn, "ops", f"SELECT ticket_board.submit_to_audit('{ticket_id}', 'abcdef1');")
+            service_call(service_conn, "main", f"SELECT ticket_board.submit_to_audit('{ticket_id}', 'abcdef1');")
             assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "audit:audit"
 
             service_call(service_conn, "audit", f"SELECT ticket_board.audit_sign_off('{ticket_id}', 'Audit verified.');")

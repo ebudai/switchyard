@@ -2469,6 +2469,7 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
         plan = json.loads((output_dir / "plan.json").read_text(encoding="utf-8"))
         board_unit = (output_dir / "porter-ticket-board.service").read_text(encoding="utf-8")
         commands = (output_dir / "operator-commands.sh").read_text(encoding="utf-8")
+        workflow_sql = (output_dir / "porter-workflow.sql").read_text(encoding="utf-8")
         loaded_config = load_project_config("porter", output_dir / "porter.json")
         launch_output = tmp_path / "launch-layout.json"
         launch_stdout = StringIO()
@@ -2500,21 +2501,30 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
     assert config["board_socket"] == "/run/porter-ticket-board/ticket-board.sock"
     assert config["repository"] == str(project_repo)
     assert config["repository"] != str(source_repo)
-    assert [role["role"] for role in config["roles"]] == ["director", "audit", "ops"]
+    assert [role["role"] for role in config["roles"]] == ["designer", "director", "audit", "ops", "app", "main"]
     assert [role["tmux_session"] for role in config["roles"]] == [
+        "porter-designer",
         "porter-director",
         "porter-audit",
         "porter-ops",
+        "porter-app",
+        "porter-main",
     ]
     assert {role["role"]: role["cli"] for role in config["roles"]} == {
+        "designer": ["claude"],
         "director": ["claude"],
         "audit": ["claude"],
         "ops": ["codex"],
+        "app": ["codex"],
+        "main": ["codex"],
     }
-    assert len(team_launcher._layout_leaves(layout)) == 3
-    assert [role.role for role in loaded_config.roles] == ["director", "audit", "ops"]
-    assert loaded_config.roles[0].target == "porter-director:0.0"
-    assert loaded_config.roles[2].target == "porter-ops:0.0"
+    assert {"designer", "director", "main", "app", "audit"} <= {role["role"] for role in config["roles"]}
+    assert "('in_progress', 'Implementation', 2, ARRAY['main', 'app']::text[]" in workflow_sql
+    assert len(team_launcher._layout_leaves(layout)) == 6
+    assert [role.role for role in loaded_config.roles] == ["designer", "director", "audit", "ops", "app", "main"]
+    assert loaded_config.roles[0].target == "porter-designer:0.0"
+    assert loaded_config.roles[3].target == "porter-ops:0.0"
+    assert loaded_config.roles[5].target == "porter-main:0.0"
     assert all(role.workdir == str(project_repo) for role in loaded_config.roles)
     assert {role.env["TICKET_BOARD_TICKET_PREFIX"] for role in loaded_config.roles} == {"PORTER"}
     assert commands.splitlines()[:2] == ["#!/usr/bin/env bash", "set -euo pipefail"]
@@ -2527,11 +2537,14 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
     assert launch_plan["project"] == "porter"
     assert launch_plan["mode"] == "attach-or-start"
     assert [role["target"] for role in launch_plan["roles"]] == [
+        "porter-designer:0.0",
         "porter-director:0.0",
         "porter-audit:0.0",
         "porter-ops:0.0",
+        "porter-app:0.0",
+        "porter-main:0.0",
     ]
-    assert [role["workdir"] for role in launch_plan["roles"]] == [str(project_repo)] * 3
+    assert [role["workdir"] for role in launch_plan["roles"]] == [str(project_repo)] * 6
     assert launch_output_exists
 
 
@@ -2870,13 +2883,11 @@ def test_switchyard_designer_session_cwd_guard_rejects_missing_session_dir() -> 
     assert "would not resume" in message
 
 
-def test_switchyard_new_launches_designer_from_derived_cwd_and_starts_director() -> None:
+def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() -> None:
     class NewProjectRunner(FakeRunner):
-        def __init__(self, home_base: Path) -> None:
+        def __init__(self) -> None:
             super().__init__()
-            self.home_base = home_base
             self.call_kwargs: list[dict[str, object]] = []
-            self.designer_cwd = ""
 
         def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
             self.call_kwargs.append(dict(kwargs))
@@ -2887,42 +2898,6 @@ def test_switchyard_new_launches_designer_from_derived_cwd_and_starts_director()
                 return subprocess.CompletedProcess(args, 0)
             if args[:1] == ["install"]:
                 return subprocess.CompletedProcess(args, 0)
-            if args[:5] == ["sudo", "-u", "otto-agent", "-H", "env"] and args[-1] == "claude":
-                cwd = Path(str(kwargs["cwd"]))
-                self.designer_cwd = str(cwd)
-                env_values = {
-                    item.split("=", 1)[0]: item.split("=", 1)[1]
-                    for item in args
-                    if item.startswith("SWITCHYARD_") and "=" in item
-                }
-                artifact_path = Path(env_values["SWITCHYARD_PROJECT_ARTIFACT"])
-                design_doc = Path(env_values["SWITCHYARD_PROJECT_DESIGN"])
-                design_doc.write_text("# Porter System\n\nDesigned.\n", encoding="utf-8")
-                artifact_path.parent.mkdir(parents=True, exist_ok=True)
-                artifact_path.write_text(
-                    json.dumps(
-                        {
-                            "schema": "switchyard.project.v1",
-                            "design_document": str(design_doc),
-                            "project": {
-                                "slug": "porter",
-                                "name": "Porter System",
-                                "ticket_prefix": "PORT",
-                                "owner_user": "otto-agent",
-                                "repository": str(cwd),
-                                "roles": ["ops", "app"],
-                            },
-                        },
-                        indent=2,
-                        sort_keys=True,
-                    )
-                    + "\n",
-                    encoding="utf-8",
-                )
-                session_dir = team_launcher._claude_project_session_dir(self.home_base / "otto-agent", cwd)
-                session_dir.mkdir(parents=True, exist_ok=True)
-                (session_dir / "session.jsonl").write_text("{}\n", encoding="utf-8")
-                return subprocess.CompletedProcess(args, 0)
             return super().__call__(args, **kwargs)
 
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new.") as tmp:
@@ -2932,7 +2907,7 @@ def test_switchyard_new_launches_designer_from_derived_cwd_and_starts_director()
         pane_state_dir = tmp_path / "pane-state"
         source_repo = tmp_path / "source-repo"
         source_repo.mkdir()
-        runner = NewProjectRunner(home_base)
+        runner = NewProjectRunner()
         stdout = StringIO()
 
         with redirect_stdout(stdout):
@@ -2956,32 +2931,35 @@ def test_switchyard_new_launches_designer_from_derived_cwd_and_starts_director()
             )
 
         project_dir = home_base / "otto-agent" / "Projects" / "porter-system"
-        designer_call_index = next(
-            index for index, call in enumerate(runner.calls) if call[:5] == ["sudo", "-u", "otto-agent", "-H", "env"] and call[-1] == "claude"
-        )
         chown_call_index = next(index for index, call in enumerate(runner.calls) if call[:2] == ["chown", "-R"])
         config = json.loads((output_dir / "porter.json").read_text(encoding="utf-8"))
         plan = json.loads((output_dir / "plan.json").read_text(encoding="utf-8"))
+        artifact = json.loads((project_dir / ".switchyard" / "porter.project.json").read_text(encoding="utf-8"))
+        generated_layout = json.loads(Path("/tmp/porter-team-layout.json").read_text(encoding="utf-8"))
+        generated_commands = _leaf_commands(generated_layout)
+        designer_env = next(role["env"] for role in config["roles"] if role["role"] == "designer")
         director_env = next(role["env"] for role in config["roles"] if role["role"] == "director")
-        session_dir = home_base / "otto-agent" / ".claude" / "projects" / team_launcher._claude_project_key(project_dir)
 
-        assert runner.designer_cwd == str(project_dir)
-        assert chown_call_index < designer_call_index
-        assert session_dir.is_dir()
-        assert plan["implementer_roles"] == ["ops", "app"]
-        assert [role["role"] for role in config["roles"]] == ["director", "audit", "ops", "app"]
+        assert chown_call_index < next(index for index, call in enumerate(runner.calls) if call == ["sudo", "-v"])
+        assert artifact["project"]["repository"] == str(project_dir)
+        assert artifact["project"]["roles"] == ["app", "main"]
+        assert plan["implementer_roles"] == ["app", "main"]
+        assert [role["role"] for role in config["roles"]] == ["designer", "director", "audit", "ops", "app", "main"]
+        assert designer_env["SWITCHYARD_PROJECT_ARTIFACT"] == str(project_dir / ".switchyard" / "porter.project.json")
+        assert designer_env["SWITCHYARD_DESIGNER_ONBOARDING"].endswith("DESIGNER_ONBOARDING.md")
         assert director_env["SWITCHYARD_PROJECT_DESIGN"] == str(project_dir / "PROJECT_DESIGN.md")
         assert director_env["SWITCHYARD_DIRECTOR_ONBOARDING"].endswith("DIRECTOR_ONBOARDING.md")
-        assert any(call[:2] == ["tmux", "new-session"] and "porter-director" in call for call in runner.calls)
-        assert "switchyard: verified designer session cwd" in stdout.getvalue()
+        assert len(generated_commands) == 6
+        assert all("switchyard porter pane attach-or-start" in command for command in generated_commands)
+        assert any(call[:1] in (["env"], ["sh"]) for call in runner.calls)
+        assert "switchyard: full pane window started for porter" in stdout.getvalue()
+        assert "Konsole Ctrl+Shift+E" in stdout.getvalue()
 
 
-def test_switchyard_new_custom_project_path_sets_designer_cwd_and_pane_workdirs() -> None:
+def test_switchyard_new_custom_project_path_sets_artifact_repository_and_pane_workdirs() -> None:
     class NewProjectRunner(FakeRunner):
-        def __init__(self, home_base: Path) -> None:
+        def __init__(self) -> None:
             super().__init__()
-            self.home_base = home_base
-            self.designer_cwd = ""
 
         def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
             self.calls.append(args)
@@ -2990,42 +2968,6 @@ def test_switchyard_new_custom_project_path_sets_designer_cwd_and_pane_workdirs(
             if args[:1] == ["useradd"]:
                 return subprocess.CompletedProcess(args, 0)
             if args[:1] == ["install"]:
-                return subprocess.CompletedProcess(args, 0)
-            if args[:5] == ["sudo", "-u", "otto-agent", "-H", "env"] and args[-1] == "claude":
-                cwd = Path(str(kwargs["cwd"]))
-                self.designer_cwd = str(cwd)
-                env_values = {
-                    item.split("=", 1)[0]: item.split("=", 1)[1]
-                    for item in args
-                    if item.startswith("SWITCHYARD_") and "=" in item
-                }
-                artifact_path = Path(env_values["SWITCHYARD_PROJECT_ARTIFACT"])
-                design_doc = Path(env_values["SWITCHYARD_PROJECT_DESIGN"])
-                design_doc.write_text("# Otto Scheduler\n\nDesigned.\n", encoding="utf-8")
-                artifact_path.parent.mkdir(parents=True, exist_ok=True)
-                artifact_path.write_text(
-                    json.dumps(
-                        {
-                            "schema": "switchyard.project.v1",
-                            "design_document": str(design_doc),
-                            "project": {
-                                "slug": "otto",
-                                "name": "Otto Scheduler",
-                                "ticket_prefix": "OTTO",
-                                "owner_user": "otto-agent",
-                                "repository": str(cwd),
-                                "roles": ["ops"],
-                            },
-                        },
-                        indent=2,
-                        sort_keys=True,
-                    )
-                    + "\n",
-                    encoding="utf-8",
-                )
-                session_dir = team_launcher._claude_project_session_dir(self.home_base / "otto-agent", cwd)
-                session_dir.mkdir(parents=True, exist_ok=True)
-                (session_dir / "session.jsonl").write_text("{}\n", encoding="utf-8")
                 return subprocess.CompletedProcess(args, 0)
             return super().__call__(args, **kwargs)
 
@@ -3036,7 +2978,7 @@ def test_switchyard_new_custom_project_path_sets_designer_cwd_and_pane_workdirs(
         output_dir = tmp_path / "out"
         source_repo = tmp_path / "source-repo"
         source_repo.mkdir()
-        runner = NewProjectRunner(home_base)
+        runner = NewProjectRunner()
 
         assert (
             switchyard_new_command(
@@ -3061,20 +3003,22 @@ def test_switchyard_new_custom_project_path_sets_designer_cwd_and_pane_workdirs(
         install_call = next(call for call in runner.calls if call[:1] == ["install"])
 
         assert custom_path.is_dir()
-        assert runner.designer_cwd == str(custom_path)
+        assert json.loads((custom_path / ".switchyard" / "otto.project.json").read_text(encoding="utf-8"))["project"]["repository"] == str(custom_path)
         assert install_call[-1] == str(custom_path)
         assert {role.role: role.workdir for role in config.roles} == {
+            "designer": str(custom_path),
             "director": str(custom_path),
             "audit": str(custom_path),
             "ops": str(custom_path),
+            "app": str(custom_path),
+            "main": str(custom_path),
         }
 
 
-def test_switchyard_new_creates_absent_zeta_owner_with_linger_and_designer_session() -> None:
+def test_switchyard_new_creates_absent_zeta_owner_with_linger_and_initial_artifact() -> None:
     class ZetaRunner(FakeRunner):
-        def __init__(self, home_base: Path) -> None:
+        def __init__(self) -> None:
             super().__init__()
-            self.home_base = home_base
 
         def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
             self.calls.append(args)
@@ -3086,41 +3030,6 @@ def test_switchyard_new_creates_absent_zeta_owner_with_linger_and_designer_sessi
                 return subprocess.CompletedProcess(args, 0)
             if args[:1] == ["install"]:
                 return subprocess.CompletedProcess(args, 0)
-            if args[:5] == ["sudo", "-u", "zeta-agent", "-H", "env"] and args[-1] == "claude":
-                cwd = Path(str(kwargs["cwd"]))
-                env_values = {
-                    item.split("=", 1)[0]: item.split("=", 1)[1]
-                    for item in args
-                    if item.startswith("SWITCHYARD_") and "=" in item
-                }
-                artifact_path = Path(env_values["SWITCHYARD_PROJECT_ARTIFACT"])
-                design_doc = Path(env_values["SWITCHYARD_PROJECT_DESIGN"])
-                design_doc.write_text("# Zeta System\n\nDesigned.\n", encoding="utf-8")
-                artifact_path.parent.mkdir(parents=True, exist_ok=True)
-                artifact_path.write_text(
-                    json.dumps(
-                        {
-                            "schema": "switchyard.project.v1",
-                            "design_document": str(design_doc),
-                            "project": {
-                                "slug": "zeta",
-                                "name": "Zeta System",
-                                "ticket_prefix": "ZETA",
-                                "owner_user": "zeta-agent",
-                                "repository": str(cwd),
-                                "roles": ["ops"],
-                            },
-                        },
-                        indent=2,
-                        sort_keys=True,
-                    )
-                    + "\n",
-                    encoding="utf-8",
-                )
-                session_dir = team_launcher._claude_project_session_dir(self.home_base / "zeta-agent", cwd)
-                session_dir.mkdir(parents=True, exist_ok=True)
-                (session_dir / "session.jsonl").write_text("{}\n", encoding="utf-8")
-                return subprocess.CompletedProcess(args, 0)
             return super().__call__(args, **kwargs)
 
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new.") as tmp:
@@ -3129,7 +3038,7 @@ def test_switchyard_new_creates_absent_zeta_owner_with_linger_and_designer_sessi
         output_dir = tmp_path / "out"
         source_repo = tmp_path / "source-repo"
         source_repo.mkdir()
-        runner = ZetaRunner(home_base)
+        runner = ZetaRunner()
         stdout = StringIO()
 
         with redirect_stdout(stdout):
@@ -3153,15 +3062,14 @@ def test_switchyard_new_creates_absent_zeta_owner_with_linger_and_designer_sessi
             )
 
         project_dir = home_base / "zeta-agent" / "Projects" / "zeta-system"
-        session_dir = home_base / "zeta-agent" / ".claude" / "projects" / team_launcher._claude_project_key(project_dir)
         expected_useradd = team_launcher._owner_project_install_args("zeta-agent", project_dir)[1]
         commands = (output_dir / "operator-commands.sh").read_text(encoding="utf-8")
-        session_dir_created = session_dir.is_dir()
+        artifact_created = (project_dir / ".switchyard" / "zeta.project.json").is_file()
 
     assert expected_useradd in runner.calls
     assert "-G" not in expected_useradd
     assert ["loginctl", "enable-linger", "zeta-agent"] in runner.calls
-    assert session_dir_created
+    assert artifact_created
     assert f"switchyard: created user zeta-agent with shell fish; linger enabled" in stdout.getvalue()
     assert "sudo loginctl enable-linger 'zeta-agent'" not in commands
     assert "loginctl show-user 'zeta-agent' -p Linger --value" in commands
@@ -3462,7 +3370,7 @@ def test_project_artifact_accepts_designer_chosen_roles() -> None:
         config = json.loads((tmp_path / "out" / "atlas.json").read_text(encoding="utf-8"))
 
     assert plan["implementer_roles"] == ["ops", "app"]
-    assert [role["role"] for role in config["roles"]] == ["director", "audit", "ops", "app"]
+    assert [role["role"] for role in config["roles"]] == ["designer", "director", "audit", "ops", "app"]
 
 
 def test_project_artifact_rejects_stage_configuration() -> None:

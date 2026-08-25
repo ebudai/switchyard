@@ -30,9 +30,9 @@ def main() -> int:
     assert plan.listener_unit in text
     assert "TICKET_BOARD_IMPLEMENTER_ROLES" in text
     assert "draft_roles` is `[\"designer\"]" in text
-    assert "implementer_roles` is `[\"ops\"]" in text
+    assert "implementer_roles` is `[\"app\", \"main\"]" in text
     assert "('draft', 'Draft', 0, ARRAY['designer']::text[]" in workflow
-    assert "('in_progress', 'Implementation', 2, ARRAY['ops']::text[]" in workflow
+    assert "('in_progress', 'Implementation', 2, ARRAY['main', 'app']::text[]" in workflow
     assert "mktemp -d /tmp/otto-board-provision" in text
     assert "rm -rf" not in text
     assert "scripts/ticket-board-write submit-to-audit OTTO-N" in text

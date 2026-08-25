@@ -19,8 +19,8 @@ guide. The remaining split is intentional:
 
 - Project: `otto`
 - Project user: `otto-agent`
-- Minimal board roles: `designer`, `director`, `audit`, `ops`, plus `user` for
-  draft release compatibility.
+- Minimal board roles: `designer`, `director`, `audit`, `ops`, `app`, `main`,
+  plus `user` for draft release compatibility.
 - Database: `otto_ticket_board`
 - HTTP port: `20740`
 - System board unit: `otto-ticket-board.service`
@@ -41,9 +41,10 @@ schema:
 | Final Sign-Off | `director_review` |
 
 PGU-598 seeds those five visible stages for non-`pgu` projects. PGU-599 makes
-the implementation-stage owner role data-driven, and PGU-644 makes the turnkey
-defaults `designer`, `director`, `audit`, and `ops`. A project that needs
-programmer-specific implementation roles adds them explicitly.
+the implementation-stage owner role data-driven, and PGU-655 makes the turnkey
+defaults `designer`, `director`, `audit`, `ops`, `app`, and `main`, with
+Implementation owned by the programmer roles `main` and `app`; `main` is first
+by convention for the default walkthrough.
 
 ## Preconditions
 
@@ -94,9 +95,9 @@ Review points:
 - `plan.json` has `port: 20740`, database `otto_ticket_board`, and socket
   `/run/otto-ticket-board/ticket-board.sock`.
 - `draft_roles` is `["designer"]`.
-- `implementer_roles` is `["ops"]`.
-- `assignee_roles` is `["unassigned", "designer", "ops", "audit", "director"]`.
-- `caller_roles` is `["director", "designer", "ops", "audit", "user"]`.
+- `implementer_roles` is `["app", "main"]`.
+- `assignee_roles` is `["unassigned", "designer", "ops", "app", "main", "audit", "director", "user"]`.
+- `caller_roles` is `["director", "designer", "ops", "app", "main", "audit", "user"]`.
 - `otto-workflow.sql` contains exactly five rows in `workflow_stages` and seven
   rows in `workflow_transitions`.
 - The generated system unit exports `TICKET_BOARD_DRAFT_ROLES`,
@@ -168,7 +169,7 @@ Expected workflow stages:
 ```text
 draft           Draft           {designer}
 analysis        Triage          {director}
-in_progress     Implementation  {ops}
+in_progress     Implementation  {main,app}
 audit           Audit           {audit}
 director_review Final Sign-Off  {director}
 ```

@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
@@ -292,6 +293,64 @@ def _session_payload(target: str, session_id: str, payload: dict[str, object]) -
 
 def _read_pane_state(state_dir: Path, target: str) -> dict[str, object]:
     return json.loads((state_dir / pane_state_file_name(target)).read_text(encoding="utf-8"))
+
+
+def test_launch_session_record_report_waits_and_warns_for_missing_records() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-launch-session-records.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        config_path = tmp_path / "porter.json"
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        session_dir = tmp_path / "sessions"
+        session_dir.mkdir()
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "session_dir": str(session_dir),
+                    "roles": [
+                        {"role": "designer", "slot": 0, "cli": ["claude"], "target": "porter-designer:0.0"},
+                        {"role": "main", "slot": 1, "cli": ["codex"], "target": "porter-main:0.0"},
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+        designer = config.roles[0]
+        messages: list[str] = []
+
+        def write_designer_record() -> None:
+            time.sleep(0.05)
+            (session_dir / session_file_name(designer.target)).write_text(
+                json.dumps({"target": designer.target, "session_id": "designer-session"}) + "\n",
+                encoding="utf-8",
+            )
+
+        writer = threading.Thread(target=write_designer_record)
+        writer.start()
+        try:
+            statuses = team_launcher.report_launch_session_records(
+                config,
+                timeout_seconds=1.0,
+                poll_seconds=0.01,
+                print_func=messages.append,
+            )
+        finally:
+            writer.join(timeout=1.0)
+
+    by_role = {status.role: status for status in statuses}
+    assert by_role["designer"].session_id == "designer-session"
+    assert by_role["main"].session_id == ""
+    assert any("session record found for designer (porter-designer:0.0): designer-session" in message for message in messages)
+    assert any("warning: switchyard: session record missing for main (porter-main:0.0)" in message for message in messages)
 
 
 def _live_session_record_fingerprint() -> dict[str, str]:
@@ -2887,6 +2946,7 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
                     input_func=lambda _prompt: "",
                     port_in_use=lambda _port: False,
                     socket_exists=lambda _path: False,
+                    session_record_timeout=0,
                 )
                 == 0
             )
@@ -2913,8 +2973,12 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
         assert len(generated_commands) == 6
         assert all("switchyard porter pane attach-or-start" in command for command in generated_commands)
         assert any(call[:1] in (["env"], ["sh"]) for call in runner.calls)
-        assert "switchyard: full pane window started for porter" in stdout.getvalue()
-        assert "Konsole Ctrl+Shift+E" in stdout.getvalue()
+        output = stdout.getvalue()
+        assert "switchyard: full pane window started for porter" in output
+        assert output.count("warning: switchyard: session record missing for ") == 6
+        assert "warning: switchyard: session record missing for designer (porter-designer:0.0)" in output
+        assert "warning: switchyard: session record missing for main (porter-main:0.0)" in output
+        assert "Konsole Ctrl+Shift+E" in output
 
 
 def test_switchyard_new_custom_project_path_sets_artifact_repository_and_pane_workdirs() -> None:
@@ -2956,6 +3020,7 @@ def test_switchyard_new_custom_project_path_sets_artifact_repository_and_pane_wo
                 pane_state_dir=tmp_path / "pane-state",
                 port_in_use=lambda _port: False,
                 socket_exists=lambda _path: False,
+                session_record_timeout=0,
             )
             == 0
         )
@@ -3018,6 +3083,7 @@ def test_switchyard_new_creates_absent_zeta_owner_with_linger_and_initial_artifa
                     input_func=lambda _prompt: "",
                     port_in_use=lambda _port: False,
                     socket_exists=lambda _path: False,
+                    session_record_timeout=0,
                 )
                 == 0
             )
@@ -3109,6 +3175,7 @@ def test_switchyard_new_reuses_existing_owner_without_account_mutation() -> None
                     pane_state_dir=tmp_path / "pane-state",
                     port_in_use=lambda _port: False,
                     socket_exists=lambda _path: False,
+                    session_record_timeout=0,
                 )
                 == 0
             )

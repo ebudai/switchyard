@@ -126,6 +126,8 @@ RESUME_STARTUP_POLL_SECONDS = 0.1
 DETACHED_SESSION_STABILITY_SECONDS = 2.0
 RUNTIME_READY_ATTEMPTS = 50
 RUNTIME_READY_POLL_SECONDS = 0.1
+LAUNCH_SESSION_RECORD_TIMEOUT_SECONDS = 10.0
+LAUNCH_SESSION_RECORD_POLL_SECONDS = 0.2
 ALLOW_STALE_LAUNCHER_ENV = "TEAM_LAUNCHER_ALLOW_STALE"
 LEGACY_ALLOW_STALE_LAUNCHER_ENV = "PGU_TEAM_LAUNCHER_ALLOW_STALE"
 NO_LAUNCHER_SELF_DEPLOY_ENV = "TEAM_LAUNCHER_NO_SELF_DEPLOY"
@@ -211,6 +213,17 @@ class LauncherCheckoutProbe:
     @property
     def undeterminable(self) -> bool:
         return bool(self.error)
+
+
+@dataclass(frozen=True)
+class LaunchSessionRecordStatus:
+    role: str
+    target: str
+    session_id: str
+
+    @property
+    def found(self) -> bool:
+        return bool(self.session_id)
 
 
 def _repo_root() -> Path:
@@ -891,6 +904,60 @@ def session_id_for_role(role: RoleConfig, session_dir: Path) -> str:
     if parsed is None:
         return ""
     return str(parsed.get("session_id") or "").strip()
+
+
+def launch_session_record_statuses(
+    config: ProjectConfig,
+    roles: Sequence[RoleConfig] | None = None,
+    *,
+    timeout_seconds: float = LAUNCH_SESSION_RECORD_TIMEOUT_SECONDS,
+    poll_seconds: float = LAUNCH_SESSION_RECORD_POLL_SECONDS,
+) -> list[LaunchSessionRecordStatus]:
+    roles = tuple(roles or config.roles)
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    statuses: list[LaunchSessionRecordStatus] = []
+    while True:
+        statuses = [
+            LaunchSessionRecordStatus(
+                role=role.role,
+                target=role.target,
+                session_id=session_id_for_role(role, config.session_dir),
+            )
+            for role in roles
+        ]
+        if all(status.found for status in statuses) or time.monotonic() >= deadline:
+            return statuses
+        sleep_seconds = min(max(0.01, poll_seconds), max(0.0, deadline - time.monotonic()))
+        if sleep_seconds <= 0:
+            return statuses
+        time.sleep(sleep_seconds)
+
+
+def report_launch_session_records(
+    config: ProjectConfig,
+    roles: Sequence[RoleConfig] | None = None,
+    *,
+    timeout_seconds: float = LAUNCH_SESSION_RECORD_TIMEOUT_SECONDS,
+    poll_seconds: float = LAUNCH_SESSION_RECORD_POLL_SECONDS,
+    print_func: Callable[[str], None] = print,
+) -> list[LaunchSessionRecordStatus]:
+    statuses = launch_session_record_statuses(
+        config,
+        roles,
+        timeout_seconds=timeout_seconds,
+        poll_seconds=poll_seconds,
+    )
+    for status in statuses:
+        if status.found:
+            print_func(
+                f"switchyard: session record found for {status.role} ({status.target}): {status.session_id}"
+            )
+        else:
+            print_func(
+                f"warning: switchyard: session record missing for {status.role} "
+                f"({status.target}) after {timeout_seconds:g}s; continuing"
+            )
+    return statuses
 
 
 def clear_session_record_for_role(role: RoleConfig, session_dir: Path) -> bool:
@@ -3138,6 +3205,8 @@ def switchyard_new_command(
     socket_exists: Callable[[Path], bool] = _path_exists,
     session_dir_exists: Callable[[Path], bool] | None = None,
     pane_state_dir: Path | None = None,
+    session_record_timeout: float = LAUNCH_SESSION_RECORD_TIMEOUT_SECONDS,
+    session_record_poll: float = LAUNCH_SESSION_RECORD_POLL_SECONDS,
     input_func: Callable[[str], str] = input,
     print_func: Callable[[str], None] = print,
 ) -> int:
@@ -3259,6 +3328,12 @@ def switchyard_new_command(
     if launch_result != 0:
         return launch_result
     print_func(f"switchyard: full pane window started for {resolved_slug}")
+    report_launch_session_records(
+        config,
+        timeout_seconds=session_record_timeout,
+        poll_seconds=session_record_poll,
+        print_func=print_func,
+    )
     print_func("switchyard: maximize the designer pane during design with Konsole Ctrl+Shift+E; restore it when done")
     return 0
 

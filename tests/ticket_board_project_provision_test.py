@@ -46,7 +46,7 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert plan.frame_dir == "/home/stellaris-agent/.claude/stellaris-ticket-frames"
     assert plan.service_role == "ticket_board_service"
     assert plan.listener_role == "ticket_board_listener"
-    assert plan.workflow_seed == "default-five-stage"
+    assert plan.workflow_seed == "default-project"
     assert plan.draft_roles == ("designer",)
     assert plan.implementer_roles == ("app", "main")
     assert plan.assignee_roles == ("unassigned", "designer", "ops", "app", "main", "audit", "director", "user")
@@ -88,16 +88,21 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "sudo psql -X -v ON_ERROR_STOP=1 'postgresql:///stellaris_ticket_board?host=/var/run/postgresql&user=postgres' -f 'stellaris-workflow.sql'" in combined
     assert combined.index("scripts/ticket-board-migrate") < combined.index("-f 'stellaris-workflow.sql'")
     assert combined.index("-f 'stellaris-workflow.sql'") < combined.index("ticket_board/rbac.sql")
-    assert "Seed the default five-stage workflow for stellaris" in combined
+    assert "Seed the default project workflow for stellaris" in combined
     assert "('draft', 'Draft', 0, ARRAY['designer']::text[]" in combined
     assert "('analysis', 'Triage', 1, ARRAY['director']::text[]" in combined
     assert "('in_progress', 'Implementation', 2, ARRAY['main', 'app']::text[]" in combined
+    assert "('done', 'Done', 9, ARRAY[]::text[], NULL, NULL, NULL, true)" in combined
+    assert "('cancelled', 'Cancelled', 10, ARRAY[]::text[], NULL, NULL, NULL, true)" in combined
     assert "('draft', 'analysis', 'release_draft', ARRAY['designer', 'director', 'user']::text[]" in combined
+    assert "('draft', 'cancelled', 'cancel', ARRAY['director']::text[]" in combined
     assert (
         "ADD CONSTRAINT tickets_assignee_check CHECK "
         "(assignee IN ('unassigned', 'designer', 'ops', 'app', 'main', 'audit', 'director', 'user'))"
     ) in combined
     assert "('audit', 'director_review', 'audit_sign_off', ARRAY['audit']::text[]" in combined
+    assert "('director_review', 'done', 'mark_done', ARRAY['director']::text[]" in combined
+    assert "('director_review', 'cancelled', 'cancel', ARRAY['director']::text[]" in combined
     assert "('backlog'," not in render_workflow_sql(plan)
     assert "('inspection'," not in render_workflow_sql(plan)
     assert 'unit === "stellaris-ticket-board.service"' in combined
@@ -416,7 +421,7 @@ def test_cli_writes_reviewable_artifacts() -> None:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        assert "Seed the default five-stage workflow for porter" in workflow_result.stdout
+        assert "Seed the default project workflow for porter" in workflow_result.stdout
         assert "ARRAY['builder']::text[]" in workflow_result.stdout
 
 

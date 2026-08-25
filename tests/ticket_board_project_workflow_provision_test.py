@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression test: provisioned projects can seed and use a five-stage workflow."""
+"""Regression test: provisioned projects can seed and use a closeable workflow."""
 
 from __future__ import annotations
 
@@ -20,16 +20,25 @@ from scripts.ticket_board.project_provision import build_plan, render_workflow_s
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
 RBAC_PATH = ROOT / "scripts" / "ticket_board" / "rbac.sql"
 EXPECTED_STAGES = [
-    {"name": "draft", "display_label": "Draft", "rank": 0, "owner_roles": ["designer"]},
-    {"name": "analysis", "display_label": "Triage", "rank": 1, "owner_roles": ["director"]},
+    {"name": "draft", "display_label": "Draft", "rank": 0, "owner_roles": ["designer"], "is_terminal": False},
+    {"name": "analysis", "display_label": "Triage", "rank": 1, "owner_roles": ["director"], "is_terminal": False},
     {
         "name": "in_progress",
         "display_label": "Implementation",
         "rank": 2,
         "owner_roles": ["main", "app"],
+        "is_terminal": False,
     },
-    {"name": "audit", "display_label": "Audit", "rank": 3, "owner_roles": ["audit"]},
-    {"name": "director_review", "display_label": "Final Sign-Off", "rank": 4, "owner_roles": ["director"]},
+    {"name": "audit", "display_label": "Audit", "rank": 3, "owner_roles": ["audit"], "is_terminal": False},
+    {
+        "name": "director_review",
+        "display_label": "Final Sign-Off",
+        "rank": 4,
+        "owner_roles": ["director"],
+        "is_terminal": False,
+    },
+    {"name": "done", "display_label": "Done", "rank": 9, "owner_roles": [], "is_terminal": True},
+    {"name": "cancelled", "display_label": "Cancelled", "rank": 10, "owner_roles": [], "is_terminal": True},
 ]
 
 
@@ -79,6 +88,22 @@ SELECT set_config('ticket_board.caller_role', '{caller_role}', false);
     ).splitlines()[-1]
 
 
+def service_call_fails(conn: str, caller_role: str, sql: str) -> str:
+    proc = subprocess.run(
+        ["psql", "-X", "-v", "ON_ERROR_STOP=1", "-tA", conn],
+        input=f"""
+SELECT set_config('ticket_board.caller_role', '{caller_role}', false);
+{sql}
+""",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode == 0:
+        raise AssertionError(f"expected service call to fail, got stdout:\n{proc.stdout}")
+    return proc.stderr
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="ticket-board-project-workflow.") as tmpdir:
         root = Path(tmpdir)
@@ -106,14 +131,15 @@ SELECT jsonb_agg(jsonb_build_object(
     'name', name,
     'display_label', display_label,
     'rank', rank,
-    'owner_roles', owner_roles
+    'owner_roles', owner_roles,
+    'is_terminal', is_terminal
 ) ORDER BY rank)::text
 FROM ticket_board.workflow_stages;
 """,
                 )
             )
             assert stages == EXPECTED_STAGES, stages
-            assert psql(admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions;") == "7"
+            assert psql(admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions;") == "13"
             assert psql(admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('main');") == "t"
             assert psql(admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('app');") == "t"
             assert psql(admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('ops');") == "f"
@@ -136,6 +162,25 @@ JOIN walk ON walk.stage = ws.name;
                 )
             )
             assert reachable == [stage["name"] for stage in EXPECTED_STAGES], reachable
+            terminal_from_director_review = json.loads(
+                psql(
+                    admin_conn,
+                    """
+WITH RECURSIVE walk(stage) AS (
+    VALUES ('director_review'::text)
+    UNION
+    SELECT wt.to_stage
+    FROM ticket_board.workflow_transitions wt
+    JOIN walk ON walk.stage = wt.from_stage
+)
+SELECT jsonb_agg(ws.name ORDER BY ws.rank)::text
+FROM ticket_board.workflow_stages ws
+JOIN walk ON walk.stage = ws.name
+WHERE ws.is_terminal;
+""",
+                )
+            )
+            assert terminal_from_director_review == ["done", "cancelled"], terminal_from_director_review
 
             ticket_id = service_call(
                 service_conn,
@@ -159,6 +204,26 @@ SELECT ticket_board.create_ticket('Provisioned workflow ticket', 'Body', 'draft'
 
             service_call(service_conn, "audit", f"SELECT ticket_board.audit_sign_off('{ticket_id}', 'Audit verified.');")
             assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "director_review:director"
+
+            service_call(service_conn, "director", f"SELECT ticket_board.mark_done('{ticket_id}', 'abcdef1');")
+            assert psql(admin_conn, f"SELECT state FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "done"
+
+            cancel_id = service_call(
+                service_conn,
+                "director",
+                """
+SELECT set_config('ticket_board.ticket_prefix', 'OTTO', false);
+SELECT ticket_board.create_ticket('Provisioned workflow cancellation', 'Body', 'draft');
+""",
+            )
+            assert cancel_id == "OTTO-2", cancel_id
+            service_call(service_conn, "designer", f"SELECT ticket_board.release_draft('{cancel_id}');")
+            service_call(service_conn, "director", f"SELECT ticket_board.route('{cancel_id}', 'in_progress', 'main');")
+            assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{cancel_id}';") == "in_progress:main"
+            cancel_error = service_call_fails(service_conn, "main", f"SELECT ticket_board.cancel('{cancel_id}', 'implementer cannot cancel');")
+            assert "role main cannot call cancel" in cancel_error, cancel_error
+            service_call(service_conn, "director", f"SELECT ticket_board.cancel('{cancel_id}', 'director cancelled.');")
+            assert psql(admin_conn, f"SELECT state FROM ticket_board.tickets WHERE id = '{cancel_id}';") == "cancelled"
         finally:
             subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 

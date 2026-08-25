@@ -201,7 +201,7 @@ def build_plan(
             f"postgresql:///{resolved_database}?host=/var/run/postgresql&user={listener_role}"
         ),
         admin_database_url=f"postgresql:///{resolved_database}?host=/var/run/postgresql&user=postgres",
-        workflow_seed="pgu-full" if project == "pgu" else "default-five-stage",
+        workflow_seed="pgu-full" if project == "pgu" else "default-project",
         draft_roles=draft_roles,
         implementer_roles=resolved_implementer_roles,
         assignee_roles=assignee_roles,
@@ -439,15 +439,23 @@ def render_workflow_sql(plan: ProjectBoardProvision) -> str:
         ("in_progress", "Implementation", 2, implementation_owner_roles, None, None, None, False),
         ("audit", "Audit", 3, ("audit",), None, None, "audit_signoff", False),
         ("director_review", "Final Sign-Off", 4, ("director",), None, None, None, False),
+        ("done", "Done", 9, (), None, None, None, True),
+        ("cancelled", "Cancelled", 10, (), None, None, None, True),
     ]
     transitions = [
         ("draft", "analysis", "release_draft", _dedupe((*plan.draft_roles, "director", "user")), False, False),
+        ("draft", "cancelled", "cancel", ("director",), False, False),
         ("analysis", "in_progress", "route", ("director",), False, False),
         ("analysis", "in_progress", "start_work", plan.implementer_roles, False, False),
+        ("analysis", "cancelled", "cancel", ("director",), False, False),
         ("in_progress", "audit", "route", ("director",), False, False),
         ("in_progress", "audit", "submit_to_audit", plan.implementer_roles, False, False),
+        ("in_progress", "cancelled", "cancel", ("director",), False, False),
         ("audit", "director_review", "route", ("director",), False, False),
         ("audit", "director_review", "audit_sign_off", ("audit",), False, False),
+        ("audit", "cancelled", "cancel", ("director",), False, False),
+        ("director_review", "done", "mark_done", ("director",), False, False),
+        ("director_review", "cancelled", "cancel", ("director",), False, False),
     ]
     stage_rows = ",\n".join(
         "    ("
@@ -481,7 +489,7 @@ def render_workflow_sql(plan: ProjectBoardProvision) -> str:
         + ")"
         for from_stage, to_stage, action_name, allowed_roles, owner_scoped, director_override in transitions
     )
-    return f"""-- Seed the default five-stage workflow for {plan.project}.
+    return f"""-- Seed the default project workflow for {plan.project}.
 -- Run after schema.sql/migrations and before rbac.sql on a newly provisioned board.
 BEGIN;
 

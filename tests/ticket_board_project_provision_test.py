@@ -86,6 +86,7 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "TICKET_BOARD_PROJECT='stellaris'" in combined
     assert "TICKET_BOARD_SKIP_MIGRATIONS=1" in combined
     assert "sudo cat 'stellaris-workflow.sql' | sudo -u postgres psql -X -v ON_ERROR_STOP=1 'postgresql:///stellaris_ticket_board?host=/var/run/postgresql' -f -" in combined
+    assert combined.index("ticket_board/schema.sql") < combined.index("scripts/ticket-board-migrate")
     assert combined.index("scripts/ticket-board-migrate") < combined.index("sudo cat 'stellaris-workflow.sql'")
     assert combined.index("sudo cat 'stellaris-workflow.sql'") < combined.index("ticket_board/rbac.sql")
     assert "Seed the default project workflow for stellaris" in combined
@@ -140,6 +141,12 @@ def test_operator_commands_use_peer_portable_postgres_admin_invocations() -> Non
         "sudo -u postgres psql -X -v ON_ERROR_STOP=1 -f -"
     ) in commands
     assert (
+        "sudo cat '/home/stellaris-agent/stellaris-ticketboard-live/current/scripts/ticket_board/schema.sql' | "
+        "sudo -u postgres psql -X -v ON_ERROR_STOP=1 "
+        "'postgresql:///stellaris_ticket_board?host=/var/run/postgresql' "
+        "-f -"
+    ) in commands
+    assert (
         "sudo env "
         "TICKET_BOARD_ADMIN_DATABASE_URL='postgresql:///stellaris_ticket_board?host=/var/run/postgresql' "
         "'/home/stellaris-agent/stellaris-ticketboard-live/current/scripts/ticket-board-migrate'"
@@ -157,6 +164,7 @@ def test_operator_commands_use_peer_portable_postgres_admin_invocations() -> Non
         "-f -"
     ) in commands
     assert "sudo -u postgres psql -X -v ON_ERROR_STOP=1 -f 'stellaris-database.sql'" not in commands
+    assert "sudo -u postgres psql -X -v ON_ERROR_STOP=1 'postgresql:///stellaris_ticket_board?host=/var/run/postgresql' -f '/home/stellaris-agent/stellaris-ticketboard-live/current/scripts/ticket_board/schema.sql'" not in commands
     assert "sudo -u postgres env TICKET_BOARD_ADMIN_DATABASE_URL=" not in commands
     assert "sudo -u postgres psql -X -v ON_ERROR_STOP=1 'postgresql:///stellaris_ticket_board?host=/var/run/postgresql' -f 'stellaris-workflow.sql'" not in commands
     assert "sudo -u postgres psql -X -v ON_ERROR_STOP=1 'postgresql:///stellaris_ticket_board?host=/var/run/postgresql' -f '/home/stellaris-agent/stellaris-ticketboard-live/current/scripts/ticket_board/rbac.sql'" not in commands

@@ -664,6 +664,7 @@ sudo install -m 0644 {shell_quote(plan.tmpfiles_name)} {q_tmpfiles}
 sudo install -m 0644 {shell_quote(plan.polkit_name)} {q_polkit}
 sudo systemd-tmpfiles --create {q_tmpfiles}
 {postgres_sql_file_command(plan.project + '-database.sql')}
+{postgres_sql_file_command(plan.board_current + '/scripts/ticket_board/schema.sql', database_url=plan.admin_database_url)}
 sudo env TICKET_BOARD_ADMIN_DATABASE_URL={shell_quote(plan.admin_database_url)} {shell_quote(plan.board_current + '/scripts/ticket-board-migrate')}
 {workflow_seed_command.rstrip()}
 {postgres_sql_file_command(plan.board_current + '/scripts/ticket_board/rbac.sql', database_url=plan.admin_database_url)}

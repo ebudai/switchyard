@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -15,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.ticket_board.project_provision import build_plan, render_workflow_sql
+from scripts.ticket_board.project_provision import build_plan, render_database_sql, render_workflow_sql
 
 
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
@@ -80,10 +81,13 @@ def psql(conn: str, sql: str) -> str:
     return proc.stdout.strip()
 
 
-def run_migrations(conn: str) -> None:
+def run_migrations(conn: str, *, migrations_dir: Path | None = None) -> None:
+    env = {**os.environ, "TICKET_BOARD_ADMIN_DATABASE_URL": conn}
+    if migrations_dir is not None:
+        env["TICKET_BOARD_MIGRATIONS_DIR"] = str(migrations_dir)
     proc = subprocess.run(
         [str(MIGRATION_RUNNER)],
-        env={**os.environ, "TICKET_BOARD_ADMIN_DATABASE_URL": conn},
+        env=env,
         text=True,
         capture_output=True,
         check=False,
@@ -158,6 +162,83 @@ def service_call_fails(conn: str, caller_role: str, sql: str) -> str:
     return proc.stderr
 
 
+def guarded_migrations_dir(root: Path) -> Path:
+    migrations_dir = root / "migrations"
+    migrations_dir.mkdir(parents=True)
+    source_migrations = ROOT / "scripts" / "ticket_board" / "migrations"
+    for migration in source_migrations.glob("*.sql"):
+        shutil.copy2(migration, migrations_dir / migration.name)
+    (root / "schema.sql").write_text(SCHEMA_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+    (migrations_dir / "270_ready_to_in_progress.sql").write_text(
+        """
+DO $$
+BEGIN
+    RAISE EXCEPTION 'legacy 270 migration should be backfilled, not executed';
+END;
+$$;
+""".lstrip(),
+        encoding="utf-8",
+    )
+    (migrations_dir / "pgu999_provision_probe.sql").write_text(
+        """
+CREATE TABLE ticket_board.provision_probe (
+    id integer PRIMARY KEY,
+    value text NOT NULL
+);
+INSERT INTO ticket_board.provision_probe (id, value) VALUES (1, 'migration-ran');
+""".lstrip(),
+        encoding="utf-8",
+    )
+    return migrations_dir
+
+
+def apply_generated_provisioning_database_sequence(
+    *,
+    root: Path,
+    socket_dir: Path,
+    port: int,
+    project: str,
+    database: str,
+    precreate_empty_database: bool,
+) -> None:
+    postgres_conn = conninfo(socket_dir, port, "postgres")
+    plan = build_plan(project=project, owner_user=f"{project}-agent", database=database)
+    if precreate_empty_database:
+        run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", database])
+
+    psql(postgres_conn, render_database_sql(plan))
+    admin_conn = conninfo(socket_dir, port, database)
+    migrations_dir = guarded_migrations_dir(root / database)
+    psql(admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
+    run_migrations(admin_conn, migrations_dir=migrations_dir)
+    psql(admin_conn, render_workflow_sql(plan))
+    psql(admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
+
+    assert psql(admin_conn, "SELECT EXISTS (SELECT 1 FROM ticket_board.schema_migrations WHERE name = 'schema.sql');") == "t"
+    assert psql(admin_conn, "SELECT EXISTS (SELECT 1 FROM ticket_board.schema_migrations WHERE name = '270_ready_to_in_progress.sql');") == "t"
+    assert psql(admin_conn, "SELECT value FROM ticket_board.provision_probe WHERE id = 1;") == "migration-ran"
+    assert int(
+        psql(
+            admin_conn,
+            """
+SELECT count(*)
+FROM information_schema.tables
+WHERE table_schema = 'ticket_board';
+""",
+        )
+    ) > 0
+    service_conn = conninfo(socket_dir, port, database, "ticket_board_service")
+    ticket_id = service_call(
+        service_conn,
+        "director",
+        f"""
+SELECT set_config('ticket_board.ticket_prefix', '{project.upper()}', false);
+SELECT ticket_board.create_ticket('Provisioning sequence probe', 'Body', 'analysis');
+""",
+    )
+    assert ticket_id == f"{project.upper()}-1", ticket_id
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="ticket-board-project-workflow.") as tmpdir:
         root = Path(tmpdir)
@@ -172,6 +253,22 @@ def main() -> int:
         run(["initdb", "-D", str(data_dir), "-A", "trust", "--no-locale", "--username=postgres"])
         try:
             run(["pg_ctl", "-D", str(data_dir), "-o", f"-k {socket_dir} -p {port} -h ''", "-w", "start"], capture=False)
+            apply_generated_provisioning_database_sequence(
+                root=root,
+                socket_dir=socket_dir,
+                port=port,
+                project="fresh",
+                database="project_workflow_fresh",
+                precreate_empty_database=False,
+            )
+            apply_generated_provisioning_database_sequence(
+                root=root,
+                socket_dir=socket_dir,
+                port=port,
+                project="retry",
+                database="project_workflow_empty_retry",
+                precreate_empty_database=True,
+            )
             run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
             bootstrap_database_roles(admin_conn)
             psql(admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))

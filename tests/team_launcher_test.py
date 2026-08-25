@@ -316,6 +316,11 @@ def _run_isolated_tmux(server: str, args: list[str], **kwargs: Any) -> subproces
     return subprocess.run(_tmux_args(server, args), **kwargs)
 
 
+def _cleanup_isolated_tmux_sessions(server: str, sessions: list[str]) -> None:
+    for session in sessions:
+        _run_isolated_tmux(server, ["kill-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def _isolated_tmux_runner(server: str) -> Any:
     def runner(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
         if args and args[0] == "tmux":
@@ -2040,7 +2045,7 @@ def test_viewer_pane_death_does_not_change_role_targets_in_real_tmux() -> None:
                     time.sleep(0.1)
                 assert marker.read_text(encoding="utf-8") == role
         finally:
-            _run_isolated_tmux(server, ["kill-server"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            _cleanup_isolated_tmux_sessions(server, [viewer_session, *sessions.values()])
 
 
 def test_detached_research_start_fails_visible_when_session_disappears() -> None:
@@ -2836,7 +2841,7 @@ def test_reload_guard_matches_cli_child_under_shell_in_real_tmux() -> None:
             assert pane_command in {"sh", "fish", "bash", "zsh"}, pane_command
             assert live_command_matches_role(role, runner=runner)
         finally:
-            _run_isolated_tmux(server, ["kill-server"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            _cleanup_isolated_tmux_sessions(server, [session])
 
 
 def test_removed_bootstrap_command_names_new_as_replacement() -> None:

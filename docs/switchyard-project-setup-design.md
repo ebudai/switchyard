@@ -336,6 +336,22 @@ strips it. Detect via the INVOKING user (SUDO_USER), and when the desktop cannot
 machine where it already was. The viewer activates on positive identification of a non-KDE desktop, never
 on a guess.
 
+## What the deploy actually ships, and what the cleanliness gate really checks
+
+Recorded because the error message implies something it does not do, and this was mid-diagnosis twice.
+
+The board release is materialised by `git archive` of a RESOLVED REF -- ticket-board-service.sh:316,
+with DEPLOY_REF=origin/main, and origin is fetched first. Three consequences:
+
+  - untracked files can never reach a release (this is why the precheck uses --untracked-files=no)
+  - modified TRACKED files never reach a release either
+  - **unpushed local commits never reach a release** -- the ref is origin's, not yours
+
+So `deploy checkout <path> has uncommitted changes` is NOT gating deploy CONTENT. It is a
+"you have work in progress, are you sure" guard, and it is worth keeping as one. But do not reason
+from it: a clean checkout does not mean the release contains what you are looking at, and a local
+commit that has not been pushed will be silently absent from what gets deployed.
+
 ## One tmux session with six panes: rejected, twice
 
 Eric tried this when switchyard was first built and abandoned it quickly. The original symptom is

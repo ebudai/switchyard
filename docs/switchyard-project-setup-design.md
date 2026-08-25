@@ -270,6 +270,36 @@ root, and agents deliberately have no sudo. Split it:
 normal pane with hooks and a board connection. A standalone agent in the project directory whose
 only outputs are the design document and the artifact.
 
+## Default roles and the pane window (Eric, 2026-08-25)
+
+`new` starts the FULL pane window with every role populated. There is no separate "spawn the director"
+step, and no separate provisioning step -- the privileged half all happens once, under the sudo the user
+already gave.
+
+Default roles: **designer, director, audit, ops, app, main**. Two default programmers rather than none,
+because most projects want them -- not merely to fill the window.
+
+Stage ownership:
+
+| Stage | Owner |
+|---|---|
+| Draft | designer |
+| Triage | director |
+| Implementation | **main** |
+| Audit | audit |
+| Final Sign-Off | director |
+
+Implementation moves from `ops` to `main`. Ops owned it only because PGU-644 dropped `implementer` and
+left the stage unowned; with real programmers in the defaults that workaround is unnecessary.
+
+The design phase is a VIEW STATE, not a lifecycle stage: maximize the designer pane while designing,
+restore when done. In Konsole that is **Ctrl+Shift+E** ("Toggle maximize current view"). Do not automate
+it -- every pane runs regardless, so driving the window manager buys nothing and adds display, focus and
+timing failure modes. Print the instruction.
+
+Open, not urgent: `app` and `main` are probably in the wrong positions in the layout and should be
+swapped.
+
 ## One tmux session with six panes: rejected, twice
 
 Eric tried this when switchyard was first built and abandoned it quickly. The original symptom is

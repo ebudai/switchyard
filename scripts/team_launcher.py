@@ -2918,7 +2918,7 @@ def _tcp_port_in_use(port: int) -> bool:
 def _git_status_porcelain(repo: Path, *, runner: Callable[..., subprocess.CompletedProcess[Any]]) -> str:
     try:
         result = runner(
-            ["git", "-C", str(repo), "status", "--porcelain"],
+            ["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=no"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -2929,16 +2929,7 @@ def _git_status_porcelain(repo: Path, *, runner: Callable[..., subprocess.Comple
         stderr = str(getattr(result, "stderr", "") or "").strip()
         detail = f": {stderr}" if stderr else ""
         raise SystemExit(f"team-launcher: cannot inspect deploy checkout {repo}{detail}")
-    lines = str(getattr(result, "stdout", "") or "").splitlines()
-    return "\n".join(line for line in lines if not _is_ignorable_python_cache_status(line))
-
-
-def _is_ignorable_python_cache_status(line: str) -> bool:
-    path = line[3:] if len(line) > 3 else line
-    if " -> " in path:
-        path = path.rsplit(" -> ", 1)[1]
-    parts = Path(path).parts
-    return "__pycache__" in parts or path.endswith((".pyc", ".pyo"))
+    return str(getattr(result, "stdout", "") or "").rstrip("\n")
 
 
 def _system_unit_file_exists(unit: str, *, runner: Callable[..., subprocess.CompletedProcess[Any]]) -> bool:

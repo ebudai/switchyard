@@ -6,3 +6,5 @@
 /imgui.ini
 /galaxy_presets.txt
 /docker/claude-bin/
+__pycache__/
+.claude/settings.local.json

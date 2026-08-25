@@ -3946,17 +3946,18 @@ def test_new_project_precheck_fails_before_sudo_when_repo_is_dirty() -> None:
     assert not any(call[:1] == ["bash"] for call in runner.calls)
 
 
-def test_new_project_precheck_ignores_python_bytecode_created_by_cli_imports() -> None:
+def test_new_project_precheck_ignores_untracked_checkout_junk() -> None:
     current_user = team_launcher.current_user_name()
 
-    class BytecodeOnlyRunner(FakeRunner):
+    class UntrackedOnlyRunner(FakeRunner):
         def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
             self.calls.append(args)
             if len(args) >= 5 and args[:4] == ["git", "-C", args[2], "status"]:
+                assert args[-1] == "--untracked-files=no"
                 return subprocess.CompletedProcess(
                     args,
                     0,
-                    stdout="?? scripts/__pycache__/\n?? scripts/ticket_board/__pycache__/project_provision.cpython-313.pyc\n",
+                    stdout="",
                 )
             return super().__call__(args, **kwargs)
 
@@ -3964,13 +3965,19 @@ def test_new_project_precheck_ignores_python_bytecode_created_by_cli_imports() -
         tmp_path = Path(tmp)
         project_repo = tmp_path / "project-repo"
         project_repo.mkdir()
-        runner = BytecodeOnlyRunner()
+        source_repo = tmp_path / "repo"
+        source_repo.mkdir()
+        (source_repo / ".claude").mkdir()
+        (source_repo / ".claude" / "settings.local.json").write_text("{}\n", encoding="utf-8")
+        (source_repo / "scripts" / "__pycache__").mkdir(parents=True)
+        (source_repo / "scripts" / "ticket_board" / "__pycache__").mkdir(parents=True)
+        runner = UntrackedOnlyRunner()
 
         assert (
             new_project_command(
                 "porter",
                 owner_user=current_user,
-                source_repo=tmp_path / "repo",
+                source_repo=source_repo,
                 repository=project_repo,
                 output_dir=tmp_path / "out",
                 runner=runner,
@@ -3979,6 +3986,61 @@ def test_new_project_precheck_ignores_python_bytecode_created_by_cli_imports() -
             )
             == 0
         )
+        assert any(
+            call[:3] == ["git", "-C", str(source_repo)] and call[3:] == ["status", "--porcelain", "--untracked-files=no"]
+            for call in runner.calls
+        )
+
+
+def test_git_status_porcelain_ignores_untracked_junk_but_reports_tracked_edits() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-status.") as tmp:
+        repo = Path(tmp) / "repo"
+        repo.mkdir()
+        _run_git(["git", "init", "-b", "main"], cwd=repo)
+        _run_git(["git", "config", "user.email", "agent@example.invalid"], cwd=repo)
+        _run_git(["git", "config", "user.name", "PGU Agent"], cwd=repo)
+        tracked = repo / "tracked.txt"
+        tracked.write_text("clean\n", encoding="utf-8")
+        _run_git(["git", "add", "tracked.txt"], cwd=repo)
+        _run_git(["git", "commit", "-m", "initial"], cwd=repo)
+        (repo / ".claude").mkdir()
+        (repo / ".claude" / "settings.local.json").write_text("{}\n", encoding="utf-8")
+        (repo / "scripts" / "__pycache__").mkdir(parents=True)
+        (repo / "scripts" / "ticket_board" / "__pycache__").mkdir(parents=True)
+        (repo / "scripts" / "__pycache__" / "team_launcher.cpython-313.pyc").write_bytes(b"pyc\n")
+        (repo / "scripts" / "ticket_board" / "__pycache__" / "project_provision.cpython-313.pyc").write_bytes(
+            b"pyc\n"
+        )
+
+        plain_status = _run_git(["git", "status", "--porcelain"], cwd=repo).stdout
+        clean_status = team_launcher._git_status_porcelain(repo, runner=subprocess.run)
+        tracked.write_text("dirty\n", encoding="utf-8")
+        dirty_status = team_launcher._git_status_porcelain(repo, runner=subprocess.run)
+
+    assert "?? .claude/" in plain_status
+    assert "?? scripts/" in plain_status
+    assert clean_status == ""
+    assert dirty_status == " M tracked.txt"
+
+
+def test_gitignore_hides_launcher_generated_junk() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-gitignore.") as tmp:
+        repo = Path(tmp) / "repo"
+        repo.mkdir()
+        _run_git(["git", "init", "-b", "main"], cwd=repo)
+        _run_git(["git", "config", "user.email", "agent@example.invalid"], cwd=repo)
+        _run_git(["git", "config", "user.name", "PGU Agent"], cwd=repo)
+        (repo / ".gitignore").write_text((ROOT / ".gitignore").read_text(encoding="utf-8"), encoding="utf-8")
+        _run_git(["git", "add", ".gitignore"], cwd=repo)
+        _run_git(["git", "commit", "-m", "initial"], cwd=repo)
+        (repo / ".claude").mkdir()
+        (repo / ".claude" / "settings.local.json").write_text("{}\n", encoding="utf-8")
+        (repo / "scripts" / "__pycache__").mkdir(parents=True)
+        (repo / "scripts" / "__pycache__" / "team_launcher.cpython-313.pyc").write_bytes(b"pyc\n")
+
+        status = _run_git(["git", "status", "--porcelain"], cwd=repo).stdout
+
+    assert status == ""
 
 
 def test_new_project_execute_warms_sudo_once_then_runs_generated_script() -> None:

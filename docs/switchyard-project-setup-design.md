@@ -300,6 +300,42 @@ timing failure modes. Print the instruction.
 Open, not urgent: `app` and `main` are probably in the wrong positions in the layout and should be
 swapped.
 
+## Layout: KDE keeps what it has, everything else gets a viewer session (Eric, 2026-08-25)
+
+Eric: "proceed with the non-KDE support, but I don't want anything with my setup to change. if the DE is
+KDE, it should do what we are already doing."
+
+TWO PATHS, and the KDE one is the status quo by definition:
+
+| | KDE | everything else |
+|---|---|---|
+| role sessions | 7, one pane each | **identical** |
+| notification address | role session name | **identical** |
+| window layout | Konsole split views (user-arranged) | a `viewer` tmux session, 6 panes |
+| maximize during design | Konsole `Ctrl+Shift+E` (printed) | `Ctrl+a z` (printed) |
+
+The viewer is PURELY ADDITIVE: an extra tmux session whose panes each run
+`TMUX= tmux attach -t <role>`. It creates no new addressable identity, and the role sessions do not know
+it exists. That is why the KDE path can be left untouched rather than refactored into a shared shape.
+
+WHY THIS IS NOT THE REJECTED ONE-SESSION DESIGN. That rejection was about ADDRESSING: under one session
+the notification target becomes a pane INDEX, and indices renumber when a pane dies. Measured, 2026-08-25:
+
+    address           team:0.0  0.1       0.2    0.3   0.4   0.5
+    before            designer  director  audit  ops   app   main
+    after pane 1 dies designer  audit     ops    app   main  main
+
+Every address after the gap shifts, and `team:0.5` does not error -- tmux clamps to the last pane, so it
+silently resolves to the wrong agent. Under the viewer, the same test moves nothing: the address stays
+`audit:0.0` through killing audit's viewer pane AND through killing and restarting the audit session
+itself, with delivery confirmed by send-keys afterwards.
+
+DETECTION MUST NOT REST ON `XDG_CURRENT_DESKTOP`. `new` runs under sudo, whose default `env_reset`
+strips it. Detect via the INVOKING user (SUDO_USER), and when the desktop cannot be determined at all,
+**fall back to the KDE path** -- that is today's behaviour, so an ambiguous detection can only leave a
+machine where it already was. The viewer activates on positive identification of a non-KDE desktop, never
+on a guess.
+
 ## One tmux session with six panes: rejected, twice
 
 Eric tried this when switchyard was first built and abandoned it quickly. The original symptom is

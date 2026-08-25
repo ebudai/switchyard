@@ -343,6 +343,21 @@ def targeted_capture_runner(target: str, *outputs: str) -> Any:
     return runner
 
 
+def spinner_aliasing_capture_runner(clock: dict[str, float]) -> Any:
+    def runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        phase = round(clock["elapsed"], 1)
+        frame = "same" if phase in {0.0, 1.2} else "changed"
+        return subprocess.CompletedProcess(args, 0, stdout=f"Roosting... {frame}\n")
+
+    return runner
+
+
+def assert_uneven_probe_sleeps(sleep_calls: list[float], total_delay: float, *, probes: int = 1) -> None:
+    first_gap = total_delay / 3.0
+    expected = [first_gap, total_delay - first_gap] * probes
+    assert [round(value, 6) for value in sleep_calls] == [round(value, 6) for value in expected]
+
+
 def failing_capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
     raise subprocess.SubprocessError("capture failed")
 
@@ -770,6 +785,62 @@ def test_static_working_timer_does_not_suppress_idle_stall_nudge() -> None:
         assert gate.last_trace("pgu-ops:0.0").reason == "working_timer_idle"  # type: ignore[union-attr]
 
 
+def test_spinner_aliasing_during_startup_does_not_false_idle() -> None:
+    sleeps: list[float] = []
+    clock = {"elapsed": 0.0}
+
+    def sleeper(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock["elapsed"] += seconds
+
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            cursor_position_runner=constant_cursor_runner(),
+            capture_pane_runner=spinner_aliasing_capture_runner(clock),
+            idle_working_timer_sample_delay_seconds=1.2,
+            sleeper=sleeper,
+        )
+        store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=100.0)
+
+        assert gate.idle_since_by_role(["ops"]) == {}
+        trace = gate.last_trace("pgu-ops:0.0")
+        assert trace is not None
+        assert trace.busy is True
+        assert trace.reason == "pane_content_changed"
+
+    assert_uneven_probe_sleeps(sleeps, 1.2)
+
+
+def test_three_sample_working_timer_probe_still_reports_genuine_idle() -> None:
+    sleeps: list[float] = []
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            cursor_position_runner=constant_cursor_runner(),
+            capture_pane_runner=targeted_capture_runner(
+                "pgu-ops:0.0",
+                "ordinary idle content\n",
+                "ordinary idle content\n",
+                "ordinary idle content\n",
+            ),
+            idle_working_timer_sample_delay_seconds=1.2,
+            sleeper=sleeps.append,
+        )
+        store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=100.0)
+
+        idle_since = gate.idle_since_by_role(["ops"])
+        assert set(idle_since) == {"ops"}
+        trace = gate.last_trace("pgu-ops:0.0")
+        assert trace is not None
+        assert trace.busy is False
+        assert trace.reason == "working_timer_idle"
+
+    assert_uneven_probe_sleeps(sleeps, 1.2)
+
+
 def test_cached_static_working_timer_is_not_working_evidence() -> None:
     with TemporaryStateDir() as tmp_path:
         gate = PaneActivityGate(
@@ -1098,7 +1169,7 @@ def test_stale_codex_busy_state_stays_busy_on_cold_cache_when_working_timer_rese
         assert gate.is_busy("pgu-ops:0.0") is True
         state = store.read("pgu-ops:0.0")
 
-    assert sleep_calls == [1.1]
+    assert_uneven_probe_sleeps(sleep_calls, 1.1)
     assert gate.last_trace("pgu-ops:0.0").reason == "pane_content_changed"  # type: ignore[union-attr]
     assert gate._last_working_timer_by_target == {}
     assert state is not None
@@ -1130,7 +1201,7 @@ def test_stale_codex_busy_state_recovers_on_cold_cache_when_working_timer_is_sta
         assert gate.is_busy("pgu-ops:0.0") is False
         state = store.read("pgu-ops:0.0")
 
-    assert sleep_calls == [1.1]
+    assert_uneven_probe_sleeps(sleep_calls, 1.1)
     assert gate.last_trace("pgu-ops:0.0").reason == "stale_codex_busy_recovered"  # type: ignore[union-attr]
     assert gate._last_working_timer_by_target == {}
     assert state is not None
@@ -1181,7 +1252,7 @@ def test_stale_codex_session_start_idle_stays_busy_when_working_timer_resets() -
         assert gate.is_busy("pgu-ops:0.0") is True
         state = store.read("pgu-ops:0.0")
 
-    assert sleep_calls == [1.1]
+    assert_uneven_probe_sleeps(sleep_calls, 1.1)
     assert gate.last_trace("pgu-ops:0.0").reason == "pane_content_changed"  # type: ignore[union-attr]
     assert gate._last_working_timer_by_target == {}
     assert state is not None
@@ -1205,7 +1276,7 @@ def test_codex_session_start_idle_without_timer_delivers() -> None:
 
         assert gate.is_busy("pgu-ops:0.0") is False
 
-    assert sleep_calls == [1.1]
+    assert_uneven_probe_sleeps(sleep_calls, 1.1)
     assert gate.last_trace("pgu-ops:0.0").reason == "working_timer_idle"  # type: ignore[union-attr]
     assert gate._last_working_timer_by_target == {}
 
@@ -1233,7 +1304,7 @@ The idle pane was displaying analysis of PGU-618 itself:
 
         assert gate.is_busy("pgu-ops:0.0") is False
 
-    assert sleep_calls == [1.1]
+    assert_uneven_probe_sleeps(sleep_calls, 1.1)
     assert gate.last_trace("pgu-ops:0.0").reason == "working_timer_idle"  # type: ignore[union-attr]
     assert gate._last_working_timer_by_target == {}
 
@@ -1262,7 +1333,7 @@ Some ordinary output above the footer.
 
         assert gate.is_busy("pgu-ops:0.0") is True
 
-    assert sleep_calls == [1.1]
+    assert_uneven_probe_sleeps(sleep_calls, 1.1)
     assert gate.last_trace("pgu-ops:0.0").reason == "pane_content_changed"  # type: ignore[union-attr]
     assert gate._last_working_timer_by_target == {}
 
@@ -1393,7 +1464,7 @@ def test_codex_session_start_idle_frozen_timer_samples_once_then_delivers() -> N
         assert gate.is_busy("pgu-ops:0.0") is False
         assert gate.is_busy("pgu-ops:0.0") is False
 
-    assert sleep_calls == [1.1, 1.1]
+    assert_uneven_probe_sleeps(sleep_calls, 1.1, probes=2)
     assert gate.last_trace("pgu-ops:0.0").reason == "working_timer_idle"  # type: ignore[union-attr]
     assert gate._last_working_timer_by_target == {}
 
@@ -1417,7 +1488,7 @@ def test_foreign_runtime_idle_with_advancing_working_timer_is_busy() -> None:
 
         assert gate.is_busy("pgu-ops:0.0") is True
 
-    assert sleep_calls == [1.1]
+    assert_uneven_probe_sleeps(sleep_calls, 1.1)
     assert gate.last_trace("pgu-ops:0.0").reason == "foreign_runtime_pane_content_changed"  # type: ignore[union-attr]
 
 
@@ -1453,7 +1524,7 @@ def test_team_launcher_start_idle_without_timer_delivers() -> None:
 
         assert gate.is_busy("pgu-main:0.0") is False
 
-    assert sleep_calls == [1.1]
+    assert_uneven_probe_sleeps(sleep_calls, 1.1)
     assert gate.last_trace("pgu-main:0.0").reason == "working_timer_idle"  # type: ignore[union-attr]
     assert gate._last_working_timer_by_target == {}
 
@@ -1479,7 +1550,7 @@ def test_stale_turn_end_idle_uses_content_hash_probe() -> None:
 
         assert gate.is_busy("pgu-ops:0.0") is True
 
-    assert sleep_calls == [1.1]
+    assert_uneven_probe_sleeps(sleep_calls, 1.1)
     assert gate.last_trace("pgu-ops:0.0").reason == "pane_content_changed"  # type: ignore[union-attr]
     assert gate._last_working_timer_by_target == {}
 

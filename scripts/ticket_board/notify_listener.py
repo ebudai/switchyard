@@ -501,6 +501,28 @@ class PaneActivityGate:
             return WorkingProbe(False, False)
         return WorkingProbe(True, True, pane_content_digest(proc.stdout))
 
+    def _working_timer_probe_trace(self, target: str, *, sample_delay_seconds: float) -> ActivityTrace:
+        first = self._captured_working_timer_probe(target)
+        if not first.captured or not first.observable:
+            return ActivityTrace(True, "working_timer_unobservable")
+        first_gap = sample_delay_seconds / 3.0
+        second_gap = sample_delay_seconds - first_gap
+        if first_gap > 0:
+            self.sleeper(first_gap)
+        second = self._captured_working_timer_probe(target)
+        if not second.captured or not second.observable:
+            return ActivityTrace(True, "working_timer_unobservable")
+        if second_gap > 0:
+            self.sleeper(second_gap)
+        third = self._captured_working_timer_probe(target)
+        if not third.captured or not third.observable:
+            return ActivityTrace(True, "working_timer_unobservable")
+        if second.digest != first.digest:
+            return ActivityTrace(True, "pane_content_changed", region_digest=second.digest)
+        if third.digest != first.digest:
+            return ActivityTrace(True, "pane_content_changed", region_digest=third.digest)
+        return ActivityTrace(False, "working_timer_idle", region_digest=third.digest)
+
     def composer_snapshot(self, target: str) -> ComposerSnapshot:
         try:
             proc = self.capture_pane_runner(
@@ -515,31 +537,17 @@ class PaneActivityGate:
         return composer_snapshot_from_pane_text(proc.stdout)
 
     def _working_timer_trace(self, target: str, *, sample_delay_seconds: float | None = None) -> ActivityTrace | None:
-        first = self._captured_working_timer_probe(target)
-        if not first.captured or not first.observable:
-            return ActivityTrace(True, "working_timer_unobservable")
         sample_delay = self.working_timer_sample_delay_seconds if sample_delay_seconds is None else sample_delay_seconds
-        if sample_delay > 0:
-            self.sleeper(sample_delay)
-        second = self._captured_working_timer_probe(target)
-        if not second.captured or not second.observable:
-            return ActivityTrace(True, "working_timer_unobservable")
-        if second.digest != first.digest:
-            return ActivityTrace(True, "pane_content_changed", region_digest=second.digest)
+        trace = self._working_timer_probe_trace(target, sample_delay_seconds=sample_delay)
+        if trace.busy:
+            return trace
         return None
 
     def _working_timer_idle_probe_trace(self, target: str) -> ActivityTrace:
-        first = self._captured_working_timer_probe(target)
-        if not first.captured or not first.observable:
-            return ActivityTrace(True, "working_timer_unobservable")
-        if self.idle_working_timer_sample_delay_seconds > 0:
-            self.sleeper(self.idle_working_timer_sample_delay_seconds)
-        second = self._captured_working_timer_probe(target)
-        if not second.captured or not second.observable:
-            return ActivityTrace(True, "working_timer_unobservable")
-        if second.digest != first.digest:
-            return ActivityTrace(True, "pane_content_changed", region_digest=second.digest)
-        return ActivityTrace(False, "working_timer_idle", region_digest=second.digest)
+        return self._working_timer_probe_trace(
+            target,
+            sample_delay_seconds=self.idle_working_timer_sample_delay_seconds,
+        )
 
     def _target_cursor_state(self, target: str) -> bool | None:
         try:

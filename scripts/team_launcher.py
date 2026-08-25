@@ -3134,7 +3134,11 @@ def switchyard_new_command(
         resolved_slug = _slug_from_project_name(
             slug or _prompt_text("Slug", default=default_slug, input_func=input_func)
         )
-        raw_agent = agent_name or _prompt_text("Agent name", default=resolved_slug, input_func=input_func)
+        raw_agent = agent_name or _prompt_text(
+            "Agent user",
+            default=_agent_owner_user(resolved_slug),
+            input_func=input_func,
+        )
         owner_user = _agent_owner_user(raw_agent)
         owner_shell = str(PROJECT_DESIGN_DEFAULT_CAPABILITY_GRANTS["shell"])
         default_project_dir = _project_dir(home_base, owner_user, resolved_project_name)

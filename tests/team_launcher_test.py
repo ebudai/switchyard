@@ -2793,9 +2793,13 @@ def test_switchyard_new_prompts_name_first_and_derives_defaults() -> None:
     assert prompts == [
         "Project name: ",
         "Slug [otto-scheduler]: ",
-        "Agent name [otto-scheduler]: ",
+        "Agent user [otto-scheduler-agent]: ",
         f"Project path [{expected_path}]: ",
     ]
+    agent_prompt = prompts[2]
+    agent_default = agent_prompt.removeprefix("Agent user [").removesuffix("]: ")
+    owner_summary = next(line.removeprefix("switchyard: owner user: ") for line in output if line.startswith("switchyard: owner user: "))
+    assert agent_default == owner_summary == "otto-scheduler-agent"
     assert f"switchyard: project path: {expected_path}" in output
 
 

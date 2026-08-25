@@ -272,8 +272,9 @@ only outputs are the design document and the artifact.
 
 ## One tmux session with six panes: rejected, twice
 
-Eric tried this when switchyard was first built and abandoned it quickly. The original symptom is not
-recorded and the attempt was long ago. Director re-proposed it on 2026-08-25 as a way to get portable
+Eric tried this when switchyard was first built and abandoned it quickly. The original symptom is
+unrecoverable: the attempt predates the ticket system entirely, so there is no ticket to find and no
+point searching for one. Do not repeat that search. Director re-proposed it on 2026-08-25 as a way to get portable
 `prefix z` zoom instead of Konsole's Ctrl+Shift+E, and it was rejected again.
 
 Recording the CURRENT technical reason so it is not proposed a third time:

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Source lint for tmux invocations in tests."""
+"""Source lint for tmux invocations in tests.
+
+Known non-goals: absolute tmux paths such as "/usr/bin/tmux", subprocess
+function aliases such as ``from subprocess import run``, tmux argv variables
+not built in Return/Assign/AnnAssign, and shell=True command strings.
+"""
 
 from __future__ import annotations
 

@@ -2984,11 +2984,12 @@ def precheck_new_project(
     port_in_use: Callable[[int], bool] = _tcp_port_in_use,
     socket_exists: Callable[[Path], bool] = _path_exists,
     require_owner_user: bool = True,
+    require_repository: bool = True,
 ) -> None:
     errors: list[str] = []
     if require_owner_user and uid_for_user(plan.owner_user) is None:
         errors.append(f"target user {plan.owner_user!r} does not exist")
-    if not _path_exists(repository):
+    if require_repository and not _path_exists(repository):
         errors.append(f"project repository {repository} does not exist")
     status = _git_status_porcelain(source_repo, runner=runner)
     if status.strip():
@@ -3548,6 +3549,33 @@ def switchyard_new_command(
     artifact_path = (from_artifact or (_switchyard_dir(project_dir) / f"{resolved_slug}.project.json")).expanduser().resolve(strict=False)
     design_document = project_dir / SWITCHYARD_DESIGN_FILE_NAME
     director_onboarding = _switchyard_dir(project_dir) / SWITCHYARD_DIRECTOR_ONBOARDING_FILE_NAME
+    _precheck_project_path_before_mutating(owner_user, project_dir)
+    effective_source_repo = (source_repo or _repo_root()).expanduser().resolve(strict=False)
+    precheck_artifact = load_project_design_artifact(from_artifact, expected_project=resolved_slug) if from_artifact else None
+    precheck_plan = build_plan(
+        project=resolved_slug,
+        owner_user=owner_user,
+        port=port,
+        database=database,
+        source_repo=effective_source_repo,
+        ticket_prefix=precheck_artifact.ticket_prefix if precheck_artifact else None,
+        implementer_roles=precheck_artifact.implementer_roles if precheck_artifact else DEFAULT_PROJECT_IMPLEMENTER_ROLES,
+        board_service_traversal=(
+            bool(precheck_artifact.capability_grants.get("board_service_traversal", True))
+            if precheck_artifact
+            else True
+        ),
+    )
+    precheck_new_project(
+        precheck_plan,
+        source_repo=effective_source_repo,
+        repository=project_dir,
+        runner=runner,
+        port_in_use=port_in_use,
+        socket_exists=socket_exists,
+        require_owner_user=False,
+        require_repository=False,
+    )
     owner_result = _ensure_owner_user_and_project_dir(
         owner_user,
         project_dir,

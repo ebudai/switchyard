@@ -3244,6 +3244,73 @@ def test_switchyard_new_without_sudo_fails_before_writing() -> None:
     assert calls == []
 
 
+def test_switchyard_new_unit_without_database_precheck_runs_before_user_and_project_creation() -> None:
+    class UnitWithoutDatabaseRunner(FakeRunner):
+        def __init__(self, *, home_base: Path) -> None:
+            super().__init__()
+            self.home_base = home_base
+
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if args[:3] == ["systemctl", "list-unit-files", "--no-legend"]:
+                return subprocess.CompletedProcess(args, 0, stdout="porter-ticket-board.service disabled\n")
+            if args[:2] == ["psql", "-XAt"]:
+                return subprocess.CompletedProcess(args, 0, stdout="")
+            if len(args) >= 5 and args[:4] == ["git", "-C", args[2], "status"]:
+                return subprocess.CompletedProcess(args, 0, stdout="")
+            if args == ["id", "-u", "otto-agent"]:
+                return subprocess.CompletedProcess(args, 1)
+            if args[:1] == ["useradd"]:
+                user_home = self.home_base / "otto-agent"
+                user_home.mkdir(parents=True, exist_ok=True)
+                (user_home / ".created-by-useradd").write_text("created\n", encoding="utf-8")
+                return subprocess.CompletedProcess(args, 0)
+            if args[:1] == ["install"] and args[-1]:
+                Path(args[-1]).mkdir(parents=True, exist_ok=True)
+                return subprocess.CompletedProcess(args, 0)
+            return super().__call__(args, **kwargs)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new.") as tmp:
+        tmp_path = Path(tmp)
+        home_base = tmp_path / "home"
+        output_dir = tmp_path / "out"
+        source_repo = tmp_path / "source-repo"
+        source_repo.mkdir()
+        project_dir = home_base / "otto-agent" / "Projects" / "porter-system"
+        created_user_marker = home_base / "otto-agent" / ".created-by-useradd"
+        runner = UnitWithoutDatabaseRunner(home_base=home_base)
+
+        try:
+            switchyard_new_command(
+                slug="porter",
+                agent_name="otto",
+                project_name="Porter System",
+                source_repo=source_repo,
+                output_dir=output_dir,
+                yes=True,
+                home_base=home_base,
+                euid_getter=lambda: 0,
+                runner=runner,
+                input_func=lambda _prompt: "",
+                port_in_use=lambda _port: False,
+                socket_exists=lambda _path: False,
+            )
+            raise AssertionError("expected unit-without-database precheck failure")
+        except SystemExit as exc:
+            message = str(exc)
+
+        assert not created_user_marker.exists()
+        assert not project_dir.exists()
+        assert not output_dir.exists()
+
+    assert "porter-ticket-board.service is installed" in message
+    assert "database 'porter_ticket_board' does not exist" in message
+    assert not any(call[:1] == ["useradd"] for call in runner.calls)
+    assert not any(call == ["loginctl", "enable-linger", "otto-agent"] for call in runner.calls)
+    assert not any(call[:1] == ["install"] for call in runner.calls)
+    assert not any(call[:1] == ["bash"] for call in runner.calls)
+
+
 def test_switchyard_new_prompts_name_first_and_derives_defaults() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new.") as tmp:
         tmp_path = Path(tmp)

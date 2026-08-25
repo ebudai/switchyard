@@ -2799,14 +2799,6 @@ def _switchyard_dir(project_dir: Path) -> Path:
     return project_dir / SWITCHYARD_PROJECT_DIR_NAME
 
 
-def _claude_project_key(cwd: Path) -> str:
-    return str(cwd.expanduser().resolve(strict=False)).replace("/", "-")
-
-
-def _claude_project_session_dir(owner_home: Path, cwd: Path) -> Path:
-    return owner_home / ".claude" / "projects" / _claude_project_key(cwd)
-
-
 def _write_switchyard_onboarding_files(
     *,
     project_name: str,
@@ -3049,73 +3041,6 @@ def _ensure_owner_user_and_project_dir(
         project_dir.mkdir(parents=True, exist_ok=True)
     _verify_project_path_writable_by_owner(owner_user, project_dir, runner=runner)
     return OwnerUserProvisionResult(created=created_user, linger_enabled=linger_enabled)
-
-
-def _designer_launch_args(
-    *,
-    owner_user: str,
-    slug: str,
-    project_name: str,
-    project_dir: Path,
-    artifact_path: Path,
-    design_document: Path,
-    designer_cli: str = "claude",
-) -> list[str]:
-    return [
-        "sudo",
-        "-u",
-        owner_user,
-        "-H",
-        "env",
-        f"SWITCHYARD_PROJECT_SLUG={slug}",
-        f"SWITCHYARD_PROJECT_NAME={project_name}",
-        f"SWITCHYARD_PROJECT_ARTIFACT={artifact_path}",
-        f"SWITCHYARD_PROJECT_DESIGN={design_document}",
-        f"SWITCHYARD_DESIGNER_ONBOARDING={_switchyard_dir(project_dir) / SWITCHYARD_DESIGN_ONBOARDING_FILE_NAME}",
-        designer_cli,
-    ]
-
-
-def _launch_designer(
-    *,
-    owner_user: str,
-    slug: str,
-    project_name: str,
-    project_dir: Path,
-    artifact_path: Path,
-    design_document: Path,
-    runner: Callable[..., subprocess.CompletedProcess[Any]],
-    designer_cli: str = "claude",
-) -> None:
-    result = runner(
-        _designer_launch_args(
-            owner_user=owner_user,
-            slug=slug,
-            project_name=project_name,
-            project_dir=project_dir,
-            artifact_path=artifact_path,
-            design_document=design_document,
-            designer_cli=designer_cli,
-        ),
-        cwd=str(project_dir),
-    )
-    if result.returncode != 0:
-        raise SystemExit(f"switchyard: designer exited with status {result.returncode}")
-
-
-def _verify_designer_session_cwd(
-    *,
-    owner_home: Path,
-    project_dir: Path,
-    exists: Callable[[Path], bool] | None = None,
-) -> Path:
-    session_dir = _claude_project_session_dir(owner_home, project_dir)
-    if not (exists or _path_exists)(session_dir):
-        raise SystemExit(
-            "switchyard: designer session was not recorded under "
-            f"{session_dir}; refusing to continue because the session would not resume from {project_dir}"
-        )
-    return session_dir
 
 
 def _project_entries(config_dir: Path | None = None) -> list[SwitchyardProjectEntry]:

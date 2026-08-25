@@ -2844,45 +2844,6 @@ def test_switchyard_new_edited_slug_does_not_change_name_derived_default_path() 
     assert f"switchyard: project path: {expected_path}" in output
 
 
-def test_switchyard_designer_session_cwd_guard_accepts_expected_session_dir() -> None:
-    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-session-cwd.") as tmp:
-        tmp_path = Path(tmp)
-        owner_home = tmp_path / "home" / "otto-agent"
-        project_dir = owner_home / "Projects" / "porter"
-        session_dir = team_launcher._claude_project_session_dir(owner_home, project_dir)
-
-        assert (
-            team_launcher._verify_designer_session_cwd(
-                owner_home=owner_home,
-                project_dir=project_dir,
-                exists=lambda path: path == session_dir,
-            )
-            == session_dir
-        )
-
-
-def test_switchyard_designer_session_cwd_guard_rejects_missing_session_dir() -> None:
-    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-session-cwd.") as tmp:
-        tmp_path = Path(tmp)
-        owner_home = tmp_path / "home" / "otto-agent"
-        project_dir = owner_home / "Projects" / "porter"
-        session_dir = team_launcher._claude_project_session_dir(owner_home, project_dir)
-
-        try:
-            team_launcher._verify_designer_session_cwd(
-                owner_home=owner_home,
-                project_dir=project_dir,
-                exists=lambda _path: False,
-            )
-            raise AssertionError("expected missing designer session cwd failure")
-        except SystemExit as exc:
-            message = str(exc)
-
-    assert str(session_dir) in message
-    assert str(project_dir) in message
-    assert "would not resume" in message
-
-
 def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() -> None:
     class NewProjectRunner(FakeRunner):
         def __init__(self) -> None:

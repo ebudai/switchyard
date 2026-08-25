@@ -349,7 +349,87 @@ def test_launch_session_record_report_waits_and_warns_for_missing_records() -> N
     by_role = {status.role: status for status in statuses}
     assert by_role["designer"].session_id == "designer-session"
     assert by_role["main"].session_id == ""
+    assert messages[0] == "switchyard: checking session records for 2 pane(s) (waiting up to 1s)"
     assert any("session record found for designer (porter-designer:0.0): designer-session" in message for message in messages)
+    assert any("warning: switchyard: session record missing for main (porter-main:0.0)" in message for message in messages)
+
+
+def test_launch_session_record_timeout_default_is_ten_seconds() -> None:
+    assert team_launcher.LAUNCH_SESSION_RECORD_TIMEOUT_SECONDS == 10.0
+
+
+def test_launch_project_reports_missing_session_record_after_reboot_resume() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-launch-resume-session-records.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text(
+            json.dumps(
+                {
+                    "Orientation": "Horizontal",
+                    "Widgets": [
+                        {"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""},
+                        {"Command": "", "SessionRestoreId": 1, "WorkingDirectory": ""},
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        session_dir = tmp_path / "sessions"
+        session_dir.mkdir()
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "session_dir": str(session_dir),
+                    "roles": [
+                        {"role": "designer", "slot": 0, "cli": ["claude"], "target": "porter-designer:0.0"},
+                        {"role": "main", "slot": 1, "cli": ["codex"], "target": "porter-main:0.0"},
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+        designer = next(role for role in config.roles if role.role == "designer")
+        (session_dir / session_file_name(designer.target)).write_text(
+            json.dumps({"target": designer.target, "session_id": "designer-resume-session"}) + "\n",
+            encoding="utf-8",
+        )
+        runner = FakeRunner(
+            current_commands={
+                "porter-designer:0.0": "claude",
+                "porter-main:0.0": "codex",
+            }
+        )
+        messages: list[str] = []
+
+        assert (
+            launch_project(
+                config,
+                config_path=config_path,
+                mode="start",
+                script_path=ROOT / "scripts" / "team-launcher",
+                runner=runner,
+                layout_output=tmp_path / "launch-layout.json",
+                pane_state_dir=tmp_path / "pane-state",
+                report_session_records=True,
+                session_record_timeout=0,
+                print_func=messages.append,
+            )
+            == 0
+        )
+
+    assert messages[0] == "switchyard: checking session records for 2 pane(s) (waiting up to 0s)"
+    assert any("session record found for designer (porter-designer:0.0): designer-resume-session" in message for message in messages)
     assert any("warning: switchyard: session record missing for main (porter-main:0.0)" in message for message in messages)
 
 
@@ -2808,6 +2888,41 @@ def test_switchyard_project_name_argv_joins_and_resumes_matching_project() -> No
     assert calls[0]["project"] == "porter"
     assert calls[0]["config_path"] == config_path
     assert calls[0]["mode"] == "start"
+    assert calls[0]["report_session_records"] is True
+
+
+def test_main_start_and_reload_enable_session_record_report() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-entry-session-records.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "roles": [{"role": "director", "slot": 0, "cli": ["claude"]}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        calls: list[dict[str, object]] = []
+        original_launch_project = team_launcher.launch_project
+        try:
+            def fake_launch_project(config: team_launcher.ProjectConfig, **kwargs: object) -> int:
+                calls.append({"project": config.project, **kwargs})
+                return 0
+
+            team_launcher.launch_project = fake_launch_project
+            assert team_launcher.main(["porter", "start", "--config", str(config_path)]) == 0
+            assert team_launcher.main(["porter", "reload", "--config", str(config_path)]) == 0
+        finally:
+            team_launcher.launch_project = original_launch_project
+
+    assert [call["mode"] for call in calls] == ["start", "reload"]
+    assert [call["report_session_records"] for call in calls] == [True, True]
 
 
 def test_switchyard_new_without_sudo_fails_before_writing() -> None:

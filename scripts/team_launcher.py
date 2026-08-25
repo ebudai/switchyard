@@ -941,9 +941,14 @@ def report_launch_session_records(
     poll_seconds: float = LAUNCH_SESSION_RECORD_POLL_SECONDS,
     print_func: Callable[[str], None] = print,
 ) -> list[LaunchSessionRecordStatus]:
+    selected_roles = tuple(roles or config.roles)
+    print_func(
+        f"switchyard: checking session records for {len(selected_roles)} pane(s) "
+        f"(waiting up to {timeout_seconds:g}s)"
+    )
     statuses = launch_session_record_statuses(
         config,
-        roles,
+        selected_roles,
         timeout_seconds=timeout_seconds,
         poll_seconds=poll_seconds,
     )
@@ -2173,6 +2178,10 @@ def launch_project(
     force_reload: bool = False,
     allow_stale_launcher: bool = False,
     no_launcher_self_deploy: bool = False,
+    report_session_records: bool = False,
+    session_record_timeout: float = LAUNCH_SESSION_RECORD_TIMEOUT_SECONDS,
+    session_record_poll: float = LAUNCH_SESSION_RECORD_POLL_SECONDS,
+    print_func: Callable[[str], None] = print,
 ) -> int:
     if mode == "start":
         mode = "attach-or-start"
@@ -2270,7 +2279,17 @@ def launch_project(
         )
         if result != 0:
             return result
-    return launch_konsole_window(output_path, project=config.project, runner=runner)
+    launch_result = launch_konsole_window(output_path, project=config.project, runner=runner)
+    if launch_result != 0:
+        return launch_result
+    if report_session_records:
+        report_launch_session_records(
+            config,
+            timeout_seconds=session_record_timeout,
+            poll_seconds=session_record_poll,
+            print_func=print_func,
+        )
+    return 0
 
 
 def _default_new_project_owner(project: str) -> str:
@@ -3449,6 +3468,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         config_path=entry.config_path,
         mode="start",
         script_path=Path(__file__).resolve().with_name(SWITCHYARD_NAME),
+        report_session_records=True,
     )
 
 
@@ -3552,6 +3572,7 @@ def main(argv: list[str] | None = None) -> int:
         force_reload=args.force,
         allow_stale_launcher=args.allow_stale_launcher,
         no_launcher_self_deploy=args.no_launcher_self_deploy,
+        report_session_records=True,
     )
 
 

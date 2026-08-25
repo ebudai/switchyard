@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import shutil
@@ -325,7 +326,8 @@ def test_launch_session_record_report_waits_and_warns_for_missing_records() -> N
         )
         config = load_project_config("porter", config_path)
         designer = config.roles[0]
-        messages: list[str] = []
+        start = time.monotonic()
+        stamps: list[tuple[float, str]] = []
 
         def write_designer_record() -> None:
             time.sleep(0.05)
@@ -341,7 +343,7 @@ def test_launch_session_record_report_waits_and_warns_for_missing_records() -> N
                 config,
                 timeout_seconds=1.0,
                 poll_seconds=0.01,
-                print_func=messages.append,
+                print_func=lambda message: stamps.append((time.monotonic() - start, message)),
             )
         finally:
             writer.join(timeout=1.0)
@@ -349,6 +351,8 @@ def test_launch_session_record_report_waits_and_warns_for_missing_records() -> N
     by_role = {status.role: status for status in statuses}
     assert by_role["designer"].session_id == "designer-session"
     assert by_role["main"].session_id == ""
+    messages = [message for _elapsed, message in stamps]
+    assert stamps[0][0] < 0.05, stamps
     assert messages[0] == "switchyard: checking session records for 2 pane(s) (waiting up to 1s)"
     assert any("session record found for designer (porter-designer:0.0): designer-session" in message for message in messages)
     assert any("warning: switchyard: session record missing for main (porter-main:0.0)" in message for message in messages)
@@ -356,6 +360,11 @@ def test_launch_session_record_report_waits_and_warns_for_missing_records() -> N
 
 def test_launch_session_record_timeout_default_is_ten_seconds() -> None:
     assert team_launcher.LAUNCH_SESSION_RECORD_TIMEOUT_SECONDS == 10.0
+    for fn in (team_launcher.launch_project, team_launcher.switchyard_new_command):
+        assert (
+            inspect.signature(fn).parameters["session_record_timeout"].default
+            == team_launcher.LAUNCH_SESSION_RECORD_TIMEOUT_SECONDS
+        )
 
 
 def test_launch_project_reports_missing_session_record_after_reboot_resume() -> None:

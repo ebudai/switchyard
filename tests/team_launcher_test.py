@@ -2668,8 +2668,14 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
     }
     assert {"designer", "director", "main", "app", "audit"} <= {role["role"] for role in config["roles"]}
     assert "('in_progress', 'Implementation', 2, ARRAY['main', 'app']::text[]" in workflow_sql
+    assert "('in_progress', 'analysis', 'route', ARRAY['director']::text[]" in workflow_sql
     assert "('done', 'Done', 9, ARRAY[]::text[], NULL, NULL, NULL, true)" in workflow_sql
     assert "('cancelled', 'Cancelled', 10, ARRAY[]::text[], NULL, NULL, NULL, true)" in workflow_sql
+    assert "('audit', 'analysis', 'route', ARRAY['director']::text[]" in workflow_sql
+    assert "('audit', 'in_progress', 'audit_kick_back', ARRAY['audit']::text[]" in workflow_sql
+    assert "('director_review', 'analysis', 'route', ARRAY['director']::text[]" in workflow_sql
+    assert "('director_review', 'analysis', 'user_reopen', ARRAY['user']::text[]" in workflow_sql
+    assert "('director_review', 'in_progress', 'route', ARRAY['director']::text[]" in workflow_sql
     assert "('director_review', 'done', 'mark_done', ARRAY['director']::text[]" in workflow_sql
     assert "('director_review', 'cancelled', 'cancel', ARRAY['director']::text[]" in workflow_sql
     assert "('done', 'analysis', 'route', ARRAY['director']::text[]" in workflow_sql

@@ -96,11 +96,17 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "('cancelled', 'Cancelled', 10, ARRAY[]::text[], NULL, NULL, NULL, true)" in combined
     assert "('draft', 'analysis', 'release_draft', ARRAY['designer', 'director', 'user']::text[]" in combined
     assert "('draft', 'cancelled', 'cancel', ARRAY['director']::text[]" in combined
+    assert "('in_progress', 'analysis', 'route', ARRAY['director']::text[]" in combined
     assert (
         "ADD CONSTRAINT tickets_assignee_check CHECK "
         "(assignee IN ('unassigned', 'designer', 'ops', 'app', 'main', 'audit', 'director', 'user'))"
     ) in combined
+    assert "('audit', 'analysis', 'route', ARRAY['director']::text[]" in combined
+    assert "('audit', 'in_progress', 'audit_kick_back', ARRAY['audit']::text[]" in combined
     assert "('audit', 'director_review', 'audit_sign_off', ARRAY['audit']::text[]" in combined
+    assert "('director_review', 'analysis', 'route', ARRAY['director']::text[]" in combined
+    assert "('director_review', 'analysis', 'user_reopen', ARRAY['user']::text[]" in combined
+    assert "('director_review', 'in_progress', 'route', ARRAY['director']::text[]" in combined
     assert "('director_review', 'done', 'mark_done', ARRAY['director']::text[]" in combined
     assert "('director_review', 'cancelled', 'cancel', ARRAY['director']::text[]" in combined
     assert "('done', 'analysis', 'route', ARRAY['director']::text[]" in combined

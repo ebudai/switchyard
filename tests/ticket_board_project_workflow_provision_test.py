@@ -195,8 +195,21 @@ FROM ticket_board.workflow_stages;
                 )
             )
             assert stages == EXPECTED_STAGES, stages
-            assert psql(admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions;") == "16"
+            assert psql(admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions;") == "22"
             assert psql(admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions WHERE from_stage IN ('done', 'cancelled');") == "3"
+            assert psql(
+                admin_conn,
+                """
+SELECT count(*)
+FROM ticket_board.workflow_stages a
+CROSS JOIN ticket_board.workflow_stages b
+WHERE a.name <> b.name
+  AND ticket_board.workflow_transition_allowed_hardcoded(a.name, b.name)
+      IS DISTINCT FROM ticket_board.workflow_transition_allowed_config(a.name, b.name);
+""",
+            ) == "0"
+            assert psql(admin_conn, "SELECT ticket_board.workflow_transition_rbac_allowed_config('audit_kick_back', 'audit', 'main');") == "t"
+            assert psql(admin_conn, "SELECT ticket_board.workflow_transition_rbac_allowed_config('audit_kick_back', 'main', 'main');") == "f"
             assert psql(admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('main');") == "t"
             assert psql(admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('app');") == "t"
             assert psql(admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('ops');") == "f"
@@ -284,6 +297,39 @@ SELECT ticket_board.create_ticket('Provisioned workflow user reopen', 'Body', 'd
             service_call_without_shadow_warning(service_conn, "user", f"SELECT ticket_board.user_reopen('{user_reopen_id}', 'Needs another pass.');")
             assert psql(admin_conn, f"SELECT state FROM ticket_board.tickets WHERE id = '{user_reopen_id}';") == "analysis"
 
+            audit_kickback_id = service_call(
+                service_conn,
+                "director",
+                """
+SELECT set_config('ticket_board.ticket_prefix', 'OTTO', false);
+SELECT ticket_board.create_ticket('Provisioned workflow audit kickback', 'Body', 'draft');
+""",
+            )
+            service_call(service_conn, "designer", f"SELECT ticket_board.release_draft('{audit_kickback_id}');")
+            service_call(service_conn, "director", f"SELECT ticket_board.route('{audit_kickback_id}', 'in_progress', 'main');")
+            service_call(service_conn, "main", f"SELECT ticket_board.submit_to_audit('{audit_kickback_id}', 'abcdef3');")
+            assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{audit_kickback_id}';") == "audit:audit"
+            service_call_without_shadow_warning(service_conn, "audit", f"SELECT ticket_board.audit_kick_back('{audit_kickback_id}', 'Needs another pass.', 'main');")
+            assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{audit_kickback_id}';") == "in_progress:main"
+
+            director_kickback_id = service_call(
+                service_conn,
+                "director",
+                """
+SELECT set_config('ticket_board.ticket_prefix', 'OTTO', false);
+SELECT ticket_board.create_ticket('Provisioned workflow director kickback', 'Body', 'draft');
+""",
+            )
+            service_call(service_conn, "designer", f"SELECT ticket_board.release_draft('{director_kickback_id}');")
+            service_call(service_conn, "director", f"SELECT ticket_board.route('{director_kickback_id}', 'in_progress', 'app');")
+            service_call(service_conn, "app", f"SELECT ticket_board.submit_to_audit('{director_kickback_id}', 'abcdef4');")
+            service_call(service_conn, "audit", f"SELECT ticket_board.audit_sign_off('{director_kickback_id}', 'Audit verified.');")
+            assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{director_kickback_id}';") == "director_review:director"
+            service_call_without_shadow_warning(service_conn, "director", f"SELECT ticket_board.route('{director_kickback_id}', 'in_progress', 'app');")
+            assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{director_kickback_id}';") == "in_progress:app"
+            service_call_without_shadow_warning(service_conn, "director", f"SELECT ticket_board.route('{director_kickback_id}', 'analysis', 'director');")
+            assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{director_kickback_id}';") == "analysis:director"
+
             cancel_id = service_call(
                 service_conn,
                 "director",
@@ -292,12 +338,12 @@ SELECT set_config('ticket_board.ticket_prefix', 'OTTO', false);
 SELECT ticket_board.create_ticket('Provisioned workflow cancellation', 'Body', 'draft');
 """,
             )
-            assert cancel_id == "OTTO-3", cancel_id
+            assert cancel_id == "OTTO-5", cancel_id
             service_call(service_conn, "designer", f"SELECT ticket_board.release_draft('{cancel_id}');")
-            service_call(service_conn, "director", f"SELECT ticket_board.route('{cancel_id}', 'in_progress', 'main');")
-            assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{cancel_id}';") == "in_progress:main"
-            cancel_error = service_call_fails(service_conn, "main", f"SELECT ticket_board.cancel('{cancel_id}', 'implementer cannot cancel');")
-            assert "role main cannot call cancel" in cancel_error, cancel_error
+            service_call(service_conn, "director", f"SELECT ticket_board.route('{cancel_id}', 'in_progress', 'app');")
+            assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{cancel_id}';") == "in_progress:app"
+            cancel_error = service_call_fails(service_conn, "app", f"SELECT ticket_board.cancel('{cancel_id}', 'implementer cannot cancel');")
+            assert "role app cannot call cancel" in cancel_error, cancel_error
             service_call(service_conn, "director", f"SELECT ticket_board.cancel('{cancel_id}', 'director cancelled.');")
             assert psql(admin_conn, f"SELECT state FROM ticket_board.tickets WHERE id = '{cancel_id}';") == "cancelled"
             service_call_without_shadow_warning(service_conn, "director", f"SELECT ticket_board.route('{cancel_id}', 'analysis', 'director');")

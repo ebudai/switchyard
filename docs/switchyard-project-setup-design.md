@@ -270,6 +270,32 @@ root, and agents deliberately have no sudo. Split it:
 normal pane with hooks and a board connection. A standalone agent in the project directory whose
 only outputs are the design document and the artifact.
 
+## One tmux session with six panes: rejected, twice
+
+Eric tried this when switchyard was first built and abandoned it quickly. The original symptom is not
+recorded and the attempt was long ago. Director re-proposed it on 2026-08-25 as a way to get portable
+`prefix z` zoom instead of Konsole's Ctrl+Shift+E, and it was rejected again.
+
+Recording the CURRENT technical reason so it is not proposed a third time:
+
+**tmux pane indices renumber when a pane dies.** Measured on an isolated server:
+
+    panes 0 1 2 3  ->  kill pane 1  ->  panes 0 1 2
+
+Every notification target and every durable session record is keyed by a stable per-role name --
+`pgu-ops:0.0`, `pgu-director_0.0.json`. Under one session those become pane INDICES, so one pane
+restarting shifts the identity of every pane after it, and notifications and session records would
+address the wrong agent.
+
+That is the exact failure class the whole PGU-6xx run was spent eliminating: writing into the wrong
+pane, and clobbering another role's session record. Seven separate sessions are what make the
+identifiers stable.
+
+Consequence, accepted: maximize is Konsole-specific (Ctrl+Shift+E). `prefix z` is a no-op here because
+each session holds exactly one pane, so there is nothing to zoom. On a non-KDE host the team still
+works -- the agents live in tmux -- but the six-pane window and its maximize do not. That is a
+Milestone 3 presentation gap, not a functional one.
+
 ## Open questions
 
 None. Both are closed (Eric, 2026-08-24):

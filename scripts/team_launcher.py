@@ -2954,22 +2954,23 @@ def _system_unit_file_exists(unit: str, *, runner: Callable[..., subprocess.Comp
     if result.returncode != 0:
         return _path_exists(Path("/etc/systemd/system") / unit)
     stdout = str(getattr(result, "stdout", "") or "").strip()
-    if stdout and not stdout.startswith("0 unit files listed"):
-        return True
-    return _path_exists(Path("/etc/systemd/system") / unit)
+    return bool(stdout and not stdout.startswith("0 unit files listed"))
 
 
 def _database_exists(database: str, *, runner: Callable[..., subprocess.CompletedProcess[Any]]) -> bool:
     escaped = database.replace("'", "''")
+    command = [
+        "psql",
+        "-XAt",
+        "postgresql:///postgres?host=/var/run/postgresql",
+        "-c",
+        f"SELECT 1 FROM pg_database WHERE datname = '{escaped}'",
+    ]
+    if os.geteuid() == 0:
+        command = ["sudo", "-u", "postgres", *command]
     try:
         result = runner(
-            [
-                "psql",
-                "-XAt",
-                "postgresql:///postgres?host=/var/run/postgresql",
-                "-c",
-                f"SELECT 1 FROM pg_database WHERE datname = '{escaped}'",
-            ],
+            command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -3013,6 +3014,8 @@ def precheck_new_project(
             errors.append(f"socket {plan.socket_path} already exists but {plan.board_unit} is not installed")
         if port_is_live:
             errors.append(f"port {plan.port} is already in use but {plan.board_unit} is not installed")
+    elif not database_exists:
+        errors.append(f"{plan.board_unit} is installed but database {plan.database!r} does not exist")
     if errors:
         raise SystemExit("team-launcher: new project precheck failed:\n- " + "\n- ".join(errors))
 

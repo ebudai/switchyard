@@ -3981,6 +3981,74 @@ def test_new_project_precheck_ignores_python_bytecode_created_by_cli_imports() -
         )
 
 
+def test_database_exists_uses_postgres_os_user_when_running_as_root() -> None:
+    calls: list[list[str]] = []
+    original_geteuid = team_launcher.os.geteuid
+
+    def runner(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="1\n")
+
+    try:
+        team_launcher.os.geteuid = lambda: 0  # type: ignore[method-assign]
+        assert team_launcher._database_exists("porter_board", runner=runner) is True
+    finally:
+        team_launcher.os.geteuid = original_geteuid  # type: ignore[method-assign]
+
+    assert calls == [
+        [
+            "sudo",
+            "-u",
+            "postgres",
+            "psql",
+            "-XAt",
+            "postgresql:///postgres?host=/var/run/postgresql",
+            "-c",
+            "SELECT 1 FROM pg_database WHERE datname = 'porter_board'",
+        ]
+    ]
+    assert "user=postgres" not in calls[0][5]
+
+
+def test_database_exists_keeps_non_root_psql_path_unchanged() -> None:
+    calls: list[list[str]] = []
+    original_geteuid = team_launcher.os.geteuid
+
+    def runner(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="")
+
+    try:
+        team_launcher.os.geteuid = lambda: 1001  # type: ignore[method-assign]
+        assert team_launcher._database_exists("porter_board", runner=runner) is False
+    finally:
+        team_launcher.os.geteuid = original_geteuid  # type: ignore[method-assign]
+
+    assert calls == [
+        [
+            "psql",
+            "-XAt",
+            "postgresql:///postgres?host=/var/run/postgresql",
+            "-c",
+            "SELECT 1 FROM pg_database WHERE datname = 'porter_board'",
+        ]
+    ]
+
+
+def test_system_unit_successful_empty_listing_means_unit_absent() -> None:
+    original_path_exists = team_launcher._path_exists
+
+    def runner(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert args == ["systemctl", "list-unit-files", "--no-legend", "porter-ticket-board.service"]
+        return subprocess.CompletedProcess(args, 0, stdout="")
+
+    try:
+        team_launcher._path_exists = lambda _path: True  # type: ignore[assignment]
+        assert team_launcher._system_unit_file_exists("porter-ticket-board.service", runner=runner) is False
+    finally:
+        team_launcher._path_exists = original_path_exists  # type: ignore[assignment]
+
+
 def test_new_project_execute_warms_sudo_once_then_runs_generated_script() -> None:
     current_user = team_launcher.current_user_name()
 
@@ -4055,6 +4123,49 @@ def test_new_project_rerun_allows_existing_same_slug_resources() -> None:
             )
             == 0
         )
+
+
+def test_new_project_rejects_installed_unit_without_database() -> None:
+    current_user = team_launcher.current_user_name()
+
+    class ExistingUnitNoDatabaseRunner(FakeRunner):
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if args[:3] == ["systemctl", "list-unit-files", "--no-legend"]:
+                return subprocess.CompletedProcess(args, 0, stdout="porter-ticket-board.service disabled\n")
+            if args[:2] == ["psql", "-XAt"]:
+                return subprocess.CompletedProcess(args, 0, stdout="")
+            if len(args) >= 5 and args[:4] == ["git", "-C", args[2], "status"]:
+                return subprocess.CompletedProcess(args, 0, stdout="")
+            return subprocess.CompletedProcess(args, 0)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-new.") as tmp:
+        tmp_path = Path(tmp)
+        output_dir = tmp_path / "out"
+        project_repo = tmp_path / "project-repo"
+        project_repo.mkdir()
+        runner = ExistingUnitNoDatabaseRunner()
+        try:
+            new_project_command(
+                "porter",
+                owner_user=current_user,
+                source_repo=tmp_path / "repo",
+                repository=project_repo,
+                output_dir=output_dir,
+                execute=True,
+                runner=runner,
+                port_in_use=lambda _port: False,
+                socket_exists=lambda _path: False,
+            )
+            raise AssertionError("expected unit-without-database precheck failure")
+        except SystemExit as exc:
+            message = str(exc)
+
+    assert "porter-ticket-board.service is installed" in message
+    assert "database 'porter_ticket_board' does not exist" in message
+    assert not output_dir.exists()
+    assert not any(call[:1] == ["sudo"] for call in runner.calls)
+    assert not any(call[:1] == ["bash"] for call in runner.calls)
 
 
 def test_new_project_rejects_port_collision_before_mutating() -> None:

@@ -505,23 +505,22 @@ class PaneActivityGate:
         first = self._captured_working_timer_probe(target)
         if not first.captured or not first.observable:
             return ActivityTrace(True, "working_timer_unobservable")
-        first_gap = sample_delay_seconds / 3.0
-        second_gap = sample_delay_seconds - first_gap
-        if first_gap > 0:
-            self.sleeper(first_gap)
-        second = self._captured_working_timer_probe(target)
-        if not second.captured or not second.observable:
-            return ActivityTrace(True, "working_timer_unobservable")
-        if second_gap > 0:
-            self.sleeper(second_gap)
-        third = self._captured_working_timer_probe(target)
-        if not third.captured or not third.observable:
-            return ActivityTrace(True, "working_timer_unobservable")
-        if second.digest != first.digest:
-            return ActivityTrace(True, "pane_content_changed", region_digest=second.digest)
-        if third.digest != first.digest:
-            return ActivityTrace(True, "pane_content_changed", region_digest=third.digest)
-        return ActivityTrace(False, "working_timer_idle", region_digest=third.digest)
+        # Interior offsets avoid the common 0.2s/0.4s spinner aliases that hit 0.4/0.8 sampling.
+        first_inner_gap = sample_delay_seconds * (23.0 / 120.0)
+        second_inner_gap = sample_delay_seconds * (1.0 / 15.0)
+        final_gap = sample_delay_seconds - first_inner_gap - second_inner_gap
+        probes = [first]
+        for gap in (first_inner_gap, second_inner_gap, final_gap):
+            if gap > 0:
+                self.sleeper(gap)
+            probe = self._captured_working_timer_probe(target)
+            if not probe.captured or not probe.observable:
+                return ActivityTrace(True, "working_timer_unobservable")
+            probes.append(probe)
+        for probe in probes[1:]:
+            if probe.digest != first.digest:
+                return ActivityTrace(True, "pane_content_changed", region_digest=probe.digest)
+        return ActivityTrace(False, "working_timer_idle", region_digest=probes[-1].digest)
 
     def composer_snapshot(self, target: str) -> ComposerSnapshot:
         try:

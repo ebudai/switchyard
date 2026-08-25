@@ -343,18 +343,50 @@ def targeted_capture_runner(target: str, *outputs: str) -> Any:
     return runner
 
 
+def targeted_alternating_capture_runner(target: str, *prefix_outputs: str) -> Any:
+    values = list(prefix_outputs)
+    index = 0
+
+    def runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        nonlocal index
+        requested_target = str(args[args.index("-t") + 1]) if "-t" in args else ""
+        if requested_target != target:
+            return subprocess.CompletedProcess(args, 0, stdout="")
+        if values:
+            value = values.pop(0)
+        else:
+            value = f"frame {index % 2}\n"
+            index += 1
+        return subprocess.CompletedProcess(args, 0, stdout=value)
+
+    return runner
+
+
 def spinner_aliasing_capture_runner(clock: dict[str, float]) -> Any:
     def runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        phase = round(clock["elapsed"], 1)
+        phase = round(clock["elapsed"], 2)
         frame = "same" if phase in {0.0, 1.2} else "changed"
         return subprocess.CompletedProcess(args, 0, stdout=f"Roosting... {frame}\n")
 
     return runner
 
 
+def periodic_spinner_capture_runner(clock: dict[str, float], *, frames: int, frame_interval: float) -> Any:
+    period = frames * frame_interval
+
+    def runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        phase = (clock["phase"] + clock["elapsed"]) % period
+        frame = int(phase / frame_interval)
+        return subprocess.CompletedProcess(args, 0, stdout=f"Roosting... frame-{frame}\n")
+
+    return runner
+
+
 def assert_uneven_probe_sleeps(sleep_calls: list[float], total_delay: float, *, probes: int = 1) -> None:
-    first_gap = total_delay / 3.0
-    expected = [first_gap, total_delay - first_gap] * probes
+    first_gap = total_delay * (23.0 / 120.0)
+    second_gap = total_delay * (1.0 / 15.0)
+    final_gap = total_delay - first_gap - second_gap
+    expected = [first_gap, second_gap, final_gap] * probes
     assert [round(value, 6) for value in sleep_calls] == [round(value, 6) for value in expected]
 
 
@@ -813,7 +845,56 @@ def test_spinner_aliasing_during_startup_does_not_false_idle() -> None:
     assert_uneven_probe_sleeps(sleeps, 1.2)
 
 
-def test_three_sample_working_timer_probe_still_reports_genuine_idle() -> None:
+def test_startup_spinner_period_sweep_does_not_false_idle() -> None:
+    periods = [
+        (4, 0.1),
+        (2, 0.1),
+        (2, 0.3),
+        (3, 0.13),
+        (4, 0.15),
+        (4, 0.3),
+    ]
+    failures: list[str] = []
+    probes = 0
+
+    for frames, frame_interval in periods:
+        period = frames * frame_interval
+        for round_index in range(20):
+            sleeps: list[float] = []
+            clock = {
+                "elapsed": 0.0,
+                "phase": period * ((round_index + 0.37) / 20.0),
+            }
+
+            def sleeper(seconds: float, *, clock: dict[str, float] = clock) -> None:
+                sleeps.append(seconds)
+                clock["elapsed"] += seconds
+
+            with TemporaryStateDir() as tmp_path:
+                store = PaneHookStateStore(tmp_path)
+                gate = PaneActivityGate(
+                    state_store=store,
+                    cursor_position_runner=constant_cursor_runner(),
+                    capture_pane_runner=periodic_spinner_capture_runner(
+                        clock,
+                        frames=frames,
+                        frame_interval=frame_interval,
+                    ),
+                    idle_working_timer_sample_delay_seconds=1.2,
+                    sleeper=sleeper,
+                )
+                store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=100.0)
+
+                if gate.idle_since_by_role(["ops"]):
+                    failures.append(f"{frames}x{frame_interval}@{clock['phase']:.6f}")
+            assert_uneven_probe_sleeps(sleeps, 1.2)
+            probes += 1
+
+    assert failures == []
+    assert probes == 120
+
+
+def test_multi_sample_working_timer_probe_still_reports_genuine_idle() -> None:
     sleeps: list[float] = []
     with TemporaryStateDir() as tmp_path:
         store = PaneHookStateStore(tmp_path)
@@ -2178,13 +2259,9 @@ def test_director_pre_send_recheck_blocks_typing_that_starts_after_initial_idle_
 def test_director_pre_send_recheck_blocks_claude_working_probe_after_initial_idle_check() -> None:
     sent: list[tuple[str, str]] = []
     cursor_runner = sequenced_cursor_runner("2 23 24", "2 23 24")
-    capture_runner = targeted_capture_runner(
+    capture_runner = targeted_alternating_capture_runner(
         "pgu-director:0.0",
         "",
-        "",
-        "",
-        "✶ Harmonizing… (2m 22s · ↓ 8.6k tokens)\n",
-        "✻ Harmonizing… (2m 23s · ↓ 8.6k tokens)\n",
     )
 
     with TemporaryStateDir() as tmp_path:
@@ -2219,7 +2296,11 @@ def test_director_pre_send_recheck_blocks_claude_working_probe_after_initial_idl
     assert detail["anti_clobber"]["reason"] == "pane_content_changed"
 
 
-def director_delivery_case(source: str, *pane_texts: str) -> tuple[list[tuple[str, str]], FakeConnection]:
+def director_delivery_case(
+    source: str,
+    *pane_texts: str,
+    capture_pane_runner: Any | None = None,
+) -> tuple[list[tuple[str, str]], FakeConnection]:
     sent: list[tuple[str, str]] = []
     cursor_runner = sequenced_cursor_runner("2 23 24", "2 23 24", "2 23 24")
 
@@ -2228,7 +2309,8 @@ def director_delivery_case(source: str, *pane_texts: str) -> tuple[list[tuple[st
         gate = PaneActivityGate(
             state_store=store,
             cursor_position_runner=cursor_runner,
-            capture_pane_runner=targeted_capture_runner("pgu-director:0.0", *pane_texts),
+            capture_pane_runner=capture_pane_runner
+            or targeted_capture_runner("pgu-director:0.0", *pane_texts),
             idle_working_timer_sample_delay_seconds=0.0,
             wall_time=lambda: 0.0,
         )
@@ -2258,11 +2340,7 @@ def test_director_delivery_matrix_for_trusted_and_untrusted_claude_idle_sources(
     untrusted_idle_sent, untrusted_idle_conn = director_delivery_case("claude.SessionStart", "")
     untrusted_changed_sent, untrusted_changed_conn = director_delivery_case(
         "claude.SessionStart",
-        "",
-        "",
-        "",
-        "✶ Harmonizing… (2m 22s · ↓ 8.6k tokens)\n",
-        "✻ Harmonizing… (2m 23s · ↓ 8.6k tokens)\n",
+        capture_pane_runner=targeted_alternating_capture_runner("pgu-director:0.0", ""),
     )
 
     assert trusted_idle_sent == [("pgu-director:0.0", "PGU-360 -- Director notification")]

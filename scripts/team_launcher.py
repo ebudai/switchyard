@@ -93,6 +93,13 @@ LEGACY_GUI_WAYLAND_ENV = "PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY"
 HOST_WAYLAND_ENV = "HOST_WAYLAND_DISPLAY"
 LEGACY_HOST_WAYLAND_ENV = "PGU_HOST_WAYLAND_DISPLAY"
 KONSOLE_QT_LOGGING_RULES = "qt.qpa.wayland.warning=false"
+LAYOUT_MODE_AUTO = "auto"
+LAYOUT_MODE_SEPARATE = "separate"
+LAYOUT_MODE_VIEWER = "viewer"
+LAYOUT_MODE_CHOICES = frozenset({LAYOUT_MODE_AUTO, LAYOUT_MODE_SEPARATE, LAYOUT_MODE_VIEWER})
+DEFAULT_VIEWER_SESSION = "viewer"
+DEFAULT_VIEWER_COLUMNS = 240
+DEFAULT_VIEWER_ROWS = 80
 YOLO_ARGS_BY_CLI = {
     "agy": ["--dangerously-skip-permissions"],
     "claude": ["--dangerously-skip-permissions"],
@@ -373,6 +380,197 @@ def konsole_launch_args(layout_path: Path, *, gui_user: str | None = None) -> li
         "--layout",
         str(layout_path),
     ]
+
+
+def _desktop_is_kde(desktop: str) -> bool:
+    tokens = {
+        token.strip().casefold()
+        for chunk in desktop.replace(";", ":").split(":")
+        for token in [chunk]
+        if token.strip()
+    }
+    return bool(tokens & {"kde", "plasma"})
+
+
+def _desktop_from_loginctl_output(output: str) -> str:
+    values: list[str] = []
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if "=" in line:
+            name, value = line.split("=", 1)
+            if name != "Desktop":
+                continue
+            value = value.strip()
+            if value:
+                values.append(value)
+        else:
+            values.append(line)
+    return ":".join(values)
+
+
+def detected_invoking_desktop(
+    *,
+    environ: dict[str, str] | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> str:
+    env = environ if environ is not None else os.environ
+    desktop = str(env.get("XDG_CURRENT_DESKTOP", "")).strip()
+    if desktop:
+        return desktop
+    if str(env.get("KDE_FULL_SESSION", "")).strip().casefold() in {"1", "true"}:
+        return "KDE"
+    user = str(env.get("SUDO_USER") or env.get("USER") or "").strip()
+    if not user:
+        return ""
+    try:
+        display_proc = runner(
+            ["loginctl", "show-user", user, "-p", "Display", "--value"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, ValueError):
+        return ""
+    if display_proc.returncode != 0:
+        return ""
+    session_id = str(display_proc.stdout or "").strip()
+    if not session_id:
+        return ""
+    try:
+        session_proc = runner(
+            ["loginctl", "show-session", session_id, "-p", "Desktop"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, ValueError):
+        return ""
+    if session_proc.returncode != 0:
+        return ""
+    return _desktop_from_loginctl_output(str(session_proc.stdout or ""))
+
+
+def resolve_layout_mode(
+    requested: str,
+    *,
+    environ: dict[str, str] | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> str:
+    if requested not in LAYOUT_MODE_CHOICES:
+        raise SystemExit(f"unknown layout mode: {requested}")
+    if requested != LAYOUT_MODE_AUTO:
+        return requested
+    desktop = detected_invoking_desktop(environ=environ, runner=runner)
+    if not desktop:
+        return LAYOUT_MODE_SEPARATE
+    return LAYOUT_MODE_SEPARATE if _desktop_is_kde(desktop) else LAYOUT_MODE_VIEWER
+
+
+def visible_roles_for_viewer(config: ProjectConfig) -> list[RoleConfig]:
+    return sorted(
+        (role for role in config.roles if not role.detached and role.slot is not None),
+        key=lambda role: (role.slot if role.slot is not None else 0, role.role),
+    )
+
+
+def tmux_set_status_off_args(role: RoleConfig) -> list[str]:
+    return ["tmux", "set-option", "-t", role.tmux_session, "status", "off"]
+
+
+def tmux_set_pane_border_status_off_args(role: RoleConfig) -> list[str]:
+    return ["tmux", "set-window-option", "-t", f"{role.tmux_session}:0", "pane-border-status", "off"]
+
+
+def tmux_viewer_new_session_args(viewer_session: str, role: RoleConfig) -> list[str]:
+    command = _quote_command(["env", "TMUX=", "tmux", "attach", "-t", role.tmux_session])
+    return [
+        "tmux",
+        "new-session",
+        "-d",
+        "-x",
+        str(DEFAULT_VIEWER_COLUMNS),
+        "-y",
+        str(DEFAULT_VIEWER_ROWS),
+        "-s",
+        viewer_session,
+        "-c",
+        role.workdir,
+        command,
+    ]
+
+
+def tmux_viewer_split_window_args(viewer_session: str, role: RoleConfig) -> list[str]:
+    command = _quote_command(["env", "TMUX=", "tmux", "attach", "-t", role.tmux_session])
+    return ["tmux", "split-window", "-t", f"{viewer_session}:0", "-c", role.workdir, command]
+
+
+def tmux_viewer_select_layout_args(viewer_session: str) -> list[str]:
+    return ["tmux", "select-layout", "-t", f"{viewer_session}:0", "tiled"]
+
+
+def tmux_viewer_set_status_args(viewer_session: str) -> list[str]:
+    return ["tmux", "set-option", "-t", viewer_session, "status", "on"]
+
+
+def tmux_viewer_set_prefix_args(viewer_session: str) -> list[str]:
+    return ["tmux", "set-option", "-t", viewer_session, "prefix", "C-a"]
+
+
+def tmux_viewer_set_border_status_args(viewer_session: str) -> list[str]:
+    return ["tmux", "set-window-option", "-t", f"{viewer_session}:0", "pane-border-status", "top"]
+
+
+def tmux_viewer_set_border_format_args(viewer_session: str) -> list[str]:
+    return ["tmux", "set-window-option", "-t", f"{viewer_session}:0", "pane-border-format", " #{@role} "]
+
+
+def tmux_viewer_set_role_arg(viewer_session: str, pane_index: int, role: str) -> list[str]:
+    return ["tmux", "set-option", "-p", "-t", f"{viewer_session}.{pane_index}", "@role", role]
+
+
+def launch_tmux_viewer_session(
+    roles: Sequence[RoleConfig],
+    *,
+    viewer_session: str = DEFAULT_VIEWER_SESSION,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> int:
+    if not roles:
+        print("team-launcher: no visible roles for viewer layout", file=sys.stderr)
+        return 1
+    if runner(["tmux", "has-session", "-t", viewer_session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+        kill_proc = runner(["tmux", "kill-session", "-t", viewer_session])
+        if kill_proc.returncode != 0:
+            return int(kill_proc.returncode)
+    for role in roles:
+        for args in (tmux_set_status_off_args(role), tmux_set_pane_border_status_off_args(role)):
+            proc = runner(args)
+            if proc.returncode != 0:
+                return int(proc.returncode)
+    first, *rest = roles
+    proc = runner(tmux_viewer_new_session_args(viewer_session, first))
+    if proc.returncode != 0:
+        return int(proc.returncode)
+    for role in rest:
+        proc = runner(tmux_viewer_split_window_args(viewer_session, role))
+        if proc.returncode != 0:
+            return int(proc.returncode)
+    for args in (
+        tmux_viewer_select_layout_args(viewer_session),
+        tmux_viewer_set_status_args(viewer_session),
+        tmux_viewer_set_prefix_args(viewer_session),
+        tmux_viewer_set_border_status_args(viewer_session),
+        tmux_viewer_set_border_format_args(viewer_session),
+    ):
+        proc = runner(args)
+        if proc.returncode != 0:
+            return int(proc.returncode)
+    for index, role in enumerate(roles):
+        proc = runner(tmux_viewer_set_role_arg(viewer_session, index, role.role))
+        if proc.returncode != 0:
+            return int(proc.returncode)
+    return 0
 
 
 def launch_konsole_window(
@@ -2029,6 +2227,56 @@ def run_detached_role(
     raise SystemExit(f"unknown detached role mode: {mode}")
 
 
+def ensure_visible_role_session_for_viewer(
+    role: RoleConfig,
+    *,
+    mode: str,
+    session_dir: Path,
+    pane_state_dir: Path = DEFAULT_PANE_STATE_DIR,
+    force_reload: bool = False,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> int:
+    exists = runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    if mode == "attach":
+        if not exists:
+            print(f"tmux session {role.tmux_session} does not exist", file=sys.stderr)
+            return 1
+        return 0
+    if mode == "reload":
+        if exists:
+            if not force_reload and not live_command_matches_role(role, runner=runner):
+                print(
+                    f"refusing to reload {role.tmux_session}: live pane command does not match configured CLI; "
+                    "rerun with --force to override",
+                    file=sys.stderr,
+                )
+                return 1
+            kill_proc = runner(tmux_kill_session_args(role))
+            if kill_proc.returncode != 0:
+                return int(kill_proc.returncode)
+        return _start_role_session(
+            role,
+            session_dir=session_dir,
+            pane_state_dir=pane_state_dir,
+            prefer_resume=True,
+            seed_source="team_launcher.reload",
+            runner=runner,
+        )
+    if mode in {"start", "attach-or-start"}:
+        if not exists:
+            return _start_role_session(
+                role,
+                session_dir=session_dir,
+                pane_state_dir=pane_state_dir,
+                prefer_resume=True,
+                seed_source="team_launcher.start",
+                runner=runner,
+            )
+        seed_initial_pane_idle_state(role, pane_state_dir=pane_state_dir, source="team_launcher.start")
+        return 0
+    raise SystemExit(f"unknown viewer role mode: {mode}")
+
+
 def _layout_leaves(node: Any) -> list[dict[str, Any]]:
     leaves: list[dict[str, Any]] = []
     if isinstance(node, dict):
@@ -2181,6 +2429,8 @@ def launch_project(
     report_session_records: bool = False,
     session_record_timeout: float = LAUNCH_SESSION_RECORD_TIMEOUT_SECONDS,
     session_record_poll: float = LAUNCH_SESSION_RECORD_POLL_SECONDS,
+    layout_mode: str = LAYOUT_MODE_AUTO,
+    layout_environ: dict[str, str] | None = None,
     print_func: Callable[[str], None] = print,
 ) -> int:
     if mode == "start":
@@ -2261,6 +2511,15 @@ def launch_project(
         ],
     }
     if dry_run:
+        resolved_layout_mode = (
+            resolve_layout_mode(layout_mode, environ=layout_environ, runner=runner)
+            if layout_mode != LAYOUT_MODE_AUTO or layout_environ is not None
+            else LAYOUT_MODE_SEPARATE
+        )
+        if resolved_layout_mode == LAYOUT_MODE_VIEWER:
+            plan["layout_mode"] = LAYOUT_MODE_VIEWER
+            plan["viewer_session"] = DEFAULT_VIEWER_SESSION
+            plan["viewer_roles"] = [role.role for role in visible_roles_for_viewer(config)]
         print(json.dumps(plan, indent=2, sort_keys=True))
         return 0
     for role in config.roles:
@@ -2279,7 +2538,29 @@ def launch_project(
         )
         if result != 0:
             return result
-    launch_result = launch_konsole_window(output_path, project=config.project, runner=runner)
+    resolved_layout_mode = resolve_layout_mode(layout_mode, environ=layout_environ, runner=runner)
+    if resolved_layout_mode == LAYOUT_MODE_VIEWER:
+        viewer_roles = visible_roles_for_viewer(config)
+        for role in viewer_roles:
+            if role.role in failed_roles:
+                print(f"skipping visible role {role.role}: {failed_roles[role.role]}", file=sys.stderr)
+                continue
+            result = ensure_visible_role_session_for_viewer(
+                role,
+                mode=mode,
+                session_dir=config.session_dir,
+                pane_state_dir=effective_pane_state_dir,
+                force_reload=force_reload,
+                runner=runner,
+            )
+            if result != 0:
+                return result
+        launch_result = launch_tmux_viewer_session(
+            [role for role in viewer_roles if role.role not in failed_roles],
+            runner=runner,
+        )
+    else:
+        launch_result = launch_konsole_window(output_path, project=config.project, runner=runner)
     if launch_result != 0:
         return launch_result
     if report_session_records:
@@ -3226,6 +3507,8 @@ def switchyard_new_command(
     pane_state_dir: Path | None = None,
     session_record_timeout: float = LAUNCH_SESSION_RECORD_TIMEOUT_SECONDS,
     session_record_poll: float = LAUNCH_SESSION_RECORD_POLL_SECONDS,
+    layout_mode: str = LAYOUT_MODE_AUTO,
+    layout_environ: dict[str, str] | None = None,
     input_func: Callable[[str], str] = input,
     print_func: Callable[[str], None] = print,
 ) -> int:
@@ -3343,6 +3626,8 @@ def switchyard_new_command(
         script_path=Path(__file__).resolve().with_name(SWITCHYARD_NAME),
         pane_state_dir=pane_state_dir or DEFAULT_PANE_STATE_DIR,
         runner=runner,
+        layout_mode=layout_mode,
+        layout_environ=layout_environ,
     )
     if launch_result != 0:
         return launch_result
@@ -3353,7 +3638,11 @@ def switchyard_new_command(
         poll_seconds=session_record_poll,
         print_func=print_func,
     )
-    print_func("switchyard: maximize the designer pane during design with Konsole Ctrl+Shift+E; restore it when done")
+    resolved_layout_mode = resolve_layout_mode(layout_mode, environ=layout_environ, runner=runner)
+    if resolved_layout_mode == LAYOUT_MODE_VIEWER:
+        print_func("switchyard: maximize the designer pane during design with Ctrl+a z; press it again to restore")
+    else:
+        print_func("switchyard: maximize the designer pane during design with Konsole Ctrl+Shift+E; restore it when done")
     return 0
 
 
@@ -3389,6 +3678,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("role", nargs="?")
     parser.add_argument("--config", type=Path, help="project launcher config JSON")
     parser.add_argument("--layout-output", type=Path, help="write generated Konsole layout here")
+    parser.add_argument(
+        "--layout",
+        choices=sorted(LAYOUT_MODE_CHOICES),
+        default=LAYOUT_MODE_AUTO,
+        help="window layout mode: auto detects the invoking desktop, separate keeps the KDE/Konsole path, viewer forces the tmux viewer",
+    )
     parser.add_argument("--script-path", type=Path, default=Path(__file__).resolve().with_name("team-launcher"))
     parser.add_argument("--pane-state-dir", type=Path, help=f"write initial pane idle state here (default: {DEFAULT_PANE_STATE_DIR})")
     parser.add_argument("--dry-run", action="store_true", help="print launch plan without starting Konsole")
@@ -3439,6 +3734,12 @@ def _build_switchyard_new_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, help="HTTP port; omitted means deterministic allocation")
     parser.add_argument("--database", help="PostgreSQL database; omitted means <slug>_ticket_board")
     parser.add_argument("--yes", action="store_true", help="proceed without the confirmation prompt")
+    parser.add_argument(
+        "--layout",
+        choices=sorted(LAYOUT_MODE_CHOICES),
+        default=LAYOUT_MODE_AUTO,
+        help="window layout mode: auto detects the invoking desktop, separate keeps the KDE/Konsole path, viewer forces the tmux viewer",
+    )
     return parser
 
 
@@ -3459,6 +3760,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             port=args.port,
             database=args.database,
             yes=args.yes,
+            layout_mode=args.layout,
         )
     selection = " ".join(argv)
     entry = _resolve_switchyard_project(selection)
@@ -3573,6 +3875,7 @@ def main(argv: list[str] | None = None) -> int:
         allow_stale_launcher=args.allow_stale_launcher,
         no_launcher_self_deploy=args.no_launcher_self_deploy,
         report_session_records=True,
+        layout_mode=args.layout,
     )
 
 

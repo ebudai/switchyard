@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -211,6 +212,45 @@ def test_pgu_layout_matches_reference_six_pane_geometry() -> None:
     assert {leaf.get("WorkingDirectory") for leaf in team_launcher._layout_leaves(layout)} == {""}
 
 
+def test_layout_detection_uses_invoking_user_and_falls_back_to_separate() -> None:
+    class DesktopRunner:
+        def __init__(self, *, desktop_output: str = "") -> None:
+            self.desktop_output = desktop_output
+            self.calls: list[list[str]] = []
+
+        def __call__(self, args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if args[:3] == ["loginctl", "show-user", "eric"]:
+                return subprocess.CompletedProcess(args, 0, stdout="7\n")
+            if args[:3] == ["loginctl", "show-session", "7"]:
+                return subprocess.CompletedProcess(args, 0, stdout=self.desktop_output)
+            return subprocess.CompletedProcess(args, 1, stdout="")
+
+    kde_runner = DesktopRunner(desktop_output="Desktop=KDE\n")
+    assert (
+        team_launcher.detected_invoking_desktop(
+            environ={"SUDO_USER": "eric"},
+            runner=kde_runner,
+        )
+        == "KDE"
+    )
+    assert kde_runner.calls[0] == ["loginctl", "show-user", "eric", "-p", "Display", "--value"]
+    assert kde_runner.calls[1] == ["loginctl", "show-session", "7", "-p", "Desktop"]
+    assert team_launcher.resolve_layout_mode(
+        "auto",
+        environ={"SUDO_USER": "eric"},
+        runner=kde_runner,
+    ) == "separate"
+
+    unknown_runner = DesktopRunner(desktop_output="")
+    assert team_launcher.resolve_layout_mode("auto", environ={"SUDO_USER": "eric"}, runner=unknown_runner) == "separate"
+    type_only_runner = DesktopRunner(desktop_output="Type=wayland\n")
+    assert team_launcher.resolve_layout_mode("auto", environ={"SUDO_USER": "eric"}, runner=type_only_runner) == "separate"
+    assert team_launcher.resolve_layout_mode("auto", environ={"XDG_CURRENT_DESKTOP": "GNOME"}, runner=FakeRunner()) == "viewer"
+    assert team_launcher.resolve_layout_mode("viewer", environ={"XDG_CURRENT_DESKTOP": "KDE"}, runner=FakeRunner()) == "viewer"
+    assert team_launcher.resolve_layout_mode("separate", environ={"XDG_CURRENT_DESKTOP": "GNOME"}, runner=FakeRunner()) == "separate"
+
+
 def _write_pgu_config_with_shared_checkout(tmp: Path) -> Path:
     source = json.loads((ROOT / "config" / "team-launcher" / "pgu.json").read_text(encoding="utf-8"))
     source["layout"] = str(ROOT / "config" / "team-launcher" / "pgu-konsole-layout.json")
@@ -222,8 +262,74 @@ def _write_pgu_config_with_shared_checkout(tmp: Path) -> Path:
     return config_path
 
 
+def _write_six_visible_role_config(tmp: Path, project: str = "porter") -> Path:
+    layout = {
+        "Orientation": "Horizontal",
+        "Widgets": [
+            {"Command": "", "SessionRestoreId": index, "WorkingDirectory": ""}
+            for index in range(6)
+        ],
+    }
+    layout_path = tmp / f"{project}-layout.json"
+    layout_path.write_text(json.dumps(layout, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    roles = ["designer", "director", "audit", "ops", "app", "main"]
+    repo = tmp / "repo"
+    repo.mkdir(exist_ok=True)
+    config_path = tmp / f"{project}.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "project": project,
+                "layout": str(layout_path),
+                "repository": str(repo),
+                "session_dir": str(tmp / "sessions"),
+                "roles": [
+                    {
+                        "role": role,
+                        "slot": index,
+                        "cli": ["claude" if role in {"designer", "director", "audit"} else "codex"],
+                        "live_commands": ["claude" if role in {"designer", "director", "audit"} else "codex"],
+                        "target": f"{project}-{role}:0.0",
+                        "tmux_session": f"{project}-{role}",
+                    }
+                    for index, role in enumerate(roles)
+                ],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return config_path
+
+
 def _run_git(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, cwd=cwd, check=True, text=True, capture_output=True)
+
+
+def _tmux_args(server: str, args: list[str]) -> list[str]:
+    return ["tmux", "-L", server, *args]
+
+
+def _run_isolated_tmux(server: str, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+    return subprocess.run(_tmux_args(server, args), **kwargs)
+
+
+def _isolated_tmux_runner(server: str) -> Any:
+    def runner(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        if args and args[0] == "tmux":
+            isolated_args = ["tmux", "-L", server, *args[1:]]
+            isolated_args = [
+                token.replace("env TMUX= tmux attach -t", f"env TMUX= tmux -L {server} attach -t")
+                if isinstance(token, str)
+                else token
+                for token in isolated_args
+            ]
+            return subprocess.run(isolated_args, **kwargs)
+        return subprocess.run(args, **kwargs)
+
+    return runner
 
 
 def _commit_all(repo: Path, message: str) -> None:
@@ -549,6 +655,47 @@ def test_dry_run_materializes_pgu_layout_with_six_visible_role_commands() -> Non
             assert f" {role} " in f" {command} ", (role, clockwise_commands)
         assert not any(" research " in f" {command} " for command in commands)
         assert not any(" perf " in f" {command} " for command in commands)
+
+
+def test_kde_auto_layout_preserves_separate_konsole_plan_shape() -> None:
+    config_path = ROOT / "config" / "team-launcher" / "pgu.json"
+    config = load_project_config("pgu", config_path)
+    runner = FakeRunner()
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-kde-layout.") as tmp:
+        tmp_path = Path(tmp)
+        layout_output = tmp_path / "layout.json"
+        stdout = StringIO()
+
+        with redirect_stdout(stdout):
+            assert (
+                launch_project(
+                    config,
+                    config_path=config_path,
+                    mode="start",
+                    script_path=ROOT / "scripts" / "team-launcher",
+                    runner=runner,
+                    dry_run=True,
+                    layout_output=layout_output,
+                    layout_environ={"XDG_CURRENT_DESKTOP": "KDE"},
+                )
+                == 0
+            )
+
+        plan = json.loads(stdout.getvalue())
+        layout = json.loads(layout_output.read_text(encoding="utf-8"))
+
+    assert runner.calls == []
+    assert "layout_mode" not in plan
+    assert "viewer_session" not in plan
+    assert [role["target"] for role in plan["roles"]] == [
+        "pgu-director:0.0",
+        "pgu-main:0.0",
+        "pgu-app:0.0",
+        "pgu-ops:0.0",
+        "pgu-audit:0.0",
+        "pgu-inspector:0.0",
+    ]
+    assert len(_leaf_commands(layout)) == 6
 
 
 def test_pgu_config_matches_director_supplied_live_role_assignments() -> None:
@@ -1780,6 +1927,122 @@ def test_start_runs_research_detached_before_opening_visible_layout() -> None:
         assert ["tmux", "attach", "-t", "pgu-research"] not in runner.calls
 
 
+def test_viewer_layout_starts_role_sessions_and_additive_viewer() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-viewer.") as tmp:
+        tmp_path = Path(tmp)
+        config_path = _write_six_visible_role_config(tmp_path)
+        config = load_project_config("porter", config_path)
+        runner = FakeRunner()
+        messages: list[str] = []
+
+        assert (
+            launch_project(
+                config,
+                config_path=config_path,
+                mode="start",
+                script_path=ROOT / "scripts" / "team-launcher",
+                runner=runner,
+                layout_output=tmp_path / "layout.json",
+                pane_state_dir=tmp_path / "pane-state",
+                layout_mode="viewer",
+                layout_environ={"XDG_CURRENT_DESKTOP": "KDE"},
+                print_func=messages.append,
+            )
+            == 0
+        )
+
+    role_sessions = ["porter-designer", "porter-director", "porter-audit", "porter-ops", "porter-app", "porter-main"]
+    role_new_sessions = [
+        call for call in runner.calls
+        if call[:2] == ["tmux", "new-session"] and call[call.index("-s") + 1] in role_sessions
+    ]
+    assert [call[call.index("-s") + 1] for call in role_new_sessions] == role_sessions
+    viewer_new_sessions = [
+        call for call in runner.calls
+        if call[:2] == ["tmux", "new-session"] and call[call.index("-s") + 1] == "viewer"
+    ]
+    assert len(viewer_new_sessions) == 1
+    assert "env TMUX= tmux attach -t porter-designer" in viewer_new_sessions[0][-1]
+    viewer_splits = [call for call in runner.calls if call[:2] == ["tmux", "split-window"]]
+    assert len(viewer_splits) == 5
+    for session in role_sessions:
+        assert ["tmux", "set-option", "-t", session, "status", "off"] in runner.calls
+        assert ["tmux", "set-window-option", "-t", f"{session}:0", "pane-border-status", "off"] in runner.calls
+    assert ["tmux", "set-option", "-t", "viewer", "status", "on"] in runner.calls
+    assert ["tmux", "set-option", "-t", "viewer", "prefix", "C-a"] in runner.calls
+    assert ["tmux", "set-window-option", "-t", "viewer:0", "pane-border-status", "top"] in runner.calls
+    assert ["tmux", "set-window-option", "-t", "viewer:0", "pane-border-format", " #{@role} "] in runner.calls
+    assert [call for call in runner.calls if call[:4] == ["tmux", "set-option", "-p", "-t"]] == [
+        ["tmux", "set-option", "-p", "-t", f"viewer.{index}", "@role", role]
+        for index, role in enumerate(["designer", "director", "audit", "ops", "app", "main"])
+    ]
+    assert not any(call[:4] == ["env", "QT_QPA_PLATFORM=wayland", f"QT_LOGGING_RULES={team_launcher.KONSOLE_QT_LOGGING_RULES}", "WAYLAND_DISPLAY="] for call in runner.calls)
+    assert messages == []
+
+
+def test_viewer_pane_death_does_not_change_role_targets_in_real_tmux() -> None:
+    if shutil.which("tmux") is None:
+        return
+    roles = ["designer", "director", "audit", "ops", "app", "main"]
+    suffix = f"pgu660-{os.getpid()}"
+    server = f"{suffix}-server"
+    runner = _isolated_tmux_runner(server)
+    viewer_session = f"{suffix}-viewer"
+    sessions = {role: f"{suffix}-{role}" for role in roles}
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-viewer-real.") as tmp:
+        tmp_path = Path(tmp)
+        config_path = _write_six_visible_role_config(tmp_path, project=suffix)
+        raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+        for role_config in raw_config["roles"]:
+            role = role_config["role"]
+            role_config["tmux_session"] = sessions[role]
+            role_config["target"] = f"{sessions[role]}:0.0"
+        config_path.write_text(json.dumps(raw_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        config = load_project_config(suffix, config_path)
+        try:
+            for session in sessions.values():
+                _run_isolated_tmux(server, ["new-session", "-d", "-s", session, "-c", str(tmp_path), "/bin/sh"], check=True)
+            assert team_launcher.launch_tmux_viewer_session(
+                team_launcher.visible_roles_for_viewer(config),
+                viewer_session=viewer_session,
+                runner=runner,
+            ) == 0
+            panes = _run_isolated_tmux(
+                server,
+                ["list-panes", "-t", f"{viewer_session}:0", "-F", "#{pane_index}:#{@role}"],
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+            ).stdout.strip().splitlines()
+            assert panes == [f"{index}:{role}" for index, role in enumerate(roles)]
+
+            _run_isolated_tmux(server, ["kill-pane", "-t", f"{viewer_session}:0.1"], check=True)
+            after = _run_isolated_tmux(
+                server,
+                ["list-panes", "-t", f"{viewer_session}:0", "-F", "#{pane_index}:#{@role}"],
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+            ).stdout.strip().splitlines()
+            assert len(after) == 5
+
+            for role, session in sessions.items():
+                marker = tmp_path / f"{role}.txt"
+                _run_isolated_tmux(server, ["has-session", "-t", session], check=True)
+                _run_isolated_tmux(
+                    server,
+                    ["send-keys", "-t", f"{session}:0.0", f"printf {role!r} > {shlex.quote(str(marker))}", "Enter"],
+                    check=True,
+                )
+                for _ in range(50):
+                    if marker.exists():
+                        break
+                    time.sleep(0.1)
+                assert marker.read_text(encoding="utf-8") == role
+        finally:
+            _run_isolated_tmux(server, ["kill-server"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def test_detached_research_start_fails_visible_when_session_disappears() -> None:
     config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
     role = next(role for role in config.roles if role.role == "research")
@@ -2511,6 +2774,8 @@ def test_reload_guard_matches_cli_child_under_shell_in_real_tmux() -> None:
     if shutil.which("tmux") is None:
         return
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-real-tmux.") as tmp:
+        server = f"pgu321-reload-guard-{os.getpid()}"
+        runner = _isolated_tmux_runner(server)
         helper = Path(tmp) / "codex"
         marker = Path(tmp) / "running"
         helper.write_text(
@@ -2543,9 +2808,9 @@ def test_reload_guard_matches_cli_child_under_shell_in_real_tmux() -> None:
             env={},
         )
         try:
-            subprocess.run(
+            _run_isolated_tmux(
+                server,
                 [
-                    "tmux",
                     "new-session",
                     "-d",
                     "-s",
@@ -2561,16 +2826,17 @@ def test_reload_guard_matches_cli_child_under_shell_in_real_tmux() -> None:
                     break
                 time.sleep(0.1)
             assert marker.exists(), "real tmux helper never started"
-            pane_command = subprocess.run(
-                ["tmux", "display-message", "-p", "-t", role.target, "#{pane_current_command}"],
+            pane_command = _run_isolated_tmux(
+                server,
+                ["display-message", "-p", "-t", role.target, "#{pane_current_command}"],
                 text=True,
                 stdout=subprocess.PIPE,
                 check=True,
             ).stdout.strip()
             assert pane_command in {"sh", "fish", "bash", "zsh"}, pane_command
-            assert live_command_matches_role(role)
+            assert live_command_matches_role(role, runner=runner)
         finally:
-            subprocess.run(["tmux", "kill-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            _run_isolated_tmux(server, ["kill-server"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def test_removed_bootstrap_command_names_new_as_replacement() -> None:
@@ -2935,12 +3201,13 @@ def test_main_start_and_reload_enable_session_record_report() -> None:
 
             team_launcher.launch_project = fake_launch_project
             assert team_launcher.main(["porter", "start", "--config", str(config_path)]) == 0
-            assert team_launcher.main(["porter", "reload", "--config", str(config_path)]) == 0
+            assert team_launcher.main(["porter", "reload", "--config", str(config_path), "--layout", "viewer"]) == 0
         finally:
             team_launcher.launch_project = original_launch_project
 
     assert [call["mode"] for call in calls] == ["start", "reload"]
     assert [call["report_session_records"] for call in calls] == [True, True]
+    assert [call["layout_mode"] for call in calls] == ["auto", "viewer"]
 
 
 def test_switchyard_new_without_sudo_fails_before_writing() -> None:

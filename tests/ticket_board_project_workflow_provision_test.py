@@ -208,8 +208,26 @@ WHERE a.name <> b.name
       IS DISTINCT FROM ticket_board.workflow_transition_allowed_config(a.name, b.name);
 """,
             ) == "0"
-            assert psql(admin_conn, "SELECT ticket_board.workflow_transition_rbac_allowed_config('audit_kick_back', 'audit', 'main');") == "t"
-            assert psql(admin_conn, "SELECT ticket_board.workflow_transition_rbac_allowed_config('audit_kick_back', 'main', 'main');") == "f"
+            aggregate_rbac_expectations = [
+                ("user_reopen", "director", "main", "f"),
+                ("mark_done", "audit", "main", "f"),
+                ("cancel", "app", "main", "f"),
+                ("audit_kick_back", "director", "main", "f"),
+                ("user_reopen", "user", "main", "t"),
+                ("audit_kick_back", "audit", "main", "t"),
+                ("audit_kick_back", "main", "main", "f"),
+            ]
+            for action_name, actor, assignee, expected in aggregate_rbac_expectations:
+                assert (
+                    psql(
+                        admin_conn,
+                        (
+                            "SELECT ticket_board.workflow_transition_rbac_allowed_config("
+                            f"'{action_name}', '{actor}', '{assignee}');"
+                        ),
+                    )
+                    == expected
+                ), (action_name, actor, assignee, expected)
             assert psql(admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('main');") == "t"
             assert psql(admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('app');") == "t"
             assert psql(admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('ops');") == "f"

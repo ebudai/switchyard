@@ -105,12 +105,12 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "('audit', 'in_progress', 'audit_kick_back', ARRAY['audit']::text[]" in combined
     assert "('audit', 'director_review', 'audit_sign_off', ARRAY['audit']::text[]" in combined
     assert "('director_review', 'analysis', 'route', ARRAY['director']::text[]" in combined
-    assert "('director_review', 'analysis', 'user_reopen', ARRAY['user']::text[]" in combined
+    assert "('director_review', 'analysis', 'user_reopen'," in combined
     assert "('director_review', 'in_progress', 'route', ARRAY['director']::text[]" in combined
     assert "('director_review', 'done', 'mark_done', ARRAY['director']::text[]" in combined
     assert "('director_review', 'cancelled', 'cancel', ARRAY['director']::text[]" in combined
     assert "('done', 'analysis', 'route', ARRAY['director']::text[]" in combined
-    assert "('done', 'analysis', 'user_reopen', ARRAY['user']::text[]" in combined
+    assert "('done', 'analysis', 'user_reopen'," in combined
     assert "('cancelled', 'analysis', 'route', ARRAY['director']::text[]" in combined
     assert "('backlog'," not in render_workflow_sql(plan)
     assert "('inspection'," not in render_workflow_sql(plan)

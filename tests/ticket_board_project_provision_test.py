@@ -85,9 +85,9 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "BOARD_ROOT='/home/stellaris-agent/stellaris-ticketboard-live'" in combined
     assert "TICKET_BOARD_PROJECT='stellaris'" in combined
     assert "TICKET_BOARD_SKIP_MIGRATIONS=1" in combined
-    assert "sudo psql -X -v ON_ERROR_STOP=1 'postgresql:///stellaris_ticket_board?host=/var/run/postgresql&user=postgres' -f 'stellaris-workflow.sql'" in combined
-    assert combined.index("scripts/ticket-board-migrate") < combined.index("-f 'stellaris-workflow.sql'")
-    assert combined.index("-f 'stellaris-workflow.sql'") < combined.index("ticket_board/rbac.sql")
+    assert "sudo cat 'stellaris-workflow.sql' | sudo -u postgres psql -X -v ON_ERROR_STOP=1 'postgresql:///stellaris_ticket_board?host=/var/run/postgresql' -f -" in combined
+    assert combined.index("scripts/ticket-board-migrate") < combined.index("sudo cat 'stellaris-workflow.sql'")
+    assert combined.index("sudo cat 'stellaris-workflow.sql'") < combined.index("ticket_board/rbac.sql")
     assert "Seed the default project workflow for stellaris" in combined
     assert "('draft', 'Draft', 0, ARRAY['designer']::text[]" in combined
     assert "('analysis', 'Triage', 1, ARRAY['director']::text[]" in combined
@@ -125,6 +125,41 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "/home/agent/.claude/pgu-tickets-assets" not in combined
     assert "RuntimeDirectory=pgu-ticket-board" not in combined
     assert "/run/pgu-ticket-board/ticket-board.sock" not in combined
+
+
+def test_operator_commands_use_peer_portable_postgres_admin_invocations() -> None:
+    plan = build_plan(project="stellaris", owner_user="stellaris-agent", port=8871)
+    commands = render_operator_commands(plan)
+
+    assert plan.admin_database_url == "postgresql:///stellaris_ticket_board?host=/var/run/postgresql"
+    assert "user=postgres" not in "\n".join(
+        line for line in commands.splitlines() if line.startswith("sudo ")
+    )
+    assert (
+        "sudo cat 'stellaris-database.sql' | "
+        "sudo -u postgres psql -X -v ON_ERROR_STOP=1 -f -"
+    ) in commands
+    assert (
+        "sudo env "
+        "TICKET_BOARD_ADMIN_DATABASE_URL='postgresql:///stellaris_ticket_board?host=/var/run/postgresql' "
+        "'/home/stellaris-agent/stellaris-ticketboard-live/current/scripts/ticket-board-migrate'"
+    ) in commands
+    assert (
+        "sudo cat 'stellaris-workflow.sql' | "
+        "sudo -u postgres psql -X -v ON_ERROR_STOP=1 "
+        "'postgresql:///stellaris_ticket_board?host=/var/run/postgresql' "
+        "-f -"
+    ) in commands
+    assert (
+        "sudo cat '/home/stellaris-agent/stellaris-ticketboard-live/current/scripts/ticket_board/rbac.sql' | "
+        "sudo -u postgres psql -X -v ON_ERROR_STOP=1 "
+        "'postgresql:///stellaris_ticket_board?host=/var/run/postgresql' "
+        "-f -"
+    ) in commands
+    assert "sudo -u postgres psql -X -v ON_ERROR_STOP=1 -f 'stellaris-database.sql'" not in commands
+    assert "sudo -u postgres env TICKET_BOARD_ADMIN_DATABASE_URL=" not in commands
+    assert "sudo -u postgres psql -X -v ON_ERROR_STOP=1 'postgresql:///stellaris_ticket_board?host=/var/run/postgresql' -f 'stellaris-workflow.sql'" not in commands
+    assert "sudo -u postgres psql -X -v ON_ERROR_STOP=1 'postgresql:///stellaris_ticket_board?host=/var/run/postgresql' -f '/home/stellaris-agent/stellaris-ticketboard-live/current/scripts/ticket_board/rbac.sql'" not in commands
 
 
 def test_operator_commands_create_owned_parents_before_systemd_paths() -> None:

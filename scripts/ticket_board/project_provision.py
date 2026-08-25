@@ -200,7 +200,7 @@ def build_plan(
         listener_database_url=(
             f"postgresql:///{resolved_database}?host=/var/run/postgresql&user={listener_role}"
         ),
-        admin_database_url=f"postgresql:///{resolved_database}?host=/var/run/postgresql&user=postgres",
+        admin_database_url=f"postgresql:///{resolved_database}?host=/var/run/postgresql",
         workflow_seed="pgu-full" if project == "pgu" else "default-project",
         draft_roles=draft_roles,
         implementer_roles=resolved_implementer_roles,
@@ -216,6 +216,15 @@ def shell_quote(value: str) -> str:
 
 def sql_identifier(value: str) -> str:
     return '"' + value.replace('"', '""') + '"'
+
+
+def postgres_sql_file_command(sql_file: str, *, database_url: str = "") -> str:
+    command = "sudo cat " + shell_quote(sql_file)
+    command += " | sudo -u postgres psql -X -v ON_ERROR_STOP=1"
+    if database_url:
+        command += " " + shell_quote(database_url)
+    command += " -f -"
+    return command
 
 
 def sql_literal(value: str) -> str:
@@ -555,10 +564,11 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
     )
     workflow_seed_command = ""
     if plan.workflow_seed != "pgu-full":
-        workflow_seed_command = (
-            f"sudo psql -X -v ON_ERROR_STOP=1 {shell_quote(plan.admin_database_url)} "
-            f"-f {shell_quote(plan.project + '-workflow.sql')}\n"
+        workflow_seed_command = postgres_sql_file_command(
+            plan.project + "-workflow.sql",
+            database_url=plan.admin_database_url,
         )
+        workflow_seed_command += "\n"
     install_board_root = owned_directory_command(
         plan,
         owned_ancestor_dirs(plan.owner_user, plan.board_root, include_target=True),
@@ -653,10 +663,10 @@ sudo install -m 0644 {shell_quote(plan.board_unit)} {q_board_unit}
 sudo install -m 0644 {shell_quote(plan.tmpfiles_name)} {q_tmpfiles}
 sudo install -m 0644 {shell_quote(plan.polkit_name)} {q_polkit}
 sudo systemd-tmpfiles --create {q_tmpfiles}
-sudo -u postgres psql -X -v ON_ERROR_STOP=1 -f {shell_quote(plan.project + '-database.sql')}
-sudo TICKET_BOARD_ADMIN_DATABASE_URL={shell_quote(plan.admin_database_url)} {shell_quote(plan.board_current + '/scripts/ticket-board-migrate')}
+{postgres_sql_file_command(plan.project + '-database.sql')}
+sudo env TICKET_BOARD_ADMIN_DATABASE_URL={shell_quote(plan.admin_database_url)} {shell_quote(plan.board_current + '/scripts/ticket-board-migrate')}
 {workflow_seed_command.rstrip()}
-sudo psql -X -v ON_ERROR_STOP=1 {shell_quote(plan.admin_database_url)} -f {shell_quote(plan.board_current + '/scripts/ticket_board/rbac.sql')}
+{postgres_sql_file_command(plan.board_current + '/scripts/ticket_board/rbac.sql', database_url=plan.admin_database_url)}
 sudo systemctl daemon-reload
 sudo systemctl enable --now {plan.board_unit}
 {install_listener_unit_parent}

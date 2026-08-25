@@ -35,6 +35,35 @@ PORT="$(free_port)"
 DBNAME="pgu_migration_runner_test"
 ADMIN_CONN="host=$SOCKET_DIR port=$PORT dbname=$DBNAME user=postgres"
 
+grep -q 'DATABASE_URL="${TICKET_BOARD_ADMIN_DATABASE_URL:-${TICKET_BOARD_DATABASE_URL:-}}"' "$REPO_ROOT/scripts/ticket-board-migrate" || {
+    echo "FAIL: migration runner should not default to the live pgu database" >&2
+    exit 1
+}
+grep -q 'command=(sudo -u postgres "${command\[@\]}")' "$REPO_ROOT/scripts/ticket-board-migrate" || {
+    echo "FAIL: migration runner should drop root psql calls to the postgres OS user" >&2
+    exit 1
+}
+grep -q 'expand_sql_file "$file" | psql_migrate -f -' "$REPO_ROOT/scripts/ticket-board-migrate" || {
+    echo "FAIL: migration runner should feed migration files through stdin" >&2
+    exit 1
+}
+if grep -q 'psql_migrate -f "$file"' "$REPO_ROOT/scripts/ticket-board-migrate"; then
+    echo "FAIL: migration runner should not make postgres-owned psql open migration files" >&2
+    exit 1
+fi
+
+if env -u TICKET_BOARD_ADMIN_DATABASE_URL -u TICKET_BOARD_DATABASE_URL \
+    TICKET_BOARD_MIGRATIONS_DIR="$MIGRATIONS_DIR" "$REPO_ROOT/scripts/ticket-board-migrate" \
+    >"$TMPDIR_T/missing-url.out" 2>"$TMPDIR_T/missing-url.err"; then
+    echo "FAIL: migration runner should fail without an explicit database URL" >&2
+    exit 1
+fi
+grep -q "refusing to default to the live pgu database" "$TMPDIR_T/missing-url.err" || {
+    echo "FAIL: migration runner missing-url failure did not name live-db refusal" >&2
+    cat "$TMPDIR_T/missing-url.err" >&2
+    exit 1
+}
+
 cat >"$MIGRATIONS_DIR/pgu401_create_probe.sql" <<'SQL'
 CREATE SCHEMA IF NOT EXISTS ticket_board;
 CREATE TABLE ticket_board.migration_probe (

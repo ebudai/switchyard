@@ -3292,6 +3292,81 @@ def test_viewer_layout_starts_role_sessions_and_additive_viewer() -> None:
     assert messages == []
 
 
+def test_viewer_visible_start_verifies_cli_before_reporting_success() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-viewer-visible.") as tmp:
+        tmp_path = Path(tmp)
+        config_path = _write_six_visible_role_config(tmp_path)
+        config = load_project_config("porter", config_path)
+        role = next(role for role in config.roles if role.role == "app")
+        runner = FakeRunner()
+        stderr = StringIO()
+
+        with redirect_stderr(stderr):
+            assert (
+                team_launcher.ensure_visible_role_session_for_viewer(
+                    role,
+                    mode="start",
+                    session_dir=tmp_path / "sessions",
+                    pane_state_dir=tmp_path / "pane-state",
+                    runner=runner,
+                )
+                == 0
+            )
+
+        state = _read_pane_state(tmp_path / "pane-state", role.target)
+        assert state["state"] == "idle"
+        assert state["source"] == "team_launcher.start"
+        assert runner.calls[1][:5] == ["tmux", "new-session", "-d", "-s", "porter-app"]
+        assert runner.calls[2] == ["tmux", "display-message", "-p", "-t", "porter-app:0.0", "#{pane_pid}"]
+        assert runner.calls[3] == ["tmux", "display-message", "-p", "-t", "porter-app:0.0", "#{pane_current_command}"]
+        assert "did not leave a live" not in stderr.getvalue()
+
+
+def test_viewer_visible_start_fails_when_cli_exits_immediately() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    role = next(role for role in config.roles if role.role == "app")
+
+    class VanishedViewerRunner:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+            self.created = False
+
+        def __call__(self, args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if args[:2] == ["tmux", "has-session"]:
+                return subprocess.CompletedProcess(args, 1)
+            if args[:2] == ["tmux", "new-session"]:
+                self.created = True
+                return subprocess.CompletedProcess(args, 0)
+            if args[:3] == ["tmux", "display-message", "-p"]:
+                return subprocess.CompletedProcess(args, 0 if self.created else 1, stdout="fish\n" if self.created else "")
+            return subprocess.CompletedProcess(args, 0)
+
+    runner = VanishedViewerRunner()
+    stderr = StringIO()
+
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        tmp_path = Path(tmp)
+        pane_state_dir = tmp_path / "pane-state"
+        with redirect_stderr(stderr):
+            assert (
+                team_launcher.ensure_visible_role_session_for_viewer(
+                    role,
+                    mode="start",
+                    session_dir=tmp_path / "sessions",
+                    pane_state_dir=pane_state_dir,
+                    runner=runner,
+                )
+                == 1
+            )
+
+        assert not (pane_state_dir / pane_state_file_name(role.target)).exists()
+
+    assert any(call[:5] == ["tmux", "new-session", "-d", "-s", "pgu-app"] for call in runner.calls)
+    assert ["tmux", "has-session", "-t", "pgu-app"] in runner.calls
+    assert "role app did not leave a live pgu-app session" in stderr.getvalue()
+
+
 def test_viewer_pane_death_does_not_change_role_targets_in_real_tmux() -> None:
     if shutil.which("tmux") is None:
         return

@@ -404,6 +404,50 @@ SCOPE DISCIPLINE: an absent `control_repository` means today's behaviour EXACTLY
 this work. Migration is an explicit command, never on launch, and moving pgu's panes changes every pane's
 cwd and needs a director-approved restart window -- a separate decision from shipping the new shape.
 
+## First-run authentication (PGU-691 design, accepted 2026-08-26)
+
+A newly provisioned project opens six panes each blocked on something different, and a blocked pane looks
+alive -- which is how PGU-688 hid a dead role for a day. So `new` sequences authentication BEFORE the
+window opens.
+
+THE STRUCTURE, which is what makes it small: **login is per CLI per owner user; trust is per directory.**
+One `codex login` covers all three codex roles. Six worktrees means six claude trust prompts. Logins do
+not multiply with roles.
+
+**We invoke the CLIs' own login commands and nothing else.** Eric, 2026-08-26: "it can't be automated,
+thats a big sec risk." No credential handling, no scripted entry, no storing anything.
+
+| CLI | login | status probe |
+|---|---|---|
+| claude | `claude auth login` | `claude auth status --json` -> `loggedIn` |
+| codex | `codex login` | `codex login status` |
+| agy | no standalone login; guided interactive startup | `agy models` (a real authenticated fetch) |
+
+Do NOT parse `~/.claude/.credentials.json`, OAuth state, or
+`~/.gemini/antigravity-cli/antigravity-oauth-token`. Ask the CLI.
+
+**TRUST IS NOT PRE-SEEDED. Decided, not open.** `~/.claude.json` does key `projects` by absolute path with
+`hasTrustDialogAccepted: true`, and agy has `trustedWorkspaces` -- so it is technically possible. We do not
+do it, and not as an opt-in either:
+
+  - it is a consent bypass through an undocumented config key, and the prompt exists so a human consents
+  - an undocumented key breaks silently on a CLI update, and the failure mode is a project that stops
+    trusting its own worktrees for reasons nobody can see
+  - "opt-in consent bypass" is still a consent bypass
+
+The user answers the trust prompts. `new` makes that a short guided step instead of a scavenger hunt.
+
+ORDER:
+  1. provision config + role worktrees, so the exact trust paths are known
+  2. probe each distinct CLI's auth status as the owner user
+  3. for anything unauthenticated, run that CLI's own login -- **from a neutral cwd (the owner's home),
+     not a worktree**, so a login does not itself trigger a trust prompt
+  4. walk the per-worktree trust prompts
+  5. launch, then print what is still unauthenticated or untrusted
+
+FAILURE POLICY: launch with a clear report. A half-authenticated team is still useful; a silent one is
+not. No hard abort by default.
+
 ## One tmux session with six panes: rejected, twice
 
 Eric tried this when switchyard was first built and abandoned it quickly. The original symptom is

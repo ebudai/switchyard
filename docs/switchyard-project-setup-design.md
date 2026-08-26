@@ -352,6 +352,58 @@ So `deploy checkout <path> has uncommitted changes` is NOT gating deploy CONTENT
 from it: a clean checkout does not mean the release contains what you are looking at, and a local
 commit that has not been pushed will be silently absent from what gets deployed.
 
+## The project directory must stop being the worktree base (PGU-674 design, accepted)
+
+Eric approved the direction 2026-08-25. Today `<project>` does two incompatible jobs: it is the user's
+project AND the ref holder that `ensure_project_worktrees` pins with `checkout --detach --force` plus
+`clean -fdx` on every launch. PGU-673 made that loud; this makes it stop.
+
+**A premise I asserted and got wrong, corrected here so nobody re-derives it.** I wrote that
+"role worktree isolation must survive unchanged". There is no launcher-managed worktree isolation.
+Measured: every role in `config/team-launcher/pgu.json` has no `workdir`, so all seven default to
+`repository`; the live panes all report `/home/agent/Projects/pgu`; and the only `worktree add` in
+`scripts/` is an unrelated demo. `ensure_project_worktrees` is MISNAMED -- it refreshes the shared
+checkout and provisions no worktrees. The isolation that exists is agent-level: each CLI makes its own
+per-task worktree. So this work CREATES launcher-managed role worktrees; it does not relocate them.
+
+THE SHAPE:
+
+| field | meaning |
+|---|---|
+| `repository` | the user-visible checkout. Never force-reset, never cleaned. |
+| `control_repository` | internal BARE base, `~/.local/state/switchyard/projects/<slug>/control.git` |
+| `worktree_base` | existing placement root for managed role worktrees |
+
+Bare, because a bare repo has no working tree and therefore no `checkout --force` or `clean -fdx`
+target -- it removes the root cause rather than moving it. Outside the project tree, because users
+delete and copy project directories.
+
+VERIFIED COMMAND SHAPE (run in scratch by both ops and audit; do not use the earlier sketch):
+
+    git clone --bare "$source_repo" "$control_repository"
+    git -C "$control_repository" config --add remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+    git -C "$control_repository" fetch origin main
+    git --git-dir "$control_repository" worktree add --detach "$worktree_base/<role>" origin/main
+
+Plain `clone --bare` sets NO fetch refspec, so `refs/remotes/origin/main` never appears and
+`worktree add ... origin/main` fails with "invalid reference". `clone --mirror` works but maps branches
+into `refs/heads/*`, forcing the attach ref to `main` and a change to `worktree_ref()`. Bare-plus-refspec
+keeps `origin/main` semantics intact.
+
+MAIN PROTECTION: not achievable in this shape. A pre-receive hook only fires on a PUSH into the bare
+base, and this topology is fetch-based -- nothing pushes into it. Client-side hooks in the visible
+checkout are decorative (not cloned, trivially bypassed). Getting real local main protection would
+require role worktrees pushing INTO the control repo, which is a workflow change, not a hook.
+
+THE RESET IS RELOCATED, NOT ELIMINATED. Managed role worktrees still get `reset --hard origin/main` and
+`clean -fdx`. Audit measured it: an uncommitted file in a role worktree is deleted, a dirty tracked edit
+reverted. That is defensible -- they are launcher state by construction -- but PGU-673's warning guards
+`repository`, so it MUST move with the reset or the defect reappears one directory over, aimed at agents.
+
+SCOPE DISCIPLINE: an absent `control_repository` means today's behaviour EXACTLY. pgu is not migrated by
+this work. Migration is an explicit command, never on launch, and moving pgu's panes changes every pane's
+cwd and needs a director-approved restart window -- a separate decision from shipping the new shape.
+
 ## One tmux session with six panes: rejected, twice
 
 Eric tried this when switchyard was first built and abandoned it quickly. The original symptom is

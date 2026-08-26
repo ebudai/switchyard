@@ -231,6 +231,41 @@ def _layout_command_role_tree(node: object) -> object:
     return None
 
 
+def _literal_layout_from_session_tree(node: object) -> dict[str, object]:
+    if isinstance(node, dict):
+        return {
+            "Orientation": node["Orientation"],
+            "Widgets": [_literal_layout_from_session_tree(child) for child in node["Widgets"]],
+        }
+    return {
+        "Command": "",
+        "SessionRestoreId": int(node),
+        "WorkingDirectory": "",
+    }
+
+
+FROZEN_STACKED_SIX_LAYOUT = _literal_layout_from_session_tree(
+    {
+        "Orientation": "Horizontal",
+        "Widgets": [
+            0,
+            {"Orientation": "Vertical", "Widgets": [1, 2, 3, 4, 5]},
+        ],
+    }
+)
+
+FROZEN_COLUMN_MAJOR_SIX_LAYOUT = _literal_layout_from_session_tree(
+    {
+        "Orientation": "Horizontal",
+        "Widgets": [
+            {"Orientation": "Vertical", "Widgets": [0, 1]},
+            {"Orientation": "Vertical", "Widgets": [2, 3]},
+            {"Orientation": "Vertical", "Widgets": [4, 5]},
+        ],
+    }
+)
+
+
 def _write_launcher_config(
     directory: Path,
     *,
@@ -373,12 +408,13 @@ def test_upgrade_refreshes_legacy_generated_provision_layout() -> None:
         provision_dir.mkdir(parents=True)
         layout_path = provision_dir / "otto-konsole-layout.json"
         layout_path.write_text(
-            json.dumps(team_launcher._legacy_new_project_stacked_layout_payload(6), indent=2, sort_keys=True) + "\n",
+            json.dumps(FROZEN_STACKED_SIX_LAYOUT, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
         config_path = _write_launcher_config(provision_dir)
         config = load_project_config("otto", config_path)
 
+        assert team_launcher._legacy_new_project_stacked_layout_payload(6) == FROZEN_STACKED_SIX_LAYOUT
         result = team_launcher.upgrade_generated_project_layout(config, config_path=config_path)
 
         assert result.changed
@@ -394,12 +430,13 @@ def test_upgrade_refreshes_column_major_generated_provision_layout() -> None:
         provision_dir.mkdir(parents=True)
         layout_path = provision_dir / "otto-konsole-layout.json"
         layout_path.write_text(
-            json.dumps(team_launcher._legacy_new_project_column_major_layout_payload(6), indent=2, sort_keys=True) + "\n",
+            json.dumps(FROZEN_COLUMN_MAJOR_SIX_LAYOUT, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
         config_path = _write_launcher_config(provision_dir)
         config = load_project_config("otto", config_path)
 
+        assert team_launcher._legacy_new_project_column_major_layout_payload(6) == FROZEN_COLUMN_MAJOR_SIX_LAYOUT
         result = team_launcher.upgrade_generated_project_layout(config, config_path=config_path)
 
         assert result.changed
@@ -496,7 +533,7 @@ def test_launch_auto_upgrades_column_major_layout_before_materializing() -> None
         provision_dir.mkdir(parents=True)
         layout_path = provision_dir / "otto-konsole-layout.json"
         layout_path.write_text(
-            json.dumps(team_launcher._legacy_new_project_column_major_layout_payload(6), indent=2, sort_keys=True) + "\n",
+            json.dumps(FROZEN_COLUMN_MAJOR_SIX_LAYOUT, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
         config_path = _write_launcher_config(provision_dir)
@@ -564,7 +601,7 @@ def test_launch_dry_run_does_not_upgrade_legacy_generated_layout() -> None:
         provision_dir = Path(tmp) / ".switchyard" / "provision"
         provision_dir.mkdir(parents=True)
         layout_path = provision_dir / "otto-konsole-layout.json"
-        legacy_layout = team_launcher._legacy_new_project_stacked_layout_payload(6)
+        legacy_layout = FROZEN_STACKED_SIX_LAYOUT
         legacy_text = json.dumps(legacy_layout, indent=2, sort_keys=True) + "\n"
         layout_path.write_text(legacy_text, encoding="utf-8")
         config_path = _write_launcher_config(provision_dir)
@@ -606,7 +643,7 @@ def test_switchyard_upgrade_command_updates_registered_project_layout() -> None:
         registry_dir.mkdir()
         layout_path = provision_dir / "otto-konsole-layout.json"
         layout_path.write_text(
-            json.dumps(team_launcher._legacy_new_project_column_major_layout_payload(6), indent=2, sort_keys=True) + "\n",
+            json.dumps(FROZEN_COLUMN_MAJOR_SIX_LAYOUT, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
         config_path = _write_launcher_config(provision_dir)

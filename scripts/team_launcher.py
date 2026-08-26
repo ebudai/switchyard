@@ -3181,16 +3181,17 @@ def launch_project(
     if mode not in {"attach", "attach-or-start", "reload"}:
         raise SystemExit(f"unknown launch mode: {mode}")
     worktree_runner = runner
+    role_process_runner = runner
     owner_runner_anchor = config.repository or config.pane_launcher
-    if config.run_as_user and owner_runner_anchor is not None and (
-        config.control_repository is not None or config.pane_launcher is not None
-    ):
-        worktree_runner = _owner_project_git_runner(
-            owner_user=config.run_as_user,
-            project_dir=owner_runner_anchor,
-            owned_roots=_control_repository_owned_roots(config),
-            runner=runner,
-        )
+    if config.run_as_user and current_user_name() != config.run_as_user:
+        role_process_runner = _owner_process_runner(owner_user=config.run_as_user, runner=runner)
+        if owner_runner_anchor is not None:
+            worktree_runner = _owner_project_git_runner(
+                owner_user=config.run_as_user,
+                project_dir=owner_runner_anchor,
+                owned_roots=_control_repository_owned_roots(config),
+                runner=runner,
+            )
     effective_pane_state_dir = pane_state_dir or DEFAULT_PANE_STATE_DIR
     output_path = layout_output or default_layout_output_path(config, config_path=config_path)
     should_assign_layout_owner = layout_output is None if assign_layout_owner is None else assign_layout_owner
@@ -3303,7 +3304,7 @@ def launch_project(
             session_dir=config.session_dir,
             pane_state_dir=effective_pane_state_dir,
             force_reload=force_reload,
-            runner=runner,
+            runner=role_process_runner,
         )
         if result != 0:
             return result
@@ -3320,7 +3321,7 @@ def launch_project(
                 session_dir=config.session_dir,
                 pane_state_dir=effective_pane_state_dir,
                 force_reload=force_reload,
-                runner=runner,
+                runner=role_process_runner,
             )
             if result != 0:
                 return result
@@ -4281,6 +4282,17 @@ def _owner_project_git_runner(
             if git_path is not None and is_owned_path(git_path):
                 return runner(["sudo", "-u", owner_user, *args], **kwargs)
         return runner(args, **kwargs)
+
+    return wrapped
+
+
+def _owner_process_runner(
+    *,
+    owner_user: str,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> Callable[..., subprocess.CompletedProcess[Any]]:
+    def wrapped(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        return runner(["sudo", "-u", owner_user, "-H", *args], **kwargs)
 
     return wrapped
 

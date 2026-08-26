@@ -89,6 +89,7 @@ from scripts.team_launcher import (
     switchyard_menu_command,
     switchyard_new_command,
     switchyard_register_command,
+    tmux_has_session_args,
     worktree_ref,
 )
 
@@ -177,6 +178,18 @@ class FakeRunner:
         if len(args) >= 6 and args[:6] == ["git", "-C", args[2], "rev-list", "--left-right", "--count"]:
             return subprocess.CompletedProcess(args, 0, stdout="0 0\n")
         return subprocess.CompletedProcess(args, 0)
+
+
+class SudoAwareFakeRunner(FakeRunner):
+    def __call__(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if args[:3] == ["sudo", "-u", "agent"]:
+            self.calls.append(args)
+            inner = args[4:] if len(args) > 3 and args[3] == "-H" else args[3:]
+            result = super().__call__(inner, **kwargs)
+            if self.calls and self.calls[-1] == inner:
+                self.calls.pop()
+            return result
+        return super().__call__(args, **kwargs)
 
 
 def _leaf_commands(node: object) -> list[str]:
@@ -3063,6 +3076,86 @@ def test_start_runs_research_detached_before_opening_visible_layout() -> None:
         assert {leaf.get("WorkingDirectory") for leaf in team_launcher._layout_leaves(layout)} == {str(tmp_path / "repo")}
         assert runner.calls[-1] == konsole_launch_args(layout_output)
         assert ["tmux", "attach", "-t", "pgu-research"] not in runner.calls
+
+
+def test_plain_shared_checkout_git_runs_as_owner_when_launcher_user_differs() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-owner-git.") as tmp:
+        tmp_path = Path(tmp)
+        config_path = _write_pgu_config_with_shared_checkout(tmp_path)
+        config = load_project_config("pgu", config_path)
+        runner = SudoAwareFakeRunner(current_commands={"pgu-research:0.0": "claude"})
+        layout_output = tmp_path / "layout.json"
+        original_current_user_name = team_launcher.current_user_name
+        try:
+            team_launcher.current_user_name = lambda: "root"
+            assert (
+                launch_project(
+                    config,
+                    config_path=config_path,
+                    mode="start",
+                    script_path=ROOT / "scripts" / "team-launcher",
+                    runner=runner,
+                    layout_output=layout_output,
+                    pane_state_dir=tmp_path / "pane-state",
+                )
+                == 0
+            )
+        finally:
+            team_launcher.current_user_name = original_current_user_name
+
+        owner_git_calls = [
+            call[3:]
+            for call in runner.calls
+            if call[:3] == ["sudo", "-u", "agent"] and len(call) > 3 and call[3] == "git"
+        ]
+        expected_refresh_calls = {
+            tuple(git_fetch_worktree_ref_args(config)),
+            tuple(git_shared_checkout_check_args(config)),
+            tuple(team_launcher.git_shared_checkout_status_porcelain_args(config)),
+            tuple(team_launcher.git_clean_shared_checkout_dry_run_args(config)),
+            tuple(git_checkout_shared_ref_args(config)),
+            tuple(git_clean_shared_checkout_args(config)),
+        }
+        assert {tuple(call) for call in owner_git_calls} >= expected_refresh_calls
+        direct_refresh_calls = [
+            call
+            for call in runner.calls
+            if tuple(call) in expected_refresh_calls
+        ]
+        assert direct_refresh_calls == []
+        assert ["sudo", "-u", "agent", "-H", *tmux_has_session_args(next(role for role in config.roles if role.role == "research"))] in runner.calls
+        assert any(
+            call[:9] == ["sudo", "-u", "agent", "-H", "tmux", "new-session", "-d", "-s", "pgu-research"]
+            for call in runner.calls
+        )
+
+
+def test_plain_shared_checkout_git_stays_direct_when_already_owner() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-owner-git.") as tmp:
+        tmp_path = Path(tmp)
+        config_path = _write_pgu_config_with_shared_checkout(tmp_path)
+        config = load_project_config("pgu", config_path)
+        runner = FakeRunner(current_commands={"pgu-research:0.0": "claude"})
+        original_current_user_name = team_launcher.current_user_name
+        try:
+            team_launcher.current_user_name = lambda: "agent"
+            assert (
+                launch_project(
+                    config,
+                    config_path=config_path,
+                    mode="start",
+                    script_path=ROOT / "scripts" / "team-launcher",
+                    runner=runner,
+                    layout_output=tmp_path / "layout.json",
+                    pane_state_dir=tmp_path / "pane-state",
+                )
+                == 0
+            )
+        finally:
+            team_launcher.current_user_name = original_current_user_name
+
+        assert git_fetch_worktree_ref_args(config) in runner.calls
+        assert not any(call[:3] == ["sudo", "-u", "agent"] and len(call) > 3 and call[3] == "git" for call in runner.calls)
 
 
 def test_control_repository_launch_uses_role_worktrees_and_preserves_repository() -> None:

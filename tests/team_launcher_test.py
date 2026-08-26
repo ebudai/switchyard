@@ -1132,6 +1132,61 @@ def test_dry_run_materializes_pgu_layout_with_six_visible_role_commands() -> Non
         assert not any(" perf " in f" {command} " for command in commands)
 
 
+def test_pane_command_sudos_to_configured_owner_when_launcher_user_differs() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    role = next(role for role in config.roles if role.role == "ops")
+    original_current_user_name = team_launcher.current_user_name
+    try:
+        team_launcher.current_user_name = lambda: "root"
+        command = team_launcher.pane_command(
+            config.project,
+            role,
+            config_path=ROOT / "config" / "team-launcher" / "pgu.json",
+            mode="attach-or-start",
+            script_path=ROOT / "scripts" / "team-launcher",
+            skip_launcher_check=True,
+            run_as_user="agent",
+        )
+    finally:
+        team_launcher.current_user_name = original_current_user_name
+
+    tokens = shlex.split(command)
+    assert tokens[:4] == ["sudo", "-u", "agent", "-H"]
+    assert tokens[4:] == [
+        str(ROOT / "scripts" / "team-launcher"),
+        "pgu",
+        "pane",
+        "attach-or-start",
+        "ops",
+        "--config",
+        str(ROOT / "config" / "team-launcher" / "pgu.json"),
+        "--skip-launcher-check",
+    ]
+
+
+def test_pane_command_does_not_sudo_when_already_owner() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    role = next(role for role in config.roles if role.role == "ops")
+    original_current_user_name = team_launcher.current_user_name
+    try:
+        team_launcher.current_user_name = lambda: "agent"
+        command = team_launcher.pane_command(
+            config.project,
+            role,
+            config_path=ROOT / "config" / "team-launcher" / "pgu.json",
+            mode="attach-or-start",
+            script_path=ROOT / "scripts" / "team-launcher",
+            skip_launcher_check=True,
+            run_as_user="agent",
+        )
+    finally:
+        team_launcher.current_user_name = original_current_user_name
+
+    tokens = shlex.split(command)
+    assert tokens[:4] != ["sudo", "-u", "agent", "-H"]
+    assert tokens[0] == str(ROOT / "scripts" / "team-launcher")
+
+
 def test_launch_project_default_layout_uses_project_scoped_switchyard_not_tmp() -> None:
     project = f"layoutsafe{os.getpid()}"
     stale_tmp_layout = Path(tempfile.gettempdir()) / f"{project}-team-layout.json"
@@ -5519,14 +5574,16 @@ def test_legacy_and_switchyard_entrypoints_render_same_plain_konsole_command() -
         config_dir: Path,
         registry_dir: Path,
         layout_output: Path,
-    ) -> list[str]:
+    ) -> tuple[list[str], list[str]]:
         runner = FakeRunner()
         original_launch_project = team_launcher.launch_project
         original_config_dir = team_launcher.DEFAULT_CONFIG_DIR
         original_registry_dir = team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR
+        original_current_user_name = team_launcher.current_user_name
         try:
             team_launcher.DEFAULT_CONFIG_DIR = config_dir
             team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
+            team_launcher.current_user_name = lambda: "root"
 
             def launch_with_fake_runner(config: team_launcher.ProjectConfig, **kwargs: object) -> int:
                 kwargs["runner"] = runner
@@ -5545,10 +5602,12 @@ def test_legacy_and_switchyard_entrypoints_render_same_plain_konsole_command() -
             team_launcher.launch_project = original_launch_project
             team_launcher.DEFAULT_CONFIG_DIR = original_config_dir
             team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = original_registry_dir
+            team_launcher.current_user_name = original_current_user_name
 
         konsole_calls = [call for call in runner.calls if "konsole" in call]
         assert len(konsole_calls) == 1
-        return konsole_calls[0]
+        pane_commands = _leaf_commands(json.loads(layout_output.read_text(encoding="utf-8")))
+        return konsole_calls[0], pane_commands
 
     original_host_wayland = os.environ.get("HOST_WAYLAND_DISPLAY")
     original_legacy_host_wayland = os.environ.get("PGU_HOST_WAYLAND_DISPLAY")
@@ -5580,14 +5639,14 @@ def test_legacy_and_switchyard_entrypoints_render_same_plain_konsole_command() -
             legacy_layout = tmp_path / "legacy-layout.json"
             switchyard_layout = tmp_path / "switchyard-layout.json"
 
-            legacy_command = run_entrypoint(
+            legacy_command, legacy_pane_commands = run_entrypoint(
                 ["team-launcher"],
                 config_path=config_path,
                 config_dir=config_dir,
                 registry_dir=registry_dir,
                 layout_output=legacy_layout,
             )
-            switchyard_command = run_entrypoint(
+            switchyard_command, switchyard_pane_commands = run_entrypoint(
                 ["switchyard"],
                 config_path=config_path,
                 config_dir=config_dir,
@@ -5613,6 +5672,12 @@ def test_legacy_and_switchyard_entrypoints_render_same_plain_konsole_command() -
             "--layout",
             str(switchyard_layout),
         ]
+        assert len(legacy_pane_commands) == 1
+        assert len(switchyard_pane_commands) == 1
+        assert shlex.split(legacy_pane_commands[0])[:4] == ["sudo", "-u", "agent", "-H"]
+        assert shlex.split(switchyard_pane_commands[0])[:4] == ["sudo", "-u", "agent", "-H"]
+        assert " pane attach-or-start ops " in f" {legacy_pane_commands[0]} "
+        assert " pane attach-or-start ops " in f" {switchyard_pane_commands[0]} "
     finally:
         os.environ.pop("HOST_WAYLAND_DISPLAY", None)
         if original_host_wayland is not None:

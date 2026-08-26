@@ -2857,6 +2857,7 @@ def pane_command(
     pane_state_dir: Path | None = None,
     force_reload: bool = False,
     skip_launcher_check: bool = False,
+    run_as_user: str = "",
 ) -> str:
     args = [
         str(script_path),
@@ -2873,6 +2874,8 @@ def pane_command(
         args.append("--skip-launcher-check")
     if pane_state_dir is not None:
         args.extend(["--pane-state-dir", str(pane_state_dir)])
+    if run_as_user and current_user_name() != run_as_user:
+        args = ["sudo", "-u", run_as_user, "-H", *args]
     return _quote_command(args)
 
 
@@ -2916,6 +2919,7 @@ def materialize_layout(
                 pane_state_dir=pane_state_dir,
                 force_reload=force_reload,
                 skip_launcher_check=True,
+                run_as_user=config.run_as_user,
             )
             leaf["WorkingDirectory"] = role.workdir
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3256,6 +3260,7 @@ def launch_project(
                         pane_state_dir=pane_state_dir,
                         force_reload=force_reload,
                         skip_launcher_check=True,
+                        run_as_user=config.run_as_user,
                     )
                 ),
                 "worktree_error": failed_roles.get(role.role, ""),

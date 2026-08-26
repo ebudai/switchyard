@@ -28,6 +28,8 @@ from scripts.ticket_board.project_provision import (
 )
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "team-launcher"
+DEFAULT_SWITCHYARD_REGISTRY_DIR = Path("/etc/switchyard/projects")
+SWITCHYARD_REGISTRY_SCHEMA = "switchyard.project-registry.v1"
 SWITCHYARD_NAME = "switchyard"
 TEAM_LAUNCHER_NAME = "team-launcher"
 DEFAULT_LEGACY_RUNTIME_SESSION_DIR = Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-sessions")
@@ -3958,23 +3960,106 @@ def _project_entries(config_dir: Path | None = None) -> list[SwitchyardProjectEn
     return entries
 
 
+def _registry_project_entries(registry_dir: Path | None = None) -> list[SwitchyardProjectEntry]:
+    registry_dir = registry_dir or DEFAULT_SWITCHYARD_REGISTRY_DIR
+    entries: list[SwitchyardProjectEntry] = []
+    try:
+        paths = sorted(path for path in registry_dir.iterdir() if path.is_file() and path.suffix == ".json")
+    except OSError:
+        return []
+    for path in paths:
+        try:
+            raw = _load_json(path)
+        except (OSError, json.JSONDecodeError, SystemExit):
+            continue
+        if str(raw.get("schema") or "") != SWITCHYARD_REGISTRY_SCHEMA:
+            continue
+        slug = str(raw.get("slug") or "").strip()
+        name = str(raw.get("name") or slug).strip() or slug
+        config_path_raw = str(raw.get("config_path") or "").strip()
+        if not slug or not config_path_raw:
+            continue
+        entries.append(SwitchyardProjectEntry(slug=slug, name=name, config_path=Path(config_path_raw).expanduser()))
+    return entries
+
+
+def _switchyard_entries(
+    *,
+    config_dir: Path | None = None,
+    registry_dir: Path | None = None,
+) -> list[SwitchyardProjectEntry]:
+    entries: dict[str, SwitchyardProjectEntry] = {}
+    for entry in [*_project_entries(config_dir), *_registry_project_entries(registry_dir)]:
+        key = entry.slug.casefold()
+        entries.setdefault(key, entry)
+    return sorted(entries.values(), key=lambda entry: (entry.name.casefold(), entry.slug.casefold()))
+
+
+def _register_switchyard_project(
+    config_path: Path,
+    *,
+    registry_dir: Path | None = None,
+) -> Path:
+    resolved_config_path = config_path.expanduser().resolve(strict=False)
+    raw = _load_json(resolved_config_path)
+    slug = str(raw.get("project") or resolved_config_path.stem).strip()
+    if not slug:
+        raise SystemExit(f"switchyard: cannot register {resolved_config_path}: project slug is empty")
+    load_project_config(slug, resolved_config_path)
+    name = str(raw.get("project_name") or raw.get("name") or slug).strip() or slug
+    registry_dir = registry_dir or DEFAULT_SWITCHYARD_REGISTRY_DIR
+    registry_path = registry_dir / f"{slug}.json"
+    payload = {
+        "schema": SWITCHYARD_REGISTRY_SCHEMA,
+        "slug": slug,
+        "name": name,
+        "config_path": str(resolved_config_path),
+    }
+    try:
+        registry_dir.mkdir(parents=True, exist_ok=True)
+        registry_dir.parent.chmod(0o755)
+        registry_dir.chmod(0o755)
+        registry_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        registry_path.chmod(0o644)
+    except OSError as exc:
+        raise SystemExit(f"switchyard: failed to register project {slug!r} in {registry_dir}: {exc}") from exc
+    return registry_path
+
+
+def switchyard_register_command(
+    config_path: Path,
+    *,
+    registry_dir: Path | None = None,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    registry_path = _register_switchyard_project(config_path, registry_dir=registry_dir)
+    print_func(f"switchyard: registered {config_path.expanduser().resolve(strict=False)} at {registry_path}")
+    return 0
+
+
 def switchyard_menu_command(
     *,
     config_dir: Path | None = None,
+    registry_dir: Path | None = None,
     print_func: Callable[[str], None] = print,
 ) -> int:
     print_func("new...")
-    for entry in _project_entries(config_dir):
+    for entry in _switchyard_entries(config_dir=config_dir, registry_dir=registry_dir):
         suffix = f" ({entry.slug})" if entry.name.casefold() != entry.slug.casefold() else ""
         print_func(f"{entry.name}{suffix}")
     return 0
 
 
-def _resolve_switchyard_project(selection: str, *, config_dir: Path | None = None) -> SwitchyardProjectEntry:
+def _resolve_switchyard_project(
+    selection: str,
+    *,
+    config_dir: Path | None = None,
+    registry_dir: Path | None = None,
+) -> SwitchyardProjectEntry:
     wanted = selection.strip().casefold()
     if not wanted:
         raise SystemExit("switchyard: project name cannot be empty")
-    entries = _project_entries(config_dir)
+    entries = _switchyard_entries(config_dir=config_dir, registry_dir=registry_dir)
     exact = [
         entry
         for entry in entries
@@ -4034,6 +4119,7 @@ def switchyard_new_command(
     session_record_poll: float = LAUNCH_SESSION_RECORD_POLL_SECONDS,
     layout_mode: str = LAYOUT_MODE_AUTO,
     layout_environ: dict[str, str] | None = None,
+    registry_dir: Path | None = None,
     input_func: Callable[[str], str] = input,
     print_func: Callable[[str], None] = print,
 ) -> int:
@@ -4189,6 +4275,7 @@ def switchyard_new_command(
     )
     config_path = provision_dir / f"{resolved_slug}.json"
     config = load_project_config(resolved_slug, config_path)
+    _register_switchyard_project(config_path, registry_dir=registry_dir)
     owned_launch_roots: list[Path] = []
     if config.control_repository is not None:
         owned_launch_roots.append(config.control_repository)
@@ -4324,6 +4411,12 @@ def _build_switchyard_new_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_switchyard_register_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="switchyard register", description="Register an existing Switchyard project config.")
+    parser.add_argument("config_path", type=Path, help="path to the project's generated launcher config JSON")
+    return parser
+
+
 def switchyard_main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
@@ -4343,6 +4436,9 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             yes=args.yes,
             layout_mode=args.layout,
         )
+    if argv[0].casefold() == "register":
+        args = _build_switchyard_register_parser().parse_args(argv[1:])
+        return switchyard_register_command(args.config_path)
     selection = " ".join(argv)
     entry = _resolve_switchyard_project(selection)
     config = load_project_config(entry.slug, entry.config_path)

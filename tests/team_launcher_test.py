@@ -87,6 +87,7 @@ from scripts.team_launcher import (
     switchyard_main,
     switchyard_menu_command,
     switchyard_new_command,
+    switchyard_register_command,
     worktree_ref,
 )
 
@@ -3470,6 +3471,7 @@ def test_design_cli_writes_project_artifact_noninteractively() -> None:
 def test_switchyard_menu_lists_new_first_then_projects() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-menu.") as tmp:
         tmp_path = Path(tmp)
+        registry_dir = tmp_path / "registry"
         layout = tmp_path / "layout.json"
         layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
         (tmp_path / "porter.json").write_text(
@@ -3486,14 +3488,168 @@ def test_switchyard_menu_lists_new_first_then_projects() -> None:
         )
         lines: list[str] = []
 
-        assert switchyard_menu_command(config_dir=tmp_path, print_func=lines.append) == 0
+        assert switchyard_menu_command(config_dir=tmp_path, registry_dir=registry_dir, print_func=lines.append) == 0
 
     assert lines == ["new...", "Porter System (porter)"]
+
+
+def test_switchyard_registry_registers_pointer_and_survives_checkout_clean() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-registry.") as tmp:
+        tmp_path = Path(tmp)
+        checkout_config_dir = tmp_path / "checkout" / "config" / "team-launcher"
+        registry_dir = tmp_path / "etc" / "switchyard" / "projects"
+        project_config_dir = tmp_path / "otto" / ".switchyard" / "provision"
+        layout = tmp_path / "layout.json"
+        checkout_config_dir.mkdir(parents=True)
+        project_config_dir.mkdir(parents=True)
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        pgu_config = checkout_config_dir / "pgu.json"
+        pgu_config.write_text(
+            json.dumps(
+                {
+                    "project": "pgu",
+                    "layout": str(layout),
+                    "roles": [{"role": "director", "slot": 0, "cli": ["claude"], "workdir": str(tmp_path / "pgu")}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        otto_config = project_config_dir / "otto.json"
+        otto_config.write_text(
+            json.dumps(
+                {
+                    "project": "otto",
+                    "project_name": "Otto System",
+                    "layout": str(layout),
+                    "roles": [{"role": "director", "slot": 0, "cli": ["claude"], "workdir": str(tmp_path / "otto")}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        lines: list[str] = []
+
+        assert switchyard_register_command(otto_config, registry_dir=registry_dir, print_func=lines.append) == 0
+        pointer = json.loads((registry_dir / "otto.json").read_text(encoding="utf-8"))
+        assert pointer == {
+            "schema": team_launcher.SWITCHYARD_REGISTRY_SCHEMA,
+            "slug": "otto",
+            "name": "Otto System",
+            "config_path": str(otto_config.resolve(strict=False)),
+        }
+        assert (registry_dir / "otto.json").stat().st_mode & 0o777 == 0o644
+        assert team_launcher._resolve_switchyard_project("otto", config_dir=checkout_config_dir, registry_dir=registry_dir).config_path == otto_config
+
+        _run_git(["git", "init", "-b", "main"], cwd=tmp_path / "checkout")
+        _run_git(["git", "config", "user.email", "agent@example.invalid"], cwd=tmp_path / "checkout")
+        _run_git(["git", "config", "user.name", "PGU Agent"], cwd=tmp_path / "checkout")
+        _run_git(["git", "add", "config/team-launcher/pgu.json"], cwd=tmp_path / "checkout")
+        _run_git(["git", "commit", "-m", "tracked pgu config"], cwd=tmp_path / "checkout")
+        (checkout_config_dir / "stray.json").write_text("{}\n", encoding="utf-8")
+        _run_git(["git", "clean", "-fdx"], cwd=tmp_path / "checkout")
+
+        menu_lines: list[str] = []
+        assert switchyard_menu_command(config_dir=checkout_config_dir, registry_dir=registry_dir, print_func=menu_lines.append) == 0
+        assert menu_lines == ["new...", "Otto System (otto)", "pgu"]
+        assert (registry_dir / "otto.json").is_file()
+        assert team_launcher._resolve_switchyard_project("pgu", config_dir=checkout_config_dir, registry_dir=registry_dir).config_path == pgu_config
+
+    assert lines and "switchyard: registered" in lines[0]
+
+
+def test_switchyard_register_cli_enables_launch_by_name_without_config_flag() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-register.") as tmp:
+        tmp_path = Path(tmp)
+        config_dir = tmp_path / "empty-checkout-config"
+        registry_dir = tmp_path / "registry"
+        project_config_dir = tmp_path / "otto" / ".switchyard" / "provision"
+        layout = tmp_path / "layout.json"
+        config_dir.mkdir()
+        project_config_dir.mkdir(parents=True)
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        config_path = project_config_dir / "otto.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "otto",
+                    "project_name": "Otto System",
+                    "layout": str(layout),
+                    "roles": [{"role": "director", "slot": 0, "cli": ["claude"], "workdir": str(tmp_path / "otto")}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        calls: list[dict[str, object]] = []
+        original_config_dir = team_launcher.DEFAULT_CONFIG_DIR
+        original_registry_dir = team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR
+        original_launch_project = team_launcher.launch_project
+        try:
+            team_launcher.DEFAULT_CONFIG_DIR = config_dir
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
+
+            def fake_launch_project(config: team_launcher.ProjectConfig, **kwargs: object) -> int:
+                calls.append({"project": config.project, **kwargs})
+                return 0
+
+            team_launcher.launch_project = fake_launch_project
+            assert switchyard_main(["register", str(config_path)]) == 0
+            assert switchyard_main(["otto"]) == 0
+        finally:
+            team_launcher.DEFAULT_CONFIG_DIR = original_config_dir
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = original_registry_dir
+            team_launcher.launch_project = original_launch_project
+
+    assert calls
+    assert calls[0]["project"] == "otto"
+    assert calls[0]["config_path"] == config_path
+    assert calls[0]["mode"] == "start"
+    assert calls[0]["report_session_records"] is True
+
+
+def test_switchyard_registry_does_not_change_pgu_resolution_or_launch_config() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-pgu-registry.") as tmp:
+        registry_dir = Path(tmp) / "registry"
+        registry_dir.mkdir()
+        (registry_dir / "otto.json").write_text(
+            json.dumps(
+                {
+                    "schema": team_launcher.SWITCHYARD_REGISTRY_SCHEMA,
+                    "slug": "otto",
+                    "name": "Otto System",
+                    "config_path": "/home/otto-agent/Projects/otto/.switchyard/provision/otto.json",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        calls: list[dict[str, object]] = []
+        original_registry_dir = team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR
+        original_launch_project = team_launcher.launch_project
+        try:
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
+
+            def fake_launch_project(config: team_launcher.ProjectConfig, **kwargs: object) -> int:
+                calls.append({"project": config.project, "workdirs": [role.workdir for role in config.roles], **kwargs})
+                return 0
+
+            team_launcher.launch_project = fake_launch_project
+            assert switchyard_main(["pgu"]) == 0
+        finally:
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = original_registry_dir
+            team_launcher.launch_project = original_launch_project
+
+    assert calls
+    assert calls[0]["project"] == "pgu"
+    assert calls[0]["config_path"] == ROOT / "config" / "team-launcher" / "pgu.json"
+    assert set(calls[0]["workdirs"]) == {"/home/agent/Projects/pgu"}
 
 
 def test_switchyard_project_name_argv_joins_and_resumes_matching_project() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-open.") as tmp:
         tmp_path = Path(tmp)
+        registry_dir = tmp_path / "registry"
         layout = tmp_path / "layout.json"
         layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
         config_path = tmp_path / "porter.json"
@@ -3511,9 +3667,11 @@ def test_switchyard_project_name_argv_joins_and_resumes_matching_project() -> No
         )
         calls: list[dict[str, object]] = []
         original_config_dir = team_launcher.DEFAULT_CONFIG_DIR
+        original_registry_dir = team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR
         original_launch_project = team_launcher.launch_project
         try:
             team_launcher.DEFAULT_CONFIG_DIR = tmp_path
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
 
             def fake_launch_project(config: team_launcher.ProjectConfig, **kwargs: object) -> int:
                 calls.append({"project": config.project, **kwargs})
@@ -3523,6 +3681,7 @@ def test_switchyard_project_name_argv_joins_and_resumes_matching_project() -> No
             assert switchyard_main(["my", "project", "name"]) == 0
         finally:
             team_launcher.DEFAULT_CONFIG_DIR = original_config_dir
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = original_registry_dir
             team_launcher.launch_project = original_launch_project
 
     assert calls
@@ -3781,6 +3940,7 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
         source_repo.mkdir()
         project_dir = home_base / "otto-agent" / "Projects" / "porter-system"
         provision_dir = project_dir / ".switchyard" / "provision"
+        registry_dir = tmp_path / "registry"
         runner = NewProjectRunner(owner_user="otto-agent", project_dir=project_dir)
         stdout = StringIO()
 
@@ -3800,6 +3960,7 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
                     port_in_use=lambda _port: False,
                     socket_exists=lambda _path: False,
                     session_record_timeout=0,
+                    registry_dir=registry_dir,
                 )
                 == 0
         )
@@ -3814,9 +3975,13 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
         designer_env = next(role["env"] for role in config["roles"] if role["role"] == "designer")
         director_env = next(role["env"] for role in config["roles"] if role["role"] == "director")
         designer_onboarding = (project_dir / ".switchyard" / "DESIGNER_ONBOARDING.md").read_text(encoding="utf-8")
+        registry_pointer = json.loads((registry_dir / "porter.json").read_text(encoding="utf-8"))
 
         assert chown_call_index < next(index for index, call in enumerate(runner.calls) if call == ["sudo", "-v"])
         assert artifact["project"]["repository"] == str(project_dir)
+        assert registry_pointer["config_path"] == str((provision_dir / "porter.json").resolve(strict=False))
+        assert registry_pointer["name"] == "Porter System"
+        assert registry_pointer["slug"] == "porter"
         assert artifact["project"]["roles"] == ["app", "main"]
         assert plan["implementer_roles"] == ["app", "main"]
         assert [role["role"] for role in config["roles"]] == ["designer", "director", "audit", "ops", "app", "main"]
@@ -3893,6 +4058,7 @@ def test_switchyard_new_custom_project_path_sets_artifact_repository_and_pane_wo
                 port_in_use=lambda _port: False,
                 socket_exists=lambda _path: False,
                 session_record_timeout=0,
+                registry_dir=tmp_path / "registry",
             )
             == 0
         )
@@ -3958,6 +4124,7 @@ def test_switchyard_new_creates_absent_zeta_owner_with_linger_and_initial_artifa
                     port_in_use=lambda _port: False,
                     socket_exists=lambda _path: False,
                     session_record_timeout=0,
+                    registry_dir=tmp_path / "registry",
                 )
                 == 0
             )
@@ -4050,6 +4217,7 @@ def test_switchyard_new_reuses_existing_owner_without_account_mutation() -> None
                     port_in_use=lambda _port: False,
                     socket_exists=lambda _path: False,
                     session_record_timeout=0,
+                    registry_dir=tmp_path / "registry",
                 )
                 == 0
             )

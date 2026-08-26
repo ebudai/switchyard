@@ -380,6 +380,7 @@ def konsole_launch_args(layout_path: Path, *, gui_user: str | None = None) -> li
         "QT_QPA_PLATFORM=wayland",
         f"WAYLAND_DISPLAY={wayland_display}",
         "konsole",
+        "--separate",
         "--layout",
         str(layout_path),
     ]

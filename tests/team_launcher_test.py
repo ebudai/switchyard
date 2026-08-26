@@ -1648,6 +1648,7 @@ def test_konsole_launch_uses_gui_user_display_environment() -> None:
             "QT_QPA_PLATFORM=wayland",
             "WAYLAND_DISPLAY=/run/user/1000/wayland-0",
             "konsole",
+            "--separate",
             "--layout",
             "/tmp/layout.json",
         ]
@@ -1679,6 +1680,7 @@ def test_konsole_launch_can_fallback_to_gui_user_uid_without_host_var() -> None:
             "QT_QPA_PLATFORM=wayland",
             "WAYLAND_DISPLAY=/run/user/4242/wayland-test",
             "konsole",
+            "--separate",
             "--layout",
             "/tmp/layout.json",
         ]
@@ -1715,6 +1717,7 @@ def test_konsole_launch_defaults_to_invoking_user_uid_without_host_var() -> None
             "QT_QPA_PLATFORM=wayland",
             "WAYLAND_DISPLAY=/run/user/4242/wayland-test",
             "konsole",
+            "--separate",
             "--layout",
             "/tmp/layout.json",
         ]

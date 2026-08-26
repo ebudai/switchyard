@@ -73,6 +73,7 @@ from scripts.team_launcher import (
     launch_konsole_window,
     launch_project,
     live_command_matches_role,
+    materialize_layout,
     design_project_command,
     load_project_config,
     load_project_design_artifact,
@@ -210,13 +211,35 @@ def _layout_session_tree(node: object) -> object:
     return None
 
 
+def _layout_command_role_tree(node: object) -> object:
+    if isinstance(node, dict) and isinstance(node.get("Widgets"), list):
+        return {
+            "Orientation": node.get("Orientation"),
+            "Widgets": [_layout_command_role_tree(child) for child in node["Widgets"]],
+        }
+    if isinstance(node, dict):
+        try:
+            parts = shlex.split(str(node.get("Command") or ""))
+        except ValueError:
+            return ""
+        for mode in ("start", "attach", "attach-or-start", "reload"):
+            if mode in parts:
+                index = parts.index(mode)
+                if index + 1 < len(parts):
+                    return parts[index + 1]
+        return ""
+    return None
+
+
 def _write_launcher_config(
     directory: Path,
     *,
     project: str = "otto",
     layout: str | None = None,
     role_count: int = 6,
+    roles: list[str] | None = None,
 ) -> Path:
+    role_names = roles or [f"role{index}" for index in range(role_count)]
     layout_name = layout or f"{project}-konsole-layout.json"
     config_path = directory / f"{project}.json"
     config_path.write_text(
@@ -228,14 +251,14 @@ def _write_launcher_config(
                     {
                         "cli": ["codex"],
                         "live_commands": ["codex"],
-                        "role": f"role{index}",
+                        "role": role,
                         "slot": index,
-                        "target": f"{project}-role{index}:0.0",
-                        "tmux_session": f"{project}-role{index}",
-                        "workdir": str(directory / "worktrees" / f"role{index}"),
+                        "target": f"{project}-{role}:0.0",
+                        "tmux_session": f"{project}-{role}",
+                        "workdir": str(directory / "worktrees" / role),
                         "yolo": True,
                     }
-                    for index in range(role_count)
+                    for index, role in enumerate(role_names)
                 ],
             },
             indent=2,
@@ -282,7 +305,7 @@ def test_pgu_layout_matches_reference_six_pane_geometry() -> None:
     assert {leaf.get("WorkingDirectory") for leaf in team_launcher._layout_leaves(layout)} == {""}
 
 
-def test_generated_new_project_layouts_are_balanced_column_major_grids() -> None:
+def test_generated_new_project_layouts_are_balanced_row_major_grids() -> None:
     expected_by_count = {
         1: 0,
         2: {
@@ -290,33 +313,47 @@ def test_generated_new_project_layouts_are_balanced_column_major_grids() -> None
             "Widgets": [0, 1],
         },
         3: {
-            "Orientation": "Horizontal",
+            "Orientation": "Vertical",
             "Widgets": [
-                {"Orientation": "Vertical", "Widgets": [0, 1]},
+                {"Orientation": "Horizontal", "Widgets": [0, 1]},
                 2,
             ],
         },
         4: {
-            "Orientation": "Horizontal",
+            "Orientation": "Vertical",
             "Widgets": [
-                {"Orientation": "Vertical", "Widgets": [0, 1]},
-                {"Orientation": "Vertical", "Widgets": [2, 3]},
+                {"Orientation": "Horizontal", "Widgets": [0, 1]},
+                {"Orientation": "Horizontal", "Widgets": [2, 3]},
             ],
         },
         5: {
-            "Orientation": "Horizontal",
+            "Orientation": "Vertical",
             "Widgets": [
-                {"Orientation": "Vertical", "Widgets": [0, 1]},
-                {"Orientation": "Vertical", "Widgets": [2, 3]},
-                4,
+                {"Orientation": "Horizontal", "Widgets": [0, 1, 2]},
+                {"Orientation": "Horizontal", "Widgets": [3, 4]},
             ],
         },
         6: {
-            "Orientation": "Horizontal",
+            "Orientation": "Vertical",
             "Widgets": [
-                {"Orientation": "Vertical", "Widgets": [0, 1]},
-                {"Orientation": "Vertical", "Widgets": [2, 3]},
-                {"Orientation": "Vertical", "Widgets": [4, 5]},
+                {"Orientation": "Horizontal", "Widgets": [0, 1, 2]},
+                {"Orientation": "Horizontal", "Widgets": [3, 4, 5]},
+            ],
+        },
+        7: {
+            "Orientation": "Vertical",
+            "Widgets": [
+                {"Orientation": "Horizontal", "Widgets": [0, 1, 2]},
+                {"Orientation": "Horizontal", "Widgets": [3, 4, 5]},
+                6,
+            ],
+        },
+        8: {
+            "Orientation": "Vertical",
+            "Widgets": [
+                {"Orientation": "Horizontal", "Widgets": [0, 1, 2]},
+                {"Orientation": "Horizontal", "Widgets": [3, 4, 5]},
+                {"Orientation": "Horizontal", "Widgets": [6, 7]},
             ],
         },
     }
@@ -351,6 +388,24 @@ def test_upgrade_refreshes_legacy_generated_provision_layout() -> None:
         assert "already current" in second_result.message
 
 
+def test_upgrade_refreshes_column_major_generated_provision_layout() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-launcher-upgrade.") as tmp:
+        provision_dir = Path(tmp) / ".switchyard" / "provision"
+        provision_dir.mkdir(parents=True)
+        layout_path = provision_dir / "otto-konsole-layout.json"
+        layout_path.write_text(
+            json.dumps(team_launcher._legacy_new_project_column_major_layout_payload(6), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        config_path = _write_launcher_config(provision_dir)
+        config = load_project_config("otto", config_path)
+
+        result = team_launcher.upgrade_generated_project_layout(config, config_path=config_path)
+
+        assert result.changed
+        assert json.loads(layout_path.read_text(encoding="utf-8")) == team_launcher._new_project_layout_payload(6)
+
+
 def test_upgrade_leaves_hand_maintained_pgu_layout_unchanged() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-launcher-upgrade.") as tmp:
         root = Path(tmp)
@@ -367,6 +422,49 @@ def test_upgrade_leaves_hand_maintained_pgu_layout_unchanged() -> None:
         assert not result.changed
         assert "hand-maintained" in result.message
         assert json.loads(layout_path.read_text(encoding="utf-8")) == original_layout
+
+
+def test_upgrade_leaves_real_pgu_layout_hash_and_plan_unchanged() -> None:
+    config_path = ROOT / "config" / "team-launcher" / "pgu.json"
+    config = load_project_config("pgu", config_path)
+    before_hash = hashlib.md5(config.layout.read_bytes()).hexdigest()
+    with tempfile.TemporaryDirectory(prefix="pgu-launcher-upgrade.") as tmp:
+        layout_output = Path(tmp) / "pgu-launch-layout.json"
+        before_stdout = StringIO()
+        with redirect_stdout(before_stdout):
+            assert (
+                launch_project(
+                    config,
+                    config_path=config_path,
+                    mode="start",
+                    script_path=ROOT / "scripts" / "team-launcher",
+                    runner=FakeRunner(),
+                    dry_run=True,
+                    layout_output=layout_output,
+                )
+                == 0
+            )
+
+        result = team_launcher.upgrade_generated_project_layout(config, config_path=config_path)
+
+        after_stdout = StringIO()
+        with redirect_stdout(after_stdout):
+            assert (
+                launch_project(
+                    config,
+                    config_path=config_path,
+                    mode="start",
+                    script_path=ROOT / "scripts" / "team-launcher",
+                    runner=FakeRunner(),
+                    dry_run=True,
+                    layout_output=layout_output,
+                )
+                == 0
+            )
+
+    assert not result.changed
+    assert hashlib.md5(config.layout.read_bytes()).hexdigest() == before_hash
+    assert after_stdout.getvalue() == before_stdout.getvalue()
 
 
 def test_upgrade_leaves_customized_provision_layout_unchanged() -> None:
@@ -388,17 +486,17 @@ def test_upgrade_leaves_customized_provision_layout_unchanged() -> None:
         result = team_launcher.upgrade_generated_project_layout(config, config_path=config_path)
 
         assert not result.changed
-        assert "differs from the known generated legacy shape" in result.message
+        assert "differs from the known generated legacy shapes" in result.message
         assert json.loads(layout_path.read_text(encoding="utf-8")) == custom_layout
 
 
-def test_launch_auto_upgrades_legacy_generated_layout_before_materializing() -> None:
+def test_launch_auto_upgrades_column_major_layout_before_materializing() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-launcher-upgrade.") as tmp:
         provision_dir = Path(tmp) / ".switchyard" / "provision"
         provision_dir.mkdir(parents=True)
         layout_path = provision_dir / "otto-konsole-layout.json"
         layout_path.write_text(
-            json.dumps(team_launcher._legacy_new_project_stacked_layout_payload(6), indent=2, sort_keys=True) + "\n",
+            json.dumps(team_launcher._legacy_new_project_column_major_layout_payload(6), indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
         config_path = _write_launcher_config(provision_dir)
@@ -422,11 +520,41 @@ def test_launch_auto_upgrades_legacy_generated_layout_before_materializing() -> 
 
         assert json.loads(layout_path.read_text(encoding="utf-8")) == team_launcher._new_project_layout_payload(6)
         assert _layout_session_tree(json.loads(launch_layout.read_text(encoding="utf-8"))) == {
-            "Orientation": "Horizontal",
+            "Orientation": "Vertical",
             "Widgets": [
-                {"Orientation": "Vertical", "Widgets": [0, 1]},
-                {"Orientation": "Vertical", "Widgets": [2, 3]},
-                {"Orientation": "Vertical", "Widgets": [4, 5]},
+                {"Orientation": "Horizontal", "Widgets": [0, 1, 2]},
+                {"Orientation": "Horizontal", "Widgets": [3, 4, 5]},
+            ],
+        }
+
+
+def test_materialize_layout_places_six_roles_row_major() -> None:
+    roles = ["designer", "director", "audit", "ops", "app", "main"]
+    with tempfile.TemporaryDirectory(prefix="pgu-launcher-row-major.") as tmp:
+        provision_dir = Path(tmp) / ".switchyard" / "provision"
+        provision_dir.mkdir(parents=True)
+        layout_path = provision_dir / "otto-konsole-layout.json"
+        layout_path.write_text(
+            json.dumps(team_launcher._new_project_layout_payload(len(roles)), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        config_path = _write_launcher_config(provision_dir, roles=roles)
+        config = load_project_config("otto", config_path)
+        output_path = Path(tmp) / "materialized-layout.json"
+
+        materialize_layout(
+            config,
+            config_path=config_path,
+            mode="attach-or-start",
+            script_path=ROOT / "scripts" / "team-launcher",
+            output_path=output_path,
+        )
+
+        assert _layout_command_role_tree(json.loads(output_path.read_text(encoding="utf-8"))) == {
+            "Orientation": "Vertical",
+            "Widgets": [
+                {"Orientation": "Horizontal", "Widgets": ["designer", "director", "audit"]},
+                {"Orientation": "Horizontal", "Widgets": ["ops", "app", "main"]},
             ],
         }
 
@@ -478,7 +606,7 @@ def test_switchyard_upgrade_command_updates_registered_project_layout() -> None:
         registry_dir.mkdir()
         layout_path = provision_dir / "otto-konsole-layout.json"
         layout_path.write_text(
-            json.dumps(team_launcher._legacy_new_project_stacked_layout_payload(6), indent=2, sort_keys=True) + "\n",
+            json.dumps(team_launcher._legacy_new_project_column_major_layout_payload(6), indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
         config_path = _write_launcher_config(provision_dir)

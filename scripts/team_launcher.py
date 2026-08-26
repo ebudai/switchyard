@@ -2954,6 +2954,37 @@ def _legacy_new_project_stacked_layout_payload(role_count: int) -> dict[str, Any
     }
 
 
+def _legacy_new_project_column_major_layout_payload(role_count: int) -> dict[str, Any]:
+    leaves = [
+        {
+            "Command": "",
+            "SessionRestoreId": index,
+            "WorkingDirectory": "",
+        }
+        for index in range(role_count)
+    ]
+    if role_count <= 1:
+        return leaves[0] if leaves else {"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}
+    column_count = math.ceil(math.sqrt(role_count))
+    row_count = math.ceil(role_count / column_count)
+    columns: list[dict[str, Any]] = []
+    for start in range(0, role_count, row_count):
+        column = leaves[start : start + row_count]
+        if len(column) == 1:
+            columns.append(column[0])
+        else:
+            columns.append(
+                {
+                    "Orientation": "Vertical",
+                    "Widgets": column,
+                }
+            )
+    return {
+        "Orientation": "Horizontal",
+        "Widgets": columns,
+    }
+
+
 def _is_generated_project_layout_template(config: ProjectConfig, *, config_path: Path) -> bool:
     config_file = config_path.expanduser().resolve(strict=False)
     layout_path = config.layout.expanduser().resolve(strict=False)
@@ -2978,7 +3009,10 @@ def upgrade_generated_project_layout(
         )
     role_count = sum(1 for role in config.roles if not role.detached)
     current_layout = _new_project_layout_payload(role_count)
-    legacy_layout = _legacy_new_project_stacked_layout_payload(role_count)
+    legacy_layouts = (
+        _legacy_new_project_stacked_layout_payload(role_count),
+        _legacy_new_project_column_major_layout_payload(role_count),
+    )
     try:
         existing_layout = json.loads(config.layout.read_text(encoding="utf-8"))
     except OSError as exc:
@@ -2996,10 +3030,10 @@ def upgrade_generated_project_layout(
             changed=False,
             message=f"switchyard: {config.project} layout template is already current",
         )
-    if existing_layout != legacy_layout:
+    if existing_layout not in legacy_layouts:
         return LauncherUpgradeResult(
             changed=False,
-            message=f"switchyard: {config.project} layout template differs from the known generated legacy shape; leaving it unchanged",
+            message=f"switchyard: {config.project} layout template differs from the known generated legacy shapes; leaving it unchanged",
         )
     if dry_run:
         return LauncherUpgradeResult(
@@ -3419,22 +3453,23 @@ def _new_project_layout_payload(role_count: int) -> dict[str, Any]:
     if role_count <= 1:
         return leaves[0] if leaves else {"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}
     column_count = math.ceil(math.sqrt(role_count))
-    row_count = math.ceil(role_count / column_count)
-    columns: list[dict[str, Any]] = []
-    for start in range(0, role_count, row_count):
-        column = leaves[start : start + row_count]
-        if len(column) == 1:
-            columns.append(column[0])
+    rows: list[dict[str, Any]] = []
+    for start in range(0, role_count, column_count):
+        row = leaves[start : start + column_count]
+        if len(row) == 1:
+            rows.append(row[0])
         else:
-            columns.append(
+            rows.append(
                 {
-                    "Orientation": "Vertical",
-                    "Widgets": column,
+                    "Orientation": "Horizontal",
+                    "Widgets": row,
                 }
             )
+    if len(rows) == 1:
+        return rows[0]
     return {
-        "Orientation": "Horizontal",
-        "Widgets": columns,
+        "Orientation": "Vertical",
+        "Widgets": rows,
     }
 
 

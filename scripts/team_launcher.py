@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import grp
 import hashlib
 import json
 import os
@@ -2055,6 +2056,9 @@ def ensure_control_repository(
 ) -> WorktreeProvisionResult:
     if config.control_repository is None:
         return WorktreeProvisionResult({})
+    repair_result = repair_control_repository_ownership(config, runner=runner)
+    if not repair_result.ok:
+        return repair_result
     mkdir_proc = runner(mkdir_p_args(config.control_repository.parent))
     if mkdir_proc.returncode != 0:
         reason = _proc_failure_reason(mkdir_proc, f"mkdir failed with exit {mkdir_proc.returncode}")
@@ -2077,6 +2081,78 @@ def ensure_control_repository(
     if fetch_proc.returncode != 0:
         reason = _proc_failure_reason(fetch_proc, f"fetch failed with exit {fetch_proc.returncode}")
         return WorktreeProvisionResult({role.role: reason for role in config.roles})
+    return WorktreeProvisionResult({})
+
+
+def chown_control_repository_args(config: ProjectConfig) -> list[str]:
+    if config.control_repository is None or not config.run_as_user:
+        raise ValueError("control repository ownership repair requires control_repository and run_as_user")
+    return ["chown", "-R", f"{config.run_as_user}:{config.run_as_user}", str(config.control_repository.parent)]
+
+
+def _path_owner_label(path: Path) -> str:
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        return f"unreadable ({exc})"
+    try:
+        user = pwd.getpwuid(info.st_uid).pw_name
+    except KeyError:
+        user = f"uid {info.st_uid}"
+    try:
+        group = grp.getgrgid(info.st_gid).gr_name
+    except KeyError:
+        group = f"gid {info.st_gid}"
+    return f"{user}:{group}"
+
+
+def _control_repository_owner_mismatch_path(config: ProjectConfig) -> Path | None:
+    if config.control_repository is None or not config.run_as_user:
+        return None
+    try:
+        expected = pwd.getpwnam(config.run_as_user)
+    except KeyError:
+        return config.control_repository.parent if config.control_repository.parent.exists() else None
+    root = config.control_repository.parent
+    if not root.exists():
+        return None
+    stack = [root]
+    while stack:
+        path = stack.pop()
+        try:
+            info = path.lstat()
+        except OSError:
+            return path
+        if info.st_uid != expected.pw_uid or info.st_gid != expected.pw_gid:
+            return path
+        if stat.S_ISDIR(info.st_mode):
+            try:
+                children = list(path.iterdir())
+            except OSError:
+                return path
+            stack.extend(children)
+    return None
+
+
+def repair_control_repository_ownership(
+    config: ProjectConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> WorktreeProvisionResult:
+    if config.control_repository is None or not config.run_as_user:
+        return WorktreeProvisionResult({})
+    mismatch = _control_repository_owner_mismatch_path(config)
+    if mismatch is None:
+        return WorktreeProvisionResult({})
+    actual_owner = _path_owner_label(mismatch)
+    chown_proc = runner(chown_control_repository_args(config))
+    if chown_proc.returncode != 0:
+        reason = _proc_failure_reason(chown_proc, f"chown failed with exit {chown_proc.returncode}")
+        message = (
+            f"failed to repair control repository ownership for {config.control_repository.parent}: {reason}; "
+            f"{mismatch} is owned by {actual_owner}, expected {config.run_as_user}:{config.run_as_user}"
+        )
+        return WorktreeProvisionResult({role.role: message for role in config.roles})
     return WorktreeProvisionResult({})
 
 

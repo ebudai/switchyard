@@ -2212,6 +2212,7 @@ def test_control_repository_launch_runs_bootstrap_as_configured_owner() -> None:
         assert ["sudo", "-u", "otto-agent", *team_launcher.git_control_worktree_add_args(config, config.roles[1])] in owner_calls
         assert team_launcher.git_clone_control_repository_args(config) not in runner.calls
         assert team_launcher.git_control_worktree_add_args(config, config.roles[0]) not in runner.calls
+        assert not any(call[:2] == ["chown", "-R"] for call in runner.calls)
         assert runner.calls[-1] == konsole_launch_args(layout_output)
 
 
@@ -2287,6 +2288,117 @@ def test_control_repository_bootstrap_failure_aborts_without_opening_window() ->
         assert not any(call == konsole_launch_args(layout_output) for call in runner.calls)
 
 
+def test_control_repository_repairs_owner_mismatch_before_clone() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-control-repair.") as tmp:
+        tmp_path = Path(tmp)
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        control_repo = tmp_path / "state" / "control.git"
+        config_path = tmp_path / "otto.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "otto",
+                    "layout": str(tmp_path / "layout.json"),
+                    "repository": str(repo),
+                    "control_repository": str(control_repo),
+                    "run_as_user": "otto-agent",
+                    "worktree_base": str(tmp_path / "worktrees"),
+                    "roles": [{"role": "ops", "slot": 0, "target": "otto-ops:0.0", "cli": ["codex"]}],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("otto", config_path)
+        repaired = {"done": False}
+
+        class RepairRunner(FakeRunner):
+            def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                if args == team_launcher.chown_control_repository_args(config):
+                    self.calls.append(args)
+                    repaired["done"] = True
+                    return subprocess.CompletedProcess(args, 0)
+                return super().__call__(args, **kwargs)
+
+        original_mismatch = team_launcher._control_repository_owner_mismatch_path
+        original_label = team_launcher._path_owner_label
+        try:
+            team_launcher._control_repository_owner_mismatch_path = (
+                lambda _config: None if repaired["done"] else control_repo.parent
+            )
+            team_launcher._path_owner_label = lambda _path: "root:root"
+            runner = RepairRunner()
+
+            result = team_launcher.ensure_control_repository(config, runner=runner)
+        finally:
+            team_launcher._control_repository_owner_mismatch_path = original_mismatch
+            team_launcher._path_owner_label = original_label
+
+        assert result.ok
+        assert repaired["done"]
+        chown_index = runner.calls.index(team_launcher.chown_control_repository_args(config))
+        mkdir_index = runner.calls.index(team_launcher.mkdir_p_args(control_repo.parent))
+        clone_index = runner.calls.index(team_launcher.git_clone_control_repository_args(config))
+        assert chown_index < mkdir_index < clone_index
+
+
+def test_control_repository_chown_failure_names_actual_and_expected_owner() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-control-repair-fail.") as tmp:
+        tmp_path = Path(tmp)
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        control_repo = tmp_path / "state" / "control.git"
+        config_path = tmp_path / "otto.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "otto",
+                    "layout": str(tmp_path / "layout.json"),
+                    "repository": str(repo),
+                    "control_repository": str(control_repo),
+                    "run_as_user": "otto-agent",
+                    "worktree_base": str(tmp_path / "worktrees"),
+                    "roles": [{"role": "ops", "slot": 0, "target": "otto-ops:0.0", "cli": ["codex"]}],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("otto", config_path)
+
+        class RefusingRunner(FakeRunner):
+            def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                if args == team_launcher.chown_control_repository_args(config):
+                    self.calls.append(args)
+                    return subprocess.CompletedProcess(args, 1, stderr="chown: Operation not permitted\n")
+                return super().__call__(args, **kwargs)
+
+        original_mismatch = team_launcher._control_repository_owner_mismatch_path
+        original_label = team_launcher._path_owner_label
+        try:
+            team_launcher._control_repository_owner_mismatch_path = lambda _config: control_repo.parent
+            team_launcher._path_owner_label = lambda _path: "root:root"
+            runner = RefusingRunner()
+
+            result = team_launcher.ensure_control_repository(config, runner=runner)
+        finally:
+            team_launcher._control_repository_owner_mismatch_path = original_mismatch
+            team_launcher._path_owner_label = original_label
+
+        assert not result.ok
+        reason = result.failed_roles["ops"]
+        assert str(control_repo.parent) in reason
+        assert "root:root" in reason
+        assert "expected otto-agent:otto-agent" in reason
+        assert "Operation not permitted" in reason
+        assert team_launcher.git_clone_control_repository_args(config) not in runner.calls
+
+
 def test_launch_without_control_repository_does_not_owner_wrap_pgu_plan() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-no-control.") as tmp:
         tmp_path = Path(tmp)
@@ -2339,6 +2451,7 @@ def test_launch_without_control_repository_does_not_owner_wrap_pgu_plan() -> Non
         )
 
         assert not any(call[:3] == ["sudo", "-u", "agent"] for call in runner.calls)
+        assert not any(call[:2] == ["chown", "-R"] for call in runner.calls)
         assert runner.calls[-1] == konsole_launch_args(layout_output)
 
 

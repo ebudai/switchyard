@@ -431,6 +431,44 @@ def test_launch_auto_upgrades_legacy_generated_layout_before_materializing() -> 
         }
 
 
+def test_launch_dry_run_does_not_upgrade_legacy_generated_layout() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-launcher-upgrade.") as tmp:
+        provision_dir = Path(tmp) / ".switchyard" / "provision"
+        provision_dir.mkdir(parents=True)
+        layout_path = provision_dir / "otto-konsole-layout.json"
+        legacy_layout = team_launcher._legacy_new_project_stacked_layout_payload(6)
+        legacy_text = json.dumps(legacy_layout, indent=2, sort_keys=True) + "\n"
+        layout_path.write_text(legacy_text, encoding="utf-8")
+        config_path = _write_launcher_config(provision_dir)
+        config = load_project_config("otto", config_path)
+        launch_layout = Path(tmp) / "launch-layout.json"
+        stdout = StringIO()
+
+        with redirect_stdout(stdout):
+            assert (
+                launch_project(
+                    config,
+                    config_path=config_path,
+                    mode="start",
+                    script_path=ROOT / "scripts" / "team-launcher",
+                    runner=FakeRunner(),
+                    dry_run=True,
+                    layout_output=launch_layout,
+                )
+                == 0
+            )
+
+        assert layout_path.read_text(encoding="utf-8") == legacy_text
+        assert _layout_session_tree(json.loads(launch_layout.read_text(encoding="utf-8"))) == {
+            "Orientation": "Horizontal",
+            "Widgets": [
+                0,
+                {"Orientation": "Vertical", "Widgets": [1, 2, 3, 4, 5]},
+            ],
+        }
+        assert "upgraded generated layout template" not in stdout.getvalue()
+
+
 def test_switchyard_upgrade_command_updates_registered_project_layout() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-upgrade.") as tmp:
         root = Path(tmp)

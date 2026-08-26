@@ -3436,13 +3436,20 @@ def test_switchyard_new_edited_slug_does_not_change_name_derived_default_path() 
 
 def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() -> None:
     class NewProjectRunner(FakeRunner):
-        def __init__(self) -> None:
+        def __init__(self, *, owner_user: str, project_dir: Path) -> None:
             super().__init__()
             self.call_kwargs: list[dict[str, object]] = []
+            self.owner_user = owner_user
+            self.project_dir = project_dir
+            self.git_output = ""
 
         def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
             self.call_kwargs.append(dict(kwargs))
             self.calls.append(args)
+            if args[:4] == ["sudo", "-u", self.owner_user, "git"]:
+                return self._run_project_git(args[3:], **kwargs)
+            if len(args) >= 3 and args[:2] == ["git", "-C"] and Path(args[2]) == self.project_dir:
+                return self._run_project_git(args, **kwargs)
             if args[:2] == ["id", "-u"]:
                 return subprocess.CompletedProcess(args, 1)
             if args[:1] == ["useradd"]:
@@ -3451,14 +3458,28 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
                 return subprocess.CompletedProcess(args, 0)
             return super().__call__(args, **kwargs)
 
+        def _run_project_git(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            run_kwargs = dict(kwargs)
+            run_kwargs.setdefault("text", True)
+            if "stdout" not in run_kwargs:
+                run_kwargs["stdout"] = subprocess.PIPE
+            if "stderr" not in run_kwargs:
+                run_kwargs["stderr"] = subprocess.PIPE
+            proc = subprocess.run(args, **run_kwargs)
+            stdout = str(proc.stdout or "")
+            stderr = str(proc.stderr or "")
+            self.git_output += stdout + stderr
+            return proc
+
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new.") as tmp:
         tmp_path = Path(tmp)
         home_base = tmp_path / "home"
-        output_dir = tmp_path / "out"
         pane_state_dir = tmp_path / "pane-state"
         source_repo = tmp_path / "source-repo"
         source_repo.mkdir()
-        runner = NewProjectRunner()
+        project_dir = home_base / "otto-agent" / "Projects" / "porter-system"
+        provision_dir = project_dir / ".switchyard" / "provision"
+        runner = NewProjectRunner(owner_user="otto-agent", project_dir=project_dir)
         stdout = StringIO()
 
         with redirect_stdout(stdout):
@@ -3468,7 +3489,6 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
                     agent_name="otto",
                     project_name="Porter System",
                     source_repo=source_repo,
-                    output_dir=output_dir,
                     yes=True,
                     home_base=home_base,
                     euid_getter=lambda: 0,
@@ -3480,18 +3500,18 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
                     session_record_timeout=0,
                 )
                 == 0
-            )
+        )
 
-        project_dir = home_base / "otto-agent" / "Projects" / "porter-system"
         chown_call_index = next(index for index, call in enumerate(runner.calls) if call[:2] == ["chown", "-R"])
-        config = json.loads((output_dir / "porter.json").read_text(encoding="utf-8"))
-        plan = json.loads((output_dir / "plan.json").read_text(encoding="utf-8"))
+        config = json.loads((provision_dir / "porter.json").read_text(encoding="utf-8"))
+        plan = json.loads((provision_dir / "plan.json").read_text(encoding="utf-8"))
         artifact = json.loads((project_dir / ".switchyard" / "porter.project.json").read_text(encoding="utf-8"))
         generated_layout_path = project_dir / ".switchyard" / "porter-team-layout.json"
         generated_layout = json.loads(generated_layout_path.read_text(encoding="utf-8"))
         generated_commands = _leaf_commands(generated_layout)
         designer_env = next(role["env"] for role in config["roles"] if role["role"] == "designer")
         director_env = next(role["env"] for role in config["roles"] if role["role"] == "director")
+        designer_onboarding = (project_dir / ".switchyard" / "DESIGNER_ONBOARDING.md").read_text(encoding="utf-8")
 
         assert chown_call_index < next(index for index, call in enumerate(runner.calls) if call == ["sudo", "-v"])
         assert artifact["project"]["repository"] == str(project_dir)
@@ -3504,6 +3524,24 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
         assert director_env["SWITCHYARD_DIRECTOR_ONBOARDING"].endswith("DIRECTOR_ONBOARDING.md")
         assert len(generated_commands) == 6
         assert all("switchyard porter pane attach-or-start" in command for command in generated_commands)
+        assert _run_git(["git", "rev-parse", "--is-inside-work-tree"], cwd=project_dir).stdout.strip() == "true"
+        assert _run_git(["git", "rev-list", "--count", "HEAD"], cwd=project_dir).stdout.strip() == "2"
+        assert _run_git(["git", "remote", "get-url", "origin"], cwd=project_dir).stdout.strip() == str(project_dir)
+        assert (provision_dir / "porter.json").is_file()
+        assert (provision_dir / "operator-commands.sh").is_file()
+        assert "local repository as a bootstrap placeholder" in designer_onboarding
+        role_worktree = tmp_path / "porter-ops-worktree"
+        _run_git(["git", "worktree", "add", "--detach", str(role_worktree), "HEAD"], cwd=project_dir)
+        assert (role_worktree / ".git").is_file()
+        assert any(call == team_launcher._owner_git_args("otto-agent", project_dir, "init", "-b", "main") for call in runner.calls)
+        assert any(
+            call[:6] == ["sudo", "-u", "otto-agent", "git", "-C", str(project_dir)]
+            and "commit" in call
+            and call[-2:] == ["-m", "Record Switchyard provisioning artifacts"]
+            for call in runner.calls
+        )
+        assert any(call[:6] == ["sudo", "-u", "otto-agent", "git", "-C", str(project_dir)] for call in runner.calls)
+        assert "not a git repository" not in runner.git_output
         assert any(call[:1] in (["env"], ["sh"]) for call in runner.calls)
         output = stdout.getvalue()
         assert "switchyard: full pane window started for porter" in output

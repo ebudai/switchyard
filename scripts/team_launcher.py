@@ -3193,6 +3193,8 @@ def _write_switchyard_onboarding_files(
                 "Create or refine the design document with the user.",
                 "The board and full pane window already exist; use tickets for follow-up implementation work.",
                 "Do not create workflow stages or workflow transitions in the artifact.",
+                "The initial git remote named origin points at this local repository as a bootstrap placeholder.",
+                "Replace origin with the project's real remote before expecting fetches to detect upstream changes.",
                 "",
             ]
         ),
@@ -3270,6 +3272,150 @@ def _chown_project_file(
     result = runner(["chown", f"{owner_user}:{owner_user}", str(path)])
     if result.returncode != 0:
         raise SystemExit(f"switchyard: failed to assign {path} to {owner_user}")
+
+
+def _owner_git_args(owner_user: str, project_dir: Path, *git_args: str) -> list[str]:
+    return ["sudo", "-u", owner_user, "git", "-C", str(project_dir), *git_args]
+
+
+def _run_owner_git(
+    owner_user: str,
+    project_dir: Path,
+    *git_args: str,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> subprocess.CompletedProcess[Any]:
+    return runner(
+        _owner_git_args(owner_user, project_dir, *git_args),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def _ensure_project_git_repository(
+    *,
+    owner_user: str,
+    project_dir: Path,
+    branch: str,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> None:
+    git_dir = project_dir / ".git"
+    if not git_dir.exists():
+        init = _run_owner_git(owner_user, project_dir, "init", "-b", branch, runner=runner)
+        if init.returncode != 0:
+            raise SystemExit(
+                f"switchyard: failed to initialize git repository in {project_dir}: "
+                f"{_proc_failure_reason(init, f'exit {init.returncode}')}"
+            )
+    else:
+        check = _run_owner_git(
+            owner_user,
+            project_dir,
+            "rev-parse",
+            "--is-inside-work-tree",
+            runner=runner,
+        )
+        if check.returncode != 0:
+            raise SystemExit(
+                f"switchyard: project path {project_dir} has unusable git metadata: "
+                f"{_proc_failure_reason(check, f'exit {check.returncode}')}"
+            )
+
+    remote = _run_owner_git(owner_user, project_dir, "remote", "get-url", "origin", runner=runner)
+    if remote.returncode != 0:
+        add_remote = _run_owner_git(owner_user, project_dir, "remote", "add", "origin", str(project_dir), runner=runner)
+        if add_remote.returncode != 0:
+            raise SystemExit(
+                f"switchyard: failed to add local origin remote for {project_dir}: "
+                f"{_proc_failure_reason(add_remote, f'exit {add_remote.returncode}')}"
+            )
+
+    head = _run_owner_git(owner_user, project_dir, "rev-parse", "--verify", "HEAD", runner=runner)
+    if head.returncode == 0:
+        return
+
+    add = _run_owner_git(owner_user, project_dir, "add", ".", runner=runner)
+    if add.returncode != 0:
+        raise SystemExit(
+            f"switchyard: failed to stage initial project files in {project_dir}: "
+            f"{_proc_failure_reason(add, f'exit {add.returncode}')}"
+        )
+    commit = _run_owner_git(
+        owner_user,
+        project_dir,
+        "-c",
+        "user.name=Switchyard",
+        "-c",
+        "user.email=switchyard@localhost",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "Initial Switchyard project",
+        runner=runner,
+    )
+    if commit.returncode != 0:
+        raise SystemExit(
+            f"switchyard: failed to create initial git commit in {project_dir}: "
+            f"{_proc_failure_reason(commit, f'exit {commit.returncode}')}"
+        )
+
+
+def _commit_project_git_changes(
+    *,
+    owner_user: str,
+    project_dir: Path,
+    message: str,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> None:
+    status = _run_owner_git(owner_user, project_dir, "status", "--porcelain", runner=runner)
+    if status.returncode != 0:
+        raise SystemExit(
+            f"switchyard: failed to inspect git status in {project_dir}: "
+            f"{_proc_failure_reason(status, f'exit {status.returncode}')}"
+        )
+    if not str(getattr(status, "stdout", "") or "").strip():
+        return
+    add = _run_owner_git(owner_user, project_dir, "add", ".", runner=runner)
+    if add.returncode != 0:
+        raise SystemExit(
+            f"switchyard: failed to stage project files in {project_dir}: "
+            f"{_proc_failure_reason(add, f'exit {add.returncode}')}"
+        )
+    commit = _run_owner_git(
+        owner_user,
+        project_dir,
+        "-c",
+        "user.name=Switchyard",
+        "-c",
+        "user.email=switchyard@localhost",
+        "commit",
+        "-m",
+        message,
+        runner=runner,
+    )
+    if commit.returncode != 0:
+        raise SystemExit(
+            f"switchyard: failed to commit project files in {project_dir}: "
+            f"{_proc_failure_reason(commit, f'exit {commit.returncode}')}"
+        )
+
+
+def _owner_project_git_runner(
+    *,
+    owner_user: str,
+    project_dir: Path,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> Callable[..., subprocess.CompletedProcess[Any]]:
+    normalized_project_dir = project_dir.resolve(strict=False)
+
+    def wrapped(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        if len(args) >= 3 and args[:2] == ["git", "-C"]:
+            git_dir = Path(args[2]).resolve(strict=False)
+            if git_dir == normalized_project_dir:
+                return runner(["sudo", "-u", owner_user, *args], **kwargs)
+        return runner(args, **kwargs)
+
+    return wrapped
 
 
 def _owner_project_install_args(owner_user: str, project_dir: Path, *, shell: str = "fish") -> list[list[str]]:
@@ -3613,6 +3759,12 @@ def switchyard_new_command(
         _chown_switchyard_project_files(owner_user=owner_user, project_dir=project_dir, runner=runner)
         if design_document.exists():
             _chown_project_file(owner_user=owner_user, path=design_document, runner=runner)
+        _ensure_project_git_repository(
+            owner_user=owner_user,
+            project_dir=project_dir,
+            branch="main",
+            runner=runner,
+        )
     else:
         artifact = load_project_design_artifact(artifact_path)
         _write_switchyard_onboarding_files(
@@ -3625,6 +3777,12 @@ def switchyard_new_command(
             director_onboarding=director_onboarding,
         )
         _chown_switchyard_project_files(owner_user=owner_user, project_dir=project_dir, runner=runner)
+        _ensure_project_git_repository(
+            owner_user=owner_user,
+            project_dir=project_dir,
+            branch=artifact.default_branch,
+            runner=runner,
+        )
 
     provision_dir = (output_dir or (_switchyard_dir(project_dir) / "provision")).expanduser().resolve(strict=False)
     result = new_project_command(
@@ -3644,15 +3802,22 @@ def switchyard_new_command(
     )
     if result != 0:
         return result
+    _commit_project_git_changes(
+        owner_user=owner_user,
+        project_dir=project_dir,
+        message="Record Switchyard provisioning artifacts",
+        runner=runner,
+    )
     config_path = provision_dir / f"{resolved_slug}.json"
     config = load_project_config(resolved_slug, config_path)
+    launch_runner = _owner_project_git_runner(owner_user=owner_user, project_dir=project_dir, runner=runner)
     launch_result = launch_project(
         config,
         config_path=config_path,
         mode="start",
         script_path=Path(__file__).resolve().with_name(SWITCHYARD_NAME),
         pane_state_dir=pane_state_dir or DEFAULT_PANE_STATE_DIR,
-        runner=runner,
+        runner=launch_runner,
         layout_mode=layout_mode,
         layout_environ=layout_environ,
     )

@@ -2291,9 +2291,15 @@ def test_control_repository_bootstrap_failure_aborts_without_opening_window() ->
 def test_control_repository_repairs_owner_mismatch_before_clone() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-control-repair.") as tmp:
         tmp_path = Path(tmp)
+        current_user = team_launcher.current_user_name()
+        current_info = team_launcher.pwd.getpwnam(current_user)
         repo = tmp_path / "repo"
         repo.mkdir()
-        control_repo = tmp_path / "state" / "control.git"
+        state_dir = tmp_path / ".local" / "state"
+        switchyard_dir = state_dir / "switchyard"
+        projects_dir = switchyard_dir / "projects"
+        projects_dir.mkdir(parents=True)
+        control_repo = projects_dir / "otto" / "control.git"
         config_path = tmp_path / "otto.json"
         config_path.write_text(
             json.dumps(
@@ -2302,7 +2308,7 @@ def test_control_repository_repairs_owner_mismatch_before_clone() -> None:
                     "layout": str(tmp_path / "layout.json"),
                     "repository": str(repo),
                     "control_repository": str(control_repo),
-                    "run_as_user": "otto-agent",
+                    "run_as_user": current_user,
                     "worktree_base": str(tmp_path / "worktrees"),
                     "roles": [{"role": "ops", "slot": 0, "target": "otto-ops:0.0", "cli": ["codex"]}],
                 },
@@ -2313,44 +2319,61 @@ def test_control_repository_repairs_owner_mismatch_before_clone() -> None:
             encoding="utf-8",
         )
         config = load_project_config("otto", config_path)
-        repaired = {"done": False}
+        root_owned = {state_dir, switchyard_dir, projects_dir}
 
         class RepairRunner(FakeRunner):
             def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-                if args == team_launcher.chown_control_repository_args(config):
+                for path in tuple(root_owned):
+                    if args == team_launcher.chown_control_repository_args(config, path, recursive=False):
+                        self.calls.append(args)
+                        root_owned.remove(path)
+                        return subprocess.CompletedProcess(args, 0)
+                if args[:2] == ["chown", "-R"] or args[:1] == ["chown"]:
                     self.calls.append(args)
-                    repaired["done"] = True
-                    return subprocess.CompletedProcess(args, 0)
+                    return subprocess.CompletedProcess(args, 1, stderr=f"unexpected chown: {shlex.join(args)}\n")
                 return super().__call__(args, **kwargs)
 
-        original_mismatch = team_launcher._control_repository_owner_mismatch_path
+        original_home = team_launcher._control_repository_owner_home
+        original_owner_ids = team_launcher._path_owner_ids
         original_label = team_launcher._path_owner_label
         try:
-            team_launcher._control_repository_owner_mismatch_path = (
-                lambda _config: None if repaired["done"] else control_repo.parent
+            team_launcher._control_repository_owner_home = lambda _config: tmp_path
+            team_launcher._path_owner_ids = (
+                lambda path: (0, 0)
+                if path in root_owned
+                else (current_info.pw_uid, current_info.pw_gid)
+                if path.exists()
+                else None
             )
             team_launcher._path_owner_label = lambda _path: "root:root"
             runner = RepairRunner()
 
             result = team_launcher.ensure_control_repository(config, runner=runner)
         finally:
-            team_launcher._control_repository_owner_mismatch_path = original_mismatch
+            team_launcher._control_repository_owner_home = original_home
+            team_launcher._path_owner_ids = original_owner_ids
             team_launcher._path_owner_label = original_label
 
         assert result.ok
-        assert repaired["done"]
-        chown_index = runner.calls.index(team_launcher.chown_control_repository_args(config))
+        assert root_owned == set()
+        state_chown_index = runner.calls.index(team_launcher.chown_control_repository_args(config, state_dir, recursive=False))
+        switchyard_chown_index = runner.calls.index(team_launcher.chown_control_repository_args(config, switchyard_dir, recursive=False))
+        projects_chown_index = runner.calls.index(team_launcher.chown_control_repository_args(config, projects_dir, recursive=False))
         mkdir_index = runner.calls.index(team_launcher.mkdir_p_args(control_repo.parent))
         clone_index = runner.calls.index(team_launcher.git_clone_control_repository_args(config))
-        assert chown_index < mkdir_index < clone_index
+        assert state_chown_index < switchyard_chown_index < projects_chown_index < mkdir_index < clone_index
 
 
 def test_control_repository_chown_failure_names_actual_and_expected_owner() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-control-repair-fail.") as tmp:
         tmp_path = Path(tmp)
+        current_user = team_launcher.current_user_name()
+        current_info = team_launcher.pwd.getpwnam(current_user)
         repo = tmp_path / "repo"
         repo.mkdir()
-        control_repo = tmp_path / "state" / "control.git"
+        projects_dir = tmp_path / ".local" / "state" / "switchyard" / "projects"
+        projects_dir.mkdir(parents=True)
+        control_repo = projects_dir / "otto" / "control.git"
         config_path = tmp_path / "otto.json"
         config_path.write_text(
             json.dumps(
@@ -2359,7 +2382,7 @@ def test_control_repository_chown_failure_names_actual_and_expected_owner() -> N
                     "layout": str(tmp_path / "layout.json"),
                     "repository": str(repo),
                     "control_repository": str(control_repo),
-                    "run_as_user": "otto-agent",
+                    "run_as_user": current_user,
                     "worktree_base": str(tmp_path / "worktrees"),
                     "roles": [{"role": "ops", "slot": 0, "target": "otto-ops:0.0", "cli": ["codex"]}],
                 },
@@ -2373,30 +2396,84 @@ def test_control_repository_chown_failure_names_actual_and_expected_owner() -> N
 
         class RefusingRunner(FakeRunner):
             def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-                if args == team_launcher.chown_control_repository_args(config):
+                if args == team_launcher.chown_control_repository_args(config, projects_dir, recursive=False):
                     self.calls.append(args)
                     return subprocess.CompletedProcess(args, 1, stderr="chown: Operation not permitted\n")
                 return super().__call__(args, **kwargs)
 
-        original_mismatch = team_launcher._control_repository_owner_mismatch_path
+        original_home = team_launcher._control_repository_owner_home
+        original_owner_ids = team_launcher._path_owner_ids
         original_label = team_launcher._path_owner_label
         try:
-            team_launcher._control_repository_owner_mismatch_path = lambda _config: control_repo.parent
+            team_launcher._control_repository_owner_home = lambda _config: tmp_path
+            team_launcher._path_owner_ids = (
+                lambda path: (0, 0)
+                if path == projects_dir
+                else (current_info.pw_uid, current_info.pw_gid)
+                if path.exists()
+                else None
+            )
             team_launcher._path_owner_label = lambda _path: "root:root"
             runner = RefusingRunner()
 
             result = team_launcher.ensure_control_repository(config, runner=runner)
         finally:
-            team_launcher._control_repository_owner_mismatch_path = original_mismatch
+            team_launcher._control_repository_owner_home = original_home
+            team_launcher._path_owner_ids = original_owner_ids
             team_launcher._path_owner_label = original_label
 
         assert not result.ok
         reason = result.failed_roles["ops"]
-        assert str(control_repo.parent) in reason
+        assert str(control_repo) in reason
         assert "root:root" in reason
-        assert "expected otto-agent:otto-agent" in reason
+        assert f"expected {current_user}:{current_user}" in reason
         assert "Operation not permitted" in reason
         assert team_launcher.git_clone_control_repository_args(config) not in runner.calls
+
+
+def test_control_repository_repair_refuses_unmanaged_or_slugless_paths() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-control-boundary.") as tmp:
+        tmp_path = Path(tmp)
+        current_user = team_launcher.current_user_name()
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        managed_root = tmp_path / ".local" / "state" / "switchyard" / "projects"
+        managed_root.mkdir(parents=True)
+        configs: list[Path] = [
+            managed_root / "control.git",
+            tmp_path / "control.git",
+            managed_root / "otto" / ".." / ".." / ".." / "control.git",
+        ]
+        original_home = team_launcher._control_repository_owner_home
+        try:
+            team_launcher._control_repository_owner_home = lambda _config: tmp_path
+            for index, control_repo in enumerate(configs):
+                config_path = tmp_path / f"otto-{index}.json"
+                config_path.write_text(
+                    json.dumps(
+                        {
+                            "project": "otto",
+                            "layout": str(tmp_path / "layout.json"),
+                            "repository": str(repo),
+                            "control_repository": str(control_repo),
+                            "run_as_user": current_user,
+                            "worktree_base": str(tmp_path / "worktrees"),
+                            "roles": [{"role": "ops", "slot": 0, "target": "otto-ops:0.0", "cli": ["codex"]}],
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                config = load_project_config("otto", config_path)
+
+                reason = team_launcher._control_repository_boundary_error(config)
+
+                assert reason is not None
+                assert "not a switchyard-managed control directory" in reason
+        finally:
+            team_launcher._control_repository_owner_home = original_home
 
 
 def test_launch_without_control_repository_does_not_owner_wrap_pgu_plan() -> None:

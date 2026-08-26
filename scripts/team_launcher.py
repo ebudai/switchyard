@@ -2084,10 +2084,14 @@ def ensure_control_repository(
     return WorktreeProvisionResult({})
 
 
-def chown_control_repository_args(config: ProjectConfig) -> list[str]:
+def chown_control_repository_args(config: ProjectConfig, path: Path | None = None, *, recursive: bool = True) -> list[str]:
     if config.control_repository is None or not config.run_as_user:
         raise ValueError("control repository ownership repair requires control_repository and run_as_user")
-    return ["chown", "-R", f"{config.run_as_user}:{config.run_as_user}", str(config.control_repository.parent)]
+    args = ["chown"]
+    if recursive:
+        args.append("-R")
+    args.extend([f"{config.run_as_user}:{config.run_as_user}", str(path or config.control_repository)])
+    return args
 
 
 def _path_owner_label(path: Path) -> str:
@@ -2106,6 +2110,43 @@ def _path_owner_label(path: Path) -> str:
     return f"{user}:{group}"
 
 
+def _control_repository_managed_root(config: ProjectConfig) -> Path | None:
+    owner_home = _control_repository_owner_home(config)
+    if owner_home is None:
+        return None
+    return (owner_home / ".local" / "state" / "switchyard" / "projects").resolve(strict=False)
+
+
+def _control_repository_owner_home(config: ProjectConfig) -> Path | None:
+    if config.control_repository is None or not config.run_as_user:
+        return None
+    try:
+        expected = pwd.getpwnam(config.run_as_user)
+    except KeyError:
+        return None
+    return Path(expected.pw_dir).resolve(strict=False)
+
+
+def _control_repository_boundary_error(config: ProjectConfig) -> str | None:
+    if config.control_repository is None:
+        return None
+    managed_root = _control_repository_managed_root(config)
+    if managed_root is None:
+        return f"target user {config.run_as_user!r} does not exist"
+    parent = config.control_repository.expanduser().resolve(strict=False).parent
+    if parent == managed_root or not parent.is_relative_to(managed_root):
+        return f"{parent} is not a switchyard-managed control directory under {managed_root}"
+    return None
+
+
+def _path_owner_ids(path: Path) -> tuple[int, int] | None:
+    try:
+        info = path.lstat()
+    except OSError:
+        return None
+    return info.st_uid, info.st_gid
+
+
 def _control_repository_owner_mismatch_path(config: ProjectConfig) -> Path | None:
     if config.control_repository is None or not config.run_as_user:
         return None
@@ -2113,18 +2154,18 @@ def _control_repository_owner_mismatch_path(config: ProjectConfig) -> Path | Non
         expected = pwd.getpwnam(config.run_as_user)
     except KeyError:
         return config.control_repository.parent if config.control_repository.parent.exists() else None
-    root = config.control_repository.parent
-    if not root.exists():
+    control_path = config.control_repository
+    if not control_path.exists():
         return None
-    stack = [root]
+    stack = [control_path]
     while stack:
         path = stack.pop()
-        try:
-            info = path.lstat()
-        except OSError:
+        owner_ids = _path_owner_ids(path)
+        if owner_ids is None:
             return path
-        if info.st_uid != expected.pw_uid or info.st_gid != expected.pw_gid:
+        if owner_ids != (expected.pw_uid, expected.pw_gid):
             return path
+        info = path.lstat()
         if stat.S_ISDIR(info.st_mode):
             try:
                 children = list(path.iterdir())
@@ -2134,6 +2175,44 @@ def _control_repository_owner_mismatch_path(config: ProjectConfig) -> Path | Non
     return None
 
 
+def _control_repository_repair_paths(config: ProjectConfig) -> tuple[list[tuple[Path, bool]], Path | None]:
+    if config.control_repository is None or not config.run_as_user:
+        return [], None
+    boundary_error = _control_repository_boundary_error(config)
+    if boundary_error is not None and not config.control_repository.exists() and not config.control_repository.parent.exists():
+        return [], None
+    try:
+        expected = pwd.getpwnam(config.run_as_user)
+    except KeyError:
+        return [], config.control_repository.parent if config.control_repository.parent.exists() else None
+
+    parent = config.control_repository.parent
+    start = config.control_repository if config.control_repository.exists() else parent
+    owner_home = _control_repository_owner_home(config)
+    if owner_home is None:
+        return [], config.control_repository.parent if config.control_repository.parent.exists() else None
+    repair_paths: list[tuple[Path, bool]] = []
+    current = start
+    while True:
+        resolved = current.expanduser().resolve(strict=False)
+        if not (resolved == owner_home or resolved.is_relative_to(owner_home)):
+            return [], current
+        owner_ids = _path_owner_ids(current)
+        if owner_ids is not None:
+            if owner_ids == (expected.pw_uid, expected.pw_gid):
+                break
+            repair_paths.append((current, current == config.control_repository))
+        if resolved == owner_home:
+            break
+        current = current.parent
+
+    leaf_mismatch = _control_repository_owner_mismatch_path(config)
+    if leaf_mismatch is not None and all(path != config.control_repository for path, _recursive in repair_paths):
+        repair_paths.append((config.control_repository, True))
+    repair_paths.reverse()
+    return repair_paths, repair_paths[0][0] if repair_paths else leaf_mismatch
+
+
 def repair_control_repository_ownership(
     config: ProjectConfig,
     *,
@@ -2141,18 +2220,23 @@ def repair_control_repository_ownership(
 ) -> WorktreeProvisionResult:
     if config.control_repository is None or not config.run_as_user:
         return WorktreeProvisionResult({})
-    mismatch = _control_repository_owner_mismatch_path(config)
+    repair_paths, mismatch = _control_repository_repair_paths(config)
     if mismatch is None:
         return WorktreeProvisionResult({})
-    actual_owner = _path_owner_label(mismatch)
-    chown_proc = runner(chown_control_repository_args(config))
-    if chown_proc.returncode != 0:
-        reason = _proc_failure_reason(chown_proc, f"chown failed with exit {chown_proc.returncode}")
-        message = (
-            f"failed to repair control repository ownership for {config.control_repository.parent}: {reason}; "
-            f"{mismatch} is owned by {actual_owner}, expected {config.run_as_user}:{config.run_as_user}"
-        )
+    boundary_error = _control_repository_boundary_error(config)
+    if boundary_error is not None:
+        message = f"refusing to repair control repository ownership for {config.control_repository}: {boundary_error}"
         return WorktreeProvisionResult({role.role: message for role in config.roles})
+    actual_owner = _path_owner_label(mismatch)
+    for path, recursive in repair_paths:
+        chown_proc = runner(chown_control_repository_args(config, path, recursive=recursive))
+        if chown_proc.returncode != 0:
+            reason = _proc_failure_reason(chown_proc, f"chown failed with exit {chown_proc.returncode}")
+            message = (
+                f"failed to repair control repository ownership for {config.control_repository}: {reason}; "
+                f"{mismatch} is owned by {actual_owner}, expected {config.run_as_user}:{config.run_as_user}"
+            )
+            return WorktreeProvisionResult({role.role: message for role in config.roles})
     return WorktreeProvisionResult({})
 
 

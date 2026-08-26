@@ -358,6 +358,9 @@ def default_gui_user() -> str:
     configured = _env_first(GUI_USER_ENV, LEGACY_GUI_USER_ENV)
     if configured:
         return configured
+    sudo_user = _env_first("SUDO_USER")
+    if sudo_user:
+        return sudo_user
     return current_user_name()
 
 

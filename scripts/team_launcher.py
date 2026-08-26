@@ -4520,7 +4520,7 @@ def switchyard_new_command(
         config,
         config_path=config_path,
         mode="start",
-        script_path=Path(__file__).resolve().with_name(SWITCHYARD_NAME),
+        script_path=Path(__file__).resolve().with_name(TEAM_LAUNCHER_NAME),
         pane_state_dir=pane_state_dir or DEFAULT_PANE_STATE_DIR,
         runner=launch_runner,
         layout_mode=layout_mode,
@@ -4675,7 +4675,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         config,
         config_path=entry.config_path,
         mode="start",
-        script_path=Path(__file__).resolve().with_name(SWITCHYARD_NAME),
+        script_path=Path(__file__).resolve().with_name(TEAM_LAUNCHER_NAME),
         report_session_records=True,
     )
 

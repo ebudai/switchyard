@@ -4273,6 +4273,7 @@ def test_switchyard_register_cli_enables_launch_by_name_without_config_flag() ->
     assert calls[0]["project"] == "otto"
     assert calls[0]["config_path"] == config_path
     assert calls[0]["mode"] == "start"
+    assert calls[0]["script_path"] == ROOT / "scripts" / "team-launcher"
     assert calls[0]["report_session_records"] is True
 
 
@@ -4311,6 +4312,7 @@ def test_switchyard_registry_does_not_change_pgu_resolution_or_launch_config() -
     assert calls
     assert calls[0]["project"] == "pgu"
     assert calls[0]["config_path"] == ROOT / "config" / "team-launcher" / "pgu.json"
+    assert calls[0]["script_path"] == ROOT / "scripts" / "team-launcher"
     assert set(calls[0]["workdirs"]) == {"/home/agent/Projects/pgu"}
 
 
@@ -4356,6 +4358,7 @@ def test_switchyard_project_name_argv_joins_and_resumes_matching_project() -> No
     assert calls[0]["project"] == "porter"
     assert calls[0]["config_path"] == config_path
     assert calls[0]["mode"] == "start"
+    assert calls[0]["script_path"] == ROOT / "scripts" / "team-launcher"
     assert calls[0]["report_session_records"] is True
 
 
@@ -4658,7 +4661,8 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
         assert director_env["SWITCHYARD_PROJECT_DESIGN"] == str(project_dir / "PROJECT_DESIGN.md")
         assert director_env["SWITCHYARD_DIRECTOR_ONBOARDING"].endswith("DIRECTOR_ONBOARDING.md")
         assert len(generated_commands) == 6
-        assert all("switchyard porter pane attach-or-start" in command for command in generated_commands)
+        assert all("team-launcher porter pane attach-or-start" in command for command in generated_commands)
+        assert not any("switchyard porter pane attach-or-start" in command for command in generated_commands)
         assert _run_git(["git", "rev-parse", "--is-inside-work-tree"], cwd=project_dir).stdout.strip() == "true"
         assert _run_git(["git", "rev-list", "--count", "HEAD"], cwd=project_dir).stdout.strip() == "2"
         assert _run_git(["git", "remote", "get-url", "origin"], cwd=project_dir).stdout.strip() == str(project_dir)

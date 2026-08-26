@@ -1968,8 +1968,10 @@ def test_start_runs_research_detached_before_opening_visible_layout() -> None:
         ]
         assert runner.calls[3] == git_fetch_worktree_ref_args(config)
         assert runner.calls[4] == git_shared_checkout_check_args(config)
-        assert runner.calls[5] == git_checkout_shared_ref_args(config)
-        assert runner.calls[6] == git_clean_shared_checkout_args(config)
+        assert runner.calls[5] == team_launcher.git_shared_checkout_status_porcelain_args(config)
+        assert runner.calls[6] == team_launcher.git_clean_shared_checkout_dry_run_args(config)
+        assert runner.calls[7] == git_checkout_shared_ref_args(config)
+        assert runner.calls[8] == git_clean_shared_checkout_args(config)
         assert not any(call[:5] == ["git", "-C", call[2], "worktree", "add"] for call in runner.calls)
         research_has_session_index = runner.calls.index(["tmux", "has-session", "-t", "pgu-research"])
         research_new_session = runner.calls[research_has_session_index + 1]
@@ -2231,6 +2233,138 @@ def test_start_force_refreshes_dirty_shared_checkout_with_real_git() -> None:
         assert not (shared_checkout / "untracked.tmp").exists()
         status = _run_git(["git", "status", "--porcelain"], cwd=shared_checkout).stdout
         assert status == ""
+
+
+def test_launch_warns_before_resetting_dirty_shared_checkout_with_real_git() -> None:
+    class ProjectGitRunner(FakeRunner):
+        def __init__(self, repo: Path) -> None:
+            super().__init__()
+            self.repo = repo
+
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if len(args) >= 3 and args[:2] == ["git", "-C"] and Path(args[2]) == self.repo:
+                run_kwargs = dict(kwargs)
+                run_kwargs.setdefault("text", True)
+                if "stdout" not in run_kwargs:
+                    run_kwargs["stdout"] = subprocess.PIPE
+                if "stderr" not in run_kwargs:
+                    run_kwargs["stderr"] = subprocess.PIPE
+                return subprocess.run(args, **run_kwargs)
+            return super().__call__(args, **kwargs)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-dirty-project.") as tmp:
+        tmp_path = Path(tmp)
+        _origin, repo = _make_origin_backed_repo(tmp_path)
+        config_path = _write_minimal_shared_checkout_config(tmp_path, repo, ["ops"])
+        layout_path = tmp_path / "launch-layout.json"
+        layout_path.write_text(
+            json.dumps(
+                {
+                    "Orientation": "Horizontal",
+                    "Widgets": [{"SessionRestoreId": 0, "Command": "", "WorkingDirectory": ""}],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+        raw_config["layout"] = str(layout_path)
+        config_path.write_text(json.dumps(raw_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        config = load_project_config("pgu", config_path)
+        runner = ProjectGitRunner(repo)
+        stderr = StringIO()
+
+        (repo / "tracked.txt").write_text("uncommitted tracked edit\n", encoding="utf-8")
+        (repo / "my_notes.txt").write_text("notes that will be removed\n", encoding="utf-8")
+
+        with redirect_stderr(stderr):
+            assert (
+                launch_project(
+                    config,
+                    config_path=config_path,
+                    mode="start",
+                    script_path=ROOT / "scripts" / "team-launcher",
+                    runner=runner,
+                    layout_output=tmp_path / "layout-out.json",
+                    pane_state_dir=tmp_path / "pane-state",
+                )
+                == 0
+            )
+
+        warning = stderr.getvalue()
+        assert "will reset managed project checkout" in warning
+        assert "tracked changes will be discarded" in warning
+        assert "tracked.txt" in warning
+        assert "untracked files will be removed" in warning
+        assert "my_notes.txt" in warning
+        assert (repo / "tracked.txt").read_text(encoding="utf-8") == "initial\n"
+        assert not (repo / "my_notes.txt").exists()
+
+
+def test_clean_launch_does_not_warn_about_shared_checkout_refresh() -> None:
+    class ProjectGitRunner(FakeRunner):
+        def __init__(self, repo: Path) -> None:
+            super().__init__()
+            self.repo = repo
+
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if len(args) >= 3 and args[:2] == ["git", "-C"] and Path(args[2]) == self.repo:
+                run_kwargs = dict(kwargs)
+                run_kwargs.setdefault("text", True)
+                if "stdout" not in run_kwargs:
+                    run_kwargs["stdout"] = subprocess.PIPE
+                if "stderr" not in run_kwargs:
+                    run_kwargs["stderr"] = subprocess.PIPE
+                return subprocess.run(args, **run_kwargs)
+            return super().__call__(args, **kwargs)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-clean-project.") as tmp:
+        tmp_path = Path(tmp)
+        _origin, repo = _make_origin_backed_repo(tmp_path)
+        (repo / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+        _run_git(["git", "add", ".gitignore"], cwd=repo)
+        _run_git(["git", "commit", "-m", "ignore launcher bytecode"], cwd=repo)
+        config_path = _write_minimal_shared_checkout_config(tmp_path, repo, ["ops"])
+        layout_path = tmp_path / "launch-layout.json"
+        layout_path.write_text(
+            json.dumps(
+                {
+                    "Orientation": "Horizontal",
+                    "Widgets": [{"SessionRestoreId": 0, "Command": "", "WorkingDirectory": ""}],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+        raw_config["layout"] = str(layout_path)
+        config_path.write_text(json.dumps(raw_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        config = load_project_config("pgu", config_path)
+        (repo / "scripts" / "ticket_board" / "__pycache__").mkdir(parents=True)
+        (repo / "scripts" / "ticket_board" / "__pycache__" / "team_launcher.cpython-313.pyc").write_bytes(b"pyc\n")
+        stderr = StringIO()
+
+        with redirect_stderr(stderr):
+            assert (
+                launch_project(
+                    config,
+                    config_path=config_path,
+                    mode="start",
+                    script_path=ROOT / "scripts" / "team-launcher",
+                    runner=ProjectGitRunner(repo),
+                    layout_output=tmp_path / "layout-out.json",
+                    pane_state_dir=tmp_path / "pane-state",
+                )
+                == 0
+            )
+
+        assert "will reset managed project checkout" not in stderr.getvalue()
 
 
 def test_bad_shared_checkout_blocks_all_roles_with_real_git() -> None:

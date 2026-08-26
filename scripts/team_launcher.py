@@ -1475,6 +1475,12 @@ def git_launcher_status_porcelain_args(launcher_repo: Path) -> list[str]:
     return ["git", "-C", str(launcher_repo), "status", "--porcelain", "--untracked-files=no"]
 
 
+def git_shared_checkout_status_porcelain_args(config: ProjectConfig) -> list[str]:
+    if config.repository is None:
+        raise SystemExit("project config does not define repository")
+    return ["git", "-C", str(config.repository), "status", "--porcelain"]
+
+
 def git_launcher_head_short_args(launcher_repo: Path) -> list[str]:
     return ["git", "-C", str(launcher_repo), "rev-parse", "--short", "HEAD"]
 
@@ -1483,6 +1489,12 @@ def git_clean_shared_checkout_args(config: ProjectConfig) -> list[str]:
     if config.repository is None:
         raise SystemExit("project config does not define repository")
     return ["git", "-C", str(config.repository), "clean", "-fdx"]
+
+
+def git_clean_shared_checkout_dry_run_args(config: ProjectConfig) -> list[str]:
+    if config.repository is None:
+        raise SystemExit("project config does not define repository")
+    return ["git", "-C", str(config.repository), "clean", "-fd", "--dry-run"]
 
 
 def git_clean_launcher_checkout_args(launcher_repo: Path) -> list[str]:
@@ -1828,6 +1840,79 @@ def deploy_launcher_checkout(
     return 0
 
 
+def _tracked_dirty_paths_from_status(output: str) -> list[str]:
+    paths: list[str] = []
+    for raw_line in output.splitlines():
+        if not raw_line:
+            continue
+        code = raw_line[:2]
+        if code in {"??", "!!"}:
+            continue
+        path = raw_line[3:].strip()
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        if path:
+            paths.append(path)
+    return paths
+
+
+def _clean_paths_from_dry_run(output: str) -> list[str]:
+    paths: list[str] = []
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        prefix = "Would remove "
+        if not line.startswith(prefix):
+            continue
+        path = line.removeprefix(prefix).strip()
+        if path:
+            paths.append(path)
+    return paths
+
+
+def warn_before_shared_checkout_refresh(
+    config: ProjectConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> WorktreeProvisionResult | None:
+    status_proc = runner(
+        git_shared_checkout_status_porcelain_args(config),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if status_proc.returncode != 0:
+        reason = _proc_failure_reason(status_proc, f"status failed with exit {status_proc.returncode}")
+        return WorktreeProvisionResult({role.role: reason for role in config.roles})
+    clean_proc = runner(
+        git_clean_shared_checkout_dry_run_args(config),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if clean_proc.returncode != 0:
+        reason = _proc_failure_reason(clean_proc, f"clean dry-run failed with exit {clean_proc.returncode}")
+        return WorktreeProvisionResult({role.role: reason for role in config.roles})
+
+    tracked_paths = _tracked_dirty_paths_from_status(str(status_proc.stdout or ""))
+    clean_paths = _clean_paths_from_dry_run(str(clean_proc.stdout or ""))
+    if not tracked_paths and not clean_paths:
+        return None
+
+    print(
+        f"warning: team-launcher will reset managed project checkout {config.repository} to {worktree_ref(config)}",
+        file=sys.stderr,
+    )
+    if tracked_paths:
+        print("warning: tracked changes will be discarded:", file=sys.stderr)
+        for path in tracked_paths:
+            print(f"warning:   {path}", file=sys.stderr)
+    if clean_paths:
+        print("warning: untracked files will be removed:", file=sys.stderr)
+        for path in clean_paths:
+            print(f"warning:   {path}", file=sys.stderr)
+    return None
+
+
 def ensure_project_worktrees(
     config: ProjectConfig,
     *,
@@ -1850,6 +1935,9 @@ def ensure_project_worktrees(
     if check_proc.returncode != 0:
         reason = _proc_failure_reason(check_proc, f"repository check failed with exit {check_proc.returncode}")
         return WorktreeProvisionResult({role.role: reason for role in config.roles})
+    warning_result = warn_before_shared_checkout_refresh(config, runner=runner)
+    if warning_result is not None:
+        return warning_result
     checkout_proc = runner(git_checkout_shared_ref_args(config))
     if checkout_proc.returncode != 0:
         reason = _proc_failure_reason(checkout_proc, f"checkout failed with exit {checkout_proc.returncode}")
@@ -3193,6 +3281,8 @@ def _write_switchyard_onboarding_files(
                 "Create or refine the design document with the user.",
                 "The board and full pane window already exist; use tickets for follow-up implementation work.",
                 "Do not create workflow stages or workflow transitions in the artifact.",
+                "This project directory is managed by Switchyard and is reset to origin/main on every launch.",
+                "Do not keep uncommitted work here; implementation work happens in the role worktrees.",
                 "The initial git remote named origin points at this local repository as a bootstrap placeholder.",
                 "Replace origin with the project's real remote before expecting fetches to detect upstream changes.",
                 "",

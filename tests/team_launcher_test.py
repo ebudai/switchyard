@@ -118,6 +118,24 @@ class FakeRunner:
             return default
         return value
 
+    @staticmethod
+    def _target_and_command_from_shell(shell_command: str) -> tuple[str, str]:
+        try:
+            tokens = shlex.split(shell_command)
+        except ValueError:
+            return "", ""
+        target = ""
+        command = ""
+        for token in tokens:
+            if token.startswith("TICKET_BOARD_PANE_TARGET="):
+                target = token.split("=", 1)[1]
+            elif token.startswith("PGU_PANE_TARGET=") and not target:
+                target = token.split("=", 1)[1]
+            elif Path(token).name in {"agy", "claude", "codex"}:
+                command = Path(token).name
+                break
+        return target, command
+
     def __call__(self, args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         self.calls.append(args)
         if args[:2] == ["tmux", "has-session"]:
@@ -133,6 +151,9 @@ class FakeRunner:
         if args[:2] == ["tmux", "new-session"]:
             session = args[args.index("-s") + 1]
             self.existing_sessions.add(session)
+            target, command = self._target_and_command_from_shell(str(args[-1]))
+            if target and command and target not in self.current_commands:
+                self.current_commands[target] = command
         if args[:2] == ["tmux", "kill-session"]:
             session = args[-1]
             self.existing_sessions.discard(session)
@@ -825,6 +846,7 @@ def test_launch_project_uses_configured_owner_readable_pane_launcher() -> None:
                 script_path=ROOT / "scripts" / "team-launcher",
                 runner=runner,
                 layout_output=layout_output,
+                pane_state_dir=tmp_path / "pane-state",
             )
             == 0
         )
@@ -876,6 +898,7 @@ def test_launch_project_probes_pane_launcher_as_owner_without_control_repository
                 script_path=ROOT / "scripts" / "team-launcher",
                 runner=runner,
                 layout_output=layout_output,
+                pane_state_dir=tmp_path / "pane-state",
             )
             == 0
         )
@@ -922,6 +945,7 @@ def test_launch_project_probes_pane_launcher_as_owner_without_repository() -> No
                 script_path=ROOT / "scripts" / "team-launcher",
                 runner=runner,
                 layout_output=layout_output,
+                pane_state_dir=tmp_path / "pane-state",
             )
             == 0
         )
@@ -2231,7 +2255,55 @@ def test_start_creates_missing_session_once_then_attaches() -> None:
     assert "--dangerously-bypass-hook-trust" in runner.calls[1][-1]
     assert "--reasoning-effort" not in runner.calls[1][-1]
     assert " resume " not in f" {runner.calls[1][-1]} "
-    assert runner.calls[2] == ["tmux", "attach", "-t", "pgu-ops"]
+    assert runner.calls[2] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_pid}"]
+    assert runner.calls[3] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_current_command}"]
+    assert runner.calls[4] == ["tmux", "attach", "-t", "pgu-ops"]
+
+
+def test_visible_start_fails_before_attach_when_cli_exits_immediately() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    role = next(role for role in config.roles if role.role == "ops")
+
+    class DeadFreshRunner:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+            self.existing = False
+
+        def __call__(self, args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if args[:2] == ["tmux", "has-session"]:
+                return subprocess.CompletedProcess(args, 0 if self.existing else 1)
+            if args[:2] == ["tmux", "new-session"]:
+                self.existing = True
+                return subprocess.CompletedProcess(args, 0)
+            if args[:3] == ["tmux", "display-message", "-p"]:
+                return subprocess.CompletedProcess(args, 1, stdout="")
+            if args[:2] == ["tmux", "attach"]:
+                raise AssertionError("dead fresh pane should fail before attach")
+            return subprocess.CompletedProcess(args, 0)
+
+    runner = DeadFreshRunner()
+    stderr = StringIO()
+
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        tmp_path = Path(tmp)
+        pane_state_dir = tmp_path / "pane-state"
+        with redirect_stderr(stderr):
+            assert (
+                run_role_pane(
+                    role,
+                    mode="start",
+                    session_dir=tmp_path / "sessions",
+                    pane_state_dir=pane_state_dir,
+                    runner=runner,
+                )
+                == 1
+            )
+
+        assert not (pane_state_dir / pane_state_file_name(role.target)).exists()
+
+    assert any(call[:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"] for call in runner.calls)
+    assert "role ops did not leave a live pgu-ops session" in stderr.getvalue()
 
 
 def test_clear_session_record_preserves_superseded_history_after_second_fallback() -> None:
@@ -3218,6 +3290,44 @@ def test_viewer_layout_starts_role_sessions_and_additive_viewer() -> None:
     ]
     assert not any(call[:2] == ["env", "QT_QPA_PLATFORM=wayland"] for call in runner.calls)
     assert messages == []
+
+
+def test_konsole_layout_prestarts_visible_role_sessions_before_window() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-konsole-prestart.") as tmp:
+        tmp_path = Path(tmp)
+        config_path = _write_six_visible_role_config(tmp_path)
+        config = load_project_config("porter", config_path)
+        runner = FakeRunner()
+        layout_output = tmp_path / "layout.json"
+
+        assert (
+            launch_project(
+                config,
+                config_path=config_path,
+                mode="start",
+                script_path=ROOT / "scripts" / "team-launcher",
+                runner=runner,
+                layout_output=layout_output,
+                pane_state_dir=tmp_path / "pane-state",
+                layout_mode="separate",
+                layout_environ={"XDG_CURRENT_DESKTOP": "KDE"},
+            )
+            == 0
+        )
+
+        role_sessions = ["porter-designer", "porter-director", "porter-audit", "porter-ops", "porter-app", "porter-main"]
+        role_new_session_indexes = [
+            index
+            for index, call in enumerate(runner.calls)
+            if call[:2] == ["tmux", "new-session"] and call[call.index("-s") + 1] in role_sessions
+        ]
+        assert [runner.calls[index][runner.calls[index].index("-s") + 1] for index in role_new_session_indexes] == role_sessions
+        konsole_index = runner.calls.index(konsole_launch_args(layout_output))
+        assert max(role_new_session_indexes) < konsole_index
+        for role in ("designer", "director", "audit", "ops", "app", "main"):
+            state = _read_pane_state(tmp_path / "pane-state", f"porter-{role}:0.0")
+            assert state["state"] == "idle"
+            assert state["source"] == "team_launcher.start"
 
 
 def test_viewer_pane_death_does_not_change_role_targets_in_real_tmux() -> None:

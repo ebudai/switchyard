@@ -2705,6 +2705,7 @@ def run_role_pane(
                 pane_state_dir=pane_state_dir,
                 prefer_resume=True,
                 seed_source="team_launcher.start",
+                post_start_verifier=lambda: _resume_launch_verified(role, runner=runner),
                 runner=runner,
             )
             if start_result != 0:
@@ -2807,6 +2808,7 @@ def ensure_visible_role_session_for_viewer(
                 pane_state_dir=pane_state_dir,
                 prefer_resume=True,
                 seed_source="team_launcher.start",
+                post_start_verifier=lambda: _resume_launch_verified(role, runner=runner),
                 runner=runner,
             )
         seed_initial_pane_idle_state(role, pane_state_dir=pane_state_dir, source="team_launcher.start")
@@ -3136,6 +3138,20 @@ def launch_project(
             runner=runner,
         )
     else:
+        for role in visible_roles_for_viewer(config):
+            if role.role in failed_roles:
+                print(f"skipping visible role {role.role}: {failed_roles[role.role]}", file=sys.stderr)
+                continue
+            result = ensure_visible_role_session_for_viewer(
+                role,
+                mode=mode,
+                session_dir=config.session_dir,
+                pane_state_dir=effective_pane_state_dir,
+                force_reload=force_reload,
+                runner=runner,
+            )
+            if result != 0:
+                return result
         launch_result = launch_konsole_window(output_path, project=config.project, runner=runner)
     if launch_result != 0:
         return launch_result

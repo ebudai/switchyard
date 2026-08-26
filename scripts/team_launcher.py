@@ -2939,9 +2939,52 @@ def _verify_pane_launcher_path(
     return pane_script_path
 
 
+def _owner_state_layout_output_path(project: str, *, owner_home: Path) -> Path:
+    return owner_home / ".local" / "state" / "switchyard" / "projects" / project / f"{project}-team-layout.json"
+
+
 def default_layout_output_path(config: ProjectConfig, *, config_path: Path) -> Path:
-    base_dir = config.repository if config.repository is not None else config_path.parent
-    return base_dir / SWITCHYARD_PROJECT_DIR_NAME / f"{config.project}-team-layout.json"
+    if config.run_as_user:
+        try:
+            owner_home = Path(pwd.getpwnam(config.run_as_user).pw_dir)
+        except KeyError:
+            owner_home = None
+            paths = [config_path.expanduser().resolve(strict=False)]
+            if config.repository is not None:
+                paths.append(config.repository.expanduser().resolve(strict=False))
+            for path in paths:
+                for candidate in (path, *path.parents):
+                    if candidate.name == config.run_as_user:
+                        owner_home = candidate
+                        break
+                if owner_home is not None:
+                    break
+            if owner_home is None:
+                owner_home = Path("/home") / config.run_as_user
+        return _owner_state_layout_output_path(config.project, owner_home=owner_home)
+    else:
+        base_dir = config_path.parent / SWITCHYARD_PROJECT_DIR_NAME / config.project
+        return base_dir / f"{config.project}-team-layout.json"
+
+
+def chown_layout_output_args(config: ProjectConfig, output_path: Path) -> list[str]:
+    if not config.run_as_user:
+        raise ValueError("layout ownership repair requires run_as_user")
+    return ["chown", "-R", f"{config.run_as_user}:{config.run_as_user}", str(output_path.parent)]
+
+
+def ensure_layout_output_owner(
+    config: ProjectConfig,
+    output_path: Path,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> None:
+    if not config.run_as_user or current_user_name() == config.run_as_user:
+        return
+    result = runner(chown_layout_output_args(config, output_path))
+    if result.returncode != 0:
+        reason = _proc_failure_reason(result, f"chown failed with exit {result.returncode}")
+        raise SystemExit(f"team-launcher: failed to assign layout output {output_path.parent} to {config.run_as_user}: {reason}")
 
 
 def _legacy_new_project_stacked_layout_payload(role_count: int) -> dict[str, Any]:
@@ -3117,6 +3160,7 @@ def launch_project(
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     dry_run: bool = False,
     layout_output: Path | None = None,
+    assign_layout_owner: bool | None = None,
     pane_state_dir: Path | None = None,
     force_reload: bool = False,
     allow_stale_launcher: bool = False,
@@ -3145,6 +3189,7 @@ def launch_project(
         )
     effective_pane_state_dir = pane_state_dir or DEFAULT_PANE_STATE_DIR
     output_path = layout_output or default_layout_output_path(config, config_path=config_path)
+    should_assign_layout_owner = layout_output is None if assign_layout_owner is None else assign_layout_owner
     pane_script_path = config.pane_launcher or script_path
     if not dry_run:
         upgrade_result = upgrade_generated_project_layout(config, config_path=config_path)
@@ -3184,6 +3229,8 @@ def launch_project(
         force_reload=force_reload,
         failed_roles=failed_roles,
     )
+    if should_assign_layout_owner:
+        ensure_layout_output_owner(config, output_path, runner=runner)
     plan = {
         "project": config.project,
         "mode": mode,
@@ -4965,6 +5012,8 @@ def switchyard_new_command(
         config_path=config_path,
         mode="start",
         script_path=Path(__file__).resolve().with_name(TEAM_LAUNCHER_NAME),
+        layout_output=_owner_state_layout_output_path(resolved_slug, owner_home=home_base / owner_user),
+        assign_layout_owner=True,
         pane_state_dir=pane_state_dir or DEFAULT_PANE_STATE_DIR,
         runner=launch_runner,
         layout_mode=layout_mode,

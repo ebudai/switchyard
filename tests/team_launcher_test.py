@@ -821,7 +821,13 @@ def _make_origin_backed_repo(tmp: Path) -> tuple[Path, Path]:
     return origin, repo
 
 
-def _write_minimal_shared_checkout_config(tmp: Path, repo: Path, roles: list[str]) -> Path:
+def _write_minimal_shared_checkout_config(
+    tmp: Path,
+    repo: Path,
+    roles: list[str],
+    *,
+    run_as_user: str = "",
+) -> Path:
     layout = {
         "KonsoleTabs": [
             {
@@ -838,6 +844,7 @@ def _write_minimal_shared_checkout_config(tmp: Path, repo: Path, roles: list[str
         "project": "pgu",
         "layout": str(layout_path),
         "repository": str(repo),
+        "run_as_user": run_as_user,
         "worktree_base": str(tmp / "worktrees"),
         "roles": [
             {
@@ -1125,7 +1132,7 @@ def test_dry_run_materializes_pgu_layout_with_six_visible_role_commands() -> Non
         assert not any(" perf " in f" {command} " for command in commands)
 
 
-def test_launch_project_default_layout_uses_project_owned_switchyard_not_tmp() -> None:
+def test_launch_project_default_layout_uses_project_scoped_switchyard_not_tmp() -> None:
     project = f"layoutsafe{os.getpid()}"
     stale_tmp_layout = Path(tempfile.gettempdir()) / f"{project}-team-layout.json"
     stale_tmp_layout.write_text("stale shared tmp layout\n", encoding="utf-8")
@@ -1150,7 +1157,7 @@ def test_launch_project_default_layout_uses_project_owned_switchyard_not_tmp() -
                     == 0
                 )
 
-            expected_layout = config.repository / ".switchyard" / f"{project}-team-layout.json"
+            expected_layout = config_path.parent / ".switchyard" / project / f"{project}-team-layout.json"
             plan = json.loads(stdout.getvalue())
             assert plan["layout"] == str(expected_layout)
             assert expected_layout.is_file()
@@ -1175,9 +1182,39 @@ def test_default_layout_paths_are_project_scoped() -> None:
         porter_layout = team_launcher.default_layout_output_path(porter, config_path=porter_config_path)
         zeta_layout = team_launcher.default_layout_output_path(zeta, config_path=zeta_config_path)
 
-    assert porter_layout == porter.repository / ".switchyard" / "porter-team-layout.json"
-    assert zeta_layout == zeta.repository / ".switchyard" / "zeta-team-layout.json"
+    assert porter_layout == porter_config_path.parent / ".switchyard" / "porter" / "porter-team-layout.json"
+    assert zeta_layout == zeta_config_path.parent / ".switchyard" / "zeta" / "zeta-team-layout.json"
     assert porter_layout != zeta_layout
+
+
+def test_default_layout_path_for_run_as_user_lives_outside_shared_checkout() -> None:
+    original_getpwnam = team_launcher.pwd.getpwnam
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-layout-owner.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "owner-home"
+        owner_home.mkdir()
+        config_path = _write_six_visible_role_config(tmp_path, project="porter")
+        raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+        raw_config["run_as_user"] = "porter-agent"
+        config_path.write_text(json.dumps(raw_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+        class FakeUserInfo:
+            pw_dir = str(owner_home)
+            pw_uid = os.getuid()
+
+        try:
+            def fake_getpwnam(user_name: str) -> object:
+                return FakeUserInfo() if user_name == "porter-agent" else original_getpwnam(user_name)
+
+            team_launcher.pwd.getpwnam = fake_getpwnam
+            config = load_project_config("porter", config_path)
+            layout = team_launcher.default_layout_output_path(config, config_path=config_path)
+        finally:
+            team_launcher.pwd.getpwnam = original_getpwnam
+
+    assert layout == owner_home / ".local" / "state" / "switchyard" / "projects" / "porter" / "porter-team-layout.json"
+    assert config.repository is not None
+    assert not layout.is_relative_to(config.repository)
 
 
 def test_launch_project_uses_configured_owner_readable_pane_launcher() -> None:
@@ -4122,6 +4159,212 @@ def test_clean_launch_does_not_warn_about_shared_checkout_refresh() -> None:
         assert "will reset managed project checkout" not in stderr.getvalue()
 
 
+def test_default_layout_does_not_create_untracked_switchyard_in_shared_checkout() -> None:
+    class ProjectGitRunner(FakeRunner):
+        def __init__(self, repo: Path) -> None:
+            super().__init__()
+            self.repo = repo
+
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if len(args) >= 3 and args[:2] == ["git", "-C"] and Path(args[2]) == self.repo:
+                run_kwargs = dict(kwargs)
+                run_kwargs.setdefault("text", True)
+                if "stdout" not in run_kwargs:
+                    run_kwargs["stdout"] = subprocess.PIPE
+                if "stderr" not in run_kwargs:
+                    run_kwargs["stderr"] = subprocess.PIPE
+                return subprocess.run(args, **run_kwargs)
+            return super().__call__(args, **kwargs)
+
+    original_getpwnam = team_launcher.pwd.getpwnam
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-clean-project.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "owner-home"
+        owner_home.mkdir()
+        _origin, repo = _make_origin_backed_repo(tmp_path)
+        config_path = _write_minimal_shared_checkout_config(tmp_path, repo, ["ops"], run_as_user="agent")
+        layout_path = tmp_path / "launch-layout.json"
+        layout_path.write_text(
+            json.dumps(
+                {
+                    "Orientation": "Horizontal",
+                    "Widgets": [{"SessionRestoreId": 0, "Command": "", "WorkingDirectory": ""}],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+        raw_config["layout"] = str(layout_path)
+        config_path.write_text(json.dumps(raw_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        config = load_project_config("pgu", config_path)
+        runner = ProjectGitRunner(repo)
+        stderr = StringIO()
+
+        class FakeUserInfo:
+            pw_dir = str(owner_home)
+            pw_uid = os.getuid()
+
+        try:
+            def fake_getpwnam(user_name: str) -> object:
+                return FakeUserInfo() if user_name == "agent" else original_getpwnam(user_name)
+
+            team_launcher.pwd.getpwnam = fake_getpwnam
+            expected_layout = owner_home / ".local" / "state" / "switchyard" / "projects" / "pgu" / "pgu-team-layout.json"
+
+            for _ in range(2):
+                with redirect_stderr(stderr):
+                    assert (
+                        launch_project(
+                            config,
+                            config_path=config_path,
+                            mode="start",
+                            script_path=ROOT / "scripts" / "team-launcher",
+                            runner=runner,
+                            pane_state_dir=tmp_path / "pane-state",
+                        )
+                        == 0
+                    )
+        finally:
+            team_launcher.pwd.getpwnam = original_getpwnam
+
+        status = _run_git(["git", "status", "--porcelain"], cwd=repo).stdout
+        assert expected_layout.is_file()
+        assert not (repo / ".switchyard").exists()
+
+    assert "will reset managed project checkout" not in stderr.getvalue()
+    assert status == ""
+
+
+def test_root_materialized_owner_state_layout_is_owner_writable_on_next_launch() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-layout-owner-transfer.") as tmp:
+        tmp_path = Path(tmp)
+        layout_template = tmp_path / "layout-template.json"
+        layout_template.write_text(
+            json.dumps({"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}) + "\n",
+            encoding="utf-8",
+        )
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout_template),
+                    "run_as_user": "porter-agent",
+                    "session_dir": str(tmp_path / "sessions"),
+                    "roles": [
+                        {
+                            "role": "ops",
+                            "slot": 0,
+                            "target": "porter-ops:0.0",
+                            "tmux_session": "porter-ops",
+                            "cli": ["codex"],
+                        }
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+        layout_output = (
+            tmp_path
+            / "home"
+            / "porter-agent"
+            / ".local"
+            / "state"
+            / "switchyard"
+            / "projects"
+            / "porter"
+            / "porter-team-layout.json"
+        )
+        synthetic_owner: dict[Path, str] = {}
+        active_user = "root"
+        expected_chown_args = ["chown", "-R", "porter-agent:porter-agent", str(layout_output.parent)]
+
+        class OwnershipRunner(FakeRunner):
+            def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                if args[:1] == ["chown"]:
+                    self.calls.append(args)
+                    owner = args[-2] if len(args) >= 3 else ""
+                    target = Path(args[-1]) if len(args) >= 3 else Path("/nonexistent")
+                    recursive = "-R" in args[1:-2]
+                    if owner == f"{config.run_as_user}:{config.run_as_user}":
+                        synthetic_owner[target] = config.run_as_user
+                        if recursive:
+                            for path in list(synthetic_owner):
+                                if path == target or path.is_relative_to(target):
+                                    synthetic_owner[path] = config.run_as_user
+                    return subprocess.CompletedProcess(args, 0)
+                return super().__call__(args, **kwargs)
+
+        def fake_materialize_layout(
+            _config: team_launcher.ProjectConfig,
+            *,
+            output_path: Path,
+            **_kwargs: object,
+        ) -> Path:
+            writer = team_launcher.current_user_name()
+            existing_owner = synthetic_owner.get(output_path)
+            if existing_owner is not None and existing_owner != writer:
+                raise PermissionError(f"{writer} cannot overwrite layout owned by {existing_owner}: {output_path}")
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text("{}\n", encoding="utf-8")
+            synthetic_owner[output_path] = writer
+            return output_path
+
+        runner = OwnershipRunner()
+        original_current_user_name = team_launcher.current_user_name
+        original_materialize_layout = team_launcher.materialize_layout
+        try:
+            team_launcher.current_user_name = lambda: active_user
+            team_launcher.materialize_layout = fake_materialize_layout
+
+            assert (
+                launch_project(
+                    config,
+                    config_path=config_path,
+                    mode="start",
+                    script_path=ROOT / "scripts" / "team-launcher",
+                    runner=runner,
+                    layout_output=layout_output,
+                    assign_layout_owner=True,
+                    pane_state_dir=tmp_path / "pane-state",
+                    layout_mode="viewer",
+                    layout_environ={"XDG_CURRENT_DESKTOP": "GNOME"},
+                )
+                == 0
+            )
+            assert synthetic_owner[layout_output] == "porter-agent"
+
+            active_user = "porter-agent"
+            assert (
+                launch_project(
+                    config,
+                    config_path=config_path,
+                    mode="start",
+                    script_path=ROOT / "scripts" / "team-launcher",
+                    runner=runner,
+                    layout_output=layout_output,
+                    assign_layout_owner=True,
+                    pane_state_dir=tmp_path / "pane-state",
+                    layout_mode="viewer",
+                    layout_environ={"XDG_CURRENT_DESKTOP": "GNOME"},
+                )
+                == 0
+            )
+        finally:
+            team_launcher.current_user_name = original_current_user_name
+            team_launcher.materialize_layout = original_materialize_layout
+
+    assert runner.calls.count(expected_chown_args) == 1
+
+
 def test_bad_shared_checkout_blocks_all_roles_with_real_git() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-git.") as tmp:
         tmp_path = Path(tmp)
@@ -5594,7 +5837,16 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
         config = json.loads((provision_dir / "porter.json").read_text(encoding="utf-8"))
         plan = json.loads((provision_dir / "plan.json").read_text(encoding="utf-8"))
         artifact = json.loads((project_dir / ".switchyard" / "porter.project.json").read_text(encoding="utf-8"))
-        generated_layout_path = project_dir / ".switchyard" / "porter-team-layout.json"
+        generated_layout_path = (
+            home_base
+            / "otto-agent"
+            / ".local"
+            / "state"
+            / "switchyard"
+            / "projects"
+            / "porter"
+            / "porter-team-layout.json"
+        )
         generated_layout = json.loads(generated_layout_path.read_text(encoding="utf-8"))
         generated_commands = _leaf_commands(generated_layout)
         designer_env = next(role["env"] for role in config["roles"] if role["role"] == "designer")

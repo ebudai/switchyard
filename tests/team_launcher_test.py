@@ -769,6 +769,7 @@ def test_pgu_config_matches_director_supplied_live_role_assignments() -> None:
     assert config.board_url == "http://127.0.0.1:8770"
     assert config.board_socket == "/run/pgu-ticket-board/ticket-board.sock"
     assert config.run_as_user == "agent"
+    assert config.control_repository is None
     assert config.worktree_base is None
     assert worktree_ref(config) == "origin/main"
     assert roles["research"].detached
@@ -1989,6 +1990,149 @@ def test_start_runs_research_detached_before_opening_visible_layout() -> None:
         assert ["tmux", "attach", "-t", "pgu-research"] not in runner.calls
 
 
+def test_control_repository_launch_uses_role_worktrees_and_preserves_repository() -> None:
+    class ProjectGitRunner(FakeRunner):
+        def __init__(self, root: Path) -> None:
+            super().__init__()
+            self.root = root.resolve(strict=False)
+
+        def _is_scratch_path(self, path: Path) -> bool:
+            resolved = path.resolve(strict=False)
+            return resolved == self.root or resolved.is_relative_to(self.root)
+
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            run_kwargs = dict(kwargs)
+            run_kwargs.setdefault("text", True)
+            if "stdout" not in run_kwargs:
+                run_kwargs["stdout"] = subprocess.PIPE
+            if "stderr" not in run_kwargs:
+                run_kwargs["stderr"] = subprocess.PIPE
+            if args[:1] == ["mkdir"] and len(args) >= 3 and self._is_scratch_path(Path(args[2])):
+                return subprocess.run(args, **run_kwargs)
+            if args[:1] == ["git"]:
+                git_path: Path | None = None
+                if len(args) >= 3 and args[1] == "-C":
+                    git_path = Path(args[2])
+                elif len(args) >= 4 and args[1:3] == ["clone", "--bare"]:
+                    git_path = Path(args[3])
+                else:
+                    for index, arg in enumerate(args):
+                        if arg == "--git-dir" and index + 1 < len(args):
+                            git_path = Path(args[index + 1])
+                            break
+                if git_path is not None and self._is_scratch_path(git_path):
+                    return subprocess.run(args, **run_kwargs)
+            return super().__call__(args, **kwargs)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-control.") as tmp:
+        tmp_path = Path(tmp)
+        _origin, repo = _make_origin_backed_repo(tmp_path)
+        (repo / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+        _run_git(["git", "add", ".gitignore"], cwd=repo)
+        _run_git(["git", "commit", "-m", "ignore bytecode"], cwd=repo)
+        (repo / "tracked.txt").write_text("user's local edit\n", encoding="utf-8")
+        (repo / "notes.txt").write_text("user notes\n", encoding="utf-8")
+        layout_path = tmp_path / "layout.json"
+        layout_path.write_text(
+            json.dumps(
+                {
+                    "Orientation": "Horizontal",
+                    "Widgets": [
+                        {"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""},
+                        {"Command": "", "SessionRestoreId": 1, "WorkingDirectory": ""},
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config_path = tmp_path / "porter.json"
+        worktree_base = tmp_path / "worktrees"
+        control_repo = tmp_path / "state" / "control.git"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout_path),
+                    "repository": str(repo),
+                    "control_repository": str(control_repo),
+                    "worktree_base": str(worktree_base),
+                    "roles": [
+                        {"role": "ops", "slot": 0, "target": "porter-ops:0.0", "cli": ["codex"]},
+                        {"role": "app", "slot": 1, "target": "porter-app:0.0", "cli": ["codex"]},
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+        runner = ProjectGitRunner(tmp_path)
+
+        assert (
+            launch_project(
+                config,
+                config_path=config_path,
+                mode="start",
+                script_path=ROOT / "scripts" / "team-launcher",
+                runner=runner,
+                layout_output=tmp_path / "launch-layout.json",
+                pane_state_dir=tmp_path / "pane-state",
+            )
+            == 0
+        )
+
+        assert (repo / "tracked.txt").read_text(encoding="utf-8") == "user's local edit\n"
+        assert (repo / "notes.txt").read_text(encoding="utf-8") == "user notes\n"
+        assert config.roles[0].workdir == str(worktree_base / "ops")
+        assert config.roles[1].workdir == str(worktree_base / "app")
+        assert _run_git(["git", "-C", worktree_base / "ops", "rev-parse", "--is-inside-work-tree"]).stdout.strip() == "true"
+        assert _run_git(["git", "-C", worktree_base / "app", "rev-parse", "--is-inside-work-tree"]).stdout.strip() == "true"
+        assert _run_git(["git", "-C", worktree_base / "ops", "rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip() == "HEAD"
+        assert _run_git(["git", "-C", control_repo, "config", "--get-all", "remote.origin.fetch"]).stdout.strip() == (
+            "+refs/heads/*:refs/remotes/origin/*"
+        )
+        assert git_checkout_shared_ref_args(config) not in runner.calls
+        assert git_clean_shared_checkout_args(config) not in runner.calls
+        assert any(call == team_launcher.git_control_worktree_add_args(config, config.roles[0]) for call in runner.calls)
+        assert any(call == team_launcher.git_control_worktree_add_args(config, config.roles[1]) for call in runner.calls)
+
+        ops_worktree = worktree_base / "ops"
+        app_worktree = worktree_base / "app"
+        (ops_worktree / "tracked.txt").write_text("agent local edit\n", encoding="utf-8")
+        (ops_worktree / "agent_notes.txt").write_text("agent notes\n", encoding="utf-8")
+        (app_worktree / "__pycache__").mkdir()
+        (app_worktree / "__pycache__" / "x.pyc").write_bytes(b"pyc\n")
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            assert (
+                launch_project(
+                    config,
+                    config_path=config_path,
+                    mode="start",
+                    script_path=ROOT / "scripts" / "team-launcher",
+                    runner=ProjectGitRunner(tmp_path),
+                    layout_output=tmp_path / "launch-layout-2.json",
+                    pane_state_dir=tmp_path / "pane-state-2",
+                )
+                == 0
+            )
+        warning = stderr.getvalue()
+        assert "will reset managed role worktree" in warning
+        assert "for ops to origin/main" in warning
+        assert "tracked.txt" in warning
+        assert "agent_notes.txt" in warning
+        assert "__pycache__" not in warning
+        assert (ops_worktree / "tracked.txt").read_text(encoding="utf-8") == "initial\n"
+        assert not (ops_worktree / "agent_notes.txt").exists()
+        assert not (app_worktree / "__pycache__").exists()
+
+
 def test_viewer_layout_starts_role_sessions_and_additive_viewer() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-viewer.") as tmp:
         tmp_path = Path(tmp)
@@ -3109,6 +3253,8 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
     assert config["board_socket"] == "/run/porter-ticket-board/ticket-board.sock"
     assert config["repository"] == str(project_repo)
     assert config["repository"] != str(source_repo)
+    assert config["control_repository"] == f"/home/{current_user}/.local/state/switchyard/projects/porter/control.git"
+    assert config["worktree_base"] == f"/home/{current_user}/porter-worktrees"
     assert [role["role"] for role in config["roles"]] == ["designer", "director", "audit", "ops", "app", "main"]
     assert [role["tmux_session"] for role in config["roles"]] == [
         "porter-designer",
@@ -3146,7 +3292,16 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
     assert loaded_config.roles[0].target == "porter-designer:0.0"
     assert loaded_config.roles[3].target == "porter-ops:0.0"
     assert loaded_config.roles[5].target == "porter-main:0.0"
-    assert all(role.workdir == str(project_repo) for role in loaded_config.roles)
+    assert loaded_config.control_repository == Path(config["control_repository"])
+    assert loaded_config.worktree_base == Path(config["worktree_base"])
+    assert {role.role: role.workdir for role in loaded_config.roles} == {
+        "designer": f"/home/{current_user}/porter-worktrees/designer",
+        "director": f"/home/{current_user}/porter-worktrees/director",
+        "audit": f"/home/{current_user}/porter-worktrees/audit",
+        "ops": f"/home/{current_user}/porter-worktrees/ops",
+        "app": f"/home/{current_user}/porter-worktrees/app",
+        "main": f"/home/{current_user}/porter-worktrees/main",
+    }
     assert {role.env["TICKET_BOARD_TICKET_PREFIX"] for role in loaded_config.roles} == {"PORTER"}
     assert commands.splitlines()[:2] == ["#!/usr/bin/env bash", "set -euo pipefail"]
     assert "Environment=TICKET_BOARD_PROJECT=porter" in board_unit
@@ -3165,7 +3320,14 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
         "porter-app:0.0",
         "porter-main:0.0",
     ]
-    assert [role["workdir"] for role in launch_plan["roles"]] == [str(project_repo)] * 6
+    assert [role["workdir"] for role in launch_plan["roles"]] == [
+        f"/home/{current_user}/porter-worktrees/designer",
+        f"/home/{current_user}/porter-worktrees/director",
+        f"/home/{current_user}/porter-worktrees/audit",
+        f"/home/{current_user}/porter-worktrees/ops",
+        f"/home/{current_user}/porter-worktrees/app",
+        f"/home/{current_user}/porter-worktrees/main",
+    ]
     assert launch_output_exists
 
 
@@ -3244,7 +3406,8 @@ def test_design_writes_artifact_that_new_from_consumes_for_missing_owner_user() 
     assert config["repository"] == str(project_repo)
     assert config["worktree_remote"] == "upstream"
     assert config["worktree_branch"] == "trunk"
-    assert "worktree_base" not in config
+    assert config["control_repository"] == f"/home/{missing_owner}/.local/state/switchyard/projects/porter/control.git"
+    assert config["worktree_base"] == f"/home/{missing_owner}/porter-worktrees"
     assert "Environment=TICKET_BOARD_PROJECT=porter" in board_unit
     assert "Environment=TICKET_BOARD_TICKET_PREFIX=PORT" in board_unit
     assert not any(call[:1] == ["sudo"] for call in runner.calls)
@@ -3581,7 +3744,12 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
             self.call_kwargs.append(dict(kwargs))
             self.calls.append(args)
             if args[:4] == ["sudo", "-u", self.owner_user, "git"]:
-                return self._run_project_git(args[3:], **kwargs)
+                git_args = args[3:]
+                if len(git_args) >= 3 and git_args[:2] == ["git", "-C"] and Path(git_args[2]) == self.project_dir:
+                    return self._run_project_git(git_args, **kwargs)
+                return subprocess.CompletedProcess(args, 0)
+            if args[:4] == ["sudo", "-u", self.owner_user, "mkdir"]:
+                return subprocess.CompletedProcess(args, 0)
             if len(args) >= 3 and args[:2] == ["git", "-C"] and Path(args[2]) == self.project_dir:
                 return self._run_project_git(args, **kwargs)
             if args[:2] == ["id", "-u"]:
@@ -3735,13 +3903,15 @@ def test_switchyard_new_custom_project_path_sets_artifact_repository_and_pane_wo
         assert custom_path.is_dir()
         assert json.loads((custom_path / ".switchyard" / "otto.project.json").read_text(encoding="utf-8"))["project"]["repository"] == str(custom_path)
         assert install_call[-1] == str(custom_path)
+        assert config.repository == custom_path
+        assert config.control_repository == Path("/home/otto-agent/.local/state/switchyard/projects/otto/control.git")
         assert {role.role: role.workdir for role in config.roles} == {
-            "designer": str(custom_path),
-            "director": str(custom_path),
-            "audit": str(custom_path),
-            "ops": str(custom_path),
-            "app": str(custom_path),
-            "main": str(custom_path),
+            "designer": "/home/otto-agent/otto-worktrees/designer",
+            "director": "/home/otto-agent/otto-worktrees/director",
+            "audit": "/home/otto-agent/otto-worktrees/audit",
+            "ops": "/home/otto-agent/otto-worktrees/ops",
+            "app": "/home/otto-agent/otto-worktrees/app",
+            "main": "/home/otto-agent/otto-worktrees/main",
         }
 
 
@@ -3995,6 +4165,7 @@ def test_new_project_from_handwritten_artifact_uses_same_provision_path() -> Non
     assert config["ticket_prefix"] == "ATL"
     assert config["worktree_branch"] == "mainline"
     assert config["worktree_base"] == f"/home/{current_user}/atlas-worktrees"
+    assert config["control_repository"] == f"/home/{current_user}/.local/state/switchyard/projects/atlas/control.git"
     assert "Environment=TICKET_BOARD_TICKET_PREFIX=ATL" in board_unit
     assert not any(call[:1] == ["sudo"] for call in runner.calls)
 

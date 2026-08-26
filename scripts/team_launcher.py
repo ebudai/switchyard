@@ -178,6 +178,7 @@ class ProjectConfig:
     board_socket: str
     run_as_user: str
     repository: Path | None
+    control_repository: Path | None
     worktree_base: Path | None
     worktree_remote: str
     worktree_branch: str
@@ -978,26 +979,34 @@ def load_project_config(project: str, config_path: Path | None = None) -> Projec
     repository_raw = config.get("repository")
     if repository_raw is not None:
         repository = _expand_path(str(repository_raw), base=base)
+    control_repository = None
+    control_repository_raw = config.get("control_repository")
+    if control_repository_raw is not None:
+        control_repository = _expand_path(str(control_repository_raw), base=base)
     worktree_base = None
     worktree_base_raw = config.get("worktree_base")
     if worktree_base_raw is not None:
         worktree_base = _expand_path(str(worktree_base_raw), base=base)
     if repository is None and worktree_base is not None:
         raise SystemExit(f"{path} must not define worktree_base without repository")
+    if control_repository is not None and repository is None:
+        raise SystemExit(f"{path} must not define control_repository without repository")
+    if control_repository is not None and worktree_base is None:
+        raise SystemExit(f"{path} must define worktree_base when control_repository is set")
     worktree_remote = str(config.get("worktree_remote") or "origin").strip()
     worktree_branch = str(config.get("worktree_branch") or "main").strip()
     if not worktree_remote or not worktree_branch:
         raise SystemExit(f"{path} worktree_remote and worktree_branch must be non-empty")
-    roles = [
-        _role_from_json(
-            project,
-            raw,
-            base=base,
-            default_workdir=repository,
-        )
-        for raw in roles_raw
-        if isinstance(raw, dict)
-    ]
+    roles: list[RoleConfig] = []
+    for raw in roles_raw:
+        if not isinstance(raw, dict):
+            continue
+        default_workdir = repository
+        if control_repository is not None and raw.get("workdir") is None and worktree_base is not None:
+            role_name = str(raw.get("role") or "").strip()
+            if role_name:
+                default_workdir = worktree_base / role_name
+        roles.append(_role_from_json(project, raw, base=base, default_workdir=default_workdir))
     if len(roles) != len(roles_raw):
         raise SystemExit(f"{path} roles must all be JSON objects")
     slots = [role.slot for role in roles if role.slot is not None]
@@ -1031,6 +1040,7 @@ def load_project_config(project: str, config_path: Path | None = None) -> Projec
         board_socket=board_socket,
         run_as_user=run_as_user,
         repository=repository,
+        control_repository=control_repository,
         worktree_base=worktree_base,
         worktree_remote=worktree_remote,
         worktree_branch=worktree_branch,
@@ -1405,10 +1415,67 @@ def worktree_ref(config: ProjectConfig) -> str:
     return f"{config.worktree_remote}/{config.worktree_branch}"
 
 
+def control_repository_refspec(config: ProjectConfig) -> str:
+    return f"+refs/heads/*:refs/remotes/{config.worktree_remote}/*"
+
+
+def mkdir_p_args(path: Path) -> list[str]:
+    return ["mkdir", "-p", str(path)]
+
+
 def git_fetch_worktree_ref_args(config: ProjectConfig) -> list[str]:
     if config.repository is None:
         raise SystemExit("project config does not define repository")
     return ["git", "-C", str(config.repository), "fetch", config.worktree_remote, config.worktree_branch]
+
+
+def git_clone_control_repository_args(config: ProjectConfig) -> list[str]:
+    if config.repository is None:
+        raise SystemExit("project config does not define repository")
+    if config.control_repository is None:
+        raise SystemExit("project config does not define control_repository")
+    return ["git", "clone", "--bare", str(config.repository), str(config.control_repository)]
+
+
+def git_control_remote_rename_args(config: ProjectConfig) -> list[str]:
+    if config.control_repository is None:
+        raise SystemExit("project config does not define control_repository")
+    return ["git", "-C", str(config.control_repository), "remote", "rename", "origin", config.worktree_remote]
+
+
+def git_control_fetch_refspec_args(config: ProjectConfig) -> list[str]:
+    if config.control_repository is None:
+        raise SystemExit("project config does not define control_repository")
+    return [
+        "git",
+        "-C",
+        str(config.control_repository),
+        "config",
+        "--replace-all",
+        f"remote.{config.worktree_remote}.fetch",
+        control_repository_refspec(config),
+    ]
+
+
+def git_fetch_control_ref_args(config: ProjectConfig) -> list[str]:
+    if config.control_repository is None:
+        raise SystemExit("project config does not define control_repository")
+    return ["git", "-C", str(config.control_repository), "fetch", config.worktree_remote, config.worktree_branch]
+
+
+def git_control_worktree_add_args(config: ProjectConfig, role: RoleConfig) -> list[str]:
+    if config.control_repository is None:
+        raise SystemExit("project config does not define control_repository")
+    return [
+        "git",
+        "--git-dir",
+        str(config.control_repository),
+        "worktree",
+        "add",
+        "--detach",
+        role.workdir,
+        worktree_ref(config),
+    ]
 
 
 def git_fetch_launcher_ref_args(config: ProjectConfig, launcher_repo: Path) -> list[str]:
@@ -1479,6 +1546,26 @@ def git_shared_checkout_status_porcelain_args(config: ProjectConfig) -> list[str
     if config.repository is None:
         raise SystemExit("project config does not define repository")
     return ["git", "-C", str(config.repository), "status", "--porcelain"]
+
+
+def git_role_worktree_check_args(role: RoleConfig) -> list[str]:
+    return ["git", "-C", role.workdir, "rev-parse", "--is-inside-work-tree"]
+
+
+def git_role_worktree_status_porcelain_args(role: RoleConfig) -> list[str]:
+    return ["git", "-C", role.workdir, "status", "--porcelain"]
+
+
+def git_role_worktree_reset_args(config: ProjectConfig, role: RoleConfig) -> list[str]:
+    return ["git", "-C", role.workdir, "reset", "--hard", worktree_ref(config)]
+
+
+def git_clean_role_worktree_args(role: RoleConfig) -> list[str]:
+    return ["git", "-C", role.workdir, "clean", "-fdx"]
+
+
+def git_clean_role_worktree_dry_run_args(role: RoleConfig) -> list[str]:
+    return ["git", "-C", role.workdir, "clean", "-fd", "--dry-run"]
 
 
 def git_launcher_head_short_args(launcher_repo: Path) -> list[str]:
@@ -1913,12 +2000,138 @@ def warn_before_shared_checkout_refresh(
     return None
 
 
+def warn_before_role_worktree_refresh(
+    config: ProjectConfig,
+    role: RoleConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> WorktreeProvisionResult | None:
+    status_proc = runner(
+        git_role_worktree_status_porcelain_args(role),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if status_proc.returncode != 0:
+        reason = _proc_failure_reason(status_proc, f"status failed with exit {status_proc.returncode}")
+        return WorktreeProvisionResult({role.role: reason})
+    clean_proc = runner(
+        git_clean_role_worktree_dry_run_args(role),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if clean_proc.returncode != 0:
+        reason = _proc_failure_reason(clean_proc, f"clean dry-run failed with exit {clean_proc.returncode}")
+        return WorktreeProvisionResult({role.role: reason})
+
+    tracked_paths = _tracked_dirty_paths_from_status(str(status_proc.stdout or ""))
+    clean_paths = _clean_paths_from_dry_run(str(clean_proc.stdout or ""))
+    if not tracked_paths and not clean_paths:
+        return None
+
+    print(
+        f"warning: team-launcher will reset managed role worktree {role.workdir} "
+        f"for {role.role} to {worktree_ref(config)}",
+        file=sys.stderr,
+    )
+    if tracked_paths:
+        print("warning: tracked changes will be discarded:", file=sys.stderr)
+        for path in tracked_paths:
+            print(f"warning:   {path}", file=sys.stderr)
+    if clean_paths:
+        print("warning: untracked files will be removed:", file=sys.stderr)
+        for path in clean_paths:
+            print(f"warning:   {path}", file=sys.stderr)
+    return None
+
+
+def ensure_control_repository(
+    config: ProjectConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> WorktreeProvisionResult:
+    if config.control_repository is None:
+        return WorktreeProvisionResult({})
+    mkdir_proc = runner(mkdir_p_args(config.control_repository.parent))
+    if mkdir_proc.returncode != 0:
+        reason = _proc_failure_reason(mkdir_proc, f"mkdir failed with exit {mkdir_proc.returncode}")
+        return WorktreeProvisionResult({role.role: reason for role in config.roles})
+    if not config.control_repository.exists():
+        clone_proc = runner(git_clone_control_repository_args(config))
+        if clone_proc.returncode != 0:
+            reason = _proc_failure_reason(clone_proc, f"clone failed with exit {clone_proc.returncode}")
+            return WorktreeProvisionResult({role.role: reason for role in config.roles})
+        if config.worktree_remote != "origin":
+            rename_proc = runner(git_control_remote_rename_args(config))
+            if rename_proc.returncode != 0:
+                reason = _proc_failure_reason(rename_proc, f"remote rename failed with exit {rename_proc.returncode}")
+                return WorktreeProvisionResult({role.role: reason for role in config.roles})
+    refspec_proc = runner(git_control_fetch_refspec_args(config))
+    if refspec_proc.returncode != 0:
+        reason = _proc_failure_reason(refspec_proc, f"fetch refspec config failed with exit {refspec_proc.returncode}")
+        return WorktreeProvisionResult({role.role: reason for role in config.roles})
+    fetch_proc = runner(git_fetch_control_ref_args(config))
+    if fetch_proc.returncode != 0:
+        reason = _proc_failure_reason(fetch_proc, f"fetch failed with exit {fetch_proc.returncode}")
+        return WorktreeProvisionResult({role.role: reason for role in config.roles})
+    return WorktreeProvisionResult({})
+
+
+def ensure_control_role_worktrees(
+    config: ProjectConfig,
+    *,
+    refresh: bool,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> WorktreeProvisionResult:
+    control_result = ensure_control_repository(config, runner=runner)
+    if not control_result.ok or not refresh:
+        return control_result
+    if config.worktree_base is None:
+        return WorktreeProvisionResult({role.role: "project config does not define worktree_base" for role in config.roles})
+    mkdir_proc = runner(mkdir_p_args(config.worktree_base))
+    if mkdir_proc.returncode != 0:
+        reason = _proc_failure_reason(mkdir_proc, f"mkdir failed with exit {mkdir_proc.returncode}")
+        return WorktreeProvisionResult({role.role: reason for role in config.roles})
+
+    failed: dict[str, str] = {}
+    for role in config.roles:
+        role_path = Path(role.workdir)
+        if not role_path.exists():
+            add_proc = runner(git_control_worktree_add_args(config, role))
+            if add_proc.returncode != 0:
+                failed[role.role] = _proc_failure_reason(add_proc, f"worktree add failed with exit {add_proc.returncode}")
+            continue
+        check_proc = runner(
+            git_role_worktree_check_args(role),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if check_proc.returncode != 0:
+            failed[role.role] = _proc_failure_reason(check_proc, f"worktree check failed with exit {check_proc.returncode}")
+            continue
+        warning_result = warn_before_role_worktree_refresh(config, role, runner=runner)
+        if warning_result is not None:
+            failed.update(warning_result.failed_roles)
+            continue
+        reset_proc = runner(git_role_worktree_reset_args(config, role))
+        if reset_proc.returncode != 0:
+            failed[role.role] = _proc_failure_reason(reset_proc, f"reset failed with exit {reset_proc.returncode}")
+            continue
+        clean_proc = runner(git_clean_role_worktree_args(role))
+        if clean_proc.returncode != 0:
+            failed[role.role] = _proc_failure_reason(clean_proc, f"clean failed with exit {clean_proc.returncode}")
+    return WorktreeProvisionResult(failed)
+
+
 def ensure_project_worktrees(
     config: ProjectConfig,
     *,
     refresh: bool,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> WorktreeProvisionResult:
+    if config.control_repository is not None:
+        return ensure_control_role_worktrees(config, refresh=refresh, runner=runner)
     if config.repository is None:
         return WorktreeProvisionResult({})
     fetch_proc = runner(git_fetch_worktree_ref_args(config))
@@ -1954,6 +2167,16 @@ def fetch_project_worktree_ref(
     *,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> int:
+    if config.control_repository is not None:
+        result = ensure_control_repository(config, runner=runner)
+        if result.ok:
+            return 0
+        print(
+            f"warning: failed to fetch {worktree_ref(config)} for reload: "
+            f"{next(iter(result.failed_roles.values()), 'unknown error')}",
+            file=sys.stderr,
+        )
+        return 1
     if config.repository is None:
         return 0
     fetch_proc = runner(git_fetch_worktree_ref_args(config))
@@ -2822,6 +3045,14 @@ def _new_project_session_dir(project: str, owner_user: str) -> str:
     return f"/run/user/{uid}/{project}-ticket-board/pane-sessions"
 
 
+def _new_project_control_repository(project: str, owner_user: str) -> Path:
+    return Path("/home") / owner_user / ".local" / "state" / "switchyard" / "projects" / project / "control.git"
+
+
+def _new_project_worktree_base(project: str, owner_user: str) -> Path:
+    return Path("/home") / owner_user / f"{project}-worktrees"
+
+
 def _new_project_layout_payload(role_count: int) -> dict[str, Any]:
     leaves = [
         {
@@ -2860,6 +3091,8 @@ def _new_project_launcher_config_payload(
 ) -> dict[str, Any]:
     layout_name = f"{plan.project}-konsole-layout.json"
     role_defs = _dedupe_role_defs([*NEW_PROJECT_BASE_ROLES, *((role, "codex") for role in implementer_roles)])
+    worktree_base = _new_project_worktree_base(plan.project, plan.owner_user)
+    control_repository = _new_project_control_repository(plan.project, plan.owner_user)
     roles = [
         {
             "cli": [cli],
@@ -2880,6 +3113,7 @@ def _new_project_launcher_config_payload(
             "slot": index,
             "target": f"{plan.project}-{role}:0.0",
             "tmux_session": f"{plan.project}-{role}",
+            "workdir": str(worktree_base / role),
             "yolo": True,
         }
         for index, (role, cli) in enumerate(role_defs)
@@ -2890,14 +3124,11 @@ def _new_project_launcher_config_payload(
         "ticket_prefix": plan.ticket_prefix,
         "layout": layout_name,
         "repository": str(repository),
+        "control_repository": str(control_repository),
         "run_as_user": plan.owner_user,
         "worktree_branch": default_branch,
         "worktree_remote": remote,
-        **(
-            {"worktree_base": str(Path("/home") / plan.owner_user / f"{plan.project}-worktrees")}
-            if worktree_policy == "isolated"
-            else {}
-        ),
+        "worktree_base": str(worktree_base),
         "board_url": f"http://127.0.0.1:{plan.port}",
         "board_socket": plan.socket_path,
         "session_dir": _new_project_session_dir(plan.project, plan.owner_user),
@@ -3281,8 +3512,8 @@ def _write_switchyard_onboarding_files(
                 "Create or refine the design document with the user.",
                 "The board and full pane window already exist; use tickets for follow-up implementation work.",
                 "Do not create workflow stages or workflow transitions in the artifact.",
-                "This project directory is managed by Switchyard and is reset to origin/main on every launch.",
-                "Do not keep uncommitted work here; implementation work happens in the role worktrees.",
+                "This project directory is the user-visible checkout and is not reset or cleaned by launch.",
+                "Implementation panes run from managed role worktrees outside this directory.",
                 "The initial git remote named origin points at this local repository as a bootstrap placeholder.",
                 "Replace origin with the project's real remote before expecting fetches to detect upstream changes.",
                 "",
@@ -3494,14 +3725,33 @@ def _owner_project_git_runner(
     *,
     owner_user: str,
     project_dir: Path,
+    owned_roots: Sequence[Path] = (),
     runner: Callable[..., subprocess.CompletedProcess[Any]],
 ) -> Callable[..., subprocess.CompletedProcess[Any]]:
-    normalized_project_dir = project_dir.resolve(strict=False)
+    normalized_roots = [project_dir.resolve(strict=False), *(path.resolve(strict=False) for path in owned_roots)]
+
+    def is_owned_path(path: Path) -> bool:
+        normalized = path.resolve(strict=False)
+        return any(normalized == root or normalized.is_relative_to(root) for root in normalized_roots)
 
     def wrapped(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
-        if len(args) >= 3 and args[:2] == ["git", "-C"]:
-            git_dir = Path(args[2]).resolve(strict=False)
-            if git_dir == normalized_project_dir:
+        if len(args) >= 3 and args[:2] == ["mkdir", "-p"] and is_owned_path(Path(args[2])):
+            return runner(["sudo", "-u", owner_user, *args], **kwargs)
+        if args[:1] == ["git"]:
+            git_path: Path | None = None
+            if len(args) >= 3 and args[1] == "-C":
+                git_path = Path(args[2])
+            else:
+                for index, arg in enumerate(args):
+                    if arg == "--git-dir" and index + 1 < len(args):
+                        git_path = Path(args[index + 1])
+                        break
+                    if arg.startswith("--git-dir="):
+                        git_path = Path(arg.split("=", 1)[1])
+                        break
+                if git_path is None and len(args) >= 4 and args[1:3] == ["clone", "--bare"]:
+                    git_path = Path(args[3])
+            if git_path is not None and is_owned_path(git_path):
                 return runner(["sudo", "-u", owner_user, *args], **kwargs)
         return runner(args, **kwargs)
 
@@ -3900,7 +4150,17 @@ def switchyard_new_command(
     )
     config_path = provision_dir / f"{resolved_slug}.json"
     config = load_project_config(resolved_slug, config_path)
-    launch_runner = _owner_project_git_runner(owner_user=owner_user, project_dir=project_dir, runner=runner)
+    owned_launch_roots: list[Path] = []
+    if config.control_repository is not None:
+        owned_launch_roots.append(config.control_repository)
+    if config.worktree_base is not None:
+        owned_launch_roots.append(config.worktree_base)
+    launch_runner = _owner_project_git_runner(
+        owner_user=owner_user,
+        project_dir=project_dir,
+        owned_roots=owned_launch_roots,
+        runner=runner,
+    )
     launch_result = launch_project(
         config,
         config_path=config_path,

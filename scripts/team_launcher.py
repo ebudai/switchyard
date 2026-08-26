@@ -6,6 +6,7 @@ import argparse
 import grp
 import hashlib
 import json
+import math
 import os
 import pwd
 import shutil
@@ -3323,15 +3324,23 @@ def _new_project_layout_payload(role_count: int) -> dict[str, Any]:
     ]
     if role_count <= 1:
         return leaves[0] if leaves else {"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}
+    column_count = math.ceil(math.sqrt(role_count))
+    row_count = math.ceil(role_count / column_count)
+    columns: list[dict[str, Any]] = []
+    for start in range(0, role_count, row_count):
+        column = leaves[start : start + row_count]
+        if len(column) == 1:
+            columns.append(column[0])
+        else:
+            columns.append(
+                {
+                    "Orientation": "Vertical",
+                    "Widgets": column,
+                }
+            )
     return {
         "Orientation": "Horizontal",
-        "Widgets": [
-            leaves[0],
-            {
-                "Orientation": "Vertical",
-                "Widgets": leaves[1:],
-            },
-        ],
+        "Widgets": columns,
     }
 
 

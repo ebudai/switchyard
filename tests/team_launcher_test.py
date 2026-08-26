@@ -178,6 +178,17 @@ def _layout_shape(node: object) -> object:
     return "leaf"
 
 
+def _layout_session_tree(node: object) -> object:
+    if isinstance(node, dict) and isinstance(node.get("Widgets"), list):
+        return {
+            "Orientation": node.get("Orientation"),
+            "Widgets": [_layout_session_tree(child) for child in node["Widgets"]],
+        }
+    if isinstance(node, dict):
+        return node.get("SessionRestoreId")
+    return None
+
+
 PANEL_CLOCKWISE_SLOT_ORDER = (0, 2, 3, 5, 4, 1)
 
 
@@ -211,6 +222,54 @@ def test_pgu_layout_matches_reference_six_pane_geometry() -> None:
         ],
     }
     assert {leaf.get("WorkingDirectory") for leaf in team_launcher._layout_leaves(layout)} == {""}
+
+
+def test_generated_new_project_layouts_are_balanced_column_major_grids() -> None:
+    expected_by_count = {
+        1: 0,
+        2: {
+            "Orientation": "Horizontal",
+            "Widgets": [0, 1],
+        },
+        3: {
+            "Orientation": "Horizontal",
+            "Widgets": [
+                {"Orientation": "Vertical", "Widgets": [0, 1]},
+                2,
+            ],
+        },
+        4: {
+            "Orientation": "Horizontal",
+            "Widgets": [
+                {"Orientation": "Vertical", "Widgets": [0, 1]},
+                {"Orientation": "Vertical", "Widgets": [2, 3]},
+            ],
+        },
+        5: {
+            "Orientation": "Horizontal",
+            "Widgets": [
+                {"Orientation": "Vertical", "Widgets": [0, 1]},
+                {"Orientation": "Vertical", "Widgets": [2, 3]},
+                4,
+            ],
+        },
+        6: {
+            "Orientation": "Horizontal",
+            "Widgets": [
+                {"Orientation": "Vertical", "Widgets": [0, 1]},
+                {"Orientation": "Vertical", "Widgets": [2, 3]},
+                {"Orientation": "Vertical", "Widgets": [4, 5]},
+            ],
+        },
+    }
+
+    for role_count, expected in expected_by_count.items():
+        layout = team_launcher._new_project_layout_payload(role_count)
+        assert _layout_session_tree(layout) == expected
+        leaves = team_launcher._layout_leaves(layout)
+        assert [leaf["SessionRestoreId"] for leaf in leaves] == list(range(role_count))
+        assert {leaf.get("Command") for leaf in leaves} == {""}
+        assert {leaf.get("WorkingDirectory") for leaf in leaves} == {""}
 
 
 def test_layout_detection_uses_invoking_user_and_falls_back_to_separate() -> None:

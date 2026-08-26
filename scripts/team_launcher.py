@@ -199,6 +199,12 @@ class WorktreeProvisionResult:
 
 
 @dataclass(frozen=True)
+class LauncherUpgradeResult:
+    changed: bool
+    message: str
+
+
+@dataclass(frozen=True)
 class ProjectDesignArtifact:
     project: str
     project_name: str
@@ -2925,6 +2931,88 @@ def default_layout_output_path(config: ProjectConfig, *, config_path: Path) -> P
     return base_dir / SWITCHYARD_PROJECT_DIR_NAME / f"{config.project}-team-layout.json"
 
 
+def _legacy_new_project_stacked_layout_payload(role_count: int) -> dict[str, Any]:
+    leaves = [
+        {
+            "Command": "",
+            "SessionRestoreId": index,
+            "WorkingDirectory": "",
+        }
+        for index in range(role_count)
+    ]
+    if role_count <= 1:
+        return leaves[0] if leaves else {"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}
+    return {
+        "Orientation": "Horizontal",
+        "Widgets": [
+            leaves[0],
+            {
+                "Orientation": "Vertical",
+                "Widgets": leaves[1:],
+            },
+        ],
+    }
+
+
+def _is_generated_project_layout_template(config: ProjectConfig, *, config_path: Path) -> bool:
+    config_file = config_path.expanduser().resolve(strict=False)
+    layout_path = config.layout.expanduser().resolve(strict=False)
+    provision_dir = config_file.parent
+    return (
+        provision_dir.name == "provision"
+        and layout_path.parent == provision_dir
+        and layout_path.name == f"{config.project}-konsole-layout.json"
+    )
+
+
+def upgrade_generated_project_layout(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    dry_run: bool = False,
+) -> LauncherUpgradeResult:
+    if not _is_generated_project_layout_template(config, config_path=config_path):
+        return LauncherUpgradeResult(
+            changed=False,
+            message=f"switchyard: {config.project} layout is hand-maintained or outside a provision directory; leaving it unchanged",
+        )
+    role_count = sum(1 for role in config.roles if not role.detached)
+    current_layout = _new_project_layout_payload(role_count)
+    legacy_layout = _legacy_new_project_stacked_layout_payload(role_count)
+    try:
+        existing_layout = json.loads(config.layout.read_text(encoding="utf-8"))
+    except OSError as exc:
+        return LauncherUpgradeResult(
+            changed=False,
+            message=f"switchyard: cannot read generated layout template {config.layout}: {exc}",
+        )
+    except json.JSONDecodeError as exc:
+        return LauncherUpgradeResult(
+            changed=False,
+            message=f"switchyard: generated layout template {config.layout} is not valid JSON: {exc}",
+        )
+    if existing_layout == current_layout:
+        return LauncherUpgradeResult(
+            changed=False,
+            message=f"switchyard: {config.project} layout template is already current",
+        )
+    if existing_layout != legacy_layout:
+        return LauncherUpgradeResult(
+            changed=False,
+            message=f"switchyard: {config.project} layout template differs from the known generated legacy shape; leaving it unchanged",
+        )
+    if dry_run:
+        return LauncherUpgradeResult(
+            changed=False,
+            message=f"switchyard: {config.project} layout template can be upgraded: {config.layout}",
+        )
+    config.layout.write_text(json.dumps(current_layout, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return LauncherUpgradeResult(
+        changed=True,
+        message=f"switchyard: upgraded generated layout template for {config.project}: {config.layout}",
+    )
+
+
 def sync_reload_config_to_live_sessions(
     config: ProjectConfig,
     *,
@@ -3011,6 +3099,10 @@ def launch_project(
     effective_pane_state_dir = pane_state_dir or DEFAULT_PANE_STATE_DIR
     output_path = layout_output or default_layout_output_path(config, config_path=config_path)
     pane_script_path = config.pane_launcher or script_path
+    if not dry_run:
+        upgrade_result = upgrade_generated_project_layout(config, config_path=config_path)
+        if upgrade_result.changed:
+            print_func(upgrade_result.message)
     if not dry_run:
         pane_script_path = _verify_pane_launcher_path(config, script_path=script_path, runner=worktree_runner)
     failed_roles: dict[str, str] = {}
@@ -4602,6 +4694,18 @@ def provision_runtime_command(user_name: str | None, config: ProjectConfig | Non
     return 0
 
 
+def upgrade_project_command(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    dry_run: bool = False,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    result = upgrade_generated_project_layout(config, config_path=config_path, dry_run=dry_run)
+    print_func(result.message)
+    return 0
+
+
 def _role_by_name(config: ProjectConfig, role_name: str) -> RoleConfig:
     for role in config.roles:
         if role.role == role_name:
@@ -4616,7 +4720,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "command",
         nargs="?",
         default="start",
-        choices=["start", "attach", "reload", "design", "new", "provision-runtime", "deploy-launcher", "pane"],
+        choices=["start", "attach", "reload", "design", "new", "provision-runtime", "deploy-launcher", "upgrade", "pane"],
         help="start is idempotent attach-or-start (resumes tracked session ids when relaunching a stopped pane); reload force-restarts running CLIs with tracked resume ids",
     )
     parser.add_argument("pane_mode", nargs="?", choices=["start", "attach", "attach-or-start", "reload"])
@@ -4694,6 +4798,13 @@ def _build_switchyard_register_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_switchyard_upgrade_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="switchyard upgrade", description="Upgrade safe generated artifacts for a Switchyard project.")
+    parser.add_argument("project", help="project name or slug")
+    parser.add_argument("--dry-run", action="store_true", help="report what would change without writing files")
+    return parser
+
+
 def switchyard_main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
@@ -4716,6 +4827,11 @@ def switchyard_main(argv: list[str] | None = None) -> int:
     if argv[0].casefold() == "register":
         args = _build_switchyard_register_parser().parse_args(argv[1:])
         return switchyard_register_command(args.config_path)
+    if argv[0].casefold() == "upgrade":
+        args = _build_switchyard_upgrade_parser().parse_args(argv[1:])
+        entry = _resolve_switchyard_project(args.project)
+        config = load_project_config(entry.slug, entry.config_path)
+        return upgrade_project_command(config, config_path=entry.config_path, dry_run=args.dry_run)
     selection = " ".join(argv)
     entry = _resolve_switchyard_project(selection)
     config = load_project_config(entry.slug, entry.config_path)
@@ -4782,6 +4898,8 @@ def main(argv: list[str] | None = None) -> int:
         config = load_project_config(args.project, config_path) if config_path.exists() else None
         return provision_runtime_command(args.runtime_user, config)
     config = load_project_config(args.project, config_path)
+    if args.command == "upgrade":
+        return upgrade_project_command(config, config_path=config_path, dry_run=args.dry_run)
     if args.command == "deploy-launcher":
         return deploy_launcher_checkout(
             config,

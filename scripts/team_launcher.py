@@ -95,7 +95,6 @@ GUI_WAYLAND_ENV = "TEAM_LAUNCHER_WAYLAND_DISPLAY"
 LEGACY_GUI_WAYLAND_ENV = "PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY"
 HOST_WAYLAND_ENV = "HOST_WAYLAND_DISPLAY"
 LEGACY_HOST_WAYLAND_ENV = "PGU_HOST_WAYLAND_DISPLAY"
-KONSOLE_QT_LOGGING_RULES = "qt.qpa.wayland.warning=false"
 LAYOUT_MODE_AUTO = "auto"
 LAYOUT_MODE_SEPARATE = "separate"
 LAYOUT_MODE_VIEWER = "viewer"
@@ -378,7 +377,6 @@ def konsole_launch_args(layout_path: Path, *, gui_user: str | None = None) -> li
     return [
         "env",
         "QT_QPA_PLATFORM=wayland",
-        f"QT_LOGGING_RULES={KONSOLE_QT_LOGGING_RULES}",
         f"WAYLAND_DISPLAY={wayland_display}",
         "konsole",
         "--layout",
@@ -595,6 +593,7 @@ def launch_konsole_window(
             delete=False,
         ) as handle:
             log_path = Path(handle.name)
+            _make_konsole_log_readable(log_path)
             proc = subprocess.Popen(
                 args,
                 stdin=subprocess.DEVNULL,
@@ -608,15 +607,60 @@ def launch_konsole_window(
     time.sleep(0.2)
     returncode = proc.poll()
     if returncode is not None:
-        print(
-            f"team-launcher: Konsole exited immediately with status {returncode}; see {log_path}",
-            file=sys.stderr,
-        )
+        _print_konsole_early_exit(returncode, log_path)
         return returncode
     print(
         f"team-launcher: started {project} in background (Konsole pid {proc.pid}; log {log_path})"
     )
     return 0
+
+
+def _make_konsole_log_readable(log_path: Path, *, environ: dict[str, str] | None = None) -> None:
+    env = environ if environ is not None else os.environ
+    sudo_user = str(env.get("SUDO_USER") or "").strip()
+    sudo_uid = _int_env(env.get("SUDO_UID"))
+    sudo_gid = _int_env(env.get("SUDO_GID"))
+    if sudo_user and (sudo_uid is None or sudo_gid is None):
+        try:
+            user_info = pwd.getpwnam(sudo_user)
+        except KeyError:
+            user_info = None
+        if user_info is not None:
+            sudo_uid = user_info.pw_uid if sudo_uid is None else sudo_uid
+            sudo_gid = user_info.pw_gid if sudo_gid is None else sudo_gid
+    if sudo_uid is not None and sudo_gid is not None:
+        try:
+            os.chown(log_path, sudo_uid, sudo_gid)
+        except OSError:
+            pass
+    try:
+        log_path.chmod(0o644)
+    except OSError:
+        pass
+
+
+def _int_env(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _print_konsole_early_exit(returncode: int, log_path: Path) -> None:
+    print(f"team-launcher: Konsole exited immediately with status {returncode}; captured output:", file=sys.stderr)
+    try:
+        captured = log_path.read_bytes()
+    except OSError as exc:
+        print(f"team-launcher: could not read Konsole log {log_path}: {exc}", file=sys.stderr)
+        return
+    if not captured:
+        print(f"team-launcher: Konsole log {log_path} was empty", file=sys.stderr)
+        return
+    text = captured.decode("utf-8", errors="replace").rstrip()
+    if text:
+        print(text, file=sys.stderr)
 
 
 def _expand_path(value: str, *, base: Path) -> Path:

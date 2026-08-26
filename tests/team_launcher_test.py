@@ -1522,7 +1522,6 @@ def test_konsole_launch_uses_gui_user_display_environment() -> None:
         assert konsole_launch_args(Path("/tmp/layout.json"), gui_user="user") == [
             "env",
             "QT_QPA_PLATFORM=wayland",
-            "QT_LOGGING_RULES=qt.qpa.wayland.warning=false",
             "WAYLAND_DISPLAY=/run/user/1000/wayland-0",
             "konsole",
             "--layout",
@@ -1554,7 +1553,6 @@ def test_konsole_launch_can_fallback_to_gui_user_uid_without_host_var() -> None:
         assert konsole_launch_args(Path("/tmp/layout.json"), gui_user="user") == [
             "env",
             "QT_QPA_PLATFORM=wayland",
-            "QT_LOGGING_RULES=qt.qpa.wayland.warning=false",
             "WAYLAND_DISPLAY=/run/user/4242/wayland-test",
             "konsole",
             "--layout",
@@ -1591,7 +1589,6 @@ def test_konsole_launch_defaults_to_invoking_user_uid_without_host_var() -> None
         assert konsole_launch_args(Path("/tmp/layout.json")) == [
             "env",
             "QT_QPA_PLATFORM=wayland",
-            "QT_LOGGING_RULES=qt.qpa.wayland.warning=false",
             "WAYLAND_DISPLAY=/run/user/4242/wayland-test",
             "konsole",
             "--layout",
@@ -1683,6 +1680,124 @@ def test_launch_konsole_window_detaches_real_spawn_and_returns_status_line() -> 
     assert hasattr(kwargs["stdout"], "name")
     assert kwargs["stderr"] is kwargs["stdout"]
     assert "team-launcher: started pgu in background (Konsole pid 424242; log " in stdout.getvalue()
+
+
+def test_launch_konsole_window_prints_captured_output_on_immediate_exit() -> None:
+    original_host_wayland = os.environ.get("HOST_WAYLAND_DISPLAY")
+    original_legacy_host_wayland = os.environ.get("PGU_HOST_WAYLAND_DISPLAY")
+    original_popen = team_launcher.subprocess.Popen
+    original_sleep = team_launcher.time.sleep
+    original_stderr = sys.stderr
+    stderr = StringIO()
+    popen_calls: list[dict[str, object]] = []
+
+    class FakePopen:
+        def __init__(self, args: list[str], **kwargs: Any) -> None:
+            popen_calls.append({"args": args, "kwargs": kwargs})
+            handle = kwargs["stderr"]
+            handle.write(b"qt.qpa.wayland: XDG_RUNTIME_DIR is invalid or not set\n")
+            handle.flush()
+            self.pid = 424243
+
+        def poll(self) -> int | None:
+            return -6
+
+    try:
+        os.environ["HOST_WAYLAND_DISPLAY"] = "/run/user/1000/wayland-0"
+        os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
+        team_launcher.subprocess.Popen = FakePopen
+        team_launcher.time.sleep = lambda _seconds: None
+        sys.stderr = stderr
+
+        assert launch_konsole_window(Path("/tmp/layout.json"), project="pgu") == -6
+    finally:
+        team_launcher.subprocess.Popen = original_popen
+        team_launcher.time.sleep = original_sleep
+        sys.stderr = original_stderr
+        if original_host_wayland is None:
+            os.environ.pop("HOST_WAYLAND_DISPLAY", None)
+        else:
+            os.environ["HOST_WAYLAND_DISPLAY"] = original_host_wayland
+        if original_legacy_host_wayland is None:
+            os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
+        else:
+            os.environ["PGU_HOST_WAYLAND_DISPLAY"] = original_legacy_host_wayland
+
+    assert len(popen_calls) == 1
+    call = popen_calls[0]
+    assert "QT_LOGGING_RULES=qt.qpa.wayland.warning=false" not in call["args"]
+    log_path = Path(call["kwargs"]["stdout"].name)
+    assert log_path.stat().st_mode & 0o777 == 0o644
+    message = stderr.getvalue()
+    assert "team-launcher: Konsole exited immediately with status -6; captured output:" in message
+    assert "qt.qpa.wayland: XDG_RUNTIME_DIR is invalid or not set" in message
+    assert "; see " not in message
+
+
+def test_launch_konsole_window_names_empty_capture_on_immediate_exit() -> None:
+    original_host_wayland = os.environ.get("HOST_WAYLAND_DISPLAY")
+    original_legacy_host_wayland = os.environ.get("PGU_HOST_WAYLAND_DISPLAY")
+    original_popen = team_launcher.subprocess.Popen
+    original_sleep = team_launcher.time.sleep
+    original_stderr = sys.stderr
+    stderr = StringIO()
+    log_paths: list[Path] = []
+
+    class FakePopen:
+        def __init__(self, _args: list[str], **kwargs: Any) -> None:
+            log_paths.append(Path(kwargs["stdout"].name))
+            self.pid = 424244
+
+        def poll(self) -> int | None:
+            return -6
+
+    try:
+        os.environ["HOST_WAYLAND_DISPLAY"] = "/run/user/1000/wayland-0"
+        os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
+        team_launcher.subprocess.Popen = FakePopen
+        team_launcher.time.sleep = lambda _seconds: None
+        sys.stderr = stderr
+
+        assert launch_konsole_window(Path("/tmp/layout.json"), project="pgu") == -6
+    finally:
+        team_launcher.subprocess.Popen = original_popen
+        team_launcher.time.sleep = original_sleep
+        sys.stderr = original_stderr
+        if original_host_wayland is None:
+            os.environ.pop("HOST_WAYLAND_DISPLAY", None)
+        else:
+            os.environ["HOST_WAYLAND_DISPLAY"] = original_host_wayland
+        if original_legacy_host_wayland is None:
+            os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
+        else:
+            os.environ["PGU_HOST_WAYLAND_DISPLAY"] = original_legacy_host_wayland
+
+    assert len(log_paths) == 1
+    assert f"team-launcher: Konsole log {log_paths[0]} was empty" in stderr.getvalue()
+
+
+def test_konsole_log_is_readable_by_sudo_invoking_user() -> None:
+    original_chown = team_launcher.os.chown
+    chown_calls: list[tuple[Path, int, int]] = []
+
+    def fake_chown(path: str | bytes | os.PathLike[str] | os.PathLike[bytes], uid: int, gid: int) -> None:
+        chown_calls.append((Path(path), uid, gid))
+
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-konsole-log.") as tmp:
+        log_path = Path(tmp) / "konsole.log"
+        log_path.write_text("", encoding="utf-8")
+        log_path.chmod(0o600)
+        try:
+            team_launcher.os.chown = fake_chown
+            team_launcher._make_konsole_log_readable(
+                log_path,
+                environ={"SUDO_USER": "user", "SUDO_UID": "1000", "SUDO_GID": "1000"},
+            )
+        finally:
+            team_launcher.os.chown = original_chown
+
+        assert chown_calls == [(log_path, 1000, 1000)]
+        assert log_path.stat().st_mode & 0o777 == 0o644
 
 
 def test_start_is_attach_or_start_and_never_duplicates_existing_session() -> None:
@@ -2736,7 +2851,7 @@ def test_viewer_layout_starts_role_sessions_and_additive_viewer() -> None:
         ["tmux", "set-option", "-p", "-t", f"viewer.{index}", "@role", role]
         for index, role in enumerate(["designer", "director", "audit", "ops", "app", "main"])
     ]
-    assert not any(call[:4] == ["env", "QT_QPA_PLATFORM=wayland", f"QT_LOGGING_RULES={team_launcher.KONSOLE_QT_LOGGING_RULES}", "WAYLAND_DISPLAY="] for call in runner.calls)
+    assert not any(call[:2] == ["env", "QT_QPA_PLATFORM=wayland"] for call in runner.calls)
     assert messages == []
 
 

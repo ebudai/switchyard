@@ -3299,6 +3299,36 @@ def _database_exists(database: str, *, runner: Callable[..., subprocess.Complete
     return str(getattr(result, "stdout", "") or "").strip() == "1"
 
 
+def _ticket_board_table_count(database: str, *, runner: Callable[..., subprocess.CompletedProcess[Any]]) -> int:
+    command = [
+        "psql",
+        "-XAt",
+        f"postgresql:///{database}?host=/var/run/postgresql",
+        "-c",
+        "SELECT count(*)::int FROM pg_catalog.pg_tables WHERE schemaname = 'ticket_board'",
+    ]
+    if os.geteuid() == 0:
+        command = ["sudo", "-u", "postgres", *command]
+    try:
+        result = runner(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except OSError as exc:
+        raise SystemExit(f"team-launcher: cannot inspect PostgreSQL database {database!r}: {exc}") from exc
+    if result.returncode != 0:
+        stderr = str(getattr(result, "stderr", "") or "").strip()
+        detail = f": {stderr}" if stderr else ""
+        raise SystemExit(f"team-launcher: cannot inspect PostgreSQL database {database!r}{detail}")
+    raw_count = str(getattr(result, "stdout", "") or "").strip()
+    try:
+        return int(raw_count)
+    except ValueError as exc:
+        raise SystemExit(f"team-launcher: cannot parse ticket_board table count for database {database!r}: {raw_count!r}") from exc
+
+
 def precheck_new_project(
     plan: ProjectBoardProvision,
     *,
@@ -3332,6 +3362,15 @@ def precheck_new_project(
             errors.append(f"port {plan.port} is already in use but {plan.board_unit} is not installed")
     elif not database_exists:
         errors.append(f"{plan.board_unit} is installed but database {plan.database!r} does not exist")
+    else:
+        table_count = _ticket_board_table_count(plan.database, runner=runner)
+        if table_count > 0:
+            errors.append(
+                f"project {plan.project!r} is already provisioned "
+                f"(database {plan.database} has {table_count} ticket_board tables, {plan.board_unit} is installed).\n"
+                f"  to launch it:      switchyard {plan.project}\n"
+                "  to start over:     tear it down first (no teardown command exists yet)"
+            )
     if errors:
         raise SystemExit("team-launcher: new project precheck failed:\n- " + "\n- ".join(errors))
 

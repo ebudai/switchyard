@@ -4563,6 +4563,34 @@ def test_database_exists_keeps_non_root_psql_path_unchanged() -> None:
     ]
 
 
+def test_ticket_board_table_count_uses_target_database_and_postgres_os_user_when_root() -> None:
+    calls: list[list[str]] = []
+    original_geteuid = team_launcher.os.geteuid
+
+    def runner(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="12\n")
+
+    try:
+        team_launcher.os.geteuid = lambda: 0  # type: ignore[method-assign]
+        assert team_launcher._ticket_board_table_count("porter_ticket_board", runner=runner) == 12
+    finally:
+        team_launcher.os.geteuid = original_geteuid  # type: ignore[method-assign]
+
+    assert calls == [
+        [
+            "sudo",
+            "-u",
+            "postgres",
+            "psql",
+            "-XAt",
+            "postgresql:///porter_ticket_board?host=/var/run/postgresql",
+            "-c",
+            "SELECT count(*)::int FROM pg_catalog.pg_tables WHERE schemaname = 'ticket_board'",
+        ]
+    ]
+
+
 def test_system_unit_successful_empty_listing_means_unit_absent() -> None:
     original_path_exists = team_launcher._path_exists
 
@@ -4618,16 +4646,18 @@ def test_new_project_execute_warms_sudo_once_then_runs_generated_script() -> Non
     assert runner.call_kwargs[bash_index]["cwd"] == str(output_dir)
 
 
-def test_new_project_rerun_allows_existing_same_slug_resources() -> None:
+def test_new_project_rerun_rejects_fully_provisioned_project_before_mutating() -> None:
     current_user = team_launcher.current_user_name()
 
-    class ExistingUnitRunner(FakeRunner):
+    class FullyProvisionedRunner(FakeRunner):
         def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
             self.calls.append(args)
             if args[:3] == ["systemctl", "list-unit-files", "--no-legend"]:
                 return subprocess.CompletedProcess(args, 0, stdout="porter-ticket-board.service enabled\n")
-            if args[:2] == ["psql", "-XAt"]:
+            if args[:2] == ["psql", "-XAt"] and args[2] == "postgresql:///postgres?host=/var/run/postgresql":
                 return subprocess.CompletedProcess(args, 0, stdout="1\n")
+            if args[:2] == ["psql", "-XAt"] and args[2] == "postgresql:///porter_ticket_board?host=/var/run/postgresql":
+                return subprocess.CompletedProcess(args, 0, stdout="12\n")
             if len(args) >= 5 and args[:4] == ["git", "-C", args[2], "status"]:
                 return subprocess.CompletedProcess(args, 0, stdout="")
             return subprocess.CompletedProcess(args, 0)
@@ -4636,7 +4666,56 @@ def test_new_project_rerun_allows_existing_same_slug_resources() -> None:
         tmp_path = Path(tmp)
         project_repo = tmp_path / "project-repo"
         project_repo.mkdir()
-        runner = ExistingUnitRunner()
+        runner = FullyProvisionedRunner()
+
+        try:
+            new_project_command(
+                "porter",
+                owner_user=current_user,
+                source_repo=tmp_path / "repo",
+                repository=project_repo,
+                output_dir=tmp_path / "out",
+                execute=True,
+                runner=runner,
+                port_in_use=lambda _port: True,
+                socket_exists=lambda _path: True,
+            )
+            raise AssertionError("expected fully provisioned precheck failure")
+        except SystemExit as exc:
+            message = str(exc)
+
+        assert not (tmp_path / "out").exists()
+
+    assert "project 'porter' is already provisioned" in message
+    assert "database porter_ticket_board has 12 ticket_board tables" in message
+    assert "porter-ticket-board.service is installed" in message
+    assert "to launch it:      switchyard porter" in message
+    assert "to start over:" in message
+    assert not any(call[:1] == ["sudo"] for call in runner.calls)
+    assert not any(call[:1] == ["bash"] for call in runner.calls)
+
+
+def test_new_project_rerun_allows_installed_unit_with_empty_database_recovery_path() -> None:
+    current_user = team_launcher.current_user_name()
+
+    class EmptyDatabaseRunner(FakeRunner):
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if args[:3] == ["systemctl", "list-unit-files", "--no-legend"]:
+                return subprocess.CompletedProcess(args, 0, stdout="porter-ticket-board.service enabled\n")
+            if args[:2] == ["psql", "-XAt"] and args[2] == "postgresql:///postgres?host=/var/run/postgresql":
+                return subprocess.CompletedProcess(args, 0, stdout="1\n")
+            if args[:2] == ["psql", "-XAt"] and args[2] == "postgresql:///porter_ticket_board?host=/var/run/postgresql":
+                return subprocess.CompletedProcess(args, 0, stdout="0\n")
+            if len(args) >= 5 and args[:4] == ["git", "-C", args[2], "status"]:
+                return subprocess.CompletedProcess(args, 0, stdout="")
+            return subprocess.CompletedProcess(args, 0)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-new.") as tmp:
+        tmp_path = Path(tmp)
+        project_repo = tmp_path / "project-repo"
+        project_repo.mkdir()
+        runner = EmptyDatabaseRunner()
 
         assert (
             new_project_command(

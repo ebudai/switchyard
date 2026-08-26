@@ -371,14 +371,27 @@ def default_gui_user() -> str:
     return current_user_name()
 
 
+def normalize_wayland_display(display: str, *, gui_user: str) -> str | None:
+    display = display.strip()
+    if display.startswith("/"):
+        return display
+    user = gui_user.strip()
+    uid = uid_for_user(user) if user else None
+    if uid is None:
+        return None
+    name = display or "wayland-0"
+    return f"/run/user/{uid}/{name}"
+
+
 def konsole_launch_args(layout_path: Path, *, gui_user: str | None = None) -> list[str]:
-    wayland_display = _env_first(HOST_WAYLAND_ENV, LEGACY_HOST_WAYLAND_ENV)
+    user = (gui_user if gui_user is not None else default_gui_user()).strip()
+    wayland_display = None
+    host_wayland_display = _env_first(HOST_WAYLAND_ENV, LEGACY_HOST_WAYLAND_ENV)
+    if host_wayland_display:
+        wayland_display = normalize_wayland_display(host_wayland_display, gui_user=user)
     if not wayland_display:
-        user = (gui_user if gui_user is not None else default_gui_user()).strip()
-        uid = uid_for_user(user) if user else None
-        if uid is not None:
-            wayland_name = _env_first(GUI_WAYLAND_ENV, LEGACY_GUI_WAYLAND_ENV) or "wayland-0"
-            wayland_display = f"/run/user/{uid}/{wayland_name}"
+        wayland_name = _env_first(GUI_WAYLAND_ENV, LEGACY_GUI_WAYLAND_ENV) or "wayland-0"
+        wayland_display = normalize_wayland_display(wayland_name, gui_user=user)
     if not wayland_display:
         return [
             "sh",

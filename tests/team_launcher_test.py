@@ -2228,6 +2228,55 @@ def test_konsole_launch_uses_gui_user_display_environment() -> None:
             os.environ["SUDO_USER"] = original_sudo_user
 
 
+def test_konsole_launch_normalizes_relative_host_wayland_display() -> None:
+    original_uid_for_user = team_launcher.uid_for_user
+    original_current_user_name = team_launcher.current_user_name
+    original_host_wayland = os.environ.get("HOST_WAYLAND_DISPLAY")
+    original_legacy_host_wayland = os.environ.get("PGU_HOST_WAYLAND_DISPLAY")
+    original_gui_user = os.environ.pop("TEAM_LAUNCHER_GUI_USER", None)
+    original_legacy_gui_user = os.environ.pop("PGU_TEAM_LAUNCHER_GUI_USER", None)
+    original_sudo_user = os.environ.get("SUDO_USER")
+    try:
+        os.environ["HOST_WAYLAND_DISPLAY"] = "wayland-0"
+        os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
+        os.environ["SUDO_USER"] = "eric"
+        team_launcher.current_user_name = lambda: "root"
+
+        def fake_uid_for_user(user_name: str) -> int | None:
+            return {"eric": 1000, "root": 0}.get(user_name)
+
+        team_launcher.uid_for_user = fake_uid_for_user
+
+        assert konsole_launch_args(Path("/tmp/layout.json")) == [
+            "env",
+            "QT_QPA_PLATFORM=wayland",
+            "WAYLAND_DISPLAY=/run/user/1000/wayland-0",
+            "konsole",
+            "--separate",
+            "--layout",
+            "/tmp/layout.json",
+        ]
+    finally:
+        team_launcher.uid_for_user = original_uid_for_user
+        team_launcher.current_user_name = original_current_user_name
+        if original_host_wayland is None:
+            os.environ.pop("HOST_WAYLAND_DISPLAY", None)
+        else:
+            os.environ["HOST_WAYLAND_DISPLAY"] = original_host_wayland
+        if original_legacy_host_wayland is None:
+            os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
+        else:
+            os.environ["PGU_HOST_WAYLAND_DISPLAY"] = original_legacy_host_wayland
+        if original_gui_user is not None:
+            os.environ["TEAM_LAUNCHER_GUI_USER"] = original_gui_user
+        if original_legacy_gui_user is not None:
+            os.environ["PGU_TEAM_LAUNCHER_GUI_USER"] = original_legacy_gui_user
+        if original_sudo_user is None:
+            os.environ.pop("SUDO_USER", None)
+        else:
+            os.environ["SUDO_USER"] = original_sudo_user
+
+
 def test_konsole_launch_can_fallback_to_gui_user_uid_without_host_var() -> None:
     original_uid_for_user = team_launcher.uid_for_user
     original_host_wayland = os.environ.pop("HOST_WAYLAND_DISPLAY", None)

@@ -662,6 +662,61 @@ def test_dry_run_materializes_pgu_layout_with_six_visible_role_commands() -> Non
         assert not any(" perf " in f" {command} " for command in commands)
 
 
+def test_launch_project_default_layout_uses_project_owned_switchyard_not_tmp() -> None:
+    project = f"layoutsafe{os.getpid()}"
+    stale_tmp_layout = Path(tempfile.gettempdir()) / f"{project}-team-layout.json"
+    stale_tmp_layout.write_text("stale shared tmp layout\n", encoding="utf-8")
+    stale_tmp_layout.chmod(0o444)
+    try:
+        with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-layout-safe.") as tmp:
+            tmp_path = Path(tmp)
+            config_path = _write_six_visible_role_config(tmp_path, project=project)
+            config = load_project_config(project, config_path)
+            stdout = StringIO()
+
+            with redirect_stdout(stdout):
+                assert (
+                    launch_project(
+                        config,
+                        config_path=config_path,
+                        mode="start",
+                        script_path=ROOT / "scripts" / "team-launcher",
+                        runner=FakeRunner(),
+                        dry_run=True,
+                    )
+                    == 0
+                )
+
+            expected_layout = config.repository / ".switchyard" / f"{project}-team-layout.json"
+            plan = json.loads(stdout.getvalue())
+            assert plan["layout"] == str(expected_layout)
+            assert expected_layout.is_file()
+            assert stale_tmp_layout.read_text(encoding="utf-8") == "stale shared tmp layout\n"
+    finally:
+        stale_tmp_layout.chmod(0o644)
+        stale_tmp_layout.unlink(missing_ok=True)
+
+
+def test_default_layout_paths_are_project_scoped() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-layout-scope.") as tmp:
+        tmp_path = Path(tmp)
+        porter_root = tmp_path / "porter-user"
+        zeta_root = tmp_path / "zeta-user"
+        porter_root.mkdir()
+        zeta_root.mkdir()
+        porter_config_path = _write_six_visible_role_config(porter_root, project="porter")
+        zeta_config_path = _write_six_visible_role_config(zeta_root, project="zeta")
+        porter = load_project_config("porter", porter_config_path)
+        zeta = load_project_config("zeta", zeta_config_path)
+
+        porter_layout = team_launcher.default_layout_output_path(porter, config_path=porter_config_path)
+        zeta_layout = team_launcher.default_layout_output_path(zeta, config_path=zeta_config_path)
+
+    assert porter_layout == porter.repository / ".switchyard" / "porter-team-layout.json"
+    assert zeta_layout == zeta.repository / ".switchyard" / "zeta-team-layout.json"
+    assert porter_layout != zeta_layout
+
+
 def test_kde_auto_layout_preserves_separate_konsole_plan_shape() -> None:
     config_path = ROOT / "config" / "team-launcher" / "pgu.json"
     config = load_project_config("pgu", config_path)
@@ -3432,7 +3487,8 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
         config = json.loads((output_dir / "porter.json").read_text(encoding="utf-8"))
         plan = json.loads((output_dir / "plan.json").read_text(encoding="utf-8"))
         artifact = json.loads((project_dir / ".switchyard" / "porter.project.json").read_text(encoding="utf-8"))
-        generated_layout = json.loads(Path("/tmp/porter-team-layout.json").read_text(encoding="utf-8"))
+        generated_layout_path = project_dir / ".switchyard" / "porter-team-layout.json"
+        generated_layout = json.loads(generated_layout_path.read_text(encoding="utf-8"))
         generated_commands = _leaf_commands(generated_layout)
         designer_env = next(role["env"] for role in config["roles"] if role["role"] == "designer")
         director_env = next(role["env"] for role in config["roles"] if role["role"] == "director")

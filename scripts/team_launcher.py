@@ -2365,6 +2365,11 @@ def materialize_layout(
     return output_path
 
 
+def default_layout_output_path(config: ProjectConfig, *, config_path: Path) -> Path:
+    base_dir = config.repository if config.repository is not None else config_path.parent
+    return base_dir / SWITCHYARD_PROJECT_DIR_NAME / f"{config.project}-team-layout.json"
+
+
 def sync_reload_config_to_live_sessions(
     config: ProjectConfig,
     *,
@@ -2438,7 +2443,7 @@ def launch_project(
     if mode not in {"attach", "attach-or-start", "reload"}:
         raise SystemExit(f"unknown launch mode: {mode}")
     effective_pane_state_dir = pane_state_dir or DEFAULT_PANE_STATE_DIR
-    output_path = layout_output or Path(tempfile.gettempdir()) / f"{config.project}-team-layout.json"
+    output_path = layout_output or default_layout_output_path(config, config_path=config_path)
     failed_roles: dict[str, str] = {}
     if not dry_run:
         ensure_launcher_checkout_current(

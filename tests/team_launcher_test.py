@@ -6024,6 +6024,249 @@ def test_project_artifact_accepts_designer_chosen_roles() -> None:
     assert [role["role"] for role in config["roles"]] == ["designer", "director", "audit", "ops", "app"]
 
 
+def _write_first_run_auth_config(tmp_path: Path, *, roles: list[tuple[str, str]], owner_user: str = "otto-agent") -> Path:
+    layout_path = tmp_path / "layout.json"
+    layout_path.write_text(
+        json.dumps(
+            {
+                "Orientation": "Horizontal",
+                "Widgets": [
+                    {"Command": "", "SessionRestoreId": index, "WorkingDirectory": ""}
+                    for index, _role in enumerate(roles)
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    config_path = tmp_path / "otto.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "project": "otto",
+                "layout": str(layout_path),
+                "repository": str(repo),
+                "run_as_user": owner_user,
+                "roles": [
+                    {
+                        "role": role,
+                        "slot": index,
+                        "target": f"otto-{role}:0.0",
+                        "tmux_session": f"otto-{role}",
+                        "workdir": str(tmp_path / "worktrees" / role),
+                        "cli": [cli],
+                        "yolo": True,
+                    }
+                    for index, (role, cli) in enumerate(roles)
+                ],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    for role, _cli in roles:
+        (tmp_path / "worktrees" / role).mkdir(parents=True, exist_ok=True)
+    return config_path
+
+
+class FirstRunAuthRunner:
+    def __init__(self, *, authenticated_after_login: bool = True) -> None:
+        self.calls: list[list[str]] = []
+        self.call_kwargs: list[dict[str, object]] = []
+        self.authenticated_after_login = authenticated_after_login
+        self.login_seen: set[str] = set()
+
+    def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        self.calls.append(args)
+        self.call_kwargs.append(dict(kwargs))
+        command = args[3:] if args[:2] == ["sudo", "-u"] else args
+        if command == ["claude", "auth", "status", "--json"]:
+            logged_in = "claude" in self.login_seen if self.authenticated_after_login else False
+            return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"loggedIn": logged_in}) + "\n")
+        if command == ["codex", "login", "status"]:
+            if self.authenticated_after_login and "codex" in self.login_seen:
+                return subprocess.CompletedProcess(args, 0, stdout="Logged in using ChatGPT\n")
+            return subprocess.CompletedProcess(args, 1, stderr="Not logged in\n")
+        if command == ["agy", "models"]:
+            if self.authenticated_after_login and "agy" in self.login_seen:
+                return subprocess.CompletedProcess(args, 0, stdout="gemini-3.7-flash-high\n")
+            return subprocess.CompletedProcess(args, 1, stderr="You are not logged into Antigravity.\n")
+        if command == ["claude", "auth", "login"]:
+            self.login_seen.add("claude")
+            return subprocess.CompletedProcess(args, 0)
+        if command == ["codex", "login"]:
+            self.login_seen.add("codex")
+            return subprocess.CompletedProcess(args, 0)
+        if command == ["agy"]:
+            self.login_seen.add("agy")
+            return subprocess.CompletedProcess(args, 0)
+        return subprocess.CompletedProcess(args, 0)
+
+
+def test_first_run_auth_phase_is_silent_when_auth_and_trust_already_pass() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-first-run-auth.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        config = load_project_config(
+            "otto",
+            _write_first_run_auth_config(
+                tmp_path,
+                roles=[
+                    ("designer", "claude"),
+                    ("director", "claude"),
+                    ("audit", "claude"),
+                    ("ops", "codex"),
+                    ("inspector", "agy"),
+                ],
+            ),
+        )
+        owner_home.joinpath(".claude.json").write_text(
+            json.dumps(
+                {
+                    "projects": {
+                        str(Path(role.workdir).resolve(strict=False)): {"hasTrustDialogAccepted": True}
+                        for role in config.roles
+                        if role.cli == ["claude"]
+                    }
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        agy_settings = owner_home / ".gemini" / "antigravity-cli" / "settings.json"
+        agy_settings.parent.mkdir(parents=True)
+        agy_settings.write_text(
+            json.dumps(
+                {
+                    "trustedWorkspaces": [
+                        str(Path(role.workdir).resolve(strict=False))
+                        for role in config.roles
+                        if role.cli == ["agy"]
+                    ]
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        runner = FirstRunAuthRunner()
+        runner.login_seen.update({"agy", "claude", "codex"})
+        messages: list[str] = []
+
+        report = team_launcher.run_first_run_auth_phase(
+            config,
+            owner_user="otto-agent",
+            owner_home=owner_home,
+            runner=runner,
+            print_func=messages.append,
+        )
+
+    assert report == team_launcher.FirstRunAuthReport({}, [])
+    assert messages == []
+    assert runner.calls == [
+        ["sudo", "-u", "otto-agent", "claude", "auth", "status", "--json"],
+        ["sudo", "-u", "otto-agent", "codex", "login", "status"],
+        ["sudo", "-u", "otto-agent", "agy", "models"],
+    ]
+    assert {kwargs.get("cwd") for kwargs in runner.call_kwargs} == {str(owner_home)}
+
+
+def test_first_run_auth_phase_sequences_distinct_logins_then_worktree_trust() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-first-run-auth.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        config = load_project_config(
+            "otto",
+            _write_first_run_auth_config(
+                tmp_path,
+                roles=[
+                    ("designer", "claude"),
+                    ("director", "claude"),
+                    ("ops", "codex"),
+                    ("inspector", "agy"),
+                    ("main", "codex"),
+                ],
+            ),
+        )
+        runner = FirstRunAuthRunner()
+        messages: list[str] = []
+
+        report = team_launcher.run_first_run_auth_phase(
+            config,
+            owner_user="otto-agent",
+            owner_home=owner_home,
+            runner=runner,
+            print_func=messages.append,
+        )
+
+    assert report.unauthenticated_roles == {}
+    assert report.untrusted_roles == [
+        ("claude", "designer", str(tmp_path / "worktrees" / "designer")),
+        ("claude", "director", str(tmp_path / "worktrees" / "director")),
+        ("agy", "inspector", str(tmp_path / "worktrees" / "inspector")),
+    ]
+    assert runner.calls == [
+        ["sudo", "-u", "otto-agent", "claude", "auth", "status", "--json"],
+        ["sudo", "-u", "otto-agent", "claude", "auth", "login"],
+        ["sudo", "-u", "otto-agent", "claude", "auth", "status", "--json"],
+        ["sudo", "-u", "otto-agent", "codex", "login", "status"],
+        ["sudo", "-u", "otto-agent", "codex", "login"],
+        ["sudo", "-u", "otto-agent", "codex", "login", "status"],
+        ["sudo", "-u", "otto-agent", "agy", "models"],
+        ["sudo", "-u", "otto-agent", "agy"],
+        ["sudo", "-u", "otto-agent", "agy", "models"],
+        ["sudo", "-u", "otto-agent", "claude", "--dangerously-skip-permissions"],
+        ["sudo", "-u", "otto-agent", "claude", "--dangerously-skip-permissions"],
+        ["sudo", "-u", "otto-agent", "agy", "--dangerously-skip-permissions"],
+    ]
+    assert [kwargs.get("cwd") for kwargs in runner.call_kwargs[:9]] == [str(owner_home)] * 9
+    assert [kwargs.get("cwd") for kwargs in runner.call_kwargs[9:]] == [
+        str(tmp_path / "worktrees" / "designer"),
+        str(tmp_path / "worktrees" / "director"),
+        str(tmp_path / "worktrees" / "inspector"),
+    ]
+    assert not (owner_home / ".claude.json").exists()
+    assert not (owner_home / ".gemini" / "antigravity-cli" / "settings.json").exists()
+    assert messages[:3] == [
+        "switchyard: first-run claude login required for designer, director; running claude auth login as otto-agent",
+        "switchyard: first-run codex login required for ops, main; running codex login as otto-agent",
+        "switchyard: first-run agy login required for inspector; running agy as otto-agent",
+    ]
+    assert all("workspace trust required" in message for message in messages[3:])
+
+
+def test_first_run_auth_phase_declined_login_reports_affected_roles_without_aborting() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-first-run-auth.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        config = load_project_config(
+            "otto",
+            _write_first_run_auth_config(tmp_path, roles=[("ops", "codex"), ("main", "codex")]),
+        )
+        messages: list[str] = []
+        runner = FirstRunAuthRunner(authenticated_after_login=False)
+
+        report = team_launcher.run_first_run_auth_phase(
+            config,
+            owner_user="otto-agent",
+            owner_home=owner_home,
+            runner=runner,
+            print_func=messages.append,
+        )
+
+    assert report.unauthenticated_roles == {"codex": ["ops", "main"]}
+    assert report.untrusted_roles == []
+    output: list[str] = []
+    team_launcher.report_first_run_auth_warnings(report, print_func=output.append)
+    assert output == ["warning: switchyard: codex is still unauthenticated; affected roles: ops, main"]
+
+
 def test_project_artifact_rejects_stage_configuration() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-design.") as tmp:
         tmp_path = Path(tmp)

@@ -3895,6 +3895,29 @@ class OwnerUserProvisionResult:
     linger_enabled: bool
 
 
+@dataclass(frozen=True)
+class FirstRunAuthReport:
+    unauthenticated_roles: dict[str, list[str]]
+    untrusted_roles: list[tuple[str, str, str]]
+
+    @property
+    def has_warnings(self) -> bool:
+        return bool(self.unauthenticated_roles or self.untrusted_roles)
+
+
+FIRST_RUN_AUTH_STATUS_COMMANDS: dict[str, list[str]] = {
+    "agy": ["agy", "models"],
+    "claude": ["claude", "auth", "status", "--json"],
+    "codex": ["codex", "login", "status"],
+}
+FIRST_RUN_AUTH_LOGIN_COMMANDS: dict[str, list[str]] = {
+    "agy": ["agy"],
+    "claude": ["claude", "auth", "login"],
+    "codex": ["codex", "login"],
+}
+FIRST_RUN_TRUST_CLIS = frozenset({"agy", "claude", "gemini"})
+
+
 def _slug_from_project_name(name: str) -> str:
     slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in name.strip())
     slug = "-".join(part for part in slug.split("-") if part)
@@ -4206,6 +4229,231 @@ def _control_repository_owned_roots(config: ProjectConfig) -> list[Path]:
     if config.pane_launcher is not None:
         owned_roots.extend([config.pane_launcher.parent, config.pane_launcher])
     return owned_roots
+
+
+def _owner_home_for_auth(owner_user: str, fallback: Path | None = None) -> Path:
+    try:
+        return Path(pwd.getpwnam(owner_user).pw_dir)
+    except KeyError:
+        return fallback or (Path("/home") / owner_user)
+
+
+def _owner_command_args(owner_user: str, command: Sequence[str]) -> list[str]:
+    return ["sudo", "-u", owner_user, *command]
+
+
+def _role_cli_name(role: RoleConfig) -> str:
+    return _command_name(role.cli[0]) if role.cli else ""
+
+
+def _roles_by_first_cli(config: ProjectConfig) -> dict[str, list[RoleConfig]]:
+    grouped: dict[str, list[RoleConfig]] = {}
+    for role in config.roles:
+        cli = _role_cli_name(role)
+        if cli:
+            grouped.setdefault(cli, []).append(role)
+    return grouped
+
+
+def _role_names(roles: Sequence[RoleConfig]) -> list[str]:
+    return [role.role for role in roles]
+
+
+def _run_owner_cli_probe(
+    *,
+    owner_user: str,
+    owner_home: Path,
+    command: Sequence[str],
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> subprocess.CompletedProcess[Any]:
+    args = _owner_command_args(owner_user, command)
+    try:
+        return runner(
+            args,
+            cwd=str(owner_home),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except OSError as exc:
+        return subprocess.CompletedProcess(args, 127, stdout="", stderr=str(exc))
+
+
+def _run_owner_cli_interactive(
+    *,
+    owner_user: str,
+    cwd: Path,
+    command: Sequence[str],
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> subprocess.CompletedProcess[Any]:
+    args = _owner_command_args(owner_user, command)
+    try:
+        return runner(args, cwd=str(cwd))
+    except OSError as exc:
+        return subprocess.CompletedProcess(args, 127, stderr=str(exc))
+
+
+def _cli_auth_probe_passed(cli: str, proc: subprocess.CompletedProcess[Any]) -> bool:
+    if proc.returncode != 0:
+        return False
+    stdout = str(getattr(proc, "stdout", "") or "")
+    stderr = str(getattr(proc, "stderr", "") or "")
+    combined = f"{stdout}\n{stderr}".casefold()
+    if cli == "claude":
+        try:
+            parsed = json.loads(stdout)
+        except json.JSONDecodeError:
+            return False
+        return parsed.get("loggedIn") is True
+    if cli in {"agy", "codex"}:
+        return "not logged" not in combined and "not authenticated" not in combined
+    return True
+
+
+def _is_cli_authenticated(
+    cli: str,
+    *,
+    owner_user: str,
+    owner_home: Path,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> bool:
+    command = FIRST_RUN_AUTH_STATUS_COMMANDS.get(cli)
+    if command is None:
+        return True
+    proc = _run_owner_cli_probe(owner_user=owner_user, owner_home=owner_home, command=command, runner=runner)
+    return _cli_auth_probe_passed(cli, proc)
+
+
+def _read_json_object(path: Path) -> dict[str, Any]:
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _claude_workdir_is_trusted(owner_home: Path, workdir: Path) -> bool:
+    config = _read_json_object(owner_home / ".claude.json")
+    projects = config.get("projects")
+    if not isinstance(projects, dict):
+        return False
+    entry = projects.get(str(workdir.expanduser().resolve(strict=False)))
+    return isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is True
+
+
+def _agy_workdir_is_trusted(owner_home: Path, workdir: Path) -> bool:
+    settings = _read_json_object(owner_home / ".gemini" / "antigravity-cli" / "settings.json")
+    trusted = settings.get("trustedWorkspaces")
+    if not isinstance(trusted, list):
+        return False
+    normalized = str(workdir.expanduser().resolve(strict=False))
+    return any(str(path) == normalized for path in trusted)
+
+
+def _workdir_is_trusted(cli: str, *, owner_home: Path, workdir: Path) -> bool:
+    if cli == "claude":
+        return _claude_workdir_is_trusted(owner_home, workdir)
+    if cli in {"agy", "gemini"}:
+        return _agy_workdir_is_trusted(owner_home, workdir)
+    return True
+
+
+def _first_run_trust_command(role: RoleConfig) -> list[str]:
+    return [*role.cli, *yolo_args_for_role(role)]
+
+
+def _prepare_first_run_auth_worktrees(
+    config: ProjectConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> None:
+    if config.repository is None:
+        return
+    worktree_runner = runner
+    owner_runner_anchor = config.repository or config.pane_launcher
+    if config.run_as_user and owner_runner_anchor is not None and (
+        config.control_repository is not None or config.pane_launcher is not None
+    ):
+        worktree_runner = _owner_project_git_runner(
+            owner_user=config.run_as_user,
+            project_dir=owner_runner_anchor,
+            owned_roots=_control_repository_owned_roots(config),
+            runner=runner,
+        )
+    ensure_project_worktrees(config, refresh=True, runner=worktree_runner)
+
+
+def run_first_run_auth_phase(
+    config: ProjectConfig,
+    *,
+    owner_user: str | None = None,
+    owner_home: Path | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> FirstRunAuthReport:
+    effective_owner = (owner_user or config.run_as_user or current_user_name()).strip()
+    if not effective_owner:
+        return FirstRunAuthReport({}, [])
+    effective_home = owner_home or _owner_home_for_auth(effective_owner)
+    roles_by_cli = _roles_by_first_cli(config)
+    unauthenticated: dict[str, list[str]] = {}
+
+    for cli, roles in roles_by_cli.items():
+        if cli not in FIRST_RUN_AUTH_STATUS_COMMANDS:
+            continue
+        if _is_cli_authenticated(cli, owner_user=effective_owner, owner_home=effective_home, runner=runner):
+            continue
+        login_command = FIRST_RUN_AUTH_LOGIN_COMMANDS[cli]
+        names = ", ".join(_role_names(roles))
+        print_func(
+            f"switchyard: first-run {cli} login required for {names}; "
+            f"running {shlex.join(login_command)} as {effective_owner}"
+        )
+        _run_owner_cli_interactive(
+            owner_user=effective_owner,
+            cwd=effective_home,
+            command=login_command,
+            runner=runner,
+        )
+        if not _is_cli_authenticated(cli, owner_user=effective_owner, owner_home=effective_home, runner=runner):
+            unauthenticated[cli] = _role_names(roles)
+
+    untrusted: list[tuple[str, str, str]] = []
+    for role in config.roles:
+        cli = _role_cli_name(role)
+        if cli not in FIRST_RUN_TRUST_CLIS:
+            continue
+        workdir = Path(role.workdir)
+        if _workdir_is_trusted(cli, owner_home=effective_home, workdir=workdir):
+            continue
+        command = _first_run_trust_command(role)
+        print_func(
+            f"switchyard: first-run {cli} workspace trust required for "
+            f"{role.role} ({workdir}); accept the trust prompt, then exit the CLI"
+        )
+        _run_owner_cli_interactive(
+            owner_user=effective_owner,
+            cwd=workdir,
+            command=command,
+            runner=runner,
+        )
+        if not _workdir_is_trusted(cli, owner_home=effective_home, workdir=workdir):
+            untrusted.append((cli, role.role, str(workdir)))
+
+    return FirstRunAuthReport(unauthenticated, untrusted)
+
+
+def report_first_run_auth_warnings(
+    report: FirstRunAuthReport,
+    *,
+    print_func: Callable[[str], None] = print,
+) -> None:
+    for cli, roles in report.unauthenticated_roles.items():
+        print_func(
+            f"warning: switchyard: {cli} is still unauthenticated; affected roles: {', '.join(roles)}"
+        )
+    for cli, role, workdir in report.untrusted_roles:
+        print_func(f"warning: switchyard: {cli} workspace still untrusted for {role}: {workdir}")
 
 
 def _owner_project_install_args(owner_user: str, project_dir: Path, *, shell: str = "fish") -> list[list[str]]:
@@ -4685,6 +4933,14 @@ def switchyard_new_command(
     config_path = provision_dir / f"{resolved_slug}.json"
     config = load_project_config(resolved_slug, config_path)
     _register_switchyard_project(config_path, registry_dir=registry_dir)
+    _prepare_first_run_auth_worktrees(config, runner=runner)
+    first_run_auth_report = run_first_run_auth_phase(
+        config,
+        owner_user=owner_user,
+        owner_home=_owner_home_for_auth(owner_user, fallback=home_base / owner_user),
+        runner=runner,
+        print_func=print_func,
+    )
     launch_runner = _owner_project_git_runner(
         owner_user=owner_user,
         project_dir=project_dir,
@@ -4704,6 +4960,7 @@ def switchyard_new_command(
     if launch_result != 0:
         return launch_result
     print_func(f"switchyard: full pane window started for {resolved_slug}")
+    report_first_run_auth_warnings(first_run_auth_report, print_func=print_func)
     report_launch_session_records(
         config,
         timeout_seconds=session_record_timeout,

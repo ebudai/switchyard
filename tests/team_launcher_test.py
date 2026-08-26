@@ -5511,6 +5511,117 @@ def test_switchyard_registry_does_not_change_pgu_resolution_or_launch_config() -
     assert set(calls[0]["workdirs"]) == {"/home/agent/Projects/pgu"}
 
 
+def test_legacy_and_switchyard_entrypoints_render_same_plain_konsole_command() -> None:
+    def run_entrypoint(
+        argv: list[str],
+        *,
+        config_path: Path,
+        config_dir: Path,
+        registry_dir: Path,
+        layout_output: Path,
+    ) -> list[str]:
+        runner = FakeRunner()
+        original_launch_project = team_launcher.launch_project
+        original_config_dir = team_launcher.DEFAULT_CONFIG_DIR
+        original_registry_dir = team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR
+        try:
+            team_launcher.DEFAULT_CONFIG_DIR = config_dir
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
+
+            def launch_with_fake_runner(config: team_launcher.ProjectConfig, **kwargs: object) -> int:
+                kwargs["runner"] = runner
+                kwargs["layout_output"] = layout_output
+                kwargs["layout_mode"] = team_launcher.LAYOUT_MODE_SEPARATE
+                kwargs["report_session_records"] = False
+                kwargs["no_launcher_self_deploy"] = True
+                return original_launch_project(config, **kwargs)
+
+            team_launcher.launch_project = launch_with_fake_runner
+            if argv[0] == "team-launcher":
+                assert team_launcher.main(["pgu", "start", "--config", str(config_path)]) == 0
+            else:
+                assert switchyard_main(["pgu"]) == 0
+        finally:
+            team_launcher.launch_project = original_launch_project
+            team_launcher.DEFAULT_CONFIG_DIR = original_config_dir
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = original_registry_dir
+
+        konsole_calls = [call for call in runner.calls if "konsole" in call]
+        assert len(konsole_calls) == 1
+        return konsole_calls[0]
+
+    original_host_wayland = os.environ.get("HOST_WAYLAND_DISPLAY")
+    original_legacy_host_wayland = os.environ.get("PGU_HOST_WAYLAND_DISPLAY")
+    try:
+        os.environ["HOST_WAYLAND_DISPLAY"] = "/run/user/1000/wayland-0"
+        os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
+        with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-entrypoint-konsole.") as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            repo.mkdir()
+            config_dir = tmp_path / "config"
+            config_dir.mkdir()
+            registry_dir = tmp_path / "registry"
+            registry_dir.mkdir()
+            config_path = _write_minimal_shared_checkout_config(config_dir, repo, ["ops"], run_as_user="agent")
+            (config_dir / "layout.json").write_text(
+                json.dumps(
+                    {
+                        "Widgets": [
+                            {"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""},
+                        ],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            legacy_layout = tmp_path / "legacy-layout.json"
+            switchyard_layout = tmp_path / "switchyard-layout.json"
+
+            legacy_command = run_entrypoint(
+                ["team-launcher"],
+                config_path=config_path,
+                config_dir=config_dir,
+                registry_dir=registry_dir,
+                layout_output=legacy_layout,
+            )
+            switchyard_command = run_entrypoint(
+                ["switchyard"],
+                config_path=config_path,
+                config_dir=config_dir,
+                registry_dir=registry_dir,
+                layout_output=switchyard_layout,
+            )
+
+        assert legacy_command == [
+            "env",
+            "QT_QPA_PLATFORM=wayland",
+            "WAYLAND_DISPLAY=/run/user/1000/wayland-0",
+            "konsole",
+            "--separate",
+            "--layout",
+            str(legacy_layout),
+        ]
+        assert switchyard_command == [
+            "env",
+            "QT_QPA_PLATFORM=wayland",
+            "WAYLAND_DISPLAY=/run/user/1000/wayland-0",
+            "konsole",
+            "--separate",
+            "--layout",
+            str(switchyard_layout),
+        ]
+    finally:
+        os.environ.pop("HOST_WAYLAND_DISPLAY", None)
+        if original_host_wayland is not None:
+            os.environ["HOST_WAYLAND_DISPLAY"] = original_host_wayland
+        os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
+        if original_legacy_host_wayland is not None:
+            os.environ["PGU_HOST_WAYLAND_DISPLAY"] = original_legacy_host_wayland
+
+
 def test_switchyard_project_name_argv_joins_and_resumes_matching_project() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-open.") as tmp:
         tmp_path = Path(tmp)

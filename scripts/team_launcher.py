@@ -1049,6 +1049,9 @@ def load_project_config(project: str, config_path: Path | None = None) -> Projec
         worktree_branch=worktree_branch,
         roles=roles,
     )
+    boundary_error = _control_repository_boundary_error(parsed_config, require_existing_user=False)
+    if boundary_error is not None:
+        raise SystemExit(f"{path} control_repository {boundary_error}")
     return replace(parsed_config, roles=_with_project_board_env(parsed_config, roles))
 
 
@@ -2127,12 +2130,18 @@ def _control_repository_owner_home(config: ProjectConfig) -> Path | None:
     return Path(expected.pw_dir).resolve(strict=False)
 
 
-def _control_repository_boundary_error(config: ProjectConfig) -> str | None:
+def _control_repository_boundary_error(config: ProjectConfig, *, require_existing_user: bool) -> str | None:
     if config.control_repository is None:
         return None
     managed_root = _control_repository_managed_root(config)
     if managed_root is None:
-        return f"target user {config.run_as_user!r} does not exist"
+        if not require_existing_user and config.run_as_user:
+            # Load-time validation accepts pre-account-creation configs from `new`.
+            # The same prefix check still bounds the eventual repair path.
+            owner_home = (Path("/home") / config.run_as_user).resolve(strict=False)
+            managed_root = (owner_home / ".local" / "state" / "switchyard" / "projects").resolve(strict=False)
+        else:
+            return f"target user {config.run_as_user!r} does not exist"
     parent = config.control_repository.expanduser().resolve(strict=False).parent
     if parent == managed_root or not parent.is_relative_to(managed_root):
         return f"{parent} is not a switchyard-managed control directory under {managed_root}"
@@ -2178,7 +2187,7 @@ def _control_repository_owner_mismatch_path(config: ProjectConfig) -> Path | Non
 def _control_repository_repair_paths(config: ProjectConfig) -> tuple[list[tuple[Path, bool]], Path | None]:
     if config.control_repository is None or not config.run_as_user:
         return [], None
-    boundary_error = _control_repository_boundary_error(config)
+    boundary_error = _control_repository_boundary_error(config, require_existing_user=True)
     if boundary_error is not None and not config.control_repository.exists() and not config.control_repository.parent.exists():
         return [], None
     try:
@@ -2223,7 +2232,7 @@ def repair_control_repository_ownership(
     repair_paths, mismatch = _control_repository_repair_paths(config)
     if mismatch is None:
         return WorktreeProvisionResult({})
-    boundary_error = _control_repository_boundary_error(config)
+    boundary_error = _control_repository_boundary_error(config, require_existing_user=True)
     if boundary_error is not None:
         message = f"refusing to repair control repository ownership for {config.control_repository}: {boundary_error}"
         return WorktreeProvisionResult({role.role: message for role in config.roles})

@@ -179,6 +179,7 @@ class ProjectConfig:
     board_url: str
     board_socket: str
     run_as_user: str
+    pane_launcher: Path | None
     repository: Path | None
     control_repository: Path | None
     worktree_base: Path | None
@@ -1022,6 +1023,10 @@ def load_project_config(project: str, config_path: Path | None = None) -> Projec
     board_url = str(config.get("board_url") or _default_board_url(project)).strip()
     board_socket = str(config.get("board_socket") or _default_board_socket(project)).strip()
     run_as_user = str(config.get("run_as_user") or "").strip()
+    pane_launcher = None
+    pane_launcher_raw = config.get("pane_launcher")
+    if pane_launcher_raw is not None:
+        pane_launcher = _expand_path(str(pane_launcher_raw), base=base)
     repository = None
     repository_raw = config.get("repository")
     if repository_raw is not None:
@@ -1086,6 +1091,7 @@ def load_project_config(project: str, config_path: Path | None = None) -> Projec
         board_url=board_url,
         board_socket=board_socket,
         run_as_user=run_as_user,
+        pane_launcher=pane_launcher,
         repository=repository,
         control_repository=control_repository,
         worktree_base=worktree_base,
@@ -2891,6 +2897,22 @@ def materialize_layout(
     return output_path
 
 
+def _verify_pane_launcher_path(
+    config: ProjectConfig,
+    *,
+    script_path: Path,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> Path:
+    pane_script_path = config.pane_launcher or script_path
+    if config.pane_launcher is None:
+        return pane_script_path
+    result = runner(["test", "-x", str(pane_script_path)])
+    if result.returncode != 0:
+        owner = f" by {config.run_as_user}" if config.run_as_user else ""
+        raise SystemExit(f"team-launcher: configured pane_launcher {pane_script_path} is not readable/executable{owner}")
+    return pane_script_path
+
+
 def default_layout_output_path(config: ProjectConfig, *, config_path: Path) -> Path:
     base_dir = config.repository if config.repository is not None else config_path.parent
     return base_dir / SWITCHYARD_PROJECT_DIR_NAME / f"{config.project}-team-layout.json"
@@ -2978,6 +3000,9 @@ def launch_project(
         )
     effective_pane_state_dir = pane_state_dir or DEFAULT_PANE_STATE_DIR
     output_path = layout_output or default_layout_output_path(config, config_path=config_path)
+    pane_script_path = config.pane_launcher or script_path
+    if not dry_run:
+        pane_script_path = _verify_pane_launcher_path(config, script_path=script_path, runner=worktree_runner)
     failed_roles: dict[str, str] = {}
     if not dry_run:
         ensure_launcher_checkout_current(
@@ -3004,7 +3029,7 @@ def launch_project(
         config,
         config_path=config_path,
         mode=mode,
-        script_path=script_path,
+        script_path=pane_script_path,
         output_path=output_path,
         pane_state_dir=pane_state_dir,
         force_reload=force_reload,
@@ -3031,7 +3056,7 @@ def launch_project(
                         role,
                         config_path=config_path,
                         mode=mode,
-                        script_path=script_path,
+                        script_path=pane_script_path,
                         pane_state_dir=pane_state_dir,
                         force_reload=force_reload,
                         skip_launcher_check=True,
@@ -3359,6 +3384,7 @@ def _new_project_launcher_config_payload(
         "board_url": f"http://127.0.0.1:{plan.port}",
         "board_socket": plan.socket_path,
         "session_dir": _new_project_session_dir(plan.project, plan.owner_user),
+        "pane_launcher": str(Path(plan.board_current) / "scripts" / TEAM_LAUNCHER_NAME),
         "roles": roles,
     }
 
@@ -4003,6 +4029,8 @@ def _owner_project_git_runner(
     def wrapped(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
         if len(args) >= 3 and args[:2] == ["mkdir", "-p"] and is_owned_path(Path(args[2])):
             return runner(["sudo", "-u", owner_user, *args], **kwargs)
+        if len(args) >= 3 and args[:2] == ["test", "-x"] and is_owned_path(Path(args[2])):
+            return runner(["sudo", "-u", owner_user, *args], **kwargs)
         if args[:1] == ["git"]:
             git_path: Path | None = None
             if len(args) >= 3 and args[1] == "-C":
@@ -4030,6 +4058,8 @@ def _control_repository_owned_roots(config: ProjectConfig) -> list[Path]:
         owned_roots.extend([config.control_repository.parent, config.control_repository])
     if config.worktree_base is not None:
         owned_roots.append(config.worktree_base)
+    if config.pane_launcher is not None:
+        owned_roots.extend([config.pane_launcher.parent, config.pane_launcher])
     return owned_roots
 
 

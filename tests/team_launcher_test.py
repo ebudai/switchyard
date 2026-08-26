@@ -652,6 +652,7 @@ def test_dry_run_materializes_pgu_layout_with_six_visible_role_commands() -> Non
         assert len(active_commands) == 6
         clockwise_commands = [commands[index] for index in PANEL_CLOCKWISE_SLOT_ORDER]
         expected_clockwise_roles = ["inspector", "director", "audit", "ops", "app", "main"]
+        assert config.pane_launcher is None
         for role in ("director", "main", "app", "ops", "audit", "inspector"):
             matching = [command for command in commands if f" {role} " in f" {command} " or command.endswith(f" {role}")]
             assert matching, (role, commands)
@@ -716,6 +717,129 @@ def test_default_layout_paths_are_project_scoped() -> None:
     assert porter_layout == porter.repository / ".switchyard" / "porter-team-layout.json"
     assert zeta_layout == zeta.repository / ".switchyard" / "zeta-team-layout.json"
     assert porter_layout != zeta_layout
+
+
+def test_launch_project_uses_configured_owner_readable_pane_launcher() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-pane-launcher.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        owner_launcher = tmp_path / "owner-home" / "porter-ticketboard-live" / "current" / "scripts" / "team-launcher"
+        control_repo = tmp_path / "owner-home" / ".local" / "state" / "switchyard" / "projects" / "porter" / "control.git"
+        worktree_base = tmp_path / "worktrees"
+        config_path = tmp_path / "porter.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        owner_launcher.parent.mkdir(parents=True)
+        owner_launcher.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        owner_launcher.chmod(0o755)
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "pane_launcher": str(owner_launcher),
+                    "repository": str(tmp_path / "project"),
+                    "control_repository": str(control_repo),
+                    "run_as_user": "porter-agent",
+                    "worktree_base": str(worktree_base),
+                    "roles": [{"role": "director", "slot": 0, "target": "porter-director:0.0", "cli": ["claude"]}],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        original_home = team_launcher._control_repository_owner_home
+        try:
+            team_launcher._control_repository_owner_home = lambda _config: tmp_path / "owner-home"
+            config = load_project_config("porter", config_path)
+        finally:
+            team_launcher._control_repository_owner_home = original_home
+        layout_output = tmp_path / "materialized.json"
+        runner = FakeRunner()
+
+        assert (
+            launch_project(
+                config,
+                config_path=config_path,
+                mode="start",
+                script_path=ROOT / "scripts" / "team-launcher",
+                runner=runner,
+                layout_output=layout_output,
+            )
+            == 0
+        )
+
+        assert ["sudo", "-u", "porter-agent", "test", "-x", str(owner_launcher)] in runner.calls
+        assert ["test", "-x", str(owner_launcher)] not in runner.calls
+        commands = _leaf_commands(json.loads(layout_output.read_text(encoding="utf-8")))
+        assert len(commands) == 1
+        assert str(owner_launcher) in commands[0]
+        assert str(ROOT / "scripts" / "team-launcher") not in commands[0]
+        assert "--skip-launcher-check" in commands[0]
+
+
+def test_launch_project_refuses_missing_configured_pane_launcher() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-pane-launcher-missing.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        owner_launcher = tmp_path / "owner-home" / "porter-ticketboard-live" / "current" / "scripts" / "team-launcher"
+        control_repo = tmp_path / "owner-home" / ".local" / "state" / "switchyard" / "projects" / "porter" / "control.git"
+        worktree_base = tmp_path / "worktrees"
+        config_path = tmp_path / "porter.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "pane_launcher": str(owner_launcher),
+                    "repository": str(tmp_path / "project"),
+                    "control_repository": str(control_repo),
+                    "run_as_user": "porter-agent",
+                    "worktree_base": str(worktree_base),
+                    "roles": [{"role": "director", "slot": 0, "target": "porter-director:0.0", "cli": ["claude"]}],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        original_home = team_launcher._control_repository_owner_home
+        try:
+            team_launcher._control_repository_owner_home = lambda _config: tmp_path / "owner-home"
+            config = load_project_config("porter", config_path)
+        finally:
+            team_launcher._control_repository_owner_home = original_home
+        layout_output = tmp_path / "materialized.json"
+        calls: list[list[str]] = []
+
+        def runner(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append(args)
+            if args == ["sudo", "-u", "porter-agent", "test", "-x", str(owner_launcher)]:
+                return subprocess.CompletedProcess(args, 1)
+            return subprocess.CompletedProcess(args, 0)
+
+        try:
+            launch_project(
+                config,
+                config_path=config_path,
+                mode="start",
+                script_path=ROOT / "scripts" / "team-launcher",
+                runner=runner,
+                layout_output=layout_output,
+            )
+            raise AssertionError("expected SystemExit")
+        except SystemExit as exc:
+            message = str(exc)
+
+        assert str(owner_launcher) in message
+        assert "configured pane_launcher" in message
+        assert "not readable/executable by porter-agent" in message
+        assert ["sudo", "-u", "porter-agent", "test", "-x", str(owner_launcher)] in calls
+        assert ["test", "-x", str(owner_launcher)] not in calls
+        assert not layout_output.exists()
 
 
 def test_kde_auto_layout_preserves_separate_konsole_plan_shape() -> None:
@@ -4243,6 +4367,7 @@ def test_switchyard_register_cli_enables_launch_by_name_without_config_flag() ->
                     "project": "otto",
                     "project_name": "Otto System",
                     "layout": str(layout),
+                    "pane_launcher": "/home/otto-agent/otto-ticketboard-live/current/scripts/team-launcher",
                     "roles": [{"role": "director", "slot": 0, "cli": ["claude"], "workdir": str(tmp_path / "otto")}],
                 }
             )
@@ -4258,7 +4383,7 @@ def test_switchyard_register_cli_enables_launch_by_name_without_config_flag() ->
             team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
 
             def fake_launch_project(config: team_launcher.ProjectConfig, **kwargs: object) -> int:
-                calls.append({"project": config.project, **kwargs})
+                calls.append({"project": config.project, "pane_launcher": config.pane_launcher, **kwargs})
                 return 0
 
             team_launcher.launch_project = fake_launch_project
@@ -4274,6 +4399,7 @@ def test_switchyard_register_cli_enables_launch_by_name_without_config_flag() ->
     assert calls[0]["config_path"] == config_path
     assert calls[0]["mode"] == "start"
     assert calls[0]["script_path"] == ROOT / "scripts" / "team-launcher"
+    assert calls[0]["pane_launcher"] == Path("/home/otto-agent/otto-ticketboard-live/current/scripts/team-launcher")
     assert calls[0]["report_session_records"] is True
 
 
@@ -4300,7 +4426,14 @@ def test_switchyard_registry_does_not_change_pgu_resolution_or_launch_config() -
             team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
 
             def fake_launch_project(config: team_launcher.ProjectConfig, **kwargs: object) -> int:
-                calls.append({"project": config.project, "workdirs": [role.workdir for role in config.roles], **kwargs})
+                calls.append(
+                    {
+                        "project": config.project,
+                        "pane_launcher": config.pane_launcher,
+                        "workdirs": [role.workdir for role in config.roles],
+                        **kwargs,
+                    }
+                )
                 return 0
 
             team_launcher.launch_project = fake_launch_project
@@ -4313,6 +4446,7 @@ def test_switchyard_registry_does_not_change_pgu_resolution_or_launch_config() -
     assert calls[0]["project"] == "pgu"
     assert calls[0]["config_path"] == ROOT / "config" / "team-launcher" / "pgu.json"
     assert calls[0]["script_path"] == ROOT / "scripts" / "team-launcher"
+    assert calls[0]["pane_launcher"] is None
     assert set(calls[0]["workdirs"]) == {"/home/agent/Projects/pgu"}
 
 
@@ -4329,6 +4463,7 @@ def test_switchyard_project_name_argv_joins_and_resumes_matching_project() -> No
                     "project": "porter",
                     "project_name": "My Project Name",
                     "layout": str(layout),
+                    "pane_launcher": "/home/porter-agent/porter-ticketboard-live/current/scripts/team-launcher",
                     "roles": [{"role": "director", "slot": 0, "cli": ["claude"]}],
                 }
             )
@@ -4344,7 +4479,7 @@ def test_switchyard_project_name_argv_joins_and_resumes_matching_project() -> No
             team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
 
             def fake_launch_project(config: team_launcher.ProjectConfig, **kwargs: object) -> int:
-                calls.append({"project": config.project, **kwargs})
+                calls.append({"project": config.project, "pane_launcher": config.pane_launcher, **kwargs})
                 return 0
 
             team_launcher.launch_project = fake_launch_project
@@ -4359,6 +4494,7 @@ def test_switchyard_project_name_argv_joins_and_resumes_matching_project() -> No
     assert calls[0]["config_path"] == config_path
     assert calls[0]["mode"] == "start"
     assert calls[0]["script_path"] == ROOT / "scripts" / "team-launcher"
+    assert calls[0]["pane_launcher"] == Path("/home/porter-agent/porter-ticketboard-live/current/scripts/team-launcher")
     assert calls[0]["report_session_records"] is True
 
 
@@ -4647,6 +4783,7 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
         director_env = next(role["env"] for role in config["roles"] if role["role"] == "director")
         designer_onboarding = (project_dir / ".switchyard" / "DESIGNER_ONBOARDING.md").read_text(encoding="utf-8")
         registry_pointer = json.loads((registry_dir / "porter.json").read_text(encoding="utf-8"))
+        expected_pane_launcher = "/home/otto-agent/porter-ticketboard-live/current/scripts/team-launcher"
 
         assert chown_call_index < next(index for index, call in enumerate(runner.calls) if call == ["sudo", "-v"])
         assert artifact["project"]["repository"] == str(project_dir)
@@ -4655,13 +4792,15 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
         assert registry_pointer["slug"] == "porter"
         assert artifact["project"]["roles"] == ["app", "main"]
         assert plan["implementer_roles"] == ["app", "main"]
+        assert config["pane_launcher"] == expected_pane_launcher
         assert [role["role"] for role in config["roles"]] == ["designer", "director", "audit", "ops", "app", "main"]
         assert designer_env["SWITCHYARD_PROJECT_ARTIFACT"] == str(project_dir / ".switchyard" / "porter.project.json")
         assert designer_env["SWITCHYARD_DESIGNER_ONBOARDING"].endswith("DESIGNER_ONBOARDING.md")
         assert director_env["SWITCHYARD_PROJECT_DESIGN"] == str(project_dir / "PROJECT_DESIGN.md")
         assert director_env["SWITCHYARD_DIRECTOR_ONBOARDING"].endswith("DIRECTOR_ONBOARDING.md")
         assert len(generated_commands) == 6
-        assert all("team-launcher porter pane attach-or-start" in command for command in generated_commands)
+        assert all(f"{expected_pane_launcher} porter pane attach-or-start" in command for command in generated_commands)
+        assert not any(f"{ROOT / 'scripts' / 'team-launcher'} porter pane attach-or-start" in command for command in generated_commands)
         assert not any("switchyard porter pane attach-or-start" in command for command in generated_commands)
         assert _run_git(["git", "rev-parse", "--is-inside-work-tree"], cwd=project_dir).stdout.strip() == "true"
         assert _run_git(["git", "rev-list", "--count", "HEAD"], cwd=project_dir).stdout.strip() == "2"

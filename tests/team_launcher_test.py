@@ -779,6 +779,100 @@ def test_launch_project_uses_configured_owner_readable_pane_launcher() -> None:
         assert "--skip-launcher-check" in commands[0]
 
 
+def test_launch_project_probes_pane_launcher_as_owner_without_control_repository() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-pane-launcher-no-control.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        owner_launcher = tmp_path / "owner-home" / "porter-ticketboard-live" / "current" / "scripts" / "team-launcher"
+        config_path = tmp_path / "porter.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        owner_launcher.parent.mkdir(parents=True)
+        owner_launcher.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        owner_launcher.chmod(0o755)
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "pane_launcher": str(owner_launcher),
+                    "repository": str(tmp_path / "project"),
+                    "run_as_user": "porter-agent",
+                    "roles": [{"role": "director", "slot": 0, "target": "porter-director:0.0", "cli": ["claude"]}],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+        layout_output = tmp_path / "materialized.json"
+        runner = FakeRunner()
+
+        assert (
+            launch_project(
+                config,
+                config_path=config_path,
+                mode="start",
+                script_path=ROOT / "scripts" / "team-launcher",
+                runner=runner,
+                layout_output=layout_output,
+            )
+            == 0
+        )
+
+        assert config.control_repository is None
+        assert ["sudo", "-u", "porter-agent", "test", "-x", str(owner_launcher)] in runner.calls
+        assert ["test", "-x", str(owner_launcher)] not in runner.calls
+
+
+def test_launch_project_probes_pane_launcher_as_owner_without_repository() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-pane-launcher-no-repo.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        owner_launcher = tmp_path / "owner-home" / "porter-ticketboard-live" / "current" / "scripts" / "team-launcher"
+        config_path = tmp_path / "porter.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        owner_launcher.parent.mkdir(parents=True)
+        owner_launcher.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        owner_launcher.chmod(0o755)
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "pane_launcher": str(owner_launcher),
+                    "run_as_user": "porter-agent",
+                    "roles": [{"role": "director", "slot": 0, "target": "porter-director:0.0", "cli": ["claude"]}],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+        layout_output = tmp_path / "materialized.json"
+        runner = FakeRunner()
+
+        assert (
+            launch_project(
+                config,
+                config_path=config_path,
+                mode="start",
+                script_path=ROOT / "scripts" / "team-launcher",
+                runner=runner,
+                layout_output=layout_output,
+            )
+            == 0
+        )
+
+        assert config.repository is None
+        assert config.control_repository is None
+        assert ["sudo", "-u", "porter-agent", "test", "-x", str(owner_launcher)] in runner.calls
+        assert ["test", "-x", str(owner_launcher)] not in runner.calls
+
+
 def test_launch_project_refuses_missing_configured_pane_launcher() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-pane-launcher-missing.") as tmp:
         tmp_path = Path(tmp)

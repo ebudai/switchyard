@@ -2992,10 +2992,13 @@ def launch_project(
     if mode not in {"attach", "attach-or-start", "reload"}:
         raise SystemExit(f"unknown launch mode: {mode}")
     worktree_runner = runner
-    if config.control_repository is not None and config.repository is not None and config.run_as_user:
+    owner_runner_anchor = config.repository or config.pane_launcher
+    if config.run_as_user and owner_runner_anchor is not None and (
+        config.control_repository is not None or config.pane_launcher is not None
+    ):
         worktree_runner = _owner_project_git_runner(
             owner_user=config.run_as_user,
-            project_dir=config.repository,
+            project_dir=owner_runner_anchor,
             owned_roots=_control_repository_owned_roots(config),
             runner=runner,
         )

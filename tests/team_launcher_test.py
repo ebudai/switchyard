@@ -2134,6 +2134,214 @@ def test_control_repository_launch_uses_role_worktrees_and_preserves_repository(
         assert not (app_worktree / "__pycache__").exists()
 
 
+def test_control_repository_launch_runs_bootstrap_as_configured_owner() -> None:
+    class OwnerRecordingRunner(FakeRunner):
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if args[:3] == ["sudo", "-u", "otto-agent"]:
+                return subprocess.CompletedProcess(args, 0)
+            return super().__call__(args, **kwargs)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-control-owner.") as tmp:
+        tmp_path = Path(tmp)
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        layout_path = tmp_path / "layout.json"
+        layout_path.write_text(
+            json.dumps(
+                {
+                    "Orientation": "Horizontal",
+                    "Widgets": [
+                        {"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""},
+                        {"Command": "", "SessionRestoreId": 1, "WorkingDirectory": ""},
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config_path = tmp_path / "otto.json"
+        control_repo = tmp_path / "state" / "control.git"
+        worktree_base = tmp_path / "worktrees"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "otto",
+                    "layout": str(layout_path),
+                    "repository": str(repo),
+                    "control_repository": str(control_repo),
+                    "run_as_user": "otto-agent",
+                    "worktree_base": str(worktree_base),
+                    "roles": [
+                        {"role": "ops", "slot": 0, "target": "otto-ops:0.0", "cli": ["codex"]},
+                        {"role": "app", "slot": 1, "target": "otto-app:0.0", "cli": ["codex"]},
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("otto", config_path)
+        runner = OwnerRecordingRunner()
+        layout_output = tmp_path / "launch-layout.json"
+
+        assert (
+            launch_project(
+                config,
+                config_path=config_path,
+                mode="start",
+                script_path=ROOT / "scripts" / "team-launcher",
+                runner=runner,
+                layout_output=layout_output,
+                pane_state_dir=tmp_path / "pane-state",
+            )
+            == 0
+        )
+
+        owner_calls = [call for call in runner.calls if call[:3] == ["sudo", "-u", "otto-agent"]]
+        assert ["sudo", "-u", "otto-agent", *team_launcher.mkdir_p_args(control_repo.parent)] in owner_calls
+        assert ["sudo", "-u", "otto-agent", *team_launcher.git_clone_control_repository_args(config)] in owner_calls
+        assert ["sudo", "-u", "otto-agent", *team_launcher.git_control_fetch_refspec_args(config)] in owner_calls
+        assert ["sudo", "-u", "otto-agent", *team_launcher.git_fetch_control_ref_args(config)] in owner_calls
+        assert ["sudo", "-u", "otto-agent", *team_launcher.mkdir_p_args(worktree_base)] in owner_calls
+        assert ["sudo", "-u", "otto-agent", *team_launcher.git_control_worktree_add_args(config, config.roles[0])] in owner_calls
+        assert ["sudo", "-u", "otto-agent", *team_launcher.git_control_worktree_add_args(config, config.roles[1])] in owner_calls
+        assert team_launcher.git_clone_control_repository_args(config) not in runner.calls
+        assert team_launcher.git_control_worktree_add_args(config, config.roles[0]) not in runner.calls
+        assert runner.calls[-1] == konsole_launch_args(layout_output)
+
+
+def test_control_repository_bootstrap_failure_aborts_without_opening_window() -> None:
+    class FailingControlRunner(FakeRunner):
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if args[:3] == ["sudo", "-u", "otto-agent"] and args[3:6] == ["git", "clone", "--bare"]:
+                return subprocess.CompletedProcess(
+                    args,
+                    128,
+                    stderr="fatal: detected dubious ownership in repository at '/home/otto-agent/Projects/otto/.git'\n",
+                )
+            if args[:3] == ["sudo", "-u", "otto-agent"]:
+                return subprocess.CompletedProcess(args, 0)
+            return super().__call__(args, **kwargs)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-control-fail.") as tmp:
+        tmp_path = Path(tmp)
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        layout_path = tmp_path / "layout.json"
+        layout_path.write_text(
+            json.dumps(
+                {
+                    "Orientation": "Horizontal",
+                    "Widgets": [{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config_path = tmp_path / "otto.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "otto",
+                    "layout": str(layout_path),
+                    "repository": str(repo),
+                    "control_repository": str(tmp_path / "state" / "control.git"),
+                    "run_as_user": "otto-agent",
+                    "worktree_base": str(tmp_path / "worktrees"),
+                    "roles": [{"role": "ops", "slot": 0, "target": "otto-ops:0.0", "cli": ["codex"]}],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("otto", config_path)
+        runner = FailingControlRunner()
+        layout_output = tmp_path / "launch-layout.json"
+        stderr = StringIO()
+
+        with redirect_stderr(stderr):
+            result = launch_project(
+                config,
+                config_path=config_path,
+                mode="start",
+                script_path=ROOT / "scripts" / "team-launcher",
+                runner=runner,
+                layout_output=layout_output,
+                pane_state_dir=tmp_path / "pane-state",
+            )
+
+        assert result == 1
+        assert "failed to prepare control repository for otto" in stderr.getvalue()
+        assert "detected dubious ownership" in stderr.getvalue()
+        assert not layout_output.exists()
+        assert not any(call == konsole_launch_args(layout_output) for call in runner.calls)
+
+
+def test_launch_without_control_repository_does_not_owner_wrap_pgu_plan() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-no-control.") as tmp:
+        tmp_path = Path(tmp)
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        layout_path = tmp_path / "layout.json"
+        layout_path.write_text(
+            json.dumps(
+                {
+                    "Orientation": "Horizontal",
+                    "Widgets": [{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config_path = tmp_path / "pgu.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "pgu",
+                    "layout": str(layout_path),
+                    "repository": str(repo),
+                    "run_as_user": "agent",
+                    "roles": [{"role": "ops", "slot": 0, "target": "pgu-ops:0.0", "cli": ["codex"]}],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("pgu", config_path)
+        runner = FakeRunner()
+        layout_output = tmp_path / "launch-layout.json"
+
+        assert (
+            launch_project(
+                config,
+                config_path=config_path,
+                mode="start",
+                script_path=ROOT / "scripts" / "team-launcher",
+                runner=runner,
+                layout_output=layout_output,
+                pane_state_dir=tmp_path / "pane-state",
+            )
+            == 0
+        )
+
+        assert not any(call[:3] == ["sudo", "-u", "agent"] for call in runner.calls)
+        assert runner.calls[-1] == konsole_launch_args(layout_output)
+
+
 def test_viewer_layout_starts_role_sessions_and_additive_viewer() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-viewer.") as tmp:
         tmp_path = Path(tmp)

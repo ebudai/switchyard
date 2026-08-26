@@ -2755,6 +2755,14 @@ def launch_project(
         mode = "attach-or-start"
     if mode not in {"attach", "attach-or-start", "reload"}:
         raise SystemExit(f"unknown launch mode: {mode}")
+    worktree_runner = runner
+    if config.control_repository is not None and config.repository is not None and config.run_as_user:
+        worktree_runner = _owner_project_git_runner(
+            owner_user=config.run_as_user,
+            project_dir=config.repository,
+            owned_roots=_control_repository_owned_roots(config),
+            runner=runner,
+        )
     effective_pane_state_dir = pane_state_dir or DEFAULT_PANE_STATE_DIR
     output_path = layout_output or default_layout_output_path(config, config_path=config_path)
     failed_roles: dict[str, str] = {}
@@ -2771,9 +2779,13 @@ def launch_project(
         ensure_configured_runtime_user(config, runner=runner)
         seed_default_session_dir_from_legacy_sources(config.session_dir)
         if mode == "attach-or-start":
-            failed_roles = ensure_project_worktrees(config, refresh=True, runner=runner).failed_roles
+            failed_roles = ensure_project_worktrees(config, refresh=True, runner=worktree_runner).failed_roles
+            if config.control_repository is not None and set(failed_roles) == {role.role for role in config.roles}:
+                reason = next(iter(failed_roles.values()), "unknown error")
+                print(f"team-launcher: failed to prepare control repository for {config.project}: {reason}", file=sys.stderr)
+                return 1
         elif mode == "reload":
-            fetch_project_worktree_ref(config, runner=runner)
+            fetch_project_worktree_ref(config, runner=worktree_runner)
             config = sync_reload_config_to_live_sessions(config, config_path=config_path, runner=runner)
     materialize_layout(
         config,
@@ -3799,6 +3811,15 @@ def _owner_project_git_runner(
     return wrapped
 
 
+def _control_repository_owned_roots(config: ProjectConfig) -> list[Path]:
+    owned_roots: list[Path] = []
+    if config.control_repository is not None:
+        owned_roots.extend([config.control_repository.parent, config.control_repository])
+    if config.worktree_base is not None:
+        owned_roots.append(config.worktree_base)
+    return owned_roots
+
+
 def _owner_project_install_args(owner_user: str, project_dir: Path, *, shell: str = "fish") -> list[list[str]]:
     shell_path = shell if "/" in shell else (shutil.which(shell) or f"/usr/bin/{shell}")
     return [
@@ -4276,15 +4297,10 @@ def switchyard_new_command(
     config_path = provision_dir / f"{resolved_slug}.json"
     config = load_project_config(resolved_slug, config_path)
     _register_switchyard_project(config_path, registry_dir=registry_dir)
-    owned_launch_roots: list[Path] = []
-    if config.control_repository is not None:
-        owned_launch_roots.append(config.control_repository)
-    if config.worktree_base is not None:
-        owned_launch_roots.append(config.worktree_base)
     launch_runner = _owner_project_git_runner(
         owner_user=owner_user,
         project_dir=project_dir,
-        owned_roots=owned_launch_roots,
+        owned_roots=_control_repository_owned_roots(config),
         runner=runner,
     )
     launch_result = launch_project(

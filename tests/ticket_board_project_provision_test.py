@@ -74,6 +74,18 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "TICKET_BOARD_ASSIGNEES=unassigned,designer,ops,app,main,audit,director,user" in combined
     assert "TICKET_BOARD_CALLER_ROLES=director,designer,ops,app,main,audit,user" in combined
     assert "TICKET_BOARD_PANE_STATE_DIR=%t/stellaris-ticket-board/pane-state" in combined
+    assert (
+        "sudo -u 'stellaris-agent' -H env XDG_RUNTIME_DIR=\"$owner_runtime_dir\" "
+        "TICKET_BOARD_PROJECT='stellaris' "
+        "TICKET_BOARD_PANE_STATE_DIR=\"$owner_runtime_dir/stellaris-ticket-board/pane-state\" "
+        "TICKET_BOARD_PANE_SESSION_DIR='/home/stellaris-agent/.local/state/stellaris-ticket-board/pane-sessions' "
+        "'/home/stellaris-agent/stellaris-ticketboard-live/current/scripts/ticket-board-install-pane-hooks' install "
+        "--home '/home/stellaris-agent' "
+        "--hook-source '/home/stellaris-agent/stellaris-ticketboard-live/current/scripts/ticket-board-pane-idle-hook' "
+        "--bin-path '/home/stellaris-agent/.local/bin/ticket-board-pane-idle-hook'"
+    ) in combined
+    assert combined.index("systemctl --user daemon-reload") < combined.index("ticket-board-install-pane-hooks")
+    assert combined.index("ticket-board-install-pane-hooks") < combined.index("systemctl --user enable --now stellaris-ticket-board-notify-listener.service")
     assert "PGU_TICKET_BOARD_SOCKET=" not in combined
     assert "PGU_TICKET_BOARD_PANE_STATE_DIR=" not in combined
     assert "ReadWritePaths=/home/stellaris-agent/.claude/stellaris-tickets-assets /home/stellaris-agent/.claude/stellaris-ticket-frames" in combined

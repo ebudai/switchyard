@@ -17,7 +17,7 @@ import time
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
 REMOTE_HEAD = "0123456789abcdef0123456789abcdef01234567"
@@ -454,6 +454,255 @@ def test_upgrade_refreshes_column_major_generated_provision_layout() -> None:
 
         assert result.changed
         assert json.loads(layout_path.read_text(encoding="utf-8")) == team_launcher._new_project_layout_payload(6)
+
+
+def test_upgrade_repairs_generated_runtime_session_dir_to_durable_owner_state() -> None:
+    original_uid_for_user = team_launcher.uid_for_user
+    original_geteuid = team_launcher.os.geteuid
+    original_current_user_name = team_launcher.current_user_name
+    try:
+        team_launcher.uid_for_user = lambda user_name: 1005 if user_name == "otto-agent" else original_uid_for_user(user_name)
+        team_launcher.os.geteuid = lambda: 0  # type: ignore[method-assign]
+        team_launcher.current_user_name = lambda: "root"
+        with tempfile.TemporaryDirectory(prefix="pgu-launcher-upgrade-session.") as tmp:
+            provision_dir = Path(tmp) / ".switchyard" / "provision"
+            provision_dir.mkdir(parents=True)
+            layout_path = provision_dir / "otto-konsole-layout.json"
+            layout_path.write_text(
+                json.dumps(team_launcher._new_project_layout_payload(6), indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            config_path = _write_launcher_config(provision_dir)
+            raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+            raw_config["run_as_user"] = "otto-agent"
+            raw_config["session_dir"] = "/run/user/1005/otto-ticket-board/pane-sessions"
+            config_path.write_text(json.dumps(raw_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            config = load_project_config("otto", config_path)
+            runner = FakeRunner()
+
+            result = team_launcher.upgrade_generated_project_layout(config, config_path=config_path, runner=runner)
+            upgraded = json.loads(config_path.read_text(encoding="utf-8"))
+    finally:
+        team_launcher.uid_for_user = original_uid_for_user
+        team_launcher.os.geteuid = original_geteuid  # type: ignore[method-assign]
+        team_launcher.current_user_name = original_current_user_name
+
+    assert result.changed
+    assert "upgraded session dir" in result.message
+    assert upgraded["session_dir"] == "/home/otto-agent/.local/state/otto-ticket-board/pane-sessions"
+    assert team_launcher.chown_owner_file_args(config, config_path) in runner.calls
+
+
+def test_launch_auto_upgrades_generated_session_dir_before_starting_panes() -> None:
+    current_user = team_launcher.current_user_name()
+    original_uid_for_user = team_launcher.uid_for_user
+    try:
+        team_launcher.uid_for_user = lambda user_name: os.getuid() if user_name == current_user else original_uid_for_user(user_name)
+        with tempfile.TemporaryDirectory(prefix="pgu-launcher-upgrade-session.") as tmp:
+            provision_dir = Path(tmp) / ".switchyard" / "provision"
+            provision_dir.mkdir(parents=True)
+            layout_path = provision_dir / "otto-konsole-layout.json"
+            layout_path.write_text(
+                json.dumps(team_launcher._new_project_layout_payload(1), indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            config_path = _write_launcher_config(provision_dir, role_count=1)
+            raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+            raw_config["run_as_user"] = current_user
+            raw_config["session_dir"] = f"/run/user/{os.getuid()}/otto-ticket-board/pane-sessions"
+            config_path.write_text(json.dumps(raw_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            config = load_project_config("otto", config_path)
+            runner = FakeRunner()
+            stdout = StringIO()
+
+            with redirect_stdout(stdout):
+                assert (
+                    launch_project(
+                        config,
+                        config_path=config_path,
+                        mode="start",
+                        script_path=ROOT / "scripts" / "team-launcher",
+                        runner=runner,
+                        layout_output=Path(tmp) / "launch-layout.json",
+                        layout_mode=team_launcher.LAYOUT_MODE_VIEWER,
+                        no_launcher_self_deploy=True,
+                        allow_stale_launcher=True,
+                    )
+                    == 0
+                )
+            upgraded = json.loads(config_path.read_text(encoding="utf-8"))
+    finally:
+        team_launcher.uid_for_user = original_uid_for_user
+
+    expected_session_dir = f"/home/{current_user}/.local/state/otto-ticket-board/pane-sessions"
+    assert upgraded["session_dir"] == expected_session_dir
+    assert "upgraded session dir" in stdout.getvalue()
+    hook_install_calls = [
+        call
+        for call in runner.calls
+        if "ticket-board-install-pane-hooks" in " ".join(str(part) for part in call)
+    ]
+    assert hook_install_calls
+    assert hook_install_calls[0][:1] == ["env"]
+    assert f"TICKET_BOARD_PROJECT=otto" in hook_install_calls[0]
+    assert f"TICKET_BOARD_PANE_STATE_DIR=/run/user/{os.getuid()}/otto-ticket-board/pane-state" in hook_install_calls[0]
+    assert f"TICKET_BOARD_PANE_SESSION_DIR={expected_session_dir}" in hook_install_calls[0]
+    assert str(ROOT / "scripts" / "ticket-board-install-pane-hooks") in hook_install_calls[0]
+    assert "install" in hook_install_calls[0]
+    assert "--home" in hook_install_calls[0]
+    assert f"/home/{current_user}" in hook_install_calls[0]
+    tmux_new_calls = [call for call in runner.calls if call[:3] == ["tmux", "new-session", "-d"]]
+    assert tmux_new_calls
+    assert runner.calls.index(hook_install_calls[0]) < runner.calls.index(tmux_new_calls[0])
+    assert f"TICKET_BOARD_PANE_SESSION_DIR={expected_session_dir}" in tmux_new_calls[0][-1]
+    assert "TICKET_BOARD_PANE_SESSION_DIR=/run/" not in tmux_new_calls[0][-1]
+
+
+def test_launch_repairs_generated_project_owner_hooks_before_starting_panes() -> None:
+    class OwnerTmuxRunner(FakeRunner):
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if args[:3] == ["sudo", "-u", "otto-agent"]:
+                inner = args[4:] if len(args) > 3 and args[3] == "-H" else args[3:]
+                if inner[:1] == ["tmux"]:
+                    result = super().__call__(inner, **kwargs)
+                    if self.calls and self.calls[-1] == inner:
+                        self.calls.pop()
+                    return subprocess.CompletedProcess(
+                        args,
+                        result.returncode,
+                        stdout=getattr(result, "stdout", None),
+                        stderr=getattr(result, "stderr", None),
+                    )
+                return subprocess.CompletedProcess(args, 0)
+            if args[:2] == ["tmux", "has-session"]:
+                return subprocess.CompletedProcess(args, 1)
+            return super().__call__(args, **kwargs)
+
+    original_uid_for_user = team_launcher.uid_for_user
+    original_current_user_name = team_launcher.current_user_name
+    original_seed_initial_pane_idle_state = team_launcher.seed_initial_pane_idle_state
+    try:
+        team_launcher.uid_for_user = lambda user_name: 1005 if user_name == "otto-agent" else original_uid_for_user(user_name)
+        team_launcher.current_user_name = lambda: "root"
+        team_launcher.seed_initial_pane_idle_state = lambda *_args, **_kwargs: None
+        with tempfile.TemporaryDirectory(prefix="pgu-launcher-hooks-repair.") as tmp:
+            tmp_path = Path(tmp)
+            provision_dir = tmp_path / "home" / "otto-agent" / "Projects" / "otto" / ".switchyard" / "provision"
+            provision_dir.mkdir(parents=True)
+            layout_path = provision_dir / "otto-konsole-layout.json"
+            layout_path.write_text(
+                json.dumps(team_launcher._new_project_layout_payload(1), indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            pane_launcher = Path("/home/otto-agent/otto-ticketboard-live/current/scripts/team-launcher")
+            config_path = _write_launcher_config(provision_dir, role_count=1)
+            raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+            raw_config["run_as_user"] = "otto-agent"
+            raw_config["pane_launcher"] = str(pane_launcher)
+            raw_config["session_dir"] = str(tmp_path / "durable-sessions")
+            config_path.write_text(json.dumps(raw_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            config = load_project_config("otto", config_path)
+            runner = OwnerTmuxRunner()
+            pane_state_dir = tmp_path / "pane-state"
+            session_dir = raw_config["session_dir"]
+
+            assert (
+                launch_project(
+                    config,
+                    config_path=config_path,
+                    mode="start",
+                    script_path=ROOT / "scripts" / "team-launcher",
+                    runner=runner,
+                    layout_output=tmp_path / "launch-layout.json",
+                    pane_state_dir=pane_state_dir,
+                    layout_mode=team_launcher.LAYOUT_MODE_VIEWER,
+                    no_launcher_self_deploy=True,
+                    allow_stale_launcher=True,
+                )
+                == 0
+            )
+    finally:
+        team_launcher.uid_for_user = original_uid_for_user
+        team_launcher.current_user_name = original_current_user_name
+        team_launcher.seed_initial_pane_idle_state = original_seed_initial_pane_idle_state
+
+    hook_install_call = next(
+        call for call in runner.calls if "ticket-board-install-pane-hooks" in " ".join(str(part) for part in call)
+    )
+    tmux_new_call = next(call for call in runner.calls if call[:3] == ["sudo", "-u", "otto-agent"] and call[4:7] == ["tmux", "new-session", "-d"])
+    assert hook_install_call == [
+        "sudo",
+        "-u",
+        "otto-agent",
+        "-H",
+        "env",
+        "XDG_RUNTIME_DIR=/run/user/1005",
+        "TICKET_BOARD_PROJECT=otto",
+        f"TICKET_BOARD_PANE_STATE_DIR={pane_state_dir}",
+        f"TICKET_BOARD_PANE_SESSION_DIR={session_dir}",
+        "/home/otto-agent/otto-ticketboard-live/current/scripts/ticket-board-install-pane-hooks",
+        "install",
+        "--home",
+        "/home/otto-agent",
+        "--hook-source",
+        "/home/otto-agent/otto-ticketboard-live/current/scripts/ticket-board-pane-idle-hook",
+        "--bin-path",
+        "/home/otto-agent/.local/bin/ticket-board-pane-idle-hook",
+    ]
+    assert runner.calls.index(hook_install_call) < runner.calls.index(tmux_new_call)
+
+
+def test_generated_project_hook_install_args_match_otto_one_time_repair_command() -> None:
+    original_uid_for_user = team_launcher.uid_for_user
+    original_current_user_name = team_launcher.current_user_name
+    try:
+        team_launcher.uid_for_user = lambda user_name: 1005 if user_name == "otto-agent" else original_uid_for_user(user_name)
+        team_launcher.current_user_name = lambda: "root"
+        with tempfile.TemporaryDirectory(prefix="pgu-launcher-hook-args.") as tmp:
+            provision_dir = Path(tmp) / ".switchyard" / "provision"
+            provision_dir.mkdir(parents=True)
+            layout_path = provision_dir / "otto-konsole-layout.json"
+            layout_path.write_text(
+                json.dumps(team_launcher._new_project_layout_payload(1), indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            config_path = _write_launcher_config(provision_dir, role_count=1)
+            raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+            raw_config["run_as_user"] = "otto-agent"
+            raw_config["pane_launcher"] = "/home/otto-agent/otto-ticketboard-live/current/scripts/team-launcher"
+            raw_config["session_dir"] = "/home/otto-agent/.local/state/otto-ticket-board/pane-sessions"
+            config_path.write_text(json.dumps(raw_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            config = load_project_config("otto", config_path)
+
+            args = team_launcher.install_generated_project_pane_hooks_args(
+                config,
+                script_path=ROOT / "scripts" / "team-launcher",
+                pane_state_dir=Path("/run/user/1005/otto-ticket-board/pane-state"),
+            )
+    finally:
+        team_launcher.uid_for_user = original_uid_for_user
+        team_launcher.current_user_name = original_current_user_name
+
+    assert args == [
+        "sudo",
+        "-u",
+        "otto-agent",
+        "-H",
+        "env",
+        "XDG_RUNTIME_DIR=/run/user/1005",
+        "TICKET_BOARD_PROJECT=otto",
+        "TICKET_BOARD_PANE_STATE_DIR=/run/user/1005/otto-ticket-board/pane-state",
+        "TICKET_BOARD_PANE_SESSION_DIR=/home/otto-agent/.local/state/otto-ticket-board/pane-sessions",
+        "/home/otto-agent/otto-ticketboard-live/current/scripts/ticket-board-install-pane-hooks",
+        "install",
+        "--home",
+        "/home/otto-agent",
+        "--hook-source",
+        "/home/otto-agent/otto-ticketboard-live/current/scripts/ticket-board-pane-idle-hook",
+        "--bin-path",
+        "/home/otto-agent/.local/bin/ticket-board-pane-idle-hook",
+    ]
 
 
 def test_upgrade_leaves_hand_maintained_pgu_layout_unchanged() -> None:
@@ -2500,7 +2749,7 @@ def test_launch_project_default_pane_state_dir_uses_run_as_user_runtime_when_lau
             team_launcher.runtime_dir_for_uid = original_runtime_dir_for_uid
             team_launcher.current_user_name = original_current_user_name
 
-        expected_state = owner_runtime / "pgu-ticket-board" / "pane-state" / pane_state_file_name("porter-ops:0.0")
+        expected_state = owner_runtime / "porter-ticket-board" / "pane-state" / pane_state_file_name("porter-ops:0.0")
         assert expected_state.exists()
         assert not (root_pane_state / pane_state_file_name("porter-ops:0.0")).exists()
 
@@ -2603,7 +2852,7 @@ def test_root_created_owner_state_dirs_are_owned_by_run_as_user() -> None:
             team_launcher.current_user_name = original_current_user_name
 
         expected_session_dir = owner_home / ".local" / "state" / "pgu-ticket-board" / "pane-sessions"
-        expected_pane_state_dir = owner_runtime / "pgu-ticket-board" / "pane-state"
+        expected_pane_state_dir = owner_runtime / "porter-ticket-board" / "pane-state"
         expected_state = expected_pane_state_dir / pane_state_file_name("porter-ops:0.0")
         expected_session_install = [
             "install",
@@ -2914,7 +3163,7 @@ def test_modern_env_names_win_over_legacy_aliases_with_legacy_fallback() -> None
             "legacy": "PGU_TICKET_BOARD_PANE_STATE_DIR",
             "modern_value": "/tmp/modern-pane-state",
             "legacy_value": "/tmp/legacy-pane-state",
-            "resolve": lambda: str(team_launcher.default_pane_state_dir_for_user("owner")),
+            "resolve": lambda: str(team_launcher.default_pane_state_dir_for_user("owner", project="pgu")),
             "expected_modern": "/tmp/modern-pane-state",
             "expected_legacy": "/tmp/legacy-pane-state",
         },
@@ -4610,7 +4859,9 @@ def test_start_resumes_from_durable_session_dir_after_runtime_tmpfs_is_cleared()
 
     assert runner.calls[1][:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"]
     assert f"TICKET_BOARD_PANE_SESSION_DIR={durable}" in runner.calls[1][-1]
+    assert f"TICKET_BOARD_PANE_STATE_DIR={tmp_path / 'pane-state'}" in runner.calls[1][-1]
     assert f"PGU_TICKET_BOARD_PANE_SESSION_DIR={durable}" in runner.calls[1][-1]
+    assert f"PGU_TICKET_BOARD_PANE_STATE_DIR={tmp_path / 'pane-state'}" in runner.calls[1][-1]
     assert f"codex resume {session_id}" in runner.calls[1][-1]
 
 
@@ -6881,6 +7132,8 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
     assert config["repository"] != str(source_repo)
     assert config["control_repository"] == f"/home/{current_user}/.local/state/switchyard/projects/porter/control.git"
     assert config["worktree_base"] == f"/home/{current_user}/porter-worktrees"
+    assert config["session_dir"] == f"/home/{current_user}/.local/state/porter-ticket-board/pane-sessions"
+    assert not config["session_dir"].startswith("/run/")
     assert [role["role"] for role in config["roles"]] == ["designer", "director", "audit", "ops", "app", "main"]
     assert [role["tmux_session"] for role in config["roles"]] == [
         "porter-designer",
@@ -6920,6 +7173,7 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
     assert loaded_config.roles[5].target == "porter-main:0.0"
     assert loaded_config.control_repository == Path(config["control_repository"])
     assert loaded_config.worktree_base == Path(config["worktree_base"])
+    assert loaded_config.session_dir == Path(config["session_dir"])
     assert {role.role: role.workdir for role in loaded_config.roles} == {
         "designer": f"/home/{current_user}/porter-worktrees/designer",
         "director": f"/home/{current_user}/porter-worktrees/director",
@@ -6954,6 +7208,9 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
         f"/home/{current_user}/porter-worktrees/app",
         f"/home/{current_user}/porter-worktrees/main",
     ]
+    cli_env_entries = _env_entries(cli_command_for_role(loaded_config.roles[0], session_dir=loaded_config.session_dir))
+    assert f"TICKET_BOARD_PANE_SESSION_DIR={config['session_dir']}" in cli_env_entries
+    assert not any(entry.startswith("TICKET_BOARD_PANE_SESSION_DIR=/run/") for entry in cli_env_entries)
     assert launch_output_exists
 
 
@@ -7030,6 +7287,8 @@ def test_design_writes_artifact_that_new_from_consumes_for_missing_owner_user() 
     assert plan["ticket_prefix"] == "PORT"
     assert config["ticket_prefix"] == "PORT"
     assert config["repository"] == str(project_repo)
+    assert config["session_dir"] == f"/home/{missing_owner}/.local/state/porter-ticket-board/pane-sessions"
+    assert not config["session_dir"].startswith("/run/")
     assert config["worktree_remote"] == "upstream"
     assert config["worktree_branch"] == "trunk"
     assert config["control_repository"] == f"/home/{missing_owner}/.local/state/switchyard/projects/porter/control.git"
@@ -8063,6 +8322,67 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
         assert "Konsole Ctrl+Shift+E" in output
 
 
+def test_switchyard_new_reports_project_specific_pane_state_dir_without_override() -> None:
+    class NewProjectRunner(FakeRunner):
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if args[:2] == ["id", "-u"]:
+                return subprocess.CompletedProcess(args, 1)
+            if args[:1] == ["useradd"]:
+                return subprocess.CompletedProcess(args, 0)
+            if args[:1] == ["install"] and args[-1]:
+                target = Path(args[-1])
+                if str(target).startswith(tempfile.gettempdir()):
+                    target.mkdir(parents=True, exist_ok=True)
+                return subprocess.CompletedProcess(args, 0)
+            return super().__call__(args, **kwargs)
+
+    captured_pane_state_dirs: list[Path | None] = []
+    original_uid_for_user = team_launcher.uid_for_user
+    original_report_launch_session_records = team_launcher.report_launch_session_records
+    try:
+        team_launcher.uid_for_user = lambda user_name: 1005 if user_name == "otto-agent" else original_uid_for_user(user_name)
+
+        def fake_report_launch_session_records(
+            _config: team_launcher.ProjectConfig,
+            _roles: Sequence[team_launcher.RoleConfig] | None = None,
+            **kwargs: object,
+        ) -> list[team_launcher.LaunchSessionRecordStatus]:
+            captured_pane_state_dirs.append(kwargs.get("pane_state_dir"))  # type: ignore[arg-type]
+            return []
+
+        team_launcher.report_launch_session_records = fake_report_launch_session_records
+
+        with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new-pane-state.") as tmp:
+            tmp_path = Path(tmp)
+            source_repo = tmp_path / "source-repo"
+            source_repo.mkdir()
+            assert (
+                switchyard_new_command(
+                    slug="porter",
+                    agent_name="otto",
+                    project_name="Porter System",
+                    source_repo=source_repo,
+                    output_dir=tmp_path / "out",
+                    yes=True,
+                    home_base=tmp_path / "home",
+                    euid_getter=lambda: 0,
+                    runner=NewProjectRunner(),
+                    input_func=lambda _prompt: "",
+                    port_in_use=lambda _port: False,
+                    socket_exists=lambda _path: False,
+                    session_record_timeout=0,
+                    registry_dir=tmp_path / "registry",
+                )
+                == 0
+            )
+    finally:
+        team_launcher.uid_for_user = original_uid_for_user
+        team_launcher.report_launch_session_records = original_report_launch_session_records
+
+    assert captured_pane_state_dirs == [Path("/run/user/1005/porter-ticket-board/pane-state")]
+
+
 def test_switchyard_new_custom_project_path_sets_artifact_repository_and_pane_workdirs() -> None:
     class NewProjectRunner(FakeRunner):
         def __init__(self) -> None:
@@ -8378,6 +8698,8 @@ def test_new_project_from_handwritten_artifact_uses_same_provision_path() -> Non
     assert config["ticket_prefix"] == "ATL"
     assert config["worktree_branch"] == "mainline"
     assert config["worktree_base"] == f"/home/{current_user}/atlas-worktrees"
+    assert config["session_dir"] == f"/home/{current_user}/.local/state/atlas-ticket-board/pane-sessions"
+    assert not config["session_dir"].startswith("/run/")
     assert config["control_repository"] == f"/home/{current_user}/.local/state/switchyard/projects/atlas/control.git"
     assert "Environment=TICKET_BOARD_TICKET_PREFIX=ATL" in board_unit
     assert not any(call[:1] == ["sudo"] for call in runner.calls)

@@ -330,7 +330,7 @@ def default_session_dir_for_user(user_name: str) -> Path:
     return owner_home / ".local" / "state" / LIVE_PGU_STATE_DIR_NAME / "pane-sessions"
 
 
-def default_pane_state_dir_for_user(user_name: str) -> Path:
+def default_pane_state_dir_for_user(user_name: str, *, project: str) -> Path:
     explicit = _explicit_pane_state_dir_from_env()
     if explicit is not None:
         return explicit
@@ -340,7 +340,7 @@ def default_pane_state_dir_for_user(user_name: str) -> Path:
     uid = uid_for_user(user)
     if uid is None:
         return DEFAULT_PANE_STATE_DIR
-    return runtime_dir_for_uid(uid) / LIVE_PGU_STATE_DIR_NAME / "pane-state"
+    return runtime_dir_for_uid(uid) / f"{project}-ticket-board" / "pane-state"
 
 
 def loginctl_enable_linger_args(user_name: str) -> list[str]:
@@ -1648,7 +1648,13 @@ def _resume_preflight_allows_attempt(role: RoleConfig, session_id: str) -> tuple
     )
 
 
-def cli_command_for_role(role: RoleConfig, *, session_dir: Path, resume: bool = False) -> list[str]:
+def cli_command_for_role(
+    role: RoleConfig,
+    *,
+    session_dir: Path,
+    pane_state_dir: Path | None = None,
+    resume: bool = False,
+) -> list[str]:
     session_id = session_id_for_role(role, session_dir) if resume else ""
     command = [*role.cli, *_resume_args_for_role(role, session_id)]
     if role.model:
@@ -1661,19 +1667,31 @@ def cli_command_for_role(role: RoleConfig, *, session_dir: Path, resume: bool = 
         "TICKET_BOARD_PANE_TARGET": role.target,
         "TICKET_BOARD_PANE_SESSION_DIR": str(session_dir.expanduser()),
     }
+    if pane_state_dir is not None:
+        env["TICKET_BOARD_PANE_STATE_DIR"] = str(pane_state_dir.expanduser())
     if session_id:
         env["TICKET_BOARD_PANE_SESSION_ID"] = session_id
     if role.target.startswith("pgu-"):
         env.setdefault("PGU_PANE_TARGET", role.target)
         env.setdefault("PGU_TICKET_BOARD_PANE_SESSION_DIR", str(session_dir.expanduser()))
+        if pane_state_dir is not None:
+            env.setdefault("PGU_TICKET_BOARD_PANE_STATE_DIR", str(pane_state_dir.expanduser()))
         if session_id:
             env.setdefault("PGU_PANE_SESSION_ID", session_id)
     env["PATH"] = _prepend_path(env.get("PATH") or os.environ.get("PATH", ""), default_user_bin())
     return ["env", *_env_prefix(env), *command]
 
 
-def tmux_new_session_args(role: RoleConfig, *, session_dir: Path, resume: bool = False) -> list[str]:
-    shell_command = _quote_command(cli_command_for_role(role, session_dir=session_dir, resume=resume))
+def tmux_new_session_args(
+    role: RoleConfig,
+    *,
+    session_dir: Path,
+    pane_state_dir: Path | None = None,
+    resume: bool = False,
+) -> list[str]:
+    shell_command = _quote_command(
+        cli_command_for_role(role, session_dir=session_dir, pane_state_dir=pane_state_dir, resume=resume)
+    )
     return ["tmux", "new-session", "-d", "-s", role.tmux_session, "-c", role.workdir, shell_command]
 
 
@@ -3070,7 +3088,9 @@ def _start_role_session(
             prefer_resume = False
     if not prefer_resume:
         clear_session_record_for_role(role, session_dir)
-    start_proc = runner(tmux_new_session_args(role, session_dir=session_dir, resume=prefer_resume))
+    start_proc = runner(
+        tmux_new_session_args(role, session_dir=session_dir, pane_state_dir=pane_state_dir, resume=prefer_resume)
+    )
     if start_proc.returncode != 0:
         return int(start_proc.returncode)
     if not prefer_resume:
@@ -3106,7 +3126,7 @@ def _start_role_session(
         if kill_proc.returncode != 0:
             return int(kill_proc.returncode)
     clear_session_record_for_role(role, session_dir)
-    fresh_proc = runner(tmux_new_session_args(role, session_dir=session_dir, resume=False))
+    fresh_proc = runner(tmux_new_session_args(role, session_dir=session_dir, pane_state_dir=pane_state_dir, resume=False))
     if fresh_proc.returncode != 0:
         return int(fresh_proc.returncode)
     if post_start_verifier is not None and not post_start_verifier():
@@ -3424,6 +3444,26 @@ def chown_layout_output_args(config: ProjectConfig, output_path: Path) -> list[s
     return ["chown", "-R", f"{config.run_as_user}:{config.run_as_user}", str(output_path.parent)]
 
 
+def chown_owner_file_args(config: ProjectConfig, path: Path) -> list[str]:
+    if not config.run_as_user:
+        raise ValueError("file ownership repair requires run_as_user")
+    return ["chown", f"{config.run_as_user}:{config.run_as_user}", str(path)]
+
+
+def ensure_owner_file(
+    config: ProjectConfig,
+    path: Path,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> None:
+    if not config.run_as_user or current_user_name() == config.run_as_user or os.geteuid() != 0:
+        return
+    result = runner(chown_owner_file_args(config, path))
+    if result.returncode != 0:
+        reason = _proc_failure_reason(result, f"chown failed with exit {result.returncode}")
+        raise SystemExit(f"team-launcher: failed to assign generated file {path} to {config.run_as_user}: {reason}")
+
+
 def ensure_layout_output_owner(
     config: ProjectConfig,
     output_path: Path,
@@ -3487,6 +3527,63 @@ def ensure_owner_state_dirs(
         if result.returncode != 0:
             reason = _proc_failure_reason(result, f"install failed with exit {result.returncode}")
             raise SystemExit(f"team-launcher: failed to assign state directory {path} to {config.run_as_user}: {reason}")
+
+
+def install_generated_project_pane_hooks_args(
+    config: ProjectConfig,
+    *,
+    script_path: Path,
+    pane_state_dir: Path,
+) -> list[str]:
+    if not config.run_as_user:
+        raise ValueError("pane hook repair requires run_as_user")
+    owner_home = home_dir_for_user(config.run_as_user) or Path("/home") / config.run_as_user
+    launcher_path = (config.pane_launcher or script_path).expanduser().resolve(strict=False)
+    hook_installer = launcher_path.with_name("ticket-board-install-pane-hooks")
+    hook_source = launcher_path.with_name("ticket-board-pane-idle-hook")
+    hook_bin = owner_home / ".local" / "bin" / "ticket-board-pane-idle-hook"
+    uid = uid_for_user(config.run_as_user)
+    if uid is None:
+        raise SystemExit(f"team-launcher: cannot install pane hooks for unknown user {config.run_as_user!r}")
+    env_args = [
+        "env",
+        f"XDG_RUNTIME_DIR={runtime_dir_for_uid(uid)}",
+        f"TICKET_BOARD_PROJECT={config.project}",
+        f"TICKET_BOARD_PANE_STATE_DIR={pane_state_dir}",
+        f"TICKET_BOARD_PANE_SESSION_DIR={config.session_dir}",
+        str(hook_installer),
+        "install",
+        "--home",
+        str(owner_home),
+        "--hook-source",
+        str(hook_source),
+        "--bin-path",
+        str(hook_bin),
+    ]
+    if current_user_name() == config.run_as_user:
+        return env_args
+    return ["sudo", "-u", config.run_as_user, "-H", *env_args]
+
+
+def ensure_generated_project_pane_hooks(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    script_path: Path,
+    pane_state_dir: Path,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> None:
+    if not config.run_as_user or not _is_generated_project_layout_template(config, config_path=config_path):
+        return
+    args = install_generated_project_pane_hooks_args(
+        config,
+        script_path=script_path,
+        pane_state_dir=pane_state_dir,
+    )
+    result = runner(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if result.returncode != 0:
+        reason = _proc_failure_reason(result, f"installer failed with exit {result.returncode}")
+        raise SystemExit(f"team-launcher: failed to install pane hooks for {config.project}: {reason}")
 
 
 def _legacy_new_project_stacked_layout_payload(role_count: int) -> dict[str, Any]:
@@ -3554,17 +3651,39 @@ def _is_generated_project_layout_template(config: ProjectConfig, *, config_path:
     )
 
 
-def upgrade_generated_project_layout(
+def _generated_project_durable_session_dir(config: ProjectConfig) -> Path | None:
+    if not config.run_as_user:
+        return None
+    return Path(_new_project_session_dir(config.project, config.run_as_user))
+
+
+def upgrade_generated_project_config(
     config: ProjectConfig,
     *,
     config_path: Path,
     dry_run: bool = False,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> LauncherUpgradeResult:
     if not _is_generated_project_layout_template(config, config_path=config_path):
         return LauncherUpgradeResult(
             changed=False,
             message=f"switchyard: {config.project} layout is hand-maintained or outside a provision directory; leaving it unchanged",
-        )
+    )
+    changed_messages: list[str] = []
+    durable_session_dir = _generated_project_durable_session_dir(config)
+    session_dir_upgrade: Path | None = None
+    if (
+        durable_session_dir is not None
+        and session_dir_uses_user_runtime(config.session_dir, config.run_as_user)
+        and config.session_dir.expanduser().resolve(strict=False) != durable_session_dir.expanduser().resolve(strict=False)
+    ):
+        if dry_run:
+            changed_messages.append(
+                f"session dir can be upgraded from {config.session_dir} to {durable_session_dir}"
+            )
+        else:
+            session_dir_upgrade = durable_session_dir
+            changed_messages.append(f"upgraded session dir to {durable_session_dir}")
     role_count = sum(1 for role in config.roles if not role.detached)
     current_layout = _new_project_layout_payload(role_count)
     legacy_layouts = (
@@ -3583,26 +3702,44 @@ def upgrade_generated_project_layout(
             changed=False,
             message=f"switchyard: generated layout template {config.layout} is not valid JSON: {exc}",
         )
-    if existing_layout == current_layout:
+    if existing_layout != current_layout:
+        if existing_layout not in legacy_layouts:
+            if not changed_messages:
+                return LauncherUpgradeResult(
+                    changed=False,
+                    message=f"switchyard: {config.project} layout template differs from the known generated legacy shapes; leaving it unchanged",
+                )
+            changed_messages.append("layout template differs from the known generated legacy shapes; leaving it unchanged")
+        elif dry_run:
+            changed_messages.append(f"layout template can be upgraded: {config.layout}")
+        else:
+            config.layout.write_text(json.dumps(current_layout, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            ensure_owner_file(config, config.layout, runner=runner)
+            changed_messages.append(f"upgraded generated layout template: {config.layout}")
+    elif not changed_messages:
         return LauncherUpgradeResult(
             changed=False,
             message=f"switchyard: {config.project} layout template is already current",
         )
-    if existing_layout not in legacy_layouts:
-        return LauncherUpgradeResult(
-            changed=False,
-            message=f"switchyard: {config.project} layout template differs from the known generated legacy shapes; leaving it unchanged",
-        )
-    if dry_run:
-        return LauncherUpgradeResult(
-            changed=False,
-            message=f"switchyard: {config.project} layout template can be upgraded: {config.layout}",
-        )
-    config.layout.write_text(json.dumps(current_layout, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if session_dir_upgrade is not None:
+        raw_config = _load_json(config_path)
+        raw_config["session_dir"] = str(session_dir_upgrade)
+        _write_json_atomic(config_path, raw_config)
+        ensure_owner_file(config, config_path, runner=runner)
     return LauncherUpgradeResult(
-        changed=True,
-        message=f"switchyard: upgraded generated layout template for {config.project}: {config.layout}",
+        changed=not dry_run,
+        message=f"switchyard: upgraded generated project config for {config.project}: {'; '.join(changed_messages)}",
     )
+
+
+def upgrade_generated_project_layout(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    dry_run: bool = False,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> LauncherUpgradeResult:
+    return upgrade_generated_project_config(config, config_path=config_path, dry_run=dry_run, runner=runner)
 
 
 def sync_reload_config_to_live_sessions(
@@ -3690,14 +3827,15 @@ def launch_project(
                 owned_roots=_control_repository_owned_roots(config),
                 runner=runner,
             )
-    effective_pane_state_dir = pane_state_dir or default_pane_state_dir_for_user(config.run_as_user)
+    effective_pane_state_dir = pane_state_dir or default_pane_state_dir_for_user(config.run_as_user, project=config.project)
     output_path = layout_output or default_layout_output_path(config, config_path=config_path)
     should_assign_layout_owner = layout_output is None if assign_layout_owner is None else assign_layout_owner
     pane_script_path = config.pane_launcher or script_path
     if not dry_run:
-        upgrade_result = upgrade_generated_project_layout(config, config_path=config_path)
+        upgrade_result = upgrade_generated_project_layout(config, config_path=config_path, runner=runner)
         if upgrade_result.changed:
             print_func(upgrade_result.message)
+            config = load_project_config(config.project, config_path)
     if not dry_run:
         pane_script_path = _verify_pane_launcher_path(config, script_path=script_path, runner=worktree_runner)
     failed_roles: dict[str, str] = {}
@@ -3713,6 +3851,13 @@ def launch_project(
         )
         ensure_configured_runtime_user(config, runner=runner)
         ensure_owner_state_dirs(config, pane_state_dir=effective_pane_state_dir, runner=runner)
+        ensure_generated_project_pane_hooks(
+            config,
+            config_path=config_path,
+            script_path=pane_script_path,
+            pane_state_dir=effective_pane_state_dir,
+            runner=runner,
+        )
         seed_default_session_dir_from_legacy_sources(config.session_dir)
         if mode == "attach-or-start":
             failed_roles = ensure_project_worktrees(config, refresh=True, runner=worktree_runner).failed_roles
@@ -3999,10 +4144,8 @@ def _new_project_artifact_dir(project: str) -> Path:
 
 
 def _new_project_session_dir(project: str, owner_user: str) -> str:
-    uid = uid_for_user(owner_user)
-    if uid is None:
-        return f"/run/user/<uid>/{project}-ticket-board/pane-sessions"
-    return f"/run/user/{uid}/{project}-ticket-board/pane-sessions"
+    owner_home = home_dir_for_user(owner_user) or Path("/home") / owner_user
+    return str(owner_home / ".local" / "state" / f"{project}-ticket-board" / "pane-sessions")
 
 
 def _new_project_control_repository(project: str, owner_user: str) -> Path:
@@ -5578,7 +5721,7 @@ def switchyard_new_command(
         timeout_seconds=session_record_timeout,
         poll_seconds=session_record_poll,
         fallback_changed_since_ns=launch_started_ns,
-        pane_state_dir=pane_state_dir or default_pane_state_dir_for_user(config.run_as_user),
+        pane_state_dir=pane_state_dir or default_pane_state_dir_for_user(config.run_as_user, project=config.project),
         pane_state_updated_since=launch_started_at,
         print_func=print_func,
     )
@@ -5842,7 +5985,7 @@ def main(argv: list[str] | None = None) -> int:
         ensure_configured_runtime_user(config)
         seed_default_session_dir_from_legacy_sources(config.session_dir)
         role = _role_by_name(config, args.role)
-        pane_state_dir = args.pane_state_dir or DEFAULT_PANE_STATE_DIR
+        pane_state_dir = args.pane_state_dir or default_pane_state_dir_for_user(config.run_as_user, project=config.project)
         if role.detached:
             return run_detached_role(
                 role,

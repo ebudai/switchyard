@@ -2736,19 +2736,36 @@ def live_command_matches_role(
     return actual in expected
 
 
+RESUME_LAUNCH_VERIFIED = "verified"
+RESUME_LAUNCH_MISSING = "missing"
+RESUME_LAUNCH_TIMEOUT = "timeout"
+
+
+def _resume_launch_status(
+    role: RoleConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> str:
+    deadline = time.monotonic() + RESUME_STARTUP_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if live_command_matches_role(role, runner=runner):
+            return RESUME_LAUNCH_VERIFIED
+        if runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+            return RESUME_LAUNCH_MISSING
+        time.sleep(RESUME_STARTUP_POLL_SECONDS)
+    if live_command_matches_role(role, runner=runner):
+        return RESUME_LAUNCH_VERIFIED
+    if runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+        return RESUME_LAUNCH_MISSING
+    return RESUME_LAUNCH_TIMEOUT
+
+
 def _resume_launch_verified(
     role: RoleConfig,
     *,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> bool:
-    deadline = time.monotonic() + RESUME_STARTUP_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        if live_command_matches_role(role, runner=runner):
-            return True
-        if runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
-            return False
-        time.sleep(RESUME_STARTUP_POLL_SECONDS)
-    return live_command_matches_role(role, runner=runner)
+    return _resume_launch_status(role, runner=runner) == RESUME_LAUNCH_VERIFIED
 
 
 def _detached_launch_verified(
@@ -2808,9 +2825,16 @@ def _start_role_session(
             return 1
         seed_initial_pane_idle_state(role, pane_state_dir=pane_state_dir, source=seed_source)
         return 0
-    resume_verified = _resume_launch_verified(role, runner=runner)
-    if resume_verified and (post_start_verifier is None or post_start_verifier()):
+    resume_status = _resume_launch_status(role, runner=runner)
+    if resume_status == RESUME_LAUNCH_VERIFIED and (post_start_verifier is None or post_start_verifier()):
         seed_initial_pane_idle_state(role, pane_state_dir=pane_state_dir, source=seed_source)
+        return 0
+    if resume_status == RESUME_LAUNCH_TIMEOUT:
+        print(
+            f"team-launcher: resume for {role.role} using session {session_id} was not verified within "
+            f"{RESUME_STARTUP_TIMEOUT_SECONDS:g}s; leaving tmux session and session record intact",
+            file=sys.stderr,
+        )
         return 0
     print(
         f"team-launcher: resume failed for {role.role} using session {session_id}; falling back to fresh session",

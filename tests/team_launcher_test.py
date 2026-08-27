@@ -5804,7 +5804,7 @@ def test_reload_without_recorded_resume_id_logs_fresh_start() -> None:
     assert "--resume" not in runner.calls[4][-1]
 
 
-def test_reload_logs_resume_fallback_when_cli_never_starts() -> None:
+def test_reload_preserves_session_record_when_resume_cli_is_slow_to_exec() -> None:
     config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
     role = next(role for role in config.roles if role.role == "ops")
     stderr = StringIO()
@@ -5840,18 +5840,22 @@ def test_reload_logs_resume_fallback_when_cli_never_starts() -> None:
                     )
                     == 0
                 )
-                state = _read_pane_state(pane_state_dir, role.target)
-                assert state["state"] == "idle"
-                assert state["source"] == "team_launcher.reload.fallback"
-                assert not (session_dir / session_file_name(role.target)).exists()
-                assert json.loads(sidecar_path.read_text(encoding="utf-8"))["session_id"] == session_id
+                assert not (pane_state_dir / pane_state_file_name(role.target)).exists()
+                assert json.loads((session_dir / session_file_name(role.target)).read_text(encoding="utf-8"))[
+                    "session_id"
+                ] == session_id
+                assert not sidecar_path.exists()
 
-        assert f"team-launcher: resume failed for ops using session {session_id}; falling back to fresh session" in stderr.getvalue()
-        assert "team-launcher: started fresh session for ops after resume fallback" in stderr.getvalue()
+        assert (
+            f"team-launcher: resume for ops using session {session_id} was not verified within 0.02s; "
+            "leaving tmux session and session record intact"
+        ) in stderr.getvalue()
+        assert "falling back to fresh session" not in stderr.getvalue()
         new_sessions = [call for call in runner.calls if call[:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"]]
-        assert len(new_sessions) == 2
+        kill_sessions = [call for call in runner.calls if call[:2] == ["tmux", "kill-session"]]
+        assert len(new_sessions) == 1
+        assert len(kill_sessions) == 1
         assert f"codex resume {session_id}" in new_sessions[0][-1]
-        assert " resume " not in f" {new_sessions[1][-1]} "
     finally:
         team_launcher.RESUME_STARTUP_TIMEOUT_SECONDS = original_timeout
         team_launcher.RESUME_STARTUP_POLL_SECONDS = original_poll

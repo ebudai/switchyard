@@ -1057,6 +1057,111 @@ def test_launch_session_record_report_names_recent_unverified_resume_timeout() -
     assert any("did not mark pane idle" in message for message in messages)
 
 
+def test_launch_session_record_report_ignores_stale_unverified_resume_timeout() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-launch-session-stale-timeout.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        session_dir = tmp_path / "sessions"
+        session_dir.mkdir()
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "session_dir": str(session_dir),
+                    "roles": [
+                        {"role": "app", "slot": 0, "cli": ["codex"], "target": "porter-app:0.0"},
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+        role = config.roles[0]
+        (session_dir / session_file_name(role.target)).write_text(
+            json.dumps({"target": role.target, "session_id": "healthy-session"}) + "\n",
+            encoding="utf-8",
+        )
+        team_launcher.record_unverified_resume_for_role(role, session_dir, "old-timeout-session")
+        marker = session_dir / f"{session_file_name(role.target)}.resume_timeout"
+        time.sleep(0.12)
+        fallback_since_ns = time.time_ns()
+        while fallback_since_ns <= marker.stat().st_ctime_ns:
+            fallback_since_ns = time.time_ns()
+        messages: list[str] = []
+
+        statuses = team_launcher.report_launch_session_records(
+            config,
+            timeout_seconds=0,
+            fallback_changed_since_ns=fallback_since_ns,
+            print_func=messages.append,
+        )
+
+    assert statuses[0].session_id == "healthy-session"
+    assert statuses[0].unverified_resume_session_id == ""
+    assert not any("was not verified before startup timeout" in message for message in messages)
+
+
+def test_launch_session_record_statuses_treat_unverified_resume_as_reported_outcome() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-launch-session-timeout-reported.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        session_dir = tmp_path / "sessions"
+        session_dir.mkdir()
+        pane_state_dir = tmp_path / "pane-state"
+        pane_state_dir.mkdir()
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "session_dir": str(session_dir),
+                    "roles": [
+                        {"role": "app", "slot": 0, "cli": ["codex"], "target": "porter-app:0.0"},
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+        role = config.roles[0]
+        fallback_since_ns = time.time_ns()
+        pane_state_since = time.time()
+        (session_dir / session_file_name(role.target)).write_text(
+            json.dumps({"target": role.target, "session_id": "kept-session"}) + "\n",
+            encoding="utf-8",
+        )
+        team_launcher.record_unverified_resume_for_role(role, session_dir, "kept-session")
+        started = time.monotonic()
+
+        statuses = team_launcher.launch_session_record_statuses(
+            config,
+            timeout_seconds=0.5,
+            poll_seconds=0.01,
+            fallback_changed_since_ns=fallback_since_ns,
+            pane_state_dir=pane_state_dir,
+            pane_state_updated_since=pane_state_since,
+        )
+        elapsed = time.monotonic() - started
+
+    assert statuses[0].pane_launch_reported
+    assert statuses[0].pane_state_source == ""
+    assert statuses[0].unverified_resume_session_id == "kept-session"
+    assert elapsed < 0.1
+
+
 def test_launch_session_record_report_ignores_stale_resume_fallback_sidecars() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-launch-session-stale-fallback.") as tmp:
         tmp_path = Path(tmp)
@@ -5798,6 +5903,34 @@ def test_reload_uses_recorded_resume_uuid_when_recreating_session() -> None:
         assert runner.calls[5] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_pid}"]
         assert runner.calls[6] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_current_command}"]
         assert runner.calls[7] == ["tmux", "attach", "-t", "pgu-ops"]
+
+
+def test_reload_clears_unverified_resume_marker_after_verified_resume() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    role = next(role for role in config.roles if role.role == "ops")
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        session_dir = Path(tmp)
+        session_id = "12345678-1234-5678-9abc-def012345678"
+        (session_dir / session_file_name(role.target)).write_text(
+            json.dumps({"target": role.target, "session_id": session_id}) + "\n",
+            encoding="utf-8",
+        )
+        timeout_path = session_dir / f"{session_file_name(role.target)}.resume_timeout"
+        team_launcher.record_unverified_resume_for_role(role, session_dir, session_id)
+        assert timeout_path.exists()
+        runner = FakeRunner(existing_sessions={"pgu-ops"}, current_commands={"pgu-ops:0.0": "codex"})
+
+        assert (
+            run_role_pane(
+                role,
+                mode="reload",
+                session_dir=session_dir,
+                pane_state_dir=Path(tmp) / "pane-state",
+                runner=runner,
+            )
+            == 0
+        )
+        assert not timeout_path.exists()
 
 
 def test_resume_commands_use_cli_specific_shapes_and_front_position() -> None:

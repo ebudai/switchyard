@@ -4914,8 +4914,11 @@ def _claude_workdir_is_trusted(owner_home: Path, workdir: Path) -> bool:
     projects = config.get("projects")
     if not isinstance(projects, dict):
         return False
-    entry = projects.get(str(workdir.expanduser().resolve(strict=False)))
-    return isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is True
+    for path in _trust_path_candidates(workdir):
+        entry = projects.get(path)
+        if isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is True:
+            return True
+    return False
 
 
 def _agy_workdir_is_trusted(owner_home: Path, workdir: Path) -> bool:
@@ -4923,8 +4926,14 @@ def _agy_workdir_is_trusted(owner_home: Path, workdir: Path) -> bool:
     trusted = settings.get("trustedWorkspaces")
     if not isinstance(trusted, list):
         return False
-    normalized = str(workdir.expanduser().resolve(strict=False))
-    return any(str(path) == normalized for path in trusted)
+    candidates = set(_trust_path_candidates(workdir))
+    return any(str(path) in candidates for path in trusted)
+
+
+def _trust_path_candidates(workdir: Path) -> list[str]:
+    expanded = workdir.expanduser()
+    candidates = [str(expanded), str(expanded.resolve(strict=False))]
+    return list(dict.fromkeys(candidates))
 
 
 def _workdir_is_trusted(cli: str, *, owner_home: Path, workdir: Path) -> bool:
@@ -4936,7 +4945,7 @@ def _workdir_is_trusted(cli: str, *, owner_home: Path, workdir: Path) -> bool:
 
 
 def _first_run_trust_command(role: RoleConfig) -> list[str]:
-    return [*role.cli, *yolo_args_for_role(role)]
+    return list(role.cli)
 
 
 def _prepare_first_run_auth_worktrees(
@@ -5005,8 +5014,8 @@ def run_first_run_auth_phase(
             continue
         command = _first_run_trust_command(role)
         print_func(
-            f"switchyard: first-run {cli} workspace trust required for "
-            f"{role.role} ({workdir}); accept the trust prompt, then exit the CLI"
+            f"switchyard: first-run folder trust required for {cli} role {role.role} "
+            f"at {workdir}; this is not account login. Accept the folder trust prompt, then exit the CLI"
         )
         _run_owner_cli_interactive(
             owner_user=effective_owner,

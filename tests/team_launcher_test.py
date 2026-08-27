@@ -8755,9 +8755,9 @@ def test_first_run_auth_phase_sequences_distinct_logins_then_worktree_trust() ->
         ["sudo", "-u", "otto-agent", "agy", "models"],
         ["sudo", "-u", "otto-agent", "agy"],
         ["sudo", "-u", "otto-agent", "agy", "models"],
-        ["sudo", "-u", "otto-agent", "claude", "--dangerously-skip-permissions"],
-        ["sudo", "-u", "otto-agent", "claude", "--dangerously-skip-permissions"],
-        ["sudo", "-u", "otto-agent", "agy", "--dangerously-skip-permissions"],
+        ["sudo", "-u", "otto-agent", "claude"],
+        ["sudo", "-u", "otto-agent", "claude"],
+        ["sudo", "-u", "otto-agent", "agy"],
     ]
     assert [kwargs.get("cwd") for kwargs in runner.call_kwargs[:9]] == [str(owner_home)] * 9
     assert [kwargs.get("cwd") for kwargs in runner.call_kwargs[9:]] == [
@@ -8772,7 +8772,121 @@ def test_first_run_auth_phase_sequences_distinct_logins_then_worktree_trust() ->
         "switchyard: first-run codex login required for ops, main; running codex login as otto-agent",
         "switchyard: first-run agy login required for inspector; running agy as otto-agent",
     ]
-    assert all("workspace trust required" in message for message in messages[3:])
+    assert all("folder trust required" in message and "not account login" in message for message in messages[3:])
+
+
+def test_first_run_trust_uses_bare_cli_and_persists_for_later_launches() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-first-run-trust-repeat.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        config = load_project_config(
+            "otto",
+            _write_first_run_auth_config(
+                tmp_path,
+                roles=[
+                    ("designer", "claude"),
+                    ("director", "claude"),
+                    ("audit", "claude"),
+                ],
+            ),
+        )
+
+        calls: list[list[str]] = []
+        call_kwargs: list[dict[str, object]] = []
+
+        def runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append(args)
+            call_kwargs.append(dict(kwargs))
+            command = args[3:] if args[:2] == ["sudo", "-u"] else args
+            if command == ["claude", "auth", "status", "--json"]:
+                return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"loggedIn": True}) + "\n")
+            if command == ["claude"]:
+                cwd = str(kwargs["cwd"])
+                claude_config = owner_home / ".claude.json"
+                try:
+                    payload = json.loads(claude_config.read_text(encoding="utf-8"))
+                except OSError:
+                    payload = {}
+                projects = payload.setdefault("projects", {})
+                projects[cwd] = {"hasTrustDialogAccepted": True}
+                claude_config.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+                return subprocess.CompletedProcess(args, 0)
+            return subprocess.CompletedProcess(args, 1, stderr="unexpected command\n")
+
+        first_messages: list[str] = []
+        first_report = team_launcher.run_first_run_auth_phase(
+            config,
+            owner_user="otto-agent",
+            owner_home=owner_home,
+            runner=runner,
+            print_func=first_messages.append,
+        )
+        calls_after_first = list(calls)
+        second_messages: list[str] = []
+        second_report = team_launcher.run_first_run_auth_phase(
+            config,
+            owner_user="otto-agent",
+            owner_home=owner_home,
+            runner=runner,
+            print_func=second_messages.append,
+        )
+
+    assert first_report == team_launcher.FirstRunAuthReport({}, [])
+    assert second_report == team_launcher.FirstRunAuthReport({}, [])
+    assert calls_after_first == [
+        ["sudo", "-u", "otto-agent", "claude", "auth", "status", "--json"],
+        ["sudo", "-u", "otto-agent", "claude"],
+        ["sudo", "-u", "otto-agent", "claude"],
+        ["sudo", "-u", "otto-agent", "claude"],
+    ]
+    assert calls == [
+        *calls_after_first,
+        ["sudo", "-u", "otto-agent", "claude", "auth", "status", "--json"],
+    ]
+    assert [kwargs.get("cwd") for kwargs in call_kwargs[1:4]] == [
+        str(tmp_path / "worktrees" / "designer"),
+        str(tmp_path / "worktrees" / "director"),
+        str(tmp_path / "worktrees" / "audit"),
+    ]
+    assert len(first_messages) == 3
+    assert all("folder trust required" in message and "not account login" in message for message in first_messages)
+    assert second_messages == []
+
+
+def test_first_run_trust_matches_configured_symlink_path_without_reprompting() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-first-run-trust-path.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        target = tmp_path / "real-worktree"
+        target.mkdir()
+        link = tmp_path / "linked-worktree"
+        link.symlink_to(target, target_is_directory=True)
+        config_path = _write_first_run_auth_config(tmp_path, roles=[("director", "claude")])
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
+        raw["roles"][0]["workdir"] = str(link)
+        config_path.write_text(json.dumps(raw) + "\n", encoding="utf-8")
+        config = load_project_config("otto", config_path)
+        owner_home.joinpath(".claude.json").write_text(
+            json.dumps({"projects": {str(link): {"hasTrustDialogAccepted": True}}}) + "\n",
+            encoding="utf-8",
+        )
+        runner = FirstRunAuthRunner()
+        runner.login_seen.add("claude")
+        messages: list[str] = []
+
+        report = team_launcher.run_first_run_auth_phase(
+            config,
+            owner_user="otto-agent",
+            owner_home=owner_home,
+            runner=runner,
+            print_func=messages.append,
+        )
+
+    assert report == team_launcher.FirstRunAuthReport({}, [])
+    assert messages == []
+    assert runner.calls == [["sudo", "-u", "otto-agent", "claude", "auth", "status", "--json"]]
 
 
 def test_first_run_auth_phase_declined_login_reports_affected_roles_without_aborting() -> None:

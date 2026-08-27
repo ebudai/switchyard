@@ -1,8 +1,8 @@
 # Switchyard Launcher
 
-`./switchyard` is the public project entrypoint. With no arguments it prints
-`new...` followed by configured projects. `./switchyard new` starts new-project
-setup, and `./switchyard My Project Name` joins all arguments, matches an
+`switchyard` is the public project entrypoint. With no arguments it prints
+`new...` followed by configured projects. `switchyard new` starts new-project
+setup, and `switchyard My Project Name` joins all arguments, matches an
 existing project case-insensitively by display name or slug, and runs today's
 idempotent start/resume behavior.
 
@@ -46,6 +46,26 @@ Set `PGU_TEAM_LAUNCHER_BIN_DIR` to override the default `$HOME/bin` PATH
 prefix, and set `PGU_TEAM_LAUNCHER_GUI_USER` or
 `PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY` when the Konsole display should be resolved
 from a different local desktop account or socket name.
+
+## Installing the Entry Point
+
+The shared checkout keeps the real `switchyard` implementation. Install only a
+system-path trampoline, so launcher self-deploys continue to update the command
+the next time it runs and Eric does not need traverse access to `/home/agent`.
+The privileged host step for Eric is:
+
+```bash
+sudo env SWITCHYARD_SOURCE_PATH=/home/agent/Projects/pgu/switchyard SWITCHYARD_INSTALL_PATH=/usr/local/bin/switchyard /home/agent/Projects/pgu/scripts/install-switchyard --apply
+command -v switchyard
+sudo env sh -c 'command -v switchyard'
+```
+
+`/usr/local/bin` is deliberately used because it is on the host's normal shell
+`PATH` and must also be present in sudo's `secure_path`; the installer refuses a
+system install path that sudo would not resolve. The installed wrapper lives
+outside `/home/agent`; when invoked without sudo, it re-execs the live checkout
+entrypoint through `sudo`, so traversal into the shared checkout happens only
+after privilege is acquired.
 
 Before any real `start`, `reload`, or direct `pane` launch, the launcher checks
 the checkout containing `scripts/team-launcher` against the configured
@@ -261,7 +281,7 @@ the visible launch window remains a six-pane operator layout.
 Run new-project setup through the zero-parameter surface:
 
 ```bash
-sudo ./switchyard new
+sudo switchyard new
 ```
 
 `new` prompts for project name first, then derived-but-editable slug, agent
@@ -294,7 +314,7 @@ transitions.
 The same provision path consumes generated and hand-written artifacts:
 
 ```bash
-sudo ./switchyard new --from /path/to/porter.project.json --yes
+sudo switchyard new --from /path/to/porter.project.json --yes
 ```
 
 The artifact's `repository` is the project checkout opened by the generated team

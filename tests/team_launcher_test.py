@@ -2552,15 +2552,18 @@ def test_root_created_owner_state_dirs_are_owned_by_run_as_user() -> None:
         class OwnershipRunner(FakeRunner):
             def __init__(self) -> None:
                 super().__init__()
-                self.installed_paths: list[Path] = []
+                self.installed_dirs: dict[Path, tuple[str, str, int]] = {}
 
             def __call__(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
                 if args[:2] == ["install", "-d"]:
                     self.calls.append(args)
+                    mode = int(args[args.index("-m") + 1], 8)
+                    owner = args[args.index("-o") + 1]
+                    group = args[args.index("-g") + 1]
                     target = Path(args[-1])
                     target.mkdir(parents=True, exist_ok=True)
-                    target.chmod(0o700)
-                    self.installed_paths.append(target)
+                    target.chmod(mode)
+                    self.installed_dirs[target] = (owner, group, mode)
                     return subprocess.CompletedProcess(args, 0)
                 if args[:3] == ["sudo", "-u", "porter-agent"]:
                     self.calls.append(args)
@@ -2602,15 +2605,129 @@ def test_root_created_owner_state_dirs_are_owned_by_run_as_user() -> None:
         expected_session_dir = owner_home / ".local" / "state" / "pgu-ticket-board" / "pane-sessions"
         expected_pane_state_dir = owner_runtime / "pgu-ticket-board" / "pane-state"
         expected_state = expected_pane_state_dir / pane_state_file_name("porter-ops:0.0")
+        expected_session_install = [
+            "install",
+            "-d",
+            "-m",
+            "700",
+            "-o",
+            "porter-agent",
+            "-g",
+            "porter-agent",
+            str(expected_session_dir),
+        ]
+        expected_pane_state_install = [
+            "install",
+            "-d",
+            "-m",
+            "700",
+            "-o",
+            "porter-agent",
+            "-g",
+            "porter-agent",
+            str(expected_pane_state_dir),
+        ]
         assert expected_session_dir.is_dir()
         assert expected_pane_state_dir.is_dir()
         assert expected_state.exists()
         assert not root_session_dir.exists()
         assert not root_pane_state.exists()
-        assert runner.installed_paths.count(expected_session_dir) == 2
-        assert runner.installed_paths.count(expected_pane_state_dir) == 2
-        assert team_launcher.install_owner_state_dir_args(config, expected_session_dir) in runner.calls
-        assert team_launcher.install_owner_state_dir_args(config, expected_pane_state_dir) in runner.calls
+        assert runner.calls.count(expected_session_install) == 2
+        assert runner.calls.count(expected_pane_state_install) == 2
+        assert runner.installed_dirs[expected_session_dir] == ("porter-agent", "porter-agent", 0o700)
+        assert runner.installed_dirs[expected_pane_state_dir] == ("porter-agent", "porter-agent", 0o700)
+
+
+def test_owner_state_dir_install_args_take_effect_on_real_filesystem_for_current_user() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-owner-state-real.") as tmp:
+        tmp_path = Path(tmp)
+        config_path = tmp_path / "porter.json"
+        layout_path = tmp_path / "layout.json"
+        repo_path = tmp_path / "repo"
+        repo_path.mkdir()
+        layout_path.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "run_as_user": current_user,
+                    "layout": str(layout_path),
+                    "repository": str(repo_path),
+                    "roles": [{"role": "ops", "slot": 0, "cli": ["codex"], "target": "porter-ops:0.0"}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+        target = tmp_path / "owner-home" / ".local" / "state" / "pgu-ticket-board" / "pane-sessions"
+
+        result = subprocess.run(team_launcher.install_owner_state_dir_args(config, target), text=True, capture_output=True)
+
+        assert result.returncode == 0, result.stderr
+        info = target.stat()
+        assert target.owner() == current_user
+        assert target.group() == current_user
+        assert info.st_mode & 0o777 == 0o700
+
+
+def test_owner_state_dir_install_is_skipped_when_already_running_as_owner() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-owner-state-same-user.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "owner-home"
+        owner_home.mkdir()
+        owner_runtime = tmp_path / "run" / "user" / "4242"
+        owner_runtime.mkdir(parents=True)
+        config_path = tmp_path / "porter.json"
+        layout_path = tmp_path / "layout.json"
+        repo_path = tmp_path / "repo"
+        session_dir = owner_home / ".local" / "state" / "pgu-ticket-board" / "pane-sessions"
+        pane_state_dir = owner_runtime / "pgu-ticket-board" / "pane-state"
+        repo_path.mkdir()
+        layout_path.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "run_as_user": "porter-agent",
+                    "layout": str(layout_path),
+                    "repository": str(repo_path),
+                    "session_dir": str(session_dir),
+                    "roles": [{"role": "ops", "slot": 0, "cli": ["codex"], "target": "porter-ops:0.0"}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        original_current_user_name = team_launcher.current_user_name
+        original_getpwnam = team_launcher.pwd.getpwnam
+        original_runtime_dir_for_uid = team_launcher.runtime_dir_for_uid
+
+        class OwnerPw:
+            pw_dir = str(owner_home)
+            pw_uid = 4242
+            pw_gid = 4242
+
+        def fake_getpwnam(user_name: str) -> Any:
+            if user_name == "porter-agent":
+                return OwnerPw()
+            return original_getpwnam(user_name)
+
+        try:
+            team_launcher.current_user_name = lambda: "porter-agent"
+            team_launcher.pwd.getpwnam = fake_getpwnam
+            team_launcher.runtime_dir_for_uid = lambda uid: owner_runtime if uid == 4242 else Path(f"/run/user/{uid}")
+            config = load_project_config("porter", config_path)
+            runner = FakeRunner()
+
+            team_launcher.ensure_owner_state_dirs(config, pane_state_dir=pane_state_dir, runner=runner)
+        finally:
+            team_launcher.current_user_name = original_current_user_name
+            team_launcher.pwd.getpwnam = original_getpwnam
+            team_launcher.runtime_dir_for_uid = original_runtime_dir_for_uid
+
+        assert not any(call[:2] == ["install", "-d"] for call in runner.calls)
 
 
 def test_explicit_pane_state_dir_env_beats_run_as_user_runtime_default() -> None:

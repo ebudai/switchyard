@@ -66,7 +66,7 @@ def test_wrapper_delegates_directly_without_sudo_when_run_as_user_unset() -> Non
     assert not hasattr(wrapper, "sudo_agent_command")
 
 
-def test_wrapper_delegates_directly_with_configured_run_as_user() -> None:
+def test_wrapper_delegates_directly_even_when_config_has_run_as_user() -> None:
     wrapper = load_wrapper()
     import scripts.team_launcher as team_launcher
 

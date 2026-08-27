@@ -928,27 +928,6 @@ def project_design_artifact_payload(artifact: ProjectDesignArtifact) -> dict[str
     }
 
 
-def _config_path_from_launcher_args(argv: Sequence[str]) -> Path | None:
-    if not argv:
-        return None
-    project = str(argv[0]).strip()
-    if not project or project.startswith("-"):
-        return None
-    command = str(argv[1]).strip() if len(argv) > 1 and not str(argv[1]).startswith("-") else "start"
-    if command in REMOVED_CONFIG_FREE_COMMANDS:
-        return None
-    for index, arg in enumerate(argv):
-        raw = str(arg)
-        if raw == "--config" and index + 1 < len(argv):
-            return Path(str(argv[index + 1]))
-        if raw.startswith("--config="):
-            return Path(raw.split("=", 1)[1])
-    try:
-        return _resolve_launcher_project_config(project).config_path
-    except SystemExit:
-        return DEFAULT_CONFIG_DIR / f"{project}.json"
-
-
 def _resolve_launcher_project_config(
     project: str,
     *,
@@ -974,17 +953,6 @@ def _resolve_launcher_project_config(
                 f"searched config dir {effective_config_dir} and registry dir {effective_registry_dir}"
             ) from exc
         raise
-
-
-def configured_run_as_user(argv: Sequence[str]) -> str:
-    path = _config_path_from_launcher_args(argv)
-    if path is None:
-        return ""
-    try:
-        config = _load_json(path)
-    except (OSError, json.JSONDecodeError):
-        return ""
-    return str(config.get("run_as_user") or "").strip()
 
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:

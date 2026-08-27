@@ -6661,6 +6661,167 @@ def test_detached_research_attach_checks_session_without_attaching() -> None:
     assert runner.calls == [["tmux", "has-session", "-t", "pgu-research"]]
 
 
+def test_stop_project_kills_only_configured_sessions_as_owner_and_is_idempotent() -> None:
+    class OwnerTmuxRunner:
+        def __init__(self, existing_sessions: set[str]) -> None:
+            self.existing_sessions = set(existing_sessions)
+            self.calls: list[list[str]] = []
+
+        def __call__(self, args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if args[:4] != ["sudo", "-u", "otto-agent", "-H"]:
+                return subprocess.CompletedProcess(args, 0)
+            inner = args[4:]
+            if inner[:2] == ["tmux", "has-session"]:
+                session = inner[-1]
+                return subprocess.CompletedProcess(args, 0 if session in self.existing_sessions else 1)
+            if inner[:2] == ["tmux", "kill-session"]:
+                session = inner[-1]
+                self.existing_sessions.discard(session)
+                return subprocess.CompletedProcess(args, 0)
+            return subprocess.CompletedProcess(args, 0)
+
+    original_current_user_name = team_launcher.current_user_name
+    try:
+        team_launcher.current_user_name = lambda: "root"
+        with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-stop.") as tmp:
+            tmp_path = Path(tmp)
+            layout = tmp_path / "layout.json"
+            layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+            for role_name in ("designer", "director", "audit", "ops", "app", "main"):
+                (tmp_path / "worktrees" / role_name).mkdir(parents=True)
+            config_path = tmp_path / "otto.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "project": "otto",
+                        "layout": str(layout),
+                        "run_as_user": "otto-agent",
+                        "roles": [
+                            {"role": "designer", "slot": 0, "tmux_session": "otto-designer", "target": "otto-designer:0.0", "cli": ["claude"], "workdir": str(tmp_path / "worktrees" / "designer")},
+                            {"role": "director", "slot": 1, "tmux_session": "otto-director", "target": "otto-director:0.0", "cli": ["claude"], "workdir": str(tmp_path / "worktrees" / "director")},
+                            {"role": "audit", "slot": 2, "tmux_session": "otto-audit", "target": "otto-audit:0.0", "cli": ["claude"], "workdir": str(tmp_path / "worktrees" / "audit")},
+                            {"role": "ops", "slot": 3, "tmux_session": "otto-ops", "target": "otto-ops:0.0", "cli": ["codex"], "workdir": str(tmp_path / "worktrees" / "ops")},
+                            {"role": "app", "slot": 4, "tmux_session": "otto-app", "target": "otto-app:0.0", "cli": ["codex"], "workdir": str(tmp_path / "worktrees" / "app")},
+                            {"role": "main", "slot": 5, "tmux_session": "otto-main", "target": "otto-main:0.0", "cli": ["codex"], "workdir": str(tmp_path / "worktrees" / "main")},
+                        ],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            config = load_project_config("otto", config_path)
+            runner = OwnerTmuxRunner(
+                {
+                    "otto-designer",
+                    "otto-director",
+                    "otto-audit",
+                    "otto-ops",
+                    "otto-app",
+                    "otto-main",
+                    "pgu-director",
+                    "pgu-ops",
+                }
+            )
+            first_output: list[str] = []
+            second_output: list[str] = []
+
+            assert team_launcher.stop_project(config, runner=runner, print_func=first_output.append) == 0
+            assert team_launcher.stop_project(config, runner=runner, print_func=second_output.append) == 0
+    finally:
+        team_launcher.current_user_name = original_current_user_name
+
+    assert runner.existing_sessions == {"pgu-director", "pgu-ops"}
+    kill_calls = [call for call in runner.calls if call[4:6] == ["tmux", "kill-session"]]
+    assert [call[-1] for call in kill_calls] == [
+        "otto-designer",
+        "otto-director",
+        "otto-audit",
+        "otto-ops",
+        "otto-app",
+        "otto-main",
+    ]
+    assert all(call[:4] == ["sudo", "-u", "otto-agent", "-H"] for call in kill_calls)
+    assert all(call[6] == "-t" for call in kill_calls)
+    forbidden_tmux_server_shutdown = "kill" + "-server"
+    assert not any(part == forbidden_tmux_server_shutdown for call in runner.calls for part in call)
+    assert first_output == [
+        "stopped designer: otto-designer",
+        "stopped director: otto-director",
+        "stopped audit: otto-audit",
+        "stopped ops: otto-ops",
+        "stopped app: otto-app",
+        "stopped main: otto-main",
+    ]
+    assert second_output == [
+        "already stopped designer: otto-designer",
+        "already stopped director: otto-director",
+        "already stopped audit: otto-audit",
+        "already stopped ops: otto-ops",
+        "already stopped app: otto-app",
+        "already stopped main: otto-main",
+    ]
+
+
+def test_stop_project_continues_after_failed_kill_and_reports_all_roles() -> None:
+    class FailingOwnerTmuxRunner:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        def __call__(self, args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if args[:4] != ["sudo", "-u", "otto-agent", "-H"]:
+                return subprocess.CompletedProcess(args, 0)
+            inner = args[4:]
+            if inner[:2] == ["tmux", "has-session"]:
+                return subprocess.CompletedProcess(args, 0)
+            if inner[:2] == ["tmux", "kill-session"] and inner[-1] == "otto-director":
+                return subprocess.CompletedProcess(args, 7, stderr="permission denied\n")
+            return subprocess.CompletedProcess(args, 0)
+
+    original_current_user_name = team_launcher.current_user_name
+    try:
+        team_launcher.current_user_name = lambda: "root"
+        with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-stop-fail.") as tmp:
+            tmp_path = Path(tmp)
+            layout = tmp_path / "layout.json"
+            layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+            for role_name in ("designer", "director", "audit"):
+                (tmp_path / "worktrees" / role_name).mkdir(parents=True)
+            config_path = tmp_path / "otto.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "project": "otto",
+                        "layout": str(layout),
+                        "run_as_user": "otto-agent",
+                        "roles": [
+                            {"role": "designer", "slot": 0, "tmux_session": "otto-designer", "target": "otto-designer:0.0", "cli": ["claude"], "workdir": str(tmp_path / "worktrees" / "designer")},
+                            {"role": "director", "slot": 1, "tmux_session": "otto-director", "target": "otto-director:0.0", "cli": ["claude"], "workdir": str(tmp_path / "worktrees" / "director")},
+                            {"role": "audit", "slot": 2, "tmux_session": "otto-audit", "target": "otto-audit:0.0", "cli": ["claude"], "workdir": str(tmp_path / "worktrees" / "audit")},
+                        ],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            config = load_project_config("otto", config_path)
+            runner = FailingOwnerTmuxRunner()
+            output: list[str] = []
+
+            assert team_launcher.stop_project(config, runner=runner, print_func=output.append) == 7
+    finally:
+        team_launcher.current_user_name = original_current_user_name
+
+    kill_calls = [call for call in runner.calls if call[4:6] == ["tmux", "kill-session"]]
+    assert [call[-1] for call in kill_calls] == ["otto-designer", "otto-director", "otto-audit"]
+    assert output == [
+        "stopped designer: otto-designer",
+        "failed to stop director: otto-director: permission denied",
+        "stopped audit: otto-audit",
+    ]
+
+
 def test_reload_uses_recorded_resume_uuid_when_recreating_session() -> None:
     config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
     role = next(role for role in config.roles if role.role == "ops")
@@ -7579,6 +7740,66 @@ def test_switchyard_launch_runs_first_run_auth_before_panes_and_warns_after() ->
     assert events[2][1] is report
 
 
+def test_switchyard_stop_resolves_project_without_launching_or_authenticating() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-stop.") as tmp:
+        tmp_path = Path(tmp)
+        config_dir = tmp_path / "config"
+        registry_dir = tmp_path / "registry"
+        layout = tmp_path / "layout.json"
+        config_dir.mkdir()
+        registry_dir.mkdir()
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        config_path = config_dir / "otto.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "otto",
+                    "project_name": "Otto System",
+                    "layout": str(layout),
+                    "run_as_user": "otto-agent",
+                    "roles": [{"role": "ops", "slot": 0, "tmux_session": "otto-ops", "target": "otto-ops:0.0", "cli": ["codex"]}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        calls: list[tuple[str, object]] = []
+        original_config_dir = team_launcher.DEFAULT_CONFIG_DIR
+        original_registry_dir = team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR
+        original_stop_project = team_launcher.stop_project
+        original_launch_project = team_launcher.launch_project
+        original_first_run_auth = team_launcher.run_switchyard_launch_first_run_auth
+        try:
+            team_launcher.DEFAULT_CONFIG_DIR = config_dir
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
+
+            def fake_stop_project(config: team_launcher.ProjectConfig, **_kwargs: object) -> int:
+                calls.append(("stop", {"project": config.project, "run_as_user": config.run_as_user}))
+                return 0
+
+            def fake_launch_project(_config: team_launcher.ProjectConfig, **_kwargs: object) -> int:
+                calls.append(("launch", {}))
+                return 0
+
+            def fake_first_run_auth(_config: team_launcher.ProjectConfig) -> team_launcher.FirstRunAuthReport:
+                calls.append(("auth", {}))
+                return team_launcher.FirstRunAuthReport({}, [])
+
+            team_launcher.stop_project = fake_stop_project
+            team_launcher.launch_project = fake_launch_project
+            team_launcher.run_switchyard_launch_first_run_auth = fake_first_run_auth
+
+            assert switchyard_main(["stop", "Otto", "System"]) == 0
+        finally:
+            team_launcher.DEFAULT_CONFIG_DIR = original_config_dir
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = original_registry_dir
+            team_launcher.stop_project = original_stop_project
+            team_launcher.launch_project = original_launch_project
+            team_launcher.run_switchyard_launch_first_run_auth = original_first_run_auth
+
+    assert calls == [("stop", {"project": "otto", "run_as_user": "otto-agent"})]
+
+
 def test_switchyard_registry_does_not_change_pgu_resolution_or_launch_config() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-pgu-registry.") as tmp:
         registry_dir = Path(tmp) / "registry"
@@ -7884,6 +8105,77 @@ def test_team_launcher_main_resolves_registered_project_for_pane_operations() ->
             "force_reload": False,
         }
     ]
+
+
+def test_team_launcher_main_resolves_registered_project_for_stop() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-registry-stop.") as tmp:
+        tmp_path = Path(tmp)
+        config_dir = tmp_path / "empty-checkout-config"
+        registry_dir = tmp_path / "registry"
+        project_dir = tmp_path / "otto-project"
+        provision_dir = project_dir / ".switchyard" / "provision"
+        layout = tmp_path / "layout.json"
+        config_dir.mkdir()
+        registry_dir.mkdir()
+        provision_dir.mkdir(parents=True)
+        project_dir.mkdir(exist_ok=True)
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        config_path = provision_dir / "otto.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "otto",
+                    "project_name": "Otto System",
+                    "layout": str(layout),
+                    "run_as_user": "otto-agent",
+                    "roles": [
+                        {
+                            "role": "app",
+                            "slot": 0,
+                            "tmux_session": "otto-app",
+                            "target": "otto-app:0.0",
+                            "cli": ["codex"],
+                            "workdir": str(project_dir),
+                        }
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (registry_dir / "otto.json").write_text(
+            json.dumps(
+                {
+                    "schema": team_launcher.SWITCHYARD_REGISTRY_SCHEMA,
+                    "slug": "otto",
+                    "name": "Otto System",
+                    "config_path": str(config_path),
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        calls: list[dict[str, object]] = []
+        original_config_dir = team_launcher.DEFAULT_CONFIG_DIR
+        original_registry_dir = team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR
+        original_stop_project = team_launcher.stop_project
+        try:
+            team_launcher.DEFAULT_CONFIG_DIR = config_dir
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
+
+            def fake_stop_project(config: team_launcher.ProjectConfig, **_kwargs: object) -> int:
+                calls.append({"project": config.project, "run_as_user": config.run_as_user})
+                return 0
+
+            team_launcher.stop_project = fake_stop_project
+
+            assert team_launcher.main(["otto", "stop"]) == 0
+        finally:
+            team_launcher.DEFAULT_CONFIG_DIR = original_config_dir
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = original_registry_dir
+            team_launcher.stop_project = original_stop_project
+
+    assert calls == [{"project": "otto", "run_as_user": "otto-agent"}]
 
 
 def test_team_launcher_main_prefers_checkout_config_before_registry_for_pgu() -> None:

@@ -2,9 +2,11 @@
 
 `switchyard` is the public project entrypoint. With no arguments it prints
 `new...` followed by configured projects. `switchyard new` starts new-project
-setup, and `switchyard My Project Name` joins all arguments, matches an
+setup, `switchyard stop <project>` stops only that project's configured tmux
+pane sessions, and `switchyard My Project Name` joins all arguments, matches an
 existing project case-insensitively by display name or slug, and runs today's
-idempotent start/resume behavior.
+idempotent start/resume behavior. Leading verbs are reserved, so a project
+literally named `new`, `upgrade`, or `stop` collides with the command namespace.
 
 `scripts/team-launcher` remains the compatibility wrapper used by existing PGU
 pane commands. It starts, attaches, or reloads a project team from a JSON config.
@@ -81,6 +83,7 @@ verification.
 scripts/team-launcher pgu start
 scripts/team-launcher pgu attach
 scripts/team-launcher pgu reload
+scripts/team-launcher pgu stop
 scripts/team-launcher pgu provision-runtime
 scripts/team-launcher pgu deploy-launcher --launcher-repo /home/eric/Projects/pgu
 ```
@@ -132,6 +135,12 @@ requires it to match the configured `live_commands` list, or the configured
 `cli` binary name when `live_commands` is omitted. A stale config fails safe and
 does not kill the pane. Use `--force` only when intentionally overriding that
 guard.
+
+`stop` kills each configured role's named tmux session as the project runtime
+user and leaves board/listener systemd services alone. It never runs
+`tmux kill-server`; absent role sessions are reported as already stopped, so a
+second `switchyard stop <project>` or `scripts/team-launcher <project> stop`
+is a clean no-op.
 
 Antigravity/Gemini resume has an additional limitation. On Antigravity CLI
 1.1.19, `agy --conversation <id>` is the correct flag and a cleanly-created

@@ -5756,6 +5756,31 @@ def upgrade_project_command(
     return 0
 
 
+def stop_project(
+    config: ProjectConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    role_runner = runner
+    if config.run_as_user and current_user_name() != config.run_as_user:
+        role_runner = _owner_process_runner(owner_user=config.run_as_user, runner=runner)
+    exit_code = 0
+    for role in config.roles:
+        exists = role_runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+        if not exists:
+            print_func(f"already stopped {role.role}: {role.tmux_session}")
+            continue
+        result = role_runner(tmux_kill_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        if result.returncode != 0:
+            reason = _proc_failure_reason(result, f"tmux kill-session failed with exit {result.returncode}")
+            print_func(f"failed to stop {role.role}: {role.tmux_session}: {reason}")
+            exit_code = exit_code or int(result.returncode)
+            continue
+        print_func(f"stopped {role.role}: {role.tmux_session}")
+    return exit_code
+
+
 def _role_by_name(config: ProjectConfig, role_name: str) -> RoleConfig:
     for role in config.roles:
         if role.role == role_name:
@@ -5770,7 +5795,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "command",
         nargs="?",
         default="start",
-        choices=["start", "attach", "reload", "design", "new", "provision-runtime", "deploy-launcher", "upgrade", "pane"],
+        choices=["start", "attach", "reload", "stop", "design", "new", "provision-runtime", "deploy-launcher", "upgrade", "pane"],
         help="start is idempotent attach-or-start (resumes tracked session ids when relaunching a stopped pane); reload force-restarts running CLIs with tracked resume ids",
     )
     parser.add_argument("pane_mode", nargs="?", choices=["start", "attach", "attach-or-start", "reload"])
@@ -5855,6 +5880,12 @@ def _build_switchyard_upgrade_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_switchyard_stop_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="switchyard stop", description="Stop a Switchyard project's tmux pane sessions.")
+    parser.add_argument("project", nargs="+", help="project name or slug")
+    return parser
+
+
 def switchyard_main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
@@ -5882,6 +5913,12 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         entry = _resolve_switchyard_project(args.project)
         config = load_project_config(entry.slug, entry.config_path)
         return upgrade_project_command(config, config_path=entry.config_path, dry_run=args.dry_run)
+    if argv[0].casefold() == "stop":
+        args = _build_switchyard_stop_parser().parse_args(argv[1:])
+        project = " ".join(args.project)
+        entry = _resolve_switchyard_project(project)
+        config = load_project_config(entry.slug, entry.config_path)
+        return stop_project(config)
     selection = " ".join(argv)
     entry = _resolve_switchyard_project(selection)
     config = load_project_config(entry.slug, entry.config_path)
@@ -5966,6 +6003,8 @@ def main(argv: list[str] | None = None) -> int:
     config = load_project_config(config_project, config_path)
     if args.command == "upgrade":
         return upgrade_project_command(config, config_path=config_path, dry_run=args.dry_run)
+    if args.command == "stop":
+        return stop_project(config)
     if args.command == "deploy-launcher":
         return deploy_launcher_checkout(
             config,

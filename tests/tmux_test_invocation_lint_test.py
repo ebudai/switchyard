@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
-"""Source lint for tmux invocations in tests.
+"""Source lint for tmux invocations.
+
+Rules:
+- tests/ tmux invocations must use an explicit -L socket for isolation.
+- tests/ and scripts/ must never invoke the tmux server-shutdown command.
+- scripts/ may use a project's default tmux socket; the -L test-isolation rule
+  does not apply there.
 
 Known non-goals: absolute tmux paths such as "/usr/bin/tmux", subprocess
 function aliases such as ``from subprocess import run``, tmux argv variables
-not built in Return/Assign/AnnAssign, and shell=True command strings.
+not built in Return/Assign/AnnAssign, dynamically assembled tmux subcommands,
+and shell=True command strings.
 """
 
 from __future__ import annotations
@@ -21,8 +28,9 @@ if str(ROOT) not in sys.path:
 from standalone_test_runner import run_module_tests
 
 TESTS_DIR = ROOT / "tests"
+SCRIPTS_DIR = ROOT / "scripts"
 SUBPROCESS_TMUX_CALLS = frozenset({"call", "check_call", "check_output", "Popen", "run"})
-FORBIDDEN_TMUX_COMMAND = "kill" "-server"
+FORBIDDEN_TMUX_COMMAND = "kill-server"
 
 
 @dataclass(frozen=True)
@@ -32,8 +40,27 @@ class TmuxLintViolation:
     detail: str
 
 
-def _test_source_paths(tests_dir: Path = TESTS_DIR) -> list[Path]:
-    return sorted(path for path in tests_dir.rglob("*.py") if path.is_file())
+@dataclass(frozen=True)
+class TmuxLintTree:
+    root: Path
+    require_explicit_socket: bool
+
+
+def _python_source_paths(root: Path) -> list[Path]:
+    return sorted(path for path in root.rglob("*") if _is_python_source_path(path))
+
+
+def _is_python_source_path(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    if path.suffix == ".py":
+        return True
+    try:
+        with path.open("rb") as handle:
+            first_line = handle.readline(200)
+    except OSError:
+        return False
+    return first_line.startswith(b"#!") and b"python" in first_line.lower()
 
 
 def _subprocess_call_name(node: ast.AST) -> str | None:
@@ -50,16 +77,30 @@ def _subprocess_call_name(node: ast.AST) -> str | None:
 class TmuxArgvShape:
     starts_with_tmux: bool
     has_explicit_socket: bool
+    literal_args: tuple[str, ...]
+
+
+def _literal_string_value(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _literal_string_value(node.left)
+        right = _literal_string_value(node.right)
+        if left is not None and right is not None:
+            return left + right
+    return None
 
 
 def _literal_string_constants(node: ast.AST) -> list[str]:
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return [node.value]
+    literal_value = _literal_string_value(node)
+    if literal_value is not None:
+        return [literal_value]
     if isinstance(node, (ast.List, ast.Tuple)):
         values: list[str] = []
         for element in node.elts:
-            if isinstance(element, ast.Constant) and isinstance(element.value, str):
-                values.append(element.value)
+            literal_element = _literal_string_value(element)
+            if literal_element is not None:
+                values.append(literal_element)
         return values
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         return [*_literal_string_constants(node.left), *_literal_string_constants(node.right)]
@@ -74,15 +115,17 @@ def _tmux_argv_shape(node: ast.AST) -> TmuxArgvShape | None:
         return TmuxArgvShape(
             starts_with_tmux=left.starts_with_tmux,
             has_explicit_socket=left.has_explicit_socket or "-L" in _literal_string_constants(node.right),
+            literal_args=(*left.literal_args, *_literal_string_constants(node.right)),
         )
     if not isinstance(node, (ast.List, ast.Tuple)) or not node.elts:
         return None
     first = node.elts[0]
-    if not isinstance(first, ast.Constant) or first.value != "tmux":
+    if _literal_string_value(first) != "tmux":
         return None
     return TmuxArgvShape(
         starts_with_tmux=True,
         has_explicit_socket="-L" in _literal_string_constants(node),
+        literal_args=tuple(_literal_string_constants(node)),
     )
 
 
@@ -149,27 +192,44 @@ def tmux_argv_builder_violations(source: str, path: Path) -> list[TmuxLintViolat
 
 
 def forbidden_server_shutdown_violations(source: str, path: Path) -> list[TmuxLintViolation]:
+    tree = ast.parse(source, filename=str(path))
     violations: list[TmuxLintViolation] = []
-    for line_number, line in enumerate(source.splitlines(), start=1):
-        if FORBIDDEN_TMUX_COMMAND in line:
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.List, ast.Tuple, ast.BinOp)):
+            continue
+        argv = _tmux_argv_shape(node)
+        if argv is None or not argv.starts_with_tmux:
+            continue
+        if FORBIDDEN_TMUX_COMMAND in argv.literal_args:
             violations.append(
                 TmuxLintViolation(
                     path=path,
-                    line=line_number,
-                    detail="tests must not invoke the tmux server shutdown command",
+                    line=node.lineno,
+                    detail="tmux server shutdown command is forbidden in tests/ and scripts/",
                 )
             )
     return violations
 
 
-def lint_test_sources(tests_dir: Path = TESTS_DIR) -> list[TmuxLintViolation]:
+def lint_tmux_sources(
+    trees: tuple[TmuxLintTree, ...] = (
+        TmuxLintTree(TESTS_DIR, require_explicit_socket=True),
+        TmuxLintTree(SCRIPTS_DIR, require_explicit_socket=False),
+    ),
+) -> list[TmuxLintViolation]:
     violations: list[TmuxLintViolation] = []
-    for path in _test_source_paths(tests_dir):
-        source = path.read_text(encoding="utf-8")
-        violations.extend(tmux_subprocess_violations(source, path))
-        violations.extend(tmux_argv_builder_violations(source, path))
-        violations.extend(forbidden_server_shutdown_violations(source, path))
+    for tree in trees:
+        for path in _python_source_paths(tree.root):
+            source = path.read_text(encoding="utf-8")
+            if tree.require_explicit_socket:
+                violations.extend(tmux_subprocess_violations(source, path))
+                violations.extend(tmux_argv_builder_violations(source, path))
+            violations.extend(forbidden_server_shutdown_violations(source, path))
     return violations
+
+
+def lint_test_sources(tests_dir: Path = TESTS_DIR) -> list[TmuxLintViolation]:
+    return lint_tmux_sources((TmuxLintTree(tests_dir, require_explicit_socket=True),))
 
 
 def _format_violations(violations: list[TmuxLintViolation]) -> str:
@@ -233,6 +293,18 @@ def test_forbidden_server_shutdown_is_reported() -> None:
     assert "server shutdown" in violations[0].detail
 
 
+def test_forbidden_server_shutdown_matches_resolved_string_literals() -> None:
+    source = 'command = ["tmux", "kill" "-server"]\n'
+    violations = forbidden_server_shutdown_violations(source, Path("bad_test.py"))
+    assert len(violations) == 1
+    assert "server shutdown" in violations[0].detail
+
+
+def test_forbidden_server_shutdown_ignores_non_tmux_literals() -> None:
+    source = f'FORBIDDEN_TMUX_COMMAND = "{FORBIDDEN_TMUX_COMMAND}"\n'
+    assert forbidden_server_shutdown_violations(source, Path("good_test.py")) == []
+
+
 def test_lint_scans_nested_tests_and_helpers() -> None:
     with tempfile.TemporaryDirectory(prefix="tmux-lint-scan.") as tmp:
         tmp_path = Path(tmp)
@@ -249,8 +321,67 @@ def test_lint_scans_nested_tests_and_helpers() -> None:
         assert nested_test in paths
 
 
+def test_lint_scans_scripts_for_forbidden_server_shutdown() -> None:
+    with tempfile.TemporaryDirectory(prefix="tmux-lint-scripts.") as tmp:
+        tmp_path = Path(tmp)
+        scripts_dir = tmp_path / "scripts"
+        tests_dir = tmp_path / "tests"
+        scripts_dir.mkdir()
+        tests_dir.mkdir()
+        script = scripts_dir / "team_launcher.py"
+        script.write_text(f"def tmux_args():\n    return ['tmux', '{FORBIDDEN_TMUX_COMMAND}']\n", encoding="utf-8")
+
+        violations = lint_tmux_sources(
+            (
+                TmuxLintTree(tests_dir, require_explicit_socket=True),
+                TmuxLintTree(scripts_dir, require_explicit_socket=False),
+            )
+        )
+
+        assert len(violations) == 1
+        assert violations[0].path == script
+        assert "server shutdown" in violations[0].detail
+
+
+def test_lint_scans_extensionless_python_scripts_for_forbidden_server_shutdown() -> None:
+    with tempfile.TemporaryDirectory(prefix="tmux-lint-scripts.") as tmp:
+        tmp_path = Path(tmp)
+        scripts_dir = tmp_path / "scripts"
+        tests_dir = tmp_path / "tests"
+        scripts_dir.mkdir()
+        tests_dir.mkdir()
+        script = scripts_dir / "ticket-board-verify-resume"
+        script.write_text(
+            "#!/usr/bin/env python3\n"
+            "def tmux_args():\n"
+            "    return ['tmux', 'kill' '-server']\n",
+            encoding="utf-8",
+        )
+
+        violations = lint_tmux_sources(
+            (
+                TmuxLintTree(tests_dir, require_explicit_socket=True),
+                TmuxLintTree(scripts_dir, require_explicit_socket=False),
+            )
+        )
+
+        assert len(violations) == 1
+        assert violations[0].path == script
+        assert "server shutdown" in violations[0].detail
+
+
+def test_scripts_tmux_without_socket_is_allowed() -> None:
+    with tempfile.TemporaryDirectory(prefix="tmux-lint-scripts.") as tmp:
+        scripts_dir = Path(tmp) / "scripts"
+        scripts_dir.mkdir()
+        script = scripts_dir / "team_launcher.py"
+        script.write_text("def tmux_args(role):\n    return ['tmux', 'kill-session', '-t', role]\n", encoding="utf-8")
+
+        assert lint_tmux_sources((TmuxLintTree(scripts_dir, require_explicit_socket=False),)) == []
+
+
 def test_tests_do_not_use_unisolated_tmux() -> None:
-    violations = lint_test_sources()
+    violations = lint_tmux_sources()
     assert violations == [], _format_violations(violations)
 
 

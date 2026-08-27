@@ -243,6 +243,7 @@ class LaunchSessionRecordStatus:
     target: str
     session_id: str
     superseded_session_id: str = ""
+    unverified_resume_session_id: str = ""
     pane_state_source: str = ""
 
     @property
@@ -254,8 +255,12 @@ class LaunchSessionRecordStatus:
         return bool(self.superseded_session_id)
 
     @property
+    def unverified_resume(self) -> bool:
+        return bool(self.unverified_resume_session_id)
+
+    @property
     def pane_launch_reported(self) -> bool:
-        return bool(self.pane_state_source)
+        return bool(self.pane_state_source or self.unverified_resume_session_id)
 
 
 def _repo_root() -> Path:
@@ -1272,6 +1277,27 @@ def superseded_session_id_for_role(
     return str(parsed.get("session_id") or "").strip()
 
 
+def unverified_resume_session_id_for_role(
+    role: RoleConfig,
+    session_dir: Path,
+    *,
+    changed_since_ns: int | None = None,
+) -> str:
+    if changed_since_ns is None:
+        return ""
+    path = session_dir / f"{session_file_name(role.target)}.resume_timeout"
+    try:
+        stat = path.stat()
+    except OSError:
+        return ""
+    if stat.st_ctime_ns + LAUNCH_RESUME_FALLBACK_FRESHNESS_SKEW_NS < changed_since_ns:
+        return ""
+    parsed = _session_record_at_path_for_role(role, path)
+    if parsed is None:
+        return ""
+    return str(parsed.get("session_id") or "").strip()
+
+
 def pane_launch_outcome_source_for_role(
     role: RoleConfig,
     pane_state_dir: Path | None,
@@ -1328,6 +1354,11 @@ def launch_session_record_statuses(
                 target=role.target,
                 session_id=session_id_for_role(role, config.session_dir),
                 superseded_session_id=superseded_session_id_for_role(
+                    role,
+                    config.session_dir,
+                    changed_since_ns=fallback_changed_since_ns,
+                ),
+                unverified_resume_session_id=unverified_resume_session_id_for_role(
                     role,
                     config.session_dir,
                     changed_since_ns=fallback_changed_since_ns,
@@ -1403,6 +1434,12 @@ def report_launch_session_records(
                 f"warning: switchyard: session record missing for {status.role} "
                 f"({status.target}) after {timeout_seconds:g}s; continuing"
             )
+        if status.unverified_resume:
+            print_func(
+                f"warning: switchyard: {status.role} ({status.target}) resume for session "
+                f"{status.unverified_resume_session_id} was not verified before startup timeout; "
+                "left session record intact and did not mark pane idle"
+            )
         if status.resume_fallback:
             print_func(
                 f"warning: switchyard: {status.role} ({status.target}) fell back to a fresh session; "
@@ -1415,15 +1452,39 @@ def clear_session_record_for_role(role: RoleConfig, session_dir: Path) -> bool:
     path = session_dir / session_file_name(role.target)
     superseded_path = path.with_name(f"{path.name}.superseded")
     previous_superseded_path = path.with_name(f"{path.name}.superseded.1")
+    timeout_path = path.with_name(f"{path.name}.resume_timeout")
     if not path.exists():
         return False
     try:
         if superseded_path.exists():
             superseded_path.replace(previous_superseded_path)
+        timeout_path.unlink(missing_ok=True)
         path.replace(superseded_path)
     except FileNotFoundError:
         return False
     return True
+
+
+def clear_unverified_resume_for_role(role: RoleConfig, session_dir: Path) -> None:
+    path = session_dir / f"{session_file_name(role.target)}.resume_timeout"
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        print(f"team-launcher: failed to clear unverified resume marker for {role.role}: {exc}", file=sys.stderr)
+
+
+def record_unverified_resume_for_role(role: RoleConfig, session_dir: Path, session_id: str) -> None:
+    _write_private_json_atomic(
+        session_dir / f"{session_file_name(role.target)}.resume_timeout",
+        {
+            "reason": "resume_startup_timeout",
+            "session_id": session_id,
+            "target": role.target,
+            "updated_at": time.time(),
+        },
+    )
 
 
 def _session_record_at_path_for_role(role: RoleConfig, path: Path) -> dict[str, Any] | None:
@@ -2823,13 +2884,16 @@ def _start_role_session(
                 file=sys.stderr,
             )
             return 1
+        clear_unverified_resume_for_role(role, session_dir)
         seed_initial_pane_idle_state(role, pane_state_dir=pane_state_dir, source=seed_source)
         return 0
     resume_status = _resume_launch_status(role, runner=runner)
     if resume_status == RESUME_LAUNCH_VERIFIED and (post_start_verifier is None or post_start_verifier()):
+        clear_unverified_resume_for_role(role, session_dir)
         seed_initial_pane_idle_state(role, pane_state_dir=pane_state_dir, source=seed_source)
         return 0
     if resume_status == RESUME_LAUNCH_TIMEOUT:
+        record_unverified_resume_for_role(role, session_dir, session_id)
         print(
             f"team-launcher: resume for {role.role} using session {session_id} was not verified within "
             f"{RESUME_STARTUP_TIMEOUT_SECONDS:g}s; leaving tmux session and session record intact",
@@ -2855,6 +2919,7 @@ def _start_role_session(
             file=sys.stderr,
         )
         return 1
+    clear_unverified_resume_for_role(role, session_dir)
     seed_initial_pane_idle_state(role, pane_state_dir=pane_state_dir, source=f"{seed_source}.fallback")
     print(
         f"team-launcher: started fresh session for {role.role} after resume fallback",

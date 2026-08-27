@@ -1005,6 +1005,58 @@ def test_launch_session_record_report_names_recent_resume_fallback() -> None:
     )
 
 
+def test_launch_session_record_report_names_recent_unverified_resume_timeout() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-launch-session-timeout.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        session_dir = tmp_path / "sessions"
+        session_dir.mkdir()
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "session_dir": str(session_dir),
+                    "roles": [
+                        {"role": "app", "slot": 0, "cli": ["codex"], "target": "porter-app:0.0"},
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+        role = config.roles[0]
+        fallback_since_ns = time.time_ns()
+        (session_dir / session_file_name(role.target)).write_text(
+            json.dumps({"target": role.target, "session_id": "kept-session"}) + "\n",
+            encoding="utf-8",
+        )
+        team_launcher.record_unverified_resume_for_role(role, session_dir, "kept-session")
+        messages: list[str] = []
+
+        statuses = team_launcher.report_launch_session_records(
+            config,
+            timeout_seconds=0,
+            fallback_changed_since_ns=fallback_since_ns,
+            print_func=messages.append,
+        )
+
+    assert statuses[0].session_id == "kept-session"
+    assert statuses[0].unverified_resume_session_id == "kept-session"
+    assert any(
+        "warning: switchyard: app (porter-app:0.0) resume for session kept-session was not verified"
+        in message
+        for message in messages
+    )
+    assert any("did not mark pane idle" in message for message in messages)
+
+
 def test_launch_session_record_report_ignores_stale_resume_fallback_sidecars() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-launch-session-stale-fallback.") as tmp:
         tmp_path = Path(tmp)
@@ -5823,6 +5875,9 @@ def test_reload_preserves_session_record_when_resume_cli_is_slow_to_exec() -> No
             sidecar_path = (session_dir / session_file_name(role.target)).with_name(
                 f"{session_file_name(role.target)}.superseded"
             )
+            timeout_path = (session_dir / session_file_name(role.target)).with_name(
+                f"{session_file_name(role.target)}.resume_timeout"
+            )
             runner = FakeRunner(
                 existing_sessions={"pgu-ops"},
                 current_commands={"pgu-ops:0.0": ["codex", "fish", "fish", "fish"]},
@@ -5845,6 +5900,10 @@ def test_reload_preserves_session_record_when_resume_cli_is_slow_to_exec() -> No
                     "session_id"
                 ] == session_id
                 assert not sidecar_path.exists()
+                timeout_record = json.loads(timeout_path.read_text(encoding="utf-8"))
+                assert timeout_record["target"] == role.target
+                assert timeout_record["session_id"] == session_id
+                assert timeout_record["reason"] == "resume_startup_timeout"
 
         assert (
             f"team-launcher: resume for ops using session {session_id} was not verified within 0.02s; "

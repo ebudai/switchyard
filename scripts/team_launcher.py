@@ -4846,6 +4846,8 @@ def _owner_home_for_auth(owner_user: str, fallback: Path | None = None) -> Path:
 
 
 def _owner_command_args(owner_user: str, command: Sequence[str]) -> list[str]:
+    if owner_user == current_user_name():
+        return list(command)
     return ["sudo", "-u", owner_user, *command]
 
 

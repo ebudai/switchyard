@@ -8640,6 +8640,76 @@ def test_first_run_auth_phase_is_silent_when_auth_and_trust_already_pass() -> No
     assert {kwargs.get("cwd") for kwargs in runner.call_kwargs} == {str(owner_home)}
 
 
+def test_first_run_auth_phase_does_not_sudo_wrap_same_owner() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-first-run-auth.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        config = load_project_config(
+            "otto",
+            _write_first_run_auth_config(
+                tmp_path,
+                roles=[
+                    ("director", "claude"),
+                    ("ops", "codex"),
+                    ("inspector", "agy"),
+                ],
+            ),
+        )
+        owner_home.joinpath(".claude.json").write_text(
+            json.dumps(
+                {
+                    "projects": {
+                        str(Path(role.workdir).resolve(strict=False)): {"hasTrustDialogAccepted": True}
+                        for role in config.roles
+                        if role.cli == ["claude"]
+                    }
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        agy_settings = owner_home / ".gemini" / "antigravity-cli" / "settings.json"
+        agy_settings.parent.mkdir(parents=True)
+        agy_settings.write_text(
+            json.dumps(
+                {
+                    "trustedWorkspaces": [
+                        str(Path(role.workdir).resolve(strict=False))
+                        for role in config.roles
+                        if role.cli == ["agy"]
+                    ]
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        runner = FirstRunAuthRunner()
+        runner.login_seen.update({"agy", "claude", "codex"})
+        messages: list[str] = []
+        original_current_user_name = team_launcher.current_user_name
+        try:
+            team_launcher.current_user_name = lambda: "otto-agent"
+            report = team_launcher.run_first_run_auth_phase(
+                config,
+                owner_user="otto-agent",
+                owner_home=owner_home,
+                runner=runner,
+                print_func=messages.append,
+            )
+        finally:
+            team_launcher.current_user_name = original_current_user_name
+
+    assert report == team_launcher.FirstRunAuthReport({}, [])
+    assert messages == []
+    assert runner.calls == [
+        ["claude", "auth", "status", "--json"],
+        ["codex", "login", "status"],
+        ["agy", "models"],
+    ]
+    assert {kwargs.get("cwd") for kwargs in runner.call_kwargs} == {str(owner_home)}
+
+
 def test_first_run_auth_phase_sequences_distinct_logins_then_worktree_trust() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-first-run-auth.") as tmp:
         tmp_path = Path(tmp)

@@ -951,6 +951,114 @@ def test_launch_session_record_report_waits_and_warns_for_missing_records() -> N
     assert any("warning: switchyard: session record missing for main (porter-main:0.0)" in message for message in messages)
 
 
+def test_launch_session_record_report_names_recent_resume_fallback() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-launch-session-fallback.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        session_dir = tmp_path / "sessions"
+        session_dir.mkdir()
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "session_dir": str(session_dir),
+                    "roles": [
+                        {"role": "app", "slot": 0, "cli": ["codex"], "target": "porter-app:0.0"},
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+        role = config.roles[0]
+        fallback_since_ns = time.time_ns()
+        (session_dir / session_file_name(role.target)).write_text(
+            json.dumps({"target": role.target, "session_id": "fresh-session"}) + "\n",
+            encoding="utf-8",
+        )
+        (session_dir / f"{session_file_name(role.target)}.superseded").write_text(
+            json.dumps({"target": role.target, "session_id": "old-session"}) + "\n",
+            encoding="utf-8",
+        )
+        messages: list[str] = []
+
+        statuses = team_launcher.report_launch_session_records(
+            config,
+            timeout_seconds=0,
+            fallback_changed_since_ns=fallback_since_ns,
+            print_func=messages.append,
+        )
+
+    assert statuses[0].session_id == "fresh-session"
+    assert statuses[0].superseded_session_id == "old-session"
+    assert any(
+        "warning: switchyard: app (porter-app:0.0) fell back to a fresh session; superseded session old-session"
+        in message
+        for message in messages
+    )
+
+
+def test_launch_session_record_report_ignores_stale_resume_fallback_sidecars() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-launch-session-stale-fallback.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        session_dir = tmp_path / "sessions"
+        session_dir.mkdir()
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "session_dir": str(session_dir),
+                    "roles": [
+                        {"role": "app", "slot": 0, "cli": ["codex"], "target": "porter-app:0.0"},
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+        role = config.roles[0]
+        (session_dir / session_file_name(role.target)).write_text(
+            json.dumps({"target": role.target, "session_id": "fresh-session"}) + "\n",
+            encoding="utf-8",
+        )
+        sidecar = session_dir / f"{session_file_name(role.target)}.superseded"
+        sidecar.write_text(
+            json.dumps({"target": role.target, "session_id": "old-session"}) + "\n",
+            encoding="utf-8",
+        )
+        time.sleep(0.12)
+        fallback_since_ns = time.time_ns()
+        while fallback_since_ns <= sidecar.stat().st_ctime_ns:
+            fallback_since_ns = time.time_ns()
+        messages: list[str] = []
+
+        statuses = team_launcher.report_launch_session_records(
+            config,
+            timeout_seconds=0,
+            fallback_changed_since_ns=fallback_since_ns,
+            print_func=messages.append,
+        )
+
+    assert statuses[0].session_id == "fresh-session"
+    assert statuses[0].superseded_session_id == ""
+    assert not any("fell back to a fresh session" in message for message in messages)
+
+
 def test_launch_session_record_timeout_default_is_ten_seconds() -> None:
     assert team_launcher.LAUNCH_SESSION_RECORD_TIMEOUT_SECONDS == 10.0
     for fn in (team_launcher.launch_project, team_launcher.switchyard_new_command):
@@ -1033,6 +1141,89 @@ def test_launch_project_reports_missing_session_record_after_reboot_resume() -> 
     assert messages[0] == "switchyard: checking session records for 2 pane(s) (waiting up to 0s)"
     assert any("session record found for designer (porter-designer:0.0): designer-resume-session" in message for message in messages)
     assert any("warning: switchyard: session record missing for main (porter-main:0.0)" in message for message in messages)
+
+
+def test_launch_project_reports_visible_role_resume_fallback_to_operator() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-launch-visible-fallback.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text(
+            json.dumps(
+                {
+                    "Orientation": "Horizontal",
+                    "Widgets": [
+                        {"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""},
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        session_dir = tmp_path / "sessions"
+        session_dir.mkdir()
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "session_dir": str(session_dir),
+                    "roles": [
+                        {"role": "app", "slot": 0, "cli": ["codex"], "target": "porter-app:0.0"},
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+        role = config.roles[0]
+        active_record = session_dir / session_file_name(role.target)
+        active_record.write_text(
+            json.dumps({"target": role.target, "session_id": "old-session"}) + "\n",
+            encoding="utf-8",
+        )
+        sidecar = session_dir / f"{session_file_name(role.target)}.superseded"
+
+        class VisibleFallbackRunner(FakeRunner):
+            def __call__(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+                if "konsole" in args and active_record.exists() and not sidecar.exists():
+                    active_record.replace(sidecar)
+                    active_record.write_text(
+                        json.dumps({"target": role.target, "session_id": "fresh-session"}) + "\n",
+                        encoding="utf-8",
+                    )
+                return super().__call__(args, **kwargs)
+
+        messages: list[str] = []
+
+        assert (
+            launch_project(
+                config,
+                config_path=config_path,
+                mode="start",
+                script_path=ROOT / "scripts" / "team-launcher",
+                runner=VisibleFallbackRunner(),
+                layout_output=tmp_path / "launch-layout.json",
+                pane_state_dir=tmp_path / "pane-state",
+                report_session_records=True,
+                session_record_timeout=0,
+                print_func=messages.append,
+            )
+            == 0
+        )
+
+    assert any("session record found for app (porter-app:0.0): fresh-session" in message for message in messages)
+    assert any(
+        "warning: switchyard: app (porter-app:0.0) fell back to a fresh session; superseded session old-session"
+        in message
+        for message in messages
+    )
 
 
 def _live_session_record_fingerprint() -> dict[str, str]:

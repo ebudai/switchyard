@@ -138,6 +138,8 @@ RUNTIME_READY_ATTEMPTS = 50
 RUNTIME_READY_POLL_SECONDS = 0.1
 LAUNCH_SESSION_RECORD_TIMEOUT_SECONDS = 10.0
 LAUNCH_SESSION_RECORD_POLL_SECONDS = 0.2
+LAUNCH_RESUME_FALLBACK_GRACE_SECONDS = 2.0
+LAUNCH_RESUME_FALLBACK_FRESHNESS_SKEW_NS = 100_000_000
 ALLOW_STALE_LAUNCHER_ENV = "TEAM_LAUNCHER_ALLOW_STALE"
 LEGACY_ALLOW_STALE_LAUNCHER_ENV = "PGU_TEAM_LAUNCHER_ALLOW_STALE"
 NO_LAUNCHER_SELF_DEPLOY_ENV = "TEAM_LAUNCHER_NO_SELF_DEPLOY"
@@ -238,10 +240,15 @@ class LaunchSessionRecordStatus:
     role: str
     target: str
     session_id: str
+    superseded_session_id: str = ""
 
     @property
     def found(self) -> bool:
         return bool(self.session_id)
+
+    @property
+    def resume_fallback(self) -> bool:
+        return bool(self.superseded_session_id)
 
 
 def _repo_root() -> Path:
@@ -1194,15 +1201,43 @@ def session_id_for_role(role: RoleConfig, session_dir: Path) -> str:
     return str(parsed.get("session_id") or "").strip()
 
 
+def superseded_session_id_for_role(
+    role: RoleConfig,
+    session_dir: Path,
+    *,
+    changed_since_ns: int | None = None,
+) -> str:
+    if changed_since_ns is None:
+        return ""
+    path = session_dir / f"{session_file_name(role.target)}.superseded"
+    try:
+        stat = path.stat()
+    except OSError:
+        return ""
+    if stat.st_ctime_ns + LAUNCH_RESUME_FALLBACK_FRESHNESS_SKEW_NS < changed_since_ns:
+        return ""
+    parsed = _session_record_at_path_for_role(role, path)
+    if parsed is None:
+        return ""
+    return str(parsed.get("session_id") or "").strip()
+
+
 def launch_session_record_statuses(
     config: ProjectConfig,
     roles: Sequence[RoleConfig] | None = None,
     *,
     timeout_seconds: float = LAUNCH_SESSION_RECORD_TIMEOUT_SECONDS,
     poll_seconds: float = LAUNCH_SESSION_RECORD_POLL_SECONDS,
+    fallback_changed_since_ns: int | None = None,
+    fallback_grace_seconds: float = LAUNCH_RESUME_FALLBACK_GRACE_SECONDS,
 ) -> list[LaunchSessionRecordStatus]:
     roles = tuple(roles or config.roles)
     deadline = time.monotonic() + max(0.0, timeout_seconds)
+    fallback_deadline = (
+        time.monotonic() + min(max(0.0, fallback_grace_seconds), max(0.0, timeout_seconds))
+        if fallback_changed_since_ns is not None
+        else time.monotonic()
+    )
     statuses: list[LaunchSessionRecordStatus] = []
     while True:
         statuses = [
@@ -1210,12 +1245,29 @@ def launch_session_record_statuses(
                 role=role.role,
                 target=role.target,
                 session_id=session_id_for_role(role, config.session_dir),
+                superseded_session_id=superseded_session_id_for_role(
+                    role,
+                    config.session_dir,
+                    changed_since_ns=fallback_changed_since_ns,
+                ),
             )
             for role in roles
         ]
-        if all(status.found for status in statuses) or time.monotonic() >= deadline:
+        now = time.monotonic()
+        all_records_found = all(status.found for status in statuses)
+        resume_fallback_found = any(status.resume_fallback for status in statuses)
+        fallback_grace_elapsed = now >= fallback_deadline
+        if (
+            now >= deadline
+            or resume_fallback_found
+            or (all_records_found and fallback_changed_since_ns is None)
+            or (all_records_found and fallback_grace_elapsed)
+        ):
             return statuses
-        sleep_seconds = min(max(0.01, poll_seconds), max(0.0, deadline - time.monotonic()))
+        next_deadline = deadline
+        if all_records_found and fallback_changed_since_ns is not None:
+            next_deadline = min(deadline, fallback_deadline)
+        sleep_seconds = min(max(0.01, poll_seconds), max(0.0, next_deadline - now))
         if sleep_seconds <= 0:
             return statuses
         time.sleep(sleep_seconds)
@@ -1227,6 +1279,7 @@ def report_launch_session_records(
     *,
     timeout_seconds: float = LAUNCH_SESSION_RECORD_TIMEOUT_SECONDS,
     poll_seconds: float = LAUNCH_SESSION_RECORD_POLL_SECONDS,
+    fallback_changed_since_ns: int | None = None,
     print_func: Callable[[str], None] = print,
 ) -> list[LaunchSessionRecordStatus]:
     selected_roles = tuple(roles or config.roles)
@@ -1239,6 +1292,7 @@ def report_launch_session_records(
         selected_roles,
         timeout_seconds=timeout_seconds,
         poll_seconds=poll_seconds,
+        fallback_changed_since_ns=fallback_changed_since_ns,
     )
     for status in statuses:
         if status.found:
@@ -1249,6 +1303,11 @@ def report_launch_session_records(
             print_func(
                 f"warning: switchyard: session record missing for {status.role} "
                 f"({status.target}) after {timeout_seconds:g}s; continuing"
+            )
+        if status.resume_fallback:
+            print_func(
+                f"warning: switchyard: {status.role} ({status.target}) fell back to a fresh session; "
+                f"superseded session {status.superseded_session_id}"
             )
     return statuses
 
@@ -1268,8 +1327,7 @@ def clear_session_record_for_role(role: RoleConfig, session_dir: Path) -> bool:
     return True
 
 
-def _session_record_for_role(role: RoleConfig, session_dir: Path) -> dict[str, Any] | None:
-    path = session_dir / session_file_name(role.target)
+def _session_record_at_path_for_role(role: RoleConfig, path: Path) -> dict[str, Any] | None:
     try:
         parsed = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -1279,6 +1337,10 @@ def _session_record_for_role(role: RoleConfig, session_dir: Path) -> dict[str, A
     if str(parsed.get("target") or "") != role.target:
         return None
     return parsed
+
+
+def _session_record_for_role(role: RoleConfig, session_dir: Path) -> dict[str, Any] | None:
+    return _session_record_at_path_for_role(role, session_dir / session_file_name(role.target))
 
 
 def _session_payload_model_for_role(role: RoleConfig, session_dir: Path) -> str:
@@ -3292,6 +3354,7 @@ def launch_project(
             plan["viewer_roles"] = [role.role for role in visible_roles_for_viewer(config)]
         print(json.dumps(plan, indent=2, sort_keys=True))
         return 0
+    launch_started_ns = time.time_ns()
     for role in config.roles:
         if not role.detached:
             continue
@@ -3338,6 +3401,7 @@ def launch_project(
             config,
             timeout_seconds=session_record_timeout,
             poll_seconds=session_record_poll,
+            fallback_changed_since_ns=launch_started_ns,
             print_func=print_func,
         )
     return 0
@@ -5024,6 +5088,7 @@ def switchyard_new_command(
         owned_roots=_control_repository_owned_roots(config),
         runner=runner,
     )
+    launch_started_ns = time.time_ns()
     launch_result = launch_project(
         config,
         config_path=config_path,
@@ -5044,6 +5109,7 @@ def switchyard_new_command(
         config,
         timeout_seconds=session_record_timeout,
         poll_seconds=session_record_poll,
+        fallback_changed_since_ns=launch_started_ns,
         print_func=print_func,
     )
     resolved_layout_mode = resolve_layout_mode(layout_mode, environ=layout_environ, runner=runner)

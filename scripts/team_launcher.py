@@ -4945,6 +4945,8 @@ def _workdir_is_trusted(cli: str, *, owner_home: Path, workdir: Path) -> bool:
 
 
 def _first_run_trust_command(role: RoleConfig) -> list[str]:
+    # Trust is directory-scoped, so the minimal interactive CLI is enough to collect it.
+    # Detached roles do not have a visible pane where the prompt can appear.
     return list(role.cli)
 
 
@@ -5006,6 +5008,8 @@ def run_first_run_auth_phase(
 
     untrusted: list[tuple[str, str, str]] = []
     for role in config.roles:
+        if not role.detached:
+            continue
         cli = _role_cli_name(role)
         if cli not in FIRST_RUN_TRUST_CLIS:
             continue

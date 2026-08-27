@@ -8710,7 +8710,7 @@ def test_first_run_auth_phase_does_not_sudo_wrap_same_owner() -> None:
     assert {kwargs.get("cwd") for kwargs in runner.call_kwargs} == {str(owner_home)}
 
 
-def test_first_run_auth_phase_sequences_distinct_logins_then_worktree_trust() -> None:
+def test_first_run_auth_phase_sequences_distinct_logins_and_skips_visible_worktree_trust() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-first-run-auth.") as tmp:
         tmp_path = Path(tmp)
         owner_home = tmp_path / "home" / "otto-agent"
@@ -8740,11 +8740,7 @@ def test_first_run_auth_phase_sequences_distinct_logins_then_worktree_trust() ->
         )
 
     assert report.unauthenticated_roles == {}
-    assert report.untrusted_roles == [
-        ("claude", "designer", str(tmp_path / "worktrees" / "designer")),
-        ("claude", "director", str(tmp_path / "worktrees" / "director")),
-        ("agy", "inspector", str(tmp_path / "worktrees" / "inspector")),
-    ]
+    assert report.untrusted_roles == []
     assert runner.calls == [
         ["sudo", "-u", "otto-agent", "claude", "auth", "status", "--json"],
         ["sudo", "-u", "otto-agent", "claude", "auth", "login"],
@@ -8755,16 +8751,8 @@ def test_first_run_auth_phase_sequences_distinct_logins_then_worktree_trust() ->
         ["sudo", "-u", "otto-agent", "agy", "models"],
         ["sudo", "-u", "otto-agent", "agy"],
         ["sudo", "-u", "otto-agent", "agy", "models"],
-        ["sudo", "-u", "otto-agent", "claude"],
-        ["sudo", "-u", "otto-agent", "claude"],
-        ["sudo", "-u", "otto-agent", "agy"],
     ]
-    assert [kwargs.get("cwd") for kwargs in runner.call_kwargs[:9]] == [str(owner_home)] * 9
-    assert [kwargs.get("cwd") for kwargs in runner.call_kwargs[9:]] == [
-        str(tmp_path / "worktrees" / "designer"),
-        str(tmp_path / "worktrees" / "director"),
-        str(tmp_path / "worktrees" / "inspector"),
-    ]
+    assert [kwargs.get("cwd") for kwargs in runner.call_kwargs] == [str(owner_home)] * 9
     assert not (owner_home / ".claude.json").exists()
     assert not (owner_home / ".gemini" / "antigravity-cli" / "settings.json").exists()
     assert messages[:3] == [
@@ -8772,25 +8760,20 @@ def test_first_run_auth_phase_sequences_distinct_logins_then_worktree_trust() ->
         "switchyard: first-run codex login required for ops, main; running codex login as otto-agent",
         "switchyard: first-run agy login required for inspector; running agy as otto-agent",
     ]
-    assert all("folder trust required" in message and "not account login" in message for message in messages[3:])
+    assert messages[3:] == []
 
 
-def test_first_run_trust_uses_bare_cli_and_persists_for_later_launches() -> None:
+def test_first_run_trust_handles_detached_roles_and_persists_for_later_launches() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-first-run-trust-repeat.") as tmp:
         tmp_path = Path(tmp)
         owner_home = tmp_path / "home" / "otto-agent"
         owner_home.mkdir(parents=True)
-        config = load_project_config(
-            "otto",
-            _write_first_run_auth_config(
-                tmp_path,
-                roles=[
-                    ("designer", "claude"),
-                    ("director", "claude"),
-                    ("audit", "claude"),
-                ],
-            ),
-        )
+        config_path = _write_first_run_auth_config(tmp_path, roles=[("research", "claude")])
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
+        raw["roles"][0]["detached"] = True
+        raw["roles"][0].pop("slot", None)
+        config_path.write_text(json.dumps(raw) + "\n", encoding="utf-8")
+        config = load_project_config("otto", config_path)
 
         calls: list[list[str]] = []
         call_kwargs: list[dict[str, object]] = []
@@ -8837,19 +8820,13 @@ def test_first_run_trust_uses_bare_cli_and_persists_for_later_launches() -> None
     assert calls_after_first == [
         ["sudo", "-u", "otto-agent", "claude", "auth", "status", "--json"],
         ["sudo", "-u", "otto-agent", "claude"],
-        ["sudo", "-u", "otto-agent", "claude"],
-        ["sudo", "-u", "otto-agent", "claude"],
     ]
     assert calls == [
         *calls_after_first,
         ["sudo", "-u", "otto-agent", "claude", "auth", "status", "--json"],
     ]
-    assert [kwargs.get("cwd") for kwargs in call_kwargs[1:4]] == [
-        str(tmp_path / "worktrees" / "designer"),
-        str(tmp_path / "worktrees" / "director"),
-        str(tmp_path / "worktrees" / "audit"),
-    ]
-    assert len(first_messages) == 3
+    assert call_kwargs[1].get("cwd") == str(tmp_path / "worktrees" / "research")
+    assert len(first_messages) == 1
     assert all("folder trust required" in message and "not account login" in message for message in first_messages)
     assert second_messages == []
 
@@ -8865,6 +8842,8 @@ def test_first_run_trust_matches_configured_symlink_path_without_reprompting() -
         link.symlink_to(target, target_is_directory=True)
         config_path = _write_first_run_auth_config(tmp_path, roles=[("director", "claude")])
         raw = json.loads(config_path.read_text(encoding="utf-8"))
+        raw["roles"][0]["detached"] = True
+        raw["roles"][0].pop("slot", None)
         raw["roles"][0]["workdir"] = str(link)
         config_path.write_text(json.dumps(raw) + "\n", encoding="utf-8")
         config = load_project_config("otto", config_path)

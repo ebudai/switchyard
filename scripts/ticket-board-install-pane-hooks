@@ -15,12 +15,13 @@ from typing import Any
 
 HOOK_BASENAME = "ticket-board-pane-idle-hook"
 LEGACY_HOOK_BASENAME = "pgu-ticket-board-pane-idle-hook"
+DEFAULT_PROJECT = os.environ.get("TICKET_BOARD_PROJECT", "").strip() or os.environ.get("PGU_TICKET_BOARD_PROJECT", "").strip() or "pgu"
 DEFAULT_PANE_STATE_DIR = (
     Path(os.environ["TICKET_BOARD_PANE_STATE_DIR"]).expanduser()
     if os.environ.get("TICKET_BOARD_PANE_STATE_DIR")
     else Path(os.environ["PGU_TICKET_BOARD_PANE_STATE_DIR"]).expanduser()
     if os.environ.get("PGU_TICKET_BOARD_PANE_STATE_DIR")
-    else Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-state")
+    else Path(f"/run/user/{os.getuid()}/{DEFAULT_PROJECT}-ticket-board/pane-state")
 )
 DEFAULT_PANE_SESSION_DIR = (
     Path(os.environ["TICKET_BOARD_PANE_SESSION_DIR"]).expanduser()
@@ -28,10 +29,9 @@ DEFAULT_PANE_SESSION_DIR = (
     else Path(os.environ["PGU_TICKET_BOARD_PANE_SESSION_DIR"]).expanduser()
     if os.environ.get("PGU_TICKET_BOARD_PANE_SESSION_DIR")
     else Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
-    / "pgu-ticket-board"
+    / f"{DEFAULT_PROJECT}-ticket-board"
     / "pane-sessions"
 )
-DEFAULT_PROJECT = os.environ.get("TICKET_BOARD_PROJECT", "").strip() or os.environ.get("PGU_TICKET_BOARD_PROJECT", "").strip() or "pgu"
 PANE_TARGETS = tuple(
     f"{DEFAULT_PROJECT}-{role}:0.0"
     for role in (
@@ -126,26 +126,80 @@ def _install_hook_binary(source: Path, destination: Path) -> None:
 def _install_claude_hooks(home: Path, hook_bin: Path) -> Path:
     path = home / ".claude" / "settings.json"
     config = _load_json(path)
-    hook = str(hook_bin)
+    state_dir = DEFAULT_PANE_STATE_DIR
+    session_dir = DEFAULT_PANE_SESSION_DIR
     _merge_hook_entries(
         config,
         "SessionStart",
-        [_hook_entry(f"{hook} idle --source claude.SessionStart --record-session")],
+        [
+            _hook_entry(
+                _shell_command(
+                    [
+                        hook_bin,
+                        "idle",
+                        "--source",
+                        "claude.SessionStart",
+                        "--state-dir",
+                        state_dir,
+                        "--session-dir",
+                        session_dir,
+                        "--record-session",
+                    ]
+                )
+            )
+        ],
     )
     _merge_hook_entries(
         config,
         "Notification",
-        [_hook_entry(f"{hook} idle --source claude.Notification.idle_prompt", matcher="idle_prompt")],
+        [
+            _hook_entry(
+                _shell_command(
+                    [
+                        hook_bin,
+                        "idle",
+                        "--source",
+                        "claude.Notification.idle_prompt",
+                        "--state-dir",
+                        state_dir,
+                        "--session-dir",
+                        session_dir,
+                    ]
+                ),
+                matcher="idle_prompt",
+            )
+        ],
     )
     _merge_hook_entries(
         config,
         "UserPromptSubmit",
-        [_hook_entry(f"{hook} busy --source claude.UserPromptSubmit")],
+        [
+            _hook_entry(
+                _shell_command(
+                    [
+                        hook_bin,
+                        "busy",
+                        "--source",
+                        "claude.UserPromptSubmit",
+                        "--state-dir",
+                        state_dir,
+                        "--session-dir",
+                        session_dir,
+                    ]
+                )
+            )
+        ],
     )
     _merge_hook_entries(
         config,
         "Stop",
-        [_hook_entry(f"{hook} idle --source claude.Stop")],
+        [
+            _hook_entry(
+                _shell_command(
+                    [hook_bin, "idle", "--source", "claude.Stop", "--state-dir", state_dir, "--session-dir", session_dir]
+                )
+            )
+        ],
     )
     _write_json(path, config)
     return path
@@ -220,7 +274,55 @@ def _install_gemini_hooks(home: Path, hook_bin: Path) -> Path:
     # settings, but current agy logs report hooks loaded from hooks.json files.
     path = home / ".gemini" / "config" / "hooks.json"
     config = _load_json(path)
-    hook = str(hook_bin)
+    session_start_command = _shell_command(
+        [
+            hook_bin,
+            "idle",
+            "--source",
+            "gemini.SessionStart",
+            "--state-dir",
+            DEFAULT_PANE_STATE_DIR,
+            "--session-dir",
+            DEFAULT_PANE_SESSION_DIR,
+            "--record-session",
+        ]
+    )
+    pre_invocation_command = _shell_command(
+        [
+            hook_bin,
+            "busy",
+            "--source",
+            "gemini.PreInvocation",
+            "--state-dir",
+            DEFAULT_PANE_STATE_DIR,
+            "--session-dir",
+            DEFAULT_PANE_SESSION_DIR,
+        ]
+    )
+    post_invocation_command = _shell_command(
+        [
+            hook_bin,
+            "idle",
+            "--source",
+            "gemini.PostInvocation",
+            "--state-dir",
+            DEFAULT_PANE_STATE_DIR,
+            "--session-dir",
+            DEFAULT_PANE_SESSION_DIR,
+        ]
+    )
+    stop_command = _shell_command(
+        [
+            hook_bin,
+            "idle",
+            "--source",
+            "gemini.Stop",
+            "--state-dir",
+            DEFAULT_PANE_STATE_DIR,
+            "--session-dir",
+            DEFAULT_PANE_SESSION_DIR,
+        ]
+    )
     if _contains_managed_hook(config.get("hooks")):
         config.pop("hooks", None)
     _merge_agy_named_hook(
@@ -229,18 +331,18 @@ def _install_gemini_hooks(home: Path, hook_bin: Path) -> Path:
         {
             "SessionStart": [
                 _flat_command_hook(
-                    f"out=\"$({hook} idle --source gemini.SessionStart --record-session)\" && "
+                    f"out=\"$({session_start_command})\" && "
                     "if [ -n \"$out\" ]; then printf '%s' \"$out\"; else printf '{}'; fi"
                 )
             ],
             "PreInvocation": [
-                _flat_command_hook(f"{hook} busy --source gemini.PreInvocation >/dev/null && printf '{{}}'")
+                _flat_command_hook(f"{pre_invocation_command} >/dev/null && printf '{{}}'")
             ],
             "PostInvocation": [
-                _flat_command_hook(f"{hook} idle --source gemini.PostInvocation >/dev/null && printf '{{}}'")
+                _flat_command_hook(f"{post_invocation_command} >/dev/null && printf '{{}}'")
             ],
             "Stop": [
-                _flat_command_hook(f"{hook} idle --source gemini.Stop >/dev/null && printf '{{}}'")
+                _flat_command_hook(f"{stop_command} >/dev/null && printf '{{}}'")
             ],
         },
     )

@@ -86,6 +86,20 @@ def _hook_env(**extra: str) -> dict[str, str]:
     return stripped_ticket_board_pane_env(**extra)
 
 
+def _without_hook_dir_env(environ: dict[str, str]) -> dict[str, str]:
+    cleaned = dict(environ)
+    for key in (
+        "TICKET_BOARD_PANE_STATE_DIR",
+        "TICKET_BOARD_PANE_SESSION_DIR",
+        "PGU_TICKET_BOARD_PANE_STATE_DIR",
+        "PGU_TICKET_BOARD_PANE_SESSION_DIR",
+        "TICKET_BOARD_PROJECT",
+        "PGU_TICKET_BOARD_PROJECT",
+    ):
+        cleaned.pop(key, None)
+    return cleaned
+
+
 def _inspector_session_record() -> dict[str, Any]:
     return {
         "target": "pgu-inspector:0.0",
@@ -211,7 +225,8 @@ def test_installer_writes_durable_cli_hook_configs_idempotently() -> None:
         assert " idle --source claude.Stop" in claude_commands["claude.Stop"]
         assert " busy --source claude.Stop" not in claude_commands["claude.Stop"]
         gemini_commands = _managed_commands_by_source(gemini)
-        assert "gemini.SessionStart --record-session)" in gemini_commands["gemini.SessionStart"]
+        assert "gemini.SessionStart" in gemini_commands["gemini.SessionStart"]
+        assert "--record-session)" in gemini_commands["gemini.SessionStart"]
         assert ">/dev/null" not in gemini_commands["gemini.SessionStart"]
 
 
@@ -1112,6 +1127,213 @@ def test_codex_installed_hooks_embed_project_state_and_session_dirs() -> None:
         assert state["state"] == "idle"
         assert state["source"] == "codex.Stop"
         assert not (home / ".local" / "state" / "pgu-ticket-board" / "pane-sessions" / "otto-ops_0.0.json").exists()
+
+
+def test_claude_installed_hooks_embed_project_state_and_session_dirs() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        tmp_path = Path(tmp)
+        home = tmp_path / "home"
+        bin_path = home / ".local" / "bin" / HOOK_NAME
+        state_dir = tmp_path / "run" / "otto-ticket-board" / "pane-state"
+        session_dir = tmp_path / "state" / "otto-ticket-board" / "pane-sessions"
+        install_env = _hook_env(
+            TICKET_BOARD_PROJECT="otto",
+            TICKET_BOARD_PANE_STATE_DIR=str(state_dir),
+            TICKET_BOARD_PANE_SESSION_DIR=str(session_dir),
+        )
+        subprocess.run(
+            [str(INSTALLER), "install", "--home", str(home), "--bin-path", str(bin_path)],
+            check=True,
+            env=install_env,
+        )
+
+        claude_commands = _managed_commands_by_source(_load(home / ".claude" / "settings.json"))
+        session_start = claude_commands["claude.SessionStart"]
+        stop = claude_commands["claude.Stop"]
+        for command in (session_start, stop):
+            assert f"--state-dir {state_dir}" in command
+            assert f"--session-dir {session_dir}" in command
+
+        hook_runtime_env = _without_hook_dir_env(
+            _hook_env(
+                HOME=str(home),
+                TICKET_BOARD_PANE_TARGET="otto-director:0.0",
+                CLAUDE_SESSION_ID="claude_otto_session_456",
+            )
+        )
+        subprocess.run(
+            ["sh", "-c", session_start],
+            input=json.dumps({"session_id": "claude_otto_session_456"}),
+            text=True,
+            check=True,
+            env=hook_runtime_env,
+        )
+        subprocess.run(["sh", "-c", stop], check=True, env=hook_runtime_env)
+
+        session = json.loads((session_dir / "otto-director_0.0.json").read_text(encoding="utf-8"))
+        state = json.loads((state_dir / "otto-director_0.0.json").read_text(encoding="utf-8"))
+        assert session["session_id"] == "claude_otto_session_456"
+        assert session["source"] == "claude.SessionStart"
+        assert state["state"] == "idle"
+        assert state["source"] == "claude.Stop"
+        assert not (home / ".local" / "state" / "pgu-ticket-board" / "pane-sessions" / "otto-director_0.0.json").exists()
+
+
+def test_gemini_installed_hooks_embed_project_state_and_session_dirs() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        tmp_path = Path(tmp)
+        home = tmp_path / "home"
+        bin_path = home / ".local" / "bin" / HOOK_NAME
+        state_dir = tmp_path / "run" / "otto-ticket-board" / "pane-state"
+        session_dir = tmp_path / "state" / "otto-ticket-board" / "pane-sessions"
+        install_env = _hook_env(
+            TICKET_BOARD_PROJECT="otto",
+            TICKET_BOARD_PANE_STATE_DIR=str(state_dir),
+            TICKET_BOARD_PANE_SESSION_DIR=str(session_dir),
+        )
+        subprocess.run(
+            [str(INSTALLER), "install", "--home", str(home), "--bin-path", str(bin_path)],
+            check=True,
+            env=install_env,
+        )
+
+        gemini_commands = _managed_commands_by_source(_load(home / ".gemini" / "config" / "hooks.json"))
+        session_start = gemini_commands["gemini.SessionStart"]
+        stop = gemini_commands["gemini.Stop"]
+        for command in (session_start, stop):
+            assert f"--state-dir {state_dir}" in command
+            assert f"--session-dir {session_dir}" in command
+
+        hook_runtime_env = _without_hook_dir_env(
+            _hook_env(
+                HOME=str(home),
+                TICKET_BOARD_PANE_TARGET="otto-inspector:0.0",
+                GEMINI_SESSION_ID="gemini_otto_session_456",
+            )
+        )
+        start = subprocess.run(
+            ["sh", "-c", session_start],
+            input=json.dumps({"session_id": "gemini_otto_session_456"}),
+            text=True,
+            capture_output=True,
+            check=True,
+            env=hook_runtime_env,
+        )
+        subprocess.run(["sh", "-c", stop], text=True, capture_output=True, check=True, env=hook_runtime_env)
+
+        session = json.loads((session_dir / "otto-inspector_0.0.json").read_text(encoding="utf-8"))
+        state = json.loads((state_dir / "otto-inspector_0.0.json").read_text(encoding="utf-8"))
+        assert start.stdout == "{}"
+        assert session["session_id"] == "gemini_otto_session_456"
+        assert session["source"] == "gemini.SessionStart"
+        assert state["state"] == "idle"
+        assert state["source"] == "gemini.Stop"
+        assert not (home / ".local" / "state" / "pgu-ticket-board" / "pane-sessions" / "otto-inspector_0.0.json").exists()
+
+
+def test_hook_default_dirs_derive_project_from_tmux_target_without_pgu_fallback() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        tmp_path = Path(tmp)
+        runtime_dir = tmp_path / "run"
+        state_home = tmp_path / "state"
+        env = _without_hook_dir_env(
+            _hook_env(
+                XDG_RUNTIME_DIR=str(runtime_dir),
+                XDG_STATE_HOME=str(state_home),
+                CODEX_SESSION_ID="codex_otto_default_session_456",
+            )
+        )
+
+        subprocess.run(
+            [
+                str(ROOT / "scripts" / HOOK_NAME),
+                "idle",
+                "--target",
+                "otto-ops:0.0",
+                "--source",
+                "codex.SessionStart",
+                "--record-session",
+            ],
+            check=True,
+            env=env,
+        )
+
+        otto_state = runtime_dir / "otto-ticket-board" / "pane-state" / "otto-ops_0.0.json"
+        otto_session = state_home / "otto-ticket-board" / "pane-sessions" / "otto-ops_0.0.json"
+        pgu_state = runtime_dir / "pgu-ticket-board" / "pane-state" / "otto-ops_0.0.json"
+        pgu_session = state_home / "pgu-ticket-board" / "pane-sessions" / "otto-ops_0.0.json"
+        assert json.loads(otto_state.read_text(encoding="utf-8"))["target"] == "otto-ops:0.0"
+        assert json.loads(otto_session.read_text(encoding="utf-8"))["session_id"] == "codex_otto_default_session_456"
+        assert not pgu_state.exists()
+        assert not pgu_session.exists()
+
+
+def test_pgu_hook_default_dirs_remain_pgu_named() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        tmp_path = Path(tmp)
+        runtime_dir = tmp_path / "run"
+        state_home = tmp_path / "state"
+        env = _without_hook_dir_env(
+            _hook_env(
+                XDG_RUNTIME_DIR=str(runtime_dir),
+                XDG_STATE_HOME=str(state_home),
+                CODEX_SESSION_ID="codex_pgu_default_session_456",
+            )
+        )
+
+        subprocess.run(
+            [
+                str(ROOT / "scripts" / HOOK_NAME),
+                "idle",
+                "--target",
+                "pgu-ops:0.0",
+                "--source",
+                "codex.SessionStart",
+                "--record-session",
+            ],
+            check=True,
+            env=env,
+        )
+
+        pgu_state = runtime_dir / "pgu-ticket-board" / "pane-state" / "pgu-ops_0.0.json"
+        pgu_session = state_home / "pgu-ticket-board" / "pane-sessions" / "pgu-ops_0.0.json"
+        assert json.loads(pgu_state.read_text(encoding="utf-8"))["target"] == "pgu-ops:0.0"
+        assert json.loads(pgu_session.read_text(encoding="utf-8"))["session_id"] == "codex_pgu_default_session_456"
+
+
+def test_hook_unresolved_default_dirs_report_but_do_not_fail_startup() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        tmp_path = Path(tmp)
+        runtime_dir = tmp_path / "run"
+        state_home = tmp_path / "state"
+        env = _without_hook_dir_env(
+            _hook_env(
+                XDG_RUNTIME_DIR=str(runtime_dir),
+                XDG_STATE_HOME=str(state_home),
+                CODEX_SESSION_ID="codex_unknown_session_456",
+            )
+        )
+
+        proc = subprocess.run(
+            [
+                str(ROOT / "scripts" / HOOK_NAME),
+                "idle",
+                "--target",
+                "ops:0.0",
+                "--source",
+                "codex.SessionStart",
+                "--record-session",
+            ],
+            text=True,
+            capture_output=True,
+            env=env,
+        )
+
+        assert proc.returncode == 0
+        assert "cannot determine pane state directory" in proc.stderr
+        assert "cannot determine pane session directory" in proc.stderr
+        assert not runtime_dir.exists()
+        assert not state_home.exists()
 
 
 def main() -> int:

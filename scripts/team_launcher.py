@@ -295,6 +295,33 @@ def runtime_dir_for_uid(uid: int) -> Path:
     return Path(f"/run/user/{uid}")
 
 
+def home_dir_for_user(user_name: str) -> Path | None:
+    user = user_name.strip()
+    if not user:
+        return None
+    try:
+        return Path(pwd.getpwnam(user).pw_dir)
+    except KeyError:
+        return Path("/home") / user
+
+
+def default_session_dir_for_user(user_name: str) -> Path:
+    owner_home = home_dir_for_user(user_name)
+    if owner_home is None:
+        return DEFAULT_SESSION_DIR
+    return owner_home / ".local" / "state" / LIVE_PGU_STATE_DIR_NAME / "pane-sessions"
+
+
+def default_pane_state_dir_for_user(user_name: str) -> Path:
+    user = user_name.strip()
+    if not user:
+        return DEFAULT_PANE_STATE_DIR
+    uid = uid_for_user(user)
+    if uid is None:
+        return DEFAULT_PANE_STATE_DIR
+    return runtime_dir_for_uid(uid) / LIVE_PGU_STATE_DIR_NAME / "pane-state"
+
+
 def loginctl_enable_linger_args(user_name: str) -> list[str]:
     return ["loginctl", "enable-linger", user_name]
 
@@ -1056,11 +1083,11 @@ def load_project_config(project: str, config_path: Path | None = None) -> Projec
         raise SystemExit(f"{path} must define a non-empty roles list")
     base = path.parent
     layout = _expand_path(str(config.get("layout") or f"{project}-konsole-layout.json"), base=base)
-    session_dir = _expand_path(str(config.get("session_dir") or str(DEFAULT_SESSION_DIR)), base=base)
+    run_as_user = str(config.get("run_as_user") or "").strip()
+    session_dir = _expand_path(str(config.get("session_dir") or str(default_session_dir_for_user(run_as_user))), base=base)
     ticket_prefix = validate_ticket_prefix(str(config.get("ticket_prefix") or project))
     board_url = str(config.get("board_url") or _default_board_url(project)).strip()
     board_socket = str(config.get("board_socket") or _default_board_socket(project)).strip()
-    run_as_user = str(config.get("run_as_user") or "").strip()
     pane_launcher = None
     pane_launcher_raw = config.get("pane_launcher")
     if pane_launcher_raw is not None:
@@ -3310,7 +3337,7 @@ def launch_project(
                 owned_roots=_control_repository_owned_roots(config),
                 runner=runner,
             )
-    effective_pane_state_dir = pane_state_dir or DEFAULT_PANE_STATE_DIR
+    effective_pane_state_dir = pane_state_dir or default_pane_state_dir_for_user(config.run_as_user)
     output_path = layout_output or default_layout_output_path(config, config_path=config_path)
     should_assign_layout_owner = layout_output is None if assign_layout_owner is None else assign_layout_owner
     pane_script_path = config.pane_launcher or script_path
@@ -5156,7 +5183,7 @@ def switchyard_new_command(
         script_path=Path(__file__).resolve().with_name(TEAM_LAUNCHER_NAME),
         layout_output=_owner_state_layout_output_path(resolved_slug, owner_home=home_base / owner_user),
         assign_layout_owner=True,
-        pane_state_dir=pane_state_dir or DEFAULT_PANE_STATE_DIR,
+        pane_state_dir=pane_state_dir,
         runner=launch_runner,
         layout_mode=layout_mode,
         layout_environ=layout_environ,
@@ -5170,7 +5197,7 @@ def switchyard_new_command(
         timeout_seconds=session_record_timeout,
         poll_seconds=session_record_poll,
         fallback_changed_since_ns=launch_started_ns,
-        pane_state_dir=pane_state_dir or DEFAULT_PANE_STATE_DIR,
+        pane_state_dir=pane_state_dir or default_pane_state_dir_for_user(config.run_as_user),
         pane_state_updated_since=launch_started_at,
         print_func=print_func,
     )

@@ -7545,6 +7545,184 @@ def test_switchyard_project_name_argv_joins_and_resumes_matching_project() -> No
     assert calls[0]["report_session_records"] is True
 
 
+def test_team_launcher_main_resolves_registered_project_for_pane_operations() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-registry-pane.") as tmp:
+        tmp_path = Path(tmp)
+        config_dir = tmp_path / "empty-checkout-config"
+        registry_dir = tmp_path / "registry"
+        project_dir = tmp_path / "otto-project"
+        provision_dir = project_dir / ".switchyard" / "provision"
+        layout = tmp_path / "layout.json"
+        session_dir = tmp_path / "sessions"
+        pane_state_dir = tmp_path / "pane-state"
+        config_dir.mkdir()
+        registry_dir.mkdir()
+        provision_dir.mkdir(parents=True)
+        project_dir.mkdir(exist_ok=True)
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        config_path = provision_dir / "otto.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "otto",
+                    "project_name": "Otto System",
+                    "layout": str(layout),
+                    "session_dir": str(session_dir),
+                    "roles": [
+                        {
+                            "role": "app",
+                            "slot": 0,
+                            "tmux_session": "otto-app",
+                            "target": "otto-app:0.0",
+                            "cli": ["codex"],
+                            "workdir": str(project_dir),
+                        }
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (registry_dir / "otto.json").write_text(
+            json.dumps(
+                {
+                    "schema": team_launcher.SWITCHYARD_REGISTRY_SCHEMA,
+                    "slug": "otto",
+                    "name": "Otto System",
+                    "config_path": str(config_path),
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        calls: list[dict[str, object]] = []
+        original_config_dir = team_launcher.DEFAULT_CONFIG_DIR
+        original_registry_dir = team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR
+        original_run_role_pane = team_launcher.run_role_pane
+        try:
+            team_launcher.DEFAULT_CONFIG_DIR = config_dir
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
+
+            def fake_run_role_pane(role: team_launcher.RoleConfig, **kwargs: object) -> int:
+                calls.append({"role": role.role, "tmux_session": role.tmux_session, **kwargs})
+                return 0
+
+            team_launcher.run_role_pane = fake_run_role_pane
+
+            assert team_launcher.main(["otto", "pane", "reload", "app", "--skip-launcher-check", "--pane-state-dir", str(pane_state_dir)]) == 0
+        finally:
+            team_launcher.DEFAULT_CONFIG_DIR = original_config_dir
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = original_registry_dir
+            team_launcher.run_role_pane = original_run_role_pane
+
+    assert calls == [
+        {
+            "role": "app",
+            "tmux_session": "otto-app",
+            "mode": "reload",
+            "session_dir": session_dir,
+            "pane_state_dir": pane_state_dir,
+            "force_reload": False,
+        }
+    ]
+
+
+def test_team_launcher_main_prefers_checkout_config_before_registry_for_pgu() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-registry-precedence.") as tmp:
+        tmp_path = Path(tmp)
+        config_dir = tmp_path / "config"
+        registry_dir = tmp_path / "registry"
+        checkout_repo = tmp_path / "checkout-repo"
+        registry_repo = tmp_path / "registry-repo"
+        layout = tmp_path / "layout.json"
+        config_dir.mkdir()
+        registry_dir.mkdir()
+        checkout_repo.mkdir()
+        registry_repo.mkdir()
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        checkout_config = config_dir / "pgu.json"
+        registry_config = tmp_path / "registry-pgu.json"
+        for path, workdir, role in [
+            (checkout_config, checkout_repo, "ops"),
+            (registry_config, registry_repo, "app"),
+        ]:
+            path.write_text(
+                json.dumps(
+                    {
+                        "project": "pgu",
+                        "layout": str(layout),
+                        "roles": [{"role": role, "slot": 0, "cli": ["codex"], "workdir": str(workdir)}],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        (registry_dir / "pgu.json").write_text(
+            json.dumps(
+                {
+                    "schema": team_launcher.SWITCHYARD_REGISTRY_SCHEMA,
+                    "slug": "pgu",
+                    "name": "pgu",
+                    "config_path": str(registry_config),
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        calls: list[dict[str, object]] = []
+        original_config_dir = team_launcher.DEFAULT_CONFIG_DIR
+        original_registry_dir = team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR
+        original_launch_project = team_launcher.launch_project
+        try:
+            team_launcher.DEFAULT_CONFIG_DIR = config_dir
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
+
+            def fake_launch_project(config: team_launcher.ProjectConfig, **kwargs: object) -> int:
+                calls.append({"config_path": kwargs["config_path"], "workdirs": [role.workdir for role in config.roles]})
+                return 0
+
+            team_launcher.launch_project = fake_launch_project
+
+            assert team_launcher.main(["pgu", "start", "--dry-run"]) == 0
+            assert team_launcher.main(["pgu", "start", "--dry-run", "--config", str(checkout_config)]) == 0
+        finally:
+            team_launcher.DEFAULT_CONFIG_DIR = original_config_dir
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = original_registry_dir
+            team_launcher.launch_project = original_launch_project
+
+    assert calls == [
+        {"config_path": checkout_config, "workdirs": [str(checkout_repo)]},
+        {"config_path": checkout_config, "workdirs": [str(checkout_repo)]},
+    ]
+
+
+def test_team_launcher_unknown_project_names_config_and_registry_dirs() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-registry-missing.") as tmp:
+        tmp_path = Path(tmp)
+        config_dir = tmp_path / "config"
+        registry_dir = tmp_path / "registry"
+        config_dir.mkdir()
+        registry_dir.mkdir()
+        original_config_dir = team_launcher.DEFAULT_CONFIG_DIR
+        original_registry_dir = team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR
+        try:
+            team_launcher.DEFAULT_CONFIG_DIR = config_dir
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
+            try:
+                team_launcher.main(["unknown", "start", "--dry-run"])
+                raise AssertionError("expected unknown project failure")
+            except SystemExit as exc:
+                message = str(exc)
+        finally:
+            team_launcher.DEFAULT_CONFIG_DIR = original_config_dir
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = original_registry_dir
+
+    assert message == (
+        f"team-launcher: unknown project 'unknown'; searched config dir {config_dir} "
+        f"and registry dir {registry_dir}"
+    )
+
+
 def test_main_start_and_reload_enable_session_record_report() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-entry-session-records.") as tmp:
         tmp_path = Path(tmp)

@@ -943,7 +943,37 @@ def _config_path_from_launcher_args(argv: Sequence[str]) -> Path | None:
             return Path(str(argv[index + 1]))
         if raw.startswith("--config="):
             return Path(raw.split("=", 1)[1])
-    return DEFAULT_CONFIG_DIR / f"{project}.json"
+    try:
+        return _resolve_launcher_project_config(project).config_path
+    except SystemExit:
+        return DEFAULT_CONFIG_DIR / f"{project}.json"
+
+
+def _resolve_launcher_project_config(
+    project: str,
+    *,
+    explicit_config: Path | None = None,
+    config_dir: Path | None = None,
+    registry_dir: Path | None = None,
+) -> SwitchyardProjectEntry:
+    if explicit_config is not None:
+        return SwitchyardProjectEntry(slug=project, name=project, config_path=explicit_config)
+    effective_config_dir = config_dir or DEFAULT_CONFIG_DIR
+    effective_registry_dir = registry_dir or DEFAULT_SWITCHYARD_REGISTRY_DIR
+    try:
+        return _resolve_switchyard_project(
+            project,
+            config_dir=effective_config_dir,
+            registry_dir=effective_registry_dir,
+        )
+    except SystemExit as exc:
+        message = str(exc)
+        if message.startswith("switchyard: unknown project"):
+            raise SystemExit(
+                f"team-launcher: unknown project {project!r}; "
+                f"searched config dir {effective_config_dir} and registry dir {effective_registry_dir}"
+            ) from exc
+        raise
 
 
 def configured_run_as_user(argv: Sequence[str]) -> str:
@@ -5792,11 +5822,22 @@ def main(argv: list[str] | None = None) -> int:
             execute=args.execute,
             dry_run=args.dry_run,
         )
-    config_path = args.config or DEFAULT_CONFIG_DIR / f"{args.project}.json"
+    if args.command == "provision-runtime" and args.config is None:
+        try:
+            resolved = _resolve_launcher_project_config(args.project)
+            config_path = resolved.config_path
+            config_project = resolved.slug
+        except SystemExit:
+            config_path = DEFAULT_CONFIG_DIR / f"{args.project}.json"
+            config_project = args.project
+    else:
+        resolved = _resolve_launcher_project_config(args.project, explicit_config=args.config)
+        config_path = resolved.config_path
+        config_project = resolved.slug
     if args.command == "provision-runtime":
-        config = load_project_config(args.project, config_path) if config_path.exists() else None
+        config = load_project_config(config_project, config_path) if config_path.exists() else None
         return provision_runtime_command(args.runtime_user, config)
-    config = load_project_config(args.project, config_path)
+    config = load_project_config(config_project, config_path)
     if args.command == "upgrade":
         return upgrade_project_command(config, config_path=config_path, dry_run=args.dry_run)
     if args.command == "deploy-launcher":

@@ -3241,6 +3241,57 @@ def ensure_layout_output_owner(
         raise SystemExit(f"team-launcher: failed to assign layout output {output_path.parent} to {config.run_as_user}: {reason}")
 
 
+def install_owner_state_dir_args(config: ProjectConfig, path: Path) -> list[str]:
+    if not config.run_as_user:
+        raise ValueError("state directory ownership setup requires run_as_user")
+    return [
+        "install",
+        "-d",
+        "-m",
+        "700",
+        "-o",
+        config.run_as_user,
+        "-g",
+        config.run_as_user,
+        str(path),
+    ]
+
+
+def _owner_state_roots(config: ProjectConfig) -> tuple[Path, ...]:
+    if not config.run_as_user:
+        return ()
+    try:
+        owner = pwd.getpwnam(config.run_as_user)
+    except KeyError:
+        return ()
+    return (
+        Path(owner.pw_dir).expanduser().resolve(strict=False),
+        runtime_dir_for_uid(owner.pw_uid).expanduser().resolve(strict=False),
+    )
+
+
+def _is_owner_state_path(config: ProjectConfig, path: Path) -> bool:
+    resolved = path.expanduser().resolve(strict=False)
+    return any(resolved == root or resolved.is_relative_to(root) for root in _owner_state_roots(config))
+
+
+def ensure_owner_state_dirs(
+    config: ProjectConfig,
+    *,
+    pane_state_dir: Path,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> None:
+    if not config.run_as_user or current_user_name() == config.run_as_user:
+        return
+    for path in (config.session_dir, pane_state_dir):
+        if not _is_owner_state_path(config, path):
+            continue
+        result = runner(install_owner_state_dir_args(config, path))
+        if result.returncode != 0:
+            reason = _proc_failure_reason(result, f"install failed with exit {result.returncode}")
+            raise SystemExit(f"team-launcher: failed to assign state directory {path} to {config.run_as_user}: {reason}")
+
+
 def _legacy_new_project_stacked_layout_payload(role_count: int) -> dict[str, Any]:
     leaves = [
         {
@@ -3464,6 +3515,7 @@ def launch_project(
             allow_stale=allow_stale_launcher,
         )
         ensure_configured_runtime_user(config, runner=runner)
+        ensure_owner_state_dirs(config, pane_state_dir=effective_pane_state_dir, runner=runner)
         seed_default_session_dir_from_legacy_sources(config.session_dir)
         if mode == "attach-or-start":
             failed_roles = ensure_project_worktrees(config, refresh=True, runner=worktree_runner).failed_roles
@@ -3577,11 +3629,13 @@ def launch_project(
             )
             if result != 0:
                 return result
+        ensure_owner_state_dirs(config, pane_state_dir=effective_pane_state_dir, runner=runner)
         launch_result = launch_tmux_viewer_session(
             [role for role in viewer_roles if role.role not in failed_roles],
             runner=runner,
         )
     else:
+        ensure_owner_state_dirs(config, pane_state_dir=effective_pane_state_dir, runner=runner)
         launch_result = launch_konsole_window(output_path, project=config.project, runner=runner)
     if launch_result != 0:
         return launch_result

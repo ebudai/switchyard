@@ -2625,6 +2625,102 @@ def test_cli_command_prepends_invoking_user_bin() -> None:
     assert any(entry.startswith("PATH=/home/otto-agent/bin:") for entry in _env_entries(command))
 
 
+def test_modern_env_names_win_over_legacy_aliases_with_legacy_fallback() -> None:
+    def wayland_from_command(command: list[str]) -> str:
+        return next(entry.split("=", 1)[1] for entry in command if entry.startswith("WAYLAND_DISPLAY="))
+
+    def konsole_wayland() -> str:
+        return wayland_from_command(konsole_launch_args(Path("/tmp/layout.json"), gui_user="user"))
+
+    cases = [
+        {
+            "name": "user bin",
+            "modern": team_launcher.USER_BIN_ENV,
+            "legacy": team_launcher.LEGACY_USER_BIN_ENV,
+            "modern_value": "/modern/bin",
+            "legacy_value": "/legacy/bin",
+            "resolve": default_user_bin,
+            "expected_modern": "/modern/bin",
+            "expected_legacy": "/legacy/bin",
+        },
+        {
+            "name": "gui user",
+            "modern": team_launcher.GUI_USER_ENV,
+            "legacy": team_launcher.LEGACY_GUI_USER_ENV,
+            "modern_value": "modern-user",
+            "legacy_value": "legacy-user",
+            "resolve": team_launcher.default_gui_user,
+            "expected_modern": "modern-user",
+            "expected_legacy": "legacy-user",
+        },
+        {
+            "name": "configured wayland display",
+            "modern": team_launcher.GUI_WAYLAND_ENV,
+            "legacy": team_launcher.LEGACY_GUI_WAYLAND_ENV,
+            "modern_value": "wayland-modern",
+            "legacy_value": "wayland-legacy",
+            "resolve": konsole_wayland,
+            "expected_modern": "/run/user/4242/wayland-modern",
+            "expected_legacy": "/run/user/4242/wayland-legacy",
+        },
+        {
+            "name": "host wayland display",
+            "modern": team_launcher.HOST_WAYLAND_ENV,
+            "legacy": team_launcher.LEGACY_HOST_WAYLAND_ENV,
+            "modern_value": "/run/user/1000/wayland-modern-host",
+            "legacy_value": "/run/user/1001/wayland-legacy-host",
+            "resolve": konsole_wayland,
+            "expected_modern": "/run/user/1000/wayland-modern-host",
+            "expected_legacy": "/run/user/1001/wayland-legacy-host",
+        },
+        {
+            "name": "pane session dir",
+            "modern": "TICKET_BOARD_PANE_SESSION_DIR",
+            "legacy": "PGU_TICKET_BOARD_PANE_SESSION_DIR",
+            "modern_value": "/tmp/modern-pane-sessions",
+            "legacy_value": "/tmp/legacy-pane-sessions",
+            "resolve": lambda: str(team_launcher.default_session_dir_for_user("owner")),
+            "expected_modern": "/tmp/modern-pane-sessions",
+            "expected_legacy": "/tmp/legacy-pane-sessions",
+        },
+        {
+            "name": "pane state dir",
+            "modern": "TICKET_BOARD_PANE_STATE_DIR",
+            "legacy": "PGU_TICKET_BOARD_PANE_STATE_DIR",
+            "modern_value": "/tmp/modern-pane-state",
+            "legacy_value": "/tmp/legacy-pane-state",
+            "resolve": lambda: str(team_launcher.default_pane_state_dir_for_user("owner")),
+            "expected_modern": "/tmp/modern-pane-state",
+            "expected_legacy": "/tmp/legacy-pane-state",
+        },
+    ]
+    env_keys = {
+        key
+        for case in cases
+        for key in (str(case["modern"]), str(case["legacy"]))
+    }
+    original_env = {key: os.environ.get(key) for key in env_keys}
+    original_uid_for_user = team_launcher.uid_for_user
+    try:
+        team_launcher.uid_for_user = lambda user_name: 4242 if user_name == "user" else None
+        for case in cases:
+            for key in env_keys:
+                os.environ.pop(key, None)
+            os.environ[str(case["modern"])] = str(case["modern_value"])
+            os.environ[str(case["legacy"])] = str(case["legacy_value"])
+            assert case["resolve"]() == case["expected_modern"], case["name"]
+
+            os.environ.pop(str(case["modern"]))
+            assert case["resolve"]() == case["expected_legacy"], case["name"]
+    finally:
+        team_launcher.uid_for_user = original_uid_for_user
+        for key, value in original_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def test_cli_command_exports_durable_session_dir_for_pane_hooks() -> None:
     config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
     role = next(role for role in config.roles if role.role == "ops")

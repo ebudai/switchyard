@@ -1067,6 +1067,53 @@ def test_session_start_records_env_session_id_fallback() -> None:
         assert session["session_id"] == "codex_env_session_456"
 
 
+def test_codex_installed_hooks_embed_project_state_and_session_dirs() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        tmp_path = Path(tmp)
+        home = tmp_path / "home"
+        bin_path = home / ".local" / "bin" / HOOK_NAME
+        state_dir = tmp_path / "run" / "otto-ticket-board" / "pane-state"
+        session_dir = tmp_path / "state" / "otto-ticket-board" / "pane-sessions"
+        install_env = _hook_env(
+            TICKET_BOARD_PROJECT="otto",
+            TICKET_BOARD_PANE_STATE_DIR=str(state_dir),
+            TICKET_BOARD_PANE_SESSION_DIR=str(session_dir),
+        )
+        subprocess.run(
+            [str(INSTALLER), "install", "--home", str(home), "--bin-path", str(bin_path)],
+            check=True,
+            env=install_env,
+        )
+
+        codex_commands = _managed_commands_by_source(_load(home / ".codex" / "hooks.json"))
+        session_start = codex_commands["codex.SessionStart"]
+        stop = codex_commands["codex.Stop"]
+        for command in (session_start, stop):
+            assert f"--state-dir {state_dir}" in command
+            assert f"--session-dir {session_dir}" in command
+
+        hook_runtime_env = _hook_env(
+            HOME=str(home),
+            TICKET_BOARD_PANE_TARGET="otto-ops:0.0",
+            CODEX_SESSION_ID="codex_otto_session_456",
+        )
+        hook_runtime_env.pop("TICKET_BOARD_PANE_STATE_DIR", None)
+        hook_runtime_env.pop("TICKET_BOARD_PANE_SESSION_DIR", None)
+        hook_runtime_env.pop("PGU_TICKET_BOARD_PANE_STATE_DIR", None)
+        hook_runtime_env.pop("PGU_TICKET_BOARD_PANE_SESSION_DIR", None)
+
+        subprocess.run(["sh", "-c", session_start], check=True, env=hook_runtime_env)
+        subprocess.run(["sh", "-c", stop], check=True, env=hook_runtime_env)
+
+        session = json.loads((session_dir / "otto-ops_0.0.json").read_text(encoding="utf-8"))
+        state = json.loads((state_dir / "otto-ops_0.0.json").read_text(encoding="utf-8"))
+        assert session["session_id"] == "codex_otto_session_456"
+        assert session["source"] == "codex.SessionStart"
+        assert state["state"] == "idle"
+        assert state["source"] == "codex.Stop"
+        assert not (home / ".local" / "state" / "pgu-ticket-board" / "pane-sessions" / "otto-ops_0.0.json").exists()
+
+
 def main() -> int:
     live_session_paths = candidate_live_pane_session_paths()
     live_pane_state_paths = candidate_live_pane_state_paths()

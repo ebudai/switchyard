@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import stat
 import sys
@@ -20,6 +21,15 @@ DEFAULT_PANE_STATE_DIR = (
     else Path(os.environ["PGU_TICKET_BOARD_PANE_STATE_DIR"]).expanduser()
     if os.environ.get("PGU_TICKET_BOARD_PANE_STATE_DIR")
     else Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-state")
+)
+DEFAULT_PANE_SESSION_DIR = (
+    Path(os.environ["TICKET_BOARD_PANE_SESSION_DIR"]).expanduser()
+    if os.environ.get("TICKET_BOARD_PANE_SESSION_DIR")
+    else Path(os.environ["PGU_TICKET_BOARD_PANE_SESSION_DIR"]).expanduser()
+    if os.environ.get("PGU_TICKET_BOARD_PANE_SESSION_DIR")
+    else Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
+    / "pgu-ticket-board"
+    / "pane-sessions"
 )
 DEFAULT_PROJECT = os.environ.get("TICKET_BOARD_PROJECT", "").strip() or os.environ.get("PGU_TICKET_BOARD_PROJECT", "").strip() or "pgu"
 PANE_TARGETS = tuple(
@@ -75,6 +85,10 @@ def _hook_entry(command: str, *, matcher: str = "") -> dict[str, Any]:
 
 def _flat_command_hook(command: str) -> dict[str, Any]:
     return {"type": "command", "command": command}
+
+
+def _shell_command(parts: list[str | Path]) -> str:
+    return " ".join(shlex.quote(str(part)) for part in parts)
 
 
 def _merge_hook_entries(config: dict[str, Any], event: str, entries: list[dict[str, Any]]) -> None:
@@ -140,11 +154,62 @@ def _install_claude_hooks(home: Path, hook_bin: Path) -> Path:
 def _install_codex_hooks(home: Path, hook_bin: Path) -> Path:
     path = home / ".codex" / "hooks.json"
     config = _load_json(path)
-    hook = str(hook_bin)
-    _merge_hook_entries(config, "SessionStart", [_hook_entry(f"{hook} idle --source codex.SessionStart --record-session")])
-    _merge_hook_entries(config, "Stop", [_hook_entry(f"{hook} idle --source codex.Stop")])
-    _merge_hook_entries(config, "UserPromptSubmit", [_hook_entry(f"{hook} busy --source codex.UserPromptSubmit")])
-    _merge_hook_entries(config, "PermissionRequest", [_hook_entry(f"{hook} blocked --source codex.PermissionRequest")])
+    state_dir = DEFAULT_PANE_STATE_DIR
+    session_dir = DEFAULT_PANE_SESSION_DIR
+    _merge_hook_entries(
+        config,
+        "SessionStart",
+        [
+            _hook_entry(
+                _shell_command(
+                    [
+                        hook_bin,
+                        "idle",
+                        "--source",
+                        "codex.SessionStart",
+                        "--state-dir",
+                        state_dir,
+                        "--session-dir",
+                        session_dir,
+                        "--record-session",
+                    ]
+                )
+            )
+        ],
+    )
+    _merge_hook_entries(
+        config,
+        "Stop",
+        [
+            _hook_entry(
+                _shell_command(
+                    [hook_bin, "idle", "--source", "codex.Stop", "--state-dir", state_dir, "--session-dir", session_dir]
+                )
+            )
+        ],
+    )
+    _merge_hook_entries(
+        config,
+        "UserPromptSubmit",
+        [
+            _hook_entry(
+                _shell_command(
+                    [hook_bin, "busy", "--source", "codex.UserPromptSubmit", "--state-dir", state_dir, "--session-dir", session_dir]
+                )
+            )
+        ],
+    )
+    _merge_hook_entries(
+        config,
+        "PermissionRequest",
+        [
+            _hook_entry(
+                _shell_command(
+                    [hook_bin, "blocked", "--source", "codex.PermissionRequest", "--state-dir", state_dir, "--session-dir", session_dir]
+                )
+            )
+        ],
+    )
     _write_json(path, config)
     return path
 

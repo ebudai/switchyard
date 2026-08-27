@@ -2216,6 +2216,52 @@ def test_explicit_session_dir_env_beats_run_as_user_default() -> None:
     assert not any("/root/.local/state/pgu-ticket-board/pane-sessions" in entry for entry in entries)
 
 
+def test_configured_session_dir_beats_inherited_session_dir_env() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-config-session.") as tmp:
+        tmp_path = Path(tmp)
+        configured_session_dir = tmp_path / "config" / "sessions"
+        inherited_session_dir = tmp_path / "inherited" / "sessions"
+        legacy_inherited_session_dir = tmp_path / "legacy-inherited" / "sessions"
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "run_as_user": "porter-agent",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "session_dir": str(configured_session_dir),
+                    "roles": [{"role": "ops", "slot": 0, "cli": ["codex"], "target": "porter-ops:0.0"}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        env_keys = ("TICKET_BOARD_PANE_SESSION_DIR", "PGU_TICKET_BOARD_PANE_SESSION_DIR")
+        original_env = {key: os.environ.get(key) for key in env_keys}
+        try:
+            os.environ["TICKET_BOARD_PANE_SESSION_DIR"] = str(inherited_session_dir)
+            os.environ["PGU_TICKET_BOARD_PANE_SESSION_DIR"] = str(legacy_inherited_session_dir)
+            config = load_project_config("porter", config_path)
+        finally:
+            for key, value in original_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    role = config.roles[0]
+    entries = _env_entries(cli_command_for_role(role, session_dir=config.session_dir))
+    assert config.session_dir == configured_session_dir
+    assert f"TICKET_BOARD_PANE_SESSION_DIR={configured_session_dir}" in entries
+    assert not any(str(inherited_session_dir) in entry for entry in entries)
+    assert not any(str(legacy_inherited_session_dir) in entry for entry in entries)
+
+
 def test_launch_project_default_pane_state_dir_uses_run_as_user_runtime_when_launcher_default_is_foreign() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-owner-pane-state.") as tmp:
         tmp_path = Path(tmp)

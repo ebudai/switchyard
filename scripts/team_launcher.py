@@ -305,7 +305,20 @@ def home_dir_for_user(user_name: str) -> Path | None:
         return Path("/home") / user
 
 
+def _explicit_session_dir_from_env() -> Path | None:
+    value = _env_first("TICKET_BOARD_PANE_SESSION_DIR", "PGU_TICKET_BOARD_PANE_SESSION_DIR")
+    return Path(value).expanduser() if value else None
+
+
+def _explicit_pane_state_dir_from_env() -> Path | None:
+    value = _env_first("TICKET_BOARD_PANE_STATE_DIR", "PGU_TICKET_BOARD_PANE_STATE_DIR")
+    return Path(value).expanduser() if value else None
+
+
 def default_session_dir_for_user(user_name: str) -> Path:
+    explicit = _explicit_session_dir_from_env()
+    if explicit is not None:
+        return explicit
     owner_home = home_dir_for_user(user_name)
     if owner_home is None:
         return DEFAULT_SESSION_DIR
@@ -313,6 +326,9 @@ def default_session_dir_for_user(user_name: str) -> Path:
 
 
 def default_pane_state_dir_for_user(user_name: str) -> Path:
+    explicit = _explicit_pane_state_dir_from_env()
+    if explicit is not None:
+        return explicit
     user = user_name.strip()
     if not user:
         return DEFAULT_PANE_STATE_DIR

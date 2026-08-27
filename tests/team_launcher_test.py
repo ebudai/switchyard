@@ -2155,6 +2155,67 @@ def test_default_session_dir_uses_run_as_user_home_when_launcher_default_is_fore
     assert not any("/root/.local/state/pgu-ticket-board/pane-sessions" in entry for entry in entries)
 
 
+def test_explicit_session_dir_env_beats_run_as_user_default() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-env-session.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "owner-home"
+        owner_home.mkdir()
+        env_session_dir = tmp_path / "env" / "sessions"
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "run_as_user": "porter-agent",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "roles": [{"role": "ops", "slot": 0, "cli": ["codex"], "target": "porter-ops:0.0"}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        env_keys = ("TICKET_BOARD_PANE_SESSION_DIR", "PGU_TICKET_BOARD_PANE_SESSION_DIR")
+        original_env = {key: os.environ.get(key) for key in env_keys}
+        original_default_session_dir = team_launcher.DEFAULT_SESSION_DIR
+        original_getpwnam = team_launcher.pwd.getpwnam
+
+        class OwnerPw:
+            pw_dir = str(owner_home)
+            pw_uid = 4242
+
+        def fake_getpwnam(user_name: str) -> Any:
+            if user_name == "porter-agent":
+                return OwnerPw()
+            return original_getpwnam(user_name)
+
+        try:
+            os.environ["TICKET_BOARD_PANE_SESSION_DIR"] = str(env_session_dir)
+            os.environ.pop("PGU_TICKET_BOARD_PANE_SESSION_DIR", None)
+            team_launcher.DEFAULT_SESSION_DIR = Path("/root/.local/state/pgu-ticket-board/pane-sessions")
+            team_launcher.pwd.getpwnam = fake_getpwnam
+            config = load_project_config("porter", config_path)
+        finally:
+            for key, value in original_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+            team_launcher.DEFAULT_SESSION_DIR = original_default_session_dir
+            team_launcher.pwd.getpwnam = original_getpwnam
+
+    role = config.roles[0]
+    entries = _env_entries(cli_command_for_role(role, session_dir=config.session_dir))
+    assert config.session_dir == env_session_dir
+    assert f"TICKET_BOARD_PANE_SESSION_DIR={env_session_dir}" in entries
+    assert not any(str(owner_home) in entry for entry in entries)
+    assert not any("/root/.local/state/pgu-ticket-board/pane-sessions" in entry for entry in entries)
+
+
 def test_launch_project_default_pane_state_dir_uses_run_as_user_runtime_when_launcher_default_is_foreign() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-owner-pane-state.") as tmp:
         tmp_path = Path(tmp)
@@ -2238,6 +2299,103 @@ def test_launch_project_default_pane_state_dir_uses_run_as_user_runtime_when_lau
 
         expected_state = owner_runtime / "pgu-ticket-board" / "pane-state" / pane_state_file_name("porter-ops:0.0")
         assert expected_state.exists()
+        assert not (root_pane_state / pane_state_file_name("porter-ops:0.0")).exists()
+
+
+def test_explicit_pane_state_dir_env_beats_run_as_user_runtime_default() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-env-pane-state.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "owner-home"
+        owner_home.mkdir()
+        owner_runtime = tmp_path / "run" / "user" / "4242"
+        owner_runtime.mkdir(parents=True)
+        env_pane_state = tmp_path / "env" / "pane-state"
+        root_pane_state = tmp_path / "run" / "user" / "0" / "pgu-ticket-board" / "pane-state"
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "run_as_user": "porter-agent",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "roles": [{"role": "ops", "slot": 0, "cli": ["codex"], "target": "porter-ops:0.0"}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        env_keys = ("TICKET_BOARD_PANE_STATE_DIR", "PGU_TICKET_BOARD_PANE_STATE_DIR")
+        original_env = {key: os.environ.get(key) for key in env_keys}
+        original_default_session_dir = team_launcher.DEFAULT_SESSION_DIR
+        original_default_pane_state_dir = team_launcher.DEFAULT_PANE_STATE_DIR
+        original_getpwnam = team_launcher.pwd.getpwnam
+        original_runtime_dir_for_uid = team_launcher.runtime_dir_for_uid
+        original_current_user_name = team_launcher.current_user_name
+
+        class OwnerPw:
+            pw_dir = str(owner_home)
+            pw_uid = 4242
+
+        def fake_getpwnam(user_name: str) -> Any:
+            if user_name == "porter-agent":
+                return OwnerPw()
+            return original_getpwnam(user_name)
+
+        class OwnerAwareRunner(FakeRunner):
+            def __call__(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+                if args[:3] == ["sudo", "-u", "porter-agent"]:
+                    self.calls.append(args)
+                    inner = args[4:] if len(args) > 3 and args[3] == "-H" else args[3:]
+                    result = super().__call__(inner, **kwargs)
+                    if self.calls and self.calls[-1] == inner:
+                        self.calls.pop()
+                    return result
+                return super().__call__(args, **kwargs)
+
+        try:
+            os.environ["TICKET_BOARD_PANE_STATE_DIR"] = str(env_pane_state)
+            os.environ.pop("PGU_TICKET_BOARD_PANE_STATE_DIR", None)
+            team_launcher.DEFAULT_SESSION_DIR = Path("/root/.local/state/pgu-ticket-board/pane-sessions")
+            team_launcher.DEFAULT_PANE_STATE_DIR = root_pane_state
+            team_launcher.pwd.getpwnam = fake_getpwnam
+            team_launcher.runtime_dir_for_uid = lambda uid: owner_runtime if uid == 4242 else Path(f"/run/user/{uid}")
+            team_launcher.current_user_name = lambda: "root"
+            config = load_project_config("porter", config_path)
+            runner = OwnerAwareRunner()
+
+            assert (
+                launch_project(
+                    config,
+                    config_path=config_path,
+                    mode="start",
+                    script_path=ROOT / "scripts" / "team-launcher",
+                    runner=runner,
+                    layout_output=tmp_path / "layout-output.json",
+                    layout_mode=team_launcher.LAYOUT_MODE_VIEWER,
+                )
+                == 0
+            )
+        finally:
+            for key, value in original_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+            team_launcher.DEFAULT_SESSION_DIR = original_default_session_dir
+            team_launcher.DEFAULT_PANE_STATE_DIR = original_default_pane_state_dir
+            team_launcher.pwd.getpwnam = original_getpwnam
+            team_launcher.runtime_dir_for_uid = original_runtime_dir_for_uid
+            team_launcher.current_user_name = original_current_user_name
+
+        expected_state = env_pane_state / pane_state_file_name("porter-ops:0.0")
+        owner_state = owner_runtime / "pgu-ticket-board" / "pane-state" / pane_state_file_name("porter-ops:0.0")
+        assert expected_state.exists()
+        assert not owner_state.exists()
         assert not (root_pane_state / pane_state_file_name("porter-ops:0.0")).exists()
 
 

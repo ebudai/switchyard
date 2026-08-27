@@ -3464,6 +3464,40 @@ def test_launcher_freshness_probe_runs_direct_when_checkout_owner_is_current_use
         team_launcher.current_user_name = original_current_user_name
 
 
+def test_owner_correct_git_skips_missing_target_without_owner_rule() -> None:
+    calls: list[list[str]] = []
+
+    def runner(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-missing-git-target.") as tmp:
+        missing_repo = Path(tmp) / "missing-repo"
+        args = ["git", "-C", str(missing_repo), "status"]
+
+        result = team_launcher.run_owner_correct_git(args, runner=runner)
+
+    assert result.returncode == 125
+    assert calls == []
+    assert "owner-correct git skipped" in str(result.stderr)
+    assert "does not exist and no owner rule matched" in str(result.stderr)
+
+
+def test_owner_correct_git_skips_command_without_target_path() -> None:
+    calls: list[list[str]] = []
+
+    def runner(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0)
+
+    result = team_launcher.run_owner_correct_git(["git", "status"], runner=runner)
+
+    assert result.returncode == 125
+    assert calls == []
+    assert "owner-correct git skipped" in str(result.stderr)
+    assert "does not declare a target path" in str(result.stderr)
+
+
 def test_launcher_freshness_probe_skips_when_checkout_owner_is_unknown() -> None:
     config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
     launcher_repo = Path("/tmp/pgu-launcher-owner-unknown")

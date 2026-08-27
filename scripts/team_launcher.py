@@ -3456,7 +3456,7 @@ def launch_project(
     if not dry_run:
         ensure_launcher_checkout_current(
             config,
-            runner=runner,
+            runner=worktree_runner,
             auto_deploy=not (
                 no_launcher_self_deploy
                 or _env_truthy_any(NO_LAUNCHER_SELF_DEPLOY_ENV, LEGACY_NO_LAUNCHER_SELF_DEPLOY_ENV)

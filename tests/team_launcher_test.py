@@ -3021,6 +3021,46 @@ def test_start_auto_fast_forwards_stale_launcher_checkout_once_before_panes() ->
         assert all("--skip-launcher-check" in command for command in commands if " pane " in command)
 
 
+def test_launcher_freshness_probe_uses_owner_runner_when_launcher_user_differs() -> None:
+    original_current_user_name = team_launcher.current_user_name
+    original_repo_root = team_launcher._repo_root
+    try:
+        with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-owner-freshness.") as tmp:
+            tmp_path = Path(tmp)
+            config_path = _write_pgu_config_with_shared_checkout(tmp_path)
+            launcher_repo = tmp_path / "repo"
+            launcher_repo.mkdir()
+            config = load_project_config("pgu", config_path)
+            runner = SudoAwareFakeRunner()
+            team_launcher.current_user_name = lambda: "root"
+            team_launcher._repo_root = lambda: launcher_repo
+
+            assert (
+                launch_project(
+                    config,
+                    config_path=config_path,
+                    mode="start",
+                    script_path=ROOT / "scripts" / "team-launcher",
+                    runner=runner,
+                    layout_output=tmp_path / "launch-layout.json",
+                    pane_state_dir=tmp_path / "pane-state",
+                )
+                == 0
+            )
+
+        launcher_probe_calls = [
+            git_launcher_checkout_check_args(launcher_repo),
+            git_launcher_head_args(launcher_repo),
+            git_launcher_ls_remote_ref_args(config, launcher_repo),
+        ]
+        for call in launcher_probe_calls:
+            assert ["sudo", "-u", "agent", *call] in runner.calls
+            assert call not in runner.calls
+    finally:
+        team_launcher.current_user_name = original_current_user_name
+        team_launcher._repo_root = original_repo_root
+
+
 def test_start_no_self_deploy_refuses_stale_launcher_checkout() -> None:
     config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
     calls: list[list[str]] = []

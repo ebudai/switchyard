@@ -3382,6 +3382,159 @@ def test_launcher_freshness_probe_uses_owner_runner_when_launcher_user_differs()
         team_launcher._repo_root = original_repo_root
 
 
+def test_launcher_freshness_probe_uses_launcher_checkout_owner_for_generated_project_shape() -> None:
+    original_current_user_name = team_launcher.current_user_name
+    try:
+        with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-generated-freshness.") as tmp:
+            tmp_path = Path(tmp)
+            launcher_repo = tmp_path / "owner-home" / "otto-ticketboard-live" / "current"
+            pane_launcher = launcher_repo / "scripts" / "team-launcher"
+            project_repo = tmp_path / "project"
+            layout = tmp_path / "layout.json"
+            config_path = tmp_path / "otto.json"
+            pane_launcher.parent.mkdir(parents=True)
+            pane_launcher.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+            pane_launcher.chmod(0o755)
+            project_repo.mkdir()
+            layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "project": "otto",
+                        "layout": str(layout),
+                        "pane_launcher": str(pane_launcher),
+                        "repository": str(project_repo),
+                        "run_as_user": "otto-agent",
+                        "roles": [{"role": "ops", "slot": 0, "target": "otto-ops:0.0", "cli": ["codex"]}],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            config = load_project_config("otto", config_path)
+            checkout_owner = launcher_repo.owner()
+            runner = SudoAwareFakeRunner()
+            project_owner_runner = team_launcher._owner_project_git_runner(
+                owner_user="otto-agent",
+                project_dir=project_repo,
+                owned_roots=team_launcher._control_repository_owned_roots(config),
+                runner=runner,
+            )
+            team_launcher.current_user_name = lambda: "root"
+
+            team_launcher.ensure_launcher_checkout_current(
+                config,
+                launcher_repo=launcher_repo,
+                runner=project_owner_runner,
+                auto_deploy=False,
+            )
+
+        launcher_probe_calls = [
+            git_launcher_checkout_check_args(launcher_repo),
+            git_launcher_head_args(launcher_repo),
+            git_launcher_ls_remote_ref_args(config, launcher_repo),
+        ]
+        for call in launcher_probe_calls:
+            assert ["sudo", "-u", checkout_owner, *call] in runner.calls
+            assert ["sudo", "-u", "otto-agent", *call] not in runner.calls
+            assert call not in runner.calls
+    finally:
+        team_launcher.current_user_name = original_current_user_name
+
+
+def test_launcher_freshness_probe_runs_direct_when_checkout_owner_is_current_user() -> None:
+    original_current_user_name = team_launcher.current_user_name
+    try:
+        with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-current-owner-freshness.") as tmp:
+            launcher_repo = Path(tmp) / "repo"
+            launcher_repo.mkdir()
+            config_path = _write_minimal_shared_checkout_config(Path(tmp), launcher_repo, ["ops"])
+            config = load_project_config("pgu", config_path)
+            runner = SudoAwareFakeRunner()
+            checkout_owner = launcher_repo.owner()
+            team_launcher.current_user_name = lambda: checkout_owner
+
+            team_launcher.ensure_launcher_checkout_current(config, launcher_repo=launcher_repo, runner=runner)
+
+        assert git_launcher_checkout_check_args(launcher_repo) in runner.calls
+        assert not any(call[:3] == ["sudo", "-u", checkout_owner] for call in runner.calls)
+    finally:
+        team_launcher.current_user_name = original_current_user_name
+
+
+def test_launcher_freshness_probe_skips_when_checkout_owner_is_unknown() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    launcher_repo = Path("/tmp/pgu-launcher-owner-unknown")
+    calls: list[list[str]] = []
+    original_getpwuid = team_launcher.pwd.getpwuid
+    try:
+        team_launcher.pwd.getpwuid = lambda _uid: (_ for _ in ()).throw(KeyError(_uid))
+
+        def runner(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0)
+
+        stderr = StringIO()
+        with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-unknown-owner.") as tmp:
+            repo = Path(tmp)
+            with redirect_stderr(stderr):
+                team_launcher.ensure_launcher_checkout_current(
+                    config,
+                    launcher_repo=repo,
+                    runner=runner,
+                    auto_deploy=True,
+                )
+    finally:
+        team_launcher.pwd.getpwuid = original_getpwuid
+
+    assert not calls
+    assert "cannot determine launcher checkout owner" in stderr.getvalue()
+    assert "skipping freshness probe" in stderr.getvalue()
+
+
+def test_deploy_launcher_checkout_uses_launcher_checkout_owner() -> None:
+    original_current_user_name = team_launcher.current_user_name
+    try:
+        with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-deploy-owner.") as tmp:
+            tmp_path = Path(tmp)
+            launcher_repo = tmp_path / "repo"
+            launcher_repo.mkdir()
+            config_path = _write_minimal_shared_checkout_config(tmp_path, tmp_path / "project", ["ops"])
+            config = load_project_config("pgu", config_path)
+            checkout_owner = launcher_repo.owner()
+            calls: list[list[str]] = []
+
+            def runner(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+                calls.append(args)
+                effective_args = args[3:] if args[:3] == ["sudo", "-u", checkout_owner] else args
+                if effective_args == git_launcher_head_args(launcher_repo):
+                    return subprocess.CompletedProcess(args, 0, stdout=f"{REMOTE_HEAD}\n")
+                if effective_args == git_launcher_ls_remote_ref_args(config, launcher_repo):
+                    return subprocess.CompletedProcess(args, 0, stdout=f"{REMOTE_HEAD}\trefs/heads/main\n")
+                return subprocess.CompletedProcess(args, 0)
+
+            team_launcher.current_user_name = lambda: "root"
+
+            assert team_launcher.deploy_launcher_checkout(config, launcher_repo=launcher_repo, runner=runner) == 0
+
+        expected_calls = [
+            git_launcher_checkout_check_args(launcher_repo),
+            git_fetch_launcher_ref_args(config, launcher_repo),
+            git_checkout_launcher_branch_args(config, launcher_repo),
+            git_fast_forward_launcher_ref_args(config, launcher_repo),
+            git_launcher_checkout_check_args(launcher_repo),
+            git_launcher_head_args(launcher_repo),
+            git_launcher_ls_remote_ref_args(config, launcher_repo),
+        ]
+        for call in expected_calls:
+            assert ["sudo", "-u", checkout_owner, *call] in calls
+            assert call not in calls
+    finally:
+        team_launcher.current_user_name = original_current_user_name
+
+
 def test_start_no_self_deploy_refuses_stale_launcher_checkout() -> None:
     config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
     calls: list[list[str]] = []
@@ -3598,31 +3751,33 @@ def test_undeterminable_launcher_checkout_warns_and_continues() -> None:
 
 def test_deploy_launcher_checkout_updates_and_verifies_configured_ref() -> None:
     config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
-    launcher_repo = Path("/home/user/Projects/pgu")
-    calls: list[list[str]] = []
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-deploy-current-owner.") as tmp:
+        launcher_repo = Path(tmp) / "pgu"
+        launcher_repo.mkdir()
+        calls: list[list[str]] = []
 
-    def runner(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
-        calls.append(args)
-        if args == git_launcher_head_args(launcher_repo):
-            return subprocess.CompletedProcess(args, 0, stdout=f"{REMOTE_HEAD}\n")
-        if args == git_launcher_ls_remote_ref_args(config, launcher_repo):
-            return subprocess.CompletedProcess(args, 0, stdout=f"{REMOTE_HEAD}\trefs/heads/main\n")
-        if args[:3] == ["git", "-C", str(launcher_repo)] and args[3:6] == ["rev-list", "--left-right", "--count"]:
-            return subprocess.CompletedProcess(args, 0, stdout="0 0\n")
-        return subprocess.CompletedProcess(args, 0)
+        def runner(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            calls.append(args)
+            if args == git_launcher_head_args(launcher_repo):
+                return subprocess.CompletedProcess(args, 0, stdout=f"{REMOTE_HEAD}\n")
+            if args == git_launcher_ls_remote_ref_args(config, launcher_repo):
+                return subprocess.CompletedProcess(args, 0, stdout=f"{REMOTE_HEAD}\trefs/heads/main\n")
+            if args[:3] == ["git", "-C", str(launcher_repo)] and args[3:6] == ["rev-list", "--left-right", "--count"]:
+                return subprocess.CompletedProcess(args, 0, stdout="0 0\n")
+            return subprocess.CompletedProcess(args, 0)
 
-    assert deploy_launcher_checkout(config, launcher_repo=launcher_repo, runner=runner, clean=True) == 0
+        assert deploy_launcher_checkout(config, launcher_repo=launcher_repo, runner=runner, clean=True) == 0
 
-    assert calls == [
-        git_launcher_checkout_check_args(launcher_repo),
-        git_fetch_launcher_ref_args(config, launcher_repo),
-        git_checkout_launcher_branch_args(config, launcher_repo),
-        git_fast_forward_launcher_ref_args(config, launcher_repo),
-        git_clean_launcher_checkout_args(launcher_repo),
-        git_launcher_checkout_check_args(launcher_repo),
-        git_launcher_head_args(launcher_repo),
-        git_launcher_ls_remote_ref_args(config, launcher_repo),
-    ]
+        assert calls == [
+            git_launcher_checkout_check_args(launcher_repo),
+            git_fetch_launcher_ref_args(config, launcher_repo),
+            git_checkout_launcher_branch_args(config, launcher_repo),
+            git_fast_forward_launcher_ref_args(config, launcher_repo),
+            git_clean_launcher_checkout_args(launcher_repo),
+            git_launcher_checkout_check_args(launcher_repo),
+            git_launcher_head_args(launcher_repo),
+            git_launcher_ls_remote_ref_args(config, launcher_repo),
+        ]
 
 
 def test_konsole_launch_uses_gui_user_display_environment() -> None:

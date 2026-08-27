@@ -1899,6 +1899,30 @@ def _proc_failure_reason(proc: subprocess.CompletedProcess[Any], fallback: str) 
     return fallback
 
 
+def _path_owner_user(path: Path) -> tuple[str, str]:
+    try:
+        info = path.stat()
+    except OSError as exc:
+        return "", str(exc)
+    try:
+        return pwd.getpwuid(info.st_uid).pw_name, ""
+    except KeyError:
+        return "", f"uid {info.st_uid} has no passwd entry"
+
+
+def _launcher_checkout_runner(
+    repo: Path,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> tuple[Callable[..., subprocess.CompletedProcess[Any]] | None, str]:
+    owner_user, error = _path_owner_user(repo)
+    if not owner_user:
+        return None, error or "owner is unknown"
+    if owner_user == current_user_name():
+        return runner, ""
+    return _owner_project_git_runner(owner_user=owner_user, project_dir=repo, runner=runner), ""
+
+
 def _parse_ahead_behind(output: str) -> tuple[int, int] | None:
     parts = output.strip().split()
     if len(parts) != 2:
@@ -2125,7 +2149,15 @@ def ensure_launcher_checkout_current(
 ) -> None:
     repo = launcher_repo or _repo_root()
     allow_stale = allow_stale or _env_truthy_any(ALLOW_STALE_LAUNCHER_ENV, LEGACY_ALLOW_STALE_LAUNCHER_ENV)
-    probe = probe_launcher_checkout(config, launcher_repo=repo, runner=runner)
+    checkout_runner, owner_error = _launcher_checkout_runner(repo, runner=runner)
+    if checkout_runner is None:
+        print(
+            f"warning: team-launcher: cannot determine launcher checkout owner for {repo}: "
+            f"{owner_error}; skipping freshness probe",
+            file=sys.stderr,
+        )
+        return
+    probe = probe_launcher_checkout(config, launcher_repo=repo, runner=checkout_runner)
     if probe.error:
         print(
             f"warning: team-launcher: cannot determine launcher checkout freshness for {repo}: "
@@ -2148,7 +2180,7 @@ def ensure_launcher_checkout_current(
                 repo,
                 behind=probe.behind,
                 behind_exact=probe.behind_exact,
-                runner=runner,
+                runner=checkout_runner,
             )
             if post_deploy_probe.error or post_deploy_probe.behind:
                 return
@@ -2177,7 +2209,15 @@ def deploy_launcher_checkout(
     clean: bool = False,
 ) -> int:
     repo = launcher_repo or _repo_root()
-    check_proc = runner(
+    checkout_runner, owner_error = _launcher_checkout_runner(repo, runner=runner)
+    if checkout_runner is None:
+        print(
+            f"team-launcher: cannot determine launcher checkout owner for {repo}: "
+            f"{owner_error}; not deploying launcher checkout",
+            file=sys.stderr,
+        )
+        return 1
+    check_proc = checkout_runner(
         git_launcher_checkout_check_args(repo),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -2185,7 +2225,7 @@ def deploy_launcher_checkout(
     if check_proc.returncode != 0:
         print(f"team-launcher: launcher path is not a git checkout: {repo}", file=sys.stderr)
         return int(check_proc.returncode)
-    fetch_proc = runner(git_fetch_launcher_ref_args(config, repo))
+    fetch_proc = checkout_runner(git_fetch_launcher_ref_args(config, repo))
     if fetch_proc.returncode != 0:
         print(
             f"team-launcher: failed to fetch {worktree_ref(config)} in {repo}: "
@@ -2193,7 +2233,7 @@ def deploy_launcher_checkout(
             file=sys.stderr,
         )
         return int(fetch_proc.returncode)
-    checkout_proc = runner(git_checkout_launcher_branch_args(config, repo))
+    checkout_proc = checkout_runner(git_checkout_launcher_branch_args(config, repo))
     if checkout_proc.returncode != 0:
         print(
             f"team-launcher: failed to checkout launcher branch {config.worktree_branch} in {repo}: "
@@ -2201,7 +2241,7 @@ def deploy_launcher_checkout(
             file=sys.stderr,
         )
         return int(checkout_proc.returncode)
-    merge_proc = runner(git_fast_forward_launcher_ref_args(config, repo))
+    merge_proc = checkout_runner(git_fast_forward_launcher_ref_args(config, repo))
     if merge_proc.returncode != 0:
         print(
             f"team-launcher: failed to fast-forward launcher checkout {repo} to {worktree_ref(config)}: "
@@ -2210,7 +2250,7 @@ def deploy_launcher_checkout(
         )
         return int(merge_proc.returncode)
     if clean:
-        clean_proc = runner(git_clean_launcher_checkout_args(repo))
+        clean_proc = checkout_runner(git_clean_launcher_checkout_args(repo))
         if clean_proc.returncode != 0:
             print(
                 f"team-launcher: failed to clean launcher checkout {repo}: "
@@ -2218,7 +2258,7 @@ def deploy_launcher_checkout(
                 file=sys.stderr,
             )
             return int(clean_proc.returncode)
-    ahead, behind = launcher_checkout_status(config, launcher_repo=repo, runner=runner)
+    ahead, behind = launcher_checkout_status(config, launcher_repo=repo, runner=checkout_runner)
     if behind:
         print(
             f"team-launcher: launcher checkout {repo} is still {behind} commit(s) behind {worktree_ref(config)}",

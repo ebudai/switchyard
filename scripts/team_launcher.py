@@ -2004,8 +2004,6 @@ def _launcher_checkout_runner(
     owner_user, error = _path_owner_user(repo)
     if not owner_user:
         return None, error or "owner is unknown"
-    if owner_user == current_user_name():
-        return _owner_correct_git_runner(runner=runner, owner_rules=[GitOwnerRule(repo, owner_user)]), ""
     return _owner_correct_git_runner(runner=runner, owner_rules=[GitOwnerRule(repo, owner_user)]), ""
 
 

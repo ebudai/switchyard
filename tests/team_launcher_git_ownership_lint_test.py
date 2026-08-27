@@ -42,15 +42,23 @@ def _is_git_args_builder(node: ast.AST) -> bool:
     return name.startswith("git_") and name.endswith("_args")
 
 
+def _parent_map(tree: ast.AST) -> dict[ast.AST, ast.AST]:
+    parents: dict[ast.AST, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+    return parents
+
+
 def git_owner_chokepoint_violations(source: str, path: Path) -> list[GitOwnershipLintViolation]:
     tree = ast.parse(source, filename=str(path))
+    parents = _parent_map(tree)
     violations: list[GitOwnershipLintViolation] = []
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not node.args:
+        if not _is_git_args_builder(node):
             continue
-        if not _is_git_args_builder(node.args[0]):
-            continue
-        if _call_name(node.func) == GIT_CHOKEPOINT:
+        parent = parents.get(node)
+        if isinstance(parent, ast.Call) and _call_name(parent.func) == GIT_CHOKEPOINT:
             continue
         violations.append(
             GitOwnershipLintViolation(
@@ -63,6 +71,9 @@ def git_owner_chokepoint_violations(source: str, path: Path) -> list[GitOwnershi
 
 
 def lint_team_launcher_git_calls(path: Path = TEAM_LAUNCHER) -> list[GitOwnershipLintViolation]:
+    # Deliberately limited to team_launcher.py: it contains every production
+    # git_*_args builder and call site today; tests use the builders as expected
+    # argv fixtures.
     return git_owner_chokepoint_violations(path.read_text(encoding="utf-8"), path)
 
 
@@ -80,6 +91,41 @@ def test_raw_runner_git_args_call_is_reported() -> None:
 def test_owner_chokepoint_git_args_call_is_allowed() -> None:
     source = "def fetch(runner, config):\n    return run_owner_correct_git(git_fetch_worktree_ref_args(config), runner=runner)\n"
     assert git_owner_chokepoint_violations(source, Path("good.py")) == []
+
+
+def test_keyword_git_args_call_is_reported() -> None:
+    source = "def fetch(runner, config):\n    return runner(args=git_fetch_worktree_ref_args(config))\n"
+    violations = git_owner_chokepoint_violations(source, Path("bad.py"))
+    assert len(violations) == 1
+
+
+def test_sudo_list_starred_git_args_call_is_reported() -> None:
+    source = "def fetch(runner, user, config):\n    return runner(['sudo', '-u', user, *git_fetch_worktree_ref_args(config)])\n"
+    violations = git_owner_chokepoint_violations(source, Path("bad.py"))
+    assert len(violations) == 1
+
+
+def test_sudo_list_concat_git_args_call_is_reported() -> None:
+    source = "def fetch(runner, config):\n    return runner(['sudo'] + git_fetch_worktree_ref_args(config))\n"
+    violations = git_owner_chokepoint_violations(source, Path("bad.py"))
+    assert len(violations) == 1
+
+
+def test_assigned_git_args_builder_is_reported() -> None:
+    source = "def fetch(runner, config):\n    argv = git_fetch_worktree_ref_args(config)\n    return runner(argv)\n"
+    violations = git_owner_chokepoint_violations(source, Path("bad.py"))
+    assert len(violations) == 1
+
+
+def test_returned_git_args_builder_is_reported() -> None:
+    source = "def build(config):\n    return git_fetch_worktree_ref_args(config)\n"
+    violations = git_owner_chokepoint_violations(source, Path("bad.py"))
+    assert len(violations) == 1
+
+
+def test_literal_git_command_is_outside_builder_lint_scope() -> None:
+    source = "def status(runner, path):\n    return runner(['git', '-C', path, 'status'])\n"
+    assert git_owner_chokepoint_violations(source, Path("literal.py")) == []
 
 
 def test_team_launcher_git_calls_use_owner_chokepoint() -> None:

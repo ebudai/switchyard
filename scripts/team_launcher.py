@@ -1910,6 +1910,92 @@ def _path_owner_user(path: Path) -> tuple[str, str]:
         return "", f"uid {info.st_uid} has no passwd entry"
 
 
+@dataclass(frozen=True)
+class GitOwnerRule:
+    root: Path
+    owner_user: str
+
+
+def _normalized_path(path: Path) -> Path:
+    return path.expanduser().resolve(strict=False)
+
+
+def _path_is_under(path: Path, root: Path) -> bool:
+    normalized = _normalized_path(path)
+    normalized_root = _normalized_path(root)
+    return normalized == normalized_root or normalized.is_relative_to(normalized_root)
+
+
+def _git_target_path_from_args(args: Sequence[str]) -> Path | None:
+    if not args or args[0] != "git":
+        return None
+    for index, arg in enumerate(args):
+        if arg == "-C" and index + 1 < len(args):
+            return Path(args[index + 1])
+        if arg == "--git-dir" and index + 1 < len(args):
+            return Path(args[index + 1])
+        if arg.startswith("--git-dir="):
+            return Path(arg.split("=", 1)[1])
+    if len(args) >= 5 and args[1:3] == ["clone", "--bare"]:
+        return Path(args[4])
+    return None
+
+
+def _git_owner_for_target(target: Path, owner_rules: Sequence[GitOwnerRule]) -> tuple[str, str]:
+    for rule in owner_rules:
+        if rule.owner_user and _path_is_under(target, rule.root):
+            return rule.owner_user, ""
+    if target.exists():
+        return _path_owner_user(target)
+    return "", f"{target} does not exist and no owner rule matched"
+
+
+def _git_owner_failure(args: Sequence[str], detail: str) -> subprocess.CompletedProcess[Any]:
+    return subprocess.CompletedProcess(list(args), 125, stderr=f"owner-correct git skipped: {detail}")
+
+
+def run_owner_correct_git(
+    args: list[str],
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    owner_rules: Sequence[GitOwnerRule] = (),
+    **kwargs: Any,
+) -> subprocess.CompletedProcess[Any]:
+    target = _git_target_path_from_args(args)
+    if target is None:
+        return _git_owner_failure(args, "git command does not declare a target path")
+    owner_user, error = _git_owner_for_target(target, owner_rules)
+    if not owner_user:
+        return _git_owner_failure(args, error or f"cannot determine owner for {target}")
+    if owner_user == current_user_name():
+        return runner(args, **kwargs)
+    return runner(["sudo", "-u", owner_user, *args], **kwargs)
+
+
+def _owner_correct_git_runner(
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    owner_rules: Sequence[GitOwnerRule] = (),
+) -> Callable[..., subprocess.CompletedProcess[Any]]:
+    def wrapped(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        if args[:1] == ["git"]:
+            return run_owner_correct_git(args, runner=runner, owner_rules=owner_rules, **kwargs)
+        return runner(args, **kwargs)
+
+    return wrapped
+
+
+def _config_git_owner_rules(config: ProjectConfig) -> list[GitOwnerRule]:
+    owner_user = config.run_as_user or current_user_name()
+    if not owner_user:
+        return []
+    roots: list[Path] = []
+    if config.repository is not None:
+        roots.append(config.repository)
+    roots.extend(_control_repository_owned_roots(config))
+    return [GitOwnerRule(root, owner_user) for root in roots]
+
+
 def _launcher_checkout_runner(
     repo: Path,
     *,
@@ -1919,8 +2005,8 @@ def _launcher_checkout_runner(
     if not owner_user:
         return None, error or "owner is unknown"
     if owner_user == current_user_name():
-        return runner, ""
-    return _owner_project_git_runner(owner_user=owner_user, project_dir=repo, runner=runner), ""
+        return _owner_correct_git_runner(runner=runner, owner_rules=[GitOwnerRule(repo, owner_user)]), ""
+    return _owner_correct_git_runner(runner=runner, owner_rules=[GitOwnerRule(repo, owner_user)]), ""
 
 
 def _parse_ahead_behind(output: str) -> tuple[int, int] | None:
@@ -1962,14 +2048,21 @@ def probe_launcher_checkout(
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> LauncherCheckoutProbe:
     repo = launcher_repo or _repo_root()
-    check_proc = runner(
+    check_proc = run_owner_correct_git(
         git_launcher_checkout_check_args(repo),
+        runner=runner,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
     if check_proc.returncode != 0:
         return LauncherCheckoutProbe(error=f"launcher path is not a git checkout: {repo}")
-    head_proc = runner(git_launcher_head_args(repo), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    head_proc = run_owner_correct_git(
+        git_launcher_head_args(repo),
+        runner=runner,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
     if head_proc.returncode != 0:
         return LauncherCheckoutProbe(
             error=(
@@ -1978,8 +2071,9 @@ def probe_launcher_checkout(
             )
         )
     local_head = str(head_proc.stdout or "").strip()
-    remote_proc = runner(
+    remote_proc = run_owner_correct_git(
         git_launcher_ls_remote_ref_args(config, repo),
+        runner=runner,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -1998,8 +2092,9 @@ def probe_launcher_checkout(
         )
     if local_head == remote_head:
         return LauncherCheckoutProbe(ahead=0, behind=0)
-    exists_proc = runner(
+    exists_proc = run_owner_correct_git(
         git_launcher_commit_exists_args(repo, remote_head),
+        runner=runner,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -2007,8 +2102,9 @@ def probe_launcher_checkout(
         # The remote tip is not in the local object database. Avoid fetching in
         # the hot-path status probe; the deploy path will fetch before merging.
         return LauncherCheckoutProbe(ahead=0, behind=1, behind_exact=False)
-    count_proc = runner(
+    count_proc = run_owner_correct_git(
         git_launcher_ahead_behind_args(config, repo, remote_head),
+        runner=runner,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -2048,7 +2144,13 @@ def launcher_checkout_status(
 
 
 def _short_head(repo: Path, *, runner: Callable[..., subprocess.CompletedProcess[Any]]) -> str:
-    proc = runner(git_launcher_head_short_args(repo), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    proc = run_owner_correct_git(
+        git_launcher_head_short_args(repo),
+        runner=runner,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
     if proc.returncode != 0:
         return "unknown"
     return str(proc.stdout or "").strip() or "unknown"
@@ -2062,8 +2164,9 @@ def _auto_fast_forward_launcher_checkout(
     behind_exact: bool,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
 ) -> LauncherCheckoutProbe:
-    branch_proc = runner(
+    branch_proc = run_owner_correct_git(
         git_launcher_current_branch_args(repo),
+        runner=runner,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -2079,8 +2182,9 @@ def _auto_fast_forward_launcher_checkout(
             f"Run `scripts/team-launcher {config.project} deploy-launcher --launcher-repo {repo}` "
             "during an approved restart window, or rerun with --allow-stale-launcher in an emergency."
         )
-    status_proc = runner(
+    status_proc = run_owner_correct_git(
         git_launcher_status_porcelain_args(repo),
+        runner=runner,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -2099,7 +2203,7 @@ def _auto_fast_forward_launcher_checkout(
             "during an approved restart window, or rerun with --allow-stale-launcher in an emergency."
         )
     before = _short_head(repo, runner=runner)
-    fetch_proc = runner(git_fetch_launcher_ref_args(config, repo))
+    fetch_proc = run_owner_correct_git(git_fetch_launcher_ref_args(config, repo), runner=runner)
     if fetch_proc.returncode != 0:
         raise SystemExit(
             f"team-launcher: refusing to launch from stale checkout {repo}; "
@@ -2108,7 +2212,7 @@ def _auto_fast_forward_launcher_checkout(
             f"Run `scripts/team-launcher {config.project} deploy-launcher --launcher-repo {repo}` "
             "during an approved restart window, or rerun with --allow-stale-launcher in an emergency."
         )
-    merge_proc = runner(git_fast_forward_launcher_ref_args(config, repo))
+    merge_proc = run_owner_correct_git(git_fast_forward_launcher_ref_args(config, repo), runner=runner)
     if merge_proc.returncode != 0:
         raise SystemExit(
             f"team-launcher: refusing to launch from stale checkout {repo}; "
@@ -2217,15 +2321,16 @@ def deploy_launcher_checkout(
             file=sys.stderr,
         )
         return 1
-    check_proc = checkout_runner(
+    check_proc = run_owner_correct_git(
         git_launcher_checkout_check_args(repo),
+        runner=checkout_runner,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
     if check_proc.returncode != 0:
         print(f"team-launcher: launcher path is not a git checkout: {repo}", file=sys.stderr)
         return int(check_proc.returncode)
-    fetch_proc = checkout_runner(git_fetch_launcher_ref_args(config, repo))
+    fetch_proc = run_owner_correct_git(git_fetch_launcher_ref_args(config, repo), runner=checkout_runner)
     if fetch_proc.returncode != 0:
         print(
             f"team-launcher: failed to fetch {worktree_ref(config)} in {repo}: "
@@ -2233,7 +2338,7 @@ def deploy_launcher_checkout(
             file=sys.stderr,
         )
         return int(fetch_proc.returncode)
-    checkout_proc = checkout_runner(git_checkout_launcher_branch_args(config, repo))
+    checkout_proc = run_owner_correct_git(git_checkout_launcher_branch_args(config, repo), runner=checkout_runner)
     if checkout_proc.returncode != 0:
         print(
             f"team-launcher: failed to checkout launcher branch {config.worktree_branch} in {repo}: "
@@ -2241,7 +2346,7 @@ def deploy_launcher_checkout(
             file=sys.stderr,
         )
         return int(checkout_proc.returncode)
-    merge_proc = checkout_runner(git_fast_forward_launcher_ref_args(config, repo))
+    merge_proc = run_owner_correct_git(git_fast_forward_launcher_ref_args(config, repo), runner=checkout_runner)
     if merge_proc.returncode != 0:
         print(
             f"team-launcher: failed to fast-forward launcher checkout {repo} to {worktree_ref(config)}: "
@@ -2250,7 +2355,7 @@ def deploy_launcher_checkout(
         )
         return int(merge_proc.returncode)
     if clean:
-        clean_proc = checkout_runner(git_clean_launcher_checkout_args(repo))
+        clean_proc = run_owner_correct_git(git_clean_launcher_checkout_args(repo), runner=checkout_runner)
         if clean_proc.returncode != 0:
             print(
                 f"team-launcher: failed to clean launcher checkout {repo}: "
@@ -2303,8 +2408,10 @@ def warn_before_shared_checkout_refresh(
     *,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
 ) -> WorktreeProvisionResult | None:
-    status_proc = runner(
+    status_proc = run_owner_correct_git(
         git_shared_checkout_status_porcelain_args(config),
+        runner=runner,
+        owner_rules=_config_git_owner_rules(config),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -2312,8 +2419,10 @@ def warn_before_shared_checkout_refresh(
     if status_proc.returncode != 0:
         reason = _proc_failure_reason(status_proc, f"status failed with exit {status_proc.returncode}")
         return WorktreeProvisionResult({role.role: reason for role in config.roles})
-    clean_proc = runner(
+    clean_proc = run_owner_correct_git(
         git_clean_shared_checkout_dry_run_args(config),
+        runner=runner,
+        owner_rules=_config_git_owner_rules(config),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -2348,8 +2457,10 @@ def warn_before_role_worktree_refresh(
     *,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
 ) -> WorktreeProvisionResult | None:
-    status_proc = runner(
+    status_proc = run_owner_correct_git(
         git_role_worktree_status_porcelain_args(role),
+        runner=runner,
+        owner_rules=_config_git_owner_rules(config),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -2357,8 +2468,10 @@ def warn_before_role_worktree_refresh(
     if status_proc.returncode != 0:
         reason = _proc_failure_reason(status_proc, f"status failed with exit {status_proc.returncode}")
         return WorktreeProvisionResult({role.role: reason})
-    clean_proc = runner(
+    clean_proc = run_owner_correct_git(
         git_clean_role_worktree_dry_run_args(role),
+        runner=runner,
+        owner_rules=_config_git_owner_rules(config),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -2403,20 +2516,36 @@ def ensure_control_repository(
         reason = _proc_failure_reason(mkdir_proc, f"mkdir failed with exit {mkdir_proc.returncode}")
         return WorktreeProvisionResult({role.role: reason for role in config.roles})
     if not config.control_repository.exists():
-        clone_proc = runner(git_clone_control_repository_args(config))
+        clone_proc = run_owner_correct_git(
+            git_clone_control_repository_args(config),
+            runner=runner,
+            owner_rules=_config_git_owner_rules(config),
+        )
         if clone_proc.returncode != 0:
             reason = _proc_failure_reason(clone_proc, f"clone failed with exit {clone_proc.returncode}")
             return WorktreeProvisionResult({role.role: reason for role in config.roles})
         if config.worktree_remote != "origin":
-            rename_proc = runner(git_control_remote_rename_args(config))
+            rename_proc = run_owner_correct_git(
+                git_control_remote_rename_args(config),
+                runner=runner,
+                owner_rules=_config_git_owner_rules(config),
+            )
             if rename_proc.returncode != 0:
                 reason = _proc_failure_reason(rename_proc, f"remote rename failed with exit {rename_proc.returncode}")
                 return WorktreeProvisionResult({role.role: reason for role in config.roles})
-    refspec_proc = runner(git_control_fetch_refspec_args(config))
+    refspec_proc = run_owner_correct_git(
+        git_control_fetch_refspec_args(config),
+        runner=runner,
+        owner_rules=_config_git_owner_rules(config),
+    )
     if refspec_proc.returncode != 0:
         reason = _proc_failure_reason(refspec_proc, f"fetch refspec config failed with exit {refspec_proc.returncode}")
         return WorktreeProvisionResult({role.role: reason for role in config.roles})
-    fetch_proc = runner(git_fetch_control_ref_args(config))
+    fetch_proc = run_owner_correct_git(
+        git_fetch_control_ref_args(config),
+        runner=runner,
+        owner_rules=_config_git_owner_rules(config),
+    )
     if fetch_proc.returncode != 0:
         reason = _proc_failure_reason(fetch_proc, f"fetch failed with exit {fetch_proc.returncode}")
         return WorktreeProvisionResult({role.role: reason for role in config.roles})
@@ -2605,12 +2734,18 @@ def ensure_control_role_worktrees(
     for role in config.roles:
         role_path = Path(role.workdir)
         if not role_path.exists():
-            add_proc = runner(git_control_worktree_add_args(config, role))
+            add_proc = run_owner_correct_git(
+                git_control_worktree_add_args(config, role),
+                runner=runner,
+                owner_rules=_config_git_owner_rules(config),
+            )
             if add_proc.returncode != 0:
                 failed[role.role] = _proc_failure_reason(add_proc, f"worktree add failed with exit {add_proc.returncode}")
             continue
-        check_proc = runner(
+        check_proc = run_owner_correct_git(
             git_role_worktree_check_args(role),
+            runner=runner,
+            owner_rules=_config_git_owner_rules(config),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -2621,11 +2756,19 @@ def ensure_control_role_worktrees(
         if warning_result is not None:
             failed.update(warning_result.failed_roles)
             continue
-        reset_proc = runner(git_role_worktree_reset_args(config, role))
+        reset_proc = run_owner_correct_git(
+            git_role_worktree_reset_args(config, role),
+            runner=runner,
+            owner_rules=_config_git_owner_rules(config),
+        )
         if reset_proc.returncode != 0:
             failed[role.role] = _proc_failure_reason(reset_proc, f"reset failed with exit {reset_proc.returncode}")
             continue
-        clean_proc = runner(git_clean_role_worktree_args(role))
+        clean_proc = run_owner_correct_git(
+            git_clean_role_worktree_args(role),
+            runner=runner,
+            owner_rules=_config_git_owner_rules(config),
+        )
         if clean_proc.returncode != 0:
             failed[role.role] = _proc_failure_reason(clean_proc, f"clean failed with exit {clean_proc.returncode}")
     return WorktreeProvisionResult(failed)
@@ -2641,14 +2784,20 @@ def ensure_project_worktrees(
         return ensure_control_role_worktrees(config, refresh=refresh, runner=runner)
     if config.repository is None:
         return WorktreeProvisionResult({})
-    fetch_proc = runner(git_fetch_worktree_ref_args(config))
+    fetch_proc = run_owner_correct_git(
+        git_fetch_worktree_ref_args(config),
+        runner=runner,
+        owner_rules=_config_git_owner_rules(config),
+    )
     if fetch_proc.returncode != 0:
         reason = _proc_failure_reason(fetch_proc, f"fetch failed with exit {fetch_proc.returncode}")
         return WorktreeProvisionResult({role.role: reason for role in config.roles})
     if not refresh:
         return WorktreeProvisionResult({})
-    check_proc = runner(
+    check_proc = run_owner_correct_git(
         git_shared_checkout_check_args(config),
+        runner=runner,
+        owner_rules=_config_git_owner_rules(config),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -2658,11 +2807,19 @@ def ensure_project_worktrees(
     warning_result = warn_before_shared_checkout_refresh(config, runner=runner)
     if warning_result is not None:
         return warning_result
-    checkout_proc = runner(git_checkout_shared_ref_args(config))
+    checkout_proc = run_owner_correct_git(
+        git_checkout_shared_ref_args(config),
+        runner=runner,
+        owner_rules=_config_git_owner_rules(config),
+    )
     if checkout_proc.returncode != 0:
         reason = _proc_failure_reason(checkout_proc, f"checkout failed with exit {checkout_proc.returncode}")
         return WorktreeProvisionResult({role.role: reason for role in config.roles})
-    clean_proc = runner(git_clean_shared_checkout_args(config))
+    clean_proc = run_owner_correct_git(
+        git_clean_shared_checkout_args(config),
+        runner=runner,
+        owner_rules=_config_git_owner_rules(config),
+    )
     if clean_proc.returncode != 0:
         reason = _proc_failure_reason(clean_proc, f"clean failed with exit {clean_proc.returncode}")
         return WorktreeProvisionResult({role.role: reason for role in config.roles})
@@ -2686,7 +2843,11 @@ def fetch_project_worktree_ref(
         return 1
     if config.repository is None:
         return 0
-    fetch_proc = runner(git_fetch_worktree_ref_args(config))
+    fetch_proc = run_owner_correct_git(
+        git_fetch_worktree_ref_args(config),
+        runner=runner,
+        owner_rules=_config_git_owner_rules(config),
+    )
     if fetch_proc.returncode != 0:
         print(
             f"warning: failed to fetch {worktree_ref(config)} for reload: "
@@ -4054,8 +4215,9 @@ def _tcp_port_in_use(port: int) -> bool:
 
 def _git_status_porcelain(repo: Path, *, runner: Callable[..., subprocess.CompletedProcess[Any]]) -> str:
     try:
-        result = runner(
+        result = run_owner_correct_git(
             ["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=no"],
+            runner=runner,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -4158,9 +4320,12 @@ def precheck_new_project(
         errors.append(f"target user {plan.owner_user!r} does not exist")
     if require_repository and not _path_exists(repository):
         errors.append(f"project repository {repository} does not exist")
-    status = _git_status_porcelain(source_repo, runner=runner)
-    if status.strip():
-        errors.append(f"deploy checkout {source_repo} has uncommitted changes")
+    if not _path_exists(source_repo):
+        errors.append(f"deploy checkout {source_repo} does not exist")
+    else:
+        status = _git_status_porcelain(source_repo, runner=runner)
+        if status.strip():
+            errors.append(f"deploy checkout {source_repo} has uncommitted changes")
     unit_exists = _system_unit_file_exists(plan.board_unit, runner=runner)
     database_exists = _database_exists(plan.database, runner=runner)
     socket_path = Path(plan.socket_path)
@@ -4480,8 +4645,10 @@ def _run_owner_git(
     *git_args: str,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
 ) -> subprocess.CompletedProcess[Any]:
-    return runner(
-        _owner_git_args(owner_user, project_dir, *git_args),
+    return run_owner_correct_git(
+        ["git", "-C", str(project_dir), *git_args],
+        runner=runner,
+        owner_rules=[GitOwnerRule(project_dir, owner_user)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -4603,11 +4770,11 @@ def _owner_project_git_runner(
     owned_roots: Sequence[Path] = (),
     runner: Callable[..., subprocess.CompletedProcess[Any]],
 ) -> Callable[..., subprocess.CompletedProcess[Any]]:
-    normalized_roots = [project_dir.resolve(strict=False), *(path.resolve(strict=False) for path in owned_roots)]
+    normalized_roots = [_normalized_path(project_dir), *(_normalized_path(path) for path in owned_roots)]
+    owner_rules = [GitOwnerRule(root, owner_user) for root in normalized_roots]
 
     def is_owned_path(path: Path) -> bool:
-        normalized = path.resolve(strict=False)
-        return any(normalized == root or normalized.is_relative_to(root) for root in normalized_roots)
+        return any(_path_is_under(path, root) for root in normalized_roots)
 
     def wrapped(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
         if len(args) >= 3 and args[:2] == ["mkdir", "-p"] and is_owned_path(Path(args[2])):
@@ -4615,21 +4782,7 @@ def _owner_project_git_runner(
         if len(args) >= 3 and args[:2] == ["test", "-x"] and is_owned_path(Path(args[2])):
             return runner(["sudo", "-u", owner_user, *args], **kwargs)
         if args[:1] == ["git"]:
-            git_path: Path | None = None
-            if len(args) >= 3 and args[1] == "-C":
-                git_path = Path(args[2])
-            else:
-                for index, arg in enumerate(args):
-                    if arg == "--git-dir" and index + 1 < len(args):
-                        git_path = Path(args[index + 1])
-                        break
-                    if arg.startswith("--git-dir="):
-                        git_path = Path(arg.split("=", 1)[1])
-                        break
-                if git_path is None and len(args) >= 4 and args[1:3] == ["clone", "--bare"]:
-                    git_path = Path(args[3])
-            if git_path is not None and is_owned_path(git_path):
-                return runner(["sudo", "-u", owner_user, *args], **kwargs)
+            return run_owner_correct_git(args, runner=runner, owner_rules=owner_rules, **kwargs)
         return runner(args, **kwargs)
 
     return wrapped

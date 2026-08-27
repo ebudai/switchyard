@@ -8537,6 +8537,8 @@ def test_new_project_precheck_fails_before_sudo_when_repo_is_dirty() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-new.") as tmp:
         tmp_path = Path(tmp)
         output_dir = tmp_path / "out"
+        source_repo = tmp_path / "repo"
+        source_repo.mkdir()
         project_repo = tmp_path / "project-repo"
         project_repo.mkdir()
         runner = DirtyRepoRunner()
@@ -8544,7 +8546,7 @@ def test_new_project_precheck_fails_before_sudo_when_repo_is_dirty() -> None:
             new_project_command(
                 "porter",
                 owner_user=current_user,
-                source_repo=tmp_path / "repo",
+                source_repo=source_repo,
                 repository=project_repo,
                 output_dir=output_dir,
                 execute=True,
@@ -8771,6 +8773,8 @@ def test_new_project_execute_warms_sudo_once_then_runs_generated_script() -> Non
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-new.") as tmp:
         tmp_path = Path(tmp)
         output_dir = tmp_path / "out"
+        source_repo = tmp_path / "repo"
+        source_repo.mkdir()
         project_repo = tmp_path / "project-repo"
         project_repo.mkdir()
         runner = RecordingRunner()
@@ -8779,7 +8783,7 @@ def test_new_project_execute_warms_sudo_once_then_runs_generated_script() -> Non
             new_project_command(
                 "porter",
                 owner_user=current_user,
-                source_repo=tmp_path / "repo",
+                source_repo=source_repo,
                 repository=project_repo,
                 output_dir=output_dir,
                 execute=True,
@@ -8815,6 +8819,8 @@ def test_new_project_rerun_rejects_fully_provisioned_project_before_mutating() -
 
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-new.") as tmp:
         tmp_path = Path(tmp)
+        source_repo = tmp_path / "repo"
+        source_repo.mkdir()
         project_repo = tmp_path / "project-repo"
         project_repo.mkdir()
         runner = FullyProvisionedRunner()
@@ -8823,7 +8829,7 @@ def test_new_project_rerun_rejects_fully_provisioned_project_before_mutating() -
             new_project_command(
                 "porter",
                 owner_user=current_user,
-                source_repo=tmp_path / "repo",
+                source_repo=source_repo,
                 repository=project_repo,
                 output_dir=tmp_path / "out",
                 execute=True,
@@ -8864,6 +8870,8 @@ def test_new_project_rerun_allows_installed_unit_with_empty_database_recovery_pa
 
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-new.") as tmp:
         tmp_path = Path(tmp)
+        source_repo = tmp_path / "repo"
+        source_repo.mkdir()
         project_repo = tmp_path / "project-repo"
         project_repo.mkdir()
         runner = EmptyDatabaseRunner()
@@ -8872,7 +8880,7 @@ def test_new_project_rerun_allows_installed_unit_with_empty_database_recovery_pa
             new_project_command(
                 "porter",
                 owner_user=current_user,
-                source_repo=tmp_path / "repo",
+                source_repo=source_repo,
                 repository=project_repo,
                 output_dir=tmp_path / "out",
                 runner=runner,
@@ -8900,6 +8908,8 @@ def test_new_project_rejects_installed_unit_without_database() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-new.") as tmp:
         tmp_path = Path(tmp)
         output_dir = tmp_path / "out"
+        source_repo = tmp_path / "repo"
+        source_repo.mkdir()
         project_repo = tmp_path / "project-repo"
         project_repo.mkdir()
         runner = ExistingUnitNoDatabaseRunner()
@@ -8907,7 +8917,7 @@ def test_new_project_rejects_installed_unit_without_database() -> None:
             new_project_command(
                 "porter",
                 owner_user=current_user,
-                source_repo=tmp_path / "repo",
+                source_repo=source_repo,
                 repository=project_repo,
                 output_dir=output_dir,
                 execute=True,
@@ -8931,6 +8941,8 @@ def test_new_project_rejects_port_collision_before_mutating() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-new.") as tmp:
         tmp_path = Path(tmp)
         output_dir = tmp_path / "out"
+        source_repo = tmp_path / "repo"
+        source_repo.mkdir()
         project_repo = tmp_path / "project-repo"
         project_repo.mkdir()
         runner = FakeRunner()
@@ -8938,7 +8950,7 @@ def test_new_project_rejects_port_collision_before_mutating() -> None:
             new_project_command(
                 "porter",
                 owner_user=current_user,
-                source_repo=tmp_path / "repo",
+                source_repo=source_repo,
                 repository=project_repo,
                 output_dir=output_dir,
                 execute=True,

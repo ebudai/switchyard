@@ -140,6 +140,7 @@ LAUNCH_SESSION_RECORD_TIMEOUT_SECONDS = 10.0
 LAUNCH_SESSION_RECORD_POLL_SECONDS = 0.2
 LAUNCH_RESUME_FALLBACK_GRACE_SECONDS = 2.0
 LAUNCH_RESUME_FALLBACK_FRESHNESS_SKEW_NS = 100_000_000
+LAUNCH_PANE_STATE_FRESHNESS_SKEW_SECONDS = 0.1
 ALLOW_STALE_LAUNCHER_ENV = "TEAM_LAUNCHER_ALLOW_STALE"
 LEGACY_ALLOW_STALE_LAUNCHER_ENV = "PGU_TEAM_LAUNCHER_ALLOW_STALE"
 NO_LAUNCHER_SELF_DEPLOY_ENV = "TEAM_LAUNCHER_NO_SELF_DEPLOY"
@@ -241,6 +242,7 @@ class LaunchSessionRecordStatus:
     target: str
     session_id: str
     superseded_session_id: str = ""
+    pane_state_source: str = ""
 
     @property
     def found(self) -> bool:
@@ -249,6 +251,10 @@ class LaunchSessionRecordStatus:
     @property
     def resume_fallback(self) -> bool:
         return bool(self.superseded_session_id)
+
+    @property
+    def pane_launch_reported(self) -> bool:
+        return bool(self.pane_state_source)
 
 
 def _repo_root() -> Path:
@@ -1222,6 +1228,35 @@ def superseded_session_id_for_role(
     return str(parsed.get("session_id") or "").strip()
 
 
+def pane_launch_outcome_source_for_role(
+    role: RoleConfig,
+    pane_state_dir: Path | None,
+    *,
+    updated_since: float | None = None,
+) -> str:
+    if pane_state_dir is None or updated_since is None:
+        return ""
+    path = pane_state_dir / pane_state_file_name(role.target)
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(parsed, dict):
+        return ""
+    if str(parsed.get("target") or "") != role.target:
+        return ""
+    source = str(parsed.get("source") or "").strip()
+    if not source.startswith("team_launcher."):
+        return ""
+    try:
+        updated_at = float(parsed.get("updated_at") or 0.0)
+    except (TypeError, ValueError):
+        return ""
+    if updated_at + LAUNCH_PANE_STATE_FRESHNESS_SKEW_SECONDS < updated_since:
+        return ""
+    return source
+
+
 def launch_session_record_statuses(
     config: ProjectConfig,
     roles: Sequence[RoleConfig] | None = None,
@@ -1230,12 +1265,15 @@ def launch_session_record_statuses(
     poll_seconds: float = LAUNCH_SESSION_RECORD_POLL_SECONDS,
     fallback_changed_since_ns: int | None = None,
     fallback_grace_seconds: float = LAUNCH_RESUME_FALLBACK_GRACE_SECONDS,
+    pane_state_dir: Path | None = None,
+    pane_state_updated_since: float | None = None,
 ) -> list[LaunchSessionRecordStatus]:
     roles = tuple(roles or config.roles)
     deadline = time.monotonic() + max(0.0, timeout_seconds)
+    pane_outcomes_required = pane_state_dir is not None and pane_state_updated_since is not None
     fallback_deadline = (
         time.monotonic() + min(max(0.0, fallback_grace_seconds), max(0.0, timeout_seconds))
-        if fallback_changed_since_ns is not None
+        if fallback_changed_since_ns is not None and not pane_outcomes_required
         else time.monotonic()
     )
     statuses: list[LaunchSessionRecordStatus] = []
@@ -1250,22 +1288,35 @@ def launch_session_record_statuses(
                     config.session_dir,
                     changed_since_ns=fallback_changed_since_ns,
                 ),
+                pane_state_source=pane_launch_outcome_source_for_role(
+                    role,
+                    pane_state_dir,
+                    updated_since=pane_state_updated_since,
+                ),
             )
             for role in roles
         ]
         now = time.monotonic()
         all_records_found = all(status.found for status in statuses)
         resume_fallback_found = any(status.resume_fallback for status in statuses)
+        all_pane_outcomes_reported = not pane_outcomes_required or all(
+            status.pane_launch_reported for status in statuses
+        )
         fallback_grace_elapsed = now >= fallback_deadline
         if (
             now >= deadline
-            or resume_fallback_found
-            or (all_records_found and fallback_changed_since_ns is None)
-            or (all_records_found and fallback_grace_elapsed)
+            or (resume_fallback_found and all_pane_outcomes_reported)
+            or (all_records_found and all_pane_outcomes_reported)
+            or (
+                all_records_found
+                and not pane_outcomes_required
+                and fallback_changed_since_ns is not None
+                and fallback_grace_elapsed
+            )
         ):
             return statuses
         next_deadline = deadline
-        if all_records_found and fallback_changed_since_ns is not None:
+        if all_records_found and fallback_changed_since_ns is not None and not pane_outcomes_required:
             next_deadline = min(deadline, fallback_deadline)
         sleep_seconds = min(max(0.01, poll_seconds), max(0.0, next_deadline - now))
         if sleep_seconds <= 0:
@@ -1280,6 +1331,8 @@ def report_launch_session_records(
     timeout_seconds: float = LAUNCH_SESSION_RECORD_TIMEOUT_SECONDS,
     poll_seconds: float = LAUNCH_SESSION_RECORD_POLL_SECONDS,
     fallback_changed_since_ns: int | None = None,
+    pane_state_dir: Path | None = None,
+    pane_state_updated_since: float | None = None,
     print_func: Callable[[str], None] = print,
 ) -> list[LaunchSessionRecordStatus]:
     selected_roles = tuple(roles or config.roles)
@@ -1293,6 +1346,8 @@ def report_launch_session_records(
         timeout_seconds=timeout_seconds,
         poll_seconds=poll_seconds,
         fallback_changed_since_ns=fallback_changed_since_ns,
+        pane_state_dir=pane_state_dir,
+        pane_state_updated_since=pane_state_updated_since,
     )
     for status in statuses:
         if status.found:
@@ -3354,6 +3409,7 @@ def launch_project(
             plan["viewer_roles"] = [role.role for role in visible_roles_for_viewer(config)]
         print(json.dumps(plan, indent=2, sort_keys=True))
         return 0
+    launch_started_at = time.time()
     launch_started_ns = time.time_ns()
     for role in config.roles:
         if not role.detached:
@@ -3402,6 +3458,8 @@ def launch_project(
             timeout_seconds=session_record_timeout,
             poll_seconds=session_record_poll,
             fallback_changed_since_ns=launch_started_ns,
+            pane_state_dir=effective_pane_state_dir,
+            pane_state_updated_since=launch_started_at,
             print_func=print_func,
         )
     return 0
@@ -5088,6 +5146,7 @@ def switchyard_new_command(
         owned_roots=_control_repository_owned_roots(config),
         runner=runner,
     )
+    launch_started_at = time.time()
     launch_started_ns = time.time_ns()
     launch_result = launch_project(
         config,
@@ -5110,6 +5169,8 @@ def switchyard_new_command(
         timeout_seconds=session_record_timeout,
         poll_seconds=session_record_poll,
         fallback_changed_since_ns=launch_started_ns,
+        pane_state_dir=pane_state_dir or DEFAULT_PANE_STATE_DIR,
+        pane_state_updated_since=launch_started_at,
         print_func=print_func,
     )
     resolved_layout_mode = resolve_layout_mode(layout_mode, environ=layout_environ, runner=runner)

@@ -1059,6 +1059,124 @@ def test_launch_session_record_report_ignores_stale_resume_fallback_sidecars() -
     assert not any("fell back to a fresh session" in message for message in messages)
 
 
+def test_launch_session_record_statuses_wait_for_late_visible_fallback_outcome() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-launch-session-late-fallback.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        session_dir = tmp_path / "sessions"
+        session_dir.mkdir()
+        pane_state_dir = tmp_path / "pane-state"
+        pane_state_dir.mkdir()
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "session_dir": str(session_dir),
+                    "roles": [
+                        {"role": "app", "slot": 0, "cli": ["codex"], "target": "porter-app:0.0"},
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+        role = config.roles[0]
+        active_record = session_dir / session_file_name(role.target)
+        active_record.write_text(
+            json.dumps({"target": role.target, "session_id": "old-session"}) + "\n",
+            encoding="utf-8",
+        )
+        sidecar = session_dir / f"{session_file_name(role.target)}.superseded"
+        fallback_since_ns = time.time_ns()
+        pane_state_since = time.time()
+
+        def write_late_fallback() -> None:
+            time.sleep(0.05)
+            active_record.replace(sidecar)
+            active_record.write_text(
+                json.dumps({"target": role.target, "session_id": "fresh-session"}) + "\n",
+                encoding="utf-8",
+            )
+            team_launcher.seed_initial_pane_idle_state(
+                role,
+                pane_state_dir=pane_state_dir,
+                source="team_launcher.start.fallback",
+            )
+
+        writer = threading.Thread(target=write_late_fallback)
+        writer.start()
+        try:
+            statuses = team_launcher.launch_session_record_statuses(
+                config,
+                timeout_seconds=1.0,
+                poll_seconds=0.01,
+                fallback_changed_since_ns=fallback_since_ns,
+                fallback_grace_seconds=0.0,
+                pane_state_dir=pane_state_dir,
+                pane_state_updated_since=pane_state_since,
+            )
+        finally:
+            writer.join(timeout=1.0)
+
+    assert statuses[0].session_id == "fresh-session"
+    assert statuses[0].superseded_session_id == "old-session"
+    assert statuses[0].pane_state_source == "team_launcher.start.fallback"
+
+
+def test_superseded_session_freshness_uses_rename_ctime_not_record_mtime() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-launch-session-ctime.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        session_dir = tmp_path / "sessions"
+        session_dir.mkdir()
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "session_dir": str(session_dir),
+                    "roles": [
+                        {"role": "app", "slot": 0, "cli": ["codex"], "target": "porter-app:0.0"},
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+        role = config.roles[0]
+        active_record = session_dir / session_file_name(role.target)
+        active_record.write_text(
+            json.dumps({"target": role.target, "session_id": "old-session"}) + "\n",
+            encoding="utf-8",
+        )
+        time.sleep(0.12)
+        fallback_since_ns = time.time_ns()
+
+        assert clear_session_record_for_role(role, session_dir) is True
+
+        assert (
+            team_launcher.superseded_session_id_for_role(
+                role,
+                session_dir,
+                changed_since_ns=fallback_since_ns,
+            )
+            == "old-session"
+        )
+
+
 def test_launch_session_record_timeout_default_is_ten_seconds() -> None:
     assert team_launcher.LAUNCH_SESSION_RECORD_TIMEOUT_SECONDS == 10.0
     for fn in (team_launcher.launch_project, team_launcher.switchyard_new_command):

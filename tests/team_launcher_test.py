@@ -7211,6 +7211,7 @@ def test_switchyard_register_cli_enables_launch_by_name_without_config_flag() ->
         original_config_dir = team_launcher.DEFAULT_CONFIG_DIR
         original_registry_dir = team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR
         original_launch_project = team_launcher.launch_project
+        original_first_run_auth = team_launcher.run_switchyard_launch_first_run_auth
         try:
             team_launcher.DEFAULT_CONFIG_DIR = config_dir
             team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
@@ -7220,12 +7221,14 @@ def test_switchyard_register_cli_enables_launch_by_name_without_config_flag() ->
                 return 0
 
             team_launcher.launch_project = fake_launch_project
+            team_launcher.run_switchyard_launch_first_run_auth = lambda _config: team_launcher.FirstRunAuthReport({}, [])
             assert switchyard_main(["register", str(config_path)]) == 0
             assert switchyard_main(["otto"]) == 0
         finally:
             team_launcher.DEFAULT_CONFIG_DIR = original_config_dir
             team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = original_registry_dir
             team_launcher.launch_project = original_launch_project
+            team_launcher.run_switchyard_launch_first_run_auth = original_first_run_auth
 
     assert calls
     assert calls[0]["project"] == "otto"
@@ -7234,6 +7237,87 @@ def test_switchyard_register_cli_enables_launch_by_name_without_config_flag() ->
     assert calls[0]["script_path"] == ROOT / "scripts" / "team-launcher"
     assert calls[0]["pane_launcher"] == Path("/home/otto-agent/otto-ticketboard-live/current/scripts/team-launcher")
     assert calls[0]["report_session_records"] is True
+
+
+def test_switchyard_launch_runs_first_run_auth_before_panes_and_warns_after() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-first-run-launch.") as tmp:
+        tmp_path = Path(tmp)
+        config_dir = tmp_path / "config"
+        registry_dir = tmp_path / "registry"
+        layout = tmp_path / "layout.json"
+        config_dir.mkdir()
+        registry_dir.mkdir()
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        config_path = config_dir / "otto.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "otto",
+                    "project_name": "Otto System",
+                    "layout": str(layout),
+                    "run_as_user": "otto-agent",
+                    "roles": [{"role": "ops", "slot": 0, "cli": ["codex"], "workdir": str(tmp_path / "repo")}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        events: list[tuple[str, object]] = []
+        report = team_launcher.FirstRunAuthReport({"codex": ["ops"]}, [])
+        original_config_dir = team_launcher.DEFAULT_CONFIG_DIR
+        original_registry_dir = team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR
+        original_launch_project = team_launcher.launch_project
+        original_run_first_run_auth_phase = team_launcher.run_first_run_auth_phase
+        original_report_first_run_auth_warnings = team_launcher.report_first_run_auth_warnings
+        try:
+            team_launcher.DEFAULT_CONFIG_DIR = config_dir
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
+
+            def fake_run_first_run_auth_phase(
+                config: team_launcher.ProjectConfig,
+                **kwargs: object,
+            ) -> team_launcher.FirstRunAuthReport:
+                events.append(
+                    (
+                        "auth",
+                        {
+                            "project": config.project,
+                            "owner_user": kwargs["owner_user"],
+                            "owner_home": kwargs["owner_home"],
+                        },
+                    )
+                )
+                return report
+
+            def fake_launch_project(config: team_launcher.ProjectConfig, **kwargs: object) -> int:
+                events.append(("launch", {"project": config.project, **kwargs}))
+                return 0
+
+            def fake_report_first_run_auth_warnings(
+                auth_report: team_launcher.FirstRunAuthReport,
+                **_kwargs: object,
+            ) -> None:
+                events.append(("warn", auth_report))
+
+            team_launcher.run_first_run_auth_phase = fake_run_first_run_auth_phase
+            team_launcher.launch_project = fake_launch_project
+            team_launcher.report_first_run_auth_warnings = fake_report_first_run_auth_warnings
+
+            assert switchyard_main(["otto"]) == 0
+        finally:
+            team_launcher.DEFAULT_CONFIG_DIR = original_config_dir
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = original_registry_dir
+            team_launcher.launch_project = original_launch_project
+            team_launcher.run_first_run_auth_phase = original_run_first_run_auth_phase
+            team_launcher.report_first_run_auth_warnings = original_report_first_run_auth_warnings
+
+    assert [name for name, _payload in events] == ["auth", "launch", "warn"]
+    assert events[0][1] == {"project": "otto", "owner_user": "otto-agent", "owner_home": Path("/home/otto-agent")}
+    assert events[1][1]["config_path"] == config_path
+    assert events[1][1]["mode"] == "start"
+    assert events[1][1]["script_path"] == ROOT / "scripts" / "team-launcher"
+    assert events[1][1]["report_session_records"] is True
+    assert events[2][1] is report
 
 
 def test_switchyard_registry_does_not_change_pgu_resolution_or_launch_config() -> None:
@@ -7255,6 +7339,7 @@ def test_switchyard_registry_does_not_change_pgu_resolution_or_launch_config() -
         calls: list[dict[str, object]] = []
         original_registry_dir = team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR
         original_launch_project = team_launcher.launch_project
+        original_first_run_auth = team_launcher.run_switchyard_launch_first_run_auth
         try:
             team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
 
@@ -7270,10 +7355,12 @@ def test_switchyard_registry_does_not_change_pgu_resolution_or_launch_config() -
                 return 0
 
             team_launcher.launch_project = fake_launch_project
+            team_launcher.run_switchyard_launch_first_run_auth = lambda _config: team_launcher.FirstRunAuthReport({}, [])
             assert switchyard_main(["pgu"]) == 0
         finally:
             team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = original_registry_dir
             team_launcher.launch_project = original_launch_project
+            team_launcher.run_switchyard_launch_first_run_auth = original_first_run_auth
 
     assert calls
     assert calls[0]["project"] == "pgu"
@@ -7297,10 +7384,12 @@ def test_legacy_and_switchyard_entrypoints_render_same_plain_konsole_command() -
         original_config_dir = team_launcher.DEFAULT_CONFIG_DIR
         original_registry_dir = team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR
         original_current_user_name = team_launcher.current_user_name
+        original_first_run_auth = team_launcher.run_switchyard_launch_first_run_auth
         try:
             team_launcher.DEFAULT_CONFIG_DIR = config_dir
             team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
             team_launcher.current_user_name = lambda: "root"
+            team_launcher.run_switchyard_launch_first_run_auth = lambda _config: team_launcher.FirstRunAuthReport({}, [])
 
             def launch_with_fake_runner(config: team_launcher.ProjectConfig, **kwargs: object) -> int:
                 kwargs["runner"] = runner
@@ -7320,6 +7409,7 @@ def test_legacy_and_switchyard_entrypoints_render_same_plain_konsole_command() -
             team_launcher.DEFAULT_CONFIG_DIR = original_config_dir
             team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = original_registry_dir
             team_launcher.current_user_name = original_current_user_name
+            team_launcher.run_switchyard_launch_first_run_auth = original_first_run_auth
 
         konsole_calls = [call for call in runner.calls if "konsole" in call]
         assert len(konsole_calls) == 1
@@ -7428,6 +7518,7 @@ def test_switchyard_project_name_argv_joins_and_resumes_matching_project() -> No
         original_config_dir = team_launcher.DEFAULT_CONFIG_DIR
         original_registry_dir = team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR
         original_launch_project = team_launcher.launch_project
+        original_first_run_auth = team_launcher.run_switchyard_launch_first_run_auth
         try:
             team_launcher.DEFAULT_CONFIG_DIR = tmp_path
             team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
@@ -7437,11 +7528,13 @@ def test_switchyard_project_name_argv_joins_and_resumes_matching_project() -> No
                 return 0
 
             team_launcher.launch_project = fake_launch_project
+            team_launcher.run_switchyard_launch_first_run_auth = lambda _config: team_launcher.FirstRunAuthReport({}, [])
             assert switchyard_main(["my", "project", "name"]) == 0
         finally:
             team_launcher.DEFAULT_CONFIG_DIR = original_config_dir
             team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = original_registry_dir
             team_launcher.launch_project = original_launch_project
+            team_launcher.run_switchyard_launch_first_run_auth = original_first_run_auth
 
     assert calls
     assert calls[0]["project"] == "porter"

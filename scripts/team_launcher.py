@@ -5033,6 +5033,24 @@ def report_first_run_auth_warnings(
         print_func(f"warning: switchyard: {cli} workspace still untrusted for {role}: {workdir}")
 
 
+def run_switchyard_launch_first_run_auth(
+    config: ProjectConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> FirstRunAuthReport:
+    owner_user = (config.run_as_user or current_user_name()).strip()
+    if not owner_user:
+        return FirstRunAuthReport({}, [])
+    return run_first_run_auth_phase(
+        config,
+        owner_user=owner_user,
+        owner_home=_owner_home_for_auth(owner_user),
+        runner=runner,
+        print_func=print_func,
+    )
+
+
 def _owner_project_install_args(owner_user: str, project_dir: Path, *, shell: str = "fish") -> list[list[str]]:
     shell_path = shell if "/" in shell else (shutil.which(shell) or f"/usr/bin/{shell}")
     return [
@@ -5711,13 +5729,18 @@ def switchyard_main(argv: list[str] | None = None) -> int:
     selection = " ".join(argv)
     entry = _resolve_switchyard_project(selection)
     config = load_project_config(entry.slug, entry.config_path)
-    return launch_project(
+    first_run_auth_report = run_switchyard_launch_first_run_auth(config)
+    launch_result = launch_project(
         config,
         config_path=entry.config_path,
         mode="start",
         script_path=Path(__file__).resolve().with_name(TEAM_LAUNCHER_NAME),
         report_session_records=True,
     )
+    if launch_result != 0:
+        return launch_result
+    report_first_run_auth_warnings(first_run_auth_report)
+    return 0
 
 
 def _reject_removed_commands(argv: Sequence[str]) -> None:

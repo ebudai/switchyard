@@ -2885,6 +2885,74 @@ def test_konsole_launch_can_fallback_to_gui_user_uid_without_host_var() -> None:
             os.environ["PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY"] = original_legacy_wayland_name
 
 
+def test_konsole_launch_prefers_host_wayland_over_configured_wayland_name() -> None:
+    original_uid_for_user = team_launcher.uid_for_user
+    env_keys = [
+        "HOST_WAYLAND_DISPLAY",
+        "PGU_HOST_WAYLAND_DISPLAY",
+        "TEAM_LAUNCHER_WAYLAND_DISPLAY",
+        "PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY",
+    ]
+    original_env = {key: os.environ.get(key) for key in env_keys}
+    try:
+        os.environ["HOST_WAYLAND_DISPLAY"] = "/run/user/1000/wayland-host"
+        os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
+        os.environ["TEAM_LAUNCHER_WAYLAND_DISPLAY"] = "wayland-configured"
+        os.environ.pop("PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY", None)
+        team_launcher.uid_for_user = lambda user_name: 4242 if user_name == "user" else None
+
+        assert konsole_launch_args(Path("/tmp/layout.json"), gui_user="user") == [
+            "env",
+            "QT_QPA_PLATFORM=wayland",
+            "WAYLAND_DISPLAY=/run/user/1000/wayland-host",
+            "konsole",
+            "--separate",
+            "--layout",
+            "/tmp/layout.json",
+        ]
+    finally:
+        team_launcher.uid_for_user = original_uid_for_user
+        for key, value in original_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def test_konsole_launch_prefers_legacy_host_wayland_over_legacy_configured_wayland_name() -> None:
+    original_uid_for_user = team_launcher.uid_for_user
+    env_keys = [
+        "HOST_WAYLAND_DISPLAY",
+        "PGU_HOST_WAYLAND_DISPLAY",
+        "TEAM_LAUNCHER_WAYLAND_DISPLAY",
+        "PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY",
+    ]
+    original_env = {key: os.environ.get(key) for key in env_keys}
+    try:
+        os.environ.pop("HOST_WAYLAND_DISPLAY", None)
+        os.environ["PGU_HOST_WAYLAND_DISPLAY"] = "/run/user/1000/wayland-legacy-host"
+        os.environ.pop("TEAM_LAUNCHER_WAYLAND_DISPLAY", None)
+        os.environ["PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY"] = "wayland-legacy-configured"
+        team_launcher.uid_for_user = lambda user_name: 4242 if user_name == "user" else None
+
+        assert konsole_launch_args(Path("/tmp/layout.json"), gui_user="user") == [
+            "env",
+            "QT_QPA_PLATFORM=wayland",
+            "WAYLAND_DISPLAY=/run/user/1000/wayland-legacy-host",
+            "konsole",
+            "--separate",
+            "--layout",
+            "/tmp/layout.json",
+        ]
+    finally:
+        team_launcher.uid_for_user = original_uid_for_user
+        for key, value in original_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def test_konsole_launch_defaults_to_invoking_user_uid_without_host_var() -> None:
     original_uid_for_user = team_launcher.uid_for_user
     original_current_user_name = team_launcher.current_user_name

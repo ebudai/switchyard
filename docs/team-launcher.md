@@ -61,11 +61,12 @@ sudo env sh -c 'command -v switchyard'
 ```
 
 `/usr/local/bin` is deliberately used because it is on the host's normal shell
-`PATH` and must also be present in sudo's `secure_path`; the installer refuses a
-system install path that sudo would not resolve. The installed wrapper lives
-outside `/home/agent`; when invoked without sudo, it re-execs the live checkout
-entrypoint through `sudo`, so traversal into the shared checkout happens only
-after privilege is acquired.
+`PATH` and should also be present in sudo's `secure_path`. When `sudo -V`
+reports a `secure_path`, the installer refuses a system install path that is not
+listed there; when sudo reports no such setting, it proceeds. The installed
+wrapper lives outside `/home/agent`; when invoked without sudo, it re-execs the
+live checkout entrypoint through `sudo`, so traversal into the shared checkout
+happens only after privilege is acquired.
 
 Before any real `start`, `reload`, or direct `pane` launch, the launcher checks
 the checkout containing `scripts/team-launcher` against the configured

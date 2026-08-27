@@ -186,13 +186,18 @@ for CI and scripted installs.
 
 Supersedes the `switchyard <slug> <command>` sketch above. Zero parameters is the default path.
 
-    ./switchyard                    menu: `new...` on the first line, then all projects
-    ./switchyard new                straight into new-project setup
-    ./switchyard My Project Name    straight into that project
+    switchyard                      menu: `new...` on the first line, then all projects
+    sudo switchyard new             straight into new-project setup
+    sudo switchyard My Project Name straight into that project
 
 The listing is the whole navigation surface -- it is both discovery and **resume**, which is the
 question a new user hits on day two. Selecting a project attaches if it is running and resumes if
 it is not (today's `start` semantics).
+
+The installed `switchyard` command is a PATH trampoline outside the shared checkout. A bare
+`switchyard` from a normal user shell re-execs through sudo before it reaches the live checkout, so
+printing the menu may prompt for a password; that is the expected boundary between Eric's account
+and the agent-owned checkout, not a menu bug.
 
 `new` prompts for **project name**, **slug**, **agent name** (`-agent` appended), and
 **project path**. The first answer is the human name; the later answers are derived from it but
@@ -486,7 +491,7 @@ None. Both are closed (Eric, 2026-08-24):
 
    | Name | Example | Job |
    |---|---|---|
-   | project name | `Otto Scheduler` | what you type; what `./switchyard <name>` matches |
+   | project name | `Otto Scheduler` | what you type; what `switchyard <name>` matches |
    | slug | `otto` | port, database, socket, unit names, ticket prefix |
    | agent | `otto-agent` | the owning user |
    | project dir | `/home/otto-agent/Projects/otto-scheduler` | derived from the NAME |

@@ -39,6 +39,7 @@ from ticket_board_live_pane_guard import (
 LIVE_PANE_STATE_PATHS = candidate_live_pane_state_paths()
 strip_ticket_board_pane_env(os.environ)
 
+from scripts.ticket_board import notify_listener
 from scripts.ticket_board.notify_listener import (
     DEFAULT_DIRECTORCTL,
     DEFAULT_IDLE_STALL_NUDGE_CADENCE_SECONDS,
@@ -2916,6 +2917,16 @@ def test_pane_state_live_guard_detects_foreign_and_source_mismatched_records() -
         foreign_path.write_text(json.dumps({"target": "pgu-probe:0.0", "state": "idle", "source": "codex.Stop"}) + "\n", encoding="utf-8")
         changed = pane_state_record_anomaly_diff(before, pane_state_record_anomalies([tmp_path]))
         assert f"{foreign_path}: target 'pgu-probe:0.0' is not a configured live pgu pane" in changed
+
+
+def test_expected_runtime_strips_known_hyphenated_project_slug() -> None:
+    previous_project = notify_listener.DEFAULT_PROJECT
+    try:
+        notify_listener.DEFAULT_PROJECT = "my-cool-thing"
+        gate = RealPaneActivityGate(role_runtimes={"code-review": "codex", "review": "gemini"})
+        assert gate._expected_runtime_for_target("my-cool-thing-code-review:0.0") == "codex"
+    finally:
+        notify_listener.DEFAULT_PROJECT = previous_project
 
 
 def main() -> int:

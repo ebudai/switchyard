@@ -85,13 +85,28 @@ def _resolve_target(raw_target: str, environ: dict[str, str]) -> str:
 
 def _project_from_target(target: str) -> str:
     session = target.split(":", 1)[0].strip()
-    if "-" not in session:
+    if session.count("-") != 1:
         return ""
-    return session.rsplit("-", 1)[0].strip()
+    return session.split("-", 1)[0].strip()
 
 
 def _project_for_dirs(target: str, environ: dict[str, str]) -> str:
     return _env_first(environ, "TICKET_BOARD_PROJECT", "PGU_TICKET_BOARD_PROJECT") or _project_from_target(target)
+
+
+def _role_for_target(target: str, environ: dict[str, str] | None = None) -> str:
+    session = target.split(":", 1)[0].strip()
+    if not session:
+        return ""
+    project = _env_first(environ or {}, "TICKET_BOARD_PROJECT", "PGU_TICKET_BOARD_PROJECT")
+    if project:
+        prefix = f"{project}-"
+        if session.startswith(prefix):
+            return session[len(prefix) :].strip().lower()
+        return ""
+    if session.count("-") != 1:
+        return ""
+    return session.split("-", 1)[1].strip().lower()
 
 
 def _runtime_base_dir(environ: dict[str, str]) -> Path:
@@ -348,11 +363,6 @@ def _should_write_session(
     return False
 
 
-def _role_for_target(target: str) -> str:
-    session = target.split(":", 1)[0]
-    return session.rsplit("-", 1)[-1].strip().lower()
-
-
 def _ticket_number(ticket_id: str) -> int:
     match = re.search(r"(\d+)$", ticket_id)
     return int(match.group(1)) if match else -1
@@ -413,7 +423,7 @@ def _session_start_additional_context_output(
     session_start_source = _session_start_source(payload)
     if session_start_source not in SESSION_START_RESUME_SOURCES:
         return None
-    role = _role_for_target(target)
+    role = _role_for_target(target, environ)
     if not role:
         return None
     board_url = _default_board_url(environ)

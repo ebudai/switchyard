@@ -1374,6 +1374,102 @@ def test_pgu_hook_default_dirs_remain_pgu_named() -> None:
         assert json.loads(pgu_session.read_text(encoding="utf-8"))["session_id"] == "codex_pgu_default_session_456"
 
 
+def test_hook_project_env_disambiguates_hyphenated_project_and_role() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        tmp_path = Path(tmp)
+        runtime_dir = tmp_path / "run"
+        state_home = tmp_path / "state"
+        target = "my-cool-thing-code-review:0.0"
+        env = _hook_env(
+            TICKET_BOARD_PROJECT="my-cool-thing",
+            XDG_RUNTIME_DIR=str(runtime_dir),
+            XDG_STATE_HOME=str(state_home),
+            CODEX_SESSION_ID="codex_hyphenated_role_session_456",
+        )
+        with _board_with_tickets(
+            [
+                {
+                    "id": "PGU-72201",
+                    "title": "Hyphenated role",
+                    "state": "in_progress",
+                    "assignee": "code-review",
+                }
+            ]
+        ) as board_url:
+            env["TICKET_BOARD_URL"] = board_url
+            proc = subprocess.run(
+                [
+                    str(ROOT / "scripts" / HOOK_NAME),
+                    "idle",
+                    "--target",
+                    target,
+                    "--source",
+                    "codex.SessionStart",
+                    "--record-session",
+                ],
+                input=json.dumps({"source": "compact"}),
+                text=True,
+                capture_output=True,
+                check=True,
+                env=env,
+            )
+
+        state_path = runtime_dir / "my-cool-thing-ticket-board" / "pane-state" / "my-cool-thing-code-review_0.0.json"
+        session_path = (
+            state_home
+            / "my-cool-thing-ticket-board"
+            / "pane-sessions"
+            / "my-cool-thing-code-review_0.0.json"
+        )
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+        output = json.loads(proc.stdout)
+        additional_context = output["hookSpecificOutput"]["additionalContext"]
+        assert state["target"] == target
+        assert state["source"] == "codex.SessionStart"
+        assert session["target"] == target
+        assert session["session_id"] == "codex_hyphenated_role_session_456"
+        assert "PGU-72201 -- Hyphenated role" in additional_context
+        assert "assigned to you" in additional_context
+        assert not (runtime_dir / "my-cool-thing-code-ticket-board").exists()
+        assert not (state_home / "my-cool-thing-code-ticket-board").exists()
+
+
+def test_hook_ambiguous_hyphenated_target_without_project_env_refuses_cleanly() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        tmp_path = Path(tmp)
+        runtime_dir = tmp_path / "run"
+        state_home = tmp_path / "state"
+        env = _without_hook_dir_env(
+            _hook_env(
+                XDG_RUNTIME_DIR=str(runtime_dir),
+                XDG_STATE_HOME=str(state_home),
+                CODEX_SESSION_ID="codex_ambiguous_session_456",
+            )
+        )
+
+        proc = subprocess.run(
+            [
+                str(ROOT / "scripts" / HOOK_NAME),
+                "idle",
+                "--target",
+                "my-cool-thing-code-review:0.0",
+                "--source",
+                "codex.SessionStart",
+                "--record-session",
+            ],
+            text=True,
+            capture_output=True,
+            env=env,
+        )
+
+        assert proc.returncode == 0
+        assert "cannot determine pane state directory" in proc.stderr
+        assert "cannot determine pane session directory" in proc.stderr
+        assert not runtime_dir.exists()
+        assert not state_home.exists()
+
+
 def test_hook_unresolved_default_dirs_report_but_do_not_fail_startup() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
         tmp_path = Path(tmp)

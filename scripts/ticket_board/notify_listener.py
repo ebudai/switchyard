@@ -475,7 +475,12 @@ class PaneActivityGate:
 
     def _role_for_target(self, target: str) -> str:
         session = self._tmux_session_for_target(target)
-        return session.rsplit("-", 1)[-1].strip().lower()
+        prefix = f"{DEFAULT_PROJECT}-"
+        if session.startswith(prefix):
+            return session[len(prefix) :].strip().lower()
+        if session.count("-") != 1:
+            return ""
+        return session.split("-", 1)[1].strip().lower()
 
     def _runtime_for_source(self, source: str) -> str:
         if source.startswith("team_launcher."):

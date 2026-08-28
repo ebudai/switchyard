@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -1212,21 +1213,22 @@ def _with_project_board_env(config: ProjectConfig, roles: list[RoleConfig]) -> l
 
 
 def load_project_config(project: str, config_path: Path | None = None) -> ProjectConfig:
-    path = config_path or DEFAULT_CONFIG_DIR / f"{project}.json"
+    project_slug = _validate_project_slug(project)
+    path = config_path or DEFAULT_CONFIG_DIR / f"{project_slug}.json"
     config = _load_json(path)
-    config_project = _validate_project_slug(str(config.get("project") or project))
-    if config_project != project:
-        raise SystemExit(f"config project {config_project!r} does not match requested project {project!r}")
+    config_project = _validate_project_slug(str(config.get("project") or project_slug))
+    if config_project != project_slug:
+        raise SystemExit(f"config project {config_project!r} does not match requested project {project_slug!r}")
     roles_raw = config.get("roles")
     if not isinstance(roles_raw, list) or not roles_raw:
         raise SystemExit(f"{path} must define a non-empty roles list")
     base = path.parent
-    layout = _expand_path(str(config.get("layout") or f"{project}-konsole-layout.json"), base=base)
+    layout = _expand_path(str(config.get("layout") or f"{config_project}-konsole-layout.json"), base=base)
     run_as_user = str(config.get("run_as_user") or "").strip()
     session_dir = _expand_path(str(config.get("session_dir") or str(default_session_dir_for_user(run_as_user))), base=base)
-    ticket_prefix = validate_ticket_prefix(str(config.get("ticket_prefix") or project))
-    board_url = str(config.get("board_url") or _default_board_url(project)).strip()
-    board_socket = str(config.get("board_socket") or _default_board_socket(project)).strip()
+    ticket_prefix = validate_ticket_prefix(str(config.get("ticket_prefix") or config_project))
+    board_url = str(config.get("board_url") or _default_board_url(config_project)).strip()
+    board_socket = str(config.get("board_socket") or _default_board_socket(config_project)).strip()
     pane_launcher = None
     pane_launcher_raw = config.get("pane_launcher")
     if pane_launcher_raw is not None:
@@ -1262,7 +1264,7 @@ def load_project_config(project: str, config_path: Path | None = None) -> Projec
             role_name = str(raw.get("role") or "").strip()
             if role_name:
                 default_workdir = worktree_base / role_name
-        roles.append(_role_from_json(project, raw, base=base, default_workdir=default_workdir))
+        roles.append(_role_from_json(config_project, raw, base=base, default_workdir=default_workdir))
     if len(roles) != len(roles_raw):
         raise SystemExit(f"{path} roles must all be JSON objects")
     slots = [role.slot for role in roles if role.slot is not None]
@@ -5076,15 +5078,33 @@ FIRST_RUN_TRUST_CLIS = frozenset({"agy", "claude", "gemini"})
 
 
 def _slug_from_project_name(name: str) -> str:
-    slug = "".join(ch.lower() if ch.isascii() and ch.isalnum() else "_" for ch in name.strip())
-    slug = "_".join(part for part in slug.split("_") if part)
+    raw = unicodedata.normalize("NFKD", name.strip())
+    pieces: list[str] = []
+    for ch in raw:
+        if ch.isascii() and ch.isalnum():
+            pieces.append(ch.lower())
+        elif unicodedata.category(ch).startswith("M"):
+            continue
+        else:
+            pieces.append("_")
+    slug = "_".join(part for part in "".join(pieces).split("_") if part)
+    if len(slug) > 40:
+        slug = slug[:40].rstrip("_")
+    if not slug:
+        raise SystemExit("switchyard: project slug cannot be empty")
+    return _validate_project_slug(slug)
+
+
+def _legacy_dash_slug_from_project_name(name: str) -> str:
+    slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in name.strip())
+    slug = "-".join(part for part in slug.split("-") if part)
     if not slug:
         raise SystemExit("switchyard: project slug cannot be empty")
     return slug
 
 
 def _validate_project_slug(value: str) -> str:
-    slug = value.strip()
+    slug = value.strip().lower()
     if not PROJECT_SLUG_RE.fullmatch(slug):
         raise SystemExit("switchyard: project slug must match ^[a-z0-9][a-z0-9_]{0,39}$")
     return slug
@@ -5816,7 +5836,8 @@ def _project_entries(config_dir: Path | None = None) -> list[SwitchyardProjectEn
             continue
         try:
             slug = _validate_project_slug(str(raw.get("project") or path.stem))
-        except SystemExit:
+        except SystemExit as exc:
+            print(f"warning: switchyard: skipping {path}: {exc}", file=sys.stderr)
             continue
         name = str(raw.get("project_name") or raw.get("name") or slug).strip() or slug
         entries.append(SwitchyardProjectEntry(slug=slug, name=name, config_path=path))
@@ -5839,7 +5860,8 @@ def _registry_project_entries(registry_dir: Path | None = None) -> list[Switchya
             continue
         try:
             slug = _validate_project_slug(str(raw.get("slug") or ""))
-        except SystemExit:
+        except SystemExit as exc:
+            print(f"warning: switchyard: skipping {path}: {exc}", file=sys.stderr)
             continue
         name = str(raw.get("name") or slug).strip() or slug
         config_path_raw = str(raw.get("config_path") or "").strip()
@@ -5865,9 +5887,14 @@ def _registered_project_collision(
     *,
     slug: str,
     name: str,
+    config_dir: Path | None = None,
     registry_dir: Path | None = None,
+    skip_config_path: Path | None = None,
 ) -> str:
-    for entry in _registry_project_entries(registry_dir):
+    skip_resolved = skip_config_path.expanduser().resolve(strict=False) if skip_config_path is not None else None
+    for entry in _switchyard_entries(config_dir=config_dir, registry_dir=registry_dir):
+        if skip_resolved is not None and entry.config_path.expanduser().resolve(strict=False) == skip_resolved:
+            continue
         if entry.slug.casefold() == slug.casefold():
             return (
                 f"switchyard: project slug {slug!r} is already registered to "
@@ -5885,9 +5912,17 @@ def _check_switchyard_registration_available(
     *,
     slug: str,
     name: str,
+    config_dir: Path | None = None,
     registry_dir: Path | None = None,
+    skip_config_path: Path | None = None,
 ) -> None:
-    collision = _registered_project_collision(slug=slug, name=name, registry_dir=registry_dir)
+    collision = _registered_project_collision(
+        slug=slug,
+        name=name,
+        config_dir=config_dir,
+        registry_dir=registry_dir,
+        skip_config_path=skip_config_path,
+    )
     if collision:
         raise SystemExit(collision)
 
@@ -5895,6 +5930,7 @@ def _check_switchyard_registration_available(
 def _register_switchyard_project(
     config_path: Path,
     *,
+    config_dir: Path | None = None,
     registry_dir: Path | None = None,
 ) -> Path:
     resolved_config_path = config_path.expanduser().resolve(strict=False)
@@ -5906,8 +5942,16 @@ def _register_switchyard_project(
     load_project_config(slug, resolved_config_path)
     name = str(raw.get("project_name") or raw.get("name") or slug).strip() or slug
     registry_dir = registry_dir or DEFAULT_SWITCHYARD_REGISTRY_DIR
-    _check_switchyard_registration_available(slug=slug, name=name, registry_dir=registry_dir)
     registry_path = registry_dir / f"{slug}.json"
+    _check_switchyard_registration_available(
+        slug=slug,
+        name=name,
+        config_dir=config_dir,
+        registry_dir=registry_dir,
+        skip_config_path=resolved_config_path,
+    )
+    if registry_path.exists():
+        raise SystemExit(f"switchyard: registry entry {registry_path} already exists; refusing to overwrite")
     payload = {
         "schema": SWITCHYARD_REGISTRY_SCHEMA,
         "slug": slug,
@@ -5928,10 +5972,11 @@ def _register_switchyard_project(
 def switchyard_register_command(
     config_path: Path,
     *,
+    config_dir: Path | None = None,
     registry_dir: Path | None = None,
     print_func: Callable[[str], None] = print,
 ) -> int:
-    registry_path = _register_switchyard_project(config_path, registry_dir=registry_dir)
+    registry_path = _register_switchyard_project(config_path, config_dir=config_dir, registry_dir=registry_dir)
     print_func(f"switchyard: registered {config_path.expanduser().resolve(strict=False)} at {registry_path}")
     return 0
 
@@ -5968,7 +6013,11 @@ def _resolve_switchyard_project(
         return exact[0]
     if len(exact) > 1:
         raise SystemExit(f"switchyard: project selector {selection!r} is ambiguous")
-    fallback = [entry for entry in entries if _slug_from_project_name(entry.name).casefold() == wanted]
+    fallback = [
+        entry
+        for entry in entries
+        if wanted in {_slug_from_project_name(entry.name).casefold(), _legacy_dash_slug_from_project_name(entry.name).casefold()}
+    ]
     if len(fallback) == 1:
         return fallback[0]
     raise SystemExit(f"switchyard: unknown project {selection!r}")
@@ -6019,6 +6068,7 @@ def switchyard_new_command(
     session_record_poll: float = LAUNCH_SESSION_RECORD_POLL_SECONDS,
     layout_mode: str = LAYOUT_MODE_AUTO,
     layout_environ: dict[str, str] | None = None,
+    config_dir: Path | None = None,
     registry_dir: Path | None = None,
     input_func: Callable[[str], str] = input,
     print_func: Callable[[str], None] = print,
@@ -6057,6 +6107,7 @@ def switchyard_new_command(
     _check_switchyard_registration_available(
         slug=resolved_slug,
         name=resolved_project_name,
+        config_dir=config_dir,
         registry_dir=registry_dir,
     )
     _confirm_switchyard_new(

@@ -71,7 +71,7 @@ def _target_from_tmux_pane(environ: dict[str, str]) -> str | None:
     return target or None
 
 
-def _resolve_target(raw_target: str, environ: dict[str, str]) -> str:
+def _resolve_target(raw_target: str, environ: dict[str, str]) -> str | None:
     if raw_target:
         return raw_target
     env_target = _env_first(environ, "TICKET_BOARD_PANE_TARGET", "PGU_PANE_TARGET")
@@ -80,7 +80,7 @@ def _resolve_target(raw_target: str, environ: dict[str, str]) -> str:
     tmux_target = _target_from_tmux_pane(environ)
     if tmux_target:
         return tmux_target
-    raise SystemExit("ticket-board-pane-idle-hook: missing --target, TICKET_BOARD_PANE_TARGET, and TMUX_PANE")
+    return None
 
 
 def _project_from_target(target: str) -> str:
@@ -462,6 +462,8 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     target = _resolve_target(args.target.strip(), os.environ)
+    if target is None:
+        return 0
     state_dir = _resolve_pane_state_dir(args.state_dir, target, os.environ)
     session_dir = _resolve_pane_session_dir(args.session_dir, target, os.environ)
     if state_dir is None or session_dir is None:

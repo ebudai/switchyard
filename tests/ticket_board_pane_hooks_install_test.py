@@ -1572,6 +1572,44 @@ def test_hook_unresolved_default_dirs_report_but_do_not_fail_startup() -> None:
         assert not state_home.exists()
 
 
+def test_hook_without_target_is_silent_noop() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks-no-target.") as tmp:
+        tmp_path = Path(tmp)
+        state_dir = tmp_path / "state"
+        session_dir = tmp_path / "sessions"
+        env = _hook_env(
+            XDG_RUNTIME_DIR=str(tmp_path / "run"),
+            XDG_STATE_HOME=str(tmp_path / "state-home"),
+        )
+        env.pop("TICKET_BOARD_PANE_TARGET", None)
+        env.pop("PGU_PANE_TARGET", None)
+        env.pop("TMUX_PANE", None)
+
+        proc = subprocess.run(
+            [
+                str(ROOT / "scripts" / HOOK_NAME),
+                "idle",
+                "--source",
+                "codex.SessionStart",
+                "--state-dir",
+                str(state_dir),
+                "--session-dir",
+                str(session_dir),
+                "--record-session",
+            ],
+            input=json.dumps({"session_id": "human-session"}),
+            text=True,
+            capture_output=True,
+            env=env,
+        )
+
+        assert proc.returncode == 0
+        assert proc.stdout == ""
+        assert proc.stderr == ""
+        assert not state_dir.exists()
+        assert not session_dir.exists()
+
+
 def main() -> int:
     live_session_paths = candidate_live_pane_session_paths()
     live_pane_state_paths = candidate_live_pane_state_paths()

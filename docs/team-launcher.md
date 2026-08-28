@@ -84,6 +84,7 @@ scripts/team-launcher pgu start
 scripts/team-launcher pgu attach
 scripts/team-launcher pgu reload
 scripts/team-launcher pgu stop
+switchyard upgrade otto
 scripts/team-launcher pgu provision-runtime
 scripts/team-launcher pgu deploy-launcher --launcher-repo /home/eric/Projects/pgu
 ```
@@ -141,6 +142,17 @@ user and leaves board/listener systemd services alone. It never runs
 `tmux kill-server`; absent role sessions are reported as already stopped, so a
 second `switchyard stop <project>` or `scripts/team-launcher <project> stop`
 is a clean no-op.
+
+`switchyard upgrade <project>` updates safe generated project artifacts and
+checks the provisioned tenant board release. For generated projects whose pane
+launcher comes from `<project>-ticketboard-live/current`, it reports the old
+deployed release, resolves the target release ref (default `origin/main`), and
+prints the privileged `ticket-board-service.sh deploy` command an operator can
+run to advance the tenant's `current` symlink. Running it again after that
+deploy reports the release unchanged. The command deliberately does not restart
+the board service or any panes; panes must be restarted after a release update
+to pick up hook installer, hook binary, or pane launcher changes because hook
+installation runs at pane launch.
 
 Resume records are preflighted against each CLI's local transcript store before
 the launcher passes them to the CLI. Claude uses the recorded

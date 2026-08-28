@@ -294,32 +294,32 @@ def _write_launcher_config(
     layout: str | None = None,
     role_count: int = 6,
     roles: list[str] | None = None,
+    pane_launcher: Path | None = None,
 ) -> Path:
     role_names = roles or [f"role{index}" for index in range(role_count)]
     layout_name = layout or f"{project}-konsole-layout.json"
+    payload: dict[str, Any] = {
+        "project": project,
+        "layout": layout_name,
+        "roles": [
+            {
+                "cli": ["codex"],
+                "live_commands": ["codex"],
+                "role": role,
+                "slot": index,
+                "target": f"{project}-{role}:0.0",
+                "tmux_session": f"{project}-{role}",
+                "workdir": str(directory / "worktrees" / role),
+                "yolo": True,
+            }
+            for index, role in enumerate(role_names)
+        ],
+    }
+    if pane_launcher is not None:
+        payload["pane_launcher"] = str(pane_launcher)
     config_path = directory / f"{project}.json"
     config_path.write_text(
-        json.dumps(
-            {
-                "project": project,
-                "layout": layout_name,
-                "roles": [
-                    {
-                        "cli": ["codex"],
-                        "live_commands": ["codex"],
-                        "role": role,
-                        "slot": index,
-                        "target": f"{project}-{role}:0.0",
-                        "tmux_session": f"{project}-{role}",
-                        "workdir": str(directory / "worktrees" / role),
-                        "yolo": True,
-                    }
-                    for index, role in enumerate(role_names)
-                ],
-            },
-            indent=2,
-            sort_keys=True,
-        )
+        json.dumps(payload, indent=2, sort_keys=True)
         + "\n",
         encoding="utf-8",
     )
@@ -942,6 +942,135 @@ def test_switchyard_upgrade_command_updates_registered_project_layout() -> None:
 
         assert "upgraded generated layout template" in stdout.getvalue()
         assert json.loads(layout_path.read_text(encoding="utf-8")) == team_launcher._new_project_layout_payload(6)
+
+
+def test_switchyard_upgrade_reports_tenant_release_update_command() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-upgrade-release.") as tmp:
+        root = Path(tmp)
+        _origin, source_repo = _make_origin_backed_repo(root)
+        target_sha = _run_git(["git", "rev-parse", "origin/main"], cwd=source_repo).stdout.strip()
+        old_sha = "1111111111111111111111111111111111111111"
+        board_root = root / "otto-ticketboard-live"
+        old_release = board_root / "releases" / old_sha
+        old_release.mkdir(parents=True)
+        (old_release / ".pgu-deploy-sha").write_text(old_sha + "\n", encoding="utf-8")
+        (board_root / "current").symlink_to(old_release)
+        provision_dir = root / "otto" / ".switchyard" / "provision"
+        provision_dir.mkdir(parents=True)
+        layout_path = provision_dir / "otto-konsole-layout.json"
+        layout_path.write_text(
+            json.dumps(team_launcher._new_project_layout_payload(6), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        config_path = _write_launcher_config(
+            provision_dir,
+            pane_launcher=board_root / "current" / "scripts" / "team-launcher",
+        )
+        config = load_project_config("otto", config_path)
+        stdout = StringIO()
+
+        with redirect_stdout(stdout):
+            assert (
+                team_launcher.upgrade_project_command(
+                    config,
+                    config_path=config_path,
+                    source_repo=source_repo,
+                    deploy_ref="origin/main",
+                )
+                == 0
+            )
+
+        rendered = stdout.getvalue()
+
+    assert f"old: {old_sha} at {old_release}" in rendered
+    assert f"new: {target_sha} from origin/main" in rendered
+    assert "privileged release update command for Eric" in rendered
+    assert "sudo env" in rendered
+    assert "TICKET_BOARD_PROJECT=otto" in rendered
+    assert f"SOURCE_REPO={source_repo}" in rendered
+    assert f"BOARD_ROOT={board_root}" in rendered
+    assert "DEPLOY_REF=origin/main" in rendered
+    assert f"{source_repo}/scripts/ticket-board-service.sh deploy" in rendered
+    assert "panes must be restarted after the release update" in rendered
+    assert "deploy-restart" not in rendered
+
+
+def test_switchyard_upgrade_reports_unchanged_tenant_release() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-upgrade-release.") as tmp:
+        root = Path(tmp)
+        _origin, source_repo = _make_origin_backed_repo(root)
+        target_sha = _run_git(["git", "rev-parse", "origin/main"], cwd=source_repo).stdout.strip()
+        board_root = root / "otto-ticketboard-live"
+        release = board_root / "releases" / target_sha
+        release.mkdir(parents=True)
+        (release / ".pgu-deploy-sha").write_text(target_sha + "\n", encoding="utf-8")
+        (board_root / "current").symlink_to(release)
+        provision_dir = root / "otto" / ".switchyard" / "provision"
+        provision_dir.mkdir(parents=True)
+        layout_path = provision_dir / "otto-konsole-layout.json"
+        layout_path.write_text(
+            json.dumps(team_launcher._new_project_layout_payload(6), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        config_path = _write_launcher_config(
+            provision_dir,
+            pane_launcher=board_root / "current" / "scripts" / "team-launcher",
+        )
+        config = load_project_config("otto", config_path)
+        stdout = StringIO()
+
+        with redirect_stdout(stdout):
+            assert (
+                team_launcher.upgrade_project_command(
+                    config,
+                    config_path=config_path,
+                    source_repo=source_repo,
+                    deploy_ref="origin/main",
+                )
+                == 0
+            )
+
+        rendered = stdout.getvalue()
+
+    assert f"old: {target_sha} at {release}" in rendered
+    assert f"new: {target_sha} from origin/main" in rendered
+    assert "deployed board release unchanged; no release deploy needed" in rendered
+    assert "sudo env" not in rendered
+    assert "panes must be restarted after the release update" not in rendered
+
+
+def test_switchyard_upgrade_pgu_without_tenant_release_emits_no_release_report() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-upgrade-pgu.") as tmp:
+        root = Path(tmp)
+        _origin, source_repo = _make_origin_backed_repo(root)
+        provision_dir = root / "pgu" / ".switchyard" / "provision"
+        provision_dir.mkdir(parents=True)
+        layout_path = provision_dir / "pgu-konsole-layout.json"
+        layout_path.write_text(
+            json.dumps(team_launcher._new_project_layout_payload(6), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        config_path = _write_launcher_config(provision_dir, project="pgu")
+        config = load_project_config("pgu", config_path)
+        stdout = StringIO()
+
+        with redirect_stdout(stdout):
+            assert (
+                team_launcher.upgrade_project_command(
+                    config,
+                    config_path=config_path,
+                    source_repo=source_repo,
+                    deploy_ref="origin/main",
+                )
+                == 0
+            )
+
+        rendered = stdout.getvalue()
+
+    assert "deployed board release" not in rendered
+    assert "privileged release update command" not in rendered
+    assert "sudo env" not in rendered
+    assert "panes must be restarted after the release update" not in rendered
 
 
 def test_layout_detection_uses_invoking_user_and_falls_back_to_separate() -> None:

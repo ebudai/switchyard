@@ -148,6 +148,7 @@ ALLOW_STALE_LAUNCHER_ENV = "TEAM_LAUNCHER_ALLOW_STALE"
 LEGACY_ALLOW_STALE_LAUNCHER_ENV = "PGU_TEAM_LAUNCHER_ALLOW_STALE"
 NO_LAUNCHER_SELF_DEPLOY_ENV = "TEAM_LAUNCHER_NO_SELF_DEPLOY"
 LEGACY_NO_LAUNCHER_SELF_DEPLOY_ENV = "PGU_TEAM_LAUNCHER_NO_SELF_DEPLOY"
+DEFAULT_TENANT_RELEASE_DEPLOY_REF = "origin/main"
 NEW_PROJECT_BASE_ROLES = (
     ("designer", "claude"),
     ("director", "claude"),
@@ -208,6 +209,21 @@ class WorktreeProvisionResult:
 class LauncherUpgradeResult:
     changed: bool
     message: str
+
+
+@dataclass(frozen=True)
+class TenantReleaseStatus:
+    board_root: Path
+    current_release: Path | None
+    current_sha: str
+    target_sha: str
+    deploy_ref: str
+    source_repo: Path
+    resolve_error: str = ""
+
+    @property
+    def unchanged(self) -> bool:
+        return bool(self.current_sha and self.target_sha and self.current_sha == self.target_sha)
 
 
 @dataclass(frozen=True)
@@ -3838,6 +3854,164 @@ def upgrade_generated_project_layout(
     return upgrade_generated_project_config(config, config_path=config_path, dry_run=dry_run, runner=runner)
 
 
+def _tenant_board_root_from_config(config: ProjectConfig) -> Path | None:
+    if config.pane_launcher is None:
+        return None
+    launcher = config.pane_launcher.expanduser()
+    for parent in launcher.parents:
+        if parent.name == "current":
+            return parent.parent
+    return None
+
+
+def _read_deploy_sha_marker(path: Path) -> str:
+    try:
+        return (path / ".pgu-deploy-sha").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _current_tenant_release(board_root: Path) -> tuple[Path | None, str]:
+    current_link = board_root / "current"
+    if not current_link.exists() and not current_link.is_symlink():
+        return None, ""
+    current_release = current_link.resolve(strict=False)
+    current_sha = _read_deploy_sha_marker(current_link)
+    if not current_sha:
+        current_sha = _read_deploy_sha_marker(current_release)
+    if not current_sha and current_release.name:
+        current_sha = current_release.name
+    return current_release, current_sha
+
+
+def git_deploy_ref_ls_remote_args(source_repo: Path, deploy_ref: str) -> list[str] | None:
+    if deploy_ref.startswith("refs/") or "/" not in deploy_ref:
+        return None
+    remote, branch = deploy_ref.split("/", 1)
+    if not remote or not branch:
+        return None
+    return ["git", "-C", str(source_repo), "ls-remote", remote, f"refs/heads/{branch}"]
+
+
+def git_deploy_ref_rev_parse_args(source_repo: Path, deploy_ref: str) -> list[str]:
+    return ["git", "-C", str(source_repo), "rev-parse", "--verify", f"{deploy_ref}^{{commit}}"]
+
+
+def _resolve_deploy_ref_readonly(
+    source_repo: Path,
+    deploy_ref: str,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> tuple[str, str]:
+    checkout_runner, owner_error = _launcher_checkout_runner(source_repo, runner=runner)
+    if checkout_runner is None:
+        return "", owner_error or f"cannot determine owner for {source_repo}"
+    ls_remote_args = git_deploy_ref_ls_remote_args(source_repo, deploy_ref)
+    if ls_remote_args is not None:
+        remote_proc = checkout_runner(
+            ls_remote_args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if remote_proc.returncode == 0:
+            remote_sha = _parse_ls_remote_head(str(remote_proc.stdout or ""))
+            if remote_sha:
+                return remote_sha, ""
+        else:
+            return "", _proc_failure_reason(remote_proc, f"git ls-remote exited {remote_proc.returncode}")
+    rev_parse_proc = checkout_runner(
+        git_deploy_ref_rev_parse_args(source_repo, deploy_ref),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if rev_parse_proc.returncode != 0:
+        return "", _proc_failure_reason(rev_parse_proc, f"git rev-parse exited {rev_parse_proc.returncode}")
+    return str(rev_parse_proc.stdout or "").strip(), ""
+
+
+def tenant_release_status(
+    config: ProjectConfig,
+    *,
+    source_repo: Path | None = None,
+    deploy_ref: str = DEFAULT_TENANT_RELEASE_DEPLOY_REF,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> TenantReleaseStatus | None:
+    board_root = _tenant_board_root_from_config(config)
+    if board_root is None:
+        return None
+    resolved_source_repo = (source_repo or _repo_root()).expanduser().resolve(strict=False)
+    current_release, current_sha = _current_tenant_release(board_root)
+    target_sha, resolve_error = _resolve_deploy_ref_readonly(resolved_source_repo, deploy_ref, runner=runner)
+    return TenantReleaseStatus(
+        board_root=board_root,
+        current_release=current_release,
+        current_sha=current_sha,
+        target_sha=target_sha,
+        deploy_ref=deploy_ref,
+        source_repo=resolved_source_repo,
+        resolve_error=resolve_error,
+    )
+
+
+def tenant_release_deploy_command(status: TenantReleaseStatus, project: str) -> str:
+    service_script = status.source_repo / "scripts" / "ticket-board-service.sh"
+    return _quote_command(
+        [
+            "sudo",
+            "env",
+            f"TICKET_BOARD_PROJECT={project}",
+            f"SOURCE_REPO={status.source_repo}",
+            f"BOARD_ROOT={status.board_root}",
+            f"DEPLOY_REF={status.deploy_ref}",
+            str(service_script),
+            "deploy",
+        ]
+    )
+
+
+def _format_release_sha(sha: str) -> str:
+    return sha if sha else "(none)"
+
+
+def _format_release_path(path: Path | None) -> str:
+    return str(path) if path is not None else "(none)"
+
+
+def report_tenant_release_upgrade(
+    config: ProjectConfig,
+    *,
+    source_repo: Path | None = None,
+    deploy_ref: str = DEFAULT_TENANT_RELEASE_DEPLOY_REF,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> None:
+    status = tenant_release_status(config, source_repo=source_repo, deploy_ref=deploy_ref, runner=runner)
+    if status is None:
+        return
+    print_func(
+        f"switchyard: {config.project} deployed board release old: "
+        f"{_format_release_sha(status.current_sha)} at {_format_release_path(status.current_release)}"
+    )
+    if status.target_sha:
+        print_func(f"switchyard: {config.project} deployed board release new: {status.target_sha} from {status.deploy_ref}")
+    else:
+        print_func(
+            f"switchyard: {config.project} deployed board release new: "
+            f"(unresolved {status.deploy_ref}: {status.resolve_error})"
+        )
+    if status.unchanged:
+        print_func(f"switchyard: {config.project} deployed board release unchanged; no release deploy needed")
+    else:
+        print_func("switchyard: privileged release update command for Eric:")
+        print_func(f"  {tenant_release_deploy_command(status, config.project)}")
+        print_func(
+            "switchyard: panes must be restarted after the release update to pick up hook installer, "
+            "hook binary, or pane launcher changes; this command does not restart panes"
+        )
+
+
 def sync_reload_config_to_live_sessions(
     config: ProjectConfig,
     *,
@@ -5845,10 +6019,22 @@ def upgrade_project_command(
     *,
     config_path: Path,
     dry_run: bool = False,
+    source_repo: Path | None = None,
+    deploy_ref: str = DEFAULT_TENANT_RELEASE_DEPLOY_REF,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     print_func: Callable[[str], None] = print,
 ) -> int:
-    result = upgrade_generated_project_layout(config, config_path=config_path, dry_run=dry_run)
+    result = upgrade_generated_project_layout(config, config_path=config_path, dry_run=dry_run, runner=runner)
     print_func(result.message)
+    if result.changed:
+        config = load_project_config(config.project, config_path)
+    report_tenant_release_upgrade(
+        config,
+        source_repo=source_repo,
+        deploy_ref=deploy_ref,
+        runner=runner,
+        print_func=print_func,
+    )
     return 0
 
 
@@ -5934,6 +6120,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--execute", action="store_true", help="execute new-project provisioning after precheck")
     parser.add_argument("--runtime-user", help="local user whose lingering /run/user/<uid> runtime should be provisioned")
     parser.add_argument("--launcher-repo", type=Path, help="launcher checkout to update or verify (default: this script's repo)")
+    parser.add_argument("--deploy-ref", default=DEFAULT_TENANT_RELEASE_DEPLOY_REF, help="board release ref to deploy during upgrade (default: origin/main)")
     parser.add_argument("--clean-launcher", action="store_true", help="run git clean -fdx after updating --launcher-repo")
     parser.add_argument("--force", action="store_true", help="allow reload to kill/relaunch even if live command validation fails")
     parser.add_argument("--allow-stale-launcher", action="store_true", help="emergency override: warn but proceed when the launcher checkout is provably stale")
@@ -5973,6 +6160,8 @@ def _build_switchyard_upgrade_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="switchyard upgrade", description="Upgrade safe generated artifacts for a Switchyard project.")
     parser.add_argument("project", help="project name or slug")
     parser.add_argument("--dry-run", action="store_true", help="report what would change without writing files")
+    parser.add_argument("--deploy-ref", default=DEFAULT_TENANT_RELEASE_DEPLOY_REF, help="board release ref to deploy (default: origin/main)")
+    parser.add_argument("--source-repo", type=Path, help="source checkout to export into the tenant board release")
     return parser
 
 
@@ -6008,7 +6197,13 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         args = _build_switchyard_upgrade_parser().parse_args(argv[1:])
         entry = _resolve_switchyard_project(args.project)
         config = load_project_config(entry.slug, entry.config_path)
-        return upgrade_project_command(config, config_path=entry.config_path, dry_run=args.dry_run)
+        return upgrade_project_command(
+            config,
+            config_path=entry.config_path,
+            dry_run=args.dry_run,
+            source_repo=args.source_repo,
+            deploy_ref=args.deploy_ref,
+        )
     if argv[0].casefold() == "stop":
         args = _build_switchyard_stop_parser().parse_args(argv[1:])
         project = " ".join(args.project)
@@ -6098,7 +6293,13 @@ def main(argv: list[str] | None = None) -> int:
         return provision_runtime_command(args.runtime_user, config)
     config = load_project_config(config_project, config_path)
     if args.command == "upgrade":
-        return upgrade_project_command(config, config_path=config_path, dry_run=args.dry_run)
+        return upgrade_project_command(
+            config,
+            config_path=config_path,
+            dry_run=args.dry_run,
+            source_repo=args.source_repo,
+            deploy_ref=args.deploy_ref,
+        )
     if args.command == "stop":
         return stop_project(config)
     if args.command == "deploy-launcher":

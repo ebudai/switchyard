@@ -7071,6 +7071,79 @@ def test_claude_reload_uses_recorded_id_when_local_transcript_exists() -> None:
     assert f"claude --resume {session_id}" in new_sessions[0][-1]
 
 
+def test_claude_no_transcript_path_record_uses_project_key_fallback() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    role = next(role for role in config.roles if role.role == "director")
+    assert role.workdir == "/home/agent/Projects/pgu"
+
+    session_id = "12345678-1234-5678-9abc-def012345678"
+
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        tmp_path = Path(tmp)
+        home = tmp_path / "home"
+        session_dir = home / ".local" / "state" / "pgu-ticket-board" / "pane-sessions"
+        session_dir.mkdir(parents=True)
+        claude_project_dir = home / ".claude" / "projects" / "-home-agent-Projects-pgu"
+        claude_project_dir.mkdir(parents=True)
+        (claude_project_dir / f"{session_id}.jsonl").write_text("{}\n", encoding="utf-8")
+        (session_dir / session_file_name(role.target)).write_text(
+            json.dumps({"target": role.target, "session_id": session_id}) + "\n",
+            encoding="utf-8",
+        )
+        runner = FakeRunner(existing_sessions={"pgu-director"}, current_commands={"pgu-director:0.0": "claude"})
+
+        assert (
+            run_role_pane(
+                role,
+                mode="reload",
+                session_dir=session_dir,
+                pane_state_dir=tmp_path / "pane-state",
+                runner=runner,
+            )
+            == 0
+        )
+
+        new_sessions = [call for call in runner.calls if call[:5] == ["tmux", "new-session", "-d", "-s", "pgu-director"]]
+        assert len(new_sessions) == 1
+        assert f"claude --resume {session_id}" in new_sessions[0][-1]
+
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
+        tmp_path = Path(tmp)
+        home = tmp_path / "home"
+        session_dir = home / ".local" / "state" / "pgu-ticket-board" / "pane-sessions"
+        session_dir.mkdir(parents=True)
+        (session_dir / session_file_name(role.target)).write_text(
+            json.dumps({"target": role.target, "session_id": session_id}) + "\n",
+            encoding="utf-8",
+        )
+        runner = FakeRunner(existing_sessions={"pgu-director"}, current_commands={"pgu-director:0.0": "claude"})
+        stderr = StringIO()
+
+        with redirect_stderr(stderr):
+            assert (
+                run_role_pane(
+                    role,
+                    mode="reload",
+                    session_dir=session_dir,
+                    pane_state_dir=tmp_path / "pane-state",
+                    runner=runner,
+                )
+                == 0
+            )
+
+        sidecar = session_dir / f"{session_file_name(role.target)}.superseded"
+        assert not (session_dir / session_file_name(role.target)).exists()
+        assert json.loads(sidecar.read_text(encoding="utf-8"))["session_id"] == session_id
+
+    assert "recorded claude session" in stderr.getvalue()
+    assert "-home-agent-Projects-pgu" in stderr.getvalue()
+    assert "starting fresh instead of passing claude --resume" in stderr.getvalue()
+    new_sessions = [call for call in runner.calls if call[:5] == ["tmux", "new-session", "-d", "-s", "pgu-director"]]
+    assert len(new_sessions) == 1
+    assert "--resume" not in new_sessions[0][-1]
+    assert session_id not in new_sessions[0][-1]
+
+
 def test_codex_reload_skips_missing_local_transcript_instead_of_passing_resume() -> None:
     config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
     role = next(role for role in config.roles if role.role == "ops")

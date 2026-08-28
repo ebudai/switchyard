@@ -10008,12 +10008,38 @@ def test_switchyard_new_stdin_eof_exits_without_traceback() -> None:
     assert "Traceback" not in combined
 
 
+def test_switchyard_new_confirmation_eof_exits_without_traceback() -> None:
+    try:
+        team_launcher._confirm_switchyard_new(
+            slug="porter",
+            owner_user="porter-agent",
+            project_name="Porter System",
+            project_dir=Path("/home/porter-agent/Projects/porter"),
+            yes=False,
+            input_func=lambda _prompt: (_ for _ in ()).throw(EOFError()),
+            print_func=lambda _line: None,
+        )
+        raise AssertionError("expected confirmation EOF failure")
+    except SystemExit as exc:
+        message = str(exc)
+
+    assert message == "switchyard: no input available"
+
+
 def test_prompt_bool_caps_invalid_retries() -> None:
     stdout = StringIO()
+    calls = 0
+
+    def input_func(_prompt: str) -> str:
+        nonlocal calls
+        calls += 1
+        if calls > 20:
+            raise AssertionError("prompt retry cap did not terminate")
+        return "maybe"
 
     with redirect_stdout(stdout):
         try:
-            team_launcher._prompt_bool("Include designer role", default=True, input_func=lambda _prompt: "maybe")
+            team_launcher._prompt_bool("Include designer role", default=True, input_func=input_func)
             raise AssertionError("expected prompt retry cap")
         except SystemExit as exc:
             message = str(exc)
@@ -10024,10 +10050,18 @@ def test_prompt_bool_caps_invalid_retries() -> None:
 
 def test_prompt_cli_caps_invalid_retries() -> None:
     stdout = StringIO()
+    calls = 0
+
+    def input_func(_prompt: str) -> str:
+        nonlocal calls
+        calls += 1
+        if calls > 20:
+            raise AssertionError("prompt retry cap did not terminate")
+        return "vim"
 
     with redirect_stdout(stdout):
         try:
-            team_launcher._prompt_cli("director", default="claude", input_func=lambda _prompt: "vim")
+            team_launcher._prompt_cli("director", default="claude", input_func=input_func)
             raise AssertionError("expected prompt retry cap")
         except SystemExit as exc:
             message = str(exc)
@@ -10040,10 +10074,18 @@ def test_prompt_cli_caps_invalid_retries() -> None:
 
 def test_switchyard_role_choices_caps_empty_implementer_retries() -> None:
     stdout = StringIO()
+    calls = 0
+
+    def input_func(_prompt: str) -> str:
+        nonlocal calls
+        calls += 1
+        if calls > 20:
+            raise AssertionError("prompt retry cap did not terminate")
+        return ""
 
     with redirect_stdout(stdout):
         try:
-            team_launcher._prompt_switchyard_role_choices(input_func=lambda _prompt: "")
+            team_launcher._prompt_switchyard_role_choices(input_func=input_func)
             raise AssertionError("expected prompt retry cap")
         except SystemExit as exc:
             message = str(exc)

@@ -5976,7 +5976,7 @@ def test_viewer_pane_death_does_not_change_role_targets_in_real_tmux() -> None:
     if shutil.which("tmux") is None:
         return
     roles = ["designer", "director", "audit", "ops", "app", "main"]
-    suffix = f"pgu660-{os.getpid()}"
+    suffix = f"pgu660_{os.getpid()}"
     server = f"{suffix}-server"
     runner = _isolated_tmux_runner(server)
     viewer_session = f"{suffix}-viewer"
@@ -8026,6 +8026,225 @@ def test_switchyard_registry_registers_pointer_and_survives_checkout_clean() -> 
     assert lines and "switchyard: registered" in lines[0]
 
 
+def test_switchyard_register_rejects_dashed_slug() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-register.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        config_path = tmp_path / "bad-project.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "bad-project",
+                    "project_name": "Bad Project",
+                    "layout": str(layout),
+                    "roles": [{"role": "director", "slot": 0, "cli": ["claude"], "workdir": str(tmp_path)}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        try:
+            switchyard_register_command(config_path, registry_dir=tmp_path / "registry", print_func=lambda _line: None)
+            raise AssertionError("expected dashed slug rejection")
+        except SystemExit as exc:
+            message = str(exc)
+
+    assert "project slug must match" in message
+    assert "^[a-z0-9][a-z0-9_]{0,39}$" in message
+
+
+def test_switchyard_register_rejects_duplicate_slug_without_overwriting_pointer() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-register.") as tmp:
+        tmp_path = Path(tmp)
+        registry_dir = tmp_path / "registry"
+        config_dir = tmp_path / "configs"
+        layout = tmp_path / "layout.json"
+        registry_dir.mkdir()
+        config_dir.mkdir()
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        existing_config = config_dir / "existing.json"
+        existing_config.write_text("{}\n", encoding="utf-8")
+        existing_payload = {
+            "schema": team_launcher.SWITCHYARD_REGISTRY_SCHEMA,
+            "slug": "otto",
+            "name": "Otto Existing",
+            "config_path": str(existing_config),
+        }
+        pointer = registry_dir / "otto.json"
+        pointer.write_text(json.dumps(existing_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        before = pointer.read_bytes()
+        duplicate_config = config_dir / "duplicate.json"
+        duplicate_config.write_text(
+            json.dumps(
+                {
+                    "project": "otto",
+                    "project_name": "Different Otto",
+                    "layout": str(layout),
+                    "roles": [{"role": "director", "slot": 0, "cli": ["claude"], "workdir": str(tmp_path / "other")}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        try:
+            switchyard_register_command(duplicate_config, registry_dir=registry_dir, print_func=lambda _line: None)
+            raise AssertionError("expected duplicate slug rejection")
+        except SystemExit as exc:
+            message = str(exc)
+
+        after = pointer.read_bytes()
+
+    assert "project slug 'otto' is already registered to 'Otto Existing'" in message
+    assert str(existing_config) in message
+    assert after == before
+
+
+def test_switchyard_register_rejects_duplicate_project_name_without_writing_pointer() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-register.") as tmp:
+        tmp_path = Path(tmp)
+        registry_dir = tmp_path / "registry"
+        config_dir = tmp_path / "configs"
+        layout = tmp_path / "layout.json"
+        registry_dir.mkdir()
+        config_dir.mkdir()
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        existing_config = config_dir / "otto.json"
+        existing_config.write_text("{}\n", encoding="utf-8")
+        (registry_dir / "otto.json").write_text(
+            json.dumps(
+                {
+                    "schema": team_launcher.SWITCHYARD_REGISTRY_SCHEMA,
+                    "slug": "otto",
+                    "name": "Otto Scheduler",
+                    "config_path": str(existing_config),
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        duplicate_config = config_dir / "atlas.json"
+        duplicate_config.write_text(
+            json.dumps(
+                {
+                    "project": "atlas",
+                    "project_name": "Otto Scheduler",
+                    "layout": str(layout),
+                    "roles": [{"role": "director", "slot": 0, "cli": ["claude"], "workdir": str(tmp_path / "atlas")}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        try:
+            switchyard_register_command(duplicate_config, registry_dir=registry_dir, print_func=lambda _line: None)
+            raise AssertionError("expected duplicate project name rejection")
+        except SystemExit as exc:
+            message = str(exc)
+        duplicate_pointer_exists = (registry_dir / "atlas.json").exists()
+
+    assert "project name 'Otto Scheduler' is already registered as 'otto'" in message
+    assert str(existing_config) in message
+    assert not duplicate_pointer_exists
+
+
+def test_switchyard_new_rejects_duplicate_slug_before_mutating() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new.") as tmp:
+        tmp_path = Path(tmp)
+        registry_dir = tmp_path / "registry"
+        home_base = tmp_path / "home"
+        output_dir = tmp_path / "out"
+        registry_dir.mkdir()
+        existing_config = tmp_path / "otto.json"
+        existing_config.write_text("{}\n", encoding="utf-8")
+        (registry_dir / "otto.json").write_text(
+            json.dumps(
+                {
+                    "schema": team_launcher.SWITCHYARD_REGISTRY_SCHEMA,
+                    "slug": "otto",
+                    "name": "Otto Scheduler",
+                    "config_path": str(existing_config),
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        calls: list[list[str]] = []
+
+        try:
+            switchyard_new_command(
+                slug="otto",
+                agent_name="atlas",
+                project_name="Atlas",
+                output_dir=output_dir,
+                yes=True,
+                home_base=home_base,
+                euid_getter=lambda: 0,
+                runner=lambda args, **_kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0),
+                registry_dir=registry_dir,
+                input_func=lambda _prompt: "",
+            )
+            raise AssertionError("expected duplicate slug rejection")
+        except SystemExit as exc:
+            message = str(exc)
+
+    assert "project slug 'otto' is already registered to 'Otto Scheduler'" in message
+    assert str(existing_config) in message
+    assert calls == []
+    assert not output_dir.exists()
+    assert not (home_base / "atlas-agent").exists()
+
+
+def test_switchyard_new_rejects_duplicate_project_name_before_mutating() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new.") as tmp:
+        tmp_path = Path(tmp)
+        registry_dir = tmp_path / "registry"
+        home_base = tmp_path / "home"
+        output_dir = tmp_path / "out"
+        registry_dir.mkdir()
+        existing_config = tmp_path / "otto.json"
+        existing_config.write_text("{}\n", encoding="utf-8")
+        (registry_dir / "otto.json").write_text(
+            json.dumps(
+                {
+                    "schema": team_launcher.SWITCHYARD_REGISTRY_SCHEMA,
+                    "slug": "otto",
+                    "name": "Otto Scheduler",
+                    "config_path": str(existing_config),
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        calls: list[list[str]] = []
+
+        try:
+            switchyard_new_command(
+                slug="atlas",
+                agent_name="atlas",
+                project_name="Otto Scheduler",
+                output_dir=output_dir,
+                yes=True,
+                home_base=home_base,
+                euid_getter=lambda: 0,
+                runner=lambda args, **_kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0),
+                registry_dir=registry_dir,
+                input_func=lambda _prompt: "",
+            )
+            raise AssertionError("expected duplicate project name rejection")
+        except SystemExit as exc:
+            message = str(exc)
+
+    assert "project name 'Otto Scheduler' is already registered as 'otto'" in message
+    assert str(existing_config) in message
+    assert calls == []
+    assert not output_dir.exists()
+    assert not (home_base / "atlas-agent").exists()
+
+
 def test_switchyard_register_cli_enables_launch_by_name_without_config_flag() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-register.") as tmp:
         tmp_path = Path(tmp)
@@ -8757,8 +8976,38 @@ def test_switchyard_new_without_sudo_fails_before_writing() -> None:
 
     assert "requires sudo" in message
     assert not output_dir.exists()
-    assert not (home_base / "otto-agent" / "Projects" / "porter-system").exists()
+    assert not (home_base / "otto-agent" / "Projects" / "porter_system").exists()
     assert calls == []
+
+
+def test_switchyard_new_rejects_dashed_slug_before_mutating() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new.") as tmp:
+        tmp_path = Path(tmp)
+        home_base = tmp_path / "home"
+        output_dir = tmp_path / "out"
+        calls: list[list[str]] = []
+
+        try:
+            switchyard_new_command(
+                slug="otto-scheduler",
+                agent_name="otto",
+                project_name="Otto Scheduler",
+                output_dir=output_dir,
+                yes=True,
+                home_base=home_base,
+                euid_getter=lambda: 0,
+                runner=lambda args, **_kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0),
+                registry_dir=tmp_path / "registry",
+                input_func=lambda _prompt: "",
+            )
+            raise AssertionError("expected dashed slug rejection")
+        except SystemExit as exc:
+            message = str(exc)
+
+    assert "project slug must match" in message
+    assert calls == []
+    assert not output_dir.exists()
+    assert not (home_base / "otto-agent").exists()
 
 
 def test_switchyard_new_unit_without_database_precheck_runs_before_user_and_project_creation() -> None:
@@ -8793,7 +9042,7 @@ def test_switchyard_new_unit_without_database_precheck_runs_before_user_and_proj
         output_dir = tmp_path / "out"
         source_repo = tmp_path / "source-repo"
         source_repo.mkdir()
-        project_dir = home_base / "otto-agent" / "Projects" / "porter-system"
+        project_dir = home_base / "otto-agent" / "Projects" / "porter_system"
         created_user_marker = home_base / "otto-agent" / ".created-by-useradd"
         runner = UnitWithoutDatabaseRunner(home_base=home_base)
 
@@ -8847,6 +9096,7 @@ def test_switchyard_new_prompts_name_first_and_derives_defaults() -> None:
                 home_base=home_base,
                 euid_getter=lambda: 1000,
                 runner=lambda args, **_kwargs: subprocess.CompletedProcess(args, 0),
+                registry_dir=tmp_path / "registry",
                 input_func=input_func,
                 print_func=output.append,
             )
@@ -8854,18 +9104,18 @@ def test_switchyard_new_prompts_name_first_and_derives_defaults() -> None:
         except SystemExit as exc:
             message = str(exc)
 
-    expected_path = home_base / "otto-scheduler-agent" / "Projects" / "otto-scheduler"
+    expected_path = home_base / "otto_scheduler-agent" / "Projects" / "otto_scheduler"
     assert "requires sudo" in message
     assert prompts == [
         "Project name: ",
-        "Slug [otto-scheduler]: ",
-        "Agent user [otto-scheduler-agent]: ",
+        "Slug [otto_scheduler]: ",
+        "Agent user [otto_scheduler-agent]: ",
         f"Project path [{expected_path}]: ",
     ]
     agent_prompt = prompts[2]
     agent_default = agent_prompt.removeprefix("Agent user [").removesuffix("]: ")
     owner_summary = next(line.removeprefix("switchyard: owner user: ") for line in output if line.startswith("switchyard: owner user: "))
-    assert agent_default == owner_summary == "otto-scheduler-agent"
+    assert agent_default == owner_summary == "otto_scheduler-agent"
     assert f"switchyard: project path: {expected_path}" in output
 
 
@@ -8884,6 +9134,7 @@ def test_switchyard_new_edited_slug_does_not_change_name_derived_default_path() 
                 home_base=home_base,
                 euid_getter=lambda: 1000,
                 runner=lambda args, **_kwargs: subprocess.CompletedProcess(args, 0),
+                registry_dir=tmp_path / "registry",
                 input_func=lambda _prompt: "",
                 print_func=output.append,
             )
@@ -8891,7 +9142,7 @@ def test_switchyard_new_edited_slug_does_not_change_name_derived_default_path() 
         except SystemExit as exc:
             message = str(exc)
 
-    expected_path = home_base / "otto-agent" / "Projects" / "otto-scheduler"
+    expected_path = home_base / "otto-agent" / "Projects" / "otto_scheduler"
     assert "requires sudo" in message
     assert "switchyard: slug: otto" in output
     assert f"switchyard: project path: {expected_path}" in output
@@ -8945,7 +9196,7 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
         pane_state_dir = tmp_path / "pane-state"
         source_repo = tmp_path / "source-repo"
         source_repo.mkdir()
-        project_dir = home_base / "otto-agent" / "Projects" / "porter-system"
+        project_dir = home_base / "otto-agent" / "Projects" / "porter_system"
         provision_dir = project_dir / ".switchyard" / "provision"
         registry_dir = tmp_path / "registry"
         runner = NewProjectRunner(owner_user="otto-agent", project_dir=project_dir)
@@ -9342,7 +9593,7 @@ def test_switchyard_new_creates_absent_zeta_owner_with_linger_and_initial_artifa
                 == 0
             )
 
-        project_dir = home_base / "zeta-agent" / "Projects" / "zeta-system"
+        project_dir = home_base / "zeta-agent" / "Projects" / "zeta_system"
         expected_useradd = team_launcher._owner_project_install_args("zeta-agent", project_dir)[1]
         commands = (output_dir / "operator-commands.sh").read_text(encoding="utf-8")
         artifact_created = (project_dir / ".switchyard" / "zeta.project.json").is_file()
@@ -9467,6 +9718,7 @@ def test_switchyard_new_unwritable_existing_project_path_refuses_before_mutating
                     yes=True,
                     euid_getter=lambda: 0,
                     runner=lambda args, **_kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0),
+                    registry_dir=tmp_path / "registry",
                 )
                 raise AssertionError("expected unwritable path failure")
             except SystemExit as exc:

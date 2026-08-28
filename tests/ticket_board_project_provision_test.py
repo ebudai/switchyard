@@ -374,6 +374,21 @@ def test_database_sql_bootstraps_schema_compatible_roles_and_project_database() 
     assert 'COMMENT ON DATABASE "4xgame_ticket_board"' in sql
 
 
+def test_project_slug_allows_underscore_and_rejects_dash() -> None:
+    plan = build_plan(project="otto_scheduler", owner_user="otto_scheduler-agent", port=8899)
+
+    assert plan.database == "otto_scheduler_ticket_board"
+    assert plan.board_unit == "otto_scheduler-ticket-board.service"
+
+    try:
+        build_plan(project="otto-scheduler", owner_user="otto-scheduler-agent", port=8899)
+        raise AssertionError("expected dashed project slug rejection")
+    except SystemExit as exc:
+        message = str(exc)
+
+    assert "project must match ^[a-z0-9][a-z0-9_]{0,39}$" in message
+
+
 def test_custom_ticket_prefix_is_rendered_into_board_service_environment() -> None:
     plan = build_plan(project="otto", owner_user="otto-agent", ticket_prefix="ot")
     board_unit = render_board_unit(plan)

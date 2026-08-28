@@ -204,12 +204,12 @@ and the agent-owned checkout, not a menu bug.
 editable:
 
     Project name: Otto Scheduler
-    Slug         [otto-scheduler]:
-    Agent name   [otto-scheduler]:
-    Project path [/home/otto-scheduler-agent/Projects/otto-scheduler]:
+    Slug         [otto_scheduler]:
+    Agent name   [otto_scheduler]:
+    Project path [/home/otto_scheduler-agent/Projects/otto_scheduler]:
 
 The default project path follows the project name, not the slug. Editing the slug to a shorter
-machine token such as `otto` still keeps the default path at `Projects/otto-scheduler`. The path is
+machine token such as `otto` still keeps the default path at `Projects/otto_scheduler`. The path is
 also editable for existing checkouts or shared locations, but it must be readable and writable by
 the project agent user. Then `new` starts the design session.
 
@@ -245,7 +245,7 @@ the director, which is usually Claude Opus carrying the most context on the team
 So the derived path must be right the FIRST time. Two things follow:
 
 - **show the project path in the prompt** before creating anything, so the user sees
-  `/home/otto-agent/Projects/otto-scheduler` and can object or override it while objecting is still free
+  `/home/otto-agent/Projects/otto_scheduler` and can object or override it while objecting is still free
 - **verify the cwd immediately after launching**, not weeks later. Confirm the session landed in
   `~/.claude/projects/<escaped-cwd>/` for the intended directory. Discovering this at the first
   reboot is how PGU-613 happened -- a resume that reports success while the model has nothing.
@@ -496,7 +496,7 @@ None. Both are closed (Eric, 2026-08-24):
    | project name | `Otto Scheduler` | what you type; what `switchyard <name>` matches |
    | slug | `otto` | port, database, socket, unit names, ticket prefix |
    | agent | `otto-agent` | the owning user |
-   | project dir | `/home/otto-agent/Projects/otto-scheduler` | derived from the NAME |
+   | project dir | `/home/otto-agent/Projects/otto_scheduler` | derived from the NAME |
 
    This is also why prompt order matters: the derived path cannot be shown until the name is known,
    so the name must be asked FIRST and the slug derived from it.

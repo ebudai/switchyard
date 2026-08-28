@@ -313,9 +313,9 @@ name, project path, and the team roles:
 
 ```text
 Project name: Otto Scheduler
-Slug [otto-scheduler]:
-Agent user [otto-scheduler-agent]:
-Project path [/home/otto-scheduler-agent/Projects/otto-scheduler]:
+Slug [otto_scheduler]:
+Agent user [otto_scheduler-agent]:
+Project path [/home/otto_scheduler-agent/Projects/otto_scheduler]:
 Include designer role [Y/n]:
 designer CLI (claude/codex/agy) [claude]:
 director CLI (claude/codex/agy) [claude]:
@@ -326,7 +326,7 @@ code-review CLI (claude/codex/agy) [codex]:
 ```
 
 The default project path follows the project name, not the machine slug; editing
-the slug to `otto` still defaults to `Projects/otto-scheduler`. The path itself
+the slug to `otto` still defaults to `Projects/otto_scheduler`. The path itself
 is editable for existing checkouts or shared locations. If an existing path is
 not readable and writable by the project agent user, `new` refuses before
 creating users or files. If `new` is not run with sudo/root privileges, it fails

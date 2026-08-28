@@ -12,7 +12,7 @@ from pathlib import Path, PurePosixPath
 from typing import Sequence
 
 
-PROJECT_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+PROJECT_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,39}$")
 USER_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$")
 ROLE_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 TICKET_PREFIX_RE = re.compile(r"^[A-Z][A-Z0-9]*$")
@@ -61,7 +61,7 @@ class ProjectBoardProvision:
 def _validate_project(value: str) -> str:
     project = value.strip().lower()
     if not PROJECT_RE.fullmatch(project):
-        raise SystemExit("project must match ^[a-z0-9][a-z0-9-]{0,39}$")
+        raise SystemExit("project must match ^[a-z0-9][a-z0-9_]{0,39}$")
     return project
 
 
@@ -99,7 +99,7 @@ def _dedupe(values: Sequence[str]) -> tuple[str, ...]:
 
 
 def _identifier_from_project(project: str) -> str:
-    return project.replace("-", "_")
+    return project
 
 
 def allocated_port(project: str, *, base: int = 18_770, span: int = 10_000) -> int:

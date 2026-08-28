@@ -9,6 +9,7 @@ import json
 import math
 import os
 import pwd
+import re
 import shutil
 import shlex
 import socket
@@ -150,6 +151,7 @@ LEGACY_ALLOW_STALE_LAUNCHER_ENV = "PGU_TEAM_LAUNCHER_ALLOW_STALE"
 NO_LAUNCHER_SELF_DEPLOY_ENV = "TEAM_LAUNCHER_NO_SELF_DEPLOY"
 LEGACY_NO_LAUNCHER_SELF_DEPLOY_ENV = "PGU_TEAM_LAUNCHER_NO_SELF_DEPLOY"
 DEFAULT_TENANT_RELEASE_DEPLOY_REF = "origin/main"
+PROJECT_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,39}$")
 SUPPORTED_NEW_PROJECT_CLIS = ("claude", "codex", "agy")
 NEW_PROJECT_ROLE_CLI_DEFAULTS = {
     "designer": "claude",
@@ -973,7 +975,7 @@ def load_project_design_artifact(path: Path, *, expected_project: str | None = N
         raise SystemExit(
             f"{artifact_path} must not preconfigure stages or roles for new projects: {', '.join(forbidden)}"
         )
-    slug = _artifact_string(project_raw, "slug", path=artifact_path).lower()
+    slug = _validate_project_slug(_artifact_string(project_raw, "slug", path=artifact_path))
     if expected_project is not None and slug != expected_project:
         raise SystemExit(f"{artifact_path} project slug {slug!r} does not match requested project {expected_project!r}")
     project_name = _artifact_optional_string(project_raw, "name", path=artifact_path, default=slug)
@@ -1212,7 +1214,7 @@ def _with_project_board_env(config: ProjectConfig, roles: list[RoleConfig]) -> l
 def load_project_config(project: str, config_path: Path | None = None) -> ProjectConfig:
     path = config_path or DEFAULT_CONFIG_DIR / f"{project}.json"
     config = _load_json(path)
-    config_project = str(config.get("project") or project).strip()
+    config_project = _validate_project_slug(str(config.get("project") or project))
     if config_project != project:
         raise SystemExit(f"config project {config_project!r} does not match requested project {project!r}")
     roles_raw = config.get("roles")
@@ -4488,7 +4490,7 @@ def design_project_command(
     input_func: Callable[[str], str] = input,
     print_func: Callable[[str], None] = print,
 ) -> int:
-    project_slug = project.strip().lower()
+    project_slug = _validate_project_slug(project)
     base_dir = (output_dir or Path.cwd()).expanduser().resolve(strict=False)
     target_artifact = (artifact_path or _default_project_artifact_path(project_slug, base_dir)).expanduser().resolve(strict=False)
     target_design_document = (
@@ -5074,10 +5076,17 @@ FIRST_RUN_TRUST_CLIS = frozenset({"agy", "claude", "gemini"})
 
 
 def _slug_from_project_name(name: str) -> str:
-    slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in name.strip())
-    slug = "-".join(part for part in slug.split("-") if part)
+    slug = "".join(ch.lower() if ch.isascii() and ch.isalnum() else "_" for ch in name.strip())
+    slug = "_".join(part for part in slug.split("_") if part)
     if not slug:
         raise SystemExit("switchyard: project slug cannot be empty")
+    return slug
+
+
+def _validate_project_slug(value: str) -> str:
+    slug = value.strip()
+    if not PROJECT_SLUG_RE.fullmatch(slug):
+        raise SystemExit("switchyard: project slug must match ^[a-z0-9][a-z0-9_]{0,39}$")
     return slug
 
 
@@ -5805,8 +5814,9 @@ def _project_entries(config_dir: Path | None = None) -> list[SwitchyardProjectEn
         roles_raw = raw.get("roles")
         if not isinstance(roles_raw, list) or not roles_raw:
             continue
-        slug = str(raw.get("project") or path.stem).strip()
-        if not slug:
+        try:
+            slug = _validate_project_slug(str(raw.get("project") or path.stem))
+        except SystemExit:
             continue
         name = str(raw.get("project_name") or raw.get("name") or slug).strip() or slug
         entries.append(SwitchyardProjectEntry(slug=slug, name=name, config_path=path))
@@ -5827,7 +5837,10 @@ def _registry_project_entries(registry_dir: Path | None = None) -> list[Switchya
             continue
         if str(raw.get("schema") or "") != SWITCHYARD_REGISTRY_SCHEMA:
             continue
-        slug = str(raw.get("slug") or "").strip()
+        try:
+            slug = _validate_project_slug(str(raw.get("slug") or ""))
+        except SystemExit:
+            continue
         name = str(raw.get("name") or slug).strip() or slug
         config_path_raw = str(raw.get("config_path") or "").strip()
         if not slug or not config_path_raw:
@@ -5848,6 +5861,37 @@ def _switchyard_entries(
     return sorted(entries.values(), key=lambda entry: (entry.name.casefold(), entry.slug.casefold()))
 
 
+def _registered_project_collision(
+    *,
+    slug: str,
+    name: str,
+    registry_dir: Path | None = None,
+) -> str:
+    for entry in _registry_project_entries(registry_dir):
+        if entry.slug.casefold() == slug.casefold():
+            return (
+                f"switchyard: project slug {slug!r} is already registered to "
+                f"{entry.name!r} at {entry.config_path}"
+            )
+        if entry.name.casefold() == name.casefold():
+            return (
+                f"switchyard: project name {name!r} is already registered as "
+                f"{entry.slug!r} at {entry.config_path}"
+            )
+    return ""
+
+
+def _check_switchyard_registration_available(
+    *,
+    slug: str,
+    name: str,
+    registry_dir: Path | None = None,
+) -> None:
+    collision = _registered_project_collision(slug=slug, name=name, registry_dir=registry_dir)
+    if collision:
+        raise SystemExit(collision)
+
+
 def _register_switchyard_project(
     config_path: Path,
     *,
@@ -5855,12 +5899,14 @@ def _register_switchyard_project(
 ) -> Path:
     resolved_config_path = config_path.expanduser().resolve(strict=False)
     raw = _load_json(resolved_config_path)
-    slug = str(raw.get("project") or resolved_config_path.stem).strip()
-    if not slug:
+    raw_slug = str(raw.get("project") or resolved_config_path.stem).strip()
+    if not raw_slug:
         raise SystemExit(f"switchyard: cannot register {resolved_config_path}: project slug is empty")
+    slug = _validate_project_slug(raw_slug)
     load_project_config(slug, resolved_config_path)
     name = str(raw.get("project_name") or raw.get("name") or slug).strip() or slug
     registry_dir = registry_dir or DEFAULT_SWITCHYARD_REGISTRY_DIR
+    _check_switchyard_registration_available(slug=slug, name=name, registry_dir=registry_dir)
     registry_path = registry_dir / f"{slug}.json"
     payload = {
         "schema": SWITCHYARD_REGISTRY_SCHEMA,
@@ -5992,9 +6038,7 @@ def switchyard_new_command(
         if not resolved_project_name:
             raise SystemExit("switchyard: project name cannot be empty")
         default_slug = _slug_from_project_name(resolved_project_name)
-        resolved_slug = _slug_from_project_name(
-            slug or _prompt_text("Slug", default=default_slug, input_func=input_func)
-        )
+        resolved_slug = _validate_project_slug(slug or _prompt_text("Slug", default=default_slug, input_func=input_func))
         raw_agent = agent_name or _prompt_text(
             "Agent user",
             default=_agent_owner_user(resolved_slug),
@@ -6010,6 +6054,11 @@ def switchyard_new_command(
         selected_role_clis = ()
         selected_implementer_roles = ()
         include_designer = True
+    _check_switchyard_registration_available(
+        slug=resolved_slug,
+        name=resolved_project_name,
+        registry_dir=registry_dir,
+    )
     _confirm_switchyard_new(
         slug=resolved_slug,
         owner_user=owner_user,

@@ -85,7 +85,7 @@ def _resolve_target(raw_target: str, environ: dict[str, str]) -> str:
 
 def _project_from_target(target: str) -> str:
     session = target.split(":", 1)[0].strip()
-    if session.count("-") != 1:
+    if "-" not in session:
         return ""
     return session.split("-", 1)[0].strip()
 
@@ -104,7 +104,7 @@ def _role_for_target(target: str, environ: dict[str, str] | None = None) -> str:
         if session.startswith(prefix):
             return session[len(prefix) :].strip().lower()
         return ""
-    if session.count("-") != 1:
+    if "-" not in session:
         return ""
     return session.split("-", 1)[1].strip().lower()
 

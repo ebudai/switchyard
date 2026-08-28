@@ -2929,12 +2929,12 @@ def test_expected_runtime_strips_known_hyphenated_project_slug() -> None:
         notify_listener.DEFAULT_PROJECT = previous_project
 
 
-def test_notify_listener_role_for_target_refuses_wrong_project_prefix() -> None:
+def test_notify_listener_no_env_target_fallback_splits_first_dash_for_hyphenated_role() -> None:
     previous_project = notify_listener.DEFAULT_PROJECT
     try:
         notify_listener.DEFAULT_PROJECT = "mycoolthing"
         gate = RealPaneActivityGate(role_runtimes={"t-ops": "codex"})
-        assert gate._role_for_target("other-project-ops:0.0") == ""
+        assert gate._role_for_target("other-project-ops:0.0") == "project-ops"
     finally:
         notify_listener.DEFAULT_PROJECT = previous_project
 

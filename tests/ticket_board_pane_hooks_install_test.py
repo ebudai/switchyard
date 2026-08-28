@@ -1446,7 +1446,7 @@ def test_hook_project_env_disambiguates_hyphenated_project_and_role() -> None:
         assert not (state_home / "my-cool-thing-code-ticket-board").exists()
 
 
-def test_hook_ambiguous_hyphenated_target_without_project_env_refuses_cleanly() -> None:
+def test_hook_hyphenated_target_without_project_env_uses_first_dash_fallback() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
         tmp_path = Path(tmp)
         runtime_dir = tmp_path / "run"
@@ -1464,7 +1464,7 @@ def test_hook_ambiguous_hyphenated_target_without_project_env_refuses_cleanly() 
                 str(ROOT / "scripts" / HOOK_NAME),
                 "idle",
                 "--target",
-                "my-cool-thing-code-review:0.0",
+                "mycoolthing-code-review:0.0",
                 "--source",
                 "codex.SessionStart",
                 "--record-session",
@@ -1475,10 +1475,9 @@ def test_hook_ambiguous_hyphenated_target_without_project_env_refuses_cleanly() 
         )
 
         assert proc.returncode == 0
-        assert "cannot determine pane state directory" in proc.stderr
-        assert "cannot determine pane session directory" in proc.stderr
-        assert not runtime_dir.exists()
-        assert not state_home.exists()
+        assert proc.stderr == ""
+        assert (runtime_dir / "mycoolthing-ticket-board" / "pane-state" / "mycoolthing-code-review_0.0.json").is_file()
+        assert (state_home / "mycoolthing-ticket-board" / "pane-sessions" / "mycoolthing-code-review_0.0.json").is_file()
 
 
 def test_hook_session_start_refuses_role_when_target_lacks_project_prefix() -> None:
@@ -1529,6 +1528,13 @@ def test_hook_role_for_target_refuses_wrong_project_prefix() -> None:
     hook = _load_hook_module()
 
     assert hook._role_for_target("other-project-ops:0.0", {"TICKET_BOARD_PROJECT": "mycoolthing"}) == ""
+
+
+def test_hook_no_env_target_fallback_splits_first_dash_for_hyphenated_role() -> None:
+    hook = _load_hook_module()
+
+    assert hook._project_from_target("otto-code-review:0.0") == "otto"
+    assert hook._role_for_target("otto-code-review:0.0", {}) == "code-review"
 
 
 def test_hook_unresolved_default_dirs_report_but_do_not_fail_startup() -> None:

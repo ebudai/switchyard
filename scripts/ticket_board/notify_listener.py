@@ -478,7 +478,7 @@ class PaneActivityGate:
         prefix = f"{DEFAULT_PROJECT}-"
         if session.startswith(prefix):
             return session[len(prefix) :].strip().lower()
-        if session.count("-") != 1:
+        if "-" not in session:
             return ""
         return session.split("-", 1)[1].strip().lower()
 

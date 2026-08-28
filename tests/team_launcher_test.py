@@ -9660,6 +9660,78 @@ def test_project_artifact_accepts_designer_chosen_roles() -> None:
     assert [role["role"] for role in config["roles"]] == ["designer", "director", "audit", "ops", "app"]
 
 
+def test_project_artifact_rejects_unknown_role_cli() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-design.") as tmp:
+        tmp_path = Path(tmp)
+        project_repo = tmp_path / "project-repo"
+        project_repo.mkdir()
+        artifact_path = tmp_path / "atlas.project.json"
+        artifact_path.write_text(
+            json.dumps(
+                {
+                    "schema": "switchyard.project.v1",
+                    "design_document": "atlas-design.md",
+                    "project": {
+                        "slug": "atlas",
+                        "name": "Atlas Project",
+                        "ticket_prefix": "ATL",
+                        "owner_user": current_user,
+                        "repository": str(project_repo),
+                        "roles": ["backend"],
+                        "role_clis": {"backend": "cluade"},
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        try:
+            load_project_design_artifact(artifact_path)
+            raise AssertionError("expected bad CLI failure")
+        except SystemExit as exc:
+            message = str(exc)
+
+    assert "CLI for backend must be one of claude, codex, agy" in message
+
+
+def test_project_artifact_rejects_non_bool_include_designer() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-design.") as tmp:
+        tmp_path = Path(tmp)
+        project_repo = tmp_path / "project-repo"
+        project_repo.mkdir()
+        artifact_path = tmp_path / "atlas.project.json"
+        artifact_path.write_text(
+            json.dumps(
+                {
+                    "schema": "switchyard.project.v1",
+                    "design_document": "atlas-design.md",
+                    "project": {
+                        "slug": "atlas",
+                        "name": "Atlas Project",
+                        "ticket_prefix": "ATL",
+                        "owner_user": current_user,
+                        "repository": str(project_repo),
+                        "roles": ["backend"],
+                        "include_designer": "yes",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        try:
+            load_project_design_artifact(artifact_path)
+            raise AssertionError("expected include_designer type failure")
+        except SystemExit as exc:
+            message = str(exc)
+
+    assert "field 'project.include_designer' must be a JSON boolean" in message
+
+
 def _write_first_run_auth_config(tmp_path: Path, *, roles: list[tuple[str, str]], owner_user: str = "otto-agent") -> Path:
     layout_path = tmp_path / "layout.json"
     layout_path.write_text(

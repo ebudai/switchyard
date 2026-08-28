@@ -1482,7 +1482,7 @@ def pane_runtime_hook_source_for_role(
     return source
 
 
-def _expects_startup_runtime_hook(role: RoleConfig) -> bool:
+def _expects_launch_runtime_hook_probe(role: RoleConfig) -> bool:
     cli_name = _command_name(role.cli[0]) if role.cli else ""
     return cli_name == "codex"
 
@@ -1543,7 +1543,7 @@ def launch_session_record_statuses(
             status.pane_launch_reported for status in statuses
         )
         all_runtime_hooks_reported = not pane_outcomes_required or all(
-            (not _expects_startup_runtime_hook(role)) or status.runtime_hook_reported or status.unverified_resume
+            (not _expects_launch_runtime_hook_probe(role)) or status.runtime_hook_reported or status.unverified_resume
             for role, status in zip(roles, statuses, strict=True)
         )
         fallback_grace_elapsed = now >= fallback_deadline
@@ -1618,14 +1618,15 @@ def report_launch_session_records(
         role = roles_by_target.get(status.target)
         if (
             role is not None
-            and _expects_startup_runtime_hook(role)
+            and _expects_launch_runtime_hook_probe(role)
             and not status.runtime_hook_reported
             and not status.unverified_resume
         ):
             print_func(
-                f"warning: switchyard: codex startup hook did not report for {status.role} "
-                f"({status.target}) after {timeout_seconds:g}s; expected codex.SessionStart state. "
-                "Check Codex hook trust or that --dangerously-bypass-hook-trust reached the codex command."
+                f"warning: switchyard: codex runtime hook did not report for {status.role} "
+                f"({status.target}) during the {timeout_seconds:g}s startup check; expected fresh codex.* "
+                "pane state. Interactive Codex may defer SessionStart until the first prompt; this pane's "
+                "hook delivery is unproven until activity writes codex.UserPromptSubmit or codex.Stop."
             )
     return statuses
 
@@ -1934,16 +1935,12 @@ def cli_command_for_role(
     resume: bool = False,
 ) -> list[str]:
     session_id = session_id_for_role(role, session_dir) if resume else ""
-    cli_options: list[str] = []
+    command = [*role.cli, *_resume_args_for_role(role, session_id)]
     if role.model:
-        cli_options.extend([role.model_arg, role.model])
-    cli_options.extend(effort_args_for_role(role))
-    cli_options.extend(yolo_args_for_role(role))
-    cli_options.extend(role.extra_args)
-    if session_id and role.resume_mode == "subcommand":
-        command = [*role.cli, role.resume_subcommand, *cli_options, session_id]
-    else:
-        command = [*role.cli, *_resume_args_for_role(role, session_id), *cli_options]
+        command.extend([role.model_arg, role.model])
+    command.extend(effort_args_for_role(role))
+    command.extend(yolo_args_for_role(role))
+    command.extend(role.extra_args)
     env = {
         **role.env,
         "TICKET_BOARD_PANE_TARGET": role.target,

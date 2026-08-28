@@ -1556,7 +1556,7 @@ def test_launch_session_record_statuses_treat_unverified_resume_as_reported_outc
     assert elapsed < 0.1
 
 
-def test_launch_session_record_report_warns_when_codex_startup_hook_never_reports() -> None:
+def test_launch_session_record_report_warns_when_codex_runtime_hook_never_reports() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-launch-session-codex-hook-missing.") as tmp:
         tmp_path = Path(tmp)
         layout = tmp_path / "layout.json"
@@ -1603,8 +1603,8 @@ def test_launch_session_record_report_warns_when_codex_startup_hook_never_report
 
     assert statuses[0].pane_state_source == "team_launcher.start"
     assert statuses[0].runtime_hook_source == ""
-    assert any("warning: switchyard: codex startup hook did not report for main" in message for message in messages)
-    assert any("expected codex.SessionStart state" in message for message in messages)
+    assert any("warning: switchyard: codex runtime hook did not report for main" in message for message in messages)
+    assert any("expected fresh codex.* pane state" in message for message in messages)
 
 
 def test_launch_session_record_statuses_wait_for_codex_runtime_hook_after_launcher_seed() -> None:
@@ -1666,6 +1666,64 @@ def test_launch_session_record_statuses_wait_for_codex_runtime_hook_after_launch
     assert elapsed < 0.3
     assert statuses[0].pane_state_source == ""
     assert statuses[0].runtime_hook_source == "codex.SessionStart"
+
+
+def test_pane_runtime_hook_source_rejects_stale_codex_state() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    role = next(role for role in config.roles if role.role == "ops")
+
+    with tempfile.TemporaryDirectory(prefix="pgu-launch-session-stale-codex-state.") as tmp:
+        pane_state_dir = Path(tmp) / "pane-state"
+        pane_state_dir.mkdir()
+        (pane_state_dir / pane_state_file_name(role.target)).write_text(
+            json.dumps(
+                {
+                    "target": role.target,
+                    "state": "idle",
+                    "updated_at": time.time() - 60.0,
+                    "source": "codex.Stop",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        source = team_launcher.pane_runtime_hook_source_for_role(
+            role,
+            pane_state_dir,
+            updated_since=time.time(),
+        )
+
+    assert source == ""
+
+
+def test_pane_runtime_hook_source_rejects_wrong_target_codex_state() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    role = next(role for role in config.roles if role.role == "ops")
+
+    with tempfile.TemporaryDirectory(prefix="pgu-launch-session-wrong-target-codex-state.") as tmp:
+        pane_state_dir = Path(tmp) / "pane-state"
+        pane_state_dir.mkdir()
+        (pane_state_dir / pane_state_file_name(role.target)).write_text(
+            json.dumps(
+                {
+                    "target": "pgu-main:0.0",
+                    "state": "idle",
+                    "updated_at": time.time(),
+                    "source": "codex.Stop",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        source = team_launcher.pane_runtime_hook_source_for_role(
+            role,
+            pane_state_dir,
+            updated_since=time.time() - 1.0,
+        )
+
+    assert source == ""
 
 
 def test_launch_session_record_report_ignores_stale_resume_fallback_sidecars() -> None:
@@ -3486,10 +3544,7 @@ def test_cli_command_exports_known_resume_session_id_for_hooks() -> None:
     entries = _env_entries(command)
     assert f"TICKET_BOARD_PANE_SESSION_ID={session_id}" in entries
     assert f"PGU_PANE_SESSION_ID={session_id}" in entries
-    tail = _command_tail(command)
-    assert tail[:2] == ["codex", "resume"]
-    assert tail[-1] == session_id
-    assert "--dangerously-bypass-hook-trust" in tail[:-1]
+    assert _command_tail(command)[:3] == ["codex", "resume", session_id]
 
 
 def test_custom_config_without_run_as_user_tracks_invoking_home() -> None:
@@ -5049,8 +5104,7 @@ def test_start_resumes_recorded_session_when_recreating_missing_pane() -> None:
 
     assert runner.calls[0] == ["tmux", "has-session", "-t", "pgu-ops"]
     assert runner.calls[1][:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"]
-    assert f"codex resume --model gpt-5.5 -c reasoning_effort=high" in runner.calls[1][-1]
-    assert runner.calls[1][-1].endswith(f" {session_id}")
+    assert f"codex resume {session_id}" in runner.calls[1][-1]
     # resume verified via pane inspection -> no fresh fallback, then attach
     assert ["tmux", "kill-session", "-t", "pgu-ops"] not in runner.calls
     assert runner.calls[-1] == ["tmux", "attach", "-t", "pgu-ops"]
@@ -5132,8 +5186,7 @@ def test_start_resumes_from_durable_session_dir_after_runtime_tmpfs_is_cleared()
     assert f"TICKET_BOARD_PANE_STATE_DIR={tmp_path / 'pane-state'}" in runner.calls[1][-1]
     assert f"PGU_TICKET_BOARD_PANE_SESSION_DIR={durable}" in runner.calls[1][-1]
     assert f"PGU_TICKET_BOARD_PANE_STATE_DIR={tmp_path / 'pane-state'}" in runner.calls[1][-1]
-    assert f"codex resume --model gpt-5.5 -c reasoning_effort=high" in runner.calls[1][-1]
-    assert runner.calls[1][-1].endswith(f" {session_id}")
+    assert f"codex resume {session_id}" in runner.calls[1][-1]
 
 
 def test_start_runs_research_detached_before_opening_visible_layout() -> None:
@@ -7119,10 +7172,11 @@ def test_reload_uses_recorded_resume_uuid_when_recreating_session() -> None:
         )
         runner = FakeRunner(existing_sessions={"pgu-ops"}, current_commands={"pgu-ops:0.0": "codex"})
 
-        command_tail = _command_tail(cli_command_for_role(role, session_dir=session_dir, resume=True))
-        assert command_tail[:2] == ["codex", "resume"]
-        assert command_tail[-1] == session_id
-        assert "--dangerously-bypass-hook-trust" in command_tail[:-1]
+        assert _command_tail(cli_command_for_role(role, session_dir=session_dir, resume=True))[:3] == [
+            "codex",
+            "resume",
+            session_id,
+        ]
         pane_state_dir = Path(tmp) / "pane-state"
         assert (
             run_role_pane(
@@ -7143,8 +7197,7 @@ def test_reload_uses_recorded_resume_uuid_when_recreating_session() -> None:
         assert runner.calls[2] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_current_command}"]
         assert runner.calls[3] == ["tmux", "kill-session", "-t", "pgu-ops"]
         assert runner.calls[4][:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"]
-        assert f"codex resume --model gpt-5.5 -c reasoning_effort=high" in runner.calls[4][-1]
-        assert runner.calls[4][-1].endswith(f" {session_id}")
+        assert f"codex resume {session_id}" in runner.calls[4][-1]
         assert "--continue" not in runner.calls[4][-1]
         assert "--last" not in runner.calls[4][-1]
         assert runner.calls[5] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_pid}"]
@@ -7203,11 +7256,8 @@ def test_resume_commands_use_cli_specific_shapes_and_front_position() -> None:
         assert _command_tail(director_command)[3:7] == ["--model", "claude-opus-5", "--effort", "high"]
 
         assert any(entry.startswith(f"PATH={default_user_bin()}:") for entry in _env_entries(ops_command))
-        ops_tail = _command_tail(ops_command)
-        assert ops_tail[:2] == ["codex", "resume"]
-        assert ops_tail[-1] == session_id
-        assert ops_tail[2:6] == ["--model", "gpt-5.5", "-c", "reasoning_effort=high"]
-        assert "--dangerously-bypass-hook-trust" in ops_tail[:-1]
+        assert _command_tail(ops_command)[:3] == ["codex", "resume", session_id]
+        assert _command_tail(ops_command)[3:7] == ["--model", "gpt-5.5", "-c", "reasoning_effort=high"]
 
         assert any(entry.startswith(f"PATH={default_user_bin()}:") for entry in _env_entries(inspector_command))
         assert _command_tail(inspector_command)[:3] == ["agy", "--conversation", session_id]
@@ -7557,8 +7607,7 @@ def test_reload_preserves_session_record_when_resume_cli_is_slow_to_exec() -> No
         kill_sessions = [call for call in runner.calls if call[:2] == ["tmux", "kill-session"]]
         assert len(new_sessions) == 1
         assert len(kill_sessions) == 1
-        assert f"codex resume --model gpt-5.5 -c reasoning_effort=high" in new_sessions[0][-1]
-        assert new_sessions[0][-1].endswith(f" {session_id}")
+        assert f"codex resume {session_id}" in new_sessions[0][-1]
     finally:
         team_launcher.RESUME_STARTUP_TIMEOUT_SECONDS = original_timeout
         team_launcher.RESUME_STARTUP_POLL_SECONDS = original_poll

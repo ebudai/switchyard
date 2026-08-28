@@ -235,9 +235,11 @@ are:
 - Claude Code: `SessionStart` writes initial `idle` and records the resume
   session id; `Notification` with matcher `idle_prompt` writes `idle`;
   `UserPromptSubmit` and `Stop` write `busy`.
-- Codex: `SessionStart` writes initial `idle` and records the resume session
-  id; `Stop` writes `idle`; `UserPromptSubmit` writes `busy`; permission
-  prompts write `blocked` if the hook surface exposes them.
+- Codex: `SessionStart` records the resume session id when Codex emits it, but
+  interactive Codex 0.150.1 can defer that event until the first prompt instead
+  of firing it during idle startup. `Stop` writes `idle`; `UserPromptSubmit`
+  writes `busy`; permission prompts write `blocked` if the hook surface exposes
+  them.
 - Gemini: `SessionStart` writes initial `idle` and records the resume session
   id; `AfterAgent` writes `idle`; `BeforeAgent` writes `busy`. Do not use Gemini
   `Notification` for idle because it is alert/permission-oriented.
@@ -284,8 +286,10 @@ That command copies the standalone writer to
 The hook cutover order is strict:
 
 1. Run `scripts/ticket-board-install-pane-hooks install`.
-2. Restart every live pane CLI so it reloads its hook config. The `SessionStart`
-   hook should seed each pane's hook-state file immediately.
+2. Restart every live pane CLI so it reloads its hook config. Claude and Gemini
+   should seed hook-state files immediately. Codex may not emit `SessionStart`
+   until the first prompt, so launcher startup reporting warns when Codex has
+   only launcher-seeded state and no fresh `codex.*` hook state.
 3. Verify all hook-state files exist:
 
 ```bash

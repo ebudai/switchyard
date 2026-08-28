@@ -1470,6 +1470,50 @@ def test_hook_ambiguous_hyphenated_target_without_project_env_refuses_cleanly() 
         assert not state_home.exists()
 
 
+def test_hook_session_start_refuses_role_when_target_lacks_project_prefix() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        tmp_path = Path(tmp)
+        runtime_dir = tmp_path / "run"
+        state_home = tmp_path / "state"
+        env = _hook_env(
+            TICKET_BOARD_PROJECT="mycoolthing",
+            XDG_RUNTIME_DIR=str(runtime_dir),
+            XDG_STATE_HOME=str(state_home),
+            CODEX_SESSION_ID="codex_wrong_prefix_session_456",
+        )
+        with _board_with_tickets(
+            [
+                {
+                    "id": "PGU-72202",
+                    "title": "Wrong prefix should not match",
+                    "state": "in_progress",
+                    "assignee": "-ops",
+                }
+            ]
+        ) as board_url:
+            env["TICKET_BOARD_URL"] = board_url
+            proc = subprocess.run(
+                [
+                    str(ROOT / "scripts" / HOOK_NAME),
+                    "idle",
+                    "--target",
+                    "other-project-ops:0.0",
+                    "--source",
+                    "codex.SessionStart",
+                    "--record-session",
+                ],
+                input=json.dumps({"source": "compact"}),
+                text=True,
+                capture_output=True,
+                check=True,
+                env=env,
+            )
+
+        assert proc.stdout == ""
+        assert (runtime_dir / "mycoolthing-ticket-board" / "pane-state" / "other-project-ops_0.0.json").is_file()
+        assert (state_home / "mycoolthing-ticket-board" / "pane-sessions" / "other-project-ops_0.0.json").is_file()
+
+
 def test_hook_unresolved_default_dirs_report_but_do_not_fail_startup() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
         tmp_path = Path(tmp)

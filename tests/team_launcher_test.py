@@ -94,6 +94,14 @@ from scripts.team_launcher import (
 )
 
 LIVE_SESSION_DIR = team_launcher.DEFAULT_SESSION_DIR
+LEGACY_SWITCHYARD_ROLE_CLIS = (
+    ("designer", "claude"),
+    ("director", "claude"),
+    ("audit", "claude"),
+    ("ops", "codex"),
+    ("app", "codex"),
+    ("main", "codex"),
+)
 
 
 class FakeRunner:
@@ -7715,12 +7723,11 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
     assert config["worktree_base"] == f"/home/{current_user}/porter-worktrees"
     assert config["session_dir"] == f"/home/{current_user}/.local/state/porter-ticket-board/pane-sessions"
     assert not config["session_dir"].startswith("/run/")
-    assert [role["role"] for role in config["roles"]] == ["designer", "director", "audit", "ops", "app", "main"]
+    assert [role["role"] for role in config["roles"]] == ["designer", "director", "audit", "app", "main"]
     assert [role["tmux_session"] for role in config["roles"]] == [
         "porter-designer",
         "porter-director",
         "porter-audit",
-        "porter-ops",
         "porter-app",
         "porter-main",
     ]
@@ -7728,7 +7735,6 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
         "designer": ["claude"],
         "director": ["claude"],
         "audit": ["claude"],
-        "ops": ["codex"],
         "app": ["codex"],
         "main": ["codex"],
     }
@@ -7747,11 +7753,11 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
     assert "('done', 'analysis', 'route', ARRAY['director']::text[]" in workflow_sql
     assert "('done', 'analysis', 'user_reopen', ARRAY['user']::text[]" in workflow_sql
     assert "('cancelled', 'analysis', 'route', ARRAY['director']::text[]" in workflow_sql
-    assert len(team_launcher._layout_leaves(layout)) == 6
-    assert [role.role for role in loaded_config.roles] == ["designer", "director", "audit", "ops", "app", "main"]
+    assert len(team_launcher._layout_leaves(layout)) == 5
+    assert [role.role for role in loaded_config.roles] == ["designer", "director", "audit", "app", "main"]
     assert loaded_config.roles[0].target == "porter-designer:0.0"
-    assert loaded_config.roles[3].target == "porter-ops:0.0"
-    assert loaded_config.roles[5].target == "porter-main:0.0"
+    assert loaded_config.roles[3].target == "porter-app:0.0"
+    assert loaded_config.roles[4].target == "porter-main:0.0"
     assert loaded_config.control_repository == Path(config["control_repository"])
     assert loaded_config.worktree_base == Path(config["worktree_base"])
     assert loaded_config.session_dir == Path(config["session_dir"])
@@ -7759,7 +7765,6 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
         "designer": f"/home/{current_user}/porter-worktrees/designer",
         "director": f"/home/{current_user}/porter-worktrees/director",
         "audit": f"/home/{current_user}/porter-worktrees/audit",
-        "ops": f"/home/{current_user}/porter-worktrees/ops",
         "app": f"/home/{current_user}/porter-worktrees/app",
         "main": f"/home/{current_user}/porter-worktrees/main",
     }
@@ -7777,7 +7782,6 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
         "porter-designer:0.0",
         "porter-director:0.0",
         "porter-audit:0.0",
-        "porter-ops:0.0",
         "porter-app:0.0",
         "porter-main:0.0",
     ]
@@ -7785,7 +7789,6 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
         f"/home/{current_user}/porter-worktrees/designer",
         f"/home/{current_user}/porter-worktrees/director",
         f"/home/{current_user}/porter-worktrees/audit",
-        f"/home/{current_user}/porter-worktrees/ops",
         f"/home/{current_user}/porter-worktrees/app",
         f"/home/{current_user}/porter-worktrees/main",
     ]
@@ -8801,6 +8804,7 @@ def test_switchyard_new_unit_without_database_precheck_runs_before_user_and_proj
                 project_name="Porter System",
                 source_repo=source_repo,
                 output_dir=output_dir,
+                role_clis=LEGACY_SWITCHYARD_ROLE_CLIS,
                 yes=True,
                 home_base=home_base,
                 euid_getter=lambda: 0,
@@ -8954,6 +8958,7 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
                     agent_name="otto",
                     project_name="Porter System",
                     source_repo=source_repo,
+                    role_clis=LEGACY_SWITCHYARD_ROLE_CLIS,
                     yes=True,
                     home_base=home_base,
                     euid_getter=lambda: 0,
@@ -8995,8 +9000,8 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
         assert registry_pointer["config_path"] == str((provision_dir / "porter.json").resolve(strict=False))
         assert registry_pointer["name"] == "Porter System"
         assert registry_pointer["slug"] == "porter"
-        assert artifact["project"]["roles"] == ["app", "main"]
-        assert plan["implementer_roles"] == ["app", "main"]
+        assert artifact["project"]["roles"] == ["ops", "app", "main"]
+        assert plan["implementer_roles"] == ["ops", "app", "main"]
         assert config["pane_launcher"] == expected_pane_launcher
         assert [role["role"] for role in config["roles"]] == ["designer", "director", "audit", "ops", "app", "main"]
         assert designer_env["SWITCHYARD_PROJECT_ARTIFACT"] == str(project_dir / ".switchyard" / "porter.project.json")
@@ -9032,6 +9037,134 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
         assert "warning: switchyard: session record missing for designer (porter-designer:0.0)" in output
         assert "warning: switchyard: session record missing for main (porter-main:0.0)" in output
         assert "Konsole Ctrl+Shift+E" in output
+
+
+def test_switchyard_new_prompts_roles_and_skips_designer_when_absent() -> None:
+    class PromptedRoleRunner(FakeRunner):
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if args[:2] == ["id", "-u"]:
+                return subprocess.CompletedProcess(args, 1)
+            if args[:1] == ["useradd"]:
+                return subprocess.CompletedProcess(args, 0)
+            if args[:1] == ["install"] and args[-1]:
+                target = Path(args[-1])
+                if str(target).startswith(tempfile.gettempdir()):
+                    target.mkdir(parents=True, exist_ok=True)
+                return subprocess.CompletedProcess(args, 0)
+            return super().__call__(args, **kwargs)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new-roles.") as tmp:
+        tmp_path = Path(tmp)
+        home_base = tmp_path / "home"
+        output_dir = tmp_path / "out"
+        source_repo = tmp_path / "source-repo"
+        source_repo.mkdir()
+        prompts: list[str] = []
+        answers = iter(["n", "claude", "agy", "code-review, runtime", "agy", "codex"])
+        runner = PromptedRoleRunner()
+        stdout = StringIO()
+
+        def input_func(prompt: str) -> str:
+            prompts.append(prompt)
+            return next(answers)
+
+        with redirect_stdout(stdout):
+            assert (
+                switchyard_new_command(
+                    slug="mycoolthing",
+                    agent_name="otto",
+                    project_name="My Cool Thing",
+                    project_path=home_base / "otto-agent" / "Projects" / "mycoolthing",
+                    source_repo=source_repo,
+                    output_dir=output_dir,
+                    yes=True,
+                    home_base=home_base,
+                    euid_getter=lambda: 0,
+                    runner=runner,
+                    pane_state_dir=tmp_path / "pane-state",
+                    input_func=input_func,
+                    port_in_use=lambda _port: False,
+                    socket_exists=lambda _path: False,
+                    session_record_timeout=0,
+                    registry_dir=tmp_path / "registry",
+                )
+                == 0
+            )
+
+        project_dir = home_base / "otto-agent" / "Projects" / "mycoolthing"
+        artifact = json.loads((project_dir / ".switchyard" / "mycoolthing.project.json").read_text(encoding="utf-8"))
+        plan = json.loads((output_dir / "plan.json").read_text(encoding="utf-8"))
+        config = json.loads((output_dir / "mycoolthing.json").read_text(encoding="utf-8"))
+        workflow_sql = (output_dir / "mycoolthing-workflow.sql").read_text(encoding="utf-8")
+        rendered = stdout.getvalue()
+
+    assert prompts == [
+        "Include designer role [Y/n]: ",
+        "director CLI (claude/codex/agy) [claude]: ",
+        "audit CLI (claude/codex/agy) [claude]: ",
+        "Implementer roles (comma-separated): ",
+        "code-review CLI (claude/codex/agy) [codex]: ",
+        "runtime CLI (claude/codex/agy) [codex]: ",
+    ]
+    assert artifact["project"]["include_designer"] is False
+    assert artifact["project"]["roles"] == ["code-review", "runtime"]
+    assert artifact["project"]["role_clis"] == {
+        "director": "claude",
+        "audit": "agy",
+        "code-review": "agy",
+        "runtime": "codex",
+    }
+    assert plan["draft_roles"] == []
+    assert plan["implementer_roles"] == ["code-review", "runtime"]
+    assert plan["assignee_roles"] == ["unassigned", "code-review", "runtime", "audit", "director", "user"]
+    assert plan["caller_roles"] == ["director", "code-review", "runtime", "audit", "user"]
+    assert [role["role"] for role in config["roles"]] == ["director", "audit", "code-review", "runtime"]
+    assert {role["role"]: role["cli"] for role in config["roles"]} == {
+        "director": ["claude"],
+        "audit": ["agy"],
+        "code-review": ["agy"],
+        "runtime": ["codex"],
+    }
+    assert [role["target"] for role in config["roles"]] == [
+        "mycoolthing-director:0.0",
+        "mycoolthing-audit:0.0",
+        "mycoolthing-code-review:0.0",
+        "mycoolthing-runtime:0.0",
+    ]
+    assert "('draft', 'Draft', 0, ARRAY[]::text[]" in workflow_sql
+    assert "('draft', 'analysis', 'release_draft', ARRAY['director', 'user']::text[]" in workflow_sql
+    assert not (project_dir / "PROJECT_DESIGN.md").exists()
+    assert not (project_dir / ".switchyard" / "DESIGNER_ONBOARDING.md").exists()
+    assert "switchyard: design phase skipped; no designer pane configured" in rendered
+    assert "maximize the designer pane" not in rendered
+
+
+def test_switchyard_new_rejects_role_choices_without_required_director() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new-required-roles.") as tmp:
+        tmp_path = Path(tmp)
+        home_base = tmp_path / "home"
+        output_dir = tmp_path / "out"
+        try:
+            switchyard_new_command(
+                slug="atlas",
+                agent_name="atlas",
+                project_name="Atlas Project",
+                project_path=home_base / "atlas-agent" / "Projects" / "atlas-project",
+                output_dir=output_dir,
+                role_clis=(("audit", "claude"), ("app", "codex")),
+                yes=True,
+                home_base=home_base,
+                euid_getter=lambda: 0,
+                runner=FakeRunner(),
+            )
+            raise AssertionError("expected missing required role failure")
+        except SystemExit as exc:
+            message = str(exc)
+
+    assert "required roles missing: director" in message
+    assert not output_dir.exists()
+    assert not (home_base / "atlas-agent" / "Projects" / "atlas-project").exists()
 
 
 def test_switchyard_new_reports_project_specific_pane_state_dir_without_override() -> None:
@@ -9076,6 +9209,7 @@ def test_switchyard_new_reports_project_specific_pane_state_dir_without_override
                     project_name="Porter System",
                     source_repo=source_repo,
                     output_dir=tmp_path / "out",
+                    role_clis=LEGACY_SWITCHYARD_ROLE_CLIS,
                     yes=True,
                     home_base=tmp_path / "home",
                     euid_getter=lambda: 0,
@@ -9127,6 +9261,7 @@ def test_switchyard_new_custom_project_path_sets_artifact_repository_and_pane_wo
                 project_path=custom_path,
                 source_repo=source_repo,
                 output_dir=output_dir,
+                role_clis=LEGACY_SWITCHYARD_ROLE_CLIS,
                 yes=True,
                 home_base=home_base,
                 euid_getter=lambda: 0,
@@ -9192,6 +9327,7 @@ def test_switchyard_new_creates_absent_zeta_owner_with_linger_and_initial_artifa
                     project_name="Zeta System",
                     source_repo=source_repo,
                     output_dir=output_dir,
+                    role_clis=LEGACY_SWITCHYARD_ROLE_CLIS,
                     yes=True,
                     home_base=home_base,
                     euid_getter=lambda: 0,
@@ -9327,6 +9463,7 @@ def test_switchyard_new_unwritable_existing_project_path_refuses_before_mutating
                     agent_name="otto",
                     project_path=project_path,
                     output_dir=output_dir,
+                    role_clis=LEGACY_SWITCHYARD_ROLE_CLIS,
                     yes=True,
                     euid_getter=lambda: 0,
                     runner=lambda args, **_kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0),

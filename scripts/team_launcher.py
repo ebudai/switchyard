@@ -24,6 +24,7 @@ from typing import Any, Callable, Sequence
 from scripts.ticket_board.project_provision import (
     DEFAULT_PROJECT_IMPLEMENTER_ROLES,
     ProjectBoardProvision,
+    ROLE_RE,
     build_plan,
     validate_ticket_prefix,
     write_artifacts,
@@ -149,12 +150,18 @@ LEGACY_ALLOW_STALE_LAUNCHER_ENV = "PGU_TEAM_LAUNCHER_ALLOW_STALE"
 NO_LAUNCHER_SELF_DEPLOY_ENV = "TEAM_LAUNCHER_NO_SELF_DEPLOY"
 LEGACY_NO_LAUNCHER_SELF_DEPLOY_ENV = "PGU_TEAM_LAUNCHER_NO_SELF_DEPLOY"
 DEFAULT_TENANT_RELEASE_DEPLOY_REF = "origin/main"
-NEW_PROJECT_BASE_ROLES = (
-    ("designer", "claude"),
-    ("director", "claude"),
-    ("audit", "claude"),
-    ("ops", "codex"),
+SUPPORTED_NEW_PROJECT_CLIS = ("claude", "codex", "agy")
+NEW_PROJECT_ROLE_CLI_DEFAULTS = {
+    "designer": "claude",
+    "director": "claude",
+    "audit": "claude",
+}
+NEW_PROJECT_REQUIRED_ROLES = (
+    "director",
+    "audit",
 )
+NEW_PROJECT_FIXED_ROLE_NAMES = frozenset({"designer", *NEW_PROJECT_REQUIRED_ROLES})
+NEW_PROJECT_RESERVED_ROLE_NAMES = frozenset({"designer", "director", "audit", "user", "unassigned"})
 
 
 @dataclass(frozen=True)
@@ -238,6 +245,8 @@ class ProjectDesignArtifact:
     worktree_policy: str
     design_document: Path
     implementer_roles: tuple[str, ...]
+    role_clis: tuple[tuple[str, str], ...]
+    include_designer: bool
     push_policy: str
     gates: dict[str, bool]
     capability_grants: dict[str, object]
@@ -825,6 +834,84 @@ def _artifact_role_list(raw: Any, *, path: Path, field: str, defaults: Sequence[
     return tuple(result)
 
 
+def _validate_new_project_cli(value: str, *, context: str = "CLI") -> str:
+    cli = value.strip().lower()
+    if cli not in SUPPORTED_NEW_PROJECT_CLIS:
+        raise SystemExit(f"{context} must be one of {', '.join(SUPPORTED_NEW_PROJECT_CLIS)}")
+    return cli
+
+
+def _validate_new_project_implementer_role(value: str, *, context: str = "role") -> str:
+    role = value.strip().lower()
+    if not ROLE_RE.fullmatch(role):
+        raise SystemExit(f"{context} must match ^[a-z][a-z0-9_-]{{0,63}}$")
+    if role in NEW_PROJECT_RESERVED_ROLE_NAMES:
+        raise SystemExit(f"{context} {role!r} is reserved")
+    return role
+
+
+def _default_role_cli_pairs(implementer_roles: Sequence[str], *, include_designer: bool) -> tuple[tuple[str, str], ...]:
+    pairs: list[tuple[str, str]] = []
+    if include_designer:
+        pairs.append(("designer", NEW_PROJECT_ROLE_CLI_DEFAULTS["designer"]))
+    pairs.extend((role, NEW_PROJECT_ROLE_CLI_DEFAULTS[role]) for role in NEW_PROJECT_REQUIRED_ROLES)
+    pairs.extend((role, "codex") for role in implementer_roles)
+    return tuple(pairs)
+
+
+def _dedupe_role_cli_pairs(role_clis: Sequence[tuple[str, str]]) -> tuple[tuple[str, str], ...]:
+    result: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for role, cli in role_clis:
+        normalized_role = role.strip().lower()
+        if normalized_role in NEW_PROJECT_RESERVED_ROLE_NAMES:
+            if normalized_role not in NEW_PROJECT_FIXED_ROLE_NAMES:
+                raise SystemExit(f"role {normalized_role!r} is reserved")
+        else:
+            _validate_new_project_implementer_role(normalized_role)
+        normalized_cli = _validate_new_project_cli(cli, context=f"CLI for {normalized_role}")
+        if normalized_role in seen:
+            continue
+        seen.add(normalized_role)
+        result.append((normalized_role, normalized_cli))
+    return tuple(result)
+
+
+def _role_cli_map(role_clis: Sequence[tuple[str, str]]) -> dict[str, str]:
+    return {role: cli for role, cli in role_clis}
+
+
+def _require_new_project_roles(role_clis: Sequence[tuple[str, str]]) -> None:
+    roles = {role for role, _cli in role_clis}
+    missing = [role for role in NEW_PROJECT_REQUIRED_ROLES if role not in roles]
+    if missing:
+        raise SystemExit(f"switchyard: required roles missing: {', '.join(missing)}")
+
+
+def _artifact_role_cli_pairs(
+    raw: Any,
+    *,
+    path: Path,
+    implementer_roles: Sequence[str],
+    include_designer: bool,
+) -> tuple[tuple[str, str], ...]:
+    defaults = _default_role_cli_pairs(implementer_roles, include_designer=include_designer)
+    if raw is None:
+        return defaults
+    if not isinstance(raw, dict):
+        raise SystemExit(f"{path} field 'project.role_clis' must be a JSON object")
+    allowed_roles = {role for role, _cli in defaults}
+    pairs_by_role = dict(defaults)
+    for raw_role, raw_cli in raw.items():
+        if not isinstance(raw_role, str) or not isinstance(raw_cli, str):
+            raise SystemExit(f"{path} field 'project.role_clis' must map role strings to CLI strings")
+        role = raw_role.strip().lower()
+        if role not in allowed_roles:
+            raise SystemExit(f"{path} field 'project.role_clis' contains unknown role {role!r}")
+        pairs_by_role[role] = _validate_new_project_cli(raw_cli, context=f"CLI for {role}")
+    return tuple((role, pairs_by_role[role]) for role, _cli in defaults)
+
+
 def _artifact_bool_mapping(raw: Any, *, path: Path, field: str, defaults: dict[str, bool]) -> dict[str, bool]:
     if raw is None:
         return dict(defaults)
@@ -905,6 +992,15 @@ def load_project_design_artifact(path: Path, *, expected_project: str | None = N
         field="project.roles",
         defaults=DEFAULT_PROJECT_IMPLEMENTER_ROLES,
     )
+    include_designer_raw = project_raw.get("include_designer", True)
+    if not isinstance(include_designer_raw, bool):
+        raise SystemExit(f"{artifact_path} field 'project.include_designer' must be a JSON boolean")
+    role_clis = _artifact_role_cli_pairs(
+        project_raw.get("role_clis"),
+        path=artifact_path,
+        implementer_roles=implementer_roles,
+        include_designer=include_designer_raw,
+    )
     push_policy = _artifact_string(project_raw, "push_policy", path=artifact_path, default="director-main-only")
     gates = _artifact_bool_mapping(project_raw.get("gates"), path=artifact_path, field="project.gates", defaults=PROJECT_DESIGN_DEFAULT_GATES)
     capability_grants = _artifact_capability_grants(project_raw.get("capability_grants"), path=artifact_path)
@@ -919,6 +1015,8 @@ def load_project_design_artifact(path: Path, *, expected_project: str | None = N
         worktree_policy=worktree_policy,
         design_document=design_document,
         implementer_roles=implementer_roles,
+        role_clis=role_clis,
+        include_designer=include_designer_raw,
         push_policy=push_policy,
         gates=gates,
         capability_grants=capability_grants,
@@ -939,6 +1037,8 @@ def project_design_artifact_payload(artifact: ProjectDesignArtifact) -> dict[str
             "default_branch": artifact.default_branch,
             "worktree_policy": artifact.worktree_policy,
             "roles": list(artifact.implementer_roles),
+            "include_designer": artifact.include_designer,
+            "role_clis": _role_cli_map(artifact.role_clis),
             "push_policy": artifact.push_policy,
             "gates": artifact.gates,
             "capability_grants": artifact.capability_grants,
@@ -4297,6 +4397,52 @@ def _prompt_bool(
         print("answer yes or no")
 
 
+def _prompt_cli(
+    role: str,
+    *,
+    default: str,
+    input_func: Callable[[str], str] = input,
+) -> str:
+    default_cli = _validate_new_project_cli(default, context=f"default CLI for {role}")
+    choices = "/".join(SUPPORTED_NEW_PROJECT_CLIS)
+    while True:
+        raw = _prompt_text(f"{role} CLI ({choices})", default=default_cli, input_func=input_func)
+        try:
+            return _validate_new_project_cli(raw, context=f"CLI for {role}")
+        except SystemExit as exc:
+            print(exc)
+
+
+def _prompt_switchyard_role_choices(
+    *,
+    input_func: Callable[[str], str] = input,
+) -> tuple[tuple[str, str], ...]:
+    include_designer = _prompt_bool("Include designer role", default=True, input_func=input_func)
+    role_clis: list[tuple[str, str]] = []
+    if include_designer:
+        role_clis.append(
+            ("designer", _prompt_cli("designer", default=NEW_PROJECT_ROLE_CLI_DEFAULTS["designer"], input_func=input_func))
+        )
+    for role in NEW_PROJECT_REQUIRED_ROLES:
+        role_clis.append((role, _prompt_cli(role, default=NEW_PROJECT_ROLE_CLI_DEFAULTS[role], input_func=input_func)))
+    while True:
+        raw_roles = _prompt_text("Implementer roles (comma-separated)", input_func=input_func)
+        roles: list[str] = []
+        try:
+            for item in _comma_list(raw_roles):
+                role = _validate_new_project_implementer_role(item, context="implementer role")
+                if role not in roles:
+                    roles.append(role)
+            if not roles:
+                raise SystemExit("at least one implementer role is required")
+            break
+        except SystemExit as exc:
+            print(exc)
+    for role in roles:
+        role_clis.append((role, _prompt_cli(role, default="codex", input_func=input_func)))
+    return tuple(role_clis)
+
+
 def _comma_list(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
@@ -4397,6 +4543,8 @@ def design_project_command(
         worktree_policy=resolved_policy,
         design_document=target_design_document,
         implementer_roles=tuple(implementer_roles or DEFAULT_PROJECT_IMPLEMENTER_ROLES),
+        role_clis=_default_role_cli_pairs(implementer_roles or DEFAULT_PROJECT_IMPLEMENTER_ROLES, include_designer=True),
+        include_designer=True,
         push_policy=resolved_push_policy,
         gates=gates,
         capability_grants=grants,
@@ -4467,12 +4615,16 @@ def _new_project_launcher_config_payload(
     design_document: Path | None = None,
     director_onboarding: Path | None = None,
     implementer_roles: Sequence[str] = DEFAULT_PROJECT_IMPLEMENTER_ROLES,
+    role_clis: Sequence[tuple[str, str]] | None = None,
+    include_designer: bool = True,
     remote: str = "origin",
     default_branch: str = "main",
     worktree_policy: str = "shared",
 ) -> dict[str, Any]:
     layout_name = f"{plan.project}-konsole-layout.json"
-    role_defs = _dedupe_role_defs([*NEW_PROJECT_BASE_ROLES, *((role, "codex") for role in implementer_roles)])
+    role_defs = _dedupe_role_defs(
+        role_clis or _default_role_cli_pairs(implementer_roles, include_designer=include_designer)
+    )
     worktree_base = _new_project_worktree_base(plan.project, plan.owner_user)
     control_repository = _new_project_control_repository(plan.project, plan.owner_user)
     roles = [
@@ -4573,11 +4725,16 @@ def write_new_project_launcher_artifacts(
     design_document: Path | None = None,
     director_onboarding: Path | None = None,
     implementer_roles: Sequence[str] = DEFAULT_PROJECT_IMPLEMENTER_ROLES,
+    role_clis: Sequence[tuple[str, str]] | None = None,
+    include_designer: bool = True,
     remote: str = "origin",
     default_branch: str = "main",
     worktree_policy: str = "shared",
 ) -> Path:
-    role_count = len(_dedupe_role_defs([*NEW_PROJECT_BASE_ROLES, *((role, "codex") for role in implementer_roles)]))
+    role_defs = _dedupe_role_defs(
+        role_clis or _default_role_cli_pairs(implementer_roles, include_designer=include_designer)
+    )
+    role_count = len(role_defs)
     config_path = output_dir / f"{plan.project}.json"
     layout_path = output_dir / f"{plan.project}-konsole-layout.json"
     layout_path.write_text(
@@ -4594,6 +4751,8 @@ def write_new_project_launcher_artifacts(
                 design_document=design_document,
                 director_onboarding=director_onboarding,
                 implementer_roles=implementer_roles,
+                role_clis=role_defs,
+                include_designer=include_designer,
                 remote=remote,
                 default_branch=default_branch,
                 worktree_policy=worktree_policy,
@@ -4795,8 +4954,10 @@ def new_project_command(
         worktree_policy = design_artifact.worktree_policy
         ticket_prefix = design_artifact.ticket_prefix
         project_name = design_artifact.project_name
-        design_document = design_artifact.design_document
+        design_document = design_artifact.design_document if design_artifact.include_designer else None
         implementer_roles = design_artifact.implementer_roles
+        role_clis = design_artifact.role_clis
+        include_designer = design_artifact.include_designer
         board_service_traversal = bool(design_artifact.capability_grants.get("board_service_traversal", True))
     else:
         if repository is None:
@@ -4810,6 +4971,8 @@ def new_project_command(
         project_name = project
         design_document = None
         implementer_roles = DEFAULT_PROJECT_IMPLEMENTER_ROLES
+        role_clis = _default_role_cli_pairs(implementer_roles, include_designer=True)
+        include_designer = True
         board_service_traversal = True
     if worktree_policy not in WORKTREE_POLICIES:
         raise SystemExit(f"team-launcher: worktree policy must be one of {sorted(WORKTREE_POLICIES)}")
@@ -4822,6 +4985,7 @@ def new_project_command(
         ticket_prefix=ticket_prefix,
         implementer_roles=implementer_roles,
         board_service_traversal=board_service_traversal,
+        include_designer=include_designer,
     )
     precheck_new_project(
         plan,
@@ -4843,6 +5007,8 @@ def new_project_command(
         design_document=design_document,
         director_onboarding=director_onboarding,
         implementer_roles=implementer_roles,
+        role_clis=role_clis,
+        include_designer=include_designer,
         remote=remote,
         default_branch=default_branch,
         worktree_policy=worktree_policy,
@@ -4943,41 +5109,43 @@ def _write_switchyard_onboarding_files(
     artifact_path: Path,
     design_document: Path,
     director_onboarding: Path,
+    include_designer: bool = True,
 ) -> None:
     switchyard_dir = _switchyard_dir(project_dir)
     switchyard_dir.mkdir(parents=True, exist_ok=True)
-    designer_onboarding = switchyard_dir / SWITCHYARD_DESIGN_ONBOARDING_FILE_NAME
-    designer_onboarding.write_text(
-        "\n".join(
-            [
-                f"# {project_name} Switchyard Design Session",
-                "",
-                f"Working directory: {project_dir}",
-                f"Project slug: {slug}",
-                f"Owner user: {owner_user}",
-                f"Design document: {design_document}",
-                f"Project artifact: {artifact_path}",
-                "",
-                "Create or refine the design document with the user.",
-                "The board and full pane window already exist; use tickets for follow-up implementation work.",
-                "Do not create workflow stages or workflow transitions in the artifact.",
-                "This project directory is the user-visible checkout and is not reset or cleaned by launch.",
-                "Implementation panes run from managed role worktrees outside this directory.",
-                "The initial git remote named origin points at this local repository as a bootstrap placeholder.",
-                "Replace origin with the project's real remote before expecting fetches to detect upstream changes.",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
+    if include_designer:
+        designer_onboarding = switchyard_dir / SWITCHYARD_DESIGN_ONBOARDING_FILE_NAME
+        designer_onboarding.write_text(
+            "\n".join(
+                [
+                    f"# {project_name} Switchyard Design Session",
+                    "",
+                    f"Working directory: {project_dir}",
+                    f"Project slug: {slug}",
+                    f"Owner user: {owner_user}",
+                    f"Design document: {design_document}",
+                    f"Project artifact: {artifact_path}",
+                    "",
+                    "Create or refine the design document with the user.",
+                    "The board and full pane window already exist; use tickets for follow-up implementation work.",
+                    "Do not create workflow stages or workflow transitions in the artifact.",
+                    "This project directory is the user-visible checkout and is not reset or cleaned by launch.",
+                    "Implementation panes run from managed role worktrees outside this directory.",
+                    "The initial git remote named origin points at this local repository as a bootstrap placeholder.",
+                    "Replace origin with the project's real remote before expecting fetches to detect upstream changes.",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
     director_onboarding.write_text(
         "\n".join(
             [
                 f"# {project_name} Director Onboarding",
                 "",
                 f"Project directory: {project_dir}",
-                f"Design document: {design_document}",
                 f"Project artifact: {artifact_path}",
+                *([f"Design document: {design_document}"] if include_designer else ["Design phase: skipped"]),
                 "",
                 "The privileged provisioning and full pane window were started by switchyard new.",
                 "Use the live board to onboard the team and reshape stages or roles later if the user asks.",
@@ -4997,6 +5165,9 @@ def _write_initial_switchyard_project_artifact(
     artifact_path: Path,
     design_document: Path,
     owner_shell: str,
+    implementer_roles: Sequence[str] = DEFAULT_PROJECT_IMPLEMENTER_ROLES,
+    role_clis: Sequence[tuple[str, str]] | None = None,
+    include_designer: bool = True,
 ) -> None:
     artifact = ProjectDesignArtifact(
         project=slug,
@@ -5008,7 +5179,11 @@ def _write_initial_switchyard_project_artifact(
         default_branch="main",
         worktree_policy="shared",
         design_document=design_document,
-        implementer_roles=DEFAULT_PROJECT_IMPLEMENTER_ROLES,
+        implementer_roles=tuple(implementer_roles),
+        role_clis=_dedupe_role_cli_pairs(
+            role_clis or _default_role_cli_pairs(implementer_roles, include_designer=include_designer)
+        ),
+        include_designer=include_designer,
         push_policy="director-main-only",
         gates=dict(PROJECT_DESIGN_DEFAULT_GATES),
         capability_grants={
@@ -5017,7 +5192,7 @@ def _write_initial_switchyard_project_artifact(
         },
     )
     artifact_path.parent.mkdir(parents=True, exist_ok=True)
-    if not design_document.exists():
+    if include_designer and not design_document.exists():
         design_document.write_text(_project_design_markdown(slug, title=project_name, body="Design in progress."), encoding="utf-8")
     _write_json_atomic(artifact_path, project_design_artifact_payload(artifact))
 
@@ -5785,6 +5960,7 @@ def switchyard_new_command(
     output_dir: Path | None = None,
     port: int | None = None,
     database: str | None = None,
+    role_clis: Sequence[tuple[str, str]] | None = None,
     yes: bool = False,
     home_base: Path = Path("/home"),
     euid_getter: Callable[[], int] = os.geteuid,
@@ -5808,6 +5984,9 @@ def switchyard_new_command(
         owner_user = artifact.owner_user
         owner_shell = str(artifact.capability_grants.get("shell") or PROJECT_DESIGN_DEFAULT_CAPABILITY_GRANTS["shell"])
         project_dir = _resolve_project_path(project_path or artifact.repository)
+        selected_role_clis = artifact.role_clis
+        selected_implementer_roles = artifact.implementer_roles
+        include_designer = artifact.include_designer
     else:
         resolved_project_name = (project_name or _prompt_text("Project name", input_func=input_func)).strip()
         if not resolved_project_name:
@@ -5828,6 +6007,9 @@ def switchyard_new_command(
             project_path
             or _prompt_text("Project path", default=str(default_project_dir), input_func=input_func)
         )
+        selected_role_clis = ()
+        selected_implementer_roles = ()
+        include_designer = True
     _confirm_switchyard_new(
         slug=resolved_slug,
         owner_user=owner_user,
@@ -5839,6 +6021,17 @@ def switchyard_new_command(
     )
     if euid_getter() != 0:
         raise SystemExit("switchyard: new requires sudo; re-run as `sudo ./switchyard new`")
+    if from_artifact is None:
+        selected_role_clis = _dedupe_role_cli_pairs(
+            role_clis if role_clis is not None else _prompt_switchyard_role_choices(input_func=input_func)
+        )
+        _require_new_project_roles(selected_role_clis)
+        selected_implementer_roles = tuple(
+            role for role, _cli in selected_role_clis if role not in NEW_PROJECT_RESERVED_ROLE_NAMES
+        )
+        if not selected_implementer_roles:
+            raise SystemExit("switchyard: at least one implementer role is required")
+        include_designer = any(role == "designer" for role, _cli in selected_role_clis)
 
     artifact_path = (from_artifact or (_switchyard_dir(project_dir) / f"{resolved_slug}.project.json")).expanduser().resolve(strict=False)
     design_document = project_dir / SWITCHYARD_DESIGN_FILE_NAME
@@ -5853,7 +6046,8 @@ def switchyard_new_command(
         database=database,
         source_repo=effective_source_repo,
         ticket_prefix=precheck_artifact.ticket_prefix if precheck_artifact else None,
-        implementer_roles=precheck_artifact.implementer_roles if precheck_artifact else DEFAULT_PROJECT_IMPLEMENTER_ROLES,
+        implementer_roles=precheck_artifact.implementer_roles if precheck_artifact else selected_implementer_roles,
+        include_designer=precheck_artifact.include_designer if precheck_artifact else include_designer,
         board_service_traversal=(
             bool(precheck_artifact.capability_grants.get("board_service_traversal", True))
             if precheck_artifact
@@ -5889,6 +6083,7 @@ def switchyard_new_command(
             artifact_path=artifact_path,
             design_document=design_document,
             director_onboarding=director_onboarding,
+            include_designer=include_designer,
         )
         _write_initial_switchyard_project_artifact(
             project_name=resolved_project_name,
@@ -5898,9 +6093,12 @@ def switchyard_new_command(
             artifact_path=artifact_path,
             design_document=design_document,
             owner_shell=owner_shell,
+            implementer_roles=selected_implementer_roles,
+            role_clis=selected_role_clis,
+            include_designer=include_designer,
         )
         _chown_switchyard_project_files(owner_user=owner_user, project_dir=project_dir, runner=runner)
-        if design_document.exists():
+        if include_designer and design_document.exists():
             _chown_project_file(owner_user=owner_user, path=design_document, runner=runner)
         _ensure_project_git_repository(
             owner_user=owner_user,
@@ -5918,6 +6116,7 @@ def switchyard_new_command(
             artifact_path=artifact_path,
             design_document=artifact.design_document,
             director_onboarding=director_onboarding,
+            include_designer=artifact.include_designer,
         )
         _chown_switchyard_project_files(owner_user=owner_user, project_dir=project_dir, runner=runner)
         _ensure_project_git_repository(
@@ -5997,9 +6196,15 @@ def switchyard_new_command(
     )
     resolved_layout_mode = resolve_layout_mode(layout_mode, environ=layout_environ, runner=runner)
     if resolved_layout_mode == LAYOUT_MODE_VIEWER:
-        print_func("switchyard: maximize the designer pane during design with Ctrl+a z; press it again to restore")
+        if include_designer:
+            print_func("switchyard: maximize the designer pane during design with Ctrl+a z; press it again to restore")
+        else:
+            print_func("switchyard: design phase skipped; no designer pane configured")
     else:
-        print_func("switchyard: maximize the designer pane during design with Konsole Ctrl+Shift+E; restore it when done")
+        if include_designer:
+            print_func("switchyard: maximize the designer pane during design with Konsole Ctrl+Shift+E; restore it when done")
+        else:
+            print_func("switchyard: design phase skipped; no designer pane configured")
     return 0
 
 

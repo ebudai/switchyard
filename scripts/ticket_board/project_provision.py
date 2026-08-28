@@ -18,7 +18,7 @@ ROLE_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 TICKET_PREFIX_RE = re.compile(r"^[A-Z][A-Z0-9]*$")
 DEFAULT_IMPLEMENTER_ROLES = ("main", "app", "ops", "perf", "research")
 DEFAULT_PROJECT_DRAFT_ROLES = ("designer",)
-DEFAULT_PROJECT_SUPPORT_ROLES = ("ops",)
+DEFAULT_PROJECT_SUPPORT_ROLES: tuple[str, ...] = ()
 DEFAULT_PROJECT_IMPLEMENTER_ROLES = ("app", "main")
 DEFAULT_PGU_ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "inspector", "agent", "director", "research", "user")
 DEFAULT_PGU_CALLER_ROLES = ("director", "main", "app", "ops", "perf", "audit", "inspector", "research", "user")
@@ -126,6 +126,7 @@ def build_plan(
     implementer_roles: Sequence[str] | None = None,
     ticket_prefix: str | None = None,
     board_service_traversal: bool = True,
+    include_designer: bool = True,
 ) -> ProjectBoardProvision:
     project = _validate_project(project)
     owner_user = _validate_user(owner_user)
@@ -149,7 +150,7 @@ def build_plan(
         assignee_roles = DEFAULT_PGU_ASSIGNEES
         caller_roles = DEFAULT_PGU_CALLER_ROLES
     else:
-        draft_roles = DEFAULT_PROJECT_DRAFT_ROLES
+        draft_roles = DEFAULT_PROJECT_DRAFT_ROLES if include_designer else ()
         assignee_roles = _dedupe(
             ("unassigned", *draft_roles, *DEFAULT_PROJECT_SUPPORT_ROLES, *resolved_implementer_roles, "audit", "director", "user")
         )
@@ -743,6 +744,12 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="implementer_roles",
         help="implementation-stage owner role; repeat for multiple implementers",
     )
+    parser.add_argument(
+        "--include-designer",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="include the optional designer draft role",
+    )
     parser.add_argument("--output-dir", type=Path, help="write all artifacts to this directory")
     parser.add_argument("--json", action="store_true", help="print plan JSON")
     parser.add_argument(
@@ -770,6 +777,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         frame_dir=args.frame_dir,
         implementer_roles=args.implementer_roles,
         board_service_traversal=args.board_service_traversal,
+        include_designer=args.include_designer,
     )
     if args.output_dir:
         write_artifacts(plan, args.output_dir)

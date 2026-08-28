@@ -49,8 +49,8 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert plan.workflow_seed == "default-project"
     assert plan.draft_roles == ("designer",)
     assert plan.implementer_roles == ("app", "main")
-    assert plan.assignee_roles == ("unassigned", "designer", "ops", "app", "main", "audit", "director", "user")
-    assert plan.caller_roles == ("director", "designer", "ops", "app", "main", "audit", "user")
+    assert plan.assignee_roles == ("unassigned", "designer", "app", "main", "audit", "director", "user")
+    assert plan.caller_roles == ("director", "designer", "app", "main", "audit", "user")
 
     combined = "\n".join(
         [
@@ -71,8 +71,8 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "TICKET_BOARD_SOCKET=/run/stellaris-ticket-board/ticket-board.sock" in combined
     assert "TICKET_BOARD_DRAFT_ROLES=designer" in combined
     assert "TICKET_BOARD_IMPLEMENTER_ROLES=app,main" in combined
-    assert "TICKET_BOARD_ASSIGNEES=unassigned,designer,ops,app,main,audit,director,user" in combined
-    assert "TICKET_BOARD_CALLER_ROLES=director,designer,ops,app,main,audit,user" in combined
+    assert "TICKET_BOARD_ASSIGNEES=unassigned,designer,app,main,audit,director,user" in combined
+    assert "TICKET_BOARD_CALLER_ROLES=director,designer,app,main,audit,user" in combined
     assert "TICKET_BOARD_PANE_STATE_DIR=%t/stellaris-ticket-board/pane-state" in combined
     assert (
         "sudo -u 'stellaris-agent' -H env XDG_RUNTIME_DIR=\"$owner_runtime_dir\" "
@@ -112,7 +112,7 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "('in_progress', 'analysis', 'route', ARRAY['director']::text[]" in combined
     assert (
         "ADD CONSTRAINT tickets_assignee_check CHECK "
-        "(assignee IN ('unassigned', 'designer', 'ops', 'app', 'main', 'audit', 'director', 'user'))"
+        "(assignee IN ('unassigned', 'designer', 'app', 'main', 'audit', 'director', 'user'))"
     ) in combined
     assert "('audit', 'analysis', 'route', ARRAY['director']::text[]" in combined
     assert "('audit', 'in_progress', 'audit_kick_back', ARRAY['audit']::text[]" in combined

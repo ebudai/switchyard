@@ -309,13 +309,20 @@ sudo switchyard new
 ```
 
 `new` prompts for project name first, then derived-but-editable slug, agent
-name, and project path:
+name, project path, and the team roles:
 
 ```text
 Project name: Otto Scheduler
 Slug [otto-scheduler]:
-Agent name [otto-scheduler]:
+Agent user [otto-scheduler-agent]:
 Project path [/home/otto-scheduler-agent/Projects/otto-scheduler]:
+Include designer role [Y/n]:
+designer CLI (claude/codex/agy) [claude]:
+director CLI (claude/codex/agy) [claude]:
+audit CLI (claude/codex/agy) [claude]:
+Implementer roles (comma-separated): app, code-review
+app CLI (claude/codex/agy) [codex]:
+code-review CLI (claude/codex/agy) [codex]:
 ```
 
 The default project path follows the project name, not the machine slug; editing
@@ -328,12 +335,15 @@ command; a project literally named "New" must be opened by its slug from the
 project list.
 
 After confirmation, `new` creates `<agent>-agent`, creates the derived project
-directory, launches a standalone designer CLI as that user from that exact
-directory, and immediately verifies the Claude session directory under
-`~/.claude/projects/<escaped-cwd>/`. The designer writes the design document and
-the `switchyard.project.v1` artifact. That artifact may include the implementer
-roles selected with the user; it still must not preconfigure workflow stages or
-transitions.
+directory, provisions the board, runs first-run auth checks for the selected
+CLIs, and launches the configured panes. `director` and `audit` are fixed
+workflow roles. `designer` is optional; when omitted, `new` skips the design
+phase and does not create a designer pane, designer onboarding file, or initial
+design document. Implementer role names are supplied as a comma-separated list
+and may contain hyphens. The selected role names are written to both the board
+provisioning plan and the generated launcher config, and each role's selected
+CLI is recorded in the `switchyard.project.v1` artifact. The artifact still
+must not preconfigure workflow stages or transitions.
 
 The same provision path consumes generated and hand-written artifacts:
 

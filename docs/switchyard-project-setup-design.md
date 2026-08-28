@@ -275,14 +275,16 @@ root, and agents deliberately have no sudo. Split it:
 normal pane with hooks and a board connection. A standalone agent in the project directory whose
 only outputs are the design document and the artifact.
 
-## Default roles and the pane window (Eric, 2026-08-25)
+## Role selection and the pane window (Eric, 2026-08-25; updated by PGU-723)
 
 `new` starts the FULL pane window with every role populated. There is no separate "spawn the director"
 step, and no separate provisioning step -- the privileged half all happens once, under the sudo the user
 already gave.
 
-Default roles: **designer, director, audit, ops, app, main**. Two default programmers rather than none,
-because most projects want them -- not merely to fill the window.
+`new` now asks for the implementer roles and the CLI for each role instead of
+silently creating a fixed programmer set. `director` and `audit` are always
+present; `designer` is optional. If the user omits `designer`, the design phase
+is skipped and no designer pane or design document is created.
 
 Stage ownership:
 

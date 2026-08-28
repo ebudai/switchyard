@@ -2929,6 +2929,16 @@ def test_expected_runtime_strips_known_hyphenated_project_slug() -> None:
         notify_listener.DEFAULT_PROJECT = previous_project
 
 
+def test_notify_listener_role_for_target_refuses_wrong_project_prefix() -> None:
+    previous_project = notify_listener.DEFAULT_PROJECT
+    try:
+        notify_listener.DEFAULT_PROJECT = "mycoolthing"
+        gate = RealPaneActivityGate(role_runtimes={"t-ops": "codex"})
+        assert gate._role_for_target("other-project-ops:0.0") == ""
+    finally:
+        notify_listener.DEFAULT_PROJECT = previous_project
+
+
 def main() -> int:
     live_snapshot = snapshot_paths_file_set(LIVE_PANE_STATE_PATHS)
     live_anomalies = pane_state_record_anomalies(LIVE_PANE_STATE_PATHS)

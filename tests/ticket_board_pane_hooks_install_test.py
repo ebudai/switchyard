@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import json
+import importlib.machinery
+import importlib.util
 import os
 import threading
 import subprocess
@@ -98,6 +100,15 @@ def _without_hook_dir_env(environ: dict[str, str]) -> dict[str, str]:
     ):
         cleaned.pop(key, None)
     return cleaned
+
+
+def _load_hook_module() -> Any:
+    loader = importlib.machinery.SourceFileLoader("ticket_board_pane_idle_hook_for_test", str(ROOT / "scripts" / HOOK_NAME))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
 
 
 def _inspector_session_record() -> dict[str, Any]:
@@ -1512,6 +1523,12 @@ def test_hook_session_start_refuses_role_when_target_lacks_project_prefix() -> N
         assert proc.stdout == ""
         assert (runtime_dir / "mycoolthing-ticket-board" / "pane-state" / "other-project-ops_0.0.json").is_file()
         assert (state_home / "mycoolthing-ticket-board" / "pane-sessions" / "other-project-ops_0.0.json").is_file()
+
+
+def test_hook_role_for_target_refuses_wrong_project_prefix() -> None:
+    hook = _load_hook_module()
+
+    assert hook._role_for_target("other-project-ops:0.0", {"TICKET_BOARD_PROJECT": "mycoolthing"}) == ""
 
 
 def test_hook_unresolved_default_dirs_report_but_do_not_fail_startup() -> None:

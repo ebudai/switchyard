@@ -131,6 +131,8 @@ DEFAULT_RESUME_SUBCOMMAND_BY_CLI = {
     "codex": "resume",
 }
 AGY_CONVERSATION_ROOT = Path.home() / ".gemini" / "antigravity-cli"
+CLAUDE_PROJECTS_DIR_NAME = ".claude/projects"
+CODEX_SESSIONS_DIR_NAME = ".codex/sessions"
 RESUME_STARTUP_TIMEOUT_SECONDS = 1.5
 RESUME_STARTUP_POLL_SECONDS = 0.1
 DETACHED_SESSION_STABILITY_SECONDS = 2.0
@@ -1626,6 +1628,16 @@ def _uses_agy_conversation_resume(role: RoleConfig) -> bool:
     return cli_name in {"agy", "gemini"} and role.resume_mode == "flag" and role.resume_flag == "--conversation"
 
 
+def _uses_claude_resume(role: RoleConfig) -> bool:
+    cli_name = _command_name(role.cli[0]) if role.cli else ""
+    return cli_name == "claude" and role.resume_mode == "flag" and role.resume_flag == "--resume"
+
+
+def _uses_codex_resume(role: RoleConfig) -> bool:
+    cli_name = _command_name(role.cli[0]) if role.cli else ""
+    return cli_name == "codex" and role.resume_mode == "subcommand" and role.resume_subcommand == "resume"
+
+
 def agy_conversation_store_exists(session_id: str, *, root: Path | None = None) -> bool:
     if not session_id:
         return False
@@ -1633,7 +1645,91 @@ def agy_conversation_store_exists(session_id: str, *, root: Path | None = None) 
     return (root / "conversations" / f"{session_id}.db").is_file() or (root / "brain" / session_id).is_dir()
 
 
-def _resume_preflight_allows_attempt(role: RoleConfig, session_id: str) -> tuple[bool, str]:
+def _home_from_session_dir(session_dir: Path) -> Path:
+    expanded = session_dir.expanduser()
+    parts = expanded.parts
+    for index in range(len(parts) - 1):
+        if parts[index] == ".local" and parts[index + 1] == "state":
+            return Path(*parts[:index])
+    return Path.home()
+
+
+def _session_record_transcript_path(record: dict[str, Any] | None) -> Path | None:
+    if record is None:
+        return None
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    raw_path = str(payload.get("transcript_path") or "").strip()
+    return Path(raw_path).expanduser() if raw_path else None
+
+
+def _claude_project_dir_for_workdir(workdir: str, *, home: Path) -> Path:
+    absolute = str(Path(workdir).expanduser().resolve(strict=False))
+    project_key = "-" + absolute.strip("/").replace("/", "-")
+    return home / CLAUDE_PROJECTS_DIR_NAME / project_key
+
+
+def claude_session_store_exists(
+    role: RoleConfig,
+    session_id: str,
+    *,
+    session_dir: Path,
+    record: dict[str, Any] | None = None,
+) -> tuple[bool, str]:
+    transcript_path = _session_record_transcript_path(record)
+    if transcript_path is not None:
+        return transcript_path.is_file(), str(transcript_path)
+    store_path = _claude_project_dir_for_workdir(role.workdir, home=_home_from_session_dir(session_dir)) / f"{session_id}.jsonl"
+    return store_path.is_file(), str(store_path)
+
+
+def codex_session_store_exists(
+    session_id: str,
+    *,
+    session_dir: Path,
+    record: dict[str, Any] | None = None,
+) -> tuple[bool, str]:
+    transcript_path = _session_record_transcript_path(record)
+    if transcript_path is not None:
+        return transcript_path.is_file(), str(transcript_path)
+    sessions_root = _home_from_session_dir(session_dir) / CODEX_SESSIONS_DIR_NAME
+    if not session_id:
+        return False, str(sessions_root)
+    try:
+        for path in sessions_root.rglob(f"*-{session_id}.jsonl"):
+            if path.is_file():
+                return True, str(path)
+    except OSError:
+        pass
+    return False, f"{sessions_root}/**/*-{session_id}.jsonl"
+
+
+def _resume_preflight_allows_attempt(role: RoleConfig, session_id: str, *, session_dir: Path) -> tuple[bool, str]:
+    record = _session_record_for_role(role, session_dir)
+    if _uses_claude_resume(role):
+        found, location = claude_session_store_exists(role, session_id, session_dir=session_dir, record=record)
+        if found:
+            return True, ""
+        return (
+            False,
+            (
+                f"team-launcher: recorded claude session {session_id} for {role.role} "
+                f"is not present at {location}; starting fresh instead of passing claude --resume, "
+                "which exits when the conversation is missing"
+            ),
+        )
+    if _uses_codex_resume(role):
+        found, location = codex_session_store_exists(session_id, session_dir=session_dir, record=record)
+        if found:
+            return True, ""
+        return (
+            False,
+            (
+                f"team-launcher: recorded codex session {session_id} for {role.role} "
+                f"is not present at {location}; starting fresh instead of passing codex resume"
+            ),
+        )
     if not _uses_agy_conversation_resume(role):
         return True, ""
     if agy_conversation_store_exists(session_id):
@@ -3082,7 +3178,7 @@ def _start_role_session(
         )
         prefer_resume = False
     if prefer_resume:
-        preflight_ok, preflight_message = _resume_preflight_allows_attempt(role, session_id)
+        preflight_ok, preflight_message = _resume_preflight_allows_attempt(role, session_id, session_dir=session_dir)
         if not preflight_ok:
             print(preflight_message, file=sys.stderr)
             prefer_resume = False

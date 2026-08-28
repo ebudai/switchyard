@@ -142,22 +142,24 @@ user and leaves board/listener systemd services alone. It never runs
 second `switchyard stop <project>` or `scripts/team-launcher <project> stop`
 is a clean no-op.
 
-Antigravity/Gemini resume has an additional limitation. On Antigravity CLI
-1.1.19, `agy --conversation <id>` is the correct flag and a cleanly-created
-throwaway conversation resumed successfully in print-mode testing. An unknown
-conversation id, however, only prints a warning, exits 0, and starts a fresh
-conversation. To avoid treating that silent fallback as a resumed inspector, the
-launcher preflights `agy`/`gemini` `--conversation` resumes against the local
-Antigravity store (`~/.gemini/antigravity-cli/conversations/<id>.db` or
-`brain/<id>`). If the store entry is missing, it starts fresh with an explicit
-warning instead of passing a doomed `--conversation` flag.
+Resume records are preflighted against each CLI's local transcript store before
+the launcher passes them to the CLI. Claude uses the recorded
+`payload.transcript_path` when present, otherwise the cwd-scoped
+`~/.claude/projects/<cwd-key>/<id>.jsonl` path. Codex uses the recorded
+`payload.transcript_path` when present, otherwise `~/.codex/sessions/**/*-<id>.jsonl`.
+Antigravity/Gemini use `~/.gemini/antigravity-cli/conversations/<id>.db` or
+`brain/<id>`. If the local store entry is missing, the launcher moves the stale
+record aside, starts fresh, and prints an explicit warning instead of passing a
+doomed resume id.
 
 That preflight does not prove model context survived. The PGU-602 reboot showed
 an inspector conversation where agy found the conversation, logged a successful
 resume and redraw, but the model still reported no prior context. After a real
 reboot or hard interruption, treat agy/gemini inspector context as unproven
-until the pane itself is asked a context-retention question. Claude `--resume`
-and Codex `resume <id>` did not show this failure in the same reboot.
+until the pane itself is asked a context-retention question. Claude and Codex
+resume attempts can also still fail after a store preflight; if the launched
+tmux session exits immediately, the launcher falls back to a fresh session and
+reports the superseded id.
 
 The PGU-613 follow-up diagnostics separated three cases:
 

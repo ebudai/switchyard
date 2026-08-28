@@ -7993,6 +7993,54 @@ def test_switchyard_resolves_legacy_dashed_name_selector_without_allowing_dashed
     assert entry.config_path == config_path
 
 
+def test_switchyard_name_fallback_ignores_entries_whose_name_derives_no_slug() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-selector.") as tmp:
+        tmp_path = Path(tmp)
+        registry_dir = tmp_path / "registry"
+        config_dir = tmp_path / "configs"
+        registry_dir.mkdir()
+        config_dir.mkdir()
+        atlas_config = tmp_path / "atlas.json"
+        nihon_config = tmp_path / "nihon.json"
+        atlas_config.write_text("{}\n", encoding="utf-8")
+        nihon_config.write_text("{}\n", encoding="utf-8")
+        (registry_dir / "atlas.json").write_text(
+            json.dumps(
+                {
+                    "schema": team_launcher.SWITCHYARD_REGISTRY_SCHEMA,
+                    "slug": "atlas",
+                    "name": "Atlas",
+                    "config_path": str(atlas_config),
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (registry_dir / "nihon.json").write_text(
+            json.dumps(
+                {
+                    "schema": team_launcher.SWITCHYARD_REGISTRY_SCHEMA,
+                    "slug": "nihon",
+                    "name": "日本",
+                    "config_path": str(nihon_config),
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        assert team_launcher._resolve_switchyard_project("atlas", config_dir=config_dir, registry_dir=registry_dir).slug == "atlas"
+        assert team_launcher._resolve_switchyard_project("Atlas", config_dir=config_dir, registry_dir=registry_dir).slug == "atlas"
+        assert team_launcher._resolve_switchyard_project("nihon", config_dir=config_dir, registry_dir=registry_dir).slug == "nihon"
+        try:
+            team_launcher._resolve_switchyard_project("anything-else", config_dir=config_dir, registry_dir=registry_dir)
+            raise AssertionError("expected unknown project")
+        except SystemExit as exc:
+            message = str(exc)
+
+    assert message == "switchyard: unknown project 'anything-else'"
+
+
 def test_project_config_slug_validation_rejects_dash_and_normalizes_uppercase() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-config-slug.") as tmp:
         tmp_path = Path(tmp)
@@ -8032,6 +8080,36 @@ def test_project_config_slug_validation_rejects_dash_and_normalizes_uppercase() 
 
     assert "project slug must match ^[a-z0-9][a-z0-9_]{0,39}$" in message
     assert config.project == "otto"
+
+
+def test_project_config_default_path_normalizes_requested_slug() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-config-default.") as tmp:
+        tmp_path = Path(tmp)
+        config_dir = tmp_path / "configs"
+        config_dir.mkdir()
+        layout = config_dir / "pgu-konsole-layout.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        (config_dir / "pgu.json").write_text(
+            json.dumps(
+                {
+                    "project": "pgu",
+                    "layout": str(layout),
+                    "roles": [{"role": "director", "slot": 0, "cli": ["claude"], "workdir": str(tmp_path)}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        original_config_dir = team_launcher.DEFAULT_CONFIG_DIR
+        try:
+            team_launcher.DEFAULT_CONFIG_DIR = config_dir
+            upper = load_project_config("PGU")
+            padded = load_project_config(" pgu ")
+        finally:
+            team_launcher.DEFAULT_CONFIG_DIR = original_config_dir
+
+    assert upper.project == "pgu"
+    assert padded.project == "pgu"
 
 
 def test_design_project_command_slug_validation_rejects_dash_and_normalizes_uppercase() -> None:

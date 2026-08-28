@@ -5103,6 +5103,16 @@ def _legacy_dash_slug_from_project_name(name: str) -> str:
     return slug
 
 
+def _project_name_selector_slugs(name: str) -> set[str]:
+    selectors: set[str] = set()
+    for derive in (_slug_from_project_name, _legacy_dash_slug_from_project_name):
+        try:
+            selectors.add(derive(name).casefold())
+        except SystemExit:
+            continue
+    return selectors
+
+
 def _validate_project_slug(value: str) -> str:
     slug = value.strip().lower()
     if not PROJECT_SLUG_RE.fullmatch(slug):
@@ -6013,11 +6023,7 @@ def _resolve_switchyard_project(
         return exact[0]
     if len(exact) > 1:
         raise SystemExit(f"switchyard: project selector {selection!r} is ambiguous")
-    fallback = [
-        entry
-        for entry in entries
-        if wanted in {_slug_from_project_name(entry.name).casefold(), _legacy_dash_slug_from_project_name(entry.name).casefold()}
-    ]
+    fallback = [entry for entry in entries if wanted in _project_name_selector_slugs(entry.name)]
     if len(fallback) == 1:
         return fallback[0]
     raise SystemExit(f"switchyard: unknown project {selection!r}")

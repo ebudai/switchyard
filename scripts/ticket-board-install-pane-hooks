@@ -105,6 +105,9 @@ def _merge_agy_named_hook(config: dict[str, Any], name: str, events: dict[str, l
     existing = config.get(name, {})
     if not isinstance(existing, dict):
         existing = {}
+    for key, value in list(config.items()):
+        if key != name and _contains_managed_hook(value):
+            config.pop(key, None)
     cleaned = {
         key: value
         for key, value in existing.items()

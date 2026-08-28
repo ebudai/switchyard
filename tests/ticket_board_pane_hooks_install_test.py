@@ -230,6 +230,79 @@ def test_installer_writes_durable_cli_hook_configs_idempotently() -> None:
         assert ">/dev/null" not in gemini_commands["gemini.SessionStart"]
 
 
+def test_installer_migrates_legacy_agy_named_hook_without_removing_foreign_keys() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        home = Path(tmp) / "home"
+        bin_path = home / ".local" / "bin" / HOOK_NAME
+        stale_gemini = home / ".gemini" / "config" / "hooks.json"
+        stale_gemini.parent.mkdir(parents=True)
+        stale_gemini.write_text(
+            json.dumps(
+                {
+                    "pgu-ticket-board-pane-state": {
+                        "SessionStart": [
+                            {
+                                "type": "command",
+                                "command": (
+                                    f"{home}/.local/bin/{LEGACY_HOOK_NAME} idle "
+                                    "--source gemini.SessionStart --record-session >/dev/null && printf '{}'"
+                                ),
+                            }
+                        ],
+                        "PreInvocation": [
+                            {
+                                "type": "command",
+                                "command": f"{home}/.local/bin/{LEGACY_HOOK_NAME} busy --source gemini.PreInvocation",
+                            }
+                        ],
+                        "PostInvocation": [
+                            {
+                                "type": "command",
+                                "command": f"{home}/.local/bin/{LEGACY_HOOK_NAME} idle --source gemini.PostInvocation",
+                            }
+                        ],
+                        "Stop": [
+                            {
+                                "type": "command",
+                                "command": f"{home}/.local/bin/{LEGACY_HOOK_NAME} idle --source gemini.Stop",
+                            }
+                        ],
+                    },
+                    "third-party": {
+                        "SessionStart": [{"type": "command", "command": "printf third-party"}],
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        for _ in range(2):
+            subprocess.run(
+                [str(INSTALLER), "install", "--home", str(home), "--bin-path", str(bin_path)],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+
+        gemini = _load(stale_gemini)
+
+    assert set(gemini) == {"ticket-board-pane-state", "third-party"}
+    assert _managed_command_count(gemini) == 4
+    assert LEGACY_HOOK_NAME not in "\n".join(_commands(gemini))
+    assert gemini["third-party"] == {
+        "SessionStart": [{"type": "command", "command": "printf third-party"}],
+    }
+    gemini_commands = _managed_commands_by_source(gemini)
+    assert set(gemini_commands) == {
+        "gemini.SessionStart",
+        "gemini.PreInvocation",
+        "gemini.PostInvocation",
+        "gemini.Stop",
+    }
+    assert ">/dev/null" not in gemini_commands["gemini.SessionStart"]
+
+
 def test_session_dir_snapshot_detects_same_count_content_mutation() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
         session_dir = Path(tmp) / "sessions"

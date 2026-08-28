@@ -159,6 +159,7 @@ NEW_PROJECT_ROLE_CLI_DEFAULTS = {
     "director": "claude",
     "audit": "claude",
 }
+SWITCHYARD_PROMPT_MAX_ATTEMPTS = 5
 NEW_PROJECT_REQUIRED_ROLES = (
     "director",
     "audit",
@@ -4435,6 +4436,17 @@ def _default_new_project_owner(project: str) -> str:
     return f"{project}-agent"
 
 
+def _read_prompt(
+    prompt: str,
+    *,
+    input_func: Callable[[str], str] = input,
+) -> str:
+    try:
+        return input_func(prompt)
+    except EOFError:
+        raise SystemExit("switchyard: no input available") from None
+
+
 def _prompt_text(
     label: str,
     *,
@@ -4442,7 +4454,7 @@ def _prompt_text(
     input_func: Callable[[str], str] = input,
 ) -> str:
     suffix = f" [{default}]" if default else ""
-    value = input_func(f"{label}{suffix}: ").strip()
+    value = _read_prompt(f"{label}{suffix}: ", input_func=input_func).strip()
     return value or default
 
 
@@ -4453,8 +4465,8 @@ def _prompt_bool(
     input_func: Callable[[str], str] = input,
 ) -> bool:
     default_text = "Y/n" if default else "y/N"
-    while True:
-        raw = input_func(f"{label} [{default_text}]: ").strip().lower()
+    for _attempt in range(SWITCHYARD_PROMPT_MAX_ATTEMPTS):
+        raw = _read_prompt(f"{label} [{default_text}]: ", input_func=input_func).strip().lower()
         if not raw:
             return default
         if raw in {"y", "yes", "true", "1"}:
@@ -4462,6 +4474,7 @@ def _prompt_bool(
         if raw in {"n", "no", "false", "0"}:
             return False
         print("answer yes or no")
+    raise SystemExit(f"switchyard: too many invalid answers for {label}")
 
 
 def _prompt_cli(
@@ -4472,12 +4485,13 @@ def _prompt_cli(
 ) -> str:
     default_cli = _validate_new_project_cli(default, context=f"default CLI for {role}")
     choices = "/".join(SUPPORTED_NEW_PROJECT_CLIS)
-    while True:
+    for _attempt in range(SWITCHYARD_PROMPT_MAX_ATTEMPTS):
         raw = _prompt_text(f"{role} CLI ({choices})", default=default_cli, input_func=input_func)
         try:
             return _validate_new_project_cli(raw, context=f"CLI for {role}")
         except SystemExit as exc:
             print(exc)
+    raise SystemExit(f"switchyard: too many invalid answers for {role} CLI")
 
 
 def _prompt_switchyard_role_choices(
@@ -4492,7 +4506,7 @@ def _prompt_switchyard_role_choices(
         )
     for role in NEW_PROJECT_REQUIRED_ROLES:
         role_clis.append((role, _prompt_cli(role, default=NEW_PROJECT_ROLE_CLI_DEFAULTS[role], input_func=input_func)))
-    while True:
+    for _attempt in range(SWITCHYARD_PROMPT_MAX_ATTEMPTS):
         raw_roles = _prompt_text("Implementer roles (comma-separated)", input_func=input_func)
         roles: list[str] = []
         try:
@@ -4505,6 +4519,8 @@ def _prompt_switchyard_role_choices(
             break
         except SystemExit as exc:
             print(exc)
+    else:
+        raise SystemExit("switchyard: too many invalid answers for implementer roles")
     for role in roles:
         role_clis.append((role, _prompt_cli(role, default="codex", input_func=input_func)))
     return tuple(role_clis)
@@ -6108,7 +6124,7 @@ def _confirm_switchyard_new(
     print_func(f"switchyard: project path: {project_dir}")
     if yes:
         return
-    answer = input_func("Proceed? [y/N]: ").strip().lower()
+    answer = _read_prompt("Proceed? [y/N]: ", input_func=input_func).strip().lower()
     if answer not in {"y", "yes"}:
         raise SystemExit("switchyard: cancelled")
 

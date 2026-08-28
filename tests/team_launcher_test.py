@@ -9992,6 +9992,68 @@ def test_switchyard_new_prompts_roles_and_skips_designer_when_absent() -> None:
     assert "maximize the designer pane" not in rendered
 
 
+def test_switchyard_new_stdin_eof_exits_without_traceback() -> None:
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "switchyard"), "new"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode != 0
+    assert proc.stdout == "Project name: "
+    assert proc.stderr.strip() == "switchyard: no input available"
+    assert "Traceback" not in combined
+
+
+def test_prompt_bool_caps_invalid_retries() -> None:
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        try:
+            team_launcher._prompt_bool("Include designer role", default=True, input_func=lambda _prompt: "maybe")
+            raise AssertionError("expected prompt retry cap")
+        except SystemExit as exc:
+            message = str(exc)
+
+    assert message == "switchyard: too many invalid answers for Include designer role"
+    assert stdout.getvalue().count("answer yes or no") == team_launcher.SWITCHYARD_PROMPT_MAX_ATTEMPTS
+
+
+def test_prompt_cli_caps_invalid_retries() -> None:
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        try:
+            team_launcher._prompt_cli("director", default="claude", input_func=lambda _prompt: "vim")
+            raise AssertionError("expected prompt retry cap")
+        except SystemExit as exc:
+            message = str(exc)
+
+    assert message == "switchyard: too many invalid answers for director CLI"
+    assert stdout.getvalue().count("CLI for director must be one of claude, codex, agy") == (
+        team_launcher.SWITCHYARD_PROMPT_MAX_ATTEMPTS
+    )
+
+
+def test_switchyard_role_choices_caps_empty_implementer_retries() -> None:
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        try:
+            team_launcher._prompt_switchyard_role_choices(input_func=lambda _prompt: "")
+            raise AssertionError("expected prompt retry cap")
+        except SystemExit as exc:
+            message = str(exc)
+
+    assert message == "switchyard: too many invalid answers for implementer roles"
+    assert stdout.getvalue().count("at least one implementer role is required") == (
+        team_launcher.SWITCHYARD_PROMPT_MAX_ATTEMPTS
+    )
+
+
 def test_switchyard_new_rejects_role_choices_without_required_director() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new-required-roles.") as tmp:
         tmp_path = Path(tmp)

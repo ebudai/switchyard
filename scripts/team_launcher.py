@@ -275,6 +275,7 @@ class LaunchSessionRecordStatus:
     superseded_session_id: str = ""
     unverified_resume_session_id: str = ""
     pane_state_source: str = ""
+    runtime_hook_source: str = ""
 
     @property
     def found(self) -> bool:
@@ -290,7 +291,11 @@ class LaunchSessionRecordStatus:
 
     @property
     def pane_launch_reported(self) -> bool:
-        return bool(self.pane_state_source or self.unverified_resume_session_id)
+        return bool(self.pane_state_source or self.runtime_hook_source or self.unverified_resume_session_id)
+
+    @property
+    def runtime_hook_reported(self) -> bool:
+        return bool(self.runtime_hook_source)
 
 
 def _repo_root() -> Path:
@@ -1447,6 +1452,41 @@ def pane_launch_outcome_source_for_role(
     return source
 
 
+def pane_runtime_hook_source_for_role(
+    role: RoleConfig,
+    pane_state_dir: Path | None,
+    *,
+    updated_since: float | None = None,
+) -> str:
+    if pane_state_dir is None or updated_since is None:
+        return ""
+    path = pane_state_dir / pane_state_file_name(role.target)
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(parsed, dict):
+        return ""
+    if str(parsed.get("target") or "") != role.target:
+        return ""
+    source = str(parsed.get("source") or "").strip()
+    expected_prefix = f"{_command_name(role.cli[0])}." if role.cli else ""
+    if not expected_prefix or not source.startswith(expected_prefix):
+        return ""
+    try:
+        updated_at = float(parsed.get("updated_at") or 0.0)
+    except (TypeError, ValueError):
+        return ""
+    if updated_at + LAUNCH_PANE_STATE_FRESHNESS_SKEW_SECONDS < updated_since:
+        return ""
+    return source
+
+
+def _expects_startup_runtime_hook(role: RoleConfig) -> bool:
+    cli_name = _command_name(role.cli[0]) if role.cli else ""
+    return cli_name == "codex"
+
+
 def launch_session_record_statuses(
     config: ProjectConfig,
     roles: Sequence[RoleConfig] | None = None,
@@ -1488,6 +1528,11 @@ def launch_session_record_statuses(
                     pane_state_dir,
                     updated_since=pane_state_updated_since,
                 ),
+                runtime_hook_source=pane_runtime_hook_source_for_role(
+                    role,
+                    pane_state_dir,
+                    updated_since=pane_state_updated_since,
+                ),
             )
             for role in roles
         ]
@@ -1497,11 +1542,15 @@ def launch_session_record_statuses(
         all_pane_outcomes_reported = not pane_outcomes_required or all(
             status.pane_launch_reported for status in statuses
         )
+        all_runtime_hooks_reported = not pane_outcomes_required or all(
+            (not _expects_startup_runtime_hook(role)) or status.runtime_hook_reported or status.unverified_resume
+            for role, status in zip(roles, statuses, strict=True)
+        )
         fallback_grace_elapsed = now >= fallback_deadline
         if (
             now >= deadline
-            or (resume_fallback_found and all_pane_outcomes_reported)
-            or (all_records_found and all_pane_outcomes_reported)
+            or (resume_fallback_found and all_pane_outcomes_reported and all_runtime_hooks_reported)
+            or (all_records_found and all_pane_outcomes_reported and all_runtime_hooks_reported)
             or (
                 all_records_found
                 and not pane_outcomes_required
@@ -1544,6 +1593,7 @@ def report_launch_session_records(
         pane_state_dir=pane_state_dir,
         pane_state_updated_since=pane_state_updated_since,
     )
+    roles_by_target = {role.target: role for role in selected_roles}
     for status in statuses:
         if status.found:
             print_func(
@@ -1564,6 +1614,18 @@ def report_launch_session_records(
             print_func(
                 f"warning: switchyard: {status.role} ({status.target}) fell back to a fresh session; "
                 f"superseded session {status.superseded_session_id}"
+            )
+        role = roles_by_target.get(status.target)
+        if (
+            role is not None
+            and _expects_startup_runtime_hook(role)
+            and not status.runtime_hook_reported
+            and not status.unverified_resume
+        ):
+            print_func(
+                f"warning: switchyard: codex startup hook did not report for {status.role} "
+                f"({status.target}) after {timeout_seconds:g}s; expected codex.SessionStart state. "
+                "Check Codex hook trust or that --dangerously-bypass-hook-trust reached the codex command."
             )
     return statuses
 
@@ -1872,12 +1934,16 @@ def cli_command_for_role(
     resume: bool = False,
 ) -> list[str]:
     session_id = session_id_for_role(role, session_dir) if resume else ""
-    command = [*role.cli, *_resume_args_for_role(role, session_id)]
+    cli_options: list[str] = []
     if role.model:
-        command.extend([role.model_arg, role.model])
-    command.extend(effort_args_for_role(role))
-    command.extend(yolo_args_for_role(role))
-    command.extend(role.extra_args)
+        cli_options.extend([role.model_arg, role.model])
+    cli_options.extend(effort_args_for_role(role))
+    cli_options.extend(yolo_args_for_role(role))
+    cli_options.extend(role.extra_args)
+    if session_id and role.resume_mode == "subcommand":
+        command = [*role.cli, role.resume_subcommand, *cli_options, session_id]
+    else:
+        command = [*role.cli, *_resume_args_for_role(role, session_id), *cli_options]
     env = {
         **role.env,
         "TICKET_BOARD_PANE_TARGET": role.target,

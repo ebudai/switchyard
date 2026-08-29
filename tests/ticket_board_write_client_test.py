@@ -153,6 +153,27 @@ def setup_git_repo(root: Path) -> tuple[Path, str, str]:
 
 
 @contextlib.contextmanager
+def isolated_board_endpoint_env():
+    keys = [
+        "TICKET_BOARD_SOCKET",
+        "PGU_TICKET_BOARD_SOCKET",
+        "TICKET_BOARD_URL",
+        "PGU_TICKET_BOARD_URL",
+    ]
+    old_values = {key: os.environ.get(key) for key in keys}
+    try:
+        for key in keys:
+            os.environ.pop(key, None)
+        yield
+    finally:
+        for key, old_value in old_values.items():
+            if old_value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old_value
+
+
+@contextlib.contextmanager
 def pushd(path: Path):
     previous = Path.cwd()
     os.chdir(path)
@@ -364,19 +385,18 @@ def assert_generic_socket_env_precedes_legacy(root: Path) -> None:
             os.environ["PGU_TICKET_BOARD_SOCKET"] = old_env_socket
 
 
-def assert_project_caller_role_resolution_from_tmux_session() -> None:
+def assert_default_caller_role_ignores_tmux_session() -> None:
     original_run = write_client_module.subprocess.run
-    seen: list[list[str]] = []
 
     def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        seen.append(args)
-        return subprocess.CompletedProcess(args, 0, stdout="otto-implementer\n", stderr="")
+        raise AssertionError(f"default_caller_role unexpectedly invoked subprocess: {args}")
 
     try:
         write_client_module.subprocess.run = fake_run
-        mapped = write_client_module.default_caller_role(
+        resolved = write_client_module.default_caller_role(
             {
                 "TMUX_PANE": "%42",
+                "TICKET_BOARD_PROJECT": "otto",
                 "TICKET_BOARD_CALLER_ROLE_MAP": json.dumps(
                     {
                         "otto-director": "director",
@@ -388,23 +408,11 @@ def assert_project_caller_role_resolution_from_tmux_session() -> None:
     finally:
         write_client_module.subprocess.run = original_run
 
-    assert mapped == "implementer"
-    assert seen == [["tmux", "display-message", "-p", "-t", "%42", "#{session_name}"]]
+    assert resolved == ""
 
 
-def assert_project_prefix_caller_role_resolution_from_tmux_session() -> None:
-    original_run = write_client_module.subprocess.run
-
-    def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(args, 0, stdout="otto-audit\n", stderr="")
-
-    try:
-        write_client_module.subprocess.run = fake_run
-        resolved = write_client_module.default_caller_role({"TMUX_PANE": "%99", "TICKET_BOARD_PROJECT": "otto"})
-    finally:
-        write_client_module.subprocess.run = original_run
-
-    assert resolved == "audit"
+def assert_default_caller_role_has_no_implicit_director_fallback() -> None:
+    assert write_client_module.default_caller_role({}) == ""
 
 
 def main() -> int:
@@ -415,17 +423,18 @@ def main() -> int:
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            base_url = f"http://127.0.0.1:{server.server_port}"
-            exercise_client(base_url, repo, pushed_hash)
-            assert_submit_rejects_unpushed_commit(base_url, repo, local_only_hash, server.requests)
-            assert_socket_discovery_prefers_runtime_then_legacy(root)
-            assert_generic_socket_env_precedes_legacy(root)
-            assert_project_caller_role_resolution_from_tmux_session()
-            assert_project_prefix_caller_role_resolution_from_tmux_session()
-            assert_auto_socket_connect_failure_falls_back_to_tcp(base_url, root / "blocked.sock")
-            assert_action_requests(server.requests)
-            assert ("/api/tickets/PGU-120/actions/start_work", "ops") in request_pairs(server.requests)
-            assert all(path != "/api/tickets/PGU-122/actions/submit_to_audit" for path, _, _, _ in server.requests)
+            with isolated_board_endpoint_env():
+                base_url = f"http://127.0.0.1:{server.server_port}"
+                exercise_client(base_url, repo, pushed_hash)
+                assert_submit_rejects_unpushed_commit(base_url, repo, local_only_hash, server.requests)
+                assert_socket_discovery_prefers_runtime_then_legacy(root)
+                assert_generic_socket_env_precedes_legacy(root)
+                assert_default_caller_role_ignores_tmux_session()
+                assert_default_caller_role_has_no_implicit_director_fallback()
+                assert_auto_socket_connect_failure_falls_back_to_tcp(base_url, root / "blocked.sock")
+                assert_action_requests(server.requests)
+                assert ("/api/tickets/PGU-120/actions/start_work", "ops") in request_pairs(server.requests)
+                assert all(path != "/api/tickets/PGU-122/actions/submit_to_audit" for path, _, _, _ in server.requests)
         finally:
             server.shutdown()
             server.server_close()

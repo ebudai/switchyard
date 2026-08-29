@@ -219,6 +219,22 @@ def run_cli_error(base_url: str, caller_role: str, cwd: Path, *args: str) -> str
     return proc.stderr or proc.stdout
 
 
+def run_cli_without_caller(base_url: str, cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    strip_board_endpoint_env(env)
+    env["TMUX_PANE"] = "%42"
+    env["TICKET_BOARD_CALLER_ROLE_MAP"] = json.dumps({"pgu-ops": "ops"})
+    env["TICKET_BOARD_PROJECT"] = "pgu"
+    return subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "ticket-board-write"), "--board-url", base_url, *args],
+        cwd=cwd,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
 def command_env(command: list[str]) -> dict[str, str]:
     assert command[0] == "env"
     result: dict[str, str] = {}
@@ -230,9 +246,16 @@ def command_env(command: list[str]) -> dict[str, str]:
     return result
 
 
-def exercise_pane_cli(base_url: str, repo: Path, commit_hash: str, local_only_hash: str) -> None:
+def exercise_pane_cli(
+    base_url: str,
+    repo: Path,
+    commit_hash: str,
+    local_only_hash: str,
+    requests: list[tuple[str, str | None, dict[str, object]]],
+) -> None:
     assert default_caller_role({"TICKET_BOARD_CALLER_ROLE": " ops ", "PGU_TICKET_BOARD_CALLER_ROLE": " app "}) == "ops"
     assert default_caller_role({"PGU_TICKET_BOARD_CALLER_ROLE": " app "}) == "app"
+    assert default_caller_role({"TMUX_PANE": "%42", "TICKET_BOARD_CALLER_ROLE_MAP": '{"pgu-ops":"ops"}'}) == ""
     assert TicketBoardWriteClient(base_url, "director").for_caller("ops").caller_role == "ops"
 
     started = run_cli(base_url, "main", repo, "start-work", "PGU-2100")
@@ -267,6 +290,12 @@ def exercise_pane_cli(base_url: str, repo: Path, commit_hash: str, local_only_ha
 
     commented = run_cli(base_url, "ops", repo, "add-comment", "PGU-2102", "--text", "Ops pane note.")
     assert commented["comments"][-1]["who"] == "ops", commented
+
+    before_missing_caller = len(requests)
+    missing_caller = run_cli_without_caller(base_url, repo, "add-comment", "PGU-2102", "--text", "Transient shell note.")
+    assert missing_caller.returncode != 0, missing_caller.stdout
+    assert "caller role required" in missing_caller.stderr, missing_caller.stderr
+    assert len(requests) == before_missing_caller, requests[before_missing_caller:]
 
 
 def assert_second_project_pane_cli_uses_project_socket(root: Path) -> None:
@@ -408,7 +437,7 @@ def main() -> int:
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            exercise_pane_cli(f"http://127.0.0.1:{server.server_port}", repo, pushed_hash, local_only_hash)
+            exercise_pane_cli(f"http://127.0.0.1:{server.server_port}", repo, pushed_hash, local_only_hash, server.requests)
             assert_second_project_pane_cli_uses_project_socket(root)
             assert_second_project_socket_regression_fails_without_live_board(root)
             assert_pane_requests(server.requests)

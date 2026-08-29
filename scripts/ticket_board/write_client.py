@@ -33,17 +33,6 @@ DEFAULT_BOARD_SOCKET = (
     or "/run/pgu-ticket-board/ticket-board.sock"
 )
 LEGACY_BOARD_SOCKET = "/tmp/pgu-ticket-board.sock"
-DEFAULT_CALLER_ROLE = "director"
-PANE_SESSION_CALLER_ROLES = {
-    "pgu-director": "director",
-    "pgu-main": "main",
-    "pgu-app": "app",
-    "pgu-ops": "ops",
-    "pgu-audit": "audit",
-    "pgu-inspector": "inspector",
-    "pgu-perf": "perf",
-    "pgu-research": "research",
-}
 
 
 class TicketBoardWriteError(RuntimeError):
@@ -101,57 +90,8 @@ def _env_first_from(environ: Mapping[str, str], *names: str) -> str:
     return ""
 
 
-def _caller_role_map_from_env(environ: Mapping[str, str]) -> dict[str, str]:
-    raw = _env_first_from(environ, "TICKET_BOARD_CALLER_ROLE_MAP", "PGU_TICKET_BOARD_CALLER_ROLE_MAP")
-    if not raw:
-        return {}
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        return {}
-    if not isinstance(parsed, dict):
-        return {}
-    result: dict[str, str] = {}
-    for session_name, role in parsed.items():
-        normalized_session = str(session_name).strip()
-        normalized_role = str(role).strip().lower()
-        if normalized_session and normalized_role:
-            result[normalized_session] = normalized_role
-    return result
-
-
-def _caller_role_from_tmux_session(environ: Mapping[str, str] = os.environ) -> str | None:
-    pane_id = environ.get("TMUX_PANE", "").strip()
-    if not pane_id:
-        return None
-    try:
-        proc = subprocess.run(
-            ["tmux", "display-message", "-p", "-t", pane_id, "#{session_name}"],
-            check=False,
-            text=True,
-            capture_output=True,
-            timeout=0.5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if proc.returncode != 0:
-        return None
-    session_name = proc.stdout.strip()
-    mapped_role = _caller_role_map_from_env(environ).get(session_name)
-    if mapped_role:
-        return mapped_role
-    explicit_project = _env_first_from(environ, "TICKET_BOARD_PROJECT", "PGU_TICKET_BOARD_PROJECT")
-    if explicit_project and session_name.startswith(f"{explicit_project}-"):
-        role = session_name.removeprefix(f"{explicit_project}-").strip().lower()
-        return role or None
-    return PANE_SESSION_CALLER_ROLES.get(session_name)
-
-
 def default_caller_role(environ: Mapping[str, str] = os.environ) -> str:
-    explicit = _env_first_from(environ, "TICKET_BOARD_CALLER_ROLE", "PGU_TICKET_BOARD_CALLER_ROLE").lower()
-    if explicit:
-        return explicit
-    return _caller_role_from_tmux_session(environ) or DEFAULT_CALLER_ROLE
+    return _env_first_from(environ, "TICKET_BOARD_CALLER_ROLE", "PGU_TICKET_BOARD_CALLER_ROLE").lower()
 
 
 def _run_git(args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -524,6 +464,7 @@ def _ticket_from_response(response: dict[str, Any]) -> dict[str, Any]:
 
 def _build_parser() -> argparse.ArgumentParser:
     caller_default = default_caller_role()
+    caller_default_display = caller_default or "unset"
     parser = argparse.ArgumentParser(description="Write tickets through the board action API.")
     parser.add_argument("--board-url", default=DEFAULT_BOARD_URL, help=f"Board root or /api/tickets URL (default: {DEFAULT_BOARD_URL})")
     parser.add_argument(
@@ -541,9 +482,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=caller_default,
         help=(
             "Value for X-Ticket-Board-Caller-Role "
-            f"(default: TICKET_BOARD_CALLER_ROLE, legacy PGU_TICKET_BOARD_CALLER_ROLE, "
-            f"current project-role tmux session, else {DEFAULT_CALLER_ROLE}; "
-            f"currently {caller_default})"
+            "(required unless TICKET_BOARD_CALLER_ROLE or legacy PGU_TICKET_BOARD_CALLER_ROLE is set; "
+            f"currently {caller_default_display})"
         ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -667,6 +607,10 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     try:
         args = _build_parser().parse_args(argv)
+        if not args.caller_role.strip():
+            raise TicketBoardWriteError(
+                "ticket board caller role required; pass --caller-role or set TICKET_BOARD_CALLER_ROLE"
+            )
         client = TicketBoardWriteClient(args.board_url, args.caller_role, socket_path=args.socket_path)
         command = args.command.replace("-", "_")
         if command == "create_ticket":

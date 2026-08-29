@@ -194,8 +194,9 @@ a team pane, isolate the hook environment or the hook can write this pane's live
 state through the inherited pane target/session environment: run with
 `env -u TMUX -u TMUX_PANE`, set `TICKET_BOARD_PANE_TARGET`,
 `TICKET_BOARD_PANE_STATE_DIR`, and `TICKET_BOARD_PANE_SESSION_DIR` to disposable
-values, and set `TICKET_BOARD_CALLER_ROLE` explicitly so board writes do not
-inherit the pane's caller identity.
+values, and set `TICKET_BOARD_CALLER_ROLE` explicitly. The board write client
+refuses writes when neither `--caller-role` nor `TICKET_BOARD_CALLER_ROLE` is
+set.
 
 `provision-runtime` is the non-launching project-user setup check. It enables
 linger for the configured `run_as_user`, or for the invoking user when the
@@ -295,6 +296,9 @@ The launcher injects the board wiring into every role process:
 `TICKET_BOARD_CALLER_ROLE`, and `TICKET_BOARD_CALLER_ROLE_MAP`. These generated
 values override stale per-role entries so every pane writes to the configured
 project board through the write client instead of falling back to PGU defaults.
+The write client no longer derives a caller role from the surrounding tmux pane;
+transient shells must pass `--caller-role` or set `TICKET_BOARD_CALLER_ROLE`
+before performing ticket writes.
 
 Do not put guessed/default roles into a real project config. If a role is not
 currently active or its CLI/model assignment is unknown, omit it until the

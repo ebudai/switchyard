@@ -4010,6 +4010,7 @@ CREATE OR REPLACE FUNCTION ticket_board.create_ticket(
     title text,
     body text,
     initial_state text,
+    assignee text,
     blocked_by text[],
     blocked_reason text,
     needs_user_signoff boolean,
@@ -4025,13 +4026,16 @@ DECLARE
     actor text;
     ticket_id text;
     normalized_state text := btrim(coalesce(initial_state, 'analysis'));
-    normalized_assignee text := 'unassigned';
+    normalized_assignee text := btrim(coalesce(assignee, 'unassigned'));
     normalized_parked boolean := false;
     blocker_count integer;
     created_at_value timestamptz := clock_timestamp();
     created_text_value text := ticket_board.utc_text(created_at_value);
 BEGIN
     actor := ticket_board.require_actor(ARRAY['director', 'user'], 'create_ticket');
+    IF normalized_assignee = '' THEN
+        normalized_assignee := 'unassigned';
+    END IF;
     IF NOT coalesce(needs_audit, true) AND ticket_board.current_app_actor() <> 'director' THEN
         RAISE EXCEPTION 'needs_audit can only be set to false by director' USING ERRCODE = '42501';
     END IF;
@@ -4043,6 +4047,12 @@ BEGIN
     END IF;
     IF normalized_state NOT IN ('draft', 'analysis', 'backlog') THEN
         RAISE EXCEPTION 'invalid create state: %; allowed: draft, analysis, backlog', normalized_state;
+    END IF;
+    IF NOT ticket_board.ticket_valid_assignee(normalized_assignee) THEN
+        RAISE EXCEPTION 'invalid assignee: %', normalized_assignee;
+    END IF;
+    IF normalized_state = 'draft' AND normalized_assignee <> 'unassigned' THEN
+        RAISE EXCEPTION 'draft tickets cannot be created with an assignee; release and route the draft instead';
     END IF;
     IF normalized_state = 'backlog' THEN
         normalized_parked := true;
@@ -4104,6 +4114,24 @@ BEGIN
     PERFORM ticket_board.refresh_ticket_source_json(ticket_id);
     RETURN ticket_id;
 END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.create_ticket(
+    title text,
+    body text,
+    initial_state text,
+    blocked_by text[],
+    blocked_reason text,
+    needs_user_signoff boolean,
+    needs_audit boolean
+)
+RETURNS text
+LANGUAGE sql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+    SELECT ticket_board.create_ticket(title, body, initial_state, 'unassigned', blocked_by, blocked_reason, needs_user_signoff, needs_audit);
 $$;
 
 CREATE OR REPLACE FUNCTION ticket_board.create_ticket(

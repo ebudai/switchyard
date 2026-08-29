@@ -696,6 +696,38 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     user_default_audit_created = user_default_audit_created_payload["ticket"]  # type: ignore[index]
     assert user_default_audit_created["needs_audit"] is True, user_default_audit_created  # type: ignore[index]
 
+    user_assigned_analysis_payload = post_json(
+        base_url,
+        "/api/tickets/actions/create_ticket",
+        {"title": "User assigned analysis create", "body": "User assigns implementation.", "state": "analysis", "assignee": "ops"},
+        caller="user",
+        expect=201,
+    )
+    user_assigned_analysis = user_assigned_analysis_payload["ticket"]  # type: ignore[index]
+    user_assigned_analysis_id = str(user_assigned_analysis["id"])  # type: ignore[index]
+    assert user_assigned_analysis["state"] == "analysis", user_assigned_analysis  # type: ignore[index]
+    assert user_assigned_analysis["assignee"] == "ops", user_assigned_analysis  # type: ignore[index]
+    assert psql(
+        admin_conn,
+        f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{user_assigned_analysis_id}';",
+    ) == "analysis:ops"
+
+    user_assigned_backlog_payload = post_json(
+        base_url,
+        "/api/tickets/actions/create_ticket",
+        {"title": "User assigned backlog create", "body": "User parks assigned work.", "initial_state": "backlog", "assignee": "research"},
+        caller="user",
+        expect=201,
+    )
+    user_assigned_backlog = user_assigned_backlog_payload["ticket"]  # type: ignore[index]
+    user_assigned_backlog_id = str(user_assigned_backlog["id"])  # type: ignore[index]
+    assert user_assigned_backlog["state"] == "backlog", user_assigned_backlog  # type: ignore[index]
+    assert user_assigned_backlog["assignee"] == "research", user_assigned_backlog  # type: ignore[index]
+    assert psql(
+        admin_conn,
+        f"SELECT state || ':' || assignee || ':' || parked FROM ticket_board.tickets WHERE id = '{user_assigned_backlog_id}';",
+    ) == "backlog:research:true"
+
     no_audit_created_payload = post_json(
         base_url,
         "/api/tickets/actions/create_ticket",

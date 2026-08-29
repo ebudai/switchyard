@@ -24,6 +24,7 @@ WRITE_FUNCTIONS = [
     "ticket_board.create_ticket(text,text,text,text[],text)",
     "ticket_board.create_ticket(text,text,text,text[],text,boolean)",
     "ticket_board.create_ticket(text,text,text,text[],text,boolean,boolean)",
+    "ticket_board.create_ticket(text,text,text,text,text[],text,boolean,boolean)",
     "ticket_board.file_bug(text,text,text)",
     "ticket_board.file_bug(text,text,text,text)",
     "ticket_board.file_bug(text,text,text,text,text[],text)",
@@ -321,6 +322,24 @@ WHERE id = {sql_string(backlog_created)};
         )
     )
     assert backlog_row == {"state": "backlog", "assignee": "unassigned", "parked": True}, backlog_row
+    assigned_created = psql(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'user', false);
+SELECT ticket_board.create_ticket('User assigned service create', 'Body', 'analysis', 'ops', ARRAY[]::text[], '', false, true);
+""",
+    ).splitlines()[-1]
+    assigned_created_row = json.loads(
+        psql(
+            admin_conn,
+            f"""
+SELECT jsonb_build_object('state', state, 'assignee', assignee)::text
+FROM ticket_board.tickets
+WHERE id = {sql_string(assigned_created)};
+""",
+        )
+    )
+    assert assigned_created_row == {"state": "analysis", "assignee": "ops"}, assigned_created_row
     draft_created = psql(service_conn, "SELECT ticket_board.create_ticket('Service draft create', 'Body', 'draft');")
     draft_row = json.loads(
         psql(
@@ -507,6 +526,11 @@ WHERE id = {sql_string(filed_blocked)};
         "SELECT set_config('ticket_board.caller_role', 'ops', false); SELECT ticket_board.route('PGU-200', 'analysis', 'ops');",
     )
     assert "role ops cannot call route" in route_denied, route_denied
+    user_route_denied = psql_error(
+        service_conn,
+        "SELECT set_config('ticket_board.caller_role', 'user', false); SELECT ticket_board.route('PGU-200', 'analysis', 'ops');",
+    )
+    assert "role user cannot call route" in user_route_denied, user_route_denied
     psql(admin_conn, "UPDATE ticket_board.tickets SET parked = true WHERE id = 'PGU-200';")
 
     insert_ticket(admin_conn, "PGU-300", title="Start fixture", state="analysis", assignee="ops", implementation="Ready.")

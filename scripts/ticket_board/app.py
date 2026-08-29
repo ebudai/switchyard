@@ -905,8 +905,8 @@ ORDER BY rank;
                 else:
                     ticket_id = self._pg_call_scalar(
                         conn,
-                        "SELECT ticket_board.create_ticket(%s, %s, %s, %s, %s, %s, %s) AS id;",
-                        (title, body.strip(), create_state, blocked_by, blocked_reason, needs_user_signoff, needs_audit),
+                        "SELECT ticket_board.create_ticket(%s, %s, %s, %s, %s, %s, %s, %s) AS id;",
+                        (title, body.strip(), create_state, assignee, blocked_by, blocked_reason, needs_user_signoff, needs_audit),
                     )
                     if parent_id:
                         self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps({"parent_id": parent_id})))
@@ -920,8 +920,6 @@ ORDER BY rank;
                     self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps({"regression": True})))
                 if create_state != state:
                     raise ValueError(f"invalid create state: {state}; allowed: draft, analysis, backlog")
-                if create_state in {"analysis", "backlog"} and assignee != "unassigned" and not created_via_file_bug:
-                    self._pg_call(conn, "SELECT ticket_board.route(%s, %s, %s);", (ticket_id, state, assignee))
                 if attachment_patch:
                     current = self._pg_get_ticket(ticket_id, conn)
                     self._materialize_edit_field_attachments(attachment_patch, ticket_id, current)

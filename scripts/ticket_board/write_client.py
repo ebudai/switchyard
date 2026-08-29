@@ -66,11 +66,11 @@ def _normalize_api_path(board_url: str) -> str:
 
 
 def _default_socket_path(board_url: str, environ: Mapping[str, str] = os.environ) -> str | None:
+    if board_url != DEFAULT_BOARD_URL:
+        return None
     explicit = _env_first_from(environ, "TICKET_BOARD_SOCKET", "PGU_TICKET_BOARD_SOCKET")
     if explicit:
         return explicit
-    if board_url != DEFAULT_BOARD_URL:
-        return None
     if Path(DEFAULT_BOARD_SOCKET).exists():
         return DEFAULT_BOARD_SOCKET
     if DEFAULT_BOARD_SOCKET != LEGACY_BOARD_SOCKET and Path(LEGACY_BOARD_SOCKET).exists():

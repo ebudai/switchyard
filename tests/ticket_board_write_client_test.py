@@ -317,6 +317,61 @@ def assert_empty_caller_role_rejects_before_request(
     assert len(requests) == before, requests[before:]
 
 
+def assert_non_default_url_precedes_ambient_socket(
+    base_url: str,
+    requests: list[tuple[str, str | None, str | None, dict[str, object]]],
+    ambient_socket: Path,
+) -> None:
+    old_socket = os.environ.get("TICKET_BOARD_SOCKET")
+    old_legacy_socket = os.environ.get("PGU_TICKET_BOARD_SOCKET")
+    try:
+        os.environ["TICKET_BOARD_SOCKET"] = str(ambient_socket)
+        os.environ.pop("PGU_TICKET_BOARD_SOCKET", None)
+        client = TicketBoardWriteClient(base_url, "director")
+        assert client.effective_socket_path is None
+
+        before = len(requests)
+        ticket = client.create_ticket(
+            title="Explicit URL create",
+            body="Must reach the explicit URL, not ambient socket.",
+            assignee="director",
+        )["ticket"]
+        assert ticket["id"] == "PGU-NEW"
+        assert len(requests) == before + 1, requests[before:]
+        assert requests[-1][0] == "/api/tickets/actions/create_ticket"
+
+        explicit_socket_client = TicketBoardWriteClient(base_url, "director", socket_path=str(ambient_socket))
+        assert explicit_socket_client.effective_socket_path == str(ambient_socket)
+    finally:
+        if old_socket is None:
+            os.environ.pop("TICKET_BOARD_SOCKET", None)
+        else:
+            os.environ["TICKET_BOARD_SOCKET"] = old_socket
+        if old_legacy_socket is None:
+            os.environ.pop("PGU_TICKET_BOARD_SOCKET", None)
+        else:
+            os.environ["PGU_TICKET_BOARD_SOCKET"] = old_legacy_socket
+
+
+def assert_default_url_keeps_ambient_socket(ambient_socket: Path) -> None:
+    old_socket = os.environ.get("TICKET_BOARD_SOCKET")
+    old_legacy_socket = os.environ.get("PGU_TICKET_BOARD_SOCKET")
+    try:
+        os.environ["TICKET_BOARD_SOCKET"] = str(ambient_socket)
+        os.environ.pop("PGU_TICKET_BOARD_SOCKET", None)
+        assert write_client_module._default_socket_path(write_client_module.DEFAULT_BOARD_URL) == str(ambient_socket)
+        assert TicketBoardWriteClient(write_client_module.DEFAULT_BOARD_URL, "director").effective_socket_path == str(ambient_socket)
+    finally:
+        if old_socket is None:
+            os.environ.pop("TICKET_BOARD_SOCKET", None)
+        else:
+            os.environ["TICKET_BOARD_SOCKET"] = old_socket
+        if old_legacy_socket is None:
+            os.environ.pop("PGU_TICKET_BOARD_SOCKET", None)
+        else:
+            os.environ["PGU_TICKET_BOARD_SOCKET"] = old_legacy_socket
+
+
 def assert_auto_socket_connect_failure_falls_back_to_tcp(base_url: str, socket_path: Path) -> None:
     socket_path.touch()
     socket_path.chmod(0)
@@ -444,6 +499,8 @@ def main() -> int:
                 exercise_client(base_url, repo, pushed_hash)
                 assert_submit_rejects_unpushed_commit(base_url, repo, local_only_hash, server.requests)
                 assert_empty_caller_role_rejects_before_request(base_url, server.requests)
+                assert_non_default_url_precedes_ambient_socket(base_url, server.requests, root / "ambient.sock")
+                assert_default_url_keeps_ambient_socket(root / "default-ambient.sock")
                 assert_socket_discovery_prefers_runtime_then_legacy(root)
                 assert_generic_socket_env_precedes_legacy(root)
                 assert_default_caller_role_ignores_tmux_session()

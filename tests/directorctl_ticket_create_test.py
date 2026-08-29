@@ -109,6 +109,10 @@ def main() -> int:
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         board_url = f"http://127.0.0.1:{server.server_port}"
+        old_socket = os.environ.get("TICKET_BOARD_SOCKET")
+        old_legacy_socket = os.environ.get("PGU_TICKET_BOARD_SOCKET")
+        os.environ["TICKET_BOARD_SOCKET"] = str(Path(tmpdir) / "ambient-ticket-board.sock")
+        os.environ.pop("PGU_TICKET_BOARD_SOCKET", None)
 
         try:
             single = subprocess.run(
@@ -164,6 +168,14 @@ def main() -> int:
             assert len(ids) == WORKERS
             assert len(set(ids)) == WORKERS, ids
         finally:
+            if old_socket is None:
+                os.environ.pop("TICKET_BOARD_SOCKET", None)
+            else:
+                os.environ["TICKET_BOARD_SOCKET"] = old_socket
+            if old_legacy_socket is None:
+                os.environ.pop("PGU_TICKET_BOARD_SOCKET", None)
+            else:
+                os.environ["PGU_TICKET_BOARD_SOCKET"] = old_legacy_socket
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)

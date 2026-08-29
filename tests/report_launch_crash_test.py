@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -42,7 +43,17 @@ class TicketHandler(BaseHTTPRequestHandler):
         return
 
 
-def run_reporter(board_url: str, dedupe_dir: str, log_file: str, exit_status: int) -> subprocess.CompletedProcess[str]:
+def run_reporter(
+    board_url: str,
+    dedupe_dir: str,
+    log_file: str,
+    exit_status: int,
+    *,
+    ambient_socket: Path,
+) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["TICKET_BOARD_SOCKET"] = str(ambient_socket)
+    env.pop("PGU_TICKET_BOARD_SOCKET", None)
     return subprocess.run(
         [
             sys.executable,
@@ -66,6 +77,7 @@ def run_reporter(board_url: str, dedupe_dir: str, log_file: str, exit_status: in
             "--log-lines",
             "3",
         ],
+        env=env,
         text=True,
         capture_output=True,
         check=False,
@@ -86,8 +98,9 @@ def main() -> int:
             tmp_path = Path(tmpdir)
             log_path = tmp_path / "launch.log"
             log_path.write_text("line one\nline two\nfatal boom\n", encoding="utf-8")
+            ambient_socket = tmp_path / "ambient-ticket-board.sock"
 
-            first = run_reporter(board_url, str(tmp_path / "dedupe"), str(log_path), 1)
+            first = run_reporter(board_url, str(tmp_path / "dedupe"), str(log_path), 1, ambient_socket=ambient_socket)
             assert_true(first.returncode == 0, f"first reporter run failed: {first.stderr}")
             assert_true(len(TicketHandler.requests) == 1, "first crash should create one ticket")
             assert_true(TicketHandler.paths == ["/api/tickets/actions/create_ticket"], "reporter should use create_ticket action route")
@@ -97,11 +110,11 @@ def main() -> int:
             assert_true(first_payload["assignee"] == "unassigned", "crash tickets should be unassigned")
             assert_true("fatal boom" in first_payload["body"], "ticket body should include the captured log tail")
 
-            second = run_reporter(board_url, str(tmp_path / "dedupe"), str(log_path), 1)
+            second = run_reporter(board_url, str(tmp_path / "dedupe"), str(log_path), 1, ambient_socket=ambient_socket)
             assert_true(second.returncode == 0, f"second reporter run failed: {second.stderr}")
             assert_true(len(TicketHandler.requests) == 1, "duplicate crash should be suppressed")
 
-            third = run_reporter(board_url, str(tmp_path / "dedupe"), str(log_path), 139)
+            third = run_reporter(board_url, str(tmp_path / "dedupe"), str(log_path), 139, ambient_socket=ambient_socket)
             assert_true(third.returncode == 0, f"signal reporter run failed: {third.stderr}")
             assert_true(len(TicketHandler.requests) == 2, "different crash reasons should create a new ticket")
             assert_true(

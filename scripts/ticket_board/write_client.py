@@ -661,6 +661,9 @@ class TicketBoardWriteClient:
             raise TicketBoardWriteError("edit_fields requires a JSON object")
         return self._ticket_action(ticket_id, "edit_fields", fields, caller_role=caller_role)
 
+    def merge(self, source_ticket_id: str, *, target_id: str, caller_role: str | None = None) -> dict[str, Any]:
+        return self._ticket_action(source_ticket_id, "merge", {"target_id": target_id}, caller_role=caller_role)
+
 
 def _ticket_from_response(response: dict[str, Any]) -> dict[str, Any]:
     ticket = response.get("ticket")
@@ -830,6 +833,10 @@ def _build_parser() -> argparse.ArgumentParser:
     edit_fields = subparsers.add_parser("edit-fields")
     edit_fields.add_argument("ticket_id")
     edit_fields.add_argument("--json", required=True, help="JSON object of fields accepted by the edit_fields action")
+
+    merge = subparsers.add_parser("merge")
+    merge.add_argument("ticket_id")
+    merge.add_argument("--target-id", required=True)
     return parser
 
 
@@ -935,6 +942,8 @@ def main(argv: list[str] | None = None) -> int:
             if not isinstance(patch, dict):
                 raise TicketBoardWriteError("edit-fields --json must be a JSON object")
             response = client.edit_fields(args.ticket_id, patch)
+        elif command == "merge":
+            response = client.merge(args.ticket_id, target_id=args.target_id)
         else:
             response = getattr(client, command)(args.ticket_id)
     except json.JSONDecodeError as exc:
@@ -943,7 +952,10 @@ def main(argv: list[str] | None = None) -> int:
     except TicketBoardWriteError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    print(json.dumps(_ticket_from_response(response)))
+    if command == "merge":
+        print(json.dumps(response))
+    else:
+        print(json.dumps(_ticket_from_response(response)))
     return 0
 
 

@@ -17,6 +17,8 @@ The remaining issues are narrower:
 | Direct HTTP/SQL RBAC mismatch | `user -> await_role`, `user -> clear_awaiting_role` | HTTP allowed `user`, SQL denied it. | Fixed in PGU-766 by removing `user` from the HTTP allowed sets. |
 | Client lagging server | `write_client.create_ticket(parent_id=...)` missing | Server accepts `parent_id`; client could not express it. | Fixed in PGU-766. |
 | Client lagging server | `write_client.edit_fields(...)` missing | Server exposes `edit_fields`; client could not express it. | Fixed in PGU-766. |
+| Client lagging server | `write_client.merge(...)` missing | Server exposes `merge`; client could not express it. | Fixed in PGU-766. |
+| Client lagging server | `write_client.crop_attachment(...)` missing | Server exposes a browser crop action whose payload is drag geometry from the UI. | Recorded as an explicit parity exception; no CLI/client method recommended unless a non-browser crop workflow appears. |
 
 ## Operation Surface
 
@@ -48,3 +50,5 @@ The remaining issues are narrower:
 ## Recommendation
 
 Close this ticket without adding a trusted internal-action primitive. A primitive is still a valid design if future actions need genuine privileged composition, but current main no longer has a live route/file_bug/create composition failure. The safer course is to keep the external safety net, fix each measured disagreement at the smallest boundary, and add targeted tests when a new cross-layer mismatch appears.
+
+For the client-parity class, use a different answer: keep an automatic parity guard. PGU-766 adds test coverage comparing `OPERATION_ALLOWED_ROLES` with `TicketBoardWriteClient` methods and CLI subcommands, with `crop_attachment` as the only documented exception. That is cheap, mechanical, and directly matches the failure mode.

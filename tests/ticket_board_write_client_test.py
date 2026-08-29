@@ -20,8 +20,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.ticket_board import write_client as write_client_module
-from scripts.ticket_board.server import CALLER_ROLE_HEADER, LEGACY_CALLER_ROLE_HEADER, REPORT_TOKEN_HEADER
+from scripts.ticket_board.server import CALLER_ROLE_HEADER, LEGACY_CALLER_ROLE_HEADER, OPERATION_ALLOWED_ROLES, REPORT_TOKEN_HEADER
 from scripts.ticket_board.write_client import TicketBoardWriteClient
+
+
+CLIENT_PARITY_EXCEPTIONS = {
+    "crop_attachment": "UI-only crop payload: it depends on browser drag geometry and has no sensible CLI shape.",
+}
 
 
 class RecordingHandler(BaseHTTPRequestHandler):
@@ -126,6 +131,18 @@ class RecordingHandler(BaseHTTPRequestHandler):
             ticket["origin_project"] = payload.get("origin_project", "")
             ticket["external_source_ref"] = payload.get("external_source_ref", "")
             ticket["parent_id"] = ""
+        elif operation == "merge":
+            source = dict(ticket)
+            source["state"] = "done"
+            source["commit_exempt"] = True
+            target = {"id": payload.get("target_id", ""), "title": "merge target"}
+            body = json.dumps({"source": source, "target": target}).encode("utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         body = json.dumps({"ticket": ticket}).encode("utf-8")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/json")
@@ -143,6 +160,29 @@ class RecordingServer(ThreadingHTTPServer):
 
 def request_pairs(requests: list[tuple[str, str | None, str | None, dict[str, object]]]) -> list[tuple[str, str | None]]:
     return [(path, caller_role) for path, caller_role, _, _ in requests]
+
+
+def cli_subcommands() -> set[str]:
+    parser = write_client_module._build_parser()
+    for action in parser._actions:
+        choices = getattr(action, "choices", None)
+        if choices:
+            return {str(choice).replace("-", "_") for choice in choices}
+    raise AssertionError("write client parser has no subcommands")
+
+
+def assert_write_client_surface_matches_server_actions() -> None:
+    server_actions = set(OPERATION_ALLOWED_ROLES)
+    exceptions = set(CLIENT_PARITY_EXCEPTIONS)
+    client_methods = {
+        name
+        for name in dir(TicketBoardWriteClient)
+        if not name.startswith("_") and callable(getattr(TicketBoardWriteClient, name))
+    }
+    missing_methods = sorted(server_actions - client_methods - exceptions)
+    missing_cli = sorted(server_actions - cli_subcommands() - exceptions)
+    assert missing_methods == [], missing_methods
+    assert missing_cli == [], missing_cli
 
 
 def run_git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -240,6 +280,7 @@ def assert_action_requests(requests: list[tuple[str, str | None, str | None, dic
     assert ("/api/tickets/PGU-111/actions/set_blockers", "director") in pairs
     assert ("/api/tickets/PGU-112/actions/add_comment", "director") in pairs
     assert ("/api/tickets/PGU-112/actions/edit_fields", "app") in pairs
+    assert ("/api/tickets/PGU-113/actions/merge", "director") in pairs
     create_payload = next(payload for path, _, _, payload in requests if path == "/api/tickets/actions/create_ticket")
     assert create_payload["parent_id"] == "PGU-100", create_payload
 
@@ -329,6 +370,9 @@ def exercise_client(base_url: str, repo: Path, commit_hash: str) -> None:
         assert client.add_comment("PGU-112", text="Director note.")["ticket"]["comments"][-1]["who"] == "director"
         assert client.add_comment("PGU-112", text="Urgent director note.", urgent=True)["ticket"]["comments"][-1]["urgent"] is True
         assert client.edit_fields("PGU-112", {"title": "Client edited title"}, caller_role="app")["ticket"]["title"] == "Client edited title"
+        merged = client.merge("PGU-113", target_id="PGU-114")
+        assert merged["source"]["id"] == "PGU-113", merged
+        assert merged["target"]["id"] == "PGU-114", merged
 
 
 def assert_submit_rejects_unpushed_commit(
@@ -665,6 +709,7 @@ def assert_default_caller_role_has_no_implicit_director_fallback() -> None:
 
 
 def main() -> int:
+    assert_write_client_surface_matches_server_actions()
     with tempfile.TemporaryDirectory(prefix="ticket-board-write-client.") as tmpdir:
         root = Path(tmpdir)
         repo, pushed_hash, local_only_hash = setup_git_repo(root)

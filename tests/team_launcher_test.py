@@ -3951,6 +3951,41 @@ def test_yolo_config_translates_to_cli_specific_bypass_flags() -> None:
             assert expected_flag in command, (role_name, command)
 
 
+def test_project_config_rejects_dead_gemini_cli_name() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-dead-cli.") as tmp:
+        tmp_path = Path(tmp)
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(tmp_path / "layout.json"),
+                    "roles": [
+                        {
+                            "role": "inspector",
+                            "slot": 0,
+                            "target": "porter-inspector:0.0",
+                            "cli": ["gemini"],
+                        }
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        try:
+            load_project_config("porter", config_path)
+            raise AssertionError("expected removed gemini CLI name to be rejected")
+        except SystemExit as exc:
+            message = str(exc)
+
+    assert "role inspector cli 'gemini' is not supported" in message
+    assert "supported clis: agy, claude, codex" in message
+
+
 def test_effort_config_translates_to_cli_specific_args() -> None:
     config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
     roles = {role.role: role for role in config.roles}
@@ -3971,6 +4006,15 @@ def test_effort_config_translates_to_cli_specific_args() -> None:
     assert "--effort" not in inspector_command
     assert "-c" not in inspector_command
     assert "reasoning_effort=high" not in inspector_command
+
+
+def test_inspector_agy_cli_stays_in_first_run_trust_phase() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    inspector = next(role for role in config.roles if role.role == "inspector")
+
+    assert team_launcher._role_cli_name(inspector) == "agy"
+    assert team_launcher._role_cli_name(inspector) in team_launcher.FIRST_RUN_TRUST_CLIS
+    assert "gemini" not in team_launcher.FIRST_RUN_TRUST_CLIS
 
 
 def test_pgu_launch_commands_include_model_and_bypass_flags() -> None:
@@ -7822,7 +7866,7 @@ def test_agy_reload_skips_missing_local_conversation_store_instead_of_silent_fal
         finally:
             team_launcher.AGY_CONVERSATION_ROOT = original_root
 
-    assert "recorded agy/gemini conversation" in stderr.getvalue()
+    assert "recorded agy conversation" in stderr.getvalue()
     assert "silently falls back" in stderr.getvalue()
     new_sessions = [call for call in runner.calls if call[:5] == ["tmux", "new-session", "-d", "-s", "pgu-inspector"]]
     assert len(new_sessions) == 1

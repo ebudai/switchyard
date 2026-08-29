@@ -110,25 +110,23 @@ YOLO_ARGS_BY_CLI = {
     "agy": ["--dangerously-skip-permissions"],
     "claude": ["--dangerously-skip-permissions"],
     "codex": ["--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust"],
-    "gemini": ["--yolo"],
 }
 EFFORT_STYLE_BY_CLI = {
     "agy": None,
     "claude": "flag",
     "codex": "config",
-    "gemini": None,
 }
-KNOWN_LIVE_CLI_NAMES = {"agy", "claude", "codex", "gemini"}
+SUPPORTED_CONFIG_CLI_NAMES = ("agy", "claude", "codex")
+REMOVED_CONFIG_CLI_NAMES = frozenset({"gemini"})
+KNOWN_LIVE_CLI_NAMES = set(SUPPORTED_CONFIG_CLI_NAMES)
 DEFAULT_RESUME_MODE_BY_CLI = {
     "agy": "flag",
     "claude": "flag",
     "codex": "subcommand",
-    "gemini": "flag",
 }
 DEFAULT_RESUME_FLAG_BY_CLI = {
     "agy": "--conversation",
     "claude": "--resume",
-    "gemini": "--conversation",
 }
 DEFAULT_RESUME_SUBCOMMAND_BY_CLI = {
     "codex": "resume",
@@ -1187,6 +1185,11 @@ def _role_from_json(project: str, raw: dict[str, Any], *, base: Path, default_wo
     else:
         workdir = str(_expand_path(str(workdir_raw), base=base))
     cli_name = _command_name(cli[0])
+    if cli_name in REMOVED_CONFIG_CLI_NAMES:
+        raise SystemExit(
+            f"role {role} cli {cli_name!r} is not supported; "
+            f"supported clis: {', '.join(SUPPORTED_CONFIG_CLI_NAMES)}"
+        )
     resume_mode = str(raw.get("resume_mode") or DEFAULT_RESUME_MODE_BY_CLI.get(cli_name, "flag")).strip()
     resume_flag = str(raw.get("resume_flag") or DEFAULT_RESUME_FLAG_BY_CLI.get(cli_name, "--resume")).strip()
     resume_subcommand = str(raw.get("resume_subcommand") or DEFAULT_RESUME_SUBCOMMAND_BY_CLI.get(cli_name, "resume")).strip()
@@ -1842,7 +1845,7 @@ def _resume_args_for_role(role: RoleConfig, session_id: str) -> list[str]:
 
 def _uses_agy_conversation_resume(role: RoleConfig) -> bool:
     cli_name = _command_name(role.cli[0]) if role.cli else ""
-    return cli_name in {"agy", "gemini"} and role.resume_mode == "flag" and role.resume_flag == "--conversation"
+    return cli_name == "agy" and role.resume_mode == "flag" and role.resume_flag == "--conversation"
 
 
 def _uses_claude_resume(role: RoleConfig) -> bool:
@@ -1954,7 +1957,7 @@ def _resume_preflight_allows_attempt(role: RoleConfig, session_id: str, *, sessi
     return (
         False,
         (
-            f"team-launcher: recorded agy/gemini conversation {session_id} for {role.role} "
+            f"team-launcher: recorded agy conversation {session_id} for {role.role} "
             "is not present in the local Antigravity store; starting fresh instead of relying "
             "on agy --conversation, which silently falls back when the id is missing"
         ),
@@ -5227,7 +5230,7 @@ FIRST_RUN_AUTH_LOGIN_COMMANDS: dict[str, list[str]] = {
     "claude": ["claude", "auth", "login"],
     "codex": ["codex", "login"],
 }
-FIRST_RUN_TRUST_CLIS = frozenset({"agy", "claude", "gemini"})
+FIRST_RUN_TRUST_CLIS = frozenset({"agy", "claude"})
 
 
 def _slug_from_project_name(name: str) -> str:
@@ -5726,7 +5729,7 @@ def _trust_path_candidates(workdir: Path) -> list[str]:
 def _workdir_is_trusted(cli: str, *, owner_home: Path, workdir: Path) -> bool:
     if cli == "claude":
         return _claude_workdir_is_trusted(owner_home, workdir)
-    if cli in {"agy", "gemini"}:
+    if cli == "agy":
         return _agy_workdir_is_trusted(owner_home, workdir)
     return True
 

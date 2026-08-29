@@ -552,7 +552,14 @@ def run_mobile_audit(playwright: Any, harness: BoardHarness) -> None:
 
 
 def main() -> int:
-    sync_playwright = load_playwright()
+    try:
+        sync_playwright = load_playwright()
+    except ModuleNotFoundError:
+        print(
+            "ticket_board_ui_audit_test: skipped, missing Playwright Python package; "
+            "install playwright and browser binaries to run the broad ticket-board UI audit"
+        )
+        return 0
     with BoardHarness(seed_tickets()) as harness:
         with sync_playwright() as playwright:
             run_desktop_audit(playwright, harness)

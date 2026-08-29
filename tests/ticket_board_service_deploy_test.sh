@@ -551,4 +551,62 @@ if grep -q '^system:start pgu-ticket-board-canary.service$' "$LOGFILE"; then
     exit 1
 fi
 
+missing_candidate_path_resolved="$(dirname "$candidate_unit_resolved")/otto-ticket-board.service.boardsvc"
+cp "$candidate_unit" "$SYSTEM_UNIT_PATH"
+sha256sum "$SYSTEM_UNIT_PATH" | awk '{print $1}' >"$HASH_RECORD"
+: >"$LOGFILE"
+
+if PATH="$MOCKDIR:/usr/bin:/bin" \
+    TICKET_BOARD_SERVICE_TEST_LOG="$LOGFILE" \
+    TICKET_BOARD_SYSTEM_UNIT_PATH="$SYSTEM_UNIT_PATH" \
+    TICKET_BOARD_SYSTEM_UNIT_HASH_RECORD="$HASH_RECORD" \
+    TICKET_BOARD_SKIP_POST_DEPLOY_SOCKET_VERIFY=1 \
+    TICKET_BOARD_POLKIT_APPROVAL_USER=user \
+    TICKET_BOARD_PROJECT=otto \
+    BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
+        "$REPO_ROOT/scripts/ticket-board-service.sh" deploy-restart >"$TMPDIR_T/missing-candidate.out" 2>"$TMPDIR_T/missing-candidate.err"; then
+    echo "FAIL: deploy-restart should fail loudly when a tenant release has no production unit" >&2
+    exit 1
+fi
+grep -Fq "release contains no production system unit at expected path: $missing_candidate_path_resolved" "$TMPDIR_T/missing-candidate.err" || {
+    echo "FAIL: missing production unit failure did not name the expected path" >&2
+    cat "$TMPDIR_T/missing-candidate.err" >&2
+    exit 1
+}
+grep -q 'generic render below is diagnostic only and must not be installed' "$TMPDIR_T/missing-candidate.err" || {
+    echo "FAIL: missing production unit failure did not mark the generic render as diagnostic-only" >&2
+    cat "$TMPDIR_T/missing-candidate.err" >&2
+    exit 1
+}
+if grep -q 'candidate system unit path:' "$TMPDIR_T/missing-candidate.err"; then
+    echo "FAIL: missing production unit fallback should not label the generic render as a candidate" >&2
+    cat "$TMPDIR_T/missing-candidate.err" >&2
+    exit 1
+fi
+if grep -q 'install the candidate unit from /tmp' "$TMPDIR_T/missing-candidate.err"; then
+    echo "FAIL: missing production unit fallback must not instruct operators to install a temporary render" >&2
+    cat "$TMPDIR_T/missing-candidate.err" >&2
+    exit 1
+fi
+grep -q 'system unit drift classification: sensitive unit drift: ExecStart, ExecStartPre, RuntimeDirectory, User, WorkingDirectory' "$TMPDIR_T/missing-candidate.err" || {
+    echo "FAIL: missing production unit classification should be a clean comma-separated sensitive list" >&2
+    cat "$TMPDIR_T/missing-candidate.err" >&2
+    exit 1
+}
+grep -q -- '-User=boardsvc' "$TMPDIR_T/missing-candidate.err" || {
+    echo "FAIL: missing production unit diff did not show installed production-only User line" >&2
+    cat "$TMPDIR_T/missing-candidate.err" >&2
+    exit 1
+}
+if grep -q '^system:daemon-reload$' "$LOGFILE"; then
+    echo "FAIL: missing production unit deploy-restart must not attempt daemon-reload" >&2
+    cat "$LOGFILE" >&2
+    exit 1
+fi
+if grep -q '^system:restart otto-ticket-board.service$' "$LOGFILE"; then
+    echo "FAIL: missing production unit deploy-restart should not restart with a generic rendered unit" >&2
+    cat "$LOGFILE" >&2
+    exit 1
+fi
+
 echo "ticket_board_service_deploy_test: ok"

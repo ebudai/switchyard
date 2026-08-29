@@ -192,6 +192,19 @@ Notes:
 - For new shell-created tickets, use `/home/agent/bin/directorctl ticket-create`; it writes through the board action API.
 - Do not hand-write `PGU-N.json` files. The retired JSON store is not a board backend.
 
+Ticket board validation:
+
+- `scripts/ticket-board-test-suite` is the standard one-command validation set
+  for ticket-board changes. It discovers every `tests/ticket_board_*_test.py`
+  and `tests/ticket_board_*_test.sh`, runs all runnable suites without
+  fail-fast, and prints a per-suite PASS/FAIL/SKIP result plus a summary.
+- The runner strips live board/socket and pane-hook environment variables before
+  launching each suite, so an ambient pane environment cannot redirect tests to
+  the production board.
+- Environment-dependent skips are reported by suite name with the reason next
+  to the result. Use `--fail-on-skip` when the validation environment is
+  expected to have every dependency installed.
+
 PostgreSQL board backend:
 
 - `scripts/ticket_board/schema.sql` is the live board schema.

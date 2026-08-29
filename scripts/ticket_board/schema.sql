@@ -1068,8 +1068,10 @@ BEGIN
        AND NOT NEW.user_signoff THEN
         RAISE EXCEPTION 'user_signoff must be true before a ticket can leave user_review';
     END IF;
-    IF NEW.state = 'done' AND OLD.state NOT IN ('done', 'director_review') THEN
-        RAISE EXCEPTION 'tickets can only enter done from director_review';
+    IF NEW.state = 'done'
+       AND OLD.state <> 'done'
+       AND NOT ticket_board.workflow_transition_allowed_config(OLD.state, NEW.state) THEN
+        RAISE EXCEPTION 'tickets can only enter done through a configured transition';
     END IF;
     IF OLD.state <> 'done' AND NEW.state = 'done' AND NOT NEW.commit_exempt AND btrim(NEW.commit_hash) = '' THEN
         RAISE EXCEPTION 'commit_hash is required before a ticket can enter done';
@@ -4455,7 +4457,7 @@ DECLARE
     current_state text;
     current_assignee text;
 BEGIN
-    IF new_state NOT IN ('draft', 'backlog', 'analysis', 'in_progress', 'inspection', 'audit', 'dat', 'user_review', 'director_review', 'done', 'cancelled') THEN
+    IF NOT EXISTS (SELECT 1 FROM ticket_board.workflow_stages WHERE name = new_state) THEN
         RAISE EXCEPTION 'invalid state: %', new_state;
     END IF;
     IF NOT ticket_board.ticket_valid_assignee(assignee) THEN
@@ -4540,7 +4542,7 @@ DECLARE
     serial_focus_queued boolean := false;
 BEGIN
     actor := ticket_board.require_actor(ARRAY['director'], 'force_move');
-    IF new_state NOT IN ('draft', 'backlog', 'analysis', 'in_progress', 'inspection', 'audit', 'dat', 'user_review', 'director_review', 'done', 'cancelled') THEN
+    IF NOT EXISTS (SELECT 1 FROM ticket_board.workflow_stages WHERE name = new_state) THEN
         RAISE EXCEPTION 'invalid state: %', new_state;
     END IF;
     IF NOT ticket_board.ticket_valid_assignee(assignee) THEN

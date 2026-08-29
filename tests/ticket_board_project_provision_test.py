@@ -73,6 +73,7 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "TICKET_BOARD_IMPLEMENTER_ROLES=app,main" in combined
     assert "TICKET_BOARD_ASSIGNEES=unassigned,designer,app,main,audit,director,user" in combined
     assert "TICKET_BOARD_CALLER_ROLES=director,designer,app,main,audit,user" in combined
+    assert "TICKET_BOARD_OPERATION_ALLOWED_ROLES=" not in combined
     assert "TICKET_BOARD_PANE_STATE_DIR=%t/stellaris-ticket-board/pane-state" in combined
     assert (
         "sudo -u 'stellaris-agent' -H env XDG_RUNTIME_DIR=\"$owner_runtime_dir\" "
@@ -138,6 +139,38 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "/home/agent/.claude/pgu-tickets-assets" not in combined
     assert "RuntimeDirectory=pgu-ticket-board" not in combined
     assert "/run/pgu-ticket-board/ticket-board.sock" not in combined
+
+
+def test_non_pgu_project_can_insert_vcs_stage_owned_by_ops() -> None:
+    plan = build_plan(
+        project="stellaris",
+        owner_user="stellaris-agent",
+        port=8871,
+        implementer_roles=("ops",),
+        vcs_close_role="ops",
+    )
+
+    board_unit = render_board_unit(plan)
+    workflow_sql = render_workflow_sql(plan)
+
+    assert plan.operation_allowed_roles == (("mark_done", ("ops",)),)
+    assert "Environment=TICKET_BOARD_OPERATION_ALLOWED_ROLES=mark_done=ops" in board_unit
+    assert "('vcs', 'VCS', 7, ARRAY['ops']::text[], NULL, NULL, NULL, false)" in workflow_sql
+    assert "('done', 'Done', 10, ARRAY[]::text[], NULL, NULL, NULL, true)" in workflow_sql
+    assert "('cancelled', 'Cancelled', 11, ARRAY[]::text[], NULL, NULL, NULL, true)" in workflow_sql
+    assert "('director_review', 'vcs', 'route', ARRAY['director']::text[]" in workflow_sql
+    assert "('vcs', 'done', 'mark_done', ARRAY['ops']::text[]" in workflow_sql
+    assert "('director_review', 'done', 'mark_done', ARRAY['director']::text[]" not in workflow_sql
+
+
+def test_pgu_plan_rejects_vcs_close_override() -> None:
+    try:
+        build_plan(project="pgu", owner_user="agent", vcs_close_role="ops")
+        raise AssertionError("expected pgu vcs override rejection")
+    except SystemExit as exc:
+        message = str(exc)
+
+    assert "--vcs-close-role is only for provisioned projects" in message
 
 
 def test_non_pgu_project_can_omit_audit_role_and_stage() -> None:
@@ -461,6 +494,7 @@ assert server.OPERATION_ALLOWED_ROLES['start_work'] == {'builder'}
 assert server.OPERATION_ALLOWED_ROLES['submit_to_audit'] == {'builder'}
 assert 'builder' in server.OPERATION_ALLOWED_ROLES['file_bug']
 assert 'ops' not in server.OPERATION_ALLOWED_ROLES['start_work']
+assert server.OPERATION_ALLOWED_ROLES == server.DEFAULT_OPERATION_ALLOWED_ROLES
 """
     env = {
         **os.environ,
@@ -469,6 +503,26 @@ assert 'ops' not in server.OPERATION_ALLOWED_ROLES['start_work']
         "TICKET_BOARD_CALLER_ROLES": "director,designer,builder,audit,user",
         "TICKET_BOARD_DRAFT_ROLES": "designer",
         "TICKET_BOARD_IMPLEMENTER_ROLES": "builder",
+    }
+    subprocess.run([sys.executable, "-c", script], check=True, env=env)
+
+
+def test_operation_allowed_roles_environment_overrides_python_gate() -> None:
+    script = """
+from scripts.ticket_board import server
+
+assert server.OPERATION_ALLOWED_ROLES['mark_done'] == {'ops'}
+assert server.OPERATION_ALLOWED_ROLES['route'] == {'director'}
+assert server.DEFAULT_OPERATION_ALLOWED_ROLES['mark_done'] == {'director'}
+assert server.OPERATION_ALLOWED_ROLES != server.DEFAULT_OPERATION_ALLOWED_ROLES
+"""
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(ROOT),
+        "TICKET_BOARD_ASSIGNEES": "unassigned,ops,director,user",
+        "TICKET_BOARD_CALLER_ROLES": "director,ops,user",
+        "TICKET_BOARD_IMPLEMENTER_ROLES": "ops",
+        "TICKET_BOARD_OPERATION_ALLOWED_ROLES": "mark_done=ops",
     }
     subprocess.run([sys.executable, "-c", script], check=True, env=env)
 

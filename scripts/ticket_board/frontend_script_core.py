@@ -326,6 +326,9 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         return 'director_review';
       }
       if (ticket.state === 'director_review') {
+        return hasState('vcs') ? 'vcs' : 'done';
+      }
+      if (ticket.state === 'vcs') {
         return 'done';
       }
       return null;

@@ -137,6 +137,7 @@ class TicketBoardApp:
         self.store_backend = "postgres"
         self.database_url = database_url
         self.ticket_prefix = ticket_prefix_for_project()
+        self._workflow_states_cache: tuple[str, ...] | None = None
         self.asset_dir.mkdir(parents=True, exist_ok=True)
 
     def snapshot(self) -> dict[str, object]:
@@ -146,10 +147,11 @@ class TicketBoardApp:
         except Exception as exc:  # noqa: BLE001
             errors = [*errors, {"file": "postgres", "error": str(exc)}]
             columns = [{"key": state, "label": state} for state in STATES]
+        states = [column["key"] for column in columns] or list(STATES)
         return {
             "tickets": tickets,
             "errors": errors,
-            "states": list(STATES),
+            "states": states,
             "columns": columns,
             "assignees": list(ASSIGNEES),
             "caller_roles": list(CALLER_ROLES),
@@ -1449,9 +1451,23 @@ SELECT EXISTS (
 
     def _validate_state(self, state: str) -> str:
         state = LEGACY_STATE_ALIASES.get(state, state)
-        if state not in STATES:
+        if state not in self._workflow_state_names():
             raise ValueError(f"invalid state: {state}")
         return state
+
+    def _workflow_state_names(self) -> tuple[str, ...]:
+        if self._workflow_states_cache is not None:
+            return self._workflow_states_cache
+        try:
+            with self._pg_connect() as conn:
+                rows = conn.execute("SELECT name FROM ticket_board.workflow_stages ORDER BY rank;").fetchall()
+        except Exception as exc:  # noqa: BLE001
+            if self.database_url:
+                raise RuntimeError("could not load configured workflow states") from exc
+            return STATES
+        states = tuple(str(row["name"]) for row in rows)
+        self._workflow_states_cache = states or STATES
+        return self._workflow_states_cache
 
     def _validate_assignee(self, assignee: str) -> str:
         assignee = LEGACY_ASSIGNEE_ALIASES.get(assignee, assignee)

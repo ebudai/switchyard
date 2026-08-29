@@ -10,6 +10,18 @@ scripts/ticket-board-provision-project \
   --output-dir /tmp/stellaris-board-provision
 ```
 
+Projects that want source-control work after final sign-off can insert a VCS
+stage and make a project role responsible for the terminal close:
+
+```bash
+scripts/ticket-board-provision-project \
+  --project stellaris \
+  --owner-user stellaris-agent \
+  --implementer-role ops \
+  --vcs-close-role ops \
+  --output-dir /tmp/stellaris-board-provision
+```
+
 The output directory contains:
 
 - `plan.json`: resolved project name, owner, port, database, unit names, socket,
@@ -27,9 +39,15 @@ The output directory contains:
   The generated `Audit` stage uses `entry_gate_field=needs_audit` and
   `gate_skip_to=dat`, so each ticket can opt out of audit while still using
   the same workflow gate machinery as inspection and UAT.
-  The default implementation-stage owner is the generic caller role
-  `implementer`; pass `--implementer-role <role>` more than once to seed a
-  project-specific implementer set instead.
+  Passing `--vcs-close-role <role>` inserts a `VCS` stage after
+  `Final Sign-Off`, routes final-signoff tickets there by director action, and
+  changes the generated terminal `mark_done` workflow transition to
+  `<role> -> done`. The board service unit also exports
+  `TICKET_BOARD_OPERATION_ALLOWED_ROLES=mark_done=<role>` so the HTTP gate
+  permits that deployment-specific close request to reach the database.
+  The default implementation-stage owners are `app` and `main`; pass
+  `--implementer-role <role>` more than once to seed a project-specific
+  implementer set instead.
 - `operator-commands.sh`: ordered privileged commands to review and run.
 
 The provisioner intentionally renders first. It does not mutate the live PGU
@@ -69,3 +87,11 @@ Workflow authority role names are still `director`, optional `audit`, and
 those are project/team specific; the board service exports the generated
 assignee, caller-role, and implementer-role lists to keep the HTTP gate and
 PostgreSQL workflow data aligned.
+
+`TICKET_BOARD_OPERATION_ALLOWED_ROLES` is an optional HTTP preflight override
+for deployment-specific operations. Its format is
+`operation=role,role;other_operation=role`. Unset keeps the built-in operation
+map unchanged. The setting can only decide which callers are allowed past the
+HTTP route check; PostgreSQL `workflow_transitions.allowed_roles` remains the
+authority for ticket state changes, so the env map cannot grant a transition
+the workflow table rejects.

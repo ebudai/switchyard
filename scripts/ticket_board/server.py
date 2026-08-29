@@ -60,7 +60,7 @@ def _role_set_from_env(name: str, default: tuple[str, ...]) -> set[str]:
 IMPLEMENTER_ROLES = _role_set_from_env("TICKET_BOARD_IMPLEMENTER_ROLES", DEFAULT_IMPLEMENTER_ROLES)
 DRAFT_ROLES = _role_set_from_env("TICKET_BOARD_DRAFT_ROLES", ())
 TASK_ROLES = IMPLEMENTER_ROLES | {"director", "audit", "inspector"}
-OPERATION_ALLOWED_ROLES = {
+DEFAULT_OPERATION_ALLOWED_ROLES = {
     "create_ticket": {"director", "user"},
     "file_bug": IMPLEMENTER_ROLES | {"audit"},
     "release_draft": DRAFT_ROLES | {"director", "user"},
@@ -94,6 +94,66 @@ OPERATION_ALLOWED_ROLES = {
     "crop_attachment": {"director", "user"},
     "merge": {"director"},
 }
+
+
+def _copy_operation_role_map(source: Mapping[str, set[str]]) -> dict[str, set[str]]:
+    return {operation: set(roles) for operation, roles in source.items()}
+
+
+def _operation_roles_from_value(value: object, *, operation: str) -> set[str]:
+    if isinstance(value, str):
+        roles = {item.strip().lower() for item in value.split(",") if item.strip()}
+    elif isinstance(value, list):
+        roles = set()
+        for item in value:
+            if not isinstance(item, str):
+                raise RuntimeError(f"operation role config for {operation} must contain only role strings")
+            normalized = item.strip().lower()
+            if normalized:
+                roles.add(normalized)
+    else:
+        raise RuntimeError(f"operation role config for {operation} must be a comma-list or string list")
+    unknown_roles = roles - CALLER_ROLES
+    if unknown_roles:
+        raise RuntimeError(f"operation role config for {operation} references unknown caller roles: {sorted(unknown_roles)}")
+    return roles
+
+
+def _operation_role_map_from_env(name: str, default: Mapping[str, set[str]]) -> dict[str, set[str]]:
+    roles_by_operation = _copy_operation_role_map(default)
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return roles_by_operation
+    if raw.startswith("{"):
+        decoded = json.loads(raw)
+        if not isinstance(decoded, dict):
+            raise RuntimeError(f"{name} must be a JSON object or operation=roles list")
+        entries = decoded.items()
+    else:
+        parsed: list[tuple[str, str]] = []
+        for chunk in re.split(r"[;\n]+", raw):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            if "=" not in chunk:
+                raise RuntimeError(f"{name} entry must be operation=role,role: {chunk}")
+            operation, roles = chunk.split("=", 1)
+            parsed.append((operation.strip(), roles.strip()))
+        entries = parsed
+    for operation, value in entries:
+        if not isinstance(operation, str):
+            raise RuntimeError(f"{name} operation names must be strings")
+        normalized_operation = operation.strip()
+        if normalized_operation not in roles_by_operation:
+            raise RuntimeError(f"{name} references unknown operation: {normalized_operation}")
+        roles_by_operation[normalized_operation] = _operation_roles_from_value(value, operation=normalized_operation)
+    return roles_by_operation
+
+
+OPERATION_ALLOWED_ROLES = _operation_role_map_from_env(
+    "TICKET_BOARD_OPERATION_ALLOWED_ROLES",
+    DEFAULT_OPERATION_ALLOWED_ROLES,
+)
 EDIT_FIELD_NAMES = {
     "title",
     "body",

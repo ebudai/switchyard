@@ -55,6 +55,7 @@ class ProjectBoardProvision:
     implementer_roles: tuple[str, ...]
     assignee_roles: tuple[str, ...]
     caller_roles: tuple[str, ...]
+    operation_allowed_roles: tuple[tuple[str, tuple[str, ...]], ...]
     board_service_traversal: bool
 
 
@@ -128,6 +129,7 @@ def build_plan(
     board_service_traversal: bool = True,
     include_designer: bool = True,
     include_audit: bool = True,
+    vcs_close_role: str | None = None,
 ) -> ProjectBoardProvision:
     project = _validate_project(project)
     owner_user = _validate_user(owner_user)
@@ -146,7 +148,10 @@ def build_plan(
         if not resolved_implementer_roles:
             raise SystemExit("at least one implementer role is required")
     resolved_implementer_roles = _dedupe(resolved_implementer_roles)
+    resolved_vcs_close_role = _validate_role(vcs_close_role) if vcs_close_role else ""
     if project == "pgu":
+        if resolved_vcs_close_role:
+            raise SystemExit("pgu uses the full built-in workflow; --vcs-close-role is only for provisioned projects")
         draft_roles: tuple[str, ...] = ()
         assignee_roles = DEFAULT_PGU_ASSIGNEES
         caller_roles = DEFAULT_PGU_CALLER_ROLES
@@ -169,6 +174,11 @@ def build_plan(
         caller_roles = _dedupe(
             ("director", *draft_roles, *DEFAULT_PROJECT_SUPPORT_ROLES, *resolved_implementer_roles, *audit_roles, "user")
         )
+    operation_allowed_roles: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    if resolved_vcs_close_role:
+        if resolved_vcs_close_role not in assignee_roles or resolved_vcs_close_role not in caller_roles:
+            raise SystemExit("--vcs-close-role must be one of the configured project roles")
+        operation_allowed_roles = (("mark_done", (resolved_vcs_close_role,)),)
     ident = _identifier_from_project(project)
     unit_prefix = f"{project}-ticket-board"
     runtime_directory = unit_prefix
@@ -221,6 +231,7 @@ def build_plan(
         implementer_roles=resolved_implementer_roles,
         assignee_roles=assignee_roles,
         caller_roles=caller_roles,
+        operation_allowed_roles=operation_allowed_roles,
         board_service_traversal=board_service_traversal,
     )
 
@@ -254,6 +265,10 @@ def env_list(values: Sequence[str]) -> str:
     return ",".join(values)
 
 
+def env_operation_role_map(values: Sequence[tuple[str, Sequence[str]]]) -> str:
+    return ";".join(f"{operation}={env_list(roles)}" for operation, roles in values)
+
+
 def owned_ancestor_dirs(owner_user: str, target: str, *, include_target: bool) -> tuple[str, ...]:
     home = PurePosixPath("/home") / owner_user
     path = PurePosixPath(target)
@@ -280,6 +295,12 @@ def owned_directory_command(plan: ProjectBoardProvision, dirs: Sequence[str], *,
 
 
 def render_board_unit(plan: ProjectBoardProvision) -> str:
+    operation_allowed_roles = env_operation_role_map(plan.operation_allowed_roles)
+    operation_allowed_roles_line = (
+        f"Environment=TICKET_BOARD_OPERATION_ALLOWED_ROLES={operation_allowed_roles}\n"
+        if operation_allowed_roles
+        else ""
+    )
     return f"""[Unit]
 Description={plan.project} Ticket Board
 After=network.target postgresql.service
@@ -306,7 +327,7 @@ Environment=TICKET_BOARD_DRAFT_ROLES={env_list(plan.draft_roles)}
 Environment=TICKET_BOARD_IMPLEMENTER_ROLES={env_list(plan.implementer_roles)}
 Environment=TICKET_BOARD_ASSIGNEES={env_list(plan.assignee_roles)}
 Environment=TICKET_BOARD_CALLER_ROLES={env_list(plan.caller_roles)}
-NoNewPrivileges=true
+{operation_allowed_roles_line}NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=read-only
 ReadWritePaths={plan.asset_dir} {plan.frame_dir}
@@ -412,9 +433,45 @@ COMMENT ON DATABASE {db_ident} IS 'ticket board database for project {plan.proje
 """
 
 
+def project_workflow_state_names(plan: ProjectBoardProvision) -> tuple[str, ...]:
+    if plan.workflow_seed == "pgu-full":
+        return (
+            "draft",
+            "backlog",
+            "analysis",
+            "in_progress",
+            "inspection",
+            "audit",
+            "dat",
+            "user_review",
+            "director_review",
+            "done",
+            "cancelled",
+        )
+    states = ["draft", "analysis", "in_progress"]
+    if "audit" in plan.assignee_roles:
+        states.extend(["audit", "dat", "user_review"])
+    states.append("director_review")
+    if dict(plan.operation_allowed_roles).get("mark_done"):
+        states.append("vcs")
+    states.extend(["done", "cancelled"])
+    return tuple(states)
+
+
 def render_project_role_constraint_sql(plan: ProjectBoardProvision) -> str:
     notification_roles = tuple(role for role in plan.assignee_roles if role not in {"unassigned", "agent", "user"})
+    state_names = project_workflow_state_names(plan)
     return f"""
+ALTER TABLE ticket_board.workflow_stages
+    DROP CONSTRAINT IF EXISTS workflow_stages_name_check;
+ALTER TABLE ticket_board.workflow_stages
+    ADD CONSTRAINT workflow_stages_name_check CHECK (name IN ({", ".join(sql_literal(state) for state in state_names)}));
+
+ALTER TABLE ticket_board.tickets
+    DROP CONSTRAINT IF EXISTS tickets_state_check;
+ALTER TABLE ticket_board.tickets
+    ADD CONSTRAINT tickets_state_check CHECK (state IN ({", ".join(sql_literal(state) for state in state_names)}));
+
 ALTER TABLE ticket_board.tickets
     DROP CONSTRAINT IF EXISTS tickets_assignee_check;
 ALTER TABLE ticket_board.tickets
@@ -458,6 +515,9 @@ def render_workflow_sql(plan: ProjectBoardProvision) -> str:
         else plan.implementer_roles
     )
     include_audit = "audit" in plan.assignee_roles
+    mark_done_roles = dict(plan.operation_allowed_roles).get("mark_done", ())
+    has_vcs_close = bool(mark_done_roles)
+    vcs_close_role = mark_done_roles[0] if has_vcs_close else ""
     stages = [
         ("draft", "Draft", 0, plan.draft_roles, None, None, None, False),
         ("analysis", "Triage", 1, ("director",), None, None, None, False),
@@ -472,8 +532,9 @@ def render_workflow_sql(plan: ProjectBoardProvision) -> str:
             else []
         ),
         ("director_review", "Final Sign-Off", 6 if include_audit else 3, ("director",), None, None, None, False),
-        ("done", "Done", 9, (), None, None, None, True),
-        ("cancelled", "Cancelled", 10, (), None, None, None, True),
+        *([("vcs", "VCS", 7 if include_audit else 4, (vcs_close_role,), None, None, None, False)] if has_vcs_close else []),
+        ("done", "Done", 10 if has_vcs_close else 9, (), None, None, None, True),
+        ("cancelled", "Cancelled", 11 if has_vcs_close else 10, (), None, None, None, True),
     ]
     audit_transitions = [
         ("in_progress", "audit", "route", ("director",), False, False),
@@ -514,7 +575,14 @@ def render_workflow_sql(plan: ProjectBoardProvision) -> str:
         ("director_review", "analysis", "route", ("director",), False, False),
         ("director_review", "analysis", "user_reopen", ("user",), False, False),
         ("director_review", "in_progress", "route", ("director",), False, False),
-        ("director_review", "done", "mark_done", ("director",), False, False),
+        *(
+            [
+                ("director_review", "vcs", "route", ("director",), False, False),
+                ("vcs", "done", "mark_done", (vcs_close_role,), False, False),
+            ]
+            if has_vcs_close
+            else [("director_review", "done", "mark_done", ("director",), False, False)]
+        ),
         ("director_review", "cancelled", "cancel", ("director",), False, False),
         ("done", "analysis", "route", ("director",), False, False),
         ("done", "analysis", "user_reopen", ("user",), False, False),
@@ -563,11 +631,12 @@ BEGIN
     END IF;
 END;
 $$;
-{render_project_role_constraint_sql(plan)}
 
 DELETE FROM ticket_board.workflow_transitions;
 UPDATE ticket_board.workflow_stages SET gate_skip_to = NULL WHERE gate_skip_to IS NOT NULL;
 DELETE FROM ticket_board.workflow_stages;
+
+{render_project_role_constraint_sql(plan)}
 
 INSERT INTO ticket_board.workflow_stages (
     name,
@@ -800,6 +869,10 @@ def _build_parser() -> argparse.ArgumentParser:
         default=True,
         help="include the optional audit role and audit workflow stage",
     )
+    parser.add_argument(
+        "--vcs-close-role",
+        help="insert a VCS stage after final sign-off and allow this role to mark tickets done",
+    )
     parser.add_argument("--output-dir", type=Path, help="write all artifacts to this directory")
     parser.add_argument("--json", action="store_true", help="print plan JSON")
     parser.add_argument(
@@ -829,6 +902,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         board_service_traversal=args.board_service_traversal,
         include_designer=args.include_designer,
         include_audit=args.include_audit,
+        vcs_close_role=args.vcs_close_role,
     )
     if args.output_dir:
         write_artifacts(plan, args.output_dir)

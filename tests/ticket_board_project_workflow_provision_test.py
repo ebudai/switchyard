@@ -840,6 +840,73 @@ SELECT ticket_board.create_ticket('Audit-less workflow ticket', 'Body', 'analysi
 
             service_call(noaudit_service_conn, "director", f"SELECT ticket_board.mark_done('{noaudit_ticket_id}', '123abcd');")
             assert psql(noaudit_admin_conn, f"SELECT state FROM ticket_board.tickets WHERE id = '{noaudit_ticket_id}';") == "done"
+
+            vcs_dbname = "project_workflow_vcs"
+            run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", vcs_dbname])
+            vcs_admin_conn = conninfo(socket_dir, port, vcs_dbname)
+            vcs_service_conn = conninfo(socket_dir, port, vcs_dbname, "ticket_board_service")
+            psql(vcs_admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
+            run_migrations(vcs_admin_conn)
+            vcs_plan = build_plan(
+                project="ship",
+                owner_user="ship-agent",
+                database=vcs_dbname,
+                include_designer=False,
+                include_audit=False,
+                implementer_roles=("ops",),
+                vcs_close_role="ops",
+            )
+            psql(vcs_admin_conn, render_workflow_sql(vcs_plan))
+            psql(vcs_admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
+            assert psql(
+                vcs_admin_conn,
+                "SELECT owner_roles::text || ':' || rank::text FROM ticket_board.workflow_stages WHERE name = 'vcs';",
+            ) == "{ops}:4"
+            assert psql(
+                vcs_admin_conn,
+                """
+SELECT allowed_roles::text
+FROM ticket_board.workflow_transitions
+WHERE from_stage = 'vcs' AND to_stage = 'done' AND action_name = 'mark_done';
+""",
+            ) == "{ops}"
+            assert psql(
+                vcs_admin_conn,
+                """
+SELECT count(*)
+FROM ticket_board.workflow_transitions
+WHERE from_stage = 'director_review' AND to_stage = 'done' AND action_name = 'mark_done';
+""",
+            ) == "0"
+            vcs_ticket_id = service_call(
+                vcs_service_conn,
+                "director",
+                """
+SELECT set_config('ticket_board.ticket_prefix', 'SHIP', false);
+SELECT ticket_board.create_ticket('Provisioned VCS close ticket', 'Body', 'analysis');
+""",
+            )
+            service_call(vcs_service_conn, "director", f"SELECT ticket_board.route('{vcs_ticket_id}', 'in_progress', 'ops');")
+            service_call(vcs_service_conn, "ops", f"SELECT ticket_board.submit_to_audit('{vcs_ticket_id}', 'abc7690');")
+            assert (
+                psql(vcs_admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{vcs_ticket_id}';")
+                == "director_review:director"
+            )
+            assert "role director cannot call mark_done" in service_call_fails(
+                vcs_service_conn,
+                "director",
+                f"SELECT ticket_board.mark_done('{vcs_ticket_id}', 'abc7690');",
+            )
+            service_call(vcs_service_conn, "director", f"SELECT ticket_board.route('{vcs_ticket_id}', 'vcs', 'ops');")
+            assert (
+                psql(vcs_admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{vcs_ticket_id}';")
+                == "vcs:ops"
+            )
+            service_call(vcs_service_conn, "ops", f"SELECT ticket_board.mark_done('{vcs_ticket_id}', 'abc7690');")
+            assert (
+                psql(vcs_admin_conn, f"SELECT state || ':' || assignee || ':' || commit_hash FROM ticket_board.tickets WHERE id = '{vcs_ticket_id}';")
+                == "done:ops:abc7690"
+            )
         finally:
             subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 

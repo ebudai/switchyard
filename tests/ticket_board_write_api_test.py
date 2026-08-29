@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -1716,6 +1717,20 @@ WHERE id = 'PGU-141';
     assert empty_user_reopened["ticket"]["state"] == "analysis", empty_user_reopened  # type: ignore[index]
     assert empty_user_reopened["ticket"]["comments"] == [], empty_user_reopened  # type: ignore[index]
 
+    original_mark_done_roles = set(OPERATION_ALLOWED_ROLES["mark_done"])
+    OPERATION_ALLOWED_ROLES["mark_done"] = {"ops"}
+    try:
+        widened_http_map_done = post_json(
+            base_url,
+            "/api/tickets/PGU-106/actions/mark_done",
+            {"commit_hash": commit_hash},
+            caller="ops",
+            expect=400,
+        )
+        assert "role ops cannot call mark_done" in str(widened_http_map_done), widened_http_map_done
+    finally:
+        OPERATION_ALLOWED_ROLES["mark_done"] = original_mark_done_roles
+
     done = post_json(base_url, "/api/tickets/PGU-106/actions/mark_done", {"commit_hash": commit_hash}, caller="director")
     assert done["ticket"]["state"] == "done", done  # type: ignore[index]
     non_exempt_empty_done = post_json(
@@ -1920,6 +1935,107 @@ def exercise_real_write_client_file_bug_payload(app: TicketBoardApp, socket_path
         thread.join(timeout=2)
 
 
+def assert_env_widening_cannot_bypass_database_workflow_rbac() -> None:
+    script = r"""
+import tempfile
+import threading
+import subprocess
+from pathlib import Path
+
+import tests.ticket_board_write_api_test as t
+
+commit_hash = t.main_commit()
+with tempfile.TemporaryDirectory(prefix="ticket-board-write-api-env-rbac.") as tmpdir:
+    root = Path(tmpdir)
+    data_dir = root / "pgdata"
+    socket_dir = root / "socket"
+    frames = root / "frames"
+    assets = root / "assets"
+    socket_dir.mkdir()
+    frames.mkdir()
+    assets.mkdir()
+    port = t.free_port()
+    dbname = "pgu_write_api_env_rbac_test"
+    admin_conn = t.conninfo(socket_dir, port, dbname)
+    t.run(["initdb", "-D", str(data_dir), "-A", "trust", "--no-locale", "--username=postgres"])
+    try:
+        t.run(["pg_ctl", "-D", str(data_dir), "-o", f"-k {socket_dir} -p {port} -h ''", "-w", "start"], capture=False)
+        t.run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
+        t.psql(admin_conn, t.SCHEMA_PATH.read_text(encoding="utf-8"))
+        t.create_roles(admin_conn)
+        t.psql(admin_conn, t.RBAC_PATH.read_text(encoding="utf-8"))
+        t.seed_fixtures(lambda ticket_id, **kwargs: t.seed_postgres_ticket(admin_conn, ticket_id, **kwargs), commit_hash)
+        assert "ops" in t.OPERATION_ALLOWED_ROLES["route"]
+        assert "ops" in t.OPERATION_ALLOWED_ROLES["mark_done"]
+        assert "ops" in t.OPERATION_ALLOWED_ROLES["force_move"]
+        app = t.TicketBoardApp(
+            frames,
+            assets,
+            database_url=t.conninfo(socket_dir, port, dbname, t.SERVICE_ROLE),
+        )
+        server = t.TicketBoardServer(
+            ("127.0.0.1", 0),
+            app,
+            director_notifier=t.QuietNotifier(),
+            report_token=t.TEST_REPORT_TOKEN,
+        )
+        t.TEST_WRITE_TOKEN = server.write_token
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            base_url = f"http://127.0.0.1:{server.server_port}"
+            before_route = t.psql(admin_conn, "SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = 'PGU-100';")
+            route_denied = t.post_json(
+                base_url,
+                "/api/tickets/PGU-100/actions/route",
+                {"state": "in_progress", "assignee": "ops"},
+                caller="ops",
+                expect=400,
+            )
+            assert "role ops cannot call route" in str(route_denied), route_denied
+            assert t.psql(admin_conn, "SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = 'PGU-100';") == before_route
+
+            before_done = t.psql(admin_conn, "SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = 'PGU-106';")
+            mark_done_denied = t.post_json(
+                base_url,
+                "/api/tickets/PGU-106/actions/mark_done",
+                {"commit_hash": commit_hash},
+                caller="ops",
+                expect=400,
+            )
+            assert "role ops cannot call mark_done" in str(mark_done_denied), mark_done_denied
+            assert t.psql(admin_conn, "SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = 'PGU-106';") == before_done
+
+            before_force_move = t.psql(admin_conn, "SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = 'PGU-129';")
+            force_move_denied = t.post_json(
+                base_url,
+                "/api/tickets/PGU-129/actions/force_move",
+                {"state": "in_progress", "assignee": "ops"},
+                caller="ops",
+                expect=400,
+            )
+            assert "role ops cannot call force_move" in str(force_move_denied), force_move_denied
+            assert t.psql(admin_conn, "SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = 'PGU-129';") == before_force_move
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+    finally:
+        subprocess.run(
+            ["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+"""
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(ROOT),
+        "TICKET_BOARD_OPERATION_ALLOWED_ROLES": "route=ops,director;mark_done=ops,director;force_move=ops,director",
+    }
+    subprocess.run([sys.executable, "-c", script], check=True, env=env)
+
+
 def exercise_postgres_backend(commit_hash: str) -> None:
     with tempfile.TemporaryDirectory(prefix="ticket-board-write-api-postgres.") as tmpdir:
         root = Path(tmpdir)
@@ -1992,6 +2108,7 @@ def main() -> int:
     commit_hash = main_commit()
     assert_frontend_update_calls_send_caller_role()
     assert_frontend_writes_send_auth_token()
+    assert_env_widening_cannot_bypass_database_workflow_rbac()
     exercise_postgres_backend(commit_hash)
     print("ticket_board_write_api_test: ok")
     return 0

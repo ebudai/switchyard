@@ -68,6 +68,8 @@ CREATE TABLE IF NOT EXISTS ticket_board.tickets (
     -- for "no parent" on newer tickets, while older tickets omit parent_id.
     parent_id text NOT NULL DEFAULT ''
         CHECK (parent_id = '' OR parent_id ~ '^[A-Z][A-Z0-9]*-[0-9]+$'),
+    origin_project text NOT NULL DEFAULT '',
+    external_source_ref text NOT NULL DEFAULT '',
     blocked_reason text NOT NULL DEFAULT '',
 
     implementation text NOT NULL DEFAULT '',
@@ -135,6 +137,10 @@ ALTER TABLE ticket_board.tickets
     ADD COLUMN IF NOT EXISTS inspector_signoff boolean NOT NULL DEFAULT false;
 ALTER TABLE ticket_board.tickets
     ADD COLUMN IF NOT EXISTS regression boolean NOT NULL DEFAULT false;
+ALTER TABLE ticket_board.tickets
+    ADD COLUMN IF NOT EXISTS origin_project text NOT NULL DEFAULT '';
+ALTER TABLE ticket_board.tickets
+    ADD COLUMN IF NOT EXISTS external_source_ref text NOT NULL DEFAULT '';
 ALTER TABLE ticket_board.tickets
     DROP CONSTRAINT IF EXISTS tickets_state_check;
 ALTER TABLE ticket_board.tickets
@@ -3790,6 +3796,8 @@ BEGIN
         'blocked_by', blocked_by,
         'blockers', blockers,
         'parent_id', ticket_row.parent_id,
+        'origin_project', ticket_row.origin_project,
+        'external_source_ref', ticket_row.external_source_ref,
         'blocked_reason', ticket_row.blocked_reason,
         'implementation', ticket_row.implementation,
         'audit_prompt', ticket_row.audit_prompt,
@@ -4192,6 +4200,85 @@ SECURITY DEFINER
 SET search_path = ticket_board, pg_temp
 AS $$
     SELECT ticket_board.create_ticket(title, body, 'analysis');
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.file_report(
+    title text,
+    body text,
+    origin_project text,
+    external_source_ref text
+)
+RETURNS text
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    ticket_id text;
+    normalized_origin_project text := btrim(coalesce(origin_project, ''));
+    normalized_external_source_ref text := btrim(coalesce(external_source_ref, ''));
+    created_at_value timestamptz := clock_timestamp();
+    created_text_value text := ticket_board.utc_text(created_at_value);
+BEGIN
+    PERFORM ticket_board.require_actor(ARRAY[]::text[], 'file_report');
+    IF btrim(coalesce(title, '')) = '' THEN
+        RAISE EXCEPTION 'title must be non-empty';
+    END IF;
+    IF normalized_origin_project = '' THEN
+        RAISE EXCEPTION 'origin_project must be non-empty';
+    END IF;
+
+    ticket_id := ticket_board.next_ticket_id();
+    INSERT INTO ticket_board.tickets (
+        id,
+        title,
+        body,
+        state,
+        assignee,
+        parent_id,
+        origin_project,
+        external_source_ref,
+        needs_audit,
+        created_text,
+        updated_text,
+        created_at,
+        updated_at,
+        source_json,
+        source_file_name
+    ) VALUES (
+        ticket_id,
+        btrim(title),
+        coalesce(body, ''),
+        'analysis',
+        'unassigned',
+        '',
+        normalized_origin_project,
+        normalized_external_source_ref,
+        true,
+        created_text_value,
+        created_text_value,
+        created_at_value,
+        created_at_value,
+        jsonb_build_object(
+            'id', ticket_id,
+            'title', btrim(title),
+            'body', coalesce(body, ''),
+            'state', 'analysis',
+            'assignee', 'unassigned',
+            'parent_id', '',
+            'origin_project', normalized_origin_project,
+            'external_source_ref', normalized_external_source_ref,
+            'needs_audit', true,
+            'comments', '[]'::jsonb,
+            'created', created_text_value,
+            'updated', created_text_value
+        ),
+        ticket_id || '.json'
+    );
+    PERFORM ticket_board.refresh_ticket_source_json(ticket_id);
+    RETURN ticket_id;
+END;
 $$;
 
 CREATE OR REPLACE FUNCTION ticket_board.file_bug(

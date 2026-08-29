@@ -20,7 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.ticket_board import write_client as write_client_module
-from scripts.ticket_board.server import CALLER_ROLE_HEADER, LEGACY_CALLER_ROLE_HEADER
+from scripts.ticket_board.server import CALLER_ROLE_HEADER, LEGACY_CALLER_ROLE_HEADER, REPORT_TOKEN_HEADER
 from scripts.ticket_board.write_client import TicketBoardWriteClient
 
 
@@ -35,7 +35,9 @@ class RecordingHandler(BaseHTTPRequestHandler):
         payload = json.loads(self.rfile.read(length) or b"{}")
         caller = self.headers.get(CALLER_ROLE_HEADER)
         legacy_caller = self.headers.get(LEGACY_CALLER_ROLE_HEADER)
+        report_token = self.headers.get(REPORT_TOKEN_HEADER)
         self.server.requests.append((self.path, caller, legacy_caller, payload))  # type: ignore[attr-defined]
+        self.server.report_tokens.append((self.path, report_token))  # type: ignore[attr-defined]
         ticket_id = "PGU-NEW"
         operation = self.path.rsplit("/", 1)[-1]
         if self.path.startswith("/api/tickets/PGU-") and "/actions/" in self.path:
@@ -114,6 +116,12 @@ class RecordingHandler(BaseHTTPRequestHandler):
             ticket["comments"] = [{"who": caller, "text": payload.get("text", ""), "urgent": bool(payload.get("urgent", False))}]
         elif operation == "file_bug":
             ticket["parent_id"] = payload.get("source_ticket_id", "")
+        elif operation == "file_report":
+            ticket["state"] = "analysis"
+            ticket["assignee"] = "unassigned"
+            ticket["origin_project"] = payload.get("origin_project", "")
+            ticket["external_source_ref"] = payload.get("external_source_ref", "")
+            ticket["parent_id"] = ""
         body = json.dumps({"ticket": ticket}).encode("utf-8")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/json")
@@ -125,6 +133,7 @@ class RecordingHandler(BaseHTTPRequestHandler):
 class RecordingServer(ThreadingHTTPServer):
     def __init__(self) -> None:
         self.requests: list[tuple[str, str | None, str | None, dict[str, object]]] = []
+        self.report_tokens: list[tuple[str, str | None]] = []
         super().__init__(("127.0.0.1", 0), RecordingHandler)
 
 
@@ -191,9 +200,14 @@ def assert_action_requests(requests: list[tuple[str, str | None, str | None, dic
     assert requests, "client should send requests"
     pairs = request_pairs(requests)
     for path, caller_role, legacy_caller_role, _ in requests:
+        if path == "/api/tickets/actions/file_report":
+            assert caller_role is None, (path, caller_role)
+            assert legacy_caller_role is None, (path, legacy_caller_role)
+            continue
         assert caller_role, (path, caller_role)
         assert legacy_caller_role == caller_role, (path, caller_role, legacy_caller_role)
         assert "/actions/" in path, (path, caller_role)
+    assert ("/api/tickets/actions/file_report", None) in pairs
     assert ("/api/tickets/actions/create_ticket", "director") in pairs
     assert ("/api/tickets/actions/file_bug", "ops") in pairs
     assert ("/api/tickets/PGU-100/actions/route", "director") in pairs
@@ -227,6 +241,17 @@ def exercise_client(base_url: str, repo: Path, commit_hash: str) -> None:
     with pushd(repo):
         client = TicketBoardWriteClient(base_url, "director")
         assert client.create_ticket(title="Client create", body="Created.", assignee="director")["ticket"]["id"] == "PGU-NEW"
+        report = client.file_report(
+            title="Tenant report",
+            body="Shared launcher issue.",
+            origin_project="otto",
+            external_source_ref="otto:OTTO-123",
+            report_token="tenant-token",
+        )["ticket"]
+        assert report["state"] == "analysis"
+        assert report["assignee"] == "unassigned"
+        assert report["origin_project"] == "otto"
+        assert report["external_source_ref"] == "otto:OTTO-123"
         assert client.file_bug(title="Bug", body="Body", source_ticket_id="PGU-NEW", caller_role="ops")["ticket"]["parent_id"] == "PGU-NEW"
         assert client.route("PGU-100", state="backlog", assignee="ops")["ticket"]["state"] == "backlog"
         forced = client.force_move("PGU-115", state="done", assignee="director", suppress_notification=True)
@@ -658,6 +683,7 @@ def main() -> int:
                 assert_default_caller_role_has_no_implicit_director_fallback()
                 assert_auto_socket_connect_failure_falls_back_to_tcp(base_url, root / "blocked.sock")
                 assert_action_requests(server.requests)
+                assert ("/api/tickets/actions/file_report", "tenant-token") in server.report_tokens
                 assert ("/api/tickets/PGU-120/actions/start_work", "ops") in request_pairs(server.requests)
                 assert all(path != "/api/tickets/PGU-122/actions/submit_to_audit" for path, _, _, _ in server.requests)
         finally:

@@ -62,6 +62,7 @@ GRANT EXECUTE ON FUNCTION ticket_board.create_ticket(text, text, text, text[], t
 GRANT EXECUTE ON FUNCTION ticket_board.create_ticket(text, text, text, text[], text, boolean) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.create_ticket(text, text, text, text[], text, boolean, boolean) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.create_ticket(text, text, text, text, text[], text, boolean, boolean) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.file_report(text, text, text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.file_bug(text, text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.file_bug(text, text, text) TO audit;
 GRANT EXECUTE ON FUNCTION ticket_board.file_bug(text, text, text, text) TO ticket_board_service;

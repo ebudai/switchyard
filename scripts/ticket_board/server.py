@@ -37,6 +37,7 @@ DIRECTOR_NOTIFICATION_BATCH_WINDOW_SECONDS = 0.35
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CALLER_ROLE_HEADER = "X-Ticket-Board-Caller-Role"
 WRITE_TOKEN_HEADER = "X-Ticket-Board-Write-Token"
+REPORT_TOKEN_HEADER = "X-Ticket-Board-Report-Token"
 LEGACY_CALLER_ROLE_HEADER = "X-PGU-Caller-Role"
 LEGACY_WRITE_TOKEN_HEADER = "X-PGU-Write-Token"
 SO_PEERCRED_FORMAT = "3i"
@@ -443,6 +444,10 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
     def write_token(self) -> str:
         return self.server.write_token  # type: ignore[attr-defined]
 
+    @property
+    def report_token(self) -> str:
+        return getattr(self.server, "report_token", "")
+
     def send_no_cache_headers(self) -> None:
         self.send_header("Cache-Control", "no-cache")
 
@@ -561,6 +566,15 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         raw = self.headers.get(WRITE_TOKEN_HEADER, "") or self.headers.get(LEGACY_WRITE_TOKEN_HEADER, "")
         if not raw or not secrets.compare_digest(raw, self.write_token):
             raise PermissionError(f"missing or invalid {WRITE_TOKEN_HEADER}")
+
+    def require_http_report_token(self) -> None:
+        if self.caller_registry is not None:
+            raise PermissionError("tenant report filing is only available over HTTP")
+        if not self.report_token:
+            raise PermissionError(f"{REPORT_TOKEN_HEADER} is not configured")
+        raw = self.headers.get(REPORT_TOKEN_HEADER, "")
+        if not raw or not secrets.compare_digest(raw, self.report_token):
+            raise PermissionError(f"missing or invalid {REPORT_TOKEN_HEADER}")
 
     def handle_register_caller(self, payload: dict[str, object]) -> None:
         if self.caller_registry is None or self._local_peer_credentials is None:
@@ -706,6 +720,39 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         ):
             self.director_notifier.notify_ticket_created(created)
         self.send_json({"ticket": created}, HTTPStatus.CREATED)
+
+    def handle_file_report(self, payload: dict[str, object]) -> None:
+        forbidden_fields = sorted(
+            set(payload)
+            & {
+                "assignee",
+                "state",
+                "initial_state",
+                "blocked_by",
+                "blocked_reason",
+                "parent_id",
+                "source_ticket_id",
+                "needs_audit",
+                "needs_inspection",
+                "needs_user_signoff",
+                "audit_signoff",
+                "inspector_signoff",
+                "user_signoff",
+                "commit_hash",
+                "commit_exempt",
+                "manually_controlled",
+            }
+        )
+        if forbidden_fields:
+            raise PermissionError(f"file_report cannot set: {', '.join(forbidden_fields)}")
+        before_signature = self.app.store_signature()
+        created = self.app.file_report(
+            title=str(payload.get("title", "")),
+            body=str(payload.get("body", "")),
+            origin_project=str(payload.get("origin_project", "")),
+            external_source_ref=str(payload.get("external_source_ref", payload.get("source_ref", ""))),
+        )
+        self.send_ticket_created(created, before_signature, notification_source_role="tenant_report")
 
     def handle_ticket_action(self, operation: str, payload: dict[str, object], ticket_id: str | None = None) -> None:
         caller = self.caller_role()
@@ -1025,6 +1072,11 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length) if length > 0 else b""
+            if parsed.path == "/api/tickets/actions/file_report":
+                self.require_http_report_token()
+                payload = json.loads(body or b"{}")
+                self.handle_file_report(payload)
+                return
             self.require_http_write_token()
             if parsed.path == "/api/upload":
                 content_type = self.headers.get("Content-Type", "")
@@ -1076,6 +1128,7 @@ class TicketBoardServer(ThreadingHTTPServer):
         events: TicketBoardEventHub | None = None,
         caller_registry: CallerRegistry | None = None,
         write_token: str | None = None,
+        report_token: str | None = None,
     ) -> None:
         self.app = app
         self.events = events or TicketBoardEventHub(app)
@@ -1085,6 +1138,7 @@ class TicketBoardServer(ThreadingHTTPServer):
         self.caller_registry = caller_registry
         self.build_id = board_build_id()
         self.write_token = write_token or secrets.token_urlsafe(32)
+        self.report_token = (report_token or "").strip()
         super().__init__(address, TicketBoardHandler)
 
     def server_close(self) -> None:

@@ -41,6 +41,11 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_UNIX_SOCKET,
         help=f"Unix-domain socket path for local pane writes with SO_PEERCRED caller identity. Default: {DEFAULT_UNIX_SOCKET}.",
     )
+    parser.add_argument(
+        "--tenant-report-token",
+        default=os.environ.get("TICKET_BOARD_TENANT_REPORT_TOKEN", "").strip(),
+        help="Enable tenant upstream report filing with this shared HTTP token. Default: TICKET_BOARD_TENANT_REPORT_TOKEN.",
+    )
     parser.add_argument("--open-browser", action="store_true", help="Open the board URL automatically.")
     return parser.parse_args()
 
@@ -59,6 +64,7 @@ def run_server(args: argparse.Namespace) -> int:
         app,
         events=event_hub,
         director_notifier=director_notifier,
+        report_token=getattr(args, "tenant_report_token", ""),
     )
     unix_server = None
     unix_thread = None
@@ -84,6 +90,7 @@ def run_server(args: argparse.Namespace) -> int:
     print(f"[ticket-board] listening on {url}")
     if unix_server is not None:
         print(f"[ticket-board] local write socket: {args.unix_socket}")
+    print(f"[ticket-board] tenant report endpoint: {'enabled' if getattr(args, 'tenant_report_token', '') else 'disabled'}")
     print("[ticket-board] press Ctrl+C to stop")
     if args.open_browser:
         threading.Timer(0.25, lambda: webbrowser.open(url)).start()

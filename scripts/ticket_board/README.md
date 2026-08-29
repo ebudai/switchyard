@@ -28,6 +28,7 @@ Pane write API:
   ticket JSON directly:
   - `POST /api/tickets/actions/create_ticket`
   - `POST /api/tickets/actions/file_bug`
+  - `POST /api/tickets/actions/file_report`
   - `POST /api/tickets/<TICKET-ID>/actions/<operation>`
 - Browser HTTP operation requests must include the per-process
   `X-Ticket-Board-Write-Token` emitted into the served board page, plus
@@ -58,6 +59,14 @@ Pane write API:
   launcher exports this variable for each role, so `pgu-main`, `pgu-app`, and
   `pgu-ops` write as `main`, `app`, and `ops` by default. Pass `--caller-role`
   when deliberately acting as a different board role.
+- Tenant projects may file cross-cutting defects or feature requests upstream
+  through the report-only HTTP action `POST /api/tickets/actions/file_report`
+  using `X-Ticket-Board-Report-Token`. That credential grants only report
+  filing; it does not grant the board write token, Unix socket access, caller
+  roles, home-directory access, or shared group membership. Filed reports land
+  unassigned in `analysis` with `origin_project` and `external_source_ref`
+  metadata preserved, so a tenant cannot inject work into a switchyard
+  implementer queue or mutate existing tickets.
 - Tests must point write-client calls at disposable board targets. When the
   write client detects it is running under a test process, it refuses writes to
   the live PGU board URL/socket before opening a connection. Use
@@ -120,6 +129,8 @@ Ticket schema:
   ],
   "assignee": "main",
   "state": "analysis",
+  "origin_project": "",
+  "external_source_ref": "",
   "blocked_by": ["PGU-23", "PGU-25"],
   "implementation": "",
   "audit_prompt": "",

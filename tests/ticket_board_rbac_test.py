@@ -25,6 +25,7 @@ WRITE_FUNCTIONS = [
     "ticket_board.create_ticket(text,text,text,text[],text,boolean)",
     "ticket_board.create_ticket(text,text,text,text[],text,boolean,boolean)",
     "ticket_board.create_ticket(text,text,text,text,text[],text,boolean,boolean)",
+    "ticket_board.file_report(text,text,text,text)",
     "ticket_board.file_bug(text,text,text)",
     "ticket_board.file_bug(text,text,text,text)",
     "ticket_board.file_bug(text,text,text,text,text[],text)",
@@ -458,6 +459,39 @@ SELECT ticket_board.create_ticket('Director can skip audit', 'Body', 'analysis',
 """,
     ).splitlines()[-1]
     assert psql(admin_conn, f"SELECT needs_audit FROM ticket_board.tickets WHERE id = {sql_string(no_audit_director_created)};") == "f"
+
+    report_created = psql(service_conn, "SELECT ticket_board.file_report('Tenant report', 'Body', 'otto', 'otto:OTTO-123');")
+    report_created_row = json.loads(
+        psql(
+            admin_conn,
+            f"""
+SELECT jsonb_build_object(
+    'state', state,
+    'assignee', assignee,
+    'parent_id', parent_id,
+    'origin_project', origin_project,
+    'external_source_ref', external_source_ref,
+    'source_origin', source_json->>'origin_project',
+    'source_external_ref', source_json->>'external_source_ref'
+)::text
+FROM ticket_board.tickets
+WHERE id = {sql_string(report_created)};
+""",
+        )
+    )
+    assert report_created_row == {
+        "state": "analysis",
+        "assignee": "unassigned",
+        "parent_id": "",
+        "origin_project": "otto",
+        "external_source_ref": "otto:OTTO-123",
+        "source_origin": "otto",
+        "source_external_ref": "otto:OTTO-123",
+    }, report_created_row
+    assert "origin_project must be non-empty" in psql_error(
+        service_conn,
+        "SELECT ticket_board.file_report('Tenant report without origin', 'Body', '', 'otto:OTTO-123');",
+    )
 
     insert_ticket(admin_conn, "PGU-100", title="Source")
     filed = psql(service_conn, "SELECT ticket_board.file_bug('Service bug', 'Body', 'PGU-100');")

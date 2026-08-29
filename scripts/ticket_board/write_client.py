@@ -16,6 +16,7 @@ from urllib import error as urllib_error
 from urllib import parse, request
 
 CALLER_ROLE_HEADER = "X-Ticket-Board-Caller-Role"
+REPORT_TOKEN_HEADER = "X-Ticket-Board-Report-Token"
 LEGACY_CALLER_ROLE_HEADER = "X-PGU-Caller-Role"
 LIVE_BOARD_URL_HOSTS = frozenset({"127.0.0.1", "localhost"})
 LIVE_BOARD_URL_PORT = 8770
@@ -54,6 +55,7 @@ DEFAULT_BOARD_SOCKET = (
     _env_first("TICKET_BOARD_SOCKET", "PGU_TICKET_BOARD_SOCKET")
     or "/run/pgu-ticket-board/ticket-board.sock"
 )
+DEFAULT_REPORT_TOKEN = _env_first("TICKET_BOARD_TENANT_REPORT_TOKEN", "TICKET_BOARD_REPORT_TOKEN")
 LEGACY_BOARD_SOCKET = "/tmp/pgu-ticket-board.sock"
 
 
@@ -255,6 +257,7 @@ class TicketBoardWriteClient:
     caller_role: str = field(default_factory=default_caller_role)
     timeout: float = 10.0
     socket_path: str | None = None
+    report_token: str = DEFAULT_REPORT_TOKEN
 
     @property
     def api_url(self) -> str:
@@ -269,7 +272,7 @@ class TicketBoardWriteClient:
         return self.socket_path or _default_socket_path(self.board_url)
 
     def for_caller(self, caller_role: str) -> "TicketBoardWriteClient":
-        return TicketBoardWriteClient(self.board_url, caller_role, self.timeout, self.socket_path)
+        return TicketBoardWriteClient(self.board_url, caller_role, self.timeout, self.socket_path, self.report_token)
 
     def _post(self, path: str, payload: dict[str, Any], *, caller_role: str | None = None) -> dict[str, Any]:
         role = (caller_role or self.caller_role).strip().lower()
@@ -289,6 +292,29 @@ class TicketBoardWriteClient:
             f"{self.api_url}{path}",
             data=body,
             headers={"Content-Type": "application/json", CALLER_ROLE_HEADER: role, LEGACY_CALLER_ROLE_HEADER: role},
+            method="POST",
+        )
+        try:
+            with request.urlopen(req, timeout=self.timeout) as response:
+                response_body = response.read().decode("utf-8", errors="replace")
+        except urllib_error.HTTPError as exc:
+            response_body = exc.read().decode("utf-8", errors="replace")
+            raise TicketBoardWriteError(response_body or f"HTTP {exc.code}") from exc
+        parsed = json.loads(response_body)
+        if not isinstance(parsed, dict):
+            raise TicketBoardWriteError("ticket board response was not an object")
+        return parsed
+
+    def _post_report(self, payload: dict[str, Any], *, report_token: str | None = None) -> dict[str, Any]:
+        token = (report_token if report_token is not None else self.report_token).strip()
+        if not token:
+            raise ValueError("report_token must be non-empty")
+        _refuse_production_write_under_test(self.board_url, None)
+        body = json.dumps(payload).encode("utf-8")
+        req = request.Request(
+            f"{self.api_url}/actions/file_report",
+            data=body,
+            headers={"Content-Type": "application/json", REPORT_TOKEN_HEADER: token},
             method="POST",
         )
         try:
@@ -454,6 +480,25 @@ class TicketBoardWriteClient:
                 "needs_user_signoff": needs_user_signoff,
             },
             caller_role=caller_role,
+        )
+
+    def file_report(
+        self,
+        *,
+        title: str,
+        body: str,
+        origin_project: str,
+        external_source_ref: str = "",
+        report_token: str | None = None,
+    ) -> dict[str, Any]:
+        return self._post_report(
+            {
+                "title": title,
+                "body": body,
+                "origin_project": origin_project,
+                "external_source_ref": external_source_ref,
+            },
+            report_token=report_token,
         )
 
     def route(self, ticket_id: str, *, state: str, assignee: str, caller_role: str | None = None) -> dict[str, Any]:
@@ -641,6 +686,11 @@ def _build_parser() -> argparse.ArgumentParser:
             f"currently {caller_default_display})"
         ),
     )
+    parser.add_argument(
+        "--report-token",
+        default=DEFAULT_REPORT_TOKEN,
+        help="Tenant report token for file-report. Default: TICKET_BOARD_TENANT_REPORT_TOKEN or TICKET_BOARD_REPORT_TOKEN.",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     create = subparsers.add_parser("create-ticket")
@@ -665,6 +715,12 @@ def _build_parser() -> argparse.ArgumentParser:
     file_bug.add_argument("--source-ticket-id", required=True)
     file_bug.add_argument("--assignee", default="unassigned")
     file_bug.add_argument("--needs-audit", action=argparse.BooleanOptionalAction, default=True)
+
+    file_report = subparsers.add_parser("file-report")
+    file_report.add_argument("--title", required=True)
+    file_report.add_argument("--body", required=True)
+    file_report.add_argument("--origin-project", required=True)
+    file_report.add_argument("--external-source-ref", default="")
 
     route = subparsers.add_parser("route")
     route.add_argument("ticket_id")
@@ -768,12 +824,12 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     try:
         args = _build_parser().parse_args(argv)
-        if not args.caller_role.strip():
+        command = args.command.replace("-", "_")
+        if command != "file_report" and not args.caller_role.strip():
             raise TicketBoardWriteError(
                 "ticket board caller role required; pass --caller-role or set TICKET_BOARD_CALLER_ROLE"
             )
-        client = TicketBoardWriteClient(args.board_url, args.caller_role, socket_path=args.socket_path)
-        command = args.command.replace("-", "_")
+        client = TicketBoardWriteClient(args.board_url, args.caller_role, socket_path=args.socket_path, report_token=args.report_token)
         if command == "create_ticket":
             response = client.create_ticket(
                 title=args.title,
@@ -797,6 +853,13 @@ def main(argv: list[str] | None = None) -> int:
                 source_ticket_id=args.source_ticket_id,
                 assignee=args.assignee,
                 needs_audit=args.needs_audit,
+            )
+        elif command == "file_report":
+            response = client.file_report(
+                title=args.title,
+                body=args.body,
+                origin_project=args.origin_project,
+                external_source_ref=args.external_source_ref,
             )
         elif command == "route":
             response = client.route(args.ticket_id, state=args.state, assignee=args.assignee)

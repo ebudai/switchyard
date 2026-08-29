@@ -701,6 +701,8 @@ SELECT
     t.state,
     t.assignee,
     t.parent_id,
+    t.origin_project,
+    t.external_source_ref,
     t.blocked_reason,
     t.implementation,
     t.audit_prompt,
@@ -802,6 +804,8 @@ ORDER BY rank;
             "blocked_by": self._validate_blocked_by(list(row["blocked_by"] or []), str(row["id"])),
             "blockers": self._validate_blockers(blockers, str(row["id"])),
             "parent_id": str(row["parent_id"] or ""),
+            "origin_project": self._require_plain_string(row["origin_project"], "origin_project"),
+            "external_source_ref": self._require_plain_string(row["external_source_ref"], "external_source_ref"),
             "blocked_reason": self._require_plain_string(row["blocked_reason"], "blocked_reason"),
             "implementation": self._require_plain_string(row["implementation"], "implementation"),
             "audit_prompt": self._require_plain_string(row["audit_prompt"], "audit_prompt"),
@@ -927,6 +931,27 @@ ORDER BY rank;
                 for comment in normalized_comments:
                     self._pg_set_caller_role(conn, comment["who"])
                     self._pg_call(conn, "SELECT ticket_board.add_comment(%s, %s, %s);", (ticket_id, comment["text"], bool(comment.get("urgent", False))))
+                return self._pg_get_ticket(ticket_id, conn)
+
+    def file_report(
+        self,
+        *,
+        title: str,
+        body: str,
+        origin_project: str,
+        external_source_ref: str = "",
+    ) -> dict[str, Any]:
+        title = self._require_text(title, "title").strip()
+        body = str(body or "")
+        origin_project = self._require_plain_string(origin_project, "origin_project").strip()
+        external_source_ref = self._require_plain_string(external_source_ref, "external_source_ref").strip()
+        with self._pg_connect() as conn:
+            with conn.transaction():
+                ticket_id = self._pg_call_scalar(
+                    conn,
+                    "SELECT ticket_board.file_report(%s, %s, %s, %s) AS id;",
+                    (title, body, origin_project, external_source_ref),
+                )
                 return self._pg_get_ticket(ticket_id, conn)
 
     def _pg_update_ticket(self, ticket_id: str, patch: dict[str, Any], *, caller_role: str | None = None) -> dict[str, Any]:

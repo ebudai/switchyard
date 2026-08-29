@@ -33,6 +33,8 @@ from scripts.ticket_board.server import (
     CALLER_ROLE_HEADER,
     LEGACY_CALLER_ROLE_HEADER,
     LEGACY_WRITE_TOKEN_HEADER,
+    OPERATION_ALLOWED_ROLES,
+    REPORT_TOKEN_HEADER,
     WRITE_TOKEN_HEADER,
     CallerRegistry,
     TicketBoardEventHub,
@@ -53,6 +55,7 @@ FRONTEND_SCRIPT_PATHS = [
 ]
 DEFAULT_TOKEN = object()
 TEST_WRITE_TOKEN: str | None = None
+TEST_REPORT_TOKEN = "tenant-report-token"
 
 
 class QuietNotifier:
@@ -226,6 +229,34 @@ def post_json(
     effective_token = TEST_WRITE_TOKEN if token is DEFAULT_TOKEN else token
     if effective_token:
         headers[WRITE_TOKEN_HEADER] = effective_token
+    request = urllib.request.Request(
+        base_url + path,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            body = response.read().decode("utf-8")
+            assert response.status == expect, (path, response.status, body)
+            return json.loads(body)
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8")
+        assert exc.code == expect, (path, exc.code, body)
+        return body
+
+
+def post_report_json(
+    base_url: str,
+    path: str,
+    payload: dict[str, object],
+    *,
+    token: str | None = TEST_REPORT_TOKEN,
+    expect: int = 200,
+) -> dict[str, object] | str:
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers[REPORT_TOKEN_HEADER] = token
     request = urllib.request.Request(
         base_url + path,
         data=json.dumps(payload).encode("utf-8"),
@@ -569,6 +600,87 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
 
 def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets: Path, admin_conn: str) -> None:
     assert_served_html_contains_write_token(base_url)
+    report_missing_token = post_report_json(
+        base_url,
+        "/api/tickets/actions/file_report",
+        {"title": "Missing report token", "body": "", "origin_project": "otto"},
+        token=None,
+        expect=403,
+    )
+    assert "missing or invalid X-Ticket-Board-Report-Token" in str(report_missing_token), report_missing_token
+    report_wrong_token = post_report_json(
+        base_url,
+        "/api/tickets/actions/file_report",
+        {"title": "Wrong report token", "body": "", "origin_project": "otto"},
+        token="wrong-token",
+        expect=403,
+    )
+    assert "missing or invalid X-Ticket-Board-Report-Token" in str(report_wrong_token), report_wrong_token
+    upstream_report_payload = post_report_json(
+        base_url,
+        "/api/tickets/actions/file_report",
+        {
+            "title": "Tenant upstream defect",
+            "body": "Shared launcher behavior breaks this tenant.",
+            "origin_project": "otto",
+            "external_source_ref": "otto:OTTO-123",
+        },
+        expect=201,
+    )
+    upstream_report = upstream_report_payload["ticket"]  # type: ignore[index]
+    upstream_report_id = str(upstream_report["id"])  # type: ignore[index]
+    assert upstream_report["state"] == "analysis", upstream_report  # type: ignore[index]
+    assert upstream_report["assignee"] == "unassigned", upstream_report  # type: ignore[index]
+    assert upstream_report["origin_project"] == "otto", upstream_report  # type: ignore[index]
+    assert upstream_report["external_source_ref"] == "otto:OTTO-123", upstream_report  # type: ignore[index]
+    assert upstream_report["parent_id"] == "", upstream_report  # type: ignore[index]
+    persisted_upstream_report = json.loads(
+        psql(
+            admin_conn,
+            f"""
+SELECT jsonb_build_object(
+    'state', state,
+    'assignee', assignee,
+    'parent_id', parent_id,
+    'origin_project', origin_project,
+    'external_source_ref', external_source_ref,
+    'source_origin', source_json->>'origin_project',
+    'source_external_ref', source_json->>'external_source_ref'
+)::text
+FROM ticket_board.tickets
+WHERE id = '{upstream_report_id}';
+""",
+        )
+    )
+    assert persisted_upstream_report == {
+        "state": "analysis",
+        "assignee": "unassigned",
+        "parent_id": "",
+        "origin_project": "otto",
+        "external_source_ref": "otto:OTTO-123",
+        "source_origin": "otto",
+        "source_external_ref": "otto:OTTO-123",
+    }, persisted_upstream_report
+    injected_report = post_report_json(
+        base_url,
+        "/api/tickets/actions/file_report",
+        {"title": "Injected queue", "body": "", "origin_project": "otto", "state": "in_progress", "assignee": "ops"},
+        expect=403,
+    )
+    assert "file_report cannot set: assignee, state" in str(injected_report), injected_report
+    report_only_payloads: dict[str, tuple[str, dict[str, object]]] = {
+        "create_ticket": ("/api/tickets/actions/create_ticket", {"title": "Nope", "body": ""}),
+        "file_bug": ("/api/tickets/actions/file_bug", {"title": "Nope", "body": "", "source_ticket_id": "PGU-100"}),
+        "crop_attachment": ("/api/tickets/PGU-112/actions/crop_attachment", {"source_path": "/tmp/nope.png", "rect": {}}),
+    }
+    for operation in OPERATION_ALLOWED_ROLES:
+        if operation == "file_report":
+            continue
+        report_only_payloads.setdefault(operation, (f"/api/tickets/PGU-100/actions/{operation}", {}))
+    for operation, (path, payload) in sorted(report_only_payloads.items()):
+        rejected = post_report_json(base_url, path, payload, expect=403)
+        assert "missing or invalid X-Ticket-Board-Write-Token" in str(rejected), (operation, rejected)
+
     unauth_spoof = post_json(
         base_url,
         "/api/tickets/PGU-100/actions/route",
@@ -1828,7 +1940,12 @@ WHERE table_schema = 'ticket_board'
                 assets,
                 database_url=conninfo(socket_dir, port, dbname, SERVICE_ROLE),
             )
-            server = TicketBoardServer(("127.0.0.1", 0), app, director_notifier=QuietNotifier())
+            server = TicketBoardServer(
+                ("127.0.0.1", 0),
+                app,
+                director_notifier=QuietNotifier(),
+                report_token=TEST_REPORT_TOKEN,
+            )
             global TEST_WRITE_TOKEN
             TEST_WRITE_TOKEN = server.write_token
             thread = threading.Thread(target=server.serve_forever, daemon=True)

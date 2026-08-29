@@ -348,6 +348,18 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       const metaLine2 = document.createElement('div');
       metaLine2.textContent = `Created: ${formatWhen(ticket.created)} | Updated: ${formatWhen(ticket.updated)}`;
       meta.append(metaLine1, metaLine2);
+      if (ticket.origin_project || ticket.external_source_ref) {
+        const originLine = document.createElement('div');
+        const originParts = [];
+        if (ticket.origin_project) {
+          originParts.push(`Origin: ${ticket.origin_project}`);
+        }
+        if (ticket.external_source_ref) {
+          originParts.push(`External Source: ${ticket.external_source_ref}`);
+        }
+        originLine.textContent = originParts.join(' | ');
+        meta.appendChild(originLine);
+      }
       const visibleBlockedBy = unresolvedBlockedBy(ticket);
       if (visibleBlockedBy.length) {
         const metaLine3 = document.createElement('div');

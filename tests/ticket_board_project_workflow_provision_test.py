@@ -43,6 +43,26 @@ EXPECTED_STAGES = [
     {"name": "done", "display_label": "Done", "rank": 9, "owner_roles": [], "is_terminal": True},
     {"name": "cancelled", "display_label": "Cancelled", "rank": 10, "owner_roles": [], "is_terminal": True},
 ]
+EXPECTED_AUDITLESS_STAGES = [
+    {"name": "draft", "display_label": "Draft", "rank": 0, "owner_roles": [], "is_terminal": False},
+    {"name": "analysis", "display_label": "Triage", "rank": 1, "owner_roles": ["director"], "is_terminal": False},
+    {
+        "name": "in_progress",
+        "display_label": "Implementation",
+        "rank": 2,
+        "owner_roles": ["app"],
+        "is_terminal": False,
+    },
+    {
+        "name": "director_review",
+        "display_label": "Final Sign-Off",
+        "rank": 3,
+        "owner_roles": ["director"],
+        "is_terminal": False,
+    },
+    {"name": "done", "display_label": "Done", "rank": 9, "owner_roles": [], "is_terminal": True},
+    {"name": "cancelled", "display_label": "Cancelled", "rank": 10, "owner_roles": [], "is_terminal": True},
+]
 
 
 def run(args: list[str], *, input_text: str | None = None, capture: bool = True) -> subprocess.CompletedProcess[str]:
@@ -463,6 +483,77 @@ SELECT ticket_board.create_ticket('Provisioned workflow cancellation', 'Body', '
             assert psql(admin_conn, f"SELECT state FROM ticket_board.tickets WHERE id = '{cancel_id}';") == "cancelled"
             service_call_without_shadow_warning(service_conn, "director", f"SELECT ticket_board.route('{cancel_id}', 'analysis', 'director');")
             assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{cancel_id}';") == "analysis:director"
+
+            noaudit_dbname = "project_workflow_noaudit"
+            run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", noaudit_dbname])
+            noaudit_admin_conn = conninfo(socket_dir, port, noaudit_dbname)
+            noaudit_service_conn = conninfo(socket_dir, port, noaudit_dbname, "ticket_board_service")
+            psql(noaudit_admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
+            run_migrations(noaudit_admin_conn)
+            noaudit_plan = build_plan(
+                project="noaudit",
+                owner_user="noaudit-agent",
+                database=noaudit_dbname,
+                include_designer=False,
+                include_audit=False,
+                implementer_roles=("app",),
+            )
+            psql(noaudit_admin_conn, render_workflow_sql(noaudit_plan))
+            psql(noaudit_admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
+
+            noaudit_stages = json.loads(
+                psql(
+                    noaudit_admin_conn,
+                    """
+SELECT jsonb_agg(jsonb_build_object(
+    'name', name,
+    'display_label', display_label,
+    'rank', rank,
+    'owner_roles', owner_roles,
+    'is_terminal', is_terminal
+) ORDER BY rank)::text
+FROM ticket_board.workflow_stages;
+""",
+                )
+            )
+            assert noaudit_stages == EXPECTED_AUDITLESS_STAGES, noaudit_stages
+            assert psql(noaudit_admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions;") == "16"
+            assert psql(noaudit_admin_conn, "SELECT count(*) FROM ticket_board.workflow_stages WHERE name = 'audit';") == "0"
+            assert psql(noaudit_admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions WHERE 'audit' = ANY(allowed_roles);") == "0"
+            assert psql(noaudit_admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('app');") == "t"
+            assert psql(noaudit_admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('audit');") == "f"
+
+            noaudit_ticket_id = service_call(
+                noaudit_service_conn,
+                "director",
+                """
+SELECT set_config('ticket_board.ticket_prefix', 'NOAUDIT', false);
+SELECT ticket_board.create_ticket('Audit-less workflow ticket', 'Body', 'analysis');
+""",
+            )
+            assert noaudit_ticket_id == "NOAUDIT-1", noaudit_ticket_id
+            assert (
+                psql(noaudit_admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{noaudit_ticket_id}';")
+                == "analysis:unassigned"
+            )
+
+            service_call(noaudit_service_conn, "director", f"SELECT ticket_board.route('{noaudit_ticket_id}', 'in_progress', 'app');")
+            assert (
+                psql(noaudit_admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{noaudit_ticket_id}';")
+                == "in_progress:app"
+            )
+
+            service_call(noaudit_service_conn, "app", f"SELECT ticket_board.submit_to_audit('{noaudit_ticket_id}', '123abcd');")
+            assert (
+                psql(
+                    noaudit_admin_conn,
+                    f"SELECT state || ':' || assignee || ':' || audit_signoff::text FROM ticket_board.tickets WHERE id = '{noaudit_ticket_id}';",
+                )
+                == "director_review:director:true"
+            )
+
+            service_call(noaudit_service_conn, "director", f"SELECT ticket_board.mark_done('{noaudit_ticket_id}', '123abcd');")
+            assert psql(noaudit_admin_conn, f"SELECT state FROM ticket_board.tickets WHERE id = '{noaudit_ticket_id}';") == "done"
         finally:
             subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 

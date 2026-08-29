@@ -300,6 +300,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     }
 
     function defaultAdvanceState(ticket) {
+      const hasState = (name) => (state.states || []).includes(name);
       if (ticket.state === 'draft') {
         return 'analysis';
       }
@@ -310,10 +311,10 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         return 'in_progress';
       }
       if (ticket.state === 'in_progress') {
-        return ticket.needs_inspection ? 'inspection' : 'audit';
+        return ticket.needs_inspection ? 'inspection' : (hasState('audit') ? 'audit' : 'director_review');
       }
       if (ticket.state === 'inspection') {
-        return 'audit';
+        return hasState('audit') ? 'audit' : 'director_review';
       }
       if (ticket.state === 'audit') {
         return ticket.needs_user_signoff ? 'dat' : 'director_review';

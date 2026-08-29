@@ -444,10 +444,10 @@ def assert_owner_scope_extraction_catches_named_assignee_drift(conn: str) -> Non
         "ticket_commit_exempt boolean;\n    ticket_last_rejected_commit text;",
         "ticket_commit_exempt boolean;\n    ticket_last_rejected_commit text;\n    v_assignee text;",
     ).replace(
-        "SELECT tickets.commit_exempt, tickets.last_rejected_commit\n"
-        "    INTO ticket_commit_exempt, ticket_last_rejected_commit",
-        "SELECT tickets.commit_exempt, tickets.last_rejected_commit, tickets.assignee\n"
-        "    INTO ticket_commit_exempt, ticket_last_rejected_commit, v_assignee",
+        "SELECT tickets.commit_exempt, tickets.last_rejected_commit, tickets.state\n"
+        "    INTO ticket_commit_exempt, ticket_last_rejected_commit, ticket_state",
+        "SELECT tickets.commit_exempt, tickets.last_rejected_commit, tickets.state, tickets.assignee\n"
+        "    INTO ticket_commit_exempt, ticket_last_rejected_commit, ticket_state, v_assignee",
     ).replace(
         "    IF NOT FOUND THEN\n"
         "        RAISE EXCEPTION 'ticket not found: %', id;\n"
@@ -539,10 +539,10 @@ def assert_owner_scope_extraction_catches_operator_drift(conn: str, operator: st
         "ticket_commit_exempt boolean;\n    ticket_last_rejected_commit text;",
         "ticket_commit_exempt boolean;\n    ticket_last_rejected_commit text;\n    ticket_assignee text;",
     ).replace(
-        "SELECT tickets.commit_exempt, tickets.last_rejected_commit\n"
-        "    INTO ticket_commit_exempt, ticket_last_rejected_commit",
-        "SELECT tickets.commit_exempt, tickets.last_rejected_commit, tickets.assignee\n"
-        "    INTO ticket_commit_exempt, ticket_last_rejected_commit, ticket_assignee",
+        "SELECT tickets.commit_exempt, tickets.last_rejected_commit, tickets.state\n"
+        "    INTO ticket_commit_exempt, ticket_last_rejected_commit, ticket_state",
+        "SELECT tickets.commit_exempt, tickets.last_rejected_commit, tickets.state, tickets.assignee\n"
+        "    INTO ticket_commit_exempt, ticket_last_rejected_commit, ticket_state, ticket_assignee",
     ).replace(
         "    IF NOT FOUND THEN\n"
         "        RAISE EXCEPTION 'ticket not found: %', id;\n"

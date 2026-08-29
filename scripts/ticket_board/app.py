@@ -968,7 +968,7 @@ ORDER BY rank;
                 state = self._validate_state(str(patch["state"])) if "state" in patch else current["state"]
                 assignee = self._validate_assignee(str(patch["assignee"])) if "assignee" in patch else current["assignee"]
                 commit_hash = str(patch.get("commit_hash", current.get("commit_hash", "")) or "").strip()
-                if "commit_hash" in patch and state not in {"audit", "done"}:
+                if "commit_hash" in patch and state not in {"audit", "director_review", "done"}:
                     raise ValueError("postgres function API only accepts commit_hash when submitting to audit or marking done")
 
                 if "audit_signoff" in patch:
@@ -1015,6 +1015,8 @@ ORDER BY rank;
                     elif state == "inspection":
                         self._pg_call(conn, "SELECT ticket_board.submit_to_inspection(%s);", (ticket_id,))
                     elif state == "audit":
+                        self._pg_call(conn, "SELECT ticket_board.submit_to_audit(%s, %s);", (ticket_id, commit_hash))
+                    elif state == "director_review" and current["state"] == "in_progress":
                         self._pg_call(conn, "SELECT ticket_board.submit_to_audit(%s, %s);", (ticket_id, commit_hash))
                     elif state == "user_review" and current["state"] == "dat":
                         self._pg_call(conn, "SELECT ticket_board.director_dat_sign_off(%s, %s);", (ticket_id, comment_text))

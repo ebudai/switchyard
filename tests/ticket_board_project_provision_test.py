@@ -140,6 +140,40 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "/run/pgu-ticket-board/ticket-board.sock" not in combined
 
 
+def test_non_pgu_project_can_omit_audit_role_and_stage() -> None:
+    plan = build_plan(
+        project="stellaris",
+        owner_user="stellaris-agent",
+        port=8871,
+        include_designer=False,
+        include_audit=False,
+        implementer_roles=("code",),
+    )
+
+    workflow_sql = render_workflow_sql(plan)
+    combined = "\n".join([json.dumps(plan.__dict__, sort_keys=True), render_board_unit(plan), workflow_sql])
+
+    assert plan.draft_roles == ()
+    assert plan.implementer_roles == ("code",)
+    assert plan.assignee_roles == ("unassigned", "code", "director", "user")
+    assert plan.caller_roles == ("director", "code", "user")
+    assert "TICKET_BOARD_DRAFT_ROLES=" in combined
+    assert "TICKET_BOARD_IMPLEMENTER_ROLES=code" in combined
+    assert "TICKET_BOARD_ASSIGNEES=unassigned,code,director,user" in combined
+    assert "TICKET_BOARD_CALLER_ROLES=director,code,user" in combined
+    assert "('audit', 'Audit'" not in workflow_sql
+    assert "ARRAY['audit']::text[]" not in workflow_sql
+    assert "'audit_sign_off'" not in workflow_sql
+    assert "'audit_kick_back'" not in workflow_sql
+    assert "('in_progress', 'audit'" not in workflow_sql
+    assert "('in_progress', 'director_review', 'submit_to_audit', ARRAY['code']::text[]" in workflow_sql
+    assert "('director_review', 'done', 'mark_done', ARRAY['director']::text[]" in workflow_sql
+    assert (
+        "ADD CONSTRAINT tickets_assignee_check CHECK "
+        "(assignee IN ('unassigned', 'code', 'director', 'user'))"
+    ) in workflow_sql
+
+
 def test_operator_commands_use_peer_portable_postgres_admin_invocations() -> None:
     plan = build_plan(project="stellaris", owner_user="stellaris-agent", port=8871)
     commands = render_operator_commands(plan)

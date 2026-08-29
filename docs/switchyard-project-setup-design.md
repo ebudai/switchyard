@@ -275,16 +275,18 @@ root, and agents deliberately have no sudo. Split it:
 normal pane with hooks and a board connection. A standalone agent in the project directory whose
 only outputs are the design document and the artifact.
 
-## Role selection and the pane window (Eric, 2026-08-25; updated by PGU-723)
+## Role selection and the pane window (Eric, 2026-08-25; updated by PGU-723/PGU-732)
 
 `new` starts the FULL pane window with every role populated. There is no separate "spawn the director"
 step, and no separate provisioning step -- the privileged half all happens once, under the sudo the user
 already gave.
 
 `new` now asks for the implementer roles and the CLI for each role instead of
-silently creating a fixed programmer set. `director` and `audit` are always
-present; `designer` is optional. If the user omits `designer`, the design phase
-is skipped and no designer pane or design document is created.
+silently creating a fixed programmer set. `director` is always present;
+`designer` and `audit` are optional. If the user omits `designer`, the design
+phase is skipped and no designer pane or design document is created. If the user
+omits `audit`, the provisioned workflow skips the Audit stage and implementation
+submissions go directly to Final Sign-Off.
 
 Stage ownership:
 
@@ -293,7 +295,7 @@ Stage ownership:
 | Draft | designer |
 | Triage | director |
 | Implementation | **main** |
-| Audit | audit |
+| Audit (when selected) | audit |
 | Final Sign-Off | director |
 
 Implementation moves from `ops` to `main`. Ops owned it only because PGU-644 dropped `implementer` and

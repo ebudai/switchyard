@@ -850,6 +850,9 @@ SELECT ticket_board.edit_fields('PGU-811', '{"commit_exempt":true}'::jsonb);
 """,
     )
     assert psql(admin_conn, "SELECT commit_exempt FROM ticket_board.tickets WHERE id = 'PGU-811';") == "t"
+    psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '' WHERE id = 'PGU-811';")
+    psql(admin_conn, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-811';")
+    psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-811';")
 
     insert_ticket(admin_conn, "PGU-820", title="Merge source", state="analysis")
     insert_ticket(admin_conn, "PGU-821", title="Merge target", state="analysis")
@@ -886,10 +889,11 @@ def assert_structural_rules_still_apply(admin_conn: str, service_conn: str) -> N
         "SELECT set_config('ticket_board.caller_role', 'director', false); SELECT ticket_board.cancel('PGU-900', '');",
     )
     insert_ticket(admin_conn, "PGU-910", title="Submit still needs commit", state="in_progress", assignee="ops", implementation="Done.")
-    assert "commit_hash must be a 7-40 character hex commit" in psql_error(
+    submit_without_commit_error = psql_error(
         service_conn,
         "SELECT set_config('ticket_board.caller_role', 'ops', false); SELECT ticket_board.submit_to_audit('PGU-910', '');",
     )
+    assert "commit_hash must be a 7-40 character hex commit" in submit_without_commit_error, submit_without_commit_error
     insert_ticket(admin_conn, "PGU-912", title="Request exempt wrong assignee", state="in_progress", assignee="ops", implementation="Done.")
     assert "role app cannot call request_commit_exempt" in psql_error(
         service_conn,

@@ -127,6 +127,7 @@ def build_plan(
     ticket_prefix: str | None = None,
     board_service_traversal: bool = True,
     include_designer: bool = True,
+    include_audit: bool = True,
 ) -> ProjectBoardProvision:
     project = _validate_project(project)
     owner_user = _validate_user(owner_user)
@@ -149,12 +150,25 @@ def build_plan(
         draft_roles: tuple[str, ...] = ()
         assignee_roles = DEFAULT_PGU_ASSIGNEES
         caller_roles = DEFAULT_PGU_CALLER_ROLES
+        resolved_include_audit = True
     else:
         draft_roles = DEFAULT_PROJECT_DRAFT_ROLES if include_designer else ()
+        resolved_include_audit = bool(include_audit)
+        audit_roles = ("audit",) if resolved_include_audit else ()
         assignee_roles = _dedupe(
-            ("unassigned", *draft_roles, *DEFAULT_PROJECT_SUPPORT_ROLES, *resolved_implementer_roles, "audit", "director", "user")
+            (
+                "unassigned",
+                *draft_roles,
+                *DEFAULT_PROJECT_SUPPORT_ROLES,
+                *resolved_implementer_roles,
+                *audit_roles,
+                "director",
+                "user",
+            )
         )
-        caller_roles = _dedupe(("director", *draft_roles, *DEFAULT_PROJECT_SUPPORT_ROLES, *resolved_implementer_roles, "audit", "user"))
+        caller_roles = _dedupe(
+            ("director", *draft_roles, *DEFAULT_PROJECT_SUPPORT_ROLES, *resolved_implementer_roles, *audit_roles, "user")
+        )
     ident = _identifier_from_project(project)
     unit_prefix = f"{project}-ticket-board"
     runtime_directory = unit_prefix
@@ -443,14 +457,31 @@ def render_workflow_sql(plan: ProjectBoardProvision) -> str:
         if "main" in plan.implementer_roles
         else plan.implementer_roles
     )
+    include_audit = "audit" in plan.assignee_roles
     stages = [
         ("draft", "Draft", 0, plan.draft_roles, None, None, None, False),
         ("analysis", "Triage", 1, ("director",), None, None, None, False),
         ("in_progress", "Implementation", 2, implementation_owner_roles, None, None, None, False),
-        ("audit", "Audit", 3, ("audit",), None, None, "audit_signoff", False),
-        ("director_review", "Final Sign-Off", 4, ("director",), None, None, None, False),
+        *(
+            [("audit", "Audit", 3, ("audit",), None, None, "audit_signoff", False)]
+            if include_audit
+            else []
+        ),
+        ("director_review", "Final Sign-Off", 4 if include_audit else 3, ("director",), None, None, None, False),
         ("done", "Done", 9, (), None, None, None, True),
         ("cancelled", "Cancelled", 10, (), None, None, None, True),
+    ]
+    audit_transitions = [
+        ("in_progress", "audit", "route", ("director",), False, False),
+        ("in_progress", "audit", "submit_to_audit", plan.implementer_roles, False, False),
+        ("audit", "analysis", "route", ("director",), False, False),
+        ("audit", "in_progress", "audit_kick_back", ("audit",), False, False),
+        ("audit", "director_review", "route", ("director",), False, False),
+        ("audit", "director_review", "audit_sign_off", ("audit",), False, False),
+        ("audit", "cancelled", "cancel", ("director",), False, False),
+    ]
+    auditless_transitions = [
+        ("in_progress", "director_review", "submit_to_audit", plan.implementer_roles, False, False),
     ]
     transitions = [
         ("draft", "analysis", "release_draft", _dedupe((*plan.draft_roles, "director", "user")), False, False),
@@ -459,14 +490,8 @@ def render_workflow_sql(plan: ProjectBoardProvision) -> str:
         ("analysis", "in_progress", "start_work", plan.implementer_roles, False, False),
         ("analysis", "cancelled", "cancel", ("director",), False, False),
         ("in_progress", "analysis", "route", ("director",), False, False),
-        ("in_progress", "audit", "route", ("director",), False, False),
-        ("in_progress", "audit", "submit_to_audit", plan.implementer_roles, False, False),
+        *(audit_transitions if include_audit else auditless_transitions),
         ("in_progress", "cancelled", "cancel", ("director",), False, False),
-        ("audit", "analysis", "route", ("director",), False, False),
-        ("audit", "in_progress", "audit_kick_back", ("audit",), False, False),
-        ("audit", "director_review", "route", ("director",), False, False),
-        ("audit", "director_review", "audit_sign_off", ("audit",), False, False),
-        ("audit", "cancelled", "cancel", ("director",), False, False),
         ("director_review", "analysis", "route", ("director",), False, False),
         ("director_review", "analysis", "user_reopen", ("user",), False, False),
         ("director_review", "in_progress", "route", ("director",), False, False),
@@ -750,6 +775,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=True,
         help="include the optional designer draft role",
     )
+    parser.add_argument(
+        "--include-audit",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="include the optional audit role and audit workflow stage",
+    )
     parser.add_argument("--output-dir", type=Path, help="write all artifacts to this directory")
     parser.add_argument("--json", action="store_true", help="print plan JSON")
     parser.add_argument(
@@ -778,6 +809,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         implementer_roles=args.implementer_roles,
         board_service_traversal=args.board_service_traversal,
         include_designer=args.include_designer,
+        include_audit=args.include_audit,
     )
     if args.output_dir:
         write_artifacts(plan, args.output_dir)

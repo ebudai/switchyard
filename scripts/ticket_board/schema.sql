@@ -997,7 +997,9 @@ BEGIN
     IF OLD.state = 'in_progress' AND NEW.state = 'audit' AND NEW.needs_inspection AND NOT NEW.inspector_signoff THEN
         RAISE EXCEPTION 'tickets requiring inspection must pass through inspection before audit';
     END IF;
-    IF OLD.state NOT IN ('audit', 'dat', 'user_review', 'director_review') AND NEW.state = 'director_review' THEN
+    IF OLD.state NOT IN ('audit', 'dat', 'user_review', 'director_review')
+       AND NEW.state = 'director_review'
+       AND NOT ticket_board.workflow_transition_allowed_config(OLD.state, NEW.state) THEN
         RAISE EXCEPTION 'tickets must pass through audit before entering director_review';
     END IF;
     IF OLD.state = 'audit' AND NEW.state = 'director_review' AND NEW.needs_user_signoff THEN
@@ -4373,14 +4375,26 @@ DECLARE
     normalized_commit text := btrim(coalesce(commit_hash, ''));
     ticket_commit_exempt boolean;
     ticket_last_rejected_commit text;
+    ticket_state text;
+    target_state text;
 BEGIN
     actor := ticket_board.require_workflow_transition_actor('submit_to_audit', id);
-    SELECT tickets.commit_exempt, tickets.last_rejected_commit
-    INTO ticket_commit_exempt, ticket_last_rejected_commit
+    SELECT tickets.commit_exempt, tickets.last_rejected_commit, tickets.state
+    INTO ticket_commit_exempt, ticket_last_rejected_commit, ticket_state
     FROM ticket_board.tickets
     WHERE tickets.id = submit_to_audit.id;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'ticket not found: %', id;
+    END IF;
+    SELECT wt.to_stage
+    INTO target_state
+    FROM ticket_board.workflow_transitions wt
+    WHERE wt.from_stage = ticket_state
+      AND wt.action_name = 'submit_to_audit'
+    ORDER BY wt.to_stage
+    LIMIT 1;
+    IF target_state IS NULL THEN
+        RAISE EXCEPTION 'submit_to_audit is not configured from %', ticket_state;
     END IF;
     IF normalized_commit <> '' AND normalized_commit !~ '^[0-9A-Fa-f]{7,40}$' THEN
         RAISE EXCEPTION 'commit_hash must be a 7-40 character hex commit';
@@ -4395,8 +4409,9 @@ BEGIN
             coalesce(nullif(ticket_last_rejected_commit, ''), '<none>');
     END IF;
     UPDATE ticket_board.tickets
-    SET state = 'audit',
+    SET state = target_state,
         commit_hash = normalized_commit,
+        audit_signoff = CASE WHEN target_state = 'director_review' THEN true ELSE false END,
         inspector_signoff = false,
         last_rejected_commit = NULL
     WHERE tickets.id = submit_to_audit.id;

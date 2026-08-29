@@ -10084,7 +10084,7 @@ def test_switchyard_new_prompts_roles_and_skips_designer_when_absent() -> None:
         source_repo = tmp_path / "source-repo"
         source_repo.mkdir()
         prompts: list[str] = []
-        answers = iter(["n", "claude", "agy", "code-review, runtime", "agy", "codex"])
+        answers = iter(["n", "n", "claude", "code-review, runtime", "agy", "codex"])
         runner = PromptedRoleRunner()
         stdout = StringIO()
 
@@ -10124,39 +10124,40 @@ def test_switchyard_new_prompts_roles_and_skips_designer_when_absent() -> None:
 
     assert prompts == [
         "Include designer role [Y/n]: ",
+        "Include audit role [Y/n]: ",
         "director CLI (claude/codex/agy) [claude]: ",
-        "audit CLI (claude/codex/agy) [claude]: ",
         "Implementer roles (comma-separated): ",
         "code-review CLI (claude/codex/agy) [codex]: ",
         "runtime CLI (claude/codex/agy) [codex]: ",
     ]
     assert artifact["project"]["include_designer"] is False
+    assert artifact["project"]["include_audit"] is False
     assert artifact["project"]["roles"] == ["code-review", "runtime"]
     assert artifact["project"]["role_clis"] == {
         "director": "claude",
-        "audit": "agy",
         "code-review": "agy",
         "runtime": "codex",
     }
     assert plan["draft_roles"] == []
     assert plan["implementer_roles"] == ["code-review", "runtime"]
-    assert plan["assignee_roles"] == ["unassigned", "code-review", "runtime", "audit", "director", "user"]
-    assert plan["caller_roles"] == ["director", "code-review", "runtime", "audit", "user"]
-    assert [role["role"] for role in config["roles"]] == ["director", "audit", "code-review", "runtime"]
+    assert plan["assignee_roles"] == ["unassigned", "code-review", "runtime", "director", "user"]
+    assert plan["caller_roles"] == ["director", "code-review", "runtime", "user"]
+    assert [role["role"] for role in config["roles"]] == ["director", "code-review", "runtime"]
     assert {role["role"]: role["cli"] for role in config["roles"]} == {
         "director": ["claude"],
-        "audit": ["agy"],
         "code-review": ["agy"],
         "runtime": ["codex"],
     }
     assert [role["target"] for role in config["roles"]] == [
         "mycoolthing-director:0.0",
-        "mycoolthing-audit:0.0",
         "mycoolthing-code-review:0.0",
         "mycoolthing-runtime:0.0",
     ]
     assert "('draft', 'Draft', 0, ARRAY[]::text[]" in workflow_sql
     assert "('draft', 'analysis', 'release_draft', ARRAY['director', 'user']::text[]" in workflow_sql
+    assert "('audit', 'Audit'" not in workflow_sql
+    assert "ARRAY['audit']::text[]" not in workflow_sql
+    assert "('in_progress', 'director_review', 'submit_to_audit', ARRAY['code-review', 'runtime']::text[]" in workflow_sql
     assert not (project_dir / "PROJECT_DESIGN.md").exists()
     assert not (project_dir / ".switchyard" / "DESIGNER_ONBOARDING.md").exists()
     assert "switchyard: design phase skipped; no designer pane configured" in rendered
@@ -10788,6 +10789,59 @@ def test_project_artifact_accepts_designer_chosen_roles() -> None:
     assert [role["role"] for role in config["roles"]] == ["designer", "director", "audit", "ops", "app"]
 
 
+def test_project_artifact_can_omit_audit_role() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-design.") as tmp:
+        tmp_path = Path(tmp)
+        project_repo = tmp_path / "project-repo"
+        source_repo = tmp_path / "source-repo"
+        project_repo.mkdir()
+        source_repo.mkdir()
+        artifact_path = tmp_path / "atlas.project.json"
+        artifact_path.write_text(
+            json.dumps(
+                {
+                    "schema": "switchyard.project.v1",
+                    "design_document": "atlas-design.md",
+                    "project": {
+                        "slug": "atlas",
+                        "name": "Atlas Project",
+                        "ticket_prefix": "ATL",
+                        "owner_user": current_user,
+                        "repository": str(project_repo),
+                        "roles": ["ops", "app"],
+                        "include_audit": False,
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        assert (
+            new_project_command(
+                "atlas",
+                from_artifact=artifact_path,
+                source_repo=source_repo,
+                output_dir=tmp_path / "out",
+                runner=FakeRunner(),
+                port_in_use=lambda _port: False,
+                socket_exists=lambda _path: False,
+            )
+            == 0
+        )
+
+        plan = json.loads((tmp_path / "out" / "plan.json").read_text(encoding="utf-8"))
+        config = json.loads((tmp_path / "out" / "atlas.json").read_text(encoding="utf-8"))
+        workflow_sql = (tmp_path / "out" / "atlas-workflow.sql").read_text(encoding="utf-8")
+
+    assert plan["assignee_roles"] == ["unassigned", "designer", "ops", "app", "director", "user"]
+    assert plan["caller_roles"] == ["director", "designer", "ops", "app", "user"]
+    assert [role["role"] for role in config["roles"]] == ["designer", "director", "ops", "app"]
+    assert "('audit', 'Audit'" not in workflow_sql
+    assert "('in_progress', 'director_review', 'submit_to_audit', ARRAY['ops', 'app']::text[]" in workflow_sql
+
+
 def test_project_artifact_rejects_unknown_role_cli() -> None:
     current_user = team_launcher.current_user_name()
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-design.") as tmp:
@@ -10858,6 +10912,42 @@ def test_project_artifact_rejects_non_bool_include_designer() -> None:
             message = str(exc)
 
     assert "field 'project.include_designer' must be a JSON boolean" in message
+
+
+def test_project_artifact_rejects_non_bool_include_audit() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-design.") as tmp:
+        tmp_path = Path(tmp)
+        project_repo = tmp_path / "project-repo"
+        project_repo.mkdir()
+        artifact_path = tmp_path / "atlas.project.json"
+        artifact_path.write_text(
+            json.dumps(
+                {
+                    "schema": "switchyard.project.v1",
+                    "design_document": "atlas-design.md",
+                    "project": {
+                        "slug": "atlas",
+                        "name": "Atlas Project",
+                        "ticket_prefix": "ATL",
+                        "owner_user": current_user,
+                        "repository": str(project_repo),
+                        "roles": ["backend"],
+                        "include_audit": "no",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        try:
+            load_project_design_artifact(artifact_path)
+            raise AssertionError("expected include_audit type failure")
+        except SystemExit as exc:
+            message = str(exc)
+
+    assert "field 'project.include_audit' must be a JSON boolean" in message
 
 
 def _write_first_run_auth_config(tmp_path: Path, *, roles: list[tuple[str, str]], owner_user: str = "otto-agent") -> Path:

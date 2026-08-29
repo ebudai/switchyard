@@ -300,6 +300,8 @@ def compile_transition_target_role(stages: list[dict[str, object]]) -> str:
         owners = stage["owner_roles"]
         if stage["name"] == "in_progress":
             lines.append("        WHEN p_state = 'in_progress' THEN NULLIF(p_assignee, 'unassigned')")
+        elif stage["name"] == "user_review":
+            lines.append("        WHEN p_state = 'user_review' THEN NULL")
         elif len(owners) == 1:
             lines.append(f"        WHEN p_state = '{stage['name']}' THEN '{owners[0]}'")
     return "\n".join(lines)

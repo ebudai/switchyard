@@ -563,6 +563,14 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
           await updateTicketAction(ticketId, 'audit_sign_off', { text: actionReason(patch) }, normalizedCaller);
           consumed.add('audit_signoff');
           consumedComment = true;
+        } else if (nextState === 'director_review' && previousState === 'in_progress') {
+          await updateTicketAction(
+            ticketId,
+            'submit_to_audit',
+            { commit_hash: patch.commit_hash || ticket?.commit_hash || '' },
+            normalizedCaller,
+          );
+          consumed.add('commit_hash');
         } else if (nextState === 'user_review' && previousState === 'dat') {
           await updateTicketAction(ticketId, 'director_dat_sign_off', { text: actionReason(patch) }, normalizedCaller);
           consumedComment = !!actionReason(patch);

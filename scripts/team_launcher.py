@@ -162,9 +162,8 @@ NEW_PROJECT_ROLE_CLI_DEFAULTS = {
 SWITCHYARD_PROMPT_MAX_ATTEMPTS = 5
 NEW_PROJECT_REQUIRED_ROLES = (
     "director",
-    "audit",
 )
-NEW_PROJECT_FIXED_ROLE_NAMES = frozenset({"designer", *NEW_PROJECT_REQUIRED_ROLES})
+NEW_PROJECT_FIXED_ROLE_NAMES = frozenset({"designer", "director", "audit"})
 NEW_PROJECT_RESERVED_ROLE_NAMES = frozenset({"designer", "director", "audit", "user", "unassigned"})
 
 
@@ -251,6 +250,7 @@ class ProjectDesignArtifact:
     implementer_roles: tuple[str, ...]
     role_clis: tuple[tuple[str, str], ...]
     include_designer: bool
+    include_audit: bool
     push_policy: str
     gates: dict[str, bool]
     capability_grants: dict[str, object]
@@ -859,11 +859,18 @@ def _validate_new_project_implementer_role(value: str, *, context: str = "role")
     return role
 
 
-def _default_role_cli_pairs(implementer_roles: Sequence[str], *, include_designer: bool) -> tuple[tuple[str, str], ...]:
+def _default_role_cli_pairs(
+    implementer_roles: Sequence[str],
+    *,
+    include_designer: bool,
+    include_audit: bool = True,
+) -> tuple[tuple[str, str], ...]:
     pairs: list[tuple[str, str]] = []
     if include_designer:
         pairs.append(("designer", NEW_PROJECT_ROLE_CLI_DEFAULTS["designer"]))
-    pairs.extend((role, NEW_PROJECT_ROLE_CLI_DEFAULTS[role]) for role in NEW_PROJECT_REQUIRED_ROLES)
+    pairs.append(("director", NEW_PROJECT_ROLE_CLI_DEFAULTS["director"]))
+    if include_audit:
+        pairs.append(("audit", NEW_PROJECT_ROLE_CLI_DEFAULTS["audit"]))
     pairs.extend((role, "codex") for role in implementer_roles)
     return tuple(pairs)
 
@@ -903,8 +910,13 @@ def _artifact_role_cli_pairs(
     path: Path,
     implementer_roles: Sequence[str],
     include_designer: bool,
+    include_audit: bool = True,
 ) -> tuple[tuple[str, str], ...]:
-    defaults = _default_role_cli_pairs(implementer_roles, include_designer=include_designer)
+    defaults = _default_role_cli_pairs(
+        implementer_roles,
+        include_designer=include_designer,
+        include_audit=include_audit,
+    )
     if raw is None:
         return defaults
     if not isinstance(raw, dict):
@@ -1004,11 +1016,15 @@ def load_project_design_artifact(path: Path, *, expected_project: str | None = N
     include_designer_raw = project_raw.get("include_designer", True)
     if not isinstance(include_designer_raw, bool):
         raise SystemExit(f"{artifact_path} field 'project.include_designer' must be a JSON boolean")
+    include_audit_raw = project_raw.get("include_audit", True)
+    if not isinstance(include_audit_raw, bool):
+        raise SystemExit(f"{artifact_path} field 'project.include_audit' must be a JSON boolean")
     role_clis = _artifact_role_cli_pairs(
         project_raw.get("role_clis"),
         path=artifact_path,
         implementer_roles=implementer_roles,
         include_designer=include_designer_raw,
+        include_audit=include_audit_raw,
     )
     push_policy = _artifact_string(project_raw, "push_policy", path=artifact_path, default="director-main-only")
     gates = _artifact_bool_mapping(project_raw.get("gates"), path=artifact_path, field="project.gates", defaults=PROJECT_DESIGN_DEFAULT_GATES)
@@ -1026,6 +1042,7 @@ def load_project_design_artifact(path: Path, *, expected_project: str | None = N
         implementer_roles=implementer_roles,
         role_clis=role_clis,
         include_designer=include_designer_raw,
+        include_audit=include_audit_raw,
         push_policy=push_policy,
         gates=gates,
         capability_grants=capability_grants,
@@ -1047,6 +1064,7 @@ def project_design_artifact_payload(artifact: ProjectDesignArtifact) -> dict[str
             "worktree_policy": artifact.worktree_policy,
             "roles": list(artifact.implementer_roles),
             "include_designer": artifact.include_designer,
+            "include_audit": artifact.include_audit,
             "role_clis": _role_cli_map(artifact.role_clis),
             "push_policy": artifact.push_policy,
             "gates": artifact.gates,
@@ -4514,13 +4532,15 @@ def _prompt_switchyard_role_choices(
     input_func: Callable[[str], str] = input,
 ) -> tuple[tuple[str, str], ...]:
     include_designer = _prompt_bool("Include designer role", default=True, input_func=input_func)
+    include_audit = _prompt_bool("Include audit role", default=True, input_func=input_func)
     role_clis: list[tuple[str, str]] = []
     if include_designer:
         role_clis.append(
             ("designer", _prompt_cli("designer", default=NEW_PROJECT_ROLE_CLI_DEFAULTS["designer"], input_func=input_func))
         )
-    for role in NEW_PROJECT_REQUIRED_ROLES:
-        role_clis.append((role, _prompt_cli(role, default=NEW_PROJECT_ROLE_CLI_DEFAULTS[role], input_func=input_func)))
+    role_clis.append(("director", _prompt_cli("director", default=NEW_PROJECT_ROLE_CLI_DEFAULTS["director"], input_func=input_func)))
+    if include_audit:
+        role_clis.append(("audit", _prompt_cli("audit", default=NEW_PROJECT_ROLE_CLI_DEFAULTS["audit"], input_func=input_func)))
     for _attempt in range(SWITCHYARD_PROMPT_MAX_ATTEMPTS):
         raw_roles = _prompt_text("Implementer roles (comma-separated)", input_func=input_func)
         roles: list[str] = []
@@ -4641,8 +4661,13 @@ def design_project_command(
         worktree_policy=resolved_policy,
         design_document=target_design_document,
         implementer_roles=tuple(implementer_roles or DEFAULT_PROJECT_IMPLEMENTER_ROLES),
-        role_clis=_default_role_cli_pairs(implementer_roles or DEFAULT_PROJECT_IMPLEMENTER_ROLES, include_designer=True),
+        role_clis=_default_role_cli_pairs(
+            implementer_roles or DEFAULT_PROJECT_IMPLEMENTER_ROLES,
+            include_designer=True,
+            include_audit=True,
+        ),
         include_designer=True,
+        include_audit=True,
         push_policy=resolved_push_policy,
         gates=gates,
         capability_grants=grants,
@@ -4715,13 +4740,19 @@ def _new_project_launcher_config_payload(
     implementer_roles: Sequence[str] = DEFAULT_PROJECT_IMPLEMENTER_ROLES,
     role_clis: Sequence[tuple[str, str]] | None = None,
     include_designer: bool = True,
+    include_audit: bool = True,
     remote: str = "origin",
     default_branch: str = "main",
     worktree_policy: str = "shared",
 ) -> dict[str, Any]:
     layout_name = f"{plan.project}-konsole-layout.json"
     role_defs = _dedupe_role_defs(
-        role_clis or _default_role_cli_pairs(implementer_roles, include_designer=include_designer)
+        role_clis
+        or _default_role_cli_pairs(
+            implementer_roles,
+            include_designer=include_designer,
+            include_audit=include_audit,
+        )
     )
     worktree_base = _new_project_worktree_base(plan.project, plan.owner_user)
     control_repository = _new_project_control_repository(plan.project, plan.owner_user)
@@ -4825,12 +4856,18 @@ def write_new_project_launcher_artifacts(
     implementer_roles: Sequence[str] = DEFAULT_PROJECT_IMPLEMENTER_ROLES,
     role_clis: Sequence[tuple[str, str]] | None = None,
     include_designer: bool = True,
+    include_audit: bool = True,
     remote: str = "origin",
     default_branch: str = "main",
     worktree_policy: str = "shared",
 ) -> Path:
     role_defs = _dedupe_role_defs(
-        role_clis or _default_role_cli_pairs(implementer_roles, include_designer=include_designer)
+        role_clis
+        or _default_role_cli_pairs(
+            implementer_roles,
+            include_designer=include_designer,
+            include_audit=include_audit,
+        )
     )
     role_count = len(role_defs)
     config_path = output_dir / f"{plan.project}.json"
@@ -4851,6 +4888,7 @@ def write_new_project_launcher_artifacts(
                 implementer_roles=implementer_roles,
                 role_clis=role_defs,
                 include_designer=include_designer,
+                include_audit=include_audit,
                 remote=remote,
                 default_branch=default_branch,
                 worktree_policy=worktree_policy,
@@ -5056,6 +5094,7 @@ def new_project_command(
         implementer_roles = design_artifact.implementer_roles
         role_clis = design_artifact.role_clis
         include_designer = design_artifact.include_designer
+        include_audit = design_artifact.include_audit
         board_service_traversal = bool(design_artifact.capability_grants.get("board_service_traversal", True))
     else:
         if repository is None:
@@ -5069,8 +5108,9 @@ def new_project_command(
         project_name = project
         design_document = None
         implementer_roles = DEFAULT_PROJECT_IMPLEMENTER_ROLES
-        role_clis = _default_role_cli_pairs(implementer_roles, include_designer=True)
+        role_clis = _default_role_cli_pairs(implementer_roles, include_designer=True, include_audit=True)
         include_designer = True
+        include_audit = True
         board_service_traversal = True
     if worktree_policy not in WORKTREE_POLICIES:
         raise SystemExit(f"team-launcher: worktree policy must be one of {sorted(WORKTREE_POLICIES)}")
@@ -5084,6 +5124,7 @@ def new_project_command(
         implementer_roles=implementer_roles,
         board_service_traversal=board_service_traversal,
         include_designer=include_designer,
+        include_audit=include_audit,
     )
     precheck_new_project(
         plan,
@@ -5107,6 +5148,7 @@ def new_project_command(
         implementer_roles=implementer_roles,
         role_clis=role_clis,
         include_designer=include_designer,
+        include_audit=include_audit,
         remote=remote,
         default_branch=default_branch,
         worktree_policy=worktree_policy,
@@ -5301,6 +5343,7 @@ def _write_initial_switchyard_project_artifact(
     implementer_roles: Sequence[str] = DEFAULT_PROJECT_IMPLEMENTER_ROLES,
     role_clis: Sequence[tuple[str, str]] | None = None,
     include_designer: bool = True,
+    include_audit: bool = True,
 ) -> None:
     artifact = ProjectDesignArtifact(
         project=slug,
@@ -5314,9 +5357,15 @@ def _write_initial_switchyard_project_artifact(
         design_document=design_document,
         implementer_roles=tuple(implementer_roles),
         role_clis=_dedupe_role_cli_pairs(
-            role_clis or _default_role_cli_pairs(implementer_roles, include_designer=include_designer)
+            role_clis
+            or _default_role_cli_pairs(
+                implementer_roles,
+                include_designer=include_designer,
+                include_audit=include_audit,
+            )
         ),
         include_designer=include_designer,
+        include_audit=include_audit,
         push_policy="director-main-only",
         gates=dict(PROJECT_DESIGN_DEFAULT_GATES),
         capability_grants={
@@ -6183,6 +6232,7 @@ def switchyard_new_command(
         selected_role_clis = artifact.role_clis
         selected_implementer_roles = artifact.implementer_roles
         include_designer = artifact.include_designer
+        include_audit = artifact.include_audit
     else:
         resolved_project_name = (project_name or _prompt_text("Project name", input_func=input_func)).strip()
         if not resolved_project_name:
@@ -6204,6 +6254,7 @@ def switchyard_new_command(
         selected_role_clis = ()
         selected_implementer_roles = ()
         include_designer = True
+        include_audit = True
     _check_switchyard_registration_available(
         slug=resolved_slug,
         name=resolved_project_name,
@@ -6232,6 +6283,7 @@ def switchyard_new_command(
         if not selected_implementer_roles:
             raise SystemExit("switchyard: at least one implementer role is required")
         include_designer = any(role == "designer" for role, _cli in selected_role_clis)
+        include_audit = any(role == "audit" for role, _cli in selected_role_clis)
 
     artifact_path = (from_artifact or (_switchyard_dir(project_dir) / f"{resolved_slug}.project.json")).expanduser().resolve(strict=False)
     design_document = project_dir / SWITCHYARD_DESIGN_FILE_NAME
@@ -6248,6 +6300,7 @@ def switchyard_new_command(
         ticket_prefix=precheck_artifact.ticket_prefix if precheck_artifact else None,
         implementer_roles=precheck_artifact.implementer_roles if precheck_artifact else selected_implementer_roles,
         include_designer=precheck_artifact.include_designer if precheck_artifact else include_designer,
+        include_audit=precheck_artifact.include_audit if precheck_artifact else include_audit,
         board_service_traversal=(
             bool(precheck_artifact.capability_grants.get("board_service_traversal", True))
             if precheck_artifact
@@ -6296,6 +6349,7 @@ def switchyard_new_command(
             implementer_roles=selected_implementer_roles,
             role_clis=selected_role_clis,
             include_designer=include_designer,
+            include_audit=include_audit,
         )
         _chown_switchyard_project_files(owner_user=owner_user, project_dir=project_dir, runner=runner)
         if include_designer and design_document.exists():

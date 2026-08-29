@@ -34,11 +34,16 @@ The output directory contains:
 - `<project>-ticket-board.conf`: tmpfiles entry for the project frame inbox.
 - `<project>-database.sql`: PostgreSQL database/role bootstrap.
 - `<project>-workflow.sql`: per-project workflow seed. For new non-`pgu`
-  projects this replaces the default PGU workflow data with the visible stages
-  `Draft`, `Triage`, `Implementation`, `Audit`, DAT, UAT, and `Final Sign-Off`.
-  The generated `Audit` stage uses `entry_gate_field=needs_audit` and
-  `gate_skip_to=dat`, so each ticket can opt out of audit while still using
-  the same workflow gate machinery as inspection and UAT.
+  projects this is rendered as a projection of the authoritative workflow seed
+  in `scripts/ticket_board/schema.sql`, with project-specific role lists
+  substituted for implementation and draft ownership. Tenant boards
+  deliberately omit the pgu-only `Backlog` and `Inspection` stages plus the
+  `defer`, `start_task`, `submit_to_inspection`, and `request_commit_exempt`
+  actions; future schema workflow additions that are not part of that explicit
+  omission policy flow into generated tenant workflow SQL. The generated
+  `Audit` stage uses `entry_gate_field=needs_audit` and `gate_skip_to=dat`, so
+  each ticket can opt out of audit while still using the same workflow gate
+  machinery as UAT.
   Passing `--vcs-close-role <role>` inserts a `VCS` stage after
   `Final Sign-Off`, routes final-signoff tickets there by director action, and
   changes the generated terminal `mark_done` workflow transition to

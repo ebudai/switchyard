@@ -16,151 +16,22 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.ticket_board.project_provision import build_plan, render_database_sql, render_workflow_sql
+from scripts.ticket_board.project_provision import (
+    TENANT_WORKFLOW_EXCLUDED_ACTIONS,
+    TENANT_WORKFLOW_EXCLUDED_STAGES,
+    WorkflowStageSeed,
+    WorkflowTransitionSeed,
+    build_plan,
+    project_workflow_stages,
+    project_workflow_transitions,
+    render_database_sql,
+    render_workflow_sql,
+)
 
 
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
 RBAC_PATH = ROOT / "scripts" / "ticket_board" / "rbac.sql"
 MIGRATION_RUNNER = ROOT / "scripts" / "ticket-board-migrate"
-EXPECTED_STAGES = [
-    {
-        "name": "draft",
-        "display_label": "Draft",
-        "rank": 0,
-        "owner_roles": ["designer"],
-        "entry_gate_field": None,
-        "gate_skip_to": None,
-        "is_terminal": False,
-    },
-    {
-        "name": "analysis",
-        "display_label": "Triage",
-        "rank": 1,
-        "owner_roles": ["director"],
-        "entry_gate_field": None,
-        "gate_skip_to": None,
-        "is_terminal": False,
-    },
-    {
-        "name": "in_progress",
-        "display_label": "Implementation",
-        "rank": 2,
-        "owner_roles": ["main", "app"],
-        "entry_gate_field": None,
-        "gate_skip_to": None,
-        "is_terminal": False,
-    },
-    {
-        "name": "audit",
-        "display_label": "Audit",
-        "rank": 3,
-        "owner_roles": ["audit"],
-        "entry_gate_field": "needs_audit",
-        "gate_skip_to": "dat",
-        "is_terminal": False,
-    },
-    {
-        "name": "dat",
-        "display_label": "DAT",
-        "rank": 4,
-        "owner_roles": ["director"],
-        "entry_gate_field": "needs_user_signoff",
-        "gate_skip_to": "director_review",
-        "is_terminal": False,
-    },
-    {
-        "name": "user_review",
-        "display_label": "UAT",
-        "rank": 5,
-        "owner_roles": ["user"],
-        "entry_gate_field": "needs_user_signoff",
-        "gate_skip_to": "director_review",
-        "is_terminal": False,
-    },
-    {
-        "name": "director_review",
-        "display_label": "Final Sign-Off",
-        "rank": 6,
-        "owner_roles": ["director"],
-        "entry_gate_field": None,
-        "gate_skip_to": None,
-        "is_terminal": False,
-    },
-    {
-        "name": "done",
-        "display_label": "Done",
-        "rank": 9,
-        "owner_roles": [],
-        "entry_gate_field": None,
-        "gate_skip_to": None,
-        "is_terminal": True,
-    },
-    {
-        "name": "cancelled",
-        "display_label": "Cancelled",
-        "rank": 10,
-        "owner_roles": [],
-        "entry_gate_field": None,
-        "gate_skip_to": None,
-        "is_terminal": True,
-    },
-]
-EXPECTED_AUDITLESS_STAGES = [
-    {
-        "name": "draft",
-        "display_label": "Draft",
-        "rank": 0,
-        "owner_roles": [],
-        "entry_gate_field": None,
-        "gate_skip_to": None,
-        "is_terminal": False,
-    },
-    {
-        "name": "analysis",
-        "display_label": "Triage",
-        "rank": 1,
-        "owner_roles": ["director"],
-        "entry_gate_field": None,
-        "gate_skip_to": None,
-        "is_terminal": False,
-    },
-    {
-        "name": "in_progress",
-        "display_label": "Implementation",
-        "rank": 2,
-        "owner_roles": ["app"],
-        "entry_gate_field": None,
-        "gate_skip_to": None,
-        "is_terminal": False,
-    },
-    {
-        "name": "director_review",
-        "display_label": "Final Sign-Off",
-        "rank": 3,
-        "owner_roles": ["director"],
-        "entry_gate_field": None,
-        "gate_skip_to": None,
-        "is_terminal": False,
-    },
-    {
-        "name": "done",
-        "display_label": "Done",
-        "rank": 9,
-        "owner_roles": [],
-        "entry_gate_field": None,
-        "gate_skip_to": None,
-        "is_terminal": True,
-    },
-    {
-        "name": "cancelled",
-        "display_label": "Cancelled",
-        "rank": 10,
-        "owner_roles": [],
-        "entry_gate_field": None,
-        "gate_skip_to": None,
-        "is_terminal": True,
-    },
-]
 
 
 def run(args: list[str], *, input_text: str | None = None, capture: bool = True) -> subprocess.CompletedProcess[str]:
@@ -197,6 +68,116 @@ def psql(conn: str, sql: str) -> str:
     if proc.returncode != 0:
         raise AssertionError(proc.stderr or proc.stdout)
     return proc.stdout.strip()
+
+
+def stage_dict(stage: WorkflowStageSeed) -> dict[str, object]:
+    return {
+        "name": stage.name,
+        "display_label": stage.display_label,
+        "rank": stage.rank,
+        "owner_roles": list(stage.owner_roles),
+        "entry_gate_field": stage.entry_gate_field,
+        "gate_skip_to": stage.gate_skip_to,
+        "is_terminal": stage.is_terminal,
+    }
+
+
+def transition_dict(transition: WorkflowTransitionSeed) -> dict[str, object]:
+    return {
+        "from_stage": transition.from_stage,
+        "to_stage": transition.to_stage,
+        "action_name": transition.action_name,
+        "allowed_roles": list(transition.allowed_roles),
+        "owner_scoped": transition.owner_scoped,
+        "director_override": transition.director_override,
+    }
+
+
+def transition_sort_key(row: dict[str, object]) -> tuple[str, str, str]:
+    return (str(row["from_stage"]), str(row["to_stage"]), str(row["action_name"]))
+
+
+def database_stages(conn: str) -> list[dict[str, object]]:
+    return json.loads(
+        psql(
+            conn,
+            """
+SELECT jsonb_agg(jsonb_build_object(
+    'name', name,
+    'display_label', display_label,
+    'rank', rank,
+    'owner_roles', owner_roles,
+    'entry_gate_field', entry_gate_field,
+    'gate_skip_to', gate_skip_to,
+    'is_terminal', is_terminal
+) ORDER BY rank, name)::text
+FROM ticket_board.workflow_stages;
+""",
+        )
+    )
+
+
+def database_transitions(conn: str) -> list[dict[str, object]]:
+    return json.loads(
+        psql(
+            conn,
+            """
+SELECT jsonb_agg(jsonb_build_object(
+    'from_stage', from_stage,
+    'to_stage', to_stage,
+    'action_name', action_name,
+    'allowed_roles', allowed_roles,
+    'owner_scoped', owner_scoped,
+    'director_override', director_override
+) ORDER BY from_stage, to_stage, action_name)::text
+FROM ticket_board.workflow_transitions;
+""",
+        )
+    )
+
+
+def assert_project_workflow_matches_schema_projection(conn: str, plan) -> None:
+    expected_stages = [stage_dict(stage) for stage in project_workflow_stages(plan)]
+    assert database_stages(conn) == expected_stages
+
+    expected_transitions = sorted(
+        (transition_dict(transition) for transition in project_workflow_transitions(plan)),
+        key=transition_sort_key,
+    )
+    actual_transitions = database_transitions(conn)
+    assert actual_transitions == expected_transitions, {
+        "missing": [row for row in expected_transitions if row not in actual_transitions],
+        "extra": [row for row in actual_transitions if row not in expected_transitions],
+    }
+
+
+def assert_tenant_projection_policy(plan) -> None:
+    stage_names = {stage.name for stage in project_workflow_stages(plan)}
+    action_names = {transition.action_name for transition in project_workflow_transitions(plan)}
+    assert stage_names.isdisjoint(TENANT_WORKFLOW_EXCLUDED_STAGES), stage_names
+    assert action_names.isdisjoint(TENANT_WORKFLOW_EXCLUDED_ACTIONS), action_names
+
+
+def assert_schema_additions_are_not_silent() -> None:
+    schema_sql = SCHEMA_PATH.read_text(encoding="utf-8")
+    synthetic_schema = schema_sql.replace(
+        "    ('audit', 'Audit', 5, ARRAY['audit']::text[], 'needs_audit', 'dat', 'audit_signoff', false),",
+        "    ('qa', 'QA', 5, ARRAY['director']::text[], NULL, NULL, NULL, false),\n"
+        "    ('audit', 'Audit', 5, ARRAY['audit']::text[], 'needs_audit', 'dat', 'audit_signoff', false),",
+    ).replace(
+        "    ('analysis', 'cancelled', 'cancel', ARRAY['director']::text[], false, false),",
+        "    ('analysis', 'qa', 'route', ARRAY['director']::text[], false, false),\n"
+        "    ('analysis', 'cancelled', 'cancel', ARRAY['director']::text[], false, false),",
+    )
+    plan = build_plan(project="otto", owner_user="otto-agent")
+    assert "qa" in {stage.name for stage in project_workflow_stages(plan, schema_sql=synthetic_schema)}
+    assert any(
+        transition.from_stage == "analysis" and transition.to_stage == "qa" and transition.action_name == "route"
+        for transition in project_workflow_transitions(plan, schema_sql=synthetic_schema)
+    )
+    rendered = render_workflow_sql(plan, schema_sql=synthetic_schema)
+    assert "('qa', 'QA'," in rendered
+    assert "('analysis', 'qa', 'route'" in rendered
 
 
 def run_migrations(conn: str, *, migrations_dir: Path | None = None) -> None:
@@ -379,6 +360,7 @@ SELECT ticket_board.create_ticket('Provisioning sequence probe', 'Body', 'analys
 
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="ticket-board-project-workflow.") as tmpdir:
+        assert_schema_additions_are_not_silent()
         root = Path(tmpdir)
         data_dir = root / "pgdata"
         socket_dir = root / "socket"
@@ -411,28 +393,12 @@ def main() -> int:
             bootstrap_database_roles(admin_conn)
             psql(admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
             run_migrations(admin_conn)
-            psql(admin_conn, render_workflow_sql(build_plan(project="otto", owner_user="otto-agent")))
+            plan = build_plan(project="otto", owner_user="otto-agent")
+            psql(admin_conn, render_workflow_sql(plan))
             psql(admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
 
-            stages = json.loads(
-                psql(
-                    admin_conn,
-                    """
-SELECT jsonb_agg(jsonb_build_object(
-    'name', name,
-    'display_label', display_label,
-    'rank', rank,
-    'owner_roles', owner_roles,
-    'entry_gate_field', entry_gate_field,
-    'gate_skip_to', gate_skip_to,
-    'is_terminal', is_terminal
-) ORDER BY rank)::text
-FROM ticket_board.workflow_stages;
-""",
-                )
-            )
-            assert stages == EXPECTED_STAGES, stages
-            assert psql(admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions;") == "37"
+            assert_project_workflow_matches_schema_projection(admin_conn, plan)
+            assert_tenant_projection_policy(plan)
             assert psql(admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions WHERE from_stage IN ('done', 'cancelled');") == "3"
             handback_transition = provisioned_transition(admin_conn, "implementer_kick_back")
             assert handback_transition == {
@@ -495,7 +461,7 @@ JOIN walk ON walk.stage = ws.name;
 """,
                 )
             )
-            assert reachable == [stage["name"] for stage in EXPECTED_STAGES], reachable
+            assert reachable == [stage.name for stage in project_workflow_stages(plan)], reachable
             terminal_from_director_review = json.loads(
                 psql(
                     admin_conn,
@@ -762,25 +728,8 @@ WHERE id = '{matrix_id}';
             psql(noaudit_admin_conn, render_workflow_sql(noaudit_plan))
             psql(noaudit_admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
 
-            noaudit_stages = json.loads(
-                psql(
-                    noaudit_admin_conn,
-                    """
-SELECT jsonb_agg(jsonb_build_object(
-    'name', name,
-    'display_label', display_label,
-    'rank', rank,
-    'owner_roles', owner_roles,
-    'entry_gate_field', entry_gate_field,
-    'gate_skip_to', gate_skip_to,
-    'is_terminal', is_terminal
-) ORDER BY rank)::text
-FROM ticket_board.workflow_stages;
-""",
-                )
-            )
-            assert noaudit_stages == EXPECTED_AUDITLESS_STAGES, noaudit_stages
-            assert psql(noaudit_admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions;") == "17"
+            assert_project_workflow_matches_schema_projection(noaudit_admin_conn, noaudit_plan)
+            assert_tenant_projection_policy(noaudit_plan)
             assert psql(noaudit_admin_conn, "SELECT count(*) FROM ticket_board.workflow_stages WHERE name = 'audit';") == "0"
             assert psql(noaudit_admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions WHERE 'audit' = ANY(allowed_roles);") == "0"
             noaudit_handback_transition = provisioned_transition(noaudit_admin_conn, "implementer_kick_back")

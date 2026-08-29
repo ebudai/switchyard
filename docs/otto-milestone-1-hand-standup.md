@@ -98,8 +98,10 @@ Review points:
 - `implementer_roles` is `["app", "main"]`.
 - `assignee_roles` is `["unassigned", "designer", "ops", "app", "main", "audit", "director", "user"]`.
 - `caller_roles` is `["director", "designer", "ops", "app", "main", "audit", "user"]`.
-- `otto-workflow.sql` contains exactly five rows in `workflow_stages` and seven
-  rows in `workflow_transitions`.
+- `otto-workflow.sql` contains the generated tenant workflow projection from
+  `schema.sql`: draft, triage, implementation, optional audit/DAT/UAT, final
+  sign-off, and terminal states, with pgu-only backlog/inspection and their
+  actions omitted.
 - The generated system unit exports `TICKET_BOARD_DRAFT_ROLES`,
   `TICKET_BOARD_IMPLEMENTER_ROLES`, `TICKET_BOARD_ASSIGNEES`, and
   `TICKET_BOARD_CALLER_ROLES` matching those role lists.

@@ -1595,13 +1595,13 @@ def report_launch_session_records(
         pane_state_updated_since=pane_state_updated_since,
     )
     roles_by_target = {role.target: role for role in selected_roles}
+    codex_runtime_hook_missing_statuses: list[LaunchSessionRecordStatus] = []
     for status in statuses:
         role = roles_by_target.get(status.target)
-        codex_runtime_deferred_until_activity = (
+        codex_runtime_hook_deferred_until_activity = (
             role is not None
             and _expects_launch_runtime_hook_probe(role)
             and status.pane_state_source.startswith("team_launcher.")
-            and not status.found
             and not status.runtime_hook_reported
             and not status.unverified_resume
             and not status.resume_fallback
@@ -1610,7 +1610,7 @@ def report_launch_session_records(
             print_func(
                 f"switchyard: session record found for {status.role} ({status.target}): {status.session_id}"
             )
-        elif not codex_runtime_deferred_until_activity:
+        elif not codex_runtime_hook_deferred_until_activity:
             print_func(
                 f"warning: switchyard: session record missing for {status.role} "
                 f"({status.target}) after {timeout_seconds:g}s; continuing"
@@ -1631,14 +1631,19 @@ def report_launch_session_records(
             and _expects_launch_runtime_hook_probe(role)
             and not status.runtime_hook_reported
             and not status.unverified_resume
-            and not codex_runtime_deferred_until_activity
+            and not status.resume_fallback
         ):
-            print_func(
-                f"warning: switchyard: codex runtime hook did not report for {status.role} "
-                f"({status.target}) during the {timeout_seconds:g}s startup check; expected fresh codex.* "
-                "pane state. Interactive Codex may defer SessionStart until the first prompt; this pane's "
-                "hook delivery is unproven until activity writes codex.UserPromptSubmit or codex.Stop."
-            )
+            codex_runtime_hook_missing_statuses.append(status)
+    if codex_runtime_hook_missing_statuses:
+        missing = ", ".join(
+            f"{status.role} ({status.target})" for status in codex_runtime_hook_missing_statuses
+        )
+        print_func(
+            f"warning: switchyard: codex runtime hook did not report for "
+            f"{len(codex_runtime_hook_missing_statuses)} pane(s): {missing}; expected fresh codex.* "
+            "pane state. Interactive Codex may defer SessionStart until the first prompt; hook delivery "
+            "is unproven until activity writes codex.UserPromptSubmit or codex.Stop."
+        )
     return statuses
 
 

@@ -1397,6 +1397,7 @@ def test_launch_session_record_report_names_recent_resume_fallback() -> None:
         in message
         for message in messages
     )
+    assert not any("codex runtime hook did not report" in message for message in messages)
 
 
 def test_launch_session_record_report_names_recent_unverified_resume_timeout() -> None:
@@ -1449,6 +1450,7 @@ def test_launch_session_record_report_names_recent_unverified_resume_timeout() -
         for message in messages
     )
     assert any("did not mark pane idle" in message for message in messages)
+    assert not any("codex runtime hook did not report" in message for message in messages)
 
 
 def test_launch_session_record_report_ignores_stale_unverified_resume_timeout() -> None:
@@ -1556,7 +1558,7 @@ def test_launch_session_record_statuses_treat_unverified_resume_as_reported_outc
     assert elapsed < 0.1
 
 
-def test_launch_session_record_report_suppresses_expected_idle_codex_startup_warnings() -> None:
+def test_launch_session_record_report_aggregates_expected_idle_codex_startup_warning() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-launch-session-codex-idle-startup.") as tmp:
         tmp_path = Path(tmp)
         layout = tmp_path / "layout.json"
@@ -1601,7 +1603,70 @@ def test_launch_session_record_report_suppresses_expected_idle_codex_startup_war
 
     assert all(status.pane_state_source == "team_launcher.start" for status in statuses)
     assert all(status.session_id == "" for status in statuses)
-    assert not any(message.startswith("warning: switchyard:") for message in messages)
+    warning_messages = [message for message in messages if message.startswith("warning: switchyard:")]
+    assert len(warning_messages) == 1
+    assert "codex runtime hook did not report for 3 pane(s)" in warning_messages[0]
+    assert "main (porter-main:0.0)" in warning_messages[0]
+    assert "app (porter-app:0.0)" in warning_messages[0]
+    assert "ops (porter-ops:0.0)" in warning_messages[0]
+    assert "session record missing" not in warning_messages[0]
+
+
+def test_launch_session_record_report_aggregates_codex_warning_with_existing_records() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-launch-session-codex-existing-records.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        session_dir = tmp_path / "sessions"
+        session_dir.mkdir()
+        pane_state_dir = tmp_path / "pane-state"
+        pane_state_dir.mkdir()
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "session_dir": str(session_dir),
+                    "roles": [
+                        {"role": "main", "slot": 0, "cli": ["codex"], "target": "porter-main:0.0"},
+                        {"role": "app", "slot": 1, "cli": ["codex"], "target": "porter-app:0.0"},
+                        {"role": "ops", "slot": 2, "cli": ["codex"], "target": "porter-ops:0.0"},
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+        pane_state_since = time.time()
+        for role in config.roles:
+            (session_dir / session_file_name(role.target)).write_text(
+                json.dumps({"target": role.target, "session_id": f"{role.role}-session"}) + "\n",
+                encoding="utf-8",
+            )
+            team_launcher.seed_initial_pane_idle_state(role, pane_state_dir=pane_state_dir, source="team_launcher.start")
+        messages: list[str] = []
+
+        statuses = team_launcher.report_launch_session_records(
+            config,
+            timeout_seconds=0,
+            pane_state_dir=pane_state_dir,
+            pane_state_updated_since=pane_state_since,
+            print_func=messages.append,
+        )
+
+    assert all(status.pane_state_source == "team_launcher.start" for status in statuses)
+    assert all(status.session_id.endswith("-session") for status in statuses)
+    warning_messages = [message for message in messages if message.startswith("warning: switchyard:")]
+    assert len(warning_messages) == 1
+    assert "codex runtime hook did not report for 3 pane(s)" in warning_messages[0]
+    assert not any("codex runtime hook did not report for main" in message for message in messages)
+    assert not any("codex runtime hook did not report for app" in message for message in messages)
+    assert not any("codex runtime hook did not report for ops" in message for message in messages)
 
 
 def test_launch_session_record_report_warns_when_codex_runtime_hook_never_reports() -> None:
@@ -1651,7 +1716,7 @@ def test_launch_session_record_report_warns_when_codex_runtime_hook_never_report
 
     assert statuses[0].pane_state_source == "team_launcher.start"
     assert statuses[0].runtime_hook_source == ""
-    assert any("warning: switchyard: codex runtime hook did not report for main" in message for message in messages)
+    assert any("warning: switchyard: codex runtime hook did not report for 1 pane(s): main" in message for message in messages)
     assert any("expected fresh codex.* pane state" in message for message in messages)
 
 

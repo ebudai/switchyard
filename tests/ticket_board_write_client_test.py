@@ -374,6 +374,26 @@ def assert_test_process_detector_matches_program_not_shell_text() -> None:
     assert not write_client_module._cmdline_looks_like_test_process(["python3", "-c", "print('tests/foo_test.py')"])
 
 
+def assert_running_under_test_ignores_shell_command_text() -> None:
+    test_path = ROOT / "tests" / "foo_test.py"
+    probe = (
+        "import sys;"
+        f"sys.path.insert(0, {str(ROOT)!r});"
+        "from scripts.ticket_board.write_client import _running_under_test_process;"
+        "print('true' if _running_under_test_process({}, max_depth=2) else 'false')"
+    )
+    command = f"printf '%s\\n' {str(test_path)!r} >/dev/null; {sys.executable} -c {probe!r}; :"
+    proc = subprocess.run(
+        ["bash", "-lc", command],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "false", proc.stdout
+
+
 def assert_cli_test_guard_rejects_live_board_target(repo: Path) -> None:
     env = os.environ.copy()
     for key in list(env):
@@ -533,6 +553,7 @@ def main() -> int:
                 assert_test_guard_rejects_live_board_target_before_request(server.requests)
                 assert_test_guard_allows_normal_pane_context_outside_tests()
                 assert_test_process_detector_matches_program_not_shell_text()
+                assert_running_under_test_ignores_shell_command_text()
                 assert_cli_test_guard_rejects_live_board_target(repo)
                 assert_socket_discovery_prefers_runtime_then_legacy(root)
                 assert_generic_socket_env_precedes_legacy(root)

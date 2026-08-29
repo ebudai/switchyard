@@ -667,6 +667,25 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     assert created["assignee"] == "unassigned", created  # type: ignore[index]
     assert created["needs_audit"] is True, created  # type: ignore[index]
 
+    parented_director_create_payload = post_json(
+        base_url,
+        "/api/tickets/actions/create_ticket",
+        {
+            "title": "Director parented analysis create",
+            "body": "Director-created child work.",
+            "state": "analysis",
+            "parent_id": source_id,
+            "assignee": "ops",
+        },
+        caller="director",
+        expect=201,
+    )
+    parented_director_create = parented_director_create_payload["ticket"]  # type: ignore[index]
+    assert parented_director_create["state"] == "analysis", parented_director_create  # type: ignore[index]
+    assert parented_director_create["assignee"] == "ops", parented_director_create  # type: ignore[index]
+    assert parented_director_create["parent_id"] == source_id, parented_director_create  # type: ignore[index]
+    assert parented_director_create["comments"] == [], parented_director_create  # type: ignore[index]
+
     user_default_audit_created_payload = post_json(
         base_url,
         "/api/tickets/actions/create_ticket",
@@ -815,6 +834,15 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     assert pasted_path.is_file(), pasted_path
     persisted_pasted_create = get_ticket(base_url, str(pasted_create["id"]))  # type: ignore[index]
     assert persisted_pasted_create["screenshots"] == [str(pasted_path)], persisted_pasted_create
+
+    director_file_bug_forbidden = post_json(
+        base_url,
+        "/api/tickets/actions/file_bug",
+        {"title": "Director should use create_ticket", "body": "No direct file_bug.", "source_ticket_id": source_id},
+        caller="director",
+        expect=403,
+    )
+    assert "director cannot call file_bug" in str(director_file_bug_forbidden), director_file_bug_forbidden
 
     filed_payload = post_json(
         base_url,

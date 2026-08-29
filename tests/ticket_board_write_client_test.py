@@ -354,6 +354,26 @@ def assert_test_guard_allows_normal_pane_context_outside_tests() -> None:
     )
 
 
+def assert_test_process_detector_matches_program_not_shell_text() -> None:
+    assert write_client_module._cmdline_looks_like_test_process(["python3", "tests/foo_test.py"])
+    assert write_client_module._cmdline_looks_like_test_process(["python3", "-m", "pytest", "tests/foo_test.py"])
+    assert write_client_module._cmdline_looks_like_test_process(["./tests/foo_test.sh"])
+    assert write_client_module._cmdline_looks_like_test_process(["bash", "tests/foo_test.sh"])
+    assert not write_client_module._cmdline_looks_like_test_process(
+        ["zsh", "-c", "python3 tests/foo_test.py && scripts/ticket-board-write add-comment PGU-739 --text ok"]
+    )
+    assert not write_client_module._cmdline_looks_like_test_process(
+        ["bash", "-lc", "python3 tests/foo_test.py && scripts/ticket-board-write add-comment PGU-739 --text ok"]
+    )
+    assert not write_client_module._cmdline_looks_like_test_process(
+        ["bash", "-lc", "tests/foo_test.sh && scripts/ticket-board-write add-comment PGU-739 --text ok"]
+    )
+    assert not write_client_module._cmdline_looks_like_test_process(
+        ["sh", "-ec", "tests/foo_test.sh && scripts/ticket-board-write add-comment PGU-739 --text ok"]
+    )
+    assert not write_client_module._cmdline_looks_like_test_process(["python3", "-c", "print('tests/foo_test.py')"])
+
+
 def assert_cli_test_guard_rejects_live_board_target(repo: Path) -> None:
     env = os.environ.copy()
     for key in list(env):
@@ -512,6 +532,7 @@ def main() -> int:
                 assert_empty_caller_role_rejects_before_request(base_url, server.requests)
                 assert_test_guard_rejects_live_board_target_before_request(server.requests)
                 assert_test_guard_allows_normal_pane_context_outside_tests()
+                assert_test_process_detector_matches_program_not_shell_text()
                 assert_cli_test_guard_rejects_live_board_target(repo)
                 assert_socket_discovery_prefers_runtime_then_legacy(root)
                 assert_generic_socket_env_precedes_legacy(root)

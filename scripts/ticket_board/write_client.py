@@ -26,6 +26,19 @@ LIVE_BOARD_SOCKET_PATHS = frozenset(
     }
 )
 ALLOW_PRODUCTION_WRITES_UNDER_TEST_ENV = "TICKET_BOARD_ALLOW_PRODUCTION_WRITES_UNDER_TEST"
+TEST_INTERPRETER_NAMES = frozenset(
+    {
+        "bash",
+        "dash",
+        "fish",
+        "python",
+        "python3",
+        "sh",
+        "zsh",
+    }
+)
+SHELL_INTERPRETER_NAMES = frozenset({"bash", "dash", "fish", "sh", "zsh"})
+TEST_RUNNER_NAMES = frozenset({"pytest", "py.test"})
 
 
 def _env_first(*names: str) -> str:
@@ -127,6 +140,35 @@ def _arg_looks_like_test_path(arg: str) -> bool:
     )
 
 
+def _cmdline_looks_like_test_process(cmdline: list[str]) -> bool:
+    if not cmdline:
+        return False
+    program = Path(cmdline[0]).name
+    if program in TEST_RUNNER_NAMES or _arg_looks_like_test_path(cmdline[0]):
+        return True
+    if program not in TEST_INTERPRETER_NAMES:
+        return False
+
+    index = 1
+    while index < len(cmdline):
+        arg = cmdline[index]
+        if arg == "--":
+            index += 1
+            break
+        if arg == "-c":
+            return False
+        if program in SHELL_INTERPRETER_NAMES and arg.startswith("-") and "c" in arg[1:]:
+            return False
+        if arg == "-m":
+            module = cmdline[index + 1] if index + 1 < len(cmdline) else ""
+            return module in TEST_RUNNER_NAMES or module.startswith("pytest")
+        if arg.startswith("-"):
+            index += 1
+            continue
+        break
+    return index < len(cmdline) and _arg_looks_like_test_path(cmdline[index])
+
+
 def _running_under_test_process(environ: Mapping[str, str] = os.environ, *, max_depth: int = 12) -> bool:
     if _env_truthy(environ, "TICKET_BOARD_TEST_MODE") or environ.get("PYTEST_CURRENT_TEST"):
         return True
@@ -138,7 +180,7 @@ def _running_under_test_process(environ: Mapping[str, str] = os.environ, *, max_
         seen.add(pid)
         proc_dir = Path("/proc") / str(pid)
         cmdline = _proc_parts(proc_dir / "cmdline")
-        if any(_arg_looks_like_test_path(arg) for arg in cmdline):
+        if _cmdline_looks_like_test_process(cmdline):
             return True
         status = {}
         try:

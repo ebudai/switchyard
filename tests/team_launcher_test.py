@@ -8270,6 +8270,42 @@ def test_design_writes_artifact_that_new_from_consumes_for_missing_owner_user() 
     assert not any(call[:1] == ["sudo"] for call in runner.calls)
 
 
+def test_design_owner_user_argument_is_verbatim_not_suffixed() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-design.") as tmp:
+        tmp_path = Path(tmp)
+        project_repo = tmp_path / "project-repo"
+        project_repo.mkdir()
+
+        assert (
+            design_project_command(
+                "porter",
+                output_dir=tmp_path / "design",
+                design_title="Porter",
+                design_body="A small coordination tool.",
+                repository=project_repo,
+                remote="origin",
+                default_branch="main",
+                worktree_policy="shared",
+                owner_user="eric",
+                ticket_prefix="PORT",
+                push_policy="director-main-only",
+                audit_signoff=True,
+                needs_inspection=False,
+                needs_user_signoff=False,
+                board_service_traversal=True,
+                supplementary_groups=[],
+                linger=True,
+                owner_shell="fish",
+                input_func=_no_input,
+            )
+            == 0
+        )
+
+        artifact = load_project_design_artifact(tmp_path / "design" / "porter.project.json", expected_project="porter")
+
+    assert artifact.owner_user == "eric"
+
+
 def test_design_cli_writes_project_artifact_noninteractively() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-design.") as tmp:
         tmp_path = Path(tmp)

@@ -340,6 +340,20 @@ WHERE id = {sql_string(assigned_created)};
         )
     )
     assert assigned_created_row == {"state": "analysis", "assignee": "ops"}, assigned_created_row
+    assert "invalid assignee: nope" in psql_error(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'user', false);
+SELECT ticket_board.create_ticket('Invalid assignee create', 'Body', 'analysis', 'nope', ARRAY[]::text[], '', false, true);
+""",
+    )
+    assert "draft tickets cannot be created with an assignee; release and route the draft instead" in psql_error(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'user', false);
+SELECT ticket_board.create_ticket('Assigned draft create', 'Body', 'draft', 'ops', ARRAY[]::text[], '', false, true);
+""",
+    )
     draft_created = psql(service_conn, "SELECT ticket_board.create_ticket('Service draft create', 'Body', 'draft');")
     draft_row = json.loads(
         psql(

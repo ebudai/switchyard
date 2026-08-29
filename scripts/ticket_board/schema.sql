@@ -4054,7 +4054,7 @@ BEGIN
     IF normalized_state = 'draft' AND normalized_assignee <> 'unassigned' THEN
         RAISE EXCEPTION 'draft tickets cannot be created with an assignee; release and route the draft instead';
     END IF;
-    IF normalized_state = 'backlog' THEN
+    IF normalized_state = 'backlog' AND normalized_assignee = 'unassigned' THEN
         normalized_parked := true;
     END IF;
     SELECT count(*)

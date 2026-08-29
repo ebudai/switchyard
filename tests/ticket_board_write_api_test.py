@@ -715,7 +715,7 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     user_assigned_backlog_payload = post_json(
         base_url,
         "/api/tickets/actions/create_ticket",
-        {"title": "User assigned backlog create", "body": "User parks assigned work.", "initial_state": "backlog", "assignee": "research"},
+        {"title": "User assigned backlog create", "body": "User assigns backlog work.", "initial_state": "backlog", "assignee": "research"},
         caller="user",
         expect=201,
     )
@@ -726,7 +726,7 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     assert psql(
         admin_conn,
         f"SELECT state || ':' || assignee || ':' || parked FROM ticket_board.tickets WHERE id = '{user_assigned_backlog_id}';",
-    ) == "backlog:research:true"
+    ) == "backlog:research:false"
 
     no_audit_created_payload = post_json(
         base_url,
@@ -759,8 +759,13 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
         expect=201,
     )
     backlog_created = backlog_created_payload["ticket"]  # type: ignore[index]
+    backlog_created_id = str(backlog_created["id"])  # type: ignore[index]
     assert backlog_created["state"] == "backlog", backlog_created  # type: ignore[index]
     assert backlog_created["assignee"] == "research", backlog_created  # type: ignore[index]
+    assert psql(
+        admin_conn,
+        f"SELECT state || ':' || assignee || ':' || parked FROM ticket_board.tickets WHERE id = '{backlog_created_id}';",
+    ) == "backlog:research:false"
 
     draft_assignee_rejected = post_json(
         base_url,

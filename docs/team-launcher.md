@@ -191,8 +191,8 @@ So the launcher can guard against missing-store silent fallback, but the real
 inspector failure is a lower-level agy context propagation failure after a
 successful local resume. When reproducing agy/gemini resume behavior from inside
 a team pane, isolate the hook environment or the hook can write this pane's live
-state through tmux's inherited `TMUX_PANE`: run with `env -u TMUX -u TMUX_PANE`
-and set `TICKET_BOARD_PANE_TARGET`, `TICKET_BOARD_PANE_STATE_DIR`, and
+state through the inherited pane target/session environment: set
+`TICKET_BOARD_PANE_TARGET`, `TICKET_BOARD_PANE_STATE_DIR`, and
 `TICKET_BOARD_PANE_SESSION_DIR` to disposable values.
 
 `provision-runtime` is the non-launching project-user setup check. It enables

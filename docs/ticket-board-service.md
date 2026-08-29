@@ -228,9 +228,9 @@ can read a per-pane state file from
 closed and defers delivery. The listener logs the panes still missing hook
 state on startup.
 
-Hook commands may pass `--target pgu-<role>:0.0`, set `PGU_PANE_TARGET`, or let
-the writer resolve the target from `TMUX_PANE`. The required state transitions
-are:
+Hook commands must pass `--target pgu-<role>:0.0` or set
+`TICKET_BOARD_PANE_TARGET` / `PGU_PANE_TARGET`; the writer does not infer a
+target from ambient tmux state. The required state transitions are:
 
 - Claude Code: `SessionStart` writes initial `idle` and records the resume
   session id; `Notification` with matcher `idle_prompt` writes `idle`;
@@ -253,8 +253,9 @@ but replacing an existing session id is guarded for every source:
 `SessionStart`, `PreInvocation`, `PostInvocation`, `Stop`, and equivalents. A
 different incoming id is accepted only when it matches the launcher-provided
 `TICKET_BOARD_PANE_SESSION_ID` or when the hook invocation passed `--session-id`
-explicitly. A transient CLI launched inside a pane inherits `TMUX_PANE`, but it
-cannot replace that pane's durable resume id with a different conversation id.
+explicitly. A transient CLI launched inside a pane inherits that pane's
+target/session environment, but it cannot replace that pane's durable resume id
+with a different conversation id.
 Before the launcher deliberately starts a pane fresh instead of resuming, it
 clears that pane's old session record; the newly launched CLI can then claim the
 empty record first. Payloads without a session id still update pane state and do
@@ -264,11 +265,11 @@ resume ids when recreating panes without losing context.
 For notification delivery, idle hook records are not all equally authoritative.
 Only turn-end sources from the pane's configured runtime can establish idle on
 their own. Session-lifecycle sources such as `SessionStart`, foreign-runtime
-sources inherited through `TMUX_PANE`, and other non-turn-end idle records must
-be corroborated by a working-timer probe. A successful probe with no visible
-`Working (Ns)` timer is idle evidence; a failed or otherwise inconclusive probe
-still treats the pane as busy and records a specific trace reason instead of
-collapsing the decision into `hook_idle`.
+sources inherited through pane target/session environment, and other
+non-turn-end idle records must be corroborated by a working-timer probe. A
+successful probe with no visible `Working (Ns)` timer is idle evidence; a failed
+or otherwise inconclusive probe still treats the pane as busy and records a
+specific trace reason instead of collapsing the decision into `hook_idle`.
 
 Install the hook writer and persistent CLI hook config entries with:
 

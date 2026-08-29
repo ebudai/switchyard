@@ -317,31 +317,51 @@ def assert_empty_caller_role_rejects_before_request(
     assert len(requests) == before, requests[before:]
 
 
-def assert_test_guard_rejects_live_board_target_before_request(
+def assert_test_guard_rejects_configured_live_target_before_request(
     requests: list[tuple[str, str | None, str | None, dict[str, object]]],
+    *,
+    live_socket_path: Path,
+    live_url_port: int,
 ) -> None:
     before = len(requests)
-    client = TicketBoardWriteClient("http://127.0.0.1:1", "director", socket_path="/run/pgu-ticket-board/ticket-board.sock")
+    old_live_socket_paths = write_client_module.LIVE_BOARD_SOCKET_PATHS
+    old_live_url_port = write_client_module.LIVE_BOARD_URL_PORT
     try:
-        client.create_ticket(title="Must not reach production", body="Guarded.")
-    except write_client_module.TicketBoardWriteError as exc:
-        message = str(exc)
-    else:
-        raise AssertionError("test write to live board socket unexpectedly proceeded")
-    assert "refusing production ticket-board write while running under test" in message, message
-    assert "/run/pgu-ticket-board/ticket-board.sock" in message, message
-    assert len(requests) == before, requests[before:]
+        write_client_module.LIVE_BOARD_SOCKET_PATHS = frozenset({str(live_socket_path)})
+        write_client_module.LIVE_BOARD_URL_PORT = live_url_port
 
-    url_client = TicketBoardWriteClient("http://localhost:8770", "director")
-    try:
-        url_client.create_ticket(title="Must not reach production URL", body="Guarded.")
-    except write_client_module.TicketBoardWriteError as exc:
-        message = str(exc)
-    else:
-        raise AssertionError("test write to live board URL unexpectedly proceeded")
-    assert "refusing production ticket-board write while running under test" in message, message
-    assert "http://localhost:8770" in message, message
-    assert len(requests) == before, requests[before:]
+        client = TicketBoardWriteClient("http://127.0.0.1:1", "director", socket_path=str(live_socket_path))
+        try:
+            client.create_ticket(title="Must not reach production", body="Guarded.")
+        except write_client_module.TicketBoardWriteError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("test write to configured live board socket unexpectedly proceeded")
+        assert "refusing production ticket-board write while running under test" in message, message
+        assert str(live_socket_path) in message, message
+        assert len(requests) == before, requests[before:]
+
+        url = f"http://localhost:{live_url_port}"
+        url_client = TicketBoardWriteClient(url, "director")
+        try:
+            url_client.create_ticket(title="Must not reach production URL", body="Guarded.")
+        except write_client_module.TicketBoardWriteError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("test write to configured live board URL unexpectedly proceeded")
+        assert "refusing production ticket-board write while running under test" in message, message
+        assert url in message, message
+        assert len(requests) == before, requests[before:]
+    finally:
+        write_client_module.LIVE_BOARD_SOCKET_PATHS = old_live_socket_paths
+        write_client_module.LIVE_BOARD_URL_PORT = old_live_url_port
+
+
+def assert_live_board_constants_are_classified_without_writes() -> None:
+    assert write_client_module._is_live_board_socket("/run/pgu-ticket-board/ticket-board.sock")
+    assert write_client_module._is_live_board_socket("/tmp/pgu-ticket-board.sock")
+    assert write_client_module._is_live_board_url("http://127.0.0.1:8770")
+    assert write_client_module._is_live_board_url("http://localhost:8770")
 
 
 def assert_test_guard_allows_normal_pane_context_outside_tests() -> None:
@@ -394,23 +414,26 @@ def assert_running_under_test_ignores_shell_command_text() -> None:
     assert proc.stdout.strip() == "false", proc.stdout
 
 
-def assert_cli_test_guard_rejects_live_board_target(repo: Path) -> None:
+def assert_cli_test_guard_rejects_configured_live_target(repo: Path, live_socket_path: Path) -> None:
     env = os.environ.copy()
     for key in list(env):
         if key.startswith("TICKET_BOARD_") or key.startswith("PGU_TICKET_BOARD_"):
             env.pop(key)
     env["TICKET_BOARD_CALLER_ROLE"] = "director"
+    wrapper = ROOT / "scripts" / "ticket-board-write"
+    child = (
+        "import runpy, sys;"
+        f"sys.path.insert(0, {str(ROOT / 'scripts')!r});"
+        "import ticket_board.write_client as write_client;"
+        f"write_client.LIVE_BOARD_SOCKET_PATHS = frozenset({[str(live_socket_path)]!r});"
+        f"sys.argv = {[str(wrapper), '--socket', str(live_socket_path), 'create-ticket', '--title', 'Must not reach production', '--body', 'Guarded.']!r};"
+        f"runpy.run_path({str(wrapper)!r}, run_name='__main__')"
+    )
     proc = subprocess.run(
         [
             sys.executable,
-            str(ROOT / "scripts" / "ticket-board-write"),
-            "--socket",
-            "/run/pgu-ticket-board/ticket-board.sock",
-            "create-ticket",
-            "--title",
-            "Must not reach production",
-            "--body",
-            "Guarded.",
+            "-c",
+            child,
         ],
         cwd=repo,
         env=env,
@@ -420,7 +443,7 @@ def assert_cli_test_guard_rejects_live_board_target(repo: Path) -> None:
     )
     assert proc.returncode == 1, proc.stdout
     assert "refusing production ticket-board write while running under test" in proc.stderr, proc.stderr
-    assert "/run/pgu-ticket-board/ticket-board.sock" in proc.stderr, proc.stderr
+    assert str(live_socket_path) in proc.stderr, proc.stderr
 
 
 def assert_auto_socket_connect_failure_falls_back_to_tcp(base_url: str, socket_path: Path) -> None:
@@ -550,11 +573,19 @@ def main() -> int:
                 exercise_client(base_url, repo, pushed_hash)
                 assert_submit_rejects_unpushed_commit(base_url, repo, local_only_hash, server.requests)
                 assert_empty_caller_role_rejects_before_request(base_url, server.requests)
-                assert_test_guard_rejects_live_board_target_before_request(server.requests)
+                assert_test_guard_rejects_configured_live_target_before_request(
+                    server.requests,
+                    live_socket_path=root / "configured-live-board.sock",
+                    live_url_port=server.server_port,
+                )
+                assert_live_board_constants_are_classified_without_writes()
                 assert_test_guard_allows_normal_pane_context_outside_tests()
                 assert_test_process_detector_matches_program_not_shell_text()
                 assert_running_under_test_ignores_shell_command_text()
-                assert_cli_test_guard_rejects_live_board_target(repo)
+                assert_cli_test_guard_rejects_configured_live_target(
+                    repo,
+                    live_socket_path=root / "configured-live-cli.sock",
+                )
                 assert_socket_discovery_prefers_runtime_then_legacy(root)
                 assert_generic_socket_env_precedes_legacy(root)
                 assert_default_caller_role_ignores_tmux_session()

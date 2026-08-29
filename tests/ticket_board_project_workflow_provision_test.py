@@ -412,7 +412,7 @@ FROM ticket_board.workflow_stages;
                 )
             )
             assert stages == EXPECTED_STAGES, stages
-            assert psql(admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions;") == "35"
+            assert psql(admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions;") == "36"
             assert psql(admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions WHERE from_stage IN ('done', 'cancelled');") == "3"
             assert psql(
                 admin_conn,

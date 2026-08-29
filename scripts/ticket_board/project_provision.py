@@ -484,6 +484,7 @@ def render_workflow_sql(plan: ProjectBoardProvision) -> str:
         ("audit", "director_review", "route", ("director",), False, False),
         ("audit", "director_review", "audit_sign_off", ("audit",), False, False),
         ("audit", "cancelled", "cancel", ("director",), False, False),
+        ("dat", "director_review", "entry_gate_skip", (), False, False),
         ("dat", "user_review", "director_dat_sign_off", ("director",), False, False),
         ("dat", "in_progress", "director_dat_kick_back", ("director",), False, False),
         ("dat", "analysis", "director_dat_kick_back", ("director",), False, False),

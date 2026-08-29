@@ -1896,6 +1896,42 @@ WHERE id = 'PGU-9';
 
             insert_ticket(
                 conninfo,
+                "PGU-75920",
+                title="DAT no longer needs UAT",
+                assignee="director",
+                state="dat",
+                implementation="done",
+                audit_signoff=False,
+                needs_audit=False,
+                needs_user_signoff=True,
+            )
+            psql(conninfo, "UPDATE ticket_board.tickets SET needs_user_signoff = false WHERE id = 'PGU-75920';")
+            dat_without_uat = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'state', state,
+    'audit_signoff', audit_signoff,
+    'needs_audit', needs_audit,
+    'needs_user_signoff', needs_user_signoff,
+    'user_signoff', user_signoff
+)::text
+FROM ticket_board.tickets
+WHERE id = 'PGU-75920';
+""",
+                ).stdout
+            )
+            assert dat_without_uat == {
+                "state": "director_review",
+                "audit_signoff": False,
+                "needs_audit": False,
+                "needs_user_signoff": False,
+                "user_signoff": False,
+            }, dat_without_uat
+
+            insert_ticket(
+                conninfo,
                 "PGU-50",
                 title="Auto implementation on insert",
                 assignee="ops",

@@ -360,6 +360,7 @@ VALUES
     ('audit', 'analysis', 'route', ARRAY['director']::text[], false, false),
     ('audit', 'backlog', 'defer', ARRAY['director']::text[], false, false),
     ('audit', 'cancelled', 'cancel', ARRAY['director']::text[], false, false),
+    ('dat', 'director_review', 'entry_gate_skip', ARRAY[]::text[], false, false),
     ('dat', 'user_review', 'director_dat_sign_off', ARRAY['director']::text[], false, false),
     ('dat', 'in_progress', 'director_dat_kick_back', ARRAY['director']::text[], false, false),
     ('dat', 'analysis', 'director_dat_kick_back', ARRAY['director']::text[], false, false),
@@ -648,7 +649,7 @@ AS $$
         OR (p_from_state = 'in_progress' AND p_to_state IN ('inspection', 'audit', 'analysis', 'backlog', 'cancelled'))
         OR (p_from_state = 'inspection' AND p_to_state IN ('audit', 'in_progress', 'backlog', 'cancelled'))
         OR (p_from_state = 'audit' AND p_to_state IN ('dat', 'director_review', 'in_progress', 'analysis', 'backlog', 'cancelled'))
-        OR (p_from_state = 'dat' AND p_to_state IN ('user_review', 'in_progress', 'analysis', 'backlog', 'cancelled'))
+        OR (p_from_state = 'dat' AND p_to_state IN ('director_review', 'user_review', 'in_progress', 'analysis', 'backlog', 'cancelled'))
         OR (p_from_state = 'user_review' AND p_to_state IN ('inspection', 'director_review', 'audit', 'analysis', 'backlog', 'cancelled'))
         OR (p_from_state = 'director_review' AND p_to_state IN ('done', 'in_progress', 'analysis', 'backlog', 'cancelled'))
         OR (p_from_state = 'done' AND p_to_state IN ('analysis', 'backlog'))

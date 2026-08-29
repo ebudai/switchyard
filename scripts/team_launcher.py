@@ -5185,6 +5185,23 @@ class SwitchyardProjectEntry:
 
 
 @dataclass(frozen=True)
+class SwitchyardProjectStatus:
+    name: str
+    slug: str
+    state: str
+    panes_up: int | None
+    panes_total: int | None
+    config_path: Path
+    error: str = ""
+
+    @property
+    def panes_display(self) -> str:
+        if self.panes_up is None or self.panes_total is None:
+            return "?/?"
+        return f"{self.panes_up}/{self.panes_total}"
+
+
+@dataclass(frozen=True)
 class OwnerUserProvisionResult:
     created: bool
     linger_enabled: bool
@@ -6147,6 +6164,115 @@ def switchyard_menu_command(
     return 0
 
 
+def _list_process_command_lines(
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> list[str]:
+    proc = runner(
+        ["ps", "-eo", "args=", "--no-headers"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if proc.returncode != 0:
+        reason = _proc_failure_reason(proc, f"ps failed with exit {proc.returncode}")
+        raise SystemExit(f"switchyard: failed to inspect processes: {reason}")
+    return [line for line in str(proc.stdout or "").splitlines() if line.strip()]
+
+
+def _role_has_pane_process(role: RoleConfig, process_commands: Sequence[str]) -> bool:
+    target_marker = f"TICKET_BOARD_PANE_TARGET={role.target}"
+    legacy_target_marker = f"PGU_PANE_TARGET={role.target}"
+    tmux_session_marker = f" -s {role.tmux_session} "
+    for command in process_commands:
+        padded = f" {command} "
+        if target_marker in command or legacy_target_marker in command:
+            return True
+        if "tmux new-session" in command and tmux_session_marker in padded:
+            return True
+    return False
+
+
+def switchyard_project_statuses(
+    *,
+    config_dir: Path | None = None,
+    registry_dir: Path | None = None,
+    process_commands: Sequence[str] | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> list[SwitchyardProjectStatus]:
+    commands = list(process_commands) if process_commands is not None else _list_process_command_lines(runner=runner)
+    statuses: list[SwitchyardProjectStatus] = []
+    for entry in _switchyard_entries(config_dir=config_dir, registry_dir=registry_dir):
+        try:
+            config = load_project_config(entry.slug, entry.config_path)
+        except (OSError, json.JSONDecodeError, SystemExit) as exc:
+            statuses.append(
+                SwitchyardProjectStatus(
+                    name=entry.name,
+                    slug=entry.slug,
+                    state="unknown",
+                    panes_up=None,
+                    panes_total=None,
+                    config_path=entry.config_path,
+                    error=str(exc),
+                )
+            )
+            continue
+        panes_up = sum(1 for role in config.roles if _role_has_pane_process(role, commands))
+        statuses.append(
+            SwitchyardProjectStatus(
+                name=entry.name,
+                slug=entry.slug,
+                state="running" if panes_up else "stopped",
+                panes_up=panes_up,
+                panes_total=len(config.roles),
+                config_path=entry.config_path,
+            )
+        )
+    return statuses
+
+
+def _switchyard_project_status_payload(status: SwitchyardProjectStatus) -> dict[str, Any]:
+    return {
+        "name": status.name,
+        "slug": status.slug,
+        "state": status.state,
+        "panes_up": status.panes_up,
+        "panes_total": status.panes_total,
+        "panes": status.panes_display,
+        "config_path": str(status.config_path),
+        "error": status.error,
+    }
+
+
+def switchyard_status_command(
+    *,
+    config_dir: Path | None = None,
+    registry_dir: Path | None = None,
+    json_output: bool = False,
+    process_commands: Sequence[str] | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    statuses = switchyard_project_statuses(
+        config_dir=config_dir,
+        registry_dir=registry_dir,
+        process_commands=process_commands,
+        runner=runner,
+    )
+    if json_output:
+        print_func(json.dumps({"projects": [_switchyard_project_status_payload(status) for status in statuses]}, indent=2))
+        return 0
+    rows = [("NAME", "SLUG", "STATE", "PANES")]
+    rows.extend((status.name, status.slug, status.state, status.panes_display) for status in statuses)
+    widths = [max(len(str(row[index])) for row in rows) for index in range(4)]
+    for row in rows:
+        print_func(
+            f"{row[0]:<{widths[0]}}  {row[1]:<{widths[1]}}  {row[2]:<{widths[2]}}  {row[3]}"
+        )
+    return 0
+
+
 def _resolve_switchyard_project(
     selection: str,
     *,
@@ -6630,6 +6756,12 @@ def _build_switchyard_stop_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_switchyard_status_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="switchyard status", description="List registered Switchyard projects and pane liveness.")
+    parser.add_argument("--json", action="store_true", help="emit stable machine-readable project status")
+    return parser
+
+
 def switchyard_main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
@@ -6669,6 +6801,9 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         entry = _resolve_switchyard_project(project)
         config = load_project_config(entry.slug, entry.config_path)
         return stop_project(config)
+    if argv[0].casefold() == "status":
+        args = _build_switchyard_status_parser().parse_args(argv[1:])
+        return switchyard_status_command(json_output=args.json)
     selection = " ".join(argv)
     entry = _resolve_switchyard_project(selection)
     config = load_project_config(entry.slug, entry.config_path)

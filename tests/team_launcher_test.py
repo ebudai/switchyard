@@ -89,6 +89,7 @@ from scripts.team_launcher import (
     switchyard_menu_command,
     switchyard_new_command,
     switchyard_register_command,
+    switchyard_status_command,
     tmux_has_session_args,
     worktree_ref,
 )
@@ -8300,6 +8301,263 @@ def test_switchyard_menu_lists_new_first_then_projects() -> None:
         assert switchyard_menu_command(config_dir=tmp_path, registry_dir=registry_dir, print_func=lines.append) == 0
 
     assert lines == ["new...", "Porter System (porter)"]
+
+
+def test_switchyard_status_lists_registered_projects_from_process_snapshot() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-status.") as tmp:
+        tmp_path = Path(tmp)
+        registry_dir = tmp_path / "registry"
+        config_dir = tmp_path / "configs"
+        registry_dir.mkdir()
+        config_dir.mkdir()
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        pgu_config = tmp_path / "pgu.json"
+        pgu_config.write_text(
+            json.dumps(
+                {
+                    "project": "pgu",
+                    "project_name": "PGU",
+                    "layout": str(layout),
+                    "repository": str(tmp_path / "pgu-repo"),
+                    "roles": [
+                        {"role": "director", "slot": 0, "target": "pgu-director:0.0", "tmux_session": "pgu-director", "cli": ["claude"]},
+                        {"role": "ops", "slot": 1, "target": "pgu-ops:0.0", "tmux_session": "pgu-ops", "cli": ["codex"]},
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        otto_config = tmp_path / "otto.json"
+        otto_config.write_text(
+            json.dumps(
+                {
+                    "project": "otto",
+                    "project_name": "Otto Scheduler",
+                    "layout": str(layout),
+                    "repository": str(tmp_path / "otto-repo"),
+                    "roles": [
+                        {"role": "director", "slot": 0, "target": "otto-director:0.0", "tmux_session": "otto-director", "cli": ["claude"]},
+                        {"role": "main", "slot": 1, "target": "otto-main:0.0", "tmux_session": "otto-main", "cli": ["codex"]},
+                        {"role": "audit", "slot": 2, "target": "otto-audit:0.0", "tmux_session": "otto-audit", "cli": ["claude"]},
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        stopped_config = tmp_path / "stopped.json"
+        stopped_config.write_text(
+            json.dumps(
+                {
+                    "project": "stopped",
+                    "project_name": "Something Else",
+                    "layout": str(layout),
+                    "repository": str(tmp_path / "stopped-repo"),
+                    "roles": [
+                        {"role": "director", "slot": 0, "target": "stopped-director:0.0", "tmux_session": "stopped-director", "cli": ["claude"]},
+                        {"role": "app", "slot": 1, "target": "stopped-app:0.0", "tmux_session": "stopped-app", "cli": ["codex"]},
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        for slug, name, config_path in (
+            ("pgu", "PGU", pgu_config),
+            ("otto", "Otto Scheduler", otto_config),
+            ("stopped", "Something Else", stopped_config),
+        ):
+            (registry_dir / f"{slug}.json").write_text(
+                json.dumps(
+                    {
+                        "schema": team_launcher.SWITCHYARD_REGISTRY_SCHEMA,
+                        "slug": slug,
+                        "name": name,
+                        "config_path": str(config_path),
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        lines: list[str] = []
+
+        assert (
+            switchyard_status_command(
+                config_dir=config_dir,
+                registry_dir=registry_dir,
+                process_commands=[
+                    "fish -c env TICKET_BOARD_PANE_TARGET=pgu-director:0.0 claude",
+                    "fish -c env TICKET_BOARD_PANE_TARGET=pgu-ops:0.0 codex",
+                    "tmux new-session -d -s otto-main -c /repo env TICKET_BOARD_PANE_TARGET=otto-main:0.0 codex",
+                    "python3 /service/ticket-board.py --project otto",
+                ],
+                print_func=lines.append,
+            )
+            == 0
+        )
+
+    assert lines == [
+        "NAME            SLUG     STATE    PANES",
+        "Otto Scheduler  otto     running  1/3",
+        "PGU             pgu      running  2/2",
+        "Something Else  stopped  stopped  0/2",
+    ]
+
+
+def test_switchyard_status_json_reports_same_project_facts() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-status-json.") as tmp:
+        tmp_path = Path(tmp)
+        registry_dir = tmp_path / "registry"
+        config_dir = tmp_path / "configs"
+        registry_dir.mkdir()
+        config_dir.mkdir()
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        config_path = tmp_path / "atlas.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "atlas",
+                    "project_name": "Atlas",
+                    "layout": str(layout),
+                    "repository": str(tmp_path / "atlas-repo"),
+                    "roles": [{"role": "director", "slot": 0, "target": "atlas-director:0.0", "tmux_session": "atlas-director", "cli": ["claude"]}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (registry_dir / "atlas.json").write_text(
+            json.dumps(
+                {
+                    "schema": team_launcher.SWITCHYARD_REGISTRY_SCHEMA,
+                    "slug": "atlas",
+                    "name": "Atlas",
+                    "config_path": str(config_path),
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        lines: list[str] = []
+
+        assert (
+            switchyard_status_command(
+                config_dir=config_dir,
+                registry_dir=registry_dir,
+                json_output=True,
+                process_commands=["fish -c env TICKET_BOARD_PANE_TARGET=atlas-director:0.0 claude"],
+                print_func=lines.append,
+            )
+            == 0
+        )
+        payload = json.loads("\n".join(lines))
+
+    assert payload == {
+        "projects": [
+            {
+                "name": "Atlas",
+                "slug": "atlas",
+                "state": "running",
+                "panes_up": 1,
+                "panes_total": 1,
+                "panes": "1/1",
+                "config_path": str(config_path),
+                "error": "",
+            }
+        ]
+    }
+
+
+def test_switchyard_status_lists_unreadable_config_as_unknown() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-status-unknown.") as tmp:
+        tmp_path = Path(tmp)
+        registry_dir = tmp_path / "registry"
+        config_dir = tmp_path / "configs"
+        registry_dir.mkdir()
+        config_dir.mkdir()
+        bad_config_path = tmp_path / "private-config"
+        bad_config_path.mkdir()
+        (registry_dir / "private.json").write_text(
+            json.dumps(
+                {
+                    "schema": team_launcher.SWITCHYARD_REGISTRY_SCHEMA,
+                    "slug": "private",
+                    "name": "Private Tenant",
+                    "config_path": str(bad_config_path),
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        lines: list[str] = []
+
+        assert (
+            switchyard_status_command(
+                config_dir=config_dir,
+                registry_dir=registry_dir,
+                process_commands=["fish -c env TICKET_BOARD_PANE_TARGET=private-director:0.0 claude"],
+                print_func=lines.append,
+            )
+            == 0
+        )
+
+    assert lines == [
+        "NAME            SLUG     STATE    PANES",
+        "Private Tenant  private  unknown  ?/?",
+    ]
+
+
+def test_switchyard_status_default_probe_uses_ps_without_root_or_tmux() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-status-probe.") as tmp:
+        tmp_path = Path(tmp)
+        registry_dir = tmp_path / "registry"
+        config_dir = tmp_path / "configs"
+        registry_dir.mkdir()
+        config_dir.mkdir()
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        config_path = tmp_path / "atlas.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "atlas",
+                    "project_name": "Atlas",
+                    "layout": str(layout),
+                    "repository": str(tmp_path / "atlas-repo"),
+                    "roles": [{"role": "director", "slot": 0, "target": "atlas-director:0.0", "tmux_session": "atlas-director", "cli": ["claude"]}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (registry_dir / "atlas.json").write_text(
+            json.dumps(
+                {
+                    "schema": team_launcher.SWITCHYARD_REGISTRY_SCHEMA,
+                    "slug": "atlas",
+                    "name": "Atlas",
+                    "config_path": str(config_path),
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        calls: list[list[str]] = []
+
+        def runner(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            calls.append(list(args))
+            assert args[0] == "ps", args
+            stdout = "fish -c env TICKET_BOARD_PANE_TARGET=atlas-director:0.0 claude\n"
+            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+        lines: list[str] = []
+        assert switchyard_status_command(config_dir=config_dir, registry_dir=registry_dir, runner=runner, print_func=lines.append) == 0
+
+    assert calls == [["ps", "-eo", "args=", "--no-headers"]]
+    assert lines[-1].strip().endswith("running  1/1")
 
 
 def test_switchyard_resolves_legacy_dashed_name_selector_without_allowing_dashed_slug() -> None:

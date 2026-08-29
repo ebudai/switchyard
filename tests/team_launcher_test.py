@@ -1697,6 +1697,35 @@ def test_pane_runtime_hook_source_rejects_stale_codex_state() -> None:
     assert source == ""
 
 
+def test_pane_launch_outcome_source_rejects_stale_launcher_state() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    role = next(role for role in config.roles if role.role == "ops")
+
+    with tempfile.TemporaryDirectory(prefix="pgu-launch-session-stale-launcher-state.") as tmp:
+        pane_state_dir = Path(tmp) / "pane-state"
+        pane_state_dir.mkdir()
+        (pane_state_dir / pane_state_file_name(role.target)).write_text(
+            json.dumps(
+                {
+                    "target": role.target,
+                    "state": "idle",
+                    "updated_at": time.time() - 60.0,
+                    "source": "team_launcher.start",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        source = team_launcher.pane_launch_outcome_source_for_role(
+            role,
+            pane_state_dir,
+            updated_since=time.time(),
+        )
+
+    assert source == ""
+
+
 def test_pane_runtime_hook_source_rejects_wrong_target_codex_state() -> None:
     config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
     role = next(role for role in config.roles if role.role == "ops")
@@ -1718,6 +1747,35 @@ def test_pane_runtime_hook_source_rejects_wrong_target_codex_state() -> None:
         )
 
         source = team_launcher.pane_runtime_hook_source_for_role(
+            role,
+            pane_state_dir,
+            updated_since=time.time() - 1.0,
+        )
+
+    assert source == ""
+
+
+def test_pane_launch_outcome_source_rejects_wrong_target_launcher_state() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    role = next(role for role in config.roles if role.role == "ops")
+
+    with tempfile.TemporaryDirectory(prefix="pgu-launch-session-wrong-target-launcher-state.") as tmp:
+        pane_state_dir = Path(tmp) / "pane-state"
+        pane_state_dir.mkdir()
+        (pane_state_dir / pane_state_file_name(role.target)).write_text(
+            json.dumps(
+                {
+                    "target": "pgu-main:0.0",
+                    "state": "idle",
+                    "updated_at": time.time(),
+                    "source": "team_launcher.start",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        source = team_launcher.pane_launch_outcome_source_for_role(
             role,
             pane_state_dir,
             updated_since=time.time() - 1.0,

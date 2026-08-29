@@ -44,6 +44,12 @@ The output directory contains:
   `Audit` stage uses `entry_gate_field=needs_audit` and `gate_skip_to=dat`, so
   each ticket can opt out of audit while still using the same workflow gate
   machinery as UAT.
+  This derivation also intentionally aligns tenant director routing with
+  `schema.sql`: newly generated tenants no longer get the historical tenant-only
+  `in_progress -> audit` or `audit -> director_review` `route` edges, and they
+  do get the schema-authoritative `audit -> in_progress` `route` edge. Existing
+  tenants are not re-seeded by this path; if an existing tenant needs those old
+  escape edges, handle that with an explicit migration or a director override.
   Passing `--vcs-close-role <role>` inserts a `VCS` stage after
   `Final Sign-Off`, routes final-signoff tickets there by director action, and
   changes the generated terminal `mark_done` workflow transition to

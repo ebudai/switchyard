@@ -108,6 +108,19 @@ the CLI, while detached roles are skipped.
 session is missing. Detached roles are checked for existence but remain
 detached.
 
+`pane attach-role <role> --slot <n>` surfaces a detached/headless role in a
+named free layout slot without rebuilding the whole window layout and without
+restarting neighbouring roles. The command updates only that role's config
+entry from `detached: true` to the named `slot`, then starts or attaches that
+role's own tmux session. If the tmux session is not already live, attach-role
+requires a recorded resume id and refuses rather than starting fresh. If the
+named slot is occupied or outside the configured layout, the launcher refuses
+and says which role owns the slot; it does not evict a neighbour or grow the
+grid implicitly. `pane detach-role <role>` moves a visible role back to
+headless by removing its slot and marking it detached, then detaches any live
+tmux clients from that role session without killing the session. The role's
+durable session record is not cleared by either operation.
+
 `reload` kills and recreates each configured role session, then starts the
 configured CLI with its recorded resume id when one exists. Before restarting a
 running role, the launcher compares the config's `cli` and `model` against the

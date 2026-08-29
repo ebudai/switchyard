@@ -7214,6 +7214,253 @@ def test_detached_research_attach_checks_session_without_attaching() -> None:
     assert runner.calls == [["tmux", "has-session", "-t", "pgu-research"]]
 
 
+def test_attach_headless_role_to_free_slot_resumes_without_touching_neighbours() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-surface.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text(
+            json.dumps(
+                {
+                    "Orientation": "Horizontal",
+                    "Widgets": [
+                        {"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""},
+                        {"Command": "", "SessionRestoreId": 1, "WorkingDirectory": ""},
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config_path = tmp_path / "porter.json"
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "session_dir": str(tmp_path / "home" / ".local" / "state" / "porter-ticket-board" / "pane-sessions"),
+                    "roles": [
+                        {"role": "director", "slot": 0, "target": "porter-director:0.0", "tmux_session": "porter-director", "cli": ["claude"]},
+                        {"role": "worker7", "detached": True, "target": "porter-worker7:0.0", "tmux_session": "porter-worker7", "cli": ["codex"]},
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+        worker = next(role for role in config.roles if role.role == "worker7")
+        session_id = "12345678-1234-5678-9abc-def012345678"
+        transcript = tmp_path / "codex-session.jsonl"
+        transcript.write_text("{}\n", encoding="utf-8")
+        config.session_dir.mkdir(parents=True)
+        (config.session_dir / session_file_name(worker.target)).write_text(
+            _session_payload(worker.target, session_id, {"transcript_path": str(transcript)}),
+            encoding="utf-8",
+        )
+        runner = FakeRunner()
+        messages: list[str] = []
+
+        assert (
+            team_launcher.attach_role_to_slot(
+                config,
+                config_path=config_path,
+                role_name="worker7",
+                slot=1,
+                session_dir=config.session_dir,
+                pane_state_dir=tmp_path / "pane-state",
+                runner=runner,
+                print_func=messages.append,
+            )
+            == 0
+        )
+
+        raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+        roles = {role["role"]: role for role in raw_config["roles"]}
+        assert roles["director"]["slot"] == 0
+        assert roles["worker7"]["slot"] == 1
+        assert roles["worker7"]["detached"] is False
+        assert (config.session_dir / session_file_name(worker.target)).exists()
+        new_sessions = [call for call in runner.calls if call[:5] == ["tmux", "new-session", "-d", "-s", "porter-worker7"]]
+        assert len(new_sessions) == 1
+        assert f"resume {session_id}" in new_sessions[0][-1]
+        assert not any(call[:5] == ["tmux", "new-session", "-d", "-s", "porter-director"] for call in runner.calls)
+        assert not any(call[:2] == ["tmux", "kill-session"] for call in runner.calls)
+        assert ["tmux", "attach", "-t", "porter-worker7"] in runner.calls
+        assert messages == ["team-launcher: attached role worker7 to slot 1; refusing to relayout other panes"]
+
+
+def test_attach_headless_role_refuses_occupied_slot_without_mutating_config() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-surface-occupied.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Widgets":[{"Command":"","SessionRestoreId":0,"WorkingDirectory":""}]}\n', encoding="utf-8")
+        config_path = tmp_path / "porter.json"
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        payload = {
+            "project": "porter",
+            "layout": str(layout),
+            "repository": str(repo),
+            "roles": [
+                {"role": "director", "slot": 0, "target": "porter-director:0.0", "tmux_session": "porter-director", "cli": ["claude"]},
+                {"role": "worker7", "detached": True, "target": "porter-worker7:0.0", "tmux_session": "porter-worker7", "cli": ["codex"]},
+            ],
+        }
+        config_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        config = load_project_config("porter", config_path)
+        before = config_path.read_text(encoding="utf-8")
+        runner = FakeRunner()
+
+        try:
+            team_launcher.attach_role_to_slot(
+                config,
+                config_path=config_path,
+                role_name="worker7",
+                slot=0,
+                session_dir=tmp_path / "sessions",
+                pane_state_dir=tmp_path / "pane-state",
+                runner=runner,
+            )
+            raise AssertionError("expected occupied slot failure")
+        except SystemExit as exc:
+            assert str(exc) == "team-launcher: cannot attach worker7 to slot 0; slot 0 is occupied by director"
+
+        assert config_path.read_text(encoding="utf-8") == before
+        assert not any(call[:2] in (["tmux", "new-session"], ["tmux", "kill-session"]) for call in runner.calls)
+
+
+def test_attach_headless_role_without_live_session_or_record_refuses_fresh_start() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-surface-no-record.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text(
+            json.dumps(
+                {
+                    "Orientation": "Horizontal",
+                    "Widgets": [
+                        {"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""},
+                        {"Command": "", "SessionRestoreId": 1, "WorkingDirectory": ""},
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "session_dir": str(tmp_path / "sessions"),
+                    "roles": [
+                        {"role": "director", "slot": 0, "target": "porter-director:0.0", "tmux_session": "porter-director", "cli": ["claude"]},
+                        {"role": "worker7", "detached": True, "target": "porter-worker7:0.0", "tmux_session": "porter-worker7", "cli": ["codex"]},
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+        before = config_path.read_text(encoding="utf-8")
+        runner = FakeRunner()
+        stderr = StringIO()
+
+        with redirect_stderr(stderr):
+            assert (
+                team_launcher.attach_role_to_slot(
+                    config,
+                    config_path=config_path,
+                    role_name="worker7",
+                    slot=1,
+                    session_dir=config.session_dir,
+                    pane_state_dir=tmp_path / "pane-state",
+                    runner=runner,
+                )
+                == 1
+            )
+
+        assert config_path.read_text(encoding="utf-8") == before
+        assert stderr.getvalue() == "team-launcher: cannot attach worker7; no live session or recorded resume id\n"
+        assert not any(call[:2] in (["tmux", "new-session"], ["tmux", "kill-session"]) for call in runner.calls)
+
+
+def test_detach_visible_role_updates_config_and_leaves_session_running() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-surface-detach.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text(
+            json.dumps(
+                {
+                    "Orientation": "Horizontal",
+                    "Widgets": [
+                        {"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""},
+                        {"Command": "", "SessionRestoreId": 1, "WorkingDirectory": ""},
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config_path = tmp_path / "porter.json"
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "roles": [
+                        {"role": "director", "slot": 0, "target": "porter-director:0.0", "tmux_session": "porter-director", "cli": ["claude"]},
+                        {"role": "worker7", "slot": 1, "target": "porter-worker7:0.0", "tmux_session": "porter-worker7", "cli": ["codex"]},
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+        runner = FakeRunner(existing_sessions={"porter-director", "porter-worker7"})
+        messages: list[str] = []
+
+        assert (
+            team_launcher.detach_role_from_slot(
+                config,
+                config_path=config_path,
+                role_name="worker7",
+                runner=runner,
+                print_func=messages.append,
+            )
+            == 0
+        )
+
+        raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+        roles = {role["role"]: role for role in raw_config["roles"]}
+        assert roles["director"]["slot"] == 0
+        assert roles["worker7"]["detached"] is True
+        assert "slot" not in roles["worker7"]
+        assert runner.existing_sessions == {"porter-director", "porter-worker7"}
+        assert ["tmux", "detach-client", "-s", "porter-worker7"] in runner.calls
+        assert not any(call[:2] == ["tmux", "kill-session"] for call in runner.calls)
+        assert messages == ["team-launcher: detached role worker7 from slot 1; tmux session remains headless"]
+
+
 def test_stop_project_kills_only_configured_sessions_as_owner_and_is_idempotent() -> None:
     class OwnerTmuxRunner:
         def __init__(self, existing_sessions: set[str]) -> None:

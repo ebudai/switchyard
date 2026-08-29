@@ -2023,6 +2023,10 @@ def tmux_kill_session_args(role: RoleConfig) -> list[str]:
     return ["tmux", "kill-session", "-t", role.tmux_session]
 
 
+def tmux_detach_clients_args(role: RoleConfig) -> list[str]:
+    return ["tmux", "detach-client", "-s", role.tmux_session]
+
+
 def tmux_current_command_args(role: RoleConfig) -> list[str]:
     return ["tmux", "display-message", "-p", "-t", role.target, "#{pane_current_command}"]
 
@@ -6949,6 +6953,153 @@ def stop_project(
     return exit_code
 
 
+def _layout_slot_count(config: ProjectConfig) -> int:
+    try:
+        layout = json.loads(config.layout.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise SystemExit(f"team-launcher: cannot read layout {config.layout}: {exc}") from exc
+    return len(_layout_leaves(layout))
+
+
+def _raw_role_for_update(raw_roles: Any, role_name: str) -> dict[str, Any]:
+    if not isinstance(raw_roles, list):
+        raise SystemExit("team-launcher: launcher config roles must be a JSON list")
+    for raw_role in raw_roles:
+        if isinstance(raw_role, dict) and str(raw_role.get("role") or "").strip() == role_name:
+            return raw_role
+    raise SystemExit(f"unknown role {role_name!r} in launcher config")
+
+
+def _write_role_visibility(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    role: RoleConfig,
+    detached: bool,
+    slot: int | None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> ProjectConfig:
+    raw_config = _load_json(config_path)
+    raw_role = _raw_role_for_update(raw_config.get("roles"), role.role)
+    if detached:
+        raw_role["detached"] = True
+        raw_role.pop("slot", None)
+    else:
+        if slot is None:
+            raise ValueError("visible role update requires slot")
+        raw_role["detached"] = False
+        raw_role["slot"] = slot
+    _write_json_atomic(config_path, raw_config)
+    ensure_owner_file(config, config_path, runner=runner)
+    return load_project_config(config.project, config_path)
+
+
+def attach_role_to_slot(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    role_name: str,
+    slot: int,
+    session_dir: Path,
+    pane_state_dir: Path = DEFAULT_PANE_STATE_DIR,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    if slot < 0:
+        raise SystemExit("team-launcher: attach-role slot must be non-negative")
+    slot_count = _layout_slot_count(config)
+    if slot >= slot_count:
+        raise SystemExit(
+            f"team-launcher: cannot attach {role_name} to slot {slot}; layout {config.layout} has {slot_count} slot(s)"
+        )
+    role = _role_by_name(config, role_name)
+    occupant = next(
+        (
+            candidate
+            for candidate in config.roles
+            if candidate.role != role.role and not candidate.detached and candidate.slot == slot
+        ),
+        None,
+    )
+    if occupant is not None:
+        raise SystemExit(
+            f"team-launcher: cannot attach {role.role} to slot {slot}; slot {slot} is occupied by {occupant.role}"
+        )
+    if not role.detached:
+        if role.slot == slot:
+            print_func(f"team-launcher: role {role.role} is already attached to slot {slot}")
+            return 0
+        raise SystemExit(f"team-launcher: role {role.role} is already attached to slot {role.slot}")
+    exists = runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    session_id = session_id_for_role(role, session_dir)
+    if not exists:
+        if not session_id:
+            print(f"team-launcher: cannot attach {role.role}; no live session or recorded resume id", file=sys.stderr)
+            return 1
+        preflight_ok, preflight_message = _resume_preflight_allows_attempt(role, session_id, session_dir=session_dir)
+        if not preflight_ok:
+            print(preflight_message, file=sys.stderr)
+            return 1
+    updated_config = _write_role_visibility(
+        config,
+        config_path=config_path,
+        role=role,
+        detached=False,
+        slot=slot,
+        runner=runner,
+    )
+    updated_role = _role_by_name(updated_config, role.role)
+    print_func(f"team-launcher: attached role {role.role} to slot {slot}; refusing to relayout other panes")
+    if not exists:
+        start_proc = runner(
+            tmux_new_session_args(updated_role, session_dir=session_dir, pane_state_dir=pane_state_dir, resume=True)
+        )
+        if start_proc.returncode != 0:
+            return int(start_proc.returncode)
+        resume_status = _resume_launch_status(updated_role, runner=runner)
+        if resume_status == RESUME_LAUNCH_VERIFIED:
+            clear_unverified_resume_for_role(updated_role, session_dir)
+            seed_initial_pane_idle_state(updated_role, pane_state_dir=pane_state_dir, source="team_launcher.attach_role")
+        else:
+            print(
+                f"team-launcher: resume for {role.role} using session {session_id} was not verified; "
+                "leaving tmux session and session record intact",
+                file=sys.stderr,
+            )
+            return 1
+    return runner(tmux_attach_args(updated_role)).returncode
+
+
+def detach_role_from_slot(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    role_name: str,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    role = _role_by_name(config, role_name)
+    if role.detached:
+        print_func(f"team-launcher: role {role.role} is already detached")
+        return 0
+    previous_slot = role.slot
+    _write_role_visibility(
+        config,
+        config_path=config_path,
+        role=role,
+        detached=True,
+        slot=None,
+        runner=runner,
+    )
+    print_func(f"team-launcher: detached role {role.role} from slot {previous_slot}; tmux session remains headless")
+    if runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+        return 0
+    detach_proc = runner(tmux_detach_clients_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if detach_proc.returncode != 0:
+        print_func(f"team-launcher: no live tmux client detached for {role.role}; session remains configured headless")
+    return 0
+
+
 def _role_by_name(config: ProjectConfig, role_name: str) -> RoleConfig:
     for role in config.roles:
         if role.role == role_name:
@@ -6966,8 +7117,9 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["start", "attach", "reload", "stop", "design", "new", "provision-runtime", "deploy-launcher", "upgrade", "pane"],
         help="start is idempotent attach-or-start (resumes tracked session ids when relaunching a stopped pane); reload force-restarts running CLIs with tracked resume ids",
     )
-    parser.add_argument("pane_mode", nargs="?", choices=["start", "attach", "attach-or-start", "reload"])
+    parser.add_argument("pane_mode", nargs="?")
     parser.add_argument("role", nargs="?")
+    parser.add_argument("--slot", type=int, help="layout slot for `pane attach-role <role>`")
     parser.add_argument("--config", type=Path, help="project launcher config JSON")
     parser.add_argument("--layout-output", type=Path, help="write generated Konsole layout here")
     parser.add_argument(
@@ -7209,9 +7361,13 @@ def main(argv: list[str] | None = None) -> int:
             launcher_repo=args.launcher_repo,
             clean=args.clean_launcher,
         )
+    if args.command != "pane" and (args.pane_mode or args.role):
+        raise SystemExit(f"{args.command} does not accept extra pane arguments")
     if args.command == "pane":
         if not args.pane_mode or not args.role:
-            raise SystemExit("pane mode requires <start|attach|attach-or-start|reload> and <role>")
+            raise SystemExit("pane mode requires <start|attach|attach-or-start|reload|attach-role|detach-role> and <role>")
+        if args.pane_mode not in {"start", "attach", "attach-or-start", "reload", "attach-role", "detach-role"}:
+            raise SystemExit(f"unknown pane mode: {args.pane_mode}")
         if not args.skip_launcher_check:
             ensure_launcher_checkout_current(
                 config,
@@ -7223,6 +7379,23 @@ def main(argv: list[str] | None = None) -> int:
         seed_default_session_dir_from_legacy_sources(config.session_dir)
         role = _role_by_name(config, args.role)
         pane_state_dir = args.pane_state_dir or default_pane_state_dir_for_user(config.run_as_user, project=config.project)
+        if args.pane_mode == "attach-role":
+            if args.slot is None:
+                raise SystemExit("pane attach-role requires --slot")
+            return attach_role_to_slot(
+                config,
+                config_path=config_path,
+                role_name=role.role,
+                slot=args.slot,
+                session_dir=config.session_dir,
+                pane_state_dir=pane_state_dir,
+            )
+        if args.pane_mode == "detach-role":
+            return detach_role_from_slot(
+                config,
+                config_path=config_path,
+                role_name=role.role,
+            )
         if role.detached:
             return run_detached_role(
                 role,

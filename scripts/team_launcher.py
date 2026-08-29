@@ -4625,7 +4625,9 @@ def design_project_command(
     resolved_policy = worktree_policy or _prompt_text("Worktree policy (shared/isolated)", default="shared", input_func=input_func)
     if resolved_policy not in WORKTREE_POLICIES:
         raise SystemExit(f"worktree policy must be one of {sorted(WORKTREE_POLICIES)}")
-    resolved_owner = owner_user or _prompt_text("Owner user", default=_default_new_project_owner(project_slug), input_func=input_func)
+    resolved_owner = _owner_user_verbatim(
+        owner_user if owner_user is not None else _prompt_text("Owner user", default=_default_new_project_owner(project_slug), input_func=input_func)
+    )
     resolved_prefix = validate_ticket_prefix(
         ticket_prefix or _prompt_text("Ticket prefix", default=project_slug.upper(), input_func=input_func)
     )
@@ -5291,6 +5293,56 @@ def _agent_owner_user(agent_name: str) -> str:
     if not agent:
         raise SystemExit("switchyard: agent name cannot be empty")
     return agent if agent.endswith("-agent") else f"{agent}-agent"
+
+
+def _owner_user_verbatim(value: str) -> str:
+    owner = value.strip()
+    if not owner:
+        raise SystemExit("switchyard: owner user cannot be empty")
+    return owner
+
+
+@dataclass(frozen=True)
+class ExistingOwnerUser:
+    name: str
+    uid: int
+    home: Path
+
+
+def _existing_owner_user(owner_user: str) -> ExistingOwnerUser | None:
+    name = _owner_user_verbatim(owner_user)
+    uid = uid_for_user(name)
+    if uid is None:
+        return None
+    home = home_dir_for_user(name) or Path("/home") / name
+    return ExistingOwnerUser(name=name, uid=uid, home=home)
+
+
+def _confirm_existing_owner_user(
+    owner_user: str,
+    *,
+    allow_existing_owner_user: bool,
+    input_func: Callable[[str], str],
+    print_func: Callable[[str], None],
+) -> None:
+    existing = _existing_owner_user(owner_user)
+    if existing is None:
+        return
+    detail = f"{existing.name} (uid {existing.uid}, home {existing.home})"
+    print_func(f"warning: switchyard: owner user {detail} already exists")
+    if allow_existing_owner_user:
+        return
+    try:
+        proceed = _prompt_bool(f"Use existing owner user {detail}", default=False, input_func=input_func)
+    except SystemExit as exc:
+        if str(exc) == "switchyard: no input available":
+            raise SystemExit(
+                f"switchyard: owner user {detail} already exists; "
+                "pass --allow-existing-owner-user to reuse it"
+            ) from None
+        raise
+    if not proceed:
+        raise SystemExit("switchyard: cancelled")
 
 
 def _project_dir(home_base: Path, owner_user: str, project_name: str) -> Path:
@@ -6513,6 +6565,7 @@ def switchyard_new_command(
     database: str | None = None,
     role_clis: Sequence[tuple[str, str]] | None = None,
     yes: bool = False,
+    allow_existing_owner_user: bool = False,
     home_base: Path = Path("/home"),
     euid_getter: Callable[[], int] = os.geteuid,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
@@ -6546,12 +6599,12 @@ def switchyard_new_command(
             raise SystemExit("switchyard: project name cannot be empty")
         default_slug = _slug_from_project_name(resolved_project_name)
         resolved_slug = _validate_project_slug(slug or _prompt_text("Slug", default=default_slug, input_func=input_func))
-        raw_agent = agent_name or _prompt_text(
+        raw_agent = agent_name if agent_name is not None else _prompt_text(
             "Agent user",
             default=_agent_owner_user(resolved_slug),
             input_func=input_func,
         )
-        owner_user = _agent_owner_user(raw_agent)
+        owner_user = _owner_user_verbatim(raw_agent)
         owner_shell = str(PROJECT_DESIGN_DEFAULT_CAPABILITY_GRANTS["shell"])
         default_project_dir = _project_dir(home_base, owner_user, resolved_project_name)
         project_dir = _resolve_project_path(
@@ -6567,6 +6620,12 @@ def switchyard_new_command(
         name=resolved_project_name,
         config_dir=config_dir,
         registry_dir=registry_dir,
+    )
+    _confirm_existing_owner_user(
+        owner_user,
+        allow_existing_owner_user=allow_existing_owner_user,
+        input_func=input_func,
+        print_func=print_func,
     )
     _confirm_switchyard_new(
         slug=resolved_slug,
@@ -6898,7 +6957,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def _build_switchyard_new_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="switchyard new", description="Create a Switchyard project.")
     parser.add_argument("--slug", help="project slug; prompted when omitted")
-    parser.add_argument("--agent-name", help="base agent name; -agent is appended unless already present")
+    parser.add_argument("--agent-name", help="owner user; prompted default is <slug>-agent when omitted")
     parser.add_argument("--project-name", help="human project name; prompted when omitted")
     parser.add_argument("--project-path", type=Path, help="project working directory; prompted when omitted")
     parser.add_argument("--from", dest="from_artifact", type=Path, help="project artifact emitted by the design session")
@@ -6907,6 +6966,11 @@ def _build_switchyard_new_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, help="HTTP port; omitted means deterministic allocation")
     parser.add_argument("--database", help="PostgreSQL database; omitted means <slug>_ticket_board")
     parser.add_argument("--yes", action="store_true", help="proceed without the confirmation prompt")
+    parser.add_argument(
+        "--allow-existing-owner-user",
+        action="store_true",
+        help="reuse an existing owner user without the existing-user confirmation prompt",
+    )
     parser.add_argument(
         "--layout",
         choices=sorted(LAYOUT_MODE_CHOICES),
@@ -6960,6 +7024,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             port=args.port,
             database=args.database,
             yes=args.yes,
+            allow_existing_owner_user=args.allow_existing_owner_user,
             layout_mode=args.layout,
         )
     if argv[0].casefold() == "register":

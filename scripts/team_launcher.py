@@ -5779,7 +5779,7 @@ def _cli_auth_status(
     proc = _run_owner_cli_probe(owner_user=owner_user, owner_home=owner_home, command=command, runner=runner)
     if _cli_auth_probe_passed(cli, proc):
         return "authenticated"
-    if proc.returncode == 127 and not _owner_cli_is_installed(
+    if not _owner_cli_is_installed(
         cli,
         owner_user=owner_user,
         owner_home=owner_home,

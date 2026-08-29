@@ -26,6 +26,7 @@ from ticket_board_pane_env import (
     pane_state_record_anomalies,
     pane_state_record_anomaly_diff,
     snapshot_diff,
+    snapshot_pane_session_paths,
     snapshot_file_set_diff,
     snapshot_path,
     snapshot_paths_file_set,
@@ -346,16 +347,25 @@ def test_session_record_guard_tolerates_same_pane_runtime_rewrite() -> None:
         session_dir.mkdir()
         session_path = session_dir / "pgu-ops_0.0.json"
         session_path.write_text(
-            json.dumps({"target": "pgu-ops:0.0", "session_id": "old-session", "source": "codex.SessionStart"}) + "\n",
+            json.dumps({"target": "pgu-ops:0.0", "session_id": "stable-session", "source": "codex.SessionStart"}) + "\n",
             encoding="utf-8",
         )
-        before = snapshot_paths([session_dir])
+        before = snapshot_pane_session_paths([session_dir])
         session_path.write_text(
-            json.dumps({"target": "pgu-ops:0.0", "session_id": "new-session", "source": "codex.Stop"}) + "\n",
+            json.dumps(
+                {
+                    "target": "pgu-ops:0.0",
+                    "session_id": "stable-session",
+                    "source": "codex.Stop",
+                    "updated_at": 123.0,
+                    "payload": {"event": "turn-end"},
+                }
+            )
+            + "\n",
             encoding="utf-8",
         )
 
-        assert pane_session_record_diff(before, snapshot_paths([session_dir])) == []
+        assert pane_session_record_diff(before, snapshot_pane_session_paths([session_dir])) == []
 
 
 def test_session_record_guard_rejects_test_clobber_content() -> None:
@@ -367,14 +377,29 @@ def test_session_record_guard_rejects_test_clobber_content() -> None:
             json.dumps({"target": "pgu-ops:0.0", "session_id": "old-session", "source": "codex.SessionStart"}) + "\n",
             encoding="utf-8",
         )
-        before_wrong_target = snapshot_paths([session_dir])
+        before_wrong_target = snapshot_pane_session_paths([session_dir])
         wrong_target_path.write_text(
             json.dumps({"target": "pgu-audit:0.0", "session_id": "clobbered-session", "source": "codex.Stop"}) + "\n",
             encoding="utf-8",
         )
 
-        assert pane_session_record_diff(before_wrong_target, snapshot_paths([session_dir])) == [
+        assert pane_session_record_diff(before_wrong_target, snapshot_pane_session_paths([session_dir])) == [
             f"{session_dir}/pgu-ops_0.0.json"
+        ]
+
+        different_session_path = session_dir / "pgu-app_0.0.json"
+        different_session_path.write_text(
+            json.dumps({"target": "pgu-app:0.0", "session_id": "old-session", "source": "codex.SessionStart"}) + "\n",
+            encoding="utf-8",
+        )
+        before_different_session = snapshot_pane_session_paths([session_dir])
+        different_session_path.write_text(
+            json.dumps({"target": "pgu-app:0.0", "session_id": "new-session", "source": "codex.Stop"}) + "\n",
+            encoding="utf-8",
+        )
+
+        assert pane_session_record_diff(before_different_session, snapshot_pane_session_paths([session_dir])) == [
+            f"{session_dir}/pgu-app_0.0.json"
         ]
 
         non_cli_source_path = session_dir / "pgu-audit_0.0.json"
@@ -382,13 +407,13 @@ def test_session_record_guard_rejects_test_clobber_content() -> None:
             json.dumps({"target": "pgu-audit:0.0", "session_id": "old-session", "source": "claude.SessionStart"}) + "\n",
             encoding="utf-8",
         )
-        before_non_cli_source = snapshot_paths([session_dir])
+        before_non_cli_source = snapshot_pane_session_paths([session_dir])
         non_cli_source_path.write_text(
-            json.dumps({"target": "pgu-audit:0.0", "session_id": "clobbered-session", "source": "test.synthetic"}) + "\n",
+            json.dumps({"target": "pgu-audit:0.0", "session_id": "old-session", "source": "test.synthetic"}) + "\n",
             encoding="utf-8",
         )
 
-        assert pane_session_record_diff(before_non_cli_source, snapshot_paths([session_dir])) == [
+        assert pane_session_record_diff(before_non_cli_source, snapshot_pane_session_paths([session_dir])) == [
             f"{session_dir}/pgu-audit_0.0.json"
         ]
 
@@ -402,18 +427,18 @@ def test_session_record_guard_rejects_file_set_changes() -> None:
             json.dumps({"target": "pgu-ops:0.0", "session_id": "old-session", "source": "codex.SessionStart"}) + "\n",
             encoding="utf-8",
         )
-        before_delete = snapshot_paths([session_dir])
+        before_delete = snapshot_pane_session_paths([session_dir])
         session_path.unlink()
-        assert pane_session_record_diff(before_delete, snapshot_paths([session_dir])) == [
+        assert pane_session_record_diff(before_delete, snapshot_pane_session_paths([session_dir])) == [
             f"{session_dir}/pgu-ops_0.0.json"
         ]
 
-        before_add = snapshot_paths([session_dir])
+        before_add = snapshot_pane_session_paths([session_dir])
         session_path.write_text(
             json.dumps({"target": "pgu-ops:0.0", "session_id": "new-session", "source": "codex.SessionStart"}) + "\n",
             encoding="utf-8",
         )
-        assert pane_session_record_diff(before_add, snapshot_paths([session_dir])) == [
+        assert pane_session_record_diff(before_add, snapshot_pane_session_paths([session_dir])) == [
             f"{session_dir}/pgu-ops_0.0.json"
         ]
 
@@ -1792,14 +1817,14 @@ def test_hook_ignores_tmux_pane_without_explicit_target() -> None:
 def main() -> int:
     live_session_paths = candidate_live_pane_session_paths()
     live_pane_state_paths = candidate_live_pane_state_paths()
-    live_session_snapshot = snapshot_paths(live_session_paths)
+    live_session_snapshot = snapshot_pane_session_paths(live_session_paths)
     live_pane_state_snapshot = snapshot_paths_file_set(live_pane_state_paths)
     live_pane_state_anomalies = pane_state_record_anomalies(live_pane_state_paths)
     try:
         run_module_tests(globals())
     finally:
         changed = [
-            *pane_session_record_diff(live_session_snapshot, snapshot_paths(live_session_paths)),
+            *pane_session_record_diff(live_session_snapshot, snapshot_pane_session_paths(live_session_paths)),
             *snapshot_file_set_diff(live_pane_state_snapshot, snapshot_paths_file_set(live_pane_state_paths)),
             *pane_state_record_anomaly_diff(
                 live_pane_state_anomalies,

@@ -128,6 +128,36 @@ def snapshot_paths(paths: list[Path]) -> dict[str, dict[str, str] | None]:
     return {str(path): snapshot_path(path) for path in paths}
 
 
+def snapshot_pane_session_path(path: Path) -> dict[str, dict[str, str]] | None:
+    try:
+        if not path.exists():
+            return None
+        if not path.is_dir():
+            return {}
+        snapshot: dict[str, dict[str, str]] = {}
+        for child in sorted(path.rglob("*")):
+            if not child.is_file():
+                continue
+            content = child.read_bytes()
+            entry = {"hash": hashlib.sha256(content).hexdigest()}
+            try:
+                record = json.loads(content.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                record = None
+            if isinstance(record, dict):
+                entry["target"] = str(record.get("target", ""))
+                entry["session_id"] = str(record.get("session_id", ""))
+                entry["source"] = str(record.get("source", ""))
+            snapshot[str(child.relative_to(path))] = entry
+        return snapshot
+    except OSError:
+        return {}
+
+
+def snapshot_pane_session_paths(paths: list[Path]) -> dict[str, dict[str, dict[str, str]] | None]:
+    return {str(path): snapshot_pane_session_path(path) for path in paths}
+
+
 def snapshot_path_file_set(path: Path) -> set[str] | None:
     try:
         if not path.exists():
@@ -162,8 +192,8 @@ def snapshot_diff(
 
 
 def pane_session_record_diff(
-    before: dict[str, dict[str, str] | None],
-    after: dict[str, dict[str, str] | None],
+    before: dict[str, dict[str, dict[str, str]] | None],
+    after: dict[str, dict[str, dict[str, str]] | None],
 ) -> list[str]:
     changed: list[str] = []
     for root in sorted(set(before) | set(after)):
@@ -174,15 +204,17 @@ def pane_session_record_diff(
                 changed.append(root)
             continue
         for name in sorted(set(before_files) | set(after_files)):
-            before_hash = before_files.get(name)
-            after_hash = after_files.get(name)
-            if before_hash == after_hash:
+            before_record = before_files.get(name)
+            after_record = after_files.get(name)
+            if before_record == after_record:
                 continue
             changed_path = f"{root}/{name}"
-            if before_hash is None or after_hash is None:
+            if before_record is None or after_record is None:
                 changed.append(changed_path)
                 continue
-            if not _pane_session_record_allows_live_rewrite(Path(root) / name):
+            if before_record.get("hash") == after_record.get("hash"):
+                continue
+            if not _pane_session_record_allows_live_rewrite(name, before_record, after_record):
                 changed.append(changed_path)
     return changed
 
@@ -233,21 +265,21 @@ def pane_state_record_anomaly_diff(before: list[str], after: list[str]) -> list[
     return sorted(set(after) - set(before))
 
 
-def _pane_session_record_allows_live_rewrite(path: Path) -> bool:
-    expected_target = pane_state_target_from_file_name(path.name)
+def _pane_session_record_allows_live_rewrite(
+    name: str,
+    before_record: dict[str, str],
+    after_record: dict[str, str],
+) -> bool:
+    expected_target = pane_state_target_from_file_name(name)
     if expected_target is None:
         return False
-    try:
-        record = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    if before_record.get("target", "") != expected_target or after_record.get("target", "") != expected_target:
         return False
-    if not isinstance(record, dict):
+    before_session_id = before_record.get("session_id", "").strip()
+    after_session_id = after_record.get("session_id", "").strip()
+    if not before_session_id or before_session_id != after_session_id:
         return False
-    if str(record.get("target", "")) != expected_target:
-        return False
-    if not str(record.get("session_id", "")).strip():
-        return False
-    source = str(record.get("source", ""))
+    source = after_record.get("source", "")
     return source.startswith(PANE_SESSION_RUNTIME_SOURCE_PREFIXES)
 
 

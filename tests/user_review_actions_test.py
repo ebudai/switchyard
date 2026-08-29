@@ -31,6 +31,8 @@ def main() -> int:
     assert "const patch = { user_signoff: true, state: 'done' };" not in HTML
     assert "setCreateStatus(`Signed off ✓ ${ticketId} moved to Final Sign-Off.`);" in HTML
     assert "toggleControl('UAT sign-off', ticket.user_signoff" in HTML
+    assert "toggleControl('Needs audit', ticket.needs_audit !== false" in HTML
+    assert "Ticket does not require audit sign-off." in HTML
     assert "toggleControl('Requires UAT', ticket.needs_user_signoff" in HTML
     assert "disabled: !ticket.needs_user_signoff" in HTML
     assert "Ticket does not require UAT sign-off." in HTML

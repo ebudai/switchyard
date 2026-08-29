@@ -61,6 +61,10 @@ class RecordingHandler(BaseHTTPRequestHandler):
             ticket["assignee"] = payload.get("assignee", caller or "director")
         elif operation == "submit_to_audit":
             ticket["state"] = "audit"
+        elif operation == "implementer_kick_back":
+            ticket["state"] = "analysis"
+            ticket["assignee"] = "director"
+            ticket["comments"] = [{"who": caller, "text": payload.get("reason", "")}]
         elif operation == "request_commit_exempt":
             ticket["state"] = "analysis"
             ticket["assignee"] = "unassigned"
@@ -198,6 +202,7 @@ def assert_action_requests(requests: list[tuple[str, str | None, str | None, dic
     assert ("/api/tickets/PGU-101/actions/start_work", "ops") in pairs
     assert ("/api/tickets/PGU-101/actions/submit_to_inspection", "ops") in pairs
     assert ("/api/tickets/PGU-101/actions/submit_to_audit", "ops") in pairs
+    assert ("/api/tickets/PGU-121/actions/implementer_kick_back", "ops") in pairs
     assert ("/api/tickets/PGU-121/actions/request_commit_exempt", "ops") in pairs
     assert ("/api/tickets/PGU-124/actions/start_task", "inspector") in pairs
     assert ("/api/tickets/PGU-124/actions/complete_task", "inspector") in pairs
@@ -236,6 +241,10 @@ def exercise_client(base_url: str, repo: Path, commit_hash: str) -> None:
         assert inspected["ticket"]["assignee"] == "inspector"
         assert client.submit_to_audit("PGU-101", commit_hash=commit_hash, caller_role="ops")["ticket"]["state"] == "audit"
         assert client.submit_to_audit("PGU-113", caller_role="ops")["ticket"]["commit_hash"] == ""
+        handed_back = client.implementer_kick_back("PGU-121", reason="Blocked by external access.", caller_role="ops")
+        assert handed_back["ticket"]["state"] == "analysis"
+        assert handed_back["ticket"]["assignee"] == "director"
+        assert handed_back["ticket"]["comments"][-1]["text"] == "Blocked by external access."
         requested = client.request_commit_exempt("PGU-121", reason="No repo change for this ticket.", caller_role="ops")
         assert requested["ticket"]["state"] == "analysis"
         assert requested["ticket"]["assignee"] == "unassigned"

@@ -262,6 +262,7 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
         screenshots: state.pendingCreateScreenshots,
         needs_user_signoff: needsUserInput.checked,
         needs_inspection: needsInspectionInput.checked,
+        needs_audit: needsAuditInput.checked,
         regression: createRegressionInput.checked,
       };
       const result = await postTicketAction('/api/tickets/actions/create_ticket', payload, 'director');
@@ -271,6 +272,7 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
       createBacklogInput.checked = false;
       needsUserInput.checked = false;
       needsInspectionInput.checked = false;
+      needsAuditInput.checked = true;
       createRegressionInput.checked = false;
       state.pendingCreateScreenshots = [];
       renderCreatePreview();
@@ -436,6 +438,7 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
         'implementation',
         'audit_prompt',
         'needs_inspection',
+        'needs_audit',
         'needs_user_signoff',
         'commit_exempt',
         'regression',
@@ -558,6 +561,9 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
           ['user_review', 'director_review', 'done'].includes(previousState)
         ) {
           await updateTicketAction(ticketId, 'user_reopen', { reason: actionReason(patch) }, normalizedCaller);
+          consumedComment = true;
+        } else if (nextState === 'analysis' && previousState === 'in_progress' && normalizedCaller !== 'director') {
+          await updateTicketAction(ticketId, 'implementer_kick_back', { reason: actionReason(patch) }, normalizedCaller);
           consumedComment = true;
         } else if (['dat', 'director_review', 'user_review'].includes(nextState) && previousState === 'audit') {
           await updateTicketAction(ticketId, 'audit_sign_off', { text: actionReason(patch) }, normalizedCaller);

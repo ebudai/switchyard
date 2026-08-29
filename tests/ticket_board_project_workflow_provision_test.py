@@ -23,34 +23,114 @@ SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
 RBAC_PATH = ROOT / "scripts" / "ticket_board" / "rbac.sql"
 MIGRATION_RUNNER = ROOT / "scripts" / "ticket-board-migrate"
 EXPECTED_STAGES = [
-    {"name": "draft", "display_label": "Draft", "rank": 0, "owner_roles": ["designer"], "is_terminal": False},
-    {"name": "analysis", "display_label": "Triage", "rank": 1, "owner_roles": ["director"], "is_terminal": False},
+    {
+        "name": "draft",
+        "display_label": "Draft",
+        "rank": 0,
+        "owner_roles": ["designer"],
+        "entry_gate_field": None,
+        "gate_skip_to": None,
+        "is_terminal": False,
+    },
+    {
+        "name": "analysis",
+        "display_label": "Triage",
+        "rank": 1,
+        "owner_roles": ["director"],
+        "entry_gate_field": None,
+        "gate_skip_to": None,
+        "is_terminal": False,
+    },
     {
         "name": "in_progress",
         "display_label": "Implementation",
         "rank": 2,
         "owner_roles": ["main", "app"],
+        "entry_gate_field": None,
+        "gate_skip_to": None,
         "is_terminal": False,
     },
-    {"name": "audit", "display_label": "Audit", "rank": 3, "owner_roles": ["audit"], "is_terminal": False},
+    {
+        "name": "audit",
+        "display_label": "Audit",
+        "rank": 3,
+        "owner_roles": ["audit"],
+        "entry_gate_field": "needs_audit",
+        "gate_skip_to": "dat",
+        "is_terminal": False,
+    },
+    {
+        "name": "dat",
+        "display_label": "DAT",
+        "rank": 4,
+        "owner_roles": ["director"],
+        "entry_gate_field": "needs_user_signoff",
+        "gate_skip_to": "director_review",
+        "is_terminal": False,
+    },
+    {
+        "name": "user_review",
+        "display_label": "UAT",
+        "rank": 5,
+        "owner_roles": ["user"],
+        "entry_gate_field": "needs_user_signoff",
+        "gate_skip_to": "director_review",
+        "is_terminal": False,
+    },
     {
         "name": "director_review",
         "display_label": "Final Sign-Off",
-        "rank": 4,
+        "rank": 6,
         "owner_roles": ["director"],
+        "entry_gate_field": None,
+        "gate_skip_to": None,
         "is_terminal": False,
     },
-    {"name": "done", "display_label": "Done", "rank": 9, "owner_roles": [], "is_terminal": True},
-    {"name": "cancelled", "display_label": "Cancelled", "rank": 10, "owner_roles": [], "is_terminal": True},
+    {
+        "name": "done",
+        "display_label": "Done",
+        "rank": 9,
+        "owner_roles": [],
+        "entry_gate_field": None,
+        "gate_skip_to": None,
+        "is_terminal": True,
+    },
+    {
+        "name": "cancelled",
+        "display_label": "Cancelled",
+        "rank": 10,
+        "owner_roles": [],
+        "entry_gate_field": None,
+        "gate_skip_to": None,
+        "is_terminal": True,
+    },
 ]
 EXPECTED_AUDITLESS_STAGES = [
-    {"name": "draft", "display_label": "Draft", "rank": 0, "owner_roles": [], "is_terminal": False},
-    {"name": "analysis", "display_label": "Triage", "rank": 1, "owner_roles": ["director"], "is_terminal": False},
+    {
+        "name": "draft",
+        "display_label": "Draft",
+        "rank": 0,
+        "owner_roles": [],
+        "entry_gate_field": None,
+        "gate_skip_to": None,
+        "is_terminal": False,
+    },
+    {
+        "name": "analysis",
+        "display_label": "Triage",
+        "rank": 1,
+        "owner_roles": ["director"],
+        "entry_gate_field": None,
+        "gate_skip_to": None,
+        "is_terminal": False,
+    },
     {
         "name": "in_progress",
         "display_label": "Implementation",
         "rank": 2,
         "owner_roles": ["app"],
+        "entry_gate_field": None,
+        "gate_skip_to": None,
         "is_terminal": False,
     },
     {
@@ -58,10 +138,28 @@ EXPECTED_AUDITLESS_STAGES = [
         "display_label": "Final Sign-Off",
         "rank": 3,
         "owner_roles": ["director"],
+        "entry_gate_field": None,
+        "gate_skip_to": None,
         "is_terminal": False,
     },
-    {"name": "done", "display_label": "Done", "rank": 9, "owner_roles": [], "is_terminal": True},
-    {"name": "cancelled", "display_label": "Cancelled", "rank": 10, "owner_roles": [], "is_terminal": True},
+    {
+        "name": "done",
+        "display_label": "Done",
+        "rank": 9,
+        "owner_roles": [],
+        "entry_gate_field": None,
+        "gate_skip_to": None,
+        "is_terminal": True,
+    },
+    {
+        "name": "cancelled",
+        "display_label": "Cancelled",
+        "rank": 10,
+        "owner_roles": [],
+        "entry_gate_field": None,
+        "gate_skip_to": None,
+        "is_terminal": True,
+    },
 ]
 
 
@@ -305,6 +403,8 @@ SELECT jsonb_agg(jsonb_build_object(
     'display_label', display_label,
     'rank', rank,
     'owner_roles', owner_roles,
+    'entry_gate_field', entry_gate_field,
+    'gate_skip_to', gate_skip_to,
     'is_terminal', is_terminal
 ) ORDER BY rank)::text
 FROM ticket_board.workflow_stages;
@@ -312,7 +412,7 @@ FROM ticket_board.workflow_stages;
                 )
             )
             assert stages == EXPECTED_STAGES, stages
-            assert psql(admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions;") == "22"
+            assert psql(admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions;") == "36"
             assert psql(admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions WHERE from_stage IN ('done', 'cancelled');") == "3"
             assert psql(
                 admin_conn,
@@ -413,6 +513,25 @@ SELECT ticket_board.create_ticket('Provisioned workflow ticket', 'Body', 'draft'
             service_call(service_conn, "director", f"SELECT ticket_board.mark_done('{ticket_id}', 'abcdef1');")
             assert psql(admin_conn, f"SELECT state FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "done"
 
+            no_audit_ticket_id = service_call(
+                service_conn,
+                "director",
+                """
+SELECT set_config('ticket_board.ticket_prefix', 'OTTO', false);
+SELECT ticket_board.create_ticket('Provisioned no-audit workflow ticket', 'Body', 'analysis', ARRAY[]::text[], '', false, false);
+""",
+            )
+            service_call(service_conn, "director", f"SELECT ticket_board.route('{no_audit_ticket_id}', 'in_progress', 'app');")
+            service_call(service_conn, "app", f"SELECT ticket_board.submit_to_audit('{no_audit_ticket_id}', 'abc7591');")
+            assert (
+                psql(
+                    admin_conn,
+                    f"SELECT state || ':' || assignee || ':' || audit_signoff::text || ':' || needs_audit::text FROM ticket_board.tickets WHERE id = '{no_audit_ticket_id}';",
+                )
+                == "director_review:director:false:false"
+            )
+            service_call(service_conn, "director", f"SELECT ticket_board.mark_done('{no_audit_ticket_id}', 'abc7591');")
+
             service_call_without_shadow_warning(service_conn, "director", f"SELECT ticket_board.route('{ticket_id}', 'analysis', 'director');")
             assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "analysis:director"
 
@@ -473,7 +592,7 @@ SELECT set_config('ticket_board.ticket_prefix', 'OTTO', false);
 SELECT ticket_board.create_ticket('Provisioned workflow cancellation', 'Body', 'draft');
 """,
             )
-            assert cancel_id == "OTTO-5", cancel_id
+            assert cancel_id == "OTTO-6", cancel_id
             service_call(service_conn, "designer", f"SELECT ticket_board.release_draft('{cancel_id}');")
             service_call(service_conn, "director", f"SELECT ticket_board.route('{cancel_id}', 'in_progress', 'app');")
             assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{cancel_id}';") == "in_progress:app"
@@ -483,6 +602,111 @@ SELECT ticket_board.create_ticket('Provisioned workflow cancellation', 'Body', '
             assert psql(admin_conn, f"SELECT state FROM ticket_board.tickets WHERE id = '{cancel_id}';") == "cancelled"
             service_call_without_shadow_warning(service_conn, "director", f"SELECT ticket_board.route('{cancel_id}', 'analysis', 'director');")
             assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{cancel_id}';") == "analysis:director"
+
+            provisioned_signoff_cases = [
+                (False, False, "director_review", "director", False, False),
+                (False, True, "dat", "director", False, False),
+                (True, False, "audit", "audit", False, False),
+                (True, True, "audit", "audit", False, False),
+            ]
+            for needs_audit, needs_user_signoff, expected_state, expected_assignee, expected_audit_signoff, expected_user_signoff in provisioned_signoff_cases:
+                matrix_id = service_call(
+                    service_conn,
+                    "director",
+                    f"""
+SELECT set_config('ticket_board.ticket_prefix', 'OTTO', false);
+SELECT ticket_board.create_ticket(
+    'Provisioned audit UAT matrix',
+    'Body',
+    'analysis',
+    ARRAY[]::text[],
+    '',
+    {'true' if needs_user_signoff else 'false'},
+    {'true' if needs_audit else 'false'}
+);
+""",
+                )
+                service_call(service_conn, "director", f"SELECT ticket_board.route('{matrix_id}', 'in_progress', 'app');")
+                service_call(service_conn, "app", f"SELECT ticket_board.submit_to_audit('{matrix_id}', 'a759{matrix_id.split('-')[-1].zfill(3)}');")
+                matrix_status = json.loads(
+                    psql(
+                        admin_conn,
+                        f"""
+SELECT jsonb_build_object(
+    'state', state,
+    'assignee', assignee,
+    'audit_signoff', audit_signoff,
+    'needs_audit', needs_audit,
+    'needs_user_signoff', needs_user_signoff,
+    'user_signoff', user_signoff
+)::text
+FROM ticket_board.tickets
+WHERE id = '{matrix_id}';
+""",
+                    )
+                )
+                assert matrix_status == {
+                    "state": expected_state,
+                    "assignee": expected_assignee,
+                    "audit_signoff": expected_audit_signoff,
+                    "needs_audit": needs_audit,
+                    "needs_user_signoff": needs_user_signoff,
+                    "user_signoff": expected_user_signoff,
+                }, matrix_status
+                if needs_audit:
+                    service_call(service_conn, "audit", f"SELECT ticket_board.audit_sign_off('{matrix_id}', 'Audit verified.');")
+                    after_audit_signoff = json.loads(
+                        psql(
+                            admin_conn,
+                            f"""
+SELECT jsonb_build_object('state', state, 'assignee', assignee, 'audit_signoff', audit_signoff, 'user_signoff', user_signoff)::text
+FROM ticket_board.tickets
+WHERE id = '{matrix_id}';
+""",
+                        )
+                    )
+                    assert after_audit_signoff == {
+                        "state": "dat" if needs_user_signoff else "director_review",
+                        "assignee": "director",
+                        "audit_signoff": True,
+                        "user_signoff": False,
+                    }, after_audit_signoff
+                if needs_user_signoff:
+                    service_call(service_conn, "director", f"SELECT ticket_board.director_dat_sign_off('{matrix_id}', 'DAT accepted.');")
+                    uat_status = json.loads(
+                        psql(
+                            admin_conn,
+                            f"""
+SELECT jsonb_build_object('state', state, 'assignee', assignee, 'audit_signoff', audit_signoff, 'user_signoff', user_signoff)::text
+FROM ticket_board.tickets
+WHERE id = '{matrix_id}';
+""",
+                        )
+                    )
+                    assert uat_status == {
+                        "state": "user_review",
+                        "assignee": "user",
+                        "audit_signoff": needs_audit,
+                        "user_signoff": False,
+                    }, uat_status
+                    service_call(service_conn, "user", f"SELECT ticket_board.user_sign_off('{matrix_id}', 'UAT accepted.');")
+                    user_signed_status = json.loads(
+                        psql(
+                            admin_conn,
+                            f"""
+SELECT jsonb_build_object('state', state, 'assignee', assignee, 'audit_signoff', audit_signoff, 'user_signoff', user_signoff)::text
+FROM ticket_board.tickets
+WHERE id = '{matrix_id}';
+""",
+                        )
+                    )
+                    assert user_signed_status == {
+                        "state": "director_review",
+                        "assignee": "director",
+                        "audit_signoff": needs_audit,
+                        "user_signoff": True,
+                    }, user_signed_status
+                service_call(service_conn, "director", f"SELECT ticket_board.mark_done('{matrix_id}', 'a759{matrix_id.split('-')[-1].zfill(3)}');")
 
             noaudit_dbname = "project_workflow_noaudit"
             run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", noaudit_dbname])
@@ -510,6 +734,8 @@ SELECT jsonb_agg(jsonb_build_object(
     'display_label', display_label,
     'rank', rank,
     'owner_roles', owner_roles,
+    'entry_gate_field', entry_gate_field,
+    'gate_skip_to', gate_skip_to,
     'is_terminal', is_terminal
 ) ORDER BY rank)::text
 FROM ticket_board.workflow_stages;

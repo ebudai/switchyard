@@ -46,10 +46,10 @@ Pane write API:
   the socket connection closes, and stale dead-PID registrations are dropped.
 - Ticket-scoped operations are `route`, `start_work`, `submit_to_inspection`,
   `submit_to_audit`,
-  `audit_sign_off`, `audit_kick_back`, `director_dat_sign_off`,
-  `director_dat_kick_back`, `user_sign_off`, `user_reopen`, `mark_done`,
-  `defer`, `cancel`, `set_manually_controlled`, `set_blockers`, `add_comment`,
-  `edit_fields`, and `merge`.
+  `implementer_kick_back`, `audit_sign_off`, `audit_kick_back`,
+  `director_dat_sign_off`, `director_dat_kick_back`, `user_sign_off`,
+  `user_reopen`, `mark_done`, `defer`, `cancel`, `set_manually_controlled`,
+  `set_blockers`, `add_comment`, `edit_fields`, and `merge`.
 - Python and shell tooling should use `scripts.ticket_board.write_client` or
   `scripts/ticket-board-write` instead of editing `PGU-N.json` directly. The
   client resolves its default caller role from `TICKET_BOARD_CALLER_ROLE`, then
@@ -67,6 +67,7 @@ Pane write API:
   for example `scripts/ticket-board-write start-work PGU-123`,
   `scripts/ticket-board-write submit-to-inspection PGU-123`,
   `scripts/ticket-board-write submit-to-audit PGU-123 --commit-hash <sha>`,
+  `scripts/ticket-board-write implementer-kick-back PGU-123 --reason ...`,
   `scripts/ticket-board-write file-bug --source-ticket-id PGU-123 ...`, and
   `scripts/ticket-board-write add-comment PGU-123 --text ...`.
 
@@ -123,6 +124,7 @@ Ticket schema:
   "implementation": "",
   "audit_prompt": "",
   "audit_signoff": false,
+  "needs_audit": true,
   "commit_hash": "0123456789abcdef0123456789abcdef01234567",
   "commit_exempt": false,
   "needs_user_signoff": true,
@@ -146,18 +148,20 @@ Allowed values:
 
 Notes:
 
-- `user_review` is reserved for tickets with `needs_user_signoff: true` and is displayed in the UI as `UAT`
+- `user_review` is displayed as UAT only for tickets with `needs_user_signoff:
+  true`; director-routed user information requests also use `user_review`, but
+  with `needs_user_signoff: false` and no `user_sign_off` requirement
 - `dat` is Director Acceptance Testing, a director-owned gate for `needs_user_signoff` tickets after audit and before UAT
 - `draft` is an opt-in pre-triage staging state for director/User prep; it stays unassigned and does not notify until released to `analysis`
 - `backlog` is for deferred or parked tickets; `analysis` is for active triage/spec work before a ticket is revived into Implementation (`in_progress`)
 - `blocked_by` is a list of ticket IDs the ticket is waiting on; `blockers` carries the same IDs with a persistent `resolved` flag, and unresolved blockers prevent forward promotion until the referenced blocker reaches `done` or `cancelled`
 - `implementation` is an optional director-authored implementation package/spec; ticket body/comments can carry the spec, and only assignee must be set before entering Implementation (`in_progress`)
 - `in_progress` is displayed as Implementation and is limited to one active ticket per implementer; extra implementer work is auto-queued as assigned `backlog` with `parked: false`
+- `needs_audit` defaults to `true`; setting it to `false` deliberately skips the `audit` stage, then sends completed implementation/inspection work to DAT when UAT is required or to `director_review` otherwise without requiring `audit_signoff`
 - `director_review` is displayed as Final Sign-Off and is the director's final gate before `done`
 - `audit_prompt` is retained for reference text but is optional in the default workflow
 - `commit_hash` stores the verified git commit associated with the ticket when it moves to `done`; it must be on `main`
 - `commit_exempt` is an explicit override for non-code/process tickets that should be allowed into `done` without a commit
-- `cancelled` is a separate terminal state for abandoned/superseded/won't-do tickets; cancelling requires a non-empty comment reason but no commit/audit sign-off
 - `cancelled` is a separate terminal state for abandoned/superseded/won't-do tickets; cancelling requires a non-empty comment reason but no commit/audit sign-off
 - `screenshots` is the canonical attachment list; `screenshot` is retained as the first attachment for back-compat with older tools and tickets
 - Screenshots referenced by tickets may live in either `/tmp/pgu-frames` or `/home/agent/.claude/pgu-tickets-assets`

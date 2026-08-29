@@ -199,13 +199,14 @@ The installed `switchyard` command is a PATH trampoline outside the shared check
 printing the menu may prompt for a password; that is the expected boundary between Eric's account
 and the agent-owned checkout, not a menu bug.
 
-`new` prompts for **project name**, **slug**, **agent name** (`-agent` appended), and
-**project path**. The first answer is the human name; the later answers are derived from it but
-editable:
+`new` prompts for **project name**, **slug**, **agent user** (defaulted with
+`-agent`), and **project path**. The first answer is the human name; the later
+answers are derived from it but editable. If the operator types an agent-user
+value, `new` uses that value verbatim:
 
     Project name: Otto Scheduler
     Slug         [otto_scheduler]:
-    Agent name   [otto_scheduler]:
+    Agent user   [otto_scheduler-agent]:
     Project path [/home/otto_scheduler-agent/Projects/otto_scheduler]:
 
 The default project path follows the project name, not the slug. Editing the slug to a shorter
@@ -231,8 +232,9 @@ or its session can never be resumed -- and resume is a hard requirement of this 
 
 That forces the sequence, and nothing here is a preference:
 
-1. prompt for project name, slug, agent name, project path
-2. create `<agent-name>-agent` (privileged -- switchyard, not the director)
+1. prompt for project name, slug, agent user, project path
+2. create the selected agent user (privileged -- switchyard, not the director;
+   the default is `<agent-name>-agent`, typed input is verbatim)
 3. create the derived project directory in that user's home
 4. launch the designer **as that user, in that directory**
 

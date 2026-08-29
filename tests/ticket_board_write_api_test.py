@@ -29,7 +29,17 @@ except ModuleNotFoundError:
     )
 
 from scripts.ticket_board.app import TicketBoardApp
-from scripts.ticket_board.server import CALLER_ROLE_HEADER, LEGACY_CALLER_ROLE_HEADER, LEGACY_WRITE_TOKEN_HEADER, WRITE_TOKEN_HEADER, TicketBoardServer
+from scripts.ticket_board.server import (
+    CALLER_ROLE_HEADER,
+    LEGACY_CALLER_ROLE_HEADER,
+    LEGACY_WRITE_TOKEN_HEADER,
+    WRITE_TOKEN_HEADER,
+    CallerRegistry,
+    TicketBoardEventHub,
+    TicketBoardServer,
+    TicketBoardUnixServer,
+)
+from scripts.ticket_board.write_client import TicketBoardWriteClient, TicketBoardWriteError
 
 
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
@@ -124,6 +134,7 @@ def seed_json_ticket(
     assignee: str = "unassigned",
     implementation: str = "",
     audit_signoff: bool = False,
+    needs_audit: bool = True,
     needs_inspection: bool = False,
     inspector_signoff: bool = False,
     needs_user_signoff: bool = False,
@@ -145,6 +156,7 @@ def seed_json_ticket(
         "implementation": implementation,
         "audit_prompt": "",
         "audit_signoff": audit_signoff,
+        "needs_audit": needs_audit,
         "needs_inspection": needs_inspection,
         "inspector_signoff": inspector_signoff,
         "needs_user_signoff": needs_user_signoff,
@@ -171,6 +183,7 @@ def seed_postgres_ticket(
     assignee: str = "unassigned",
     implementation: str = "",
     audit_signoff: bool = False,
+    needs_audit: bool = True,
     needs_inspection: bool = False,
     inspector_signoff: bool = False,
     needs_user_signoff: bool = False,
@@ -185,11 +198,11 @@ def seed_postgres_ticket(
         f"""
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation,
-    audit_signoff, needs_inspection, inspector_signoff, needs_user_signoff, user_signoff, commit_hash,
+    audit_signoff, needs_audit, needs_inspection, inspector_signoff, needs_user_signoff, user_signoff, commit_hash,
     commit_exempt, regression, parked, created_text, updated_text, source_json
 ) VALUES (
     '{ticket_id}', '{title}', '', '{state}', '{assignee}', '{implementation}',
-    {str(audit_signoff).lower()}, {str(needs_inspection).lower()}, {str(inspector_signoff).lower()}, {str(needs_user_signoff).lower()},
+    {str(audit_signoff).lower()}, {str(needs_audit).lower()}, {str(needs_inspection).lower()}, {str(inspector_signoff).lower()}, {str(needs_user_signoff).lower()},
     {str(user_signoff).lower()}, '{commit_hash}', {str(commit_exempt).lower()}, {str(regression).lower()}, {str(parked).lower()},
     '2026-07-10T00:00:00+00:00', '2026-07-10T00:00:00+00:00',
     '{ticket_source(ticket_id, title, state, assignee)}'::jsonb
@@ -537,6 +550,21 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
         implementation="Ready for override.",
         needs_user_signoff=True,
     )
+    seed_ticket(
+        "PGU-143",
+        title="User information request",
+        state="analysis",
+        assignee="director",
+        implementation="Need external decision.",
+    )
+    seed_ticket(
+        "PGU-144",
+        title="Do not bypass UAT pipeline",
+        state="analysis",
+        assignee="director",
+        implementation="Unfinished work.",
+        needs_user_signoff=True,
+    )
 
 
 def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets: Path, admin_conn: str) -> None:
@@ -637,6 +665,40 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     source_id = str(created["id"])  # type: ignore[index]
     assert created["state"] == "analysis", created  # type: ignore[index]
     assert created["assignee"] == "unassigned", created  # type: ignore[index]
+    assert created["needs_audit"] is True, created  # type: ignore[index]
+
+    user_default_audit_created_payload = post_json(
+        base_url,
+        "/api/tickets/actions/create_ticket",
+        {"title": "User default-audit create", "body": "User keeps audit enabled.", "needs_audit": True},
+        caller="user",
+        expect=201,
+    )
+    user_default_audit_created = user_default_audit_created_payload["ticket"]  # type: ignore[index]
+    assert user_default_audit_created["needs_audit"] is True, user_default_audit_created  # type: ignore[index]
+
+    no_audit_created_payload = post_json(
+        base_url,
+        "/api/tickets/actions/create_ticket",
+        {"title": "API no-audit create", "body": "Director partitions this away from audit.", "needs_audit": False},
+        caller="director",
+        expect=201,
+    )
+    no_audit_created = no_audit_created_payload["ticket"]  # type: ignore[index]
+    assert no_audit_created["needs_audit"] is False, no_audit_created  # type: ignore[index]
+    assert psql(
+        admin_conn,
+        f"SELECT (source_json->>'needs_audit') FROM ticket_board.tickets WHERE id = '{no_audit_created['id']}';",
+    ) == "false"
+
+    no_audit_create_forbidden = post_json(
+        base_url,
+        "/api/tickets/actions/create_ticket",
+        {"title": "Implementer cannot skip audit", "body": "", "needs_audit": False},
+        caller="user",
+        expect=403,
+    )
+    assert "needs_audit can only be set to false by director" in str(no_audit_create_forbidden), no_audit_create_forbidden
 
     backlog_created_payload = post_json(
         base_url,
@@ -763,6 +825,60 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     )
     filed = filed_payload["ticket"]  # type: ignore[index]
     assert filed["parent_id"] == source_id, filed  # type: ignore[index]
+    assert filed["needs_audit"] is True, filed  # type: ignore[index]
+    no_audit_file_bug_forbidden = post_json(
+        base_url,
+        "/api/tickets/actions/file_bug",
+        {"title": "Ops cannot skip audit on filed bug", "body": "", "source_ticket_id": source_id, "needs_audit": False},
+        caller="ops",
+        expect=403,
+    )
+    assert "needs_audit can only be set to false by director" in str(no_audit_file_bug_forbidden), no_audit_file_bug_forbidden
+    blocked_file_bug_payload = post_json(
+        base_url,
+        "/api/tickets/actions/file_bug",
+        {
+            "title": "API blocked file bug",
+            "body": "Linked blocked bug.",
+            "source_ticket_id": source_id,
+            "assignee": "ops",
+            "blocked_by": [source_id],
+            "blocked_reason": "Waiting on source fix.",
+        },
+        caller="ops",
+        expect=201,
+    )
+    blocked_file_bug = blocked_file_bug_payload["ticket"]  # type: ignore[index]
+    assert blocked_file_bug["parent_id"] == source_id, blocked_file_bug  # type: ignore[index]
+    assert blocked_file_bug["state"] == "analysis", blocked_file_bug  # type: ignore[index]
+    assert blocked_file_bug["assignee"] == "ops", blocked_file_bug  # type: ignore[index]
+    assert blocked_file_bug["blocked_by"] == [source_id], blocked_file_bug  # type: ignore[index]
+    assert blocked_file_bug["blocked_reason"] == "Waiting on source fix.", blocked_file_bug  # type: ignore[index]
+    assert blocked_file_bug["comments"][0]["who"] == "ops", blocked_file_bug  # type: ignore[index]
+    assert psql(
+        admin_conn,
+        f"SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = '{blocked_file_bug['id']}';",
+    ) == "0"
+    assigned_bug_roles = ("ops", "main", "app", "perf", "research", "audit")
+    for role in assigned_bug_roles:
+        assigned_file_bug_payload = post_json(
+            base_url,
+            "/api/tickets/actions/file_bug",
+            {
+                "title": f"{role} assigned file bug",
+                "body": f"{role} found a bug.",
+                "source_ticket_id": source_id,
+                "assignee": role,
+            },
+            caller=role,
+            expect=201,
+        )
+        assigned_file_bug = assigned_file_bug_payload["ticket"]  # type: ignore[index]
+        assert assigned_file_bug["parent_id"] == source_id, assigned_file_bug  # type: ignore[index]
+        assert assigned_file_bug["state"] == "analysis", assigned_file_bug  # type: ignore[index]
+        assert assigned_file_bug["assignee"] == role, assigned_file_bug  # type: ignore[index]
+        assert assigned_file_bug["comments"][0]["who"] == role, assigned_file_bug  # type: ignore[index]
+        assert assigned_file_bug["comments"][0]["text"] == f"Filed bug against {source_id}.", assigned_file_bug  # type: ignore[index]
     audit_filed_payload = post_json(
         base_url,
         "/api/tickets/actions/file_bug",
@@ -860,6 +976,37 @@ WHERE id = 'PGU-141';
         "app_reserved_ticket": "<none>",
         "reserved_from_ticket": "<none>",
     }, uat_reservation
+
+    user_info_request = post_json(
+        base_url,
+        "/api/tickets/PGU-143/actions/route",
+        {"state": "user_review", "assignee": "user"},
+        caller="director",
+    )
+    assert user_info_request["ticket"]["state"] == "user_review", user_info_request  # type: ignore[index]
+    assert user_info_request["ticket"]["assignee"] == "user", user_info_request  # type: ignore[index]
+    assert user_info_request["ticket"]["needs_user_signoff"] is False, user_info_request  # type: ignore[index]
+    assert user_info_request["ticket"]["user_signoff"] is False, user_info_request  # type: ignore[index]
+    user_info_signoff = post_json(
+        base_url,
+        "/api/tickets/PGU-143/actions/user_sign_off",
+        {"text": "Looks approved."},
+        caller="user",
+        expect=400,
+    )
+    assert "user_sign_off requires needs_user_signoff=true" in str(user_info_signoff), user_info_signoff
+    user_info_after_signoff = get_ticket(base_url, "PGU-143")
+    assert user_info_after_signoff["state"] == "user_review", user_info_after_signoff
+    assert user_info_after_signoff["user_signoff"] is False, user_info_after_signoff
+    assert user_info_after_signoff["comments"] == [], user_info_after_signoff
+    uat_bypass = post_json(
+        base_url,
+        "/api/tickets/PGU-144/actions/route",
+        {"state": "user_review", "assignee": "user"},
+        caller="director",
+        expect=400,
+    )
+    assert "analysis -> user_review is only for user information requests with needs_user_signoff=false" in str(uat_bypass), uat_bypass
 
     force_moved_user = post_json(
         base_url,
@@ -1091,6 +1238,21 @@ WHERE id = 'PGU-141';
         caller="director",
     )
     assert inspector_field_director["ticket"]["needs_inspection"] is True, inspector_field_director  # type: ignore[index]
+    audit_field_forbidden = post_json(
+        base_url,
+        "/api/tickets/PGU-112/actions/edit_fields",
+        {"needs_audit": False},
+        caller="app",
+        expect=403,
+    )
+    assert "needs_audit can only be set to false by director" in str(audit_field_forbidden), audit_field_forbidden
+    audit_field_director = post_json(
+        base_url,
+        "/api/tickets/PGU-112/actions/edit_fields",
+        {"needs_audit": False},
+        caller="director",
+    )
+    assert audit_field_director["ticket"]["needs_audit"] is False, audit_field_director  # type: ignore[index]
     regression_field_set = post_json(
         base_url,
         "/api/tickets/PGU-112/actions/edit_fields",
@@ -1404,6 +1566,61 @@ WHERE id = 'PGU-141';
     assert backlog_cancelled["ticket"]["state"] == "cancelled", backlog_cancelled  # type: ignore[index]
     assert backlog_cancelled["ticket"]["comments"][-1]["who"] == "director", backlog_cancelled  # type: ignore[index]
 
+    psql(admin_conn, "ALTER TABLE ticket_board.tickets DISABLE TRIGGER USER;")
+    seed_postgres_ticket(admin_conn, "PGU-128", title="Implementer hand-back", state="in_progress", assignee="ops", implementation="Blocked.")
+    seed_postgres_ticket(admin_conn, "PGU-1281", title="Other implementer hand-back", state="in_progress", assignee="main", implementation="Blocked.")
+    seed_postgres_ticket(admin_conn, "PGU-1282", title="Hand-back is not route", state="in_progress", assignee="ops", implementation="Blocked.")
+    psql(admin_conn, "ALTER TABLE ticket_board.tickets ENABLE TRIGGER USER;")
+    psql(admin_conn, "DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id IN ('PGU-128', 'PGU-1281', 'PGU-1282');")
+    handed_back = post_json(
+        base_url,
+        "/api/tickets/PGU-128/actions/implementer_kick_back",
+        {"reason": "Cannot access the required external credentials."},
+        caller="ops",
+    )
+    assert handed_back["ticket"]["state"] == "analysis", handed_back  # type: ignore[index]
+    assert handed_back["ticket"]["assignee"] == "director", handed_back  # type: ignore[index]
+    assert handed_back["ticket"]["comments"][-1]["who"] == "ops", handed_back  # type: ignore[index]
+    assert handed_back["ticket"]["comments"][-1]["text"] == "Cannot access the required external credentials.", handed_back  # type: ignore[index]
+    director_notice = json.loads(
+        psql(
+            admin_conn,
+            """
+SELECT jsonb_build_object('target_role', target_role, 'kind', kind, 'new_state', payload->>'new_state')::text
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-128'
+ORDER BY id
+LIMIT 1;
+""",
+        )
+    )
+    assert director_notice == {"target_role": "director", "kind": "transition", "new_state": "analysis"}, director_notice
+    empty_handback = post_json(
+        base_url,
+        "/api/tickets/PGU-1281/actions/implementer_kick_back",
+        {"reason": "   "},
+        caller="main",
+        expect=400,
+    )
+    assert "implementer_kick_back requires a non-empty reason" in str(empty_handback), empty_handback
+    wrong_handback = post_json(
+        base_url,
+        "/api/tickets/PGU-1281/actions/implementer_kick_back",
+        {"reason": "Please clarify."},
+        caller="ops",
+        expect=403,
+    )
+    assert "ops cannot call implementer_kick_back for ticket assigned to main" in str(wrong_handback), wrong_handback
+    route_disguised_as_handback = post_json(
+        base_url,
+        "/api/tickets/PGU-1282/actions/implementer_kick_back",
+        {"reason": "Cannot proceed.", "state": "done", "assignee": "ops"},
+        caller="ops",
+    )
+    assert route_disguised_as_handback["ticket"]["state"] == "analysis", route_disguised_as_handback  # type: ignore[index]
+    assert route_disguised_as_handback["ticket"]["assignee"] == "director", route_disguised_as_handback  # type: ignore[index]
+    psql(admin_conn, "DELETE FROM ticket_board.tickets WHERE id IN ('PGU-128', 'PGU-1281', 'PGU-1282');")
+
     manual = post_json(
         base_url,
         "/api/tickets/PGU-109/actions/set_manually_controlled",
@@ -1472,6 +1689,44 @@ WHERE id = 'PGU-141';
     assert "regression" in merged_source, merged_source
 
 
+def exercise_real_write_client_file_bug_payload(app: TicketBoardApp, socket_path: Path) -> None:
+    events = TicketBoardEventHub(app)
+    server = TicketBoardUnixServer(
+        socket_path,
+        app,
+        events=events,
+        director_notifier=QuietNotifier(),
+        caller_registry=CallerRegistry(),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        client = TicketBoardWriteClient(socket_path=str(socket_path), caller_role="ops")
+        filed = client.file_bug(
+            title="Real write client file bug",
+            body="Default needs_audit=true must not trip the director-only skip guard.",
+            source_ticket_id="PGU-100",
+        )["ticket"]
+        assert filed["parent_id"] == "PGU-100", filed
+        assert filed["needs_audit"] is True, filed
+        forbidden = client.file_bug(
+            title="Real write client forbidden no-audit file bug",
+            body="Only director can turn audit off.",
+            source_ticket_id="PGU-100",
+            needs_audit=False,
+        )
+    except TicketBoardWriteError as exc:
+        if "needs_audit can only be set to false by director" not in str(exc):
+            raise
+    else:
+        raise AssertionError(f"needs_audit=false unexpectedly succeeded: {forbidden}")
+    finally:
+        server.shutdown()
+        server.server_close()
+        events.close()
+        thread.join(timeout=2)
+
+
 def exercise_postgres_backend(commit_hash: str) -> None:
     with tempfile.TemporaryDirectory(prefix="ticket-board-write-api-postgres.") as tmpdir:
         root = Path(tmpdir)
@@ -1525,6 +1780,7 @@ WHERE table_schema = 'ticket_board'
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=2)
+            exercise_real_write_client_file_bug_payload(app, root / "ticket-board.sock")
         finally:
             subprocess.run(
                 ["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"],

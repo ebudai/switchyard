@@ -254,6 +254,9 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       toggles.appendChild(toggleControl('Needs inspection', ticket.needs_inspection, async (checked) => {
         await updateDetailTicketForToggle({ needs_inspection: checked }, 'director');
       }));
+      toggles.appendChild(toggleControl('Needs audit', ticket.needs_audit !== false, async (checked) => {
+        await updateDetailTicketForToggle({ needs_audit: checked }, 'director');
+      }));
       toggles.appendChild(toggleControl('Regression', ticket.regression, async (checked) => {
         await updateDetailTicketForToggle({ regression: checked });
       }));
@@ -273,6 +276,9 @@ SCRIPT_DETAIL = """    function selectedTicket() {
           patch.comment = { who: 'audit', text: commentText.value.trim() };
         }
         await updateDetailTicketForToggle(patch, 'audit');
+      }, {
+        disabled: ticket.needs_audit === false,
+        title: ticket.needs_audit === false ? 'Ticket does not require audit sign-off.' : '',
       }));
       toggles.appendChild(toggleControl('UAT sign-off', ticket.user_signoff, async (checked) => {
         const patch = { user_signoff: checked };

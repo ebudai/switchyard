@@ -69,6 +69,7 @@ OPERATION_ALLOWED_ROLES = {
     "start_work": IMPLEMENTER_ROLES,
     "submit_to_inspection": IMPLEMENTER_ROLES,
     "submit_to_audit": IMPLEMENTER_ROLES,
+    "implementer_kick_back": IMPLEMENTER_ROLES,
     "request_commit_exempt": IMPLEMENTER_ROLES,
     "start_task": TASK_ROLES,
     "complete_task": TASK_ROLES,
@@ -100,6 +101,7 @@ EDIT_FIELD_NAMES = {
     "screenshot",
     "implementation",
     "audit_prompt",
+    "needs_audit",
     "needs_inspection",
     "needs_user_signoff",
     "commit_exempt",
@@ -580,7 +582,15 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             raise ValueError(f"unknown ticket operation: {operation}")
         if caller_role not in allowed:
             raise PermissionError(f"{caller_role} cannot call {operation}")
-        if operation in {"start_work", "submit_to_inspection", "submit_to_audit", "request_commit_exempt", "start_task", "complete_task"} and ticket_id is not None:
+        if operation in {
+            "start_work",
+            "submit_to_inspection",
+            "submit_to_audit",
+            "implementer_kick_back",
+            "request_commit_exempt",
+            "start_task",
+            "complete_task",
+        } and ticket_id is not None:
             ticket = self.app.get_ticket(ticket_id)
             if caller_role != "director" and str(ticket.get("assignee", "")).strip().lower() != caller_role:
                 raise PermissionError(f"{caller_role} cannot call {operation} for ticket assigned to {ticket.get('assignee')}")
@@ -619,6 +629,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             raise ValueError("advanced create fields require /api/tickets/actions/create_ticket")
         if bool(payload.get("needs_inspection", False)) and caller_role != "director":
             raise PermissionError("needs_inspection can only be set by director")
+        if payload.get("needs_audit", True) is False and caller_role != "director":
+            raise PermissionError("needs_audit can only be set to false by director")
         if bool(payload.get("commit_exempt", False)) and caller_role != "director":
             raise PermissionError("commit_exempt can only be set by director")
         if not advanced_create:
@@ -629,6 +641,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 screenshots=payload.get("screenshots"),  # type: ignore[arg-type]
                 assignee=str(payload.get("assignee", "unassigned")),
                 needs_user_signoff=bool(payload.get("needs_user_signoff", False)),
+                needs_audit=bool(payload.get("needs_audit", True)),
                 needs_inspection=bool(payload.get("needs_inspection", False)),
                 regression=regression,
                 blocked_by=payload.get("blocked_by"),  # type: ignore[arg-type]
@@ -653,6 +666,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             implementation=implementation,
             audit_prompt=audit_prompt,
             audit_signoff=bool(payload.get("audit_signoff", False)),
+            needs_audit=bool(payload.get("needs_audit", True)),
             needs_inspection=bool(payload.get("needs_inspection", False)),
             inspector_signoff=bool(payload.get("inspector_signoff", False)),
             needs_user_signoff=bool(payload.get("needs_user_signoff", False)),
@@ -710,6 +724,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         if operation == "file_bug":
             if bool(payload.get("needs_inspection", False)) and caller != "director":
                 raise PermissionError("needs_inspection can only be set by director")
+            if payload.get("needs_audit", True) is False and caller != "director":
+                raise PermissionError("needs_audit can only be set to false by director")
             if bool(payload.get("commit_exempt", False)) and caller != "director":
                 raise PermissionError("commit_exempt can only be set by director")
             before_signature = self.app.store_signature()
@@ -725,6 +741,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 implementation="",
                 audit_prompt="",
                 audit_signoff=False,
+                needs_audit=bool(payload.get("needs_audit", True)),
                 needs_inspection=bool(payload.get("needs_inspection", False)),
                 inspector_signoff=False,
                 needs_user_signoff=bool(payload.get("needs_user_signoff", False)),
@@ -783,6 +800,14 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             patch = {"state": "inspection", "assignee": "inspector"}
         elif operation == "submit_to_audit":
             patch = {"state": "audit", "commit_hash": str(payload.get("commit_hash", ""))}
+        elif operation == "implementer_kick_back":
+            comment_text = self.action_comment_text(payload)
+            if not comment_text:
+                raise ValueError("implementer_kick_back requires a non-empty reason")
+            updated = self.app.implementer_kick_back(ticket_id, comment_text, caller_role=caller)
+            self.events.notify_change(self.app.store_signature())
+            self.send_json({"ticket": updated})
+            return
         elif operation == "request_commit_exempt":
             updated = self.app.request_commit_exempt(ticket_id, self.action_comment_text(payload), caller_role=caller)
             self.events.notify_change(self.app.store_signature())
@@ -881,6 +906,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 raise ValueError("user_signoff=true requires user_sign_off")
             if "needs_inspection" in payload and caller != "director":
                 raise PermissionError("needs_inspection can only be edited by director")
+            if payload.get("needs_audit", True) is False and caller != "director":
+                raise PermissionError("needs_audit can only be set to false by director")
             if "commit_exempt" in payload and caller != "director":
                 raise PermissionError("commit_exempt can only be edited by director")
             patch = dict(payload)

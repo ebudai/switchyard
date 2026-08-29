@@ -22,6 +22,7 @@ def main() -> int:
     assert "return 'analysis';" in HTML
     assert "if (ticket.state === 'analysis') {" in HTML
     assert "return 'in_progress';" in HTML
+    assert "ticket.needs_audit !== false ? 'audit' : (ticket.needs_user_signoff ? 'dat' : 'director_review')" in HTML
     assert "return ticket.needs_user_signoff ? 'dat' : 'director_review';" in HTML
     assert "if (ticket.state === 'dat') {" in HTML
     assert "return 'user_review';" in HTML
@@ -41,6 +42,7 @@ def main() -> int:
     assert "Save audit prompt before advancing to audit." not in HTML
     assert "Set audit signoff before advancing to DAT." in HTML
     assert "Set audit signoff before advancing to Final Sign-Off." in HTML
+    assert "ticket.needs_audit === false || !!ticket.audit_signoff" in HTML
     assert "Record UAT sign-off before advancing to Final Sign-Off." in HTML
     assert "Save a verified commit hash or enable no-commit override before advancing to done." in HTML
     assert "Advance -> ${stateLabel(detailAdvanceState)}" in HTML

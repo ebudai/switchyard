@@ -23,13 +23,18 @@ WRITE_FUNCTIONS = [
     "ticket_board.create_ticket(text,text,text)",
     "ticket_board.create_ticket(text,text,text,text[],text)",
     "ticket_board.create_ticket(text,text,text,text[],text,boolean)",
+    "ticket_board.create_ticket(text,text,text,text[],text,boolean,boolean)",
     "ticket_board.file_bug(text,text,text)",
+    "ticket_board.file_bug(text,text,text,text)",
+    "ticket_board.file_bug(text,text,text,text,text[],text)",
+    "ticket_board.file_bug(text,text,text,text,text[],text,boolean)",
     "ticket_board.release_draft(text)",
     "ticket_board.route(text,text,text)",
     "ticket_board.force_move(text,text,text,boolean)",
     "ticket_board.start_work(text)",
     "ticket_board.submit_to_inspection(text)",
     "ticket_board.submit_to_audit(text,text)",
+    "ticket_board.implementer_kick_back(text,text)",
     "ticket_board.request_commit_exempt(text,text)",
     "ticket_board.start_task(text,text)",
     "ticket_board.complete_task(text,text)",
@@ -405,14 +410,103 @@ SELECT set_config('ticket_board.caller_role', 'director', false);
 SELECT ticket_board.create_ticket('Bad direct create', 'Body', 'in_progress');
 """,
     )
+    assert "needs_audit can only be set to false by director" in psql_error(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'user', false);
+SELECT ticket_board.create_ticket('User cannot skip audit', 'Body', 'analysis', ARRAY[]::text[], '', false, false);
+""",
+    )
+    no_audit_director_created = psql(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'director', false);
+SELECT ticket_board.create_ticket('Director can skip audit', 'Body', 'analysis', ARRAY[]::text[], '', false, false);
+""",
+    ).splitlines()[-1]
+    assert psql(admin_conn, f"SELECT needs_audit FROM ticket_board.tickets WHERE id = {sql_string(no_audit_director_created)};") == "f"
 
     insert_ticket(admin_conn, "PGU-100", title="Source")
     filed = psql(service_conn, "SELECT ticket_board.file_bug('Service bug', 'Body', 'PGU-100');")
     assert psql(admin_conn, f"SELECT parent_id FROM ticket_board.tickets WHERE id = {sql_string(filed)};") == "PGU-100"
+    assert "needs_audit can only be set to false by director" in psql_error(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'ops', false);
+SELECT ticket_board.file_bug('Ops cannot skip audit bug', 'Body', 'PGU-100', 'ops', ARRAY[]::text[], '', false);
+""",
+    )
+    insert_ticket(admin_conn, "PGU-180", title="Assignable source")
+    filed_assigned = psql(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'ops', false);
+SELECT ticket_board.file_bug('Assigned service bug', 'Body', 'PGU-180', 'ops');
+""",
+    ).splitlines()[-1]
+    filed_assigned_row = json.loads(
+        psql(
+            admin_conn,
+            f"""
+SELECT jsonb_build_object(
+    'state', state,
+    'assignee', assignee,
+    'parent_id', parent_id,
+    'comment_who', (SELECT who FROM ticket_board.ticket_comments WHERE ticket_id = t.id ORDER BY position LIMIT 1)
+)::text
+FROM ticket_board.tickets t
+WHERE id = {sql_string(filed_assigned)};
+""",
+        )
+    )
+    assert filed_assigned_row == {
+        "state": "analysis",
+        "assignee": "ops",
+        "parent_id": "PGU-180",
+        "comment_who": "ops",
+    }, filed_assigned_row
+    insert_ticket(admin_conn, "PGU-1800", title="Blocked bug source")
+    filed_blocked = psql(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'ops', false);
+SELECT ticket_board.file_bug('Blocked service bug', 'Body', 'PGU-1800', 'ops', ARRAY['PGU-100'], 'Waiting on source.');
+""",
+    ).splitlines()[-1]
+    filed_blocked_row = json.loads(
+        psql(
+            admin_conn,
+            f"""
+SELECT jsonb_build_object(
+    'state', state,
+    'assignee', assignee,
+    'parent_id', parent_id,
+    'blocked_reason', blocked_reason,
+    'blocked_by', (SELECT jsonb_agg(blocker_ticket_id ORDER BY position) FROM ticket_board.ticket_blockers WHERE ticket_id = t.id),
+    'comment_who', (SELECT who FROM ticket_board.ticket_comments WHERE ticket_id = t.id ORDER BY position LIMIT 1)
+)::text
+FROM ticket_board.tickets t
+WHERE id = {sql_string(filed_blocked)};
+""",
+        )
+    )
+    assert filed_blocked_row == {
+        "state": "analysis",
+        "assignee": "ops",
+        "parent_id": "PGU-1800",
+        "blocked_reason": "Waiting on source.",
+        "blocked_by": ["PGU-100"],
+        "comment_who": "ops",
+    }, filed_blocked_row
 
     insert_ticket(admin_conn, "PGU-200", title="Route fixture", state="analysis")
     psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'director', false); SELECT ticket_board.route('PGU-200', 'backlog', 'ops');")
     assert psql(admin_conn, "SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = 'PGU-200';") == "backlog:ops"
+    route_denied = psql_error(
+        service_conn,
+        "SELECT set_config('ticket_board.caller_role', 'ops', false); SELECT ticket_board.route('PGU-200', 'analysis', 'ops');",
+    )
+    assert "role ops cannot call route" in route_denied, route_denied
     psql(admin_conn, "UPDATE ticket_board.tickets SET parked = true WHERE id = 'PGU-200';")
 
     insert_ticket(admin_conn, "PGU-300", title="Start fixture", state="analysis", assignee="ops", implementation="Ready.")
@@ -421,6 +515,70 @@ SELECT ticket_board.create_ticket('Bad direct create', 'Body', 'in_progress');
     psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '3003003' WHERE id = 'PGU-300';")
     psql(admin_conn, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-300';")
     psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-300';")
+
+    insert_ticket(admin_conn, "PGU-7560", title="Hand-back fixture", state="in_progress", assignee="ops", implementation="Blocked.")
+    psql(admin_conn, "DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-7560';")
+    psql(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'ops', false);
+SELECT ticket_board.implementer_kick_back('PGU-7560', 'Cannot access required credentials.');
+""",
+    )
+    handed_back = json.loads(
+        psql(
+            admin_conn,
+            """
+SELECT jsonb_build_object(
+    'state', t.state,
+    'assignee', t.assignee,
+    'parked', t.parked,
+    'comment_who', (SELECT who FROM ticket_board.ticket_comments WHERE ticket_id = t.id ORDER BY position DESC LIMIT 1),
+    'comment_text', (SELECT text FROM ticket_board.ticket_comments WHERE ticket_id = t.id ORDER BY position DESC LIMIT 1),
+    'queue_target', (SELECT target_role FROM ticket_board.ticket_notification_queue WHERE ticket_id = t.id ORDER BY id LIMIT 1),
+    'queue_kind', (SELECT kind FROM ticket_board.ticket_notification_queue WHERE ticket_id = t.id ORDER BY id LIMIT 1),
+    'queue_state', (SELECT payload->>'new_state' FROM ticket_board.ticket_notification_queue WHERE ticket_id = t.id ORDER BY id LIMIT 1)
+)::text
+FROM ticket_board.tickets t
+WHERE id = 'PGU-7560';
+""",
+        )
+    )
+    assert handed_back == {
+        "state": "analysis",
+        "assignee": "director",
+        "parked": False,
+        "comment_who": "ops",
+        "comment_text": "Cannot access required credentials.",
+        "queue_target": "director",
+        "queue_kind": "transition",
+        "queue_state": "analysis",
+    }, handed_back
+    insert_ticket(admin_conn, "PGU-7561", title="Empty hand-back", state="in_progress", assignee="ops", implementation="Blocked.")
+    assert "implementer_kick_back requires a non-empty reason" in psql_error(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'ops', false);
+SELECT ticket_board.implementer_kick_back('PGU-7561', '   ');
+""",
+    )
+    insert_ticket(admin_conn, "PGU-7562", title="Wrong assignee hand-back", state="in_progress", assignee="main", implementation="Blocked.")
+    assert "role ops cannot call implementer_kick_back" in psql_error(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'ops', false);
+SELECT ticket_board.implementer_kick_back('PGU-7562', 'Please clarify.');
+""",
+    )
+    insert_ticket(admin_conn, "PGU-7563", title="Wrong state hand-back", state="audit", assignee="ops", implementation="Blocked.")
+    assert "in_progress ticket not found: PGU-7563" in psql_error(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'ops', false);
+SELECT ticket_board.implementer_kick_back('PGU-7563', 'Please clarify.');
+""",
+    )
+    psql(admin_conn, "DELETE FROM ticket_board.tickets WHERE id IN ('PGU-7560', 'PGU-7561', 'PGU-7562', 'PGU-7563');")
 
     insert_ticket(admin_conn, "PGU-400", title="Submit fixture", state="in_progress", assignee="app", implementation="Done.")
     psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'app', false); SELECT ticket_board.submit_to_audit('PGU-400', 'abcdef0');")
@@ -698,6 +856,68 @@ FROM ticket_board.tickets t WHERE id = 'PGU-600';
 
     insert_ticket(
         admin_conn,
+        "PGU-602",
+        title="User information request",
+        state="analysis",
+        assignee="director",
+        implementation="Need external decision.",
+    )
+    psql(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'director', false);
+SELECT ticket_board.route('PGU-602', 'user_review', 'user');
+""",
+    )
+    user_request = json.loads(
+        psql(
+            admin_conn,
+            """
+SELECT jsonb_build_object(
+    'state', state,
+    'assignee', assignee,
+    'needs_user_signoff', needs_user_signoff,
+    'user_signoff', user_signoff
+)::text
+FROM ticket_board.tickets WHERE id = 'PGU-602';
+""",
+        )
+    )
+    assert user_request == {
+        "state": "user_review",
+        "assignee": "user",
+        "needs_user_signoff": False,
+        "user_signoff": False,
+    }, user_request
+    assert "user_sign_off requires needs_user_signoff=true" in psql_error(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'user', false);
+SELECT ticket_board.user_sign_off('PGU-602', 'Looks approved.');
+""",
+    )
+    assert psql(admin_conn, "SELECT state || ':' || user_signoff::text FROM ticket_board.tickets WHERE id = 'PGU-602';") == "user_review:false"
+    assert psql(admin_conn, "SELECT count(*) FROM ticket_board.ticket_comments WHERE ticket_id = 'PGU-602';") == "0"
+
+    insert_ticket(
+        admin_conn,
+        "PGU-603",
+        title="Do not bypass UAT pipeline",
+        state="analysis",
+        assignee="director",
+        implementation="Unfinished work.",
+        needs_user_signoff=True,
+    )
+    assert "analysis -> user_review is only for user information requests with needs_user_signoff=false" in psql_error(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'director', false);
+SELECT ticket_board.route('PGU-603', 'user_review', 'user');
+""",
+    )
+
+    insert_ticket(
+        admin_conn,
         "PGU-601",
         title="User reopen",
         state="user_review",
@@ -854,6 +1074,30 @@ SELECT ticket_board.edit_fields('PGU-811', '{"commit_exempt":true}'::jsonb);
     psql(admin_conn, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-811';")
     psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-811';")
 
+    insert_ticket(admin_conn, "PGU-812", title="Needs audit director gate", state="analysis")
+    psql(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'ops', false);
+SELECT ticket_board.edit_fields('PGU-812', '{"needs_audit":true}'::jsonb);
+""",
+    )
+    assert "needs_audit can only be set to false by director" in psql_error(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'ops', false);
+SELECT ticket_board.edit_fields('PGU-812', '{"needs_audit":false}'::jsonb);
+""",
+    )
+    psql(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'director', false);
+SELECT ticket_board.edit_fields('PGU-812', '{"needs_audit":false}'::jsonb);
+""",
+    )
+    assert psql(admin_conn, "SELECT needs_audit FROM ticket_board.tickets WHERE id = 'PGU-812';") == "f"
+
     insert_ticket(admin_conn, "PGU-820", title="Merge source", state="analysis")
     insert_ticket(admin_conn, "PGU-821", title="Merge target", state="analysis")
     psql(service_conn, "SELECT ticket_board.merge('PGU-820', 'PGU-821');")
@@ -867,13 +1111,20 @@ def assert_audit_direct_file_bug_grant(admin_conn: str, role_conn: dict[str, str
         psql(
             admin_conn,
             f"""
-SELECT jsonb_build_object('state', state, 'assignee', assignee, 'parent_id', parent_id)::text
-FROM ticket_board.tickets
+SELECT jsonb_build_object(
+    'state', state,
+    'assignee', assignee,
+    'parent_id', parent_id,
+    'comment_who', (SELECT who FROM ticket_board.ticket_comments WHERE ticket_id = t.id ORDER BY position LIMIT 1)
+)::text
+FROM ticket_board.tickets t
 WHERE id = {sql_string(filed)};
 """,
         )
     )
-    assert filed_row == {"state": "analysis", "assignee": "unassigned", "parent_id": "PGU-150"}, filed_row
+    assert filed_row == {"state": "analysis", "assignee": "unassigned", "parent_id": "PGU-150", "comment_who": "audit"}, filed_row
+    assert_permission_denied(role_conn["audit"], "SELECT ticket_board.file_bug('Audit cannot self-assign direct bug', 'Body', 'PGU-150', 'audit');")
+    assert_permission_denied(role_conn["audit"], "SELECT ticket_board.file_bug('Audit cannot file direct blocked bug', 'Body', 'PGU-150', 'audit', ARRAY['PGU-150'], 'Waiting.');")
     assert_permission_denied(role_conn["main"], "SELECT ticket_board.file_bug('Main cannot file bug', 'Body', 'PGU-150');")
 
 

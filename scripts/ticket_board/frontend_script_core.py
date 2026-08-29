@@ -311,10 +311,10 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         return 'in_progress';
       }
       if (ticket.state === 'in_progress') {
-        return ticket.needs_inspection ? 'inspection' : (hasState('audit') ? 'audit' : 'director_review');
+        return ticket.needs_inspection ? 'inspection' : (hasState('audit') && ticket.needs_audit !== false ? 'audit' : (ticket.needs_user_signoff ? 'dat' : 'director_review'));
       }
       if (ticket.state === 'inspection') {
-        return hasState('audit') ? 'audit' : 'director_review';
+        return hasState('audit') && ticket.needs_audit !== false ? 'audit' : (ticket.needs_user_signoff ? 'dat' : 'director_review');
       }
       if (ticket.state === 'audit') {
         return ticket.needs_user_signoff ? 'dat' : 'director_review';
@@ -902,7 +902,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
 
     function userReviewStatusItems(ticket) {
       return [
-        { label: 'Audit sign-off', ok: !!ticket.audit_signoff },
+        { label: 'Audit sign-off', ok: ticket.needs_audit === false || !!ticket.audit_signoff },
         { label: 'Inspector sign-off', ok: !ticket.needs_inspection || !!ticket.inspector_signoff },
         { label: 'UAT sign-off', ok: !ticket.needs_user_signoff || !!ticket.user_signoff },
         {
@@ -1672,7 +1672,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
 
       const badges = document.createElement('div');
       badges.className = 'badge-row';
-      badges.appendChild(badge(`audit ${ticket.audit_signoff ? '✓' : '✗'}`, ticket.audit_signoff));
+      badges.appendChild(badge(`audit ${ticket.needs_audit === false ? 'skip' : (ticket.audit_signoff ? '✓' : '✗')}`, ticket.needs_audit === false || ticket.audit_signoff));
       if (ticket.regression) {
         badges.appendChild(badge('regression', false));
       }

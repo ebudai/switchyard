@@ -4043,9 +4043,9 @@ def test_project_config_accepts_hermes_runtime_defaults() -> None:
         "--reasoning",
         "xhigh",
         "--yolo",
+        "--accept-hooks",
         "--pass-session-id",
     ]
-    assert "--accept-hooks" not in tail
 
 
 def test_effort_config_translates_to_cli_specific_args() -> None:
@@ -7272,6 +7272,350 @@ def test_detached_research_attach_checks_session_without_attaching() -> None:
         )
 
     assert runner.calls == [["tmux", "has-session", "-t", "pgu-research"]]
+
+
+def test_attach_headless_role_to_free_slot_resumes_without_touching_neighbours() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-surface.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text(
+            json.dumps(
+                {
+                    "Orientation": "Horizontal",
+                    "Widgets": [
+                        {"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""},
+                        {"Command": "", "SessionRestoreId": 1, "WorkingDirectory": ""},
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config_path = tmp_path / "porter.json"
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "session_dir": str(tmp_path / "home" / ".local" / "state" / "porter-ticket-board" / "pane-sessions"),
+                    "roles": [
+                        {"role": "director", "slot": 0, "target": "porter-director:0.0", "tmux_session": "porter-director", "cli": ["claude"]},
+                        {"role": "worker7", "detached": True, "target": "porter-worker7:0.0", "tmux_session": "porter-worker7", "cli": ["codex"]},
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+        worker = next(role for role in config.roles if role.role == "worker7")
+        session_id = "12345678-1234-5678-9abc-def012345678"
+        transcript = tmp_path / "codex-session.jsonl"
+        transcript.write_text("{}\n", encoding="utf-8")
+        config.session_dir.mkdir(parents=True)
+        (config.session_dir / session_file_name(worker.target)).write_text(
+            _session_payload(worker.target, session_id, {"transcript_path": str(transcript)}),
+            encoding="utf-8",
+        )
+        runner = FakeRunner()
+        messages: list[str] = []
+
+        assert (
+            team_launcher.attach_role_to_slot(
+                config,
+                config_path=config_path,
+                role_name="worker7",
+                slot=1,
+                session_dir=config.session_dir,
+                pane_state_dir=tmp_path / "pane-state",
+                runner=runner,
+                print_func=messages.append,
+            )
+            == 0
+        )
+
+        raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+        roles = {role["role"]: role for role in raw_config["roles"]}
+        assert roles["director"]["slot"] == 0
+        assert roles["worker7"]["slot"] == 1
+        assert roles["worker7"]["detached"] is False
+        assert (config.session_dir / session_file_name(worker.target)).exists()
+        new_sessions = [call for call in runner.calls if call[:5] == ["tmux", "new-session", "-d", "-s", "porter-worker7"]]
+        assert len(new_sessions) == 1
+        assert f"resume {session_id}" in new_sessions[0][-1]
+        assert not any(call[:5] == ["tmux", "new-session", "-d", "-s", "porter-director"] for call in runner.calls)
+        assert not any(call[:2] == ["tmux", "kill-session"] for call in runner.calls)
+        assert ["tmux", "attach", "-t", "porter-worker7"] in runner.calls
+        assert messages == ["team-launcher: attached role worker7 to slot 1; refusing to relayout other panes"]
+
+
+def test_attach_headless_role_refuses_occupied_slot_without_mutating_config() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-surface-occupied.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Widgets":[{"Command":"","SessionRestoreId":0,"WorkingDirectory":""}]}\n', encoding="utf-8")
+        config_path = tmp_path / "porter.json"
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        payload = {
+            "project": "porter",
+            "layout": str(layout),
+            "repository": str(repo),
+            "roles": [
+                {"role": "director", "slot": 0, "target": "porter-director:0.0", "tmux_session": "porter-director", "cli": ["claude"]},
+                {"role": "worker7", "detached": True, "target": "porter-worker7:0.0", "tmux_session": "porter-worker7", "cli": ["codex"]},
+            ],
+        }
+        config_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        config = load_project_config("porter", config_path)
+        before = config_path.read_text(encoding="utf-8")
+        runner = FakeRunner()
+
+        try:
+            team_launcher.attach_role_to_slot(
+                config,
+                config_path=config_path,
+                role_name="worker7",
+                slot=0,
+                session_dir=tmp_path / "sessions",
+                pane_state_dir=tmp_path / "pane-state",
+                runner=runner,
+            )
+            raise AssertionError("expected occupied slot failure")
+        except SystemExit as exc:
+            assert str(exc) == "team-launcher: cannot attach worker7 to slot 0; slot 0 is occupied by director"
+
+        assert config_path.read_text(encoding="utf-8") == before
+        assert not any(call[:2] in (["tmux", "new-session"], ["tmux", "kill-session"]) for call in runner.calls)
+
+
+def test_attach_headless_role_without_live_session_or_record_refuses_fresh_start() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-surface-no-record.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text(
+            json.dumps(
+                {
+                    "Orientation": "Horizontal",
+                    "Widgets": [
+                        {"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""},
+                        {"Command": "", "SessionRestoreId": 1, "WorkingDirectory": ""},
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "session_dir": str(tmp_path / "sessions"),
+                    "roles": [
+                        {"role": "director", "slot": 0, "target": "porter-director:0.0", "tmux_session": "porter-director", "cli": ["claude"]},
+                        {"role": "worker7", "detached": True, "target": "porter-worker7:0.0", "tmux_session": "porter-worker7", "cli": ["codex"]},
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+        before = config_path.read_text(encoding="utf-8")
+        runner = FakeRunner()
+        stderr = StringIO()
+
+        with redirect_stderr(stderr):
+            assert (
+                team_launcher.attach_role_to_slot(
+                    config,
+                    config_path=config_path,
+                    role_name="worker7",
+                    slot=1,
+                    session_dir=config.session_dir,
+                    pane_state_dir=tmp_path / "pane-state",
+                    runner=runner,
+                )
+                == 1
+            )
+
+        assert config_path.read_text(encoding="utf-8") == before
+        assert stderr.getvalue() == "team-launcher: cannot attach worker7; no live session or recorded resume id\n"
+        assert not any(call[:2] in (["tmux", "new-session"], ["tmux", "kill-session"]) for call in runner.calls)
+
+
+def test_attach_headless_role_unverified_resume_does_not_mutate_config() -> None:
+    class UnverifiedResumeRunner(FakeRunner):
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            if args[:3] == ["tmux", "new-session", "-d"]:
+                self.calls.append(args)
+                self.existing_sessions.add(args[args.index("-s") + 1])
+                return subprocess.CompletedProcess(args, 0)
+            return super().__call__(args, **kwargs)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-surface-unverified.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text(
+            json.dumps(
+                {
+                    "Orientation": "Horizontal",
+                    "Widgets": [
+                        {"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""},
+                        {"Command": "", "SessionRestoreId": 1, "WorkingDirectory": ""},
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "session_dir": str(tmp_path / "sessions"),
+                    "roles": [
+                        {"role": "director", "slot": 0, "target": "porter-director:0.0", "tmux_session": "porter-director", "cli": ["claude"]},
+                        {"role": "worker7", "detached": True, "target": "porter-worker7:0.0", "tmux_session": "porter-worker7", "cli": ["codex"]},
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+        worker = next(role for role in config.roles if role.role == "worker7")
+        session_id = "12345678-1234-5678-9abc-def012345678"
+        transcript = tmp_path / "codex-session.jsonl"
+        transcript.write_text("{}\n", encoding="utf-8")
+        config.session_dir.mkdir(parents=True)
+        (config.session_dir / session_file_name(worker.target)).write_text(
+            _session_payload(worker.target, session_id, {"transcript_path": str(transcript)}),
+            encoding="utf-8",
+        )
+        before = config_path.read_text(encoding="utf-8")
+        runner = UnverifiedResumeRunner()
+        messages: list[str] = []
+        stderr = StringIO()
+        original_timeout = team_launcher.RESUME_STARTUP_TIMEOUT_SECONDS
+        original_poll = team_launcher.RESUME_STARTUP_POLL_SECONDS
+
+        try:
+            team_launcher.RESUME_STARTUP_TIMEOUT_SECONDS = 0.02
+            team_launcher.RESUME_STARTUP_POLL_SECONDS = 0.001
+            with redirect_stderr(stderr):
+                assert (
+                    team_launcher.attach_role_to_slot(
+                        config,
+                        config_path=config_path,
+                        role_name="worker7",
+                        slot=1,
+                        session_dir=config.session_dir,
+                        pane_state_dir=tmp_path / "pane-state",
+                        runner=runner,
+                        print_func=messages.append,
+                    )
+                    == 1
+                )
+        finally:
+            team_launcher.RESUME_STARTUP_TIMEOUT_SECONDS = original_timeout
+            team_launcher.RESUME_STARTUP_POLL_SECONDS = original_poll
+
+        assert config_path.read_text(encoding="utf-8") == before
+        assert runner.existing_sessions == {"porter-worker7"}
+        assert (config.session_dir / session_file_name(worker.target)).exists()
+        assert any(call[:5] == ["tmux", "new-session", "-d", "-s", "porter-worker7"] for call in runner.calls)
+        assert not any(call[:3] == ["tmux", "attach", "-t"] for call in runner.calls)
+        assert not any(call[:2] == ["tmux", "kill-session"] for call in runner.calls)
+        assert messages == []
+        assert stderr.getvalue() == (
+            f"team-launcher: resume for worker7 using session {session_id} was not verified; "
+            "leaving tmux session and session record intact\n"
+        )
+
+
+def test_detach_visible_role_updates_config_and_leaves_session_running() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-surface-detach.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text(
+            json.dumps(
+                {
+                    "Orientation": "Horizontal",
+                    "Widgets": [
+                        {"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""},
+                        {"Command": "", "SessionRestoreId": 1, "WorkingDirectory": ""},
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config_path = tmp_path / "porter.json"
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "roles": [
+                        {"role": "director", "slot": 0, "target": "porter-director:0.0", "tmux_session": "porter-director", "cli": ["claude"]},
+                        {"role": "worker7", "slot": 1, "target": "porter-worker7:0.0", "tmux_session": "porter-worker7", "cli": ["codex"]},
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+        runner = FakeRunner(existing_sessions={"porter-director", "porter-worker7"})
+        messages: list[str] = []
+
+        assert (
+            team_launcher.detach_role_from_slot(
+                config,
+                config_path=config_path,
+                role_name="worker7",
+                runner=runner,
+                print_func=messages.append,
+            )
+            == 0
+        )
+
+        raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+        roles = {role["role"]: role for role in raw_config["roles"]}
+        assert roles["director"]["slot"] == 0
+        assert roles["worker7"]["detached"] is True
+        assert "slot" not in roles["worker7"]
+        assert runner.existing_sessions == {"porter-director", "porter-worker7"}
+        assert ["tmux", "detach-client", "-s", "porter-worker7"] in runner.calls
+        assert not any(call[:2] == ["tmux", "kill-session"] for call in runner.calls)
+        assert messages == ["team-launcher: detached role worker7 from slot 1; tmux session remains headless"]
 
 
 def test_stop_project_kills_only_configured_sessions_as_owner_and_is_idempotent() -> None:
@@ -11674,31 +12018,72 @@ def _write_first_run_auth_config(tmp_path: Path, *, roles: list[tuple[str, str]]
 
 
 class FirstRunAuthRunner:
-    def __init__(self, *, authenticated_after_login: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        authenticated_after_login: bool = True,
+        missing_clis: set[str] | None = None,
+        missing_cli_status_returncode: int = 127,
+    ) -> None:
         self.calls: list[list[str]] = []
         self.call_kwargs: list[dict[str, object]] = []
         self.authenticated_after_login = authenticated_after_login
         self.login_seen: set[str] = set()
+        self.missing_clis = set(missing_clis or ())
+        self.missing_cli_status_returncode = missing_cli_status_returncode
 
     def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         self.calls.append(args)
         self.call_kwargs.append(dict(kwargs))
         command = args[3:] if args[:2] == ["sudo", "-u"] else args
+        if command[:2] == ["sh", "-lc"] and len(command) == 3 and command[2].startswith("command -v "):
+            cli = command[2].removeprefix("command -v ").strip()
+            if cli in self.missing_clis:
+                return subprocess.CompletedProcess(args, 1, stdout="", stderr="")
+            return subprocess.CompletedProcess(args, 0, stdout=f"/usr/bin/{cli}\n")
         if command == ["claude", "auth", "status", "--json"]:
+            if "claude" in self.missing_clis:
+                return subprocess.CompletedProcess(
+                    args,
+                    self.missing_cli_status_returncode,
+                    stdout="",
+                    stderr="claude: command not found\n",
+                )
             logged_in = "claude" in self.login_seen if self.authenticated_after_login else False
             return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"loggedIn": logged_in}) + "\n")
         if command == ["codex", "login", "status"]:
+            if "codex" in self.missing_clis:
+                return subprocess.CompletedProcess(
+                    args,
+                    self.missing_cli_status_returncode,
+                    stdout="",
+                    stderr="codex: command not found\n",
+                )
             if self.authenticated_after_login and "codex" in self.login_seen:
                 return subprocess.CompletedProcess(args, 0, stdout="Logged in using ChatGPT\n")
             return subprocess.CompletedProcess(args, 1, stderr="Not logged in\n")
         if command == ["agy", "models"]:
+            if "agy" in self.missing_clis:
+                return subprocess.CompletedProcess(
+                    args,
+                    self.missing_cli_status_returncode,
+                    stdout="",
+                    stderr="agy: command not found\n",
+                )
             if self.authenticated_after_login and "agy" in self.login_seen:
                 return subprocess.CompletedProcess(args, 0, stdout="gemini-3.7-flash-high\n")
             return subprocess.CompletedProcess(args, 1, stderr="You are not logged into Antigravity.\n")
-        if command == ["hermes", "auth", "status"]:
+        if command == ["hermes", "auth", "list"]:
+            if "hermes" in self.missing_clis:
+                return subprocess.CompletedProcess(
+                    args,
+                    self.missing_cli_status_returncode,
+                    stdout="",
+                    stderr="hermes: command not found\n",
+                )
             if self.authenticated_after_login and "hermes" in self.login_seen:
-                return subprocess.CompletedProcess(args, 0, stdout="authenticated\n")
-            return subprocess.CompletedProcess(args, 1, stderr="not authenticated\n")
+                return subprocess.CompletedProcess(args, 0, stdout="openrouter (1 credentials):\n  #1  pgu634-probe         api_key manual <-\n")
+            return subprocess.CompletedProcess(args, 0, stdout="")
         if command == ["claude", "auth", "login"]:
             self.login_seen.add("claude")
             return subprocess.CompletedProcess(args, 0)
@@ -12014,6 +12399,49 @@ def test_first_run_auth_phase_does_not_sudo_wrap_same_owner() -> None:
     assert {kwargs.get("cwd") for kwargs in runner.call_kwargs} == {str(owner_home)}
 
 
+def test_first_run_auth_phase_reports_missing_cli_separately_from_login() -> None:
+    for status_returncode in (127, 1):
+        with tempfile.TemporaryDirectory(prefix="pgu-first-run-auth-missing-cli.") as tmp:
+            tmp_path = Path(tmp)
+            owner_home = tmp_path / "home" / "otto-agent"
+            owner_home.mkdir(parents=True)
+            config = load_project_config(
+                "otto",
+                _write_first_run_auth_config(tmp_path, roles=[("inspector", "agy"), ("ops", "codex")]),
+            )
+            runner = FirstRunAuthRunner(missing_clis={"agy"}, missing_cli_status_returncode=status_returncode)
+            runner.login_seen.add("codex")
+            messages: list[str] = []
+
+            report = team_launcher.run_first_run_auth_phase(
+                config,
+                owner_user="otto-agent",
+                owner_home=owner_home,
+                runner=runner,
+                print_func=messages.append,
+            )
+
+        assert report.unauthenticated_roles == {}, status_returncode
+        assert report.missing_cli_roles == {"agy": ["inspector"]}, status_returncode
+        assert report.owner_user == "otto-agent", status_returncode
+        assert messages == [
+            "switchyard: first-run agy not installed for owner user otto-agent; "
+            "install agy for owner user otto-agent; affected roles: inspector"
+        ], status_returncode
+        assert runner.calls == [
+            ["sudo", "-u", "otto-agent", "agy", "models"],
+            ["sudo", "-u", "otto-agent", "sh", "-lc", "command -v agy"],
+            ["sudo", "-u", "otto-agent", "codex", "login", "status"],
+        ], status_returncode
+        assert not any(call == ["sudo", "-u", "otto-agent", "agy"] for call in runner.calls), status_returncode
+        output: list[str] = []
+        team_launcher.report_first_run_auth_warnings(report, print_func=output.append)
+        assert output == [
+            "warning: switchyard: agy is not installed for owner user otto-agent; "
+            "install agy for owner user otto-agent; affected roles: inspector"
+        ], status_returncode
+
+
 def test_first_run_auth_phase_sequences_distinct_logins_and_skips_visible_worktree_trust() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-first-run-auth.") as tmp:
         tmp_path = Path(tmp)
@@ -12047,16 +12475,19 @@ def test_first_run_auth_phase_sequences_distinct_logins_and_skips_visible_worktr
     assert report.untrusted_roles == []
     assert runner.calls == [
         ["sudo", "-u", "otto-agent", "claude", "auth", "status", "--json"],
+        ["sudo", "-u", "otto-agent", "sh", "-lc", "command -v claude"],
         ["sudo", "-u", "otto-agent", "claude", "auth", "login"],
         ["sudo", "-u", "otto-agent", "claude", "auth", "status", "--json"],
         ["sudo", "-u", "otto-agent", "codex", "login", "status"],
+        ["sudo", "-u", "otto-agent", "sh", "-lc", "command -v codex"],
         ["sudo", "-u", "otto-agent", "codex", "login"],
         ["sudo", "-u", "otto-agent", "codex", "login", "status"],
         ["sudo", "-u", "otto-agent", "agy", "models"],
+        ["sudo", "-u", "otto-agent", "sh", "-lc", "command -v agy"],
         ["sudo", "-u", "otto-agent", "agy"],
         ["sudo", "-u", "otto-agent", "agy", "models"],
     ]
-    assert [kwargs.get("cwd") for kwargs in runner.call_kwargs] == [str(owner_home)] * 9
+    assert [kwargs.get("cwd") for kwargs in runner.call_kwargs] == [str(owner_home)] * 12
     assert not (owner_home / ".claude.json").exists()
     assert not (owner_home / ".gemini" / "antigravity-cli" / "settings.json").exists()
     assert messages[:3] == [
@@ -12095,9 +12526,62 @@ def test_first_run_auth_phase_handles_hermes_model_setup() -> None:
     assert report.unauthenticated_roles == {}
     assert report.untrusted_roles == []
     assert runner.calls == [
-        ["sudo", "-u", "otto-agent", "hermes", "auth", "status"],
+        ["sudo", "-u", "otto-agent", "hermes", "auth", "list"],
+        ["sudo", "-u", "otto-agent", "sh", "-lc", "command -v hermes"],
         ["sudo", "-u", "otto-agent", "hermes", "model"],
-        ["sudo", "-u", "otto-agent", "hermes", "auth", "status"],
+        ["sudo", "-u", "otto-agent", "hermes", "auth", "list"],
+    ]
+    assert messages == [
+        "switchyard: first-run hermes login required for bulk; running hermes model as otto-agent",
+    ]
+
+
+def test_hermes_auth_list_requires_non_empty_credential_output() -> None:
+    empty = subprocess.CompletedProcess(["hermes", "auth", "list"], 0, stdout="", stderr="")
+    populated = subprocess.CompletedProcess(
+        ["hermes", "auth", "list"],
+        0,
+        stdout="openrouter (1 credentials):\n  #1  pgu634-probe         api_key manual <-\n",
+        stderr="",
+    )
+
+    assert not team_launcher._cli_auth_probe_passed("hermes", empty)
+    assert team_launcher._cli_auth_probe_passed("hermes", populated)
+
+
+def test_first_run_auth_phase_reports_hermes_empty_auth_list_as_unauthenticated() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-first-run-auth-hermes-empty.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        config = load_project_config(
+            "otto",
+            _write_first_run_auth_config(
+                tmp_path,
+                roles=[
+                    ("bulk", "hermes"),
+                ],
+            ),
+        )
+        runner = FirstRunAuthRunner(authenticated_after_login=False)
+        messages: list[str] = []
+
+        report = team_launcher.run_first_run_auth_phase(
+            config,
+            owner_user="otto-agent",
+            owner_home=owner_home,
+            runner=runner,
+            print_func=messages.append,
+        )
+
+    assert report.unauthenticated_roles == {"hermes": ["bulk"]}
+    assert report.missing_cli_roles == {}
+    assert runner.calls == [
+        ["sudo", "-u", "otto-agent", "hermes", "auth", "list"],
+        ["sudo", "-u", "otto-agent", "sh", "-lc", "command -v hermes"],
+        ["sudo", "-u", "otto-agent", "hermes", "model"],
+        ["sudo", "-u", "otto-agent", "hermes", "auth", "list"],
+        ["sudo", "-u", "otto-agent", "sh", "-lc", "command -v hermes"],
     ]
     assert messages == [
         "switchyard: first-run hermes login required for bulk; running hermes model as otto-agent",
@@ -12230,6 +12714,7 @@ def test_first_run_auth_phase_declined_login_reports_affected_roles_without_abor
         )
 
     assert report.unauthenticated_roles == {"codex": ["ops", "main"]}
+    assert report.missing_cli_roles == {}
     assert report.untrusted_roles == []
     output: list[str] = []
     team_launcher.report_first_run_auth_warnings(report, print_func=output.append)

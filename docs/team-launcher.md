@@ -108,6 +108,19 @@ the CLI, while detached roles are skipped.
 session is missing. Detached roles are checked for existence but remain
 detached.
 
+`pane attach-role <role> --slot <n>` surfaces a detached/headless role in a
+named free layout slot without rebuilding the whole window layout and without
+restarting neighbouring roles. The command updates only that role's config
+entry from `detached: true` to the named `slot`, then starts or attaches that
+role's own tmux session. If the tmux session is not already live, attach-role
+requires a recorded resume id and refuses rather than starting fresh. If the
+named slot is occupied or outside the configured layout, the launcher refuses
+and says which role owns the slot; it does not evict a neighbour or grow the
+grid implicitly. `pane detach-role <role>` moves a visible role back to
+headless by removing its slot and marking it detached, then detaches any live
+tmux clients from that role session without killing the session. The role's
+durable session record is not cleared by either operation.
+
 `reload` kills and recreates each configured role session, then starts the
 configured CLI with its recorded resume id when one exists. Before restarting a
 running role, the launcher compares the config's `cli` and `model` against the
@@ -158,16 +171,17 @@ Resume records are preflighted against each CLI's local transcript store before
 the launcher passes them to the CLI. Claude uses the recorded
 `payload.transcript_path` when present, otherwise the cwd-scoped
 `~/.claude/projects/<cwd-key>/<id>.jsonl` path. Codex uses the recorded
-`payload.transcript_path` when present, otherwise `~/.codex/sessions/**/*-<id>.jsonl`.
-Antigravity/Gemini use `~/.gemini/antigravity-cli/conversations/<id>.db` or
-`brain/<id>`. If the local store entry is missing, the launcher moves the stale
-record aside, starts fresh, and prints an explicit warning instead of passing a
-doomed resume id.
+`payload.transcript_path` when present, otherwise
+`~/.codex/sessions/**/*-<id>.jsonl`. Agy uses
+`~/.gemini/antigravity-cli/conversations/<id>.db` or `brain/<id>`;
+`~/.gemini` is its storage path, not a supported launcher CLI name. If the local
+store entry is missing, the launcher moves the stale record aside, starts fresh,
+and prints an explicit warning instead of passing a doomed resume id.
 
 That preflight does not prove model context survived. The PGU-602 reboot showed
 an inspector conversation where agy found the conversation, logged a successful
 resume and redraw, but the model still reported no prior context. After a real
-reboot or hard interruption, treat agy/gemini inspector context as unproven
+reboot or hard interruption, treat agy inspector context as unproven
 until the pane itself is asked a context-retention question. Claude and Codex
 resume attempts can also still fail after a store preflight; if the launched
 tmux session exits immediately, the launcher falls back to a fresh session and
@@ -189,7 +203,7 @@ The PGU-613 follow-up diagnostics separated three cases:
 
 So the launcher can guard against missing-store silent fallback, but the real
 inspector failure is a lower-level agy context propagation failure after a
-successful local resume. When reproducing agy/gemini resume behavior from inside
+successful local resume. When reproducing agy resume behavior from inside
 a team pane, isolate the hook environment or the hook can write this pane's live
 state through the inherited pane target/session environment: run with
 `env -u TMUX -u TMUX_PANE`, set `TICKET_BOARD_PANE_TARGET`,
@@ -273,18 +287,26 @@ Each role entry contains:
 - `workdir`: working directory for the tmux session. Omit it for PGU roles so
   they default to the shared `repository` checkout. Duplicate role workdirs are
   allowed only when the duplicate path is the shared checkout.
-- `cli`: argv array for the CLI binary.
+- `cli`: argv array for the CLI binary. The only supported CLI names are
+  `claude`, `codex`, `agy`, and `hermes`; invalid names, including the retired
+  `gemini` launcher name, are rejected while parsing project artifacts or prompt
+  answers, before provisioning or launch mutates the project. The configured
+  CLI must be executable by the project's owner user, not just installed
+  somewhere on the host.
 - `model`: optional model selector. The launcher passes it with the role's
   `model_arg` at process launch so the pane starts on its configured model.
 - `model_arg`: optional model flag, defaulting to `--model`.
 - `effort`: optional effort selector. Claude receives it as `--effort <value>`;
-  Codex receives it as `-c reasoning_effort=<value>`; Agy and Gemini omit a
-  separate effort flag.
+  Codex receives it as `-c reasoning_effort=<value>`; Agy omits a separate
+  effort flag.
 - `yolo`: optional boolean. When true, the launcher appends the appropriate
   bypass-permissions flag for the configured CLI: Agy and Claude use
-  `--dangerously-skip-permissions`, Codex uses
+  `--dangerously-skip-permissions`; Codex uses
   `--dangerously-bypass-approvals-and-sandbox` plus
-  `--dangerously-bypass-hook-trust`, and Gemini uses `--yolo`.
+  `--dangerously-bypass-hook-trust`; Hermes uses `--yolo`.
+  Hermes panes also receive launcher startup flags `--accept-hooks` and
+  `--pass-session-id` so the installed pane-state hooks can run non-interactively
+  and the agent can see its own resumable session id.
 - `extra_args`: optional additional argv entries appended after the yolo flag.
 - `resume_flag`: flag used by that CLI for context resume.
 - `live_commands`: optional command names accepted as the live pane process
@@ -325,6 +347,7 @@ Project path [/home/otto_scheduler-agent/Projects/otto_scheduler]:
 Include designer role [Y/n]:
 designer CLI (claude/codex/agy/hermes) [claude]:
 director CLI (claude/codex/agy/hermes) [claude]:
+Include audit role [Y/n]:
 audit CLI (claude/codex/agy/hermes) [claude]:
 Implementer roles (comma-separated): app, code-review
 app CLI (claude/codex/agy/hermes) [codex]:
@@ -340,16 +363,34 @@ before creating files or users. The project name `new` is reserved for the
 command; a project literally named "New" must be opened by its slug from the
 project list.
 
-After confirmation, `new` creates `<agent>-agent`, creates the derived project
-directory, provisions the board, runs first-run auth checks for the selected
-CLIs, and launches the configured panes. `director` and `audit` are fixed
-workflow roles. `designer` is optional; when omitted, `new` skips the design
-phase and does not create a designer pane, designer onboarding file, or initial
-design document. Implementer role names are supplied as a comma-separated list
-and may contain hyphens. The selected role names are written to both the board
-provisioning plan and the generated launcher config, and each role's selected
-CLI is recorded in the `switchyard.project.v1` artifact. The artifact still
-must not preconfigure workflow stages or transitions.
+After confirmation, `new` creates the selected agent user, creates the derived
+project directory, provisions the board, runs first-run auth checks for the
+selected CLIs, and launches the configured panes. The default agent user is
+`<slug>-agent`; a typed agent-user value is used verbatim. If that user already
+exists, `new` warns and asks for explicit confirmation, defaulting to No, before
+reusing that account. Pass `--allow-existing-owner-user` to skip that
+existing-user confirmation and reuse the account without prompting. In
+non-interactive runs, `new` refuses an existing owner user unless that flag is
+present. `--yes` is unrelated to this check; it skips the project-plan
+confirmation. `director` is a fixed workflow role. `designer` is optional; when
+omitted, `new` skips the design phase and does not create a designer pane,
+designer onboarding file, or initial design document. `audit` is optional; when
+omitted, the generated workflow skips the Audit stage and implementers submit
+directly to Final Sign-Off. Implementer role names are supplied as a
+comma-separated list and may contain hyphens. The selected role names are
+written to both the board provisioning plan and the generated launcher config,
+and each role's selected CLI is recorded in the `switchyard.project.v1`
+artifact. The artifact still must not preconfigure workflow stages or
+transitions.
+
+The first-run auth phase runs before panes launch. It probes each distinct
+selected CLI as the project owner, invokes that CLI's own login command when it
+is unauthenticated, reports a missing CLI as not installed for that owner user,
+and then walks per-worktree trust prompts. Trust is never pre-seeded by editing
+CLI config files. Codex hook-trust entries are also checked against the
+installed pane-hook commands; stale trust hashes are reported as warnings with
+the affected role/event so the operator can refresh trust deliberately instead
+of silently launching panes with inert hooks.
 
 The same provision path consumes generated and hand-written artifacts:
 

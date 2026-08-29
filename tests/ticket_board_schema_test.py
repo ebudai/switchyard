@@ -14,6 +14,7 @@ EXPECTED_JSON_FIELDS = {
     "assignee",
     "audit_prompt",
     "audit_signoff",
+    "needs_audit",
     "inspector_signoff",
     "blocked_by",
     "blockers",
@@ -74,6 +75,7 @@ EXPECTED_FUNCTION_API = {
     "ticket_board.start_work",
     "ticket_board.submit_to_inspection",
     "ticket_board.submit_to_audit",
+    "ticket_board.implementer_kick_back",
     "ticket_board.request_commit_exempt",
     "ticket_board.start_task",
     "ticket_board.complete_task",
@@ -101,6 +103,7 @@ FIELD_TO_SCHEMA_TOKENS = {
     "assignee": ["assignee"],
     "audit_prompt": ["audit_prompt"],
     "audit_signoff": ["audit_signoff"],
+    "needs_audit": ["needs_audit"],
     "inspector_signoff": ["inspector_signoff"],
     "blocked_by": ["ticket_blockers", "blocker_ticket_id"],
     "blockers": ["ticket_blockers", "resolved"],
@@ -360,8 +363,9 @@ def main() -> int:
     assert "create or replace function ticket_board.log_workflow_transition_rbac_shadow_mismatch" in executable_schema_lower
     assert "workflow transition shadow mismatch" in executable_schema_lower
     assert "workflow transition rbac shadow mismatch" in executable_schema_lower
-    assert "workflow_transition_allowed_hardcoded(old.state, new.state)" in executable_schema_lower
-    assert "workflow_transition_allowed_config(old.state, new.state)" in executable_schema_lower
+    assert "transition_check_state := new.state" in executable_schema_lower
+    assert "workflow_transition_allowed_hardcoded(old.state, transition_check_state)" in executable_schema_lower
+    assert "workflow_transition_allowed_config(old.state, transition_check_state)" in executable_schema_lower
     rbac_sql = (ROOT / "scripts" / "ticket_board" / "rbac.sql").read_text(encoding="utf-8").lower()
     assert "revoke all on ticket_board.workflow_transition_shadow_log" in rbac_sql
     assert "grant select on ticket_board.workflow_transition_shadow_log" in rbac_sql
@@ -401,7 +405,10 @@ def main() -> int:
     ).read_text(encoding="utf-8").lower()
     audit_stage_exists_condition = "from ticket_board.workflow_stages ws\n           where ws.name = 'audit'"
     assert audit_stage_exists_condition in enforce_update_function.group(1)
+    assert "and new.needs_audit\n       and exists" in enforce_update_function.group(1)
     assert audit_stage_exists_condition in director_review_gate_migration
+    assert "('audit', 'audit', 5, array['audit']::text[], 'needs_audit', 'dat', 'audit_signoff', false)" in executable_schema_lower
+    assert "add column if not exists needs_audit boolean not null default true" in schema_lower
     assert "add column if not exists parked boolean not null default false" in schema_lower
     assert "add column if not exists regression boolean not null default false" in schema_lower
     assert "{7,40}" in schema, "commit_hash check must allow historical short hashes"
@@ -524,6 +531,28 @@ def main() -> int:
         ROOT / "scripts" / "ticket_board" / "migrations" / "286_allow_audit_file_bug.sql"
     ).read_text(encoding="utf-8").lower()
     assert "grant execute on function ticket_board.file_bug(text, text, text) to audit" in audit_file_bug_migration
+    file_bug_assignee_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu755_file_bug_assignee.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "create or replace function ticket_board.file_bug" in file_bug_assignee_migration
+    assert "source_ticket_id text,\n    assignee text" in file_bug_assignee_migration
+    assert "target_assignee" in file_bug_assignee_migration
+    assert "ticket_board.append_ticket_comment(ticket_id, actor, 'filed bug against ' || source_id || '.')" in file_bug_assignee_migration
+    assert "grant execute on function ticket_board.file_bug(text, text, text, text) to ticket_board_service" in file_bug_assignee_migration
+    file_bug_blockers_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu755_file_bug_blockers.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "source_ticket_id text,\n    assignee text,\n    blocked_by text[]" in file_bug_blockers_migration
+    assert "blocked_reason text" in file_bug_blockers_migration
+    assert "ticket_board.apply_blockers(ticket_id, blocked_by, blocked_reason)" in file_bug_blockers_migration
+    assert "set_config('ticket_board.suppress_create_notify', 'on', true)" in file_bug_blockers_migration
+    assert "grant execute on function ticket_board.file_bug(text, text, text, text, text[], text) to ticket_board_service" in file_bug_blockers_migration
+    assert "grant execute on function ticket_board.file_bug(text, text, text, text) to ticket_board_service" in (
+        ROOT / "scripts" / "ticket_board" / "rbac.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "grant execute on function ticket_board.file_bug(text, text, text, text, text[], text) to ticket_board_service" in (
+        ROOT / "scripts" / "ticket_board" / "rbac.sql"
+    ).read_text(encoding="utf-8").lower()
     assert "create or replace function ticket_board.file_bug" in audit_file_bug_migration
     assert "array['main', 'app', 'ops', 'perf', 'research', 'audit']" in audit_file_bug_migration
     assert "current_actor_role()" in audit_file_bug_migration
@@ -532,6 +561,34 @@ def main() -> int:
     assert "grant execute on function ticket_board.file_bug(text, text, text) to audit" in (
         ROOT / "scripts" / "ticket_board" / "rbac.sql"
     ).read_text(encoding="utf-8").lower()
+    implementer_handback_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu756_implementer_kick_back.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "create or replace function ticket_board.implementer_kick_back" in implementer_handback_migration
+    assert "'in_progress', 'analysis', 'implementer_kick_back'" in implementer_handback_migration
+    assert "owner_scoped" in implementer_handback_migration
+    assert "implementer_kick_back requires a non-empty reason" in implementer_handback_migration
+    assert "set state = 'analysis'," in implementer_handback_migration
+    assert "assignee = 'director'" in implementer_handback_migration
+    assert "grant execute on function ticket_board.implementer_kick_back(text, text) to ticket_board_service" in implementer_handback_migration
+    assert "grant execute on function ticket_board.implementer_kick_back(text, text) to ticket_board_service" in (
+        ROOT / "scripts" / "ticket_board" / "rbac.sql"
+    ).read_text(encoding="utf-8").lower()
+    user_information_request_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu757_user_information_request.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "'analysis', 'user_review', 'route'" in user_information_request_migration
+    assert "p_from_state = 'analysis' and p_to_state in ('in_progress', 'user_review', 'backlog', 'cancelled')" in (
+        user_information_request_migration
+    )
+    assert "old.state = 'analysis' and new.state = 'user_review' and new.needs_user_signoff" in (
+        user_information_request_migration
+    )
+    assert "old.needs_user_signoff" in user_information_request_migration
+    assert "analysis -> user_review is only for user information requests with needs_user_signoff=false" in (
+        user_information_request_migration
+    )
+    assert "user_sign_off requires needs_user_signoff=true" in user_information_request_migration
     active_inprogress_idle_filter_migration = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "287_active_inprogress_idle_filter.sql"
     ).read_text(encoding="utf-8").lower()

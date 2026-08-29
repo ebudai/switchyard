@@ -35,9 +35,12 @@ the generated commands during an approved window.
 
 `switchyard new` validates role CLI choices before it reaches this render step.
 The accepted CLI names are `claude`, `codex`, and `agy`; retired aliases such as
-`gemini` are rejected at prompt/artifact parse time. `new` also refuses to reuse
-an existing owner user unless `--allow-existing-owner-user` is passed, then asks
-for explicit confirmation before treating that account as the project owner.
+`gemini` are rejected at prompt/artifact parse time. If the selected owner user
+already exists, `new` warns and asks for explicit confirmation, defaulting to No,
+before treating that account as the project owner. Pass
+`--allow-existing-owner-user` to skip that existing-user confirmation and reuse
+the account without prompting. In non-interactive runs, `new` refuses an
+existing owner user unless that flag is present.
 
 The `pgu` project is intentionally special-cased to reproduce the deployed
 production board: database `pgu`, HTTP port `8770`, and frame inbox

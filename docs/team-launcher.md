@@ -349,9 +349,12 @@ After confirmation, `new` creates the selected agent user, creates the derived
 project directory, provisions the board, runs first-run auth checks for the
 selected CLIs, and launches the configured panes. The default agent user is
 `<slug>-agent`; a typed agent-user value is used verbatim. If that user already
-exists, `new` refuses unless `--allow-existing-owner-user` is passed, and still
-asks for explicit confirmation before reusing it unless `--yes` is also
-supplied. `director` is a fixed workflow role. `designer` is optional; when
+exists, `new` warns and asks for explicit confirmation, defaulting to No, before
+reusing that account. Pass `--allow-existing-owner-user` to skip that
+existing-user confirmation and reuse the account without prompting. In
+non-interactive runs, `new` refuses an existing owner user unless that flag is
+present. `--yes` is unrelated to this check; it skips the project-plan
+confirmation. `director` is a fixed workflow role. `designer` is optional; when
 omitted, `new` skips the design phase and does not create a designer pane,
 designer onboarding file, or initial design document. `audit` is optional; when
 omitted, the generated workflow skips the Audit stage and implementers submit

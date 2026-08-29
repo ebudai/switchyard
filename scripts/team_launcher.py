@@ -1596,11 +1596,21 @@ def report_launch_session_records(
     )
     roles_by_target = {role.target: role for role in selected_roles}
     for status in statuses:
+        role = roles_by_target.get(status.target)
+        codex_runtime_deferred_until_activity = (
+            role is not None
+            and _expects_launch_runtime_hook_probe(role)
+            and status.pane_state_source.startswith("team_launcher.")
+            and not status.found
+            and not status.runtime_hook_reported
+            and not status.unverified_resume
+            and not status.resume_fallback
+        )
         if status.found:
             print_func(
                 f"switchyard: session record found for {status.role} ({status.target}): {status.session_id}"
             )
-        else:
+        elif not codex_runtime_deferred_until_activity:
             print_func(
                 f"warning: switchyard: session record missing for {status.role} "
                 f"({status.target}) after {timeout_seconds:g}s; continuing"
@@ -1616,12 +1626,12 @@ def report_launch_session_records(
                 f"warning: switchyard: {status.role} ({status.target}) fell back to a fresh session; "
                 f"superseded session {status.superseded_session_id}"
             )
-        role = roles_by_target.get(status.target)
         if (
             role is not None
             and _expects_launch_runtime_hook_probe(role)
             and not status.runtime_hook_reported
             and not status.unverified_resume
+            and not codex_runtime_deferred_until_activity
         ):
             print_func(
                 f"warning: switchyard: codex runtime hook did not report for {status.role} "

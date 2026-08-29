@@ -1556,6 +1556,54 @@ def test_launch_session_record_statuses_treat_unverified_resume_as_reported_outc
     assert elapsed < 0.1
 
 
+def test_launch_session_record_report_suppresses_expected_idle_codex_startup_warnings() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-launch-session-codex-idle-startup.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        session_dir = tmp_path / "sessions"
+        session_dir.mkdir()
+        pane_state_dir = tmp_path / "pane-state"
+        pane_state_dir.mkdir()
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "session_dir": str(session_dir),
+                    "roles": [
+                        {"role": "main", "slot": 0, "cli": ["codex"], "target": "porter-main:0.0"},
+                        {"role": "app", "slot": 1, "cli": ["codex"], "target": "porter-app:0.0"},
+                        {"role": "ops", "slot": 2, "cli": ["codex"], "target": "porter-ops:0.0"},
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+        pane_state_since = time.time()
+        for role in config.roles:
+            team_launcher.seed_initial_pane_idle_state(role, pane_state_dir=pane_state_dir, source="team_launcher.start")
+        messages: list[str] = []
+
+        statuses = team_launcher.report_launch_session_records(
+            config,
+            timeout_seconds=0,
+            pane_state_dir=pane_state_dir,
+            pane_state_updated_since=pane_state_since,
+            print_func=messages.append,
+        )
+
+    assert all(status.pane_state_source == "team_launcher.start" for status in statuses)
+    assert all(status.session_id == "" for status in statuses)
+    assert not any(message.startswith("warning: switchyard:") for message in messages)
+
+
 def test_launch_session_record_report_warns_when_codex_runtime_hook_never_reports() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-launch-session-codex-hook-missing.") as tmp:
         tmp_path = Path(tmp)

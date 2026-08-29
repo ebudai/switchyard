@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the ticket_board_* standalone suites as one reported set."""
+"""Run ticket-board standalone suites as reported groups."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
@@ -16,6 +17,21 @@ from typing import TextIO
 
 ROOT = Path(__file__).resolve().parents[1]
 PLAYWRIGHT_AUDIT_TEST = "tests/ticket_board_ui_audit_test.py"
+TICKET_BOARD_GROUP = "ticket_board"
+BOARD_ADJACENT_GROUP = "board_adjacent"
+ALL_GROUPS = (TICKET_BOARD_GROUP, BOARD_ADJACENT_GROUP)
+GROUP_LABELS = {
+    TICKET_BOARD_GROUP: "ticket_board namespace",
+    BOARD_ADJACENT_GROUP: "board-adjacent",
+}
+BOARD_ADJACENT_MARKERS = (
+    "TICKET_BOARD_SOCKET",
+    "TICKET_BOARD_URL",
+    "board_url",
+    "--board-url",
+    "ticket-board-write",
+    "ticket_board.write_client",
+)
 
 LIVE_BOARD_ENV_KEYS = {
     "DATABASE_URL",
@@ -46,6 +62,7 @@ SANITIZED_ENV_KEYS = LIVE_BOARD_ENV_KEYS | LIVE_PANE_ENV_KEYS
 
 @dataclass(frozen=True)
 class SuiteResult:
+    group: str
     path: str
     status: str
     returncode: int
@@ -66,6 +83,43 @@ def discover_ticket_board_suites(root: Path = ROOT) -> list[str]:
         and path.name.startswith("ticket_board_")
         and path.name.endswith(("_test.py", "_test.sh"))
     )
+
+
+def _is_standalone_test(path: Path) -> bool:
+    return path.is_file() and path.name.endswith(("_test.py", "_test.sh"))
+
+
+def _mentions_board_endpoint(path: Path) -> bool:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    return any(marker in text for marker in BOARD_ADJACENT_MARKERS)
+
+
+def discover_board_adjacent_suites(root: Path = ROOT) -> list[str]:
+    tests_dir = root / "tests"
+    if not tests_dir.is_dir():
+        return []
+    return sorted(
+        path.relative_to(root).as_posix()
+        for path in tests_dir.iterdir()
+        if _is_standalone_test(path)
+        and not path.name.startswith("ticket_board_")
+        and _mentions_board_endpoint(path)
+    )
+
+
+def discover_suites_by_group(root: Path = ROOT, groups: Iterable[str] = (TICKET_BOARD_GROUP,)) -> dict[str, list[str]]:
+    suites: dict[str, list[str]] = {}
+    for group in groups:
+        if group == TICKET_BOARD_GROUP:
+            suites[group] = discover_ticket_board_suites(root)
+        elif group == BOARD_ADJACENT_GROUP:
+            suites[group] = discover_board_adjacent_suites(root)
+        else:
+            raise ValueError(f"unknown suite group: {group}")
+    return suites
 
 
 def _module_importable(module: str, *, root: Path = ROOT) -> bool:
@@ -99,7 +153,13 @@ def sanitized_environment(environ: dict[str, str] | None = None) -> dict[str, st
     return clean
 
 
-def run_one_suite(path: str, *, root: Path = ROOT, env: dict[str, str] | None = None) -> SuiteResult:
+def run_one_suite(
+    path: str,
+    *,
+    group: str = TICKET_BOARD_GROUP,
+    root: Path = ROOT,
+    env: dict[str, str] | None = None,
+) -> SuiteResult:
     started = time.monotonic()
     if path.endswith(".py"):
         args = [sys.executable, path]
@@ -123,6 +183,7 @@ def run_one_suite(path: str, *, root: Path = ROOT, env: dict[str, str] | None = 
     if proc.returncode == 0 and skip_marker in combined and ok_marker not in combined:
         status = "SKIP"
     return SuiteResult(
+        group=group,
         path=path,
         status=status,
         returncode=proc.returncode,
@@ -141,11 +202,11 @@ def _tail_lines(text: str, max_lines: int) -> str:
 
 def report_result(result: SuiteResult, *, out: TextIO, output_lines: int) -> None:
     if result.status == "SKIP" and result.reason:
-        print(f"SKIP {result.path} ({result.duration_seconds:.2f}s) - {result.reason}", file=out)
+        print(f"SKIP [{result.group}] {result.path} ({result.duration_seconds:.2f}s) - {result.reason}", file=out)
     elif result.status == "SKIP":
-        print(f"SKIP {result.path} ({result.duration_seconds:.2f}s)", file=out)
+        print(f"SKIP [{result.group}] {result.path} ({result.duration_seconds:.2f}s)", file=out)
     else:
-        print(f"{result.status} {result.path} ({result.duration_seconds:.2f}s)", file=out)
+        print(f"{result.status} [{result.group}] {result.path} ({result.duration_seconds:.2f}s)", file=out)
     if result.status == "FAIL":
         stdout_tail = _tail_lines(result.stdout, output_lines)
         stderr_tail = _tail_lines(result.stderr, output_lines)
@@ -160,27 +221,31 @@ def report_result(result: SuiteResult, *, out: TextIO, output_lines: int) -> Non
 def run_suite(
     *,
     root: Path = ROOT,
+    groups: Iterable[str] = (TICKET_BOARD_GROUP,),
     out: TextIO = sys.stdout,
     env: dict[str, str] | None = None,
     skip_reasons: dict[str, str] | None = None,
     output_lines: int = 80,
 ) -> list[SuiteResult]:
-    tests = discover_ticket_board_suites(root)
+    suites_by_group = discover_suites_by_group(root, groups)
     skips = dict(prerequisite_skip_reasons(root) if skip_reasons is None else skip_reasons)
     results: list[SuiteResult] = []
-    for test in tests:
-        if test in skips:
-            result = SuiteResult(
-                path=test,
-                status="SKIP",
-                returncode=0,
-                duration_seconds=0.0,
-                reason=skips[test],
-            )
-        else:
-            result = run_one_suite(test, root=root, env=env)
-        results.append(result)
-        report_result(result, out=out, output_lines=output_lines)
+    for group, tests in suites_by_group.items():
+        print(f"group: {group} ({GROUP_LABELS[group]}, {len(tests)} suites)", file=out)
+        for test in tests:
+            if test in skips:
+                result = SuiteResult(
+                    group=group,
+                    path=test,
+                    status="SKIP",
+                    returncode=0,
+                    duration_seconds=0.0,
+                    reason=skips[test],
+                )
+            else:
+                result = run_one_suite(test, group=group, root=root, env=env)
+            results.append(result)
+            report_result(result, out=out, output_lines=output_lines)
     return results
 
 
@@ -194,17 +259,33 @@ def print_summary(results: list[SuiteResult], *, out: TextIO) -> None:
         for result in results:
             if result.status == "SKIP":
                 suffix = f" - {result.reason}" if result.reason else ""
-                print(f"  {result.path}{suffix}", file=out)
+                print(f"  [{result.group}] {result.path}{suffix}", file=out)
     if failed:
         print("failed suites:", file=out)
         for result in results:
             if result.status == "FAIL":
-                print(f"  {result.path} (exit {result.returncode})", file=out)
+                print(f"  [{result.group}] {result.path} (exit {result.returncode})", file=out)
+
+
+def normalize_groups(group: str) -> tuple[str, ...]:
+    if group == "all":
+        return ALL_GROUPS
+    if group == "adjacent":
+        return (BOARD_ADJACENT_GROUP,)
+    if group == "ticket-board":
+        return (TICKET_BOARD_GROUP,)
+    raise ValueError(f"unknown suite group: {group}")
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run every tests/ticket_board_*_test.py/.sh suite as one set.")
+    parser = argparse.ArgumentParser(description="Run ticket-board standalone suites as reported groups.")
     parser.add_argument("--root", type=Path, default=ROOT, help="repository root to scan")
+    parser.add_argument(
+        "--group",
+        choices=("ticket-board", "adjacent", "all"),
+        default="ticket-board",
+        help="suite group to run: ticket-board (default fast set), adjacent, or all",
+    )
     parser.add_argument("--list", action="store_true", help="list discovered suites and prerequisite skips without running")
     parser.add_argument("--fail-on-skip", action="store_true", help="return non-zero when any suite is skipped")
     parser.add_argument("--output-lines", type=int, default=80, help="failure stdout/stderr tail lines to print")
@@ -214,18 +295,27 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     root = args.root.resolve()
-    tests = discover_ticket_board_suites(root)
+    groups = normalize_groups(args.group)
+    suites_by_group = discover_suites_by_group(root, groups)
     skips = prerequisite_skip_reasons(root)
     if args.list:
-        for test in tests:
-            if test in skips:
-                print(f"SKIP {test} - {skips[test]}")
-            else:
-                print(f"RUN  {test}")
-        print(f"summary: {len(tests) - len(skips)} runnable, {len(skips)} skipped")
-        return 0 if tests else 1
-    results = run_suite(root=root, skip_reasons=skips, output_lines=max(1, int(args.output_lines)))
+        test_count = 0
+        skip_count = 0
+        for group, tests in suites_by_group.items():
+            print(f"group: {group} ({GROUP_LABELS[group]}, {len(tests)} suites)")
+            for test in tests:
+                test_count += 1
+                if test in skips:
+                    skip_count += 1
+                    print(f"SKIP [{group}] {test} - {skips[test]}")
+                else:
+                    print(f"RUN  [{group}] {test}")
+        print(f"summary: {test_count - skip_count} runnable, {skip_count} skipped")
+        return 0 if test_count else 1
+    started = time.monotonic()
+    results = run_suite(root=root, groups=groups, skip_reasons=skips, output_lines=max(1, int(args.output_lines)))
     print_summary(results, out=sys.stdout)
+    print(f"wall clock: {time.monotonic() - started:.2f}s", file=sys.stdout)
     failed = any(result.status == "FAIL" for result in results)
     skipped = any(result.status == "SKIP" for result in results)
     if failed or (args.fail_on_skip and skipped):

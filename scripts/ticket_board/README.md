@@ -200,9 +200,16 @@ Notes:
 Ticket board validation:
 
 - `scripts/ticket-board-test-suite` is the standard one-command validation set
-  for ticket-board changes. It discovers every `tests/ticket_board_*_test.py`
-  and `tests/ticket_board_*_test.sh`, runs all runnable suites without
-  fail-fast, and prints a per-suite PASS/FAIL/SKIP result plus a summary.
+  for ticket-board changes. By default it discovers every
+  `tests/ticket_board_*_test.py` and `tests/ticket_board_*_test.sh`, runs all
+  runnable suites without fail-fast, and prints per-group and per-suite
+  PASS/FAIL/SKIP results plus a summary. Use `--group adjacent` for
+  board-adjacent tests outside the `ticket_board_*` namespace, or `--group all`
+  for both groups.
+- The adjacent group is discovered from test file content, not a manifest: any
+  non-`ticket_board_*` standalone test that references `TICKET_BOARD_SOCKET`,
+  `TICKET_BOARD_URL`, `board_url`, `--board-url`, `ticket-board-write`, or
+  `ticket_board.write_client` is included automatically.
 - The runner strips live board/socket and pane-hook environment variables before
   launching each suite, so an ambient pane environment cannot redirect tests to
   the production board.

@@ -568,6 +568,21 @@ def main() -> int:
     assert "grant execute on function ticket_board.implementer_kick_back(text, text) to ticket_board_service" in (
         ROOT / "scripts" / "ticket_board" / "rbac.sql"
     ).read_text(encoding="utf-8").lower()
+    user_information_request_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu757_user_information_request.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "'analysis', 'user_review', 'route'" in user_information_request_migration
+    assert "p_from_state = 'analysis' and p_to_state in ('in_progress', 'user_review', 'backlog', 'cancelled')" in (
+        user_information_request_migration
+    )
+    assert "old.state = 'analysis' and new.state = 'user_review' and new.needs_user_signoff" in (
+        user_information_request_migration
+    )
+    assert "old.needs_user_signoff" in user_information_request_migration
+    assert "analysis -> user_review is only for user information requests with needs_user_signoff=false" in (
+        user_information_request_migration
+    )
+    assert "user_sign_off requires needs_user_signoff=true" in user_information_request_migration
     active_inprogress_idle_filter_migration = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "287_active_inprogress_idle_filter.sql"
     ).read_text(encoding="utf-8").lower()

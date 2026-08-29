@@ -537,6 +537,21 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
         implementation="Ready for override.",
         needs_user_signoff=True,
     )
+    seed_ticket(
+        "PGU-143",
+        title="User information request",
+        state="analysis",
+        assignee="director",
+        implementation="Need external decision.",
+    )
+    seed_ticket(
+        "PGU-144",
+        title="Do not bypass UAT pipeline",
+        state="analysis",
+        assignee="director",
+        implementation="Unfinished work.",
+        needs_user_signoff=True,
+    )
 
 
 def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets: Path, admin_conn: str) -> None:
@@ -905,6 +920,37 @@ WHERE id = 'PGU-141';
         "app_reserved_ticket": "<none>",
         "reserved_from_ticket": "<none>",
     }, uat_reservation
+
+    user_info_request = post_json(
+        base_url,
+        "/api/tickets/PGU-143/actions/route",
+        {"state": "user_review", "assignee": "user"},
+        caller="director",
+    )
+    assert user_info_request["ticket"]["state"] == "user_review", user_info_request  # type: ignore[index]
+    assert user_info_request["ticket"]["assignee"] == "user", user_info_request  # type: ignore[index]
+    assert user_info_request["ticket"]["needs_user_signoff"] is False, user_info_request  # type: ignore[index]
+    assert user_info_request["ticket"]["user_signoff"] is False, user_info_request  # type: ignore[index]
+    user_info_signoff = post_json(
+        base_url,
+        "/api/tickets/PGU-143/actions/user_sign_off",
+        {"text": "Looks approved."},
+        caller="user",
+        expect=400,
+    )
+    assert "user_sign_off requires needs_user_signoff=true" in str(user_info_signoff), user_info_signoff
+    user_info_after_signoff = get_ticket(base_url, "PGU-143")
+    assert user_info_after_signoff["state"] == "user_review", user_info_after_signoff
+    assert user_info_after_signoff["user_signoff"] is False, user_info_after_signoff
+    assert user_info_after_signoff["comments"] == [], user_info_after_signoff
+    uat_bypass = post_json(
+        base_url,
+        "/api/tickets/PGU-144/actions/route",
+        {"state": "user_review", "assignee": "user"},
+        caller="director",
+        expect=400,
+    )
+    assert "analysis -> user_review is only for user information requests with needs_user_signoff=false" in str(uat_bypass), uat_bypass
 
     force_moved_user = post_json(
         base_url,

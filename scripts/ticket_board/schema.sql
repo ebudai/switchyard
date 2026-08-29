@@ -334,6 +334,7 @@ VALUES
     ('backlog', 'cancelled', 'cancel', ARRAY['director']::text[], false, false),
     ('analysis', 'in_progress', 'route', ARRAY['director']::text[], false, false),
     ('analysis', 'in_progress', 'start_work', ARRAY['main', 'app', 'ops', 'perf', 'research']::text[], false, false),
+    ('analysis', 'user_review', 'route', ARRAY['director']::text[], false, false),
     ('analysis', 'backlog', 'defer', ARRAY['director']::text[], false, false),
     ('analysis', 'cancelled', 'cancel', ARRAY['director']::text[], false, false),
     ('in_progress', 'inspection', 'submit_to_inspection', ARRAY['main', 'app', 'ops', 'perf', 'research']::text[], true, false),
@@ -640,7 +641,7 @@ IMMUTABLE
 AS $$
     SELECT (p_from_state = 'backlog' AND p_to_state IN ('analysis', 'in_progress', 'cancelled'))
         OR (p_from_state = 'draft' AND p_to_state IN ('analysis', 'cancelled'))
-        OR (p_from_state = 'analysis' AND p_to_state IN ('in_progress', 'backlog', 'cancelled'))
+        OR (p_from_state = 'analysis' AND p_to_state IN ('in_progress', 'user_review', 'backlog', 'cancelled'))
         OR (p_from_state = 'in_progress' AND p_to_state IN ('inspection', 'audit', 'analysis', 'backlog', 'cancelled'))
         OR (p_from_state = 'inspection' AND p_to_state IN ('audit', 'in_progress', 'backlog', 'cancelled'))
         OR (p_from_state = 'audit' AND p_to_state IN ('dat', 'director_review', 'in_progress', 'analysis', 'backlog', 'cancelled'))
@@ -886,9 +887,26 @@ BEGIN
         RETURN NEW;
     END IF;
 
-    IF NEW.state IN ('dat', 'user_review') AND NOT NEW.needs_user_signoff THEN
+    IF NEW.state = 'dat'
+       AND NOT NEW.needs_user_signoff
+       AND (OLD.needs_user_signoff OR OLD.state IS DISTINCT FROM NEW.state) THEN
         NEW.state := 'audit';
         NEW.audit_signoff := false;
+    END IF;
+    IF NEW.state = 'user_review'
+       AND NOT NEW.needs_user_signoff
+       AND (
+           OLD.needs_user_signoff
+           OR (
+               OLD.state IS DISTINCT FROM NEW.state
+               AND OLD.state IS DISTINCT FROM 'analysis'
+           )
+       ) THEN
+        NEW.state := 'audit';
+        NEW.audit_signoff := false;
+    END IF;
+    IF OLD.state = 'analysis' AND NEW.state = 'user_review' AND NEW.needs_user_signoff THEN
+        RAISE EXCEPTION 'analysis -> user_review is only for user information requests with needs_user_signoff=false';
     END IF;
     IF NOT NEW.needs_user_signoff THEN
         NEW.user_signoff := false;
@@ -4961,18 +4979,27 @@ AS $$
 DECLARE
     actor text;
     comment_actor text;
+    ticket_state text;
+    requires_signoff boolean;
 BEGIN
     comment_actor := ticket_board.require_workflow_transition_actor('user_sign_off', id);
+    SELECT tickets.state, tickets.needs_user_signoff
+    INTO ticket_state, requires_signoff
+    FROM ticket_board.tickets
+    WHERE tickets.id = user_sign_off.id
+    FOR UPDATE;
+    IF NOT FOUND OR ticket_state <> 'user_review' THEN
+        RAISE EXCEPTION 'user_review ticket not found: %', id;
+    END IF;
+    IF NOT requires_signoff THEN
+        RAISE EXCEPTION 'user_sign_off requires needs_user_signoff=true';
+    END IF;
     IF btrim(coalesce(comment_text, '')) <> '' THEN
         PERFORM ticket_board.append_ticket_comment(id, comment_actor, comment_text);
     END IF;
     UPDATE ticket_board.tickets
     SET user_signoff = true
-    WHERE tickets.id = user_sign_off.id
-      AND tickets.state = 'user_review';
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'user_review ticket not found: %', id;
-    END IF;
+    WHERE tickets.id = user_sign_off.id;
     PERFORM ticket_board.touch_ticket(id);
 END;
 $$;

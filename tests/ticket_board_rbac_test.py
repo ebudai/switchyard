@@ -832,6 +832,68 @@ FROM ticket_board.tickets t WHERE id = 'PGU-600';
 
     insert_ticket(
         admin_conn,
+        "PGU-602",
+        title="User information request",
+        state="analysis",
+        assignee="director",
+        implementation="Need external decision.",
+    )
+    psql(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'director', false);
+SELECT ticket_board.route('PGU-602', 'user_review', 'user');
+""",
+    )
+    user_request = json.loads(
+        psql(
+            admin_conn,
+            """
+SELECT jsonb_build_object(
+    'state', state,
+    'assignee', assignee,
+    'needs_user_signoff', needs_user_signoff,
+    'user_signoff', user_signoff
+)::text
+FROM ticket_board.tickets WHERE id = 'PGU-602';
+""",
+        )
+    )
+    assert user_request == {
+        "state": "user_review",
+        "assignee": "user",
+        "needs_user_signoff": False,
+        "user_signoff": False,
+    }, user_request
+    assert "user_sign_off requires needs_user_signoff=true" in psql_error(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'user', false);
+SELECT ticket_board.user_sign_off('PGU-602', 'Looks approved.');
+""",
+    )
+    assert psql(admin_conn, "SELECT state || ':' || user_signoff::text FROM ticket_board.tickets WHERE id = 'PGU-602';") == "user_review:false"
+    assert psql(admin_conn, "SELECT count(*) FROM ticket_board.ticket_comments WHERE ticket_id = 'PGU-602';") == "0"
+
+    insert_ticket(
+        admin_conn,
+        "PGU-603",
+        title="Do not bypass UAT pipeline",
+        state="analysis",
+        assignee="director",
+        implementation="Unfinished work.",
+        needs_user_signoff=True,
+    )
+    assert "analysis -> user_review is only for user information requests with needs_user_signoff=false" in psql_error(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'director', false);
+SELECT ticket_board.route('PGU-603', 'user_review', 'user');
+""",
+    )
+
+    insert_ticket(
+        admin_conn,
         "PGU-601",
         title="User reopen",
         state="user_review",

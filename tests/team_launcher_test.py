@@ -4043,9 +4043,9 @@ def test_project_config_accepts_hermes_runtime_defaults() -> None:
         "--reasoning",
         "xhigh",
         "--yolo",
-        "--accept-hooks",
         "--pass-session-id",
     ]
+    assert "--accept-hooks" not in tail
 
 
 def test_effort_config_translates_to_cli_specific_args() -> None:

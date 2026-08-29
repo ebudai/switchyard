@@ -114,7 +114,7 @@ YOLO_ARGS_BY_CLI = {
     "hermes": ["--yolo"],
 }
 STARTUP_ARGS_BY_CLI = {
-    "hermes": ["--accept-hooks", "--pass-session-id"],
+    "hermes": ["--pass-session-id"],
 }
 EFFORT_STYLE_BY_CLI = {
     "agy": None,

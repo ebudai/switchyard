@@ -3951,39 +3951,41 @@ def test_yolo_config_translates_to_cli_specific_bypass_flags() -> None:
             assert expected_flag in command, (role_name, command)
 
 
-def test_project_config_rejects_dead_gemini_cli_name() -> None:
+def test_project_config_rejects_unsupported_cli_names() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-dead-cli.") as tmp:
         tmp_path = Path(tmp)
         config_path = tmp_path / "porter.json"
-        config_path.write_text(
-            json.dumps(
-                {
-                    "project": "porter",
-                    "layout": str(tmp_path / "layout.json"),
-                    "roles": [
-                        {
-                            "role": "inspector",
-                            "slot": 0,
-                            "target": "porter-inspector:0.0",
-                            "cli": ["gemini"],
-                        }
-                    ],
-                },
-                indent=2,
-                sort_keys=True,
+
+        for cli_name in ("gemini", "gemeni", "hermes", "totally-made-up"):
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "project": "porter",
+                        "layout": str(tmp_path / "layout.json"),
+                        "roles": [
+                            {
+                                "role": "inspector",
+                                "slot": 0,
+                                "target": "porter-inspector:0.0",
+                                "cli": [cli_name],
+                            }
+                        ],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
             )
-            + "\n",
-            encoding="utf-8",
-        )
 
-        try:
-            load_project_config("porter", config_path)
-            raise AssertionError("expected removed gemini CLI name to be rejected")
-        except SystemExit as exc:
-            message = str(exc)
+            try:
+                load_project_config("porter", config_path)
+                raise AssertionError(f"expected unsupported CLI {cli_name!r} to be rejected")
+            except SystemExit as exc:
+                message = str(exc)
 
-    assert "role inspector cli 'gemini' is not supported" in message
-    assert "supported clis: agy, claude, codex" in message
+            assert f"role inspector cli {cli_name!r} is not supported" in message
+            assert "supported clis: agy, claude, codex" in message
 
 
 def test_effort_config_translates_to_cli_specific_args() -> None:

@@ -117,7 +117,6 @@ EFFORT_STYLE_BY_CLI = {
     "codex": "config",
 }
 SUPPORTED_CONFIG_CLI_NAMES = ("agy", "claude", "codex")
-REMOVED_CONFIG_CLI_NAMES = frozenset({"gemini"})
 KNOWN_LIVE_CLI_NAMES = set(SUPPORTED_CONFIG_CLI_NAMES)
 DEFAULT_RESUME_MODE_BY_CLI = {
     "agy": "flag",
@@ -1185,7 +1184,7 @@ def _role_from_json(project: str, raw: dict[str, Any], *, base: Path, default_wo
     else:
         workdir = str(_expand_path(str(workdir_raw), base=base))
     cli_name = _command_name(cli[0])
-    if cli_name in REMOVED_CONFIG_CLI_NAMES:
+    if cli_name not in SUPPORTED_CONFIG_CLI_NAMES:
         raise SystemExit(
             f"role {role} cli {cli_name!r} is not supported; "
             f"supported clis: {', '.join(SUPPORTED_CONFIG_CLI_NAMES)}"

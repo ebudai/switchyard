@@ -887,11 +887,11 @@ ORDER BY rank;
                 self._validate_blocker_ticket_states(conn, blocked_by)
                 parent_id = "" if parent_id in (None, "", "null") else str(parent_id).strip().upper()
                 created_via_file_bug = False
-                if parent_id and create_state == "analysis" and not blocked_by:
+                if parent_id and create_state == "analysis":
                     ticket_id = self._pg_call_scalar(
                         conn,
-                        "SELECT ticket_board.file_bug(%s, %s, %s, %s) AS id;",
-                        (title, body.strip(), parent_id, assignee),
+                        "SELECT ticket_board.file_bug(%s, %s, %s, %s, %s, %s) AS id;",
+                        (title, body.strip(), parent_id, assignee, blocked_by, blocked_reason),
                     )
                     created_via_file_bug = True
                 else:

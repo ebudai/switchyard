@@ -532,7 +532,18 @@ def main() -> int:
     assert "target_assignee" in file_bug_assignee_migration
     assert "ticket_board.append_ticket_comment(ticket_id, actor, 'filed bug against ' || source_id || '.')" in file_bug_assignee_migration
     assert "grant execute on function ticket_board.file_bug(text, text, text, text) to ticket_board_service" in file_bug_assignee_migration
+    file_bug_blockers_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu755_file_bug_blockers.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "source_ticket_id text,\n    assignee text,\n    blocked_by text[]" in file_bug_blockers_migration
+    assert "blocked_reason text" in file_bug_blockers_migration
+    assert "ticket_board.apply_blockers(ticket_id, blocked_by, blocked_reason)" in file_bug_blockers_migration
+    assert "set_config('ticket_board.suppress_create_notify', 'on', true)" in file_bug_blockers_migration
+    assert "grant execute on function ticket_board.file_bug(text, text, text, text, text[], text) to ticket_board_service" in file_bug_blockers_migration
     assert "grant execute on function ticket_board.file_bug(text, text, text, text) to ticket_board_service" in (
+        ROOT / "scripts" / "ticket_board" / "rbac.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "grant execute on function ticket_board.file_bug(text, text, text, text, text[], text) to ticket_board_service" in (
         ROOT / "scripts" / "ticket_board" / "rbac.sql"
     ).read_text(encoding="utf-8").lower()
     assert "create or replace function ticket_board.file_bug" in audit_file_bug_migration

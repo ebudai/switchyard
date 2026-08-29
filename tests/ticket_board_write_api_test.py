@@ -763,6 +763,31 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     )
     filed = filed_payload["ticket"]  # type: ignore[index]
     assert filed["parent_id"] == source_id, filed  # type: ignore[index]
+    blocked_file_bug_payload = post_json(
+        base_url,
+        "/api/tickets/actions/file_bug",
+        {
+            "title": "API blocked file bug",
+            "body": "Linked blocked bug.",
+            "source_ticket_id": source_id,
+            "assignee": "ops",
+            "blocked_by": [source_id],
+            "blocked_reason": "Waiting on source fix.",
+        },
+        caller="ops",
+        expect=201,
+    )
+    blocked_file_bug = blocked_file_bug_payload["ticket"]  # type: ignore[index]
+    assert blocked_file_bug["parent_id"] == source_id, blocked_file_bug  # type: ignore[index]
+    assert blocked_file_bug["state"] == "analysis", blocked_file_bug  # type: ignore[index]
+    assert blocked_file_bug["assignee"] == "ops", blocked_file_bug  # type: ignore[index]
+    assert blocked_file_bug["blocked_by"] == [source_id], blocked_file_bug  # type: ignore[index]
+    assert blocked_file_bug["blocked_reason"] == "Waiting on source fix.", blocked_file_bug  # type: ignore[index]
+    assert blocked_file_bug["comments"][0]["who"] == "ops", blocked_file_bug  # type: ignore[index]
+    assert psql(
+        admin_conn,
+        f"SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = '{blocked_file_bug['id']}';",
+    ) == "0"
     assigned_bug_roles = ("ops", "main", "app", "perf", "research", "audit")
     for role in assigned_bug_roles:
         assigned_file_bug_payload = post_json(

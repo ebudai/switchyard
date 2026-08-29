@@ -4107,7 +4107,9 @@ CREATE OR REPLACE FUNCTION ticket_board.file_bug(
     title text,
     body text,
     source_ticket_id text,
-    assignee text
+    assignee text,
+    blocked_by text[],
+    blocked_reason text
 )
 RETURNS text
 LANGUAGE plpgsql
@@ -4120,6 +4122,7 @@ DECLARE
     ticket_id text;
     source_id text := upper(btrim(coalesce(source_ticket_id, '')));
     target_assignee text := btrim(coalesce(assignee, 'unassigned'));
+    blocker_count integer;
     created_at_value timestamptz := clock_timestamp();
     created_text_value text := ticket_board.utc_text(created_at_value);
 BEGIN
@@ -4146,12 +4149,18 @@ BEGIN
     IF NOT ticket_board.ticket_valid_assignee(target_assignee) THEN
         RAISE EXCEPTION 'invalid assignee: %', target_assignee;
     END IF;
+    SELECT count(*)
+    INTO blocker_count
+    FROM unnest(coalesce(blocked_by, ARRAY[]::text[])) AS raw_id;
     PERFORM 1 FROM ticket_board.tickets WHERE id = source_id;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'source_ticket_id ticket not found: %', source_id;
     END IF;
 
     ticket_id := ticket_board.next_ticket_id();
+    IF blocker_count > 0 THEN
+        PERFORM set_config('ticket_board.suppress_create_notify', 'on', true);
+    END IF;
     INSERT INTO ticket_board.tickets (
         id,
         title,
@@ -4188,12 +4197,30 @@ BEGIN
         ),
         ticket_id || '.json'
     );
+    IF blocker_count > 0 THEN
+        PERFORM ticket_board.apply_blockers(ticket_id, blocked_by, blocked_reason);
+    END IF;
     IF actor <> 'ticket_board_service' THEN
         PERFORM ticket_board.append_ticket_comment(ticket_id, actor, 'Filed bug against ' || source_id || '.');
     END IF;
     PERFORM ticket_board.refresh_ticket_source_json(ticket_id);
     RETURN ticket_id;
 END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.file_bug(
+    title text,
+    body text,
+    source_ticket_id text,
+    assignee text
+)
+RETURNS text
+LANGUAGE sql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+    SELECT ticket_board.file_bug(title, body, source_ticket_id, assignee, ARRAY[]::text[], '');
 $$;
 
 CREATE OR REPLACE FUNCTION ticket_board.file_bug(
@@ -4207,7 +4234,7 @@ VOLATILE
 SECURITY DEFINER
 SET search_path = ticket_board, pg_temp
 AS $$
-    SELECT ticket_board.file_bug(title, body, source_ticket_id, 'unassigned');
+    SELECT ticket_board.file_bug(title, body, source_ticket_id, 'unassigned', ARRAY[]::text[], '');
 $$;
 
 CREATE OR REPLACE FUNCTION ticket_board.route(

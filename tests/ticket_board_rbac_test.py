@@ -25,6 +25,7 @@ WRITE_FUNCTIONS = [
     "ticket_board.create_ticket(text,text,text,text[],text,boolean)",
     "ticket_board.file_bug(text,text,text)",
     "ticket_board.file_bug(text,text,text,text)",
+    "ticket_board.file_bug(text,text,text,text,text[],text)",
     "ticket_board.release_draft(text)",
     "ticket_board.route(text,text,text)",
     "ticket_board.force_move(text,text,text,boolean)",
@@ -439,10 +440,48 @@ WHERE id = {sql_string(filed_assigned)};
         "parent_id": "PGU-180",
         "comment_who": "ops",
     }, filed_assigned_row
+    insert_ticket(admin_conn, "PGU-1800", title="Blocked bug source")
+    filed_blocked = psql(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'ops', false);
+SELECT ticket_board.file_bug('Blocked service bug', 'Body', 'PGU-1800', 'ops', ARRAY['PGU-100'], 'Waiting on source.');
+""",
+    ).splitlines()[-1]
+    filed_blocked_row = json.loads(
+        psql(
+            admin_conn,
+            f"""
+SELECT jsonb_build_object(
+    'state', state,
+    'assignee', assignee,
+    'parent_id', parent_id,
+    'blocked_reason', blocked_reason,
+    'blocked_by', (SELECT jsonb_agg(blocker_ticket_id ORDER BY position) FROM ticket_board.ticket_blockers WHERE ticket_id = t.id),
+    'comment_who', (SELECT who FROM ticket_board.ticket_comments WHERE ticket_id = t.id ORDER BY position LIMIT 1)
+)::text
+FROM ticket_board.tickets t
+WHERE id = {sql_string(filed_blocked)};
+""",
+        )
+    )
+    assert filed_blocked_row == {
+        "state": "analysis",
+        "assignee": "ops",
+        "parent_id": "PGU-1800",
+        "blocked_reason": "Waiting on source.",
+        "blocked_by": ["PGU-100"],
+        "comment_who": "ops",
+    }, filed_blocked_row
 
     insert_ticket(admin_conn, "PGU-200", title="Route fixture", state="analysis")
     psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'director', false); SELECT ticket_board.route('PGU-200', 'backlog', 'ops');")
     assert psql(admin_conn, "SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = 'PGU-200';") == "backlog:ops"
+    route_denied = psql_error(
+        service_conn,
+        "SELECT set_config('ticket_board.caller_role', 'ops', false); SELECT ticket_board.route('PGU-200', 'analysis', 'ops');",
+    )
+    assert "role ops cannot call route" in route_denied, route_denied
     psql(admin_conn, "UPDATE ticket_board.tickets SET parked = true WHERE id = 'PGU-200';")
 
     insert_ticket(admin_conn, "PGU-300", title="Start fixture", state="analysis", assignee="ops", implementation="Ready.")
@@ -910,6 +949,7 @@ WHERE id = {sql_string(filed)};
     )
     assert filed_row == {"state": "analysis", "assignee": "unassigned", "parent_id": "PGU-150", "comment_who": "audit"}, filed_row
     assert_permission_denied(role_conn["audit"], "SELECT ticket_board.file_bug('Audit cannot self-assign direct bug', 'Body', 'PGU-150', 'audit');")
+    assert_permission_denied(role_conn["audit"], "SELECT ticket_board.file_bug('Audit cannot file direct blocked bug', 'Body', 'PGU-150', 'audit', ARRAY['PGU-150'], 'Waiting.');")
     assert_permission_denied(role_conn["main"], "SELECT ticket_board.file_bug('Main cannot file bug', 'Body', 'PGU-150');")
 
 

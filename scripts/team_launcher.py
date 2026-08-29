@@ -5226,10 +5226,17 @@ class FirstRunAuthReport:
     unauthenticated_roles: dict[str, list[str]]
     untrusted_roles: list[tuple[str, str, str]]
     stale_codex_hook_trust: list[CodexHookTrustMismatch] = field(default_factory=list)
+    missing_cli_roles: dict[str, list[str]] = field(default_factory=dict)
+    owner_user: str = ""
 
     @property
     def has_warnings(self) -> bool:
-        return bool(self.unauthenticated_roles or self.untrusted_roles or self.stale_codex_hook_trust)
+        return bool(
+            self.unauthenticated_roles
+            or self.untrusted_roles
+            or self.stale_codex_hook_trust
+            or self.missing_cli_roles
+        )
 
 
 FIRST_RUN_AUTH_STATUS_COMMANDS: dict[str, list[str]] = {
@@ -5739,7 +5746,7 @@ def _cli_auth_probe_passed(cli: str, proc: subprocess.CompletedProcess[Any]) -> 
     return True
 
 
-def _is_cli_authenticated(
+def _owner_cli_is_installed(
     cli: str,
     *,
     owner_user: str,
@@ -5747,10 +5754,39 @@ def _is_cli_authenticated(
     runner: Callable[..., subprocess.CompletedProcess[Any]],
 ) -> bool:
     command = FIRST_RUN_AUTH_STATUS_COMMANDS.get(cli)
-    if command is None:
+    if command is None or not command:
         return True
+    binary = command[0]
+    proc = _run_owner_cli_probe(
+        owner_user=owner_user,
+        owner_home=owner_home,
+        command=["sh", "-lc", f"command -v {shlex.quote(binary)}"],
+        runner=runner,
+    )
+    return proc.returncode == 0
+
+
+def _cli_auth_status(
+    cli: str,
+    *,
+    owner_user: str,
+    owner_home: Path,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> str:
+    command = FIRST_RUN_AUTH_STATUS_COMMANDS.get(cli)
+    if command is None:
+        return "authenticated"
     proc = _run_owner_cli_probe(owner_user=owner_user, owner_home=owner_home, command=command, runner=runner)
-    return _cli_auth_probe_passed(cli, proc)
+    if _cli_auth_probe_passed(cli, proc):
+        return "authenticated"
+    if proc.returncode == 127 and not _owner_cli_is_installed(
+        cli,
+        owner_user=owner_user,
+        owner_home=owner_home,
+        runner=runner,
+    ):
+        return "not_installed"
+    return "unauthenticated"
 
 
 def _read_json_object(path: Path) -> dict[str, Any]:
@@ -5991,11 +6027,21 @@ def run_first_run_auth_phase(
     effective_home = owner_home or _owner_home_for_auth(effective_owner)
     roles_by_cli = _roles_by_first_cli(config)
     unauthenticated: dict[str, list[str]] = {}
+    missing_cli_roles: dict[str, list[str]] = {}
 
     for cli, roles in roles_by_cli.items():
         if cli not in FIRST_RUN_AUTH_STATUS_COMMANDS:
             continue
-        if _is_cli_authenticated(cli, owner_user=effective_owner, owner_home=effective_home, runner=runner):
+        auth_status = _cli_auth_status(cli, owner_user=effective_owner, owner_home=effective_home, runner=runner)
+        if auth_status == "authenticated":
+            continue
+        if auth_status == "not_installed":
+            names = ", ".join(_role_names(roles))
+            print_func(
+                f"switchyard: first-run {cli} not installed for owner user {effective_owner}; "
+                f"install {cli} for owner user {effective_owner}; affected roles: {names}"
+            )
+            missing_cli_roles[cli] = _role_names(roles)
             continue
         login_command = FIRST_RUN_AUTH_LOGIN_COMMANDS[cli]
         names = ", ".join(_role_names(roles))
@@ -6009,7 +6055,10 @@ def run_first_run_auth_phase(
             command=login_command,
             runner=runner,
         )
-        if not _is_cli_authenticated(cli, owner_user=effective_owner, owner_home=effective_home, runner=runner):
+        auth_status = _cli_auth_status(cli, owner_user=effective_owner, owner_home=effective_home, runner=runner)
+        if auth_status == "not_installed":
+            missing_cli_roles[cli] = _role_names(roles)
+        elif auth_status != "authenticated":
             unauthenticated[cli] = _role_names(roles)
 
     untrusted: list[tuple[str, str, str]] = []
@@ -6043,7 +6092,13 @@ def run_first_run_auth_phase(
             "run /hooks in Codex as the project owner and approve the changed hook"
         )
 
-    return FirstRunAuthReport(unauthenticated, untrusted, stale_codex_hook_trust)
+    return FirstRunAuthReport(
+        unauthenticated,
+        untrusted,
+        stale_codex_hook_trust,
+        missing_cli_roles,
+        effective_owner if missing_cli_roles else "",
+    )
 
 
 def report_first_run_auth_warnings(
@@ -6051,6 +6106,12 @@ def report_first_run_auth_warnings(
     *,
     print_func: Callable[[str], None] = print,
 ) -> None:
+    owner_detail = f" for owner user {report.owner_user}" if report.owner_user else ""
+    for cli, roles in report.missing_cli_roles.items():
+        print_func(
+            f"warning: switchyard: {cli} is not installed{owner_detail}; "
+            f"install {cli}{owner_detail}; affected roles: {', '.join(roles)}"
+        )
     for cli, roles in report.unauthenticated_roles.items():
         print_func(
             f"warning: switchyard: {cli} is still unauthenticated; affected roles: {', '.join(roles)}"

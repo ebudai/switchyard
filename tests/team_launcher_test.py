@@ -11614,24 +11614,36 @@ def _write_first_run_auth_config(tmp_path: Path, *, roles: list[tuple[str, str]]
 
 
 class FirstRunAuthRunner:
-    def __init__(self, *, authenticated_after_login: bool = True) -> None:
+    def __init__(self, *, authenticated_after_login: bool = True, missing_clis: set[str] | None = None) -> None:
         self.calls: list[list[str]] = []
         self.call_kwargs: list[dict[str, object]] = []
         self.authenticated_after_login = authenticated_after_login
         self.login_seen: set[str] = set()
+        self.missing_clis = set(missing_clis or ())
 
     def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         self.calls.append(args)
         self.call_kwargs.append(dict(kwargs))
         command = args[3:] if args[:2] == ["sudo", "-u"] else args
+        if command[:2] == ["sh", "-lc"] and len(command) == 3 and command[2].startswith("command -v "):
+            cli = command[2].removeprefix("command -v ").strip()
+            if cli in self.missing_clis:
+                return subprocess.CompletedProcess(args, 1, stdout="", stderr="")
+            return subprocess.CompletedProcess(args, 0, stdout=f"/usr/bin/{cli}\n")
         if command == ["claude", "auth", "status", "--json"]:
+            if "claude" in self.missing_clis:
+                return subprocess.CompletedProcess(args, 127, stdout="", stderr="claude: command not found\n")
             logged_in = "claude" in self.login_seen if self.authenticated_after_login else False
             return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"loggedIn": logged_in}) + "\n")
         if command == ["codex", "login", "status"]:
+            if "codex" in self.missing_clis:
+                return subprocess.CompletedProcess(args, 127, stdout="", stderr="codex: command not found\n")
             if self.authenticated_after_login and "codex" in self.login_seen:
                 return subprocess.CompletedProcess(args, 0, stdout="Logged in using ChatGPT\n")
             return subprocess.CompletedProcess(args, 1, stderr="Not logged in\n")
         if command == ["agy", "models"]:
+            if "agy" in self.missing_clis:
+                return subprocess.CompletedProcess(args, 127, stdout="", stderr="agy: command not found\n")
             if self.authenticated_after_login and "agy" in self.login_seen:
                 return subprocess.CompletedProcess(args, 0, stdout="gemini-3.7-flash-high\n")
             return subprocess.CompletedProcess(args, 1, stderr="You are not logged into Antigravity.\n")
@@ -11947,6 +11959,48 @@ def test_first_run_auth_phase_does_not_sudo_wrap_same_owner() -> None:
     assert {kwargs.get("cwd") for kwargs in runner.call_kwargs} == {str(owner_home)}
 
 
+def test_first_run_auth_phase_reports_missing_cli_separately_from_login() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-first-run-auth-missing-cli.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        config = load_project_config(
+            "otto",
+            _write_first_run_auth_config(tmp_path, roles=[("inspector", "agy"), ("ops", "codex")]),
+        )
+        runner = FirstRunAuthRunner(missing_clis={"agy"})
+        runner.login_seen.add("codex")
+        messages: list[str] = []
+
+        report = team_launcher.run_first_run_auth_phase(
+            config,
+            owner_user="otto-agent",
+            owner_home=owner_home,
+            runner=runner,
+            print_func=messages.append,
+        )
+
+    assert report.unauthenticated_roles == {}
+    assert report.missing_cli_roles == {"agy": ["inspector"]}
+    assert report.owner_user == "otto-agent"
+    assert messages == [
+        "switchyard: first-run agy not installed for owner user otto-agent; "
+        "install agy for owner user otto-agent; affected roles: inspector"
+    ]
+    assert runner.calls == [
+        ["sudo", "-u", "otto-agent", "agy", "models"],
+        ["sudo", "-u", "otto-agent", "sh", "-lc", "command -v agy"],
+        ["sudo", "-u", "otto-agent", "codex", "login", "status"],
+    ]
+    assert not any(call == ["sudo", "-u", "otto-agent", "agy"] for call in runner.calls)
+    output: list[str] = []
+    team_launcher.report_first_run_auth_warnings(report, print_func=output.append)
+    assert output == [
+        "warning: switchyard: agy is not installed for owner user otto-agent; "
+        "install agy for owner user otto-agent; affected roles: inspector"
+    ]
+
+
 def test_first_run_auth_phase_sequences_distinct_logins_and_skips_visible_worktree_trust() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-first-run-auth.") as tmp:
         tmp_path = Path(tmp)
@@ -12126,6 +12180,7 @@ def test_first_run_auth_phase_declined_login_reports_affected_roles_without_abor
         )
 
     assert report.unauthenticated_roles == {"codex": ["ops", "main"]}
+    assert report.missing_cli_roles == {}
     assert report.untrusted_roles == []
     output: list[str] = []
     team_launcher.report_first_run_auth_warnings(report, print_func=output.append)

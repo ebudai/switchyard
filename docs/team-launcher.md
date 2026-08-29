@@ -367,11 +367,12 @@ transitions.
 
 The first-run auth phase runs before panes launch. It probes each distinct
 selected CLI as the project owner, invokes that CLI's own login command when it
-is unauthenticated, and then walks per-worktree trust prompts. Trust is never
-pre-seeded by editing CLI config files. Codex hook-trust entries are also
-checked against the installed pane-hook commands; stale trust hashes are
-reported as warnings with the affected role/event so the operator can refresh
-trust deliberately instead of silently launching panes with inert hooks.
+is unauthenticated, reports a missing CLI as not installed for that owner user,
+and then walks per-worktree trust prompts. Trust is never pre-seeded by editing
+CLI config files. Codex hook-trust entries are also checked against the
+installed pane-hook commands; stale trust hashes are reported as warnings with
+the affected role/event so the operator can refresh trust deliberately instead
+of silently launching panes with inert hooks.
 
 The same provision path consumes generated and hand-written artifacts:
 

@@ -968,6 +968,8 @@ ORDER BY rank;
                 if edit_fields:
                     self._materialize_edit_field_attachments(edit_fields, ticket_id, current)
                     self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps(edit_fields)))
+                if "commit_hash" in patch and "state" not in patch:
+                    raise ValueError("commit_hash must be written with submit_to_audit or mark_done, not edit_fields")
                 if "manually_controlled" in patch:
                     self._pg_call(
                         conn,
@@ -1189,7 +1191,6 @@ SELECT EXISTS (
             "needs_user_signoff",
             "commit_exempt",
             "regression",
-            "commit_hash",
         }
         if patch.get("inspector_signoff") is False:
             editable = set(editable)

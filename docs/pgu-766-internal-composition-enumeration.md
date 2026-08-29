@@ -13,7 +13,7 @@ The remaining issues are narrower:
 | Historical internal composition | `ops/main/app/perf/research/audit -> file_bug -> route()` | Fixed by making `file_bug` create the linked ticket directly instead of routing afterward. | No primitive needed for this case. |
 | Historical internal composition | `director -> create_ticket(parent_id=...) -> file_bug()` | Fixed by keeping director/user parented creates on `create_ticket` plus `edit_fields(parent_id)`. | No primitive needed for this case. |
 | Historical internal composition | `user -> create_ticket(assignee=...) -> route()` | Fixed by passing assignee into `create_ticket`, avoiding a nested director-only route. | No primitive needed for this case. |
-| Field/action semantic mismatch | `any caller -> edit_fields(commit_hash=...)` | Still rejected before the SQL function API because commit hashes are only valid through `submit_to_audit` or `mark_done`. | Keep as bespoke policy; do not make generic `edit_fields` a commit path. Track/fix under PGU-770. |
+| Field/action semantic mismatch | `any caller -> edit_fields(commit_hash=...)` | Fixed in PGU-770 by rejecting `commit_hash` in `edit_fields` before and inside the SQL function API; commit hashes are only valid through `submit_to_audit` or `mark_done`. | Keep as bespoke policy; do not make generic `edit_fields` a commit path. |
 | Direct HTTP/SQL RBAC mismatch | `user -> await_role`, `user -> clear_awaiting_role` | HTTP allowed `user`, SQL denied it. | Fixed in PGU-766 by removing `user` from the HTTP allowed sets. |
 | Client lagging server | `write_client.create_ticket(parent_id=...)` missing | Server accepts `parent_id`; client could not express it. | Fixed in PGU-766. |
 | Client lagging server | `write_client.edit_fields(...)` missing | Server exposes `edit_fields`; client could not express it. | Fixed in PGU-766. |
@@ -43,7 +43,7 @@ The remaining issues are narrower:
 | `mark_done`, `defer`, `cancel` | `director` | `mark_done`, `defer`, `cancel` | None. |
 | `set_manually_controlled`, `set_blockers` | `director` | `set_manually_controlled`, `set_blockers` | None. |
 | `add_comment` | all caller roles | `add_comment` | None. |
-| `edit_fields` | all caller roles | `edit_fields` | No actor-gate mismatch; `commit_hash` remains a semantic mismatch. |
+| `edit_fields` | all caller roles | `edit_fields` | No actor-gate mismatch; `commit_hash` is explicitly rejected and must use `submit_to_audit` or `mark_done`. |
 | `crop_attachment` | `director`, `user` | attachment crop plus `edit_fields`-style persistence | None. |
 | `merge` | `director` | `merge_tickets` | None. |
 

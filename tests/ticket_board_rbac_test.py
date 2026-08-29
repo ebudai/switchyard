@@ -1125,6 +1125,14 @@ FROM ticket_board.tickets t WHERE id = 'PGU-704';
     insert_ticket(admin_conn, "PGU-810", title="Editable", state="analysis")
     psql(service_conn, "SELECT ticket_board.edit_fields('PGU-810', '{\"title\":\"Edited\"}'::jsonb);")
     assert psql(admin_conn, "SELECT title FROM ticket_board.tickets WHERE id = 'PGU-810';") == "Edited"
+    assert "commit_hash must be written with submit_to_audit or mark_done" in psql_error(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'ops', false);
+SELECT ticket_board.edit_fields('PGU-810', '{"commit_hash":"abcdef1"}'::jsonb);
+""",
+    )
+    assert psql(admin_conn, "SELECT commit_hash FROM ticket_board.tickets WHERE id = 'PGU-810';") == ""
 
     insert_ticket(admin_conn, "PGU-811", title="Commit exempt director gate", state="in_progress", assignee="ops")
     assert "commit_exempt can only be edited by director" in psql_error(

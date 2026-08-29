@@ -5443,6 +5443,9 @@ BEGIN
     IF patch IS NULL OR jsonb_typeof(patch) <> 'object' THEN
         RAISE EXCEPTION 'edit_fields patch must be an object';
     END IF;
+    IF patch ? 'commit_hash' THEN
+        RAISE EXCEPTION 'commit_hash must be written with submit_to_audit or mark_done, not edit_fields';
+    END IF;
 
     SELECT key
     INTO invalid_field
@@ -5460,7 +5463,6 @@ BEGIN
         'needs_user_signoff',
         'commit_exempt',
         'regression',
-        'commit_hash',
         'audit_signoff',
         'inspector_signoff',
         'user_signoff'
@@ -5548,7 +5550,6 @@ BEGIN
         needs_user_signoff = CASE WHEN patch ? 'needs_user_signoff' THEN (patch->>'needs_user_signoff')::boolean ELSE needs_user_signoff END,
         commit_exempt = CASE WHEN patch ? 'commit_exempt' THEN (patch->>'commit_exempt')::boolean ELSE commit_exempt END,
         regression = CASE WHEN patch ? 'regression' THEN (patch->>'regression')::boolean ELSE regression END,
-        commit_hash = CASE WHEN patch ? 'commit_hash' THEN btrim(coalesce(patch->>'commit_hash', '')) ELSE commit_hash END,
         audit_signoff = CASE WHEN patch ? 'audit_signoff' THEN (patch->>'audit_signoff')::boolean ELSE audit_signoff END,
         inspector_signoff = CASE WHEN patch ? 'inspector_signoff' THEN (patch->>'inspector_signoff')::boolean ELSE inspector_signoff END,
         user_signoff = CASE WHEN patch ? 'user_signoff' THEN (patch->>'user_signoff')::boolean ELSE user_signoff END,

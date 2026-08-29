@@ -167,7 +167,6 @@ EDIT_FIELD_NAMES = {
     "needs_user_signoff",
     "commit_exempt",
     "regression",
-    "commit_hash",
     "audit_signoff",
     "inspector_signoff",
     "user_signoff",
@@ -1002,6 +1001,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         elif operation == "add_comment":
             patch = {"comment": {"who": caller, "text": str(payload.get("text", "")), "urgent": bool(payload.get("urgent", False))}}
         elif operation == "edit_fields":
+            if "commit_hash" in payload:
+                raise ValueError("commit_hash must be written with submit_to_audit or mark_done, not edit_fields")
             invalid_fields = sorted(set(payload) - EDIT_FIELD_NAMES)
             if invalid_fields:
                 raise ValueError(f"edit_fields cannot update: {', '.join(invalid_fields)}")

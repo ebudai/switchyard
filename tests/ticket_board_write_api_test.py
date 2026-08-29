@@ -1871,6 +1871,15 @@ LIMIT 1;
     assert edited["ticket"]["title"] == "Edited through action", edited  # type: ignore[index]
     invalid_edit = post_json(base_url, "/api/tickets/PGU-112/actions/edit_fields", {"state": "done"}, caller="app", expect=400)
     assert "edit_fields cannot update: state" in str(invalid_edit), invalid_edit
+    commit_hash_edit = post_json(
+        base_url,
+        "/api/tickets/PGU-112/actions/edit_fields",
+        {"commit_hash": commit_hash},
+        caller="app",
+        expect=400,
+    )
+    assert "commit_hash must be written with submit_to_audit or mark_done" in str(commit_hash_edit), commit_hash_edit
+    assert get_ticket(base_url, "PGU-112")["commit_hash"] == ""
     frame_attachment = frames / "api-frame-ref.png"
     Image.new("RGB", (2, 2), (40, 80, 120)).save(frame_attachment)
     attachment_edit = post_json(

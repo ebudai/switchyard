@@ -15,9 +15,10 @@ from scripts.ticket_board.frontend import HTML
 
 def main() -> int:
     assert "Commit Hash" in HTML
-    assert "Save Commit" in HTML
+    assert "Save Commit" not in HTML
     assert "No commit required" in HTML
-    assert "commit_hash: commitHashInput.value" in HTML
+    assert "await updateDetailTicket({ commit_hash: commitHashInput.value });" not in HTML
+    assert "{ commit_hash: patch.commit_hash || ticket?.commit_hash || '' }" in HTML
     assert "commit_exempt: checked" in HTML
     assert "A verified git commit is required before moving this ticket to done." in HTML
     print("done_commit_frontend_test: ok")

@@ -442,7 +442,6 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
         'needs_user_signoff',
         'commit_exempt',
         'regression',
-        'commit_hash',
         'audit_signoff',
         'inspector_signoff',
         'user_signoff',

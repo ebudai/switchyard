@@ -518,15 +518,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       commitHashInput.value = ticket.commit_hash || '';
       commitHashInput.placeholder = 'Required before done unless exempt';
       bindDetailDraftField(draftFields, commitHashInput, 'commitHash', commitHashInput.value);
-      const commitActions = document.createElement('div');
-      commitActions.className = 'inline-actions';
-      const saveCommitButton = document.createElement('button');
-      saveCommitButton.textContent = 'Save Commit';
-      saveCommitButton.addEventListener('click', async () => {
-        await updateDetailTicket({ commit_hash: commitHashInput.value });
-      });
-      commitActions.appendChild(saveCommitButton);
-      commitInfo.append(commitHashInput, commitActions);
+      commitInfo.append(commitHashInput);
       const commitOverride = toggleControl('No commit required', ticket.commit_exempt, async (checked) => {
         await updateDetailTicketForToggle({ commit_exempt: checked });
       });

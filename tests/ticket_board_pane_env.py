@@ -39,6 +39,7 @@ PANE_STATE_SOURCE_PREFIXES_BY_TARGET = {
     "pgu-inspector:0.0": ("gemini.", "team_launcher."),
 }
 PANE_STATE_STATES = frozenset({"idle", "busy", "blocked"})
+PANE_SESSION_RUNTIME_SOURCE_PREFIXES = ("codex.", "claude.", "gemini.")
 
 
 def strip_ticket_board_pane_env(environ: dict[str, str], *, keep: tuple[str, ...] = ()) -> dict[str, str]:
@@ -160,6 +161,32 @@ def snapshot_diff(
     return changed
 
 
+def pane_session_record_diff(
+    before: dict[str, dict[str, str] | None],
+    after: dict[str, dict[str, str] | None],
+) -> list[str]:
+    changed: list[str] = []
+    for root in sorted(set(before) | set(after)):
+        before_files = before.get(root)
+        after_files = after.get(root)
+        if before_files is None or after_files is None:
+            if before_files != after_files:
+                changed.append(root)
+            continue
+        for name in sorted(set(before_files) | set(after_files)):
+            before_hash = before_files.get(name)
+            after_hash = after_files.get(name)
+            if before_hash == after_hash:
+                continue
+            changed_path = f"{root}/{name}"
+            if before_hash is None or after_hash is None:
+                changed.append(changed_path)
+                continue
+            if not _pane_session_record_allows_live_rewrite(Path(root) / name):
+                changed.append(changed_path)
+    return changed
+
+
 def snapshot_file_set_diff(
     before: dict[str, set[str] | None],
     after: dict[str, set[str] | None],
@@ -204,6 +231,24 @@ def pane_state_record_anomalies(paths: list[Path]) -> list[str]:
 
 def pane_state_record_anomaly_diff(before: list[str], after: list[str]) -> list[str]:
     return sorted(set(after) - set(before))
+
+
+def _pane_session_record_allows_live_rewrite(path: Path) -> bool:
+    expected_target = pane_state_target_from_file_name(path.name)
+    if expected_target is None:
+        return False
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(record, dict):
+        return False
+    if str(record.get("target", "")) != expected_target:
+        return False
+    if not str(record.get("session_id", "")).strip():
+        return False
+    source = str(record.get("source", ""))
+    return source.startswith(PANE_SESSION_RUNTIME_SOURCE_PREFIXES)
 
 
 def _pane_state_record_anomaly_detail(path: Path, expected_target: str | None) -> str:

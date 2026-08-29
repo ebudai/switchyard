@@ -22,6 +22,7 @@ from typing import Any
 from ticket_board_pane_env import (
     candidate_live_pane_session_paths,
     candidate_live_pane_state_paths,
+    pane_session_record_diff,
     pane_state_record_anomalies,
     pane_state_record_anomaly_diff,
     snapshot_diff,
@@ -337,6 +338,84 @@ def test_session_dir_snapshot_detects_same_count_content_mutation() -> None:
         assert after is not None
         assert len(before) == len(after) == 1
         assert before != after
+
+
+def test_session_record_guard_tolerates_same_pane_runtime_rewrite() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        session_dir = Path(tmp) / "sessions"
+        session_dir.mkdir()
+        session_path = session_dir / "pgu-ops_0.0.json"
+        session_path.write_text(
+            json.dumps({"target": "pgu-ops:0.0", "session_id": "old-session", "source": "codex.SessionStart"}) + "\n",
+            encoding="utf-8",
+        )
+        before = snapshot_paths([session_dir])
+        session_path.write_text(
+            json.dumps({"target": "pgu-ops:0.0", "session_id": "new-session", "source": "codex.Stop"}) + "\n",
+            encoding="utf-8",
+        )
+
+        assert pane_session_record_diff(before, snapshot_paths([session_dir])) == []
+
+
+def test_session_record_guard_rejects_test_clobber_content() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        session_dir = Path(tmp) / "sessions"
+        session_dir.mkdir()
+        wrong_target_path = session_dir / "pgu-ops_0.0.json"
+        wrong_target_path.write_text(
+            json.dumps({"target": "pgu-ops:0.0", "session_id": "old-session", "source": "codex.SessionStart"}) + "\n",
+            encoding="utf-8",
+        )
+        before_wrong_target = snapshot_paths([session_dir])
+        wrong_target_path.write_text(
+            json.dumps({"target": "pgu-audit:0.0", "session_id": "clobbered-session", "source": "codex.Stop"}) + "\n",
+            encoding="utf-8",
+        )
+
+        assert pane_session_record_diff(before_wrong_target, snapshot_paths([session_dir])) == [
+            f"{session_dir}/pgu-ops_0.0.json"
+        ]
+
+        non_cli_source_path = session_dir / "pgu-audit_0.0.json"
+        non_cli_source_path.write_text(
+            json.dumps({"target": "pgu-audit:0.0", "session_id": "old-session", "source": "claude.SessionStart"}) + "\n",
+            encoding="utf-8",
+        )
+        before_non_cli_source = snapshot_paths([session_dir])
+        non_cli_source_path.write_text(
+            json.dumps({"target": "pgu-audit:0.0", "session_id": "clobbered-session", "source": "test.synthetic"}) + "\n",
+            encoding="utf-8",
+        )
+
+        assert pane_session_record_diff(before_non_cli_source, snapshot_paths([session_dir])) == [
+            f"{session_dir}/pgu-audit_0.0.json"
+        ]
+
+
+def test_session_record_guard_rejects_file_set_changes() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        session_dir = Path(tmp) / "sessions"
+        session_dir.mkdir()
+        session_path = session_dir / "pgu-ops_0.0.json"
+        session_path.write_text(
+            json.dumps({"target": "pgu-ops:0.0", "session_id": "old-session", "source": "codex.SessionStart"}) + "\n",
+            encoding="utf-8",
+        )
+        before_delete = snapshot_paths([session_dir])
+        session_path.unlink()
+        assert pane_session_record_diff(before_delete, snapshot_paths([session_dir])) == [
+            f"{session_dir}/pgu-ops_0.0.json"
+        ]
+
+        before_add = snapshot_paths([session_dir])
+        session_path.write_text(
+            json.dumps({"target": "pgu-ops:0.0", "session_id": "new-session", "source": "codex.SessionStart"}) + "\n",
+            encoding="utf-8",
+        )
+        assert pane_session_record_diff(before_add, snapshot_paths([session_dir])) == [
+            f"{session_dir}/pgu-ops_0.0.json"
+        ]
 
 
 def test_pane_state_snapshot_ignores_content_churn_but_detects_file_set_changes() -> None:
@@ -1720,14 +1799,18 @@ def main() -> int:
         run_module_tests(globals())
     finally:
         changed = [
-            *snapshot_diff(live_session_snapshot, snapshot_paths(live_session_paths)),
+            *pane_session_record_diff(live_session_snapshot, snapshot_paths(live_session_paths)),
             *snapshot_file_set_diff(live_pane_state_snapshot, snapshot_paths_file_set(live_pane_state_paths)),
             *pane_state_record_anomaly_diff(
                 live_pane_state_anomalies,
                 pane_state_record_anomalies(live_pane_state_paths),
             ),
         ]
-        assert not changed, changed
+        assert not changed, (
+            changed,
+            "Live pane hook state changed while the suite ran. This can also fire if a live pane rewrote "
+            "its own record while the suite ran; re-run on a quiet fleet to distinguish.",
+        )
     print("ticket_board_pane_hooks_install_test: ok")
     return 0
 

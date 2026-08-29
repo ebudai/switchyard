@@ -1002,6 +1002,26 @@ WHERE id = 'PGU-32';
                 conninfo,
                 "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-4';",
             )
+            insert_ticket(
+                conninfo,
+                "PGU-73601",
+                title="User review cannot silently bypass audit signoff",
+                assignee="user",
+                state="user_review",
+                implementation="done",
+                needs_user_signoff=True,
+                user_signoff=True,
+                audit_signoff=False,
+            )
+            assert_error(
+                conninfo,
+                "UPDATE ticket_board.tickets SET state = 'director_review' WHERE id = 'PGU-73601';",
+                "audit_signoff must be true before a ticket can enter director_review",
+            )
+            psql(
+                conninfo,
+                "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-73601';",
+            )
             assert_error(
                 conninfo,
                 "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-4';",

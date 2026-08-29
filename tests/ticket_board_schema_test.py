@@ -396,6 +396,12 @@ def main() -> int:
     assert "create or replace function ticket_board.enforce_ticket_workflow_update" in config_authoritative_migration
     assert "if not config_transition_allowed then" in config_authoritative_migration
     assert "if not hardcoded_transition_allowed then" not in config_authoritative_migration
+    director_review_gate_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu736_narrow_director_review_audit_signoff_gate.sql"
+    ).read_text(encoding="utf-8").lower()
+    audit_stage_exists_condition = "from ticket_board.workflow_stages ws\n           where ws.name = 'audit'"
+    assert audit_stage_exists_condition in enforce_update_function.group(1)
+    assert audit_stage_exists_condition in director_review_gate_migration
     assert "add column if not exists parked boolean not null default false" in schema_lower
     assert "add column if not exists regression boolean not null default false" in schema_lower
     assert "{7,40}" in schema, "commit_hash check must allow historical short hashes"

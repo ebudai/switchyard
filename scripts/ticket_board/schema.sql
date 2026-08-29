@@ -991,7 +991,11 @@ BEGIN
     IF OLD.state <> 'director_review'
        AND NEW.state = 'director_review'
        AND NOT NEW.audit_signoff
-       AND NOT ticket_board.workflow_transition_allowed_config(OLD.state, NEW.state) THEN
+       AND EXISTS (
+           SELECT 1
+           FROM ticket_board.workflow_stages ws
+           WHERE ws.name = 'audit'
+       ) THEN
         RAISE EXCEPTION 'audit_signoff must be true before a ticket can enter director_review';
     END IF;
     IF OLD.state = 'inspection' AND NEW.state = 'audit' AND NOT NEW.inspector_signoff THEN

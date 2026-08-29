@@ -22,7 +22,7 @@ def main() -> int:
     assert "return 'analysis';" in HTML
     assert "if (ticket.state === 'analysis') {" in HTML
     assert "return 'in_progress';" in HTML
-    assert "ticket.needs_audit !== false ? 'audit' : 'director_review'" in HTML
+    assert "ticket.needs_audit !== false ? 'audit' : (ticket.needs_user_signoff ? 'dat' : 'director_review')" in HTML
     assert "return ticket.needs_user_signoff ? 'dat' : 'director_review';" in HTML
     assert "if (ticket.state === 'dat') {" in HTML
     assert "return 'user_review';" in HTML

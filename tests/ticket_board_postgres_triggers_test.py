@@ -1166,6 +1166,89 @@ SET commit_exempt = true,
 WHERE id IN ('PGU-75901', 'PGU-75902', 'PGU-75903', 'PGU-75904');
 """,
             )
+            signoff_cases = [
+                ("PGU-75910", False, False, "director_review", "director", False, False),
+                ("PGU-75911", False, True, "dat", "director", False, False),
+                ("PGU-75912", True, False, "audit", "audit", False, False),
+                ("PGU-75913", True, True, "audit", "audit", False, False),
+            ]
+            for ticket_id, needs_audit, needs_user_signoff, expected_state, expected_assignee, expected_audit_signoff, expected_user_signoff in signoff_cases:
+                insert_ticket(
+                    conninfo,
+                    ticket_id,
+                    title=f"Audit/UAT matrix {ticket_id}",
+                    assignee="ops",
+                    state="in_progress",
+                    implementation="done",
+                    needs_audit=needs_audit,
+                    needs_user_signoff=needs_user_signoff,
+                )
+                service_call(conninfo, "ops", f"SELECT ticket_board.submit_to_audit('{ticket_id}', 'a7591{ticket_id[-2:]}');")
+                matrix_status = ticket_status(
+                    conninfo,
+                    ticket_id,
+                    (
+                        "'state', state, 'assignee', assignee, 'audit_signoff', audit_signoff, "
+                        "'needs_audit', needs_audit, 'needs_user_signoff', needs_user_signoff, "
+                        "'user_signoff', user_signoff"
+                    ),
+                )
+                assert matrix_status == {
+                    "state": expected_state,
+                    "assignee": expected_assignee,
+                    "audit_signoff": expected_audit_signoff,
+                    "needs_audit": needs_audit,
+                    "needs_user_signoff": needs_user_signoff,
+                    "user_signoff": expected_user_signoff,
+                }, matrix_status
+                if needs_audit:
+                    service_call(conninfo, "audit", f"SELECT ticket_board.audit_sign_off('{ticket_id}', 'Audit verified.');")
+                    after_audit_signoff = ticket_status(
+                        conninfo,
+                        ticket_id,
+                        "'state', state, 'assignee', assignee, 'audit_signoff', audit_signoff, 'user_signoff', user_signoff",
+                    )
+                    assert after_audit_signoff == {
+                        "state": "dat" if needs_user_signoff else "director_review",
+                        "assignee": "director",
+                        "audit_signoff": True,
+                        "user_signoff": False,
+                    }, after_audit_signoff
+                if needs_user_signoff:
+                    service_call(conninfo, "director", f"SELECT ticket_board.director_dat_sign_off('{ticket_id}', 'DAT accepted.');")
+                    uat_status = ticket_status(
+                        conninfo,
+                        ticket_id,
+                        "'state', state, 'assignee', assignee, 'audit_signoff', audit_signoff, 'user_signoff', user_signoff",
+                    )
+                    assert uat_status == {
+                        "state": "user_review",
+                        "assignee": "user",
+                        "audit_signoff": needs_audit,
+                        "user_signoff": False,
+                    }, uat_status
+                    service_call(conninfo, "user", f"SELECT ticket_board.user_sign_off('{ticket_id}', 'UAT accepted.');")
+                    user_signed_status = ticket_status(
+                        conninfo,
+                        ticket_id,
+                        "'state', state, 'assignee', assignee, 'audit_signoff', audit_signoff, 'user_signoff', user_signoff",
+                    )
+                    assert user_signed_status == {
+                        "state": "director_review",
+                        "assignee": "director",
+                        "audit_signoff": needs_audit,
+                        "user_signoff": True,
+                    }, user_signed_status
+                psql(conninfo, f"UPDATE ticket_board.tickets SET commit_exempt = true, state = 'done' WHERE id = '{ticket_id}';")
+            psql(
+                conninfo,
+                """
+UPDATE ticket_board.tickets
+SET commit_exempt = true,
+    state = 'done'
+WHERE id IN ('PGU-75910', 'PGU-75911', 'PGU-75912', 'PGU-75913');
+""",
+            )
             insert_ticket(
                 conninfo,
                 "PGU-75905",
@@ -1805,8 +1888,8 @@ WHERE id = 'PGU-9';
                 ).stdout
             )
             assert reaudit == {
-                "state": "audit",
-                "audit_signoff": False,
+                "state": "director_review",
+                "audit_signoff": True,
                 "needs_user_signoff": False,
                 "user_signoff": False,
             }, reaudit

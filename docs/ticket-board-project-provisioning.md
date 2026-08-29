@@ -22,11 +22,11 @@ The output directory contains:
 - `<project>-ticket-board.conf`: tmpfiles entry for the project frame inbox.
 - `<project>-database.sql`: PostgreSQL database/role bootstrap.
 - `<project>-workflow.sql`: per-project workflow seed. For new non-`pgu`
-  projects this replaces the default PGU workflow data with the five visible
-  stages `Draft`, `Triage`, `Implementation`, `Audit`, and `Final Sign-Off`.
+  projects this replaces the default PGU workflow data with the visible stages
+  `Draft`, `Triage`, `Implementation`, `Audit`, DAT, UAT, and `Final Sign-Off`.
   The generated `Audit` stage uses `entry_gate_field=needs_audit` and
-  `gate_skip_to=director_review`, so each ticket can opt out of audit while
-  still using the same workflow gate machinery as inspection and UAT.
+  `gate_skip_to=dat`, so each ticket can opt out of audit while still using
+  the same workflow gate machinery as inspection and UAT.
   The default implementation-stage owner is the generic caller role
   `implementer`; pass `--implementer-role <role>` more than once to seed a
   project-specific implementer set instead.

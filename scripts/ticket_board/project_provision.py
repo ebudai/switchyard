@@ -463,11 +463,15 @@ def render_workflow_sql(plan: ProjectBoardProvision) -> str:
         ("analysis", "Triage", 1, ("director",), None, None, None, False),
         ("in_progress", "Implementation", 2, implementation_owner_roles, None, None, None, False),
         *(
-            [("audit", "Audit", 3, ("audit",), "needs_audit", "director_review", "audit_signoff", False)]
+            [
+                ("audit", "Audit", 3, ("audit",), "needs_audit", "dat", "audit_signoff", False),
+                ("dat", "DAT", 4, ("director",), "needs_user_signoff", "director_review", None, False),
+                ("user_review", "UAT", 5, ("user",), "needs_user_signoff", "director_review", "user_signoff", False),
+            ]
             if include_audit
             else []
         ),
-        ("director_review", "Final Sign-Off", 4 if include_audit else 3, ("director",), None, None, None, False),
+        ("director_review", "Final Sign-Off", 6 if include_audit else 3, ("director",), None, None, None, False),
         ("done", "Done", 9, (), None, None, None, True),
         ("cancelled", "Cancelled", 10, (), None, None, None, True),
     ]
@@ -476,9 +480,22 @@ def render_workflow_sql(plan: ProjectBoardProvision) -> str:
         ("in_progress", "audit", "submit_to_audit", plan.implementer_roles, False, False),
         ("audit", "analysis", "route", ("director",), False, False),
         ("audit", "in_progress", "audit_kick_back", ("audit",), False, False),
+        ("audit", "dat", "audit_sign_off", ("audit",), False, False),
         ("audit", "director_review", "route", ("director",), False, False),
         ("audit", "director_review", "audit_sign_off", ("audit",), False, False),
         ("audit", "cancelled", "cancel", ("director",), False, False),
+        ("dat", "user_review", "director_dat_sign_off", ("director",), False, False),
+        ("dat", "in_progress", "director_dat_kick_back", ("director",), False, False),
+        ("dat", "analysis", "director_dat_kick_back", ("director",), False, False),
+        ("dat", "in_progress", "route", ("director",), False, False),
+        ("dat", "analysis", "route", ("director",), False, False),
+        ("dat", "cancelled", "cancel", ("director",), False, False),
+        ("analysis", "user_review", "route", ("director",), False, False),
+        ("user_review", "director_review", "user_sign_off", ("user",), False, False),
+        ("user_review", "audit", "route", ("director",), False, False),
+        ("user_review", "analysis", "user_reopen", ("user",), False, False),
+        ("user_review", "analysis", "route", ("director",), False, False),
+        ("user_review", "cancelled", "cancel", ("director",), False, False),
     ]
     auditless_transitions = [
         ("in_progress", "director_review", "submit_to_audit", plan.implementer_roles, False, False),

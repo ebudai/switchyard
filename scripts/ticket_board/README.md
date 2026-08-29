@@ -157,7 +157,7 @@ Notes:
 - `blocked_by` is a list of ticket IDs the ticket is waiting on; `blockers` carries the same IDs with a persistent `resolved` flag, and unresolved blockers prevent forward promotion until the referenced blocker reaches `done` or `cancelled`
 - `implementation` is an optional director-authored implementation package/spec; ticket body/comments can carry the spec, and only assignee must be set before entering Implementation (`in_progress`)
 - `in_progress` is displayed as Implementation and is limited to one active ticket per implementer; extra implementer work is auto-queued as assigned `backlog` with `parked: false`
-- `needs_audit` defaults to `true`; setting it to `false` deliberately skips the `audit` stage and sends completed implementation/inspection work to `director_review` without requiring `audit_signoff`
+- `needs_audit` defaults to `true`; setting it to `false` deliberately skips the `audit` stage, then sends completed implementation/inspection work to DAT when UAT is required or to `director_review` otherwise without requiring `audit_signoff`
 - `director_review` is displayed as Final Sign-Off and is the director's final gate before `done`
 - `audit_prompt` is retained for reference text but is optional in the default workflow
 - `commit_hash` stores the verified git commit associated with the ticket when it moves to `done`; it must be on `main`

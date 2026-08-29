@@ -407,7 +407,7 @@ def main() -> int:
     assert audit_stage_exists_condition in enforce_update_function.group(1)
     assert "and new.needs_audit\n       and exists" in enforce_update_function.group(1)
     assert audit_stage_exists_condition in director_review_gate_migration
-    assert "('audit', 'audit', 5, array['audit']::text[], 'needs_audit', 'director_review', 'audit_signoff', false)" in executable_schema_lower
+    assert "('audit', 'audit', 5, array['audit']::text[], 'needs_audit', 'dat', 'audit_signoff', false)" in executable_schema_lower
     assert "add column if not exists needs_audit boolean not null default true" in schema_lower
     assert "add column if not exists parked boolean not null default false" in schema_lower
     assert "add column if not exists regression boolean not null default false" in schema_lower

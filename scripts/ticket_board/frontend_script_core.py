@@ -311,10 +311,10 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         return 'in_progress';
       }
       if (ticket.state === 'in_progress') {
-        return ticket.needs_inspection ? 'inspection' : (hasState('audit') && ticket.needs_audit !== false ? 'audit' : 'director_review');
+        return ticket.needs_inspection ? 'inspection' : (hasState('audit') && ticket.needs_audit !== false ? 'audit' : (ticket.needs_user_signoff ? 'dat' : 'director_review'));
       }
       if (ticket.state === 'inspection') {
-        return hasState('audit') && ticket.needs_audit !== false ? 'audit' : 'director_review';
+        return hasState('audit') && ticket.needs_audit !== false ? 'audit' : (ticket.needs_user_signoff ? 'dat' : 'director_review');
       }
       if (ticket.state === 'audit') {
         return ticket.needs_user_signoff ? 'dat' : 'director_review';

@@ -311,7 +311,7 @@ INSERT INTO ticket_board.workflow_stages (
     ('analysis', 'Triage', 2, ARRAY['director']::text[], NULL, NULL, NULL, false),
     ('in_progress', 'Implementation', 3, ARRAY['main', 'app', 'ops', 'perf', 'research']::text[], NULL, NULL, NULL, false),
     ('inspection', 'Inspection', 4, ARRAY['inspector']::text[], 'needs_inspection', 'audit', 'inspector_signoff', false),
-    ('audit', 'Audit', 5, ARRAY['audit']::text[], 'needs_audit', 'director_review', 'audit_signoff', false),
+    ('audit', 'Audit', 5, ARRAY['audit']::text[], 'needs_audit', 'dat', 'audit_signoff', false),
     ('dat', 'DAT', 6, ARRAY['director']::text[], 'needs_user_signoff', 'director_review', NULL, false),
     ('user_review', 'UAT', 7, ARRAY['user']::text[], 'needs_user_signoff', 'director_review', 'user_signoff', false),
     ('director_review', 'Final Sign-Off', 8, ARRAY['director']::text[], NULL, NULL, NULL, false),
@@ -894,8 +894,7 @@ BEGIN
     IF NEW.state = 'dat'
        AND NOT NEW.needs_user_signoff
        AND (OLD.needs_user_signoff OR OLD.state IS DISTINCT FROM NEW.state) THEN
-        NEW.state := 'audit';
-        NEW.audit_signoff := false;
+        NEW.state := 'director_review';
     END IF;
     IF NEW.state = 'user_review'
        AND NOT NEW.needs_user_signoff
@@ -906,8 +905,7 @@ BEGIN
                AND OLD.state IS DISTINCT FROM 'analysis'
            )
        ) THEN
-        NEW.state := 'audit';
-        NEW.audit_signoff := false;
+        NEW.state := 'director_review';
     END IF;
     IF OLD.state = 'analysis' AND NEW.state = 'user_review' AND NEW.needs_user_signoff THEN
         RAISE EXCEPTION 'analysis -> user_review is only for user information requests with needs_user_signoff=false';
@@ -930,7 +928,7 @@ BEGIN
     END IF;
     transition_check_state := NEW.state;
     IF OLD.state IN ('in_progress', 'inspection') AND NEW.state = 'audit' AND NOT NEW.needs_audit THEN
-        NEW.state := 'director_review';
+        NEW.state := CASE WHEN NEW.needs_user_signoff THEN 'dat' ELSE 'director_review' END;
         NEW.audit_signoff := false;
     END IF;
     IF NEW.state = 'inspection' AND OLD.state IS DISTINCT FROM NEW.state THEN

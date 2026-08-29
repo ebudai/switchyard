@@ -301,6 +301,22 @@ def assert_submit_rejects_unpushed_commit(
         assert len(requests) == before, requests[before:]
 
 
+def assert_empty_caller_role_rejects_before_request(
+    base_url: str,
+    requests: list[tuple[str, str | None, str | None, dict[str, object]]],
+) -> None:
+    client = TicketBoardWriteClient(base_url, "")
+    before = len(requests)
+    try:
+        client.add_comment("PGU-125", text="Must not be sent.")
+    except ValueError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("empty caller role unexpectedly sent a write request")
+    assert "caller_role must be non-empty" in message, message
+    assert len(requests) == before, requests[before:]
+
+
 def assert_auto_socket_connect_failure_falls_back_to_tcp(base_url: str, socket_path: Path) -> None:
     socket_path.touch()
     socket_path.chmod(0)
@@ -427,6 +443,7 @@ def main() -> int:
                 base_url = f"http://127.0.0.1:{server.server_port}"
                 exercise_client(base_url, repo, pushed_hash)
                 assert_submit_rejects_unpushed_commit(base_url, repo, local_only_hash, server.requests)
+                assert_empty_caller_role_rejects_before_request(base_url, server.requests)
                 assert_socket_discovery_prefers_runtime_then_legacy(root)
                 assert_generic_socket_env_precedes_legacy(root)
                 assert_default_caller_role_ignores_tmux_session()

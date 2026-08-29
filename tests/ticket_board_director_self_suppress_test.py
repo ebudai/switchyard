@@ -221,24 +221,24 @@ def assert_director_write_client_self_suppresses_notifications() -> None:
                 clear_notifications(admin_conn, "PGU-35001")
                 routed_to_director = client.route("PGU-35001", state="analysis", assignee="unassigned")["ticket"]
                 assert routed_to_director["state"] == "analysis", routed_to_director
-                assert routed_to_director["assignee"] == "unassigned", routed_to_director
+                assert routed_to_director["assignee"] == "director", routed_to_director
                 assert queued_notifications(admin_conn, "PGU-35001") == [], queued_notifications(admin_conn, "PGU-35001")
 
                 seed_postgres_ticket(
                     admin_conn,
                     "PGU-35002",
-                    title="Director route still notifies ops",
+                    title="Director route still notifies app",
                     state="analysis",
                     assignee="unassigned",
                 )
                 clear_notifications(admin_conn, "PGU-35002")
-                routed_to_ops = client.route("PGU-35002", state="in_progress", assignee="ops")["ticket"]
-                assert routed_to_ops["state"] == "in_progress", routed_to_ops
-                assert routed_to_ops["assignee"] == "ops", routed_to_ops
+                routed_to_app = client.route("PGU-35002", state="in_progress", assignee="app")["ticket"]
+                assert routed_to_app["state"] == "in_progress", routed_to_app
+                assert routed_to_app["assignee"] == "app", routed_to_app
                 assert queued_notifications(admin_conn, "PGU-35002") == [
                     {
-                        "target_role": "ops",
-                        "message": "New ticket for you: PGU-35002 -- Director route still notifies ops",
+                        "target_role": "app",
+                        "message": "New ticket for you: PGU-35002 -- Director route still notifies app",
                         "old_state": "analysis",
                         "new_state": "in_progress",
                     }

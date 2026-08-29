@@ -29,7 +29,17 @@ except ModuleNotFoundError:
     )
 
 from scripts.ticket_board.app import TicketBoardApp
-from scripts.ticket_board.server import CALLER_ROLE_HEADER, LEGACY_CALLER_ROLE_HEADER, LEGACY_WRITE_TOKEN_HEADER, WRITE_TOKEN_HEADER, TicketBoardServer
+from scripts.ticket_board.server import (
+    CALLER_ROLE_HEADER,
+    LEGACY_CALLER_ROLE_HEADER,
+    LEGACY_WRITE_TOKEN_HEADER,
+    WRITE_TOKEN_HEADER,
+    CallerRegistry,
+    TicketBoardEventHub,
+    TicketBoardServer,
+    TicketBoardUnixServer,
+)
+from scripts.ticket_board.write_client import TicketBoardWriteClient, TicketBoardWriteError
 
 
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
@@ -657,6 +667,16 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     assert created["assignee"] == "unassigned", created  # type: ignore[index]
     assert created["needs_audit"] is True, created  # type: ignore[index]
 
+    user_default_audit_created_payload = post_json(
+        base_url,
+        "/api/tickets/actions/create_ticket",
+        {"title": "User default-audit create", "body": "User keeps audit enabled.", "needs_audit": True},
+        caller="user",
+        expect=201,
+    )
+    user_default_audit_created = user_default_audit_created_payload["ticket"]  # type: ignore[index]
+    assert user_default_audit_created["needs_audit"] is True, user_default_audit_created  # type: ignore[index]
+
     no_audit_created_payload = post_json(
         base_url,
         "/api/tickets/actions/create_ticket",
@@ -678,7 +698,7 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
         caller="user",
         expect=403,
     )
-    assert "needs_audit can only be set by director" in str(no_audit_create_forbidden), no_audit_create_forbidden
+    assert "needs_audit can only be set to false by director" in str(no_audit_create_forbidden), no_audit_create_forbidden
 
     backlog_created_payload = post_json(
         base_url,
@@ -813,7 +833,7 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
         caller="ops",
         expect=403,
     )
-    assert "needs_audit can only be set by director" in str(no_audit_file_bug_forbidden), no_audit_file_bug_forbidden
+    assert "needs_audit can only be set to false by director" in str(no_audit_file_bug_forbidden), no_audit_file_bug_forbidden
     blocked_file_bug_payload = post_json(
         base_url,
         "/api/tickets/actions/file_bug",
@@ -1225,7 +1245,7 @@ WHERE id = 'PGU-141';
         caller="app",
         expect=403,
     )
-    assert "needs_audit can only be edited by director" in str(audit_field_forbidden), audit_field_forbidden
+    assert "needs_audit can only be set to false by director" in str(audit_field_forbidden), audit_field_forbidden
     audit_field_director = post_json(
         base_url,
         "/api/tickets/PGU-112/actions/edit_fields",
@@ -1669,6 +1689,44 @@ LIMIT 1;
     assert "regression" in merged_source, merged_source
 
 
+def exercise_real_write_client_file_bug_payload(app: TicketBoardApp, socket_path: Path) -> None:
+    events = TicketBoardEventHub(app)
+    server = TicketBoardUnixServer(
+        socket_path,
+        app,
+        events=events,
+        director_notifier=QuietNotifier(),
+        caller_registry=CallerRegistry(),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        client = TicketBoardWriteClient(socket_path=str(socket_path), caller_role="ops")
+        filed = client.file_bug(
+            title="Real write client file bug",
+            body="Default needs_audit=true must not trip the director-only skip guard.",
+            source_ticket_id="PGU-100",
+        )["ticket"]
+        assert filed["parent_id"] == "PGU-100", filed
+        assert filed["needs_audit"] is True, filed
+        forbidden = client.file_bug(
+            title="Real write client forbidden no-audit file bug",
+            body="Only director can turn audit off.",
+            source_ticket_id="PGU-100",
+            needs_audit=False,
+        )
+    except TicketBoardWriteError as exc:
+        if "needs_audit can only be set to false by director" not in str(exc):
+            raise
+    else:
+        raise AssertionError(f"needs_audit=false unexpectedly succeeded: {forbidden}")
+    finally:
+        server.shutdown()
+        server.server_close()
+        events.close()
+        thread.join(timeout=2)
+
+
 def exercise_postgres_backend(commit_hash: str) -> None:
     with tempfile.TemporaryDirectory(prefix="ticket-board-write-api-postgres.") as tmpdir:
         root = Path(tmpdir)
@@ -1722,6 +1780,7 @@ WHERE table_schema = 'ticket_board'
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=2)
+            exercise_real_write_client_file_bug_payload(app, root / "ticket-board.sock")
         finally:
             subprocess.run(
                 ["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"],

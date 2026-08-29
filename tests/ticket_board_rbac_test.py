@@ -23,9 +23,11 @@ WRITE_FUNCTIONS = [
     "ticket_board.create_ticket(text,text,text)",
     "ticket_board.create_ticket(text,text,text,text[],text)",
     "ticket_board.create_ticket(text,text,text,text[],text,boolean)",
+    "ticket_board.create_ticket(text,text,text,text[],text,boolean,boolean)",
     "ticket_board.file_bug(text,text,text)",
     "ticket_board.file_bug(text,text,text,text)",
     "ticket_board.file_bug(text,text,text,text,text[],text)",
+    "ticket_board.file_bug(text,text,text,text,text[],text,boolean)",
     "ticket_board.release_draft(text)",
     "ticket_board.route(text,text,text)",
     "ticket_board.force_move(text,text,text,boolean)",
@@ -1049,6 +1051,30 @@ SELECT ticket_board.edit_fields('PGU-811', '{"commit_exempt":true}'::jsonb);
     psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '' WHERE id = 'PGU-811';")
     psql(admin_conn, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-811';")
     psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-811';")
+
+    insert_ticket(admin_conn, "PGU-812", title="Needs audit director gate", state="analysis")
+    psql(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'ops', false);
+SELECT ticket_board.edit_fields('PGU-812', '{"needs_audit":true}'::jsonb);
+""",
+    )
+    assert "needs_audit can only be set to false by director" in psql_error(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'ops', false);
+SELECT ticket_board.edit_fields('PGU-812', '{"needs_audit":false}'::jsonb);
+""",
+    )
+    psql(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'director', false);
+SELECT ticket_board.edit_fields('PGU-812', '{"needs_audit":false}'::jsonb);
+""",
+    )
+    assert psql(admin_conn, "SELECT needs_audit FROM ticket_board.tickets WHERE id = 'PGU-812';") == "f"
 
     insert_ticket(admin_conn, "PGU-820", title="Merge source", state="analysis")
     insert_ticket(admin_conn, "PGU-821", title="Merge target", state="analysis")

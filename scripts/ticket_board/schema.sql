@@ -4033,6 +4033,9 @@ DECLARE
     created_text_value text := ticket_board.utc_text(created_at_value);
 BEGIN
     actor := ticket_board.require_actor(ARRAY['director', 'user'], 'create_ticket');
+    IF NOT coalesce(needs_audit, true) AND ticket_board.current_app_actor() <> 'director' THEN
+        RAISE EXCEPTION 'needs_audit can only be set to false by director' USING ERRCODE = '42501';
+    END IF;
     IF btrim(coalesce(title, '')) = '' THEN
         RAISE EXCEPTION 'title must be non-empty';
     END IF;
@@ -4195,6 +4198,9 @@ BEGIN
     IF actor = 'ticket_board_service' THEN
         PERFORM ticket_board.require_actor(ARRAY['main', 'app', 'ops', 'perf', 'research', 'audit'], 'file_bug');
         actor := ticket_board.current_app_actor();
+    END IF;
+    IF NOT coalesce(needs_audit, true) AND actor <> 'director' THEN
+        RAISE EXCEPTION 'needs_audit can only be set to false by director' USING ERRCODE = '42501';
     END IF;
     IF actor <> 'ticket_board_service'
        AND actor <> 'audit'
@@ -5360,8 +5366,10 @@ BEGIN
     IF patch ? 'needs_inspection' AND ticket_board.current_app_actor() <> 'director' THEN
         RAISE EXCEPTION 'needs_inspection can only be edited by director' USING ERRCODE = '42501';
     END IF;
-    IF patch ? 'needs_audit' AND ticket_board.current_app_actor() <> 'director' THEN
-        RAISE EXCEPTION 'needs_audit can only be edited by director' USING ERRCODE = '42501';
+    IF patch ? 'needs_audit'
+       AND (patch->>'needs_audit')::boolean = false
+       AND ticket_board.current_app_actor() <> 'director' THEN
+        RAISE EXCEPTION 'needs_audit can only be set to false by director' USING ERRCODE = '42501';
     END IF;
     IF patch ? 'commit_exempt' AND ticket_board.current_app_actor() <> 'director' THEN
         RAISE EXCEPTION 'commit_exempt can only be edited by director' USING ERRCODE = '42501';

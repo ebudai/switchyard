@@ -18,8 +18,9 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import unicodedata
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -5210,13 +5211,23 @@ class OwnerUserProvisionResult:
 
 
 @dataclass(frozen=True)
+class CodexHookTrustMismatch:
+    role: str
+    event: str
+    hook_key: str
+    expected_hash: str
+    trusted_hash: str
+
+
+@dataclass(frozen=True)
 class FirstRunAuthReport:
     unauthenticated_roles: dict[str, list[str]]
     untrusted_roles: list[tuple[str, str, str]]
+    stale_codex_hook_trust: list[CodexHookTrustMismatch] = field(default_factory=list)
 
     @property
     def has_warnings(self) -> bool:
-        return bool(self.unauthenticated_roles or self.untrusted_roles)
+        return bool(self.unauthenticated_roles or self.untrusted_roles or self.stale_codex_hook_trust)
 
 
 FIRST_RUN_AUTH_STATUS_COMMANDS: dict[str, list[str]] = {
@@ -5698,6 +5709,14 @@ def _read_json_object(path: Path) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _read_toml_object(path: Path) -> dict[str, Any]:
+    try:
+        parsed = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _claude_workdir_is_trusted(owner_home: Path, workdir: Path) -> bool:
     config = _read_json_object(owner_home / ".claude.json")
     projects = config.get("projects")
@@ -5737,6 +5756,152 @@ def _first_run_trust_command(role: RoleConfig) -> list[str]:
     # Trust is directory-scoped, so the minimal interactive CLI is enough to collect it.
     # Detached roles do not have a visible pane where the prompt can appear.
     return list(role.cli)
+
+
+_CODEX_HOOK_EVENT_KEYS = {
+    "PreToolUse": "pre_tool_use",
+    "PermissionRequest": "permission_request",
+    "PostToolUse": "post_tool_use",
+    "PreCompact": "pre_compact",
+    "PostCompact": "post_compact",
+    "SessionStart": "session_start",
+    "SessionEnd": "session_end",
+    "UserPromptSubmit": "user_prompt_submit",
+    "SubagentStart": "subagent_start",
+    "SubagentStop": "subagent_stop",
+    "Stop": "stop",
+    "Interrupt": "interrupt",
+}
+_CODEX_ADDITIONAL_CONTEXT_EVENTS = frozenset(
+    {"pre_tool_use", "post_tool_use", "session_start", "user_prompt_submit", "subagent_start"}
+)
+_CODEX_DEFAULT_ADDITIONAL_CONTEXT_LIMIT = 2500
+
+
+def _codex_hook_event_key(event: str) -> str:
+    if event in _CODEX_HOOK_EVENT_KEYS.values():
+        return event
+    mapped = _CODEX_HOOK_EVENT_KEYS.get(event)
+    if mapped:
+        return mapped
+    pieces = re.sub(r"(?<!^)(?=[A-Z])", "_", event).lower()
+    return pieces.replace("-", "_")
+
+
+def _codex_hook_timeout(event_key: str, raw_timeout: Any) -> int:
+    try:
+        timeout = int(raw_timeout) if raw_timeout is not None else None
+    except (TypeError, ValueError):
+        timeout = None
+    if event_key in {"session_end", "interrupt"}:
+        return max(1, min(timeout if timeout is not None else 1, 3))
+    return max(1, timeout if timeout is not None else 600)
+
+
+def _codex_hook_current_hash(event_key: str, group: dict[str, Any], handler: dict[str, Any]) -> str:
+    command = str(handler.get("command") or "")
+    normalized_handler: dict[str, Any] = {
+        "async": bool(handler.get("async", False)),
+        "command": command,
+        "timeout": _codex_hook_timeout(event_key, handler.get("timeout")),
+        "type": "command",
+    }
+    status_message = handler.get("statusMessage")
+    if isinstance(status_message, str):
+        normalized_handler["statusMessage"] = status_message
+    additional_context_limit = handler.get("additionalContextLimit")
+    if (
+        isinstance(additional_context_limit, int)
+        and event_key in _CODEX_ADDITIONAL_CONTEXT_EVENTS
+        and additional_context_limit != _CODEX_DEFAULT_ADDITIONAL_CONTEXT_LIMIT
+    ):
+        normalized_handler["additionalContextLimit"] = additional_context_limit
+
+    identity: dict[str, Any] = {
+        "event_name": event_key,
+        "hooks": [normalized_handler],
+    }
+    matcher = group.get("matcher")
+    if isinstance(matcher, str):
+        identity["matcher"] = matcher
+    serialized = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return f"sha256:{hashlib.sha256(serialized).hexdigest()}"
+
+
+def _codex_command_hook_trust_entries(owner_home: Path) -> list[tuple[str, str, str]]:
+    hooks_path = owner_home / ".codex" / "hooks.json"
+    hooks_config = _read_json_object(hooks_path)
+    hooks = hooks_config.get("hooks")
+    if not isinstance(hooks, dict):
+        return []
+    entries: list[tuple[str, str, str]] = []
+    for event_name, groups in hooks.items():
+        if not isinstance(groups, list):
+            continue
+        event_key = _codex_hook_event_key(str(event_name))
+        for group_index, group in enumerate(groups):
+            if not isinstance(group, dict):
+                continue
+            handlers = group.get("hooks")
+            if not isinstance(handlers, list):
+                continue
+            for handler_index, handler in enumerate(handlers):
+                if not isinstance(handler, dict) or handler.get("type") != "command":
+                    continue
+                command = str(handler.get("command") or "").strip()
+                if not command:
+                    continue
+                hook_key = f"{hooks_path}:{event_key}:{group_index}:{handler_index}"
+                entries.append((event_key, hook_key, _codex_hook_current_hash(event_key, group, handler)))
+    return entries
+
+
+def _codex_trusted_hashes(owner_home: Path) -> dict[str, str]:
+    config = _read_toml_object(owner_home / ".codex" / "config.toml")
+    hooks = config.get("hooks")
+    if not isinstance(hooks, dict):
+        return {}
+    state = hooks.get("state")
+    if not isinstance(state, dict):
+        return {}
+    trusted: dict[str, str] = {}
+    for hook_key, value in state.items():
+        if not isinstance(value, dict):
+            continue
+        trusted_hash = value.get("trusted_hash")
+        if isinstance(trusted_hash, str):
+            trusted[str(hook_key)] = trusted_hash
+    return trusted
+
+
+def stale_codex_hook_trust_for_roles(
+    roles: Sequence[RoleConfig],
+    *,
+    owner_home: Path,
+) -> list[CodexHookTrustMismatch]:
+    codex_roles = [role for role in roles if _role_cli_name(role) == "codex"]
+    if not codex_roles:
+        return []
+    hook_entries = _codex_command_hook_trust_entries(owner_home)
+    if not hook_entries:
+        return []
+    trusted_hashes = _codex_trusted_hashes(owner_home)
+    mismatches: list[CodexHookTrustMismatch] = []
+    for role in codex_roles:
+        for event_key, hook_key, expected_hash in hook_entries:
+            trusted_hash = trusted_hashes.get(hook_key, "")
+            if trusted_hash == expected_hash:
+                continue
+            mismatches.append(
+                CodexHookTrustMismatch(
+                    role=role.role,
+                    event=event_key,
+                    hook_key=hook_key,
+                    expected_hash=expected_hash,
+                    trusted_hash=trusted_hash,
+                )
+            )
+    return mismatches
 
 
 def _prepare_first_run_auth_worktrees(
@@ -5819,7 +5984,14 @@ def run_first_run_auth_phase(
         if not _workdir_is_trusted(cli, owner_home=effective_home, workdir=workdir):
             untrusted.append((cli, role.role, str(workdir)))
 
-    return FirstRunAuthReport(unauthenticated, untrusted)
+    stale_codex_hook_trust = stale_codex_hook_trust_for_roles(config.roles, owner_home=effective_home)
+    for mismatch in stale_codex_hook_trust:
+        print_func(
+            f"switchyard: first-run codex hook trust stale for {mismatch.role} event {mismatch.event}; "
+            "run /hooks in Codex as the project owner and approve the changed hook"
+        )
+
+    return FirstRunAuthReport(unauthenticated, untrusted, stale_codex_hook_trust)
 
 
 def report_first_run_auth_warnings(
@@ -5833,6 +6005,11 @@ def report_first_run_auth_warnings(
         )
     for cli, role, workdir in report.untrusted_roles:
         print_func(f"warning: switchyard: {cli} workspace still untrusted for {role}: {workdir}")
+    for mismatch in report.stale_codex_hook_trust:
+        print_func(
+            f"warning: switchyard: codex hook trust stale for {mismatch.role} event {mismatch.event}; "
+            f"run /hooks in Codex to approve {mismatch.hook_key}"
+        )
 
 
 def run_switchyard_launch_first_run_auth(

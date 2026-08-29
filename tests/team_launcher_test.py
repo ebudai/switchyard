@@ -11393,6 +11393,68 @@ class FirstRunAuthRunner:
         return subprocess.CompletedProcess(args, 0)
 
 
+def _write_codex_first_run_hooks(owner_home: Path) -> None:
+    hooks_path = owner_home / ".codex" / "hooks.json"
+    hooks_path.parent.mkdir(parents=True, exist_ok=True)
+    hooks_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "SessionStart": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": (
+                                        "/home/otto-agent/.local/bin/ticket-board-pane-idle-hook "
+                                        "idle --source codex.SessionStart --state-dir "
+                                        "/run/user/1001/otto-ticket-board/pane-state --session-dir "
+                                        "/home/otto-agent/.local/state/otto-ticket-board/pane-sessions --record-session"
+                                    ),
+                                }
+                            ]
+                        }
+                    ],
+                    "Stop": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": (
+                                        "/home/otto-agent/.local/bin/ticket-board-pane-idle-hook "
+                                        "idle --source codex.Stop --state-dir "
+                                        "/run/user/1001/otto-ticket-board/pane-state --session-dir "
+                                        "/home/otto-agent/.local/state/otto-ticket-board/pane-sessions"
+                                    ),
+                                }
+                            ]
+                        }
+                    ],
+                }
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_matching_codex_hook_trust(owner_home: Path) -> None:
+    entries = team_launcher._codex_command_hook_trust_entries(owner_home)
+    config_path = owner_home / ".codex" / "config.toml"
+    lines = ["[hooks.state]", ""]
+    for _event, hook_key, current_hash in entries:
+        lines.extend(
+            [
+                f'[hooks.state."{hook_key}"]',
+                f'trusted_hash = "{current_hash}"',
+                "",
+            ]
+        )
+    config_path.write_text("\n".join(lines), encoding="utf-8")
+
+
 def test_first_run_auth_phase_is_silent_when_auth_and_trust_already_pass() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-first-run-auth.") as tmp:
         tmp_path = Path(tmp)
@@ -11459,6 +11521,106 @@ def test_first_run_auth_phase_is_silent_when_auth_and_trust_already_pass() -> No
         ["sudo", "-u", "otto-agent", "agy", "models"],
     ]
     assert {kwargs.get("cwd") for kwargs in runner.call_kwargs} == {str(owner_home)}
+
+
+def test_first_run_auth_phase_reports_stale_codex_hook_trust_without_writing_config() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-first-run-codex-hooks.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        _write_codex_first_run_hooks(owner_home)
+        config_path = owner_home / ".codex" / "config.toml"
+        original_config = "[hooks.state]\n"
+        config_path.write_text(original_config, encoding="utf-8")
+        config = load_project_config(
+            "otto",
+            _write_first_run_auth_config(tmp_path, roles=[("ops", "codex"), ("main", "codex")]),
+        )
+        runner = FirstRunAuthRunner()
+        runner.login_seen.add("codex")
+        messages: list[str] = []
+
+        report = team_launcher.run_first_run_auth_phase(
+            config,
+            owner_user="otto-agent",
+            owner_home=owner_home,
+            runner=runner,
+            print_func=messages.append,
+        )
+        after_config = config_path.read_text(encoding="utf-8")
+
+    assert report.unauthenticated_roles == {}
+    assert report.untrusted_roles == []
+    assert {(item.role, item.event) for item in report.stale_codex_hook_trust} == {
+        ("ops", "session_start"),
+        ("ops", "stop"),
+        ("main", "session_start"),
+        ("main", "stop"),
+    }
+    assert after_config == original_config
+    assert runner.calls == [["sudo", "-u", "otto-agent", "codex", "login", "status"]]
+    assert all("first-run codex hook trust stale" in message and "/hooks" in message for message in messages)
+    output: list[str] = []
+    team_launcher.report_first_run_auth_warnings(report, print_func=output.append)
+    assert len(output) == 4
+    assert all("warning: switchyard: codex hook trust stale" in message for message in output)
+
+
+def test_first_run_auth_phase_accepts_matching_codex_hook_trust_without_writing_config() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-first-run-codex-hooks-clean.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        _write_codex_first_run_hooks(owner_home)
+        _write_matching_codex_hook_trust(owner_home)
+        original_config = (owner_home / ".codex" / "config.toml").read_text(encoding="utf-8")
+        config = load_project_config(
+            "otto",
+            _write_first_run_auth_config(tmp_path, roles=[("ops", "codex")]),
+        )
+        runner = FirstRunAuthRunner()
+        runner.login_seen.add("codex")
+        messages: list[str] = []
+
+        report = team_launcher.run_first_run_auth_phase(
+            config,
+            owner_user="otto-agent",
+            owner_home=owner_home,
+            runner=runner,
+            print_func=messages.append,
+        )
+        after_config = (owner_home / ".codex" / "config.toml").read_text(encoding="utf-8")
+
+    assert report == team_launcher.FirstRunAuthReport({}, [])
+    assert messages == []
+    assert after_config == original_config
+
+
+def test_first_run_auth_phase_ignores_codex_role_with_no_installed_hooks() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-first-run-codex-no-hooks.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        config = load_project_config(
+            "otto",
+            _write_first_run_auth_config(tmp_path, roles=[("ops", "codex")]),
+        )
+        runner = FirstRunAuthRunner()
+        runner.login_seen.add("codex")
+        messages: list[str] = []
+
+        report = team_launcher.run_first_run_auth_phase(
+            config,
+            owner_user="otto-agent",
+            owner_home=owner_home,
+            runner=runner,
+            print_func=messages.append,
+        )
+        config_written = (owner_home / ".codex" / "config.toml").exists()
+
+    assert report == team_launcher.FirstRunAuthReport({}, [])
+    assert messages == []
+    assert not config_written
 
 
 def test_first_run_auth_phase_does_not_sudo_wrap_same_owner() -> None:

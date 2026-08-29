@@ -410,10 +410,32 @@ SELECT set_config('ticket_board.caller_role', 'director', false);
 SELECT ticket_board.create_ticket('Bad direct create', 'Body', 'in_progress');
 """,
     )
+    assert "needs_audit can only be set to false by director" in psql_error(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'user', false);
+SELECT ticket_board.create_ticket('User cannot skip audit', 'Body', 'analysis', ARRAY[]::text[], '', false, false);
+""",
+    )
+    no_audit_director_created = psql(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'director', false);
+SELECT ticket_board.create_ticket('Director can skip audit', 'Body', 'analysis', ARRAY[]::text[], '', false, false);
+""",
+    ).splitlines()[-1]
+    assert psql(admin_conn, f"SELECT needs_audit FROM ticket_board.tickets WHERE id = {sql_string(no_audit_director_created)};") == "f"
 
     insert_ticket(admin_conn, "PGU-100", title="Source")
     filed = psql(service_conn, "SELECT ticket_board.file_bug('Service bug', 'Body', 'PGU-100');")
     assert psql(admin_conn, f"SELECT parent_id FROM ticket_board.tickets WHERE id = {sql_string(filed)};") == "PGU-100"
+    assert "needs_audit can only be set to false by director" in psql_error(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'ops', false);
+SELECT ticket_board.file_bug('Ops cannot skip audit bug', 'Body', 'PGU-100', 'ops', ARRAY[]::text[], '', false);
+""",
+    )
     insert_ticket(admin_conn, "PGU-180", title="Assignable source")
     filed_assigned = psql(
         service_conn,

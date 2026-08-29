@@ -7398,6 +7398,103 @@ def test_attach_headless_role_without_live_session_or_record_refuses_fresh_start
         assert not any(call[:2] in (["tmux", "new-session"], ["tmux", "kill-session"]) for call in runner.calls)
 
 
+def test_attach_headless_role_unverified_resume_does_not_mutate_config() -> None:
+    class UnverifiedResumeRunner(FakeRunner):
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            if args[:3] == ["tmux", "new-session", "-d"]:
+                self.calls.append(args)
+                self.existing_sessions.add(args[args.index("-s") + 1])
+                return subprocess.CompletedProcess(args, 0)
+            return super().__call__(args, **kwargs)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-surface-unverified.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text(
+            json.dumps(
+                {
+                    "Orientation": "Horizontal",
+                    "Widgets": [
+                        {"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""},
+                        {"Command": "", "SessionRestoreId": 1, "WorkingDirectory": ""},
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "session_dir": str(tmp_path / "sessions"),
+                    "roles": [
+                        {"role": "director", "slot": 0, "target": "porter-director:0.0", "tmux_session": "porter-director", "cli": ["claude"]},
+                        {"role": "worker7", "detached": True, "target": "porter-worker7:0.0", "tmux_session": "porter-worker7", "cli": ["codex"]},
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+        worker = next(role for role in config.roles if role.role == "worker7")
+        session_id = "12345678-1234-5678-9abc-def012345678"
+        transcript = tmp_path / "codex-session.jsonl"
+        transcript.write_text("{}\n", encoding="utf-8")
+        config.session_dir.mkdir(parents=True)
+        (config.session_dir / session_file_name(worker.target)).write_text(
+            _session_payload(worker.target, session_id, {"transcript_path": str(transcript)}),
+            encoding="utf-8",
+        )
+        before = config_path.read_text(encoding="utf-8")
+        runner = UnverifiedResumeRunner()
+        messages: list[str] = []
+        stderr = StringIO()
+        original_timeout = team_launcher.RESUME_STARTUP_TIMEOUT_SECONDS
+        original_poll = team_launcher.RESUME_STARTUP_POLL_SECONDS
+
+        try:
+            team_launcher.RESUME_STARTUP_TIMEOUT_SECONDS = 0.02
+            team_launcher.RESUME_STARTUP_POLL_SECONDS = 0.001
+            with redirect_stderr(stderr):
+                assert (
+                    team_launcher.attach_role_to_slot(
+                        config,
+                        config_path=config_path,
+                        role_name="worker7",
+                        slot=1,
+                        session_dir=config.session_dir,
+                        pane_state_dir=tmp_path / "pane-state",
+                        runner=runner,
+                        print_func=messages.append,
+                    )
+                    == 1
+                )
+        finally:
+            team_launcher.RESUME_STARTUP_TIMEOUT_SECONDS = original_timeout
+            team_launcher.RESUME_STARTUP_POLL_SECONDS = original_poll
+
+        assert config_path.read_text(encoding="utf-8") == before
+        assert runner.existing_sessions == {"porter-worker7"}
+        assert (config.session_dir / session_file_name(worker.target)).exists()
+        assert any(call[:5] == ["tmux", "new-session", "-d", "-s", "porter-worker7"] for call in runner.calls)
+        assert not any(call[:3] == ["tmux", "attach", "-t"] for call in runner.calls)
+        assert not any(call[:2] == ["tmux", "kill-session"] for call in runner.calls)
+        assert messages == []
+        assert stderr.getvalue() == (
+            f"team-launcher: resume for worker7 using session {session_id} was not verified; "
+            "leaving tmux session and session record intact\n"
+        )
+
+
 def test_detach_visible_role_updates_config_and_leaves_session_running() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-surface-detach.") as tmp:
         tmp_path = Path(tmp)

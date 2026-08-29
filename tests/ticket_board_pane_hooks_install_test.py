@@ -7,6 +7,8 @@ import json
 import importlib.machinery
 import importlib.util
 import os
+import shlex
+import shutil
 import threading
 import subprocess
 import sys
@@ -1628,6 +1630,82 @@ def test_hook_without_target_is_silent_noop() -> None:
         assert no_dir_proc.returncode == 0
         assert no_dir_proc.stdout == ""
         assert no_dir_proc.stderr == ""
+        assert not (tmp_path / "run").exists()
+        assert not (tmp_path / "state-home").exists()
+
+
+def test_hook_ignores_tmux_pane_without_explicit_target() -> None:
+    if shutil.which("tmux") is None:
+        return
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks-tmux-no-target.") as tmp:
+        tmp_path = Path(tmp)
+        server = f"pgu731-hook-{os.getpid()}"
+        session = "work"
+        done_signal = "pgu731-hook-done"
+        state_dir = tmp_path / "state"
+        session_dir = tmp_path / "sessions"
+        out_path = tmp_path / "hook.out"
+        err_path = tmp_path / "hook.err"
+        status_path = tmp_path / "hook.status"
+        hook_path = ROOT / "scripts" / HOOK_NAME
+        runner = tmp_path / "run-hook.sh"
+        runner.write_text(
+            "#!/bin/sh\n"
+            "printf '%s' '{\"session_id\":\"human-session\"}' | "
+            "env "
+            "-u TICKET_BOARD_PANE_TARGET "
+            "-u PGU_PANE_TARGET "
+            "-u TICKET_BOARD_PROJECT "
+            "-u PGU_TICKET_BOARD_PROJECT "
+            "-u TICKET_BOARD_PANE_STATE_DIR "
+            "-u PGU_TICKET_BOARD_PANE_STATE_DIR "
+            "-u TICKET_BOARD_PANE_SESSION_DIR "
+            "-u PGU_TICKET_BOARD_PANE_SESSION_DIR "
+            "-u TICKET_BOARD_PANE_SESSION_ID "
+            "-u PGU_PANE_SESSION_ID "
+            "-u CODEX_SESSION_ID "
+            "-u CLAUDE_SESSION_ID "
+            f"HOME={shlex.quote(str(tmp_path / 'home'))} "
+            f"XDG_RUNTIME_DIR={shlex.quote(str(tmp_path / 'run'))} "
+            f"XDG_STATE_HOME={shlex.quote(str(tmp_path / 'state-home'))} "
+            f"{shlex.quote(str(hook_path))} idle "
+            "--source codex.Stop "
+            f"--state-dir {shlex.quote(str(state_dir))} "
+            f"--session-dir {shlex.quote(str(session_dir))} "
+            "--record-session "
+            f">{shlex.quote(str(out_path))} 2>{shlex.quote(str(err_path))}\n"
+            f"printf '%s\\n' \"$?\" >{shlex.quote(str(status_path))}\n"
+            f"env -u TMUX tmux -L {shlex.quote(server)} wait-for -S {shlex.quote(done_signal)}\n",
+            encoding="utf-8",
+        )
+        runner.chmod(0o755)
+
+        try:
+            subprocess.run(
+                ["tmux", "-L", server, "new-session", "-d", "-s", session, str(runner)],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["tmux", "-L", server, "wait-for", done_signal],
+                check=True,
+                timeout=5.0,
+                text=True,
+                capture_output=True,
+            )
+        finally:
+            subprocess.run(
+                ["tmux", "-L", server, "kill-session", "-t", session],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+        assert status_path.read_text(encoding="utf-8").strip() == "0"
+        assert out_path.read_text(encoding="utf-8") == ""
+        assert err_path.read_text(encoding="utf-8") == ""
+        assert not state_dir.exists()
+        assert not session_dir.exists()
         assert not (tmp_path / "run").exists()
         assert not (tmp_path / "state-home").exists()
 

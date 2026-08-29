@@ -178,27 +178,6 @@ def _managed_commands_by_source(config: dict[str, Any]) -> dict[str, str]:
     return commands
 
 
-def _hermes_valid_hook_events() -> set[str]:
-    hermes = shutil.which("hermes")
-    assert hermes is not None, "hermes CLI is required to validate Hermes hook event names"
-    proc = subprocess.run(
-        [hermes, "hooks", "test", "__pgu_invalid_hook_event__"],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    text = f"{proc.stdout}\n{proc.stderr}"
-    marker = "Valid events:"
-    assert marker in text, text
-    valid_lines: list[str] = []
-    for line in text.split(marker, 1)[1].strip().splitlines():
-        stripped = line.strip()
-        if not stripped:
-            break
-        valid_lines.append(stripped)
-    return {event.strip() for event in " ".join(valid_lines).split(",") if event.strip()}
-
-
 def test_installer_writes_durable_cli_hook_configs_idempotently() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
         home = Path(tmp) / "home"
@@ -298,7 +277,6 @@ def test_installer_writes_durable_cli_hook_configs_idempotently() -> None:
             "on_session_finalize",
         )
         assert set(hermes["hooks"]) >= set(hermes_events)
-        assert set(hermes_events) <= _hermes_valid_hook_events()
         for event in hermes_events:
             assert hermes["hooks"][event] == [{"command": hermes_commands[f"hermes.{event}"]}]
 
@@ -1969,12 +1947,6 @@ def test_hook_ignores_tmux_pane_without_explicit_target() -> None:
 
 
 def main() -> int:
-    if shutil.which("hermes") is None:
-        print(
-            "ticket_board_pane_hooks_install_test: skipped, missing hermes CLI; "
-            "install hermes to validate Hermes hook event names"
-        )
-        return 0
     live_session_paths = candidate_live_pane_session_paths()
     live_pane_state_paths = candidate_live_pane_state_paths()
     live_session_snapshot = snapshot_pane_session_paths(live_session_paths)

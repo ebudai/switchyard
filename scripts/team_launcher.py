@@ -5266,7 +5266,7 @@ FIRST_RUN_AUTH_STATUS_COMMANDS: dict[str, list[str]] = {
     "agy": ["agy", "models"],
     "claude": ["claude", "auth", "status", "--json"],
     "codex": ["codex", "login", "status"],
-    "hermes": ["hermes", "auth", "list"],
+    "hermes": ["hermes", "config", "check"],
 }
 FIRST_RUN_AUTH_LOGIN_COMMANDS: dict[str, list[str]] = {
     "agy": ["agy"],
@@ -5767,7 +5767,11 @@ def _cli_auth_probe_passed(cli: str, proc: subprocess.CompletedProcess[Any]) -> 
             return False
         return parsed.get("loggedIn") is True
     if cli == "hermes":
-        return bool(stdout.strip())
+        # PGU-773 measured `hermes auth list` as a false positive: a pooled
+        # manual OpenRouter credential appears there while Hermes still reports
+        # no resolved API keys and opens `hermes setup`. `config check` reports
+        # only environment/config-resolved keys, which is the runnable shape.
+        return any(line.strip().startswith("\N{CHECK MARK} ") and "_API_KEY" in line for line in stdout.splitlines())
     if cli in {"agy", "codex"}:
         return "not logged" not in combined and "not authenticated" not in combined
     return True

@@ -433,6 +433,7 @@ thats a big sec risk." No credential handling, no scripted entry, no storing any
 | claude | `claude auth login` | `claude auth status --json` -> `loggedIn` |
 | codex | `codex login` | `codex login status` |
 | agy | no standalone login; guided interactive startup | `agy models` (a real authenticated fetch) |
+| hermes | `hermes model` | `hermes config check` -> at least one resolved `*_API_KEY` |
 
 Do NOT parse `~/.claude/.credentials.json`, OAuth state, or
 `~/.gemini/antigravity-cli/antigravity-oauth-token`. Ask the CLI.

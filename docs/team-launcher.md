@@ -391,6 +391,10 @@ CLI config files. Codex hook-trust entries are also checked against the
 installed pane-hook commands; stale trust hashes are reported as warnings with
 the affected role/event so the operator can refresh trust deliberately instead
 of silently launching panes with inert hooks.
+Hermes is probed with `hermes config check`, not `hermes auth list`, because
+pooled credentials can appear in `auth list` while Hermes still has no resolved
+API key and opens its setup prompt. Env/config-resolved API keys are the
+runnable shape the launcher accepts.
 
 The same provision path consumes generated and hand-written artifacts:
 

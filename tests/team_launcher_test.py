@@ -12073,7 +12073,7 @@ class FirstRunAuthRunner:
             if self.authenticated_after_login and "agy" in self.login_seen:
                 return subprocess.CompletedProcess(args, 0, stdout="gemini-3.7-flash-high\n")
             return subprocess.CompletedProcess(args, 1, stderr="You are not logged into Antigravity.\n")
-        if command == ["hermes", "auth", "list"]:
+        if command == ["hermes", "config", "check"]:
             if "hermes" in self.missing_clis:
                 return subprocess.CompletedProcess(
                     args,
@@ -12082,8 +12082,12 @@ class FirstRunAuthRunner:
                     stderr="hermes: command not found\n",
                 )
             if self.authenticated_after_login and "hermes" in self.login_seen:
-                return subprocess.CompletedProcess(args, 0, stdout="openrouter (1 credentials):\n  #1  pgu634-probe         api_key manual <-\n")
-            return subprocess.CompletedProcess(args, 0, stdout="")
+                return subprocess.CompletedProcess(args, 0, stdout="📋 Configuration Status\n\n  Optional:\n    ✓ OPENROUTER_API_KEY\n")
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                stdout="📋 Configuration Status\n\n  Optional:\n    ○ OPENROUTER_API_KEY → vision_analyze, mixture_of_agents\n",
+            )
         if command == ["claude", "auth", "login"]:
             self.login_seen.add("claude")
             return subprocess.CompletedProcess(args, 0)
@@ -12526,30 +12530,76 @@ def test_first_run_auth_phase_handles_hermes_model_setup() -> None:
     assert report.unauthenticated_roles == {}
     assert report.untrusted_roles == []
     assert runner.calls == [
-        ["sudo", "-u", "otto-agent", "hermes", "auth", "list"],
+        ["sudo", "-u", "otto-agent", "hermes", "config", "check"],
         ["sudo", "-u", "otto-agent", "sh", "-lc", "command -v hermes"],
         ["sudo", "-u", "otto-agent", "hermes", "model"],
-        ["sudo", "-u", "otto-agent", "hermes", "auth", "list"],
+        ["sudo", "-u", "otto-agent", "hermes", "config", "check"],
     ]
     assert messages == [
         "switchyard: first-run hermes login required for bulk; running hermes model as otto-agent",
     ]
 
 
-def test_hermes_auth_list_requires_non_empty_credential_output() -> None:
-    empty = subprocess.CompletedProcess(["hermes", "auth", "list"], 0, stdout="", stderr="")
-    populated = subprocess.CompletedProcess(
+def test_first_run_auth_phase_accepts_hermes_resolved_api_key_without_model_setup() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-first-run-auth-hermes-env.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        config = load_project_config(
+            "otto",
+            _write_first_run_auth_config(
+                tmp_path,
+                roles=[
+                    ("bulk", "hermes"),
+                ],
+            ),
+        )
+        runner = FirstRunAuthRunner()
+        runner.login_seen.add("hermes")
+        messages: list[str] = []
+
+        report = team_launcher.run_first_run_auth_phase(
+            config,
+            owner_user="otto-agent",
+            owner_home=owner_home,
+            runner=runner,
+            print_func=messages.append,
+        )
+
+    assert report.unauthenticated_roles == {}
+    assert report.untrusted_roles == []
+    assert runner.calls == [
+        ["sudo", "-u", "otto-agent", "hermes", "config", "check"],
+    ]
+    assert messages == []
+
+
+def test_hermes_config_check_requires_resolved_api_key() -> None:
+    unauthenticated = subprocess.CompletedProcess(
+        ["hermes", "config", "check"],
+        0,
+        stdout="📋 Configuration Status\n\n  Optional:\n    ○ OPENROUTER_API_KEY → vision_analyze, mixture_of_agents\n",
+        stderr="",
+    )
+    pooled_false_positive = subprocess.CompletedProcess(
         ["hermes", "auth", "list"],
         0,
         stdout="openrouter (1 credentials):\n  #1  pgu634-probe         api_key manual <-\n",
         stderr="",
     )
+    env_resolved = subprocess.CompletedProcess(
+        ["hermes", "config", "check"],
+        0,
+        stdout="📋 Configuration Status\n\n  Optional:\n    ✓ OPENROUTER_API_KEY\n",
+        stderr="",
+    )
 
-    assert not team_launcher._cli_auth_probe_passed("hermes", empty)
-    assert team_launcher._cli_auth_probe_passed("hermes", populated)
+    assert not team_launcher._cli_auth_probe_passed("hermes", unauthenticated)
+    assert not team_launcher._cli_auth_probe_passed("hermes", pooled_false_positive)
+    assert team_launcher._cli_auth_probe_passed("hermes", env_resolved)
 
 
-def test_first_run_auth_phase_reports_hermes_empty_auth_list_as_unauthenticated() -> None:
+def test_first_run_auth_phase_reports_hermes_without_resolved_api_key_as_unauthenticated() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-first-run-auth-hermes-empty.") as tmp:
         tmp_path = Path(tmp)
         owner_home = tmp_path / "home" / "otto-agent"
@@ -12577,10 +12627,10 @@ def test_first_run_auth_phase_reports_hermes_empty_auth_list_as_unauthenticated(
     assert report.unauthenticated_roles == {"hermes": ["bulk"]}
     assert report.missing_cli_roles == {}
     assert runner.calls == [
-        ["sudo", "-u", "otto-agent", "hermes", "auth", "list"],
+        ["sudo", "-u", "otto-agent", "hermes", "config", "check"],
         ["sudo", "-u", "otto-agent", "sh", "-lc", "command -v hermes"],
         ["sudo", "-u", "otto-agent", "hermes", "model"],
-        ["sudo", "-u", "otto-agent", "hermes", "auth", "list"],
+        ["sudo", "-u", "otto-agent", "hermes", "config", "check"],
         ["sudo", "-u", "otto-agent", "sh", "-lc", "command -v hermes"],
     ]
     assert messages == [

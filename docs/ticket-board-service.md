@@ -81,12 +81,28 @@ refresh the canonical runtime copy with:
 scripts/install-directorctl
 ```
 
-The source of truth for the legacy agent-user unit is
-`scripts/ticket-board-service.sh render-unit`. The future dedicated `boardsvc`
-system unit source is `deploy/systemd/pgu-ticket-board.service.boardsvc`; the
-boardsvc runbook copies that file to `/etc/systemd/system/pgu-ticket-board.service`.
-Both units must stay Postgres-only and must not pass the retired backend
+`scripts/ticket-board-service.sh render-unit` emits the generic legacy
+agent-user unit for comparison and local diagnosis; it is not the deploy
+candidate. For a dedicated `boardsvc` deployment, compare and install the
+candidate from the release snapshot,
+`<release>/deploy/systemd/<service>.boardsvc`, to the live systemd unit path.
+Both unit shapes must stay Postgres-only and must not pass the retired backend
 selector CLI option.
+
+## Ticket Board Validation
+
+`scripts/ticket-board-test-suite` is the standard one-command validation set
+for ticket-board changes. By default it discovers every
+`tests/ticket_board_*_test.py` and `tests/ticket_board_*_test.sh`, runs all
+runnable suites without fail-fast, and prints per-group and per-suite
+PASS/FAIL/SKIP results plus a summary.
+
+Use `--group adjacent` for board-adjacent tests outside the `ticket_board_*`
+namespace, or `--group all` for both groups. The adjacent group is discovered
+from test file content, not a manifest: standalone tests that reference board
+URLs, sockets, `ticket-board-write`, or `ticket_board.write_client` are included
+automatically. Use `--fail-on-skip` when the validation environment is expected
+to have every dependency installed.
 
 ## PostgreSQL notification listener
 
@@ -240,9 +256,11 @@ target from ambient tmux state. The required state transitions are:
   of firing it during idle startup. `Stop` writes `idle`; `UserPromptSubmit`
   writes `busy`; permission prompts write `blocked` if the hook surface exposes
   them.
-- Gemini: `SessionStart` writes initial `idle` and records the resume session
-  id; `AfterAgent` writes `idle`; `BeforeAgent` writes `busy`. Do not use Gemini
-  `Notification` for idle because it is alert/permission-oriented.
+- Agy: hook config is stored under the Gemini config tree and still emits
+  `gemini.*` source labels. `SessionStart` writes initial `idle` and records the
+  resume session id; `PreInvocation` writes `busy`; `PostInvocation` and `Stop`
+  write `idle`. Do not use Gemini `Notification` for idle because it is
+  alert/permission-oriented.
 
 Session ids are stored under `$TICKET_BOARD_PANE_SESSION_DIR` (default:
 `~/.local/state/pgu-ticket-board/pane-sessions`) using the same per-pane file
@@ -278,11 +296,11 @@ scripts/ticket-board-install-pane-hooks install
 ```
 
 That command copies the standalone writer to
-`~/.local/bin/pgu-ticket-board-pane-idle-hook` and writes managed entries to:
+`~/.local/bin/ticket-board-pane-idle-hook` and writes managed entries to:
 
 - Claude: `~/.claude/settings.json`
 - Codex: `~/.codex/hooks.json`
-- Gemini: `~/.gemini/antigravity-cli/settings.json`
+- Agy/Gemini config tree: `~/.gemini/config/hooks.json`
 
 The hook cutover order is strict:
 

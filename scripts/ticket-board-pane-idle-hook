@@ -34,7 +34,6 @@ SESSION_ID_KEYS = {
     "sessionuuid",
     "conversation_id",
     "conversationid",
-    "hermes_session_id",
     "resume_id",
     "resumeid",
     "uuid",
@@ -241,7 +240,6 @@ def _env_session_id(environ: dict[str, str]) -> str:
         "CLAUDE_SESSION_ID",
         "CODEX_SESSION_ID",
         "GEMINI_SESSION_ID",
-        "HERMES_SESSION_ID",
         "SESSION_ID",
     ):
         value = environ.get(key, "").strip()

@@ -400,24 +400,24 @@ def _install_hermes_hooks(home: Path, hook_bin: Path) -> Path:
             "--record-session",
         ]
     )
-    pre_llm_command = _shell_command(
+    stream_start_command = _shell_command(
         [
             hook_bin,
             "busy",
             "--source",
-            "hermes.pre_llm_call",
+            "hermes.on_stream_start",
             "--state-dir",
             DEFAULT_PANE_STATE_DIR,
             "--session-dir",
             DEFAULT_PANE_SESSION_DIR,
         ]
     )
-    post_llm_command = _shell_command(
+    stream_end_command = _shell_command(
         [
             hook_bin,
             "idle",
             "--source",
-            "hermes.post_llm_call",
+            "hermes.on_stream_end",
             "--state-dir",
             DEFAULT_PANE_STATE_DIR,
             "--session-dir",
@@ -436,21 +436,27 @@ def _install_hermes_hooks(home: Path, hook_bin: Path) -> Path:
             DEFAULT_PANE_SESSION_DIR,
         ]
     )
+    session_finalize_command = _shell_command(
+        [
+            hook_bin,
+            "idle",
+            "--source",
+            "hermes.on_session_finalize",
+            "--state-dir",
+            DEFAULT_PANE_STATE_DIR,
+            "--session-dir",
+            DEFAULT_PANE_SESSION_DIR,
+        ]
+    )
     hooks = config.setdefault("hooks", {})
     if not isinstance(hooks, dict):
         raise SystemExit("existing Hermes hooks field must be a YAML object")
     managed_entries = {
-        "on_session_start": [
-            {
-                "command": (
-                    f"out=\"$({session_start_command})\" && "
-                    "if [ -n \"$out\" ]; then printf '%s' \"$out\"; else printf '{}'; fi"
-                )
-            }
-        ],
-        "pre_llm_call": [{"command": f"{pre_llm_command} >/dev/null && printf '{{}}'"}],
-        "post_llm_call": [{"command": f"{post_llm_command} >/dev/null && printf '{{}}'"}],
-        "on_session_end": [{"command": f"{session_end_command} >/dev/null && printf '{{}}'"}],
+        "on_session_start": [{"command": session_start_command}],
+        "on_stream_start": [{"command": stream_start_command}],
+        "on_stream_end": [{"command": stream_end_command}],
+        "on_session_end": [{"command": session_end_command}],
+        "on_session_finalize": [{"command": session_finalize_command}],
     }
     for event, entries in managed_entries.items():
         existing = hooks.get(event, [])

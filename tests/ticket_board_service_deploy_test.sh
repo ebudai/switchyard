@@ -419,8 +419,13 @@ fi
     exit 1
 }
 
-printf 'stale unit\n' >"$SYSTEM_UNIT_PATH"
-printf 'stale-unit-hash\n' >"$HASH_RECORD"
+candidate_unit="$DEPLOY_ROOT/current/deploy/systemd/pgu-ticket-board.service.boardsvc"
+candidate_unit_resolved="$(readlink -f "$candidate_unit")"
+sed \
+    -e 's/^Environment=TICKET_BOARD_PROJECT=pgu$/Environment=PGU_TICKET_BOARD_PROJECT=pgu/' \
+    -e 's|^Environment=TICKET_BOARD_SOCKET=/run/pgu-ticket-board/ticket-board.sock$|Environment=PGU_TICKET_BOARD_SOCKET=/run/pgu-ticket-board/ticket-board.sock|' \
+    "$candidate_unit" >"$SYSTEM_UNIT_PATH"
+sha256sum "$SYSTEM_UNIT_PATH" | awk '{print $1}' >"$HASH_RECORD"
 : >"$LOGFILE"
 
 if PATH="$MOCKDIR:/usr/bin:/bin" \
@@ -431,7 +436,7 @@ if PATH="$MOCKDIR:/usr/bin:/bin" \
     TICKET_BOARD_POLKIT_APPROVAL_USER=user \
     BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
         "$REPO_ROOT/scripts/ticket-board-service.sh" deploy-restart >"$TMPDIR_T/unit-changed.out" 2>"$TMPDIR_T/unit-changed.err"; then
-    echo "FAIL: deploy-restart should fail loudly when the candidate system unit differs" >&2
+    echo "FAIL: deploy-restart should fail loudly when the candidate system unit has Environment-only drift" >&2
     exit 1
 fi
 grep -q 'candidate system unit .* differs from installed' "$TMPDIR_T/unit-changed.err" || {
@@ -439,7 +444,42 @@ grep -q 'candidate system unit .* differs from installed' "$TMPDIR_T/unit-change
     cat "$TMPDIR_T/unit-changed.err" >&2
     exit 1
 }
-grep -qx 'stale unit' "$SYSTEM_UNIT_PATH" || {
+grep -Fq "candidate system unit path: $candidate_unit_resolved" "$TMPDIR_T/unit-changed.err" || {
+    echo "FAIL: changed-unit failure did not name the actual candidate unit path" >&2
+    cat "$TMPDIR_T/unit-changed.err" >&2
+    exit 1
+}
+grep -Fq "installed system unit path: $SYSTEM_UNIT_PATH" "$TMPDIR_T/unit-changed.err" || {
+    echo "FAIL: changed-unit failure did not name the installed unit path" >&2
+    cat "$TMPDIR_T/unit-changed.err" >&2
+    exit 1
+}
+grep -q 'system unit drift classification: Environment-only drift' "$TMPDIR_T/unit-changed.err" || {
+    echo "FAIL: Environment-only drift was not classified distinctly" >&2
+    cat "$TMPDIR_T/unit-changed.err" >&2
+    exit 1
+}
+grep -q -- '-Environment=PGU_TICKET_BOARD_SOCKET=/run/pgu-ticket-board/ticket-board.sock' "$TMPDIR_T/unit-changed.err" || {
+    echo "FAIL: Environment-only drift diff did not show the installed socket line" >&2
+    cat "$TMPDIR_T/unit-changed.err" >&2
+    exit 1
+}
+grep -q -- '+Environment=TICKET_BOARD_SOCKET=/run/pgu-ticket-board/ticket-board.sock' "$TMPDIR_T/unit-changed.err" || {
+    echo "FAIL: Environment-only drift diff did not show the candidate socket line" >&2
+    cat "$TMPDIR_T/unit-changed.err" >&2
+    exit 1
+}
+grep -q -- '-Environment=PGU_TICKET_BOARD_PROJECT=pgu' "$TMPDIR_T/unit-changed.err" || {
+    echo "FAIL: Environment-only drift diff did not show the installed project line" >&2
+    cat "$TMPDIR_T/unit-changed.err" >&2
+    exit 1
+}
+grep -q -- '+Environment=TICKET_BOARD_PROJECT=pgu' "$TMPDIR_T/unit-changed.err" || {
+    echo "FAIL: Environment-only drift diff did not show the candidate project line" >&2
+    cat "$TMPDIR_T/unit-changed.err" >&2
+    exit 1
+}
+grep -q '^Environment=PGU_TICKET_BOARD_SOCKET=/run/pgu-ticket-board/ticket-board.sock$' "$SYSTEM_UNIT_PATH" || {
     echo "FAIL: deploy-restart should not install a changed unit it cannot reload" >&2
     cat "$SYSTEM_UNIT_PATH" >&2
     exit 1
@@ -456,6 +496,57 @@ if grep -q '^system:restart pgu-ticket-board.service$' "$LOGFILE"; then
 fi
 if grep -q '^system:start pgu-ticket-board-canary.service$' "$LOGFILE"; then
     echo "FAIL: changed-unit deploy-restart should fail before canary" >&2
+    cat "$LOGFILE" >&2
+    exit 1
+fi
+
+sed -e 's/^User=boardsvc$/User=root/' "$candidate_unit" >"$SYSTEM_UNIT_PATH"
+sha256sum "$SYSTEM_UNIT_PATH" | awk '{print $1}' >"$HASH_RECORD"
+: >"$LOGFILE"
+
+if PATH="$MOCKDIR:/usr/bin:/bin" \
+    TICKET_BOARD_SERVICE_TEST_LOG="$LOGFILE" \
+    TICKET_BOARD_SYSTEM_UNIT_PATH="$SYSTEM_UNIT_PATH" \
+    TICKET_BOARD_SYSTEM_UNIT_HASH_RECORD="$HASH_RECORD" \
+    TICKET_BOARD_SKIP_POST_DEPLOY_SOCKET_VERIFY=1 \
+    TICKET_BOARD_POLKIT_APPROVAL_USER=user \
+    BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
+        "$REPO_ROOT/scripts/ticket-board-service.sh" deploy-restart >"$TMPDIR_T/user-changed.out" 2>"$TMPDIR_T/user-changed.err"; then
+    echo "FAIL: deploy-restart should fail loudly when the candidate system unit has User= drift" >&2
+    exit 1
+fi
+grep -q 'system unit drift classification: sensitive unit drift: User' "$TMPDIR_T/user-changed.err" || {
+    echo "FAIL: User= drift was not called out distinctly" >&2
+    cat "$TMPDIR_T/user-changed.err" >&2
+    exit 1
+}
+grep -q -- '-User=root' "$TMPDIR_T/user-changed.err" || {
+    echo "FAIL: User= drift diff did not show the installed User line" >&2
+    cat "$TMPDIR_T/user-changed.err" >&2
+    exit 1
+}
+grep -q -- '+User=boardsvc' "$TMPDIR_T/user-changed.err" || {
+    echo "FAIL: User= drift diff did not show the candidate User line" >&2
+    cat "$TMPDIR_T/user-changed.err" >&2
+    exit 1
+}
+grep -q '^User=root$' "$SYSTEM_UNIT_PATH" || {
+    echo "FAIL: deploy-restart should not install a User= drift unit it cannot reload" >&2
+    cat "$SYSTEM_UNIT_PATH" >&2
+    exit 1
+}
+if grep -q '^system:daemon-reload$' "$LOGFILE"; then
+    echo "FAIL: User= drift deploy-restart must not attempt daemon-reload" >&2
+    cat "$LOGFILE" >&2
+    exit 1
+fi
+if grep -q '^system:restart pgu-ticket-board.service$' "$LOGFILE"; then
+    echo "FAIL: User= drift deploy-restart should not restart with a stale systemd definition" >&2
+    cat "$LOGFILE" >&2
+    exit 1
+fi
+if grep -q '^system:start pgu-ticket-board-canary.service$' "$LOGFILE"; then
+    echo "FAIL: User= drift deploy-restart should fail before canary" >&2
     cat "$LOGFILE" >&2
     exit 1
 fi

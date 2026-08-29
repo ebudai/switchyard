@@ -734,6 +734,16 @@ render_system_unit_for_release() {
     render_unit
 }
 
+system_unit_candidate_path_for_release() {
+    local release_dir="$1"
+    local production_unit="$release_dir/deploy/systemd/$SERVICE_NAME.boardsvc"
+    if [[ ! -f "$production_unit" && "$PROJECT_SLUG" == "pgu" ]]; then
+        production_unit="$release_dir/deploy/systemd/pgu-ticket-board.service.boardsvc"
+    fi
+    [[ -f "$production_unit" ]] || return 1
+    printf '%s\n' "$production_unit"
+}
+
 render_system_unit() {
     render_system_unit_for_release "$BOARD_CURRENT_LINK"
 }
@@ -743,17 +753,74 @@ write_unit() {
     render_unit >"$UNIT_PATH"
 }
 
+changed_unit_directives() {
+    awk '
+        /^[+-][^-+@]/ {
+            line = substr($0, 2)
+            sub(/^[[:space:]]+/, "", line)
+            sub(/[[:space:]]+$/, "", line)
+            if (line == "") next
+            if (line ~ /^\[/) {
+                print line
+                next
+            }
+            split(line, parts, "=")
+            print parts[1]
+        }
+    ' "$1" | sort -u
+}
+
+classify_system_unit_drift() {
+    local diff_file="$1"
+    local directives sensitive
+    directives="$(changed_unit_directives "$diff_file")"
+    if [[ -z "$directives" ]]; then
+        printf 'unclassified unit drift\n'
+        return
+    fi
+    if ! grep -Ev '^(Environment)$' <<<"$directives" >/dev/null; then
+        printf 'Environment-only drift\n'
+        return
+    fi
+    sensitive="$(grep -E '^(User|Group|SupplementaryGroups|WorkingDirectory|ExecStart|ExecStartPre|RuntimeDirectory|StateDirectory|ReadWritePaths|Protect[A-Za-z]*|Private[A-Za-z]*|NoNewPrivileges|CapabilityBoundingSet|Restrict[A-Za-z]*|SystemCall[A-Za-z]*)$' <<<"$directives" | paste -sd ', ' - || true)"
+    if [[ -n "$sensitive" ]]; then
+        printf 'sensitive unit drift: %s\n' "$sensitive"
+        return
+    fi
+    printf 'unit drift in directives: %s\n' "$(paste -sd ', ' <<<"$directives")"
+}
+
+report_system_unit_drift() {
+    local installed_unit="$1"
+    local rendered_unit="$2"
+    local candidate_label="$3"
+    local diff_file="$4"
+    log "candidate system unit path: $candidate_label"
+    log "installed system unit path: $installed_unit"
+    log "system unit drift classification: $(classify_system_unit_drift "$diff_file")"
+    log "system unit unified diff:"
+    sed 's/^/[ticket-board-service]   /' "$diff_file" >&2
+}
+
 assert_system_unit_reload_not_required_for_release() {
     local release_dir="$1"
-    local rendered_unit installed_unit
+    local rendered_unit installed_unit candidate_path candidate_label diff_file
     installed_unit="$(system_unit_file_path)" || die "system service scope resolved to system, but no installed $SERVICE_NAME unit file was found"
     rendered_unit="$(mktemp "${TMPDIR:-/tmp}/$PROJECT_SLUG-ticket-board-unit.XXXXXX")"
+    diff_file="$(mktemp "${TMPDIR:-/tmp}/$PROJECT_SLUG-ticket-board-unit-diff.XXXXXX")"
     render_system_unit_for_release "$release_dir" >"$rendered_unit"
-    if ! cmp -s "$rendered_unit" "$installed_unit"; then
-        rm -f "$rendered_unit"
-        die "candidate system unit for $release_dir differs from installed $installed_unit; daemon-reload is required but is intentionally outside the board deploy polkit grant. Ask an operator to install the candidate unit from that release and run systemctl daemon-reload, then rerun deploy-restart."
+    if candidate_path="$(system_unit_candidate_path_for_release "$release_dir")"; then
+        candidate_label="$candidate_path"
+    else
+        candidate_label="$rendered_unit (rendered generic fallback; release has no deploy/systemd/$SERVICE_NAME.boardsvc)"
     fi
-    rm -f "$rendered_unit"
+    if ! cmp -s "$rendered_unit" "$installed_unit"; then
+        diff -u --label "installed:$installed_unit" --label "candidate:$candidate_label" "$installed_unit" "$rendered_unit" >"$diff_file" || true
+        report_system_unit_drift "$installed_unit" "$rendered_unit" "$candidate_label" "$diff_file"
+        rm -f "$rendered_unit" "$diff_file"
+        die "candidate system unit for $release_dir differs from installed $installed_unit; daemon-reload is required but is intentionally outside the board deploy polkit grant. Ask an operator to install the candidate unit from $candidate_label and run systemctl daemon-reload, then rerun deploy-restart."
+    fi
+    rm -f "$rendered_unit" "$diff_file"
     if system_unit_needs_daemon_reload; then
         die "systemd reports NeedDaemonReload=yes for $SERVICE_NAME; daemon-reload is required but is intentionally outside the board deploy polkit grant. Ask an operator to run systemctl daemon-reload, then rerun deploy-restart."
     fi

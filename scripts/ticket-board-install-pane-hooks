@@ -68,6 +68,37 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
+def _load_yaml(path: Path) -> dict[str, Any]:
+    try:
+        import yaml
+    except ImportError as exc:
+        if not path.exists():
+            return {}
+        raise SystemExit(f"PyYAML is required to preserve existing Hermes config: {path}") from exc
+    try:
+        parsed = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    if parsed is None:
+        return {}
+    if not isinstance(parsed, dict):
+        raise SystemExit(f"{path} must contain a YAML object")
+    return parsed
+
+
+def _write_yaml(path: Path, payload: dict[str, Any]) -> None:
+    try:
+        import yaml
+    except ImportError:
+        rendered = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    else:
+        rendered = yaml.safe_dump(payload, sort_keys=False)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(rendered, encoding="utf-8")
+    tmp.replace(path)
+
+
 def _contains_managed_hook(value: Any) -> bool:
     if isinstance(value, dict):
         return any(_contains_managed_hook(child) for child in value.values())
@@ -353,6 +384,83 @@ def _install_gemini_hooks(home: Path, hook_bin: Path) -> Path:
     return path
 
 
+def _install_hermes_hooks(home: Path, hook_bin: Path) -> Path:
+    path = home / ".hermes" / "config.yaml"
+    config = _load_yaml(path)
+    session_start_command = _shell_command(
+        [
+            hook_bin,
+            "idle",
+            "--source",
+            "hermes.on_session_start",
+            "--state-dir",
+            DEFAULT_PANE_STATE_DIR,
+            "--session-dir",
+            DEFAULT_PANE_SESSION_DIR,
+            "--record-session",
+        ]
+    )
+    pre_llm_command = _shell_command(
+        [
+            hook_bin,
+            "busy",
+            "--source",
+            "hermes.pre_llm_call",
+            "--state-dir",
+            DEFAULT_PANE_STATE_DIR,
+            "--session-dir",
+            DEFAULT_PANE_SESSION_DIR,
+        ]
+    )
+    post_llm_command = _shell_command(
+        [
+            hook_bin,
+            "idle",
+            "--source",
+            "hermes.post_llm_call",
+            "--state-dir",
+            DEFAULT_PANE_STATE_DIR,
+            "--session-dir",
+            DEFAULT_PANE_SESSION_DIR,
+        ]
+    )
+    session_end_command = _shell_command(
+        [
+            hook_bin,
+            "idle",
+            "--source",
+            "hermes.on_session_end",
+            "--state-dir",
+            DEFAULT_PANE_STATE_DIR,
+            "--session-dir",
+            DEFAULT_PANE_SESSION_DIR,
+        ]
+    )
+    hooks = config.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        raise SystemExit("existing Hermes hooks field must be a YAML object")
+    managed_entries = {
+        "on_session_start": [
+            {
+                "command": (
+                    f"out=\"$({session_start_command})\" && "
+                    "if [ -n \"$out\" ]; then printf '%s' \"$out\"; else printf '{}'; fi"
+                )
+            }
+        ],
+        "pre_llm_call": [{"command": f"{pre_llm_command} >/dev/null && printf '{{}}'"}],
+        "post_llm_call": [{"command": f"{post_llm_command} >/dev/null && printf '{{}}'"}],
+        "on_session_end": [{"command": f"{session_end_command} >/dev/null && printf '{{}}'"}],
+    }
+    for event, entries in managed_entries.items():
+        existing = hooks.get(event, [])
+        if not isinstance(existing, list):
+            raise SystemExit(f"existing Hermes hooks.{event} field must be a YAML list")
+        hooks[event] = [entry for entry in existing if not _contains_managed_hook(entry)] + entries
+    _write_yaml(path, config)
+    return path
+
+
 def _target_path(state_dir: Path, target: str) -> Path:
     safe = "".join(ch if ch.isalnum() or ch in ".-" else "_" for ch in target)
     return state_dir / f"{safe}.json"
@@ -378,6 +486,7 @@ def install(args: argparse.Namespace) -> int:
         _install_claude_hooks(home, hook_bin),
         _install_codex_hooks(home, hook_bin),
         _install_gemini_hooks(home, hook_bin),
+        _install_hermes_hooks(home, hook_bin),
     ]
     print(f"installed {hook_bin}")
     for path in written:

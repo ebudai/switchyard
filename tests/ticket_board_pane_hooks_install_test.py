@@ -141,6 +141,14 @@ def _load(path: Path) -> dict[str, Any]:
     return parsed
 
 
+def _load_yaml(path: Path) -> dict[str, Any]:
+    import yaml
+
+    parsed = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert isinstance(parsed, dict)
+    return parsed
+
+
 def _commands(value: Any) -> list[str]:
     if isinstance(value, dict):
         command = value.get("command")
@@ -210,8 +218,9 @@ def test_installer_writes_durable_cli_hook_configs_idempotently() -> None:
         claude = _load(home / ".claude" / "settings.json")
         codex = _load(home / ".codex" / "hooks.json")
         gemini = _load(home / ".gemini" / "config" / "hooks.json")
+        hermes = _load_yaml(home / ".hermes" / "config.yaml")
 
-        all_commands = "\n".join(_commands([claude, codex, gemini]))
+        all_commands = "\n".join(_commands([claude, codex, gemini, hermes]))
         for required in (
             "claude.SessionStart",
             "claude.Notification.idle_prompt",
@@ -225,12 +234,17 @@ def test_installer_writes_durable_cli_hook_configs_idempotently() -> None:
             "gemini.PreInvocation",
             "gemini.PostInvocation",
             "gemini.Stop",
+            "hermes.on_session_start",
+            "hermes.pre_llm_call",
+            "hermes.post_llm_call",
+            "hermes.on_session_end",
             "--record-session",
         ):
             assert required in all_commands
         assert _managed_command_count(claude) == 4
         assert _managed_command_count(codex) == 4
         assert _managed_command_count(gemini) == 4
+        assert _managed_command_count(hermes) == 4
         assert "ticket-board-pane-state" in gemini
         assert "pgu-ticket-board-pane-state" not in gemini
         assert "hooks" not in gemini
@@ -243,6 +257,10 @@ def test_installer_writes_durable_cli_hook_configs_idempotently() -> None:
         assert "gemini.SessionStart" in gemini_commands["gemini.SessionStart"]
         assert "--record-session)" in gemini_commands["gemini.SessionStart"]
         assert ">/dev/null" not in gemini_commands["gemini.SessionStart"]
+        hermes_commands = _managed_commands_by_source(hermes)
+        assert "hermes.on_session_start" in hermes_commands["hermes.on_session_start"]
+        assert "--record-session)" in hermes_commands["hermes.on_session_start"]
+        assert ">/dev/null" not in hermes_commands["hermes.on_session_start"]
 
 
 def test_installer_migrates_legacy_agy_named_hook_without_removing_foreign_keys() -> None:
@@ -1041,6 +1059,39 @@ def test_session_start_records_non_uuid_named_session_id() -> None:
         assert session["session_id"] == session_id
 
 
+def test_session_start_records_hermes_timestamp_session_id_from_known_key() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        home = Path(tmp) / "home"
+        state_dir = Path(tmp) / "state"
+        session_dir = Path(tmp) / "sessions"
+        bin_path = home / ".local" / "bin" / HOOK_NAME
+        subprocess.run([str(INSTALLER), "install", "--home", str(home), "--bin-path", str(bin_path)], check=True)
+
+        session_id = "20260823_140512_b49a1a"
+        subprocess.run(
+            [
+                str(bin_path),
+                "idle",
+                "--target",
+                "pgu-ops:0.0",
+                "--source",
+                "hermes.on_session_start",
+                "--state-dir",
+                str(state_dir),
+                "--session-dir",
+                str(session_dir),
+                "--record-session",
+            ],
+            input=json.dumps({"hermes_session_id": session_id, "cwd": "/home/agent/Projects/pgu"}),
+            text=True,
+            check=True,
+            env=_hook_env(),
+        )
+
+        session = json.loads((session_dir / "pgu-ops_0.0.json").read_text(encoding="utf-8"))
+        assert session["session_id"] == session_id
+
+
 def test_session_start_updates_existing_record_when_it_matches_launched_session() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
         home = Path(tmp) / "home"
@@ -1419,6 +1470,58 @@ def test_gemini_installed_hooks_embed_project_state_and_session_dirs() -> None:
         assert state["state"] == "idle"
         assert state["source"] == "gemini.Stop"
         assert not (home / ".local" / "state" / "pgu-ticket-board" / "pane-sessions" / "otto-inspector_0.0.json").exists()
+
+
+def test_hermes_installed_hooks_embed_project_state_and_session_dirs() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        tmp_path = Path(tmp)
+        home = tmp_path / "home"
+        bin_path = home / ".local" / "bin" / HOOK_NAME
+        state_dir = tmp_path / "run" / "otto-ticket-board" / "pane-state"
+        session_dir = tmp_path / "state" / "otto-ticket-board" / "pane-sessions"
+        install_env = _hook_env(
+            TICKET_BOARD_PROJECT="otto",
+            TICKET_BOARD_PANE_STATE_DIR=str(state_dir),
+            TICKET_BOARD_PANE_SESSION_DIR=str(session_dir),
+        )
+        subprocess.run(
+            [str(INSTALLER), "install", "--home", str(home), "--bin-path", str(bin_path)],
+            check=True,
+            env=install_env,
+        )
+
+        hermes_commands = _managed_commands_by_source(_load_yaml(home / ".hermes" / "config.yaml"))
+        session_start = hermes_commands["hermes.on_session_start"]
+        session_end = hermes_commands["hermes.on_session_end"]
+        for command in (session_start, session_end):
+            assert f"--state-dir {state_dir}" in command
+            assert f"--session-dir {session_dir}" in command
+
+        hook_runtime_env = _without_hook_dir_env(
+            _hook_env(
+                HOME=str(home),
+                TICKET_BOARD_PANE_TARGET="otto-bulk:0.0",
+                HERMES_SESSION_ID="20260823_140512_b49a1a",
+            )
+        )
+        start = subprocess.run(
+            ["sh", "-c", session_start],
+            input=json.dumps({"session_id": "20260823_140512_b49a1a"}),
+            text=True,
+            capture_output=True,
+            check=True,
+            env=hook_runtime_env,
+        )
+        subprocess.run(["sh", "-c", session_end], text=True, capture_output=True, check=True, env=hook_runtime_env)
+
+        session = json.loads((session_dir / "otto-bulk_0.0.json").read_text(encoding="utf-8"))
+        state = json.loads((state_dir / "otto-bulk_0.0.json").read_text(encoding="utf-8"))
+        assert start.stdout == "{}"
+        assert session["session_id"] == "20260823_140512_b49a1a"
+        assert session["source"] == "hermes.on_session_start"
+        assert state["state"] == "idle"
+        assert state["source"] == "hermes.on_session_end"
+        assert not (home / ".local" / "state" / "pgu-ticket-board" / "pane-sessions" / "otto-bulk_0.0.json").exists()
 
 
 def test_hook_default_dirs_derive_project_from_tmux_target_without_pgu_fallback() -> None:

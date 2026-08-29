@@ -3956,7 +3956,7 @@ def test_project_config_rejects_unsupported_cli_names() -> None:
         tmp_path = Path(tmp)
         config_path = tmp_path / "porter.json"
 
-        for cli_name in ("gemini", "gemeni", "hermes", "totally-made-up"):
+        for cli_name in ("gemini", "gemeni", "totally-made-up"):
             config_path.write_text(
                 json.dumps(
                     {
@@ -3985,7 +3985,67 @@ def test_project_config_rejects_unsupported_cli_names() -> None:
                 message = str(exc)
 
             assert f"role inspector cli {cli_name!r} is not supported" in message
-            assert "supported clis: agy, claude, codex" in message
+            assert "supported clis: agy, claude, codex, hermes" in message
+
+
+def test_project_config_accepts_hermes_runtime_defaults() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-hermes.") as tmp:
+        tmp_path = Path(tmp)
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(tmp_path / "layout.json"),
+                    "session_dir": str(tmp_path / "sessions"),
+                    "roles": [
+                        {
+                            "role": "bulk",
+                            "slot": 0,
+                            "target": "porter-bulk:0.0",
+                            "cli": ["/home/eric/.local/bin/hermes"],
+                            "model": "zai/glm-5.3",
+                            "effort": "xhigh",
+                            "yolo": True,
+                        }
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        session_id = "20260823_140512_b49a1a"
+        session_dir = tmp_path / "sessions"
+
+        config = load_project_config("porter", config_path)
+        role = config.roles[0]
+        session_dir.mkdir()
+        (session_dir / session_file_name(role.target)).write_text(
+            json.dumps({"target": role.target, "session_id": session_id}) + "\n",
+            encoding="utf-8",
+        )
+
+        command = cli_command_for_role(role, session_dir=session_dir, resume=True)
+
+    entries = _env_entries(command)
+    tail = _command_tail(command)
+    assert role.model_arg == "-m"
+    assert (role.resume_mode, role.resume_flag) == ("flag", "--resume")
+    assert f"TICKET_BOARD_PANE_SESSION_ID={session_id}" in entries
+    assert tail == [
+        "/home/eric/.local/bin/hermes",
+        "--resume",
+        session_id,
+        "-m",
+        "zai/glm-5.3",
+        "--reasoning",
+        "xhigh",
+        "--yolo",
+        "--accept-hooks",
+        "--pass-session-id",
+    ]
 
 
 def test_effort_config_translates_to_cli_specific_args() -> None:
@@ -10485,10 +10545,10 @@ def test_switchyard_new_prompts_roles_and_skips_designer_when_absent() -> None:
     assert prompts == [
         "Include designer role [Y/n]: ",
         "Include audit role [Y/n]: ",
-        "director CLI (claude/codex/agy) [claude]: ",
+        "director CLI (claude/codex/agy/hermes) [claude]: ",
         "Implementer roles (comma-separated): ",
-        "code-review CLI (claude/codex/agy) [codex]: ",
-        "runtime CLI (claude/codex/agy) [codex]: ",
+        "code-review CLI (claude/codex/agy/hermes) [codex]: ",
+        "runtime CLI (claude/codex/agy/hermes) [codex]: ",
     ]
     assert artifact["project"]["include_designer"] is False
     assert artifact["project"]["include_audit"] is False
@@ -10599,7 +10659,7 @@ def test_prompt_cli_caps_invalid_retries() -> None:
             message = str(exc)
 
     assert message == "switchyard: too many invalid answers for director CLI"
-    assert stdout.getvalue().count("CLI for director must be one of claude, codex, agy") == (
+    assert stdout.getvalue().count("CLI for director must be one of claude, codex, agy, hermes") == (
         team_launcher.SWITCHYARD_PROMPT_MAX_ATTEMPTS
     )
 
@@ -11235,7 +11295,7 @@ def test_project_artifact_rejects_unknown_role_cli() -> None:
         except SystemExit as exc:
             message = str(exc)
 
-    assert "CLI for backend must be one of claude, codex, agy" in message
+    assert "CLI for backend must be one of claude, codex, agy, hermes" in message
 
 
 def test_project_artifact_rejects_non_bool_include_designer() -> None:
@@ -11381,6 +11441,10 @@ class FirstRunAuthRunner:
             if self.authenticated_after_login and "agy" in self.login_seen:
                 return subprocess.CompletedProcess(args, 0, stdout="gemini-3.7-flash-high\n")
             return subprocess.CompletedProcess(args, 1, stderr="You are not logged into Antigravity.\n")
+        if command == ["hermes", "auth", "status"]:
+            if self.authenticated_after_login and "hermes" in self.login_seen:
+                return subprocess.CompletedProcess(args, 0, stdout="authenticated\n")
+            return subprocess.CompletedProcess(args, 1, stderr="not authenticated\n")
         if command == ["claude", "auth", "login"]:
             self.login_seen.add("claude")
             return subprocess.CompletedProcess(args, 0)
@@ -11389,6 +11453,9 @@ class FirstRunAuthRunner:
             return subprocess.CompletedProcess(args, 0)
         if command == ["agy"]:
             self.login_seen.add("agy")
+            return subprocess.CompletedProcess(args, 0)
+        if command == ["hermes", "model"]:
+            self.login_seen.add("hermes")
             return subprocess.CompletedProcess(args, 0)
         return subprocess.CompletedProcess(args, 0)
 
@@ -11744,6 +11811,43 @@ def test_first_run_auth_phase_sequences_distinct_logins_and_skips_visible_worktr
         "switchyard: first-run agy login required for inspector; running agy as otto-agent",
     ]
     assert messages[3:] == []
+
+
+def test_first_run_auth_phase_handles_hermes_model_setup() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-first-run-auth-hermes.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        config = load_project_config(
+            "otto",
+            _write_first_run_auth_config(
+                tmp_path,
+                roles=[
+                    ("bulk", "hermes"),
+                ],
+            ),
+        )
+        runner = FirstRunAuthRunner()
+        messages: list[str] = []
+
+        report = team_launcher.run_first_run_auth_phase(
+            config,
+            owner_user="otto-agent",
+            owner_home=owner_home,
+            runner=runner,
+            print_func=messages.append,
+        )
+
+    assert report.unauthenticated_roles == {}
+    assert report.untrusted_roles == []
+    assert runner.calls == [
+        ["sudo", "-u", "otto-agent", "hermes", "auth", "status"],
+        ["sudo", "-u", "otto-agent", "hermes", "model"],
+        ["sudo", "-u", "otto-agent", "hermes", "auth", "status"],
+    ]
+    assert messages == [
+        "switchyard: first-run hermes login required for bulk; running hermes model as otto-agent",
+    ]
 
 
 def test_first_run_trust_handles_detached_roles_and_persists_for_later_launches() -> None:

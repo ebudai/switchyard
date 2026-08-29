@@ -323,12 +323,12 @@ Slug [otto_scheduler]:
 Agent user [otto_scheduler-agent]:
 Project path [/home/otto_scheduler-agent/Projects/otto_scheduler]:
 Include designer role [Y/n]:
-designer CLI (claude/codex/agy) [claude]:
-director CLI (claude/codex/agy) [claude]:
-audit CLI (claude/codex/agy) [claude]:
+designer CLI (claude/codex/agy/hermes) [claude]:
+director CLI (claude/codex/agy/hermes) [claude]:
+audit CLI (claude/codex/agy/hermes) [claude]:
 Implementer roles (comma-separated): app, code-review
-app CLI (claude/codex/agy) [codex]:
-code-review CLI (claude/codex/agy) [codex]:
+app CLI (claude/codex/agy/hermes) [codex]:
+code-review CLI (claude/codex/agy/hermes) [codex]:
 ```
 
 The default project path follows the project name, not the machine slug; editing

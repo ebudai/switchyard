@@ -111,22 +111,32 @@ YOLO_ARGS_BY_CLI = {
     "agy": ["--dangerously-skip-permissions"],
     "claude": ["--dangerously-skip-permissions"],
     "codex": ["--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust"],
+    "hermes": ["--yolo"],
+}
+STARTUP_ARGS_BY_CLI = {
+    "hermes": ["--accept-hooks", "--pass-session-id"],
 }
 EFFORT_STYLE_BY_CLI = {
     "agy": None,
     "claude": "flag",
     "codex": "config",
+    "hermes": "reasoning",
 }
-SUPPORTED_CONFIG_CLI_NAMES = ("agy", "claude", "codex")
+SUPPORTED_CONFIG_CLI_NAMES = ("agy", "claude", "codex", "hermes")
 KNOWN_LIVE_CLI_NAMES = set(SUPPORTED_CONFIG_CLI_NAMES)
+DEFAULT_MODEL_ARG_BY_CLI = {
+    "hermes": "-m",
+}
 DEFAULT_RESUME_MODE_BY_CLI = {
     "agy": "flag",
     "claude": "flag",
     "codex": "subcommand",
+    "hermes": "flag",
 }
 DEFAULT_RESUME_FLAG_BY_CLI = {
     "agy": "--conversation",
     "claude": "--resume",
+    "hermes": "--resume",
 }
 DEFAULT_RESUME_SUBCOMMAND_BY_CLI = {
     "codex": "resume",
@@ -151,7 +161,7 @@ NO_LAUNCHER_SELF_DEPLOY_ENV = "TEAM_LAUNCHER_NO_SELF_DEPLOY"
 LEGACY_NO_LAUNCHER_SELF_DEPLOY_ENV = "PGU_TEAM_LAUNCHER_NO_SELF_DEPLOY"
 DEFAULT_TENANT_RELEASE_DEPLOY_REF = "origin/main"
 PROJECT_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,39}$")
-SUPPORTED_NEW_PROJECT_CLIS = ("claude", "codex", "agy")
+SUPPORTED_NEW_PROJECT_CLIS = ("claude", "codex", "agy", "hermes")
 NEW_PROJECT_ROLE_CLI_DEFAULTS = {
     "designer": "claude",
     "director": "claude",
@@ -1202,7 +1212,7 @@ def _role_from_json(project: str, raw: dict[str, Any], *, base: Path, default_wo
         workdir=workdir,
         cli=cli,
         model=str(raw.get("model") or "").strip(),
-        model_arg=str(raw.get("model_arg") or "--model").strip(),
+        model_arg=str(raw.get("model_arg") or DEFAULT_MODEL_ARG_BY_CLI.get(cli_name, "--model")).strip(),
         effort=str(raw.get("effort") or "").strip(),
         yolo=_bool_value(raw.get("yolo"), field="yolo", role=role),
         extra_args=_string_list(raw.get("extra_args"), field="extra_args", role=role),
@@ -1819,6 +1829,12 @@ def yolo_args_for_role(role: RoleConfig) -> list[str]:
     return [flag for flag in flags if flag not in role.extra_args]
 
 
+def startup_args_for_role(role: RoleConfig) -> list[str]:
+    cli_name = _command_name(role.cli[0])
+    flags = STARTUP_ARGS_BY_CLI.get(cli_name, [])
+    return [flag for flag in flags if flag not in role.extra_args]
+
+
 def effort_args_for_role(role: RoleConfig) -> list[str]:
     if not role.effort:
         return []
@@ -1828,6 +1844,8 @@ def effort_args_for_role(role: RoleConfig) -> list[str]:
         return ["--effort", role.effort]
     if style == "config":
         return ["-c", f"reasoning_effort={role.effort}"]
+    if style == "reasoning":
+        return ["--reasoning", role.effort]
     if style is None and cli_name in EFFORT_STYLE_BY_CLI:
         return []
     raise SystemExit(f"role {role.role} uses unsupported effort cli {cli_name!r}")
@@ -1977,6 +1995,7 @@ def cli_command_for_role(
         command.extend([role.model_arg, role.model])
     command.extend(effort_args_for_role(role))
     command.extend(yolo_args_for_role(role))
+    command.extend(startup_args_for_role(role))
     command.extend(role.extra_args)
     env = {
         **role.env,
@@ -5234,11 +5253,13 @@ FIRST_RUN_AUTH_STATUS_COMMANDS: dict[str, list[str]] = {
     "agy": ["agy", "models"],
     "claude": ["claude", "auth", "status", "--json"],
     "codex": ["codex", "login", "status"],
+    "hermes": ["hermes", "auth", "status"],
 }
 FIRST_RUN_AUTH_LOGIN_COMMANDS: dict[str, list[str]] = {
     "agy": ["agy"],
     "claude": ["claude", "auth", "login"],
     "codex": ["codex", "login"],
+    "hermes": ["hermes", "model"],
 }
 FIRST_RUN_TRUST_CLIS = frozenset({"agy", "claude"})
 
@@ -5682,7 +5703,7 @@ def _cli_auth_probe_passed(cli: str, proc: subprocess.CompletedProcess[Any]) -> 
         except json.JSONDecodeError:
             return False
         return parsed.get("loggedIn") is True
-    if cli in {"agy", "codex"}:
+    if cli in {"agy", "codex", "hermes"}:
         return "not logged" not in combined and "not authenticated" not in combined
     return True
 

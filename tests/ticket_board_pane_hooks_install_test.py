@@ -178,6 +178,22 @@ def _managed_commands_by_source(config: dict[str, Any]) -> dict[str, str]:
     return commands
 
 
+def _hermes_valid_hook_events() -> set[str]:
+    hermes = shutil.which("hermes")
+    assert hermes is not None, "hermes CLI is required to validate Hermes hook event names"
+    proc = subprocess.run(
+        [hermes, "hooks", "test", "__pgu_invalid_hook_event__"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    text = f"{proc.stdout}\n{proc.stderr}"
+    marker = "Valid events:"
+    assert marker in text, text
+    valid_line = text.split(marker, 1)[1].strip().splitlines()[0]
+    return {event.strip() for event in valid_line.split(",") if event.strip()}
+
+
 def test_installer_writes_durable_cli_hook_configs_idempotently() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
         home = Path(tmp) / "home"
@@ -235,8 +251,8 @@ def test_installer_writes_durable_cli_hook_configs_idempotently() -> None:
             "gemini.PostInvocation",
             "gemini.Stop",
             "hermes.on_session_start",
-            "hermes.on_stream_start",
-            "hermes.on_stream_end",
+            "hermes.pre_llm_call",
+            "hermes.post_llm_call",
             "hermes.on_session_end",
             "hermes.on_session_finalize",
             "--record-session",
@@ -269,13 +285,16 @@ def test_installer_writes_durable_cli_hook_configs_idempotently() -> None:
             assert "printf" not in command
             parsed = shlex.split(command)
             assert parsed[0] == str(bin_path)
-        for event in (
+        hermes_events = (
             "on_session_start",
-            "on_stream_start",
-            "on_stream_end",
+            "pre_llm_call",
+            "post_llm_call",
             "on_session_end",
             "on_session_finalize",
-        ):
+        )
+        assert set(hermes["hooks"]) >= set(hermes_events)
+        assert set(hermes_events) <= _hermes_valid_hook_events()
+        for event in hermes_events:
             assert hermes["hooks"][event] == [{"command": hermes_commands[f"hermes.{event}"]}]
 
 
@@ -1508,11 +1527,11 @@ def test_hermes_installed_hooks_embed_project_state_and_session_dirs() -> None:
 
         hermes_commands = _managed_commands_by_source(_load_yaml(home / ".hermes" / "config.yaml"))
         session_start = hermes_commands["hermes.on_session_start"]
-        stream_start = hermes_commands["hermes.on_stream_start"]
-        stream_end = hermes_commands["hermes.on_stream_end"]
+        llm_start = hermes_commands["hermes.pre_llm_call"]
+        llm_end = hermes_commands["hermes.post_llm_call"]
         session_end = hermes_commands["hermes.on_session_end"]
         session_finalize = hermes_commands["hermes.on_session_finalize"]
-        for command in (session_start, stream_start, stream_end, session_end, session_finalize):
+        for command in (session_start, llm_start, llm_end, session_end, session_finalize):
             assert f"--state-dir {state_dir}" in command
             assert f"--session-dir {session_dir}" in command
 
@@ -1530,9 +1549,9 @@ def test_hermes_installed_hooks_embed_project_state_and_session_dirs() -> None:
             check=True,
             env=hook_runtime_env,
         )
-        subprocess.run(["sh", "-c", stream_start], text=True, capture_output=True, check=True, env=hook_runtime_env)
+        subprocess.run(["sh", "-c", llm_start], text=True, capture_output=True, check=True, env=hook_runtime_env)
         busy_state = json.loads((state_dir / "otto-bulk_0.0.json").read_text(encoding="utf-8"))
-        subprocess.run(["sh", "-c", stream_end], text=True, capture_output=True, check=True, env=hook_runtime_env)
+        subprocess.run(["sh", "-c", llm_end], text=True, capture_output=True, check=True, env=hook_runtime_env)
         idle_state = json.loads((state_dir / "otto-bulk_0.0.json").read_text(encoding="utf-8"))
         subprocess.run(["sh", "-c", session_end], text=True, capture_output=True, check=True, env=hook_runtime_env)
         subprocess.run(["sh", "-c", session_finalize], text=True, capture_output=True, check=True, env=hook_runtime_env)
@@ -1543,9 +1562,9 @@ def test_hermes_installed_hooks_embed_project_state_and_session_dirs() -> None:
         assert session["session_id"] == "20260823_140512_b49a1a"
         assert session["source"] == "hermes.on_session_start"
         assert busy_state["state"] == "busy"
-        assert busy_state["source"] == "hermes.on_stream_start"
+        assert busy_state["source"] == "hermes.pre_llm_call"
         assert idle_state["state"] == "idle"
-        assert idle_state["source"] == "hermes.on_stream_end"
+        assert idle_state["source"] == "hermes.post_llm_call"
         assert state["state"] == "idle"
         assert state["source"] == "hermes.on_session_finalize"
         assert not (home / ".local" / "state" / "pgu-ticket-board" / "pane-sessions" / "otto-bulk_0.0.json").exists()

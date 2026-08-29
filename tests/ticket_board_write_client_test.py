@@ -53,6 +53,8 @@ class RecordingHandler(BaseHTTPRequestHandler):
             "manually_controlled": bool(payload.get("manually_controlled", False)),
             "commit_hash": payload.get("commit_hash", ""),
         }
+        if "parent_id" in payload:
+            ticket["parent_id"] = payload.get("parent_id", "")
         if operation == "start_work":
             ticket["state"] = "in_progress"
         elif operation == "submit_to_inspection":
@@ -114,6 +116,8 @@ class RecordingHandler(BaseHTTPRequestHandler):
             ticket["state"] = "cancelled"
         elif operation == "add_comment":
             ticket["comments"] = [{"who": caller, "text": payload.get("text", ""), "urgent": bool(payload.get("urgent", False))}]
+        elif operation == "edit_fields":
+            ticket.update(payload)
         elif operation == "file_bug":
             ticket["parent_id"] = payload.get("source_ticket_id", "")
         elif operation == "file_report":
@@ -235,12 +239,22 @@ def assert_action_requests(requests: list[tuple[str, str | None, str | None, dic
     assert ("/api/tickets/PGU-109/actions/set_manually_controlled", "director") in pairs
     assert ("/api/tickets/PGU-111/actions/set_blockers", "director") in pairs
     assert ("/api/tickets/PGU-112/actions/add_comment", "director") in pairs
+    assert ("/api/tickets/PGU-112/actions/edit_fields", "app") in pairs
+    create_payload = next(payload for path, _, _, payload in requests if path == "/api/tickets/actions/create_ticket")
+    assert create_payload["parent_id"] == "PGU-100", create_payload
 
 
 def exercise_client(base_url: str, repo: Path, commit_hash: str) -> None:
     with pushd(repo):
         client = TicketBoardWriteClient(base_url, "director")
-        assert client.create_ticket(title="Client create", body="Created.", assignee="director")["ticket"]["id"] == "PGU-NEW"
+        created = client.create_ticket(
+            title="Client create",
+            body="Created.",
+            assignee="director",
+            parent_id="PGU-100",
+        )["ticket"]
+        assert created["id"] == "PGU-NEW"
+        assert created["parent_id"] == "PGU-100"
         report = client.file_report(
             title="Tenant report",
             body="Shared launcher issue.",
@@ -314,6 +328,7 @@ def exercise_client(base_url: str, repo: Path, commit_hash: str) -> None:
         assert client.set_blockers("PGU-111", blocked_by=["PGU-110"], blocked_reason="Waiting.")["ticket"]["blocked_by"] == ["PGU-110"]
         assert client.add_comment("PGU-112", text="Director note.")["ticket"]["comments"][-1]["who"] == "director"
         assert client.add_comment("PGU-112", text="Urgent director note.", urgent=True)["ticket"]["comments"][-1]["urgent"] is True
+        assert client.edit_fields("PGU-112", {"title": "Client edited title"}, caller_role="app")["ticket"]["title"] == "Client edited title"
 
 
 def assert_submit_rejects_unpushed_commit(

@@ -1224,6 +1224,22 @@ WHERE id = 'PGU-141';
 
     wrong_assignee = post_json(base_url, "/api/tickets/PGU-101/actions/start_work", {}, caller="app", expect=403)
     assert "app cannot call start_work for ticket assigned to ops" in str(wrong_assignee), wrong_assignee
+    user_await_forbidden = post_json(
+        base_url,
+        "/api/tickets/PGU-120/actions/await_role",
+        {"role": "ops"},
+        caller="user",
+        expect=403,
+    )
+    assert "user cannot call await_role" in str(user_await_forbidden), user_await_forbidden
+    user_clear_awaiting_forbidden = post_json(
+        base_url,
+        "/api/tickets/PGU-120/actions/clear_awaiting_role",
+        {},
+        caller="user",
+        expect=403,
+    )
+    assert "user cannot call clear_awaiting_role" in str(user_clear_awaiting_forbidden), user_clear_awaiting_forbidden
     utility_wrong_assignee = post_json(
         base_url,
         "/api/tickets/PGU-127/actions/start_task",

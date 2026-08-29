@@ -421,6 +421,7 @@ class TicketBoardWriteClient:
         screenshots: list[str] | None = None,
         assignee: str = "unassigned",
         state: str = "analysis",
+        parent_id: str = "",
         blocked_by: list[str] | None = None,
         blocked_reason: str = "",
         implementation: str = "",
@@ -438,6 +439,7 @@ class TicketBoardWriteClient:
             "screenshots": screenshots or [],
             "assignee": assignee,
             "state": state,
+            "parent_id": parent_id,
             "blocked_by": blocked_by or [],
             "blocked_reason": blocked_reason,
             "implementation": implementation,
@@ -654,6 +656,11 @@ class TicketBoardWriteClient:
     def add_comment(self, ticket_id: str, *, text: str, urgent: bool = False, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "add_comment", {"text": text, "urgent": urgent}, caller_role=caller_role)
 
+    def edit_fields(self, ticket_id: str, fields: dict[str, Any], *, caller_role: str | None = None) -> dict[str, Any]:
+        if not isinstance(fields, dict):
+            raise TicketBoardWriteError("edit_fields requires a JSON object")
+        return self._ticket_action(ticket_id, "edit_fields", fields, caller_role=caller_role)
+
 
 def _ticket_from_response(response: dict[str, Any]) -> dict[str, Any]:
     ticket = response.get("ticket")
@@ -698,6 +705,7 @@ def _build_parser() -> argparse.ArgumentParser:
     create.add_argument("--body", required=True)
     create.add_argument("--assignee", default="unassigned")
     create.add_argument("--state", default="analysis")
+    create.add_argument("--parent-id", default="")
     create.add_argument("--draft", action="store_true")
     create.add_argument("--screenshot")
     create.add_argument("--blocked-by", action="append", default=[])
@@ -818,6 +826,10 @@ def _build_parser() -> argparse.ArgumentParser:
     comment.add_argument("ticket_id")
     comment.add_argument("--text", required=True)
     comment.add_argument("--urgent", action="store_true")
+
+    edit_fields = subparsers.add_parser("edit-fields")
+    edit_fields.add_argument("ticket_id")
+    edit_fields.add_argument("--json", required=True, help="JSON object of fields accepted by the edit_fields action")
     return parser
 
 
@@ -837,6 +849,7 @@ def main(argv: list[str] | None = None) -> int:
                 screenshot=args.screenshot,
                 assignee=args.assignee,
                 state="draft" if args.draft else args.state,
+                parent_id=args.parent_id,
                 blocked_by=args.blocked_by,
                 blocked_reason=args.blocked_reason,
                 implementation=args.implementation,
@@ -917,8 +930,16 @@ def main(argv: list[str] | None = None) -> int:
             response = client.set_blockers(args.ticket_id, blocked_by=args.blocked_by, blocked_reason=args.blocked_reason)
         elif command == "add_comment":
             response = client.add_comment(args.ticket_id, text=args.text, urgent=args.urgent)
+        elif command == "edit_fields":
+            patch = json.loads(args.json)
+            if not isinstance(patch, dict):
+                raise TicketBoardWriteError("edit-fields --json must be a JSON object")
+            response = client.edit_fields(args.ticket_id, patch)
         else:
             response = getattr(client, command)(args.ticket_id)
+    except json.JSONDecodeError as exc:
+        print(f"invalid edit-fields --json: {exc}", file=sys.stderr)
+        return 1
     except TicketBoardWriteError as exc:
         print(str(exc), file=sys.stderr)
         return 1

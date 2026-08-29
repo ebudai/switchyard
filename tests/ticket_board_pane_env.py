@@ -39,7 +39,7 @@ PANE_STATE_SOURCE_PREFIXES_BY_TARGET = {
     "pgu-inspector:0.0": ("gemini.", "team_launcher."),
 }
 PANE_STATE_STATES = frozenset({"idle", "busy", "blocked"})
-PANE_SESSION_RUNTIME_SOURCE_PREFIXES = ("codex.", "claude.", "gemini.")
+PANE_SESSION_RUNTIME_SOURCE_PREFIXES = ("codex.", "claude.", "gemini.", "hermes.")
 
 
 def strip_ticket_board_pane_env(environ: dict[str, str], *, keep: tuple[str, ...] = ()) -> dict[str, str]:

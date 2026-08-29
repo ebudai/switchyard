@@ -261,6 +261,13 @@ target from ambient tmux state. The required state transitions are:
   resume session id; `PreInvocation` writes `busy`; `PostInvocation` and `Stop`
   write `idle`. Do not use Gemini `Notification` for idle because it is
   alert/permission-oriented.
+- Hermes: hook config is stored in `~/.hermes/config.yaml` and emits
+  `hermes.*` source labels. Hermes has no separate runtime status timer that
+  the listener parses today; it is intentionally hook-state-only.
+  `pre_llm_call` writes `busy`; `post_llm_call`, `on_session_end`, and
+  `on_session_finalize` are turn-end idle sources. `on_session_start` only
+  seeds initial idle and the resume id, so it still needs the normal
+  pane-content corroboration before delivery.
 
 Session ids are stored under `$TICKET_BOARD_PANE_SESSION_DIR` (default:
 `~/.local/state/pgu-ticket-board/pane-sessions`) using the same per-pane file
@@ -284,10 +291,12 @@ For notification delivery, idle hook records are not all equally authoritative.
 Only turn-end sources from the pane's configured runtime can establish idle on
 their own. Session-lifecycle sources such as `SessionStart`, foreign-runtime
 sources inherited through pane target/session environment, and other
-non-turn-end idle records must be corroborated by a working-timer probe. A
-successful probe with no visible `Working (Ns)` timer is idle evidence; a failed
-or otherwise inconclusive probe still treats the pane as busy and records a
-specific trace reason instead of collapsing the decision into `hook_idle`.
+non-turn-end idle records must be corroborated by a working-timer/content probe.
+Hermes is a known hook-state-only runtime in this table; a Hermes-configured
+role should not report `foreign_runtime_*` merely because its hook source is
+`hermes.*`. A successful probe with stable pane content is idle evidence; a
+failed or otherwise inconclusive probe still treats the pane as busy and records
+a specific trace reason instead of collapsing the decision into `hook_idle`.
 
 Install the hook writer and persistent CLI hook config entries with:
 

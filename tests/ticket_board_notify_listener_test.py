@@ -436,6 +436,35 @@ def test_hook_state_writer_and_gate_idle_before_arrival_delivers_immediately() -
     assert conn.traces[1][6] == "hook_idle"
 
 
+def test_hermes_turn_end_idle_delivers_without_foreign_runtime_trace() -> None:
+    sent: list[tuple[str, str]] = []
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            cursor_position_runner=constant_cursor_runner(),
+            capture_pane_runner=sequenced_capture_runner("Hermes idle prompt\n"),
+            role_runtimes={"inspector": "hermes"},
+        )
+        store.write("pgu-inspector:0.0", "idle", source="hermes.post_llm_call", now=100.0)
+        conn = FakeConnection([queue_row(774, "PGU-774", target_role="inspector", message="PGU-774 -- Hermes notification")])
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=gate.is_working,
+            connector=lambda *args, **kwargs: conn,
+            poll_seconds=0,
+        )
+
+        assert listener.listen_once(max_notifications=1) == 1
+
+    assert sent == [("pgu-inspector:0.0", "PGU-774 -- Hermes notification")]
+    assert conn.requeued == []
+    assert conn.acked == [774]
+    assert conn.traces[1][5] == "idle"
+    assert conn.traces[1][6] == "hook_idle"
+
+
 def test_worker_cursor_advanced_holds_notification_delivery() -> None:
     sent: list[tuple[str, str]] = []
     cursor = ["5 23 24"]
@@ -1589,6 +1618,60 @@ def test_foreign_runtime_idle_without_timer_delivers() -> None:
         assert gate.is_busy("pgu-ops:0.0") is False
 
     assert gate.last_trace("pgu-ops:0.0").reason == "foreign_runtime_working_timer_idle"  # type: ignore[union-attr]
+
+
+def test_hermes_runtime_turn_end_idle_is_known_runtime_not_foreign_fallback() -> None:
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            cursor_position_runner=constant_cursor_runner("2 23 24"),
+            capture_pane_runner=targeted_capture_runner("pgu-inspector:0.0", "idle hermes prompt\n"),
+            role_runtimes={"inspector": "hermes"},
+            idle_working_timer_sample_delay_seconds=1.1,
+            sleeper=lambda _seconds: None,
+        )
+        store.write("pgu-inspector:0.0", "idle", source="hermes.post_llm_call", now=1_800_000_000.0)
+
+        assert gate.is_busy("pgu-inspector:0.0") is False
+
+    assert gate.last_trace("pgu-inspector:0.0").reason == "hook_idle"  # type: ignore[union-attr]
+
+
+def test_hermes_runtime_session_start_idle_still_requires_probe() -> None:
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            cursor_position_runner=constant_cursor_runner("2 23 24"),
+            capture_pane_runner=targeted_capture_runner(
+                "pgu-inspector:0.0",
+                "Hermes working\n",
+                "Hermes working.\n",
+            ),
+            role_runtimes={"inspector": "hermes"},
+            idle_working_timer_sample_delay_seconds=1.1,
+            sleeper=lambda _seconds: None,
+        )
+        store.write("pgu-inspector:0.0", "idle", source="hermes.on_session_start", now=1_800_000_000.0)
+
+        assert gate.is_busy("pgu-inspector:0.0") is True
+
+    assert gate.last_trace("pgu-inspector:0.0").reason == "pane_content_changed"  # type: ignore[union-attr]
+
+
+def test_hermes_busy_hook_blocks_delivery_for_known_runtime() -> None:
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            role_runtimes={"inspector": "hermes"},
+        )
+        store.write("pgu-inspector:0.0", "busy", source="hermes.pre_llm_call", now=1_800_000_000.0)
+
+        assert gate.is_busy("pgu-inspector:0.0") is True
+
+    assert gate.last_trace("pgu-inspector:0.0").reason == "hook_busy"  # type: ignore[union-attr]
 
 
 def test_team_launcher_start_idle_without_timer_delivers() -> None:

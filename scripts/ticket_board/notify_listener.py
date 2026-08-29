@@ -49,7 +49,16 @@ DEFAULT_IDLE_STALL_ESCALATE_AFTER = 2
 # any send.
 DEFAULT_PRESENT_IDLE_FRESHNESS_SECONDS = 0.0
 IDLE_TURN_END_SOURCES = frozenset(
-    {"claude.Stop", "codex.Stop", "gemini.AfterAgent", "gemini.PostInvocation", "gemini.Stop"}
+    {
+        "claude.Stop",
+        "codex.Stop",
+        "gemini.AfterAgent",
+        "gemini.PostInvocation",
+        "gemini.Stop",
+        "hermes.post_llm_call",
+        "hermes.on_session_end",
+        "hermes.on_session_finalize",
+    }
 )
 TRUSTED_IDLE_SOURCES = IDLE_TURN_END_SOURCES | frozenset({"claude.Notification.idle_prompt", "listener.stale_codex_busy_recovery"})
 DEFAULT_ROLE_RUNTIMES = {

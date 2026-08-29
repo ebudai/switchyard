@@ -1584,6 +1584,8 @@ def test_hook_without_target_is_silent_noop() -> None:
         env.pop("TICKET_BOARD_PANE_TARGET", None)
         env.pop("PGU_PANE_TARGET", None)
         env.pop("TMUX_PANE", None)
+        env.pop("TICKET_BOARD_PROJECT", None)
+        env.pop("PGU_TICKET_BOARD_PROJECT", None)
 
         proc = subprocess.run(
             [

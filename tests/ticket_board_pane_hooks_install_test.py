@@ -190,8 +190,13 @@ def _hermes_valid_hook_events() -> set[str]:
     text = f"{proc.stdout}\n{proc.stderr}"
     marker = "Valid events:"
     assert marker in text, text
-    valid_line = text.split(marker, 1)[1].strip().splitlines()[0]
-    return {event.strip() for event in valid_line.split(",") if event.strip()}
+    valid_lines: list[str] = []
+    for line in text.split(marker, 1)[1].strip().splitlines():
+        stripped = line.strip()
+        if not stripped:
+            break
+        valid_lines.append(stripped)
+    return {event.strip() for event in " ".join(valid_lines).split(",") if event.strip()}
 
 
 def test_installer_writes_durable_cli_hook_configs_idempotently() -> None:
@@ -1964,6 +1969,12 @@ def test_hook_ignores_tmux_pane_without_explicit_target() -> None:
 
 
 def main() -> int:
+    if shutil.which("hermes") is None:
+        print(
+            "ticket_board_pane_hooks_install_test: skipped, missing hermes CLI; "
+            "install hermes to validate Hermes hook event names"
+        )
+        return 0
     live_session_paths = candidate_live_pane_session_paths()
     live_pane_state_paths = candidate_live_pane_state_paths()
     live_session_snapshot = snapshot_pane_session_paths(live_session_paths)

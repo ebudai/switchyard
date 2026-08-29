@@ -1,0 +1,237 @@
+#!/usr/bin/env python3
+"""Run the ticket_board_* standalone suites as one reported set."""
+
+from __future__ import annotations
+
+import argparse
+import importlib
+import os
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TextIO
+
+
+ROOT = Path(__file__).resolve().parents[1]
+PLAYWRIGHT_AUDIT_TEST = "tests/ticket_board_ui_audit_test.py"
+
+LIVE_BOARD_ENV_KEYS = {
+    "DATABASE_URL",
+    "PGU_TICKET_BOARD_CALLER_ROLE",
+    "PGU_TICKET_BOARD_SOCKET",
+    "PGU_TICKET_BOARD_URL",
+    "TICKET_BOARD_ADMIN_DATABASE_URL",
+    "TICKET_BOARD_CALLER_ROLE",
+    "TICKET_BOARD_DATABASE_URL",
+    "TICKET_BOARD_NOTIFY_DATABASE_URL",
+    "TICKET_BOARD_SOCKET",
+    "TICKET_BOARD_URL",
+}
+LIVE_PANE_ENV_KEYS = {
+    "PGU_PANE_SESSION_ID",
+    "PGU_PANE_TARGET",
+    "PGU_TICKET_BOARD_PANE_SESSION_DIR",
+    "PGU_TICKET_BOARD_PANE_STATE_DIR",
+    "PGU_TICKET_BOARD_PROJECT",
+    "TICKET_BOARD_PANE_SESSION_DIR",
+    "TICKET_BOARD_PANE_SESSION_ID",
+    "TICKET_BOARD_PANE_STATE_DIR",
+    "TICKET_BOARD_PANE_TARGET",
+    "TICKET_BOARD_PROJECT",
+}
+SANITIZED_ENV_KEYS = LIVE_BOARD_ENV_KEYS | LIVE_PANE_ENV_KEYS
+
+
+@dataclass(frozen=True)
+class SuiteResult:
+    path: str
+    status: str
+    returncode: int
+    duration_seconds: float
+    stdout: str = ""
+    stderr: str = ""
+    reason: str = ""
+
+
+def discover_ticket_board_suites(root: Path = ROOT) -> list[str]:
+    tests_dir = root / "tests"
+    if not tests_dir.is_dir():
+        return []
+    return sorted(
+        path.relative_to(root).as_posix()
+        for path in tests_dir.iterdir()
+        if path.is_file()
+        and path.name.startswith("ticket_board_")
+        and path.name.endswith(("_test.py", "_test.sh"))
+    )
+
+
+def _module_importable(module: str, *, root: Path = ROOT) -> bool:
+    original_path = list(sys.path)
+    try:
+        root_text = str(root)
+        if root_text not in sys.path:
+            sys.path.insert(0, root_text)
+        importlib.import_module(module)
+        return True
+    except ModuleNotFoundError:
+        return False
+    finally:
+        sys.path[:] = original_path
+
+
+def prerequisite_skip_reasons(root: Path = ROOT) -> dict[str, str]:
+    reasons: dict[str, str] = {}
+    if (root / PLAYWRIGHT_AUDIT_TEST).exists() and not _module_importable("playwright.sync_api", root=root):
+        reasons[PLAYWRIGHT_AUDIT_TEST] = (
+            "missing Playwright Python package; install playwright and browser binaries "
+            "to run the broad ticket-board UI audit"
+        )
+    return reasons
+
+
+def sanitized_environment(environ: dict[str, str] | None = None) -> dict[str, str]:
+    clean = dict(os.environ if environ is None else environ)
+    for key in SANITIZED_ENV_KEYS:
+        clean.pop(key, None)
+    return clean
+
+
+def run_one_suite(path: str, *, root: Path = ROOT, env: dict[str, str] | None = None) -> SuiteResult:
+    started = time.monotonic()
+    if path.endswith(".py"):
+        args = [sys.executable, path]
+    elif path.endswith(".sh"):
+        args = ["bash", path]
+    else:
+        args = [str(root / path)]
+    proc = subprocess.run(
+        args,
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=sanitized_environment(env),
+    )
+    duration = time.monotonic() - started
+    status = "PASS" if proc.returncode == 0 else "FAIL"
+    combined = (proc.stdout + "\n" + proc.stderr).lower()
+    ok_marker = f"{Path(path).stem}: ok".lower()
+    skip_marker = f"{Path(path).stem}: skipped".lower()
+    if proc.returncode == 0 and skip_marker in combined and ok_marker not in combined:
+        status = "SKIP"
+    return SuiteResult(
+        path=path,
+        status=status,
+        returncode=proc.returncode,
+        duration_seconds=duration,
+        stdout=proc.stdout,
+        stderr=proc.stderr,
+    )
+
+
+def _tail_lines(text: str, max_lines: int) -> str:
+    lines = text.rstrip().splitlines()
+    if len(lines) <= max_lines:
+        return "\n".join(lines)
+    return "\n".join(["...", *lines[-max_lines:]])
+
+
+def report_result(result: SuiteResult, *, out: TextIO, output_lines: int) -> None:
+    if result.status == "SKIP" and result.reason:
+        print(f"SKIP {result.path} ({result.duration_seconds:.2f}s) - {result.reason}", file=out)
+    elif result.status == "SKIP":
+        print(f"SKIP {result.path} ({result.duration_seconds:.2f}s)", file=out)
+    else:
+        print(f"{result.status} {result.path} ({result.duration_seconds:.2f}s)", file=out)
+    if result.status == "FAIL":
+        stdout_tail = _tail_lines(result.stdout, output_lines)
+        stderr_tail = _tail_lines(result.stderr, output_lines)
+        if stdout_tail:
+            print(f"--- stdout: {result.path} ---", file=out)
+            print(stdout_tail, file=out)
+        if stderr_tail:
+            print(f"--- stderr: {result.path} ---", file=out)
+            print(stderr_tail, file=out)
+
+
+def run_suite(
+    *,
+    root: Path = ROOT,
+    out: TextIO = sys.stdout,
+    env: dict[str, str] | None = None,
+    skip_reasons: dict[str, str] | None = None,
+    output_lines: int = 80,
+) -> list[SuiteResult]:
+    tests = discover_ticket_board_suites(root)
+    skips = dict(prerequisite_skip_reasons(root) if skip_reasons is None else skip_reasons)
+    results: list[SuiteResult] = []
+    for test in tests:
+        if test in skips:
+            result = SuiteResult(
+                path=test,
+                status="SKIP",
+                returncode=0,
+                duration_seconds=0.0,
+                reason=skips[test],
+            )
+        else:
+            result = run_one_suite(test, root=root, env=env)
+        results.append(result)
+        report_result(result, out=out, output_lines=output_lines)
+    return results
+
+
+def print_summary(results: list[SuiteResult], *, out: TextIO) -> None:
+    passed = sum(1 for result in results if result.status == "PASS")
+    skipped = sum(1 for result in results if result.status == "SKIP")
+    failed = sum(1 for result in results if result.status == "FAIL")
+    print(f"summary: {passed} passed, {skipped} skipped, {failed} failed", file=out)
+    if skipped:
+        print("skipped suites:", file=out)
+        for result in results:
+            if result.status == "SKIP":
+                suffix = f" - {result.reason}" if result.reason else ""
+                print(f"  {result.path}{suffix}", file=out)
+    if failed:
+        print("failed suites:", file=out)
+        for result in results:
+            if result.status == "FAIL":
+                print(f"  {result.path} (exit {result.returncode})", file=out)
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run every tests/ticket_board_*_test.py/.sh suite as one set.")
+    parser.add_argument("--root", type=Path, default=ROOT, help="repository root to scan")
+    parser.add_argument("--list", action="store_true", help="list discovered suites and prerequisite skips without running")
+    parser.add_argument("--fail-on-skip", action="store_true", help="return non-zero when any suite is skipped")
+    parser.add_argument("--output-lines", type=int, default=80, help="failure stdout/stderr tail lines to print")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    root = args.root.resolve()
+    tests = discover_ticket_board_suites(root)
+    skips = prerequisite_skip_reasons(root)
+    if args.list:
+        for test in tests:
+            if test in skips:
+                print(f"SKIP {test} - {skips[test]}")
+            else:
+                print(f"RUN  {test}")
+        print(f"summary: {len(tests) - len(skips)} runnable, {len(skips)} skipped")
+        return 0 if tests else 1
+    results = run_suite(root=root, skip_reasons=skips, output_lines=max(1, int(args.output_lines)))
+    print_summary(results, out=sys.stdout)
+    failed = any(result.status == "FAIL" for result in results)
+    skipped = any(result.status == "SKIP" for result in results)
+    if failed or (args.fail_on_skip and skipped):
+        return 1
+    return 0 if results else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

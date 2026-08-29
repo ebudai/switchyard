@@ -6184,6 +6184,12 @@ def _role_has_pane_process(role: RoleConfig, process_commands: Sequence[str]) ->
     target_marker = f"TICKET_BOARD_PANE_TARGET={role.target}"
     legacy_target_marker = f"PGU_PANE_TARGET={role.target}"
     for command in process_commands:
+        try:
+            first = shlex.split(command)[0] if command.strip() else ""
+        except ValueError:
+            first = command.strip().split(maxsplit=1)[0] if command.strip() else ""
+        if Path(first).name == "tmux":
+            continue
         if target_marker in command or legacy_target_marker in command:
             return True
     return False

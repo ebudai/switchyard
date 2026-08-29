@@ -8390,7 +8390,7 @@ def test_switchyard_status_lists_registered_projects_from_process_snapshot() -> 
                 process_commands=[
                     "fish -c env TICKET_BOARD_PANE_TARGET=pgu-director:0.0 claude",
                     "fish -c env TICKET_BOARD_PANE_TARGET=pgu-ops:0.0 codex",
-                    "tmux new-session -d -s otto-main -c /repo env TICKET_BOARD_PANE_TARGET=otto-main:0.0 codex",
+                    "fish -c env TICKET_BOARD_PANE_TARGET=otto-main:0.0 codex",
                     "python3 /service/ticket-board.py --project otto",
                 ],
                 print_func=lines.append,
@@ -8510,7 +8510,7 @@ def test_switchyard_status_lists_unreadable_config_as_unknown() -> None:
     ]
 
 
-def test_switchyard_status_ignores_tmux_server_new_session_argv_without_pane_target() -> None:
+def test_switchyard_status_ignores_tmux_server_new_session_argv_with_pane_target() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-status-tmux-server.") as tmp:
         tmp_path = Path(tmp)
         registry_dir = tmp_path / "registry"
@@ -8552,7 +8552,7 @@ def test_switchyard_status_ignores_tmux_server_new_session_argv_without_pane_tar
                 config_dir=config_dir,
                 registry_dir=registry_dir,
                 process_commands=[
-                    "tmux new-session -d -s atlas-research -c /repo claude",
+                    "tmux new-session -d -s atlas-research -c /repo env TICKET_BOARD_PANE_TARGET=atlas-research:0.0 claude",
                     "tmux: server (/tmp/tmux-1001/default) for atlas",
                 ],
                 print_func=lines.append,

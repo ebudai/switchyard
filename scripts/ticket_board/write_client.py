@@ -17,6 +17,15 @@ from urllib import parse, request
 
 CALLER_ROLE_HEADER = "X-Ticket-Board-Caller-Role"
 LEGACY_CALLER_ROLE_HEADER = "X-PGU-Caller-Role"
+LIVE_BOARD_URL_HOSTS = frozenset({"127.0.0.1", "localhost"})
+LIVE_BOARD_URL_PORT = 8770
+LIVE_BOARD_SOCKET_PATHS = frozenset(
+    {
+        "/run/pgu-ticket-board/ticket-board.sock",
+        "/tmp/pgu-ticket-board.sock",
+    }
+)
+ALLOW_PRODUCTION_WRITES_UNDER_TEST_ENV = "TICKET_BOARD_ALLOW_PRODUCTION_WRITES_UNDER_TEST"
 
 
 def _env_first(*names: str) -> str:
@@ -94,6 +103,102 @@ def default_caller_role(environ: Mapping[str, str] = os.environ) -> str:
     return _env_first_from(environ, "TICKET_BOARD_CALLER_ROLE", "PGU_TICKET_BOARD_CALLER_ROLE").lower()
 
 
+def _env_truthy(environ: Mapping[str, str], name: str) -> bool:
+    return environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _proc_parts(path: Path) -> list[str]:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return []
+    return [part.decode("utf-8", errors="replace") for part in data.split(b"\0") if part]
+
+
+def _arg_looks_like_test_path(arg: str) -> bool:
+    normalized = arg.replace("\\", "/")
+    name = Path(normalized).name
+    return (
+        normalized.startswith("tests/")
+        or "/tests/" in normalized
+        or name.endswith("_test.py")
+        or name.endswith("_test.sh")
+        or name.startswith("test_")
+    )
+
+
+def _running_under_test_process(environ: Mapping[str, str] = os.environ, *, max_depth: int = 12) -> bool:
+    if _env_truthy(environ, "TICKET_BOARD_TEST_MODE") or environ.get("PYTEST_CURRENT_TEST"):
+        return True
+    pid = os.getpid()
+    seen: set[int] = set()
+    for _ in range(max_depth):
+        if pid <= 1 or pid in seen:
+            return False
+        seen.add(pid)
+        proc_dir = Path("/proc") / str(pid)
+        cmdline = _proc_parts(proc_dir / "cmdline")
+        if any(_arg_looks_like_test_path(arg) for arg in cmdline):
+            return True
+        status = {}
+        try:
+            status_text = (proc_dir / "status").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        for line in status_text.splitlines():
+            if ":" in line:
+                key, value = line.split(":", 1)
+                status[key] = value.strip()
+        try:
+            pid = int(status.get("PPid", "0"))
+        except ValueError:
+            return False
+    return False
+
+
+def _normalized_socket_path(socket_path: str | None) -> str:
+    if not socket_path:
+        return ""
+    return os.path.normpath(socket_path.strip())
+
+
+def _is_live_board_socket(socket_path: str | None) -> bool:
+    return _normalized_socket_path(socket_path) in LIVE_BOARD_SOCKET_PATHS
+
+
+def _is_live_board_url(board_url: str) -> bool:
+    parsed = parse.urlparse(board_url)
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    if (parsed.hostname or "").lower() not in LIVE_BOARD_URL_HOSTS:
+        return False
+    return (parsed.port or (443 if parsed.scheme == "https" else 80)) == LIVE_BOARD_URL_PORT
+
+
+def _refuse_production_write_under_test(
+    board_url: str,
+    socket_path: str | None,
+    environ: Mapping[str, str] = os.environ,
+) -> None:
+    if _env_truthy(environ, ALLOW_PRODUCTION_WRITES_UNDER_TEST_ENV):
+        return
+    if not _running_under_test_process(environ):
+        return
+    if _is_live_board_socket(socket_path):
+        target = socket_path
+    elif socket_path:
+        return
+    elif _is_live_board_url(board_url):
+        target = board_url
+    else:
+        return
+    raise TicketBoardWriteError(
+        "refusing production ticket-board write while running under test; "
+        f"target {target} is the live board. Point the test at a disposable board target "
+        f"or set {ALLOW_PRODUCTION_WRITES_UNDER_TEST_ENV}=1 only for an intentional production write."
+    )
+
+
 def _run_git(args: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["git", *args], capture_output=True, text=True, check=False)
 
@@ -129,6 +234,7 @@ class TicketBoardWriteClient:
         if not role:
             raise ValueError("caller_role must be non-empty")
         socket_path = self.effective_socket_path
+        _refuse_production_write_under_test(self.board_url, socket_path)
         if socket_path:
             try:
                 return self._post_unix(path, payload, role, socket_path)

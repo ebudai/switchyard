@@ -317,6 +317,72 @@ def assert_empty_caller_role_rejects_before_request(
     assert len(requests) == before, requests[before:]
 
 
+def assert_test_guard_rejects_live_board_target_before_request(
+    requests: list[tuple[str, str | None, str | None, dict[str, object]]],
+) -> None:
+    before = len(requests)
+    client = TicketBoardWriteClient("http://127.0.0.1:1", "director", socket_path="/run/pgu-ticket-board/ticket-board.sock")
+    try:
+        client.create_ticket(title="Must not reach production", body="Guarded.")
+    except write_client_module.TicketBoardWriteError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("test write to live board socket unexpectedly proceeded")
+    assert "refusing production ticket-board write while running under test" in message, message
+    assert "/run/pgu-ticket-board/ticket-board.sock" in message, message
+    assert len(requests) == before, requests[before:]
+
+    url_client = TicketBoardWriteClient("http://localhost:8770", "director")
+    try:
+        url_client.create_ticket(title="Must not reach production URL", body="Guarded.")
+    except write_client_module.TicketBoardWriteError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("test write to live board URL unexpectedly proceeded")
+    assert "refusing production ticket-board write while running under test" in message, message
+    assert "http://localhost:8770" in message, message
+    assert len(requests) == before, requests[before:]
+
+
+def assert_test_guard_allows_normal_pane_context_outside_tests() -> None:
+    assert not write_client_module._running_under_test_process(
+        {
+            "TICKET_BOARD_PANE_TARGET": "pgu-ops:0.0",
+            "TICKET_BOARD_CALLER_ROLE": "ops",
+        },
+        max_depth=0,
+    )
+
+
+def assert_cli_test_guard_rejects_live_board_target(repo: Path) -> None:
+    env = os.environ.copy()
+    for key in list(env):
+        if key.startswith("TICKET_BOARD_") or key.startswith("PGU_TICKET_BOARD_"):
+            env.pop(key)
+    env["TICKET_BOARD_CALLER_ROLE"] = "director"
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "ticket-board-write"),
+            "--socket",
+            "/run/pgu-ticket-board/ticket-board.sock",
+            "create-ticket",
+            "--title",
+            "Must not reach production",
+            "--body",
+            "Guarded.",
+        ],
+        cwd=repo,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert proc.returncode == 1, proc.stdout
+    assert "refusing production ticket-board write while running under test" in proc.stderr, proc.stderr
+    assert "/run/pgu-ticket-board/ticket-board.sock" in proc.stderr, proc.stderr
+
+
 def assert_auto_socket_connect_failure_falls_back_to_tcp(base_url: str, socket_path: Path) -> None:
     socket_path.touch()
     socket_path.chmod(0)
@@ -444,6 +510,9 @@ def main() -> int:
                 exercise_client(base_url, repo, pushed_hash)
                 assert_submit_rejects_unpushed_commit(base_url, repo, local_only_hash, server.requests)
                 assert_empty_caller_role_rejects_before_request(base_url, server.requests)
+                assert_test_guard_rejects_live_board_target_before_request(server.requests)
+                assert_test_guard_allows_normal_pane_context_outside_tests()
+                assert_cli_test_guard_rejects_live_board_target(repo)
                 assert_socket_discovery_prefers_runtime_then_legacy(root)
                 assert_generic_socket_env_precedes_legacy(root)
                 assert_default_caller_role_ignores_tmux_session()

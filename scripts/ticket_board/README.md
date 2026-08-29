@@ -58,6 +58,11 @@ Pane write API:
   launcher exports this variable for each role, so `pgu-main`, `pgu-app`, and
   `pgu-ops` write as `main`, `app`, and `ops` by default. Pass `--caller-role`
   when deliberately acting as a different board role.
+- Tests must point write-client calls at disposable board targets. When the
+  write client detects it is running under a test process, it refuses writes to
+  the live PGU board URL/socket before opening a connection. Use
+  `TICKET_BOARD_ALLOW_PRODUCTION_WRITES_UNDER_TEST=1` only for a deliberate
+  production-write test.
 - The main/app/ops panes should use their own role for allowed pane operations,
   for example `scripts/ticket-board-write start-work PGU-123`,
   `scripts/ticket-board-write submit-to-inspection PGU-123`,

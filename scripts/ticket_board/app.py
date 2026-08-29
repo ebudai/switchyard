@@ -968,7 +968,15 @@ ORDER BY rank;
                 state = self._validate_state(str(patch["state"])) if "state" in patch else current["state"]
                 assignee = self._validate_assignee(str(patch["assignee"])) if "assignee" in patch else current["assignee"]
                 commit_hash = str(patch.get("commit_hash", current.get("commit_hash", "")) or "").strip()
-                if "commit_hash" in patch and state not in {"audit", "director_review", "done"}:
+                if (
+                    "commit_hash" in patch
+                    and state not in {"audit", "done"}
+                    and not (
+                        state == "director_review"
+                        and current["state"] == "in_progress"
+                        and self._pg_transition_configured(conn, "in_progress", "director_review", "submit_to_audit")
+                    )
+                ):
                     raise ValueError("postgres function API only accepts commit_hash when submitting to audit or marking done")
 
                 if "audit_signoff" in patch:
@@ -1016,7 +1024,11 @@ ORDER BY rank;
                         self._pg_call(conn, "SELECT ticket_board.submit_to_inspection(%s);", (ticket_id,))
                     elif state == "audit":
                         self._pg_call(conn, "SELECT ticket_board.submit_to_audit(%s, %s);", (ticket_id, commit_hash))
-                    elif state == "director_review" and current["state"] == "in_progress":
+                    elif (
+                        state == "director_review"
+                        and current["state"] == "in_progress"
+                        and self._pg_transition_configured(conn, "in_progress", "director_review", "submit_to_audit")
+                    ):
                         self._pg_call(conn, "SELECT ticket_board.submit_to_audit(%s, %s);", (ticket_id, commit_hash))
                     elif state == "user_review" and current["state"] == "dat":
                         self._pg_call(conn, "SELECT ticket_board.director_dat_sign_off(%s, %s);", (ticket_id, comment_text))
@@ -1105,6 +1117,21 @@ ORDER BY rank;
             raise ValueError("postgres function returned no row")
         value = next(iter(row.values()))
         return str(value)
+
+    def _pg_transition_configured(self, conn: Any, from_stage: str, to_stage: str, action_name: str) -> bool:
+        row = conn.execute(
+            """
+SELECT EXISTS (
+    SELECT 1
+    FROM ticket_board.workflow_transitions
+    WHERE from_stage = %s
+      AND to_stage = %s
+      AND action_name = %s
+) AS configured;
+""",
+            (from_stage, to_stage, action_name),
+        ).fetchone()
+        return bool(row and row["configured"])
 
     def _pg_edit_field_patch(self, patch: dict[str, Any]) -> dict[str, Any]:
         editable = {

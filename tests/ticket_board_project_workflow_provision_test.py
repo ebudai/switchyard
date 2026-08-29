@@ -549,7 +549,7 @@ SELECT ticket_board.create_ticket('Audit-less workflow ticket', 'Body', 'analysi
                     noaudit_admin_conn,
                     f"SELECT state || ':' || assignee || ':' || audit_signoff::text FROM ticket_board.tickets WHERE id = '{noaudit_ticket_id}';",
                 )
-                == "director_review:director:true"
+                == "director_review:director:false"
             )
 
             service_call(noaudit_service_conn, "director", f"SELECT ticket_board.mark_done('{noaudit_ticket_id}', '123abcd');")

@@ -469,6 +469,17 @@ SELECT ticket_board.create_ticket('Cycle blocked', 'Body', 'analysis', ARRAY['PG
             submitted = service_app.update_ticket("PGU-100", {"state": "audit", "commit_hash": "abcdef1"}, caller_role="ops")
             assert submitted["state"] == "audit", submitted
             assert submitted["commit_hash"] == "abcdef1", submitted
+            insert_ticket(admin_conn, "PGU-101", title="Direct final signoff forbidden", state="in_progress", assignee="app")
+            try:
+                service_app.update_ticket(
+                    "PGU-101",
+                    {"state": "director_review", "commit_hash": "123abcd"},
+                    caller_role="app",
+                )
+                raise AssertionError("expected direct final signoff to be rejected for pgu workflow")
+            except ValueError as exc:
+                assert "postgres function API only accepts commit_hash when submitting to audit or marking done" in str(exc), exc
+            assert psql(admin_conn, "SELECT state || ':' || coalesce(commit_hash, '') FROM ticket_board.tickets WHERE id = 'PGU-101';") == "in_progress:"
             edited = service_app.update_ticket("PGU-100", {"implementation": "Edited through function API."})
             assert edited["implementation"] == "Edited through function API.", edited
             regression_edited = service_app.update_ticket("PGU-100", {"regression": True})

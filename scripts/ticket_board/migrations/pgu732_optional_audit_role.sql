@@ -134,7 +134,10 @@ BEGIN
         NEW.parked := false;
     END IF;
 
-    IF OLD.state <> 'director_review' AND NEW.state = 'director_review' AND NOT NEW.audit_signoff THEN
+    IF OLD.state <> 'director_review'
+       AND NEW.state = 'director_review'
+       AND NOT NEW.audit_signoff
+       AND NOT ticket_board.workflow_transition_allowed_config(OLD.state, NEW.state) THEN
         RAISE EXCEPTION 'audit_signoff must be true before a ticket can enter director_review';
     END IF;
     IF OLD.state = 'inspection' AND NEW.state = 'audit' AND NOT NEW.inspector_signoff THEN
@@ -225,7 +228,7 @@ BEGIN
     UPDATE ticket_board.tickets
     SET state = target_state,
         commit_hash = normalized_commit,
-        audit_signoff = CASE WHEN target_state = 'director_review' THEN true ELSE false END,
+        audit_signoff = false,
         inspector_signoff = false,
         last_rejected_commit = NULL
     WHERE tickets.id = submit_to_audit.id;

@@ -4106,7 +4106,8 @@ $$;
 CREATE OR REPLACE FUNCTION ticket_board.file_bug(
     title text,
     body text,
-    source_ticket_id text
+    source_ticket_id text,
+    assignee text
 )
 RETURNS text
 LANGUAGE plpgsql
@@ -4118,9 +4119,13 @@ DECLARE
     actor text;
     ticket_id text;
     source_id text := upper(btrim(coalesce(source_ticket_id, '')));
+    target_assignee text := btrim(coalesce(assignee, 'unassigned'));
     created_at_value timestamptz := clock_timestamp();
     created_text_value text := ticket_board.utc_text(created_at_value);
 BEGIN
+    IF target_assignee = '' THEN
+        target_assignee := 'unassigned';
+    END IF;
     actor := ticket_board.current_actor_role();
     IF actor = 'ticket_board_service' THEN
         PERFORM ticket_board.require_actor(ARRAY['main', 'app', 'ops', 'perf', 'research', 'audit'], 'file_bug');
@@ -4137,6 +4142,9 @@ BEGIN
     END IF;
     IF source_id !~ ticket_board.ticket_id_pattern() THEN
         RAISE EXCEPTION 'source_ticket_id must look like PREFIX-N';
+    END IF;
+    IF NOT ticket_board.ticket_valid_assignee(target_assignee) THEN
+        RAISE EXCEPTION 'invalid assignee: %', target_assignee;
     END IF;
     PERFORM 1 FROM ticket_board.tickets WHERE id = source_id;
     IF NOT FOUND THEN
@@ -4162,7 +4170,7 @@ BEGIN
         btrim(title),
         coalesce(body, ''),
         'analysis',
-        'unassigned',
+        target_assignee,
         source_id,
         created_text_value,
         created_text_value,
@@ -4173,16 +4181,33 @@ BEGIN
             'title', btrim(title),
             'body', coalesce(body, ''),
             'state', 'analysis',
-            'assignee', 'unassigned',
+            'assignee', target_assignee,
             'comments', '[]'::jsonb,
             'created', created_text_value,
             'updated', created_text_value
         ),
         ticket_id || '.json'
     );
+    IF actor <> 'ticket_board_service' THEN
+        PERFORM ticket_board.append_ticket_comment(ticket_id, actor, 'Filed bug against ' || source_id || '.');
+    END IF;
     PERFORM ticket_board.refresh_ticket_source_json(ticket_id);
     RETURN ticket_id;
 END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.file_bug(
+    title text,
+    body text,
+    source_ticket_id text
+)
+RETURNS text
+LANGUAGE sql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+    SELECT ticket_board.file_bug(title, body, source_ticket_id, 'unassigned');
 $$;
 
 CREATE OR REPLACE FUNCTION ticket_board.route(

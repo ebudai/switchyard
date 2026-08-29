@@ -24,6 +24,7 @@ WRITE_FUNCTIONS = [
     "ticket_board.create_ticket(text,text,text,text[],text)",
     "ticket_board.create_ticket(text,text,text,text[],text,boolean)",
     "ticket_board.file_bug(text,text,text)",
+    "ticket_board.file_bug(text,text,text,text)",
     "ticket_board.release_draft(text)",
     "ticket_board.route(text,text,text)",
     "ticket_board.force_move(text,text,text,boolean)",
@@ -409,6 +410,35 @@ SELECT ticket_board.create_ticket('Bad direct create', 'Body', 'in_progress');
     insert_ticket(admin_conn, "PGU-100", title="Source")
     filed = psql(service_conn, "SELECT ticket_board.file_bug('Service bug', 'Body', 'PGU-100');")
     assert psql(admin_conn, f"SELECT parent_id FROM ticket_board.tickets WHERE id = {sql_string(filed)};") == "PGU-100"
+    insert_ticket(admin_conn, "PGU-180", title="Assignable source")
+    filed_assigned = psql(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'ops', false);
+SELECT ticket_board.file_bug('Assigned service bug', 'Body', 'PGU-180', 'ops');
+""",
+    ).splitlines()[-1]
+    filed_assigned_row = json.loads(
+        psql(
+            admin_conn,
+            f"""
+SELECT jsonb_build_object(
+    'state', state,
+    'assignee', assignee,
+    'parent_id', parent_id,
+    'comment_who', (SELECT who FROM ticket_board.ticket_comments WHERE ticket_id = t.id ORDER BY position LIMIT 1)
+)::text
+FROM ticket_board.tickets t
+WHERE id = {sql_string(filed_assigned)};
+""",
+        )
+    )
+    assert filed_assigned_row == {
+        "state": "analysis",
+        "assignee": "ops",
+        "parent_id": "PGU-180",
+        "comment_who": "ops",
+    }, filed_assigned_row
 
     insert_ticket(admin_conn, "PGU-200", title="Route fixture", state="analysis")
     psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'director', false); SELECT ticket_board.route('PGU-200', 'backlog', 'ops');")
@@ -867,13 +897,19 @@ def assert_audit_direct_file_bug_grant(admin_conn: str, role_conn: dict[str, str
         psql(
             admin_conn,
             f"""
-SELECT jsonb_build_object('state', state, 'assignee', assignee, 'parent_id', parent_id)::text
-FROM ticket_board.tickets
+SELECT jsonb_build_object(
+    'state', state,
+    'assignee', assignee,
+    'parent_id', parent_id,
+    'comment_who', (SELECT who FROM ticket_board.ticket_comments WHERE ticket_id = t.id ORDER BY position LIMIT 1)
+)::text
+FROM ticket_board.tickets t
 WHERE id = {sql_string(filed)};
 """,
         )
     )
-    assert filed_row == {"state": "analysis", "assignee": "unassigned", "parent_id": "PGU-150"}, filed_row
+    assert filed_row == {"state": "analysis", "assignee": "unassigned", "parent_id": "PGU-150", "comment_who": "audit"}, filed_row
+    assert_permission_denied(role_conn["audit"], "SELECT ticket_board.file_bug('Audit cannot self-assign direct bug', 'Body', 'PGU-150', 'audit');")
     assert_permission_denied(role_conn["main"], "SELECT ticket_board.file_bug('Main cannot file bug', 'Body', 'PGU-150');")
 
 

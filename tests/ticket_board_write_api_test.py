@@ -763,6 +763,26 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     )
     filed = filed_payload["ticket"]  # type: ignore[index]
     assert filed["parent_id"] == source_id, filed  # type: ignore[index]
+    assigned_bug_roles = ("ops", "main", "app", "perf", "research", "audit")
+    for role in assigned_bug_roles:
+        assigned_file_bug_payload = post_json(
+            base_url,
+            "/api/tickets/actions/file_bug",
+            {
+                "title": f"{role} assigned file bug",
+                "body": f"{role} found a bug.",
+                "source_ticket_id": source_id,
+                "assignee": role,
+            },
+            caller=role,
+            expect=201,
+        )
+        assigned_file_bug = assigned_file_bug_payload["ticket"]  # type: ignore[index]
+        assert assigned_file_bug["parent_id"] == source_id, assigned_file_bug  # type: ignore[index]
+        assert assigned_file_bug["state"] == "analysis", assigned_file_bug  # type: ignore[index]
+        assert assigned_file_bug["assignee"] == role, assigned_file_bug  # type: ignore[index]
+        assert assigned_file_bug["comments"][0]["who"] == role, assigned_file_bug  # type: ignore[index]
+        assert assigned_file_bug["comments"][0]["text"] == f"Filed bug against {source_id}.", assigned_file_bug  # type: ignore[index]
     audit_filed_payload = post_json(
         base_url,
         "/api/tickets/actions/file_bug",

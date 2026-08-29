@@ -890,8 +890,8 @@ ORDER BY rank;
                 if parent_id and create_state == "analysis" and not blocked_by:
                     ticket_id = self._pg_call_scalar(
                         conn,
-                        "SELECT ticket_board.file_bug(%s, %s, %s) AS id;",
-                        (title, body.strip(), parent_id),
+                        "SELECT ticket_board.file_bug(%s, %s, %s, %s) AS id;",
+                        (title, body.strip(), parent_id, assignee),
                     )
                     created_via_file_bug = True
                 else:
@@ -912,7 +912,7 @@ ORDER BY rank;
                     self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps({"regression": True})))
                 if create_state != state:
                     raise ValueError(f"invalid create state: {state}; allowed: draft, analysis, backlog")
-                if create_state in {"analysis", "backlog"} and assignee != "unassigned":
+                if create_state in {"analysis", "backlog"} and assignee != "unassigned" and not created_via_file_bug:
                     self._pg_call(conn, "SELECT ticket_board.route(%s, %s, %s);", (ticket_id, state, assignee))
                 if attachment_patch:
                     current = self._pg_get_ticket(ticket_id, conn)

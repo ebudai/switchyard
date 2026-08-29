@@ -524,6 +524,17 @@ def main() -> int:
         ROOT / "scripts" / "ticket_board" / "migrations" / "286_allow_audit_file_bug.sql"
     ).read_text(encoding="utf-8").lower()
     assert "grant execute on function ticket_board.file_bug(text, text, text) to audit" in audit_file_bug_migration
+    file_bug_assignee_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu755_file_bug_assignee.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "create or replace function ticket_board.file_bug" in file_bug_assignee_migration
+    assert "source_ticket_id text,\n    assignee text" in file_bug_assignee_migration
+    assert "target_assignee" in file_bug_assignee_migration
+    assert "ticket_board.append_ticket_comment(ticket_id, actor, 'filed bug against ' || source_id || '.')" in file_bug_assignee_migration
+    assert "grant execute on function ticket_board.file_bug(text, text, text, text) to ticket_board_service" in file_bug_assignee_migration
+    assert "grant execute on function ticket_board.file_bug(text, text, text, text) to ticket_board_service" in (
+        ROOT / "scripts" / "ticket_board" / "rbac.sql"
+    ).read_text(encoding="utf-8").lower()
     assert "create or replace function ticket_board.file_bug" in audit_file_bug_migration
     assert "array['main', 'app', 'ops', 'perf', 'research', 'audit']" in audit_file_bug_migration
     assert "current_actor_role()" in audit_file_bug_migration

@@ -1609,6 +1609,26 @@ def test_hook_without_target_is_silent_noop() -> None:
         assert not state_dir.exists()
         assert not session_dir.exists()
 
+        no_dir_proc = subprocess.run(
+            [
+                str(ROOT / "scripts" / HOOK_NAME),
+                "idle",
+                "--source",
+                "codex.SessionStart",
+                "--record-session",
+            ],
+            input=json.dumps({"session_id": "human-session"}),
+            text=True,
+            capture_output=True,
+            env=env,
+        )
+
+        assert no_dir_proc.returncode == 0
+        assert no_dir_proc.stdout == ""
+        assert no_dir_proc.stderr == ""
+        assert not (tmp_path / "run").exists()
+        assert not (tmp_path / "state-home").exists()
+
 
 def main() -> int:
     live_session_paths = candidate_live_pane_session_paths()

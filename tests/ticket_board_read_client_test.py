@@ -71,6 +71,7 @@ class RecordingHandler(BaseHTTPRequestHandler):
             "blocked_reason": "Waiting on PGU-500." if ticket_id == "PGU-506" else "",
             "needs_inspection": True,
             "inspector_signoff": False,
+            "needs_audit": True,
             "needs_user_signoff": True,
             "user_signoff": False,
             "audit_signoff": False,
@@ -139,6 +140,7 @@ def assert_ticket_and_comments_output(base_url: str) -> None:
     assert code == 0, stderr
     assert "PGU-506 [in_progress/ops] Read client fixture" in stdout
     assert "needs_inspection: True" in stdout
+    assert "needs_audit: True" in stdout
     assert "blocked_by: PGU-500" in stdout
     assert "Body:" in stdout and "Ticket body." in stdout
     assert "Implementation:" in stdout and "Implementation notes." in stdout

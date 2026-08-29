@@ -463,7 +463,7 @@ def render_workflow_sql(plan: ProjectBoardProvision) -> str:
         ("analysis", "Triage", 1, ("director",), None, None, None, False),
         ("in_progress", "Implementation", 2, implementation_owner_roles, None, None, None, False),
         *(
-            [("audit", "Audit", 3, ("audit",), None, None, "audit_signoff", False)]
+            [("audit", "Audit", 3, ("audit",), "needs_audit", "director_review", "audit_signoff", False)]
             if include_audit
             else []
         ),

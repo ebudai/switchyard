@@ -14,6 +14,7 @@ EXPECTED_JSON_FIELDS = {
     "assignee",
     "audit_prompt",
     "audit_signoff",
+    "needs_audit",
     "inspector_signoff",
     "blocked_by",
     "blockers",
@@ -102,6 +103,7 @@ FIELD_TO_SCHEMA_TOKENS = {
     "assignee": ["assignee"],
     "audit_prompt": ["audit_prompt"],
     "audit_signoff": ["audit_signoff"],
+    "needs_audit": ["needs_audit"],
     "inspector_signoff": ["inspector_signoff"],
     "blocked_by": ["ticket_blockers", "blocker_ticket_id"],
     "blockers": ["ticket_blockers", "resolved"],
@@ -361,8 +363,9 @@ def main() -> int:
     assert "create or replace function ticket_board.log_workflow_transition_rbac_shadow_mismatch" in executable_schema_lower
     assert "workflow transition shadow mismatch" in executable_schema_lower
     assert "workflow transition rbac shadow mismatch" in executable_schema_lower
-    assert "workflow_transition_allowed_hardcoded(old.state, new.state)" in executable_schema_lower
-    assert "workflow_transition_allowed_config(old.state, new.state)" in executable_schema_lower
+    assert "transition_check_state := new.state" in executable_schema_lower
+    assert "workflow_transition_allowed_hardcoded(old.state, transition_check_state)" in executable_schema_lower
+    assert "workflow_transition_allowed_config(old.state, transition_check_state)" in executable_schema_lower
     rbac_sql = (ROOT / "scripts" / "ticket_board" / "rbac.sql").read_text(encoding="utf-8").lower()
     assert "revoke all on ticket_board.workflow_transition_shadow_log" in rbac_sql
     assert "grant select on ticket_board.workflow_transition_shadow_log" in rbac_sql
@@ -402,7 +405,10 @@ def main() -> int:
     ).read_text(encoding="utf-8").lower()
     audit_stage_exists_condition = "from ticket_board.workflow_stages ws\n           where ws.name = 'audit'"
     assert audit_stage_exists_condition in enforce_update_function.group(1)
+    assert "and new.needs_audit\n       and exists" in enforce_update_function.group(1)
     assert audit_stage_exists_condition in director_review_gate_migration
+    assert "('audit', 'audit', 5, array['audit']::text[], 'needs_audit', 'director_review', 'audit_signoff', false)" in executable_schema_lower
+    assert "add column if not exists needs_audit boolean not null default true" in schema_lower
     assert "add column if not exists parked boolean not null default false" in schema_lower
     assert "add column if not exists regression boolean not null default false" in schema_lower
     assert "{7,40}" in schema, "commit_hash check must allow historical short hashes"

@@ -180,6 +180,7 @@ def format_ticket(ticket: dict[str, Any]) -> str:
         "Flags:",
         f"  needs_inspection: {bool(ticket.get('needs_inspection', False))}",
         f"  inspector_signoff: {bool(ticket.get('inspector_signoff', False))}",
+        f"  needs_audit: {bool(ticket.get('needs_audit', True))}",
         f"  needs_user_signoff: {bool(ticket.get('needs_user_signoff', False))}",
         f"  user_signoff: {bool(ticket.get('user_signoff', False))}",
         f"  audit_signoff: {bool(ticket.get('audit_signoff', False))}",

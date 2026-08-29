@@ -400,6 +400,7 @@ class TicketBoardWriteClient:
         implementation: str = "",
         audit_prompt: str = "",
         needs_inspection: bool = False,
+        needs_audit: bool = True,
         needs_user_signoff: bool = False,
         comment_text: str = "",
         caller_role: str | None = None,
@@ -416,6 +417,7 @@ class TicketBoardWriteClient:
             "implementation": implementation,
             "audit_prompt": audit_prompt,
             "needs_inspection": needs_inspection,
+            "needs_audit": needs_audit,
             "needs_user_signoff": needs_user_signoff,
         }
         if comment_text:
@@ -433,6 +435,7 @@ class TicketBoardWriteClient:
         assignee: str = "unassigned",
         blocked_by: list[str] | None = None,
         blocked_reason: str = "",
+        needs_audit: bool = True,
         needs_user_signoff: bool = False,
         caller_role: str | None = None,
     ) -> dict[str, Any]:
@@ -447,6 +450,7 @@ class TicketBoardWriteClient:
                 "assignee": assignee,
                 "blocked_by": blocked_by or [],
                 "blocked_reason": blocked_reason,
+                "needs_audit": needs_audit,
                 "needs_user_signoff": needs_user_signoff,
             },
             caller_role=caller_role,
@@ -652,6 +656,7 @@ def _build_parser() -> argparse.ArgumentParser:
     create.add_argument("--audit-prompt", default="")
     create.add_argument("--comment-text", default="")
     create.add_argument("--needs-inspection", action="store_true")
+    create.add_argument("--needs-audit", action=argparse.BooleanOptionalAction, default=True)
     create.add_argument("--needs-user-signoff", action="store_true")
 
     file_bug = subparsers.add_parser("file-bug")
@@ -659,6 +664,7 @@ def _build_parser() -> argparse.ArgumentParser:
     file_bug.add_argument("--body", required=True)
     file_bug.add_argument("--source-ticket-id", required=True)
     file_bug.add_argument("--assignee", default="unassigned")
+    file_bug.add_argument("--needs-audit", action=argparse.BooleanOptionalAction, default=True)
 
     route = subparsers.add_parser("route")
     route.add_argument("ticket_id")
@@ -780,11 +786,18 @@ def main(argv: list[str] | None = None) -> int:
                 implementation=args.implementation,
                 audit_prompt=args.audit_prompt,
                 needs_inspection=args.needs_inspection,
+                needs_audit=args.needs_audit,
                 needs_user_signoff=args.needs_user_signoff,
                 comment_text=args.comment_text,
             )
         elif command == "file_bug":
-            response = client.file_bug(title=args.title, body=args.body, source_ticket_id=args.source_ticket_id, assignee=args.assignee)
+            response = client.file_bug(
+                title=args.title,
+                body=args.body,
+                source_ticket_id=args.source_ticket_id,
+                assignee=args.assignee,
+                needs_audit=args.needs_audit,
+            )
         elif command == "route":
             response = client.route(args.ticket_id, state=args.state, assignee=args.assignee)
         elif command == "force_move":

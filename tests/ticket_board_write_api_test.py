@@ -124,6 +124,7 @@ def seed_json_ticket(
     assignee: str = "unassigned",
     implementation: str = "",
     audit_signoff: bool = False,
+    needs_audit: bool = True,
     needs_inspection: bool = False,
     inspector_signoff: bool = False,
     needs_user_signoff: bool = False,
@@ -145,6 +146,7 @@ def seed_json_ticket(
         "implementation": implementation,
         "audit_prompt": "",
         "audit_signoff": audit_signoff,
+        "needs_audit": needs_audit,
         "needs_inspection": needs_inspection,
         "inspector_signoff": inspector_signoff,
         "needs_user_signoff": needs_user_signoff,
@@ -171,6 +173,7 @@ def seed_postgres_ticket(
     assignee: str = "unassigned",
     implementation: str = "",
     audit_signoff: bool = False,
+    needs_audit: bool = True,
     needs_inspection: bool = False,
     inspector_signoff: bool = False,
     needs_user_signoff: bool = False,
@@ -185,11 +188,11 @@ def seed_postgres_ticket(
         f"""
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation,
-    audit_signoff, needs_inspection, inspector_signoff, needs_user_signoff, user_signoff, commit_hash,
+    audit_signoff, needs_audit, needs_inspection, inspector_signoff, needs_user_signoff, user_signoff, commit_hash,
     commit_exempt, regression, parked, created_text, updated_text, source_json
 ) VALUES (
     '{ticket_id}', '{title}', '', '{state}', '{assignee}', '{implementation}',
-    {str(audit_signoff).lower()}, {str(needs_inspection).lower()}, {str(inspector_signoff).lower()}, {str(needs_user_signoff).lower()},
+    {str(audit_signoff).lower()}, {str(needs_audit).lower()}, {str(needs_inspection).lower()}, {str(inspector_signoff).lower()}, {str(needs_user_signoff).lower()},
     {str(user_signoff).lower()}, '{commit_hash}', {str(commit_exempt).lower()}, {str(regression).lower()}, {str(parked).lower()},
     '2026-07-10T00:00:00+00:00', '2026-07-10T00:00:00+00:00',
     '{ticket_source(ticket_id, title, state, assignee)}'::jsonb
@@ -652,6 +655,30 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     source_id = str(created["id"])  # type: ignore[index]
     assert created["state"] == "analysis", created  # type: ignore[index]
     assert created["assignee"] == "unassigned", created  # type: ignore[index]
+    assert created["needs_audit"] is True, created  # type: ignore[index]
+
+    no_audit_created_payload = post_json(
+        base_url,
+        "/api/tickets/actions/create_ticket",
+        {"title": "API no-audit create", "body": "Director partitions this away from audit.", "needs_audit": False},
+        caller="director",
+        expect=201,
+    )
+    no_audit_created = no_audit_created_payload["ticket"]  # type: ignore[index]
+    assert no_audit_created["needs_audit"] is False, no_audit_created  # type: ignore[index]
+    assert psql(
+        admin_conn,
+        f"SELECT (source_json->>'needs_audit') FROM ticket_board.tickets WHERE id = '{no_audit_created['id']}';",
+    ) == "false"
+
+    no_audit_create_forbidden = post_json(
+        base_url,
+        "/api/tickets/actions/create_ticket",
+        {"title": "Implementer cannot skip audit", "body": "", "needs_audit": False},
+        caller="user",
+        expect=403,
+    )
+    assert "needs_audit can only be set by director" in str(no_audit_create_forbidden), no_audit_create_forbidden
 
     backlog_created_payload = post_json(
         base_url,
@@ -778,6 +805,15 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
     )
     filed = filed_payload["ticket"]  # type: ignore[index]
     assert filed["parent_id"] == source_id, filed  # type: ignore[index]
+    assert filed["needs_audit"] is True, filed  # type: ignore[index]
+    no_audit_file_bug_forbidden = post_json(
+        base_url,
+        "/api/tickets/actions/file_bug",
+        {"title": "Ops cannot skip audit on filed bug", "body": "", "source_ticket_id": source_id, "needs_audit": False},
+        caller="ops",
+        expect=403,
+    )
+    assert "needs_audit can only be set by director" in str(no_audit_file_bug_forbidden), no_audit_file_bug_forbidden
     blocked_file_bug_payload = post_json(
         base_url,
         "/api/tickets/actions/file_bug",
@@ -1182,6 +1218,21 @@ WHERE id = 'PGU-141';
         caller="director",
     )
     assert inspector_field_director["ticket"]["needs_inspection"] is True, inspector_field_director  # type: ignore[index]
+    audit_field_forbidden = post_json(
+        base_url,
+        "/api/tickets/PGU-112/actions/edit_fields",
+        {"needs_audit": False},
+        caller="app",
+        expect=403,
+    )
+    assert "needs_audit can only be edited by director" in str(audit_field_forbidden), audit_field_forbidden
+    audit_field_director = post_json(
+        base_url,
+        "/api/tickets/PGU-112/actions/edit_fields",
+        {"needs_audit": False},
+        caller="director",
+    )
+    assert audit_field_director["ticket"]["needs_audit"] is False, audit_field_director  # type: ignore[index]
     regression_field_set = post_json(
         base_url,
         "/api/tickets/PGU-112/actions/edit_fields",

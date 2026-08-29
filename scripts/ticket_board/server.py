@@ -101,6 +101,7 @@ EDIT_FIELD_NAMES = {
     "screenshot",
     "implementation",
     "audit_prompt",
+    "needs_audit",
     "needs_inspection",
     "needs_user_signoff",
     "commit_exempt",
@@ -628,6 +629,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             raise ValueError("advanced create fields require /api/tickets/actions/create_ticket")
         if bool(payload.get("needs_inspection", False)) and caller_role != "director":
             raise PermissionError("needs_inspection can only be set by director")
+        if "needs_audit" in payload and caller_role != "director":
+            raise PermissionError("needs_audit can only be set by director")
         if bool(payload.get("commit_exempt", False)) and caller_role != "director":
             raise PermissionError("commit_exempt can only be set by director")
         if not advanced_create:
@@ -638,6 +641,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 screenshots=payload.get("screenshots"),  # type: ignore[arg-type]
                 assignee=str(payload.get("assignee", "unassigned")),
                 needs_user_signoff=bool(payload.get("needs_user_signoff", False)),
+                needs_audit=bool(payload.get("needs_audit", True)),
                 needs_inspection=bool(payload.get("needs_inspection", False)),
                 regression=regression,
                 blocked_by=payload.get("blocked_by"),  # type: ignore[arg-type]
@@ -662,6 +666,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             implementation=implementation,
             audit_prompt=audit_prompt,
             audit_signoff=bool(payload.get("audit_signoff", False)),
+            needs_audit=bool(payload.get("needs_audit", True)),
             needs_inspection=bool(payload.get("needs_inspection", False)),
             inspector_signoff=bool(payload.get("inspector_signoff", False)),
             needs_user_signoff=bool(payload.get("needs_user_signoff", False)),
@@ -719,6 +724,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         if operation == "file_bug":
             if bool(payload.get("needs_inspection", False)) and caller != "director":
                 raise PermissionError("needs_inspection can only be set by director")
+            if "needs_audit" in payload and caller != "director":
+                raise PermissionError("needs_audit can only be set by director")
             if bool(payload.get("commit_exempt", False)) and caller != "director":
                 raise PermissionError("commit_exempt can only be set by director")
             before_signature = self.app.store_signature()
@@ -734,6 +741,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 implementation="",
                 audit_prompt="",
                 audit_signoff=False,
+                needs_audit=bool(payload.get("needs_audit", True)),
                 needs_inspection=bool(payload.get("needs_inspection", False)),
                 inspector_signoff=False,
                 needs_user_signoff=bool(payload.get("needs_user_signoff", False)),
@@ -898,6 +906,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 raise ValueError("user_signoff=true requires user_sign_off")
             if "needs_inspection" in payload and caller != "director":
                 raise PermissionError("needs_inspection can only be edited by director")
+            if "needs_audit" in payload and caller != "director":
+                raise PermissionError("needs_audit can only be edited by director")
             if "commit_exempt" in payload and caller != "director":
                 raise PermissionError("commit_exempt can only be edited by director")
             patch = dict(payload)

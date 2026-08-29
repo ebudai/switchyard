@@ -380,6 +380,7 @@ class TicketBoardApp:
         screenshots: list[str] | None = None,
         assignee: str,
         needs_user_signoff: bool,
+        needs_audit: bool = True,
         needs_inspection: bool = False,
         regression: bool = False,
         blocked_by: list[str] | None = None,
@@ -405,6 +406,7 @@ class TicketBoardApp:
             implementation=implementation,
             audit_prompt="",
             audit_signoff=False,
+            needs_audit=needs_audit,
             needs_inspection=needs_inspection,
             inspector_signoff=False,
             needs_user_signoff=needs_user_signoff,
@@ -437,6 +439,7 @@ class TicketBoardApp:
         implementation: str,
         audit_prompt: str,
         audit_signoff: bool,
+        needs_audit: bool = True,
         needs_inspection: bool = False,
         inspector_signoff: bool = False,
         needs_user_signoff: bool,
@@ -463,6 +466,7 @@ class TicketBoardApp:
             implementation=implementation,
             audit_prompt=audit_prompt,
             audit_signoff=audit_signoff,
+            needs_audit=needs_audit,
             needs_inspection=needs_inspection,
             inspector_signoff=inspector_signoff,
             needs_user_signoff=needs_user_signoff,
@@ -701,6 +705,7 @@ SELECT
     t.implementation,
     t.audit_prompt,
     t.audit_signoff,
+    t.needs_audit,
     t.needs_inspection,
     t.inspector_signoff,
     t.needs_user_signoff,
@@ -801,6 +806,7 @@ ORDER BY rank;
             "implementation": self._require_plain_string(row["implementation"], "implementation"),
             "audit_prompt": self._require_plain_string(row["audit_prompt"], "audit_prompt"),
             "audit_signoff": bool(row["audit_signoff"]),
+            "needs_audit": bool(row["needs_audit"]),
             "needs_inspection": bool(row["needs_inspection"]),
             "inspector_signoff": bool(row["inspector_signoff"]),
             "needs_user_signoff": bool(row["needs_user_signoff"]),
@@ -839,6 +845,7 @@ ORDER BY rank;
         implementation: str,
         audit_prompt: str,
         audit_signoff: bool,
+        needs_audit: bool = True,
         needs_inspection: bool = False,
         inspector_signoff: bool = False,
         needs_user_signoff: bool,
@@ -890,15 +897,15 @@ ORDER BY rank;
                 if parent_id and create_state == "analysis":
                     ticket_id = self._pg_call_scalar(
                         conn,
-                        "SELECT ticket_board.file_bug(%s, %s, %s, %s, %s, %s) AS id;",
-                        (title, body.strip(), parent_id, assignee, blocked_by, blocked_reason),
+                        "SELECT ticket_board.file_bug(%s, %s, %s, %s, %s, %s, %s) AS id;",
+                        (title, body.strip(), parent_id, assignee, blocked_by, blocked_reason, needs_audit),
                     )
                     created_via_file_bug = True
                 else:
                     ticket_id = self._pg_call_scalar(
                         conn,
-                        "SELECT ticket_board.create_ticket(%s, %s, %s, %s, %s, %s) AS id;",
-                        (title, body.strip(), create_state, blocked_by, blocked_reason, needs_user_signoff),
+                        "SELECT ticket_board.create_ticket(%s, %s, %s, %s, %s, %s, %s) AS id;",
+                        (title, body.strip(), create_state, blocked_by, blocked_reason, needs_user_signoff, needs_audit),
                     )
                     if parent_id:
                         self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps({"parent_id": parent_id})))
@@ -1152,6 +1159,7 @@ SELECT EXISTS (
             "implementation",
             "audit_prompt",
             "needs_inspection",
+            "needs_audit",
             "needs_user_signoff",
             "commit_exempt",
             "regression",

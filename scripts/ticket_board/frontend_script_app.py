@@ -262,6 +262,7 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
         screenshots: state.pendingCreateScreenshots,
         needs_user_signoff: needsUserInput.checked,
         needs_inspection: needsInspectionInput.checked,
+        needs_audit: needsAuditInput.checked,
         regression: createRegressionInput.checked,
       };
       const result = await postTicketAction('/api/tickets/actions/create_ticket', payload, 'director');
@@ -271,6 +272,7 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
       createBacklogInput.checked = false;
       needsUserInput.checked = false;
       needsInspectionInput.checked = false;
+      needsAuditInput.checked = true;
       createRegressionInput.checked = false;
       state.pendingCreateScreenshots = [];
       renderCreatePreview();
@@ -436,6 +438,7 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
         'implementation',
         'audit_prompt',
         'needs_inspection',
+        'needs_audit',
         'needs_user_signoff',
         'commit_exempt',
         'regression',

@@ -59,6 +59,10 @@ class RecordingHandler(BaseHTTPRequestHandler):
             ticket["assignee"] = "inspector"
         elif operation == "submit_to_audit":
             ticket["state"] = "audit"
+        elif operation == "implementer_kick_back":
+            ticket["state"] = "analysis"
+            ticket["assignee"] = "director"
+            ticket["comments"] = [{"who": caller, "text": payload.get("reason", "")}]
         elif operation == "file_bug":
             ticket["state"] = "analysis"
         elif operation == "add_comment":
@@ -271,6 +275,18 @@ def exercise_pane_cli(
     assert exempt_submitted["commit_hash"] == "", exempt_submitted
     rejected = run_cli_error(base_url, "main", repo, "submit-to-audit", "PGU-2104", "--commit-hash", local_only_hash)
     assert "is not pushed to origin" in rejected, rejected
+    handed_back = run_cli(
+        base_url,
+        "main",
+        repo,
+        "implementer-kick-back",
+        "PGU-2106",
+        "--reason",
+        "Needs director clarification.",
+    )
+    assert handed_back["state"] == "analysis", handed_back
+    assert handed_back["assignee"] == "director", handed_back
+    assert handed_back["comments"][-1]["text"] == "Needs director clarification.", handed_back
 
     filed = run_cli(
         base_url,
@@ -416,6 +432,7 @@ def assert_pane_requests(requests: list[tuple[str, str | None, dict[str, object]
     assert ("/api/tickets/PGU-2100/actions/submit_to_audit", "main") in pairs
     assert ("/api/tickets/PGU-2105/actions/submit_to_inspection", "main") in pairs
     assert ("/api/tickets/PGU-2103/actions/submit_to_audit", "main") in pairs
+    assert ("/api/tickets/PGU-2106/actions/implementer_kick_back", "main") in pairs
     assert ("/api/tickets/actions/file_bug", "app") in pairs
     assert ("/api/tickets/PGU-2102/actions/add_comment", "ops") in pairs
     assert ("/api/tickets/PGU-2104/actions/submit_to_audit", "main") not in pairs

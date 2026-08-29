@@ -70,6 +70,7 @@ GRANT EXECUTE ON FUNCTION ticket_board.force_move(text, text, text, boolean) TO 
 GRANT EXECUTE ON FUNCTION ticket_board.start_work(text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.submit_to_inspection(text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.submit_to_audit(text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.implementer_kick_back(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.request_commit_exempt(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.start_task(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.complete_task(text, text) TO ticket_board_service;

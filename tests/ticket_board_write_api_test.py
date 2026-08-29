@@ -1449,6 +1449,61 @@ WHERE id = 'PGU-141';
     assert backlog_cancelled["ticket"]["state"] == "cancelled", backlog_cancelled  # type: ignore[index]
     assert backlog_cancelled["ticket"]["comments"][-1]["who"] == "director", backlog_cancelled  # type: ignore[index]
 
+    psql(admin_conn, "ALTER TABLE ticket_board.tickets DISABLE TRIGGER USER;")
+    seed_postgres_ticket(admin_conn, "PGU-128", title="Implementer hand-back", state="in_progress", assignee="ops", implementation="Blocked.")
+    seed_postgres_ticket(admin_conn, "PGU-1281", title="Other implementer hand-back", state="in_progress", assignee="main", implementation="Blocked.")
+    seed_postgres_ticket(admin_conn, "PGU-1282", title="Hand-back is not route", state="in_progress", assignee="ops", implementation="Blocked.")
+    psql(admin_conn, "ALTER TABLE ticket_board.tickets ENABLE TRIGGER USER;")
+    psql(admin_conn, "DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id IN ('PGU-128', 'PGU-1281', 'PGU-1282');")
+    handed_back = post_json(
+        base_url,
+        "/api/tickets/PGU-128/actions/implementer_kick_back",
+        {"reason": "Cannot access the required external credentials."},
+        caller="ops",
+    )
+    assert handed_back["ticket"]["state"] == "analysis", handed_back  # type: ignore[index]
+    assert handed_back["ticket"]["assignee"] == "director", handed_back  # type: ignore[index]
+    assert handed_back["ticket"]["comments"][-1]["who"] == "ops", handed_back  # type: ignore[index]
+    assert handed_back["ticket"]["comments"][-1]["text"] == "Cannot access the required external credentials.", handed_back  # type: ignore[index]
+    director_notice = json.loads(
+        psql(
+            admin_conn,
+            """
+SELECT jsonb_build_object('target_role', target_role, 'kind', kind, 'new_state', payload->>'new_state')::text
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-128'
+ORDER BY id
+LIMIT 1;
+""",
+        )
+    )
+    assert director_notice == {"target_role": "director", "kind": "transition", "new_state": "analysis"}, director_notice
+    empty_handback = post_json(
+        base_url,
+        "/api/tickets/PGU-1281/actions/implementer_kick_back",
+        {"reason": "   "},
+        caller="main",
+        expect=400,
+    )
+    assert "implementer_kick_back requires a non-empty reason" in str(empty_handback), empty_handback
+    wrong_handback = post_json(
+        base_url,
+        "/api/tickets/PGU-1281/actions/implementer_kick_back",
+        {"reason": "Please clarify."},
+        caller="ops",
+        expect=403,
+    )
+    assert "ops cannot call implementer_kick_back for ticket assigned to main" in str(wrong_handback), wrong_handback
+    route_disguised_as_handback = post_json(
+        base_url,
+        "/api/tickets/PGU-1282/actions/implementer_kick_back",
+        {"reason": "Cannot proceed.", "state": "done", "assignee": "ops"},
+        caller="ops",
+    )
+    assert route_disguised_as_handback["ticket"]["state"] == "analysis", route_disguised_as_handback  # type: ignore[index]
+    assert route_disguised_as_handback["ticket"]["assignee"] == "director", route_disguised_as_handback  # type: ignore[index]
+    psql(admin_conn, "DELETE FROM ticket_board.tickets WHERE id IN ('PGU-128', 'PGU-1281', 'PGU-1282');")
+
     manual = post_json(
         base_url,
         "/api/tickets/PGU-109/actions/set_manually_controlled",

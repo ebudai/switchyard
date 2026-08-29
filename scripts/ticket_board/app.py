@@ -1064,6 +1064,15 @@ ORDER BY rank;
                 self._pg_call(conn, "SELECT ticket_board.request_commit_exempt(%s, %s);", (ticket_id, reason))
                 return self._pg_get_ticket(ticket_id, conn)
 
+    def implementer_kick_back(self, ticket_id: str, reason: str, *, caller_role: str) -> dict[str, Any]:
+        ticket_id = str(ticket_id).strip().upper()
+        reason = self._require_text(reason, "reason").strip()
+        with self._pg_connect() as conn:
+            with conn.transaction():
+                self._pg_set_caller_role(conn, caller_role)
+                self._pg_call(conn, "SELECT ticket_board.implementer_kick_back(%s, %s);", (ticket_id, reason))
+                return self._pg_get_ticket(ticket_id, conn)
+
     def start_task(self, ticket_id: str, note: str = "", *, caller_role: str) -> dict[str, Any]:
         ticket_id = str(ticket_id).strip().upper()
         note = self._require_plain_string(note, "note").strip()

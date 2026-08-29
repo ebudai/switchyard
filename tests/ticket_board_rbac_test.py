@@ -32,6 +32,7 @@ WRITE_FUNCTIONS = [
     "ticket_board.start_work(text)",
     "ticket_board.submit_to_inspection(text)",
     "ticket_board.submit_to_audit(text,text)",
+    "ticket_board.implementer_kick_back(text,text)",
     "ticket_board.request_commit_exempt(text,text)",
     "ticket_board.start_task(text,text)",
     "ticket_board.complete_task(text,text)",
@@ -490,6 +491,70 @@ WHERE id = {sql_string(filed_blocked)};
     psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '3003003' WHERE id = 'PGU-300';")
     psql(admin_conn, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-300';")
     psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-300';")
+
+    insert_ticket(admin_conn, "PGU-7560", title="Hand-back fixture", state="in_progress", assignee="ops", implementation="Blocked.")
+    psql(admin_conn, "DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-7560';")
+    psql(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'ops', false);
+SELECT ticket_board.implementer_kick_back('PGU-7560', 'Cannot access required credentials.');
+""",
+    )
+    handed_back = json.loads(
+        psql(
+            admin_conn,
+            """
+SELECT jsonb_build_object(
+    'state', t.state,
+    'assignee', t.assignee,
+    'parked', t.parked,
+    'comment_who', (SELECT who FROM ticket_board.ticket_comments WHERE ticket_id = t.id ORDER BY position DESC LIMIT 1),
+    'comment_text', (SELECT text FROM ticket_board.ticket_comments WHERE ticket_id = t.id ORDER BY position DESC LIMIT 1),
+    'queue_target', (SELECT target_role FROM ticket_board.ticket_notification_queue WHERE ticket_id = t.id ORDER BY id LIMIT 1),
+    'queue_kind', (SELECT kind FROM ticket_board.ticket_notification_queue WHERE ticket_id = t.id ORDER BY id LIMIT 1),
+    'queue_state', (SELECT payload->>'new_state' FROM ticket_board.ticket_notification_queue WHERE ticket_id = t.id ORDER BY id LIMIT 1)
+)::text
+FROM ticket_board.tickets t
+WHERE id = 'PGU-7560';
+""",
+        )
+    )
+    assert handed_back == {
+        "state": "analysis",
+        "assignee": "director",
+        "parked": False,
+        "comment_who": "ops",
+        "comment_text": "Cannot access required credentials.",
+        "queue_target": "director",
+        "queue_kind": "transition",
+        "queue_state": "analysis",
+    }, handed_back
+    insert_ticket(admin_conn, "PGU-7561", title="Empty hand-back", state="in_progress", assignee="ops", implementation="Blocked.")
+    assert "implementer_kick_back requires a non-empty reason" in psql_error(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'ops', false);
+SELECT ticket_board.implementer_kick_back('PGU-7561', '   ');
+""",
+    )
+    insert_ticket(admin_conn, "PGU-7562", title="Wrong assignee hand-back", state="in_progress", assignee="main", implementation="Blocked.")
+    assert "role ops cannot call implementer_kick_back" in psql_error(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'ops', false);
+SELECT ticket_board.implementer_kick_back('PGU-7562', 'Please clarify.');
+""",
+    )
+    insert_ticket(admin_conn, "PGU-7563", title="Wrong state hand-back", state="audit", assignee="ops", implementation="Blocked.")
+    assert "in_progress ticket not found: PGU-7563" in psql_error(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'ops', false);
+SELECT ticket_board.implementer_kick_back('PGU-7563', 'Please clarify.');
+""",
+    )
+    psql(admin_conn, "DELETE FROM ticket_board.tickets WHERE id IN ('PGU-7560', 'PGU-7561', 'PGU-7562', 'PGU-7563');")
 
     insert_ticket(admin_conn, "PGU-400", title="Submit fixture", state="in_progress", assignee="app", implementation="Done.")
     psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'app', false); SELECT ticket_board.submit_to_audit('PGU-400', 'abcdef0');")

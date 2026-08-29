@@ -74,6 +74,7 @@ EXPECTED_FUNCTION_API = {
     "ticket_board.start_work",
     "ticket_board.submit_to_inspection",
     "ticket_board.submit_to_audit",
+    "ticket_board.implementer_kick_back",
     "ticket_board.request_commit_exempt",
     "ticket_board.start_task",
     "ticket_board.complete_task",
@@ -552,6 +553,19 @@ def main() -> int:
     assert "current_app_actor()" in audit_file_bug_migration
     assert "role % cannot call file_bug" in audit_file_bug_migration
     assert "grant execute on function ticket_board.file_bug(text, text, text) to audit" in (
+        ROOT / "scripts" / "ticket_board" / "rbac.sql"
+    ).read_text(encoding="utf-8").lower()
+    implementer_handback_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu756_implementer_kick_back.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "create or replace function ticket_board.implementer_kick_back" in implementer_handback_migration
+    assert "'in_progress', 'analysis', 'implementer_kick_back'" in implementer_handback_migration
+    assert "owner_scoped" in implementer_handback_migration
+    assert "implementer_kick_back requires a non-empty reason" in implementer_handback_migration
+    assert "set state = 'analysis'," in implementer_handback_migration
+    assert "assignee = 'director'" in implementer_handback_migration
+    assert "grant execute on function ticket_board.implementer_kick_back(text, text) to ticket_board_service" in implementer_handback_migration
+    assert "grant execute on function ticket_board.implementer_kick_back(text, text) to ticket_board_service" in (
         ROOT / "scripts" / "ticket_board" / "rbac.sql"
     ).read_text(encoding="utf-8").lower()
     active_inprogress_idle_filter_migration = (

@@ -559,6 +559,9 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
         ) {
           await updateTicketAction(ticketId, 'user_reopen', { reason: actionReason(patch) }, normalizedCaller);
           consumedComment = true;
+        } else if (nextState === 'analysis' && previousState === 'in_progress' && normalizedCaller !== 'director') {
+          await updateTicketAction(ticketId, 'implementer_kick_back', { reason: actionReason(patch) }, normalizedCaller);
+          consumedComment = true;
         } else if (['dat', 'director_review', 'user_review'].includes(nextState) && previousState === 'audit') {
           await updateTicketAction(ticketId, 'audit_sign_off', { text: actionReason(patch) }, normalizedCaller);
           consumed.add('audit_signoff');

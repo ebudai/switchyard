@@ -8330,6 +8330,42 @@ def test_design_writes_artifact_that_new_from_consumes_for_missing_owner_user() 
     assert not any(call[:1] == ["sudo"] for call in runner.calls)
 
 
+def test_design_owner_user_argument_is_verbatim_not_suffixed() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-design.") as tmp:
+        tmp_path = Path(tmp)
+        project_repo = tmp_path / "project-repo"
+        project_repo.mkdir()
+
+        assert (
+            design_project_command(
+                "porter",
+                output_dir=tmp_path / "design",
+                design_title="Porter",
+                design_body="A small coordination tool.",
+                repository=project_repo,
+                remote="origin",
+                default_branch="main",
+                worktree_policy="shared",
+                owner_user="eric",
+                ticket_prefix="PORT",
+                push_policy="director-main-only",
+                audit_signoff=True,
+                needs_inspection=False,
+                needs_user_signoff=False,
+                board_service_traversal=True,
+                supplementary_groups=[],
+                linger=True,
+                owner_shell="fish",
+                input_func=_no_input,
+            )
+            == 0
+        )
+
+        artifact = load_project_design_artifact(tmp_path / "design" / "porter.project.json", expected_project="porter")
+
+    assert artifact.owner_user == "eric"
+
+
 def test_design_cli_writes_project_artifact_noninteractively() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-design.") as tmp:
         tmp_path = Path(tmp)
@@ -10153,10 +10189,11 @@ def test_switchyard_new_without_sudo_fails_before_writing() -> None:
         try:
             switchyard_new_command(
                 slug="porter",
-                agent_name="otto",
+                agent_name="otto-agent",
                 project_name="Porter System",
                 output_dir=output_dir,
                 yes=True,
+                allow_existing_owner_user=True,
                 home_base=home_base,
                 euid_getter=lambda: 1000,
                 runner=lambda args, **_kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0),
@@ -10182,7 +10219,7 @@ def test_switchyard_new_rejects_dashed_slug_before_mutating() -> None:
         try:
             switchyard_new_command(
                 slug="otto-scheduler",
-                agent_name="otto",
+                agent_name="otto-agent",
                 project_name="Otto Scheduler",
                 output_dir=output_dir,
                 yes=True,
@@ -10241,12 +10278,13 @@ def test_switchyard_new_unit_without_database_precheck_runs_before_user_and_proj
         try:
             switchyard_new_command(
                 slug="porter",
-                agent_name="otto",
+                agent_name="otto-agent",
                 project_name="Porter System",
                 source_repo=source_repo,
                 output_dir=output_dir,
                 role_clis=LEGACY_SWITCHYARD_ROLE_CLIS,
                 yes=True,
+                allow_existing_owner_user=True,
                 home_base=home_base,
                 euid_getter=lambda: 0,
                 runner=runner,
@@ -10311,6 +10349,215 @@ def test_switchyard_new_prompts_name_first_and_derives_defaults() -> None:
     assert f"switchyard: project path: {expected_path}" in output
 
 
+def test_switchyard_new_typed_agent_user_is_verbatim_not_suffixed() -> None:
+    original_uid_for_user = team_launcher.uid_for_user
+    try:
+        team_launcher.uid_for_user = lambda _user_name: None
+        with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new.") as tmp:
+            tmp_path = Path(tmp)
+            home_base = tmp_path / "home"
+            prompts: list[str] = []
+            output: list[str] = []
+            answers = iter(["Otto Scheduler", "", "eric", ""])
+
+            def input_func(prompt: str) -> str:
+                prompts.append(prompt)
+                return next(answers)
+
+            try:
+                switchyard_new_command(
+                    yes=True,
+                    home_base=home_base,
+                    euid_getter=lambda: 1000,
+                    runner=lambda args, **_kwargs: subprocess.CompletedProcess(args, 0),
+                    registry_dir=tmp_path / "registry",
+                    input_func=input_func,
+                    print_func=output.append,
+                )
+                raise AssertionError("expected sudo precheck failure")
+            except SystemExit as exc:
+                message = str(exc)
+    finally:
+        team_launcher.uid_for_user = original_uid_for_user
+
+    expected_path = home_base / "eric" / "Projects" / "otto_scheduler"
+    assert "requires sudo" in message
+    assert prompts == [
+        "Project name: ",
+        "Slug [otto_scheduler]: ",
+        "Agent user [otto_scheduler-agent]: ",
+        f"Project path [{expected_path}]: ",
+    ]
+    assert "switchyard: owner user: eric" in output
+    assert f"switchyard: project path: {expected_path}" in output
+
+
+def test_switchyard_new_agent_name_argument_is_verbatim_not_suffixed() -> None:
+    original_uid_for_user = team_launcher.uid_for_user
+    try:
+        team_launcher.uid_for_user = lambda _user_name: None
+        with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new.") as tmp:
+            tmp_path = Path(tmp)
+            home_base = tmp_path / "home"
+            output: list[str] = []
+
+            try:
+                switchyard_new_command(
+                    slug="otto",
+                    agent_name="eric",
+                    project_name="Otto Scheduler",
+                    yes=True,
+                    home_base=home_base,
+                    euid_getter=lambda: 1000,
+                    runner=lambda args, **_kwargs: subprocess.CompletedProcess(args, 0),
+                    registry_dir=tmp_path / "registry",
+                    input_func=lambda _prompt: "",
+                    print_func=output.append,
+                )
+                raise AssertionError("expected sudo precheck failure")
+            except SystemExit as exc:
+                message = str(exc)
+    finally:
+        team_launcher.uid_for_user = original_uid_for_user
+
+    expected_path = home_base / "eric" / "Projects" / "otto_scheduler"
+    assert "requires sudo" in message
+    assert "switchyard: owner user: eric" in output
+    assert f"switchyard: project path: {expected_path}" in output
+
+
+def test_new_project_owner_user_argument_is_verbatim_not_suffixed() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-new.") as tmp:
+        tmp_path = Path(tmp)
+        output_dir = tmp_path / "out"
+        source_repo = tmp_path / "repo"
+        project_repo = tmp_path / "project-repo"
+        source_repo.mkdir()
+        project_repo.mkdir()
+
+        assert (
+            new_project_command(
+                "otto",
+                owner_user="eric",
+                source_repo=source_repo,
+                repository=project_repo,
+                output_dir=output_dir,
+                runner=FakeRunner(),
+                port_in_use=lambda _port: False,
+                socket_exists=lambda _path: False,
+            )
+            == 0
+        )
+
+        config = json.loads((output_dir / "otto.json").read_text(encoding="utf-8"))
+
+    assert config["run_as_user"] == "eric"
+
+
+def test_switchyard_new_existing_owner_decline_aborts_before_mutating() -> None:
+    original_uid_for_user = team_launcher.uid_for_user
+    original_home_dir_for_user = team_launcher.home_dir_for_user
+    try:
+        team_launcher.uid_for_user = lambda user_name: 1000 if user_name == "eric" else None
+        team_launcher.home_dir_for_user = lambda user_name: Path("/home/eric") if user_name == "eric" else None
+        with tempfile.TemporaryDirectory(prefix="pgu-switchyard-existing-owner.") as tmp:
+            tmp_path = Path(tmp)
+            home_base = tmp_path / "home"
+            output_dir = tmp_path / "out"
+            calls: list[list[str]] = []
+            prompts: list[str] = []
+            output: list[str] = []
+
+            def input_func(prompt: str) -> str:
+                prompts.append(prompt)
+                return "n"
+
+            try:
+                switchyard_new_command(
+                    slug="otto",
+                    agent_name="eric",
+                    project_name="Otto Scheduler",
+                    project_path=home_base / "eric" / "Projects" / "otto_scheduler",
+                    output_dir=output_dir,
+                    yes=True,
+                    home_base=home_base,
+                    euid_getter=lambda: 0,
+                    runner=lambda args, **_kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0),
+                    registry_dir=tmp_path / "registry",
+                    input_func=input_func,
+                    print_func=output.append,
+                )
+                raise AssertionError("expected existing owner cancellation")
+            except SystemExit as exc:
+                message = str(exc)
+    finally:
+        team_launcher.uid_for_user = original_uid_for_user
+        team_launcher.home_dir_for_user = original_home_dir_for_user
+
+    assert message == "switchyard: cancelled"
+    assert prompts == ["Use existing owner user eric (uid 1000, home /home/eric) [y/N]: "]
+    assert output == ["warning: switchyard: owner user eric (uid 1000, home /home/eric) already exists"]
+    assert calls == []
+    assert not output_dir.exists()
+    assert not (home_base / "eric").exists()
+
+
+def test_switchyard_new_existing_owner_noninteractive_requires_explicit_opt_in() -> None:
+    original_uid_for_user = team_launcher.uid_for_user
+    original_home_dir_for_user = team_launcher.home_dir_for_user
+    try:
+        team_launcher.uid_for_user = lambda user_name: 1000 if user_name == "eric" else None
+        team_launcher.home_dir_for_user = lambda user_name: Path("/home/eric") if user_name == "eric" else None
+        with tempfile.TemporaryDirectory(prefix="pgu-switchyard-existing-owner.") as tmp:
+            tmp_path = Path(tmp)
+            home_base = tmp_path / "home"
+            output: list[str] = []
+
+            try:
+                switchyard_new_command(
+                    slug="otto",
+                    agent_name="eric",
+                    project_name="Otto Scheduler",
+                    project_path=home_base / "eric" / "Projects" / "otto_scheduler",
+                    yes=True,
+                    home_base=home_base,
+                    euid_getter=lambda: 0,
+                    runner=lambda args, **_kwargs: subprocess.CompletedProcess(args, 0),
+                    registry_dir=tmp_path / "registry",
+                    input_func=lambda _prompt: (_ for _ in ()).throw(EOFError()),
+                    print_func=output.append,
+                )
+                raise AssertionError("expected noninteractive existing-owner failure")
+            except SystemExit as exc:
+                refused = str(exc)
+
+            try:
+                switchyard_new_command(
+                    slug="atlas",
+                    agent_name="eric",
+                    project_name="Atlas",
+                    project_path=home_base / "eric" / "Projects" / "atlas",
+                    yes=True,
+                    allow_existing_owner_user=True,
+                    home_base=home_base,
+                    euid_getter=lambda: 1000,
+                    runner=lambda args, **_kwargs: subprocess.CompletedProcess(args, 0),
+                    registry_dir=tmp_path / "registry",
+                    input_func=lambda _prompt: (_ for _ in ()).throw(AssertionError("unexpected prompt")),
+                    print_func=output.append,
+                )
+                raise AssertionError("expected sudo precheck failure")
+            except SystemExit as exc:
+                allowed = str(exc)
+    finally:
+        team_launcher.uid_for_user = original_uid_for_user
+        team_launcher.home_dir_for_user = original_home_dir_for_user
+
+    assert "already exists; pass --allow-existing-owner-user to reuse it" in refused
+    assert "requires sudo" in allowed
+    assert output.count("warning: switchyard: owner user eric (uid 1000, home /home/eric) already exists") == 2
+
+
 def test_switchyard_new_edited_slug_does_not_change_name_derived_default_path() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new.") as tmp:
         tmp_path = Path(tmp)
@@ -10321,8 +10568,9 @@ def test_switchyard_new_edited_slug_does_not_change_name_derived_default_path() 
             switchyard_new_command(
                 project_name="Otto Scheduler",
                 slug="otto",
-                agent_name="otto",
+                agent_name="otto-agent",
                 yes=True,
+                allow_existing_owner_user=True,
                 home_base=home_base,
                 euid_getter=lambda: 1000,
                 runner=lambda args, **_kwargs: subprocess.CompletedProcess(args, 0),
@@ -10398,11 +10646,12 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
             assert (
                 switchyard_new_command(
                     slug="porter",
-                    agent_name="otto",
+                    agent_name="otto-agent",
                     project_name="Porter System",
                     source_repo=source_repo,
                     role_clis=LEGACY_SWITCHYARD_ROLE_CLIS,
                     yes=True,
+                    allow_existing_owner_user=True,
                     home_base=home_base,
                     euid_getter=lambda: 0,
                     runner=runner,
@@ -10516,12 +10765,13 @@ def test_switchyard_new_prompts_roles_and_skips_designer_when_absent() -> None:
             assert (
                 switchyard_new_command(
                     slug="mycoolthing",
-                    agent_name="otto",
+                    agent_name="otto-agent",
                     project_name="My Cool Thing",
                     project_path=home_base / "otto-agent" / "Projects" / "mycoolthing",
                     source_repo=source_repo,
                     output_dir=output_dir,
                     yes=True,
+                    allow_existing_owner_user=True,
                     home_base=home_base,
                     euid_getter=lambda: 0,
                     runner=runner,
@@ -10753,12 +11003,13 @@ def test_switchyard_new_reports_project_specific_pane_state_dir_without_override
             assert (
                 switchyard_new_command(
                     slug="porter",
-                    agent_name="otto",
+                    agent_name="otto-agent",
                     project_name="Porter System",
                     source_repo=source_repo,
                     output_dir=tmp_path / "out",
                     role_clis=LEGACY_SWITCHYARD_ROLE_CLIS,
                     yes=True,
+                    allow_existing_owner_user=True,
                     home_base=tmp_path / "home",
                     euid_getter=lambda: 0,
                     runner=NewProjectRunner(),
@@ -10805,12 +11056,13 @@ def test_switchyard_new_custom_project_path_sets_artifact_repository_and_pane_wo
             switchyard_new_command(
                 project_name="Otto Scheduler",
                 slug="otto",
-                agent_name="otto",
+                agent_name="otto-agent",
                 project_path=custom_path,
                 source_repo=source_repo,
                 output_dir=output_dir,
                 role_clis=LEGACY_SWITCHYARD_ROLE_CLIS,
                 yes=True,
+                allow_existing_owner_user=True,
                 home_base=home_base,
                 euid_getter=lambda: 0,
                 runner=runner,
@@ -10871,12 +11123,13 @@ def test_switchyard_new_creates_absent_zeta_owner_with_linger_and_initial_artifa
             assert (
                 switchyard_new_command(
                     slug="zeta",
-                    agent_name="zeta",
+                    agent_name="zeta-agent",
                     project_name="Zeta System",
                     source_repo=source_repo,
                     output_dir=output_dir,
                     role_clis=LEGACY_SWITCHYARD_ROLE_CLIS,
                     yes=True,
+                    allow_existing_owner_user=True,
                     home_base=home_base,
                     euid_getter=lambda: 0,
                     runner=runner,
@@ -11008,11 +11261,12 @@ def test_switchyard_new_unwritable_existing_project_path_refuses_before_mutating
                 switchyard_new_command(
                     project_name="Otto Scheduler",
                     slug="otto",
-                    agent_name="otto",
+                    agent_name="otto-agent",
                     project_path=project_path,
                     output_dir=output_dir,
                     role_clis=LEGACY_SWITCHYARD_ROLE_CLIS,
                     yes=True,
+                    allow_existing_owner_user=True,
                     euid_getter=lambda: 0,
                     runner=lambda args, **_kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0),
                     registry_dir=tmp_path / "registry",

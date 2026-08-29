@@ -6183,12 +6183,8 @@ def _list_process_command_lines(
 def _role_has_pane_process(role: RoleConfig, process_commands: Sequence[str]) -> bool:
     target_marker = f"TICKET_BOARD_PANE_TARGET={role.target}"
     legacy_target_marker = f"PGU_PANE_TARGET={role.target}"
-    tmux_session_marker = f" -s {role.tmux_session} "
     for command in process_commands:
-        padded = f" {command} "
         if target_marker in command or legacy_target_marker in command:
-            return True
-        if "tmux new-session" in command and tmux_session_marker in padded:
             return True
     return False
 

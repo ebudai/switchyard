@@ -8510,6 +8510,62 @@ def test_switchyard_status_lists_unreadable_config_as_unknown() -> None:
     ]
 
 
+def test_switchyard_status_ignores_tmux_server_new_session_argv_without_pane_target() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-status-tmux-server.") as tmp:
+        tmp_path = Path(tmp)
+        registry_dir = tmp_path / "registry"
+        config_dir = tmp_path / "configs"
+        registry_dir.mkdir()
+        config_dir.mkdir()
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        config_path = tmp_path / "atlas.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "atlas",
+                    "project_name": "Atlas",
+                    "layout": str(layout),
+                    "repository": str(tmp_path / "atlas-repo"),
+                    "roles": [{"role": "research", "slot": 0, "target": "atlas-research:0.0", "tmux_session": "atlas-research", "cli": ["claude"]}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (registry_dir / "atlas.json").write_text(
+            json.dumps(
+                {
+                    "schema": team_launcher.SWITCHYARD_REGISTRY_SCHEMA,
+                    "slug": "atlas",
+                    "name": "Atlas",
+                    "config_path": str(config_path),
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        lines: list[str] = []
+
+        assert (
+            switchyard_status_command(
+                config_dir=config_dir,
+                registry_dir=registry_dir,
+                process_commands=[
+                    "tmux new-session -d -s atlas-research -c /repo claude",
+                    "tmux: server (/tmp/tmux-1001/default) for atlas",
+                ],
+                print_func=lines.append,
+            )
+            == 0
+        )
+
+    assert lines == [
+        "NAME   SLUG   STATE    PANES",
+        "Atlas  atlas  stopped  0/1",
+    ]
+
+
 def test_switchyard_status_default_probe_uses_ps_without_root_or_tmux() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-status-probe.") as tmp:
         tmp_path = Path(tmp)

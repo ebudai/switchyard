@@ -508,6 +508,7 @@ def render_workflow_sql(plan: ProjectBoardProvision) -> str:
         ("analysis", "in_progress", "start_work", plan.implementer_roles, False, False),
         ("analysis", "cancelled", "cancel", ("director",), False, False),
         ("in_progress", "analysis", "route", ("director",), False, False),
+        ("in_progress", "analysis", "implementer_kick_back", plan.implementer_roles, True, False),
         *(audit_transitions if include_audit else auditless_transitions),
         ("in_progress", "cancelled", "cancel", ("director",), False, False),
         ("director_review", "analysis", "route", ("director",), False, False),

@@ -280,6 +280,26 @@ def service_call_fails(conn: str, caller_role: str, sql: str) -> str:
     return proc.stderr
 
 
+def provisioned_transition(conn: str, action_name: str) -> dict[str, object]:
+    row = psql(
+        conn,
+        f"""
+SELECT jsonb_build_object(
+    'from_stage', from_stage,
+    'to_stage', to_stage,
+    'action_name', action_name,
+    'allowed_roles', allowed_roles,
+    'owner_scoped', owner_scoped,
+    'director_override', director_override
+)::text
+FROM ticket_board.workflow_transitions
+WHERE action_name = '{action_name}';
+""",
+    )
+    assert row, action_name
+    return json.loads(row)
+
+
 def guarded_migrations_dir(root: Path) -> Path:
     migrations_dir = root / "migrations"
     migrations_dir.mkdir(parents=True)
@@ -412,8 +432,17 @@ FROM ticket_board.workflow_stages;
                 )
             )
             assert stages == EXPECTED_STAGES, stages
-            assert psql(admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions;") == "36"
+            assert psql(admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions;") == "37"
             assert psql(admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions WHERE from_stage IN ('done', 'cancelled');") == "3"
+            handback_transition = provisioned_transition(admin_conn, "implementer_kick_back")
+            assert handback_transition == {
+                "from_stage": "in_progress",
+                "to_stage": "analysis",
+                "action_name": "implementer_kick_back",
+                "allowed_roles": ["app", "main"],
+                "owner_scoped": True,
+                "director_override": False,
+            }, handback_transition
             assert psql(
                 admin_conn,
                 """
@@ -503,6 +532,14 @@ SELECT ticket_board.create_ticket('Provisioned workflow ticket', 'Body', 'draft'
 
             service_call(service_conn, "director", f"SELECT ticket_board.route('{ticket_id}', 'in_progress', 'main');")
             assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "in_progress:main"
+
+            service_call(service_conn, "main", f"SELECT ticket_board.implementer_kick_back('{ticket_id}', 'Cannot proceed as specified.');")
+            assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "analysis:director"
+            assert (
+                psql(admin_conn, f"SELECT who || ':' || text FROM ticket_board.ticket_comments WHERE ticket_id = '{ticket_id}' ORDER BY position DESC LIMIT 1;")
+                == "main:Cannot proceed as specified."
+            )
+            service_call(service_conn, "director", f"SELECT ticket_board.route('{ticket_id}', 'in_progress', 'main');")
 
             service_call(service_conn, "main", f"SELECT ticket_board.submit_to_audit('{ticket_id}', 'abcdef1');")
             assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "audit:audit"
@@ -743,9 +780,18 @@ FROM ticket_board.workflow_stages;
                 )
             )
             assert noaudit_stages == EXPECTED_AUDITLESS_STAGES, noaudit_stages
-            assert psql(noaudit_admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions;") == "16"
+            assert psql(noaudit_admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions;") == "17"
             assert psql(noaudit_admin_conn, "SELECT count(*) FROM ticket_board.workflow_stages WHERE name = 'audit';") == "0"
             assert psql(noaudit_admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions WHERE 'audit' = ANY(allowed_roles);") == "0"
+            noaudit_handback_transition = provisioned_transition(noaudit_admin_conn, "implementer_kick_back")
+            assert noaudit_handback_transition == {
+                "from_stage": "in_progress",
+                "to_stage": "analysis",
+                "action_name": "implementer_kick_back",
+                "allowed_roles": ["app"],
+                "owner_scoped": True,
+                "director_override": False,
+            }, noaudit_handback_transition
             assert psql(noaudit_admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('app');") == "t"
             assert psql(noaudit_admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('audit');") == "f"
 
@@ -768,6 +814,20 @@ SELECT ticket_board.create_ticket('Audit-less workflow ticket', 'Body', 'analysi
                 psql(noaudit_admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{noaudit_ticket_id}';")
                 == "in_progress:app"
             )
+
+            service_call(noaudit_service_conn, "app", f"SELECT ticket_board.implementer_kick_back('{noaudit_ticket_id}', 'Auditless hand-back.');")
+            assert (
+                psql(noaudit_admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{noaudit_ticket_id}';")
+                == "analysis:director"
+            )
+            assert (
+                psql(
+                    noaudit_admin_conn,
+                    f"SELECT who || ':' || text FROM ticket_board.ticket_comments WHERE ticket_id = '{noaudit_ticket_id}' ORDER BY position DESC LIMIT 1;",
+                )
+                == "app:Auditless hand-back."
+            )
+            service_call(noaudit_service_conn, "director", f"SELECT ticket_board.route('{noaudit_ticket_id}', 'in_progress', 'app');")
 
             service_call(noaudit_service_conn, "app", f"SELECT ticket_board.submit_to_audit('{noaudit_ticket_id}', '123abcd');")
             assert (

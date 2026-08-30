@@ -114,7 +114,10 @@ browser-runtime suite in the selected groups is reported as `SKIP` by name and
 counted in the summary instead of failing inconsistently inside individual test
 files. Use `--fail-on-skip` when the validation environment is expected to have
 every dependency installed; that makes a browser skip a non-zero runner result
-while preserving the explicit skipped-suite summary.
+while preserving the explicit skipped-suite summary. Direct invocation of an
+individual browser test is a developer convenience path and may fail with the
+raw missing dependency; use the suite runner when the skip-vs-fail convention
+matters.
 
 The browser fallback state-label map in `frontend_script_core.py` is generated
 from the `workflow_stages` seed in `schema.sql`. Keep workflow stage labels in

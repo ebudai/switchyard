@@ -211,7 +211,12 @@ def test_browser_group_runs_only_inline_ticket_board_browser_suites() -> None:
         )
 
         output = io.StringIO()
-        results = runner.run_suite(root=root, groups=(runner.TICKET_BOARD_BROWSER_GROUP,), out=output)
+        results = runner.run_suite(
+            root=root,
+            groups=(runner.TICKET_BOARD_BROWSER_GROUP,),
+            out=output,
+            skip_reasons={},
+        )
 
         assert [(result.group, result.path, result.status) for result in results] == [
             (runner.TICKET_BOARD_BROWSER_GROUP, "tests/inline_browser_pass_test.py", "PASS"),

@@ -246,6 +246,9 @@ Ticket board validation:
   to the result. Use `--fail-on-skip` when the validation environment is
   expected to have every dependency installed; browser skips then make the
   runner exit non-zero while preserving the explicit skipped-suite summary.
+  Direct invocation of one browser test is a developer convenience path and may
+  fail with the raw missing dependency; use the suite runner when the
+  skip-vs-fail convention matters.
 
 PostgreSQL board backend:
 

@@ -67,9 +67,14 @@ def test_discovers_board_adjacent_suites_by_content_property() -> None:
             "from scripts.ticket_board.write_client import TicketBoardWriteClient\n",
             encoding="utf-8",
         )
+        (tests / "attachment_crop_browser_test.py").write_text(
+            "from tests.ticket_board_ui_harness import BoardHarness\n",
+            encoding="utf-8",
+        )
         (tests / "unrelated_test.py").write_text("print('not a board client')\n", encoding="utf-8")
 
         assert runner.discover_board_adjacent_suites(root) == [
+            "tests/attachment_crop_browser_test.py",
             "tests/directorctl_ticket_create_test.py",
             "tests/otto_milestone2_runbook_test.py",
             "tests/report_launch_crash_test.py",
@@ -91,16 +96,22 @@ def test_adjacent_group_runs_only_board_adjacent_suites() -> None:
             "board_url = 'http://127.0.0.1:1'\nprint('adjacent_pass_test: ok')\n",
             encoding="utf-8",
         )
+        (tests / "browser_harness_pass_test.py").write_text(
+            "marker = 'ticket_board_ui_harness'\nprint('browser_harness_pass_test: ok')\n",
+            encoding="utf-8",
+        )
 
         output = io.StringIO()
         results = runner.run_suite(root=root, groups=(runner.BOARD_ADJACENT_GROUP,), out=output)
 
         assert [(result.group, result.path, result.status) for result in results] == [
-            (runner.BOARD_ADJACENT_GROUP, "tests/adjacent_pass_test.py", "PASS")
+            (runner.BOARD_ADJACENT_GROUP, "tests/adjacent_pass_test.py", "PASS"),
+            (runner.BOARD_ADJACENT_GROUP, "tests/browser_harness_pass_test.py", "PASS"),
         ]
         rendered = output.getvalue()
         assert "group: board_adjacent" in rendered
         assert "PASS [board_adjacent] tests/adjacent_pass_test.py" in rendered
+        assert "PASS [board_adjacent] tests/browser_harness_pass_test.py" in rendered
         assert "ticket_board_fail_if_run_test" not in rendered
 
 

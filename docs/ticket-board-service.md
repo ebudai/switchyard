@@ -100,9 +100,10 @@ PASS/FAIL/SKIP results plus a summary.
 Use `--group adjacent` for board-adjacent tests outside the `ticket_board_*`
 namespace, or `--group all` for both groups. The adjacent group is discovered
 from test file content, not a manifest: standalone tests that reference board
-URLs, sockets, `ticket-board-write`, or `ticket_board.write_client` are included
-automatically. Use `--fail-on-skip` when the validation environment is expected
-to have every dependency installed.
+URLs, sockets, `ticket-board-write`, `ticket_board.write_client`, or the
+`ticket_board_ui_harness` browser harness are included automatically. Use
+`--fail-on-skip` when the validation environment is expected to have every
+dependency installed.
 
 ## PostgreSQL notification listener
 

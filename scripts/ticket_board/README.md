@@ -224,7 +224,8 @@ Ticket board validation:
 - The adjacent group is discovered from test file content, not a manifest: any
   non-`ticket_board_*` standalone test that references `TICKET_BOARD_SOCKET`,
   `TICKET_BOARD_URL`, `board_url`, `--board-url`, `ticket-board-write`, or
-  `ticket_board.write_client` is included automatically.
+  `ticket_board.write_client`, or `ticket_board_ui_harness` is included
+  automatically.
 - The runner strips live board/socket and pane-hook environment variables before
   launching each suite, so an ambient pane environment cannot redirect tests to
   the production board.

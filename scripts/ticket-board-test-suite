@@ -31,6 +31,7 @@ BOARD_ADJACENT_MARKERS = (
     "--board-url",
     "ticket-board-write",
     "ticket_board.write_client",
+    "ticket_board_ui_harness",
 )
 
 LIVE_BOARD_ENV_KEYS = {

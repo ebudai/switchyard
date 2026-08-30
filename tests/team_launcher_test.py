@@ -13647,10 +13647,20 @@ def test_first_run_auth_phase_reports_stale_codex_hook_trust_without_writing_con
         config_path.write_text(original_config, encoding="utf-8")
         config = load_project_config(
             "otto",
-            _write_first_run_auth_config(tmp_path, roles=[("ops", "codex"), ("main", "codex"), ("app", "codex")]),
+            _write_first_run_auth_config(
+                tmp_path,
+                roles=[
+                    ("director", "claude"),
+                    ("ops", "codex"),
+                    ("inspector", "agy"),
+                    ("main", "codex"),
+                    ("audit", "claude"),
+                    ("app", "codex"),
+                ],
+            ),
         )
         runner = FirstRunAuthRunner()
-        runner.login_seen.add("codex")
+        runner.login_seen.update({"agy", "claude", "codex"})
         messages: list[str] = []
 
         report = team_launcher.run_first_run_auth_phase(
@@ -13668,14 +13678,25 @@ def test_first_run_auth_phase_reports_stale_codex_hook_trust_without_writing_con
         ("session_start", ("ops", "main", "app")),
         ("stop", ("ops", "main", "app")),
     ]
+    for mismatch in report.stale_codex_hook_trust:
+        assert "director" not in mismatch.affected_roles
+        assert "inspector" not in mismatch.affected_roles
+        assert "audit" not in mismatch.affected_roles
     assert after_config == original_config
-    assert runner.calls == [["sudo", "-u", "otto-agent", "codex", "login", "status"]]
+    assert runner.calls == [
+        ["sudo", "-u", "otto-agent", "claude", "auth", "status", "--json"],
+        ["sudo", "-u", "otto-agent", "codex", "login", "status"],
+        ["sudo", "-u", "otto-agent", "agy", "models"],
+    ]
     assert messages == [
         "switchyard: first-run codex hook trust needs 2 approvals for owner user otto-agent; "
         "run /hooks once in any Codex pane as that owner. "
         "This trust is shared by affected Codex roles: ops, main, app. "
         "Approvals: session_start (new project, never trusted); stop (new project, never trusted)"
     ]
+    assert "director" not in messages[0]
+    assert "inspector" not in messages[0]
+    assert "audit" not in messages[0]
     output: list[str] = []
     team_launcher.report_first_run_auth_warnings(report, print_func=output.append)
     assert output == [
@@ -13684,6 +13705,9 @@ def test_first_run_auth_phase_reports_stale_codex_hook_trust_without_writing_con
         "This trust is shared by affected Codex roles: ops, main, app. "
         "Approvals: session_start (new project, never trusted); stop (new project, never trusted)"
     ]
+    assert "director" not in output[0]
+    assert "inspector" not in output[0]
+    assert "audit" not in output[0]
 
 
 def test_first_run_auth_phase_distinguishes_changed_codex_hook_trust_from_never_trusted() -> None:

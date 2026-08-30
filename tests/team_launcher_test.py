@@ -38,6 +38,13 @@ from ticket_board_pane_env import (
     strip_ticket_board_pane_env,
 )
 from standalone_test_runner import run_module_tests
+from tmux_socket_cleanup import (
+    cleanup_dead_isolated_tmux_socket as _cleanup_dead_isolated_tmux_socket,
+    cleanup_isolated_tmux_sessions as _cleanup_isolated_tmux_sessions,
+    isolated_tmux_socket_path as _isolated_tmux_socket_path,
+    run_isolated_tmux as _run_isolated_tmux,
+    tmux_args as _tmux_args,
+)
 
 LIVE_PANE_SESSION_PATHS = candidate_live_pane_session_paths()
 LIVE_PANE_STATE_PATHS = candidate_live_pane_state_paths()
@@ -1199,44 +1206,6 @@ def _write_six_visible_role_config(tmp: Path, project: str = "porter") -> Path:
 
 def _run_git(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, cwd=cwd, check=True, text=True, capture_output=True)
-
-
-def _tmux_args(server: str, args: list[str]) -> list[str]:
-    return ["tmux", "-L", server, *args]
-
-
-def _run_isolated_tmux(server: str, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
-    return subprocess.run(_tmux_args(server, args), **kwargs)
-
-
-def _isolated_tmux_socket_path(server: str) -> Path:
-    return Path(os.environ.get("TMUX_TMPDIR", tempfile.gettempdir())) / f"tmux-{os.getuid()}" / server
-
-
-def _cleanup_dead_isolated_tmux_socket(server: str) -> None:
-    socket_path = _isolated_tmux_socket_path(server)
-    if not socket_path.exists():
-        return
-    try:
-        probe = _run_isolated_tmux(
-            server,
-            ["list-sessions"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=5,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return
-    if probe.returncode == 0:
-        return
-    socket_path.unlink(missing_ok=True)
-
-
-def _cleanup_isolated_tmux_sessions(server: str, sessions: list[str]) -> None:
-    for session in sessions:
-        _run_isolated_tmux(server, ["kill-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    _cleanup_dead_isolated_tmux_socket(server)
 
 
 def test_cleanup_isolated_tmux_sessions_removes_dead_reload_guard_socket() -> None:

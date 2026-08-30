@@ -34,6 +34,10 @@ from ticket_board_pane_env import (
     stripped_ticket_board_pane_env,
 )
 from standalone_test_runner import run_module_tests
+from tmux_socket_cleanup import (
+    cleanup_dead_isolated_tmux_socket,
+    isolated_tmux_socket_path,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "scripts" / "ticket-board-install-pane-hooks"
@@ -1936,6 +1940,7 @@ def test_hook_ignores_tmux_pane_without_explicit_target() -> None:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+            cleanup_dead_isolated_tmux_socket(server)
 
         assert status_path.read_text(encoding="utf-8").strip() == "0"
         assert out_path.read_text(encoding="utf-8") == ""
@@ -1944,6 +1949,34 @@ def test_hook_ignores_tmux_pane_without_explicit_target() -> None:
         assert not session_dir.exists()
         assert not (tmp_path / "run").exists()
         assert not (tmp_path / "state-home").exists()
+
+
+def test_hook_tmux_no_target_cleanup_removes_dead_isolated_socket() -> None:
+    if shutil.which("tmux") is None:
+        return
+    server = f"pgu731-hook-{os.getpid()}"
+    session = f"pgu731-hook-cleanup-{os.getpid()}"
+    socket_path = isolated_tmux_socket_path(server)
+    subprocess.run(
+        ["tmux", "-L", server, "new-session", "-d", "-s", session, "sleep", "60"],
+        text=True,
+        capture_output=True,
+        timeout=5,
+        check=True,
+    )
+    assert socket_path.exists(), socket_path
+    try:
+        subprocess.run(
+            ["tmux", "-L", server, "kill-session", "-t", session],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+        cleanup_dead_isolated_tmux_socket(server)
+        assert not socket_path.exists(), socket_path
+    finally:
+        cleanup_dead_isolated_tmux_socket(server)
 
 
 def main() -> int:

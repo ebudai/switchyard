@@ -107,7 +107,10 @@ when the role session does not exist. Roles marked `detached` are started
 directly by the launcher before Konsole opens and are not assigned a visible
 layout pane. The visible Konsole window is then launched in the background so
 `start` returns promptly to the invoking shell with a short status line instead
-of blocking on the window process. Before opening Konsole, `start` fetches
+of blocking on the window process. New role sessions are created with the tmux
+window name set to the board role (`director`, `main`, `app`, `ops`, `audit`,
+`inspector`, `research`), so the status bar keeps a deterministic role label
+even after the CLI updates its pane title. Before opening Konsole, `start` fetches
 `origin main`, checks the shared checkout out to `origin/main` with `--force`,
 then runs `git clean -fdx`.
 This is intentionally destructive to uncommitted files in the shared checkout;

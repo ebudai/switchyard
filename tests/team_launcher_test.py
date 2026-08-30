@@ -5499,6 +5499,7 @@ def test_start_creates_missing_session_once_then_attaches() -> None:
     assert runner.calls[0] == ["tmux", "has-session", "-t", "pgu-ops"]
     assert runner.calls[1][:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"]
     assert runner.calls[1][5:7] == ["-c", str(_pgu_project_root())]
+    assert runner.calls[1][7:9] == ["-n", "ops"]
     assert "TICKET_BOARD_PANE_TARGET=pgu-ops:0.0" in runner.calls[1][-1]
     assert "PGU_PANE_TARGET=pgu-ops:0.0" in runner.calls[1][-1]
     assert "--model gpt-5.5" in runner.calls[1][-1]
@@ -5510,6 +5511,96 @@ def test_start_creates_missing_session_once_then_attaches() -> None:
     assert runner.calls[2] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_pid}"]
     assert runner.calls[3] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_current_command}"]
     assert runner.calls[4] == ["tmux", "attach", "-t", "pgu-ops"]
+
+
+def test_tmux_new_session_names_window_for_every_role() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-role-window.") as tmp:
+        session_dir = Path(tmp) / "sessions"
+        for role in config.roles:
+            args = team_launcher.tmux_new_session_args(role, session_dir=session_dir)
+            assert args[:5] == ["tmux", "new-session", "-d", "-s", role.tmux_session]
+            assert args[args.index("-n") + 1] == role.role
+
+
+def test_tmux_role_window_name_survives_cli_pane_title_write() -> None:
+    if shutil.which("tmux") is None:
+        return
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-role-title.") as tmp:
+        tmp_path = Path(tmp)
+        server = f"pgu800-role-title-{os.getpid()}"
+        runner = _isolated_tmux_runner(server)
+        helper = tmp_path / "fake-cli"
+        helper.write_text(
+            "#!/bin/sh\n"
+            "title=\"$1\"\n"
+            "marker=\"$2\"\n"
+            "printf '\\033]2;%s\\033\\\\' \"$title\"\n"
+            "touch \"$marker\"\n"
+            "trap 'exit 0' TERM INT\n"
+            "while :; do sleep 1; done\n",
+            encoding="utf-8",
+        )
+        helper.chmod(0o755)
+        base_roles = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json").roles
+        measured_cli_titles = {
+            "director": "X Director",
+            "audit": "X Audit",
+            "research": "X Claude Code",
+            "inspector": "machine",
+            "main": "pgu",
+            "app": "pgu",
+            "ops": "pgu",
+        }
+        roles = []
+        try:
+            for base_role in base_roles:
+                session = f"pgu800-role-title-{os.getpid()}-{base_role.role}"
+                marker = tmp_path / f"{base_role.role}.running"
+                role = base_role.__class__(
+                    role=base_role.role,
+                    slot=base_role.slot,
+                    detached=base_role.detached,
+                    tmux_session=session,
+                    target=f"{session}:0.0",
+                    workdir=str(tmp_path),
+                    cli=[str(helper), measured_cli_titles[base_role.role], str(marker)],
+                    model="",
+                    model_arg=base_role.model_arg,
+                    effort="",
+                    yolo=False,
+                    extra_args=[],
+                    resume_mode=base_role.resume_mode,
+                    resume_flag=base_role.resume_flag,
+                    resume_subcommand=base_role.resume_subcommand,
+                    live_commands=["fake-cli"],
+                    env={},
+                )
+                roles.append(role)
+                proc = runner(
+                    team_launcher.tmux_new_session_args(role, session_dir=tmp_path / "sessions"),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                assert proc.returncode == 0, proc.stderr
+                for _ in range(50):
+                    if marker.exists():
+                        break
+                    time.sleep(0.1)
+                assert marker.exists(), f"fake CLI never started for {base_role.role}"
+
+            for role in roles:
+                status = _run_isolated_tmux(
+                    server,
+                    ["display-message", "-p", "-t", role.target, "#{window_name}|#{pane_title}|#{automatic-rename}"],
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    check=True,
+                ).stdout.strip()
+                assert status == f"{role.role}|{measured_cli_titles[role.role]}|0"
+        finally:
+            _cleanup_isolated_tmux_sessions(server, [role.tmux_session for role in roles])
 
 
 def test_pane_start_from_another_pane_uses_target_session_and_clears_caller_tmux_env() -> None:

@@ -2101,7 +2101,7 @@ def tmux_new_session_args(
     shell_command = _quote_command(
         cli_command_for_role(role, session_dir=session_dir, pane_state_dir=pane_state_dir, resume=resume, bin_user=bin_user)
     )
-    return ["tmux", "new-session", "-d", "-s", role.tmux_session, "-c", role.workdir, shell_command]
+    return ["tmux", "new-session", "-d", "-s", role.tmux_session, "-c", role.workdir, "-n", role.role, shell_command]
 
 
 def tmux_attach_args(role: RoleConfig) -> list[str]:

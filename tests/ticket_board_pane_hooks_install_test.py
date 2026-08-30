@@ -318,7 +318,9 @@ def test_installer_seeds_codex_hook_trust_for_fresh_owner_only() -> None:
 
         entries = codex_command_hook_trust_entries(home)
         trusted = codex_trusted_hashes(home)
-        config = _load_toml(home / ".codex" / "config.toml")
+        config_path = home / ".codex" / "config.toml"
+        assert config_path.exists(), "fresh install with --seed-codex-hook-trust-if-new must create config.toml"
+        config = _load_toml(config_path)
 
     assert len(entries) == 4
     assert "seeded Codex hook trust for 4 installed hooks" in proc.stdout
@@ -330,6 +332,34 @@ def test_installer_seeds_codex_hook_trust_for_fresh_owner_only() -> None:
         "user_prompt_submit": True,
         "permission_request": True,
     }
+
+
+def test_installer_does_not_seed_codex_hook_trust_without_opt_in_flag() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks-codex-trust-no-flag.") as tmp:
+        home = Path(tmp) / "home"
+        bin_path = home / ".local" / "bin" / HOOK_NAME
+        proc = subprocess.run(
+            [
+                str(INSTALLER),
+                "install",
+                "--home",
+                str(home),
+                "--bin-path",
+                str(bin_path),
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+
+        entries = codex_command_hook_trust_entries(home)
+        trusted = codex_trusted_hashes(home)
+        config_exists = (home / ".codex" / "config.toml").exists()
+
+    assert len(entries) == 4
+    assert "seeded Codex hook trust" not in proc.stdout
+    assert trusted == {}
+    assert not config_exists
 
 
 def test_installer_refuses_codex_hook_trust_seed_when_trust_records_exist() -> None:

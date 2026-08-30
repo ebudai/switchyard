@@ -1209,9 +1209,53 @@ def _run_isolated_tmux(server: str, args: list[str], **kwargs: Any) -> subproces
     return subprocess.run(_tmux_args(server, args), **kwargs)
 
 
+def _isolated_tmux_socket_path(server: str) -> Path:
+    return Path(os.environ.get("TMUX_TMPDIR", tempfile.gettempdir())) / f"tmux-{os.getuid()}" / server
+
+
+def _cleanup_dead_isolated_tmux_socket(server: str) -> None:
+    socket_path = _isolated_tmux_socket_path(server)
+    if not socket_path.exists():
+        return
+    try:
+        probe = _run_isolated_tmux(
+            server,
+            ["list-sessions"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    if probe.returncode == 0:
+        return
+    socket_path.unlink(missing_ok=True)
+
+
 def _cleanup_isolated_tmux_sessions(server: str, sessions: list[str]) -> None:
     for session in sessions:
         _run_isolated_tmux(server, ["kill-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    _cleanup_dead_isolated_tmux_socket(server)
+
+
+def test_cleanup_isolated_tmux_sessions_removes_dead_reload_guard_socket() -> None:
+    if shutil.which("tmux") is None:
+        return
+    server = f"pgu321-reload-guard-{os.getpid()}"
+    session = f"pgu-791-reload-guard-cleanup-{os.getpid()}"
+    socket_path = _isolated_tmux_socket_path(server)
+    _run_isolated_tmux(
+        server,
+        ["new-session", "-d", "-s", session, "sleep", "60"],
+        text=True,
+        capture_output=True,
+        timeout=5,
+        check=True,
+    )
+    assert socket_path.exists(), socket_path
+    _cleanup_isolated_tmux_sessions(server, [session])
+    assert not socket_path.exists(), socket_path
 
 
 def _isolated_tmux_runner(server: str) -> Any:

@@ -17,7 +17,7 @@ import time
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
 REMOTE_HEAD = "0123456789abcdef0123456789abcdef01234567"
@@ -13375,6 +13375,16 @@ def _write_first_run_auth_config(
     return config_path
 
 
+def _mark_first_run_roles_detached(config_path: Path, *role_names: str) -> None:
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    detached = set(role_names)
+    for role in raw["roles"]:
+        if role["role"] in detached:
+            role["detached"] = True
+            role.pop("slot", None)
+    config_path.write_text(json.dumps(raw) + "\n", encoding="utf-8")
+
+
 class FirstRunAuthRunner:
     def __init__(
         self,
@@ -14330,6 +14340,104 @@ def test_first_run_auth_phase_accepts_hermes_resolved_api_key_without_model_setu
         ["sudo", "-u", "otto-agent", "hermes", "config", "check"],
     ]
     assert messages == []
+
+
+def test_first_run_trust_skips_detached_non_folder_trust_clis() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-first-run-trust-non-folder-clis.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        config_path = _write_first_run_auth_config(
+            tmp_path,
+            roles=[
+                ("ops", "codex"),
+                ("bulk", "hermes"),
+            ],
+        )
+        _mark_first_run_roles_detached(config_path, "ops", "bulk")
+        config = load_project_config("otto", config_path)
+        runner = FirstRunAuthRunner()
+        runner.login_seen.update({"codex", "hermes"})
+        messages: list[str] = []
+        trust_probes: list[str] = []
+
+        original_workdir_is_trusted = team_launcher._workdir_is_trusted
+
+        def fake_workdir_is_trusted(cli: str, *, owner_home: Path, workdir: Path) -> bool:
+            trust_probes.append(cli)
+            return False
+
+        try:
+            team_launcher._workdir_is_trusted = fake_workdir_is_trusted
+            report = team_launcher.run_first_run_auth_phase(
+                config,
+                owner_user="otto-agent",
+                owner_home=owner_home,
+                runner=runner,
+                print_func=messages.append,
+            )
+        finally:
+            team_launcher._workdir_is_trusted = original_workdir_is_trusted
+
+    assert report == team_launcher.FirstRunAuthReport({}, [])
+    assert messages == []
+    assert trust_probes == []
+    assert runner.calls == [
+        ["sudo", "-u", "otto-agent", "codex", "login", "status"],
+        ["sudo", "-u", "otto-agent", "hermes", "config", "check"],
+    ]
+
+
+def test_first_run_auth_phase_skips_cli_absent_from_status_commands() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-first-run-auth-unknown-status.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        config = load_project_config(
+            "otto",
+            _write_first_run_auth_config(
+                tmp_path,
+                roles=[
+                    ("bulk", "hermes"),
+                ],
+            ),
+        )
+        runner = FirstRunAuthRunner()
+        messages: list[str] = []
+
+        original_status_commands = team_launcher.FIRST_RUN_AUTH_STATUS_COMMANDS
+        original_cli_auth_status = team_launcher._cli_auth_status
+
+        def fake_cli_auth_status(
+            cli: str,
+            *,
+            owner_user: str,
+            owner_home: Path,
+            runner: Callable[..., subprocess.CompletedProcess[Any]],
+        ) -> str:
+            if cli == "hermes":
+                raise AssertionError("hermes should be skipped while absent from FIRST_RUN_AUTH_STATUS_COMMANDS")
+            return original_cli_auth_status(cli, owner_user=owner_user, owner_home=owner_home, runner=runner)
+
+        try:
+            team_launcher.FIRST_RUN_AUTH_STATUS_COMMANDS = {
+                key: value for key, value in original_status_commands.items() if key != "hermes"
+            }
+            team_launcher._cli_auth_status = fake_cli_auth_status
+            report = team_launcher.run_first_run_auth_phase(
+                config,
+                owner_user="otto-agent",
+                owner_home=owner_home,
+                runner=runner,
+                print_func=messages.append,
+            )
+        finally:
+            team_launcher.FIRST_RUN_AUTH_STATUS_COMMANDS = original_status_commands
+            team_launcher._cli_auth_status = original_cli_auth_status
+
+    assert report == team_launcher.FirstRunAuthReport({}, [])
+    assert messages == []
+    assert runner.calls == []
 
 
 def test_hermes_config_check_requires_resolved_api_key() -> None:

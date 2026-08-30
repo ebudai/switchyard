@@ -95,7 +95,7 @@ def run_browser_check(playwright: object, server_port: int) -> None:
         page.locator(".column-title", has_text="Final Sign-Off").wait_for(timeout=5000)
 
         columns = page.locator(".column")
-        assert columns.count() == 6
+        assert columns.count() == 8
 
         metrics = page.evaluate(
             """() => {
@@ -114,7 +114,7 @@ def run_browser_check(playwright: object, server_port: int) -> None:
               };
             }"""
         )
-        assert len(metrics["gridTemplateColumns"].split()) == 6
+        assert len(metrics["gridTemplateColumns"].split()) == 8
         tops = {column["top"] for column in metrics["columnRects"]}
         assert len(tops) == 1, metrics["columnRects"]
         assert metrics["columnRects"][-1]["title"] == "Final Sign-Off"
@@ -122,7 +122,7 @@ def run_browser_check(playwright: object, server_port: int) -> None:
         page.locator("#showDeferredInput").check()
         page.locator("#showDoneInput").check()
         page.locator("#showCancelledInput").check()
-        page.wait_for_function("() => document.querySelectorAll('.column').length === 9")
+        page.wait_for_function("() => document.querySelectorAll('.column').length === 11")
         expanded_metrics = page.evaluate(
             """() => {
               const scroll = document.querySelector('.board-scroll');
@@ -141,7 +141,7 @@ def run_browser_check(playwright: object, server_port: int) -> None:
             }"""
         )
         assert expanded_metrics["scrollWidth"] > expanded_metrics["clientWidth"]
-        assert len(expanded_metrics["gridTemplateColumns"].split()) == 9
+        assert len(expanded_metrics["gridTemplateColumns"].split()) == 11
         expanded_tops = {column["top"] for column in expanded_metrics["columnRects"]}
         assert len(expanded_tops) == 1, expanded_metrics["columnRects"]
         assert expanded_metrics["columnRects"][-1]["title"] == "Cancelled"

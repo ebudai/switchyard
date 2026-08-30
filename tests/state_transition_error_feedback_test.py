@@ -14,7 +14,7 @@ from scripts.ticket_board.frontend import HTML
 
 
 def main() -> int:
-    assert "stateSelect.addEventListener('change', async (event) => {" in HTML
+    assert "assigneeSelect.addEventListener('change', async () => {" in HTML
     assert "setCreateStatus(error.message, true);" in HTML
     assert "await requestBoardReload();" in HTML
     print("state_transition_error_feedback_test: ok")

@@ -98,12 +98,18 @@ runnable suites without fail-fast, and prints per-group and per-suite
 PASS/FAIL/SKIP results plus a summary.
 
 Use `--group adjacent` for board-adjacent tests outside the `ticket_board_*`
-namespace, or `--group all` for both groups. The adjacent group is discovered
-from test file content, not a manifest: standalone tests that reference board
-URLs, sockets, `ticket-board-write`, `ticket_board.write_client`, or the
-`ticket_board_ui_harness` browser harness are included automatically. Use
-`--fail-on-skip` when the validation environment is expected to have every
-dependency installed.
+namespace, `--group frontend` for non-browser standalone tests that import the
+`scripts.ticket_board` package, `--group browser` for inline Playwright tests
+that import `scripts.ticket_board`, or `--group all` for all four groups. These
+extra groups are discovered from test file content, not a manifest: standalone
+tests that reference board URLs, sockets, `ticket-board-write`,
+`ticket_board.write_client`, or the `ticket_board_ui_harness` browser harness
+are included as adjacent, while remaining inline `scripts.ticket_board`
+importers are split by whether they use Playwright/browser markers. PGU-787
+measured the 14 inline browser importers at 13.14s and the full 52 inline
+importer set at 21.62s, so they are included in `--group all` rather than left
+as manual-only tests. Use `--fail-on-skip` when the validation environment is
+expected to have every dependency installed.
 
 ## PostgreSQL notification listener
 

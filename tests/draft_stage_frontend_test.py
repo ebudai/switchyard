@@ -14,8 +14,8 @@ from scripts.ticket_board.frontend import HTML
 
 
 def main() -> int:
-    assert "{ key: 'draft', label: 'Draft' }" in HTML
-    assert HTML.index("{ key: 'draft', label: 'Draft' }") < HTML.index("{ key: 'analysis', label: 'Triage' }")
+    assert "draft: 'Draft'" in HTML
+    assert HTML.index("draft: 'Draft'") < HTML.index("analysis: 'Triage'")
     assert 'id="createDraftInput"' in HTML
     assert "Create as draft" in HTML
     assert "initial_state: createDraftInput.checked ? 'draft'" in HTML

@@ -14,7 +14,7 @@ from scripts.ticket_board.frontend import HTML
 
 
 def main() -> int:
-    assert "{ key: 'cancelled', label: 'Cancelled' }," in HTML
+    assert "cancelled: 'Cancelled'," in HTML
     assert 'id="showCancelledInput"' in HTML
     assert 'id="showCancelledCount"' in HTML
     assert "showCancelled: false," in HTML

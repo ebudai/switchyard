@@ -53,7 +53,7 @@ def main() -> int:
     assert "state.pendingCreateScreenshots = uniquePaths([...state.pendingCreateScreenshots, uploaded.path]);" in HTML
     assert "imageLightboxOverlay" in HTML
     assert "imageLightboxCloseBtn" in HTML
-    assert "openImageLightbox(entry);" in HTML
+    assert "openImageLightbox(entry, ticket);" in HTML
     assert "Open attachment full size:" in HTML
     assert "Available Frame" not in HTML
     assert "screenshotInput" not in HTML

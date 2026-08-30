@@ -250,8 +250,24 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       return boardColumns().find((column) => column.key === key)?.label || key;
     }
 
+    const DEFAULT_STATE_LABELS = {
+      draft: 'Draft',
+      backlog: 'Backlog',
+      analysis: 'Triage',
+      in_progress: 'Implementation',
+      inspection: 'Inspection',
+      audit: 'Audit',
+      dat: 'DAT',
+      user_review: 'UAT',
+      director_review: 'Final Sign-Off',
+      done: 'Done',
+      cancelled: 'Cancelled',
+    };
+
     function normalizeBoardColumns(columns, states) {
-      const source = Array.isArray(columns) && columns.length ? columns : (states || []).map((key) => ({ key, label: key }));
+      const source = Array.isArray(columns) && columns.length
+        ? columns
+        : (states || []).map((key) => ({ key, label: DEFAULT_STATE_LABELS[key] || key }));
       return source
         .map((column) => ({
           key: String(column?.key || '').trim(),

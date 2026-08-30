@@ -22,7 +22,8 @@ def main() -> int:
     assert "detailOverlayEl.hidden = !isOpen;" in HTML
     assert "detailCloseBtn.addEventListener('click', () => {" in HTML
     assert "detailOverlayEl.addEventListener('click', (event) => {" in HTML
-    assert "if (event.key === 'Escape' && state.detailOpen)" in HTML
+    assert "if (event.key !== 'Escape') {" in HTML
+    assert "if (state.detailOpen) {" in HTML
     assert "body.detail-open" in HTML
     print("detail_modal_overlay_test: ok")
     return 0

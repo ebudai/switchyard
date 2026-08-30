@@ -82,6 +82,76 @@ def test_discovers_board_adjacent_suites_by_content_property() -> None:
         ]
 
 
+def test_discovers_inline_ticket_board_browser_suites_by_content_property() -> None:
+    runner = load_runner()
+    with tempfile.TemporaryDirectory(prefix="ticket-board-suite-browser-discovery.") as tmpdir:
+        root = Path(tmpdir)
+        tests = root / "tests"
+        tests.mkdir()
+        (tests / "ticket_board_a_test.py").write_text(
+            "from scripts.ticket_board.server import TicketBoardServer\n"
+            "from playwright.sync_api import sync_playwright\n",
+            encoding="utf-8",
+        )
+        (tests / "inline_browser_test.py").write_text(
+            "from scripts.ticket_board.server import TicketBoardServer\n"
+            "from playwright.sync_api import sync_playwright\n",
+            encoding="utf-8",
+        )
+        (tests / "inline_browser_alt_test.py").write_text(
+            "import scripts.ticket_board.frontend\n"
+            "browser = playwright.chromium.launch(headless=True)\n",
+            encoding="utf-8",
+        )
+        (tests / "inline_frontend_only_test.py").write_text(
+            "from scripts.ticket_board.frontend import HTML\n",
+            encoding="utf-8",
+        )
+        (tests / "harness_browser_test.py").write_text(
+            "from scripts.ticket_board.frontend import HTML\n"
+            "from tests.ticket_board_ui_harness import BoardHarness, load_playwright\n",
+            encoding="utf-8",
+        )
+        (tests / "unrelated_browser_test.py").write_text(
+            "from playwright.sync_api import sync_playwright\n",
+            encoding="utf-8",
+        )
+
+        assert runner.discover_ticket_board_browser_suites(root) == [
+            "tests/inline_browser_alt_test.py",
+            "tests/inline_browser_test.py",
+        ]
+
+
+def test_discovers_inline_ticket_board_frontend_suites_by_content_property() -> None:
+    runner = load_runner()
+    with tempfile.TemporaryDirectory(prefix="ticket-board-suite-frontend-discovery.") as tmpdir:
+        root = Path(tmpdir)
+        tests = root / "tests"
+        tests.mkdir()
+        (tests / "ticket_board_a_test.py").write_text(
+            "from scripts.ticket_board.frontend import HTML\n",
+            encoding="utf-8",
+        )
+        (tests / "inline_frontend_test.py").write_text(
+            "from scripts.ticket_board.frontend import HTML\n",
+            encoding="utf-8",
+        )
+        (tests / "inline_browser_test.py").write_text(
+            "from scripts.ticket_board.server import TicketBoardServer\n"
+            "from playwright.sync_api import sync_playwright\n",
+            encoding="utf-8",
+        )
+        (tests / "harness_frontend_test.py").write_text(
+            "from tests.ticket_board_ui_harness import BoardHarness\n",
+            encoding="utf-8",
+        )
+
+        assert runner.discover_ticket_board_frontend_suites(root) == [
+            "tests/inline_frontend_test.py",
+        ]
+
+
 def test_adjacent_group_runs_only_board_adjacent_suites() -> None:
     runner = load_runner()
     with tempfile.TemporaryDirectory(prefix="ticket-board-suite-adjacent-run.") as tmpdir:
@@ -113,6 +183,112 @@ def test_adjacent_group_runs_only_board_adjacent_suites() -> None:
         assert "PASS [board_adjacent] tests/adjacent_pass_test.py" in rendered
         assert "PASS [board_adjacent] tests/browser_harness_pass_test.py" in rendered
         assert "ticket_board_fail_if_run_test" not in rendered
+
+
+def test_browser_group_runs_only_inline_ticket_board_browser_suites() -> None:
+    runner = load_runner()
+    with tempfile.TemporaryDirectory(prefix="ticket-board-suite-browser-run.") as tmpdir:
+        root = Path(tmpdir)
+        tests = root / "tests"
+        tests.mkdir()
+        (tests / "inline_browser_pass_test.py").write_text(
+            "marker = 'from scripts.ticket_board.server import TicketBoardServer'\n"
+            "browser = 'playwright.chromium.launch(headless=True)'\n"
+            "print('inline_browser_pass_test: ok')\n",
+            encoding="utf-8",
+        )
+        (tests / "inline_frontend_fail_if_run_test.py").write_text(
+            "marker = 'from scripts.ticket_board.frontend import HTML'\n"
+            "raise AssertionError('non-browser importer should not run in browser group')\n",
+            encoding="utf-8",
+        )
+        (tests / "harness_fail_if_run_test.py").write_text(
+            "marker = 'ticket_board_ui_harness'\n"
+            "browser = 'playwright.chromium.launch(headless=True)'\n"
+            "raise AssertionError('adjacent harness browser should not be duplicated')\n",
+            encoding="utf-8",
+        )
+
+        output = io.StringIO()
+        results = runner.run_suite(root=root, groups=(runner.TICKET_BOARD_BROWSER_GROUP,), out=output)
+
+        assert [(result.group, result.path, result.status) for result in results] == [
+            (runner.TICKET_BOARD_BROWSER_GROUP, "tests/inline_browser_pass_test.py", "PASS"),
+        ]
+        rendered = output.getvalue()
+        assert "group: ticket_board_browser" in rendered
+        assert "PASS [ticket_board_browser] tests/inline_browser_pass_test.py" in rendered
+        assert "inline_frontend_fail_if_run_test" not in rendered
+        assert "harness_fail_if_run_test" not in rendered
+
+
+def test_frontend_group_runs_only_inline_ticket_board_non_browser_suites() -> None:
+    runner = load_runner()
+    with tempfile.TemporaryDirectory(prefix="ticket-board-suite-frontend-run.") as tmpdir:
+        root = Path(tmpdir)
+        tests = root / "tests"
+        tests.mkdir()
+        (tests / "inline_frontend_pass_test.py").write_text(
+            "marker = 'from scripts.ticket_board.frontend import HTML'\n"
+            "print('inline_frontend_pass_test: ok')\n",
+            encoding="utf-8",
+        )
+        (tests / "inline_browser_fail_if_run_test.py").write_text(
+            "marker = 'from scripts.ticket_board.server import TicketBoardServer'\n"
+            "browser = 'load_playwright()'\n"
+            "raise AssertionError('browser importer should not run in frontend group')\n",
+            encoding="utf-8",
+        )
+        (tests / "harness_fail_if_run_test.py").write_text(
+            "marker = 'ticket_board_ui_harness'\n"
+            "raise AssertionError('adjacent harness test should not be duplicated')\n",
+            encoding="utf-8",
+        )
+
+        output = io.StringIO()
+        results = runner.run_suite(root=root, groups=(runner.TICKET_BOARD_FRONTEND_GROUP,), out=output)
+
+        assert [(result.group, result.path, result.status) for result in results] == [
+            (runner.TICKET_BOARD_FRONTEND_GROUP, "tests/inline_frontend_pass_test.py", "PASS"),
+        ]
+        rendered = output.getvalue()
+        assert "group: ticket_board_frontend" in rendered
+        assert "PASS [ticket_board_frontend] tests/inline_frontend_pass_test.py" in rendered
+        assert "inline_browser_fail_if_run_test" not in rendered
+        assert "harness_fail_if_run_test" not in rendered
+
+
+def test_all_group_includes_inline_ticket_board_importer_suites() -> None:
+    runner = load_runner()
+    with tempfile.TemporaryDirectory(prefix="ticket-board-suite-all-browser.") as tmpdir:
+        root = Path(tmpdir)
+        tests = root / "tests"
+        tests.mkdir()
+        (tests / "ticket_board_core_test.py").write_text("print('ticket_board_core_test: ok')\n", encoding="utf-8")
+        (tests / "adjacent_test.py").write_text(
+            "board_url = 'http://127.0.0.1:1'\nprint('adjacent_test: ok')\n",
+            encoding="utf-8",
+        )
+        (tests / "inline_browser_test.py").write_text(
+            "marker = 'from scripts.ticket_board.server import TicketBoardServer'\n"
+            "browser = 'load_playwright()'\n"
+            "print('inline_browser_test: ok')\n",
+            encoding="utf-8",
+        )
+        (tests / "inline_frontend_test.py").write_text(
+            "marker = 'from scripts.ticket_board.frontend import HTML'\n"
+            "print('inline_frontend_test: ok')\n",
+            encoding="utf-8",
+        )
+
+        suites = runner.discover_suites_by_group(root, runner.normalize_groups("all"))
+
+        assert suites == {
+            runner.TICKET_BOARD_GROUP: ["tests/ticket_board_core_test.py"],
+            runner.BOARD_ADJACENT_GROUP: ["tests/adjacent_test.py"],
+            runner.TICKET_BOARD_FRONTEND_GROUP: ["tests/inline_frontend_test.py"],
+            runner.TICKET_BOARD_BROWSER_GROUP: ["tests/inline_browser_test.py"],
+        }
 
 
 def test_runner_reports_failures_without_stopping_and_strips_live_env() -> None:
@@ -188,7 +364,12 @@ def test_runner_names_skipped_suites_with_reasons() -> None:
 def main() -> int:
     test_discovers_python_and_shell_ticket_board_suites_only()
     test_discovers_board_adjacent_suites_by_content_property()
+    test_discovers_inline_ticket_board_browser_suites_by_content_property()
+    test_discovers_inline_ticket_board_frontend_suites_by_content_property()
     test_adjacent_group_runs_only_board_adjacent_suites()
+    test_browser_group_runs_only_inline_ticket_board_browser_suites()
+    test_frontend_group_runs_only_inline_ticket_board_non_browser_suites()
+    test_all_group_includes_inline_ticket_board_importer_suites()
     test_runner_reports_failures_without_stopping_and_strips_live_env()
     test_runner_names_skipped_suites_with_reasons()
     print("ticket_board_suite_runner_test: ok")

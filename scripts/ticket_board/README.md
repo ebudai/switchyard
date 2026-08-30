@@ -219,13 +219,18 @@ Ticket board validation:
   `tests/ticket_board_*_test.py` and `tests/ticket_board_*_test.sh`, runs all
   runnable suites without fail-fast, and prints per-group and per-suite
   PASS/FAIL/SKIP results plus a summary. Use `--group adjacent` for
-  board-adjacent tests outside the `ticket_board_*` namespace, or `--group all`
-  for both groups.
-- The adjacent group is discovered from test file content, not a manifest: any
-  non-`ticket_board_*` standalone test that references `TICKET_BOARD_SOCKET`,
-  `TICKET_BOARD_URL`, `board_url`, `--board-url`, `ticket-board-write`, or
-  `ticket_board.write_client`, or `ticket_board_ui_harness` is included
-  automatically.
+  board-adjacent tests outside the `ticket_board_*` namespace, `--group
+  frontend` for non-browser standalone tests that import `scripts.ticket_board`,
+  `--group browser` for inline Playwright tests that import
+  `scripts.ticket_board`, or `--group all` for every group.
+- The adjacent, frontend, and browser groups are discovered from test file
+  content, not manifests. Board URLs, sockets, `ticket-board-write`,
+  `ticket_board.write_client`, and `ticket_board_ui_harness` mark adjacent
+  suites. Remaining inline `scripts.ticket_board` importers are split into
+  frontend or browser by Playwright/browser markers.
+- PGU-787 measured the 14 inline browser importers at 13.14s and the full 52
+  inline importer set at 21.62s, so `--group all` includes both importer groups
+  instead of leaving them as manual-only tests.
 - The runner strips live board/socket and pane-hook environment variables before
   launching each suite, so an ambient pane environment cannot redirect tests to
   the production board.

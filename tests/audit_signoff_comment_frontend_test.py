@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 import tempfile
 import threading
@@ -102,13 +103,20 @@ def run_browser_check(playwright: object, server_port: int, app: ToggleFailureBo
         page.locator(".column-title", has_text="Audit").wait_for(timeout=5000)
         page.locator(".card", has_text="PGU-279").click()
 
-        audit_toggle = page.get_by_role("checkbox", name="Audit signoff")
+        audit_toggle = page.locator(".detail-modal label", has_text=re.compile(r"^Audit signoff$")).locator("input")
         audit_toggle.wait_for(timeout=5000)
         assert audit_toggle.is_checked() is False
 
         audit_toggle.click()
         page.wait_for_function(
-            "() => document.body.innerText.includes('audit_sign_off requires a non-empty comment')",
+            "() => document.getElementById('createStatus')?.innerText.includes('audit_sign_off requires a non-empty comment')",
+            timeout=5000,
+        )
+        page.wait_for_function(
+            """() => Array.from(document.querySelectorAll('.detail-modal label'))
+              .find((label) => label.textContent.trim() === 'Audit signoff')
+              ?.querySelector('input')
+              ?.checked === false""",
             timeout=5000,
         )
         assert audit_toggle.is_checked() is False

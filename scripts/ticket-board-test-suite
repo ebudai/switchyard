@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import os
+import re
 import subprocess
 import sys
 import time
@@ -19,10 +20,14 @@ ROOT = Path(__file__).resolve().parents[1]
 PLAYWRIGHT_AUDIT_TEST = "tests/ticket_board_ui_audit_test.py"
 TICKET_BOARD_GROUP = "ticket_board"
 BOARD_ADJACENT_GROUP = "board_adjacent"
-ALL_GROUPS = (TICKET_BOARD_GROUP, BOARD_ADJACENT_GROUP)
+TICKET_BOARD_FRONTEND_GROUP = "ticket_board_frontend"
+TICKET_BOARD_BROWSER_GROUP = "ticket_board_browser"
+ALL_GROUPS = (TICKET_BOARD_GROUP, BOARD_ADJACENT_GROUP, TICKET_BOARD_FRONTEND_GROUP, TICKET_BOARD_BROWSER_GROUP)
 GROUP_LABELS = {
     TICKET_BOARD_GROUP: "ticket_board namespace",
     BOARD_ADJACENT_GROUP: "board-adjacent",
+    TICKET_BOARD_FRONTEND_GROUP: "inline ticket-board non-browser",
+    TICKET_BOARD_BROWSER_GROUP: "inline ticket-board browser",
 }
 BOARD_ADJACENT_MARKERS = (
     "TICKET_BOARD_SOCKET",
@@ -32,6 +37,12 @@ BOARD_ADJACENT_MARKERS = (
     "ticket-board-write",
     "ticket_board.write_client",
     "ticket_board_ui_harness",
+)
+TICKET_BOARD_IMPORT_RE = re.compile(r"(?:from|import)\s+scripts\.ticket_board|scripts\.ticket_board\.")
+BROWSER_TEST_MARKERS = (
+    "playwright",
+    "chromium.launch",
+    "load_playwright",
 )
 
 LIVE_BOARD_ENV_KEYS = {
@@ -98,6 +109,22 @@ def _mentions_board_endpoint(path: Path) -> bool:
     return any(marker in text for marker in BOARD_ADJACENT_MARKERS)
 
 
+def _test_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return path.read_text(encoding="utf-8", errors="ignore")
+
+
+def _imports_ticket_board_package(path: Path) -> bool:
+    return bool(TICKET_BOARD_IMPORT_RE.search(_test_text(path)))
+
+
+def _uses_browser_runtime(path: Path) -> bool:
+    text = _test_text(path)
+    return any(marker in text for marker in BROWSER_TEST_MARKERS)
+
+
 def discover_board_adjacent_suites(root: Path = ROOT) -> list[str]:
     tests_dir = root / "tests"
     if not tests_dir.is_dir():
@@ -111,6 +138,36 @@ def discover_board_adjacent_suites(root: Path = ROOT) -> list[str]:
     )
 
 
+def discover_ticket_board_browser_suites(root: Path = ROOT) -> list[str]:
+    tests_dir = root / "tests"
+    if not tests_dir.is_dir():
+        return []
+    return sorted(
+        path.relative_to(root).as_posix()
+        for path in tests_dir.iterdir()
+        if _is_standalone_test(path)
+        and not path.name.startswith("ticket_board_")
+        and not _mentions_board_endpoint(path)
+        and _imports_ticket_board_package(path)
+        and _uses_browser_runtime(path)
+    )
+
+
+def discover_ticket_board_frontend_suites(root: Path = ROOT) -> list[str]:
+    tests_dir = root / "tests"
+    if not tests_dir.is_dir():
+        return []
+    return sorted(
+        path.relative_to(root).as_posix()
+        for path in tests_dir.iterdir()
+        if _is_standalone_test(path)
+        and not path.name.startswith("ticket_board_")
+        and not _mentions_board_endpoint(path)
+        and _imports_ticket_board_package(path)
+        and not _uses_browser_runtime(path)
+    )
+
+
 def discover_suites_by_group(root: Path = ROOT, groups: Iterable[str] = (TICKET_BOARD_GROUP,)) -> dict[str, list[str]]:
     suites: dict[str, list[str]] = {}
     for group in groups:
@@ -118,6 +175,10 @@ def discover_suites_by_group(root: Path = ROOT, groups: Iterable[str] = (TICKET_
             suites[group] = discover_ticket_board_suites(root)
         elif group == BOARD_ADJACENT_GROUP:
             suites[group] = discover_board_adjacent_suites(root)
+        elif group == TICKET_BOARD_FRONTEND_GROUP:
+            suites[group] = discover_ticket_board_frontend_suites(root)
+        elif group == TICKET_BOARD_BROWSER_GROUP:
+            suites[group] = discover_ticket_board_browser_suites(root)
         else:
             raise ValueError(f"unknown suite group: {group}")
     return suites
@@ -273,6 +334,10 @@ def normalize_groups(group: str) -> tuple[str, ...]:
         return ALL_GROUPS
     if group == "adjacent":
         return (BOARD_ADJACENT_GROUP,)
+    if group == "frontend":
+        return (TICKET_BOARD_FRONTEND_GROUP,)
+    if group == "browser":
+        return (TICKET_BOARD_BROWSER_GROUP,)
     if group == "ticket-board":
         return (TICKET_BOARD_GROUP,)
     raise ValueError(f"unknown suite group: {group}")
@@ -283,9 +348,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--root", type=Path, default=ROOT, help="repository root to scan")
     parser.add_argument(
         "--group",
-        choices=("ticket-board", "adjacent", "all"),
+        choices=("ticket-board", "adjacent", "frontend", "browser", "all"),
         default="ticket-board",
-        help="suite group to run: ticket-board (default fast set), adjacent, or all",
+        help="suite group to run: ticket-board (default fast set), adjacent, frontend, browser, or all",
     )
     parser.add_argument("--list", action="store_true", help="list discovered suites and prerequisite skips without running")
     parser.add_argument("--fail-on-skip", action="store_true", help="return non-zero when any suite is skipped")

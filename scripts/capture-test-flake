@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+"""Run a standalone test repeatedly and preserve diagnostics on first failure."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+DEFAULT_RUNS = 50
+DEFAULT_OUTPUT_PARENT = Path("/tmp")
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run a standalone test file repeatedly, stop on first failure, "
+            "and capture stdout/stderr plus local diagnostic state."
+        )
+    )
+    parser.add_argument("test_file", help="Test file to execute repeatedly.")
+    parser.add_argument("test_args", nargs=argparse.REMAINDER, help="Optional arguments passed to the test after --.")
+    parser.add_argument("-n", "--runs", type=int, default=DEFAULT_RUNS, help=f"Maximum runs (default: {DEFAULT_RUNS}).")
+    parser.add_argument(
+        "--output-parent",
+        type=Path,
+        default=DEFAULT_OUTPUT_PARENT,
+        help=f"Parent directory for capture directories (default: {DEFAULT_OUTPUT_PARENT}).",
+    )
+    parser.add_argument(
+        "--pane-state-dir",
+        action="append",
+        type=Path,
+        default=[],
+        help="Pane-state directory to list on failure; may be repeated. Defaults include env and /run/user/$UID/pgu-ticket-board/pane-state.",
+    )
+    parser.add_argument(
+        "--keep-pass-logs",
+        action="store_true",
+        help="Keep stdout/stderr for passing runs too. By default only the failing run's logs are retained.",
+    )
+    return parser.parse_args(argv)
+
+
+def command_for_test(test_file: Path, test_args: list[str]) -> list[str]:
+    args = test_args[1:] if test_args and test_args[0] == "--" else test_args
+    if test_file.suffix == ".py":
+        return [sys.executable, str(test_file), *args]
+    if test_file.suffix == ".sh":
+        return ["bash", str(test_file), *args]
+    return [str(test_file), *args]
+
+
+def timestamp_slug() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def make_capture_dir(output_parent: Path, test_file: Path) -> Path:
+    safe_name = "".join(ch if ch.isalnum() or ch in ".-" else "_" for ch in test_file.name).strip("._")
+    capture_dir = output_parent / f"test-flake-{safe_name}-{timestamp_slug()}-{os.getpid()}"
+    capture_dir.mkdir(parents=True, exist_ok=False)
+    return capture_dir
+
+
+def pane_state_dirs(explicit_dirs: list[Path]) -> list[Path]:
+    candidates: list[Path] = []
+    candidates.extend(explicit_dirs)
+    for key in ("TICKET_BOARD_PANE_STATE_DIR", "PGU_TICKET_BOARD_PANE_STATE_DIR"):
+        value = os.environ.get(key, "").strip()
+        if value:
+            candidates.append(Path(value).expanduser())
+    candidates.append(Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-state"))
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        resolved = str(candidate.resolve(strict=False))
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(candidate)
+    return unique
+
+
+def write_bytes(path: Path, data: bytes) -> None:
+    path.write_bytes(data)
+
+
+def write_text(path: Path, text: str) -> None:
+    path.write_text(text, encoding="utf-8")
+
+
+def format_stat(path: Path) -> str:
+    stat = path.stat()
+    mtime = datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat()
+    return (
+        f"mode={stat.st_mode & 0o777:04o} size={stat.st_size} "
+        f"mtime={mtime} mtime_ns={stat.st_mtime_ns} path={path}"
+    )
+
+
+def capture_pane_state_listing(path: Path) -> str:
+    lines = [f"# pane-state dir: {path}"]
+    try:
+        if not path.exists():
+            lines.append("<missing>")
+            return "\n".join(lines) + "\n"
+        if not path.is_dir():
+            lines.append("<not a directory>")
+            lines.append(format_stat(path))
+            return "\n".join(lines) + "\n"
+        entries = sorted(child for child in path.rglob("*") if child.is_file())
+    except OSError as exc:
+        lines.append(f"<unreadable: {exc}>")
+        return "\n".join(lines) + "\n"
+
+    if not entries:
+        lines.append("<empty>")
+        return "\n".join(lines) + "\n"
+
+    for entry in entries:
+        try:
+            lines.append(format_stat(entry))
+            preview = entry.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError as exc:
+            lines.append(f"  <unreadable: {exc}>")
+            continue
+        if preview:
+            lines.append(f"  first_line={preview[0]}")
+        else:
+            lines.append("  first_line=")
+    return "\n".join(lines) + "\n"
+
+
+def capture_process_list() -> str:
+    command = ["ps", "-eo", "pid,ppid,user,stat,etimes,pcpu,pmem,args", "--sort=-pcpu"]
+    try:
+        proc = subprocess.run(command, text=True, capture_output=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"failed to capture process list: {exc}\n"
+    output = proc.stdout
+    if proc.stderr:
+        output += "\n# stderr\n" + proc.stderr
+    if proc.returncode != 0:
+        output += f"\n# ps exited {proc.returncode}\n"
+    return output
+
+
+def capture_failure_artifacts(
+    capture_dir: Path,
+    *,
+    run_number: int,
+    command: list[str],
+    returncode: int,
+    elapsed_seconds: float,
+    stdout: bytes,
+    stderr: bytes,
+    pane_dirs: list[Path],
+) -> None:
+    failure_dir = capture_dir / f"failure-run-{run_number:04d}"
+    failure_dir.mkdir()
+    write_bytes(failure_dir / "stdout.txt", stdout)
+    write_bytes(failure_dir / "stderr.txt", stderr)
+    write_text(failure_dir / "process-list.txt", capture_process_list())
+    write_text(
+        failure_dir / "pane-state-listing.txt",
+        "\n".join(capture_pane_state_listing(path).rstrip("\n") for path in pane_dirs) + "\n",
+    )
+    write_text(
+        failure_dir / "metadata.json",
+        json.dumps(
+            {
+                "run_number": run_number,
+                "command": command,
+                "returncode": returncode,
+                "elapsed_seconds": elapsed_seconds,
+                "captured_at": datetime.now(timezone.utc).isoformat(),
+                "cwd": os.getcwd(),
+                "pane_state_dirs": [str(path) for path in pane_dirs],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+    )
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    if args.runs <= 0:
+        raise SystemExit("--runs must be positive")
+
+    test_file = Path(args.test_file)
+    command = command_for_test(test_file, list(args.test_args))
+    capture_dir = make_capture_dir(args.output_parent, test_file)
+    pane_dirs = pane_state_dirs(args.pane_state_dir)
+    summary: list[dict[str, Any]] = []
+    print(f"capture_dir={capture_dir}")
+    print(f"command={' '.join(command)}")
+    print(f"runs={args.runs}")
+
+    for run_number in range(1, args.runs + 1):
+        started = time.monotonic()
+        proc = subprocess.run(command, capture_output=True, check=False)
+        elapsed = time.monotonic() - started
+        result = {
+            "run_number": run_number,
+            "returncode": proc.returncode,
+            "elapsed_seconds": round(elapsed, 3),
+        }
+        summary.append(result)
+        if args.keep_pass_logs or proc.returncode != 0:
+            prefix = capture_dir / f"run-{run_number:04d}"
+            write_bytes(prefix.with_suffix(".stdout.txt"), proc.stdout)
+            write_bytes(prefix.with_suffix(".stderr.txt"), proc.stderr)
+        if proc.returncode != 0:
+            capture_failure_artifacts(
+                capture_dir,
+                run_number=run_number,
+                command=command,
+                returncode=proc.returncode,
+                elapsed_seconds=elapsed,
+                stdout=proc.stdout,
+                stderr=proc.stderr,
+                pane_dirs=pane_dirs,
+            )
+            write_text(capture_dir / "summary.json", json.dumps(summary, indent=2, sort_keys=True) + "\n")
+            print(f"FAIL run={run_number} rc={proc.returncode} elapsed={elapsed:.3f}s")
+            print(f"failure_artifacts={capture_dir / f'failure-run-{run_number:04d}'}")
+            return proc.returncode if proc.returncode else 1
+        print(f"PASS run={run_number} elapsed={elapsed:.3f}s")
+
+    write_text(capture_dir / "summary.json", json.dumps(summary, indent=2, sort_keys=True) + "\n")
+    print(f"PASS all_runs={args.runs}")
+    print(f"capture_dir={capture_dir}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

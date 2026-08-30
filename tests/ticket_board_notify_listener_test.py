@@ -56,6 +56,8 @@ from scripts.ticket_board.notify_listener import (
     display_message,
 )
 
+_REAL_TMUX_TARGET_EXISTS = notify_listener.tmux_target_exists
+
 
 @dataclass(frozen=True)
 class FakeNotify:
@@ -399,6 +401,14 @@ def assert_uneven_probe_sleeps(sleep_calls: list[float], total_delay: float, *, 
 
 def failing_capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
     raise subprocess.SubprocessError("capture failed")
+
+
+def missing_target_tmux_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+    raise subprocess.CalledProcessError(
+        1,
+        args,
+        stderr="can't find session: pgu-perf\n",
+    )
 
 
 def PaneActivityGate(*args: Any, **kwargs: Any) -> RealPaneActivityGate:
@@ -2720,10 +2730,10 @@ def test_tmux_target_exists_uses_loud_probe_on_isolated_tmux_socket() -> None:
             check=True,
         )
         try:
-            assert notify_listener.tmux_target_exists(f"{session}:0.0", runner=tmux_run) is True
-            assert notify_listener.tmux_target_exists(f"{session}-missing:0.0", runner=tmux_run) is False
-            assert notify_listener.tmux_target_exists(f"{session}:9.0", runner=tmux_run) is False
-            assert notify_listener.tmux_target_exists("%999", runner=tmux_run) is False
+            assert _REAL_TMUX_TARGET_EXISTS(f"{session}:0.0", runner=tmux_run) is True
+            assert _REAL_TMUX_TARGET_EXISTS(f"{session}-missing:0.0", runner=tmux_run) is False
+            assert _REAL_TMUX_TARGET_EXISTS(f"{session}:9.0", runner=tmux_run) is False
+            assert _REAL_TMUX_TARGET_EXISTS("%999", runner=tmux_run) is False
         finally:
             subprocess.run(
                 ["tmux", "-L", socket_name, "kill-session", "-t", session],
@@ -2741,8 +2751,8 @@ def test_tmux_target_exists_treats_inconclusive_probe_as_unknown() -> None:
     def os_error_runner(_args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         raise OSError("tmux unavailable")
 
-    assert notify_listener.tmux_target_exists("pgu-ops:0.0", runner=timeout_runner) is None
-    assert notify_listener.tmux_target_exists("pgu-ops:0.0", runner=os_error_runner) is None
+    assert _REAL_TMUX_TARGET_EXISTS("pgu-ops:0.0", runner=timeout_runner) is None
+    assert _REAL_TMUX_TARGET_EXISTS("pgu-ops:0.0", runner=os_error_runner) is None
 
 
 def test_missing_tmux_target_dead_letters_before_busy_gate() -> None:
@@ -2776,8 +2786,15 @@ def test_missing_tmux_target_dead_letters_before_busy_gate() -> None:
 def test_stale_idle_state_for_missing_pane_dead_letters_before_activity_gate() -> None:
     sent: list[tuple[str, str]] = []
     with TemporaryStateDir() as tmp_path:
-        store, gate = hook_gate(tmp_path)
+        store = PaneHookStateStore(tmp_path)
+        gate = PaneActivityGate(
+            state_store=store,
+            cursor_position_runner=missing_target_tmux_runner,
+            capture_pane_runner=missing_target_tmux_runner,
+        )
         store.write("pgu-perf:0.0", "idle", source="hermes.on_session_finalize", now=100.0)
+        assert gate.is_working("pgu-perf:0.0") is True
+        assert gate.last_trace("pgu-perf:0.0").reason == "cursor_state_unavailable"  # type: ignore[union-attr]
         conn = FakeConnection([queue_row(64, "PGU-772", attempts=64, assignee="perf", target_role="perf")])
         listener = TicketBoardNotifyListener(
             conninfo="dbname=test",
@@ -2791,7 +2808,7 @@ def test_stale_idle_state_for_missing_pane_dead_letters_before_activity_gate() -
         assert listener.listen_once(max_notifications=1) == 0
 
     assert sent == []
-    assert conn.requeued == []
+    assert conn.requeued == [], f"stale state must not requeue: {conn.requeued}"
     assert conn.acked == []
     assert len(conn.dead_lettered) == 1
     notification_id, params = conn.dead_lettered[0]
@@ -3121,6 +3138,28 @@ def test_live_pane_shellout_guard_rejects_real_gate_default_capture_runner() -> 
     assert guard.escapes == [["tmux", "capture-pane", "-p", "-J", "-t", "pgu-ops:0.0"]], guard.escapes
 
 
+def test_live_pane_shellout_guard_rejects_real_target_exists_default_runner() -> None:
+    test_name = "test_live_pane_shellout_guard_rejects_real_target_exists_default_runner"
+    delegated: list[object] = []
+
+    def original_run(args: object, *positional: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        delegated.append(args)
+        return subprocess.CompletedProcess(args, 0)
+
+    guard = LivePaneShelloutGuard(original_run=original_run)
+    guard.current_test = test_name
+    try:
+        guard.run(["tmux", "has-session", "-t", "pgu-ops:0.0"])
+    except AssertionError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("tmux has-session reached no live-pane guard")
+
+    assert delegated == []
+    assert test_name in message
+    assert guard.escapes == [["tmux", "has-session", "-t", "pgu-ops:0.0"]], guard.escapes
+
+
 class TemporaryStateDir:
     def __enter__(self) -> Path:
         import tempfile
@@ -3194,12 +3233,14 @@ def test_notify_listener_no_env_target_fallback_splits_first_dash_for_hyphenated
 def main() -> int:
     live_snapshot = snapshot_paths_file_set(LIVE_PANE_STATE_PATHS)
     live_anomalies = pane_state_record_anomalies(LIVE_PANE_STATE_PATHS)
+    notify_listener.tmux_target_exists = lambda _target: True  # type: ignore[assignment]
     try:
         run_module_tests_with_live_pane_guard(
             globals(),
             patch_bound_run_defaults=(RealPaneActivityGate.__init__,),
         )
     finally:
+        notify_listener.tmux_target_exists = _REAL_TMUX_TARGET_EXISTS
         changed = [
             *snapshot_file_set_diff(live_snapshot, snapshot_paths_file_set(LIVE_PANE_STATE_PATHS)),
             *pane_state_record_anomaly_diff(live_anomalies, pane_state_record_anomalies(LIVE_PANE_STATE_PATHS)),

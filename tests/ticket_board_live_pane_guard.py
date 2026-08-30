@@ -8,7 +8,7 @@ from typing import Any
 
 from standalone_test_runner import module_test_functions
 
-LIVE_TMUX_PANE_COMMANDS = frozenset({"capture-pane", "display-message", "list-clients", "send-keys"})
+LIVE_TMUX_PANE_COMMANDS = frozenset({"capture-pane", "display-message", "has-session", "list-clients", "send-keys"})
 
 
 class LivePaneShelloutGuard:

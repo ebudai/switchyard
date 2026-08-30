@@ -2773,6 +2773,60 @@ def test_missing_tmux_target_dead_letters_before_busy_gate() -> None:
     assert detail["attempts"] == 49
 
 
+def test_stale_idle_state_for_missing_pane_dead_letters_before_activity_gate() -> None:
+    sent: list[tuple[str, str]] = []
+    with TemporaryStateDir() as tmp_path:
+        store, gate = hook_gate(tmp_path)
+        store.write("pgu-perf:0.0", "idle", source="hermes.on_session_finalize", now=100.0)
+        conn = FakeConnection([queue_row(64, "PGU-772", attempts=64, assignee="perf", target_role="perf")])
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=gate.is_working,
+            connector=lambda *args, **kwargs: conn,
+            poll_seconds=0,
+            target_exists=lambda target: False if target == "pgu-perf:0.0" else True,
+        )
+
+        assert listener.listen_once(max_notifications=1) == 0
+
+    assert sent == []
+    assert conn.requeued == []
+    assert conn.acked == []
+    assert len(conn.dead_lettered) == 1
+    notification_id, params = conn.dead_lettered[0]
+    assert notification_id == 64
+    assert params is not None
+    assert params[1] == "tmux_target_missing"
+    detail = json.loads(params[2])
+    assert detail["target"] == "pgu-perf:0.0"
+    assert detail["attempts"] == 64
+    assert detail["message"] == "New ticket for you: PGU-772 -- Queue"
+
+
+def test_long_idle_live_pane_still_delivers() -> None:
+    sent: list[tuple[str, str]] = []
+    with TemporaryStateDir() as tmp_path:
+        store, gate = hook_gate(tmp_path)
+        store.write("pgu-research:0.0", "idle", source="claude.Stop", now=100.0)
+        conn = FakeConnection([queue_row(51, "PGU-778", attempts=12, assignee="research", target_role="research")])
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=gate.is_working,
+            connector=lambda *args, **kwargs: conn,
+            poll_seconds=0,
+            target_exists=lambda target: target == "pgu-research:0.0",
+        )
+
+        assert listener.listen_once(max_notifications=1) == 1
+
+    assert sent == [("pgu-research:0.0", "New ticket for you: PGU-778 -- Queue")]
+    assert conn.requeued == []
+    assert conn.dead_lettered == []
+    assert conn.acked == [51]
+
+
 def test_busy_existing_pane_holds_then_delivers_when_idle() -> None:
     sent: list[tuple[str, str]] = []
     gate_busy = [True]

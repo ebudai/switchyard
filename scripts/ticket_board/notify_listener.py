@@ -1463,6 +1463,10 @@ WHERE id = %s
                 self._ack_notification(conn, notification_id)
                 self._traced_gate_defer_notifications.discard(notification_id)
                 continue
+            # Pane hook state can outlive its tmux pane. Probe the target once per
+            # claimed notification before the activity gate so stale state files
+            # cannot hold delivery forever; this keeps the subprocess cost off the
+            # gate's repeated sampling path.
             target_exists = self.target_exists(target)
             if target_exists is False:
                 self.logger.error(

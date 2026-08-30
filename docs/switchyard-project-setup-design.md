@@ -421,9 +421,10 @@ A newly provisioned project opens six panes each blocked on something different,
 alive -- which is how PGU-688 hid a dead role for a day. So `new` sequences authentication BEFORE the
 window opens.
 
-THE STRUCTURE, which is what makes it small: **login is per CLI per owner user; trust is per directory.**
-One `codex login` covers all three codex roles. Six worktrees means six claude trust prompts. Logins do
-not multiply with roles.
+THE STRUCTURE, which is what makes it small: **login is per CLI per owner user; trust is scoped to the
+CLI's own trust store.** One `codex login` covers all codex roles for that owner, and Codex hook trust is
+also per owner user and installed hook entry, not per pane role. Six Claude worktrees means six Claude
+folder-trust prompts. Logins and Codex hook approvals do not multiply with roles.
 
 **We invoke the CLIs' own login commands and nothing else.** Eric, 2026-08-26: "it can't be automated,
 thats a big sec risk." No credential handling, no scripted entry, no storing anything.

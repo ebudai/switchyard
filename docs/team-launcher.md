@@ -435,9 +435,12 @@ selected CLI as the project owner, invokes that CLI's own login command when it
 is unauthenticated, reports a missing CLI as not installed for that owner user,
 and then walks per-worktree trust prompts. Trust is never pre-seeded by editing
 CLI config files. Codex hook-trust entries are also checked against the
-installed pane-hook commands; stale trust hashes are reported as warnings with
-the affected role/event so the operator can refresh trust deliberately instead
-of silently launching panes with inert hooks.
+installed pane-hook commands. Codex hook trust is stored per owner user and
+hook entry, not per pane role, so missing or stale hashes are reported as
+distinct approvals needed with affected Codex roles listed only as context. A
+new project with no trust records is reported separately from a hook-content
+change that requires re-approval. The approval itself still happens in Codex
+via `/hooks`; Switchyard only reports what is missing.
 During `switchyard new`, the same phase also validates every configured role
 model with that CLI's one-shot prompt mode before panes start. A failed model
 probe happens after the project is created and registered, but before any panes

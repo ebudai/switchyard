@@ -5417,11 +5417,11 @@ class OwnerUserProvisionResult:
 
 @dataclass(frozen=True)
 class CodexHookTrustMismatch:
-    role: str
     event: str
     hook_key: str
     expected_hash: str
     trusted_hash: str
+    affected_roles: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -6301,22 +6301,55 @@ def stale_codex_hook_trust_for_roles(
     if not hook_entries:
         return []
     trusted_hashes = _codex_trusted_hashes(owner_home)
+    affected_roles = tuple(_role_names(codex_roles))
     mismatches: list[CodexHookTrustMismatch] = []
-    for role in codex_roles:
-        for event_key, hook_key, expected_hash in hook_entries:
-            trusted_hash = trusted_hashes.get(hook_key, "")
-            if trusted_hash == expected_hash:
-                continue
-            mismatches.append(
-                CodexHookTrustMismatch(
-                    role=role.role,
-                    event=event_key,
-                    hook_key=hook_key,
-                    expected_hash=expected_hash,
-                    trusted_hash=trusted_hash,
-                )
+    for event_key, hook_key, expected_hash in hook_entries:
+        trusted_hash = trusted_hashes.get(hook_key, "")
+        if trusted_hash == expected_hash:
+            continue
+        mismatches.append(
+            CodexHookTrustMismatch(
+                event=event_key,
+                hook_key=hook_key,
+                expected_hash=expected_hash,
+                trusted_hash=trusted_hash,
+                affected_roles=affected_roles,
             )
+        )
     return mismatches
+
+
+def _codex_hook_trust_reason(mismatch: CodexHookTrustMismatch) -> str:
+    if mismatch.trusted_hash:
+        return "hooks changed, re-approve"
+    return "new project, never trusted"
+
+
+def _codex_hook_trust_affected_roles(mismatches: Sequence[CodexHookTrustMismatch]) -> list[str]:
+    roles: list[str] = []
+    for mismatch in mismatches:
+        for role in mismatch.affected_roles:
+            if role not in roles:
+                roles.append(role)
+    return roles
+
+
+def _format_codex_hook_trust_report(
+    mismatches: Sequence[CodexHookTrustMismatch],
+    *,
+    owner_user: str,
+) -> str:
+    count = len(mismatches)
+    plural = "" if count == 1 else "s"
+    owner = f"owner user {owner_user}" if owner_user else "the project owner user"
+    roles = ", ".join(_codex_hook_trust_affected_roles(mismatches)) or "none"
+    approvals = "; ".join(f"{mismatch.event} ({_codex_hook_trust_reason(mismatch)})" for mismatch in mismatches)
+    return (
+        f"codex hook trust needs {count} approval{plural} for {owner}; "
+        f"run /hooks once in any Codex pane as that owner. "
+        f"This trust is shared by affected Codex roles: {roles}. "
+        f"Approvals: {approvals}"
+    )
 
 
 def _prepare_first_run_auth_worktrees(
@@ -6414,11 +6447,8 @@ def run_first_run_auth_phase(
             untrusted.append((cli, role.role, str(workdir)))
 
     stale_codex_hook_trust = stale_codex_hook_trust_for_roles(config.roles, owner_home=effective_home)
-    for mismatch in stale_codex_hook_trust:
-        print_func(
-            f"switchyard: first-run codex hook trust stale for {mismatch.role} event {mismatch.event}; "
-            "run /hooks in Codex as the project owner and approve the changed hook"
-        )
+    if stale_codex_hook_trust:
+        print_func(f"switchyard: first-run {_format_codex_hook_trust_report(stale_codex_hook_trust, owner_user=effective_owner)}")
 
     model_validation_failures: list[ModelValidationFailure] = []
     if validate_models:
@@ -6437,7 +6467,7 @@ def run_first_run_auth_phase(
         stale_codex_hook_trust,
         missing_cli_roles,
         model_validation_failures,
-        effective_owner if missing_cli_roles else "",
+        effective_owner if missing_cli_roles or stale_codex_hook_trust else "",
     )
 
 
@@ -6458,10 +6488,10 @@ def report_first_run_auth_warnings(
         )
     for cli, role, workdir in report.untrusted_roles:
         print_func(f"warning: switchyard: {cli} workspace still untrusted for {role}: {workdir}")
-    for mismatch in report.stale_codex_hook_trust:
+    if report.stale_codex_hook_trust:
         print_func(
-            f"warning: switchyard: codex hook trust stale for {mismatch.role} event {mismatch.event}; "
-            f"run /hooks in Codex to approve {mismatch.hook_key}"
+            "warning: switchyard: "
+            + _format_codex_hook_trust_report(report.stale_codex_hook_trust, owner_user=report.owner_user)
         )
     for failure in report.model_validation_failures:
         print_func(

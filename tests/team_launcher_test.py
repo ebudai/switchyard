@@ -13678,7 +13678,7 @@ def test_first_run_auth_phase_reports_stale_codex_hook_trust_without_writing_con
         config_path.write_text(original_config, encoding="utf-8")
         config = load_project_config(
             "otto",
-            _write_first_run_auth_config(tmp_path, roles=[("ops", "codex"), ("main", "codex")]),
+            _write_first_run_auth_config(tmp_path, roles=[("ops", "codex"), ("main", "codex"), ("app", "codex")]),
         )
         runner = FirstRunAuthRunner()
         runner.login_seen.add("codex")
@@ -13695,19 +13695,72 @@ def test_first_run_auth_phase_reports_stale_codex_hook_trust_without_writing_con
 
     assert report.unauthenticated_roles == {}
     assert report.untrusted_roles == []
-    assert {(item.role, item.event) for item in report.stale_codex_hook_trust} == {
-        ("ops", "session_start"),
-        ("ops", "stop"),
-        ("main", "session_start"),
-        ("main", "stop"),
-    }
+    assert [(item.event, item.affected_roles) for item in report.stale_codex_hook_trust] == [
+        ("session_start", ("ops", "main", "app")),
+        ("stop", ("ops", "main", "app")),
+    ]
     assert after_config == original_config
     assert runner.calls == [["sudo", "-u", "otto-agent", "codex", "login", "status"]]
-    assert all("first-run codex hook trust stale" in message and "/hooks" in message for message in messages)
+    assert messages == [
+        "switchyard: first-run codex hook trust needs 2 approvals for owner user otto-agent; "
+        "run /hooks once in any Codex pane as that owner. "
+        "This trust is shared by affected Codex roles: ops, main, app. "
+        "Approvals: session_start (new project, never trusted); stop (new project, never trusted)"
+    ]
     output: list[str] = []
     team_launcher.report_first_run_auth_warnings(report, print_func=output.append)
-    assert len(output) == 4
-    assert all("warning: switchyard: codex hook trust stale" in message for message in output)
+    assert output == [
+        "warning: switchyard: codex hook trust needs 2 approvals for owner user otto-agent; "
+        "run /hooks once in any Codex pane as that owner. "
+        "This trust is shared by affected Codex roles: ops, main, app. "
+        "Approvals: session_start (new project, never trusted); stop (new project, never trusted)"
+    ]
+
+
+def test_first_run_auth_phase_distinguishes_changed_codex_hook_trust_from_never_trusted() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-first-run-codex-hooks-mixed.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        _write_codex_first_run_hooks(owner_home)
+        entries = team_launcher._codex_command_hook_trust_entries(owner_home)
+        assert len(entries) == 2
+        first_event, first_key, _first_hash = entries[0]
+        config_path = owner_home / ".codex" / "config.toml"
+        original_config = "\n".join(
+            [
+                "[hooks.state]",
+                "",
+                f'[hooks.state."{first_key}"]',
+                'trusted_hash = "sha256:old-hook-body"',
+                "",
+            ]
+        )
+        config_path.write_text(original_config, encoding="utf-8")
+        config = load_project_config(
+            "otto",
+            _write_first_run_auth_config(tmp_path, roles=[("ops", "codex"), ("main", "codex")]),
+        )
+        runner = FirstRunAuthRunner()
+        runner.login_seen.add("codex")
+        messages: list[str] = []
+
+        report = team_launcher.run_first_run_auth_phase(
+            config,
+            owner_user="otto-agent",
+            owner_home=owner_home,
+            runner=runner,
+            print_func=messages.append,
+        )
+        after_config = config_path.read_text(encoding="utf-8")
+
+    assert len(report.stale_codex_hook_trust) == 2
+    assert report.stale_codex_hook_trust[0].event == first_event
+    assert report.stale_codex_hook_trust[0].trusted_hash == "sha256:old-hook-body"
+    assert "session_start (hooks changed, re-approve)" in messages[0]
+    assert "stop (new project, never trusted)" in messages[0]
+    assert "ops, main" in messages[0]
+    assert after_config == original_config
 
 
 def test_first_run_auth_phase_accepts_matching_codex_hook_trust_without_writing_config() -> None:
@@ -13720,7 +13773,7 @@ def test_first_run_auth_phase_accepts_matching_codex_hook_trust_without_writing_
         original_config = (owner_home / ".codex" / "config.toml").read_text(encoding="utf-8")
         config = load_project_config(
             "otto",
-            _write_first_run_auth_config(tmp_path, roles=[("ops", "codex")]),
+            _write_first_run_auth_config(tmp_path, roles=[("ops", "codex"), ("main", "codex"), ("app", "codex")]),
         )
         runner = FirstRunAuthRunner()
         runner.login_seen.add("codex")

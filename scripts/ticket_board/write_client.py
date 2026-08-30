@@ -672,14 +672,22 @@ class TicketBoardWriteClient:
 
     def dismiss_notification(
         self,
-        notification_id: int,
+        notification_id: int | None = None,
         *,
+        ticket_id: str = "",
+        target_role: str = "",
+        kind: str = "transition",
         reason: str = "",
         caller_role: str | None = None,
     ) -> dict[str, Any]:
+        payload: dict[str, Any]
+        if notification_id is not None:
+            payload = {"notification_id": notification_id, "reason": reason}
+        else:
+            payload = {"ticket_id": ticket_id, "target_role": target_role, "kind": kind, "reason": reason}
         return self._post(
             "/actions/dismiss_notification",
-            {"notification_id": notification_id, "reason": reason},
+            payload,
             caller_role=caller_role,
         )
 
@@ -863,7 +871,10 @@ def _build_parser() -> argparse.ArgumentParser:
     merge.add_argument("--target-id", required=True)
 
     dismiss_notification = subparsers.add_parser("dismiss-notification")
-    dismiss_notification.add_argument("notification_id", type=int)
+    dismiss_notification.add_argument("notification_id", type=int, nargs="?")
+    dismiss_notification.add_argument("--ticket-id", default="")
+    dismiss_notification.add_argument("--target-role", default="")
+    dismiss_notification.add_argument("--kind", default="transition")
     dismiss_notification.add_argument("--reason", default="")
     return parser
 
@@ -979,7 +990,13 @@ def main(argv: list[str] | None = None) -> int:
         elif command == "merge":
             response = client.merge(args.ticket_id, target_id=args.target_id)
         elif command == "dismiss_notification":
-            response = client.dismiss_notification(args.notification_id, reason=args.reason)
+            response = client.dismiss_notification(
+                args.notification_id,
+                ticket_id=args.ticket_id,
+                target_role=args.target_role,
+                kind=args.kind,
+                reason=args.reason,
+            )
         else:
             response = getattr(client, command)(args.ticket_id)
     except json.JSONDecodeError as exc:

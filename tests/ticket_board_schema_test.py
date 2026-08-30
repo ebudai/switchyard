@@ -213,6 +213,7 @@ def main() -> int:
     assert "terminal_reason text" in schema_lower
     assert "create or replace function ticket_board.dead_letter_notification" in executable_schema_lower
     assert "create or replace function ticket_board.dismiss_notification" in executable_schema_lower
+    assert "create or replace function ticket_board.dismiss_notification_by_key" in executable_schema_lower
     assert "and q.dead_lettered_at is null" in executable_schema_lower
     assert "ticket_state_at_event" in schema_lower
     assert "ticket_assignee_at_event" in schema_lower

@@ -101,6 +101,7 @@ GRANT EXECUTE ON FUNCTION ticket_board.edit_fields(text, jsonb) TO ticket_board_
 GRANT EXECUTE ON FUNCTION ticket_board.append_ticket_attachment(text, text, jsonb) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.merge(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.dismiss_notification(bigint, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.dismiss_notification_by_key(text, text, text, text) TO ticket_board_service;
 
 GRANT EXECUTE ON FUNCTION ticket_board.claim_notification(timestamptz, interval) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.next_notification_attempt(timestamptz, interval) TO ticket_board_listener;

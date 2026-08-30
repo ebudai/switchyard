@@ -341,7 +341,7 @@ def delivery_failure_reason(exc: BaseException, target: str) -> str:
 def tmux_target_exists(target: str, *, runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run) -> bool | None:
     try:
         proc = runner(
-            ["tmux", "display-message", "-p", "-t", target, "#{pane_id}"],
+            ["tmux", "has-session", "-t", target],
             text=True,
             capture_output=True,
             timeout=2,
@@ -349,7 +349,7 @@ def tmux_target_exists(target: str, *, runner: Callable[..., subprocess.Complete
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-    if proc.returncode == 0 and proc.stdout.strip():
+    if proc.returncode == 0:
         return True
     reason = delivery_failure_reason(
         subprocess.CalledProcessError(proc.returncode, proc.args, output=proc.stdout, stderr=proc.stderr),

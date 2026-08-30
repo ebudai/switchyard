@@ -307,6 +307,7 @@ terminal or otherwise stuck notification through the supported write API:
 
 ```bash
 scripts/ticket-board-write dismiss-notification <notification-id> --reason "pane was detached"
+scripts/ticket-board-write dismiss-notification --ticket-id PGU-772 --target-role perf --kind transition --reason "pane was detached"
 ```
 
 Install the hook writer and persistent CLI hook config entries with:

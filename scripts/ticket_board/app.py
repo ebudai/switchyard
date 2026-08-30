@@ -1152,6 +1152,28 @@ ORDER BY rank;
                 self._pg_call(conn, "SELECT ticket_board.dismiss_notification(%s::bigint, %s::text);", (notification_id, reason))
         return {"notification_id": notification_id, "dismissed": True}
 
+    def dismiss_notification_by_key(
+        self,
+        *,
+        ticket_id: str,
+        target_role: str,
+        kind: str = "transition",
+        reason: str = "",
+        caller_role: str,
+    ) -> dict[str, Any]:
+        ticket_id = self._require_text(ticket_id, "ticket_id").strip().upper()
+        target_role = self._require_text(target_role, "target_role").strip().lower()
+        kind = str(kind or "transition").strip().lower() or "transition"
+        with self._pg_connect() as conn:
+            with conn.transaction():
+                self._pg_set_caller_role(conn, caller_role)
+                result = conn.execute(
+                    "SELECT ticket_board.dismiss_notification_by_key(%s::text, %s::text, %s::text, %s::text) AS notification_id;",
+                    (ticket_id, target_role, kind, reason),
+                ).fetchone()
+        notification_id = int(result["notification_id"]) if result else 0
+        return {"notification_id": notification_id, "dismissed": True}
+
     def _pg_call(self, conn: Any, sql: str, params: tuple[Any, ...]) -> None:
         conn.execute(sql, params)
 

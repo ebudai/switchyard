@@ -1856,6 +1856,61 @@ LIMIT 1;
         "actor": "director",
         "reason": "director cleared orphaned notification",
     }, dismiss_trace
+    by_key_notification_id = int(
+        psql(
+            admin_conn,
+            """
+SELECT ticket_board.enqueue_notification(
+    'PGU-128',
+    'transition',
+    'perf',
+    'New ticket for you: PGU-128 -- Orphaned queue row by key',
+    '{"kind":"transition","id":"PGU-128","target_role":"perf","new_state":"in_progress","assignee":"perf"}'::jsonb,
+    'pgu776-write-api-dismiss-by-key'
+);
+""",
+        )
+    )
+    audit_dismiss = post_json(
+        base_url,
+        "/api/tickets/actions/dismiss_notification",
+        {"ticket_id": "PGU-128", "target_role": "perf", "kind": "transition", "reason": "try as audit"},
+        caller="audit",
+        expect=403,
+    )
+    assert "audit cannot call dismiss_notification" in str(audit_dismiss), audit_dismiss
+    dismissed_by_key = TicketBoardWriteClient(base_url, "director", write_token=TEST_WRITE_TOKEN or "").dismiss_notification(
+        ticket_id="PGU-128",
+        target_role="perf",
+        kind="transition",
+        reason="director cleared by ticket and role",
+    )
+    assert dismissed_by_key == {"notification_id": by_key_notification_id, "dismissed": True}, dismissed_by_key
+    assert psql(admin_conn, f"SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE id = {by_key_notification_id};") == "0"
+    by_key_trace = json.loads(
+        psql(
+            admin_conn,
+            f"""
+SELECT jsonb_build_object(
+    'event', event,
+    'busy_reason', busy_reason,
+    'actor', detail->>'actor',
+    'reason', detail->>'reason'
+)::text
+FROM ticket_board.notification_trace
+WHERE notification_id = {by_key_notification_id}
+  AND event = 'director_dismiss'
+ORDER BY id DESC
+LIMIT 1;
+""",
+        )
+    )
+    assert by_key_trace == {
+        "event": "director_dismiss",
+        "busy_reason": "director cleared by ticket and role",
+        "actor": "director",
+        "reason": "director cleared by ticket and role",
+    }, by_key_trace
     empty_handback = post_json(
         base_url,
         "/api/tickets/PGU-1281/actions/implementer_kick_back",

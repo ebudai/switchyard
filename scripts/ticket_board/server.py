@@ -829,11 +829,21 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             return
 
         if operation == "dismiss_notification":
-            dismissed = self.app.dismiss_notification(
-                int(payload.get("notification_id", 0)),
-                reason=str(payload.get("reason", "")),
-                caller_role=caller,
-            )
+            raw_notification_id = payload.get("notification_id")
+            if raw_notification_id not in (None, ""):
+                dismissed = self.app.dismiss_notification(
+                    int(raw_notification_id),
+                    reason=str(payload.get("reason", "")),
+                    caller_role=caller,
+                )
+            else:
+                dismissed = self.app.dismiss_notification_by_key(
+                    ticket_id=str(payload.get("ticket_id", "")),
+                    target_role=str(payload.get("target_role", "")),
+                    kind=str(payload.get("kind", "transition")),
+                    reason=str(payload.get("reason", "")),
+                    caller_role=caller,
+                )
             self.events.notify_change(self.app.store_signature())
             self.send_json(dismissed)
             return

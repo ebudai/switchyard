@@ -151,6 +151,14 @@ class RecordingHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        elif operation == "dismiss_notification":
+            body = json.dumps({"notification_id": payload.get("notification_id", 772), "dismissed": True}).encode("utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         body = json.dumps({"ticket": ticket}).encode("utf-8")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/json")
@@ -290,8 +298,16 @@ def assert_action_requests(requests: list[tuple[str, str | None, str | None, dic
     assert ("/api/tickets/PGU-112/actions/add_comment", "director") in pairs
     assert ("/api/tickets/PGU-112/actions/edit_fields", "app") in pairs
     assert ("/api/tickets/PGU-113/actions/merge", "director") in pairs
+    assert ("/api/tickets/actions/dismiss_notification", "director") in pairs
     create_payload = next(payload for path, _, _, payload in requests if path == "/api/tickets/actions/create_ticket")
     assert create_payload["parent_id"] == "PGU-100", create_payload
+    dismiss_payload = next(payload for path, _, _, payload in requests if path == "/api/tickets/actions/dismiss_notification")
+    assert dismiss_payload == {
+        "ticket_id": "PGU-772",
+        "target_role": "perf",
+        "kind": "transition",
+        "reason": "pane detached",
+    }, dismiss_payload
 
 
 def exercise_client(base_url: str, repo: Path, commit_hash: str) -> None:
@@ -382,6 +398,8 @@ def exercise_client(base_url: str, repo: Path, commit_hash: str) -> None:
         merged = client.merge("PGU-113", target_id="PGU-114")
         assert merged["source"]["id"] == "PGU-113", merged
         assert merged["target"]["id"] == "PGU-114", merged
+        dismissed = client.dismiss_notification(ticket_id="PGU-772", target_role="perf", reason="pane detached")
+        assert dismissed == {"notification_id": 772, "dismissed": True}, dismissed
 
 
 def assert_submit_rejects_unpushed_commit(

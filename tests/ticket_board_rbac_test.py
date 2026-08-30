@@ -58,6 +58,7 @@ WRITE_FUNCTIONS = [
     "ticket_board.edit_fields(text,jsonb)",
     "ticket_board.merge(text,text)",
     "ticket_board.dismiss_notification(bigint,text)",
+    "ticket_board.dismiss_notification_by_key(text,text,text,text)",
 ]
 LISTENER_FUNCTIONS = [
     "ticket_board.claim_notification(timestamp with time zone,interval)",
@@ -1545,6 +1546,17 @@ FROM ticket_board.claim_notification() AS claimed;
         )
     )
     assert dead_claim["notification_id"] == int(dead_letter_id), dead_claim
+    empty_reason_error = psql_error(
+        listener_conn,
+        f"""
+SELECT ticket_board.dead_letter_notification(
+    {dead_letter_id},
+    '   ',
+    '{{"target":"pgu-research:0.0"}}'::jsonb
+);
+""",
+    )
+    assert "dead_letter_notification requires a non-empty reason" in empty_reason_error, empty_reason_error
     psql(
         listener_conn,
         f"""
@@ -1562,6 +1574,7 @@ SELECT ticket_board.dead_letter_notification(
 SELECT jsonb_build_object(
     'visible', count(*) = 1,
     'dead_lettered', bool_or(dead_lettered_at IS NOT NULL),
+    'claimed_at_is_null', bool_and(claimed_at IS NULL),
     'terminal_reason', max(terminal_reason),
     'last_error', max(last_error)
 )::text
@@ -1573,9 +1586,11 @@ WHERE id = {dead_letter_id};
     assert dead_lettered_row == {
         "visible": True,
         "dead_lettered": True,
+        "claimed_at_is_null": True,
         "terminal_reason": "tmux_target_missing",
         "last_error": "tmux_target_missing",
     }, dead_lettered_row
+    assert psql(listener_conn, "SELECT ticket_board.next_notification_attempt();") == ""
     assert psql(
         listener_conn,
         """
@@ -1592,19 +1607,34 @@ FROM ticket_board.claim_notification() AS claimed;
         f"SELECT ticket_board.dismiss_notification({dead_letter_id}, 'listener cannot dismiss');",
     )
     assert_permission_denied(
-        service_conn,
-        f"""
-SELECT set_config('ticket_board.caller_role', 'ops', false);
+        listener_conn,
+        "SELECT ticket_board.dismiss_notification_by_key('PGU-950', 'research', 'transition', 'listener cannot dismiss');",
+    )
+    for role in PANE_ROLES:
+        if role == "director":
+            continue
+        assert_permission_denied(
+            service_conn,
+            f"""
+SELECT set_config('ticket_board.caller_role', {sql_string(role)}, false);
 SELECT ticket_board.dismiss_notification({dead_letter_id}, 'non-director cannot dismiss');
 """,
-    )
-    psql(
-        service_conn,
-        f"""
-SELECT set_config('ticket_board.caller_role', 'director', false);
-SELECT ticket_board.dismiss_notification({dead_letter_id}, 'director cleared orphaned notification');
+        )
+        assert_permission_denied(
+            service_conn,
+            f"""
+SELECT set_config('ticket_board.caller_role', {sql_string(role)}, false);
+SELECT ticket_board.dismiss_notification_by_key('PGU-950', 'research', 'transition', 'non-director cannot dismiss');
 """,
-    )
+        )
+    dismissed_by_key = psql(
+        service_conn,
+        """
+SELECT set_config('ticket_board.caller_role', 'director', false);
+SELECT ticket_board.dismiss_notification_by_key('PGU-950', 'research', 'transition', 'director cleared orphaned notification');
+""",
+    ).splitlines()[-1]
+    assert dismissed_by_key == dead_letter_id, dismissed_by_key
     assert psql(
         admin_conn,
         f"SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE id = {dead_letter_id};",

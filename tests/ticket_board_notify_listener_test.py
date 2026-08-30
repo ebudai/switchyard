@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -2697,6 +2699,50 @@ def test_send_failure_marks_missing_tmux_target_as_structural_fault() -> None:
     assert detail["attempts"] == 2
     assert detail["target"] == "pgu-research:0.0"
     assert detail["message"] == "New ticket for you: PGU-637 -- Queue"
+
+
+def test_tmux_target_exists_uses_loud_probe_on_isolated_tmux_socket() -> None:
+    if shutil.which("tmux") is None:
+        return
+    session = f"pgu776-probe-{os.getpid()}"
+    with tempfile.TemporaryDirectory(prefix="ticket-board-tmux-probe.") as tmpdir:
+        socket_name = Path(tmpdir).name
+
+        def tmux_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            assert args[0] == "tmux", args
+            return subprocess.run(["tmux", "-L", socket_name] + args[1:], **kwargs)
+
+        subprocess.run(
+            ["tmux", "-L", socket_name, "new-session", "-d", "-s", session, "-n", "main", "sleep 60"],
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=True,
+        )
+        try:
+            assert notify_listener.tmux_target_exists(f"{session}:0.0", runner=tmux_run) is True
+            assert notify_listener.tmux_target_exists(f"{session}-missing:0.0", runner=tmux_run) is False
+            assert notify_listener.tmux_target_exists(f"{session}:9.0", runner=tmux_run) is False
+            assert notify_listener.tmux_target_exists("%999", runner=tmux_run) is False
+        finally:
+            subprocess.run(
+                ["tmux", "-L", socket_name, "kill-session", "-t", session],
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+
+
+def test_tmux_target_exists_treats_inconclusive_probe_as_unknown() -> None:
+    def timeout_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(args, kwargs.get("timeout"))
+
+    def os_error_runner(_args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise OSError("tmux unavailable")
+
+    assert notify_listener.tmux_target_exists("pgu-ops:0.0", runner=timeout_runner) is None
+    assert notify_listener.tmux_target_exists("pgu-ops:0.0", runner=os_error_runner) is None
 
 
 def test_missing_tmux_target_dead_letters_before_busy_gate() -> None:

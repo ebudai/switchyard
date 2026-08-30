@@ -5,13 +5,18 @@ from __future__ import annotations
 
 import json
 import os
+import runpy
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / "scripts" / "merge-gate-helper"
+SCRIPTS_DIR = ROOT / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
 
 from standalone_test_runner import run_module_tests
 
@@ -237,6 +242,94 @@ def test_infers_directorctl_tests() -> None:
         code, payload = run_gate(repo, "feature/directorctl")
         assert code == 0, payload
         assert payload["tests"] == ["tests/directorctl_smoke_test.py"], payload
+
+
+def test_ready_gate_runs_stale_worktree_cleanup() -> None:
+    with tempfile.TemporaryDirectory(prefix="merge-gate-worktree-cleanup.") as tmpdir:
+        tmp = Path(tmpdir)
+        _origin, repo = make_repo(tmp)
+        git(repo, "branch", "feature/stale", "origin/main")
+        stale = tmp / "stale-worktree"
+        git(repo, "worktree", "add", str(stale), "feature/stale")
+        assert stale.exists()
+
+        create_branch(repo, "feature/ready-with-cleanup")
+        write_fixture(repo, value=2)
+        commit_all(repo, "covered change")
+        code, payload = run_gate(repo, "feature/ready-with-cleanup")
+
+        assert code == 0, payload
+        assert payload["verdict"] == "READY-TO-PUSH", payload
+        cleanup = payload["worktree_cleanup"]
+        assert cleanup["ok"] is True, payload
+        assert str(stale) in cleanup["removed"], payload
+        assert "feature/stale" in cleanup["local_branches_deleted"], payload
+        assert not stale.exists()
+        assert git(repo, "branch", "--list", "feature/stale").stdout.strip() == ""
+
+
+def test_cleanup_failure_from_missing_tmux_does_not_escape_ready_verdict() -> None:
+    namespace = runpy.run_path(str(HELPER))
+    cleanup = namespace["cleanup_merged_worktrees"]
+    cleanup.__globals__["prune_missing_worktrees"] = lambda _repo: None
+    cleanup.__globals__["read_registered_worktrees"] = lambda _repo: []
+    cleanup.__globals__["tmux_active_pane_paths"] = lambda: (_ for _ in ()).throw(SystemExit("no server running"))
+
+    result = cleanup(Path("/repo"), "origin/main")
+
+    assert result["ok"] is False
+    assert "no server running" in result["error"]
+
+
+def test_ready_gate_passes_trial_worktree_as_protected_path() -> None:
+    namespace = runpy.run_path(str(HELPER))
+    run_gate_func = namespace["run_gate"]
+    helper_globals = run_gate_func.__globals__
+    captured: dict[str, object] = {}
+
+    def fake_cleanup(repo: Path, base_ref: str, *, protected_paths: list[Path]) -> dict[str, object]:
+        captured["repo"] = repo
+        captured["base_ref"] = base_ref
+        captured["protected_paths"] = protected_paths
+        return {"ok": True}
+
+    helper_globals["cleanup_merged_worktrees"] = fake_cleanup
+    helper_globals["normalize_branch"] = lambda _repo, _branch: "branch-ref"
+    helper_globals["changed_files"] = lambda _repo, _base_ref, _branch_ref: []
+    helper_globals["infer_tests"] = lambda _files, _worktree: []
+    helper_globals["run_tests"] = lambda _worktree, _tests, _output: ([], {})
+    helper_globals["parse_changed_lines"] = lambda _repo, _base_ref, _branch_ref, _python_files: {}
+    helper_globals["uncovered_changed_lines"] = lambda _worktree, _changed, _executed: []
+    command_log: list[list[str]] = []
+
+    def fake_git(repo: Path, *args: str, check: bool = False):
+        del check
+        command_log.append([str(repo), *args])
+        if args[:3] == ("worktree", "add", "--detach"):
+            Path(args[3]).mkdir(parents=True)
+        return helper_globals["CommandResult"](["git", *args], 0, "", "")
+
+    helper_globals["git"] = fake_git
+    args = type(
+        "Args",
+        (),
+        {
+            "repo": Path("/repo"),
+            "branch": "feature/already-merged",
+            "test": [],
+            "remote": "origin",
+            "base_branch": "main",
+            "base_ref": "origin/main",
+        },
+    )()
+
+    result = run_gate_func(args)
+
+    assert result["verdict"] == "READY-TO-PUSH", result
+    protected_paths = captured["protected_paths"]
+    assert isinstance(protected_paths, list)
+    assert len(protected_paths) == 1
+    assert protected_paths[0].name == "merged"
 
 
 def main() -> int:

@@ -108,6 +108,19 @@ Defaults:
 - Screenshot directory: `/tmp/pgu-frames`
 - Local URL: `http://127.0.0.1:8770/`
 
+Worktree housekeeping:
+
+- Ticket work happens in isolated git worktrees, so merged ticket branches can
+  leave behind real registered worktrees long after the ticket closes.
+  `scripts/ticket-board-clean-worktrees --repo /home/agent/Projects/pgu`
+  reports the exact clean, merged worktrees that can be removed. It is dry-run
+  by default, protects the shared checkout, protects launcher-managed
+  `~/.claude/worktrees/pgu-team/*` worktrees, checks live tmux pane directories,
+  and reports dirty or unmerged worktrees instead of removing them. Add
+  `--execute` only after reviewing the candidate list. Successful
+  `scripts/merge-gate-helper` review runs execute the same guarded cleanup, so
+  merged clean ticket worktrees are reaped as part of the normal review cycle.
+
 Store contract:
 
 - One JSON file per ticket in the store directory, named `PGU-N.json`

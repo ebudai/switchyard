@@ -22,6 +22,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ticket_board.worktree_cleanup import (
+    default_protected_prefixes,
+    execute_plan,
+    plan_cleanup,
+    prune_missing_worktrees,
+    read_registered_worktrees,
+    tmux_active_pane_paths,
+)
+
 
 READY = "READY-TO-PUSH"
 CONFLICT = "CONFLICT"
@@ -297,6 +306,34 @@ def verdict_payload(verdict: str, **kwargs: Any) -> dict[str, Any]:
     return payload
 
 
+def cleanup_merged_worktrees(repo: Path, base_ref: str, *, protected_paths: Iterable[Path] = ()) -> dict[str, Any]:
+    try:
+        prune_missing_worktrees(repo)
+        entries = read_registered_worktrees(repo)
+        active_paths = tmux_active_pane_paths()
+        plan = plan_cleanup(
+            entries,
+            repo=repo,
+            base_ref=base_ref,
+            active_pane_paths=active_paths,
+            protected_paths=protected_paths,
+            protected_prefixes=default_protected_prefixes(),
+        )
+        execution = execute_plan(plan, repo=repo)
+        return {
+            "ok": True,
+            "total": plan.summary()["total"],
+            "remove_candidates": plan.summary()["remove_candidates"],
+            "skipped": plan.summary()["skipped"],
+            "removed": execution["removed"],
+            "failed": execution["failed"],
+            "local_branches_deleted": execution["local_branches_deleted"],
+            "local_branch_delete_failed": execution["local_branch_delete_failed"],
+        }
+    except (Exception, SystemExit) as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 def run_gate(args: argparse.Namespace) -> dict[str, Any]:
     repo = args.repo.resolve()
     branch_ref = normalize_branch(repo, args.branch)
@@ -341,7 +378,9 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
                 return verdict_payload(COVERAGE_UNAVAILABLE, changed_files=files, tests=tests, coverage_not_available=coverage_unavailable)
             if uncovered:
                 return verdict_payload(UNCOVERED, changed_files=files, tests=tests, uncovered=uncovered)
-            return verdict_payload(READY, changed_files=files, tests=tests)
+            payload = verdict_payload(READY, changed_files=files, tests=tests)
+            payload["worktree_cleanup"] = cleanup_merged_worktrees(repo, args.base_ref, protected_paths=[worktree])
+            return payload
         finally:  # pragma: no cover - cleanup runs in top-level helper process, outside traced child tests.
             git(repo, "worktree", "remove", "--force", str(worktree))
 

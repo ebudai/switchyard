@@ -41,6 +41,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       const commentUrgentText = document.createElement('span');
       commentUrgentText.textContent = 'Urgent';
       commentUrgentLabel.append(commentUrgent, commentUrgentText);
+      bindDetailDraftField(draftFields, commentUrgent, 'commentUrgent', 'false');
       const detailCallerRole = () => commentWho.value;
       const updateDetailTicket = async (patch, callerRole = null) => {
         try {
@@ -634,7 +635,8 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       addCommentButton.textContent = 'Add Comment';
       addCommentButton.addEventListener('click', async () => {
         try {
-          await submitComment(ticket.id, commentWho.value, commentText.value, null, commentUrgent.checked);
+          const currentUrgent = detailContentEl.querySelector('.comment-composer .urgent-comment-toggle input');
+          await submitComment(ticket.id, commentWho.value, commentText.value, null, currentUrgent ? currentUrgent.checked : commentUrgent.checked);
         } catch (error) {
           setCreateStatus(error.message, true);
           await requestBoardReload();

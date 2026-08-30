@@ -46,6 +46,8 @@ The reusable in-memory upload path mirrors the production PGU-502/PGU-503 attach
 
 The blocker-card assertion now uses a retry-safe browser render check after the API has persisted the blocker update. The flake exposed a stale-load rendering race: an older `/api/board` response could finish after a newer load and overwrite the card DOM with stale blocker state. The frontend now tracks a `loadSequence` and discards superseded `loadBoard()` responses, and the test waits for the clicked `updateTicket()` promise before checking the rendered blocker card.
 
+PGU-785 made the API-backed ticket-field assertions load-bearing after Playwright became available again: the helper now polls the harness API from Python and evaluates the predicate through Playwright, and the audit test includes a deliberately false predicate guard. The same pass also pins that browser-created tickets persist the default `needs_audit=true`, verifies analysis-to-Implementation advance uses the assigned implementer's `start_work` permission, and preserves the urgent-comment checkbox through smart-refresh re-renders before Add Comment submits.
+
 ## Findings Filed
 
 - `PGU-507` - Board detail draft restore can clear saved field values after live reload

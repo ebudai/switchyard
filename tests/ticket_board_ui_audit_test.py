@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import sys
+import re
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,19 @@ from tests.ticket_board_ui_harness import (
 
 def detail_field(modal: Any, label: str) -> Any:
     return modal.locator(".field-label", has_text=label).locator("xpath=..").first
+
+
+def open_detail(page: Any, ticket_id: str) -> Any:
+    page.locator(".card > .card-top .card-id").filter(has_text=re.compile(f"^{re.escape(ticket_id)}$")).click()
+    modal = page.locator(".detail-modal")
+    modal.wait_for(timeout=5000)
+    modal.locator(".detail-ticket-headline strong", has_text=ticket_id).wait_for(timeout=5000)
+    return modal
+
+
+def close_detail(page: Any) -> None:
+    page.locator("#detailCloseBtn").click()
+    page.locator("#detailOverlay").wait_for(state="hidden", timeout=5000)
 
 
 def refresh_open_detail_from_server(page: Any, ticket_id: str) -> None:
@@ -246,6 +260,12 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         page.goto(harness.url, wait_until="domcontentloaded")
         page.locator(".column-title", has_text="Triage").wait_for(timeout=5000)
         install_update_ticket_tracker(page)
+        try:
+            wait_for_ticket_field(page, harness.url, "PGU-501", "ticket.id === 'NOPE-SENTINEL'", timeout=100)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("wait_for_ticket_field returned for a false predicate")
 
         assert page.locator(".card", has_text="PGU-506").count() == 0
         page.locator("#showDoneInput").check()
@@ -310,9 +330,7 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
             "ticket.screenshots.length === 1 && ticket.assignee === 'ops' && ticket.needs_audit === true",
         )
 
-        page.locator(".card", has=page.locator(".card-id", has_text="PGU-503")).click()
-        modal = page.locator(".detail-modal")
-        modal.wait_for(timeout=5000)
+        modal = open_detail(page, "PGU-503")
         blocked_by = detail_field(modal, "Blocked By")
         add_blocker_with_picker(page, blocked_by, "PGU-502")
         wait_for_ticket_field(page, harness.url, "PGU-503", "ticket.blocked_by.includes('PGU-502') && ticket.blocked_reason === 'Waiting on PGU-502.'")
@@ -324,15 +342,14 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         wait_for_ticket_field(page, harness.url, "PGU-503", "ticket.blocked_by.length === 0")
         wait_for_blocker_card_render(page, "PGU-503", "PGU-502", blocked=False)
 
-        page.locator("#detailCloseBtn").click()
-        page.locator(".card", has=page.locator(".card-id", has_text="PGU-512")).click()
-        modal.wait_for(timeout=5000)
+        close_detail(page)
+        modal = open_detail(page, "PGU-512")
         detail_field(modal, "Title").locator("input").first.fill("Detail edit target renamed")
         detail_field(modal, "Title").get_by_role("button", name="Save Title").click()
         wait_for_ticket_field(page, harness.url, "PGU-512", "ticket.title === 'Detail edit target renamed'")
         refresh_open_detail_from_server(page, "PGU-512")
 
-        page.locator("#detailCloseBtn").click()
+        close_detail(page)
         page.evaluate("""() => { window.PGU_TICKET_BOARD_REFRESH_IDLE_MS = 25; state.lastActivityAt = 0; }""")
         harness.server.build_id = "pgu-525-idle-build"
         page.evaluate("""async () => { await requestBoardReload(); }""")
@@ -342,8 +359,7 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         page.locator("#refreshUpdateBanner").wait_for(state="hidden", timeout=5000)
         page.evaluate("""() => { window.PGU_TICKET_BOARD_REFRESH_IDLE_MS = 25; state.lastActivityAt = 0; }""")
 
-        page.locator(".card", has=page.locator(".card-id", has_text="PGU-512")).click()
-        modal.wait_for(timeout=5000)
+        modal = open_detail(page, "PGU-512")
         comment_box = modal.get_by_placeholder("Add a comment or bounce-back note")
         comment_box.fill("Draft survives smart auto refresh")
         harness.server.build_id = "pgu-525-typing-build"
@@ -351,13 +367,12 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         page.locator("#refreshUpdateBanner", has_text="A newer board version is ready").wait_for(timeout=5000)
         page.wait_for_timeout(150)
         page.wait_for_function("() => window.PGU_TICKET_BOARD_BUILD_ID === 'pgu-525-idle-build'", timeout=5000)
-        page.locator("#detailCloseBtn").click()
+        close_detail(page)
         page.wait_for_load_state("domcontentloaded")
         page.locator(".column-title", has_text="Triage").wait_for(timeout=5000)
         page.wait_for_function("() => window.PGU_TICKET_BOARD_BUILD_ID === 'pgu-525-typing-build'", timeout=5000)
         page.evaluate("""() => { window.PGU_TICKET_BOARD_REFRESH_IDLE_MS = 25; state.lastActivityAt = 0; }""")
-        page.locator(".card", has=page.locator(".card-id", has_text="PGU-512")).click()
-        modal.wait_for(timeout=5000)
+        modal = open_detail(page, "PGU-512")
         comment_box = modal.get_by_placeholder("Add a comment or bounce-back note")
         page.wait_for_function(
             "(element) => element.value === 'Draft survives smart auto refresh'",
@@ -371,12 +386,11 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         page.locator("#refreshUpdateBanner", has_text="A newer board version is ready").wait_for(timeout=5000)
         page.wait_for_timeout(150)
         page.wait_for_function("() => window.PGU_TICKET_BOARD_BUILD_ID === 'pgu-525-typing-build'", timeout=5000)
-        page.locator("#detailCloseBtn").click()
+        close_detail(page)
         page.wait_for_load_state("domcontentloaded")
         page.locator(".column-title", has_text="Triage").wait_for(timeout=5000)
         page.wait_for_function("() => window.PGU_TICKET_BOARD_BUILD_ID === 'pgu-525-detail-open-build'", timeout=5000)
-        page.locator(".card", has=page.locator(".card-id", has_text="PGU-512")).click()
-        modal.wait_for(timeout=5000)
+        modal = open_detail(page, "PGU-512")
         page.evaluate("""() => { window.PGU_TICKET_BOARD_REFRESH_IDLE_MS = 25; state.lastActivityAt = 0; }""")
         comment_box = modal.get_by_placeholder("Add a comment or bounce-back note")
         comment_box.fill("Submit survives reload replay")
@@ -389,8 +403,7 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         page.wait_for_function("() => window.__pguNoReloadMarker === undefined", timeout=5000)
         page.locator("#createStatus", has_text="Comment added to PGU-512.").wait_for(timeout=5000)
         wait_for_ticket_field(page, harness.url, "PGU-512", "ticket.comments.some((comment) => comment.text === 'Submit survives reload replay')")
-        page.locator(".card", has=page.locator(".card-id", has_text="PGU-512")).click()
-        modal.wait_for(timeout=5000)
+        modal = open_detail(page, "PGU-512")
         comment_box = modal.get_by_placeholder("Add a comment or bounce-back note")
         page.wait_for_function(
             "(element) => element.value === ''",
@@ -447,10 +460,10 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
             arg=comment_box.element_handle(timeout=5000),
             timeout=5000,
         )
+        page.evaluate("""() => { window.PGU_TICKET_BOARD_REFRESH_IDLE_MS = 2500; state.lastActivityAt = Date.now(); }""")
 
-        page.locator("#detailCloseBtn").click()
-        page.locator(".card", has=page.locator(".card-id", has_text="PGU-512")).click()
-        modal.wait_for(timeout=5000)
+        close_detail(page)
+        modal = open_detail(page, "PGU-512")
 
         detail_field(modal, "Parent Ticket").locator("input").fill("PGU-502")
         detail_field(modal, "Parent Ticket").get_by_role("button", name="Save Parent Link").click()
@@ -471,11 +484,33 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         modal.get_by_label("Regression").check()
         wait_for_ticket_field(page, harness.url, "PGU-512", "ticket.regression")
         wait_for_ticket_field(page, harness.url, "PGU-512", "ticket.needs_user_signoff && ticket.needs_inspection && ticket.regression && ticket.implementation.includes('PGU-503') && ticket.audit_prompt.includes('PGU-503')")
+        refresh_open_detail_from_server(page, "PGU-512")
+        modal.locator(".detail-ticket-headline strong", has_text="PGU-512").wait_for(timeout=5000)
 
         comment_box = modal.get_by_placeholder("Add a comment or bounce-back note")
         comment_box.fill("Playwright comment on PGU-512")
-        modal.get_by_label("Urgent").check()
-        modal.get_by_role("button", name="Add Comment").click()
+        urgent_checkbox = modal.get_by_label("Urgent")
+        urgent_checkbox.check()
+        page.wait_for_function(
+            "(element) => element.checked === true",
+            arg=urgent_checkbox.element_handle(timeout=5000),
+            timeout=5000,
+        )
+        page.evaluate(
+            """() => {
+              state.lastActivityAt = Date.now();
+              const composer = document.querySelector('.detail-modal .comment-composer');
+              const urgent = composer && composer.querySelector('.urgent-comment-toggle input');
+              if (!urgent || !urgent.checked) {
+                throw new Error('urgent checkbox was not checked before Add Comment');
+              }
+              const addButton = Array.from(composer.querySelectorAll('button')).find((button) => button.textContent === 'Add Comment');
+              if (!addButton) {
+                throw new Error('Add Comment button not found');
+              }
+              addButton.click();
+            }"""
+        )
         wait_for_ticket_field(page, harness.url, "PGU-512", "ticket.comments.some((comment) => comment.text === 'Playwright comment on PGU-512' && comment.urgent)")
 
         attach_panel = modal.locator(".detail-attach-panel")
@@ -490,29 +525,25 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         modal.locator(".attachment-remove").click()
         wait_for_ticket_field(page, harness.url, "PGU-512", "ticket.screenshots.length === 0")
 
-        page.locator("#detailCloseBtn").click()
-        page.locator(".card", has=page.locator(".card-id", has_text="PGU-507")).click()
-        modal.wait_for(timeout=5000)
+        close_detail(page)
+        modal = open_detail(page, "PGU-507")
         modal.get_by_role("button", name="Sign Off").click()
         wait_for_ticket_field(page, harness.url, "PGU-507", "ticket.user_signoff && ticket.state === 'director_review'")
         page.locator(".card.card-signed-off", has=page.locator(".card-id", has_text="PGU-507")).wait_for(timeout=5000)
 
-        page.locator("#detailCloseBtn").click()
-        page.locator(".card", has=page.locator(".card-id", has_text="PGU-508")).click()
-        modal.wait_for(timeout=5000)
+        close_detail(page)
+        modal = open_detail(page, "PGU-508")
         modal.get_by_role("button", name="Advance -> Implementation").click()
         wait_for_ticket_field(page, harness.url, "PGU-508", "ticket.state === 'in_progress' && ticket.assignee === 'ops'")
 
-        page.locator("#detailCloseBtn").click()
-        page.locator(".card", has=page.locator(".card-id", has_text="PGU-511")).click()
-        modal.wait_for(timeout=5000)
+        close_detail(page)
+        modal = open_detail(page, "PGU-511")
         modal.get_by_placeholder("Add a comment or bounce-back note").fill("No longer needed.")
         modal.get_by_role("button", name="Cancel Ticket").click()
         wait_for_ticket_field(page, harness.url, "PGU-511", "ticket.state === 'cancelled' && ticket.comments.some((comment) => comment.text === 'No longer needed.')")
 
-        page.locator("#detailCloseBtn").click()
-        page.locator(".card", has=page.locator(".card-id", has_text="PGU-502")).click()
-        modal.wait_for(timeout=5000)
+        close_detail(page)
+        modal = open_detail(page, "PGU-502")
         modal.get_by_role("button", name="Advance -> Implementation").click()
         wait_for_ticket_field(page, harness.url, "PGU-502", "ticket.state === 'backlog' && ticket.assignee === 'app'")
         complete_task_from_browser(page, "PGU-501", "app", "Free app serial focus slot.")

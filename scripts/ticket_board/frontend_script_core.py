@@ -338,6 +338,9 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       if (ticket.state === 'inspection') {
         return 'inspector';
       }
+      if (ticket.state === 'analysis') {
+        return ticket.assignee;
+      }
       return ticket.state === 'in_progress'
         ? ticket.assignee
         : 'director';
@@ -550,7 +553,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       Object.entries(savedFields).forEach(([key, value]) => {
         const normalizedValue = value == null ? '' : String(value);
         detailContentEl.querySelectorAll(`[data-draft-key="${key}"]`).forEach((element) => {
-          element.value = normalizedValue;
+          setDetailDraftFieldValue(element, normalizedValue);
           element.dataset.serverValue = normalizedValue;
         });
       });
@@ -772,6 +775,21 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       scheduleAutoRefreshCheck();
     }
 
+    function detailDraftFieldValue(element) {
+      if (element.type === 'checkbox') {
+        return element.checked ? 'true' : 'false';
+      }
+      return element.value ?? '';
+    }
+
+    function setDetailDraftFieldValue(element, value) {
+      if (element.type === 'checkbox') {
+        element.checked = String(value) === 'true';
+        return;
+      }
+      element.value = value ?? '';
+    }
+
     function rememberDetailDraft() {
       if (!state.detailOpen) {
         return;
@@ -788,7 +806,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         if (!key) {
           return;
         }
-        const value = element.value ?? '';
+        const value = detailDraftFieldValue(element);
         const serverValue = element.dataset.serverValue ?? '';
         const isFocused = element === document.activeElement;
         const isDirty = value !== serverValue;
@@ -824,7 +842,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         if (!element) {
           return;
         }
-        element.value = entry.value;
+        setDetailDraftFieldValue(element, entry.value);
         if (draft.activeKey === key) {
           element.focus();
           if (typeof entry.selectionStart === 'number' && typeof entry.selectionEnd === 'number') {

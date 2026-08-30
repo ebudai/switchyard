@@ -7,6 +7,7 @@ import json
 import sys
 import tempfile
 import threading
+import time
 from contextlib import AbstractContextManager
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
@@ -694,16 +695,25 @@ class BoardHarness(AbstractContextManager["BoardHarness"]):
 
 
 def wait_for_ticket_field(page: Any, base_url: str, ticket_id: str, expression: str, timeout: int = 5000) -> None:
-    page.wait_for_function(
-        """async ([baseUrl, ticketId, expr]) => {
-          const response = await fetch(`${baseUrl}api/tickets/${ticketId}`, { cache: 'no-store' });
-          if (!response.ok) return false;
-          const ticket = await response.json();
-          return Function('ticket', `return (${expr});`)(ticket);
-        }""",
-        arg=[base_url, ticket_id, expression],
-        timeout=timeout,
-    )
+    deadline = time.monotonic() + timeout / 1000
+    last_error: Exception | None = None
+    last_ticket: dict[str, Any] | None = None
+    ticket_url = f"{base_url.rstrip('/')}/api/tickets/{ticket_id}"
+    while time.monotonic() < deadline:
+        try:
+            with urlopen(ticket_url, timeout=1) as response:
+                last_ticket = json.load(response)
+            matched = page.evaluate(
+                """([ticket, expr]) => Boolean(Function('ticket', `return (${expr});`)(ticket))""",
+                [last_ticket, expression],
+            )
+            if matched:
+                return
+        except Exception as exc:  # noqa: BLE001 - preserve the last failed poll in timeout diagnostics.
+            last_error = exc
+        time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+    detail = f"last_ticket={last_ticket!r}" if last_ticket is not None else f"last_error={last_error!r}"
+    raise AssertionError(f"Timed out waiting for {ticket_id} to satisfy {expression!r}: {detail}")
 
 
 def create_clipboard_png_payload() -> str:

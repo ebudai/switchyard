@@ -10640,6 +10640,7 @@ def test_switchyard_launch_runs_first_run_auth_before_panes_and_warns_after() ->
                             "project": config.project,
                             "owner_user": kwargs["owner_user"],
                             "owner_home": kwargs["owner_home"],
+                            "validate_models": kwargs.get("validate_models"),
                         },
                     )
                 )
@@ -10668,12 +10669,74 @@ def test_switchyard_launch_runs_first_run_auth_before_panes_and_warns_after() ->
             team_launcher.report_first_run_auth_warnings = original_report_first_run_auth_warnings
 
     assert [name for name, _payload in events] == ["auth", "launch", "warn"]
-    assert events[0][1] == {"project": "otto", "owner_user": "otto-agent", "owner_home": Path("/home/otto-agent")}
+    assert events[0][1] == {
+        "project": "otto",
+        "owner_user": "otto-agent",
+        "owner_home": Path("/home/otto-agent"),
+        "validate_models": False,
+    }
     assert events[1][1]["config_path"] == config_path
     assert events[1][1]["mode"] == "start"
     assert events[1][1]["script_path"] == ROOT / "scripts" / "team-launcher"
     assert events[1][1]["report_session_records"] is True
     assert events[2][1] is report
+
+
+def test_switchyard_validate_models_command_runs_model_validation_on_demand() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-validate-models.") as tmp:
+        tmp_path = Path(tmp)
+        config_dir = tmp_path / "config"
+        registry_dir = tmp_path / "registry"
+        layout = tmp_path / "layout.json"
+        config_dir.mkdir()
+        registry_dir.mkdir()
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        config_path = config_dir / "otto.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "otto",
+                    "project_name": "Otto System",
+                    "layout": str(layout),
+                    "run_as_user": "otto-agent",
+                    "roles": [
+                        {
+                            "role": "ops",
+                            "slot": 0,
+                            "cli": ["codex"],
+                            "model": "openai/not-a-model",
+                            "workdir": str(tmp_path / "repo"),
+                        }
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        runner = FirstRunAuthRunner(
+            invalid_models={("codex", "openai/not-a-model"): "model not found: openai/not-a-model\n"}
+        )
+        runner.login_seen.add("codex")
+        output: list[str] = []
+
+        result = team_launcher.switchyard_validate_models_command(
+            "otto",
+            config_dir=config_dir,
+            registry_dir=registry_dir,
+            runner=runner,
+            print_func=output.append,
+        )
+
+    assert result == 1
+    assert runner.calls == [
+        ["sudo", "-u", "otto-agent", "codex", "login", "status"],
+        ["sudo", "-u", "otto-agent", "codex", "exec", "--model", "openai/not-a-model", team_launcher.MODEL_VALIDATION_PROMPT],
+    ]
+    assert output == [
+        "warning: switchyard: model validation failed for role ops "
+        "(cli codex, model openai/not-a-model): model not found: openai/not-a-model; "
+        "no model list is available for codex; validation used a one-shot prompt"
+    ]
 
 
 def test_switchyard_stop_resolves_project_without_launching_or_authenticating() -> None:
@@ -11798,6 +11861,143 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
         assert "Konsole Ctrl+Shift+E" in output
 
 
+def test_switchyard_new_validates_models_before_launching_panes() -> None:
+    original_uid_for_user = team_launcher.uid_for_user
+    original_precheck_project_path = team_launcher._precheck_project_path_before_mutating
+    original_precheck_new_project = team_launcher.precheck_new_project
+    original_ensure_owner = team_launcher._ensure_owner_user_and_project_dir
+    original_ensure_git = team_launcher._ensure_project_git_repository
+    original_chown_project_files = team_launcher._chown_switchyard_project_files
+    original_chown_project_file = team_launcher._chown_project_file
+    original_new_project = team_launcher.new_project_command
+    original_commit_project_git_changes = team_launcher._commit_project_git_changes
+    original_register = team_launcher._register_switchyard_project
+    original_prepare_auth_worktrees = team_launcher._prepare_first_run_auth_worktrees
+    original_launch_project = team_launcher.launch_project
+    try:
+        with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new-model-validation.") as tmp:
+            tmp_path = Path(tmp)
+            home_base = tmp_path / "home"
+            project_dir = home_base / "porter-agent" / "Projects" / "porter_system"
+            source_repo = tmp_path / "source-repo"
+            output_dir = tmp_path / "provision"
+            source_repo.mkdir()
+            launch_calls: list[team_launcher.ProjectConfig] = []
+            output: list[str] = []
+
+            team_launcher.uid_for_user = lambda _user_name: None
+            team_launcher._precheck_project_path_before_mutating = lambda _owner_user, _project_dir: None
+            team_launcher.precheck_new_project = lambda *_args, **_kwargs: None
+
+            def fake_ensure_owner(
+                _owner_user: str,
+                requested_project_dir: Path,
+                **_kwargs: object,
+            ) -> team_launcher.OwnerUserProvisionResult:
+                requested_project_dir.mkdir(parents=True, exist_ok=True)
+                return team_launcher.OwnerUserProvisionResult(created=False, linger_enabled=False)
+
+            def fake_new_project(project: str, **kwargs: object) -> int:
+                provision_dir = Path(kwargs["output_dir"])
+                layout = provision_dir / f"{project}-layout.json"
+                role_workdir = project_dir / "worktrees" / "director"
+                provision_dir.mkdir(parents=True, exist_ok=True)
+                role_workdir.mkdir(parents=True, exist_ok=True)
+                layout.write_text(
+                    '{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n',
+                    encoding="utf-8",
+                )
+                (provision_dir / f"{project}.json").write_text(
+                    json.dumps(
+                        {
+                            "project": project,
+                            "project_name": "Porter System",
+                            "layout": str(layout),
+                            "repository": str(project_dir),
+                            "run_as_user": "porter-agent",
+                            "roles": [
+                                {
+                                    "role": "director",
+                                    "slot": 0,
+                                    "target": "porter-director:0.0",
+                                    "tmux_session": "porter-director",
+                                    "workdir": str(role_workdir),
+                                    "cli": ["codex"],
+                                    "model": "openai/not-a-model",
+                                }
+                            ],
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                return 0
+
+            def fake_launch_project(config: team_launcher.ProjectConfig, **_kwargs: object) -> int:
+                launch_calls.append(config)
+                return 0
+
+            team_launcher._ensure_owner_user_and_project_dir = fake_ensure_owner
+            team_launcher._ensure_project_git_repository = lambda *_args, **_kwargs: None
+            team_launcher._chown_switchyard_project_files = lambda *_args, **_kwargs: None
+            team_launcher._chown_project_file = lambda *_args, **_kwargs: None
+            team_launcher.new_project_command = fake_new_project
+            team_launcher._commit_project_git_changes = lambda *_args, **_kwargs: None
+            team_launcher._register_switchyard_project = lambda config_path, **_kwargs: config_path
+            team_launcher._prepare_first_run_auth_worktrees = lambda *_args, **_kwargs: None
+            team_launcher.launch_project = fake_launch_project
+
+            runner = FirstRunAuthRunner(
+                invalid_models={("codex", "openai/not-a-model"): "model not found: openai/not-a-model\n"}
+            )
+            runner.login_seen.add("codex")
+
+            result = switchyard_new_command(
+                slug="porter",
+                agent_name="porter-agent",
+                project_name="Porter System",
+                project_path=project_dir,
+                source_repo=source_repo,
+                output_dir=output_dir,
+                role_clis=(("director", "codex"), ("ops", "codex")),
+                yes=True,
+                allow_existing_owner_user=True,
+                home_base=home_base,
+                euid_getter=lambda: 0,
+                runner=runner,
+                input_func=lambda _prompt: "",
+                print_func=output.append,
+                port_in_use=lambda _port: False,
+                socket_exists=lambda _path: False,
+                registry_dir=tmp_path / "registry",
+            )
+    finally:
+        team_launcher.uid_for_user = original_uid_for_user
+        team_launcher._precheck_project_path_before_mutating = original_precheck_project_path
+        team_launcher.precheck_new_project = original_precheck_new_project
+        team_launcher._ensure_owner_user_and_project_dir = original_ensure_owner
+        team_launcher._ensure_project_git_repository = original_ensure_git
+        team_launcher._chown_switchyard_project_files = original_chown_project_files
+        team_launcher._chown_project_file = original_chown_project_file
+        team_launcher.new_project_command = original_new_project
+        team_launcher._commit_project_git_changes = original_commit_project_git_changes
+        team_launcher._register_switchyard_project = original_register
+        team_launcher._prepare_first_run_auth_worktrees = original_prepare_auth_worktrees
+        team_launcher.launch_project = original_launch_project
+
+    assert result == 1
+    assert launch_calls == []
+    assert runner.calls == [
+        ["sudo", "-u", "porter-agent", "codex", "login", "status"],
+        ["sudo", "-u", "porter-agent", "codex", "exec", "--model", "openai/not-a-model", team_launcher.MODEL_VALIDATION_PROMPT],
+    ]
+    assert output[-1] == (
+        "warning: switchyard: model validation failed for role director "
+        "(cli codex, model openai/not-a-model): model not found: openai/not-a-model; "
+        "no model list is available for codex; validation used a one-shot prompt"
+    )
+
+
 def test_switchyard_new_prompts_roles_and_skips_designer_when_absent() -> None:
     class PromptedRoleRunner(FakeRunner):
         def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -12691,7 +12891,13 @@ def test_project_artifact_rejects_non_bool_include_audit() -> None:
     assert "field 'project.include_audit' must be a JSON boolean" in message
 
 
-def _write_first_run_auth_config(tmp_path: Path, *, roles: list[tuple[str, str]], owner_user: str = "otto-agent") -> Path:
+def _write_first_run_auth_config(
+    tmp_path: Path,
+    *,
+    roles: list[tuple[str, str]],
+    owner_user: str = "otto-agent",
+    role_models: dict[str, str] | None = None,
+) -> Path:
     layout_path = tmp_path / "layout.json"
     layout_path.write_text(
         json.dumps(
@@ -12718,13 +12924,16 @@ def _write_first_run_auth_config(tmp_path: Path, *, roles: list[tuple[str, str]]
                 "run_as_user": owner_user,
                 "roles": [
                     {
-                        "role": role,
-                        "slot": index,
-                        "target": f"otto-{role}:0.0",
-                        "tmux_session": f"otto-{role}",
-                        "workdir": str(tmp_path / "worktrees" / role),
-                        "cli": [cli],
-                        "yolo": True,
+                        **{
+                            "role": role,
+                            "slot": index,
+                            "target": f"otto-{role}:0.0",
+                            "tmux_session": f"otto-{role}",
+                            "workdir": str(tmp_path / "worktrees" / role),
+                            "cli": [cli],
+                            "yolo": True,
+                        },
+                        **({"model": role_models[role]} if role_models and role in role_models else {}),
                     }
                     for index, (role, cli) in enumerate(roles)
                 ],
@@ -12747,6 +12956,8 @@ class FirstRunAuthRunner:
         authenticated_after_login: bool = True,
         missing_clis: set[str] | None = None,
         missing_cli_status_returncode: int = 127,
+        invalid_models: dict[tuple[str, str], str] | None = None,
+        model_catalogs: dict[str, list[str]] | None = None,
     ) -> None:
         self.calls: list[list[str]] = []
         self.call_kwargs: list[dict[str, object]] = []
@@ -12754,6 +12965,26 @@ class FirstRunAuthRunner:
         self.login_seen: set[str] = set()
         self.missing_clis = set(missing_clis or ())
         self.missing_cli_status_returncode = missing_cli_status_returncode
+        self.invalid_models = dict(invalid_models or {})
+        self.model_catalogs = {
+            "agy": ["gemini-3.7-flash-high", "gemini-3.7-pro"],
+            **dict(model_catalogs or {}),
+        }
+
+    @staticmethod
+    def _model_from_command(command: list[str], model_arg: str = "--model") -> str:
+        for index, token in enumerate(command):
+            if token == model_arg and index + 1 < len(command):
+                return command[index + 1]
+            if token.startswith(f"{model_arg}="):
+                return token.split("=", 1)[1]
+        return ""
+
+    def _model_probe(self, args: list[str], command: list[str], cli: str, model: str) -> subprocess.CompletedProcess[str]:
+        reason = self.invalid_models.get((cli, model))
+        if reason:
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr=reason)
+        return subprocess.CompletedProcess(args, 0, stdout="model-ok\n")
 
     def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         self.calls.append(args)
@@ -12794,8 +13025,17 @@ class FirstRunAuthRunner:
                     stderr="agy: command not found\n",
                 )
             if self.authenticated_after_login and "agy" in self.login_seen:
-                return subprocess.CompletedProcess(args, 0, stdout="gemini-3.7-flash-high\n")
+                catalog = self.model_catalogs.get("agy", [])
+                return subprocess.CompletedProcess(args, 0, stdout="".join(f"{model} description\n" for model in catalog))
             return subprocess.CompletedProcess(args, 1, stderr="You are not logged into Antigravity.\n")
+        if command and command[0] == "claude" and "-p" in command:
+            return self._model_probe(args, command, "claude", self._model_from_command(command))
+        if command[:2] == ["codex", "exec"]:
+            return self._model_probe(args, command, "codex", self._model_from_command(command))
+        if command and command[0] == "agy" and "-p" in command:
+            return self._model_probe(args, command, "agy", self._model_from_command(command))
+        if command and command[0] == "hermes" and "-z" in command:
+            return self._model_probe(args, command, "hermes", self._model_from_command(command, "-m"))
         if command == ["hermes", "config", "check"]:
             if "hermes" in self.missing_clis:
                 return subprocess.CompletedProcess(
@@ -13167,6 +13407,164 @@ def test_first_run_auth_phase_reports_missing_cli_separately_from_login() -> Non
             "warning: switchyard: agy is not installed for owner user otto-agent; "
             "install agy for owner user otto-agent; affected roles: inspector"
         ], status_returncode
+
+
+def test_first_run_auth_phase_validates_configured_models_for_all_clis() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-first-run-models.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        role_models = {
+            "director": "claude-opus-5",
+            "ops": "gpt-5.5",
+            "inspector": "gemini-3.7-flash-high",
+            "bulk": "z-ai/glm-4.6",
+            "research": "deepseek/deepseek-chat",
+        }
+        config = load_project_config(
+            "otto",
+            _write_first_run_auth_config(
+                tmp_path,
+                roles=[
+                    ("director", "claude"),
+                    ("ops", "codex"),
+                    ("inspector", "agy"),
+                    ("bulk", "hermes"),
+                    ("research", "hermes"),
+                ],
+                role_models=role_models,
+            ),
+        )
+        runner = FirstRunAuthRunner()
+        runner.login_seen.update({"agy", "claude", "codex", "hermes"})
+        messages: list[str] = []
+
+        report = team_launcher.run_first_run_auth_phase(
+            config,
+            owner_user="otto-agent",
+            owner_home=owner_home,
+            validate_models=True,
+            runner=runner,
+            print_func=messages.append,
+        )
+
+    assert report.model_validation_failures == []
+    assert messages == []
+    assert runner.calls == [
+        ["sudo", "-u", "otto-agent", "claude", "auth", "status", "--json"],
+        ["sudo", "-u", "otto-agent", "codex", "login", "status"],
+        ["sudo", "-u", "otto-agent", "agy", "models"],
+        ["sudo", "-u", "otto-agent", "hermes", "config", "check"],
+        ["sudo", "-u", "otto-agent", "claude", "--model", "claude-opus-5", "-p", team_launcher.MODEL_VALIDATION_PROMPT],
+        ["sudo", "-u", "otto-agent", "codex", "exec", "--model", "gpt-5.5", team_launcher.MODEL_VALIDATION_PROMPT],
+        ["sudo", "-u", "otto-agent", "agy", "--model", "gemini-3.7-flash-high", "-p", team_launcher.MODEL_VALIDATION_PROMPT],
+        ["sudo", "-u", "otto-agent", "hermes", "-m", "z-ai/glm-4.6", "-z", team_launcher.MODEL_VALIDATION_PROMPT],
+        ["sudo", "-u", "otto-agent", "hermes", "-m", "deepseek/deepseek-chat", "-z", team_launcher.MODEL_VALIDATION_PROMPT],
+    ]
+    assert {kwargs.get("cwd") for kwargs in runner.call_kwargs} == {str(owner_home)}
+
+
+def test_first_run_auth_phase_reports_bad_models_with_agy_suggestions_and_no_catalog_for_other_clis() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-first-run-models-bad.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        role_models = {
+            "director": "anthropic/claude-3.5-sonnet",
+            "ops": "openai/not-a-model",
+            "inspector": "gemini-retired",
+            "bulk": "openrouter/missing",
+        }
+        config = load_project_config(
+            "otto",
+            _write_first_run_auth_config(
+                tmp_path,
+                roles=[
+                    ("director", "claude"),
+                    ("ops", "codex"),
+                    ("inspector", "agy"),
+                    ("bulk", "hermes"),
+                ],
+                role_models=role_models,
+            ),
+        )
+        runner = FirstRunAuthRunner(
+            invalid_models={
+                ("claude", "anthropic/claude-3.5-sonnet"): "HTTP 404: No endpoints found for anthropic/claude-3.5-sonnet\n",
+                ("codex", "openai/not-a-model"): "model not found: openai/not-a-model\n",
+                ("agy", "gemini-retired"): "model gemini-retired is unavailable\n",
+                ("hermes", "openrouter/missing"): "provider returned 404 for openrouter/missing\n",
+            }
+        )
+        runner.login_seen.update({"agy", "claude", "codex", "hermes"})
+
+        report = team_launcher.run_first_run_auth_phase(
+            config,
+            owner_user="otto-agent",
+            owner_home=owner_home,
+            validate_models=True,
+            runner=runner,
+        )
+
+    failures = {(failure.role, failure.cli, failure.model): failure for failure in report.model_validation_failures}
+    assert set(failures) == {
+        ("director", "claude", "anthropic/claude-3.5-sonnet"),
+        ("ops", "codex", "openai/not-a-model"),
+        ("inspector", "agy", "gemini-retired"),
+        ("bulk", "hermes", "openrouter/missing"),
+    }
+    assert "No endpoints found" in failures[("director", "claude", "anthropic/claude-3.5-sonnet")].reason
+    assert "no model list is available for claude" in failures[("director", "claude", "anthropic/claude-3.5-sonnet")].suggestion
+    assert "no model list is available for codex" in failures[("ops", "codex", "openai/not-a-model")].suggestion
+    assert "valid agy models include: gemini-3.7-flash-high, gemini-3.7-pro" in failures[("inspector", "agy", "gemini-retired")].suggestion
+    assert "no model list is available for hermes" in failures[("bulk", "hermes", "openrouter/missing")].suggestion
+    warning_lines: list[str] = []
+    team_launcher.report_first_run_auth_warnings(report, print_func=warning_lines.append)
+    assert any(
+        "role director (cli claude, model anthropic/claude-3.5-sonnet)" in line
+        and "no model list is available for claude" in line
+        for line in warning_lines
+    )
+    assert any(
+        "role inspector (cli agy, model gemini-retired)" in line
+        and "valid agy models include: gemini-3.7-flash-high, gemini-3.7-pro" in line
+        for line in warning_lines
+    )
+    validation_models = [
+        runner._model_from_command(call[4:] if call[:2] == ["sudo", "-u"] else call, "-m" if "hermes" in call else "--model")
+        for call in runner.calls
+        if any(token in call for token in ("-p", "-z", "exec"))
+    ]
+    assert set(validation_models) == set(role_models.values())
+
+
+def test_first_run_auth_phase_does_not_validate_models_unless_requested() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-first-run-models-disabled.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        config = load_project_config(
+            "otto",
+            _write_first_run_auth_config(
+                tmp_path,
+                roles=[("ops", "codex")],
+                role_models={"ops": "openai/not-a-model"},
+            ),
+        )
+        runner = FirstRunAuthRunner(
+            invalid_models={("codex", "openai/not-a-model"): "model not found: openai/not-a-model\n"}
+        )
+        runner.login_seen.add("codex")
+
+        report = team_launcher.run_first_run_auth_phase(
+            config,
+            owner_user="otto-agent",
+            owner_home=owner_home,
+            runner=runner,
+        )
+
+    assert report.model_validation_failures == []
+    assert runner.calls == [["sudo", "-u", "otto-agent", "codex", "login", "status"]]
 
 
 def test_first_run_auth_phase_sequences_distinct_logins_and_skips_visible_worktree_trust() -> None:

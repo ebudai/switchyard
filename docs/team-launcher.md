@@ -3,10 +3,12 @@
 `switchyard` is the public project entrypoint. With no arguments it prints
 `new...` followed by configured projects. `switchyard new` starts new-project
 setup, `switchyard stop <project>` stops only that project's configured tmux
-pane sessions, and `switchyard My Project Name` joins all arguments, matches an
-existing project case-insensitively by display name or slug, and runs today's
-idempotent start/resume behavior. Leading verbs are reserved, so a project
-literally named `new`, `upgrade`, or `stop` collides with the command namespace.
+pane sessions, `switchyard validate-models <project>` checks configured role
+models without starting panes, and `switchyard My Project Name` joins all
+arguments, matches an existing project case-insensitively by display name or
+slug, and runs today's idempotent start/resume behavior. Leading verbs are
+reserved, so a project literally named `new`, `upgrade`, `stop`, or
+`validate-models` collides with the command namespace.
 
 `scripts/team-launcher` remains the compatibility wrapper used by existing PGU
 pane commands. It starts, attaches, or reloads a project team from a JSON config.
@@ -92,6 +94,7 @@ scripts/team-launcher pgu start
 scripts/team-launcher pgu attach
 scripts/team-launcher pgu reload
 scripts/team-launcher pgu stop
+switchyard validate-models otto
 switchyard upgrade otto
 scripts/team-launcher pgu provision-runtime
 scripts/team-launcher pgu deploy-launcher --launcher-repo /home/eric/Projects/pgu
@@ -402,10 +405,20 @@ CLI config files. Codex hook-trust entries are also checked against the
 installed pane-hook commands; stale trust hashes are reported as warnings with
 the affected role/event so the operator can refresh trust deliberately instead
 of silently launching panes with inert hooks.
+During `switchyard new`, the same phase also validates every configured role
+model with that CLI's one-shot prompt mode before panes start. A failed model
+probe aborts creation-time launch and reports the role, CLI, configured model,
+and provider error; the launcher never substitutes a different model. The same
+check can be run later with `switchyard validate-models <project>`. Routine
+`switchyard <project>` starts do not validate models because the probe is an API
+call per role and team startup should not depend on transient provider
+availability.
 Hermes is probed with `hermes config check`, not `hermes auth list`, because
 pooled credentials can appear in `auth list` while Hermes still has no resolved
 API key and opens its setup prompt. Env/config-resolved API keys are the
-runnable shape the launcher accepts.
+runnable shape the launcher accepts. Agy failures include suggestions from
+`agy models` when that catalogue is available; Claude, Codex, and Hermes report
+that no model list is available and use only the one-shot validation result.
 
 The same provision path consumes generated and hand-written artifacts:
 

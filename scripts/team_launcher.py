@@ -5359,11 +5359,21 @@ class CodexHookTrustMismatch:
 
 
 @dataclass(frozen=True)
+class ModelValidationFailure:
+    role: str
+    cli: str
+    model: str
+    reason: str
+    suggestion: str
+
+
+@dataclass(frozen=True)
 class FirstRunAuthReport:
     unauthenticated_roles: dict[str, list[str]]
     untrusted_roles: list[tuple[str, str, str]]
     stale_codex_hook_trust: list[CodexHookTrustMismatch] = field(default_factory=list)
     missing_cli_roles: dict[str, list[str]] = field(default_factory=dict)
+    model_validation_failures: list[ModelValidationFailure] = field(default_factory=list)
     owner_user: str = ""
 
     @property
@@ -5373,6 +5383,7 @@ class FirstRunAuthReport:
             or self.untrusted_roles
             or self.stale_codex_hook_trust
             or self.missing_cli_roles
+            or self.model_validation_failures
         )
 
 
@@ -5389,6 +5400,7 @@ FIRST_RUN_AUTH_LOGIN_COMMANDS: dict[str, list[str]] = {
     "hermes": ["hermes", "model"],
 }
 FIRST_RUN_TRUST_CLIS = frozenset({"agy", "claude"})
+MODEL_VALIDATION_PROMPT = "Reply with exactly: model-ok"
 
 
 def _slug_from_project_name(name: str) -> str:
@@ -5934,6 +5946,93 @@ def _cli_auth_status(
     return "unauthenticated"
 
 
+def _model_validation_command(role: RoleConfig) -> list[str] | None:
+    cli = _role_cli_name(role)
+    if not cli or not role.model:
+        return None
+    model_args = [role.model_arg, role.model] if role.model_arg else []
+    if cli == "codex":
+        return [*role.cli, "exec", *model_args, MODEL_VALIDATION_PROMPT]
+    if cli in {"agy", "claude"}:
+        return [*role.cli, *model_args, "-p", MODEL_VALIDATION_PROMPT]
+    if cli == "hermes":
+        return [*role.cli, *model_args, "-z", MODEL_VALIDATION_PROMPT]
+    return None
+
+
+def _parse_agy_model_ids(stdout: str) -> list[str]:
+    ids: list[str] = []
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        model_id = stripped.split(maxsplit=1)[0]
+        if model_id:
+            ids.append(model_id)
+    return list(dict.fromkeys(ids))
+
+
+def _model_failure_suggestion(
+    cli: str,
+    *,
+    owner_user: str,
+    owner_home: Path,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> str:
+    if cli != "agy":
+        return f"no model list is available for {cli}; validation used a one-shot prompt"
+    proc = _run_owner_cli_probe(
+        owner_user=owner_user,
+        owner_home=owner_home,
+        command=["agy", "models"],
+        runner=runner,
+    )
+    if proc.returncode != 0:
+        return "agy exposes a model list, but `agy models` failed while building suggestions"
+    ids = _parse_agy_model_ids(str(getattr(proc, "stdout", "") or ""))
+    if not ids:
+        return "agy exposes a model list, but `agy models` returned no ids"
+    return f"valid agy models include: {', '.join(ids[:8])}"
+
+
+def validate_role_models(
+    roles: Sequence[RoleConfig],
+    *,
+    owner_user: str,
+    owner_home: Path,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> list[ModelValidationFailure]:
+    failures: list[ModelValidationFailure] = []
+    for role in roles:
+        cli = _role_cli_name(role)
+        command = _model_validation_command(role)
+        if command is None:
+            continue
+        proc = _run_owner_cli_probe(
+            owner_user=owner_user,
+            owner_home=owner_home,
+            command=command,
+            runner=runner,
+        )
+        if proc.returncode == 0:
+            continue
+        failures.append(
+            ModelValidationFailure(
+                role=role.role,
+                cli=cli,
+                model=role.model,
+                reason=_proc_failure_reason(proc, f"model probe failed with exit {proc.returncode}"),
+                suggestion=_model_failure_suggestion(
+                    cli,
+                    owner_user=owner_user,
+                    owner_home=owner_home,
+                    runner=runner,
+                ),
+            )
+        )
+    return failures
+
+
 def _read_json_object(path: Path) -> dict[str, Any]:
     try:
         parsed = json.loads(path.read_text(encoding="utf-8"))
@@ -6163,6 +6262,7 @@ def run_first_run_auth_phase(
     *,
     owner_user: str | None = None,
     owner_home: Path | None = None,
+    validate_models: bool = False,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     print_func: Callable[[str], None] = print,
 ) -> FirstRunAuthReport:
@@ -6237,11 +6337,23 @@ def run_first_run_auth_phase(
             "run /hooks in Codex as the project owner and approve the changed hook"
         )
 
+    model_validation_failures: list[ModelValidationFailure] = []
+    if validate_models:
+        skipped_clis = set(unauthenticated) | set(missing_cli_roles)
+        model_roles = [role for role in config.roles if _role_cli_name(role) not in skipped_clis]
+        model_validation_failures = validate_role_models(
+            model_roles,
+            owner_user=effective_owner,
+            owner_home=effective_home,
+            runner=runner,
+        )
+
     return FirstRunAuthReport(
         unauthenticated,
         untrusted,
         stale_codex_hook_trust,
         missing_cli_roles,
+        model_validation_failures,
         effective_owner if missing_cli_roles else "",
     )
 
@@ -6268,11 +6380,17 @@ def report_first_run_auth_warnings(
             f"warning: switchyard: codex hook trust stale for {mismatch.role} event {mismatch.event}; "
             f"run /hooks in Codex to approve {mismatch.hook_key}"
         )
+    for failure in report.model_validation_failures:
+        print_func(
+            f"warning: switchyard: model validation failed for role {failure.role} "
+            f"(cli {failure.cli}, model {failure.model}): {failure.reason}; {failure.suggestion}"
+        )
 
 
 def run_switchyard_launch_first_run_auth(
     config: ProjectConfig,
     *,
+    validate_models: bool = False,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     print_func: Callable[[str], None] = print,
 ) -> FirstRunAuthReport:
@@ -6283,6 +6401,7 @@ def run_switchyard_launch_first_run_auth(
         config,
         owner_user=owner_user,
         owner_home=_owner_home_for_auth(owner_user),
+        validate_models=validate_models,
         runner=runner,
         print_func=print_func,
     )
@@ -6712,6 +6831,26 @@ def switchyard_status_command(
     return 0
 
 
+def switchyard_validate_models_command(
+    project: str,
+    *,
+    config_dir: Path | None = None,
+    registry_dir: Path | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    entry = _resolve_switchyard_project(project, config_dir=config_dir, registry_dir=registry_dir)
+    config = load_project_config(entry.slug, entry.config_path)
+    report = run_switchyard_launch_first_run_auth(
+        config,
+        validate_models=True,
+        runner=runner,
+        print_func=print_func,
+    )
+    report_first_run_auth_warnings(report, print_func=print_func)
+    return 1 if report.model_validation_failures else 0
+
+
 def _resolve_switchyard_project(
     selection: str,
     *,
@@ -6984,9 +7123,13 @@ def switchyard_new_command(
         config,
         owner_user=owner_user,
         owner_home=_owner_home_for_auth(owner_user, fallback=home_base / owner_user),
+        validate_models=True,
         runner=runner,
         print_func=print_func,
     )
+    if first_run_auth_report.model_validation_failures:
+        report_first_run_auth_warnings(first_run_auth_report, print_func=print_func)
+        return 1
     launch_runner = _owner_project_git_runner(
         owner_user=owner_user,
         project_dir=project_dir,
@@ -7424,9 +7567,17 @@ def switchyard_main(argv: list[str] | None = None) -> int:
     if argv[0].casefold() == "status":
         args = _build_switchyard_status_parser().parse_args(argv[1:])
         return switchyard_status_command(json_output=args.json)
+    if argv[0].casefold() == "validate-models":
+        if len(argv) < 2:
+            raise SystemExit("switchyard validate-models requires <project>")
+        project = " ".join(argv[1:])
+        return switchyard_validate_models_command(project)
     selection = " ".join(argv)
     entry = _resolve_switchyard_project(selection)
     config = load_project_config(entry.slug, entry.config_path)
+    # Model validation intentionally runs only for `switchyard new` and the
+    # explicit validate-models command. It performs provider API calls, so a
+    # routine team start should not depend on provider availability.
     first_run_auth_report = run_switchyard_launch_first_run_auth(config)
     launch_result = launch_project(
         config,

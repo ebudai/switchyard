@@ -1803,6 +1803,59 @@ LIMIT 1;
         )
     )
     assert director_notice == {"target_role": "director", "kind": "transition", "new_state": "analysis"}, director_notice
+    notification_id = int(
+        psql(
+            admin_conn,
+            """
+SELECT ticket_board.enqueue_notification(
+    'PGU-128',
+    'transition',
+    'ops',
+    'New ticket for you: PGU-128 -- Orphaned queue row',
+    '{"kind":"transition","id":"PGU-128","target_role":"ops","new_state":"in_progress","assignee":"ops"}'::jsonb,
+    'pgu776-write-api-dismiss'
+);
+""",
+        )
+    )
+    non_director_dismiss = post_json(
+        base_url,
+        "/api/tickets/actions/dismiss_notification",
+        {"notification_id": notification_id, "reason": "try as ops"},
+        caller="ops",
+        expect=403,
+    )
+    assert "ops cannot call dismiss_notification" in str(non_director_dismiss), non_director_dismiss
+    dismissed = TicketBoardWriteClient(base_url, "director", write_token=TEST_WRITE_TOKEN or "").dismiss_notification(
+        notification_id,
+        reason="director cleared orphaned notification",
+    )
+    assert dismissed == {"notification_id": notification_id, "dismissed": True}, dismissed
+    assert psql(admin_conn, f"SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE id = {notification_id};") == "0"
+    dismiss_trace = json.loads(
+        psql(
+            admin_conn,
+            f"""
+SELECT jsonb_build_object(
+    'event', event,
+    'busy_reason', busy_reason,
+    'actor', detail->>'actor',
+    'reason', detail->>'reason'
+)::text
+FROM ticket_board.notification_trace
+WHERE notification_id = {notification_id}
+  AND event = 'director_dismiss'
+ORDER BY id DESC
+LIMIT 1;
+""",
+        )
+    )
+    assert dismiss_trace == {
+        "event": "director_dismiss",
+        "busy_reason": "director cleared orphaned notification",
+        "actor": "director",
+        "reason": "director cleared orphaned notification",
+    }, dismiss_trace
     empty_handback = post_json(
         base_url,
         "/api/tickets/PGU-1281/actions/implementer_kick_back",

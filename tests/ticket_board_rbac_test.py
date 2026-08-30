@@ -57,12 +57,14 @@ WRITE_FUNCTIONS = [
     "ticket_board.add_comment(text,text,boolean)",
     "ticket_board.edit_fields(text,jsonb)",
     "ticket_board.merge(text,text)",
+    "ticket_board.dismiss_notification(bigint,text)",
 ]
 LISTENER_FUNCTIONS = [
     "ticket_board.claim_notification(timestamp with time zone,interval)",
     "ticket_board.next_notification_attempt(timestamp with time zone,interval)",
     "ticket_board.finish_current_blocker(text,text,timestamp with time zone,interval)",
     "ticket_board.ack_notification(bigint)",
+    "ticket_board.dead_letter_notification(bigint,text,jsonb)",
     "ticket_board.requeue_notification(bigint,interval,text)",
     "ticket_board.record_notification_trace(text,bigint,text,text,text,text,text,text,jsonb)",
     "ticket_board.notify_idle_stall_nudges(jsonb,timestamp with time zone,interval,interval,integer,jsonb)",
@@ -1520,6 +1522,105 @@ SELECT ticket_board.record_notification_trace(
     assert_permission_denied(service_conn, "SELECT * FROM ticket_board.claim_notification();")
     assert_permission_denied(service_conn, f"SELECT ticket_board.ack_notification({claimed_again['notification_id']});")
     assert_permission_denied(service_conn, f"SELECT ticket_board.requeue_notification({claimed_again['notification_id']}, interval '1 second', 'x');")
+    dead_letter_id = psql(
+        admin_conn,
+        """
+SELECT ticket_board.enqueue_notification(
+    'PGU-950',
+    'transition',
+    'research',
+    'New ticket for you: PGU-950 -- Listener dead-letter',
+    '{"kind":"transition","id":"PGU-950","target_role":"research","new_state":"in_progress","assignee":"research"}'::jsonb,
+    'pgu776-dead-letter'
+);
+""",
+    )
+    dead_claim = json.loads(
+        psql(
+            listener_conn,
+            """
+SELECT row_to_json(claimed)::text
+FROM ticket_board.claim_notification() AS claimed;
+""",
+        )
+    )
+    assert dead_claim["notification_id"] == int(dead_letter_id), dead_claim
+    psql(
+        listener_conn,
+        f"""
+SELECT ticket_board.dead_letter_notification(
+    {dead_letter_id},
+    'tmux_target_missing',
+    '{{"target":"pgu-research:0.0"}}'::jsonb
+);
+""",
+    )
+    dead_lettered_row = json.loads(
+        psql(
+            admin_conn,
+            f"""
+SELECT jsonb_build_object(
+    'visible', count(*) = 1,
+    'dead_lettered', bool_or(dead_lettered_at IS NOT NULL),
+    'terminal_reason', max(terminal_reason),
+    'last_error', max(last_error)
+)::text
+FROM ticket_board.ticket_notification_queue
+WHERE id = {dead_letter_id};
+""",
+        )
+    )
+    assert dead_lettered_row == {
+        "visible": True,
+        "dead_lettered": True,
+        "terminal_reason": "tmux_target_missing",
+        "last_error": "tmux_target_missing",
+    }, dead_lettered_row
+    assert psql(
+        listener_conn,
+        """
+SELECT count(*)
+FROM ticket_board.claim_notification() AS claimed;
+""",
+    ) == "0"
+    assert_permission_denied(
+        service_conn,
+        f"SELECT ticket_board.dead_letter_notification({dead_letter_id}, 'tmux_target_missing', '{{}}'::jsonb);",
+    )
+    assert_permission_denied(
+        listener_conn,
+        f"SELECT ticket_board.dismiss_notification({dead_letter_id}, 'listener cannot dismiss');",
+    )
+    assert_permission_denied(
+        service_conn,
+        f"""
+SELECT set_config('ticket_board.caller_role', 'ops', false);
+SELECT ticket_board.dismiss_notification({dead_letter_id}, 'non-director cannot dismiss');
+""",
+    )
+    psql(
+        service_conn,
+        f"""
+SELECT set_config('ticket_board.caller_role', 'director', false);
+SELECT ticket_board.dismiss_notification({dead_letter_id}, 'director cleared orphaned notification');
+""",
+    )
+    assert psql(
+        admin_conn,
+        f"SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE id = {dead_letter_id};",
+    ) == "0"
+    terminal_trace_events = json.loads(
+        psql(
+            admin_conn,
+            f"""
+SELECT jsonb_agg(event ORDER BY id)::text
+FROM ticket_board.notification_trace
+WHERE notification_id = {dead_letter_id};
+""",
+        )
+    )
+    assert "dead_letter" in terminal_trace_events, terminal_trace_events
+    assert "director_dismiss" in terminal_trace_events, terminal_trace_events
     assert_permission_denied(
         service_conn,
         """

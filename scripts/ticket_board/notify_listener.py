@@ -338,6 +338,28 @@ def delivery_failure_reason(exc: BaseException, target: str) -> str:
     return str(exc)
 
 
+def tmux_target_exists(target: str, *, runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run) -> bool | None:
+    try:
+        proc = runner(
+            ["tmux", "display-message", "-p", "-t", target, "#{pane_id}"],
+            text=True,
+            capture_output=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode == 0 and proc.stdout.strip():
+        return True
+    reason = delivery_failure_reason(
+        subprocess.CalledProcessError(proc.returncode, proc.args, output=proc.stdout, stderr=proc.stderr),
+        target,
+    )
+    if reason == "tmux_target_missing":
+        return False
+    return None
+
+
 class PaneHookStateStore:
     def __init__(self, state_dir: str | Path = DEFAULT_PANE_STATE_DIR) -> None:
         self.state_dir = Path(state_dir).expanduser()
@@ -765,6 +787,7 @@ class TicketBoardNotifyListener:
         sleeper: Callable[[float], None] = time.sleep,
         stop_event: threading.Event | None = None,
         logger: logging.Logger = LOGGER,
+        target_exists: Callable[[str], bool | None] | None = None,
     ) -> None:
         self.conninfo = conninfo
         self.channel = channel
@@ -786,6 +809,7 @@ class TicketBoardNotifyListener:
         self.sleeper = sleeper
         self.stop_event = stop_event or threading.Event()
         self.logger = logger
+        self.target_exists = target_exists or tmux_target_exists
         self.delivered_count = 0
         self._traced_gate_defer_notifications: set[int] = set()
         self._seen_turn_end_idle_since_by_role: dict[str, str] = {}
@@ -1004,6 +1028,35 @@ SELECT ticket_board.record_notification_trace(
             "SELECT ticket_board.requeue_notification(%s::bigint, %s::interval, %s::text)",
             (notification_id, f"{delay_seconds:g} seconds", error[:500]),
         )
+
+    def _dead_letter_notification(
+        self,
+        conn: Any,
+        notification_id: int,
+        reason: str,
+        *,
+        target: str,
+        message: str,
+        attempts: int,
+        payload: str,
+    ) -> None:
+        conn.execute(
+            "SELECT ticket_board.dead_letter_notification(%s::bigint, %s::text, %s::jsonb)",
+            (
+                notification_id,
+                reason[:500],
+                json.dumps(
+                    {
+                        "target": target,
+                        "message": message,
+                        "attempts": attempts,
+                        "payload": self._safe_json_payload(payload),
+                    },
+                    sort_keys=True,
+                ),
+            ),
+        )
+        self._traced_gate_defer_notifications.discard(notification_id)
 
     def _reset_busy_backoff_for_idle_roles(self, conn: Any, idle_since_by_role: dict[str, str]) -> int:
         if not idle_since_by_role:
@@ -1410,6 +1463,24 @@ WHERE id = %s
                 self._ack_notification(conn, notification_id)
                 self._traced_gate_defer_notifications.discard(notification_id)
                 continue
+            target_exists = self.target_exists(target)
+            if target_exists is False:
+                self.logger.error(
+                    "Dead-lettering ticket notification %s for %s: target %s does not exist",
+                    notification_id,
+                    ticket_id,
+                    target,
+                )
+                self._dead_letter_notification(
+                    conn,
+                    notification_id,
+                    "tmux_target_missing",
+                    target=target,
+                    message=message,
+                    attempts=attempts,
+                    payload=payload,
+                )
+                continue
             finish_current_ticket = self._finish_current_blocker(conn, ticket_id, target_role, payload)
             if finish_current_ticket:
                 self.logger.info(
@@ -1528,7 +1599,8 @@ WHERE id = %s
                 failure_reason = delivery_failure_reason(exc, target)
                 if failure_reason == "tmux_target_missing":
                     self.logger.error(
-                        "Ticket notification target %s does not exist; role %s is undeliverable until its tmux session is restored",
+                        "Dead-lettering ticket notification %s because target %s does not exist; role %s is undeliverable until its tmux session is restored",
+                        notification_id,
                         target,
                         target_role,
                     )
@@ -1557,7 +1629,18 @@ WHERE id = %s
                         directorctl_diagnostic=directorctl_diagnostic,
                     ),
                 )
-                self._requeue_notification(conn, notification_id, attempts, failure_reason)
+                if failure_reason == "tmux_target_missing":
+                    self._dead_letter_notification(
+                        conn,
+                        notification_id,
+                        failure_reason,
+                        target=target,
+                        message=message,
+                        attempts=attempts,
+                        payload=payload,
+                    )
+                else:
+                    self._requeue_notification(conn, notification_id, attempts, failure_reason)
                 continue
             composer_after = self._composer_snapshot(target)
             self._trace_notification(

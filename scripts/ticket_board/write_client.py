@@ -16,6 +16,7 @@ from urllib import error as urllib_error
 from urllib import parse, request
 
 CALLER_ROLE_HEADER = "X-Ticket-Board-Caller-Role"
+WRITE_TOKEN_HEADER = "X-Ticket-Board-Write-Token"
 REPORT_TOKEN_HEADER = "X-Ticket-Board-Report-Token"
 LEGACY_CALLER_ROLE_HEADER = "X-PGU-Caller-Role"
 LIVE_BOARD_URL_HOSTS = frozenset({"127.0.0.1", "localhost"})
@@ -55,6 +56,7 @@ DEFAULT_BOARD_SOCKET = (
     _env_first("TICKET_BOARD_SOCKET", "PGU_TICKET_BOARD_SOCKET")
     or "/run/pgu-ticket-board/ticket-board.sock"
 )
+DEFAULT_WRITE_TOKEN = _env_first("TICKET_BOARD_WRITE_TOKEN", "PGU_TICKET_BOARD_WRITE_TOKEN")
 DEFAULT_REPORT_TOKEN = _env_first("TICKET_BOARD_TENANT_REPORT_TOKEN", "TICKET_BOARD_REPORT_TOKEN")
 LEGACY_BOARD_SOCKET = "/tmp/pgu-ticket-board.sock"
 
@@ -258,6 +260,7 @@ class TicketBoardWriteClient:
     timeout: float = 10.0
     socket_path: str | None = None
     report_token: str = DEFAULT_REPORT_TOKEN
+    write_token: str = DEFAULT_WRITE_TOKEN
 
     @property
     def api_url(self) -> str:
@@ -272,7 +275,7 @@ class TicketBoardWriteClient:
         return self.socket_path or _default_socket_path(self.board_url)
 
     def for_caller(self, caller_role: str) -> "TicketBoardWriteClient":
-        return TicketBoardWriteClient(self.board_url, caller_role, self.timeout, self.socket_path, self.report_token)
+        return TicketBoardWriteClient(self.board_url, caller_role, self.timeout, self.socket_path, self.report_token, self.write_token)
 
     def _post(self, path: str, payload: dict[str, Any], *, caller_role: str | None = None) -> dict[str, Any]:
         role = (caller_role or self.caller_role).strip().lower()
@@ -288,10 +291,13 @@ class TicketBoardWriteClient:
                     raise
                 print(f"WARNING: ticket board Unix socket {socket_path} failed ({exc}); falling back to TCP {self.api_url}", file=sys.stderr)
         body = json.dumps(payload).encode("utf-8")
+        headers = {"Content-Type": "application/json", CALLER_ROLE_HEADER: role, LEGACY_CALLER_ROLE_HEADER: role}
+        if self.write_token:
+            headers[WRITE_TOKEN_HEADER] = self.write_token
         req = request.Request(
             f"{self.api_url}{path}",
             data=body,
-            headers={"Content-Type": "application/json", CALLER_ROLE_HEADER: role, LEGACY_CALLER_ROLE_HEADER: role},
+            headers=headers,
             method="POST",
         )
         try:
@@ -664,6 +670,19 @@ class TicketBoardWriteClient:
     def merge(self, source_ticket_id: str, *, target_id: str, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(source_ticket_id, "merge", {"target_id": target_id}, caller_role=caller_role)
 
+    def dismiss_notification(
+        self,
+        notification_id: int,
+        *,
+        reason: str = "",
+        caller_role: str | None = None,
+    ) -> dict[str, Any]:
+        return self._post(
+            "/actions/dismiss_notification",
+            {"notification_id": notification_id, "reason": reason},
+            caller_role=caller_role,
+        )
+
 
 def _ticket_from_response(response: dict[str, Any]) -> dict[str, Any]:
     ticket = response.get("ticket")
@@ -700,6 +719,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--report-token",
         default=DEFAULT_REPORT_TOKEN,
         help="Tenant report token for file-report. Default: TICKET_BOARD_TENANT_REPORT_TOKEN or TICKET_BOARD_REPORT_TOKEN.",
+    )
+    parser.add_argument(
+        "--write-token",
+        default=DEFAULT_WRITE_TOKEN,
+        help="HTTP write token for TCP board action routes. Default: TICKET_BOARD_WRITE_TOKEN or legacy PGU_TICKET_BOARD_WRITE_TOKEN.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -837,6 +861,10 @@ def _build_parser() -> argparse.ArgumentParser:
     merge = subparsers.add_parser("merge")
     merge.add_argument("ticket_id")
     merge.add_argument("--target-id", required=True)
+
+    dismiss_notification = subparsers.add_parser("dismiss-notification")
+    dismiss_notification.add_argument("notification_id", type=int)
+    dismiss_notification.add_argument("--reason", default="")
     return parser
 
 
@@ -848,7 +876,13 @@ def main(argv: list[str] | None = None) -> int:
             raise TicketBoardWriteError(
                 "ticket board caller role required; pass --caller-role or set TICKET_BOARD_CALLER_ROLE"
             )
-        client = TicketBoardWriteClient(args.board_url, args.caller_role, socket_path=args.socket_path, report_token=args.report_token)
+        client = TicketBoardWriteClient(
+            args.board_url,
+            args.caller_role,
+            socket_path=args.socket_path,
+            report_token=args.report_token,
+            write_token=args.write_token,
+        )
         if command == "create_ticket":
             response = client.create_ticket(
                 title=args.title,
@@ -944,6 +978,8 @@ def main(argv: list[str] | None = None) -> int:
             response = client.edit_fields(args.ticket_id, patch)
         elif command == "merge":
             response = client.merge(args.ticket_id, target_id=args.target_id)
+        elif command == "dismiss_notification":
+            response = client.dismiss_notification(args.notification_id, reason=args.reason)
         else:
             response = getattr(client, command)(args.ticket_id)
     except json.JSONDecodeError as exc:
@@ -952,7 +988,7 @@ def main(argv: list[str] | None = None) -> int:
     except TicketBoardWriteError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    if command == "merge":
+    if command in {"merge", "dismiss_notification"}:
         print(json.dumps(response))
     else:
         print(json.dumps(_ticket_from_response(response)))

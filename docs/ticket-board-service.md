@@ -298,6 +298,17 @@ role should not report `foreign_runtime_*` merely because its hook source is
 failed or otherwise inconclusive probe still treats the pane as busy and records
 a specific trace reason instead of collapsing the decision into `hook_idle`.
 
+If a queued notification targets a tmux pane that no longer exists, the listener
+does not keep retrying it as a busy pane and does not silently drop it. The row
+stays in `ticket_board.ticket_notification_queue` with `dead_lettered_at` set
+and `terminal_reason='tmux_target_missing'`, is excluded from future claims, and
+has a `dead_letter` trace event. A director can explicitly clear a visible
+terminal or otherwise stuck notification through the supported write API:
+
+```bash
+scripts/ticket-board-write dismiss-notification <notification-id> --reason "pane was detached"
+```
+
 Install the hook writer and persistent CLI hook config entries with:
 
 ```bash

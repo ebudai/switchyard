@@ -97,6 +97,7 @@ class FakeConnection:
         self.idle_stall_result = idle_stall_result
         self.acked: list[int] = []
         self.requeued: list[tuple[int, tuple[Any, ...] | None]] = []
+        self.dead_lettered: list[tuple[int, tuple[Any, ...] | None]] = []
         self.traces: list[tuple[Any, ...] | None] = []
         self.reset_backoff_calls: list[tuple[Any, ...] | None] = []
         self.idle_turn_end_calls: list[tuple[Any, ...] | None] = []
@@ -168,6 +169,9 @@ class FakeConnection:
         if "ack_notification" in statement_text:
             assert params is not None
             self.acked.append(int(params[0]))
+        if "dead_letter_notification" in statement_text:
+            assert params is not None
+            self.dead_lettered.append((int(params[0]), params))
         if "requeue_notification" in statement_text:
             assert params is not None
             self.requeued.append((int(params[0]), params))
@@ -2674,6 +2678,7 @@ def test_send_failure_marks_missing_tmux_target_as_structural_fault() -> None:
         activity_gate=lambda _target: False,
         connector=lambda *args, **kwargs: conn,
         poll_seconds=0,
+        target_exists=lambda _target: None,
     )
 
     assert listener.listen_once(max_notifications=1) == 0
@@ -2682,7 +2687,71 @@ def test_send_failure_marks_missing_tmux_target_as_structural_fault() -> None:
     assert conn.traces[1][6] == "tmux_target_missing"
     detail = json.loads(conn.traces[1][8])
     assert detail["decision_reason"] == "tmux_target_missing"
-    assert conn.requeued == [(17, (17, "10 seconds", "tmux_target_missing"))]
+    assert conn.requeued == []
+    assert len(conn.dead_lettered) == 1
+    notification_id, params = conn.dead_lettered[0]
+    assert notification_id == 17
+    assert params is not None
+    assert params[1] == "tmux_target_missing"
+    detail = json.loads(params[2])
+    assert detail["attempts"] == 2
+    assert detail["target"] == "pgu-research:0.0"
+    assert detail["message"] == "New ticket for you: PGU-637 -- Queue"
+
+
+def test_missing_tmux_target_dead_letters_before_busy_gate() -> None:
+    gate_calls: list[str] = []
+    send_calls: list[tuple[str, str]] = []
+    conn = FakeConnection([queue_row(49, "PGU-772", attempts=49, assignee="perf", target_role="perf")])
+    listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=lambda target, message: send_calls.append((target, message)),
+        activity_gate=lambda target: gate_calls.append(target) or True,
+        connector=lambda *args, **kwargs: conn,
+        poll_seconds=0,
+        target_exists=lambda target: False if target == "pgu-perf:0.0" else True,
+    )
+
+    assert listener.listen_once(max_notifications=1) == 0
+    assert send_calls == []
+    assert gate_calls == []
+    assert conn.requeued == []
+    assert conn.acked == []
+    assert len(conn.dead_lettered) == 1
+    notification_id, params = conn.dead_lettered[0]
+    assert notification_id == 49
+    assert params is not None
+    assert params[1] == "tmux_target_missing"
+    detail = json.loads(params[2])
+    assert detail["target"] == "pgu-perf:0.0"
+    assert detail["attempts"] == 49
+
+
+def test_busy_existing_pane_holds_then_delivers_when_idle() -> None:
+    sent: list[tuple[str, str]] = []
+    gate_busy = [True]
+    row = queue_row(50, "PGU-776", attempts=1, assignee="ops", target_role="ops")
+    conn = FakeConnection([row])
+    listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=lambda target, message: sent.append((target, message)),
+        activity_gate=lambda _target: gate_busy[0],
+        connector=lambda *args, **kwargs: conn,
+        poll_seconds=0,
+        target_exists=lambda _target: True,
+    )
+
+    assert listener.listen_once(max_notifications=1) == 0
+    assert sent == []
+    assert conn.requeued == [(50, (50, f"{DEFAULT_REQUEUE_BASE_SECONDS:g} seconds", "pane busy"))]
+    assert conn.dead_lettered == []
+
+    gate_busy[0] = False
+    conn.queue_rows.append(queue_row(50, "PGU-776", attempts=2, assignee="ops", target_role="ops"))
+    assert listener.listen_once(max_notifications=1) == 1
+    assert sent == [("pgu-ops:0.0", "New ticket for you: PGU-776 -- Queue")]
+    assert conn.acked == [50]
+    assert conn.dead_lettered == []
 
 
 def test_stale_notification_for_cancelled_ticket_is_acked_not_delivered() -> None:

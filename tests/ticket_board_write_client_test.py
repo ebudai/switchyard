@@ -20,7 +20,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.ticket_board import write_client as write_client_module
-from scripts.ticket_board.server import CALLER_ROLE_HEADER, LEGACY_CALLER_ROLE_HEADER, OPERATION_ALLOWED_ROLES, REPORT_TOKEN_HEADER
+from scripts.ticket_board.server import (
+    CALLER_ROLE_HEADER,
+    LEGACY_CALLER_ROLE_HEADER,
+    OPERATION_ALLOWED_ROLES,
+    REPORT_TOKEN_HEADER,
+    WRITE_TOKEN_HEADER,
+)
 from scripts.ticket_board.write_client import TicketBoardWriteClient
 
 
@@ -41,8 +47,10 @@ class RecordingHandler(BaseHTTPRequestHandler):
         caller = self.headers.get(CALLER_ROLE_HEADER)
         legacy_caller = self.headers.get(LEGACY_CALLER_ROLE_HEADER)
         report_token = self.headers.get(REPORT_TOKEN_HEADER)
+        write_token = self.headers.get(WRITE_TOKEN_HEADER)
         self.server.requests.append((self.path, caller, legacy_caller, payload))  # type: ignore[attr-defined]
         self.server.report_tokens.append((self.path, report_token))  # type: ignore[attr-defined]
+        self.server.write_tokens.append((self.path, write_token))  # type: ignore[attr-defined]
         ticket_id = "PGU-NEW"
         operation = self.path.rsplit("/", 1)[-1]
         if self.path.startswith("/api/tickets/PGU-") and "/actions/" in self.path:
@@ -155,6 +163,7 @@ class RecordingServer(ThreadingHTTPServer):
     def __init__(self) -> None:
         self.requests: list[tuple[str, str | None, str | None, dict[str, object]]] = []
         self.report_tokens: list[tuple[str, str | None]] = []
+        self.write_tokens: list[tuple[str, str | None]] = []
         super().__init__(("127.0.0.1", 0), RecordingHandler)
 
 
@@ -287,7 +296,7 @@ def assert_action_requests(requests: list[tuple[str, str | None, str | None, dic
 
 def exercise_client(base_url: str, repo: Path, commit_hash: str) -> None:
     with pushd(repo):
-        client = TicketBoardWriteClient(base_url, "director")
+        client = TicketBoardWriteClient(base_url, "director", write_token="write-token")
         created = client.create_ticket(
             title="Client create",
             body="Created.",
@@ -744,6 +753,7 @@ def main() -> int:
                 assert_auto_socket_connect_failure_falls_back_to_tcp(base_url, root / "blocked.sock")
                 assert_action_requests(server.requests)
                 assert ("/api/tickets/actions/file_report", "tenant-token") in server.report_tokens
+                assert ("/api/tickets/actions/create_ticket", "write-token") in server.write_tokens
                 assert ("/api/tickets/PGU-120/actions/start_work", "ops") in request_pairs(server.requests)
                 assert all(path != "/api/tickets/PGU-122/actions/submit_to_audit" for path, _, _, _ in server.requests)
         finally:

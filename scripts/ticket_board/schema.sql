@@ -457,9 +457,15 @@ CREATE TABLE IF NOT EXISTS ticket_board.ticket_notification_queue (
     next_attempt_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     claimed_at timestamptz,
     last_error text,
+    dead_lettered_at timestamptz,
+    terminal_reason text,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
+ALTER TABLE ticket_board.ticket_notification_queue
+    ADD COLUMN IF NOT EXISTS dead_lettered_at timestamptz;
+ALTER TABLE ticket_board.ticket_notification_queue
+    ADD COLUMN IF NOT EXISTS terminal_reason text;
 
 ALTER TABLE ticket_board.ticket_notification_queue
     DROP CONSTRAINT IF EXISTS ticket_notification_queue_target_role_check;
@@ -469,11 +475,11 @@ ALTER TABLE ticket_board.ticket_notification_queue
 
 CREATE INDEX IF NOT EXISTS ticket_notification_queue_due_idx
     ON ticket_board.ticket_notification_queue (next_attempt_at, id)
-    WHERE claimed_at IS NULL;
+    WHERE claimed_at IS NULL AND dead_lettered_at IS NULL;
 
 CREATE INDEX IF NOT EXISTS ticket_notification_queue_claimed_idx
     ON ticket_board.ticket_notification_queue (claimed_at, next_attempt_at, id)
-    WHERE claimed_at IS NOT NULL;
+    WHERE claimed_at IS NOT NULL AND dead_lettered_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS ticket_board.notification_trace (
     id bigserial PRIMARY KEY,
@@ -2072,6 +2078,11 @@ BEGIN
     SET payload = EXCLUDED.payload,
         target_role = EXCLUDED.target_role,
         message = EXCLUDED.message,
+        claimed_at = NULL,
+        next_attempt_at = EXCLUDED.next_attempt_at,
+        last_error = NULL,
+        dead_lettered_at = NULL,
+        terminal_reason = NULL,
         updated_at = clock_timestamp()
     RETURNING id INTO notification_id;
 
@@ -2117,6 +2128,7 @@ BEGIN
         FROM ticket_board.ticket_notification_queue q
         WHERE q.next_attempt_at <= p_now
           AND (q.claimed_at IS NULL OR q.claimed_at <= p_now - p_claim_timeout)
+          AND q.dead_lettered_at IS NULL
         ORDER BY q.next_attempt_at, q.id
         LIMIT 1
         FOR UPDATE SKIP LOCKED
@@ -2166,8 +2178,8 @@ BEGIN
     SELECT min(q.next_attempt_at)
     INTO next_attempt
     FROM ticket_board.ticket_notification_queue q
-    WHERE q.claimed_at IS NULL
-       OR q.claimed_at <= p_now - p_claim_timeout;
+    WHERE (q.claimed_at IS NULL OR q.claimed_at <= p_now - p_claim_timeout)
+      AND q.dead_lettered_at IS NULL;
     RETURN next_attempt;
 END;
 $$;
@@ -2238,6 +2250,7 @@ BEGIN
               AND q.kind = 'transition'
               AND q.next_attempt_at <= p_now
               AND (q.claimed_at IS NULL OR q.claimed_at <= p_now - p_claim_timeout)
+              AND q.dead_lettered_at IS NULL
         )
         AND NOT EXISTS (
             SELECT 1
@@ -2246,6 +2259,7 @@ BEGIN
               AND q.kind = 'transition'
               AND q.next_attempt_at <= p_now
               AND (q.claimed_at IS NULL OR q.claimed_at <= p_now - p_claim_timeout)
+              AND q.dead_lettered_at IS NULL
             ORDER BY q.next_attempt_at, q.id
             FOR UPDATE SKIP LOCKED
             LIMIT 1
@@ -2299,6 +2313,100 @@ BEGIN
     )
     FROM ticket_board.ticket_notification_queue q
     WHERE q.id = p_notification_id;
+
+    DELETE FROM ticket_board.ticket_notification_queue
+    WHERE id = p_notification_id;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.dead_letter_notification(
+    p_notification_id bigint,
+    p_reason text,
+    p_detail jsonb DEFAULT '{}'::jsonb
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    now_at timestamptz := clock_timestamp();
+BEGIN
+    PERFORM ticket_board.require_ticket_board_listener('dead_letter_notification');
+    IF btrim(coalesce(p_reason, '')) = '' THEN
+        RAISE EXCEPTION 'dead_letter_notification requires a non-empty reason';
+    END IF;
+
+    UPDATE ticket_board.ticket_notification_queue
+    SET claimed_at = NULL,
+        dead_lettered_at = now_at,
+        terminal_reason = left(p_reason, 500),
+        last_error = left(p_reason, 500),
+        updated_at = now_at
+    WHERE id = p_notification_id;
+
+    PERFORM ticket_board.record_notification_trace(
+        q.ticket_id,
+        q.id,
+        q.target_role,
+        q.kind,
+        'dead_letter',
+        NULL,
+        p_reason,
+        NULL,
+        jsonb_build_object(
+            'reason', p_reason,
+            'attempts', q.attempts,
+            'payload', q.payload,
+            'detail', coalesce(p_detail, '{}'::jsonb)
+        )
+    )
+    FROM ticket_board.ticket_notification_queue q
+    WHERE q.id = p_notification_id;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.dismiss_notification(
+    p_notification_id bigint,
+    p_reason text DEFAULT ''
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    actor text;
+BEGIN
+    actor := ticket_board.require_actor(ARRAY['director'], 'dismiss_notification');
+
+    PERFORM ticket_board.record_notification_trace(
+        q.ticket_id,
+        q.id,
+        q.target_role,
+        q.kind,
+        'director_dismiss',
+        NULL,
+        coalesce(nullif(btrim(p_reason), ''), 'director dismissed notification'),
+        NULL,
+        jsonb_build_object(
+            'actor', nullif(current_setting('ticket_board.caller_role', true), ''),
+            'reason', p_reason,
+            'attempts', q.attempts,
+            'last_error', q.last_error,
+            'terminal_reason', q.terminal_reason,
+            'dead_lettered_at', q.dead_lettered_at,
+            'payload', q.payload
+        )
+    )
+    FROM ticket_board.ticket_notification_queue q
+    WHERE q.id = p_notification_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'notification % not found', p_notification_id;
+    END IF;
 
     DELETE FROM ticket_board.ticket_notification_queue
     WHERE id = p_notification_id;
@@ -2366,7 +2474,8 @@ BEGIN
         next_attempt_at = now_at + p_delay,
         last_error = p_error,
         updated_at = now_at
-    WHERE id = p_notification_id;
+    WHERE id = p_notification_id
+      AND dead_lettered_at IS NULL;
 END;
 $$;
 
@@ -2401,6 +2510,7 @@ BEGIN
           AND q.next_attempt_at > p_now
           -- Must match PANE_BUSY_REQUEUE_ERROR in notify_listener.py.
           AND q.last_error = 'pane busy'
+          AND q.dead_lettered_at IS NULL
         RETURNING q.id
     )
     SELECT count(*)::integer

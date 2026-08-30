@@ -209,6 +209,11 @@ def main() -> int:
     assert "create or replace function ticket_board.append_ticket_attachment" in crop_metadata_migration
     assert "grant execute on function ticket_board.append_ticket_attachment(text, text, jsonb) to ticket_board_service" in crop_metadata_migration
     assert "create table if not exists ticket_board.notification_trace" in schema_lower
+    assert "dead_lettered_at timestamptz" in schema_lower
+    assert "terminal_reason text" in schema_lower
+    assert "create or replace function ticket_board.dead_letter_notification" in executable_schema_lower
+    assert "create or replace function ticket_board.dismiss_notification" in executable_schema_lower
+    assert "and q.dead_lettered_at is null" in executable_schema_lower
     assert "ticket_state_at_event" in schema_lower
     assert "ticket_assignee_at_event" in schema_lower
     assert "pane_busy_determination" in schema_lower

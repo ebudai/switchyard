@@ -93,6 +93,7 @@ DEFAULT_OPERATION_ALLOWED_ROLES = {
     "edit_fields": CALLER_ROLES,
     "crop_attachment": {"director", "user"},
     "merge": {"director"},
+    "dismiss_notification": {"director"},
 }
 
 
@@ -825,6 +826,16 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 before_signature,
                 notification_source_role=self.notification_source_role(operation, caller) or caller,
             )
+            return
+
+        if operation == "dismiss_notification":
+            dismissed = self.app.dismiss_notification(
+                int(payload.get("notification_id", 0)),
+                reason=str(payload.get("reason", "")),
+                caller_role=caller,
+            )
+            self.events.notify_change(self.app.store_signature())
+            self.send_json(dismissed)
             return
 
         if operation == "file_bug":

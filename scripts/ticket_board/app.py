@@ -1143,6 +1143,15 @@ ORDER BY rank;
                 self._pg_call(conn, "SELECT ticket_board.clear_awaiting_role(%s);", (ticket_id,))
                 return self._pg_get_ticket(ticket_id, conn)
 
+    def dismiss_notification(self, notification_id: int, *, reason: str = "", caller_role: str) -> dict[str, Any]:
+        if notification_id <= 0:
+            raise ValueError("notification_id must be a positive integer")
+        with self._pg_connect() as conn:
+            with conn.transaction():
+                self._pg_set_caller_role(conn, caller_role)
+                self._pg_call(conn, "SELECT ticket_board.dismiss_notification(%s::bigint, %s::text);", (notification_id, reason))
+        return {"notification_id": notification_id, "dismissed": True}
+
     def _pg_call(self, conn: Any, sql: str, params: tuple[Any, ...]) -> None:
         conn.execute(sql, params)
 

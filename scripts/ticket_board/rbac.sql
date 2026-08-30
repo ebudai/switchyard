@@ -100,11 +100,13 @@ GRANT EXECUTE ON FUNCTION ticket_board.add_comment(text, text, boolean) TO ticke
 GRANT EXECUTE ON FUNCTION ticket_board.edit_fields(text, jsonb) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.append_ticket_attachment(text, text, jsonb) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.merge(text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.dismiss_notification(bigint, text) TO ticket_board_service;
 
 GRANT EXECUTE ON FUNCTION ticket_board.claim_notification(timestamptz, interval) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.next_notification_attempt(timestamptz, interval) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.finish_current_blocker(text, text, timestamptz, interval) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.ack_notification(bigint) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.dead_letter_notification(bigint, text, jsonb) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.requeue_notification(bigint, interval, text) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.reset_notification_backoff_for_idle_roles(jsonb, timestamptz) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.record_notification_trace(text, bigint, text, text, text, text, text, text, jsonb) TO ticket_board_listener;

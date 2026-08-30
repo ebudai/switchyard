@@ -16,7 +16,8 @@ from scripts.ticket_board.frontend import HTML
 def main() -> int:
     assert "{ key: 'ready', label: 'Ready' }" not in HTML
     assert "stateLabel(key)" in HTML
-    assert "column.key === 'user_review'" in HTML
+    assert "columnKey !== 'user_review' || ticket.needs_user_signoff" not in HTML
+    assert "Only tickets flagged for UAT appear here." not in HTML
     assert "function defaultAdvanceState(ticket)" in HTML
     assert "if (ticket.state === 'backlog') {" in HTML
     assert "return 'analysis';" in HTML

@@ -1529,7 +1529,6 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       return state.tickets
         .filter((ticket) => (
           ticket.state === columnKey
-          && (columnKey !== 'user_review' || ticket.needs_user_signoff)
           && isTopLevelBoardTicket(ticket)
         ))
         .length;
@@ -1542,7 +1541,6 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       return state.tickets
         .filter((ticket) => (
           ticket.state === columnKey
-          && (columnKey !== 'user_review' || ticket.needs_user_signoff)
           && isTopLevelBoardTicket(ticket)
         ))
         .sort(compareTicketsWithActiveWorkFirst);
@@ -1650,9 +1648,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
         if (!tickets.length) {
           const empty = document.createElement('div');
           empty.className = 'empty';
-          empty.textContent = column.key === 'user_review'
-            ? 'Only tickets flagged for UAT appear here.'
-            : 'No tickets in this state.';
+          empty.textContent = 'No tickets in this state.';
           body.appendChild(empty);
         }
         tickets.forEach((ticket) => body.appendChild(renderCard(ticket)));

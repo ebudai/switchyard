@@ -407,12 +407,13 @@ the affected role/event so the operator can refresh trust deliberately instead
 of silently launching panes with inert hooks.
 During `switchyard new`, the same phase also validates every configured role
 model with that CLI's one-shot prompt mode before panes start. A failed model
-probe aborts creation-time launch and reports the role, CLI, configured model,
-and provider error; the launcher never substitutes a different model. The same
-check can be run later with `switchyard validate-models <project>`. Routine
-`switchyard <project>` starts do not validate models because the probe is an API
-call per role and team startup should not depend on transient provider
-availability.
+probe happens after the project is created and registered, but before any panes
+launch; fix the model in the generated config and rerun `switchyard <project>`.
+The warning reports the role, CLI, configured model, and provider error; the
+launcher never substitutes a different model. The same check can be run later
+with `switchyard validate-models <project>`. Routine `switchyard <project>`
+starts do not validate models because the probe is an API call per role and
+team startup should not depend on transient provider availability.
 Hermes is probed with `hermes config check`, not `hermes auth list`, because
 pooled credentials can appear in `auth list` while Hermes still has no resolved
 API key and opens its setup prompt. Env/config-resolved API keys are the

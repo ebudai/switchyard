@@ -10730,7 +10730,17 @@ def test_switchyard_validate_models_command_runs_model_validation_on_demand() ->
     assert result == 1
     assert runner.calls == [
         ["sudo", "-u", "otto-agent", "codex", "login", "status"],
-        ["sudo", "-u", "otto-agent", "codex", "exec", "--model", "openai/not-a-model", team_launcher.MODEL_VALIDATION_PROMPT],
+        [
+            "sudo",
+            "-u",
+            "otto-agent",
+            "codex",
+            "exec",
+            "--skip-git-repo-check",
+            "--model",
+            "openai/not-a-model",
+            team_launcher.MODEL_VALIDATION_PROMPT,
+        ],
     ]
     assert output == [
         "warning: switchyard: model validation failed for role ops "
@@ -11989,7 +11999,17 @@ def test_switchyard_new_validates_models_before_launching_panes() -> None:
     assert launch_calls == []
     assert runner.calls == [
         ["sudo", "-u", "porter-agent", "codex", "login", "status"],
-        ["sudo", "-u", "porter-agent", "codex", "exec", "--model", "openai/not-a-model", team_launcher.MODEL_VALIDATION_PROMPT],
+        [
+            "sudo",
+            "-u",
+            "porter-agent",
+            "codex",
+            "exec",
+            "--skip-git-repo-check",
+            "--model",
+            "openai/not-a-model",
+            team_launcher.MODEL_VALIDATION_PROMPT,
+        ],
     ]
     assert output[-1] == (
         "warning: switchyard: model validation failed for role director "
@@ -12957,7 +12977,9 @@ class FirstRunAuthRunner:
         missing_clis: set[str] | None = None,
         missing_cli_status_returncode: int = 127,
         invalid_models: dict[tuple[str, str], str] | None = None,
+        empty_success_models: set[tuple[str, str]] | None = None,
         model_catalogs: dict[str, list[str]] | None = None,
+        unauthenticated_clis: set[str] | None = None,
     ) -> None:
         self.calls: list[list[str]] = []
         self.call_kwargs: list[dict[str, object]] = []
@@ -12966,6 +12988,8 @@ class FirstRunAuthRunner:
         self.missing_clis = set(missing_clis or ())
         self.missing_cli_status_returncode = missing_cli_status_returncode
         self.invalid_models = dict(invalid_models or {})
+        self.empty_success_models = set(empty_success_models or ())
+        self.unauthenticated_clis = set(unauthenticated_clis or ())
         self.model_catalogs = {
             "agy": ["gemini-3.7-flash-high", "gemini-3.7-pro"],
             **dict(model_catalogs or {}),
@@ -12981,6 +13005,8 @@ class FirstRunAuthRunner:
         return ""
 
     def _model_probe(self, args: list[str], command: list[str], cli: str, model: str) -> subprocess.CompletedProcess[str]:
+        if (cli, model) in self.empty_success_models:
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
         reason = self.invalid_models.get((cli, model))
         if reason:
             return subprocess.CompletedProcess(args, 1, stdout="", stderr=reason)
@@ -13013,6 +13039,8 @@ class FirstRunAuthRunner:
                     stdout="",
                     stderr="codex: command not found\n",
                 )
+            if "codex" in self.unauthenticated_clis:
+                return subprocess.CompletedProcess(args, 1, stderr="Not logged in\n")
             if self.authenticated_after_login and "codex" in self.login_seen:
                 return subprocess.CompletedProcess(args, 0, stdout="Logged in using ChatGPT\n")
             return subprocess.CompletedProcess(args, 1, stderr="Not logged in\n")
@@ -13043,6 +13071,12 @@ class FirstRunAuthRunner:
                     self.missing_cli_status_returncode,
                     stdout="",
                     stderr="hermes: command not found\n",
+                )
+            if "hermes" in self.unauthenticated_clis:
+                return subprocess.CompletedProcess(
+                    args,
+                    0,
+                    stdout="📋 Configuration Status\n\n  Optional:\n    ○ OPENROUTER_API_KEY → vision_analyze, mixture_of_agents\n",
                 )
             if self.authenticated_after_login and "hermes" in self.login_seen:
                 return subprocess.CompletedProcess(args, 0, stdout="📋 Configuration Status\n\n  Optional:\n    ✓ OPENROUTER_API_KEY\n")
@@ -13456,7 +13490,17 @@ def test_first_run_auth_phase_validates_configured_models_for_all_clis() -> None
         ["sudo", "-u", "otto-agent", "agy", "models"],
         ["sudo", "-u", "otto-agent", "hermes", "config", "check"],
         ["sudo", "-u", "otto-agent", "claude", "--model", "claude-opus-5", "-p", team_launcher.MODEL_VALIDATION_PROMPT],
-        ["sudo", "-u", "otto-agent", "codex", "exec", "--model", "gpt-5.5", team_launcher.MODEL_VALIDATION_PROMPT],
+        [
+            "sudo",
+            "-u",
+            "otto-agent",
+            "codex",
+            "exec",
+            "--skip-git-repo-check",
+            "--model",
+            "gpt-5.5",
+            team_launcher.MODEL_VALIDATION_PROMPT,
+        ],
         ["sudo", "-u", "otto-agent", "agy", "--model", "gemini-3.7-flash-high", "-p", team_launcher.MODEL_VALIDATION_PROMPT],
         ["sudo", "-u", "otto-agent", "hermes", "-m", "z-ai/glm-4.6", "-z", team_launcher.MODEL_VALIDATION_PROMPT],
         ["sudo", "-u", "otto-agent", "hermes", "-m", "deepseek/deepseek-chat", "-z", team_launcher.MODEL_VALIDATION_PROMPT],
@@ -13493,8 +13537,8 @@ def test_first_run_auth_phase_reports_bad_models_with_agy_suggestions_and_no_cat
                 ("claude", "anthropic/claude-3.5-sonnet"): "HTTP 404: No endpoints found for anthropic/claude-3.5-sonnet\n",
                 ("codex", "openai/not-a-model"): "model not found: openai/not-a-model\n",
                 ("agy", "gemini-retired"): "model gemini-retired is unavailable\n",
-                ("hermes", "openrouter/missing"): "provider returned 404 for openrouter/missing\n",
-            }
+            },
+            empty_success_models={("hermes", "openrouter/missing")},
         )
         runner.login_seen.update({"agy", "claude", "codex", "hermes"})
 
@@ -13517,6 +13561,7 @@ def test_first_run_auth_phase_reports_bad_models_with_agy_suggestions_and_no_cat
     assert "no model list is available for claude" in failures[("director", "claude", "anthropic/claude-3.5-sonnet")].suggestion
     assert "no model list is available for codex" in failures[("ops", "codex", "openai/not-a-model")].suggestion
     assert "valid agy models include: gemini-3.7-flash-high, gemini-3.7-pro" in failures[("inspector", "agy", "gemini-retired")].suggestion
+    assert failures[("bulk", "hermes", "openrouter/missing")].reason == "model probe did not confirm model-ok"
     assert "no model list is available for hermes" in failures[("bulk", "hermes", "openrouter/missing")].suggestion
     warning_lines: list[str] = []
     team_launcher.report_first_run_auth_warnings(report, print_func=warning_lines.append)
@@ -13565,6 +13610,50 @@ def test_first_run_auth_phase_does_not_validate_models_unless_requested() -> Non
 
     assert report.model_validation_failures == []
     assert runner.calls == [["sudo", "-u", "otto-agent", "codex", "login", "status"]]
+
+
+def test_first_run_auth_phase_skips_model_validation_for_unauthenticated_or_missing_clis() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-first-run-models-skip-auth.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        config = load_project_config(
+            "otto",
+            _write_first_run_auth_config(
+                tmp_path,
+                roles=[("ops", "codex"), ("inspector", "agy"), ("bulk", "hermes")],
+                role_models={
+                    "ops": "openai/not-a-model",
+                    "inspector": "gemini-retired",
+                    "bulk": "openrouter/missing",
+                },
+            ),
+        )
+        runner = FirstRunAuthRunner(
+            missing_clis={"agy"},
+            missing_cli_status_returncode=127,
+            invalid_models={("codex", "openai/not-a-model"): "model not found: openai/not-a-model\n"},
+            empty_success_models={("hermes", "openrouter/missing")},
+            unauthenticated_clis={"codex"},
+        )
+        runner.login_seen.add("hermes")
+
+        report = team_launcher.run_first_run_auth_phase(
+            config,
+            owner_user="otto-agent",
+            owner_home=owner_home,
+            validate_models=True,
+            runner=runner,
+        )
+
+    assert report.unauthenticated_roles == {"codex": ["ops"]}
+    assert report.missing_cli_roles == {"agy": ["inspector"]}
+    assert [(failure.role, failure.cli, failure.model) for failure in report.model_validation_failures] == [
+        ("bulk", "hermes", "openrouter/missing")
+    ]
+    assert not any(call[:5] == ["sudo", "-u", "otto-agent", "codex", "exec"] for call in runner.calls)
+    assert not any(call[:4] == ["sudo", "-u", "otto-agent", "agy"] and "-p" in call for call in runner.calls)
+    assert ["sudo", "-u", "otto-agent", "hermes", "-m", "openrouter/missing", "-z", team_launcher.MODEL_VALIDATION_PROMPT] in runner.calls
 
 
 def test_first_run_auth_phase_sequences_distinct_logins_and_skips_visible_worktree_trust() -> None:

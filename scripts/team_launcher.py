@@ -5952,7 +5952,7 @@ def _model_validation_command(role: RoleConfig) -> list[str] | None:
         return None
     model_args = [role.model_arg, role.model] if role.model_arg else []
     if cli == "codex":
-        return [*role.cli, "exec", *model_args, MODEL_VALIDATION_PROMPT]
+        return [*role.cli, "exec", "--skip-git-repo-check", *model_args, MODEL_VALIDATION_PROMPT]
     if cli in {"agy", "claude"}:
         return [*role.cli, *model_args, "-p", MODEL_VALIDATION_PROMPT]
     if cli == "hermes":
@@ -5995,6 +5995,10 @@ def _model_failure_suggestion(
     return f"valid agy models include: {', '.join(ids[:8])}"
 
 
+def _model_validation_passed(proc: subprocess.CompletedProcess[Any]) -> bool:
+    return proc.returncode == 0 and "model-ok" in str(getattr(proc, "stdout", "") or "")
+
+
 def validate_role_models(
     roles: Sequence[RoleConfig],
     *,
@@ -6014,14 +6018,17 @@ def validate_role_models(
             command=command,
             runner=runner,
         )
-        if proc.returncode == 0:
+        if _model_validation_passed(proc):
             continue
+        reason = _proc_failure_reason(proc, f"model probe failed with exit {proc.returncode}")
+        if proc.returncode == 0:
+            reason = "model probe did not confirm model-ok"
         failures.append(
             ModelValidationFailure(
                 role=role.role,
                 cli=cli,
                 model=role.model,
-                reason=_proc_failure_reason(proc, f"model probe failed with exit {proc.returncode}"),
+                reason=reason,
                 suggestion=_model_failure_suggestion(
                     cli,
                     owner_user=owner_user,

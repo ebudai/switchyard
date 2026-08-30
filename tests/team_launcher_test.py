@@ -13901,6 +13901,23 @@ def test_first_run_auth_phase_validates_configured_models_for_all_clis() -> None
     assert {kwargs.get("cwd") for kwargs in runner.call_kwargs} == {str(owner_home)}
 
 
+def test_model_validation_ignores_stderr_echoed_prompt_sentinel() -> None:
+    proc = subprocess.CompletedProcess(
+        ["codex", "exec", "--skip-git-repo-check", "--model", "openai/not-a-model"],
+        0,
+        stdout="",
+        stderr=f"model not found\n{team_launcher.MODEL_VALIDATION_PROMPT}\n",
+    )
+
+    assert team_launcher._model_validation_passed(proc) is False
+    assert (
+        team_launcher._model_validation_passed(
+            subprocess.CompletedProcess(["codex"], 0, stdout="model-ok\n", stderr="")
+        )
+        is True
+    )
+
+
 def test_first_run_auth_phase_reports_bad_models_with_agy_suggestions_and_no_catalog_for_other_clis() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-first-run-models-bad.") as tmp:
         tmp_path = Path(tmp)

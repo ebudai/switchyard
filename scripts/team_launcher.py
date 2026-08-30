@@ -6070,6 +6070,8 @@ def _model_failure_suggestion(
 
 
 def _model_validation_passed(proc: subprocess.CompletedProcess[Any]) -> bool:
+    # Codex can echo the prompt text to stderr on model failures; the prompt
+    # contains "model-ok", so stderr must never satisfy the sentinel check.
     return proc.returncode == 0 and "model-ok" in str(getattr(proc, "stdout", "") or "")
 
 

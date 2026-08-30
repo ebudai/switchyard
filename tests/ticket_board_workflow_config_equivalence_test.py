@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
 
 from scripts.ticket_board import frontend_script_core  # noqa: E402
 from scripts.ticket_board.app import STATES, TicketBoardApp  # noqa: E402
+from scripts.ticket_board.project_provision import schema_workflow_stages  # noqa: E402
 
 
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
@@ -286,6 +287,74 @@ def assert_frontend_columns_are_dynamic() -> None:
     assert "visibleColumns() {\n      return boardColumns().filter" in frontend_script_core.SCRIPT_CORE
 
 
+def frontend_default_state_labels() -> dict[str, str]:
+    match = re.search(
+        r"const DEFAULT_STATE_LABELS = (?P<labels>\{.*?\});",
+        frontend_script_core.SCRIPT_CORE,
+        re.S,
+    )
+    if not match:
+        raise AssertionError("could not find DEFAULT_STATE_LABELS in frontend script")
+    return {str(key): str(value) for key, value in json.loads(match.group("labels")).items()}
+
+
+def assert_default_state_labels_match(canonical: dict[str, str], actual: dict[str, str]) -> None:
+    missing = sorted(set(canonical) - set(actual))
+    extra = sorted(set(actual) - set(canonical))
+    mismatched = {
+        key: {"canonical": canonical[key], "actual": actual[key]}
+        for key in sorted(set(canonical) & set(actual))
+        if canonical[key] != actual[key]
+    }
+    assert not missing, f"DEFAULT_STATE_LABELS missing workflow stage labels: {missing}"
+    assert not extra, f"DEFAULT_STATE_LABELS contains non-workflow labels: {extra}"
+    assert not mismatched, f"DEFAULT_STATE_LABELS differs from workflow labels: {mismatched}"
+
+
+def assert_frontend_default_state_labels_match_schema() -> None:
+    canonical = {stage.name: stage.display_label for stage in schema_workflow_stages()}
+    assert_default_state_labels_match(canonical, frontend_default_state_labels())
+
+
+def assert_default_state_label_guard_fails_on_label_divergence_and_missing_stage() -> None:
+    actual = frontend_default_state_labels()
+
+    renamed_canonical = dict(actual)
+    renamed_canonical["analysis"] = "Analysis"
+    try:
+        assert_default_state_labels_match(renamed_canonical, actual)
+    except AssertionError as exc:
+        assert "differs from workflow labels" in str(exc), exc
+        assert "analysis" in str(exc), exc
+    else:
+        raise AssertionError("renamed canonical workflow label did not fail DEFAULT_STATE_LABELS guard")
+
+    added_stage_canonical = dict(actual)
+    added_stage_canonical["qa"] = "QA"
+    try:
+        assert_default_state_labels_match(added_stage_canonical, actual)
+    except AssertionError as exc:
+        assert "missing workflow stage labels" in str(exc), exc
+        assert "qa" in str(exc), exc
+    else:
+        raise AssertionError("new canonical workflow stage did not fail DEFAULT_STATE_LABELS guard")
+
+
+def assert_default_state_label_generator_tracks_schema_seed() -> None:
+    schema_sql = SCHEMA_PATH.read_text(encoding="utf-8")
+    renamed_schema = schema_sql.replace("('analysis', 'Triage',", "('analysis', 'Analysis',")
+    renamed_labels = frontend_script_core.default_state_labels(schema_workflow_stages(renamed_schema))
+    assert renamed_labels["analysis"] == "Analysis"
+
+    added_stage_schema = schema_sql.replace(
+        "    ('cancelled', 'Cancelled', 10, ARRAY[]::text[], NULL, NULL, NULL, true)",
+        "    ('qa', 'QA', 9, ARRAY['audit']::text[], NULL, NULL, NULL, false),\n"
+        "    ('cancelled', 'Cancelled', 10, ARRAY[]::text[], NULL, NULL, NULL, true)",
+    )
+    added_stage_labels = frontend_script_core.default_state_labels(schema_workflow_stages(added_stage_schema))
+    assert added_stage_labels["qa"] == "QA"
+
+
 def compile_columns(stages: list[dict[str, object]]) -> list[dict[str, str]]:
     return [{"key": str(stage["name"]), "label": str(stage["display_label"])} for stage in stages]
 
@@ -422,6 +491,9 @@ def main() -> int:
 
             assert tuple(stage["name"] for stage in stages) == STATES
             assert_frontend_columns_are_dynamic()
+            assert_frontend_default_state_labels_match_schema()
+            assert_default_state_label_guard_fails_on_label_divergence_and_missing_stage()
+            assert_default_state_label_generator_tracks_schema_seed()
             assert compile_columns(stages) == app_columns
             assert compile_state_rank(stages) == state_rank_values_from_db(admin_conn, stages)
             assert compile_transition_target_role(stages) == transition_target_role_case_from_db(admin_conn)

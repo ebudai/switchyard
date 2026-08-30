@@ -1,5 +1,18 @@
 """Core board frontend JavaScript helpers and board rendering."""
 
+from __future__ import annotations
+
+import json
+
+from .project_provision import WorkflowStageSeed, schema_workflow_stages
+
+
+def default_state_labels(stages: tuple[WorkflowStageSeed, ...] | None = None) -> dict[str, str]:
+    return {stage.name: stage.display_label for stage in (stages if stages is not None else schema_workflow_stages())}
+
+
+DEFAULT_STATE_LABELS_JSON = json.dumps(default_state_labels(), sort_keys=True)
+
 SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     const state = {
       tickets: [],
@@ -250,19 +263,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       return boardColumns().find((column) => column.key === key)?.label || key;
     }
 
-    const DEFAULT_STATE_LABELS = {
-      draft: 'Draft',
-      backlog: 'Backlog',
-      analysis: 'Triage',
-      in_progress: 'Implementation',
-      inspection: 'Inspection',
-      audit: 'Audit',
-      dat: 'DAT',
-      user_review: 'UAT',
-      director_review: 'Final Sign-Off',
-      done: 'Done',
-      cancelled: 'Cancelled',
-    };
+    const DEFAULT_STATE_LABELS = """ + DEFAULT_STATE_LABELS_JSON + """;
 
     function normalizeBoardColumns(columns, states) {
       const source = Array.isArray(columns) && columns.length

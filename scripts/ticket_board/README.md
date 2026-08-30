@@ -231,6 +231,10 @@ Ticket board validation:
 - PGU-787 measured the 14 inline browser importers at 13.14s and the full 52
   inline importer set at 21.62s, so `--group all` includes both importer groups
   instead of leaving them as manual-only tests.
+- The frontend fallback `DEFAULT_STATE_LABELS` map is generated from the
+  `workflow_stages` seed in `schema.sql`; update the schema when a workflow
+  label changes. `ticket_board_workflow_config_equivalence_test.py` pins the
+  generated browser fallback to that canonical source.
 - The runner strips live board/socket and pane-hook environment variables before
   launching each suite, so an ambient pane environment cannot redirect tests to
   the production board.

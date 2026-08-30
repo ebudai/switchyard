@@ -111,6 +111,11 @@ importer set at 21.62s, so they are included in `--group all` rather than left
 as manual-only tests. Use `--fail-on-skip` when the validation environment is
 expected to have every dependency installed.
 
+The browser fallback state-label map in `frontend_script_core.py` is generated
+from the `workflow_stages` seed in `schema.sql`. Keep workflow stage labels in
+the schema; `ticket_board_workflow_config_equivalence_test.py` pins the emitted
+frontend fallback against that canonical source.
+
 ## PostgreSQL notification listener
 
 The post-cutover notification shim runs as a separate `agent` user systemd

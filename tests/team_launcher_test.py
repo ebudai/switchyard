@@ -685,6 +685,8 @@ def test_launch_repairs_generated_project_owner_hooks_before_starting_panes() ->
         "--config",
         str(config_path),
         "--skip-launcher-check",
+        "--allow-stale-launcher",
+        "--no-attach",
         "--pane-state-dir",
         str(pane_state_dir),
     ]
@@ -3321,6 +3323,7 @@ def test_launch_project_default_pane_state_dir_uses_run_as_user_runtime_when_lau
             "--config",
             str(config_path),
             "--skip-launcher-check",
+            "--no-attach",
             "--pane-state-dir",
             str(expected_pane_state_dir),
         ]
@@ -3462,6 +3465,7 @@ def test_root_created_owner_state_dirs_are_owned_by_run_as_user() -> None:
             "--config",
             str(config_path),
             "--skip-launcher-check",
+            "--no-attach",
             "--pane-state-dir",
             str(expected_pane_state_dir),
         ]
@@ -3671,6 +3675,7 @@ def test_explicit_pane_state_dir_env_beats_run_as_user_runtime_default() -> None
             "--config",
             str(config_path),
             "--skip-launcher-check",
+            "--no-attach",
             "--pane-state-dir",
             str(env_pane_state),
         ]
@@ -7603,6 +7608,7 @@ def test_pane_start_reexecs_as_owner_before_detached_tmux_or_state_work() -> Non
                     str(config_path),
                     "--script-path",
                     str(ROOT / "scripts" / "team-launcher"),
+                    "--allow-stale-launcher",
                 ]
             )
         finally:
@@ -7625,11 +7631,195 @@ def test_pane_start_reexecs_as_owner_before_detached_tmux_or_state_work() -> Non
                 "research",
                 "--config",
                 str(config_path),
+                "--allow-stale-launcher",
                 "--pane-state-dir",
                 str(owner_runtime / "porter-ticket-board" / "pane-state"),
             ]
         ]
         assert not (tmp_path / "run" / "user" / "0" / "porter-ticket-board" / "pane-state").exists()
+
+
+def test_pane_attach_role_reexecs_as_owner_with_slot_before_tmux_or_state_work() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-attach-role-owner.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "owner-home"
+        owner_home.mkdir()
+        owner_runtime = tmp_path / "run" / "user" / "4242"
+        owner_runtime.mkdir(parents=True)
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        layout = tmp_path / "layout.json"
+        layout.write_text(
+            json.dumps(
+                {
+                    "Widgets": [
+                        {"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""},
+                        {"Command": "", "SessionRestoreId": 1, "WorkingDirectory": ""},
+                    ]
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "run_as_user": "porter-agent",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "roles": [
+                        {
+                            "role": "research",
+                            "detached": True,
+                            "cli": ["claude"],
+                            "target": "porter-research:0.0",
+                        }
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        calls: list[list[str]] = []
+        original_run = team_launcher.subprocess.run
+        original_getpwnam = team_launcher.pwd.getpwnam
+        original_runtime_dir_for_uid = team_launcher.runtime_dir_for_uid
+        original_current_user_name = team_launcher.current_user_name
+
+        class OwnerPw:
+            pw_dir = str(owner_home)
+            pw_uid = 4242
+            pw_gid = 4242
+
+        def fake_getpwnam(user_name: str) -> Any:
+            if user_name == "porter-agent":
+                return OwnerPw()
+            return original_getpwnam(user_name)
+
+        def fake_run(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0)
+
+        try:
+            team_launcher.subprocess.run = fake_run
+            team_launcher.pwd.getpwnam = fake_getpwnam
+            team_launcher.runtime_dir_for_uid = lambda uid: owner_runtime if uid == 4242 else Path(f"/run/user/{uid}")
+            team_launcher.current_user_name = lambda: "root"
+            result = team_launcher.main(
+                [
+                    "porter",
+                    "pane",
+                    "attach-role",
+                    "research",
+                    "--slot",
+                    "1",
+                    "--config",
+                    str(config_path),
+                    "--script-path",
+                    str(ROOT / "scripts" / "team-launcher"),
+                ]
+            )
+        finally:
+            team_launcher.subprocess.run = original_run
+            team_launcher.pwd.getpwnam = original_getpwnam
+            team_launcher.runtime_dir_for_uid = original_runtime_dir_for_uid
+            team_launcher.current_user_name = original_current_user_name
+
+        assert result == 0
+        assert calls == [
+            [
+                "sudo",
+                "-u",
+                "porter-agent",
+                "-H",
+                str(ROOT / "scripts" / "team-launcher"),
+                "porter",
+                "pane",
+                "attach-role",
+                "research",
+                "--config",
+                str(config_path),
+                "--slot",
+                "1",
+                "--pane-state-dir",
+                str(owner_runtime / "porter-ticket-board" / "pane-state"),
+            ]
+        ]
+        assert not (tmp_path / "run" / "user" / "0" / "porter-ticket-board" / "pane-state").exists()
+
+
+def test_pane_no_attach_uses_viewer_ensure_path_without_tmux_attach() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-pane-no-attach.") as tmp:
+        tmp_path = Path(tmp)
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        session_dir = tmp_path / "sessions"
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "session_dir": str(session_dir),
+                    "roles": [
+                        {
+                            "role": "app",
+                            "slot": 0,
+                            "cli": ["codex"],
+                            "target": "porter-app:0.0",
+                            "tmux_session": "porter-app",
+                        }
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        pane_state_dir = tmp_path / "pane-state"
+        calls: list[dict[str, Any]] = []
+        original_ensure = team_launcher.ensure_visible_role_session_for_viewer
+        original_run_role_pane = team_launcher.run_role_pane
+
+        def fake_ensure(role: team_launcher.RoleConfig, **kwargs: Any) -> int:
+            calls.append({"role": role.role, **kwargs})
+            return 0
+
+        def fake_run_role_pane(*_args: Any, **_kwargs: Any) -> int:
+            raise AssertionError("pane --no-attach must not call run_role_pane")
+
+        try:
+            team_launcher.ensure_visible_role_session_for_viewer = fake_ensure
+            team_launcher.run_role_pane = fake_run_role_pane
+            result = team_launcher.main(
+                [
+                    "porter",
+                    "pane",
+                    "start",
+                    "app",
+                    "--config",
+                    str(config_path),
+                    "--skip-launcher-check",
+                    "--no-attach",
+                    "--pane-state-dir",
+                    str(pane_state_dir),
+                ]
+            )
+        finally:
+            team_launcher.ensure_visible_role_session_for_viewer = original_ensure
+            team_launcher.run_role_pane = original_run_role_pane
+
+        assert result == 0
+        assert len(calls) == 1
+        assert calls[0]["role"] == "app"
+        assert calls[0]["mode"] == "start"
+        assert calls[0]["session_dir"] == session_dir
+        assert calls[0]["pane_state_dir"] == pane_state_dir
 
 
 def test_attach_headless_role_to_free_slot_resumes_without_touching_neighbours() -> None:

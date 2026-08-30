@@ -3697,9 +3697,12 @@ def pane_command_args(
     config_path: Path,
     mode: str,
     script_path: Path,
+    slot: int | None = None,
     pane_state_dir: Path | None = None,
     force_reload: bool = False,
     skip_launcher_check: bool = False,
+    allow_stale_launcher: bool = False,
+    no_attach: bool = False,
     run_as_user: str = "",
 ) -> list[str]:
     args = [
@@ -3713,8 +3716,14 @@ def pane_command_args(
     ]
     if mode == "reload" and force_reload:
         args.append("--force")
+    if slot is not None:
+        args.extend(["--slot", str(slot)])
     if skip_launcher_check:
         args.append("--skip-launcher-check")
+    if allow_stale_launcher:
+        args.append("--allow-stale-launcher")
+    if no_attach:
+        args.append("--no-attach")
     if pane_state_dir is not None:
         args.extend(["--pane-state-dir", str(pane_state_dir)])
     if run_as_user and current_user_name() != run_as_user:
@@ -3729,9 +3738,12 @@ def pane_command(
     config_path: Path,
     mode: str,
     script_path: Path,
+    slot: int | None = None,
     pane_state_dir: Path | None = None,
     force_reload: bool = False,
     skip_launcher_check: bool = False,
+    allow_stale_launcher: bool = False,
+    no_attach: bool = False,
     run_as_user: str = "",
 ) -> str:
     args = pane_command_args(
@@ -3740,9 +3752,12 @@ def pane_command(
         config_path=config_path,
         mode=mode,
         script_path=script_path,
+        slot=slot,
         pane_state_dir=pane_state_dir,
         force_reload=force_reload,
         skip_launcher_check=skip_launcher_check,
+        allow_stale_launcher=allow_stale_launcher,
+        no_attach=no_attach,
         run_as_user=run_as_user,
     )
     return _quote_command(args)
@@ -4516,6 +4531,7 @@ def launch_project(
                     pane_state_dir=effective_pane_state_dir,
                     force_reload=force_reload,
                     skip_launcher_check=True,
+                    allow_stale_launcher=allow_stale_launcher,
                     run_as_user=config.run_as_user,
                 )
             ).returncode
@@ -4549,6 +4565,8 @@ def launch_project(
                         pane_state_dir=effective_pane_state_dir,
                         force_reload=force_reload,
                         skip_launcher_check=True,
+                        allow_stale_launcher=allow_stale_launcher,
+                        no_attach=True,
                         run_as_user=config.run_as_user,
                     )
                 ).returncode
@@ -7253,6 +7271,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--script-path", type=Path, default=Path(__file__).resolve().with_name("team-launcher"))
     parser.add_argument("--pane-state-dir", type=Path, help=f"write initial pane idle state here (default: {DEFAULT_PANE_STATE_DIR})")
+    parser.add_argument("--no-attach", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--dry-run", action="store_true", help="print launch plan without starting Konsole")
     parser.add_argument("--owner-user", help="new project owner Unix user (default: <project>-agent)")
     parser.add_argument("--port", type=int, help="new project board port; omitted means deterministic allocation")
@@ -7493,11 +7512,7 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(f"unknown pane mode: {args.pane_mode}")
         role = _role_by_name(config, args.role)
         pane_state_dir = args.pane_state_dir or default_pane_state_dir_for_user(config.run_as_user, project=config.project)
-        if (
-            args.pane_mode in {"start", "attach", "attach-or-start", "reload"}
-            and config.run_as_user
-            and current_user_name() != config.run_as_user
-        ):
+        if config.run_as_user and current_user_name() != config.run_as_user:
             return subprocess.run(
                 pane_command_args(
                     config.project,
@@ -7505,9 +7520,12 @@ def main(argv: list[str] | None = None) -> int:
                     config_path=config_path,
                     mode=args.pane_mode,
                     script_path=args.script_path,
+                    slot=args.slot,
                     pane_state_dir=pane_state_dir,
                     force_reload=args.force,
                     skip_launcher_check=args.skip_launcher_check,
+                    allow_stale_launcher=args.allow_stale_launcher,
+                    no_attach=args.no_attach,
                     run_as_user=config.run_as_user,
                 )
             ).returncode
@@ -7536,6 +7554,15 @@ def main(argv: list[str] | None = None) -> int:
                 config,
                 config_path=config_path,
                 role_name=role.role,
+            )
+        if args.no_attach and not role.detached:
+            return ensure_visible_role_session_for_viewer(
+                role,
+                mode=args.pane_mode,
+                session_dir=config.session_dir,
+                pane_state_dir=pane_state_dir,
+                force_reload=args.force,
+                bin_user=config.run_as_user,
             )
         if role.detached:
             return run_detached_role(

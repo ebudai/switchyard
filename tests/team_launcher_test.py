@@ -7822,6 +7822,100 @@ def test_pane_no_attach_uses_viewer_ensure_path_without_tmux_attach() -> None:
         assert calls[0]["pane_state_dir"] == pane_state_dir
 
 
+def test_attach_role_config_write_failure_does_not_start_or_attach_session() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-attach-role-config-denied.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text(
+            json.dumps(
+                {
+                    "Widgets": [
+                        {"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""},
+                        {"Command": "", "SessionRestoreId": 1, "WorkingDirectory": ""},
+                    ]
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        session_dir = tmp_path / "sessions"
+        session_dir.mkdir()
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "session_dir": str(session_dir),
+                    "roles": [
+                        {
+                            "role": "director",
+                            "slot": 0,
+                            "target": "porter-director:0.0",
+                            "tmux_session": "porter-director",
+                            "cli": ["claude"],
+                        },
+                        {
+                            "role": "research",
+                            "detached": True,
+                            "target": "porter-research:0.0",
+                            "tmux_session": "porter-research",
+                            "cli": ["codex"],
+                        },
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+        research = next(role for role in config.roles if role.role == "research")
+        session_id = "12345678-1234-5678-9abc-def012345678"
+        transcript = tmp_path / "codex-session.jsonl"
+        transcript.write_text("{}\n", encoding="utf-8")
+        (session_dir / session_file_name(research.target)).write_text(
+            _session_payload(research.target, session_id, {"transcript_path": str(transcript)}),
+            encoding="utf-8",
+        )
+        runner = FakeRunner()
+        original_write_json_atomic = team_launcher._write_json_atomic
+
+        def fake_write_json_atomic(_path: Path, _payload: dict[str, Any]) -> None:
+            raise PermissionError("permission denied")
+
+        try:
+            team_launcher._write_json_atomic = fake_write_json_atomic
+            try:
+                team_launcher.attach_role_to_slot(
+                    config,
+                    config_path=config_path,
+                    role_name="research",
+                    slot=1,
+                    session_dir=session_dir,
+                    pane_state_dir=tmp_path / "pane-state",
+                    runner=runner,
+                )
+                raise AssertionError("expected config write failure")
+            except SystemExit as exc:
+                message = str(exc)
+        finally:
+            team_launcher._write_json_atomic = original_write_json_atomic
+
+        assert "team-launcher: cannot update launcher config" in message
+        assert str(config_path) in message
+        assert not any(call[:2] == ["tmux", "new-session"] for call in runner.calls)
+        assert not any(call[:2] == ["tmux", "attach"] for call in runner.calls)
+        raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+        roles = {role["role"]: role for role in raw_config["roles"]}
+        assert roles["research"]["detached"] is True
+        assert "slot" not in roles["research"]
+
+
 def test_attach_headless_role_to_free_slot_resumes_without_touching_neighbours() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-surface.") as tmp:
         tmp_path = Path(tmp)

@@ -7130,7 +7130,10 @@ def _write_role_visibility(
             raise ValueError("visible role update requires slot")
         raw_role["detached"] = False
         raw_role["slot"] = slot
-    _write_json_atomic(config_path, raw_config)
+    try:
+        _write_json_atomic(config_path, raw_config)
+    except OSError as exc:
+        raise SystemExit(f"team-launcher: cannot update launcher config {config_path}: {exc}") from exc
     ensure_owner_file(config, config_path, runner=runner)
     return load_project_config(config.project, config_path)
 
@@ -7181,23 +7184,6 @@ def attach_role_to_slot(
         if not preflight_ok:
             print(preflight_message, file=sys.stderr)
             return 1
-    if not exists:
-        start_proc = runner(
-            tmux_new_session_args(role, session_dir=session_dir, pane_state_dir=pane_state_dir, resume=True)
-        )
-        if start_proc.returncode != 0:
-            return int(start_proc.returncode)
-        resume_status = _resume_launch_status(role, runner=runner)
-        if resume_status == RESUME_LAUNCH_VERIFIED:
-            clear_unverified_resume_for_role(role, session_dir)
-            seed_initial_pane_idle_state(role, pane_state_dir=pane_state_dir, source="team_launcher.attach_role")
-        else:
-            print(
-                f"team-launcher: resume for {role.role} using session {session_id} was not verified; "
-                "leaving tmux session and session record intact",
-                file=sys.stderr,
-            )
-            return 1
     updated_config = _write_role_visibility(
         config,
         config_path=config_path,
@@ -7207,6 +7193,39 @@ def attach_role_to_slot(
         runner=runner,
     )
     updated_role = _role_by_name(updated_config, role.role)
+    if not exists:
+        start_proc = runner(
+            tmux_new_session_args(updated_role, session_dir=session_dir, pane_state_dir=pane_state_dir, resume=True)
+        )
+        if start_proc.returncode != 0:
+            _write_role_visibility(
+                updated_config,
+                config_path=config_path,
+                role=updated_role,
+                detached=True,
+                slot=None,
+                runner=runner,
+            )
+            return int(start_proc.returncode)
+        resume_status = _resume_launch_status(updated_role, runner=runner)
+        if resume_status == RESUME_LAUNCH_VERIFIED:
+            clear_unverified_resume_for_role(updated_role, session_dir)
+            seed_initial_pane_idle_state(updated_role, pane_state_dir=pane_state_dir, source="team_launcher.attach_role")
+        else:
+            _write_role_visibility(
+                updated_config,
+                config_path=config_path,
+                role=updated_role,
+                detached=True,
+                slot=None,
+                runner=runner,
+            )
+            print(
+                f"team-launcher: resume for {updated_role.role} using session {session_id} was not verified; "
+                "leaving tmux session and session record intact",
+                file=sys.stderr,
+            )
+            return 1
     print_func(f"team-launcher: attached role {role.role} to slot {slot}; refusing to relayout other panes")
     return runner(tmux_attach_args(updated_role)).returncode
 

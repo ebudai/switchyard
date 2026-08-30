@@ -21,10 +21,12 @@ may opt into a dedicated runtime account with `run_as_user`; when that key is
 set and the invoker is different, the wrapper re-execs through
 `sudo -u <run_as_user> -H`. The PGU config uses `run_as_user: agent` so Eric's
 production launch keeps the existing agent-owned tmux sessions, pane hook
-state, and shared checkout. Parent-launched role sessions, including detached
-roles and the non-KDE viewer path, delegate their pane start/reload work through
-that runtime user before touching tmux, pane hook state, or resume session
-files. Projects without `run_as_user` use the invoking user's runtime
+state, and shared checkout. Pane subcommands delegate through that runtime user
+before touching tmux, pane hook state, or resume session files, including
+detached roles, `attach-role`/`detach-role`, and the non-KDE viewer path. Viewer
+launches use an internal no-attach pane mode so parent-launched visible role
+sessions are ensured without attaching tmux before the viewer is built. Projects
+without `run_as_user` use the invoking user's runtime
 pane-state directory and `$HOME/bin` prepended to pane CLI `PATH`; projects
 with `run_as_user` prepend that runtime user's `$HOME/bin`, not the invoking
 user's private bin directory. Resume session records are durable state under
@@ -118,11 +120,14 @@ detached.
 named free layout slot without rebuilding the whole window layout and without
 restarting neighbouring roles. The command updates only that role's config
 entry from `detached: true` to the named `slot`, then starts or attaches that
-role's own tmux session. If the tmux session is not already live, attach-role
-requires a recorded resume id and refuses rather than starting fresh. If the
-named slot is occupied or outside the configured layout, the launcher refuses
-and says which role owns the slot; it does not evict a neighbour or grow the
-grid implicitly. `pane detach-role <role>` moves a visible role back to
+role's own tmux session. If the config update is not permitted, the command
+fails before starting the role session. If the tmux session is not already live,
+attach-role requires a recorded resume id and refuses rather than starting
+fresh; a failed start or unverified resume rolls the config entry back to
+detached. If the named slot is occupied or outside the configured layout, the
+launcher refuses and says which role owns the slot; it does not evict a
+neighbour or grow the grid implicitly. `pane detach-role <role>` moves a visible
+role back to
 headless by removing its slot and marking it detached, then detaches any live
 tmux clients from that role session without killing the session. The role's
 durable session record is not cleared by either operation.

@@ -17,7 +17,6 @@ from typing import TextIO
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PLAYWRIGHT_AUDIT_TEST = "tests/ticket_board_ui_audit_test.py"
 TICKET_BOARD_GROUP = "ticket_board"
 BOARD_ADJACENT_GROUP = "board_adjacent"
 TICKET_BOARD_FRONTEND_GROUP = "ticket_board_frontend"
@@ -40,10 +39,19 @@ BOARD_ADJACENT_MARKERS = (
 )
 TICKET_BOARD_IMPORT_RE = re.compile(r"(?:from|import)\s+scripts\.ticket_board|scripts\.ticket_board\.")
 BROWSER_TEST_MARKERS = (
-    "playwright",
+    "from playwright",
+    "import playwright",
     "chromium.launch",
-    "load_playwright",
+    "load_playwright(",
 )
+PLAYWRIGHT_MISSING_REASON = (
+    "missing Playwright Python package; install playwright and browser binaries "
+    "to run browser UI suites"
+)
+BROWSER_PREFLIGHT_EXCLUDES = {
+    # This self-test contains browser marker strings as fixture text; it is not a browser suite.
+    "tests/ticket_board_suite_runner_test.py",
+}
 
 LIVE_BOARD_ENV_KEYS = {
     "DATABASE_URL",
@@ -198,13 +206,26 @@ def _module_importable(module: str, *, root: Path = ROOT) -> bool:
         sys.path[:] = original_path
 
 
-def prerequisite_skip_reasons(root: Path = ROOT) -> dict[str, str]:
+def discover_browser_runtime_suites(
+    root: Path = ROOT,
+    groups: Iterable[str] = ALL_GROUPS,
+) -> list[str]:
+    suites_by_group = discover_suites_by_group(root, groups)
+    return sorted(
+        {
+            test
+            for tests in suites_by_group.values()
+            for test in tests
+            if test not in BROWSER_PREFLIGHT_EXCLUDES and _uses_browser_runtime(root / test)
+        }
+    )
+
+
+def prerequisite_skip_reasons(root: Path = ROOT, groups: Iterable[str] = ALL_GROUPS) -> dict[str, str]:
     reasons: dict[str, str] = {}
-    if (root / PLAYWRIGHT_AUDIT_TEST).exists() and not _module_importable("playwright.sync_api", root=root):
-        reasons[PLAYWRIGHT_AUDIT_TEST] = (
-            "missing Playwright Python package; install playwright and browser binaries "
-            "to run the broad ticket-board UI audit"
-        )
+    if not _module_importable("playwright.sync_api", root=root):
+        for test in discover_browser_runtime_suites(root, groups):
+            reasons[test] = PLAYWRIGHT_MISSING_REASON
     return reasons
 
 
@@ -290,7 +311,7 @@ def run_suite(
     output_lines: int = 80,
 ) -> list[SuiteResult]:
     suites_by_group = discover_suites_by_group(root, groups)
-    skips = dict(prerequisite_skip_reasons(root) if skip_reasons is None else skip_reasons)
+    skips = dict(prerequisite_skip_reasons(root, groups) if skip_reasons is None else skip_reasons)
     results: list[SuiteResult] = []
     for group, tests in suites_by_group.items():
         print(f"group: {group} ({GROUP_LABELS[group]}, {len(tests)} suites)", file=out)
@@ -363,7 +384,7 @@ def main(argv: list[str] | None = None) -> int:
     root = args.root.resolve()
     groups = normalize_groups(args.group)
     suites_by_group = discover_suites_by_group(root, groups)
-    skips = prerequisite_skip_reasons(root)
+    skips = prerequisite_skip_reasons(root, groups)
     if args.list:
         test_count = 0
         skip_count = 0

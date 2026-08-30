@@ -108,8 +108,13 @@ are included as adjacent, while remaining inline `scripts.ticket_board`
 importers are split by whether they use Playwright/browser markers. PGU-787
 measured the 14 inline browser importers at 13.14s and the full 52 inline
 importer set at 21.62s, so they are included in `--group all` rather than left
-as manual-only tests. Use `--fail-on-skip` when the validation environment is
-expected to have every dependency installed.
+as manual-only tests. Browser dependency handling is centralized in this
+runner: when the Playwright Python package is unavailable, every discovered
+browser-runtime suite in the selected groups is reported as `SKIP` by name and
+counted in the summary instead of failing inconsistently inside individual test
+files. Use `--fail-on-skip` when the validation environment is expected to have
+every dependency installed; that makes a browser skip a non-zero runner result
+while preserving the explicit skipped-suite summary.
 
 The browser fallback state-label map in `frontend_script_core.py` is generated
 from the `workflow_stages` seed in `schema.sql`. Keep workflow stage labels in

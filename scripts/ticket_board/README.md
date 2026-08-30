@@ -231,6 +231,10 @@ Ticket board validation:
 - PGU-787 measured the 14 inline browser importers at 13.14s and the full 52
   inline importer set at 21.62s, so `--group all` includes both importer groups
   instead of leaving them as manual-only tests.
+- Browser dependency handling lives in the runner. When the Playwright Python
+  package is unavailable, every discovered browser-runtime suite in the selected
+  groups is reported as `SKIP` by name and counted in the summary instead of
+  failing or passing inconsistently inside individual test files.
 - The frontend fallback `DEFAULT_STATE_LABELS` map is generated from the
   `workflow_stages` seed in `schema.sql`; update the schema when a workflow
   label changes. `ticket_board_workflow_config_equivalence_test.py` pins the
@@ -240,7 +244,8 @@ Ticket board validation:
   the production board.
 - Environment-dependent skips are reported by suite name with the reason next
   to the result. Use `--fail-on-skip` when the validation environment is
-  expected to have every dependency installed.
+  expected to have every dependency installed; browser skips then make the
+  runner exit non-zero while preserving the explicit skipped-suite summary.
 
 PostgreSQL board backend:
 

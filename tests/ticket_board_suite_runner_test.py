@@ -8,6 +8,7 @@ import importlib.util
 import io
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -361,6 +362,89 @@ def test_runner_names_skipped_suites_with_reasons() -> None:
         assert "missing fixture dependency" in output.getvalue()
 
 
+def test_runner_skips_every_browser_suite_when_playwright_is_unavailable() -> None:
+    with tempfile.TemporaryDirectory(prefix="ticket-board-suite-playwright-missing.") as tmpdir:
+        root = Path(tmpdir) / "repo"
+        tests = root / "tests"
+        tests.mkdir(parents=True)
+        playwright_import_marker = "from " + "playwright.sync_api import sync_playwright"
+        load_playwright_marker = "load_" + "playwright()"
+        (tests / "ticket_board_browser_test.py").write_text(
+            f"marker = {playwright_import_marker!r}\n"
+            "raise AssertionError('ticket_board browser suite should be skipped')\n",
+            encoding="utf-8",
+        )
+        (tests / "ticket_board_core_test.py").write_text(
+            "print('ticket_board_core_test: ok')\n",
+            encoding="utf-8",
+        )
+        (tests / "adjacent_browser_test.py").write_text(
+            f"marker = 'ticket_board_ui_harness ' + {load_playwright_marker!r}\n"
+            "raise AssertionError('adjacent browser suite should be skipped')\n",
+            encoding="utf-8",
+        )
+        (tests / "inline_browser_test.py").write_text(
+            f"marker = 'from scripts.ticket_board.server import TicketBoardServer ' + {load_playwright_marker!r}\n"
+            "raise AssertionError('inline browser suite should be skipped')\n",
+            encoding="utf-8",
+        )
+        (tests / "inline_frontend_test.py").write_text(
+            "marker = 'from scripts.ticket_board.frontend import HTML'\n"
+            "print('inline_frontend_test: ok')\n",
+            encoding="utf-8",
+        )
+        blocker = Path(tmpdir) / "hide_playwright"
+        blocker.mkdir()
+        (blocker / "sitecustomize.py").write_text(
+            "import builtins\n"
+            "_real_import = builtins.__import__\n"
+            "def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):\n"
+            "    if name == 'playwright' or name.startswith('playwright.'):\n"
+            "        raise ModuleNotFoundError(\"No module named 'playwright'\")\n"
+            "    return _real_import(name, globals, locals, fromlist, level)\n"
+            "builtins.__import__ = guarded_import\n",
+            encoding="utf-8",
+        )
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.pathsep.join(
+            [str(blocker), *(part for part in env.get("PYTHONPATH", "").split(os.pathsep) if part)]
+        )
+        command = [
+            sys.executable,
+            str(ROOT / "scripts" / "ticket-board-test-suite"),
+            "--root",
+            str(root),
+            "--group",
+            "all",
+        ]
+
+        proc = subprocess.run(command, text=True, capture_output=True, env=env, check=False)
+
+        output = proc.stdout + proc.stderr
+        assert proc.returncode == 0
+        assert "PASS [ticket_board] tests/ticket_board_core_test.py" in output
+        assert "PASS [ticket_board_frontend] tests/inline_frontend_test.py" in output
+        assert "SKIP [ticket_board] tests/ticket_board_browser_test.py" in output
+        assert "SKIP [board_adjacent] tests/adjacent_browser_test.py" in output
+        assert "SKIP [ticket_board_browser] tests/inline_browser_test.py" in output
+        assert "missing Playwright Python package" in output
+        assert "summary: 2 passed, 3 skipped, 0 failed" in output
+        assert "skipped suites:" in output
+        assert "should be skipped" not in output
+
+        fail_proc = subprocess.run(
+            [*command, "--fail-on-skip"],
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+        fail_output = fail_proc.stdout + fail_proc.stderr
+        assert fail_proc.returncode == 1
+        assert "summary: 2 passed, 3 skipped, 0 failed" in fail_output
+        assert "skipped suites:" in fail_output
+
+
 def main() -> int:
     test_discovers_python_and_shell_ticket_board_suites_only()
     test_discovers_board_adjacent_suites_by_content_property()
@@ -372,6 +456,7 @@ def main() -> int:
     test_all_group_includes_inline_ticket_board_importer_suites()
     test_runner_reports_failures_without_stopping_and_strips_live_env()
     test_runner_names_skipped_suites_with_reasons()
+    test_runner_skips_every_browser_suite_when_playwright_is_unavailable()
     print("ticket_board_suite_runner_test: ok")
     return 0
 

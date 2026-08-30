@@ -242,11 +242,17 @@ def run_cli_without_caller(base_url: str, cwd: Path, *args: str) -> subprocess.C
 def command_env(command: list[str]) -> dict[str, str]:
     assert command[0] == "env"
     result: dict[str, str] = {}
-    for token in command[1:]:
+    index = 1
+    while index < len(command):
+        token = command[index]
+        if token == "-u":
+            index += 2
+            continue
         if "=" not in token:
             break
         key, value = token.split("=", 1)
         result[key] = value
+        index += 1
     return result
 
 

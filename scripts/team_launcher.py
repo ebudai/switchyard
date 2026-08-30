@@ -22,7 +22,7 @@ import tomllib
 import unicodedata
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from scripts.ticket_board.project_provision import (
     DEFAULT_PROJECT_IMPLEMENTER_ROLES,
@@ -1374,6 +1374,28 @@ def _env_prefix(env: dict[str, str]) -> list[str]:
     ]
 
 
+PANE_IDENTITY_ENV_KEYS = (
+    "PGU_PANE_SESSION_ID",
+    "TICKET_BOARD_PANE_SESSION_ID",
+    "PGU_TICKET_BOARD_PANE_SESSION_DIR",
+    "PGU_TICKET_BOARD_PANE_STATE_DIR",
+    "TICKET_BOARD_PANE_SESSION_DIR",
+    "TICKET_BOARD_PANE_STATE_DIR",
+    "TMUX_PANE",
+    "TMUX",
+    "TICKET_BOARD_PANE_TARGET",
+    "PGU_PANE_TARGET",
+    "TICKET_BOARD_CALLER_ROLE",
+)
+
+
+def _env_unset_prefix(keys: Sequence[str]) -> list[str]:
+    result: list[str] = []
+    for key in keys:
+        result.extend(["-u", key])
+    return result
+
+
 def _prepend_path(path_value: str, directory: str) -> str:
     parts = [part for part in path_value.split(":") if part]
     parts = [part for part in parts if part != directory]
@@ -1422,6 +1444,39 @@ def session_id_for_role(role: RoleConfig, session_dir: Path) -> str:
     if parsed is None:
         return ""
     return str(parsed.get("session_id") or "").strip()
+
+
+def _ambient_pane_session_ids(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    source = os.environ if environ is None else environ
+    result: dict[str, str] = {}
+    for key in ("TICKET_BOARD_PANE_SESSION_ID", "PGU_PANE_SESSION_ID"):
+        value = str(source.get(key) or "").strip()
+        if value:
+            result[key] = value
+    return result
+
+
+def _ambient_session_conflict_for_role(
+    role: RoleConfig,
+    *,
+    session_dir: Path,
+    environ: Mapping[str, str] | None = None,
+) -> str:
+    recorded_session_id = session_id_for_role(role, session_dir)
+    if not recorded_session_id:
+        return ""
+    conflicts = [
+        f"{key}={value}"
+        for key, value in _ambient_pane_session_ids(environ).items()
+        if value != recorded_session_id
+    ]
+    if not conflicts:
+        return ""
+    return (
+        f"team-launcher: refusing to launch {role.role}; ambient pane session id "
+        f"{', '.join(conflicts)} does not match recorded session {recorded_session_id} "
+        f"for target {role.target}. Strip pane identity env or run from outside a pane."
+    )
 
 
 def superseded_session_id_for_role(
@@ -2026,7 +2081,7 @@ def cli_command_for_role(
         if session_id:
             env.setdefault("PGU_PANE_SESSION_ID", session_id)
     env["PATH"] = _prepend_path(env.get("PATH") or default_pane_base_path(bin_user), default_user_bin(bin_user))
-    return ["env", *_env_prefix(env), *command]
+    return ["env", *_env_unset_prefix(PANE_IDENTITY_ENV_KEYS), *_env_prefix(env), *command]
 
 
 def tmux_new_session_args(
@@ -3528,6 +3583,10 @@ def run_role_pane(
             print(f"tmux session {role.tmux_session} does not exist", file=sys.stderr)
             return 1
         return runner(tmux_attach_args(role)).returncode
+    conflict = _ambient_session_conflict_for_role(role, session_dir=session_dir)
+    if conflict:
+        print(conflict, file=sys.stderr)
+        return 1
     if mode == "reload":
         if exists:
             if not force_reload and not live_command_matches_role(role, runner=runner):
@@ -3586,6 +3645,10 @@ def run_detached_role(
             print(f"tmux session {role.tmux_session} does not exist", file=sys.stderr)
             return 1
         return 0
+    conflict = _ambient_session_conflict_for_role(role, session_dir=session_dir)
+    if conflict:
+        print(conflict, file=sys.stderr)
+        return 1
     if mode == "reload":
         if exists:
             if not force_reload and not live_command_matches_role(role, runner=runner):
@@ -3640,6 +3703,10 @@ def ensure_visible_role_session_for_viewer(
             print(f"tmux session {role.tmux_session} does not exist", file=sys.stderr)
             return 1
         return 0
+    conflict = _ambient_session_conflict_for_role(role, session_dir=session_dir)
+    if conflict:
+        print(conflict, file=sys.stderr)
+        return 1
     if mode == "reload":
         if exists:
             if not force_reload and not live_command_matches_role(role, runner=runner):
@@ -7324,6 +7391,10 @@ def attach_role_to_slot(
             print_func(f"team-launcher: role {role.role} is already attached to slot {slot}")
             return 0
         raise SystemExit(f"team-launcher: role {role.role} is already attached to slot {role.slot}")
+    conflict = _ambient_session_conflict_for_role(role, session_dir=session_dir)
+    if conflict:
+        print(conflict, file=sys.stderr)
+        return 1
     exists = runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
     session_id = session_id_for_role(role, session_dir)
     if not exists:

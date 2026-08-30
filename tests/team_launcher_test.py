@@ -2466,18 +2466,30 @@ def test_ticket_board_pane_env_is_stripped_before_launcher_import() -> None:
 def _env_entries(command: list[str]) -> list[str]:
     assert command[0] == "env"
     entries: list[str] = []
-    for token in command[1:]:
+    index = 1
+    while index < len(command):
+        token = command[index]
+        if token == "-u":
+            index += 2
+            continue
         if "=" not in token:
             break
         entries.append(token)
+        index += 1
     return entries
 
 
 def _command_tail(command: list[str]) -> list[str]:
     assert command[0] == "env"
-    for index, token in enumerate(command[1:], start=1):
+    index = 1
+    while index < len(command):
+        token = command[index]
+        if token == "-u":
+            index += 2
+            continue
         if "=" not in token:
             return command[index:]
+        index += 1
     return []
 
 
@@ -3883,6 +3895,35 @@ def test_cli_command_exports_known_resume_session_id_for_hooks() -> None:
     assert f"TICKET_BOARD_PANE_SESSION_ID={session_id}" in entries
     assert f"PGU_PANE_SESSION_ID={session_id}" in entries
     assert _command_tail(command)[:3] == ["codex", "resume", session_id]
+
+
+def test_cli_command_clears_ambient_pane_identity_before_target_identity() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    role = next(role for role in config.roles if role.role == "research")
+    with tempfile.TemporaryDirectory(prefix="pgu-cli-command-pane-identity.") as tmp:
+        tmp_path = Path(tmp)
+        session_dir = tmp_path / "sessions"
+        pane_state_dir = tmp_path / "pane-state"
+        session_dir.mkdir()
+        session_id = "research-session-id"
+        transcript = tmp_path / "research.jsonl"
+        transcript.write_text("{}\n", encoding="utf-8")
+        (session_dir / session_file_name(role.target)).write_text(
+            json.dumps({"target": role.target, "session_id": session_id, "payload": {"transcript_path": str(transcript)}})
+            + "\n",
+            encoding="utf-8",
+        )
+
+        command = cli_command_for_role(role, session_dir=session_dir, pane_state_dir=pane_state_dir, resume=True)
+
+    unsets = {command[index + 1] for index, token in enumerate(command[:-1]) if token == "-u"}
+    assert set(team_launcher.PANE_IDENTITY_ENV_KEYS).issubset(unsets)
+    entries = _env_entries(command)
+    assert f"TICKET_BOARD_PANE_TARGET={role.target}" in entries
+    assert f"PGU_PANE_TARGET={role.target}" in entries
+    assert f"TICKET_BOARD_PANE_SESSION_ID={session_id}" in entries
+    assert f"PGU_PANE_SESSION_ID={session_id}" in entries
+    assert _command_tail(command)[:3] == ["claude", "--resume", session_id]
 
 
 def test_custom_config_without_run_as_user_tracks_invoking_home() -> None:
@@ -5389,6 +5430,150 @@ def test_start_creates_missing_session_once_then_attaches() -> None:
     assert runner.calls[2] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_pid}"]
     assert runner.calls[3] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_current_command}"]
     assert runner.calls[4] == ["tmux", "attach", "-t", "pgu-ops"]
+
+
+def test_pane_start_from_another_pane_uses_target_session_and_clears_caller_tmux_env() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    role = next(role for role in config.roles if role.role == "research")
+    runner = FakeRunner()
+    env_keys = [
+        "TMUX",
+        "TMUX_PANE",
+        "TICKET_BOARD_PANE_TARGET",
+        "PGU_PANE_TARGET",
+        "TICKET_BOARD_CALLER_ROLE",
+        "TICKET_BOARD_PANE_SESSION_DIR",
+        "TICKET_BOARD_PANE_STATE_DIR",
+        "PGU_TICKET_BOARD_PANE_SESSION_DIR",
+        "PGU_TICKET_BOARD_PANE_STATE_DIR",
+    ]
+    original_env = {key: os.environ.get(key) for key in env_keys}
+    try:
+        os.environ["TMUX"] = "/tmp/tmux-1001/default,123,0"
+        os.environ["TMUX_PANE"] = "%director"
+        os.environ["TICKET_BOARD_PANE_TARGET"] = "pgu-director:0.0"
+        os.environ["PGU_PANE_TARGET"] = "pgu-director:0.0"
+        os.environ["TICKET_BOARD_CALLER_ROLE"] = "director"
+        os.environ["TICKET_BOARD_PANE_SESSION_DIR"] = "/live/director/sessions"
+        os.environ["TICKET_BOARD_PANE_STATE_DIR"] = "/live/director/state"
+        os.environ["PGU_TICKET_BOARD_PANE_SESSION_DIR"] = "/live/director/legacy-sessions"
+        os.environ["PGU_TICKET_BOARD_PANE_STATE_DIR"] = "/live/director/legacy-state"
+        with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-target-session.") as tmp:
+            tmp_path = Path(tmp)
+            session_dir = tmp_path / "sessions"
+            pane_state_dir = tmp_path / "pane-state"
+            session_dir.mkdir()
+            session_id = "research-session-id"
+            transcript = tmp_path / "research.jsonl"
+            transcript.write_text("{}\n", encoding="utf-8")
+            (session_dir / session_file_name(role.target)).write_text(
+                json.dumps({"target": role.target, "session_id": session_id, "payload": {"transcript_path": str(transcript)}})
+                + "\n",
+                encoding="utf-8",
+            )
+
+            assert (
+                run_detached_role(
+                    role,
+                    mode="start",
+                    session_dir=session_dir,
+                    pane_state_dir=pane_state_dir,
+                    runner=runner,
+                )
+                == 0
+            )
+    finally:
+        for key, value in original_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    new_session = next(call for call in runner.calls if call[:2] == ["tmux", "new-session"])
+    assert f"claude --resume {session_id}" in new_session[-1]
+    assert "director-session-id" not in new_session[-1]
+    assert "TICKET_BOARD_PANE_TARGET=pgu-director:0.0" not in new_session[-1]
+    assert "PGU_PANE_TARGET=pgu-director:0.0" not in new_session[-1]
+    assert "/live/director" not in new_session[-1]
+    assert "TICKET_BOARD_CALLER_ROLE=research" in new_session[-1]
+    for key in env_keys:
+        assert f"-u {key}" in new_session[-1]
+
+
+def test_pane_reload_refuses_conflicting_ambient_session_id_before_killing_target() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    role = next(role for role in config.roles if role.role == "research")
+    runner = FakeRunner(existing_sessions={role.tmux_session}, current_commands={role.target: "claude"})
+    original_env = {
+        "PGU_PANE_SESSION_ID": os.environ.get("PGU_PANE_SESSION_ID"),
+        "TICKET_BOARD_PANE_SESSION_ID": os.environ.get("TICKET_BOARD_PANE_SESSION_ID"),
+    }
+    stderr = StringIO()
+    try:
+        os.environ["PGU_PANE_SESSION_ID"] = "director-session-id"
+        os.environ["TICKET_BOARD_PANE_SESSION_ID"] = "director-session-id"
+        with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-session-conflict.") as tmp:
+            session_dir = Path(tmp) / "sessions"
+            session_dir.mkdir()
+            (session_dir / session_file_name(role.target)).write_text(
+                json.dumps({"target": role.target, "session_id": "research-session-id"}) + "\n",
+                encoding="utf-8",
+            )
+            with redirect_stderr(stderr):
+                result = run_detached_role(role, mode="reload", session_dir=session_dir, runner=runner)
+    finally:
+        for key, value in original_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    assert result == 1
+    assert "refusing to launch research" in stderr.getvalue()
+    assert "director-session-id" in stderr.getvalue()
+    assert "research-session-id" in stderr.getvalue()
+    assert not any(call[:2] == ["tmux", "kill-session"] for call in runner.calls)
+    assert not any(call[:2] == ["tmux", "new-session"] for call in runner.calls)
+
+
+def test_pane_start_without_recorded_session_ignores_ambient_session_and_starts_fresh() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    role = next(role for role in config.roles if role.role == "ops")
+    runner = FakeRunner()
+    original_env = {
+        "PGU_PANE_SESSION_ID": os.environ.get("PGU_PANE_SESSION_ID"),
+        "TICKET_BOARD_PANE_SESSION_ID": os.environ.get("TICKET_BOARD_PANE_SESSION_ID"),
+    }
+    stderr = StringIO()
+    try:
+        os.environ["PGU_PANE_SESSION_ID"] = "director-session-id"
+        os.environ["TICKET_BOARD_PANE_SESSION_ID"] = "director-session-id"
+        with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-fresh-session.") as tmp:
+            with redirect_stderr(stderr):
+                assert (
+                    run_role_pane(
+                        role,
+                        mode="start",
+                        session_dir=Path(tmp) / "sessions",
+                        pane_state_dir=Path(tmp) / "pane-state",
+                        runner=runner,
+                    )
+                    == 0
+                )
+    finally:
+        for key, value in original_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    new_session = next(call for call in runner.calls if call[:2] == ["tmux", "new-session"])
+    assert "director-session-id" not in new_session[-1]
+    assert " resume " not in f" {new_session[-1]} "
+    assert "--resume" not in new_session[-1]
+    assert "-u PGU_PANE_SESSION_ID" in new_session[-1]
+    assert "-u TICKET_BOARD_PANE_SESSION_ID" in new_session[-1]
+    assert "no recorded session id for ops; starting fresh session" in stderr.getvalue()
 
 
 def test_visible_start_fails_before_attach_when_cli_exits_immediately() -> None:

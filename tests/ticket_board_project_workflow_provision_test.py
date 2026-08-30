@@ -26,6 +26,8 @@ from scripts.ticket_board.project_provision import (
     project_workflow_transitions,
     render_database_sql,
     render_workflow_sql,
+    schema_workflow_stages,
+    schema_workflow_transitions,
 )
 
 
@@ -178,6 +180,34 @@ def assert_schema_additions_are_not_silent() -> None:
     rendered = render_workflow_sql(plan, schema_sql=synthetic_schema)
     assert "('qa', 'QA'," in rendered
     assert "('analysis', 'qa', 'route'" in rendered
+
+
+def assert_missing_workflow_seed_inserts_fail_loudly() -> None:
+    schema_sql = SCHEMA_PATH.read_text(encoding="utf-8")
+    missing_stages_schema = schema_sql.replace(
+        "INSERT INTO ticket_board.workflow_stages",
+        "INSERT INTO ticket_board.workflow_stages_missing",
+        1,
+    )
+    missing_transitions_schema = schema_sql.replace(
+        "INSERT INTO ticket_board.workflow_transitions",
+        "INSERT INTO ticket_board.workflow_transitions_missing",
+        1,
+    )
+
+    try:
+        schema_workflow_stages(missing_stages_schema)
+    except ValueError as exc:
+        assert "could not find ticket_board.workflow_stages seed INSERT in schema.sql" in str(exc), exc
+    else:
+        raise AssertionError("missing workflow_stages seed INSERT did not fail loudly")
+
+    try:
+        schema_workflow_transitions(missing_transitions_schema)
+    except ValueError as exc:
+        assert "could not find ticket_board.workflow_transitions seed INSERT in schema.sql" in str(exc), exc
+    else:
+        raise AssertionError("missing workflow_transitions seed INSERT did not fail loudly")
 
 
 def run_migrations(conn: str, *, migrations_dir: Path | None = None) -> None:
@@ -361,6 +391,7 @@ SELECT ticket_board.create_ticket('Provisioning sequence probe', 'Body', 'analys
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="ticket-board-project-workflow.") as tmpdir:
         assert_schema_additions_are_not_silent()
+        assert_missing_workflow_seed_inserts_fail_loudly()
         root = Path(tmpdir)
         data_dir = root / "pgdata"
         socket_dir = root / "socket"

@@ -320,7 +320,7 @@ def assert_default_state_label_guard_fails_on_label_divergence_and_missing_stage
     actual = frontend_default_state_labels()
 
     renamed_canonical = dict(actual)
-    renamed_canonical["analysis"] = "Analysis"
+    renamed_canonical["analysis"] = "ZZ-NOT-A-LABEL"
     try:
         assert_default_state_labels_match(renamed_canonical, actual)
     except AssertionError as exc:

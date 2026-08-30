@@ -117,6 +117,16 @@ def run_browser_check(playwright: object, server_port: int) -> None:
         assert len(metrics["gridTemplateColumns"].split()) == 8
         tops = {column["top"] for column in metrics["columnRects"]}
         assert len(tops) == 1, metrics["columnRects"]
+        assert [column["title"] for column in metrics["columnRects"]] == [
+            "Draft",
+            "Triage",
+            "Implementation",
+            "Inspection",
+            "Audit",
+            "DAT",
+            "UAT",
+            "Final Sign-Off",
+        ]
         assert metrics["columnRects"][-1]["title"] == "Final Sign-Off"
 
         page.locator("#showDeferredInput").check()

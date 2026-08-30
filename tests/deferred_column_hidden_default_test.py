@@ -14,7 +14,6 @@ from scripts.ticket_board.frontend import HTML
 
 
 def main() -> int:
-    assert '"backlog": "Backlog"' in HTML
     assert 'id="showDeferredInput"' in HTML
     assert 'id="showDeferredCount"' in HTML
     assert "Show Deferred" in HTML

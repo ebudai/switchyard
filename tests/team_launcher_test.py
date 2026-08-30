@@ -2493,6 +2493,22 @@ def _command_tail(command: list[str]) -> list[str]:
     return []
 
 
+def _env_unsets(command: list[str]) -> set[str]:
+    assert command[0] == "env"
+    result: set[str] = set()
+    index = 1
+    while index < len(command):
+        token = command[index]
+        if token == "-u":
+            result.add(command[index + 1])
+            index += 2
+            continue
+        if "=" not in token:
+            break
+        index += 1
+    return result
+
+
 def _no_input(prompt: str) -> str:
     raise AssertionError(f"unexpected prompt: {prompt}")
 
@@ -3916,14 +3932,65 @@ def test_cli_command_clears_ambient_pane_identity_before_target_identity() -> No
 
         command = cli_command_for_role(role, session_dir=session_dir, pane_state_dir=pane_state_dir, resume=True)
 
-    unsets = {command[index + 1] for index, token in enumerate(command[:-1]) if token == "-u"}
-    assert set(team_launcher.PANE_IDENTITY_ENV_KEYS).issubset(unsets)
+    unsets = _env_unsets(command)
+    assert set(team_launcher.PANE_TARGET_ENV_KEYS).issubset(unsets)
+    assert "TMUX" not in unsets
+    assert "TMUX_PANE" not in unsets
     entries = _env_entries(command)
     assert f"TICKET_BOARD_PANE_TARGET={role.target}" in entries
     assert f"PGU_PANE_TARGET={role.target}" in entries
     assert f"TICKET_BOARD_PANE_SESSION_ID={session_id}" in entries
     assert f"PGU_PANE_SESSION_ID={session_id}" in entries
     assert _command_tail(command)[:3] == ["claude", "--resume", session_id]
+
+
+def test_owner_cli_probe_and_interactive_strip_caller_pane_identity() -> None:
+    calls: list[list[str]] = []
+    call_kwargs: list[dict[str, Any]] = []
+
+    def runner(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        call_kwargs.append(dict(kwargs))
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    owner = team_launcher.current_user_name()
+    original_env = {key: os.environ.get(key) for key in team_launcher.PROBE_IDENTITY_ENV_KEYS}
+    with tempfile.TemporaryDirectory(prefix="pgu-owner-cli-probe-env.") as tmp:
+        try:
+            for key in team_launcher.PROBE_IDENTITY_ENV_KEYS:
+                os.environ[key] = f"ambient-{key}"
+            owner_home = Path(tmp)
+            probe = team_launcher._run_owner_cli_probe(
+                owner_user=owner,
+                owner_home=owner_home,
+                command=["agy", "--model", "gemini-3.7-flash-high", "-p", "model-ok"],
+                runner=runner,
+            )
+            interactive = team_launcher._run_owner_cli_interactive(
+                owner_user=owner,
+                cwd=owner_home,
+                command=["claude", "login"],
+                runner=runner,
+            )
+        finally:
+            for key, value in original_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    assert probe.returncode == 0
+    assert interactive.returncode == 0
+    assert calls == [
+        ["agy", "--model", "gemini-3.7-flash-high", "-p", "model-ok"],
+        ["claude", "login"],
+    ]
+    assert len(call_kwargs) == 2
+    for kwargs in call_kwargs:
+        env = kwargs["env"]
+        assert isinstance(env, dict)
+        for key in team_launcher.PROBE_IDENTITY_ENV_KEYS:
+            assert key not in env
 
 
 def test_custom_config_without_run_as_user_tracks_invoking_home() -> None:
@@ -5436,7 +5503,7 @@ def test_pane_start_from_another_pane_uses_target_session_and_clears_caller_tmux
     config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
     role = next(role for role in config.roles if role.role == "research")
     runner = FakeRunner()
-    env_keys = [
+    ambient_env_keys = [
         "TMUX",
         "TMUX_PANE",
         "TICKET_BOARD_PANE_TARGET",
@@ -5447,7 +5514,7 @@ def test_pane_start_from_another_pane_uses_target_session_and_clears_caller_tmux
         "PGU_TICKET_BOARD_PANE_SESSION_DIR",
         "PGU_TICKET_BOARD_PANE_STATE_DIR",
     ]
-    original_env = {key: os.environ.get(key) for key in env_keys}
+    original_env = {key: os.environ.get(key) for key in ambient_env_keys}
     try:
         os.environ["TMUX"] = "/tmp/tmux-1001/default,123,0"
         os.environ["TMUX_PANE"] = "%director"
@@ -5496,8 +5563,10 @@ def test_pane_start_from_another_pane_uses_target_session_and_clears_caller_tmux
     assert "PGU_PANE_TARGET=pgu-director:0.0" not in new_session[-1]
     assert "/live/director" not in new_session[-1]
     assert "TICKET_BOARD_CALLER_ROLE=research" in new_session[-1]
-    for key in env_keys:
+    for key in set(team_launcher.PANE_TARGET_ENV_KEYS):
         assert f"-u {key}" in new_session[-1]
+    assert "-u TMUX " not in f"{new_session[-1]} "
+    assert "-u TMUX_PANE" not in new_session[-1]
 
 
 def test_pane_reload_refuses_conflicting_ambient_session_id_before_killing_target() -> None:
@@ -5534,6 +5603,145 @@ def test_pane_reload_refuses_conflicting_ambient_session_id_before_killing_targe
     assert "research-session-id" in stderr.getvalue()
     assert not any(call[:2] == ["tmux", "kill-session"] for call in runner.calls)
     assert not any(call[:2] == ["tmux", "new-session"] for call in runner.calls)
+
+
+def test_visible_pane_reload_refuses_conflicting_ambient_session_id_before_killing_target() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    role = next(role for role in config.roles if role.role == "ops")
+    runner = FakeRunner(existing_sessions={role.tmux_session}, current_commands={role.target: "codex"})
+    original_env = {
+        "PGU_PANE_SESSION_ID": os.environ.get("PGU_PANE_SESSION_ID"),
+        "TICKET_BOARD_PANE_SESSION_ID": os.environ.get("TICKET_BOARD_PANE_SESSION_ID"),
+    }
+    stderr = StringIO()
+    try:
+        os.environ["PGU_PANE_SESSION_ID"] = "director-session-id"
+        os.environ["TICKET_BOARD_PANE_SESSION_ID"] = "director-session-id"
+        with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-visible-session-conflict.") as tmp:
+            session_dir = Path(tmp) / "sessions"
+            session_dir.mkdir()
+            (session_dir / session_file_name(role.target)).write_text(
+                json.dumps({"target": role.target, "session_id": "ops-session-id"}) + "\n",
+                encoding="utf-8",
+            )
+            with redirect_stderr(stderr):
+                result = run_role_pane(role, mode="reload", session_dir=session_dir, runner=runner)
+    finally:
+        for key, value in original_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    assert result == 1
+    assert "refusing to launch ops" in stderr.getvalue()
+    assert "director-session-id" in stderr.getvalue()
+    assert "ops-session-id" in stderr.getvalue()
+    assert not any(call[:2] == ["tmux", "kill-session"] for call in runner.calls)
+    assert not any(call[:2] == ["tmux", "new-session"] for call in runner.calls)
+    assert not any(call[:2] == ["tmux", "attach"] for call in runner.calls)
+
+
+def test_viewer_visible_reload_refuses_conflicting_ambient_session_id_before_killing_target() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-viewer-session-conflict.") as tmp:
+        tmp_path = Path(tmp)
+        config_path = _write_six_visible_role_config(tmp_path)
+        config = load_project_config("porter", config_path)
+        role = next(role for role in config.roles if role.role == "app")
+        session_dir = tmp_path / "sessions"
+        session_dir.mkdir()
+        (session_dir / session_file_name(role.target)).write_text(
+            json.dumps({"target": role.target, "session_id": "app-session-id"}) + "\n",
+            encoding="utf-8",
+        )
+        runner = FakeRunner(existing_sessions={role.tmux_session}, current_commands={role.target: "codex"})
+        original_env = {
+            "PGU_PANE_SESSION_ID": os.environ.get("PGU_PANE_SESSION_ID"),
+            "TICKET_BOARD_PANE_SESSION_ID": os.environ.get("TICKET_BOARD_PANE_SESSION_ID"),
+        }
+        stderr = StringIO()
+        try:
+            os.environ["PGU_PANE_SESSION_ID"] = "director-session-id"
+            os.environ["TICKET_BOARD_PANE_SESSION_ID"] = "director-session-id"
+            with redirect_stderr(stderr):
+                result = team_launcher.ensure_visible_role_session_for_viewer(
+                    role,
+                    mode="reload",
+                    session_dir=session_dir,
+                    pane_state_dir=tmp_path / "pane-state",
+                    runner=runner,
+                )
+        finally:
+            for key, value in original_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    assert result == 1
+    assert "refusing to launch app" in stderr.getvalue()
+    assert "director-session-id" in stderr.getvalue()
+    assert "app-session-id" in stderr.getvalue()
+    assert not any(call[:2] == ["tmux", "kill-session"] for call in runner.calls)
+    assert not any(call[:2] == ["tmux", "new-session"] for call in runner.calls)
+
+
+def test_attach_headless_role_refuses_conflicting_ambient_session_id_before_mutating_config() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-attach-session-conflict.") as tmp:
+        tmp_path = Path(tmp)
+        config_path = _write_six_visible_role_config(tmp_path)
+        layout = json.loads((tmp_path / "porter-layout.json").read_text(encoding="utf-8"))
+        layout["Widgets"].append({"Command": "", "SessionRestoreId": 6, "WorkingDirectory": ""})
+        (tmp_path / "porter-layout.json").write_text(json.dumps(layout, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+        raw_config["roles"].append(
+            {"role": "research", "detached": True, "target": "porter-research:0.0", "tmux_session": "porter-research", "cli": ["codex"]}
+        )
+        config_path.write_text(json.dumps(raw_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        config = load_project_config("porter", config_path)
+        role = next(role for role in config.roles if role.role == "research")
+        session_dir = tmp_path / "sessions"
+        session_dir.mkdir()
+        (session_dir / session_file_name(role.target)).write_text(
+            json.dumps({"target": role.target, "session_id": "research-session-id"}) + "\n",
+            encoding="utf-8",
+        )
+        before = config_path.read_text(encoding="utf-8")
+        runner = FakeRunner()
+        original_env = {
+            "PGU_PANE_SESSION_ID": os.environ.get("PGU_PANE_SESSION_ID"),
+            "TICKET_BOARD_PANE_SESSION_ID": os.environ.get("TICKET_BOARD_PANE_SESSION_ID"),
+        }
+        stderr = StringIO()
+        try:
+            os.environ["PGU_PANE_SESSION_ID"] = "director-session-id"
+            os.environ["TICKET_BOARD_PANE_SESSION_ID"] = "director-session-id"
+            with redirect_stderr(stderr):
+                result = team_launcher.attach_role_to_slot(
+                    config,
+                    config_path=config_path,
+                    role_name="research",
+                    slot=6,
+                    session_dir=session_dir,
+                    pane_state_dir=tmp_path / "pane-state",
+                    runner=runner,
+                )
+        finally:
+            for key, value in original_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+        after = config_path.read_text(encoding="utf-8")
+
+    assert result == 1
+    assert after == before
+    assert "refusing to launch research" in stderr.getvalue()
+    assert "director-session-id" in stderr.getvalue()
+    assert "research-session-id" in stderr.getvalue()
+    assert not any(call[:2] == ["tmux", "has-session"] for call in runner.calls)
+    assert not any(call[:2] == ["tmux", "new-session"] for call in runner.calls)
+    assert not any(call[:2] == ["tmux", "attach"] for call in runner.calls)
 
 
 def test_pane_start_without_recorded_session_ignores_ambient_session_and_starts_fresh() -> None:

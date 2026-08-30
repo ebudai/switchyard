@@ -1374,19 +1374,18 @@ def _env_prefix(env: dict[str, str]) -> list[str]:
     ]
 
 
-PANE_IDENTITY_ENV_KEYS = (
+PANE_TARGET_ENV_KEYS = (
     "PGU_PANE_SESSION_ID",
     "TICKET_BOARD_PANE_SESSION_ID",
     "PGU_TICKET_BOARD_PANE_SESSION_DIR",
     "PGU_TICKET_BOARD_PANE_STATE_DIR",
     "TICKET_BOARD_PANE_SESSION_DIR",
     "TICKET_BOARD_PANE_STATE_DIR",
-    "TMUX_PANE",
-    "TMUX",
     "TICKET_BOARD_PANE_TARGET",
     "PGU_PANE_TARGET",
     "TICKET_BOARD_CALLER_ROLE",
 )
+PROBE_IDENTITY_ENV_KEYS = ("TMUX", "TMUX_PANE", *PANE_TARGET_ENV_KEYS)
 
 
 def _env_unset_prefix(keys: Sequence[str]) -> list[str]:
@@ -2081,7 +2080,7 @@ def cli_command_for_role(
         if session_id:
             env.setdefault("PGU_PANE_SESSION_ID", session_id)
     env["PATH"] = _prepend_path(env.get("PATH") or default_pane_base_path(bin_user), default_user_bin(bin_user))
-    return ["env", *_env_unset_prefix(PANE_IDENTITY_ENV_KEYS), *_env_prefix(env), *command]
+    return ["env", *_env_unset_prefix(PANE_TARGET_ENV_KEYS), *_env_prefix(env), *command]
 
 
 def tmux_new_session_args(
@@ -5896,6 +5895,13 @@ def _owner_command_args(owner_user: str, command: Sequence[str]) -> list[str]:
     return ["sudo", "-u", owner_user, *command]
 
 
+def _pane_identity_scrubbed_env(source: Mapping[str, str] | None = None) -> dict[str, str]:
+    env = dict(os.environ if source is None else source)
+    for key in PROBE_IDENTITY_ENV_KEYS:
+        env.pop(key, None)
+    return env
+
+
 def _role_cli_name(role: RoleConfig) -> str:
     return _command_name(role.cli[0]) if role.cli else ""
 
@@ -5925,6 +5931,7 @@ def _run_owner_cli_probe(
         return runner(
             args,
             cwd=str(owner_home),
+            env=_pane_identity_scrubbed_env(),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -5942,7 +5949,7 @@ def _run_owner_cli_interactive(
 ) -> subprocess.CompletedProcess[Any]:
     args = _owner_command_args(owner_user, command)
     try:
-        return runner(args, cwd=str(cwd))
+        return runner(args, cwd=str(cwd), env=_pane_identity_scrubbed_env())
     except OSError as exc:
         return subprocess.CompletedProcess(args, 127, stderr=str(exc))
 

@@ -137,7 +137,7 @@ durable session record is not cleared by either operation.
 
 When a launcher `pane` command is run from inside another role's pane, inherited
 pane identity is treated as caller state, not target state. The launcher strips
-`TMUX`, `TMUX_PANE`, pane target, caller-role, pane-session, and pane-state environment
+pane target, caller-role, pane-session, and pane-state environment
 from the spawned role process, then supplies the target role's own values. If an
 ambient pane-session id disagrees with the target role's recorded session id,
 the launcher refuses before killing or starting a tmux session. Until a fixed
@@ -149,13 +149,16 @@ env -u PGU_PANE_SESSION_ID -u TICKET_BOARD_PANE_SESSION_ID \
     -u TICKET_BOARD_PANE_SESSION_DIR -u TICKET_BOARD_PANE_STATE_DIR \
     -u PGU_TICKET_BOARD_PANE_SESSION_DIR -u PGU_TICKET_BOARD_PANE_STATE_DIR \
     -u TICKET_BOARD_PANE_TARGET -u PGU_PANE_TARGET \
-    -u TICKET_BOARD_CALLER_ROLE -u TMUX -u TMUX_PANE \
+    -u TICKET_BOARD_CALLER_ROLE \
     team-launcher <project> pane start <role>
 ```
 
 For real one-shot CLI probes, also clear `TMUX` and `TMUX_PANE` and point
 `TICKET_BOARD_PANE_STATE_DIR` and `TICKET_BOARD_PANE_SESSION_DIR` at throwaway
-directories so hooks cannot write live pane state:
+directories. Current installed hooks pass absolute state/session directories,
+so clearing `TICKET_BOARD_PANE_TARGET` and `PGU_PANE_TARGET` is the part that
+prevents a probe hook from writing live pane state; the throwaway directories
+protect probe setups that still resolve paths from environment:
 
 ```bash
 TICKET_BOARD_PANE_STATE_DIR="$(mktemp -d)" \

@@ -496,21 +496,21 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
             arg=urgent_checkbox.element_handle(timeout=5000),
             timeout=5000,
         )
-        page.evaluate(
-            """() => {
-              state.lastActivityAt = Date.now();
-              const composer = document.querySelector('.detail-modal .comment-composer');
-              const urgent = composer && composer.querySelector('.urgent-comment-toggle input');
-              if (!urgent || !urgent.checked) {
-                throw new Error('urgent checkbox was not checked before Add Comment');
-              }
-              const addButton = Array.from(composer.querySelectorAll('button')).find((button) => button.textContent === 'Add Comment');
-              if (!addButton) {
-                throw new Error('Add Comment button not found');
-              }
-              addButton.click();
-            }"""
+        page.evaluate("""() => { rememberDetailDraft(); renderDetail(); }""")
+        modal.locator(".detail-ticket-headline strong", has_text="PGU-512").wait_for(timeout=5000)
+        comment_box = modal.get_by_placeholder("Add a comment or bounce-back note")
+        page.wait_for_function(
+            "(element) => element.value === 'Playwright comment on PGU-512'",
+            arg=comment_box.element_handle(timeout=5000),
+            timeout=5000,
         )
+        urgent_checkbox = modal.get_by_label("Urgent")
+        page.wait_for_function(
+            "(element) => element.checked === true",
+            arg=urgent_checkbox.element_handle(timeout=5000),
+            timeout=5000,
+        )
+        modal.get_by_role("button", name="Add Comment").click()
         wait_for_ticket_field(page, harness.url, "PGU-512", "ticket.comments.some((comment) => comment.text === 'Playwright comment on PGU-512' && comment.urgent)")
 
         attach_panel = modal.locator(".detail-attach-panel")

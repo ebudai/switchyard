@@ -635,8 +635,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       addCommentButton.textContent = 'Add Comment';
       addCommentButton.addEventListener('click', async () => {
         try {
-          const currentUrgent = detailContentEl.querySelector('.comment-composer .urgent-comment-toggle input');
-          await submitComment(ticket.id, commentWho.value, commentText.value, null, currentUrgent ? currentUrgent.checked : commentUrgent.checked);
+          await submitComment(ticket.id, commentWho.value, commentText.value, null, commentUrgent.checked);
         } catch (error) {
           setCreateStatus(error.message, true);
           await requestBoardReload();

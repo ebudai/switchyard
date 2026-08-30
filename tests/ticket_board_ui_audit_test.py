@@ -303,7 +303,12 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         page.locator("#assigneeInput").select_option("ops")
         page.locator("#createBtn").click()
         page.locator("#createStatus", has_text="Created PGU-514.").wait_for(timeout=5000)
-        wait_for_ticket_field(page, harness.url, "PGU-514", "ticket.screenshots.length === 1 && ticket.assignee === 'ops'")
+        wait_for_ticket_field(
+            page,
+            harness.url,
+            "PGU-514",
+            "ticket.screenshots.length === 1 && ticket.assignee === 'ops' && ticket.needs_audit === true",
+        )
 
         page.locator(".card", has=page.locator(".card-id", has_text="PGU-503")).click()
         modal = page.locator(".detail-modal")

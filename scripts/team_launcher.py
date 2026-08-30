@@ -69,6 +69,7 @@ SWITCHYARD_PROJECT_DIR_NAME = ".switchyard"
 SWITCHYARD_DESIGN_FILE_NAME = "PROJECT_DESIGN.md"
 SWITCHYARD_DESIGN_ONBOARDING_FILE_NAME = "DESIGNER_ONBOARDING.md"
 SWITCHYARD_DIRECTOR_ONBOARDING_FILE_NAME = "DIRECTOR_ONBOARDING.md"
+DEFAULT_PANE_BASE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 
 def _env_first(*names: str) -> str:
@@ -460,11 +461,21 @@ def ensure_configured_runtime_user(
     )
 
 
-def default_user_bin() -> str:
+def default_user_bin(user_name: str = "") -> str:
     configured = _env_first(USER_BIN_ENV, LEGACY_USER_BIN_ENV)
     if configured:
         return str(Path(configured).expanduser())
+    owner_home = home_dir_for_user(user_name) if user_name.strip() else None
+    if owner_home is not None:
+        return str(owner_home / "bin")
     return str(Path.home() / "bin")
+
+
+def default_pane_base_path(user_name: str = "") -> str:
+    user = user_name.strip()
+    if user and current_user_name() != user:
+        return DEFAULT_PANE_BASE_PATH
+    return os.environ.get("PATH", "")
 
 
 def default_gui_user() -> str:
@@ -1988,6 +1999,7 @@ def cli_command_for_role(
     session_dir: Path,
     pane_state_dir: Path | None = None,
     resume: bool = False,
+    bin_user: str = "",
 ) -> list[str]:
     session_id = session_id_for_role(role, session_dir) if resume else ""
     command = [*role.cli, *_resume_args_for_role(role, session_id)]
@@ -2013,7 +2025,7 @@ def cli_command_for_role(
             env.setdefault("PGU_TICKET_BOARD_PANE_STATE_DIR", str(pane_state_dir.expanduser()))
         if session_id:
             env.setdefault("PGU_PANE_SESSION_ID", session_id)
-    env["PATH"] = _prepend_path(env.get("PATH") or os.environ.get("PATH", ""), default_user_bin())
+    env["PATH"] = _prepend_path(env.get("PATH") or default_pane_base_path(bin_user), default_user_bin(bin_user))
     return ["env", *_env_prefix(env), *command]
 
 
@@ -2023,9 +2035,10 @@ def tmux_new_session_args(
     session_dir: Path,
     pane_state_dir: Path | None = None,
     resume: bool = False,
+    bin_user: str = "",
 ) -> list[str]:
     shell_command = _quote_command(
-        cli_command_for_role(role, session_dir=session_dir, pane_state_dir=pane_state_dir, resume=resume)
+        cli_command_for_role(role, session_dir=session_dir, pane_state_dir=pane_state_dir, resume=resume, bin_user=bin_user)
     )
     return ["tmux", "new-session", "-d", "-s", role.tmux_session, "-c", role.workdir, shell_command]
 
@@ -3411,6 +3424,7 @@ def _start_role_session(
     prefer_resume: bool,
     seed_source: str,
     post_start_verifier: Callable[[], bool] | None = None,
+    bin_user: str = "",
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> int:
     session_id = session_id_for_role(role, session_dir) if prefer_resume else ""
@@ -3428,7 +3442,13 @@ def _start_role_session(
     if not prefer_resume:
         clear_session_record_for_role(role, session_dir)
     start_proc = runner(
-        tmux_new_session_args(role, session_dir=session_dir, pane_state_dir=pane_state_dir, resume=prefer_resume)
+        tmux_new_session_args(
+            role,
+            session_dir=session_dir,
+            pane_state_dir=pane_state_dir,
+            resume=prefer_resume,
+            bin_user=bin_user,
+        )
     )
     if start_proc.returncode != 0:
         return int(start_proc.returncode)
@@ -3465,7 +3485,15 @@ def _start_role_session(
         if kill_proc.returncode != 0:
             return int(kill_proc.returncode)
     clear_session_record_for_role(role, session_dir)
-    fresh_proc = runner(tmux_new_session_args(role, session_dir=session_dir, pane_state_dir=pane_state_dir, resume=False))
+    fresh_proc = runner(
+        tmux_new_session_args(
+            role,
+            session_dir=session_dir,
+            pane_state_dir=pane_state_dir,
+            resume=False,
+            bin_user=bin_user,
+        )
+    )
     if fresh_proc.returncode != 0:
         return int(fresh_proc.returncode)
     if post_start_verifier is not None and not post_start_verifier():
@@ -3491,6 +3519,7 @@ def run_role_pane(
     session_dir: Path,
     pane_state_dir: Path = DEFAULT_PANE_STATE_DIR,
     force_reload: bool = False,
+    bin_user: str = "",
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> int:
     exists = runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
@@ -3517,6 +3546,7 @@ def run_role_pane(
             pane_state_dir=pane_state_dir,
             prefer_resume=True,
             seed_source="team_launcher.reload",
+            bin_user=bin_user,
             runner=runner,
         )
         if start_result != 0:
@@ -3531,6 +3561,7 @@ def run_role_pane(
                 prefer_resume=True,
                 seed_source="team_launcher.start",
                 post_start_verifier=lambda: _resume_launch_verified(role, runner=runner),
+                bin_user=bin_user,
                 runner=runner,
             )
             if start_result != 0:
@@ -3546,6 +3577,7 @@ def run_detached_role(
     session_dir: Path,
     pane_state_dir: Path = DEFAULT_PANE_STATE_DIR,
     force_reload: bool = False,
+    bin_user: str = "",
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> int:
     exists = runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
@@ -3573,6 +3605,7 @@ def run_detached_role(
             prefer_resume=True,
             seed_source="team_launcher.reload",
             post_start_verifier=lambda: _detached_launch_verified(role, runner=runner),
+            bin_user=bin_user,
             runner=runner,
         )
     if mode in {"start", "attach-or-start"}:
@@ -3584,6 +3617,7 @@ def run_detached_role(
                 prefer_resume=True,
                 seed_source="team_launcher.start",
                 post_start_verifier=lambda: _detached_launch_verified(role, runner=runner),
+                bin_user=bin_user,
                 runner=runner,
             )
         return 0
@@ -3597,6 +3631,7 @@ def ensure_visible_role_session_for_viewer(
     session_dir: Path,
     pane_state_dir: Path = DEFAULT_PANE_STATE_DIR,
     force_reload: bool = False,
+    bin_user: str = "",
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> int:
     exists = runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
@@ -3623,6 +3658,7 @@ def ensure_visible_role_session_for_viewer(
             pane_state_dir=pane_state_dir,
             prefer_resume=True,
             seed_source="team_launcher.reload",
+            bin_user=bin_user,
             runner=runner,
         )
     if mode in {"start", "attach-or-start"}:
@@ -3634,6 +3670,7 @@ def ensure_visible_role_session_for_viewer(
                 prefer_resume=True,
                 seed_source="team_launcher.start",
                 post_start_verifier=lambda: _resume_launch_verified(role, runner=runner),
+                bin_user=bin_user,
                 runner=runner,
             )
         seed_initial_pane_idle_state(role, pane_state_dir=pane_state_dir, source="team_launcher.start")
@@ -3653,7 +3690,7 @@ def _layout_leaves(node: Any) -> list[dict[str, Any]]:
     return leaves
 
 
-def pane_command(
+def pane_command_args(
     project: str,
     role: RoleConfig,
     *,
@@ -3664,7 +3701,7 @@ def pane_command(
     force_reload: bool = False,
     skip_launcher_check: bool = False,
     run_as_user: str = "",
-) -> str:
+) -> list[str]:
     args = [
         str(script_path),
         project,
@@ -3682,6 +3719,32 @@ def pane_command(
         args.extend(["--pane-state-dir", str(pane_state_dir)])
     if run_as_user and current_user_name() != run_as_user:
         args = ["sudo", "-u", run_as_user, "-H", *args]
+    return args
+
+
+def pane_command(
+    project: str,
+    role: RoleConfig,
+    *,
+    config_path: Path,
+    mode: str,
+    script_path: Path,
+    pane_state_dir: Path | None = None,
+    force_reload: bool = False,
+    skip_launcher_check: bool = False,
+    run_as_user: str = "",
+) -> str:
+    args = pane_command_args(
+        project,
+        role,
+        config_path=config_path,
+        mode=mode,
+        script_path=script_path,
+        pane_state_dir=pane_state_dir,
+        force_reload=force_reload,
+        skip_launcher_check=skip_launcher_check,
+        run_as_user=run_as_user,
+    )
     return _quote_command(args)
 
 
@@ -4315,7 +4378,8 @@ def launch_project(
     worktree_runner = runner
     role_process_runner = runner
     owner_runner_anchor = config.repository or config.pane_launcher
-    if config.run_as_user and current_user_name() != config.run_as_user:
+    delegate_role_sessions_to_owner = bool(config.run_as_user and current_user_name() != config.run_as_user)
+    if delegate_role_sessions_to_owner:
         role_process_runner = _owner_process_runner(owner_user=config.run_as_user, runner=runner)
         if owner_runner_anchor is not None:
             worktree_runner = _owner_project_git_runner(
@@ -4441,14 +4505,30 @@ def launch_project(
         if role.role in failed_roles:
             print(f"skipping detached role {role.role}: {failed_roles[role.role]}", file=sys.stderr)
             continue
-        result = run_detached_role(
-            role,
-            mode=mode,
-            session_dir=config.session_dir,
-            pane_state_dir=effective_pane_state_dir,
-            force_reload=force_reload,
-            runner=role_process_runner,
-        )
+        if delegate_role_sessions_to_owner:
+            result = runner(
+                pane_command_args(
+                    config.project,
+                    role,
+                    config_path=config_path,
+                    mode=mode,
+                    script_path=pane_script_path,
+                    pane_state_dir=effective_pane_state_dir,
+                    force_reload=force_reload,
+                    skip_launcher_check=True,
+                    run_as_user=config.run_as_user,
+                )
+            ).returncode
+        else:
+            result = run_detached_role(
+                role,
+                mode=mode,
+                session_dir=config.session_dir,
+                pane_state_dir=effective_pane_state_dir,
+                force_reload=force_reload,
+                bin_user=config.run_as_user,
+                runner=role_process_runner,
+            )
         if result != 0:
             return result
     resolved_layout_mode = resolve_layout_mode(layout_mode, environ=layout_environ, runner=runner)
@@ -4458,14 +4538,30 @@ def launch_project(
             if role.role in failed_roles:
                 print(f"skipping visible role {role.role}: {failed_roles[role.role]}", file=sys.stderr)
                 continue
-            result = ensure_visible_role_session_for_viewer(
-                role,
-                mode=mode,
-                session_dir=config.session_dir,
-                pane_state_dir=effective_pane_state_dir,
-                force_reload=force_reload,
-                runner=role_process_runner,
-            )
+            if delegate_role_sessions_to_owner:
+                result = runner(
+                    pane_command_args(
+                        config.project,
+                        role,
+                        config_path=config_path,
+                        mode=mode,
+                        script_path=pane_script_path,
+                        pane_state_dir=effective_pane_state_dir,
+                        force_reload=force_reload,
+                        skip_launcher_check=True,
+                        run_as_user=config.run_as_user,
+                    )
+                ).returncode
+            else:
+                result = ensure_visible_role_session_for_viewer(
+                    role,
+                    mode=mode,
+                    session_dir=config.session_dir,
+                    pane_state_dir=effective_pane_state_dir,
+                    force_reload=force_reload,
+                    bin_user=config.run_as_user,
+                    runner=role_process_runner,
+                )
             if result != 0:
                 return result
         ensure_owner_state_dirs(config, pane_state_dir=effective_pane_state_dir, runner=runner)
@@ -7395,6 +7491,26 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit("pane mode requires <start|attach|attach-or-start|reload|attach-role|detach-role> and <role>")
         if args.pane_mode not in {"start", "attach", "attach-or-start", "reload", "attach-role", "detach-role"}:
             raise SystemExit(f"unknown pane mode: {args.pane_mode}")
+        role = _role_by_name(config, args.role)
+        pane_state_dir = args.pane_state_dir or default_pane_state_dir_for_user(config.run_as_user, project=config.project)
+        if (
+            args.pane_mode in {"start", "attach", "attach-or-start", "reload"}
+            and config.run_as_user
+            and current_user_name() != config.run_as_user
+        ):
+            return subprocess.run(
+                pane_command_args(
+                    config.project,
+                    role,
+                    config_path=config_path,
+                    mode=args.pane_mode,
+                    script_path=args.script_path,
+                    pane_state_dir=pane_state_dir,
+                    force_reload=args.force,
+                    skip_launcher_check=args.skip_launcher_check,
+                    run_as_user=config.run_as_user,
+                )
+            ).returncode
         if not args.skip_launcher_check:
             ensure_launcher_checkout_current(
                 config,
@@ -7404,8 +7520,6 @@ def main(argv: list[str] | None = None) -> int:
             )
         ensure_configured_runtime_user(config)
         seed_default_session_dir_from_legacy_sources(config.session_dir)
-        role = _role_by_name(config, args.role)
-        pane_state_dir = args.pane_state_dir or default_pane_state_dir_for_user(config.run_as_user, project=config.project)
         if args.pane_mode == "attach-role":
             if args.slot is None:
                 raise SystemExit("pane attach-role requires --slot")
@@ -7430,6 +7544,7 @@ def main(argv: list[str] | None = None) -> int:
                 session_dir=config.session_dir,
                 pane_state_dir=pane_state_dir,
                 force_reload=args.force,
+                bin_user=config.run_as_user,
             )
         return run_role_pane(
             role,
@@ -7437,6 +7552,7 @@ def main(argv: list[str] | None = None) -> int:
             session_dir=config.session_dir,
             pane_state_dir=pane_state_dir,
             force_reload=args.force,
+            bin_user=config.run_as_user,
         )
     return launch_project(
         config,

@@ -21,10 +21,14 @@ may opt into a dedicated runtime account with `run_as_user`; when that key is
 set and the invoker is different, the wrapper re-execs through
 `sudo -u <run_as_user> -H`. The PGU config uses `run_as_user: agent` so Eric's
 production launch keeps the existing agent-owned tmux sessions, pane hook
-state, and shared checkout. Projects without `run_as_user` use the invoking
-user's runtime pane-state directory and `$HOME/bin` prepended to pane CLI
-`PATH`. Resume session records are durable state under the runtime user's home,
-not `/run`.
+state, and shared checkout. Parent-launched role sessions, including detached
+roles and the non-KDE viewer path, delegate their pane start/reload work through
+that runtime user before touching tmux, pane hook state, or resume session
+files. Projects without `run_as_user` use the invoking user's runtime
+pane-state directory and `$HOME/bin` prepended to pane CLI `PATH`; projects
+with `run_as_user` prepend that runtime user's `$HOME/bin`, not the invoking
+user's private bin directory. Resume session records are durable state under
+the runtime user's home, not `/run`.
 Real `start` and `reload` launches verify that the selected runtime user has
 linger enabled and a `/run/user/<uid>` directory before starting tmux panes. If
 host policy denies that setup, the launcher fails before touching panes and
@@ -45,7 +49,9 @@ env QT_QPA_PLATFORM=wayland \
 The commands inside the Konsole layout call `scripts/team-launcher pane ...`
 as the same user, so visible panes attach to that user's tmux sessions.
 Set `PGU_TEAM_LAUNCHER_BIN_DIR` to override the default `$HOME/bin` PATH
-prefix, and set `PGU_TEAM_LAUNCHER_GUI_USER` or
+prefix. The launcher deliberately prepends only `$HOME/bin`, not
+`$HOME/.local/bin`; pane hooks are installed and referenced by absolute paths.
+Set `PGU_TEAM_LAUNCHER_GUI_USER` or
 `PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY` when the Konsole display should be resolved
 from a different local desktop account or socket name.
 

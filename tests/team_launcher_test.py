@@ -647,7 +647,12 @@ def test_launch_repairs_generated_project_owner_hooks_before_starting_panes() ->
     hook_install_call = next(
         call for call in runner.calls if "ticket-board-install-pane-hooks" in " ".join(str(part) for part in call)
     )
-    tmux_new_call = next(call for call in runner.calls if call[:3] == ["sudo", "-u", "otto-agent"] and call[4:7] == ["tmux", "new-session", "-d"])
+    pane_start_call = next(
+        call
+        for call in runner.calls
+        if call[:5] == ["sudo", "-u", "otto-agent", "-H", "/home/otto-agent/otto-ticketboard-live/current/scripts/team-launcher"]
+        and call[5:8] == ["otto", "pane", "attach-or-start"]
+    )
     assert hook_install_call == [
         "sudo",
         "-u",
@@ -667,7 +672,23 @@ def test_launch_repairs_generated_project_owner_hooks_before_starting_panes() ->
         "--bin-path",
         "/home/otto-agent/.local/bin/ticket-board-pane-idle-hook",
     ]
-    assert runner.calls.index(hook_install_call) < runner.calls.index(tmux_new_call)
+    assert pane_start_call == [
+        "sudo",
+        "-u",
+        "otto-agent",
+        "-H",
+        "/home/otto-agent/otto-ticketboard-live/current/scripts/team-launcher",
+        "otto",
+        "pane",
+        "attach-or-start",
+        "role0",
+        "--config",
+        str(config_path),
+        "--skip-launcher-check",
+        "--pane-state-dir",
+        str(pane_state_dir),
+    ]
+    assert runner.calls.index(hook_install_call) < runner.calls.index(pane_start_call)
 
 
 def test_generated_project_hook_install_args_match_otto_one_time_repair_command() -> None:
@@ -2562,6 +2583,56 @@ def test_pane_command_does_not_sudo_when_already_owner() -> None:
     assert tokens[0] == str(ROOT / "scripts" / "team-launcher")
 
 
+def test_visible_layout_command_stays_owner_wrapped_without_forcing_pane_state_dir() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-visible-owner-command.") as tmp:
+        tmp_path = Path(tmp)
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "run_as_user": "porter-agent",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "roles": [{"role": "ops", "slot": 0, "cli": ["codex"], "target": "porter-ops:0.0"}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+        role = config.roles[0]
+        output = tmp_path / "out.json"
+        original_current_user_name = team_launcher.current_user_name
+        try:
+            team_launcher.current_user_name = lambda: "root"
+            materialize_layout(
+                config,
+                config_path=config_path,
+                mode="attach-or-start",
+                script_path=ROOT / "scripts" / "team-launcher",
+                output_path=output,
+            )
+        finally:
+            team_launcher.current_user_name = original_current_user_name
+
+        command = json.loads(output.read_text(encoding="utf-8"))["Command"]
+        assert shlex.split(command) == team_launcher.pane_command_args(
+            "porter",
+            role,
+            config_path=config_path,
+            mode="attach-or-start",
+            script_path=ROOT / "scripts" / "team-launcher",
+            skip_launcher_check=True,
+            run_as_user="porter-agent",
+        )
+        assert "--pane-state-dir" not in shlex.split(command)
+
+
 def test_launch_project_default_layout_uses_project_scoped_switchyard_not_tmp() -> None:
     project = f"layoutsafe{os.getpid()}"
     stale_tmp_layout = Path(tempfile.gettempdir()) / f"{project}-team-layout.json"
@@ -3236,8 +3307,24 @@ def test_launch_project_default_pane_state_dir_uses_run_as_user_runtime_when_lau
             team_launcher.runtime_dir_for_uid = original_runtime_dir_for_uid
             team_launcher.current_user_name = original_current_user_name
 
-        expected_state = owner_runtime / "porter-ticket-board" / "pane-state" / pane_state_file_name("porter-ops:0.0")
-        assert expected_state.exists()
+        expected_pane_state_dir = owner_runtime / "porter-ticket-board" / "pane-state"
+        expected_call = [
+            "sudo",
+            "-u",
+            "porter-agent",
+            "-H",
+            str(ROOT / "scripts" / "team-launcher"),
+            "porter",
+            "pane",
+            "attach-or-start",
+            "ops",
+            "--config",
+            str(config_path),
+            "--skip-launcher-check",
+            "--pane-state-dir",
+            str(expected_pane_state_dir),
+        ]
+        assert expected_call in runner.calls
         assert not (root_pane_state / pane_state_file_name("porter-ops:0.0")).exists()
 
 
@@ -3340,7 +3427,6 @@ def test_root_created_owner_state_dirs_are_owned_by_run_as_user() -> None:
 
         expected_session_dir = owner_home / ".local" / "state" / "pgu-ticket-board" / "pane-sessions"
         expected_pane_state_dir = owner_runtime / "porter-ticket-board" / "pane-state"
-        expected_state = expected_pane_state_dir / pane_state_file_name("porter-ops:0.0")
         expected_session_install = [
             "install",
             "-d",
@@ -3363,9 +3449,25 @@ def test_root_created_owner_state_dirs_are_owned_by_run_as_user() -> None:
             "porter-agent",
             str(expected_pane_state_dir),
         ]
+        expected_pane_start = [
+            "sudo",
+            "-u",
+            "porter-agent",
+            "-H",
+            str(ROOT / "scripts" / "team-launcher"),
+            "porter",
+            "pane",
+            "attach-or-start",
+            "ops",
+            "--config",
+            str(config_path),
+            "--skip-launcher-check",
+            "--pane-state-dir",
+            str(expected_pane_state_dir),
+        ]
         assert expected_session_dir.is_dir()
         assert expected_pane_state_dir.is_dir()
-        assert expected_state.exists()
+        assert expected_pane_start in runner.calls
         assert not root_session_dir.exists()
         assert not root_pane_state.exists()
         assert runner.calls.count(expected_session_install) == 2
@@ -3556,9 +3658,24 @@ def test_explicit_pane_state_dir_env_beats_run_as_user_runtime_default() -> None
             team_launcher.runtime_dir_for_uid = original_runtime_dir_for_uid
             team_launcher.current_user_name = original_current_user_name
 
-        expected_state = env_pane_state / pane_state_file_name("porter-ops:0.0")
+        expected_call = [
+            "sudo",
+            "-u",
+            "porter-agent",
+            "-H",
+            str(ROOT / "scripts" / "team-launcher"),
+            "porter",
+            "pane",
+            "attach-or-start",
+            "ops",
+            "--config",
+            str(config_path),
+            "--skip-launcher-check",
+            "--pane-state-dir",
+            str(env_pane_state),
+        ]
         owner_state = owner_runtime / "pgu-ticket-board" / "pane-state" / pane_state_file_name("porter-ops:0.0")
-        assert expected_state.exists()
+        assert expected_call in runner.calls
         assert not owner_state.exists()
         assert not (root_pane_state / pane_state_file_name("porter-ops:0.0")).exists()
 
@@ -3584,6 +3701,50 @@ def test_cli_command_prepends_invoking_user_bin() -> None:
             os.environ["PGU_TEAM_LAUNCHER_BIN_DIR"] = original_bin_dir
 
     assert any(entry.startswith("PATH=/home/otto-agent/bin:") for entry in _env_entries(command))
+
+
+def test_cli_command_with_explicit_owner_uses_owner_bin_and_drops_invoker_private_path() -> None:
+    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    role = next(role for role in config.roles if role.role == "research")
+    original_path = os.environ.get("PATH")
+    original_generic_bin_dir = os.environ.pop("TEAM_LAUNCHER_BIN_DIR", None)
+    original_bin_dir = os.environ.pop("PGU_TEAM_LAUNCHER_BIN_DIR", None)
+    original_getpwnam = team_launcher.pwd.getpwnam
+    original_current_user_name = team_launcher.current_user_name
+
+    class OwnerPw:
+        pw_dir = "/home/porter-agent"
+
+    def fake_getpwnam(user_name: str) -> Any:
+        if user_name == "porter-agent":
+            return OwnerPw()
+        return original_getpwnam(user_name)
+
+    try:
+        os.environ["PATH"] = "/root/bin:/usr/bin"
+        team_launcher.pwd.getpwnam = fake_getpwnam
+        team_launcher.current_user_name = lambda: "root"
+        command = cli_command_for_role(
+            role,
+            session_dir=Path("/home/porter-agent/.local/state/pgu-ticket-board/pane-sessions"),
+            pane_state_dir=Path("/run/user/4242/pgu-ticket-board/pane-state"),
+            bin_user="porter-agent",
+        )
+    finally:
+        if original_path is None:
+            os.environ.pop("PATH", None)
+        else:
+            os.environ["PATH"] = original_path
+        if original_generic_bin_dir is not None:
+            os.environ["TEAM_LAUNCHER_BIN_DIR"] = original_generic_bin_dir
+        if original_bin_dir is not None:
+            os.environ["PGU_TEAM_LAUNCHER_BIN_DIR"] = original_bin_dir
+        team_launcher.pwd.getpwnam = original_getpwnam
+        team_launcher.current_user_name = original_current_user_name
+
+    path = next(entry.split("=", 1)[1] for entry in _env_entries(command) if entry.startswith("PATH="))
+    assert path.startswith("/home/porter-agent/bin:")
+    assert "/root/bin" not in path.split(":")
 
 
 def test_modern_env_names_win_over_legacy_aliases_with_legacy_fallback() -> None:
@@ -5561,11 +5722,22 @@ def test_plain_shared_checkout_git_runs_as_owner_when_launcher_user_differs() ->
             if tuple(call) in expected_refresh_calls
         ]
         assert direct_refresh_calls == []
-        assert ["sudo", "-u", "agent", "-H", *tmux_has_session_args(next(role for role in config.roles if role.role == "research"))] in runner.calls
-        assert any(
-            call[:9] == ["sudo", "-u", "agent", "-H", "tmux", "new-session", "-d", "-s", "pgu-research"]
-            for call in runner.calls
-        )
+        assert [
+            "sudo",
+            "-u",
+            "agent",
+            "-H",
+            str(ROOT / "scripts" / "team-launcher"),
+            "pgu",
+            "pane",
+            "attach-or-start",
+            "research",
+            "--config",
+            str(config_path),
+            "--skip-launcher-check",
+            "--pane-state-dir",
+            str(tmp_path / "pane-state"),
+        ] in runner.calls
 
 
 def test_plain_shared_checkout_git_stays_direct_when_already_owner() -> None:
@@ -6596,6 +6768,95 @@ def test_detached_research_resume_falls_back_when_failed_session_is_already_gone
     assert "--resume" not in new_sessions[1][-1]
 
 
+def test_full_launch_delegates_detached_role_start_to_owner_pane_subcommand() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-detached-owner.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "owner-home"
+        owner_home.mkdir()
+        owner_runtime = tmp_path / "run" / "user" / "4242"
+        owner_runtime.mkdir(parents=True)
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "run_as_user": "porter-agent",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "roles": [
+                        {
+                            "role": "research",
+                            "detached": True,
+                            "cli": ["claude"],
+                            "target": "porter-research:0.0",
+                        }
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        original_getpwnam = team_launcher.pwd.getpwnam
+        original_runtime_dir_for_uid = team_launcher.runtime_dir_for_uid
+        original_current_user_name = team_launcher.current_user_name
+
+        class OwnerPw:
+            pw_dir = str(owner_home)
+            pw_uid = 4242
+            pw_gid = 4242
+
+        def fake_getpwnam(user_name: str) -> Any:
+            if user_name == "porter-agent":
+                return OwnerPw()
+            return original_getpwnam(user_name)
+
+        try:
+            team_launcher.pwd.getpwnam = fake_getpwnam
+            team_launcher.runtime_dir_for_uid = lambda uid: owner_runtime if uid == 4242 else Path(f"/run/user/{uid}")
+            team_launcher.current_user_name = lambda: "root"
+            config = load_project_config("porter", config_path)
+            runner = FakeRunner()
+            result = launch_project(
+                config,
+                config_path=config_path,
+                mode="start",
+                script_path=ROOT / "scripts" / "team-launcher",
+                runner=runner,
+                layout_output=tmp_path / "layout-output.json",
+            )
+        finally:
+            team_launcher.pwd.getpwnam = original_getpwnam
+            team_launcher.runtime_dir_for_uid = original_runtime_dir_for_uid
+            team_launcher.current_user_name = original_current_user_name
+
+        pane_state_dir = owner_runtime / "porter-ticket-board" / "pane-state"
+        expected = [
+            "sudo",
+            "-u",
+            "porter-agent",
+            "-H",
+            str(ROOT / "scripts" / "team-launcher"),
+            "porter",
+            "pane",
+            "attach-or-start",
+            "research",
+            "--config",
+            str(config_path),
+            "--skip-launcher-check",
+            "--pane-state-dir",
+            str(pane_state_dir),
+        ]
+        assert result == 0
+        assert expected in runner.calls
+        assert not any(call[:2] == ["tmux", "new-session"] for call in runner.calls)
+        assert not (tmp_path / "run" / "user" / "0" / "porter-ticket-board" / "pane-state").exists()
+
+
 def test_start_force_refreshes_dirty_shared_checkout_with_real_git() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-git.") as tmp:
         tmp_path = Path(tmp)
@@ -7272,6 +7533,103 @@ def test_detached_research_attach_checks_session_without_attaching() -> None:
         )
 
     assert runner.calls == [["tmux", "has-session", "-t", "pgu-research"]]
+
+
+def test_pane_start_reexecs_as_owner_before_detached_tmux_or_state_work() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-pane-owner.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "owner-home"
+        owner_home.mkdir()
+        owner_runtime = tmp_path / "run" / "user" / "4242"
+        owner_runtime.mkdir(parents=True)
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "run_as_user": "porter-agent",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "roles": [
+                        {
+                            "role": "research",
+                            "detached": True,
+                            "cli": ["claude"],
+                            "target": "porter-research:0.0",
+                        }
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        calls: list[list[str]] = []
+        original_run = team_launcher.subprocess.run
+        original_getpwnam = team_launcher.pwd.getpwnam
+        original_runtime_dir_for_uid = team_launcher.runtime_dir_for_uid
+        original_current_user_name = team_launcher.current_user_name
+
+        class OwnerPw:
+            pw_dir = str(owner_home)
+            pw_uid = 4242
+            pw_gid = 4242
+
+        def fake_getpwnam(user_name: str) -> Any:
+            if user_name == "porter-agent":
+                return OwnerPw()
+            return original_getpwnam(user_name)
+
+        def fake_run(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0)
+
+        try:
+            team_launcher.subprocess.run = fake_run
+            team_launcher.pwd.getpwnam = fake_getpwnam
+            team_launcher.runtime_dir_for_uid = lambda uid: owner_runtime if uid == 4242 else Path(f"/run/user/{uid}")
+            team_launcher.current_user_name = lambda: "root"
+            result = team_launcher.main(
+                [
+                    "porter",
+                    "pane",
+                    "start",
+                    "research",
+                    "--config",
+                    str(config_path),
+                    "--script-path",
+                    str(ROOT / "scripts" / "team-launcher"),
+                ]
+            )
+        finally:
+            team_launcher.subprocess.run = original_run
+            team_launcher.pwd.getpwnam = original_getpwnam
+            team_launcher.runtime_dir_for_uid = original_runtime_dir_for_uid
+            team_launcher.current_user_name = original_current_user_name
+
+        assert result == 0
+        assert calls == [
+            [
+                "sudo",
+                "-u",
+                "porter-agent",
+                "-H",
+                str(ROOT / "scripts" / "team-launcher"),
+                "porter",
+                "pane",
+                "start",
+                "research",
+                "--config",
+                str(config_path),
+                "--pane-state-dir",
+                str(owner_runtime / "porter-ticket-board" / "pane-state"),
+            ]
+        ]
+        assert not (tmp_path / "run" / "user" / "0" / "porter-ticket-board" / "pane-state").exists()
 
 
 def test_attach_headless_role_to_free_slot_resumes_without_touching_neighbours() -> None:
@@ -10317,6 +10675,7 @@ def test_team_launcher_main_resolves_registered_project_for_pane_operations() ->
             "session_dir": session_dir,
             "pane_state_dir": pane_state_dir,
             "force_reload": False,
+            "bin_user": "",
         }
     ]
 

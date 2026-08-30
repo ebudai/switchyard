@@ -13786,6 +13786,54 @@ def test_first_run_auth_phase_accepts_matching_codex_hook_trust_without_writing_
     assert after_config == original_config
 
 
+def test_first_run_auth_phase_accepts_fresh_installer_seeded_codex_hook_trust() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-first-run-codex-hooks-seeded.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        bin_path = owner_home / ".local" / "bin" / "ticket-board-pane-idle-hook"
+        subprocess.run(
+            [
+                str(ROOT / "scripts" / "ticket-board-install-pane-hooks"),
+                "install",
+                "--home",
+                str(owner_home),
+                "--bin-path",
+                str(bin_path),
+                "--seed-codex-hook-trust-if-new",
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        config = load_project_config(
+            "otto",
+            _write_first_run_auth_config(
+                tmp_path,
+                roles=[
+                    ("director", "claude"),
+                    ("ops", "codex"),
+                    ("inspector", "agy"),
+                    ("main", "codex"),
+                    ("app", "codex"),
+                ],
+            ),
+        )
+        runner = FirstRunAuthRunner()
+        runner.login_seen.update({"agy", "claude", "codex"})
+        messages: list[str] = []
+
+        report = team_launcher.run_first_run_auth_phase(
+            config,
+            owner_user="otto-agent",
+            owner_home=owner_home,
+            runner=runner,
+            print_func=messages.append,
+        )
+
+    assert report.stale_codex_hook_trust == []
+    assert messages == []
+
+
 def test_first_run_auth_phase_ignores_codex_role_with_no_installed_hooks() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-first-run-codex-no-hooks.") as tmp:
         tmp_path = Path(tmp)

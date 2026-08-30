@@ -10,8 +10,15 @@ import shlex
 import shutil
 import stat
 import sys
+import tomllib
 from pathlib import Path
 from typing import Any
+
+from ticket_board.codex_hook_trust import (
+    codex_command_hook_trust_entries,
+    codex_trusted_hashes,
+    render_codex_hook_trust_records,
+)
 
 HOOK_BASENAME = "ticket-board-pane-idle-hook"
 LEGACY_HOOK_BASENAME = "pgu-ticket-board-pane-idle-hook"
@@ -302,6 +309,54 @@ def _install_codex_hooks(home: Path, hook_bin: Path) -> Path:
     return path
 
 
+def _toml_loads(text: str) -> dict[str, Any]:
+    try:
+        parsed = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise SystemExit(f"cannot seed Codex hook trust because config.toml is invalid: {exc}") from exc
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _has_hooks_state_table(config: dict[str, Any]) -> bool:
+    hooks = config.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    return isinstance(hooks.get("state"), dict)
+
+
+def _seed_codex_hook_trust_if_new(
+    home: Path,
+    *,
+    had_codex_hooks: bool,
+    had_codex_trust_records: bool,
+) -> str:
+    if had_codex_trust_records:
+        return "skipped Codex hook trust seed: existing trust records require manual /hooks re-approval"
+    if had_codex_hooks:
+        return "skipped Codex hook trust seed: existing hooks.json requires manual /hooks approval"
+
+    entries = codex_command_hook_trust_entries(home)
+    if not entries:
+        return "skipped Codex hook trust seed: no installed Codex command hooks"
+
+    config_path = home / ".codex" / "config.toml"
+    existing = ""
+    if config_path.exists():
+        existing = config_path.read_text(encoding="utf-8")
+        config = _toml_loads(existing)
+    else:
+        config = {}
+    include_parent_header = not _has_hooks_state_table(config)
+    addition = render_codex_hook_trust_records(entries, include_parent_header=include_parent_header)
+    if existing and not existing.endswith("\n"):
+        existing += "\n"
+    if existing and addition:
+        existing += "\n"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(existing + addition, encoding="utf-8")
+    return f"seeded Codex hook trust for {len(entries)} installed hooks"
+
+
 def _install_gemini_hooks(home: Path, hook_bin: Path) -> Path:
     # agy 1.0.8 moved hook discovery to the shared Gemini config tree.
     # The old antigravity-cli/settings.json path is still used for other
@@ -487,6 +542,8 @@ def install(args: argparse.Namespace) -> int:
     home = Path(args.home).expanduser()
     hook_source = Path(args.hook_source).expanduser()
     hook_bin = Path(args.bin_path).expanduser()
+    had_codex_hooks = (home / ".codex" / "hooks.json").exists()
+    had_codex_trust_records = bool(codex_trusted_hashes(home))
     _install_hook_binary(hook_source, hook_bin)
     written = [
         _install_claude_hooks(home, hook_bin),
@@ -494,9 +551,18 @@ def install(args: argparse.Namespace) -> int:
         _install_gemini_hooks(home, hook_bin),
         _install_hermes_hooks(home, hook_bin),
     ]
+    codex_seed_result = ""
+    if args.seed_codex_hook_trust_if_new:
+        codex_seed_result = _seed_codex_hook_trust_if_new(
+            home,
+            had_codex_hooks=had_codex_hooks,
+            had_codex_trust_records=had_codex_trust_records,
+        )
     print(f"installed {hook_bin}")
     for path in written:
         print(f"wrote {path}")
+    if codex_seed_result:
+        print(codex_seed_result)
     print("restart every pane CLI before restarting the ticket-board notify-listener service")
     return 0
 
@@ -529,6 +595,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--bin-path",
         default=str(Path.home() / ".local" / "bin" / HOOK_BASENAME),
         help="installed hook binary path",
+    )
+    install_parser.add_argument(
+        "--seed-codex-hook-trust-if-new",
+        action="store_true",
+        help="seed Codex hook trust only when the owner has no existing hooks.json or hook trust records",
     )
     install_parser.set_defaults(func=install)
 

@@ -83,7 +83,8 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
         "'/home/stellaris-agent/stellaris-ticketboard-live/current/scripts/ticket-board-install-pane-hooks' install "
         "--home '/home/stellaris-agent' "
         "--hook-source '/home/stellaris-agent/stellaris-ticketboard-live/current/scripts/ticket-board-pane-idle-hook' "
-        "--bin-path '/home/stellaris-agent/.local/bin/ticket-board-pane-idle-hook'"
+        "--bin-path '/home/stellaris-agent/.local/bin/ticket-board-pane-idle-hook' "
+        "--seed-codex-hook-trust-if-new"
     ) in combined
     assert combined.index("systemctl --user daemon-reload") < combined.index("ticket-board-install-pane-hooks")
     assert combined.index("ticket-board-install-pane-hooks") < combined.index("systemctl --user enable --now stellaris-ticket-board-notify-listener.service")

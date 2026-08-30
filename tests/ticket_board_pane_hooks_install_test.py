@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -40,6 +41,11 @@ from tmux_socket_cleanup import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.ticket_board.codex_hook_trust import codex_command_hook_trust_entries, codex_trusted_hashes
+
 INSTALLER = ROOT / "scripts" / "ticket-board-install-pane-hooks"
 HOOK_NAME = "ticket-board-pane-idle-hook"
 LEGACY_HOOK_NAME = "pgu-ticket-board-pane-idle-hook"
@@ -149,6 +155,12 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     import yaml
 
     parsed = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert isinstance(parsed, dict)
+    return parsed
+
+
+def _load_toml(path: Path) -> dict[str, Any]:
+    parsed = tomllib.loads(path.read_text(encoding="utf-8"))
     assert isinstance(parsed, dict)
     return parsed
 
@@ -283,6 +295,108 @@ def test_installer_writes_durable_cli_hook_configs_idempotently() -> None:
         assert set(hermes["hooks"]) >= set(hermes_events)
         for event in hermes_events:
             assert hermes["hooks"][event] == [{"command": hermes_commands[f"hermes.{event}"]}]
+
+
+def test_installer_seeds_codex_hook_trust_for_fresh_owner_only() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks-codex-trust.") as tmp:
+        home = Path(tmp) / "home"
+        bin_path = home / ".local" / "bin" / HOOK_NAME
+        proc = subprocess.run(
+            [
+                str(INSTALLER),
+                "install",
+                "--home",
+                str(home),
+                "--bin-path",
+                str(bin_path),
+                "--seed-codex-hook-trust-if-new",
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+
+        entries = codex_command_hook_trust_entries(home)
+        trusted = codex_trusted_hashes(home)
+        config = _load_toml(home / ".codex" / "config.toml")
+
+    assert len(entries) == 4
+    assert "seeded Codex hook trust for 4 installed hooks" in proc.stdout
+    assert "hooks" in config
+    trusted_by_event = {event: trusted.get(hook_key) == current_hash for event, hook_key, current_hash in entries}
+    assert trusted_by_event == {
+        "session_start": True,
+        "stop": True,
+        "user_prompt_submit": True,
+        "permission_request": True,
+    }
+
+
+def test_installer_refuses_codex_hook_trust_seed_when_trust_records_exist() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks-codex-trust-existing.") as tmp:
+        home = Path(tmp) / "home"
+        config_path = home / ".codex" / "config.toml"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text(
+            '[hooks.state]\n\n[hooks.state."/tmp/foreign:stop:0:0"]\ntrusted_hash = "sha256:foreign"\n',
+            encoding="utf-8",
+        )
+        bin_path = home / ".local" / "bin" / HOOK_NAME
+        proc = subprocess.run(
+            [
+                str(INSTALLER),
+                "install",
+                "--home",
+                str(home),
+                "--bin-path",
+                str(bin_path),
+                "--seed-codex-hook-trust-if-new",
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+
+        entries = codex_command_hook_trust_entries(home)
+        trusted = codex_trusted_hashes(home)
+
+    assert "skipped Codex hook trust seed: existing trust records require manual /hooks re-approval" in proc.stdout
+    assert trusted == {"/tmp/foreign:stop:0:0": "sha256:foreign"}
+    assert all(hook_key not in trusted for _event, hook_key, _current_hash in entries)
+
+
+def test_installer_refuses_codex_hook_trust_seed_when_hooks_json_exists() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks-codex-trust-foreign-hooks.") as tmp:
+        home = Path(tmp) / "home"
+        hooks_path = home / ".codex" / "hooks.json"
+        hooks_path.parent.mkdir(parents=True)
+        hooks_path.write_text(
+            json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "printf foreign"}]}]}}) + "\n",
+            encoding="utf-8",
+        )
+        bin_path = home / ".local" / "bin" / HOOK_NAME
+        proc = subprocess.run(
+            [
+                str(INSTALLER),
+                "install",
+                "--home",
+                str(home),
+                "--bin-path",
+                str(bin_path),
+                "--seed-codex-hook-trust-if-new",
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+
+        trusted = codex_trusted_hashes(home)
+        codex = _load(hooks_path)
+
+    assert "skipped Codex hook trust seed: existing hooks.json requires manual /hooks approval" in proc.stdout
+    assert trusted == {}
+    assert "printf foreign" in "\n".join(_commands(codex))
+    assert _managed_command_count(codex) == 4
 
 
 def test_installer_migrates_legacy_agy_named_hook_without_removing_foreign_keys() -> None:

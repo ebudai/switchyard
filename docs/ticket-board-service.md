@@ -343,6 +343,11 @@ That command copies the standalone writer to
 - Codex: `~/.codex/hooks.json`
 - Agy/Gemini config tree: `~/.gemini/config/hooks.json`
 
+Project provisioning passes `--seed-codex-hook-trust-if-new` so a fresh owner
+does not need a redundant Codex `/hooks` approval for hooks Switchyard just
+wrote. Manual reinstalls should omit that flag; if Codex hooks or trust records
+already exist, hook trust remains a manual `/hooks` re-approval.
+
 The hook cutover order is strict:
 
 1. Run `scripts/ticket-board-install-pane-hooks install`.

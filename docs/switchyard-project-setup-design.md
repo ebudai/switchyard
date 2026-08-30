@@ -423,8 +423,11 @@ window opens.
 
 THE STRUCTURE, which is what makes it small: **login is per CLI per owner user; trust is scoped to the
 CLI's own trust store.** One `codex login` covers all codex roles for that owner, and Codex hook trust is
-also per owner user and installed hook entry, not per pane role. Six Claude worktrees means six Claude
-folder-trust prompts. Logins and Codex hook approvals do not multiply with roles.
+also per owner user and installed hook entry, not per pane role. On project creation only, Switchyard
+seeds Codex trust for the hooks it just wrote when the owner has no existing Codex hooks file and no
+existing hook trust records. If hooks or trust records already exist, that is a manual `/hooks`
+re-approval path. Six Claude worktrees means six Claude folder-trust prompts. Logins and Codex hook
+approvals do not multiply with roles.
 
 **We invoke the CLIs' own login commands and nothing else.** Eric, 2026-08-26: "it can't be automated,
 thats a big sec risk." No credential handling, no scripted entry, no storing anything.
@@ -439,16 +442,19 @@ thats a big sec risk." No credential handling, no scripted entry, no storing any
 Do NOT parse `~/.claude/.credentials.json`, OAuth state, or
 `~/.gemini/antigravity-cli/antigravity-oauth-token`. Ask the CLI.
 
-**TRUST IS NOT PRE-SEEDED. Decided, not open.** `~/.claude.json` does key `projects` by absolute path with
-`hasTrustDialogAccepted: true`, and agy has `trustedWorkspaces` -- so it is technically possible. We do not
-do it, and not as an opt-in either:
+**FOLDER TRUST IS NOT PRE-SEEDED. Decided, not open.** `~/.claude.json` does key `projects` by absolute path
+with `hasTrustDialogAccepted: true`, and agy has `trustedWorkspaces` -- so it is technically possible. We
+do not do it, and not as an opt-in either:
 
   - it is a consent bypass through an undocumented config key, and the prompt exists so a human consents
   - an undocumented key breaks silently on a CLI update, and the failure mode is a project that stops
     trusting its own worktrees for reasons nobody can see
   - "opt-in consent bypass" is still a consent bypass
 
-The user answers the trust prompts. `new` makes that a short guided step instead of a scavenger hunt.
+The user answers folder-trust prompts. `new` makes that a short guided step instead of a scavenger hunt.
+Codex hook trust is different: at creation the operator already authorized Switchyard to write the hook
+file, so Switchyard records trust for that exact new file. Later hook-content changes still require manual
+Codex `/hooks` approval.
 
 ORDER:
   1. provision config + role worktrees, so the exact trust paths are known

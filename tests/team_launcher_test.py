@@ -268,6 +268,17 @@ def _layout_session_tree(node: object) -> object:
     return None
 
 
+def _layout_row_lengths(tree: object) -> list[int]:
+    if isinstance(tree, dict) and tree.get("Orientation") == "Horizontal":
+        return [len(tree.get("Widgets", []))]
+    if isinstance(tree, dict) and tree.get("Orientation") == "Vertical":
+        return [
+            len(row.get("Widgets", [])) if isinstance(row, dict) else 1
+            for row in tree.get("Widgets", [])
+        ]
+    return [1]
+
+
 def _layout_command_role_tree(node: object) -> object:
     if isinstance(node, dict) and isinstance(node.get("Widgets"), list):
         return {
@@ -439,24 +450,57 @@ def test_generated_new_project_layouts_are_balanced_row_major_grids() -> None:
         7: {
             "Orientation": "Vertical",
             "Widgets": [
-                {"Orientation": "Horizontal", "Widgets": [0, 1, 2]},
-                {"Orientation": "Horizontal", "Widgets": [3, 4, 5]},
-                6,
+                {"Orientation": "Horizontal", "Widgets": [0, 1, 2, 3]},
+                {"Orientation": "Horizontal", "Widgets": [4, 5, 6]},
             ],
         },
         8: {
             "Orientation": "Vertical",
             "Widgets": [
+                {"Orientation": "Horizontal", "Widgets": [0, 1, 2, 3]},
+                {"Orientation": "Horizontal", "Widgets": [4, 5, 6, 7]},
+            ],
+        },
+        9: {
+            "Orientation": "Vertical",
+            "Widgets": [
                 {"Orientation": "Horizontal", "Widgets": [0, 1, 2]},
                 {"Orientation": "Horizontal", "Widgets": [3, 4, 5]},
-                {"Orientation": "Horizontal", "Widgets": [6, 7]},
+                {"Orientation": "Horizontal", "Widgets": [6, 7, 8]},
+            ],
+        },
+        10: {
+            "Orientation": "Vertical",
+            "Widgets": [
+                {"Orientation": "Horizontal", "Widgets": [0, 1, 2, 3]},
+                {"Orientation": "Horizontal", "Widgets": [4, 5, 6]},
+                {"Orientation": "Horizontal", "Widgets": [7, 8, 9]},
+            ],
+        },
+        11: {
+            "Orientation": "Vertical",
+            "Widgets": [
+                {"Orientation": "Horizontal", "Widgets": [0, 1, 2, 3]},
+                {"Orientation": "Horizontal", "Widgets": [4, 5, 6, 7]},
+                {"Orientation": "Horizontal", "Widgets": [8, 9, 10]},
+            ],
+        },
+        12: {
+            "Orientation": "Vertical",
+            "Widgets": [
+                {"Orientation": "Horizontal", "Widgets": [0, 1, 2, 3]},
+                {"Orientation": "Horizontal", "Widgets": [4, 5, 6, 7]},
+                {"Orientation": "Horizontal", "Widgets": [8, 9, 10, 11]},
             ],
         },
     }
 
     for role_count, expected in expected_by_count.items():
         layout = team_launcher._new_project_layout_payload(role_count)
-        assert _layout_session_tree(layout) == expected
+        tree = _layout_session_tree(layout)
+        assert tree == expected
+        row_lengths = _layout_row_lengths(tree)
+        assert not (1 in row_lengths and 3 in row_lengths), (role_count, row_lengths)
         leaves = team_launcher._layout_leaves(layout)
         assert [leaf["SessionRestoreId"] for leaf in leaves] == list(range(role_count))
         assert {leaf.get("Command") for leaf in leaves} == {""}
@@ -530,6 +574,39 @@ def test_upgrade_refreshes_column_major_generated_provision_layout() -> None:
 
         assert result.changed
         assert json.loads(layout_path.read_text(encoding="utf-8")) == team_launcher._new_project_layout_payload(6)
+
+
+def test_upgrade_refreshes_chunked_seven_role_generated_provision_layout() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-launcher-upgrade.") as tmp:
+        provision_dir = Path(tmp) / ".switchyard" / "provision"
+        provision_dir.mkdir(parents=True)
+        layout_path = provision_dir / "otto-konsole-layout.json"
+        legacy_layout = team_launcher._legacy_new_project_chunked_row_major_layout_payload(7)
+        layout_path.write_text(
+            json.dumps(legacy_layout, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        config_path = _write_launcher_config(provision_dir, role_count=7)
+        config = load_project_config("otto", config_path)
+
+        assert _layout_session_tree(legacy_layout) == {
+            "Orientation": "Vertical",
+            "Widgets": [
+                {"Orientation": "Horizontal", "Widgets": [0, 1, 2]},
+                {"Orientation": "Horizontal", "Widgets": [3, 4, 5]},
+                6,
+            ],
+        }
+        result = team_launcher.upgrade_generated_project_layout(config, config_path=config_path)
+
+        assert result.changed
+        assert _layout_session_tree(json.loads(layout_path.read_text(encoding="utf-8"))) == {
+            "Orientation": "Vertical",
+            "Widgets": [
+                {"Orientation": "Horizontal", "Widgets": [0, 1, 2, 3]},
+                {"Orientation": "Horizontal", "Widgets": [4, 5, 6]},
+            ],
+        }
 
 
 def test_upgrade_refreshes_old_three_role_column_major_generated_layout() -> None:

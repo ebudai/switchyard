@@ -444,7 +444,8 @@ transitions.
 
 Generated Konsole layouts use a single horizontal row for up to four visible
 roles, so small teams get tall side-by-side panes. Five or more visible roles
-fall back to the balanced row-major grid. The project config's `layout` path
+fall back to a balanced row-major grid that spreads panes across rows with a
+maximum row width of four. The project config's `layout` path
 remains the override: edit or replace that JSON file for a project-specific
 window shape without changing the provisioning prompts.
 

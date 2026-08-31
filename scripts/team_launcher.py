@@ -4138,6 +4138,29 @@ def _legacy_new_project_sqrt_column_major_layout_payload(role_count: int) -> dic
     }
 
 
+def _legacy_new_project_chunked_row_major_layout_payload(role_count: int) -> dict[str, Any]:
+    leaves = _new_project_layout_leaves(role_count)
+    if role_count <= NEW_PROJECT_SINGLE_ROW_LAYOUT_MAX_ROLES:
+        return _single_row_layout_payload(leaves)
+    column_count = math.ceil(math.sqrt(len(leaves)))
+    rows: list[dict[str, Any]] = []
+    for start in range(0, len(leaves), column_count):
+        row = leaves[start : start + column_count]
+        if len(row) == 1:
+            rows.append(row[0])
+        else:
+            rows.append(
+                {
+                    "Orientation": "Horizontal",
+                    "Widgets": row,
+                }
+            )
+    return {
+        "Orientation": "Vertical",
+        "Widgets": rows,
+    }
+
+
 def _is_generated_project_layout_template(config: ProjectConfig, *, config_path: Path) -> bool:
     config_file = config_path.expanduser().resolve(strict=False)
     layout_path = config.layout.expanduser().resolve(strict=False)
@@ -4188,6 +4211,7 @@ def upgrade_generated_project_config(
         _legacy_new_project_stacked_layout_payload(role_count),
         _legacy_new_project_column_major_layout_payload(role_count),
         _legacy_new_project_sqrt_column_major_layout_payload(role_count),
+        _legacy_new_project_chunked_row_major_layout_payload(role_count),
     )
     try:
         existing_layout = json.loads(config.layout.read_text(encoding="utf-8"))
@@ -4951,10 +4975,14 @@ def _single_row_layout_payload(leaves: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _row_major_grid_layout_payload(leaves: list[dict[str, Any]]) -> dict[str, Any]:
-    column_count = math.ceil(math.sqrt(len(leaves)))
+    row_count = math.ceil(len(leaves) / NEW_PROJECT_SINGLE_ROW_LAYOUT_MAX_ROLES)
+    base_row_size, extra = divmod(len(leaves), row_count)
     rows: list[dict[str, Any]] = []
-    for start in range(0, len(leaves), column_count):
-        row = leaves[start : start + column_count]
+    start = 0
+    for row_index in range(row_count):
+        row_size = base_row_size + (1 if row_index < extra else 0)
+        row = leaves[start : start + row_size]
+        start += row_size
         if len(row) == 1:
             rows.append(row[0])
         else:

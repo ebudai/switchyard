@@ -3331,7 +3331,7 @@ def test_launch_project_refuses_missing_configured_pane_launcher() -> None:
         assert not layout_output.exists()
 
 
-def test_launch_project_refuses_project_start_when_role_session_is_already_running() -> None:
+def test_launch_project_with_running_shared_checkout_session_skips_destructive_refresh_and_opens_window() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-running-project.") as tmp:
         tmp_path = Path(tmp)
         config_path = _write_six_visible_role_config(tmp_path, project="porter")
@@ -3339,7 +3339,7 @@ def test_launch_project_refuses_project_start_when_role_session_is_already_runni
         runner = FakeRunner(existing_sessions={"porter-director"})
         process_launcher = RecordingProcessLauncher()
 
-        try:
+        assert (
             launch_project(
                 config,
                 config_path=config_path,
@@ -3349,17 +3349,92 @@ def test_launch_project_refuses_project_start_when_role_session_is_already_runni
                 layout_output=tmp_path / "materialized.json",
                 konsole_process_launcher=process_launcher,
             )
-            raise AssertionError("expected already-running project start to be refused")
-        except SystemExit as exc:
-            message = str(exc)
+            == 0
+        )
 
-    assert "project porter already has running tmux session(s): porter-director" in message
-    assert "refusing to launch another project window" in message
-    assert "switchyard porter pane attach-or-start <role> --no-attach" in message
-    assert not any("worktree" in call for call in runner.calls)
-    assert not any(call[:2] == ["git", "clone"] for call in runner.calls)
-    assert not any(call[:1] == ["mkdir"] for call in runner.calls)
-    assert process_launcher.calls == []
+    assert any(call == git_fetch_worktree_ref_args(config) for call in runner.calls)
+    assert not any(call == git_checkout_shared_ref_args(config) for call in runner.calls)
+    assert not any(call == team_launcher.git_clean_shared_checkout_args(config) for call in runner.calls)
+    assert len(process_launcher.calls) == 1
+
+
+def test_launch_project_with_running_control_role_session_refreshes_only_stopped_roles_and_opens_window() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-running-control-project.") as tmp:
+        tmp_path = Path(tmp)
+        layout_path = tmp_path / "porter-layout.json"
+        layout_path.write_text(
+            json.dumps(team_launcher._new_project_layout_payload(2), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        control_repo = tmp_path / ".local" / "state" / "switchyard" / "projects" / "porter" / "control.git"
+        worktree_base = tmp_path / "worktrees"
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout_path),
+                    "repository": str(repo),
+                    "control_repository": str(control_repo),
+                    "worktree_base": str(worktree_base),
+                    "run_as_user": team_launcher.current_user_name(),
+                    "session_dir": str(tmp_path / "sessions"),
+                    "roles": [
+                        {
+                            "role": "director",
+                            "slot": 0,
+                            "target": "porter-director:0.0",
+                            "tmux_session": "porter-director",
+                            "workdir": str(worktree_base / "director"),
+                            "cli": ["claude"],
+                        },
+                        {
+                            "role": "ops",
+                            "slot": 1,
+                            "target": "porter-ops:0.0",
+                            "tmux_session": "porter-ops",
+                            "workdir": str(worktree_base / "ops"),
+                            "cli": ["codex"],
+                        },
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        original_home = team_launcher._control_repository_owner_home
+        try:
+            team_launcher._control_repository_owner_home = lambda _config: tmp_path
+            config = load_project_config("porter", config_path)
+        finally:
+            team_launcher._control_repository_owner_home = original_home
+        runner = FakeRunner(existing_sessions={"porter-director"})
+        process_launcher = RecordingProcessLauncher()
+
+        assert (
+            launch_project(
+                config,
+                config_path=config_path,
+                mode="start",
+                script_path=ROOT / "scripts" / "team-launcher",
+                runner=runner,
+                layout_output=tmp_path / "materialized.json",
+                konsole_process_launcher=process_launcher,
+            )
+            == 0
+        )
+
+    director = team_launcher._role_by_name(config, "director")
+    ops = team_launcher._role_by_name(config, "ops")
+    assert team_launcher.git_control_worktree_add_args(config, ops) in runner.calls
+    assert team_launcher.git_control_worktree_add_args(config, director) not in runner.calls
+    assert team_launcher.git_role_worktree_reset_args(config, director) not in runner.calls
+    assert team_launcher.git_clean_role_worktree_args(director) not in runner.calls
+    assert len(process_launcher.calls) == 1
 
 
 def test_kde_auto_layout_preserves_separate_konsole_plan_shape() -> None:

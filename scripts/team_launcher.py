@@ -3982,33 +3982,37 @@ def pane_command(
     return _quote_command(args)
 
 
-def _running_project_role_sessions(
+def _running_project_roles(
     config: ProjectConfig,
     *,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
-) -> list[str]:
-    running_sessions: list[str] = []
+) -> list[RoleConfig]:
+    running_roles: list[RoleConfig] = []
     for role in config.roles:
         result = runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if result.returncode == 0:
-            running_sessions.append(role.tmux_session)
-    return running_sessions
+            running_roles.append(role)
+    return running_roles
 
 
-def _refuse_running_project_window(
+def _prepare_project_worktrees_for_launch(
     config: ProjectConfig,
     *,
+    running_roles: list[RoleConfig],
     runner: Callable[..., subprocess.CompletedProcess[Any]],
-) -> None:
-    running_sessions = _running_project_role_sessions(config, runner=runner)
-    if not running_sessions:
-        return
-    sessions = ", ".join(running_sessions)
-    raise SystemExit(
-        f"team-launcher: project {config.project} already has running tmux session(s): {sessions}; "
-        "refusing to launch another project window. "
-        f"To recover a missing role pane, run `switchyard {config.project} pane attach-or-start <role> --no-attach`; "
-        f"to replace the running project, run `switchyard {config.project} reload`."
+) -> WorktreeProvisionResult:
+    if not running_roles:
+        return ensure_project_worktrees(config, refresh=True, runner=runner)
+    running_role_names = {role.role for role in running_roles}
+    if config.control_repository is not None:
+        stopped_roles = [role for role in config.roles if role.role not in running_role_names]
+        if not stopped_roles:
+            return WorktreeProvisionResult({})
+        result = ensure_project_worktrees(replace(config, roles=stopped_roles), refresh=True, runner=runner)
+    else:
+        result = ensure_project_worktrees(config, refresh=False, runner=runner)
+    return WorktreeProvisionResult(
+        {role: reason for role, reason in result.failed_roles.items() if role not in running_role_names}
     )
 
 
@@ -4713,6 +4717,7 @@ def launch_project(
     if not dry_run:
         pane_script_path = _verify_pane_launcher_path(config, script_path=script_path, runner=worktree_runner)
     failed_roles: dict[str, str] = {}
+    running_roles: list[RoleConfig] = []
     if not dry_run:
         ensure_launcher_checkout_current(
             config,
@@ -4724,7 +4729,7 @@ def launch_project(
             allow_stale=allow_stale_launcher,
         )
         if mode == "attach-or-start":
-            _refuse_running_project_window(config, runner=role_process_runner)
+            running_roles = _running_project_roles(config, runner=role_process_runner)
         ensure_configured_runtime_user(config, runner=runner)
         ensure_owner_state_dirs(config, pane_state_dir=effective_pane_state_dir, runner=runner)
         ensure_generated_project_pane_hooks(
@@ -4736,8 +4741,17 @@ def launch_project(
         )
         seed_default_session_dir_from_legacy_sources(config.session_dir)
         if mode == "attach-or-start":
-            failed_roles = ensure_project_worktrees(config, refresh=True, runner=worktree_runner).failed_roles
-            if config.control_repository is not None and set(failed_roles) == {role.role for role in config.roles}:
+            worktree_roles = (
+                [role for role in config.roles if role.role not in {running.role for running in running_roles}]
+                if running_roles and config.control_repository is not None
+                else config.roles
+            )
+            failed_roles = _prepare_project_worktrees_for_launch(
+                config,
+                running_roles=running_roles,
+                runner=worktree_runner,
+            ).failed_roles
+            if worktree_roles and config.control_repository is not None and set(failed_roles) == {role.role for role in worktree_roles}:
                 reason = next(iter(failed_roles.values()), "unknown error")
                 print(f"team-launcher: failed to prepare control repository for {config.project}: {reason}", file=sys.stderr)
                 return 1

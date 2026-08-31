@@ -71,8 +71,13 @@ help_output="$(
     PATH="$fake_privilege_bin:$PATH" \
         "$install_path" --help
 )"
-[[ "$help_output" == "version-one:--help" ]] || {
-    echo "FAIL: installed switchyard did not execute --help directly" >&2
+grep -q "switchyard <project name or slug>" <<<"$help_output" || {
+    echo "FAIL: installed switchyard did not print embedded --help" >&2
+    echo "$help_output" >&2
+    exit 1
+}
+grep -q "Bare project names start or attach the project" <<<"$help_output" || {
+    echo "FAIL: installed switchyard help does not explain bare project launch" >&2
     echo "$help_output" >&2
     exit 1
 }
@@ -121,6 +126,51 @@ printf 'privileged:%s\n' "$*"
 EOF
 chmod +x "$fake_privilege_noexec"
 chmod 000 "$(dirname "$source_path")"
+if ! inaccessible_help_output="$(
+    FAKE_PRIVILEGE_LOG="$fake_privilege_noexec_log" \
+    PATH="$fake_privilege_noexec_bin:$PATH" \
+        "$install_path" --help 2>&1
+)"; then
+    chmod 755 "$(dirname "$source_path")"
+    echo "FAIL: --help failed when the target was inaccessible" >&2
+    echo "$inaccessible_help_output" >&2
+    exit 1
+fi
+grep -q "switchyard <project name or slug>" <<<"$inaccessible_help_output" || {
+    chmod 755 "$(dirname "$source_path")"
+    echo "FAIL: inaccessible target --help did not print help" >&2
+    echo "$inaccessible_help_output" >&2
+    exit 1
+}
+if [[ -s "$fake_privilege_noexec_log" ]]; then
+    chmod 755 "$(dirname "$source_path")"
+    echo "FAIL: inaccessible target --help tried to use sudo" >&2
+    cat "$fake_privilege_noexec_log" >&2
+    exit 1
+fi
+if ! inaccessible_bare_output="$(
+    FAKE_PRIVILEGE_LOG="$fake_privilege_noexec_log" \
+    PATH="$fake_privilege_noexec_bin:$PATH" \
+        "$install_path" otto 2>&1
+)"; then
+    chmod 755 "$(dirname "$source_path")"
+    echo "FAIL: inaccessible target bare project did not delegate cleanly to privilege command" >&2
+    echo "$inaccessible_bare_output" >&2
+    exit 1
+fi
+[[ "$inaccessible_bare_output" == "privileged:$source_path otto" ]] || {
+    chmod 755 "$(dirname "$source_path")"
+    echo "FAIL: inaccessible target bare project did not pass through the privilege command" >&2
+    echo "$inaccessible_bare_output" >&2
+    exit 1
+}
+grep -q "^$source_path otto$" "$fake_privilege_noexec_log" || {
+    chmod 755 "$(dirname "$source_path")"
+    echo "FAIL: inaccessible target bare project was not delegated to the privilege command" >&2
+    cat "$fake_privilege_noexec_log" >&2
+    exit 1
+}
+>"$fake_privilege_noexec_log"
 if ! inaccessible_output="$(
     FAKE_PRIVILEGE_LOG="$fake_privilege_noexec_log" \
     PATH="$fake_privilege_noexec_bin:$PATH" \
@@ -143,6 +193,33 @@ grep -q "^$source_path new$" "$fake_privilege_noexec_log" || {
     exit 1
 }
 
+>"$fake_privilege_noexec_log"
+if [[ "$(id -u)" != "0" ]]; then
+    for privileged_args in \
+        "new" \
+        "register $TMPDIR_T/project.json" \
+        "upgrade otto" \
+        "status" \
+        "validate-models otto" \
+        "stop otto"; do
+        privileged_output="$(
+            FAKE_PRIVILEGE_LOG="$fake_privilege_noexec_log" \
+            PATH="$fake_privilege_noexec_bin:$PATH" \
+                "$install_path" $privileged_args
+        )"
+        [[ "$privileged_output" == "privileged:$source_path $privileged_args" ]] || {
+            echo "FAIL: trampoline did not acquire privilege for switchyard $privileged_args" >&2
+            echo "$privileged_output" >&2
+            exit 1
+        }
+        grep -q "^$source_path $privileged_args$" "$fake_privilege_noexec_log" || {
+            echo "FAIL: switchyard $privileged_args did not reach the privilege command" >&2
+            cat "$fake_privilege_noexec_log" >&2
+            exit 1
+        }
+    done
+fi
+
 fake_privilege_denied="$TMPDIR_T/sudo-denied"
 cat >"$fake_privilege_denied" <<'EOF'
 #!/usr/bin/env bash
@@ -157,11 +234,14 @@ chmod +x "$fake_privilege_denied"
 if [[ "$(id -u)" != "0" ]]; then
     denied_stdout="$TMPDIR_T/denied.stdout"
     denied_stderr="$TMPDIR_T/denied.stderr"
-    if timeout 2 env SWITCHYARD_SUDO_BIN="$fake_privilege_denied" "$install_path" new >"$denied_stdout" 2>"$denied_stderr"; then
+    set +e
+    timeout 2 env SWITCHYARD_SUDO_BIN="$fake_privilege_denied" "$install_path" new >"$denied_stdout" 2>"$denied_stderr"
+    denied_status=$?
+    set -e
+    if [[ "$denied_status" == "0" ]]; then
         echo "FAIL: privileged switchyard new unexpectedly succeeded without sudo" >&2
         exit 1
     fi
-    denied_status=$?
     if [[ "$denied_status" == "124" ]]; then
         echo "FAIL: privileged switchyard new blocked instead of failing fast" >&2
         cat "$denied_stderr" >&2

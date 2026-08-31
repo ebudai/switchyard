@@ -7863,6 +7863,17 @@ Bare project names start or attach the project. Recognized commands: {commands}.
 """
 
 
+def _require_switchyard_project_owner_or_root(config: ProjectConfig, command_display: str) -> None:
+    owner = (config.run_as_user or "").strip()
+    if not owner or current_user_name() == owner or os.geteuid() == 0:
+        return
+    raise SystemExit(
+        f"switchyard: command requires root: switchyard {command_display}\n"
+        f"switchyard: project {config.project!r} is owned by {owner!r}; "
+        "run it as a sudo-capable human or ask an operator"
+    )
+
+
 def switchyard_main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
@@ -7897,6 +7908,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         args = _build_switchyard_upgrade_parser().parse_args(argv[1:])
         entry = _resolve_switchyard_project(args.project)
         config = load_project_config(entry.slug, entry.config_path)
+        _require_switchyard_project_owner_or_root(config, f"upgrade {entry.slug}")
         return upgrade_project_command(
             config,
             config_path=entry.config_path,
@@ -7909,6 +7921,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         project = " ".join(args.project)
         entry = _resolve_switchyard_project(project)
         config = load_project_config(entry.slug, entry.config_path)
+        _require_switchyard_project_owner_or_root(config, f"stop {entry.slug}")
         return stop_project(config)
     if argv[0].casefold() == "status":
         args = _build_switchyard_status_parser().parse_args(argv[1:])
@@ -7917,10 +7930,14 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         if len(argv) < 2:
             raise SystemExit("switchyard validate-models requires <project>")
         project = " ".join(argv[1:])
+        entry = _resolve_switchyard_project(project)
+        config = load_project_config(entry.slug, entry.config_path)
+        _require_switchyard_project_owner_or_root(config, f"validate-models {entry.slug}")
         return switchyard_validate_models_command(project)
     selection = " ".join(argv)
     entry = _resolve_switchyard_project(selection)
     config = load_project_config(entry.slug, entry.config_path)
+    _require_switchyard_project_owner_or_root(config, entry.slug)
     # Model validation intentionally runs only for `switchyard new` and the
     # explicit validate-models command. It performs provider API calls, so a
     # routine team start should not depend on provider availability.

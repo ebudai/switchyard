@@ -11567,9 +11567,11 @@ def test_switchyard_launch_runs_first_run_auth_before_panes_and_warns_after() ->
         original_launch_project = team_launcher.launch_project
         original_run_first_run_auth_phase = team_launcher.run_first_run_auth_phase
         original_report_first_run_auth_warnings = team_launcher.report_first_run_auth_warnings
+        original_geteuid = team_launcher.os.geteuid
         try:
             team_launcher.DEFAULT_CONFIG_DIR = config_dir
             team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
+            team_launcher.os.geteuid = lambda: 0  # type: ignore[method-assign]
 
             def fake_run_first_run_auth_phase(
                 config: team_launcher.ProjectConfig,
@@ -11609,6 +11611,7 @@ def test_switchyard_launch_runs_first_run_auth_before_panes_and_warns_after() ->
             team_launcher.launch_project = original_launch_project
             team_launcher.run_first_run_auth_phase = original_run_first_run_auth_phase
             team_launcher.report_first_run_auth_warnings = original_report_first_run_auth_warnings
+            team_launcher.os.geteuid = original_geteuid  # type: ignore[method-assign]
 
     assert [name for name, _payload in events] == ["auth", "launch", "warn"]
     assert events[0][1] == {
@@ -11720,9 +11723,11 @@ def test_switchyard_stop_resolves_project_without_launching_or_authenticating() 
         original_stop_project = team_launcher.stop_project
         original_launch_project = team_launcher.launch_project
         original_first_run_auth = team_launcher.run_switchyard_launch_first_run_auth
+        original_geteuid = team_launcher.os.geteuid
         try:
             team_launcher.DEFAULT_CONFIG_DIR = config_dir
             team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
+            team_launcher.os.geteuid = lambda: 0  # type: ignore[method-assign]
 
             def fake_stop_project(config: team_launcher.ProjectConfig, **_kwargs: object) -> int:
                 calls.append(("stop", {"project": config.project, "run_as_user": config.run_as_user}))
@@ -11747,8 +11752,120 @@ def test_switchyard_stop_resolves_project_without_launching_or_authenticating() 
             team_launcher.stop_project = original_stop_project
             team_launcher.launch_project = original_launch_project
             team_launcher.run_switchyard_launch_first_run_auth = original_first_run_auth
+            team_launcher.os.geteuid = original_geteuid  # type: ignore[method-assign]
 
     assert calls == [("stop", {"project": "otto", "run_as_user": "otto-agent"})]
+
+
+def test_switchyard_bare_cross_owner_project_fails_before_launch_or_auth() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-cross-owner-launch.") as tmp:
+        tmp_path = Path(tmp)
+        config_dir = tmp_path / "config"
+        registry_dir = tmp_path / "registry"
+        layout = tmp_path / "layout.json"
+        config_dir.mkdir()
+        registry_dir.mkdir()
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        config_path = config_dir / "otto.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "otto",
+                    "project_name": "Otto System",
+                    "layout": str(layout),
+                    "run_as_user": "otto-agent",
+                    "roles": [{"role": "ops", "slot": 0, "cli": ["codex"], "workdir": str(tmp_path / "repo")}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        calls: list[str] = []
+        original_config_dir = team_launcher.DEFAULT_CONFIG_DIR
+        original_registry_dir = team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR
+        original_current_user_name = team_launcher.current_user_name
+        original_geteuid = team_launcher.os.geteuid
+        original_launch_project = team_launcher.launch_project
+        original_first_run_auth = team_launcher.run_switchyard_launch_first_run_auth
+        try:
+            team_launcher.DEFAULT_CONFIG_DIR = config_dir
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
+            team_launcher.current_user_name = lambda: "agent"
+            team_launcher.os.geteuid = lambda: 1001  # type: ignore[method-assign]
+            team_launcher.launch_project = lambda *_args, **_kwargs: calls.append("launch") or 0
+            team_launcher.run_switchyard_launch_first_run_auth = (
+                lambda *_args, **_kwargs: calls.append("auth") or team_launcher.FirstRunAuthReport({}, [])
+            )
+
+            try:
+                switchyard_main(["otto"])
+                raise AssertionError("expected cross-owner launch to require root")
+            except SystemExit as exc:
+                message = str(exc)
+        finally:
+            team_launcher.DEFAULT_CONFIG_DIR = original_config_dir
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = original_registry_dir
+            team_launcher.current_user_name = original_current_user_name
+            team_launcher.os.geteuid = original_geteuid  # type: ignore[method-assign]
+            team_launcher.launch_project = original_launch_project
+            team_launcher.run_switchyard_launch_first_run_auth = original_first_run_auth
+
+    assert calls == []
+    assert "switchyard: command requires root: switchyard otto" in message
+    assert "project 'otto' is owned by 'otto-agent'" in message
+
+
+def test_switchyard_stop_cross_owner_project_fails_before_tmux_probe() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-cross-owner-stop.") as tmp:
+        tmp_path = Path(tmp)
+        config_dir = tmp_path / "config"
+        registry_dir = tmp_path / "registry"
+        layout = tmp_path / "layout.json"
+        config_dir.mkdir()
+        registry_dir.mkdir()
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        config_path = config_dir / "otto.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "otto",
+                    "project_name": "Otto System",
+                    "layout": str(layout),
+                    "run_as_user": "otto-agent",
+                    "roles": [{"role": "ops", "slot": 0, "tmux_session": "otto-ops", "target": "otto-ops:0.0", "cli": ["codex"]}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        calls: list[str] = []
+        original_config_dir = team_launcher.DEFAULT_CONFIG_DIR
+        original_registry_dir = team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR
+        original_current_user_name = team_launcher.current_user_name
+        original_geteuid = team_launcher.os.geteuid
+        original_stop_project = team_launcher.stop_project
+        try:
+            team_launcher.DEFAULT_CONFIG_DIR = config_dir
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
+            team_launcher.current_user_name = lambda: "agent"
+            team_launcher.os.geteuid = lambda: 1001  # type: ignore[method-assign]
+            team_launcher.stop_project = lambda *_args, **_kwargs: calls.append("stop") or 0
+
+            try:
+                switchyard_main(["stop", "otto"])
+                raise AssertionError("expected cross-owner stop to require root")
+            except SystemExit as exc:
+                message = str(exc)
+        finally:
+            team_launcher.DEFAULT_CONFIG_DIR = original_config_dir
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = original_registry_dir
+            team_launcher.current_user_name = original_current_user_name
+            team_launcher.os.geteuid = original_geteuid  # type: ignore[method-assign]
+            team_launcher.stop_project = original_stop_project
+
+    assert calls == []
+    assert "switchyard: command requires root: switchyard stop otto" in message
+    assert "project 'otto' is owned by 'otto-agent'" in message
 
 
 def test_switchyard_registry_does_not_change_pgu_resolution_or_launch_config() -> None:
@@ -11816,11 +11933,13 @@ def test_legacy_and_switchyard_entrypoints_render_same_plain_konsole_command() -
         original_config_dir = team_launcher.DEFAULT_CONFIG_DIR
         original_registry_dir = team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR
         original_current_user_name = team_launcher.current_user_name
+        original_geteuid = team_launcher.os.geteuid
         original_first_run_auth = team_launcher.run_switchyard_launch_first_run_auth
         try:
             team_launcher.DEFAULT_CONFIG_DIR = config_dir
             team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
             team_launcher.current_user_name = lambda: "root"
+            team_launcher.os.geteuid = lambda: 0  # type: ignore[method-assign]
             team_launcher.run_switchyard_launch_first_run_auth = lambda _config: team_launcher.FirstRunAuthReport({}, [])
 
             def launch_with_fake_runner(config: team_launcher.ProjectConfig, **kwargs: object) -> int:
@@ -11842,6 +11961,7 @@ def test_legacy_and_switchyard_entrypoints_render_same_plain_konsole_command() -
             team_launcher.DEFAULT_CONFIG_DIR = original_config_dir
             team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = original_registry_dir
             team_launcher.current_user_name = original_current_user_name
+            team_launcher.os.geteuid = original_geteuid  # type: ignore[method-assign]
             team_launcher.run_switchyard_launch_first_run_auth = original_first_run_auth
 
         assert not any("konsole" in call for call in runner.calls)

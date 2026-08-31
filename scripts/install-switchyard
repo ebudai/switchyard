@@ -79,15 +79,34 @@ set -euo pipefail
 readonly SWITCHYARD_TARGET=$(quote "$target")
 readonly SWITCHYARD_SUDO_BIN="\${SWITCHYARD_SUDO_BIN:-sudo}"
 
+switchyard_print_help() {
+    cat <<'HELPEOF'
+Usage:
+  switchyard
+  switchyard <project name or slug>
+  switchyard <command> [options]
+
+Commands:
+  new              create and provision a new project
+  register         register an existing project config
+  upgrade          update generated project artifacts and report release drift
+  stop             stop a project's configured tmux pane sessions
+  status           list registered projects and pane liveness
+  validate-models  check configured role models without starting panes
+
+Bare project names start or attach the project. Recognized commands: new, register, upgrade, stop, status, validate-models.
+HELPEOF
+}
+
 switchyard_invocation_requires_root() {
     if [[ "\$#" -eq 0 ]]; then
         return 1
     fi
     case "\$1" in
-        -h|--help|help|--version|version|status|validate-models|stop)
+        -h|--help|help|--version|version)
             return 1
             ;;
-        new|register|upgrade)
+        new|register|upgrade|status|validate-models|stop)
             if [[ "\${2:-}" == "-h" || "\${2:-}" == "--help" ]]; then
                 return 1
             fi
@@ -121,7 +140,20 @@ switchyard_exec_with_root() {
 }
 
 if [[ "\${EUID:-\$(id -u)}" -ne 0 ]]; then
+    case "\${1:-}" in
+        -h|--help|help)
+            switchyard_print_help
+            exit 0
+            ;;
+        --version|version)
+            printf 'switchyard dev\n'
+            exit 0
+            ;;
+    esac
     if switchyard_invocation_requires_root "\$@"; then
+        switchyard_exec_with_root "\$@"
+    fi
+    if [[ ! -x "\$SWITCHYARD_TARGET" ]]; then
         switchyard_exec_with_root "\$@"
     fi
     exec "\$SWITCHYARD_TARGET" "\$@"

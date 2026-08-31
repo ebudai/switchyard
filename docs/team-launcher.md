@@ -10,10 +10,11 @@ there is no separate `switchyard <project> attach` verb. Leading verbs are
 reserved, so a project literally named `new`, `register`, `upgrade`, `stop`,
 `status`, or `validate-models` collides with the command namespace.
 
-The installed `/usr/local/bin/switchyard` trampoline does not elevate
-discoverability and read/probe commands: no arguments, `--help`, `--version`,
-`status`, `validate-models`, `stop`, and bare project names run directly.
-Privileged public mutations are `new`, `register`, and `upgrade`; the wrapper
+The installed `/usr/local/bin/switchyard` trampoline does not elevate top-level
+discoverability commands: no arguments, `--help`, `--version`, and bare project
+names run directly when the launcher target is reachable. Privileged public
+operations are `new`, `register`, `upgrade`, `status`, `validate-models`, and
+`stop`; they create, mutate, traverse, or act on tenant-owned state. The wrapper
 preflights sudo non-interactively first, so a non-sudo agent gets a clear
 failure instead of an unanswerable password prompt. A sudo-capable human at a
 TTY still gets the normal sudo prompt for those privileged commands.

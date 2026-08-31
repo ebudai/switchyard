@@ -662,6 +662,7 @@ RuntimeDirectory={plan.runtime_directory}
 ExecStart=/usr/bin/python3 {plan.board_current}/scripts/ticket-board.py --host 127.0.0.1 --port {plan.port} --unix-socket {plan.socket_path} --frames {plan.frame_dir} --assets {plan.asset_dir}
 Restart=on-failure
 RestartSec=2
+EnvironmentFile=-/home/{plan.owner_user}/.config/{plan.project}/ticket-board.env
 Environment=PYTHONUNBUFFERED=1
 Environment=HOME=/home/{plan.owner_user}
 Environment=TICKET_BOARD_PROJECT={plan.project}
@@ -1003,8 +1004,17 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
             f"/home/{plan.owner_user}/.config/systemd/user",
             include_target=True,
         ),
-        )
+    )
     q_owner_user = shell_quote(plan.owner_user)
+    q_board_env_file = shell_quote(f"/home/{plan.owner_user}/.config/{plan.project}/ticket-board.env")
+    q_owner_config_dir = shell_quote(f"/home/{plan.owner_user}/.config")
+    q_board_env_dir = shell_quote(f"/home/{plan.owner_user}/.config/{plan.project}")
+    install_board_env_parent = "\n".join(
+        [
+            f"sudo install -d -m 0755 -o {q_owner_user} -g {q_owner_user} {q_owner_config_dir}",
+            f"sudo install -d -m 0700 -o {q_owner_user} -g {q_owner_user} {q_board_env_dir}",
+        ]
+    )
     if plan.board_service_traversal:
         grant_board_root = "\n".join(
             [
@@ -1052,6 +1062,12 @@ sudo env TICKET_BOARD_PROJECT={shell_quote(plan.project)} SOURCE_REPO={q_source_
 {install_asset_frame}
 {grant_home_traversal}
 {effective_grant_asset_frame}
+{install_board_env_parent}
+if ! sudo -u {q_owner_user} test -s {q_board_env_file}; then
+    report_token="$(/usr/bin/python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+    printf 'TICKET_BOARD_TENANT_REPORT_TOKEN=%s\\n' "$report_token" | sudo -u {q_owner_user} tee {q_board_env_file} >/dev/null
+    sudo -u {q_owner_user} chmod 0600 {q_board_env_file}
+fi
 sudo install -m 0644 {shell_quote(plan.board_unit)} {q_board_unit}
 sudo install -m 0644 {shell_quote(plan.tmpfiles_name)} {q_tmpfiles}
 sudo install -m 0644 {shell_quote(plan.polkit_name)} {q_polkit}

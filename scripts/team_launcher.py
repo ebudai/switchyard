@@ -229,6 +229,8 @@ class ProjectConfig:
     session_dir: Path
     board_url: str
     board_socket: str
+    upstream_report_url: str
+    upstream_report_token: str
     run_as_user: str
     pane_launcher: Path | None
     repository: Path | None
@@ -1285,7 +1287,7 @@ def _role_from_json(project: str, raw: dict[str, Any], *, base: Path, default_wo
 
 
 def _role_board_env(config: ProjectConfig, role: RoleConfig, session_role_map: dict[str, str]) -> dict[str, str]:
-    return {
+    env = {
         "TICKET_BOARD_PROJECT": config.project,
         "TICKET_BOARD_TICKET_PREFIX": config.ticket_prefix,
         "TICKET_BOARD_URL": config.board_url,
@@ -1293,6 +1295,12 @@ def _role_board_env(config: ProjectConfig, role: RoleConfig, session_role_map: d
         "TICKET_BOARD_CALLER_ROLE": role.role,
         "TICKET_BOARD_CALLER_ROLE_MAP": json.dumps(session_role_map, sort_keys=True, separators=(",", ":")),
     }
+    if config.upstream_report_url:
+        env["TICKET_BOARD_REPORT_URL"] = config.upstream_report_url
+        env["TICKET_BOARD_REPORT_ORIGIN_PROJECT"] = config.project
+    if config.upstream_report_token:
+        env["TICKET_BOARD_TENANT_REPORT_TOKEN"] = config.upstream_report_token
+    return env
 
 
 def _with_project_board_env(config: ProjectConfig, roles: list[RoleConfig]) -> list[RoleConfig]:
@@ -1326,6 +1334,8 @@ def load_project_config(project: str, config_path: Path | None = None) -> Projec
     ticket_prefix = validate_ticket_prefix(str(config.get("ticket_prefix") or config_project))
     board_url = str(config.get("board_url") or _default_board_url(config_project)).strip()
     board_socket = str(config.get("board_socket") or _default_board_socket(config_project)).strip()
+    upstream_report_url = str(config.get("upstream_report_url") or config.get("report_board_url") or "").strip()
+    upstream_report_token = str(config.get("upstream_report_token") or config.get("tenant_report_token") or "").strip()
     pane_launcher = None
     pane_launcher_raw = config.get("pane_launcher")
     if pane_launcher_raw is not None:
@@ -1393,6 +1403,8 @@ def load_project_config(project: str, config_path: Path | None = None) -> Projec
         session_dir=session_dir,
         board_url=board_url,
         board_socket=board_socket,
+        upstream_report_url=upstream_report_url,
+        upstream_report_token=upstream_report_token,
         run_as_user=run_as_user,
         pane_launcher=pane_launcher,
         repository=repository,
@@ -5076,6 +5088,8 @@ def _new_project_launcher_config_payload(
     remote: str = "origin",
     default_branch: str = "main",
     worktree_policy: str = "shared",
+    upstream_report_url: str = "",
+    upstream_report_token: str = "",
 ) -> dict[str, Any]:
     layout_name = f"{plan.project}-konsole-layout.json"
     role_defs = _dedupe_role_defs(
@@ -5113,7 +5127,7 @@ def _new_project_launcher_config_payload(
         }
         for index, (role, cli) in enumerate(role_defs)
     ]
-    return {
+    payload = {
         "project": plan.project,
         **({"project_name": project_name} if project_name else {}),
         "ticket_prefix": plan.ticket_prefix,
@@ -5130,6 +5144,11 @@ def _new_project_launcher_config_payload(
         "pane_launcher": str(Path(plan.board_current) / "scripts" / TEAM_LAUNCHER_NAME),
         "roles": roles,
     }
+    if upstream_report_url:
+        payload["upstream_report_url"] = upstream_report_url
+    if upstream_report_token:
+        payload["upstream_report_token"] = upstream_report_token
+    return payload
 
 
 def _dedupe_role_defs(role_defs: Sequence[tuple[str, str]]) -> list[tuple[str, str]]:
@@ -5192,6 +5211,8 @@ def write_new_project_launcher_artifacts(
     remote: str = "origin",
     default_branch: str = "main",
     worktree_policy: str = "shared",
+    upstream_report_url: str = "",
+    upstream_report_token: str = "",
 ) -> Path:
     role_defs = _dedupe_role_defs(
         role_clis
@@ -5224,6 +5245,8 @@ def write_new_project_launcher_artifacts(
                 remote=remote,
                 default_branch=default_branch,
                 worktree_policy=worktree_policy,
+                upstream_report_url=upstream_report_url,
+                upstream_report_token=upstream_report_token,
             ),
             indent=2,
             sort_keys=True,
@@ -5407,6 +5430,8 @@ def new_project_command(
     socket_exists: Callable[[Path], bool] = _path_exists,
     require_owner_user: bool | None = None,
     enable_owner_linger: bool = True,
+    upstream_report_url: str = "",
+    upstream_report_token: str = "",
 ) -> int:
     if execute and dry_run:
         raise SystemExit("team-launcher: --execute and --dry-run are mutually exclusive")
@@ -5484,6 +5509,8 @@ def new_project_command(
         remote=remote,
         default_branch=default_branch,
         worktree_policy=worktree_policy,
+        upstream_report_url=upstream_report_url.strip(),
+        upstream_report_token=upstream_report_token.strip(),
     )
     commands_path = artifact_dir / "operator-commands.sh"
     if not execute:
@@ -7766,6 +7793,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--default-branch", help="project default branch for generated launcher config")
     parser.add_argument("--worktree-policy", choices=sorted(WORKTREE_POLICIES), help="shared or isolated role worktrees")
     parser.add_argument("--ticket-prefix", help="ticket id prefix for the new board, e.g. OTTO")
+    parser.add_argument("--upstream-report-url", help="board URL where tenant reports should be filed")
+    parser.add_argument("--upstream-report-token", help="report-only token for --upstream-report-url")
     parser.add_argument("--push-policy", help="reviewable push policy label recorded in the design artifact")
     parser.add_argument("--audit-signoff", action=argparse.BooleanOptionalAction, default=None, help="record whether audit signoff is a project gate")
     parser.add_argument("--needs-inspection", action=argparse.BooleanOptionalAction, default=None, help="record whether inspection is a project gate")
@@ -8071,6 +8100,8 @@ def main(argv: list[str] | None = None) -> int:
             output_dir=args.new_output_dir,
             execute=args.execute,
             dry_run=args.dry_run,
+            upstream_report_url=args.upstream_report_url or "",
+            upstream_report_token=args.upstream_report_token or "",
         )
     if args.command == "provision-runtime" and args.config is None:
         try:

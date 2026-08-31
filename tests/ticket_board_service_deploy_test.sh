@@ -164,6 +164,10 @@ grep -q '^Environment=TICKET_BOARD_PROJECT=pgu$' "$UNIT_DIR/service.unit" || {
     echo "FAIL: unit did not export TICKET_BOARD_PROJECT" >&2
     exit 1
 }
+grep -q '^EnvironmentFile=-/home/agent/.config/pgu/ticket-board.env$' "$UNIT_DIR/service.unit" || {
+    echo "FAIL: unit did not load the tenant report token env file" >&2
+    exit 1
+}
 grep -q '^Environment=TICKET_BOARD_SOCKET=/run/pgu-ticket-board/ticket-board.sock$' "$UNIT_DIR/service.unit" || {
     echo "FAIL: unit did not export TICKET_BOARD_SOCKET" >&2
     exit 1

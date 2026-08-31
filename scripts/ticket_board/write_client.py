@@ -52,12 +52,14 @@ def _env_first(*names: str) -> str:
 
 
 DEFAULT_BOARD_URL = _env_first("TICKET_BOARD_URL", "PGU_TICKET_BOARD_URL") or "http://127.0.0.1:8770"
+DEFAULT_REPORT_BOARD_URL = _env_first("TICKET_BOARD_REPORT_URL", "PGU_TICKET_BOARD_REPORT_URL")
 DEFAULT_BOARD_SOCKET = (
     _env_first("TICKET_BOARD_SOCKET", "PGU_TICKET_BOARD_SOCKET")
     or "/run/pgu-ticket-board/ticket-board.sock"
 )
 DEFAULT_WRITE_TOKEN = _env_first("TICKET_BOARD_WRITE_TOKEN", "PGU_TICKET_BOARD_WRITE_TOKEN")
 DEFAULT_REPORT_TOKEN = _env_first("TICKET_BOARD_TENANT_REPORT_TOKEN", "TICKET_BOARD_REPORT_TOKEN")
+DEFAULT_REPORT_ORIGIN_PROJECT = _env_first("TICKET_BOARD_REPORT_ORIGIN_PROJECT")
 LEGACY_BOARD_SOCKET = "/tmp/pgu-ticket-board.sock"
 
 
@@ -261,6 +263,7 @@ class TicketBoardWriteClient:
     socket_path: str | None = None
     report_token: str = DEFAULT_REPORT_TOKEN
     write_token: str = DEFAULT_WRITE_TOKEN
+    report_board_url: str = DEFAULT_REPORT_BOARD_URL
 
     @property
     def api_url(self) -> str:
@@ -271,11 +274,23 @@ class TicketBoardWriteClient:
         return _normalize_api_path(self.board_url)
 
     @property
+    def report_api_url(self) -> str:
+        return _normalize_api_url(self.report_board_url or self.board_url)
+
+    @property
     def effective_socket_path(self) -> str | None:
         return self.socket_path or _default_socket_path(self.board_url)
 
     def for_caller(self, caller_role: str) -> "TicketBoardWriteClient":
-        return TicketBoardWriteClient(self.board_url, caller_role, self.timeout, self.socket_path, self.report_token, self.write_token)
+        return TicketBoardWriteClient(
+            self.board_url,
+            caller_role,
+            self.timeout,
+            self.socket_path,
+            self.report_token,
+            self.write_token,
+            self.report_board_url,
+        )
 
     def _post(self, path: str, payload: dict[str, Any], *, caller_role: str | None = None) -> dict[str, Any]:
         role = (caller_role or self.caller_role).strip().lower()
@@ -315,10 +330,10 @@ class TicketBoardWriteClient:
         token = (report_token if report_token is not None else self.report_token).strip()
         if not token:
             raise ValueError("report_token must be non-empty")
-        _refuse_production_write_under_test(self.board_url, None)
+        _refuse_production_write_under_test(self.report_board_url or self.board_url, None)
         body = json.dumps(payload).encode("utf-8")
         req = request.Request(
-            f"{self.api_url}/actions/file_report",
+            f"{self.report_api_url}/actions/file_report",
             data=body,
             headers={"Content-Type": "application/json", REPORT_TOKEN_HEADER: token},
             method="POST",
@@ -729,6 +744,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Tenant report token for file-report. Default: TICKET_BOARD_TENANT_REPORT_TOKEN or TICKET_BOARD_REPORT_TOKEN.",
     )
     parser.add_argument(
+        "--report-board-url",
+        default=DEFAULT_REPORT_BOARD_URL,
+        help="Target board URL for file-report. Default: TICKET_BOARD_REPORT_URL or PGU_TICKET_BOARD_REPORT_URL; falls back to --board-url.",
+    )
+    parser.add_argument(
         "--write-token",
         default=DEFAULT_WRITE_TOKEN,
         help="HTTP write token for TCP board action routes. Default: TICKET_BOARD_WRITE_TOKEN or legacy PGU_TICKET_BOARD_WRITE_TOKEN.",
@@ -762,7 +782,7 @@ def _build_parser() -> argparse.ArgumentParser:
     file_report = subparsers.add_parser("file-report")
     file_report.add_argument("--title", required=True)
     file_report.add_argument("--body", required=True)
-    file_report.add_argument("--origin-project", required=True)
+    file_report.add_argument("--origin-project", default=DEFAULT_REPORT_ORIGIN_PROJECT)
     file_report.add_argument("--external-source-ref", default="")
 
     route = subparsers.add_parser("route")
@@ -893,6 +913,7 @@ def main(argv: list[str] | None = None) -> int:
             socket_path=args.socket_path,
             report_token=args.report_token,
             write_token=args.write_token,
+            report_board_url=args.report_board_url,
         )
         if command == "create_ticket":
             response = client.create_ticket(
@@ -920,6 +941,8 @@ def main(argv: list[str] | None = None) -> int:
                 needs_audit=args.needs_audit,
             )
         elif command == "file_report":
+            if not args.origin_project.strip():
+                raise TicketBoardWriteError("file-report requires --origin-project or TICKET_BOARD_REPORT_ORIGIN_PROJECT")
             response = client.file_report(
                 title=args.title,
                 body=args.body,

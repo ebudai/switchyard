@@ -11,6 +11,7 @@ RuntimeDirectory=pgu-ticket-board
 ExecStart=/usr/bin/python3 /home/agent/pgu-ticketboard-live/current/scripts/ticket-board.py --host 127.0.0.1 --port 8770 --unix-socket /run/pgu-ticket-board/ticket-board.sock --frames /tmp/pgu-frames --assets /home/agent/.claude/pgu-tickets-assets
 Restart=on-failure
 RestartSec=2
+EnvironmentFile=-/home/agent/.config/pgu/ticket-board.env
 Environment=PYTHONUNBUFFERED=1
 Environment=HOME=/home/agent
 Environment=PGHOST=/var/run/postgresql

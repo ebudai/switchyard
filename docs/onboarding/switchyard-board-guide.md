@@ -145,6 +145,32 @@ scripts/ticket-board-write --caller-role audit audit-sign-off PGU-123 --text "..
 Subcommands are the operation name with dashes: `submit-to-audit`, `audit-sign-off`,
 `mark-done`, `set-blockers`.
 
+### Reporting Switchyard issues upstream
+
+Tenant projects can file cross-cutting Switchyard defects and feature requests to an
+upstream board without receiving broader write access to that board. Use the report-only
+write path:
+
+```bash
+ticket-board-write file-report \
+  --title "Switchyard issue title" \
+  --body "What failed, what you expected, and any reproduction steps." \
+  --external-source-ref "$TICKET_BOARD_PROJECT:local-context"
+```
+
+The target board is `TICKET_BOARD_REPORT_URL`, not the tenant board's
+`TICKET_BOARD_URL`, and the credential is `TICKET_BOARD_TENANT_REPORT_TOKEN`. New
+projects can carry those values in their launcher config as `upstream_report_url` and
+`upstream_report_token`; the pane launcher exports them for every role. If
+`TICKET_BOARD_REPORT_ORIGIN_PROJECT` is set, `--origin-project` is optional and defaults
+to the current tenant slug.
+
+An upstream report lands in `analysis`, assigned to `unassigned`. Directors identify it
+by the detail metadata: `Origin: <tenant>` and, when supplied,
+`External Source: <tenant-local-ref>`. The report token can only create this report; it
+cannot set `state`, `assignee`, blockers, signoff flags, commit fields, or mutate an
+existing ticket.
+
 **Python:**
 
 ```python

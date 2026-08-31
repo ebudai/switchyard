@@ -709,6 +709,7 @@ ExecStartPre=/bin/chmod 1777 $FRAME_ROOT
 ExecStart=/usr/bin/python3 $BOARD_SCRIPT --host $BOARD_HOST --port $BOARD_PORT --unix-socket $BOARD_UNIX_SOCKET --frames $FRAME_ROOT
 Restart=on-failure
 RestartSec=2
+EnvironmentFile=-$HOME/.config/$PROJECT_SLUG/ticket-board.env
 Environment=PYTHONUNBUFFERED=1
 Environment=TICKET_BOARD_PROJECT=$PROJECT_SLUG
 Environment=TICKET_BOARD_SOCKET=$BOARD_UNIX_SOCKET

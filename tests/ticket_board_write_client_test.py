@@ -233,6 +233,11 @@ def isolated_board_endpoint_env():
         "PGU_TICKET_BOARD_SOCKET",
         "TICKET_BOARD_URL",
         "PGU_TICKET_BOARD_URL",
+        "TICKET_BOARD_REPORT_URL",
+        "PGU_TICKET_BOARD_REPORT_URL",
+        "TICKET_BOARD_TENANT_REPORT_TOKEN",
+        "TICKET_BOARD_REPORT_TOKEN",
+        "TICKET_BOARD_REPORT_ORIGIN_PROJECT",
     ]
     old_values = {key: os.environ.get(key) for key in keys}
     try:
@@ -735,6 +740,73 @@ def assert_default_caller_role_has_no_implicit_director_fallback() -> None:
     assert write_client_module.default_caller_role({}) == ""
 
 
+def assert_file_report_uses_configured_report_board_url(root: Path) -> None:
+    own_board = RecordingServer()
+    upstream_board = RecordingServer()
+    own_thread = threading.Thread(target=own_board.serve_forever, daemon=True)
+    upstream_thread = threading.Thread(target=upstream_board.serve_forever, daemon=True)
+    own_thread.start()
+    upstream_thread.start()
+    try:
+        client = TicketBoardWriteClient(
+            f"http://127.0.0.1:{own_board.server_port}",
+            "director",
+            report_token="tenant-token",
+            report_board_url=f"http://127.0.0.1:{upstream_board.server_port}",
+        )
+        report = client.file_report(
+            title="Tenant report",
+            body="Cross-tenant report.",
+            origin_project="mefp",
+            external_source_ref="MEFP-1",
+        )["ticket"]
+        assert report["origin_project"] == "mefp", report
+        assert own_board.requests == []
+        assert [path for path, _caller, _legacy, _payload in upstream_board.requests] == [
+            "/api/tickets/actions/file_report"
+        ]
+        assert upstream_board.report_tokens == [("/api/tickets/actions/file_report", "tenant-token")]
+
+        env = os.environ.copy()
+        env.update(
+            {
+                "TICKET_BOARD_URL": f"http://127.0.0.1:{own_board.server_port}",
+                "TICKET_BOARD_REPORT_URL": f"http://127.0.0.1:{upstream_board.server_port}",
+                "TICKET_BOARD_TENANT_REPORT_TOKEN": "env-tenant-token",
+                "TICKET_BOARD_REPORT_ORIGIN_PROJECT": "mefp",
+            }
+        )
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts" / "ticket-board-write"),
+                "file-report",
+                "--title",
+                "Env report",
+                "--body",
+                "Uses report URL env.",
+                "--external-source-ref",
+                "MEFP-2",
+            ],
+            cwd=root,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise AssertionError(proc.stderr or proc.stdout)
+        assert len(own_board.requests) == 0
+        assert upstream_board.report_tokens[-1] == ("/api/tickets/actions/file_report", "env-tenant-token")
+    finally:
+        own_board.shutdown()
+        upstream_board.shutdown()
+        own_board.server_close()
+        upstream_board.server_close()
+        own_thread.join(timeout=2)
+        upstream_thread.join(timeout=2)
+
+
 def main() -> int:
     assert_write_client_surface_matches_server_actions()
     with tempfile.TemporaryDirectory(prefix="ticket-board-write-client.") as tmpdir:
@@ -768,6 +840,7 @@ def main() -> int:
                 assert_generic_socket_env_precedes_legacy(root)
                 assert_default_caller_role_ignores_tmux_session()
                 assert_default_caller_role_has_no_implicit_director_fallback()
+                assert_file_report_uses_configured_report_board_url(root)
                 assert_auto_socket_connect_failure_falls_back_to_tcp(base_url, root / "blocked.sock")
                 assert_action_requests(server.requests)
                 assert ("/api/tickets/actions/file_report", "tenant-token") in server.report_tokens

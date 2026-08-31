@@ -79,6 +79,10 @@ grep -q '^Environment=TICKET_BOARD_SOCKET=/run/pgu-ticket-board/ticket-board.soc
     echo "FAIL: proposed unit does not export the runtime socket path" >&2
     exit 1
 }
+grep -q '^EnvironmentFile=-/home/agent/.config/pgu/ticket-board.env$' "$UNIT" || {
+    echo "FAIL: proposed unit does not load the tenant report token env file" >&2
+    exit 1
+}
 grep -q '^Environment=PGUSER=ticket_board_service$' "$UNIT" || {
     echo "FAIL: proposed unit does not select ticket_board_service" >&2
     exit 1

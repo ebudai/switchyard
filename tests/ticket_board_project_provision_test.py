@@ -74,6 +74,11 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "TICKET_BOARD_ASSIGNEES=unassigned,designer,app,main,audit,director,user" in combined
     assert "TICKET_BOARD_CALLER_ROLES=director,designer,app,main,audit,user" in combined
     assert "TICKET_BOARD_OPERATION_ALLOWED_ROLES=" not in combined
+    assert "EnvironmentFile=-/home/stellaris-agent/.config/stellaris/ticket-board.env" in combined
+    assert "sudo install -d -m 0755 -o 'stellaris-agent' -g 'stellaris-agent' '/home/stellaris-agent/.config'" in combined
+    assert "sudo install -d -m 0700 -o 'stellaris-agent' -g 'stellaris-agent' '/home/stellaris-agent/.config/stellaris'" in combined
+    assert "TICKET_BOARD_TENANT_REPORT_TOKEN=%s" in combined
+    assert "sudo -u 'stellaris-agent' chmod 0600 '/home/stellaris-agent/.config/stellaris/ticket-board.env'" in combined
     assert "TICKET_BOARD_PANE_STATE_DIR=%t/stellaris-ticket-board/pane-state" in combined
     assert (
         "sudo -u 'stellaris-agent' -H env XDG_RUNTIME_DIR=\"$owner_runtime_dir\" "
@@ -462,6 +467,7 @@ def test_custom_ticket_prefix_is_rendered_into_board_service_environment() -> No
     board_unit = render_board_unit(plan)
 
     assert plan.ticket_prefix == "OT"
+    assert "EnvironmentFile=-/home/otto-agent/.config/otto/ticket-board.env" in board_unit
     assert "Environment=TICKET_BOARD_PROJECT=otto" in board_unit
     assert "Environment=TICKET_BOARD_TICKET_PREFIX=OT" in board_unit
 

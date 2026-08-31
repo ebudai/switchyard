@@ -61,12 +61,16 @@ Pane write API:
   when deliberately acting as a different board role.
 - Tenant projects may file cross-cutting defects or feature requests upstream
   through the report-only HTTP action `POST /api/tickets/actions/file_report`
-  using `X-Ticket-Board-Report-Token`. That credential grants only report
-  filing; it does not grant the board write token, Unix socket access, caller
-  roles, home-directory access, or shared group membership. Filed reports land
-  unassigned in `analysis` with `origin_project` and `external_source_ref`
-  metadata preserved, so a tenant cannot inject work into a switchyard
-  implementer queue or mutate existing tickets.
+  using `X-Ticket-Board-Report-Token`. `ticket-board-write file-report` sends
+  to `TICKET_BOARD_REPORT_URL` when set, so a tenant can report to an upstream
+  board while normal writes still use its own `TICKET_BOARD_URL`. The token
+  comes from `TICKET_BOARD_TENANT_REPORT_TOKEN` or `TICKET_BOARD_REPORT_TOKEN`.
+  That credential grants only report filing; it does not grant the board write
+  token, Unix socket access, caller roles, home-directory access, or shared
+  group membership. Filed reports land unassigned in `analysis` with
+  `origin_project` and `external_source_ref` metadata preserved, so a tenant
+  cannot inject work into a switchyard implementer queue or mutate existing
+  tickets.
 - Tests must point write-client calls at disposable board targets. When the
   write client detects it is running under a test process, it refuses writes to
   the live PGU board URL/socket before opening a connection. Use

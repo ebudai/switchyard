@@ -14008,6 +14008,46 @@ def test_switchyard_new_custom_project_path_sets_artifact_repository_and_pane_wo
         }
 
 
+def test_new_project_config_threads_upstream_report_env_to_panes() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-reporting.") as tmp:
+        tmp_path = Path(tmp)
+        source_repo = tmp_path / "source-repo"
+        project_repo = tmp_path / "project-repo"
+        output_dir = tmp_path / "out"
+        source_repo.mkdir()
+        project_repo.mkdir()
+
+        assert (
+            new_project_command(
+                "mefp",
+                owner_user=current_user,
+                source_repo=source_repo,
+                repository=project_repo,
+                output_dir=output_dir,
+                runner=FakeRunner(),
+                port_in_use=lambda _port: False,
+                socket_exists=lambda _path: False,
+                upstream_report_url="http://127.0.0.1:8770",
+                upstream_report_token="tenant-report-token",
+            )
+            == 0
+        )
+
+        raw_config = json.loads((output_dir / "mefp.json").read_text(encoding="utf-8"))
+        loaded_config = load_project_config("mefp", output_dir / "mefp.json")
+
+    assert raw_config["upstream_report_url"] == "http://127.0.0.1:8770"
+    assert raw_config["upstream_report_token"] == "tenant-report-token"
+    assert loaded_config.upstream_report_url == "http://127.0.0.1:8770"
+    assert loaded_config.upstream_report_token == "tenant-report-token"
+    for role in loaded_config.roles:
+        assert role.env["TICKET_BOARD_URL"].startswith("http://127.0.0.1:")
+        assert role.env["TICKET_BOARD_REPORT_URL"] == "http://127.0.0.1:8770"
+        assert role.env["TICKET_BOARD_TENANT_REPORT_TOKEN"] == "tenant-report-token"
+        assert role.env["TICKET_BOARD_REPORT_ORIGIN_PROJECT"] == "mefp"
+
+
 def test_switchyard_new_creates_absent_zeta_owner_with_linger_and_initial_artifact() -> None:
     class ZetaRunner(FakeRunner):
         def __init__(self) -> None:

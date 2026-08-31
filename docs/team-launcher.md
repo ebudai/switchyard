@@ -146,11 +146,14 @@ attach-role requires a recorded resume id and refuses rather than starting
 fresh; a failed start or unverified resume rolls the config entry back to
 detached. If the named slot is occupied or outside the configured layout, the
 launcher refuses and says which role owns the slot; it does not evict a
-neighbour or grow the grid implicitly. `pane detach-role <role>` moves a visible
-role back to
-headless by removing its slot and marking it detached, then detaches any live
-tmux clients from that role session without killing the session. The role's
-durable session record is not cleared by either operation.
+neighbour or grow the grid implicitly. A single launcher window may contain at
+most six visible panes, so `attach-role` also refuses to surface a seventh
+visible role until another role is detached. `pane detach-role <role>` moves a
+visible role back to headless by removing its slot and marking it detached, then
+detaches any live tmux clients from that role session without killing the
+session. The role's durable session record is not cleared by either operation.
+Use detached roles for workers the director rarely interacts with directly; they
+continue running as tmux sessions and can be surfaced later with `attach-role`.
 
 When a launcher `pane` command is run from inside another role's pane, inherited
 pane identity is treated as caller state, not target state. The launcher strips
@@ -466,12 +469,27 @@ and each role's selected CLI is recorded in the `switchyard.project.v1`
 artifact. The artifact still must not preconfigure workflow stages or
 transitions.
 
+`switchyard add-role <project> <role> --cli <cli>` adds another implementer role
+after provisioning. By default it creates a visible pane, and it refuses when
+that would become the seventh visible role in the automatic window. Use
+`--detached` for the added role, or detach another visible role first, when the
+project already has six visible panes.
+
 Generated Konsole layouts use a single horizontal row for up to four visible
 roles, so small teams get tall side-by-side panes. Five or more visible roles
 fall back to a balanced row-major grid that spreads panes across rows with a
-maximum row width of four. The project config's `layout` path
-remains the override: edit or replace that JSON file for a project-specific
-window shape without changing the provisioning prompts.
+maximum row width of four. Automatic project creation caps the visible Konsole
+window at six panes. When a provisioned role list is longer than six, the first
+six roles get slots in the layout and the overflow roles are written as
+`detached: true`; the provision output names those auto-detached roles and
+reminds the operator to use `attach-role` later or detach another role first.
+This is a display cap, not a project role cap. The project config's `layout`
+path remains the override for shapes up to the six-pane automatic window limit:
+edit or replace that JSON file for a project-specific window shape without
+changing the provisioning prompts. True multi-window display needs explicit
+window-plus-slot role placement and a director-invoked command to open the
+additional role set; the launcher does not split a team across windows
+automatically.
 
 The first-run auth phase runs before panes launch. It probes each distinct
 selected CLI as the project owner, invokes that CLI's own login command when it

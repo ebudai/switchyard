@@ -124,6 +124,7 @@ DEFAULT_VIEWER_SESSION = "viewer"
 DEFAULT_VIEWER_COLUMNS = 240
 DEFAULT_VIEWER_ROWS = 80
 DEFAULT_TMUX_HISTORY_LIMIT = 200_000
+MAX_VISIBLE_PANES_PER_WINDOW = 6
 SWITCHYARD_VERSION = "dev"
 SWITCHYARD_COMMANDS = ("new", "register", "upgrade", "add-role", "stop", "status", "validate-models")
 YOLO_ARGS_BY_CLI = {
@@ -3983,6 +3984,13 @@ def materialize_layout(
     failed_roles: dict[str, str] | None = None,
 ) -> Path:
     failed_roles = failed_roles or {}
+    visible_roles = [role.role for role in config.roles if not role.detached]
+    if len(visible_roles) > MAX_VISIBLE_PANES_PER_WINDOW:
+        raise SystemExit(
+            f"team-launcher: {config.project} has {len(visible_roles)} visible roles; at most "
+            f"{MAX_VISIBLE_PANES_PER_WINDOW} panes can be visible in one window; detach extra roles or open an "
+            "additional director-invoked window"
+        )
     layout = json.loads(config.layout.read_text(encoding="utf-8"))
     leaves = _layout_leaves(layout)
     for role in config.roles:
@@ -5178,31 +5186,30 @@ def _new_project_launcher_config_payload(
     )
     worktree_base = _new_project_worktree_base(plan.project, plan.owner_user)
     control_repository = _new_project_control_repository(plan.project, plan.owner_user)
-    roles = [
-        {
+    roles = []
+    for index, (role, cli) in enumerate(role_defs):
+        role_payload: dict[str, Any] = {
             "cli": [cli],
-            **(
-                {
-                    "env": _new_project_role_env(
-                        role,
-                        plan,
-                        project_name=project_name,
-                        artifact_path=artifact_path,
-                        design_document=design_document,
-                        director_onboarding=director_onboarding,
-                    )
-                }
+            "env": _new_project_role_env(
+                role,
+                plan,
+                project_name=project_name,
+                artifact_path=artifact_path,
+                design_document=design_document,
+                director_onboarding=director_onboarding,
             ),
             "live_commands": [cli],
             "role": role,
-            "slot": index,
             "target": f"{plan.project}-{role}:0.0",
             "tmux_session": f"{plan.project}-{role}",
             "workdir": str(worktree_base / role),
             "yolo": True,
         }
-        for index, (role, cli) in enumerate(role_defs)
-    ]
+        if index < MAX_VISIBLE_PANES_PER_WINDOW:
+            role_payload["slot"] = index
+        else:
+            role_payload["detached"] = True
+        roles.append(role_payload)
     payload = {
         "project": plan.project,
         **({"project_name": project_name} if project_name else {}),
@@ -5290,6 +5297,7 @@ def write_new_project_launcher_artifacts(
     worktree_policy: str = "shared",
     upstream_report_url: str = "",
     upstream_report_token_file: str = "",
+    print_func: Callable[[str], None] = print,
 ) -> Path:
     role_defs = _dedupe_role_defs(
         role_clis
@@ -5300,11 +5308,17 @@ def write_new_project_launcher_artifacts(
             audit_roles=audit_roles,
         )
     )
-    role_count = len(role_defs)
+    visible_role_count = min(len(role_defs), MAX_VISIBLE_PANES_PER_WINDOW)
+    detached_roles = [role for role, _cli in role_defs[MAX_VISIBLE_PANES_PER_WINDOW:]]
+    if detached_roles:
+        print_func(
+            f"team-launcher: auto-detached roles beyond the {MAX_VISIBLE_PANES_PER_WINDOW}-pane window cap: "
+            f"{', '.join(detached_roles)}; use attach-role to surface one later or detach another role first"
+        )
     config_path = output_dir / f"{plan.project}.json"
     layout_path = output_dir / f"{plan.project}-konsole-layout.json"
     layout_path.write_text(
-        json.dumps(_new_project_layout_payload(role_count), indent=2, sort_keys=True) + "\n",
+        json.dumps(_new_project_layout_payload(visible_role_count), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     config_path.write_text(
@@ -5511,6 +5525,7 @@ def new_project_command(
     enable_owner_linger: bool = True,
     upstream_report_url: str = "",
     upstream_report_token_file: str = "",
+    print_func: Callable[[str], None] = print,
 ) -> int:
     if execute and dry_run:
         raise SystemExit("team-launcher: --execute and --dry-run are mutually exclusive")
@@ -5594,19 +5609,20 @@ def new_project_command(
         worktree_policy=worktree_policy,
         upstream_report_url=upstream_report_url.strip(),
         upstream_report_token_file=upstream_report_token_file.strip(),
+        print_func=print_func,
     )
     commands_path = artifact_dir / "operator-commands.sh"
     if not execute:
-        print(f"team-launcher: dry-run for {plan.project}; artifacts in {artifact_dir}")
-        print(f"team-launcher: launcher config {config_path}")
-        print("team-launcher: execution plan:")
-        print(f"  cd {shlex.quote(str(artifact_dir))}")
-        print("  sudo -v")
-        print(f"  bash {shlex.quote(str(commands_path.name))}")
-        print()
-        print(commands_path.read_text(encoding="utf-8"), end="")
+        print_func(f"team-launcher: dry-run for {plan.project}; artifacts in {artifact_dir}")
+        print_func(f"team-launcher: launcher config {config_path}")
+        print_func("team-launcher: execution plan:")
+        print_func(f"  cd {shlex.quote(str(artifact_dir))}")
+        print_func("  sudo -v")
+        print_func(f"  bash {shlex.quote(str(commands_path.name))}")
+        print_func("")
+        print_func(commands_path.read_text(encoding="utf-8").rstrip("\n"))
         return 0
-    print(f"team-launcher: provisioning {plan.project}; artifacts in {artifact_dir}")
+    print_func(f"team-launcher: provisioning {plan.project}; artifacts in {artifact_dir}")
     sudo_result = runner(["sudo", "-v"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if sudo_result.returncode != 0:
         stderr = str(getattr(sudo_result, "stderr", "") or "").strip()
@@ -5615,7 +5631,7 @@ def new_project_command(
     result = runner(["bash", str(commands_path)], cwd=str(artifact_dir))
     if result.returncode != 0:
         raise SystemExit(f"team-launcher: provisioning failed with exit status {result.returncode}")
-    print(f"team-launcher: provisioned {plan.project}; launcher config {config_path}")
+    print_func(f"team-launcher: provisioned {plan.project}; launcher config {config_path}")
     return 0
 
 
@@ -7670,6 +7686,7 @@ def switchyard_new_command(
         socket_exists=socket_exists,
         require_owner_user=False,
         enable_owner_linger=False,
+        print_func=print_func,
     )
     if result != 0:
         return result
@@ -7973,6 +7990,12 @@ def _write_added_role_config(
     if slot is not None and slot < 0:
         raise SystemExit("team-launcher: add-role slot must be non-negative")
     if not detached:
+        visible_count = sum(1 for role in config.roles if not role.detached)
+        if visible_count >= MAX_VISIBLE_PANES_PER_WINDOW:
+            raise SystemExit(
+                f"team-launcher: cannot add {role_name} as visible; at most {MAX_VISIBLE_PANES_PER_WINDOW} panes "
+                "can be visible in one window; add it with --detached or detach another role first"
+            )
         if slot is None:
             slot = _next_visible_role_slot(config)
         occupant = next(
@@ -8245,6 +8268,12 @@ def attach_role_to_slot(
             print_func(f"team-launcher: role {role.role} is already attached to slot {slot}")
             return 0
         raise SystemExit(f"team-launcher: role {role.role} is already attached to slot {role.slot}")
+    visible_count = sum(1 for candidate in config.roles if not candidate.detached)
+    if visible_count >= MAX_VISIBLE_PANES_PER_WINDOW:
+        raise SystemExit(
+            f"team-launcher: cannot attach {role.role}; at most {MAX_VISIBLE_PANES_PER_WINDOW} panes "
+            "can be visible in one window; detach another role first"
+        )
     conflict = _ambient_session_conflict_for_role(role, session_dir=session_dir)
     if conflict:
         print(conflict, file=sys.stderr)

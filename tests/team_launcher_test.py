@@ -625,6 +625,48 @@ def test_upgrade_refreshes_chunked_seven_role_generated_provision_layout() -> No
         }
 
 
+def test_upgrade_generated_project_layout_counts_visible_roles_only() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-launcher-visible-count.") as tmp:
+        provision_dir = Path(tmp) / ".switchyard" / "provision"
+        provision_dir.mkdir(parents=True)
+        layout_path = provision_dir / "otto-konsole-layout.json"
+        layout_path.write_text(
+            json.dumps(team_launcher._legacy_new_project_stacked_layout_payload(6), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        config_path = _write_launcher_config(provision_dir, role_count=6)
+        raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+        raw_config["roles"].append(
+            {
+                "cli": ["codex"],
+                "detached": True,
+                "live_commands": ["codex"],
+                "role": "detached-worker",
+                "target": "otto-detached-worker:0.0",
+                "tmux_session": "otto-detached-worker",
+                "workdir": str(provision_dir / "worktrees" / "detached-worker"),
+                "yolo": True,
+            }
+        )
+        config_path.write_text(json.dumps(raw_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        config = load_project_config("otto", config_path)
+
+        result = team_launcher.upgrade_generated_project_layout(config, config_path=config_path)
+        upgraded_layout = json.loads(layout_path.read_text(encoding="utf-8"))
+
+        assert result.changed
+        assert len(team_launcher._layout_leaves(upgraded_layout)) == 6
+        assert len([role for role in config.roles if not role.detached]) == 6
+        assert len(config.roles) == 7
+        assert _layout_session_tree(upgraded_layout) == {
+            "Orientation": "Vertical",
+            "Widgets": [
+                {"Orientation": "Horizontal", "Widgets": [0, 1, 2]},
+                {"Orientation": "Horizontal", "Widgets": [3, 4, 5]},
+            ],
+        }
+
+
 def test_upgrade_refreshes_old_three_role_column_major_generated_layout() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-launcher-upgrade.") as tmp:
         provision_dir = Path(tmp) / ".switchyard" / "provision"
@@ -1378,6 +1420,59 @@ def _write_six_visible_role_config(tmp: Path, project: str = "porter") -> Path:
         encoding="utf-8",
     )
     return config_path
+
+
+def test_materialize_layout_refuses_more_than_six_visible_roles() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-visible-cap.") as tmp:
+        tmp_path = Path(tmp)
+        layout_path = tmp_path / "porter-layout.json"
+        layout_path.write_text(
+            json.dumps(team_launcher._new_project_layout_payload(7), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        roles = [f"role{index}" for index in range(7)]
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout_path),
+                    "repository": str(repo),
+                    "roles": [
+                        {
+                            "role": role,
+                            "slot": index,
+                            "cli": ["codex"],
+                            "target": f"porter-{role}:0.0",
+                            "tmux_session": f"porter-{role}",
+                        }
+                        for index, role in enumerate(roles)
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+
+        try:
+            materialize_layout(
+                config,
+                config_path=config_path,
+                mode="attach-or-start",
+                script_path=ROOT / "scripts" / "team-launcher",
+                output_path=tmp_path / "materialized.json",
+            )
+            raise AssertionError("expected visible pane cap failure")
+        except SystemExit as exc:
+            message = str(exc)
+
+    assert "has 7 visible roles" in message
+    assert "at most 6 panes can be visible in one window" in message
 
 
 def _run_git(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -3256,9 +3351,13 @@ def test_kde_auto_layout_preserves_separate_konsole_plan_shape() -> None:
 def test_pgu_config_matches_director_supplied_live_role_assignments() -> None:
     config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
     roles = {role.role: role for role in config.roles}
+    layout = json.loads(config.layout.read_text(encoding="utf-8"))
     expected_repository = Path("/home/agent/Projects/pgu")
 
     assert set(roles) == {"director", "main", "app", "research", "ops", "audit", "inspector"}
+    assert len(roles) == 7
+    assert len([role for role in roles.values() if not role.detached]) == 6
+    assert len(team_launcher._layout_leaves(layout)) == 6
     assert all(role.yolo for role in roles.values())
     assert config.repository == expected_repository
     assert config.board_url == "http://127.0.0.1:8770"
@@ -6174,10 +6273,8 @@ def test_attach_headless_role_refuses_conflicting_ambient_session_id_before_muta
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-attach-session-conflict.") as tmp:
         tmp_path = Path(tmp)
         config_path = _write_six_visible_role_config(tmp_path)
-        layout = json.loads((tmp_path / "porter-layout.json").read_text(encoding="utf-8"))
-        layout["Widgets"].append({"Command": "", "SessionRestoreId": 6, "WorkingDirectory": ""})
-        (tmp_path / "porter-layout.json").write_text(json.dumps(layout, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+        raw_config["roles"] = raw_config["roles"][:5]
         raw_config["roles"].append(
             {"role": "research", "detached": True, "target": "porter-research:0.0", "tmux_session": "porter-research", "cli": ["codex"]}
         )
@@ -6205,7 +6302,7 @@ def test_attach_headless_role_refuses_conflicting_ambient_session_id_before_muta
                     config,
                     config_path=config_path,
                     role_name="research",
-                    slot=6,
+                    slot=5,
                     session_dir=session_dir,
                     pane_state_dir=tmp_path / "pane-state",
                     runner=runner,
@@ -8966,6 +9063,43 @@ def test_attach_headless_role_refuses_occupied_slot_without_mutating_config() ->
         assert not any(call[:2] in (["tmux", "new-session"], ["tmux", "kill-session"]) for call in runner.calls)
 
 
+def test_attach_headless_role_refuses_seventh_visible_pane_without_mutating_config() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-surface-visible-cap.") as tmp:
+        tmp_path = Path(tmp)
+        config_path = _write_six_visible_role_config(tmp_path)
+        layout_path = tmp_path / "porter-layout.json"
+        layout = json.loads(layout_path.read_text(encoding="utf-8"))
+        layout["Widgets"].append({"Command": "", "SessionRestoreId": 6, "WorkingDirectory": ""})
+        layout_path.write_text(json.dumps(layout, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+        raw_config["roles"].append(
+            {"role": "worker7", "detached": True, "target": "porter-worker7:0.0", "tmux_session": "porter-worker7", "cli": ["codex"]}
+        )
+        config_path.write_text(json.dumps(raw_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        config = load_project_config("porter", config_path)
+        before = config_path.read_text(encoding="utf-8")
+        runner = FakeRunner()
+
+        try:
+            team_launcher.attach_role_to_slot(
+                config,
+                config_path=config_path,
+                role_name="worker7",
+                slot=6,
+                session_dir=tmp_path / "sessions",
+                pane_state_dir=tmp_path / "pane-state",
+                runner=runner,
+            )
+            raise AssertionError("expected seventh visible pane attach failure")
+        except SystemExit as exc:
+            message = str(exc)
+
+        assert "cannot attach worker7" in message
+        assert "at most 6 panes can be visible in one window" in message
+        assert config_path.read_text(encoding="utf-8") == before
+        assert not any(call[:2] in (["tmux", "new-session"], ["tmux", "kill-session"]) for call in runner.calls)
+
+
 def test_attach_headless_role_without_live_session_or_record_refuses_fresh_start() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-surface-no-record.") as tmp:
         tmp_path = Path(tmp)
@@ -10242,6 +10376,52 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
     assert launch_output_exists
 
 
+def test_new_project_caps_automatic_window_to_six_visible_roles() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-visible-cap.") as tmp:
+        tmp_path = Path(tmp)
+        output_dir = tmp_path / "out"
+        source_repo = tmp_path / "source-repo"
+        project_repo = tmp_path / "project-repo"
+        output_dir.mkdir()
+        source_repo.mkdir()
+        project_repo.mkdir()
+        plan = team_launcher.build_plan(
+            project="porter",
+            owner_user=current_user,
+            source_repo=source_repo,
+            implementer_roles=("ops", "app", "main", "perf", "research"),
+        )
+        messages: list[str] = []
+
+        config_path = team_launcher.write_new_project_launcher_artifacts(
+            plan,
+            output_dir,
+            repository=project_repo,
+            implementer_roles=("ops", "app", "main", "perf", "research"),
+            print_func=messages.append,
+        )
+
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        layout = json.loads((output_dir / "porter-konsole-layout.json").read_text(encoding="utf-8"))
+        loaded_config = load_project_config("porter", output_dir / "porter.json")
+        visible_roles = [role for role in config["roles"] if not role.get("detached")]
+        detached_roles = [role for role in config["roles"] if role.get("detached")]
+
+    assert len(config["roles"]) == 8
+    assert [role["role"] for role in visible_roles] == ["designer", "director", "audit", "ops", "app", "main"]
+    assert [role["slot"] for role in visible_roles] == list(range(team_launcher.MAX_VISIBLE_PANES_PER_WINDOW))
+    assert [role["role"] for role in detached_roles] == ["perf", "research"]
+    assert not any("slot" in role for role in detached_roles)
+    assert len(team_launcher._layout_leaves(layout)) == team_launcher.MAX_VISIBLE_PANES_PER_WINDOW
+    assert len([role for role in loaded_config.roles if not role.detached]) == team_launcher.MAX_VISIBLE_PANES_PER_WINDOW
+    assert len(loaded_config.roles) == 8
+    assert messages == [
+        "team-launcher: auto-detached roles beyond the 6-pane window cap: perf, research; "
+        "use attach-role to surface one later or detach another role first"
+    ]
+
+
 def test_add_role_updates_generated_config_board_registration_and_starts_only_new_role() -> None:
     current_user = team_launcher.current_user_name()
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-add-role.") as tmp:
@@ -10333,6 +10513,69 @@ def test_add_role_updates_generated_config_board_registration_and_starts_only_ne
     assert [role.role for role in updated_config.roles] == ["designer", "director", "audit", "app", "main", "ops"]
     assert updated_config.roles[-1].env["TICKET_BOARD_CALLER_ROLE"] == "ops"
     assert "team-launcher: added role ops to mefp" in stdout.getvalue()
+
+
+def test_add_role_refuses_seventh_visible_pane_without_mutating_config() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-add-role-visible-cap.") as tmp:
+        tmp_path = Path(tmp)
+        provision_dir = tmp_path / "project" / ".switchyard" / "provision"
+        provision_dir.mkdir(parents=True)
+        source_repo = tmp_path / "source-repo"
+        project_repo = tmp_path / "project-repo"
+        source_repo.mkdir()
+        project_repo.mkdir()
+        plan = team_launcher.build_plan(
+            project="mefp",
+            owner_user=current_user,
+            port=18811,
+            source_repo=source_repo,
+            implementer_roles=("app", "main", "ops"),
+        )
+        (provision_dir / "plan.json").write_text(json.dumps(plan.__dict__, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        config_path = provision_dir / "mefp.json"
+        config_path.write_text(
+            json.dumps(
+                team_launcher._new_project_launcher_config_payload(
+                    plan,
+                    repository=project_repo,
+                    implementer_roles=("app", "main", "ops"),
+                ),
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        layout_path = provision_dir / "mefp-konsole-layout.json"
+        layout_path.write_text(
+            json.dumps(team_launcher._new_project_layout_payload(6), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("mefp", config_path)
+        before_config = config_path.read_text(encoding="utf-8")
+        before_layout = layout_path.read_text(encoding="utf-8")
+        runner = KeywordRecordingFakeRunner()
+
+        try:
+            team_launcher.add_project_role_command(
+                config,
+                config_path=config_path,
+                role_name="perf",
+                cli="codex",
+                runner=runner,
+            )
+            raise AssertionError("expected seventh visible role to be rejected")
+        except SystemExit as exc:
+            message = str(exc)
+        after_config = config_path.read_text(encoding="utf-8")
+        after_layout = layout_path.read_text(encoding="utf-8")
+
+    assert "cannot add perf as visible" in message
+    assert "at most 6 panes can be visible in one window" in message
+    assert after_config == before_config
+    assert after_layout == before_layout
+    assert not any(call[:4] == ["sudo", "-u", "postgres", "psql"] for call in runner.calls)
 
 
 def test_add_role_rejects_duplicate_role_before_privileged_mutation() -> None:

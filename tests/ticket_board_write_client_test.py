@@ -236,7 +236,9 @@ def isolated_board_endpoint_env():
         "TICKET_BOARD_REPORT_URL",
         "PGU_TICKET_BOARD_REPORT_URL",
         "TICKET_BOARD_TENANT_REPORT_TOKEN",
+        "TICKET_BOARD_TENANT_REPORT_TOKEN_FILE",
         "TICKET_BOARD_REPORT_TOKEN",
+        "TICKET_BOARD_REPORT_TOKEN_FILE",
         "TICKET_BOARD_REPORT_ORIGIN_PROJECT",
     ]
     old_values = {key: os.environ.get(key) for key in keys}
@@ -767,12 +769,14 @@ def assert_file_report_uses_configured_report_board_url(root: Path) -> None:
         ]
         assert upstream_board.report_tokens == [("/api/tickets/actions/file_report", "tenant-token")]
 
+        token_file = root / "tenant-report.env"
+        token_file.write_text("TICKET_BOARD_TENANT_REPORT_TOKEN=env-tenant-token\n", encoding="utf-8")
         env = os.environ.copy()
         env.update(
             {
                 "TICKET_BOARD_URL": f"http://127.0.0.1:{own_board.server_port}",
                 "TICKET_BOARD_REPORT_URL": f"http://127.0.0.1:{upstream_board.server_port}",
-                "TICKET_BOARD_TENANT_REPORT_TOKEN": "env-tenant-token",
+                "TICKET_BOARD_TENANT_REPORT_TOKEN_FILE": str(token_file),
                 "TICKET_BOARD_REPORT_ORIGIN_PROJECT": "mefp",
             }
         )

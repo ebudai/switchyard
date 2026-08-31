@@ -63,14 +63,18 @@ Pane write API:
   through the report-only HTTP action `POST /api/tickets/actions/file_report`
   using `X-Ticket-Board-Report-Token`. `ticket-board-write file-report` sends
   to `TICKET_BOARD_REPORT_URL` when set, so a tenant can report to an upstream
-  board while normal writes still use its own `TICKET_BOARD_URL`. The token
-  comes from `TICKET_BOARD_TENANT_REPORT_TOKEN` or `TICKET_BOARD_REPORT_TOKEN`.
-  That credential grants only report filing; it does not grant the board write
-  token, Unix socket access, caller roles, home-directory access, or shared
-  group membership. Filed reports land unassigned in `analysis` with
-  `origin_project` and `external_source_ref` metadata preserved, so a tenant
-  cannot inject work into a switchyard implementer queue or mutate existing
-  tickets.
+  board while normal writes still use its own `TICKET_BOARD_URL`. The token is
+  read from `TICKET_BOARD_TENANT_REPORT_TOKEN_FILE` or
+  `TICKET_BOARD_REPORT_TOKEN_FILE` when set; those files use the same
+  EnvironmentFile-style `TICKET_BOARD_TENANT_REPORT_TOKEN=...` format as the
+  board service. Direct token env vars remain accepted for manual use, but
+  pane launch configs must carry only the file path so the token value does not
+  appear in process argv. That credential grants only report filing; it does
+  not grant the board write token, Unix socket access, caller roles,
+  home-directory access, or shared group membership. Filed reports land
+  unassigned in `analysis` with `origin_project` and `external_source_ref`
+  metadata preserved, so a tenant cannot inject work into a switchyard
+  implementer queue or mutate existing tickets.
 - Tests must point write-client calls at disposable board targets. When the
   write client detects it is running under a test process, it refuses writes to
   the live PGU board URL/socket before opening a connection. Use

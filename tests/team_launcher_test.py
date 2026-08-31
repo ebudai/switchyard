@@ -14015,6 +14015,7 @@ def test_new_project_config_threads_upstream_report_env_to_panes() -> None:
         source_repo = tmp_path / "source-repo"
         project_repo = tmp_path / "project-repo"
         output_dir = tmp_path / "out"
+        token_file = tmp_path / "mefp-upstream-report.env"
         source_repo.mkdir()
         project_repo.mkdir()
 
@@ -14029,7 +14030,7 @@ def test_new_project_config_threads_upstream_report_env_to_panes() -> None:
                 port_in_use=lambda _port: False,
                 socket_exists=lambda _path: False,
                 upstream_report_url="http://127.0.0.1:8770",
-                upstream_report_token="tenant-report-token",
+                upstream_report_token_file=str(token_file),
             )
             == 0
         )
@@ -14038,14 +14039,52 @@ def test_new_project_config_threads_upstream_report_env_to_panes() -> None:
         loaded_config = load_project_config("mefp", output_dir / "mefp.json")
 
     assert raw_config["upstream_report_url"] == "http://127.0.0.1:8770"
-    assert raw_config["upstream_report_token"] == "tenant-report-token"
+    assert raw_config["upstream_report_token_file"] == str(token_file)
+    assert "upstream_report_token" not in raw_config
     assert loaded_config.upstream_report_url == "http://127.0.0.1:8770"
-    assert loaded_config.upstream_report_token == "tenant-report-token"
+    assert loaded_config.upstream_report_token_file == str(token_file)
     for role in loaded_config.roles:
         assert role.env["TICKET_BOARD_URL"].startswith("http://127.0.0.1:")
         assert role.env["TICKET_BOARD_REPORT_URL"] == "http://127.0.0.1:8770"
-        assert role.env["TICKET_BOARD_TENANT_REPORT_TOKEN"] == "tenant-report-token"
+        assert role.env["TICKET_BOARD_TENANT_REPORT_TOKEN_FILE"] == str(token_file)
+        assert "TICKET_BOARD_TENANT_REPORT_TOKEN" not in role.env
         assert role.env["TICKET_BOARD_REPORT_ORIGIN_PROJECT"] == "mefp"
+        command = cli_command_for_role(role, session_dir=loaded_config.session_dir)
+        assert f"TICKET_BOARD_TENANT_REPORT_TOKEN_FILE={token_file}" in command
+        assert not any("tenant-report-token" in part for part in command)
+
+
+def test_project_config_rejects_inline_upstream_report_token() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-reporting-inline.") as tmp:
+        tmp_path = Path(tmp)
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        config_path = tmp_path / "mefp.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "mefp",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "upstream_report_url": "http://127.0.0.1:8770",
+                    "upstream_report_token": "tenant-report-token",
+                    "roles": [{"role": "ops", "slot": 0, "cli": ["codex"], "target": "mefp-ops:0.0"}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        try:
+            load_project_config("mefp", config_path)
+            raise AssertionError("expected inline upstream report token rejection")
+        except SystemExit as exc:
+            message = str(exc)
+
+    assert "upstream_report_token" in message
+    assert "use upstream_report_token_file instead" in message
 
 
 def test_switchyard_new_creates_absent_zeta_owner_with_linger_and_initial_artifact() -> None:

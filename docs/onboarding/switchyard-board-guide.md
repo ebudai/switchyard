@@ -159,11 +159,12 @@ ticket-board-write file-report \
 ```
 
 The target board is `TICKET_BOARD_REPORT_URL`, not the tenant board's
-`TICKET_BOARD_URL`, and the credential is `TICKET_BOARD_TENANT_REPORT_TOKEN`. New
-projects can carry those values in their launcher config as `upstream_report_url` and
-`upstream_report_token`; the pane launcher exports them for every role. If
-`TICKET_BOARD_REPORT_ORIGIN_PROJECT` is set, `--origin-project` is optional and defaults
-to the current tenant slug.
+`TICKET_BOARD_URL`. The credential stays in a 0600 EnvironmentFile-style file, and panes
+carry only its path through `TICKET_BOARD_TENANT_REPORT_TOKEN_FILE`. New projects can
+carry those values in their launcher config as `upstream_report_url` and
+`upstream_report_token_file`; the pane launcher exports them for every role without
+putting the token value on the process command line. If `TICKET_BOARD_REPORT_ORIGIN_PROJECT`
+is set, `--origin-project` is optional and defaults to the current tenant slug.
 
 An upstream report lands in `analysis`, assigned to `unassigned`. Directors identify it
 by the detail metadata: `Origin: <tenant>` and, when supplied,

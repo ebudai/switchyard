@@ -230,7 +230,7 @@ class ProjectConfig:
     board_url: str
     board_socket: str
     upstream_report_url: str
-    upstream_report_token: str
+    upstream_report_token_file: str
     run_as_user: str
     pane_launcher: Path | None
     repository: Path | None
@@ -1298,8 +1298,8 @@ def _role_board_env(config: ProjectConfig, role: RoleConfig, session_role_map: d
     if config.upstream_report_url:
         env["TICKET_BOARD_REPORT_URL"] = config.upstream_report_url
         env["TICKET_BOARD_REPORT_ORIGIN_PROJECT"] = config.project
-    if config.upstream_report_token:
-        env["TICKET_BOARD_TENANT_REPORT_TOKEN"] = config.upstream_report_token
+    if config.upstream_report_token_file:
+        env["TICKET_BOARD_TENANT_REPORT_TOKEN_FILE"] = config.upstream_report_token_file
     return env
 
 
@@ -1335,7 +1335,17 @@ def load_project_config(project: str, config_path: Path | None = None) -> Projec
     board_url = str(config.get("board_url") or _default_board_url(config_project)).strip()
     board_socket = str(config.get("board_socket") or _default_board_socket(config_project)).strip()
     upstream_report_url = str(config.get("upstream_report_url") or config.get("report_board_url") or "").strip()
-    upstream_report_token = str(config.get("upstream_report_token") or config.get("tenant_report_token") or "").strip()
+    inline_report_token_keys = [
+        key for key in ("upstream_report_token", "tenant_report_token") if str(config.get(key) or "").strip()
+    ]
+    if inline_report_token_keys:
+        raise SystemExit(
+            f"{path} stores an upstream report token value in {', '.join(inline_report_token_keys)}; "
+            "use upstream_report_token_file instead"
+        )
+    upstream_report_token_file = str(
+        config.get("upstream_report_token_file") or config.get("tenant_report_token_file") or ""
+    ).strip()
     pane_launcher = None
     pane_launcher_raw = config.get("pane_launcher")
     if pane_launcher_raw is not None:
@@ -1404,7 +1414,7 @@ def load_project_config(project: str, config_path: Path | None = None) -> Projec
         board_url=board_url,
         board_socket=board_socket,
         upstream_report_url=upstream_report_url,
-        upstream_report_token=upstream_report_token,
+        upstream_report_token_file=upstream_report_token_file,
         run_as_user=run_as_user,
         pane_launcher=pane_launcher,
         repository=repository,
@@ -5089,7 +5099,7 @@ def _new_project_launcher_config_payload(
     default_branch: str = "main",
     worktree_policy: str = "shared",
     upstream_report_url: str = "",
-    upstream_report_token: str = "",
+    upstream_report_token_file: str = "",
 ) -> dict[str, Any]:
     layout_name = f"{plan.project}-konsole-layout.json"
     role_defs = _dedupe_role_defs(
@@ -5146,8 +5156,8 @@ def _new_project_launcher_config_payload(
     }
     if upstream_report_url:
         payload["upstream_report_url"] = upstream_report_url
-    if upstream_report_token:
-        payload["upstream_report_token"] = upstream_report_token
+    if upstream_report_token_file:
+        payload["upstream_report_token_file"] = upstream_report_token_file
     return payload
 
 
@@ -5212,7 +5222,7 @@ def write_new_project_launcher_artifacts(
     default_branch: str = "main",
     worktree_policy: str = "shared",
     upstream_report_url: str = "",
-    upstream_report_token: str = "",
+    upstream_report_token_file: str = "",
 ) -> Path:
     role_defs = _dedupe_role_defs(
         role_clis
@@ -5246,7 +5256,7 @@ def write_new_project_launcher_artifacts(
                 default_branch=default_branch,
                 worktree_policy=worktree_policy,
                 upstream_report_url=upstream_report_url,
-                upstream_report_token=upstream_report_token,
+                upstream_report_token_file=upstream_report_token_file,
             ),
             indent=2,
             sort_keys=True,
@@ -5431,7 +5441,7 @@ def new_project_command(
     require_owner_user: bool | None = None,
     enable_owner_linger: bool = True,
     upstream_report_url: str = "",
-    upstream_report_token: str = "",
+    upstream_report_token_file: str = "",
 ) -> int:
     if execute and dry_run:
         raise SystemExit("team-launcher: --execute and --dry-run are mutually exclusive")
@@ -5510,7 +5520,7 @@ def new_project_command(
         default_branch=default_branch,
         worktree_policy=worktree_policy,
         upstream_report_url=upstream_report_url.strip(),
-        upstream_report_token=upstream_report_token.strip(),
+        upstream_report_token_file=upstream_report_token_file.strip(),
     )
     commands_path = artifact_dir / "operator-commands.sh"
     if not execute:
@@ -7794,7 +7804,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--worktree-policy", choices=sorted(WORKTREE_POLICIES), help="shared or isolated role worktrees")
     parser.add_argument("--ticket-prefix", help="ticket id prefix for the new board, e.g. OTTO")
     parser.add_argument("--upstream-report-url", help="board URL where tenant reports should be filed")
-    parser.add_argument("--upstream-report-token", help="report-only token for --upstream-report-url")
+    parser.add_argument("--upstream-report-token-file", help="0600 file containing the report-only token for --upstream-report-url")
     parser.add_argument("--push-policy", help="reviewable push policy label recorded in the design artifact")
     parser.add_argument("--audit-signoff", action=argparse.BooleanOptionalAction, default=None, help="record whether audit signoff is a project gate")
     parser.add_argument("--needs-inspection", action=argparse.BooleanOptionalAction, default=None, help="record whether inspection is a project gate")
@@ -8101,7 +8111,7 @@ def main(argv: list[str] | None = None) -> int:
             execute=args.execute,
             dry_run=args.dry_run,
             upstream_report_url=args.upstream_report_url or "",
-            upstream_report_token=args.upstream_report_token or "",
+            upstream_report_token_file=args.upstream_report_token_file or "",
         )
     if args.command == "provision-runtime" and args.config is None:
         try:

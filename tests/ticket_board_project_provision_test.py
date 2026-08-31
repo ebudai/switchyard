@@ -77,6 +77,7 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "EnvironmentFile=-/home/stellaris-agent/.config/stellaris/ticket-board.env" in combined
     assert "sudo install -d -m 0755 -o 'stellaris-agent' -g 'stellaris-agent' '/home/stellaris-agent/.config'" in combined
     assert "sudo install -d -m 0700 -o 'stellaris-agent' -g 'stellaris-agent' '/home/stellaris-agent/.config/stellaris'" in combined
+    assert "if ! sudo -u 'stellaris-agent' test -s '/home/stellaris-agent/.config/stellaris/ticket-board.env'; then" in combined
     assert "TICKET_BOARD_TENANT_REPORT_TOKEN=%s" in combined
     assert "sudo -u 'stellaris-agent' chmod 0600 '/home/stellaris-agent/.config/stellaris/ticket-board.env'" in combined
     assert "TICKET_BOARD_PANE_STATE_DIR=%t/stellaris-ticket-board/pane-state" in combined

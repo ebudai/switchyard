@@ -59,6 +59,7 @@ DEFAULT_BOARD_SOCKET = (
 )
 DEFAULT_WRITE_TOKEN = _env_first("TICKET_BOARD_WRITE_TOKEN", "PGU_TICKET_BOARD_WRITE_TOKEN")
 DEFAULT_REPORT_TOKEN = _env_first("TICKET_BOARD_TENANT_REPORT_TOKEN", "TICKET_BOARD_REPORT_TOKEN")
+DEFAULT_REPORT_TOKEN_FILE = _env_first("TICKET_BOARD_TENANT_REPORT_TOKEN_FILE", "TICKET_BOARD_REPORT_TOKEN_FILE")
 DEFAULT_REPORT_ORIGIN_PROJECT = _env_first("TICKET_BOARD_REPORT_ORIGIN_PROJECT")
 LEGACY_BOARD_SOCKET = "/tmp/pgu-ticket-board.sock"
 
@@ -116,6 +117,33 @@ def _env_first_from(environ: Mapping[str, str], *names: str) -> str:
         if value:
             return value
     return ""
+
+
+def _unquote_env_file_value(value: str) -> str:
+    stripped = value.strip()
+    if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in {"'", '"'}:
+        return stripped[1:-1]
+    return stripped
+
+
+def _read_report_token_file(path: str) -> str:
+    token_file = Path(path).expanduser()
+    try:
+        lines = token_file.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise TicketBoardWriteError(f"cannot read report token file {token_file}: {exc}") from exc
+    raw_token = ""
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if "=" not in stripped:
+            raw_token = raw_token or stripped
+            continue
+        key, value = stripped.split("=", 1)
+        if key.strip() in {"TICKET_BOARD_TENANT_REPORT_TOKEN", "TICKET_BOARD_REPORT_TOKEN"}:
+            return _unquote_env_file_value(value)
+    return raw_token
 
 
 def default_caller_role(environ: Mapping[str, str] = os.environ) -> str:
@@ -264,6 +292,7 @@ class TicketBoardWriteClient:
     report_token: str = DEFAULT_REPORT_TOKEN
     write_token: str = DEFAULT_WRITE_TOKEN
     report_board_url: str = DEFAULT_REPORT_BOARD_URL
+    report_token_file: str = DEFAULT_REPORT_TOKEN_FILE
 
     @property
     def api_url(self) -> str:
@@ -290,6 +319,7 @@ class TicketBoardWriteClient:
             self.report_token,
             self.write_token,
             self.report_board_url,
+            self.report_token_file,
         )
 
     def _post(self, path: str, payload: dict[str, Any], *, caller_role: str | None = None) -> dict[str, Any]:
@@ -328,6 +358,8 @@ class TicketBoardWriteClient:
 
     def _post_report(self, payload: dict[str, Any], *, report_token: str | None = None) -> dict[str, Any]:
         token = (report_token if report_token is not None else self.report_token).strip()
+        if not token and self.report_token_file.strip():
+            token = _read_report_token_file(self.report_token_file.strip()).strip()
         if not token:
             raise ValueError("report_token must be non-empty")
         _refuse_production_write_under_test(self.report_board_url or self.board_url, None)
@@ -744,6 +776,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Tenant report token for file-report. Default: TICKET_BOARD_TENANT_REPORT_TOKEN or TICKET_BOARD_REPORT_TOKEN.",
     )
     parser.add_argument(
+        "--report-token-file",
+        default=DEFAULT_REPORT_TOKEN_FILE,
+        help=(
+            "EnvironmentFile-style file containing TICKET_BOARD_TENANT_REPORT_TOKEN for file-report. "
+            "Default: TICKET_BOARD_TENANT_REPORT_TOKEN_FILE or TICKET_BOARD_REPORT_TOKEN_FILE."
+        ),
+    )
+    parser.add_argument(
         "--report-board-url",
         default=DEFAULT_REPORT_BOARD_URL,
         help="Target board URL for file-report. Default: TICKET_BOARD_REPORT_URL or PGU_TICKET_BOARD_REPORT_URL; falls back to --board-url.",
@@ -914,6 +954,7 @@ def main(argv: list[str] | None = None) -> int:
             report_token=args.report_token,
             write_token=args.write_token,
             report_board_url=args.report_board_url,
+            report_token_file=args.report_token_file,
         )
         if command == "create_ticket":
             response = client.create_ticket(

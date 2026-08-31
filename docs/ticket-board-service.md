@@ -299,6 +299,13 @@ opening wording so a cleared pane is not told it resumed or compacted. Hermes
 does not honor this `hookSpecificOutput.additionalContext` shape; use its
 `pre_llm_call` flat context path instead.
 
+A fresh `director` `SessionStart` gets a short pointer to the project's
+onboarding packet before any ticket work begins. The hook emits that pointer
+only when it can verify an installed `docs/onboarding/` packet, and it resolves
+the project root from the generated pane environment before falling back to the
+pane cwd. A launcher-provided resume session id suppresses the pointer so normal
+director resumes are not nagged.
+
 Session ids are stored under `$TICKET_BOARD_PANE_SESSION_DIR` (default:
 `~/.local/state/pgu-ticket-board/pane-sessions`) using the same per-pane file
 naming as hook state. This durable directory is the maintained source of truth;

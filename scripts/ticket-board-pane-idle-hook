@@ -46,6 +46,7 @@ SESSION_START_HOOK_SOURCES = {"hermes.on_session_start"}
 SESSION_START_FRESH_SOURCE = "startup"
 ONBOARDING_PACKET_DIR = Path("docs") / "onboarding"
 DIRECTOR_ONBOARDING_GUIDE = ONBOARDING_PACKET_DIR / "switchyard-director-guide.md"
+SWITCHYARD_PROJECT_DIR_NAME = ".switchyard"
 
 
 def _default_board_url(environ: dict[str, str]) -> str:
@@ -467,12 +468,44 @@ def _onboarding_packet_exists(root: Path) -> bool:
     return any(path.is_file() for path in packet_dir.glob("*.md"))
 
 
-def _director_startup_onboarding_context(root: Path) -> str:
+def _candidate_project_roots(environ: dict[str, str], cwd: Path) -> list[Path]:
+    candidates: list[Path] = []
+    for key in ("SWITCHYARD_PROJECT_DIR", "TICKET_BOARD_PROJECT_DIR", "PGU_TICKET_BOARD_PROJECT_DIR"):
+        value = environ.get(key, "").strip()
+        if value:
+            candidates.append(Path(value).expanduser())
+    design_path = environ.get("SWITCHYARD_PROJECT_DESIGN", "").strip()
+    if design_path:
+        candidates.append(Path(design_path).expanduser().parent)
+    director_onboarding = environ.get("SWITCHYARD_DIRECTOR_ONBOARDING", "").strip()
+    if director_onboarding:
+        parent = Path(director_onboarding).expanduser().parent
+        candidates.append(parent.parent if parent.name == SWITCHYARD_PROJECT_DIR_NAME else parent)
+    candidates.append(cwd)
+
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        normalized = str(candidate.resolve(strict=False))
+        if normalized not in seen:
+            seen.add(normalized)
+            deduped.append(candidate)
+    return deduped
+
+
+def _onboarding_project_root(environ: dict[str, str], cwd: Path) -> Path | None:
+    for root in _candidate_project_roots(environ, cwd):
+        if _onboarding_packet_exists(root):
+            return root
+    return None
+
+
+def _director_startup_onboarding_context(root: Path, *, cwd: Path) -> str:
     packet_dir = root / ONBOARDING_PACKET_DIR
     guide = root / DIRECTOR_ONBOARDING_GUIDE
-    packet_display = _display_path(packet_dir, root=root)
+    packet_display = _display_path(packet_dir, root=cwd)
     if guide.is_file():
-        guide_display = _display_path(guide, root=root)
+        guide_display = _display_path(guide, root=cwd)
         return (
             f"Your director session just started fresh. Read the onboarding packet first: {packet_display}. "
             f"Start with {guide_display}."
@@ -495,12 +528,15 @@ def _session_start_additional_context_output(
         role == "director"
         and session_start_source == SESSION_START_FRESH_SOURCE
         and not resume_session_id.strip()
-        and _onboarding_packet_exists(Path.cwd())
     ):
+        cwd = Path.cwd()
+        onboarding_root = _onboarding_project_root(environ, cwd)
+        if onboarding_root is None:
+            return None
         return {
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",
-                "additionalContext": _director_startup_onboarding_context(Path.cwd()),
+                "additionalContext": _director_startup_onboarding_context(onboarding_root, cwd=cwd),
             }
         }
     if session_start_source not in SESSION_START_ACTIVE_WORK_SOURCES:

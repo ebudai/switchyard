@@ -911,6 +911,45 @@ def test_director_fresh_session_start_injects_onboarding_pointer_when_packet_exi
     assert "Director guide" not in context
 
 
+def test_director_onboarding_pointer_resolves_project_env_from_role_worktree_cwd() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        project_dir = Path(tmp) / "project"
+        worktree_dir = Path(tmp) / "project-worktrees" / "director"
+        project_dir.mkdir()
+        worktree_dir.mkdir(parents=True)
+        _write_onboarding_packet(project_dir)
+        proc = subprocess.run(
+            [
+                str(ROOT / "scripts" / HOOK_NAME),
+                "idle",
+                "--target",
+                "otto-director:0.0",
+                "--source",
+                "claude.SessionStart",
+                "--state-dir",
+                str(Path(tmp) / "state"),
+                "--session-dir",
+                str(Path(tmp) / "sessions"),
+                "--record-session",
+            ],
+            input=json.dumps({"source": "startup", "session_id": "fresh-director-session"}),
+            text=True,
+            cwd=worktree_dir,
+            capture_output=True,
+            check=True,
+            env=_hook_env(
+                TICKET_BOARD_PROJECT="otto",
+                SWITCHYARD_PROJECT_DESIGN=str(project_dir / "PROJECT_DESIGN.md"),
+            ),
+        )
+
+    output = json.loads(proc.stdout)
+    context = output["hookSpecificOutput"]["additionalContext"]
+    assert str(project_dir / "docs" / "onboarding") in context
+    assert str(project_dir / "docs" / "onboarding" / "switchyard-director-guide.md") in context
+    assert str(worktree_dir / "docs" / "onboarding") not in context
+
+
 def test_director_onboarding_pointer_skips_resumed_launches() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
         project_dir = Path(tmp) / "project"

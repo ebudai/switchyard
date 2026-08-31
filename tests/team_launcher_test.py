@@ -1265,6 +1265,47 @@ def _run_git(args: list[str], cwd: Path | None = None) -> subprocess.CompletedPr
     return subprocess.run(args, cwd=cwd, check=True, text=True, capture_output=True)
 
 
+def _write_source_onboarding_docs(source_repo: Path, *, initialize_git: bool = False) -> str:
+    docs_dir = source_repo / "docs" / "onboarding"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    for name in team_launcher.SWITCHYARD_ONBOARDING_DOC_NAMES:
+        docs_dir.joinpath(name).write_text(f"# {name}\n\nSource copy for {name}.\n", encoding="utf-8")
+    if not initialize_git:
+        return ""
+    _run_git(["git", "init", "-b", "main"], cwd=source_repo)
+    _run_git(["git", "add", "docs/onboarding"], cwd=source_repo)
+    _run_git(
+        [
+            "git",
+            "-c",
+            "user.name=Switchyard Test",
+            "-c",
+            "user.email=switchyard-test@example.invalid",
+            "commit",
+            "-m",
+            "Add onboarding docs",
+        ],
+        cwd=source_repo,
+    )
+    return _run_git(["git", "rev-parse", "HEAD"], cwd=source_repo).stdout.strip()
+
+
+def _owner_file_install_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+    if args[:1] == ["git"]:
+        run_kwargs = dict(kwargs)
+        run_kwargs.setdefault("text", True)
+        run_kwargs.setdefault("stdout", subprocess.PIPE)
+        run_kwargs.setdefault("stderr", subprocess.PIPE)
+        return subprocess.run(args, **run_kwargs)
+    if args[:1] == ["install"]:
+        for raw_path in args[args.index("-g") + 2 :]:
+            Path(raw_path).mkdir(parents=True, exist_ok=True)
+        return subprocess.CompletedProcess(args, 0)
+    if args[:1] == ["chown"]:
+        return subprocess.CompletedProcess(args, 0)
+    return subprocess.CompletedProcess(args, 0)
+
+
 def test_cleanup_isolated_tmux_sessions_removes_dead_reload_guard_socket() -> None:
     if shutil.which("tmux") is None:
         return
@@ -12330,6 +12371,7 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
         pane_state_dir = tmp_path / "pane-state"
         source_repo = tmp_path / "source-repo"
         source_repo.mkdir()
+        _write_source_onboarding_docs(source_repo)
         project_dir = home_base / "otto-agent" / "Projects" / "porter_system"
         provision_dir = project_dir / ".switchyard" / "provision"
         registry_dir = tmp_path / "registry"
@@ -12378,6 +12420,7 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
         designer_env = next(role["env"] for role in config["roles"] if role["role"] == "designer")
         director_env = next(role["env"] for role in config["roles"] if role["role"] == "director")
         designer_onboarding = (project_dir / ".switchyard" / "DESIGNER_ONBOARDING.md").read_text(encoding="utf-8")
+        project_onboarding_dir = project_dir / "docs" / "onboarding"
         registry_pointer = json.loads((registry_dir / "porter.json").read_text(encoding="utf-8"))
         expected_pane_launcher = "/home/otto-agent/porter-ticketboard-live/current/scripts/team-launcher"
 
@@ -12404,6 +12447,11 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
         assert (provision_dir / "porter.json").is_file()
         assert (provision_dir / "operator-commands.sh").is_file()
         assert "local repository as a bootstrap placeholder" in designer_onboarding
+        for name in team_launcher.SWITCHYARD_ONBOARDING_DOC_NAMES:
+            target_doc = project_onboarding_dir / name
+            assert target_doc.is_file()
+            assert f"source docs/onboarding/{name}" in target_doc.read_text(encoding="utf-8")
+            assert ["chown", "otto-agent:otto-agent", str(target_doc)] in runner.calls
         role_worktree = tmp_path / "porter-ops-worktree"
         _run_git(["git", "worktree", "add", "--detach", str(role_worktree), "HEAD"], cwd=project_dir)
         assert (role_worktree / ".git").is_file()
@@ -12418,12 +12466,76 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
         assert "not a git repository" not in runner.git_output
         assert any(call[:1] in (["env"], ["sh"]) for call in runner.calls)
         output = stdout.getvalue()
+        assert f"switchyard: installed onboarding docs into {project_onboarding_dir}: " in output
         assert "switchyard: full pane window started for porter" in output
         assert output.count("warning: switchyard: session record missing for ") == 6
         assert "warning: switchyard: session record missing for designer (porter-designer:0.0)" in output
         assert "warning: switchyard: session record missing for main (porter-main:0.0)" in output
         assert "Konsole Ctrl+Shift+E" in output
         assert f"switchyard: initialized git repository in {project_dir} on branch main with an initial commit" in output
+
+
+def test_install_switchyard_onboarding_docs_stamps_provenance_and_skips_existing_files() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-onboarding-docs.") as tmp:
+        tmp_path = Path(tmp)
+        source_repo = tmp_path / "source-repo"
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        source_repo.mkdir()
+        source_commit = _write_source_onboarding_docs(source_repo, initialize_git=True)
+        target_dir = project_dir / "docs" / "onboarding"
+        target_dir.mkdir(parents=True)
+        existing_readme = target_dir / "README.md"
+        existing_readme.write_text("# Edited README\n\nKeep me.\n", encoding="utf-8")
+        output: list[str] = []
+
+        team_launcher._install_switchyard_onboarding_docs(
+            source_repo=source_repo,
+            project_dir=project_dir,
+            owner_user=current_user,
+            runner=_owner_file_install_runner,
+            print_func=output.append,
+        )
+
+        listing = subprocess.check_output(["ls", "-l", str(target_dir)], text=True)
+
+        assert existing_readme.read_text(encoding="utf-8") == "# Edited README\n\nKeep me.\n"
+        assert f"switchyard: skipped existing onboarding docs in {target_dir}: README.md" in output
+        for name in team_launcher.SWITCHYARD_ONBOARDING_DOC_NAMES[1:]:
+            text = target_dir.joinpath(name).read_text(encoding="utf-8")
+            assert f"source commit {source_commit}" in text
+            assert f"source docs/onboarding/{name}" in text
+            assert f"Source copy for {name}." in text
+        assert current_user in listing
+
+
+def test_install_switchyard_onboarding_docs_warns_and_continues_when_source_missing() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-onboarding-missing.") as tmp:
+        tmp_path = Path(tmp)
+        missing_source = tmp_path / "missing-source"
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        output: list[str] = []
+
+        team_launcher._install_switchyard_onboarding_docs(
+            source_repo=missing_source,
+            project_dir=project_dir,
+            owner_user=current_user,
+            runner=_owner_file_install_runner,
+            print_func=output.append,
+        )
+
+        target_dir_exists = (project_dir / "docs" / "onboarding").exists()
+
+    assert target_dir_exists is False
+    assert output == [
+        "warning: switchyard: onboarding docs source "
+        f"{missing_source / 'docs' / 'onboarding'} is missing; skipped installing "
+        f"{', '.join(team_launcher.SWITCHYARD_ONBOARDING_DOC_NAMES)} into {project_dir / 'docs' / 'onboarding'}. "
+        "Copy them later from docs/onboarding/ in the Switchyard source checkout."
+    ]
 
 
 def test_new_project_git_init_creates_main_branch_initial_commit_and_worktrees() -> None:

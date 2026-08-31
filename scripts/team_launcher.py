@@ -76,6 +76,12 @@ SWITCHYARD_PROJECT_DIR_NAME = ".switchyard"
 SWITCHYARD_DESIGN_FILE_NAME = "PROJECT_DESIGN.md"
 SWITCHYARD_DESIGN_ONBOARDING_FILE_NAME = "DESIGNER_ONBOARDING.md"
 SWITCHYARD_DIRECTOR_ONBOARDING_FILE_NAME = "DIRECTOR_ONBOARDING.md"
+SWITCHYARD_ONBOARDING_DOC_NAMES = (
+    "README.md",
+    "adversarial-collaborative-methodology.md",
+    "switchyard-board-guide.md",
+    "switchyard-director-guide.md",
+)
 DEFAULT_PANE_BASE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 
@@ -5665,6 +5671,103 @@ def _write_switchyard_onboarding_files(
     )
 
 
+def _switchyard_source_commit(
+    source_repo: Path,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> str:
+    proc = run_owner_correct_git(
+        ["git", "-C", str(source_repo), "rev-parse", "--verify", "HEAD"],
+        runner=runner,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return "unknown"
+    return str(getattr(proc, "stdout", "") or "").strip() or "unknown"
+
+
+def _stamp_onboarding_doc(*, source_name: str, source_commit: str, body: str) -> str:
+    return (
+        f"<!-- Switchyard onboarding snapshot: source commit {source_commit}; "
+        f"source docs/onboarding/{source_name}. -->\n\n"
+        f"{body}"
+    )
+
+
+def _install_switchyard_onboarding_docs(
+    *,
+    source_repo: Path,
+    project_dir: Path,
+    owner_user: str,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    print_func: Callable[[str], None],
+) -> None:
+    source_dir = source_repo / "docs" / "onboarding"
+    target_dir = project_dir / "docs" / "onboarding"
+    if not source_dir.is_dir():
+        print_func(
+            "warning: switchyard: onboarding docs source "
+            f"{source_dir} is missing; skipped installing "
+            f"{', '.join(SWITCHYARD_ONBOARDING_DOC_NAMES)} into {target_dir}. "
+            "Copy them later from docs/onboarding/ in the Switchyard source checkout."
+        )
+        return
+
+    install = runner(
+        [
+            "install",
+            "-d",
+            "-m",
+            "0755",
+            "-o",
+            owner_user,
+            "-g",
+            owner_user,
+            str(target_dir.parent),
+            str(target_dir),
+        ]
+    )
+    if install.returncode != 0:
+        raise SystemExit(f"switchyard: failed to create onboarding docs directory {target_dir} for {owner_user}")
+    if not target_dir.exists():
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+    source_commit = _switchyard_source_commit(source_repo, runner=runner)
+    copied: list[str] = []
+    skipped_existing: list[str] = []
+    skipped_missing: list[str] = []
+    for name in SWITCHYARD_ONBOARDING_DOC_NAMES:
+        source_path = source_dir / name
+        target_path = target_dir / name
+        if target_path.exists():
+            skipped_existing.append(name)
+            continue
+        try:
+            body = source_path.read_text(encoding="utf-8")
+        except OSError:
+            skipped_missing.append(name)
+            continue
+        target_path.write_text(
+            _stamp_onboarding_doc(source_name=name, source_commit=source_commit, body=body),
+            encoding="utf-8",
+        )
+        _chown_project_file(owner_user=owner_user, path=target_path, runner=runner)
+        copied.append(name)
+
+    if copied:
+        print_func(f"switchyard: installed onboarding docs into {target_dir}: {', '.join(copied)}")
+    if skipped_existing:
+        print_func(f"switchyard: skipped existing onboarding docs in {target_dir}: {', '.join(skipped_existing)}")
+    if skipped_missing:
+        print_func(
+            "warning: switchyard: onboarding docs source "
+            f"{source_dir} is incomplete; skipped missing {', '.join(skipped_missing)}. "
+            "Copy them later from docs/onboarding/ in the Switchyard source checkout."
+        )
+
+
 def _write_initial_switchyard_project_artifact(
     *,
     project_name: str,
@@ -7124,6 +7227,13 @@ def switchyard_new_command(
         _chown_switchyard_project_files(owner_user=owner_user, project_dir=project_dir, runner=runner)
         if include_designer and design_document.exists():
             _chown_project_file(owner_user=owner_user, path=design_document, runner=runner)
+        _install_switchyard_onboarding_docs(
+            source_repo=effective_source_repo,
+            project_dir=project_dir,
+            owner_user=owner_user,
+            runner=runner,
+            print_func=print_func,
+        )
         if git_init:
             created_git_repository = _ensure_project_git_repository(
                 owner_user=owner_user,
@@ -7158,6 +7268,13 @@ def switchyard_new_command(
             include_designer=artifact.include_designer,
         )
         _chown_switchyard_project_files(owner_user=owner_user, project_dir=project_dir, runner=runner)
+        _install_switchyard_onboarding_docs(
+            source_repo=effective_source_repo,
+            project_dir=project_dir,
+            owner_user=owner_user,
+            runner=runner,
+            print_func=print_func,
+        )
         if git_init:
             created_git_repository = _ensure_project_git_repository(
                 owner_user=owner_user,

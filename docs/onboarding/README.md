@@ -29,6 +29,10 @@ git repository on the configured branch and creates the initial commit needed fo
 role worktrees. Existing repositories are left untouched. Use `--no-git-init`
 only for a path that already has a repo with `HEAD`.
 
+`switchyard new` also copies this onboarding packet into the new project at
+`docs/onboarding/`, preserving a source-commit header in each copied file.
+Existing files there are left untouched and reported as skipped.
+
 ## Not onboarding, but nearby
 
 - `../ticket-board-service.md` — deploying and operating the board service.

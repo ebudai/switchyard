@@ -417,11 +417,16 @@ After confirmation, `new` creates the selected agent user, creates the derived
 project directory, initializes it as a git repo on the configured worktree branch
 when it is not already one, creates the required initial commit, provisions the
 board, runs first-run auth checks for the selected CLIs, and launches the
-configured panes. Existing git repos are left untouched. Pass `--no-git-init`
-only when the project path already has a usable repo with a `HEAD`; otherwise
-`new` refuses instead of launching a project with broken role worktrees. The default agent user is
-`<slug>-agent`; a typed agent-user value is used verbatim. If that user already
-exists, `new` warns and asks for explicit confirmation, defaulting to No, before
+configured panes. It also copies the source checkout's project-agnostic
+`docs/onboarding/` packet into the new project at `docs/onboarding/`, stamping
+each copied file with the source commit and skipping any existing target files
+without clobbering operator edits. `switchyard upgrade` does not refresh those
+copied docs; update edited project copies deliberately. Existing git repos are
+left untouched. Pass `--no-git-init` only when the project path already has a
+usable repo with a `HEAD`; otherwise `new` refuses instead of launching a
+project with broken role worktrees. The default agent user is `<slug>-agent`; a
+typed agent-user value is used verbatim. If that user already exists, `new`
+warns and asks for explicit confirmation, defaulting to No, before
 reusing that account. Pass `--allow-existing-owner-user` to skip that
 existing-user confirmation and reuse the account without prompting. In
 non-interactive runs, `new` refuses an existing owner user unless that flag is

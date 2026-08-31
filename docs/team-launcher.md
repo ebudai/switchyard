@@ -440,9 +440,11 @@ board, runs first-run auth checks for the selected CLIs, and launches the
 configured panes. It also copies the source checkout's project-agnostic
 `docs/onboarding/` packet into the new project at `docs/onboarding/`, stamping
 each copied file with the source commit and skipping any existing target files
-without clobbering operator edits. `switchyard upgrade` does not refresh those
-copied docs; update edited project copies deliberately. Existing git repos are
-left untouched. Pass `--no-git-init` only when the project path already has a
+without clobbering operator edits. `switchyard upgrade` refreshes only copies
+that still match their stamped source commit, installs missing onboarding files,
+and reports each file as refreshed, installed, or skipped. Files with local
+edits or no provenance header are left untouched. Existing git repos are left
+untouched. Pass `--no-git-init` only when the project path already has a
 usable repo with a `HEAD`; otherwise `new` refuses instead of launching a
 project with broken role worktrees. The default agent user is `<slug>-agent`; a
 typed agent-user value is used verbatim. If that user already exists, `new`

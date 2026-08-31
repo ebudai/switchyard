@@ -13330,6 +13330,93 @@ def test_install_switchyard_onboarding_docs_stamps_provenance_and_skips_existing
         assert current_user in listing
 
 
+def test_switchyard_upgrade_refreshes_only_unedited_onboarding_docs() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-onboarding-upgrade.") as tmp:
+        tmp_path = Path(tmp)
+        source_repo = tmp_path / "source-repo"
+        project_dir = tmp_path / "project"
+        provision_dir = project_dir / ".switchyard" / "provision"
+        source_repo.mkdir()
+        provision_dir.mkdir(parents=True)
+        old_commit = _write_source_onboarding_docs(source_repo, initialize_git=True)
+        target_dir = project_dir / "docs" / "onboarding"
+        output: list[str] = []
+        team_launcher._install_switchyard_onboarding_docs(
+            source_repo=source_repo,
+            project_dir=project_dir,
+            owner_user=current_user,
+            runner=_owner_file_install_runner,
+            print_func=output.append,
+        )
+        docs_dir = source_repo / "docs" / "onboarding"
+        for name in team_launcher.SWITCHYARD_ONBOARDING_DOC_NAMES:
+            docs_dir.joinpath(name).write_text(f"# {name}\n\nCurrent copy for {name}.\n", encoding="utf-8")
+        _run_git(["git", "add", "docs/onboarding"], cwd=source_repo)
+        _run_git(
+            [
+                "git",
+                "-c",
+                "user.name=Switchyard Test",
+                "-c",
+                "user.email=switchyard-test@example.invalid",
+                "commit",
+                "-m",
+                "Refresh onboarding docs",
+            ],
+            cwd=source_repo,
+        )
+        new_commit = _run_git(["git", "rev-parse", "HEAD"], cwd=source_repo).stdout.strip()
+
+        refreshed_name = "README.md"
+        edited_name = "adversarial-collaborative-methodology.md"
+        no_header_name = "switchyard-board-guide.md"
+        missing_name = "switchyard-director-guide.md"
+        edited_path = target_dir / edited_name
+        no_header_path = target_dir / no_header_name
+        missing_path = target_dir / missing_name
+        edited_bytes = edited_path.read_bytes() + b"\nTenant note.\n"
+        no_header_bytes = b"# Tenant-maintained board guide\n\nNo provenance.\n"
+        edited_path.write_bytes(edited_bytes)
+        no_header_path.write_bytes(no_header_bytes)
+        missing_path.unlink()
+        layout_path = provision_dir / "otto-konsole-layout.json"
+        layout_path.write_text(
+            json.dumps(team_launcher._new_project_layout_payload(6), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        config_path = _write_launcher_config(provision_dir)
+        config = load_project_config("otto", config_path)
+
+        output.clear()
+        assert (
+            team_launcher.upgrade_project_command(
+                config,
+                config_path=config_path,
+                source_repo=source_repo,
+                runner=_owner_file_install_runner,
+                print_func=output.append,
+            )
+            == 0
+        )
+
+        refreshed_text = (target_dir / refreshed_name).read_text(encoding="utf-8")
+        missing_text = missing_path.read_text(encoding="utf-8")
+        assert old_commit not in refreshed_text
+        assert f"source commit {new_commit}" in refreshed_text
+        assert f"Current copy for {refreshed_name}." in refreshed_text
+        assert edited_path.read_bytes() == edited_bytes
+        assert no_header_path.read_bytes() == no_header_bytes
+        assert f"source commit {new_commit}" in missing_text
+        assert f"Current copy for {missing_name}." in missing_text
+        assert any(f"onboarding doc {refreshed_name}: refreshed" in line for line in output)
+        assert any(f"onboarding doc {edited_name}: skipped, edited since source commit {old_commit}" in line for line in output)
+        assert any(f"onboarding doc {no_header_name}: skipped, no provenance header" in line for line in output)
+        assert any(f"onboarding doc {missing_name}: installed" in line for line in output)
+        for name in team_launcher.SWITCHYARD_ONBOARDING_DOC_NAMES:
+            assert sum(f"onboarding doc {name}:" in line for line in output) == 1
+
+
 def test_install_switchyard_onboarding_docs_warns_and_continues_when_source_missing() -> None:
     current_user = team_launcher.current_user_name()
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-onboarding-missing.") as tmp:

@@ -5896,6 +5896,138 @@ def _stamp_onboarding_doc(*, source_name: str, source_commit: str, body: str) ->
     )
 
 
+ONBOARDING_SNAPSHOT_RE = re.compile(
+    r"\A<!-- Switchyard onboarding snapshot: source commit (?P<commit>[^;]+); "
+    r"source docs/onboarding/(?P<source>.+?)\. -->\n\n",
+    re.S,
+)
+
+
+def _parse_onboarding_snapshot(text: str) -> tuple[str, str] | None:
+    match = ONBOARDING_SNAPSHOT_RE.match(text)
+    if not match:
+        return None
+    return match.group("commit").strip(), match.group("source").strip()
+
+
+def _read_source_onboarding_doc_at_commit(
+    *,
+    source_repo: Path,
+    source_commit: str,
+    source_name: str,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> str | None:
+    if not source_commit or source_commit == "unknown":
+        return None
+    proc = run_owner_correct_git(
+        ["git", "-C", str(source_repo), "show", f"{source_commit}:docs/onboarding/{source_name}"],
+        runner=runner,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return None
+    return str(getattr(proc, "stdout", "") or "")
+
+
+def _project_dir_from_generated_config_path(config_path: Path) -> Path | None:
+    resolved = config_path.expanduser().resolve(strict=False)
+    if resolved.parent.name != "provision" or resolved.parent.parent.name != SWITCHYARD_PROJECT_DIR_NAME:
+        return None
+    return resolved.parent.parent.parent
+
+
+def upgrade_switchyard_onboarding_docs(
+    *,
+    source_repo: Path,
+    project_dir: Path,
+    owner_user: str,
+    dry_run: bool,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    print_func: Callable[[str], None],
+) -> None:
+    source_dir = source_repo / "docs" / "onboarding"
+    target_dir = project_dir / "docs" / "onboarding"
+    if not source_dir.is_dir():
+        print_func(
+            "warning: switchyard: onboarding docs source "
+            f"{source_dir} is missing; skipped upgrading "
+            f"{', '.join(SWITCHYARD_ONBOARDING_DOC_NAMES)} in {target_dir}."
+        )
+        return
+
+    current_source_commit = _switchyard_source_commit(source_repo, runner=runner)
+    if not dry_run:
+        install = runner(
+            [
+                "install",
+                "-d",
+                "-m",
+                "0755",
+                "-o",
+                owner_user,
+                "-g",
+                owner_user,
+                str(target_dir.parent),
+                str(target_dir),
+            ]
+        )
+        if install.returncode != 0:
+            raise SystemExit(f"switchyard: failed to create onboarding docs directory {target_dir} for {owner_user}")
+        if not target_dir.exists():
+            target_dir.mkdir(parents=True, exist_ok=True)
+
+    for name in SWITCHYARD_ONBOARDING_DOC_NAMES:
+        source_path = source_dir / name
+        target_path = target_dir / name
+        try:
+            current_body = source_path.read_text(encoding="utf-8")
+        except OSError:
+            print_func(f"switchyard: onboarding doc {name}: skipped, source missing")
+            continue
+        current_snapshot = _stamp_onboarding_doc(
+            source_name=name,
+            source_commit=current_source_commit,
+            body=current_body,
+        )
+        if not target_path.exists():
+            if not dry_run:
+                target_path.write_text(current_snapshot, encoding="utf-8")
+                _chown_project_file(owner_user=owner_user, path=target_path, runner=runner)
+            print_func(f"switchyard: onboarding doc {name}: {'would install' if dry_run else 'installed'}")
+            continue
+        try:
+            existing = target_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            print_func(f"switchyard: onboarding doc {name}: skipped, cannot read installed copy: {exc}")
+            continue
+        provenance = _parse_onboarding_snapshot(existing)
+        if provenance is None:
+            print_func(f"switchyard: onboarding doc {name}: skipped, no provenance header")
+            continue
+        source_commit, source_name = provenance
+        if source_name != name:
+            print_func(f"switchyard: onboarding doc {name}: skipped, provenance names {source_name}")
+            continue
+        old_body = _read_source_onboarding_doc_at_commit(
+            source_repo=source_repo,
+            source_commit=source_commit,
+            source_name=source_name,
+            runner=runner,
+        )
+        if old_body is None:
+            print_func(f"switchyard: onboarding doc {name}: skipped, cannot verify source commit {source_commit}")
+            continue
+        if existing != _stamp_onboarding_doc(source_name=name, source_commit=source_commit, body=old_body):
+            print_func(f"switchyard: onboarding doc {name}: skipped, edited since source commit {source_commit}")
+            continue
+        if not dry_run:
+            target_path.write_text(current_snapshot, encoding="utf-8")
+            _chown_project_file(owner_user=owner_user, path=target_path, runner=runner)
+        print_func(f"switchyard: onboarding doc {name}: {'would refresh' if dry_run else 'refreshed'}")
+
+
 def _install_switchyard_onboarding_docs(
     *,
     source_repo: Path,
@@ -7635,9 +7767,20 @@ def upgrade_project_command(
     print_func(result.message)
     if result.changed:
         config = load_project_config(config.project, config_path)
+    effective_source_repo = (source_repo or _repo_root()).expanduser().resolve(strict=False)
+    project_dir = _project_dir_from_generated_config_path(config_path)
+    if project_dir is not None:
+        upgrade_switchyard_onboarding_docs(
+            source_repo=effective_source_repo,
+            project_dir=project_dir,
+            owner_user=config.run_as_user or current_user_name(),
+            dry_run=dry_run,
+            runner=runner,
+            print_func=print_func,
+        )
     report_tenant_release_upgrade(
         config,
-        source_repo=source_repo,
+        source_repo=effective_source_repo,
         deploy_ref=deploy_ref,
         runner=runner,
         print_func=print_func,

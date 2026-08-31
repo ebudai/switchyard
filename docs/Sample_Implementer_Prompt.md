@@ -11,7 +11,7 @@ You are an Implementer in the adversarial-collaborative methodology. Your job is
 
 **6.3.4 — Reconciliation Pane**
 
-Read `docs/current-focus.md` for full specification. Read `docs/adversarial-collaborative-methodology.md` for process rules.
+Read `docs/current-focus.md` for full specification. Read `docs/onboarding/adversarial-collaborative-methodology.md` for process rules.
 
 ## Objective
 

@@ -1,0 +1,31 @@
+# Onboarding
+
+Read these three, in this order. They are project-agnostic — they describe Switchyard, not
+any particular project.
+
+1. **[adversarial-collaborative-methodology.md](adversarial-collaborative-methodology.md)** — *why*.
+   The principles the whole system rests on. Read the principles; its Roles and Phases
+   sections predate the ticket board and are marked superseded.
+
+2. **[switchyard-board-guide.md](switchyard-board-guide.md)** — *mechanics*. Stages,
+   transitions, who may do what, how to read and write the board, `directorctl`, and the
+   behaviours that surprise people. Everyone reads this one.
+
+3. **[switchyard-director-guide.md](switchyard-director-guide.md)** — *judgment*. Writing a
+   ticket, review discipline, merge versus kick back, working with audit, routing and
+   holds, escalation. Directors read this one.
+
+## Start here if you are new
+
+Your board's address is already in your environment — you do not need to look it up:
+
+```bash
+echo "$TICKET_BOARD_URL"
+curl -s "$TICKET_BOARD_URL/api/board"
+```
+
+## Not onboarding, but nearby
+
+- `../ticket-board-service.md` — deploying and operating the board service.
+- `../team-launcher.md` — the launcher, panes, roles and first-run auth.
+- `../switchyard-project-setup-design.md` — how a new project is provisioned.

@@ -31,6 +31,7 @@ from scripts.ticket_board.project_provision import (
     build_plan,
     render_add_role_sql,
     render_board_unit,
+    render_vcs_close_role_sql,
     validate_ticket_prefix,
     write_artifacts,
 )
@@ -126,7 +127,7 @@ DEFAULT_VIEWER_ROWS = 80
 DEFAULT_TMUX_HISTORY_LIMIT = 200_000
 MAX_VISIBLE_PANES_PER_WINDOW = 6
 SWITCHYARD_VERSION = "dev"
-SWITCHYARD_COMMANDS = ("new", "register", "upgrade", "add-role", "stop", "status", "validate-models")
+SWITCHYARD_COMMANDS = ("new", "register", "upgrade", "add-role", "set-vcs-close-role", "stop", "status", "validate-models")
 YOLO_ARGS_BY_CLI = {
     "agy": ["--dangerously-skip-permissions"],
     "claude": ["--dangerously-skip-permissions"],
@@ -7929,6 +7930,48 @@ def _project_plan_for_added_role(
     )
 
 
+def _project_plan_for_vcs_close_role(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    role_name: str,
+) -> ProjectBoardProvision:
+    role = role_name.strip().lower()
+    if not ROLE_RE.fullmatch(role):
+        raise SystemExit("team-launcher: VCS close role must match ^[a-z][a-z0-9_-]{0,63}$")
+    if config.project == "pgu":
+        raise SystemExit("team-launcher: pgu uses the full built-in workflow; set-vcs-close-role is only for provisioned projects")
+    configured_roles = {configured.role for configured in config.roles}
+    if role not in configured_roles:
+        raise SystemExit(f"team-launcher: VCS close role {role!r} does not exist in project {config.project}")
+    plan_data = _plan_data_from_config(config, config_path)
+    audit_roles = _configured_audit_roles(config, plan_data=plan_data)
+    extra_implementer = role if role not in NEW_PROJECT_RESERVED_ROLE_NAMES and role not in audit_roles else None
+    implementer_roles = _configured_implementer_roles(config, plan_data=plan_data, extra_role=extra_implementer)
+    include_designer = any(configured.role == "designer" for configured in config.roles)
+    return build_plan(
+        project=config.project,
+        owner_user=str(_loaded_plan_field(plan_data, "owner_user", config.run_as_user or current_user_name())),
+        port=_loaded_plan_field(plan_data, "port", None),
+        database=_loaded_plan_field(plan_data, "database", None),
+        source_repo=Path(str(_loaded_plan_field(plan_data, "source_repo", _repo_root()))),
+        ticket_prefix=str(_loaded_plan_field(plan_data, "ticket_prefix", config.ticket_prefix)),
+        board_root=(
+            Path(str(plan_data["board_root"]))
+            if plan_data.get("board_root")
+            else _tenant_board_root_from_config(config)
+        ),
+        asset_dir=Path(str(plan_data["asset_dir"])) if plan_data.get("asset_dir") else None,
+        frame_dir=Path(str(plan_data["frame_dir"])) if plan_data.get("frame_dir") else None,
+        implementer_roles=implementer_roles,
+        include_designer=include_designer,
+        include_audit=bool(audit_roles),
+        audit_roles=audit_roles,
+        board_service_traversal=bool(_loaded_plan_field(plan_data, "board_service_traversal", True)),
+        vcs_close_role=role,
+    )
+
+
 def _next_visible_role_slot(config: ProjectConfig) -> int:
     slots = [role.slot for role in config.roles if not role.detached and role.slot is not None]
     return max(slots) + 1 if slots else 0
@@ -8068,6 +8111,25 @@ def _write_updated_project_plan_artifacts(
     return plan_path, board_unit_path, add_role_sql_path
 
 
+def _write_vcs_close_role_artifacts(
+    plan: ProjectBoardProvision,
+    *,
+    role_name: str,
+    provision_dir: Path,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    config: ProjectConfig,
+) -> tuple[Path, Path, Path]:
+    plan_path = provision_dir / "plan.json"
+    board_unit_path = provision_dir / plan.board_unit
+    workflow_sql_path = provision_dir / f"{plan.project}-vcs-close-role.sql"
+    _write_json_atomic(plan_path, {key: value for key, value in plan.__dict__.items()})
+    board_unit_path.write_text(render_board_unit(plan), encoding="utf-8")
+    workflow_sql_path.write_text(render_vcs_close_role_sql(plan), encoding="utf-8")
+    for path in (plan_path, board_unit_path, workflow_sql_path):
+        ensure_owner_file(config, path, runner=runner)
+    return plan_path, board_unit_path, workflow_sql_path
+
+
 def _apply_add_role_board_sql(
     plan: ProjectBoardProvision,
     *,
@@ -8087,6 +8149,27 @@ def _apply_add_role_board_sql(
         raise SystemExit(f"team-launcher: failed to register role {role_name} in board database {plan.database}: {reason}")
 
 
+def _apply_vcs_close_role_board_sql(
+    plan: ProjectBoardProvision,
+    *,
+    role_name: str,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> None:
+    sql = render_vcs_close_role_sql(plan)
+    result = runner(
+        ["sudo", "-u", "postgres", "psql", "-X", "-v", "ON_ERROR_STOP=1", plan.admin_database_url, "-f", "-"],
+        input=sql,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        reason = _proc_failure_reason(result, f"psql failed with exit {result.returncode}")
+        raise SystemExit(
+            f"team-launcher: failed to configure VCS close role {role_name} in board database {plan.database}: {reason}"
+        )
+
+
 def _install_and_restart_board_unit(
     plan: ProjectBoardProvision,
     *,
@@ -8102,6 +8185,33 @@ def _install_and_restart_board_unit(
     restart = runner(["sudo", "systemctl", "restart", plan.board_unit])
     if restart.returncode != 0:
         raise SystemExit(f"team-launcher: failed to restart {plan.board_unit}")
+
+
+def set_project_vcs_close_role_command(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    role_name: str,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    plan = _project_plan_for_vcs_close_role(config, config_path=config_path, role_name=role_name)
+    role = dict(plan.operation_allowed_roles)["mark_done"][0]
+    render_vcs_close_role_sql(plan)
+    plan_path, board_unit_path, workflow_sql_path = _write_vcs_close_role_artifacts(
+        plan,
+        role_name=role,
+        provision_dir=config_path.parent,
+        runner=runner,
+        config=config,
+    )
+    _apply_vcs_close_role_board_sql(plan, role_name=role, runner=runner)
+    _install_and_restart_board_unit(plan, board_unit_path=board_unit_path, runner=runner)
+    print_func(
+        f"team-launcher: set VCS close role for {config.project} to {role}; "
+        f"updated {plan_path}, {board_unit_path}, and {workflow_sql_path}"
+    )
+    return 0
 
 
 def add_project_role_command(
@@ -8403,6 +8513,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "deploy-launcher",
             "upgrade",
             "add-role",
+            "set-vcs-close-role",
             "pane",
         ],
         help="start is idempotent attach-or-start (resumes tracked session ids when relaunching a stopped pane); reload force-restarts running CLIs with tracked resume ids",
@@ -8519,6 +8630,16 @@ def _build_switchyard_add_role_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_switchyard_set_vcs_close_role_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="switchyard set-vcs-close-role",
+        description="Set the role that closes a provisioned project after final sign-off.",
+    )
+    parser.add_argument("project", help="project name or slug")
+    parser.add_argument("role", help="existing project role allowed to mark tickets done")
+    return parser
+
+
 def _build_switchyard_stop_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="switchyard stop", description="Stop a Switchyard project's tmux pane sessions.")
     parser.add_argument("project", nargs="+", help="project name or slug")
@@ -8543,6 +8664,8 @@ Commands:
   register         register an existing project config
   upgrade          update generated project artifacts and report release drift
   add-role         add an implementer role, worktree, pane, and board registration
+  set-vcs-close-role
+                   set which existing project role can mark tickets done
   stop             stop a project's configured tmux pane sessions
   status           list registered projects and pane liveness
   validate-models  check configured role models without starting panes
@@ -8687,6 +8810,15 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             start=not args.no_start,
             script_path=Path(__file__).resolve().with_name(TEAM_LAUNCHER_NAME),
         )
+    if argv[0].casefold() == "set-vcs-close-role":
+        args = _build_switchyard_set_vcs_close_role_parser().parse_args(argv[1:])
+        entry = _resolve_switchyard_project(args.project)
+        config = _load_switchyard_project_config_for_command(entry, argv)
+        return set_project_vcs_close_role_command(
+            config,
+            config_path=entry.config_path,
+            role_name=args.role,
+        )
     if argv[0].casefold() == "stop":
         args = _build_switchyard_stop_parser().parse_args(argv[1:])
         project = " ".join(args.project)
@@ -8813,6 +8945,15 @@ def main(argv: list[str] | None = None) -> int:
             start=not args.no_attach,
             script_path=args.script_path,
             pane_state_dir=args.pane_state_dir,
+        )
+    if args.command == "set-vcs-close-role":
+        if not args.pane_mode or args.role:
+            raise SystemExit("set-vcs-close-role requires exactly one <role> argument")
+        return set_project_vcs_close_role_command(
+            config,
+            config_path=config_path,
+            role_name=args.pane_mode,
+            runner=subprocess.run,
         )
     if args.command == "stop":
         return stop_project(config)

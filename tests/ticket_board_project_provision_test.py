@@ -25,6 +25,7 @@ from scripts.ticket_board.project_provision import (
     render_operator_commands,
     render_polkit_rule,
     render_tmpfiles,
+    render_vcs_close_role_sql,
     render_workflow_sql,
 )
 from standalone_test_runner import run_module_tests
@@ -283,6 +284,47 @@ def test_add_role_sql_expands_existing_project_constraints_and_workflow_roles() 
     assert "('in_progress', 'audit', 'submit_to_audit', ARRAY['app', 'main', 'ops']::text[]" in sql
     assert "ON CONFLICT (name) DO UPDATE SET" in sql
     assert "ON CONFLICT (from_stage, to_stage, action_name) DO UPDATE SET" in sql
+
+
+def test_vcs_close_role_sql_updates_existing_project_close_workflow() -> None:
+    plan = build_plan(
+        project="mefp",
+        owner_user="mefp-agent",
+        port=8878,
+        implementer_roles=("app", "main", "archivist"),
+        vcs_close_role="archivist",
+    )
+    sql = render_vcs_close_role_sql(plan)
+
+    assert "Configure VCS close role archivist for the existing project workflow for mefp" in sql
+    assert "DELETE FROM ticket_board.tickets" not in sql
+    assert "DELETE FROM ticket_board.workflow_stages" not in sql
+    assert "DELETE FROM ticket_board.workflow_transitions\nWHERE action_name = 'mark_done';" in sql
+    assert (
+        "ADD CONSTRAINT workflow_stages_name_check CHECK "
+        "(name IN ('draft', 'analysis', 'in_progress', 'audit', 'dat', 'user_review', 'director_review', 'vcs', 'done', 'cancelled'))"
+    ) in sql
+    assert (
+        "ADD CONSTRAINT tickets_assignee_check CHECK "
+        "(assignee IN ('unassigned', 'designer', 'app', 'main', 'archivist', 'audit', 'director', 'user'))"
+    ) in sql
+    assert "('vcs', 'VCS', 7, ARRAY['archivist']::text[]" in sql
+    assert "('director_review', 'vcs', 'route', ARRAY['director']::text[]" in sql
+    assert "('vcs', 'done', 'mark_done', ARRAY['archivist']::text[]" in sql
+    assert "('director_review', 'done', 'mark_done', ARRAY['director']::text[]" not in sql
+    assert "ON CONFLICT (name) DO UPDATE SET" in sql
+    assert "ON CONFLICT (from_stage, to_stage, action_name) DO UPDATE SET" in sql
+
+
+def test_vcs_close_role_sql_rejects_pgu_plan() -> None:
+    pgu_plan = build_plan(project="pgu", owner_user="agent")
+    try:
+        render_vcs_close_role_sql(pgu_plan)
+        raise AssertionError("expected pgu workflow override rejection")
+    except SystemExit as exc:
+        message = str(exc)
+
+    assert "only for provisioned project workflows" in message
 
 
 def test_operator_commands_use_peer_portable_postgres_admin_invocations() -> None:

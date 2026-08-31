@@ -269,6 +269,9 @@ PY
             add-role)
                 privileged_args="add-role otto ops --cli codex"
                 ;;
+            set-vcs-close-role)
+                privileged_args="set-vcs-close-role otto archivist"
+                ;;
             *)
                 echo "FAIL: install-switchyard test has no privileged sample for switchyard $verb" >&2
                 exit 1

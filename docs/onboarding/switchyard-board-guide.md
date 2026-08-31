@@ -40,6 +40,17 @@ For example, `switchyard add-role mefp ops --cli codex` adds an `ops` implemente
 that can receive implementation tickets and call implementer operations. Existing
 roles are left running.
 
+To move the final close after sign-off to an existing role, use:
+
+```bash
+switchyard set-vcs-close-role <project> <role>
+```
+
+The role must already exist in that project. The command inserts the generated
+`VCS` stage before `Done`, changes `mark_done` to that role, updates the board
+unit's operation-role environment, and restarts the tenant board. It is not
+available for the built-in `pgu` board.
+
 ---
 
 ## The pipeline

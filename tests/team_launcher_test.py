@@ -92,6 +92,7 @@ from scripts.team_launcher import (
     run_role_pane,
     seed_session_dir_from_legacy_sources,
     session_id_for_role,
+    set_project_vcs_close_role_command,
     session_file_name,
     switchyard_main,
     switchyard_menu_command,
@@ -10699,6 +10700,188 @@ def test_add_role_rejects_duplicate_role_before_privileged_mutation() -> None:
     assert not any(call[:1] == ["git"] for call in runner.calls)
 
 
+def test_set_vcs_close_role_updates_generated_artifacts_database_and_unit() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-vcs-close.") as tmp:
+        tmp_path = Path(tmp)
+        provision_dir = tmp_path / "project" / ".switchyard" / "provision"
+        provision_dir.mkdir(parents=True)
+        source_repo = tmp_path / "source-repo"
+        project_repo = tmp_path / "project-repo"
+        source_repo.mkdir()
+        project_repo.mkdir()
+        plan = team_launcher.build_plan(
+            project="mefp",
+            owner_user=current_user,
+            port=18811,
+            source_repo=source_repo,
+            implementer_roles=("app", "main", "archivist"),
+        )
+        (provision_dir / "plan.json").write_text(json.dumps(plan.__dict__, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        (provision_dir / plan.board_unit).write_text(team_launcher.render_board_unit(plan), encoding="utf-8")
+        config_path = provision_dir / "mefp.json"
+        config_path.write_text(
+            json.dumps(
+                team_launcher._new_project_launcher_config_payload(
+                    plan,
+                    repository=project_repo,
+                    implementer_roles=("app", "main", "archivist"),
+                ),
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("mefp", config_path)
+        runner = KeywordRecordingFakeRunner()
+        stdout = StringIO()
+
+        with redirect_stdout(stdout):
+            assert (
+                set_project_vcs_close_role_command(
+                    config,
+                    config_path=config_path,
+                    role_name="archivist",
+                    runner=runner,
+                )
+                == 0
+            )
+
+        updated_plan = json.loads((provision_dir / "plan.json").read_text(encoding="utf-8"))
+        updated_unit = (provision_dir / "mefp-ticket-board.service").read_text(encoding="utf-8")
+        workflow_sql = (provision_dir / "mefp-vcs-close-role.sql").read_text(encoding="utf-8")
+
+    assert updated_plan["operation_allowed_roles"] == [["mark_done", ["archivist"]]]
+    assert "Environment=TICKET_BOARD_OPERATION_ALLOWED_ROLES=mark_done=archivist" in updated_unit
+    assert "('vcs', 'VCS', 7, ARRAY['archivist']::text[]" in workflow_sql
+    assert "('director_review', 'vcs', 'route', ARRAY['director']::text[]" in workflow_sql
+    assert "('vcs', 'done', 'mark_done', ARRAY['archivist']::text[]" in workflow_sql
+    assert "('director_review', 'done', 'mark_done', ARRAY['director']::text[]" not in workflow_sql
+    assert "DELETE FROM ticket_board.workflow_transitions\nWHERE action_name = 'mark_done';" in workflow_sql
+    psql_calls = [
+        (args, kwargs)
+        for args, kwargs in runner.calls_with_kwargs
+        if args[:4] == ["sudo", "-u", "postgres", "psql"]
+    ]
+    assert len(psql_calls) == 1
+    assert "ARRAY['archivist']::text[]" in str(psql_calls[0][1]["input"])
+    assert "DELETE FROM ticket_board.workflow_transitions\nWHERE action_name = 'mark_done';" in str(psql_calls[0][1]["input"])
+    assert any(call == ["sudo", "systemctl", "restart", "mefp-ticket-board.service"] for call in runner.calls)
+    assert "team-launcher: set VCS close role for mefp to archivist" in stdout.getvalue()
+
+
+def test_set_vcs_close_role_refuses_unknown_role_before_mutating() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-vcs-close-unknown.") as tmp:
+        tmp_path = Path(tmp)
+        provision_dir = tmp_path / "project" / ".switchyard" / "provision"
+        provision_dir.mkdir(parents=True)
+        source_repo = tmp_path / "source-repo"
+        project_repo = tmp_path / "project-repo"
+        source_repo.mkdir()
+        project_repo.mkdir()
+        plan = team_launcher.build_plan(
+            project="mefp",
+            owner_user=current_user,
+            port=18811,
+            source_repo=source_repo,
+            implementer_roles=("app", "main"),
+        )
+        (provision_dir / "plan.json").write_text(json.dumps(plan.__dict__, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        config_path = provision_dir / "mefp.json"
+        config_path.write_text(
+            json.dumps(
+                team_launcher._new_project_launcher_config_payload(
+                    plan,
+                    repository=project_repo,
+                    implementer_roles=("app", "main"),
+                ),
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config_before = config_path.read_text(encoding="utf-8")
+        plan_before = (provision_dir / "plan.json").read_text(encoding="utf-8")
+        config = load_project_config("mefp", config_path)
+        runner = KeywordRecordingFakeRunner()
+
+        try:
+            set_project_vcs_close_role_command(
+                config,
+                config_path=config_path,
+                role_name="archivist",
+                runner=runner,
+            )
+            raise AssertionError("expected unknown VCS close role to be rejected")
+        except SystemExit as exc:
+            message = str(exc)
+        config_after = config_path.read_text(encoding="utf-8")
+        plan_after = (provision_dir / "plan.json").read_text(encoding="utf-8")
+        workflow_sql_exists = (provision_dir / "mefp-vcs-close-role.sql").exists()
+
+    assert "VCS close role 'archivist' does not exist in project mefp" in message
+    assert config_after == config_before
+    assert plan_after == plan_before
+    assert not workflow_sql_exists
+    assert not any(call[:4] == ["sudo", "-u", "postgres", "psql"] for call in runner.calls)
+
+
+def test_set_vcs_close_role_refuses_pgu_before_mutating() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-vcs-close-pgu.") as tmp:
+        tmp_path = Path(tmp)
+        provision_dir = tmp_path / "project" / ".switchyard" / "provision"
+        provision_dir.mkdir(parents=True)
+        source_repo = tmp_path / "source-repo"
+        project_repo = tmp_path / "project-repo"
+        source_repo.mkdir()
+        project_repo.mkdir()
+        plan = team_launcher.build_plan(
+            project="pgu",
+            owner_user="agent",
+            port=8770,
+            source_repo=source_repo,
+        )
+        (provision_dir / "plan.json").write_text(json.dumps(plan.__dict__, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        config_path = provision_dir / "pgu.json"
+        config_path.write_text(
+            json.dumps(
+                team_launcher._new_project_launcher_config_payload(
+                    plan,
+                    repository=project_repo,
+                    implementer_roles=("main", "app", "ops", "perf", "research"),
+                    include_designer=False,
+                    include_audit=True,
+                ),
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config_before = config_path.read_text(encoding="utf-8")
+        config = load_project_config("pgu", config_path)
+        runner = KeywordRecordingFakeRunner()
+
+        try:
+            set_project_vcs_close_role_command(
+                config,
+                config_path=config_path,
+                role_name="ops",
+                runner=runner,
+            )
+            raise AssertionError("expected pgu VCS close-role rejection")
+        except SystemExit as exc:
+            message = str(exc)
+        config_after = config_path.read_text(encoding="utf-8")
+
+    assert "pgu uses the full built-in workflow" in message
+    assert config_after == config_before
+    assert not any(call[:4] == ["sudo", "-u", "postgres", "psql"] for call in runner.calls)
+
+
 def test_design_writes_artifact_that_new_from_consumes_for_missing_owner_user() -> None:
     missing_owner = "pgu647-missing-agent"
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-design.") as tmp:
@@ -10904,7 +11087,7 @@ def test_switchyard_help_lists_verbs_and_bare_project_start() -> None:
         assert switchyard_main(["--help"]) == 0
 
     output = stdout.getvalue()
-    for verb in ("new", "register", "upgrade", "stop", "status", "validate-models"):
+    for verb in ("new", "register", "upgrade", "add-role", "set-vcs-close-role", "stop", "status", "validate-models"):
         assert verb in output
     assert "switchyard <project name or slug>" in output
     assert "Bare project names start or attach the project" in output

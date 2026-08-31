@@ -1099,6 +1099,109 @@ COMMIT;
 """
 
 
+def render_vcs_close_role_sql(plan: ProjectBoardProvision, *, schema_sql: str | None = None) -> str:
+    if plan.workflow_seed == "pgu-full":
+        raise SystemExit("incremental VCS close-role SQL is only for provisioned project workflows")
+    mark_done_roles = dict(plan.operation_allowed_roles).get("mark_done", ())
+    if len(mark_done_roles) != 1:
+        raise SystemExit("incremental VCS close-role SQL requires exactly one configured mark_done role")
+    role = mark_done_roles[0]
+    if role not in plan.assignee_roles or role not in plan.caller_roles:
+        raise SystemExit("--vcs-close-role must be one of the configured project roles")
+    stages = project_workflow_stages(plan, schema_sql=schema_sql)
+    transitions = project_workflow_transitions(plan, schema_sql=schema_sql)
+    stage_rows = _workflow_stage_rows_sql(stages)
+    transition_rows = _workflow_transition_rows_sql(transitions)
+    return f"""-- Configure VCS close role {role} for the existing project workflow for {plan.project}.
+-- Run after the launcher plan has been updated with operation_allowed_roles mark_done={role}.
+BEGIN;
+
+{render_project_role_constraint_sql(plan)}
+
+UPDATE ticket_board.workflow_stages
+SET rank = rank + 1000;
+
+WITH desired(
+    name,
+    display_label,
+    rank,
+    owner_roles,
+    entry_gate_field,
+    gate_skip_to,
+    exit_signoff_field,
+    is_terminal
+) AS (
+    VALUES
+{stage_rows}
+)
+INSERT INTO ticket_board.workflow_stages (
+    name,
+    display_label,
+    rank,
+    owner_roles,
+    entry_gate_field,
+    gate_skip_to,
+    exit_signoff_field,
+    is_terminal
+)
+SELECT
+    name,
+    display_label,
+    rank,
+    owner_roles,
+    entry_gate_field,
+    gate_skip_to,
+    exit_signoff_field,
+    is_terminal
+FROM desired
+ON CONFLICT (name) DO UPDATE SET
+    display_label = EXCLUDED.display_label,
+    rank = EXCLUDED.rank,
+    owner_roles = EXCLUDED.owner_roles,
+    entry_gate_field = EXCLUDED.entry_gate_field,
+    gate_skip_to = EXCLUDED.gate_skip_to,
+    exit_signoff_field = EXCLUDED.exit_signoff_field,
+    is_terminal = EXCLUDED.is_terminal;
+
+DELETE FROM ticket_board.workflow_transitions
+WHERE action_name = 'mark_done';
+
+WITH desired(
+    from_stage,
+    to_stage,
+    action_name,
+    allowed_roles,
+    owner_scoped,
+    director_override
+) AS (
+    VALUES
+{transition_rows}
+)
+INSERT INTO ticket_board.workflow_transitions (
+    from_stage,
+    to_stage,
+    action_name,
+    allowed_roles,
+    owner_scoped,
+    director_override
+)
+SELECT
+    from_stage,
+    to_stage,
+    action_name,
+    allowed_roles,
+    owner_scoped,
+    director_override
+FROM desired
+ON CONFLICT (from_stage, to_stage, action_name) DO UPDATE SET
+    allowed_roles = EXCLUDED.allowed_roles,
+    owner_scoped = EXCLUDED.owner_scoped,
+    director_override = EXCLUDED.director_override;
+
+COMMIT;
+"""
+
+
 def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger: bool = True) -> str:
     q_asset = shell_quote(plan.asset_dir)
     q_frame = shell_quote(plan.frame_dir)

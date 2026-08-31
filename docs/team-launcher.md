@@ -475,6 +475,13 @@ that would become the seventh visible role in the automatic window. Use
 `--detached` for the added role, or detach another visible role first, when the
 project already has six visible panes.
 
+`switchyard set-vcs-close-role <project> <role>` changes an existing
+provisioned project's terminal close role without re-provisioning. The role must
+already exist, so add it first with `add-role` when needed. The command updates
+the generated plan, board unit, and workflow SQL, applies the workflow change to
+Postgres, and restarts the tenant board so both the HTTP gate and SQL transition
+table agree. The built-in `pgu` project rejects this command by design.
+
 Generated Konsole layouts use a single horizontal row for up to four visible
 roles, so small teams get tall side-by-side panes. Five or more visible roles
 fall back to a balanced row-major grid that spreads panes across rows with a

@@ -25,6 +25,7 @@ from scripts.ticket_board.project_provision import (
     project_workflow_stages,
     project_workflow_transitions,
     render_database_sql,
+    render_vcs_close_role_sql,
     render_workflow_sql,
     schema_workflow_stages,
     schema_workflow_transitions,
@@ -950,6 +951,80 @@ SELECT ticket_board.create_ticket('Second partitioned audit workflow ticket', 'B
                     f"SELECT state || ':' || assignee || ':' || audit_signoff::text FROM ticket_board.tickets WHERE id = '{second_multi_audit_ticket_id}';",
                 )
                 == "director_review:director:true"
+            )
+
+            post_vcs_dbname = "project_workflow_post_vcs"
+            run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", post_vcs_dbname])
+            post_vcs_admin_conn = conninfo(socket_dir, port, post_vcs_dbname)
+            post_vcs_service_conn = conninfo(socket_dir, port, post_vcs_dbname, "ticket_board_service")
+            psql(post_vcs_admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
+            run_migrations(post_vcs_admin_conn)
+            post_vcs_plan = build_plan(
+                project="ship",
+                owner_user="ship-agent",
+                database=post_vcs_dbname,
+                include_designer=False,
+                include_audit=False,
+                implementer_roles=("ops", "archivist"),
+            )
+            psql(post_vcs_admin_conn, render_workflow_sql(post_vcs_plan))
+            psql(post_vcs_admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
+            post_vcs_ticket_id = service_call(
+                post_vcs_service_conn,
+                "director",
+                """
+SELECT set_config('ticket_board.ticket_prefix', 'SHIP', false);
+SELECT ticket_board.create_ticket('Post-provision VCS close ticket', 'Body', 'analysis');
+""",
+            )
+            service_call(post_vcs_service_conn, "director", f"SELECT ticket_board.route('{post_vcs_ticket_id}', 'in_progress', 'ops');")
+            service_call(post_vcs_service_conn, "ops", f"SELECT ticket_board.submit_to_audit('{post_vcs_ticket_id}', 'abc8210');")
+            assert (
+                psql(post_vcs_admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{post_vcs_ticket_id}';")
+                == "director_review:director"
+            )
+            post_vcs_plan = build_plan(
+                project="ship",
+                owner_user="ship-agent",
+                database=post_vcs_dbname,
+                include_designer=False,
+                include_audit=False,
+                implementer_roles=("ops", "archivist"),
+                vcs_close_role="archivist",
+            )
+            psql(post_vcs_admin_conn, render_vcs_close_role_sql(post_vcs_plan))
+            assert (
+                psql(
+                    post_vcs_admin_conn,
+                    """
+SELECT allowed_roles::text
+FROM ticket_board.workflow_transitions
+WHERE from_stage = 'vcs' AND to_stage = 'done' AND action_name = 'mark_done';
+""",
+                )
+                == "{archivist}"
+            )
+            assert (
+                psql(
+                    post_vcs_admin_conn,
+                    """
+SELECT count(*)
+FROM ticket_board.workflow_transitions
+WHERE from_stage = 'director_review' AND to_stage = 'done' AND action_name = 'mark_done';
+""",
+                )
+                == "0"
+            )
+            assert "role director cannot call mark_done" in service_call_fails(
+                post_vcs_service_conn,
+                "director",
+                f"SELECT ticket_board.mark_done('{post_vcs_ticket_id}', 'abc8210');",
+            )
+            service_call(post_vcs_service_conn, "director", f"SELECT ticket_board.route('{post_vcs_ticket_id}', 'vcs', 'archivist');")
+            service_call(post_vcs_service_conn, "archivist", f"SELECT ticket_board.mark_done('{post_vcs_ticket_id}', 'abc8210');")
+            assert (
+                psql(post_vcs_admin_conn, f"SELECT state || ':' || assignee || ':' || commit_hash FROM ticket_board.tickets WHERE id = '{post_vcs_ticket_id}';")
+                == "done:archivist:abc8210"
             )
 
             vcs_dbname = "project_workflow_vcs"

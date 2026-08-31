@@ -33,8 +33,8 @@ only for a path that already has a repo with `HEAD`.
 `docs/onboarding/`, preserving a source-commit header in each copied file.
 Existing files there are left untouched and reported as skipped.
 
-## Not onboarding, but nearby
+## Not onboarding, but nearby in the Switchyard source checkout
 
-- `../ticket-board-service.md` — deploying and operating the board service.
-- `../team-launcher.md` — the launcher, panes, roles and first-run auth.
-- `../switchyard-project-setup-design.md` — how a new project is provisioned.
+- Switchyard source checkout `docs/ticket-board-service.md` — deploying and operating the board service.
+- Switchyard source checkout `docs/team-launcher.md` — the launcher, panes, roles and first-run auth.
+- Switchyard source checkout `docs/switchyard-project-setup-design.md` — how a new project is provisioned.

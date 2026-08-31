@@ -12538,6 +12538,21 @@ def test_install_switchyard_onboarding_docs_warns_and_continues_when_source_miss
     ]
 
 
+def test_onboarding_packet_service_doc_references_are_source_checkout_scoped() -> None:
+    packet_dir = ROOT / "docs" / "onboarding"
+    references: list[tuple[str, str]] = []
+    for name in team_launcher.SWITCHYARD_ONBOARDING_DOC_NAMES:
+        for line in packet_dir.joinpath(name).read_text(encoding="utf-8").splitlines():
+            if "ticket-board-service.md" in line:
+                references.append((name, line.strip()))
+
+    assert references
+    for name, line in references:
+        assert "Switchyard source checkout" in line, (name, line)
+        assert "`ticket-board-service.md`" not in line, (name, line)
+        assert "../ticket-board-service.md" not in line, (name, line)
+
+
 def test_new_project_git_init_creates_main_branch_initial_commit_and_worktrees() -> None:
     current_user = team_launcher.current_user_name()
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-git-init.") as tmp:

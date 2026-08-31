@@ -6,7 +6,7 @@ stages are, who may move a ticket where, and how to read and write from a pane.
 For *why* the system is shaped this way, see
 `adversarial-collaborative-methodology.md`. For how to run the pipeline as director,
 see `switchyard-director-guide.md`. For deploying and operating the board service itself,
-see `ticket-board-service.md`.
+see the Switchyard source checkout's `docs/ticket-board-service.md`.
 
 This guide is project-agnostic. Examples use `PGU-123`; your project has its own prefix.
 

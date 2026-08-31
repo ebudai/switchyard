@@ -10395,6 +10395,26 @@ def test_switchyard_menu_lists_new_first_then_projects() -> None:
     assert lines == ["new...", "Porter System (porter)"]
 
 
+def test_switchyard_help_lists_verbs_and_bare_project_start() -> None:
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        assert switchyard_main(["--help"]) == 0
+
+    output = stdout.getvalue()
+    for verb in ("new", "register", "upgrade", "stop", "status", "validate-models"):
+        assert verb in output
+    assert "switchyard <project name or slug>" in output
+    assert "Bare project names start or attach the project" in output
+
+
+def test_switchyard_version_prints_without_project_resolution() -> None:
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        assert switchyard_main(["--version"]) == 0
+
+    assert stdout.getvalue().strip() == f"switchyard {team_launcher.SWITCHYARD_VERSION}"
+
+
 def test_switchyard_status_lists_registered_projects_from_process_snapshot() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-status.") as tmp:
         tmp_path = Path(tmp)
@@ -10706,6 +10726,44 @@ def test_switchyard_status_default_probe_uses_ps_without_root_or_tmux() -> None:
 
     assert calls == [["ps", "-eo", "args=", "--no-headers"]]
     assert lines[-1].strip().endswith("running  1/1")
+
+
+def test_switchyard_known_project_plus_unknown_word_suggests_bare_project() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-project-command-hint.") as tmp:
+        tmp_path = Path(tmp)
+        registry_dir = tmp_path / "registry"
+        config_dir = tmp_path / "configs"
+        config_dir.mkdir()
+        registry_dir.mkdir()
+        config_path = tmp_path / "mefp.json"
+        config_path.write_text("{}\n", encoding="utf-8")
+        (registry_dir / "mefp.json").write_text(
+            json.dumps(
+                {
+                    "schema": team_launcher.SWITCHYARD_REGISTRY_SCHEMA,
+                    "slug": "mefp",
+                    "name": "MEFP",
+                    "config_path": str(config_path),
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        try:
+            team_launcher._resolve_switchyard_project(
+                "mefp attach",
+                config_dir=config_dir,
+                registry_dir=registry_dir,
+            )
+            raise AssertionError("expected helpful unknown command failure")
+        except SystemExit as exc:
+            message = str(exc)
+
+    assert message == (
+        "switchyard: 'mefp' is a project; did you mean `switchyard mefp`? "
+        "A bare project name starts or attaches it."
+    )
 
 
 def test_switchyard_resolves_legacy_dashed_name_selector_without_allowing_dashed_slug() -> None:

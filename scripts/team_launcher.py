@@ -122,6 +122,8 @@ DEFAULT_VIEWER_SESSION = "viewer"
 DEFAULT_VIEWER_COLUMNS = 240
 DEFAULT_VIEWER_ROWS = 80
 DEFAULT_TMUX_HISTORY_LIMIT = 200_000
+SWITCHYARD_VERSION = "dev"
+SWITCHYARD_COMMANDS = ("new", "register", "upgrade", "stop", "status", "validate-models")
 YOLO_ARGS_BY_CLI = {
     "agy": ["--dangerously-skip-permissions"],
     "claude": ["--dangerously-skip-permissions"],
@@ -7121,6 +7123,19 @@ def _resolve_switchyard_project(
     fallback = [entry for entry in entries if wanted in _project_name_selector_slugs(entry.name)]
     if len(fallback) == 1:
         return fallback[0]
+    words = selection.split()
+    if len(words) > 1:
+        first = words[0].casefold()
+        first_matches = [
+            entry
+            for entry in entries
+            if entry.slug.casefold() == first or entry.name.casefold() == first
+        ]
+        if len(first_matches) == 1:
+            raise SystemExit(
+                f"switchyard: {words[0]!r} is a project; did you mean `switchyard {first_matches[0].slug}`? "
+                "A bare project name starts or attaches it."
+            )
     raise SystemExit(f"switchyard: unknown project {selection!r}")
 
 
@@ -7829,10 +7844,35 @@ def _build_switchyard_status_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def switchyard_help_text() -> str:
+    commands = ", ".join(SWITCHYARD_COMMANDS)
+    return f"""Usage:
+  switchyard
+  switchyard <project name or slug>
+  switchyard <command> [options]
+
+Commands:
+  new              create and provision a new project
+  register         register an existing project config
+  upgrade          update generated project artifacts and report release drift
+  stop             stop a project's configured tmux pane sessions
+  status           list registered projects and pane liveness
+  validate-models  check configured role models without starting panes
+
+Bare project names start or attach the project. Recognized commands: {commands}.
+"""
+
+
 def switchyard_main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
         return switchyard_menu_command()
+    if argv[0] in {"-h", "--help", "help"}:
+        print(switchyard_help_text(), end="")
+        return 0
+    if argv[0] in {"--version", "version"}:
+        print(f"switchyard {SWITCHYARD_VERSION}")
+        return 0
     if argv[0].casefold() == "new":
         args = _build_switchyard_new_parser().parse_args(argv[1:])
         return switchyard_new_command(

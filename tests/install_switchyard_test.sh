@@ -38,6 +38,12 @@ fake_privilege_log="$TMPDIR_T/fake-privilege.log"
 mkdir -p "$fake_privilege_bin"
 cat >"$fake_privilege" <<'EOF'
 #!/usr/bin/env bash
+if [[ "${1:-}" == "-n" && "${2:-}" == "-v" ]]; then
+    exit 0
+fi
+if [[ "${1:-}" == "-n" ]]; then
+    shift
+fi
 printf '%s\n' "$*" >>"${FAKE_PRIVILEGE_LOG:?}"
 exec "$@"
 EOF
@@ -53,11 +59,27 @@ first_output="$(
     exit 1
 }
 if [[ "$(id -u)" != "0" ]]; then
-    grep -q "^$source_path otto$" "$fake_privilege_log" || {
-        echo "FAIL: trampoline did not acquire privilege before traversing to source" >&2
+    if [ -s "$fake_privilege_log" ]; then
+        echo "FAIL: trampoline elevated a bare project launch" >&2
         cat "$fake_privilege_log" >&2
         exit 1
-    }
+    fi
+fi
+
+help_output="$(
+    FAKE_PRIVILEGE_LOG="$fake_privilege_log" \
+    PATH="$fake_privilege_bin:$PATH" \
+        "$install_path" --help
+)"
+[[ "$help_output" == "version-one:--help" ]] || {
+    echo "FAIL: installed switchyard did not execute --help directly" >&2
+    echo "$help_output" >&2
+    exit 1
+}
+if [[ "$(id -u)" != "0" && -s "$fake_privilege_log" ]]; then
+    echo "FAIL: trampoline elevated --help" >&2
+    cat "$fake_privilege_log" >&2
+    exit 1
 fi
 
 cat >"$source_path" <<'EOF'
@@ -74,6 +96,13 @@ second_output="$(
     echo "FAIL: switchyard install went stale instead of following the live source" >&2
     exit 1
 }
+if [[ "$(id -u)" != "0" ]]; then
+    grep -q "^$source_path new$" "$fake_privilege_log" || {
+        echo "FAIL: trampoline did not acquire privilege for switchyard new" >&2
+        cat "$fake_privilege_log" >&2
+        exit 1
+    }
+fi
 
 fake_privilege_noexec_bin="$TMPDIR_T/fake-privilege-noexec-bin"
 fake_privilege_noexec="$fake_privilege_noexec_bin/sudo"
@@ -81,6 +110,12 @@ fake_privilege_noexec_log="$TMPDIR_T/fake-privilege-noexec.log"
 mkdir -p "$fake_privilege_noexec_bin"
 cat >"$fake_privilege_noexec" <<'EOF'
 #!/usr/bin/env bash
+if [[ "${1:-}" == "-n" && "${2:-}" == "-v" ]]; then
+    exit 0
+fi
+if [[ "${1:-}" == "-n" ]]; then
+    shift
+fi
 printf '%s\n' "$*" >>"${FAKE_PRIVILEGE_LOG:?}"
 printf 'privileged:%s\n' "$*"
 EOF
@@ -89,7 +124,7 @@ chmod 000 "$(dirname "$source_path")"
 if ! inaccessible_output="$(
     FAKE_PRIVILEGE_LOG="$fake_privilege_noexec_log" \
     PATH="$fake_privilege_noexec_bin:$PATH" \
-        "$install_path" menu 2>&1
+        "$install_path" new 2>&1
 )"; then
     chmod 755 "$(dirname "$source_path")"
     echo "FAIL: trampoline touched the target before acquiring privilege" >&2
@@ -97,16 +132,52 @@ if ! inaccessible_output="$(
     exit 1
 fi
 chmod 755 "$(dirname "$source_path")"
-[[ "$inaccessible_output" == "privileged:$source_path menu" ]] || {
+[[ "$inaccessible_output" == "privileged:$source_path new" ]] || {
     echo "FAIL: trampoline did not pass the target through the privilege command" >&2
     echo "$inaccessible_output" >&2
     exit 1
 }
-grep -q "^$source_path menu$" "$fake_privilege_noexec_log" || {
+grep -q "^$source_path new$" "$fake_privilege_noexec_log" || {
     echo "FAIL: inaccessible source was not delegated to the privilege command" >&2
     cat "$fake_privilege_noexec_log" >&2
     exit 1
 }
+
+fake_privilege_denied="$TMPDIR_T/sudo-denied"
+cat >"$fake_privilege_denied" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-n" && "${2:-}" == "-v" ]]; then
+    printf 'sudo: a password is required\n' >&2
+    exit 1
+fi
+printf 'FAIL: sudo would have prompted or blocked: %s\n' "$*" >&2
+sleep 10
+EOF
+chmod +x "$fake_privilege_denied"
+if [[ "$(id -u)" != "0" ]]; then
+    denied_stdout="$TMPDIR_T/denied.stdout"
+    denied_stderr="$TMPDIR_T/denied.stderr"
+    if timeout 2 env SWITCHYARD_SUDO_BIN="$fake_privilege_denied" "$install_path" new >"$denied_stdout" 2>"$denied_stderr"; then
+        echo "FAIL: privileged switchyard new unexpectedly succeeded without sudo" >&2
+        exit 1
+    fi
+    denied_status=$?
+    if [[ "$denied_status" == "124" ]]; then
+        echo "FAIL: privileged switchyard new blocked instead of failing fast" >&2
+        cat "$denied_stderr" >&2
+        exit 1
+    fi
+    grep -q "switchyard: command requires root: switchyard new" "$denied_stderr" || {
+        echo "FAIL: no-sudo failure did not name the privileged command" >&2
+        cat "$denied_stderr" >&2
+        exit 1
+    }
+    if grep -q "FAIL: sudo would have prompted" "$denied_stderr"; then
+        echo "FAIL: wrapper attempted an interactive sudo after non-interactive preflight failed" >&2
+        cat "$denied_stderr" >&2
+        exit 1
+    fi
+fi
 
 printout="$(
     SWITCHYARD_SOURCE_PATH=/home/agent/Projects/pgu/switchyard \

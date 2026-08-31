@@ -1,14 +1,22 @@
 # Switchyard Launcher
 
 `switchyard` is the public project entrypoint. With no arguments it prints
-`new...` followed by configured projects. `switchyard new` starts new-project
-setup, `switchyard stop <project>` stops only that project's configured tmux
-pane sessions, `switchyard validate-models <project>` checks configured role
-models without starting panes, and `switchyard My Project Name` joins all
-arguments, matches an existing project case-insensitively by display name or
-slug, and runs today's idempotent start/resume behavior. Leading verbs are
-reserved, so a project literally named `new`, `upgrade`, `stop`, or
-`validate-models` collides with the command namespace.
+`new...` followed by configured projects. `switchyard --help` lists the public
+verbs: `new`, `register`, `upgrade`, `stop`, `status`, and
+`validate-models`. `switchyard My Project Name` joins all arguments, matches an
+existing project case-insensitively by display name or slug, and runs today's
+idempotent start/resume behavior. A bare project name is the start/attach form;
+there is no separate `switchyard <project> attach` verb. Leading verbs are
+reserved, so a project literally named `new`, `register`, `upgrade`, `stop`,
+`status`, or `validate-models` collides with the command namespace.
+
+The installed `/usr/local/bin/switchyard` trampoline does not elevate
+discoverability and read/probe commands: no arguments, `--help`, `--version`,
+`status`, `validate-models`, `stop`, and bare project names run directly.
+Privileged public mutations are `new`, `register`, and `upgrade`; the wrapper
+preflights sudo non-interactively first, so a non-sudo agent gets a clear
+failure instead of an unanswerable password prompt. A sudo-capable human at a
+TTY still gets the normal sudo prompt for those privileged commands.
 
 `scripts/team-launcher` remains the compatibility wrapper used by existing PGU
 pane commands. It starts, attaches, or reloads a project team from a JSON config.

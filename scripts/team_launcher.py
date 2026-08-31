@@ -3982,6 +3982,36 @@ def pane_command(
     return _quote_command(args)
 
 
+def _running_project_role_sessions(
+    config: ProjectConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> list[str]:
+    running_sessions: list[str] = []
+    for role in config.roles:
+        result = runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if result.returncode == 0:
+            running_sessions.append(role.tmux_session)
+    return running_sessions
+
+
+def _refuse_running_project_window(
+    config: ProjectConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> None:
+    running_sessions = _running_project_role_sessions(config, runner=runner)
+    if not running_sessions:
+        return
+    sessions = ", ".join(running_sessions)
+    raise SystemExit(
+        f"team-launcher: project {config.project} already has running tmux session(s): {sessions}; "
+        "refusing to launch another project window. "
+        f"To recover a missing role pane, run `switchyard {config.project} pane attach-or-start <role> --no-attach`; "
+        f"to replace the running project, run `switchyard {config.project} reload`."
+    )
+
+
 def failed_role_command(role: RoleConfig, reason: str) -> str:
     message = f"PGU launcher did not start {role.role}: checkout refresh failed: {reason}"
     return _quote_command(["sh", "-lc", f"printf '%s\\n' {shlex.quote(message)}; sleep 30"])
@@ -4693,6 +4723,8 @@ def launch_project(
             ),
             allow_stale=allow_stale_launcher,
         )
+        if mode == "attach-or-start":
+            _refuse_running_project_window(config, runner=role_process_runner)
         ensure_configured_runtime_user(config, runner=runner)
         ensure_owner_state_dirs(config, pane_state_dir=effective_pane_state_dir, runner=runner)
         ensure_generated_project_pane_hooks(
@@ -8268,16 +8300,22 @@ def add_project_role_command(
     cli_name = _validate_new_project_cli(cli, context=f"CLI for {role}")
     preflight_plan = _project_plan_for_added_role(config, config_path=config_path, role_name=role)
     render_add_role_sql(preflight_plan, role)
-    updated_config, regenerated_layout = _write_added_role_config(
-        config,
-        config_path=config_path,
-        role_name=role,
-        cli=cli_name,
-        detached=detached,
-        slot=slot,
-        relayout=relayout,
-        runner=runner,
-    )
+    existing_role = next((candidate for candidate in config.roles if candidate.role == role), None)
+    recovering_existing_role = existing_role is not None
+    if recovering_existing_role:
+        updated_config = config
+        regenerated_layout = False
+    else:
+        updated_config, regenerated_layout = _write_added_role_config(
+            config,
+            config_path=config_path,
+            role_name=role,
+            cli=cli_name,
+            detached=detached,
+            slot=slot,
+            relayout=relayout,
+            runner=runner,
+        )
     plan = _project_plan_for_added_role(updated_config, config_path=config_path, role_name=role)
     _plan_path, board_unit_path, _sql_path = _write_updated_project_plan_artifacts(
         plan,
@@ -8306,12 +8344,13 @@ def add_project_role_command(
         raise SystemExit(f"team-launcher: failed to prepare worktree for {role}: {reason}")
     if start:
         pane_role = _role_by_name(updated_config, role)
+        pane_script_path = updated_config.pane_launcher or script_path or Path(__file__).resolve().with_name(TEAM_LAUNCHER_NAME)
         pane_args = pane_command_args(
             updated_config.project,
             pane_role,
             config_path=config_path,
             mode="attach-or-start",
-            script_path=script_path or Path(__file__).resolve().with_name(TEAM_LAUNCHER_NAME),
+            script_path=pane_script_path,
             pane_state_dir=pane_state_dir or default_pane_state_dir_for_user(updated_config.run_as_user, project=updated_config.project),
             skip_launcher_check=True,
             no_attach=True,
@@ -8320,13 +8359,19 @@ def add_project_role_command(
         pane_proc = runner(pane_args)
         if pane_proc.returncode != 0:
             raise SystemExit(f"team-launcher: added {role}, but failed to start its pane with exit {pane_proc.returncode}")
-    message = f"team-launcher: added role {role} to {updated_config.project}"
+    if recovering_existing_role:
+        message = f"team-launcher: role {role} already exists in {updated_config.project}; reapplied board registration"
+    else:
+        message = f"team-launcher: added role {role} to {updated_config.project}"
     if not detached:
         visible_count = sum(1 for candidate in updated_config.roles if not candidate.detached)
         if regenerated_layout:
             message += f"; regenerated layout for {visible_count} visible pane(s)"
         if start:
-            message += "; started tmux session for the new role"
+            if recovering_existing_role:
+                message += "; started tmux session for the existing role"
+            else:
+                message += "; started tmux session for the new role"
         message += "; relaunch the project window to display newly added visible slots"
     print_func(message)
     return 0

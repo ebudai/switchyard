@@ -176,6 +176,29 @@ class FakeRunner:
 
     def __call__(self, args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         self.calls.append(args)
+        if args[:2] == ["sudo", "-u"] and len(args) >= 4:
+            inner = args[4:] if len(args) >= 5 and args[3] == "-H" else args[3:]
+            if inner[:2] == ["tmux", "has-session"]:
+                session = inner[-1]
+                return subprocess.CompletedProcess(args, 0 if session in self.existing_sessions else 1)
+            if inner[:3] == ["tmux", "display-message", "-p"]:
+                target = inner[inner.index("-t") + 1]
+                if inner[-1] == "#{pane_pid}":
+                    pane_pid = int(self._value_for(self.pane_pids, target, 0) or 0)
+                    return subprocess.CompletedProcess(args, 0 if pane_pid else 1, stdout=f"{pane_pid}\n" if pane_pid else "")
+                command = str(self._value_for(self.current_commands, target, "") or "")
+                return subprocess.CompletedProcess(args, 0 if command else 1, stdout=command + "\n")
+            if inner[:2] == ["tmux", "new-session"]:
+                session = inner[inner.index("-s") + 1]
+                self.existing_sessions.add(session)
+                target, command = self._target_and_command_from_shell(str(inner[-1]))
+                if target and command and target not in self.current_commands:
+                    self.current_commands[target] = command
+                return subprocess.CompletedProcess(args, 0)
+            if inner[:2] == ["tmux", "kill-session"]:
+                session = inner[-1]
+                self.existing_sessions.discard(session)
+                return subprocess.CompletedProcess(args, 0)
         if args[:2] == ["tmux", "has-session"]:
             session = args[-1]
             return subprocess.CompletedProcess(args, 0 if session in self.existing_sessions else 1)
@@ -3306,6 +3329,37 @@ def test_launch_project_refuses_missing_configured_pane_launcher() -> None:
         assert ["sudo", "-u", "porter-agent", "test", "-x", str(owner_launcher)] in calls
         assert ["test", "-x", str(owner_launcher)] not in calls
         assert not layout_output.exists()
+
+
+def test_launch_project_refuses_project_start_when_role_session_is_already_running() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-running-project.") as tmp:
+        tmp_path = Path(tmp)
+        config_path = _write_six_visible_role_config(tmp_path, project="porter")
+        config = load_project_config("porter", config_path)
+        runner = FakeRunner(existing_sessions={"porter-director"})
+        process_launcher = RecordingProcessLauncher()
+
+        try:
+            launch_project(
+                config,
+                config_path=config_path,
+                mode="start",
+                script_path=ROOT / "scripts" / "team-launcher",
+                runner=runner,
+                layout_output=tmp_path / "materialized.json",
+                konsole_process_launcher=process_launcher,
+            )
+            raise AssertionError("expected already-running project start to be refused")
+        except SystemExit as exc:
+            message = str(exc)
+
+    assert "project porter already has running tmux session(s): porter-director" in message
+    assert "refusing to launch another project window" in message
+    assert "switchyard porter pane attach-or-start <role> --no-attach" in message
+    assert not any("worktree" in call for call in runner.calls)
+    assert not any(call[:2] == ["git", "clone"] for call in runner.calls)
+    assert not any(call[:1] == ["mkdir"] for call in runner.calls)
+    assert process_launcher.calls == []
 
 
 def test_kde_auto_layout_preserves_separate_konsole_plan_shape() -> None:
@@ -6635,15 +6689,18 @@ def test_start_runs_research_detached_before_opening_visible_layout() -> None:
             git_launcher_head_args(ROOT),
             git_launcher_ls_remote_ref_args(config, ROOT),
         ]
-        assert runner.calls[3] == git_fetch_worktree_ref_args(config)
-        assert runner.calls[4] == git_shared_checkout_check_args(config)
-        assert runner.calls[5] == team_launcher.git_shared_checkout_status_porcelain_args(config)
-        assert runner.calls[6] == team_launcher.git_clean_shared_checkout_dry_run_args(config)
-        assert runner.calls[7] == git_checkout_shared_ref_args(config)
-        assert runner.calls[8] == git_clean_shared_checkout_args(config)
+        shared_checkout_calls = [
+            git_fetch_worktree_ref_args(config),
+            git_shared_checkout_check_args(config),
+            team_launcher.git_shared_checkout_status_porcelain_args(config),
+            team_launcher.git_clean_shared_checkout_dry_run_args(config),
+            git_checkout_shared_ref_args(config),
+            git_clean_shared_checkout_args(config),
+        ]
+        shared_checkout_indexes = [runner.calls.index(call) for call in shared_checkout_calls]
+        assert shared_checkout_indexes == sorted(shared_checkout_indexes)
         assert not any(call[:5] == ["git", "-C", call[2], "worktree", "add"] for call in runner.calls)
-        research_has_session_index = runner.calls.index(["tmux", "has-session", "-t", "pgu-research"])
-        research_new_session = runner.calls[research_has_session_index + 1]
+        research_new_session = next(call for call in runner.calls if call[:5] == ["tmux", "new-session", "-d", "-s", "pgu-research"])
         assert research_new_session[:5] == ["tmux", "new-session", "-d", "-s", "pgu-research"]
         assert research_new_session[5:7] == ["-c", str(tmp_path / "repo")]
         assert "TICKET_BOARD_PANE_TARGET=pgu-research:0.0" in research_new_session[-1]
@@ -6912,6 +6969,8 @@ def test_control_repository_launch_runs_bootstrap_as_configured_owner() -> None:
     class OwnerRecordingRunner(FakeRunner):
         def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
             self.calls.append(args)
+            if args[:4] == ["sudo", "-u", "otto-agent", "-H"] and args[4:6] == ["tmux", "has-session"]:
+                return subprocess.CompletedProcess(args, 1)
             if args[:3] == ["sudo", "-u", "otto-agent"]:
                 return subprocess.CompletedProcess(args, 0)
             return super().__call__(args, **kwargs)
@@ -7004,6 +7063,8 @@ def test_control_repository_bootstrap_failure_aborts_without_opening_window() ->
     class FailingControlRunner(FakeRunner):
         def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
             self.calls.append(args)
+            if args[:4] == ["sudo", "-u", "otto-agent", "-H"] and args[4:6] == ["tmux", "has-session"]:
+                return subprocess.CompletedProcess(args, 1)
             if args[:3] == ["sudo", "-u", "otto-agent"] and args[3:6] == ["git", "clone", "--bare"]:
                 return subprocess.CompletedProcess(
                     args,
@@ -10566,9 +10627,8 @@ def test_add_role_updates_generated_config_board_registration_and_starts_only_ne
     assert "('analysis', 'in_progress', 'start_work', ARRAY['app', 'main', 'ops']::text[]" in add_role_sql
     assert any(call[:5] == ["git", "--git-dir", f"/home/{current_user}/.local/state/switchyard/projects/mefp/control.git", "worktree", "add"] for call in runner.calls)
     assert any(call == ["sudo", "systemctl", "restart", "mefp-ticket-board.service"] for call in runner.calls)
-    pane_calls = [call for call in runner.calls if call[:3] == [str(ROOT / "scripts" / "team-launcher"), "mefp", "pane"]]
+    pane_calls = [call for call in runner.calls if call[1:5] == ["mefp", "pane", "attach-or-start", "ops"]]
     assert len(pane_calls) == 1
-    assert pane_calls[0][3:5] == ["attach-or-start", "ops"]
     psql_calls = [
         (args, kwargs)
         for args, kwargs in runner.calls_with_kwargs
@@ -10579,6 +10639,183 @@ def test_add_role_updates_generated_config_board_registration_and_starts_only_ne
     assert [role.role for role in updated_config.roles] == ["designer", "director", "audit", "app", "main", "ops"]
     assert updated_config.roles[-1].env["TICKET_BOARD_CALLER_ROLE"] == "ops"
     assert "team-launcher: added role ops to mefp" in stdout.getvalue()
+
+
+def test_add_role_uses_project_pane_launcher_when_run_as_user_differs() -> None:
+    original_current_user_name = team_launcher.current_user_name
+    try:
+        team_launcher.current_user_name = lambda: "eric"
+        with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-add-role-owner-launcher.") as tmp:
+            tmp_path = Path(tmp)
+            provision_dir = tmp_path / "project" / ".switchyard" / "provision"
+            provision_dir.mkdir(parents=True)
+            project_repo = tmp_path / "project-repo"
+            project_repo.mkdir()
+            owner_launcher = (
+                tmp_path
+                / "home"
+                / "porter-agent"
+                / "mefp-ticketboard-live"
+                / "current"
+                / "scripts"
+                / "team-launcher"
+            )
+            owner_launcher.parent.mkdir(parents=True)
+            owner_launcher.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+            owner_launcher.chmod(0o755)
+            config_path = provision_dir / "mefp.json"
+            layout_path = provision_dir / "mefp-konsole-layout.json"
+            layout_path.write_text(
+                json.dumps(team_launcher._new_project_layout_payload(2), indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "project": "mefp",
+                        "run_as_user": "porter-agent",
+                        "layout": str(layout_path),
+                        "pane_launcher": str(owner_launcher),
+                        "repository": str(project_repo),
+                        "roles": [
+                            {"role": "app", "slot": 0, "cli": ["codex"], "target": "mefp-app:0.0"},
+                            {"role": "main", "slot": 1, "cli": ["codex"], "target": "mefp-main:0.0"},
+                        ],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            config = load_project_config("mefp", config_path)
+            runner = KeywordRecordingFakeRunner()
+
+            assert (
+                team_launcher.add_project_role_command(
+                    config,
+                    config_path=config_path,
+                    role_name="ops",
+                    cli="codex",
+                    script_path=ROOT / "scripts" / "team-launcher",
+                    pane_state_dir=tmp_path / "pane-state",
+                    runner=runner,
+                )
+                == 0
+            )
+
+        pane_calls = [
+            call
+            for call in runner.calls
+            if call[:4] == ["sudo", "-u", "porter-agent", "-H"] and call[5:8] == ["mefp", "pane", "attach-or-start"]
+        ]
+    finally:
+        team_launcher.current_user_name = original_current_user_name
+
+    assert len(pane_calls) == 1
+    assert pane_calls[0][4] == str(owner_launcher)
+    assert str(ROOT / "scripts" / "team-launcher") not in pane_calls[0]
+
+
+def test_add_role_can_recover_half_added_role_without_reappending_config() -> None:
+    original_current_user_name = team_launcher.current_user_name
+    try:
+        team_launcher.current_user_name = lambda: "eric"
+        with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-add-role-recovery.") as tmp:
+            tmp_path = Path(tmp)
+            provision_dir = tmp_path / "project" / ".switchyard" / "provision"
+            provision_dir.mkdir(parents=True)
+            project_repo = tmp_path / "project-repo"
+            project_repo.mkdir()
+            owner_launcher = (
+                tmp_path
+                / "home"
+                / "porter-agent"
+                / "mefp-ticketboard-live"
+                / "current"
+                / "scripts"
+                / "team-launcher"
+            )
+            owner_launcher.parent.mkdir(parents=True)
+            owner_launcher.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+            owner_launcher.chmod(0o755)
+            plan = team_launcher.build_plan(
+                project="mefp",
+                owner_user="porter-agent",
+                port=18811,
+                source_repo=tmp_path / "source-repo",
+                implementer_roles=("app", "main"),
+            )
+            (tmp_path / "source-repo").mkdir()
+            (provision_dir / "plan.json").write_text(
+                json.dumps(plan.__dict__, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            (provision_dir / plan.board_unit).write_text(team_launcher.render_board_unit(plan), encoding="utf-8")
+            config_path = provision_dir / "mefp.json"
+            layout_path = provision_dir / "mefp-konsole-layout.json"
+            layout_path.write_text(
+                json.dumps(team_launcher._new_project_layout_payload(3), indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "project": "mefp",
+                        "run_as_user": "porter-agent",
+                        "layout": str(layout_path),
+                        "pane_launcher": str(owner_launcher),
+                        "repository": str(project_repo),
+                        "roles": [
+                            {"role": "app", "slot": 0, "cli": ["codex"], "target": "mefp-app:0.0"},
+                            {"role": "main", "slot": 1, "cli": ["codex"], "target": "mefp-main:0.0"},
+                            {"role": "ops", "slot": 2, "cli": ["codex"], "target": "mefp-ops:0.0"},
+                        ],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            config = load_project_config("mefp", config_path)
+            runner = KeywordRecordingFakeRunner()
+            stdout = StringIO()
+
+            with redirect_stdout(stdout):
+                assert (
+                    team_launcher.add_project_role_command(
+                        config,
+                        config_path=config_path,
+                        role_name="ops",
+                        cli="codex",
+                        script_path=ROOT / "scripts" / "team-launcher",
+                        pane_state_dir=tmp_path / "pane-state",
+                        runner=runner,
+                    )
+                    == 0
+                )
+
+            updated_config_json = json.loads(config_path.read_text(encoding="utf-8"))
+            updated_plan = json.loads((provision_dir / "plan.json").read_text(encoding="utf-8"))
+            add_role_sql = (provision_dir / "mefp-add-role.sql").read_text(encoding="utf-8")
+            output = stdout.getvalue()
+    finally:
+        team_launcher.current_user_name = original_current_user_name
+
+    assert [role["role"] for role in updated_config_json["roles"]] == ["app", "main", "ops"]
+    assert updated_plan["implementer_roles"] == ["app", "main", "ops"]
+    assert "ARRAY['app', 'main', 'ops']::text[]" in add_role_sql
+    assert any(call[:4] == ["sudo", "-u", "postgres", "psql"] for call in runner.calls)
+    pane_calls = [
+        call
+        for call in runner.calls
+        if call[:4] == ["sudo", "-u", "porter-agent", "-H"] and call[5:8] == ["mefp", "pane", "attach-or-start"]
+    ]
+    assert len(pane_calls) == 1
+    assert pane_calls[0][4] == str(owner_launcher)
+    assert "role ops already exists in mefp; reapplied board registration" in output
+    assert "started tmux session for the existing role" in output
 
 
 def test_add_role_unrecognized_layout_without_room_refuses_actionably_without_mutation() -> None:
@@ -10760,9 +10997,8 @@ def test_add_role_relayout_replaces_unrecognized_layout_and_starts_new_role() ->
     assert updated_layout == team_launcher._new_project_layout_payload(4)
     assert updated_plan["implementer_roles"] == ["app", "main", "ops"]
     assert any(call == ["sudo", "systemctl", "restart", "mefp-ticket-board.service"] for call in runner.calls)
-    pane_calls = [call for call in runner.calls if call[:3] == [str(ROOT / "scripts" / "team-launcher"), "mefp", "pane"]]
+    pane_calls = [call for call in runner.calls if call[1:5] == ["mefp", "pane", "attach-or-start", "ops"]]
     assert len(pane_calls) == 1
-    assert pane_calls[0][3:5] == ["attach-or-start", "ops"]
     assert "--no-attach" in pane_calls[0]
     assert "team-launcher: added role ops to mefp; regenerated layout for 4 visible pane(s)" in output
     assert "started tmux session for the new role" in output
@@ -10832,7 +11068,7 @@ def test_add_role_refuses_seventh_visible_pane_without_mutating_config() -> None
     assert not any(call[:4] == ["sudo", "-u", "postgres", "psql"] for call in runner.calls)
 
 
-def test_add_role_rejects_duplicate_role_before_privileged_mutation() -> None:
+def test_add_role_existing_role_reapplies_registration_without_reappending_config() -> None:
     current_user = team_launcher.current_user_name()
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-add-role-duplicate.") as tmp:
         tmp_path = Path(tmp)
@@ -10867,23 +11103,96 @@ def test_add_role_rejects_duplicate_role_before_privileged_mutation() -> None:
         config_before = config_path.read_text(encoding="utf-8")
         config = load_project_config("mefp", config_path)
         runner = KeywordRecordingFakeRunner()
+        stdout = StringIO()
+
+        with redirect_stdout(stdout):
+            assert (
+                team_launcher.add_project_role_command(
+                    config,
+                    config_path=config_path,
+                    role_name="main",
+                    cli="codex",
+                    runner=runner,
+                )
+                == 0
+            )
+
+        config_after = config_path.read_text(encoding="utf-8")
+        output = stdout.getvalue()
+
+    assert config_after == config_before
+    assert any(call[:4] == ["sudo", "-u", "postgres", "psql"] for call in runner.calls)
+    assert any(call == ["sudo", "systemctl", "restart", "mefp-ticket-board.service"] for call in runner.calls)
+    assert any(
+        call[1:5] == ["mefp", "pane", "attach-or-start", "main"]
+        for call in runner.calls
+    )
+    assert "role main already exists in mefp; reapplied board registration" in output
+
+
+def test_add_role_seventh_visible_role_rejects_before_privileged_mutation() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-add-role-seventh-repeat.") as tmp:
+        tmp_path = Path(tmp)
+        provision_dir = tmp_path / "project" / ".switchyard" / "provision"
+        provision_dir.mkdir(parents=True)
+        source_repo = tmp_path / "source-repo"
+        project_repo = tmp_path / "project-repo"
+        source_repo.mkdir()
+        project_repo.mkdir()
+        plan = team_launcher.build_plan(
+            project="mefp",
+            owner_user=current_user,
+            port=18811,
+            source_repo=source_repo,
+            implementer_roles=("app", "main", "ops", "perf", "research", "qa"),
+        )
+        (provision_dir / "plan.json").write_text(json.dumps(plan.__dict__, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        config_path = provision_dir / "mefp.json"
+        config_path.write_text(
+            json.dumps(
+                team_launcher._new_project_launcher_config_payload(
+                    plan,
+                    repository=project_repo,
+                    implementer_roles=("app", "main", "ops", "perf", "research", "qa"),
+                    include_designer=False,
+                    include_audit=False,
+                ),
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        layout_path = provision_dir / "mefp-konsole-layout.json"
+        layout_path.write_text(
+            json.dumps(team_launcher._new_project_layout_payload(6), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("mefp", config_path)
+        before_config = config_path.read_text(encoding="utf-8")
+        before_layout = layout_path.read_text(encoding="utf-8")
+        runner = KeywordRecordingFakeRunner()
 
         try:
             team_launcher.add_project_role_command(
                 config,
                 config_path=config_path,
-                role_name="main",
+                role_name="build",
                 cli="codex",
                 runner=runner,
             )
-            raise AssertionError("expected duplicate role to be rejected")
+            raise AssertionError("expected seventh visible role to be rejected")
         except SystemExit as exc:
             message = str(exc)
 
         config_after = config_path.read_text(encoding="utf-8")
+        layout_after = layout_path.read_text(encoding="utf-8")
 
-    assert "role 'main' already exists in project mefp" in message
-    assert config_after == config_before
+    assert "cannot add build as visible" in message
+    assert "at most 6 panes can be visible in one window" in message
+    assert config_after == before_config
+    assert layout_after == before_layout
     assert not any(call[:1] == ["sudo"] for call in runner.calls)
     assert not any(call[:1] == ["git"] for call in runner.calls)
 

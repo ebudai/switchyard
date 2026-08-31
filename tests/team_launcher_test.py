@@ -13289,7 +13289,7 @@ def test_switchyard_new_prompts_roles_and_skips_designer_when_absent() -> None:
         "Include designer role [Y/n]: ",
         "Include audit role [Y/n]: ",
         "director CLI (claude/codex/agy/hermes) [claude]: ",
-        "Implementer roles (comma-separated): ",
+        "Implementer roles (comma-separated) [main, ops]: ",
         "code-review CLI (claude/codex/agy/hermes) [codex]: ",
         "runtime CLI (claude/codex/agy/hermes) [codex]: ",
     ]
@@ -13325,6 +13325,104 @@ def test_switchyard_new_prompts_roles_and_skips_designer_when_absent() -> None:
     assert not (project_dir / ".switchyard" / "DESIGNER_ONBOARDING.md").exists()
     assert "switchyard: design phase skipped; no designer pane configured" in rendered
     assert "maximize the designer pane" not in rendered
+
+
+def test_switchyard_new_accepts_role_defaults_and_includes_ops() -> None:
+    class PromptedRoleRunner(FakeRunner):
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if args[:2] == ["id", "-u"]:
+                return subprocess.CompletedProcess(args, 1)
+            if args[:1] == ["useradd"]:
+                return subprocess.CompletedProcess(args, 0)
+            if args[:1] == ["install"] and args[-1]:
+                target = Path(args[-1])
+                if str(target).startswith(tempfile.gettempdir()):
+                    target.mkdir(parents=True, exist_ok=True)
+                return subprocess.CompletedProcess(args, 0)
+            return super().__call__(args, **kwargs)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new-default-roles.") as tmp:
+        tmp_path = Path(tmp)
+        home_base = tmp_path / "home"
+        output_dir = tmp_path / "out"
+        source_repo = tmp_path / "source-repo"
+        source_repo.mkdir()
+        prompts: list[str] = []
+        output: list[str] = []
+        answers = iter(["", "", "", "", "", "", "", ""])
+        runner = PromptedRoleRunner()
+
+        def input_func(prompt: str) -> str:
+            prompts.append(prompt)
+            return next(answers)
+
+        assert (
+            switchyard_new_command(
+                slug="porter",
+                agent_name="otto-agent",
+                project_name="Porter System",
+                project_path=home_base / "otto-agent" / "Projects" / "porter",
+                source_repo=source_repo,
+                output_dir=output_dir,
+                yes=True,
+                allow_existing_owner_user=True,
+                home_base=home_base,
+                euid_getter=lambda: 0,
+                runner=runner,
+                pane_state_dir=tmp_path / "pane-state",
+                input_func=input_func,
+                print_func=output.append,
+                port_in_use=lambda _port: False,
+                socket_exists=lambda _path: False,
+                session_record_timeout=0,
+                registry_dir=tmp_path / "registry",
+            )
+            == 0
+        )
+
+        project_dir = home_base / "otto-agent" / "Projects" / "porter"
+        artifact = json.loads((project_dir / ".switchyard" / "porter.project.json").read_text(encoding="utf-8"))
+        plan = json.loads((output_dir / "plan.json").read_text(encoding="utf-8"))
+        config = json.loads((output_dir / "porter.json").read_text(encoding="utf-8"))
+
+    assert prompts == [
+        "Include designer role [Y/n]: ",
+        "Include audit role [Y/n]: ",
+        "designer CLI (claude/codex/agy/hermes) [claude]: ",
+        "director CLI (claude/codex/agy/hermes) [claude]: ",
+        "audit CLI (claude/codex/agy/hermes) [claude]: ",
+        "Implementer roles (comma-separated) [main, ops]: ",
+        "main CLI (claude/codex/agy/hermes) [codex]: ",
+        "ops CLI (claude/codex/agy/hermes) [codex]: ",
+    ]
+    assert "switchyard: project name: Porter System" in output
+    assert "switchyard: slug: porter" in output
+    assert "switchyard: owner user: otto-agent" in output
+    assert f"switchyard: project path: {project_dir}" in output
+    assert "Conventional implementer roles:" in output
+    assert "  main: core/domain implementation and integration" in output
+    assert "  ops: environment, services, tooling, and infrastructure" in output
+    assert "  app: application/UI work" in output
+    assert "  research: investigation, design support, and unknowns" in output
+    assert "  perf: measurement and performance work" in output
+    assert artifact["project"]["roles"] == ["main", "ops"]
+    assert artifact["project"]["role_clis"] == {
+        "designer": "claude",
+        "director": "claude",
+        "audit": "claude",
+        "main": "codex",
+        "ops": "codex",
+    }
+    assert plan["implementer_roles"] == ["main", "ops"]
+    assert [role["role"] for role in config["roles"]] == ["designer", "director", "audit", "main", "ops"]
+    assert {role["role"]: role["cli"] for role in config["roles"]} == {
+        "designer": ["claude"],
+        "director": ["claude"],
+        "audit": ["claude"],
+        "main": ["codex"],
+        "ops": ["codex"],
+    }
 
 
 def test_switchyard_new_stdin_eof_exits_without_traceback() -> None:
@@ -13407,7 +13505,7 @@ def test_prompt_cli_caps_invalid_retries() -> None:
     )
 
 
-def test_switchyard_role_choices_caps_empty_implementer_retries() -> None:
+def test_switchyard_role_choices_caps_comma_only_implementer_retries() -> None:
     stdout = StringIO()
     calls = 0
 
@@ -13416,7 +13514,7 @@ def test_switchyard_role_choices_caps_empty_implementer_retries() -> None:
         calls += 1
         if calls > 20:
             raise AssertionError("prompt retry cap did not terminate")
-        return ""
+        return "" if calls <= 5 else ","
 
     with redirect_stdout(stdout):
         try:

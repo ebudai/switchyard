@@ -399,7 +399,13 @@ designer CLI (claude/codex/agy/hermes) [claude]:
 director CLI (claude/codex/agy/hermes) [claude]:
 Include audit role [Y/n]:
 audit CLI (claude/codex/agy/hermes) [claude]:
-Implementer roles (comma-separated): app, code-review
+Conventional implementer roles:
+  main: core/domain implementation and integration
+  ops: environment, services, tooling, and infrastructure
+  app: application/UI work
+  research: investigation, design support, and unknowns
+  perf: measurement and performance work
+Implementer roles (comma-separated) [main, ops]: app, code-review
 app CLI (claude/codex/agy/hermes) [codex]:
 code-review CLI (claude/codex/agy/hermes) [codex]:
 ```
@@ -436,7 +442,9 @@ omitted, `new` skips the design phase and does not create a designer pane,
 designer onboarding file, or initial design document. `audit` is optional; when
 omitted, the generated workflow skips the Audit stage and implementers submit
 directly to Final Sign-Off. Implementer role names are supplied as a
-comma-separated list and may contain hyphens. The selected role names are
+comma-separated list and may contain hyphens. The default implementer roles are
+`main` and `ops`; conventional names also include `app`, `research`, and `perf`,
+but custom names are accepted when they match the role-name rules. The selected role names are
 written to both the board provisioning plan and the generated launcher config,
 and each role's selected CLI is recorded in the `switchyard.project.v1`
 artifact. The artifact still must not preconfigure workflow stages or

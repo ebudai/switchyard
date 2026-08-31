@@ -20,8 +20,11 @@ only along declared **transitions**. Nothing moves by editing a field — moveme
 always an operation with a name, and the board records who performed it.
 
 Roles are per-project. A typical set: `director` (coordinates, reviews, merges), one or
-more implementers (`main`, `app`, `ops`, …), `audit` (verifies), `inspector` (visual
-review), `user` (the human), `research`.
+more implementers, `audit` (verifies), `inspector` (visual review), `user` (the
+human), and optional support roles. Conventional implementer names are `main` for
+core/domain implementation and integration, `ops` for environment, services, tooling,
+and infrastructure, `app` for application/UI work, `research` for investigation and
+design support, and `perf` for measurement and performance work.
 
 ---
 

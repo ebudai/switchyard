@@ -286,11 +286,17 @@ step, and no separate provisioning step -- the privileged half all happens once,
 already gave.
 
 `new` now asks for the implementer roles and the CLI for each role instead of
-silently creating a fixed programmer set. `director` is always present;
-`designer` and `audit` are optional. If the user omits `designer`, the design
-phase is skipped and no designer pane or design document is created. If the user
-omits `audit`, the provisioned workflow skips the Audit stage and implementation
-submissions go directly to Final Sign-Off.
+silently creating a fixed programmer set. The implementer prompt defaults to
+`main, ops` and displays the conventional vocabulary: `main` for core/domain
+implementation and integration, `ops` for environment, services, tooling, and
+infrastructure, `app` for application/UI work, `research` for investigation and
+design support, and `perf` for measurement and performance work. Custom
+implementer names still work; the conventional list is guidance, not a
+constraint. `director` is always present; `designer` and `audit` are optional.
+If the user omits `designer`, the design phase is skipped and no designer pane
+or design document is created. If the user omits `audit`, the provisioned
+workflow skips the Audit stage and implementation submissions go directly to
+Final Sign-Off.
 
 Stage ownership:
 
@@ -302,8 +308,10 @@ Stage ownership:
 | Audit (when selected) | audit |
 | Final Sign-Off | director |
 
-Implementation moves from `ops` to `main`. Ops owned it only because PGU-644 dropped `implementer` and
-left the stage unowned; with real programmers in the defaults that workaround is unnecessary.
+Implementation defaults to `main`, while `ops` is included by default as an
+implementer because new projects usually need environment, tooling, desktop, and
+service setup on day one. Ops is not mandatory; remove it at the prompt when a
+project does not need that role.
 
 The design phase is a VIEW STATE, not a lifecycle stage: maximize the designer pane while designing,
 restore when done. In Konsole that is **Ctrl+Shift+E** ("Toggle maximize current view"). Do not automate

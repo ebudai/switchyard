@@ -187,6 +187,14 @@ NEW_PROJECT_REQUIRED_ROLES = (
 )
 NEW_PROJECT_FIXED_ROLE_NAMES = frozenset({"designer", "director", "audit"})
 NEW_PROJECT_RESERVED_ROLE_NAMES = frozenset({"designer", "director", "audit", "user", "unassigned"})
+NEW_PROJECT_DEFAULT_IMPLEMENTER_ROLES = ("main", "ops")
+NEW_PROJECT_CONVENTIONAL_IMPLEMENTER_ROLES = (
+    ("main", "core/domain implementation and integration"),
+    ("ops", "environment, services, tooling, and infrastructure"),
+    ("app", "application/UI work"),
+    ("research", "investigation, design support, and unknowns"),
+    ("perf", "measurement and performance work"),
+)
 
 
 @dataclass(frozen=True)
@@ -4782,6 +4790,7 @@ def _prompt_cli(
 def _prompt_switchyard_role_choices(
     *,
     input_func: Callable[[str], str] = input,
+    print_func: Callable[[str], None] = print,
 ) -> tuple[tuple[str, str], ...]:
     include_designer = _prompt_bool("Include designer role", default=True, input_func=input_func)
     include_audit = _prompt_bool("Include audit role", default=True, input_func=input_func)
@@ -4793,8 +4802,15 @@ def _prompt_switchyard_role_choices(
     role_clis.append(("director", _prompt_cli("director", default=NEW_PROJECT_ROLE_CLI_DEFAULTS["director"], input_func=input_func)))
     if include_audit:
         role_clis.append(("audit", _prompt_cli("audit", default=NEW_PROJECT_ROLE_CLI_DEFAULTS["audit"], input_func=input_func)))
+    print_func("Conventional implementer roles:")
+    for role, description in NEW_PROJECT_CONVENTIONAL_IMPLEMENTER_ROLES:
+        print_func(f"  {role}: {description}")
     for _attempt in range(SWITCHYARD_PROMPT_MAX_ATTEMPTS):
-        raw_roles = _prompt_text("Implementer roles (comma-separated)", input_func=input_func)
+        raw_roles = _prompt_text(
+            "Implementer roles (comma-separated)",
+            default=", ".join(NEW_PROJECT_DEFAULT_IMPLEMENTER_ROLES),
+            input_func=input_func,
+        )
         roles: list[str] = []
         try:
             for item in _comma_list(raw_roles):
@@ -7183,7 +7199,7 @@ def switchyard_new_command(
         raise SystemExit("switchyard: new requires sudo; re-run as `sudo ./switchyard new`")
     if from_artifact is None:
         selected_role_clis = _dedupe_role_cli_pairs(
-            role_clis if role_clis is not None else _prompt_switchyard_role_choices(input_func=input_func)
+            role_clis if role_clis is not None else _prompt_switchyard_role_choices(input_func=input_func, print_func=print_func)
         )
         _require_new_project_roles(selected_role_clis)
         selected_implementer_roles = tuple(

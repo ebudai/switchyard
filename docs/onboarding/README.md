@@ -33,6 +33,13 @@ only for a path that already has a repo with `HEAD`.
 `docs/onboarding/`, preserving a source-commit header in each copied file.
 Existing files there are left untouched and reported as skipped.
 
+During `switchyard new`, the default implementer roles are `main` and `ops`.
+Conventional implementer role names are: `main` for core/domain implementation
+and integration; `ops` for environment, services, tooling, and infrastructure;
+`app` for application/UI work; `research` for investigation and design support;
+and `perf` for measurement and performance work. Custom implementer role names
+are allowed when the project needs different vocabulary.
+
 ## Not onboarding, but nearby in the Switchyard source checkout
 
 - Switchyard source checkout `docs/ticket-board-service.md` — deploying and operating the board service.

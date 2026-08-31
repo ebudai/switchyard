@@ -863,8 +863,86 @@ def test_session_start_resume_injection_is_scoped_to_resume_sources_and_active_t
     resume_context = json.loads(resume.stdout)["hookSpecificOutput"]["additionalContext"]
     assert "Your session just resumed." in resume_context
     assert "Your context was just compacted." not in resume_context
+    assert "Your session was just cleared." not in resume_context
     assert "ACTIVE work: PGU-557 -- Resume compacted work" in resume_context
     assert no_ticket.stdout == ""
+
+
+def test_clear_session_start_injects_assigned_in_progress_ticket_context() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        state_dir = Path(tmp) / "state"
+        session_dir = Path(tmp) / "sessions"
+        with _board_with_tickets(
+            [{"id": "PGU-816", "title": "Clear active work", "state": "in_progress", "assignee": "ops"}]
+        ) as board_url:
+            proc = subprocess.run(
+                [
+                    str(ROOT / "scripts" / HOOK_NAME),
+                    "idle",
+                    "--target",
+                    "pgu-ops:0.0",
+                    "--source",
+                    "claude.SessionStart",
+                    "--state-dir",
+                    str(state_dir),
+                    "--session-dir",
+                    str(session_dir),
+                    "--record-session",
+                ],
+                input=json.dumps({"source": "clear", "session_id": "clear-session-1"}),
+                text=True,
+                capture_output=True,
+                check=True,
+                env=_hook_env(TICKET_BOARD_URL=board_url),
+            )
+
+    output = json.loads(proc.stdout)
+    context = output["hookSpecificOutput"]["additionalContext"]
+    assert output["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+    assert "Your session was just cleared." in context
+    assert "Your session just resumed." not in context
+    assert "Your context was just compacted." not in context
+    assert "ACTIVE work: PGU-816 -- Clear active work" in context
+
+
+def test_session_start_active_work_injection_covers_supported_hook_sources() -> None:
+    hook_sources = (
+        "claude.SessionStart",
+        "codex.SessionStart",
+        "gemini.SessionStart",
+        "hermes.on_session_start",
+    )
+    for hook_source in hook_sources:
+        with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+            state_dir = Path(tmp) / "state"
+            session_dir = Path(tmp) / "sessions"
+            with _board_with_tickets(
+                [{"id": "PGU-816", "title": "Clear active work", "state": "in_progress", "assignee": "ops"}]
+            ) as board_url:
+                proc = subprocess.run(
+                    [
+                        str(ROOT / "scripts" / HOOK_NAME),
+                        "idle",
+                        "--target",
+                        "pgu-ops:0.0",
+                        "--source",
+                        hook_source,
+                        "--state-dir",
+                        str(state_dir),
+                        "--session-dir",
+                        str(session_dir),
+                        "--record-session",
+                    ],
+                    input=json.dumps({"source": "clear", "session_id": f"{hook_source}-clear-session"}),
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                    env=_hook_env(TICKET_BOARD_URL=board_url),
+                )
+
+        context = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "Your session was just cleared." in context
+        assert "ACTIVE work: PGU-816 -- Clear active work" in context
 
 
 def test_session_start_hook_defaults_to_xdg_state_home_session_dir() -> None:

@@ -289,6 +289,11 @@ target from ambient tmux state. The required state transitions are:
   seeds initial idle and the resume id, so it still needs the normal
   pane-content corroboration before delivery.
 
+On `SessionStart`, the hook also injects active-work context when the CLI
+reports a lifecycle source of `compact`, `resume`, or `clear` and the pane's
+role already owns an `in_progress` ticket. Each source gets distinct opening
+wording so a cleared pane is not told it resumed or compacted.
+
 Session ids are stored under `$TICKET_BOARD_PANE_SESSION_DIR` (default:
 `~/.local/state/pgu-ticket-board/pane-sessions`) using the same per-pane file
 naming as hook state. This durable directory is the maintained source of truth;

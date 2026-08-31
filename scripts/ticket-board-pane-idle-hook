@@ -41,7 +41,8 @@ SESSION_ID_KEYS = {
 UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
-SESSION_START_RESUME_SOURCES = {"compact", "resume"}
+SESSION_START_ACTIVE_WORK_SOURCES = {"clear", "compact", "resume"}
+SESSION_START_HOOK_SOURCES = {"hermes.on_session_start"}
 
 
 def _default_board_url(environ: dict[str, str]) -> str:
@@ -389,12 +390,24 @@ def _resume_context_for_ticket(ticket: dict[str, object], *, board_url: str, sou
     title = str(ticket.get("title", "")).strip()
     ticket_url = f"{_board_root_url(board_url)}/api/tickets/{ticket_id}"
     title_suffix = f" -- {title}" if title else ""
-    opening = "Your context was just compacted." if source == "compact" else "Your session just resumed."
+    opening = _session_start_active_work_opening(source)
     return (
         f"{opening} You have ACTIVE work: {ticket_id}{title_suffix} "
         f"(in_progress, assigned to you). Re-read it: curl {ticket_url} . "
         "Resume where you left off; do NOT wait for a new prompt."
     )
+
+
+def _session_start_active_work_opening(source: str) -> str:
+    if source == "clear":
+        return "Your session was just cleared."
+    if source == "compact":
+        return "Your context was just compacted."
+    return "Your session just resumed."
+
+
+def _is_session_start_hook_source(source: str) -> bool:
+    return source.endswith(".SessionStart") or source in SESSION_START_HOOK_SOURCES
 
 
 def _session_start_additional_context_output(
@@ -404,7 +417,7 @@ def _session_start_additional_context_output(
     environ: dict[str, str],
 ) -> dict[str, object] | None:
     session_start_source = _session_start_source(payload)
-    if session_start_source not in SESSION_START_RESUME_SOURCES:
+    if session_start_source not in SESSION_START_ACTIVE_WORK_SOURCES:
         return None
     role = _role_for_target(target, environ)
     if not role:
@@ -470,7 +483,7 @@ def main(argv: list[str] | None = None) -> int:
         explicit_session_id=bool(args.session_id.strip()),
     ):
         _write_session(session_dir, target, session_id, source=args.source, payload=payload)
-    if args.state == "idle" and args.source.endswith(".SessionStart"):
+    if args.state == "idle" and _is_session_start_hook_source(args.source):
         output = _session_start_additional_context_output(target=target, payload=payload, environ=os.environ)
         if output is not None:
             print(json.dumps(output, sort_keys=True))

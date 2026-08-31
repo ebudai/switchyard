@@ -12395,6 +12395,133 @@ def test_new_project_git_init_creates_main_branch_initial_commit_and_worktrees()
         assert current_user in git_listing
 
 
+def test_switchyard_new_from_artifact_initializes_repo_on_configured_worktree_branch() -> None:
+    current_user = team_launcher.current_user_name()
+    original_precheck_project_path = team_launcher._precheck_project_path_before_mutating
+    original_precheck_new_project = team_launcher.precheck_new_project
+    original_ensure_owner = team_launcher._ensure_owner_user_and_project_dir
+    original_chown_project_files = team_launcher._chown_switchyard_project_files
+    original_prepare_auth_worktrees = team_launcher._prepare_first_run_auth_worktrees
+    original_run_first_run_auth_phase = team_launcher.run_first_run_auth_phase
+    original_launch_project = team_launcher.launch_project
+    try:
+        with tempfile.TemporaryDirectory(prefix="pgu-switchyard-artifact-branch.") as tmp:
+            tmp_path = Path(tmp)
+            project_dir = tmp_path / "home" / current_user / "Projects" / "atlas"
+            source_repo = tmp_path / "source-repo"
+            output_dir = project_dir / ".switchyard" / "provision"
+            registry_dir = tmp_path / "registry"
+            design_document = project_dir / "PROJECT_DESIGN.md"
+            artifact_path = tmp_path / "atlas.project.json"
+            output: list[str] = []
+            source_repo.mkdir()
+            artifact_path.write_text(
+                json.dumps(
+                    {
+                        "schema": "switchyard.project.v1",
+                        "design_document": str(design_document),
+                        "project": {
+                            "slug": "atlas",
+                            "name": "Atlas Planner",
+                            "ticket_prefix": "ATL",
+                            "owner_user": current_user,
+                            "repository": str(project_dir),
+                            "remote": "origin",
+                            "default_branch": "trunk",
+                            "worktree_policy": "isolated",
+                            "roles": ["ops"],
+                            "role_clis": {"director": "claude", "ops": "codex"},
+                            "include_designer": False,
+                            "include_audit": False,
+                        },
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            team_launcher._precheck_project_path_before_mutating = lambda _owner_user, _project_dir: None
+            team_launcher.precheck_new_project = lambda *_args, **_kwargs: None
+
+            def fake_ensure_owner(
+                _owner_user: str,
+                requested_project_dir: Path,
+                **_kwargs: object,
+            ) -> team_launcher.OwnerUserProvisionResult:
+                requested_project_dir.mkdir(parents=True, exist_ok=True)
+                return team_launcher.OwnerUserProvisionResult(created=False, linger_enabled=False)
+
+            def pass_real_git_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                if args[:1] == ["git"]:
+                    run_kwargs = dict(kwargs)
+                    run_kwargs.setdefault("text", True)
+                    run_kwargs.setdefault("stdout", subprocess.PIPE)
+                    run_kwargs.setdefault("stderr", subprocess.PIPE)
+                    return subprocess.run(args, **run_kwargs)
+                return subprocess.CompletedProcess(args, 0)
+
+            def fake_launch_project(config: team_launcher.ProjectConfig, **_kwargs: object) -> int:
+                assert worktree_ref(config) == "origin/trunk"
+                return 0
+
+            team_launcher._ensure_owner_user_and_project_dir = fake_ensure_owner
+            team_launcher._chown_switchyard_project_files = lambda *_args, **_kwargs: None
+            team_launcher._prepare_first_run_auth_worktrees = lambda *_args, **_kwargs: None
+            team_launcher.run_first_run_auth_phase = lambda *_args, **_kwargs: team_launcher.FirstRunAuthReport({}, [])
+            team_launcher.launch_project = fake_launch_project
+
+            with redirect_stdout(StringIO()):
+                assert (
+                    switchyard_new_command(
+                        from_artifact=artifact_path,
+                        source_repo=source_repo,
+                        output_dir=output_dir,
+                        yes=True,
+                        allow_existing_owner_user=True,
+                        home_base=tmp_path / "home",
+                        euid_getter=lambda: 0,
+                        runner=pass_real_git_runner,
+                        pane_state_dir=tmp_path / "pane-state",
+                        port_in_use=lambda _port: False,
+                        socket_exists=lambda _path: False,
+                        session_record_timeout=0,
+                        registry_dir=registry_dir,
+                        print_func=output.append,
+                    )
+                    == 0
+                )
+
+            config = load_project_config("atlas", output_dir / "atlas.json")
+            branch = _run_git(["git", "branch", "--show-current"], cwd=project_dir).stdout.strip()
+            commits = _run_git(["git", "rev-list", "--count", "HEAD"], cwd=project_dir).stdout.strip()
+            remote = _run_git(["git", "remote", "get-url", "origin"], cwd=project_dir).stdout.strip()
+            _run_git(["git", "fetch", "origin", "trunk:refs/remotes/origin/trunk"], cwd=project_dir)
+            role_worktree = tmp_path / "atlas-ops-worktree"
+            _run_git(["git", "worktree", "add", "--detach", str(role_worktree), worktree_ref(config)], cwd=project_dir)
+
+            assert config.worktree_branch == "trunk"
+            assert worktree_ref(config) == "origin/trunk"
+            assert branch == "trunk"
+            assert commits == "2"
+            assert remote == str(project_dir)
+            assert (role_worktree / ".git").is_file()
+            assert any(
+                line == f"switchyard: initialized git repository in {project_dir} on branch trunk with an initial commit"
+                for line in output
+            )
+
+    finally:
+        team_launcher._precheck_project_path_before_mutating = original_precheck_project_path
+        team_launcher.precheck_new_project = original_precheck_new_project
+        team_launcher._ensure_owner_user_and_project_dir = original_ensure_owner
+        team_launcher._chown_switchyard_project_files = original_chown_project_files
+        team_launcher._prepare_first_run_auth_worktrees = original_prepare_auth_worktrees
+        team_launcher.run_first_run_auth_phase = original_run_first_run_auth_phase
+        team_launcher.launch_project = original_launch_project
+
+
 def test_new_project_git_init_leaves_existing_repo_config_branch_and_head_untouched() -> None:
     current_user = team_launcher.current_user_name()
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-existing-git.") as tmp:

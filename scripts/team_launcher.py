@@ -7039,6 +7039,7 @@ def switchyard_new_command(
     _precheck_project_path_before_mutating(owner_user, project_dir)
     effective_source_repo = (source_repo or _repo_root()).expanduser().resolve(strict=False)
     precheck_artifact = load_project_design_artifact(from_artifact, expected_project=resolved_slug) if from_artifact else None
+    worktree_branch = precheck_artifact.default_branch if precheck_artifact else "main"
     precheck_plan = build_plan(
         project=resolved_slug,
         owner_user=owner_user,
@@ -7106,11 +7107,14 @@ def switchyard_new_command(
             created_git_repository = _ensure_project_git_repository(
                 owner_user=owner_user,
                 project_dir=project_dir,
-                branch="main",
+                branch=worktree_branch,
                 runner=runner,
             )
             if created_git_repository:
-                print_func(f"switchyard: initialized git repository in {project_dir} on branch main with an initial commit")
+                print_func(
+                    f"switchyard: initialized git repository in {project_dir} "
+                    f"on branch {worktree_branch} with an initial commit"
+                )
             else:
                 print_func(f"switchyard: using existing git repository in {project_dir} without modifying it")
         else:
@@ -7137,13 +7141,13 @@ def switchyard_new_command(
             created_git_repository = _ensure_project_git_repository(
                 owner_user=owner_user,
                 project_dir=project_dir,
-                branch=artifact.default_branch,
+                branch=worktree_branch,
                 runner=runner,
             )
             if created_git_repository:
                 print_func(
                     f"switchyard: initialized git repository in {project_dir} "
-                    f"on branch {artifact.default_branch} with an initial commit"
+                    f"on branch {worktree_branch} with an initial commit"
                 )
             else:
                 print_func(f"switchyard: using existing git repository in {project_dir} without modifying it")

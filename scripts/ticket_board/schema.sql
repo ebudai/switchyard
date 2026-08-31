@@ -757,6 +757,35 @@ AS $$
     FROM normalized;
 $$;
 
+CREATE OR REPLACE FUNCTION ticket_board.require_stage_owner_assignee(p_state text, p_assignee text)
+RETURNS void
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    owners text[];
+    normalized_assignee text := btrim(lower(coalesce(p_assignee, '')));
+BEGIN
+    SELECT ws.owner_roles
+    INTO owners
+    FROM ticket_board.workflow_stages ws
+    WHERE ws.name = p_state;
+
+    IF NOT FOUND OR coalesce(cardinality(owners), 0) = 0 THEN
+        RETURN;
+    END IF;
+
+    IF normalized_assignee = 'unassigned' OR normalized_assignee = ANY(owners) THEN
+        RETURN;
+    END IF;
+
+    RAISE EXCEPTION 'assignee % is not an owner of stage % (owners: %)',
+        coalesce(nullif(btrim(coalesce(p_assignee, '')), ''), '<empty>'),
+        p_state,
+        array_to_string(owners, ', ');
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION ticket_board.ticket_reserved_implementer(
     p_ticket_id text,
     p_state text,
@@ -857,9 +886,7 @@ BEGIN
         NEW.assignee := coalesce(ticket_board.stage_default_assignee('draft'), 'unassigned');
         NEW.parked := false;
     END IF;
-    IF NEW.state = 'in_progress' AND NOT ticket_board.ticket_is_implementer_assignee(NEW.assignee) THEN
-        RAISE EXCEPTION 'in_progress tickets require an implementation-stage owner assignee';
-    END IF;
+    PERFORM ticket_board.require_stage_owner_assignee(NEW.state, NEW.assignee);
     IF NEW.state = 'in_progress'
        AND ticket_board.ticket_is_implementer_assignee(NEW.assignee)
        AND ticket_board.ticket_current_reserved_ticket(NEW.assignee, NEW.id) IS NOT NULL THEN
@@ -896,9 +923,24 @@ BEGIN
         RETURN NEW;
     END IF;
 
-    IF NEW.state = 'in_progress' AND NOT ticket_board.ticket_is_implementer_assignee(NEW.assignee) THEN
-        RAISE EXCEPTION 'in_progress tickets require an implementation-stage owner assignee';
+    IF OLD.state = 'audit' AND NEW.state = 'analysis' THEN
+        NEW.assignee := 'unassigned';
     END IF;
+
+    IF OLD.state IS DISTINCT FROM NEW.state
+       AND NOT coalesce(OLD.manually_controlled, false)
+       AND NOT coalesce(NEW.manually_controlled, false)
+       AND ticket_board.stage_entry_assignee(NEW.state, NEW.assignee, NEW.id) IS NOT NULL
+       AND (
+           NEW.state <> 'analysis'
+           OR NEW.assignee IS NULL
+           OR btrim(NEW.assignee) = ''
+           OR NEW.assignee = 'unassigned'
+       ) THEN
+        NEW.assignee := ticket_board.stage_entry_assignee(NEW.state, NEW.assignee, NEW.id);
+    END IF;
+
+    PERFORM ticket_board.require_stage_owner_assignee(NEW.state, NEW.assignee);
 
     IF coalesce(OLD.manually_controlled, false) OR coalesce(NEW.manually_controlled, false) THEN
         RETURN NEW;
@@ -961,6 +1003,19 @@ BEGIN
         NEW.assignee := 'director';
         transition_check_state := NEW.state;
     END IF;
+
+    IF OLD.state IS DISTINCT FROM NEW.state
+       AND ticket_board.stage_entry_assignee(NEW.state, NEW.assignee, NEW.id) IS NOT NULL
+       AND (
+           NEW.state <> 'analysis'
+           OR NEW.assignee IS NULL
+           OR btrim(NEW.assignee) = ''
+           OR NEW.assignee = 'unassigned'
+       ) THEN
+        NEW.assignee := ticket_board.stage_entry_assignee(NEW.state, NEW.assignee, NEW.id);
+    END IF;
+
+    PERFORM ticket_board.require_stage_owner_assignee(NEW.state, NEW.assignee);
 
     IF NEW.state = 'done'
        AND OLD.state IN ('backlog', 'analysis')
@@ -4521,6 +4576,16 @@ BEGIN
     IF NOT ticket_board.ticket_valid_assignee(target_assignee) THEN
         RAISE EXCEPTION 'invalid assignee: %', target_assignee;
     END IF;
+    IF NOT (
+        target_assignee = 'unassigned' OR EXISTS (
+        SELECT 1
+        FROM ticket_board.workflow_stages ws
+        WHERE ws.name = 'analysis'
+          AND target_assignee = ANY(ws.owner_roles)
+        )
+    ) THEN
+        target_assignee := 'unassigned';
+    END IF;
     SELECT count(*)
     INTO blocker_count
     FROM unnest(coalesce(blocked_by, ARRAY[]::text[])) AS raw_id;
@@ -4664,6 +4729,7 @@ BEGIN
     IF current_state = 'draft' THEN
         RAISE EXCEPTION 'draft tickets must be released with release_draft';
     END IF;
+    PERFORM ticket_board.require_stage_owner_assignee(new_state, assignee);
 
     UPDATE ticket_board.tickets
     SET state = new_state,
@@ -4985,6 +5051,7 @@ BEGIN
     IF ticket_state <> 'backlog' THEN
         RAISE EXCEPTION 'start_task requires a backlog ticket';
     END IF;
+    PERFORM ticket_board.require_stage_owner_assignee('analysis', ticket_assignee);
     IF normalized_note <> '' THEN
         PERFORM ticket_board.append_ticket_comment(id, comment_actor, normalized_note);
     END IF;
@@ -5396,7 +5463,8 @@ BEGIN
         PERFORM ticket_board.append_ticket_comment(id, comment_actor, reason);
     END IF;
     UPDATE ticket_board.tickets
-    SET state = 'analysis'
+    SET state = 'analysis',
+        assignee = 'director'
     WHERE tickets.id = user_reopen.id
       AND tickets.state IN ('user_review', 'director_review', 'done');
     IF NOT FOUND THEN

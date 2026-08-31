@@ -235,7 +235,8 @@ def main() -> int:
     assert_contains_all(schema, EXPECTED_STATES, "state constraint")
     assert "'ready'" not in schema, "removed ready state must not appear in schema.sql"
     assert "implementation must be non-empty before a ticket can enter in_progress" not in schema
-    assert "in_progress tickets require an implementation-stage owner assignee" in schema
+    assert "create or replace function ticket_board.require_stage_owner_assignee" in executable_schema_lower
+    assert "is not an owner of stage" in schema
     assert "create or replace function ticket_board.ticket_is_implementer_assignee" in executable_schema_lower
     assert "where ws.name = 'in_progress'" in executable_schema_lower
     assert "create or replace function ticket_board.stage_default_assignee" in executable_schema_lower

@@ -108,17 +108,17 @@ def main() -> int:
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation, created_text, updated_text, source_json
 ) VALUES (
-    'PGU-206', 'Locked head', '', 'analysis', 'ops', 'Ready.',
+    'PGU-206', 'Locked head', '', 'backlog', 'ops', 'Ready.',
     '2026-07-11T00:00:00+00:00', '2026-07-11T00:00:00+00:00',
-    '{ticket_source("PGU-206", "Locked head", "analysis", "ops")}'::jsonb
+    '{ticket_source("PGU-206", "Locked head", "backlog", "ops")}'::jsonb
 );
 UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-206';
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation, created_text, updated_text, source_json
 ) VALUES (
-    'PGU-207', 'Durable reconcile', '', 'analysis', 'app', 'Ready.',
+    'PGU-207', 'Durable reconcile', '', 'backlog', 'app', 'Ready.',
     '2026-07-11T00:00:00+00:00', '2026-07-11T00:00:00+00:00',
-    '{ticket_source("PGU-207", "Durable reconcile", "analysis", "app")}'::jsonb
+    '{ticket_source("PGU-207", "Durable reconcile", "backlog", "app")}'::jsonb
 );
 UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-207';
 DELETE FROM ticket_board.ticket_notification_queue;

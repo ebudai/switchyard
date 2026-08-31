@@ -413,20 +413,18 @@ SET owner_scoped = false
 WHERE action_name = 'start_task';
 """,
     )
-    psql(
-        conn,
-        """
+    failed = False
+    try:
+        psql(
+            conn,
+            """
 SELECT set_config('ticket_board.caller_role', 'app', false);
 SELECT ticket_board.start_task('PGU-52802', '');
 """,
-    )
-    state = psql(
-        conn,
-        """
-SELECT state FROM ticket_board.tickets WHERE id = 'PGU-52802';
-""",
-    )
-    assert state == "analysis", "flipping start_task owner_scoped=false must allow non-owner runtime start_task"
+        )
+    except subprocess.CalledProcessError as exc:
+        failed = "assignee ops is not an owner of stage analysis (owners: director)" in exc.stderr
+    assert failed, "flipping start_task owner_scoped=false must reach the stage-owner invariant"
 
     psql(
         conn,

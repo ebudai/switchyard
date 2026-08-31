@@ -280,19 +280,19 @@ INSERT INTO ticket_board.tickets (
     created_text, updated_text, created_at, updated_at, source_json
 ) VALUES
     (
-        'PGU-58401', 'Stage assignee handoff', '', 'analysis', 'ops', 'Ready.', false,
+        'PGU-58401', 'Stage assignee handoff', '', 'in_progress', 'ops', 'Ready.', false,
         '2026-08-22T00:00:00+00:00', '2026-08-22T00:00:00+00:00', clock_timestamp(), clock_timestamp(),
-        '{"id":"PGU-58401","title":"Stage assignee handoff","body":"","state":"analysis","assignee":"ops","implementation":"Ready.","comments":[],"created":"2026-08-22T00:00:00+00:00","updated":"2026-08-22T00:00:00+00:00"}'::jsonb
+        '{"id":"PGU-58401","title":"Stage assignee handoff","body":"","state":"in_progress","assignee":"ops","implementation":"Ready.","comments":[],"created":"2026-08-22T00:00:00+00:00","updated":"2026-08-22T00:00:00+00:00"}'::jsonb
     ),
     (
-        'PGU-58402', 'Manual stage assignee handoff', '', 'analysis', 'ops', 'Ready.', true,
+        'PGU-58402', 'Manual stage assignee handoff', '', 'in_progress', 'ops', 'Ready.', true,
         '2026-08-22T00:00:00+00:00', '2026-08-22T00:00:00+00:00', clock_timestamp(), clock_timestamp(),
-        '{"id":"PGU-58402","title":"Manual stage assignee handoff","body":"","state":"analysis","assignee":"ops","implementation":"Ready.","comments":[],"created":"2026-08-22T00:00:00+00:00","updated":"2026-08-22T00:00:00+00:00"}'::jsonb
+        '{"id":"PGU-58402","title":"Manual stage assignee handoff","body":"","state":"in_progress","assignee":"ops","implementation":"Ready.","comments":[],"created":"2026-08-22T00:00:00+00:00","updated":"2026-08-22T00:00:00+00:00"}'::jsonb
     ),
     (
-        'PGU-58403', 'Force stage assignee handoff', '', 'analysis', 'ops', 'Ready.', false,
+        'PGU-58403', 'Force stage assignee handoff', '', 'in_progress', 'ops', 'Ready.', false,
         '2026-08-22T00:00:00+00:00', '2026-08-22T00:00:00+00:00', clock_timestamp(), clock_timestamp(),
-        '{"id":"PGU-58403","title":"Force stage assignee handoff","body":"","state":"analysis","assignee":"ops","implementation":"Ready.","comments":[],"created":"2026-08-22T00:00:00+00:00","updated":"2026-08-22T00:00:00+00:00"}'::jsonb
+        '{"id":"PGU-58403","title":"Force stage assignee handoff","body":"","state":"in_progress","assignee":"ops","implementation":"Ready.","comments":[],"created":"2026-08-22T00:00:00+00:00","updated":"2026-08-22T00:00:00+00:00"}'::jsonb
     ),
     (
         'PGU-58801', 'Analysis assignee handoff', '', 'backlog', 'unassigned', '', false,
@@ -305,13 +305,13 @@ INSERT INTO ticket_board.tickets (
         '{"id":"PGU-58802","title":"Implementer analysis auto-advance","body":"","state":"backlog","assignee":"research","implementation":"Ready.","comments":[],"created":"2026-08-22T00:00:00+00:00","updated":"2026-08-22T00:00:00+00:00"}'::jsonb
     );
 UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '5840101' WHERE id = 'PGU-58401';
-UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '5840202' WHERE id = 'PGU-58402';
+UPDATE ticket_board.tickets SET state = 'audit', assignee = 'audit', commit_hash = '5840202' WHERE id = 'PGU-58402';
 BEGIN;
 SELECT set_config('ticket_board.force_move', 'on', true);
 UPDATE ticket_board.tickets SET state = 'audit', commit_hash = '5840303' WHERE id = 'PGU-58403';
 COMMIT;
 UPDATE ticket_board.tickets SET state = 'analysis' WHERE id = 'PGU-58801';
-UPDATE ticket_board.tickets SET state = 'analysis' WHERE id = 'PGU-58802';
+UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-58802';
 SQL
 
 stage_handoff_result="$(
@@ -336,7 +336,7 @@ FROM ticket_board.tickets t
 WHERE t.id IN ('PGU-58401', 'PGU-58402', 'PGU-58403', 'PGU-58801', 'PGU-58802');
 SQL
 )"
-expected_stage_handoff_result='{"PGU-58401": {"state": "audit", "assignee": "audit", "queue_target": "audit"}, "PGU-58402": {"state": "audit", "assignee": "ops", "queue_target": null}, "PGU-58403": {"state": "audit", "assignee": "ops", "queue_target": "audit"}, "PGU-58801": {"state": "analysis", "assignee": "director", "queue_target": "director"}, "PGU-58802": {"state": "in_progress", "assignee": "research", "queue_target": "research"}}'
+expected_stage_handoff_result='{"PGU-58401": {"state": "audit", "assignee": "audit", "queue_target": "audit"}, "PGU-58402": {"state": "audit", "assignee": "audit", "queue_target": null}, "PGU-58403": {"state": "audit", "assignee": "ops", "queue_target": "audit"}, "PGU-58801": {"state": "analysis", "assignee": "director", "queue_target": "director"}, "PGU-58802": {"state": "in_progress", "assignee": "research", "queue_target": "research"}}'
 [[ "$stage_handoff_result" == "$expected_stage_handoff_result" ]] || {
     echo "FAIL: migrated DB stage assignee handoff produced wrong state or notification target: $stage_handoff_result" >&2
     exit 1
@@ -389,7 +389,7 @@ FROM ticket_board.tickets t
 WHERE t.id IN ('PGU-47701', 'PGU-47702', 'PGU-47703');
 SQL
 )"
-expected_append_action_result='{"PGU-47701": {"state": "done", "assignee": "director", "comments": 1}, "PGU-47702": {"state": "analysis", "assignee": "user", "comments": 1}, "PGU-47703": {"state": "in_progress", "assignee": "main", "comments": 1}}'
+expected_append_action_result='{"PGU-47701": {"state": "done", "assignee": "director", "comments": 1}, "PGU-47702": {"state": "analysis", "assignee": "director", "comments": 1}, "PGU-47703": {"state": "in_progress", "assignee": "main", "comments": 1}}'
 [[ "$append_action_result" == "$expected_append_action_result" ]] || {
     echo "FAIL: migrated DB append actions failed or produced wrong state: $append_action_result" >&2
     exit 1

@@ -462,7 +462,7 @@ SELECT ticket_board.create_ticket('Cycle blocked', 'Body', 'analysis', ARRAY['PG
             assert cancelled["state"] == "cancelled", cancelled
             assert cancelled["comments"][-1]["text"] == "Covered by PGU-1.", cancelled
 
-            insert_ticket(admin_conn, "PGU-100", title="Ops implementation", state="analysis", assignee="ops", implementation="")
+            insert_ticket(admin_conn, "PGU-100", title="Ops implementation", state="backlog", assignee="ops", implementation="")
             in_progress = service_app.update_ticket("PGU-100", {"state": "in_progress"}, caller_role="ops")
             assert in_progress["state"] == "in_progress", in_progress
             assert in_progress["implementation"] == "", in_progress
@@ -547,7 +547,7 @@ WHERE id = 'PGU-100';
                 "PGU-300",
                 title="User review",
                 state="user_review",
-                assignee="director",
+                assignee="user",
                 audit_signoff=True,
                 needs_user_signoff=True,
             )
@@ -565,7 +565,7 @@ WHERE id = 'PGU-100';
                 "PGU-301",
                 title="User reopen",
                 state="user_review",
-                assignee="director",
+                assignee="user",
                 audit_signoff=True,
                 needs_user_signoff=True,
             )
@@ -580,8 +580,8 @@ WHERE id = 'PGU-100';
             deferred = service_app.update_ticket("PGU-1", {"state": "backlog"}, caller_role="director")
             assert deferred["state"] == "backlog", deferred
 
-            insert_ticket(admin_conn, "PGU-401", title="Old analysis ping", state="analysis", assignee="ops", implementation="")
-            insert_ticket(admin_conn, "PGU-402", title="Active analysis ping", state="analysis", assignee="ops", implementation="")
+            insert_ticket(admin_conn, "PGU-401", title="Old analysis ping", state="analysis", assignee="director", implementation="")
+            insert_ticket(admin_conn, "PGU-402", title="Active analysis ping", state="analysis", assignee="director", implementation="")
             insert_ticket(admin_conn, "PGU-403", title="Old audit ping", state="audit", assignee="audit")
             insert_ticket(admin_conn, "PGU-404", title="Active audit ping", state="audit", assignee="audit")
             insert_ticket(admin_conn, "PGU-407", title="Old perf implementation ping", state="in_progress", assignee="perf")
@@ -591,7 +591,7 @@ WHERE id = 'PGU-100';
             insert_ticket(admin_conn, "PGU-411", title="Unassigned backlog ping", state="backlog", assignee="unassigned")
             insert_ticket(admin_conn, "PGU-412", title="Queued-only ops implementation ping", state="in_progress", assignee="ops")
             insert_ticket(admin_conn, "PGU-413", title="Nudged-only ops implementation ping", state="in_progress", assignee="ops")
-            insert_ticket(admin_conn, "PGU-414", title="Active inspection ping", state="inspection", assignee="ops")
+            insert_ticket(admin_conn, "PGU-414", title="Active inspection ping", state="inspection", assignee="inspector")
             insert_ticket(
                 admin_conn,
                 "PGU-405",
@@ -727,7 +727,7 @@ INSERT INTO ticket_board.notification_trace (
             assert tickets_by_id["PGU-405"]["active_work_highlight"] is False, tickets_by_id["PGU-405"]
             assert tickets_by_id["PGU-1"]["active_work_highlight"] is False, tickets_by_id["PGU-1"]
 
-            insert_ticket(admin_conn, "PGU-415", title="Prompt refresh analysis ping", state="analysis", assignee="ops", implementation="")
+            insert_ticket(admin_conn, "PGU-415", title="Prompt refresh analysis ping", state="analysis", assignee="director", implementation="")
             before_send_signature = service_app.store_signature()
             before_send = service_app.get_ticket("PGU-415")
             assert before_send["active_work_highlight"] is False, before_send
@@ -737,7 +737,7 @@ INSERT INTO ticket_board.notification_trace (
 INSERT INTO ticket_board.notification_trace (
     ts, ticket_id, target_role, kind, event, ticket_state_at_event, ticket_assignee_at_event, pane_busy_determination, busy_reason
 ) VALUES (
-    clock_timestamp(), 'PGU-415', 'director', 'transition', 'send', 'analysis', 'ops', 'idle', 'idle'
+    clock_timestamp(), 'PGU-415', 'director', 'transition', 'send', 'analysis', 'director', 'idle', 'idle'
 );
 """,
             )

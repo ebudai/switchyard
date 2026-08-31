@@ -385,7 +385,7 @@ def assert_frontend_writes_send_auth_token() -> None:
 
 def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
     seed_ticket("PGU-100", title="Route", state="analysis")
-    seed_ticket("PGU-101", title="Start submit", state="analysis", assignee="ops", implementation="Ready.")
+    seed_ticket("PGU-101", title="Start submit", state="backlog", assignee="ops", implementation="Ready.")
     seed_ticket("PGU-102", title="Audit signoff", state="audit", assignee="audit", implementation="Done.")
     seed_ticket("PGU-103", title="Audit kickback", state="audit", assignee="audit", implementation="Done.")
     seed_ticket(
@@ -421,7 +421,7 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
     seed_ticket(
         "PGU-117",
         title="Needs inspection submit",
-        state="analysis",
+        state="backlog",
         assignee="ops",
         implementation="Render output attached.",
         needs_inspection=True,
@@ -430,7 +430,7 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
         "PGU-118",
         title="Inspection audit gate",
         state="inspection",
-        assignee="ops",
+        assignee="inspector",
         implementation="Rendered.",
         needs_inspection=True,
     )
@@ -438,7 +438,7 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
         "PGU-119",
         title="Inspection kickback",
         state="inspection",
-        assignee="ops",
+        assignee="inspector",
         implementation="Rendered.",
         needs_inspection=True,
         inspector_signoff=True,
@@ -447,7 +447,7 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
         "PGU-133",
         title="Inspection kickback with comment",
         state="inspection",
-        assignee="ops",
+        assignee="inspector",
         implementation="Rendered.",
         needs_inspection=True,
         inspector_signoff=True,
@@ -457,7 +457,7 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
         "PGU-135",
         title="User reopen empty",
         state="user_review",
-        assignee="director",
+        assignee="user",
         implementation="Done.",
         audit_signoff=True,
         needs_user_signoff=True,
@@ -471,18 +471,10 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
         needs_inspection=True,
     )
     seed_ticket(
-        "PGU-131",
-        title="Submit to inspection not applicable",
-        state="analysis",
-        assignee="unassigned",
-        implementation="Non-visual change.",
-        needs_inspection=False,
-    )
-    seed_ticket(
         "PGU-132",
         title="Submit to inspection wrong state",
-        state="audit",
-        assignee="ops",
+        state="backlog",
+        assignee="app",
         implementation="Already in audit.",
         commit_hash=commit_hash,
     )
@@ -520,7 +512,7 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
         "PGU-124",
         title="User review to inspection",
         state="user_review",
-        assignee="director",
+        assignee="user",
         implementation="Rendered.",
         audit_signoff=True,
         inspector_signoff=True,
@@ -532,7 +524,7 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
         "PGU-125",
         title="User review inspection guard",
         state="user_review",
-        assignee="director",
+        assignee="user",
         implementation="Rendered.",
         audit_signoff=True,
         needs_user_signoff=True,
@@ -569,7 +561,7 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
     seed_ticket(
         "PGU-141",
         title="Route to user assignee",
-        state="analysis",
+        state="backlog",
         assignee="app",
         implementation="Ready for UAT.",
         needs_user_signoff=True,
@@ -786,7 +778,7 @@ WHERE id = '{upstream_report_id}';
         {
             "title": "Director parented analysis create",
             "body": "Director-created child work.",
-            "state": "analysis",
+            "state": "backlog",
             "parent_id": source_id,
             "assignee": "ops",
         },
@@ -794,7 +786,7 @@ WHERE id = '{upstream_report_id}';
         expect=201,
     )
     parented_director_create = parented_director_create_payload["ticket"]  # type: ignore[index]
-    assert parented_director_create["state"] == "analysis", parented_director_create  # type: ignore[index]
+    assert parented_director_create["state"] == "backlog", parented_director_create  # type: ignore[index]
     assert parented_director_create["assignee"] == "ops", parented_director_create  # type: ignore[index]
     assert parented_director_create["parent_id"] == source_id, parented_director_create  # type: ignore[index]
     assert parented_director_create["comments"] == [], parented_director_create  # type: ignore[index]
@@ -809,21 +801,14 @@ WHERE id = '{upstream_report_id}';
     user_default_audit_created = user_default_audit_created_payload["ticket"]  # type: ignore[index]
     assert user_default_audit_created["needs_audit"] is True, user_default_audit_created  # type: ignore[index]
 
-    user_assigned_analysis_payload = post_json(
+    user_assigned_analysis_rejected = post_json(
         base_url,
         "/api/tickets/actions/create_ticket",
         {"title": "User assigned analysis create", "body": "User assigns implementation.", "state": "analysis", "assignee": "ops"},
         caller="user",
-        expect=201,
+        expect=400,
     )
-    user_assigned_analysis = user_assigned_analysis_payload["ticket"]  # type: ignore[index]
-    user_assigned_analysis_id = str(user_assigned_analysis["id"])  # type: ignore[index]
-    assert user_assigned_analysis["state"] == "analysis", user_assigned_analysis  # type: ignore[index]
-    assert user_assigned_analysis["assignee"] == "ops", user_assigned_analysis  # type: ignore[index]
-    assert psql(
-        admin_conn,
-        f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{user_assigned_analysis_id}';",
-    ) == "analysis:ops"
+    assert "assignee ops is not an owner of stage analysis (owners: director)" in str(user_assigned_analysis_rejected), user_assigned_analysis_rejected
 
     user_assigned_backlog_payload = post_json(
         base_url,
@@ -1029,7 +1014,7 @@ WHERE id = '{upstream_report_id}';
     blocked_file_bug = blocked_file_bug_payload["ticket"]  # type: ignore[index]
     assert blocked_file_bug["parent_id"] == source_id, blocked_file_bug  # type: ignore[index]
     assert blocked_file_bug["state"] == "analysis", blocked_file_bug  # type: ignore[index]
-    assert blocked_file_bug["assignee"] == "ops", blocked_file_bug  # type: ignore[index]
+    assert blocked_file_bug["assignee"] == "unassigned", blocked_file_bug  # type: ignore[index]
     assert blocked_file_bug["blocked_by"] == [source_id], blocked_file_bug  # type: ignore[index]
     assert blocked_file_bug["blocked_reason"] == "Waiting on source fix.", blocked_file_bug  # type: ignore[index]
     assert blocked_file_bug["comments"][0]["who"] == "ops", blocked_file_bug  # type: ignore[index]
@@ -1054,7 +1039,7 @@ WHERE id = '{upstream_report_id}';
         assigned_file_bug = assigned_file_bug_payload["ticket"]  # type: ignore[index]
         assert assigned_file_bug["parent_id"] == source_id, assigned_file_bug  # type: ignore[index]
         assert assigned_file_bug["state"] == "analysis", assigned_file_bug  # type: ignore[index]
-        assert assigned_file_bug["assignee"] == role, assigned_file_bug  # type: ignore[index]
+        assert assigned_file_bug["assignee"] == "unassigned", assigned_file_bug  # type: ignore[index]
         assert assigned_file_bug["comments"][0]["who"] == role, assigned_file_bug  # type: ignore[index]
         assert assigned_file_bug["comments"][0]["text"] == f"Filed bug against {source_id}.", assigned_file_bug  # type: ignore[index]
     audit_filed_payload = post_json(
@@ -1100,15 +1085,15 @@ WHERE id = '{upstream_report_id}';
         caller="director",
         expect=400,
     )
-    assert "in_progress tickets require an implementation-stage owner assignee" in str(invalid_implementation_assignee), invalid_implementation_assignee
+    assert "assignee director is not an owner of stage in_progress (owners: main, app, ops, perf, research)" in str(invalid_implementation_assignee), invalid_implementation_assignee
     incoherent_audit_route = post_json(
         base_url,
         "/api/tickets/PGU-136/actions/route",
         {"state": "dat", "assignee": "audit"},
         caller="director",
+        expect=400,
     )
-    assert incoherent_audit_route["ticket"]["state"] == "dat", incoherent_audit_route  # type: ignore[index]
-    assert incoherent_audit_route["ticket"]["assignee"] == "director", incoherent_audit_route  # type: ignore[index]
+    assert "assignee audit is not an owner of stage dat (owners: director)" in str(incoherent_audit_route), incoherent_audit_route
 
     uat_started = post_json(base_url, "/api/tickets/PGU-141/actions/start_work", {}, caller="app")
     assert uat_started["ticket"]["state"] == "in_progress", uat_started  # type: ignore[index]
@@ -1254,9 +1239,9 @@ WHERE id = 'PGU-141';
         "/api/tickets/PGU-127/actions/start_task",
         {"text": "Starting utility task."},
         caller="inspector",
+        expect=400,
     )
-    assert utility_started["ticket"]["state"] == "analysis", utility_started  # type: ignore[index]
-    assert utility_started["ticket"]["comments"][-1]["text"] == "Starting utility task.", utility_started  # type: ignore[index]
+    assert "assignee inspector is not an owner of stage analysis (owners: director)" in str(utility_started), utility_started
     empty_utility_complete = post_json(
         base_url,
         "/api/tickets/PGU-127/actions/complete_task",
@@ -1533,13 +1518,17 @@ WHERE id = 'PGU-141';
         {"state": "done", "assignee": "director", "suppress_notification": True},
         caller="director",
     )
-    not_applicable_started = post_json(
-        base_url,
-        "/api/tickets/PGU-131/actions/route",
-        {"state": "in_progress", "assignee": "app"},
-        caller="director",
+    seed_postgres_ticket(
+        admin_conn,
+        "PGU-131",
+        title="Submit to inspection not applicable",
+        state="backlog",
+        assignee="app",
+        implementation="Non-visual change.",
+        needs_inspection=False,
     )
-    assert not_applicable_started["ticket"]["state"] == "in_progress", not_applicable_started  # type: ignore[index]
+    psql(admin_conn, "BEGIN; SET LOCAL ticket_board.force_move = 'on'; UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-131'; COMMIT;")
+    assert psql(admin_conn, "SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = 'PGU-131';") == "in_progress:app"
     not_applicable_inspection = post_json(
         base_url,
         "/api/tickets/PGU-131/actions/submit_to_inspection",
@@ -1552,10 +1541,10 @@ WHERE id = 'PGU-141';
         base_url,
         "/api/tickets/PGU-132/actions/submit_to_inspection",
         {},
-        caller="ops",
+        caller="app",
         expect=400,
     )
-    assert "submit_to_inspection requires an in_progress ticket" in str(wrong_state_inspection), wrong_state_inspection
+    assert "submit_to_inspection requires needs_inspection=true" in str(wrong_state_inspection), wrong_state_inspection
 
     inspector_cannot_audit = post_json(base_url, "/api/tickets/PGU-102/actions/audit_sign_off", {}, caller="inspector", expect=403)
     assert "inspector cannot call audit_sign_off" in str(inspector_cannot_audit), inspector_cannot_audit
@@ -1573,11 +1562,17 @@ WHERE id = 'PGU-141';
     inspection_skip = post_json(
         base_url,
         "/api/tickets/PGU-118/actions/route",
-        {"state": "audit", "assignee": "ops"},
+        {"state": "audit", "assignee": "audit"},
         caller="director",
         expect=400,
     )
     assert "inspector_signoff must be true" in str(inspection_skip), inspection_skip
+    post_json(
+        base_url,
+        "/api/tickets/PGU-118/actions/force_move",
+        {"state": "done", "assignee": "director", "suppress_notification": True},
+        caller="director",
+    )
     inspection_signed = post_json(base_url, "/api/tickets/PGU-117/actions/inspector_sign_off", {}, caller="inspector")
     assert inspection_signed["ticket"]["state"] == "audit", inspection_signed  # type: ignore[index]
     assert inspection_signed["ticket"]["assignee"] == "audit", inspection_signed  # type: ignore[index]
@@ -1600,10 +1595,10 @@ WHERE id = 'PGU-141';
     empty_inspector_kick = post_json(
         base_url,
         "/api/tickets/PGU-119/actions/inspector_kick_back",
-        {"recommendations": ""},
+        {"recommendations": "", "target_assignee": "app"},
         caller="inspector",
     )
-    assert empty_inspector_kick["ticket"]["state"] == "in_progress", empty_inspector_kick  # type: ignore[index]
+    assert empty_inspector_kick["ticket"]["state"] == "backlog", empty_inspector_kick  # type: ignore[index]
     assert empty_inspector_kick["ticket"]["inspector_signoff"] is False, empty_inspector_kick  # type: ignore[index]
     assert empty_inspector_kick["ticket"]["comments"] == [], empty_inspector_kick  # type: ignore[index]
     post_json(
@@ -1615,21 +1610,21 @@ WHERE id = 'PGU-141';
     inspector_kicked = post_json(
         base_url,
         "/api/tickets/PGU-133/actions/inspector_kick_back",
-        {"recommendations": "Frame has visible banding."},
+        {"recommendations": "Frame has visible banding.", "target_assignee": "app"},
         caller="inspector",
     )
-    assert inspector_kicked["ticket"]["state"] == "in_progress", inspector_kicked  # type: ignore[index]
-    assert inspector_kicked["ticket"]["assignee"] == "ops", inspector_kicked  # type: ignore[index]
+    assert inspector_kicked["ticket"]["state"] == "backlog", inspector_kicked  # type: ignore[index]
+    assert inspector_kicked["ticket"]["assignee"] == "app", inspector_kicked  # type: ignore[index]
     assert inspector_kicked["ticket"]["inspector_signoff"] is False, inspector_kicked  # type: ignore[index]
     assert inspector_kicked["ticket"]["comments"][-1]["who"] == "inspector", inspector_kicked  # type: ignore[index]
     assert "Frame has visible banding." in inspector_kicked["ticket"]["comments"][-1]["text"], inspector_kicked  # type: ignore[index]
-    inspector_restarted = post_json(base_url, "/api/tickets/PGU-133/actions/start_work", {}, caller="ops")
-    assert inspector_restarted["ticket"]["state"] == "in_progress", inspector_restarted  # type: ignore[index]
+    psql(admin_conn, "BEGIN; SET LOCAL ticket_board.force_move = 'on'; UPDATE ticket_board.tickets SET state = 'in_progress', assignee = 'app' WHERE id = 'PGU-133'; COMMIT;")
+    assert psql(admin_conn, "SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = 'PGU-133';") == "in_progress:app"
     inspector_resubmitted = post_json(
         base_url,
         "/api/tickets/PGU-133/actions/submit_to_audit",
         {"commit_hash": commit_hash},
-        caller="ops",
+        caller="app",
     )
     assert inspector_resubmitted["ticket"]["state"] == "inspection", inspector_resubmitted  # type: ignore[index]
     assert inspector_resubmitted["ticket"]["assignee"] == "inspector", inspector_resubmitted  # type: ignore[index]
@@ -1679,7 +1674,7 @@ WHERE id = 'PGU-141';
         {"reason": "Needs another pass."},
         caller="audit",
     )
-    assert audit_kicked["ticket"]["state"] == "in_progress", audit_kicked  # type: ignore[index]
+    assert audit_kicked["ticket"]["state"] == "backlog", audit_kicked  # type: ignore[index]
     assert audit_kicked["ticket"]["assignee"] == "ops", audit_kicked  # type: ignore[index]
     assert audit_kicked["ticket"]["comments"][-1]["who"] == "audit", audit_kicked  # type: ignore[index]
     post_json(
@@ -1694,7 +1689,7 @@ WHERE id = 'PGU-141';
         {},
         caller="audit",
     )
-    assert empty_audit_kicked["ticket"]["state"] == "in_progress", empty_audit_kicked  # type: ignore[index]
+    assert empty_audit_kicked["ticket"]["state"] == "backlog", empty_audit_kicked  # type: ignore[index]
     assert empty_audit_kicked["ticket"]["comments"] == [], empty_audit_kicked  # type: ignore[index]
 
     eric_signed = post_json(base_url, "/api/tickets/PGU-104/actions/user_sign_off", {"text": "User approves."}, caller="user")

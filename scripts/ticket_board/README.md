@@ -186,6 +186,10 @@ Notes:
 - `dat` is Director Acceptance Testing, a director-owned gate for `needs_user_signoff` tickets after audit and before UAT
 - `draft` is an opt-in pre-triage staging state for director/User prep; it stays unassigned and does not notify until released to `analysis`
 - `backlog` is for deferred or parked tickets; `analysis` is for active triage/spec work before a ticket is revived into Implementation (`in_progress`)
+- For stages with non-empty `workflow_stages.owner_roles`, the stored assignee
+  must be one of those owners or `unassigned`; mismatches are rejected with an
+  error naming the stage and legal owners. Empty-owner stages such as `backlog`,
+  `done`, and `cancelled` remain unconstrained.
 - `blocked_by` is a list of ticket IDs the ticket is waiting on; `blockers` carries the same IDs with a persistent `resolved` flag, and unresolved blockers prevent forward promotion until the referenced blocker reaches `done` or `cancelled`
 - `implementation` is an optional director-authored implementation package/spec; ticket body/comments can carry the spec, and only assignee must be set before entering Implementation (`in_progress`)
 - `in_progress` is displayed as Implementation and is limited to one active ticket per implementer; extra implementer work is auto-queued as assigned `backlog` with `parked: false`
@@ -224,6 +228,12 @@ Notes:
 - New transitions into `done` require either a verified `commit_hash` or `commit_exempt: true`
 - `draft -> analysis` must use the `release_draft` operation and is restricted to director/User plus configured draft-owner roles
 - `analysis -> in_progress` is the default handoff from triage/spec to Implementation
+- `file_bug` always creates in `analysis`; if the requested assignee is not an
+  owner of `analysis`, the ticket is created as `unassigned` so director triage
+  still sees it.
+- `start_task` is only coherent for backlog tickets whose assignee can own
+  `analysis` or is `unassigned`; other assignees are rejected by the stage-owner
+  invariant instead of silently remaining in `backlog`.
 - Any state can move to `backlog` to defer work; backlog tickets can be revived to `analysis`
 - The default UAT-bound review path is `in_progress -> audit -> DAT (internal state: dat) -> UAT (internal state: user_review, assignee=user) -> director_review -> done`; code-only tickets keep `in_progress -> audit -> director_review -> done`
 - Implementer focus is reserved from `in_progress` through agent/director review (`inspection`, `audit`, DAT, and director review). UAT tickets assigned to `user` do not hold an implementer reservation. Finishing/cancelling/parking a reserved ticket auto-activates that implementer's oldest unblocked queued backlog ticket

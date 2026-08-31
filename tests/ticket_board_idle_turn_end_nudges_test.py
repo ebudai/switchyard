@@ -90,19 +90,19 @@ INSERT INTO ticket_board.tickets (
     jsonb_build_object('id', 'PGU-3544', 'title', 'Active implementation reminder', 'body', '', 'state', 'in_progress', 'assignee', 'ops', 'implementation', 'Working.', 'comments', '[]'::jsonb, 'created', '2026-07-13T00:00:00+00:00', 'updated', '2026-07-13T00:00:00+00:00')
 ),
 (
-    'PGU-3542', 'Idle analysis reminder', '', 'analysis', 'app', '', false,
+    'PGU-3542', 'Idle analysis reminder', '', 'analysis', 'director', '', false,
     '2026-07-13T00:00:00+00:00', '2026-07-13T00:00:00+00:00',
-    jsonb_build_object('id', 'PGU-3542', 'title', 'Idle analysis reminder', 'body', '', 'state', 'analysis', 'assignee', 'app', 'implementation', '', 'comments', '[]'::jsonb, 'created', '2026-07-13T00:00:00+00:00', 'updated', '2026-07-13T00:00:00+00:00')
+    jsonb_build_object('id', 'PGU-3542', 'title', 'Idle analysis reminder', 'body', '', 'state', 'analysis', 'assignee', 'director', 'implementation', '', 'comments', '[]'::jsonb, 'created', '2026-07-13T00:00:00+00:00', 'updated', '2026-07-13T00:00:00+00:00')
 ),
 (
-    'PGU-3543', 'Idle audit reminder', '', 'audit', 'perf', 'Audit.', false,
+    'PGU-3543', 'Idle audit reminder', '', 'audit', 'audit', 'Audit.', false,
     '2026-07-13T00:00:00+00:00', '2026-07-13T00:00:00+00:00',
-    jsonb_build_object('id', 'PGU-3543', 'title', 'Idle audit reminder', 'body', '', 'state', 'audit', 'assignee', 'perf', 'implementation', 'Audit.', 'comments', '[]'::jsonb, 'created', '2026-07-13T00:00:00+00:00', 'updated', '2026-07-13T00:00:00+00:00')
+    jsonb_build_object('id', 'PGU-3543', 'title', 'Idle audit reminder', 'body', '', 'state', 'audit', 'assignee', 'audit', 'implementation', 'Audit.', 'comments', '[]'::jsonb, 'created', '2026-07-13T00:00:00+00:00', 'updated', '2026-07-13T00:00:00+00:00')
 ),
 (
-    'PGU-3545', 'Idle inspection reminder', '', 'inspection', 'main', 'Inspect.', false,
+    'PGU-3545', 'Idle inspection reminder', '', 'inspection', 'inspector', 'Inspect.', false,
     '2026-07-13T00:00:00+00:00', '2026-07-13T00:00:00+00:00',
-    jsonb_build_object('id', 'PGU-3545', 'title', 'Idle inspection reminder', 'body', '', 'state', 'inspection', 'assignee', 'main', 'implementation', 'Inspect.', 'comments', '[]'::jsonb, 'created', '2026-07-13T00:00:00+00:00', 'updated', '2026-07-13T00:00:00+00:00')
+    jsonb_build_object('id', 'PGU-3545', 'title', 'Idle inspection reminder', 'body', '', 'state', 'inspection', 'assignee', 'inspector', 'implementation', 'Inspect.', 'comments', '[]'::jsonb, 'created', '2026-07-13T00:00:00+00:00', 'updated', '2026-07-13T00:00:00+00:00')
 ),
 (
     'PGU-3546', 'No active owner reminder', '', 'backlog', 'research', 'Parked.', false,

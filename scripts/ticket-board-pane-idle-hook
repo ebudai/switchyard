@@ -398,6 +398,34 @@ def _resume_context_for_ticket(ticket: dict[str, object], *, board_url: str, sou
     )
 
 
+def _ticket_text_field(ticket: dict[str, object], name: str) -> str:
+    return str(ticket.get(name, "") or "").strip()
+
+
+def _active_work_full_context_for_ticket(ticket: dict[str, object], *, board_url: str) -> str:
+    ticket_id = str(ticket.get("id", "")).strip().upper()
+    title = _ticket_text_field(ticket, "title")
+    ticket_url = f"{_board_root_url(board_url)}/api/tickets/{ticket_id}"
+    lines = [
+        f"You have ACTIVE work: {ticket_id}{f' -- {title}' if title else ''} (in_progress, assigned to you).",
+        f"Read the full ticket before acting: curl {ticket_url} .",
+        "Do not inherit assumptions, scope, or implementation context from any previous ticket.",
+    ]
+    body = _ticket_text_field(ticket, "body")
+    if body:
+        lines.extend(["", "Ticket body:", body])
+    implementation = _ticket_text_field(ticket, "implementation")
+    if implementation:
+        lines.extend(["", "Implementation notes:", implementation])
+    audit_prompt = _ticket_text_field(ticket, "audit_prompt")
+    if audit_prompt:
+        lines.extend(["", "Acceptance/audit constraints:", audit_prompt])
+    blocked_reason = _ticket_text_field(ticket, "blocked_reason")
+    if blocked_reason:
+        lines.extend(["", "Blocked reason:", blocked_reason])
+    return "\n".join(lines)
+
+
 def _session_start_active_work_opening(source: str) -> str:
     if source == "clear":
         return "Your session was just cleared."
@@ -432,6 +460,21 @@ def _session_start_additional_context_output(
             "additionalContext": _resume_context_for_ticket(ticket, board_url=board_url, source=session_start_source),
         }
     }
+
+
+def _hermes_pre_llm_context_output(
+    *,
+    target: str,
+    environ: dict[str, str],
+) -> dict[str, object] | None:
+    role = _role_for_target(target, environ)
+    if not role:
+        return None
+    board_url = _default_board_url(environ)
+    ticket = _active_in_progress_ticket_for_role(role, board_url=board_url)
+    if ticket is None:
+        return None
+    return {"context": _active_work_full_context_for_ticket(ticket, board_url=board_url)}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -485,6 +528,10 @@ def main(argv: list[str] | None = None) -> int:
         _write_session(session_dir, target, session_id, source=args.source, payload=payload)
     if args.state == "idle" and _is_session_start_hook_source(args.source):
         output = _session_start_additional_context_output(target=target, payload=payload, environ=os.environ)
+        if output is not None:
+            print(json.dumps(output, sort_keys=True))
+    if args.state == "busy" and args.source == "hermes.pre_llm_call":
+        output = _hermes_pre_llm_context_output(target=target, environ=os.environ)
         if output is not None:
             print(json.dumps(output, sort_keys=True))
     return 0

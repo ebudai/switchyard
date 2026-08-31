@@ -168,7 +168,7 @@ class FakeRunner:
                 target = token.split("=", 1)[1]
             elif token.startswith("PGU_PANE_TARGET=") and not target:
                 target = token.split("=", 1)[1]
-            elif Path(token).name in {"agy", "claude", "codex"}:
+            elif Path(token).name in {"agy", "claude", "codex", "hermes"}:
                 command = Path(token).name
                 break
         return target, command
@@ -4650,11 +4650,10 @@ def test_project_config_accepts_hermes_runtime_defaults() -> None:
     tail = _command_tail(command)
     assert role.model_arg == "-m"
     assert (role.resume_mode, role.resume_flag) == ("flag", "--resume")
-    assert f"TICKET_BOARD_PANE_SESSION_ID={session_id}" in entries
+    assert not any(entry.startswith("TICKET_BOARD_PANE_SESSION_ID=") for entry in entries)
+    assert not any(entry.startswith("PGU_PANE_SESSION_ID=") for entry in entries)
     assert tail == [
         "/home/eric/.local/bin/hermes",
-        "--resume",
-        session_id,
         "-m",
         "zai/glm-5.3",
         "--reasoning",
@@ -9611,6 +9610,72 @@ def test_reload_uses_recorded_resume_uuid_when_recreating_session() -> None:
         assert ["tmux", "set-option", "-t", "pgu-ops", "mouse", "on"] in runner.calls
         assert ["tmux", "set-option", "-t", "pgu-ops", "history-limit", "200000"] in runner.calls
         assert ["tmux", "attach", "-t", "pgu-ops"] in runner.calls
+
+
+def test_hermes_reload_supersedes_recorded_session_and_starts_fresh() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-hermes-fresh.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "session_dir": str(tmp_path / "sessions"),
+                    "roles": [
+                        {
+                            "role": "bulk",
+                            "slot": 0,
+                            "target": "porter-bulk:0.0",
+                            "tmux_session": "porter-bulk",
+                            "cli": ["hermes"],
+                            "model": "zai/glm-5.3",
+                            "yolo": True,
+                        }
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+        role = config.roles[0]
+        session_dir = config.session_dir
+        session_dir.mkdir()
+        session_path = session_dir / session_file_name(role.target)
+        session_path.write_text(
+            json.dumps({"target": role.target, "session_id": "previous-hermes-ticket-session"}) + "\n",
+            encoding="utf-8",
+        )
+        runner = FakeRunner(existing_sessions={"porter-bulk"}, current_commands={"porter-bulk:0.0": "hermes"})
+        stderr = StringIO()
+
+        with redirect_stderr(stderr):
+            result = run_role_pane(
+                role,
+                mode="reload",
+                session_dir=session_dir,
+                pane_state_dir=tmp_path / "pane-state",
+                runner=runner,
+            )
+
+        assert result == 0
+        assert not session_path.exists()
+        sidecar_path = session_dir / f"{session_file_name(role.target)}.superseded"
+        sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        assert sidecar["session_id"] == "previous-hermes-ticket-session"
+        assert "uses hermes, which has no dependable reset" in stderr.getvalue()
+        new_session = next(call for call in runner.calls if call[:2] == ["tmux", "new-session"])
+        assert "--resume" not in new_session[-1]
+        assert "previous-hermes-ticket-session" not in new_session[-1]
+        assert "TICKET_BOARD_PANE_SESSION_ID=previous-hermes-ticket-session" not in new_session[-1]
 
 
 def test_reload_clears_unverified_resume_marker_after_verified_resume() -> None:

@@ -81,7 +81,54 @@ The Hermes hook tester emits `on_session_start` payloads without a
 ```
 
 The interactive chat probe showed `/clear` opens the fresh-session flow, but did
-not capture a clear-source hook from chat. The hook code now treats
-`hermes.on_session_start` as a SessionStart-equivalent hook label, so Hermes is
-covered if it emits `source: clear`; current Hermes 0.15.2 clear behavior is not
-empirically covered.
+not capture a clear-source hook from chat. Hermes also does not honor the
+Claude/Codex `hookSpecificOutput.additionalContext` shape, so the
+`hermes.on_session_start` label is only useful for idle/session recording. It is
+not counted as active-work injection support.
+
+Round 2 uses two Hermes-specific mechanisms:
+
+- Identity/body/scope/constraints: `hermes.pre_llm_call` emits a flat
+  `{"context": "..."}` payload. Hermes 0.15.2 consumes that shape before each
+  model call.
+- No previous-ticket inheritance: Hermes has no dependable reset flag, so the
+  launcher starts Hermes fresh for each ticket. The old session record is moved
+  to the `.superseded` sidecar before the next fresh session starts.
+
+End-to-end active-work and no-inheritance proof:
+`/home/agent/pgu-816-probes/hermes-round2-e2e-1788202840-527198` used a scratch
+board and two real Hermes invocations inside isolated tmux panes. First, the
+worker received old-ticket context:
+
+```text
+OLD:PGU-815; OLD_BODY:OLD-BODY-PGU-815; OLD_SCOPE:OLD-SCOPE-PGU-815; OLD_CONSTRAINT:OLD-CONSTRAINT-PGU-815
+```
+
+The launcher clear path then superseded the old session record:
+
+```text
+old=20260831_150040_e15c46
+superseded=20260831_150040_e15c46
+new=20260831_150055_33c760
+```
+
+The next fresh Hermes pane received the next ticket's injected context and did
+not report any prior-ticket context:
+
+```text
+CURRENT:PGU-816; BODY:NEXT-BODY-PGU-816; SCOPE:NEXT-SCOPE-PGU-816; CONSTRAINT:NEXT-CONSTRAINT-PGU-816
+PREVIOUS:NONE
+```
+
+The wrapper log also captured the exact flat hook contexts emitted to Hermes:
+
+```text
+You have ACTIVE work: PGU-815 -- Old Hermes ticket (in_progress, assigned to you).
+  OLD-BODY-PGU-815
+  OLD-SCOPE-PGU-815
+  OLD-CONSTRAINT-PGU-815
+You have ACTIVE work: PGU-816 -- Next Hermes ticket (in_progress, assigned to you).
+  NEXT-BODY-PGU-816
+  NEXT-SCOPE-PGU-816
+  NEXT-CONSTRAINT-PGU-816
+```

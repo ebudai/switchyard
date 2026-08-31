@@ -2067,6 +2067,11 @@ def _uses_codex_resume(role: RoleConfig) -> bool:
     return cli_name == "codex" and role.resume_mode == "subcommand" and role.resume_subcommand == "resume"
 
 
+def _uses_fresh_session_per_ticket(role: RoleConfig) -> bool:
+    cli_name = _command_name(role.cli[0]) if role.cli else ""
+    return cli_name == "hermes"
+
+
 def agy_conversation_store_exists(session_id: str, *, root: Path | None = None) -> bool:
     if not session_id:
         return False
@@ -2182,6 +2187,8 @@ def cli_command_for_role(
     bin_user: str = "",
 ) -> list[str]:
     session_id = session_id_for_role(role, session_dir) if resume else ""
+    if session_id and _uses_fresh_session_per_ticket(role):
+        session_id = ""
     command = [*role.cli, *_resume_args_for_role(role, session_id)]
     if role.model:
         command.extend([role.model_arg, role.model])
@@ -3611,6 +3618,13 @@ def _start_role_session(
     if prefer_resume and not session_id:
         print(
             f"team-launcher: no recorded session id for {role.role}; starting fresh session",
+            file=sys.stderr,
+        )
+        prefer_resume = False
+    if prefer_resume and _uses_fresh_session_per_ticket(role):
+        print(
+            f"team-launcher: {role.role} uses hermes, which has no dependable reset; "
+            "starting a fresh session instead of inheriting the previous ticket context",
             file=sys.stderr,
         )
         prefer_resume = False

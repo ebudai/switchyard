@@ -945,6 +945,85 @@ def test_session_start_active_work_injection_covers_supported_hook_sources() -> 
         assert "ACTIVE work: PGU-816 -- Clear active work" in context
 
 
+def test_hermes_pre_llm_call_emits_flat_active_work_context() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        state_dir = Path(tmp) / "state"
+        session_dir = Path(tmp) / "sessions"
+        with _board_with_tickets(
+            [
+                {
+                    "id": "PGU-816",
+                    "title": "Clear active work",
+                    "body": "Preserve identity, body, scope, and constraints for the next ticket.",
+                    "implementation": "Use Hermes pre_llm_call context injection.",
+                    "audit_prompt": "Prove the worker received the next ticket.",
+                    "state": "in_progress",
+                    "assignee": "ops",
+                }
+            ]
+        ) as board_url:
+            proc = subprocess.run(
+                [
+                    str(ROOT / "scripts" / HOOK_NAME),
+                    "busy",
+                    "--target",
+                    "pgu-ops:0.0",
+                    "--source",
+                    "hermes.pre_llm_call",
+                    "--state-dir",
+                    str(state_dir),
+                    "--session-dir",
+                    str(session_dir),
+                ],
+                input=json.dumps({"hook_event_name": "pre_llm_call", "session_id": "hermes-session-1"}),
+                text=True,
+                capture_output=True,
+                check=True,
+                env=_hook_env(TICKET_BOARD_URL=board_url),
+            )
+
+    output = json.loads(proc.stdout)
+    context = output["context"]
+    assert set(output) == {"context"}
+    assert "hookSpecificOutput" not in output
+    assert "ACTIVE work: PGU-816 -- Clear active work" in context
+    assert "Preserve identity, body, scope, and constraints for the next ticket." in context
+    assert "Use Hermes pre_llm_call context injection." in context
+    assert "Prove the worker received the next ticket." in context
+    assert "Do not inherit assumptions, scope, or implementation context from any previous ticket." in context
+    assert f"curl {board_url}/api/tickets/PGU-816" in context
+
+
+def test_non_hermes_pre_invocation_does_not_emit_context() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        state_dir = Path(tmp) / "state"
+        session_dir = Path(tmp) / "sessions"
+        with _board_with_tickets(
+            [{"id": "PGU-816", "title": "Clear active work", "state": "in_progress", "assignee": "ops"}]
+        ) as board_url:
+            proc = subprocess.run(
+                [
+                    str(ROOT / "scripts" / HOOK_NAME),
+                    "busy",
+                    "--target",
+                    "pgu-ops:0.0",
+                    "--source",
+                    "gemini.PreInvocation",
+                    "--state-dir",
+                    str(state_dir),
+                    "--session-dir",
+                    str(session_dir),
+                ],
+                input=json.dumps({"hook_event_name": "PreInvocation", "conversationId": "agy-session-1"}),
+                text=True,
+                capture_output=True,
+                check=True,
+                env=_hook_env(TICKET_BOARD_URL=board_url),
+            )
+
+    assert proc.stdout == ""
+
+
 def test_session_start_hook_defaults_to_xdg_state_home_session_dir() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
         home = Path(tmp) / "home"

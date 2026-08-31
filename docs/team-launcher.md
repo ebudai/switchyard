@@ -523,6 +523,14 @@ runnable shape the launcher accepts. Agy failures include suggestions from
 `agy models` when that catalogue is available; Claude, Codex, and Hermes report
 that no model list is available and use only the one-shot validation result.
 
+Hermes panes intentionally start a fresh session instead of using a recorded
+`--resume` id. Hermes has no dependable clear/reset operation, and resuming a
+worker after a completed ticket can carry old ticket context into the next one.
+When the launcher is asked to resume or reload Hermes, it moves the old session
+record to the `.superseded` sidecar and launches without `--resume` or
+`TICKET_BOARD_PANE_SESSION_ID`; the active ticket is supplied on the next
+`hermes.pre_llm_call` hook as flat `{"context": "..."}`.
+
 The same provision path consumes generated and hand-written artifacts:
 
 ```bash

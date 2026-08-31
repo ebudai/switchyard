@@ -284,15 +284,20 @@ target from ambient tmux state. The required state transitions are:
 - Hermes: hook config is stored in `~/.hermes/config.yaml` and emits
   `hermes.*` source labels. Hermes has no separate runtime status timer that
   the listener parses today; it is intentionally hook-state-only.
-  `pre_llm_call` writes `busy`; `post_llm_call`, `on_session_end`, and
-  `on_session_finalize` are turn-end idle sources. `on_session_start` only
-  seeds initial idle and the resume id, so it still needs the normal
-  pane-content corroboration before delivery.
+  `pre_llm_call` writes `busy` and is also the Hermes active-work context
+  injection point: the hook emits flat `{"context": "..."}` with the current
+  `in_progress` ticket identity, body, implementation scope, and audit
+  constraints. `post_llm_call`, `on_session_end`, and `on_session_finalize` are
+  turn-end idle sources. `on_session_start` only seeds initial idle and the
+  resume id, so it still needs the normal pane-content corroboration before
+  delivery and does not provide active-work context for Hermes.
 
-On `SessionStart`, the hook also injects active-work context when the CLI
-reports a lifecycle source of `compact`, `resume`, or `clear` and the pane's
-role already owns an `in_progress` ticket. Each source gets distinct opening
-wording so a cleared pane is not told it resumed or compacted.
+On Claude/Codex-style `SessionStart`, the hook also injects active-work context
+when the CLI reports a lifecycle source of `compact`, `resume`, or `clear` and
+the pane's role already owns an `in_progress` ticket. Each source gets distinct
+opening wording so a cleared pane is not told it resumed or compacted. Hermes
+does not honor this `hookSpecificOutput.additionalContext` shape; use its
+`pre_llm_call` flat context path instead.
 
 Session ids are stored under `$TICKET_BOARD_PANE_SESSION_DIR` (default:
 `~/.local/state/pgu-ticket-board/pane-sessions`) using the same per-pane file

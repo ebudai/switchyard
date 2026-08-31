@@ -11,6 +11,8 @@ a stale 26-ticket inventory.
 - HTTP port: `23326`.
 - Port rule: `18770 + (blake2s(slug, digest_size=2) mod 10000)`.
 - Verified reference ports: `mefp=26623`, `otto=20740`, `syrd=23326`.
+  PGU's `8770` is a hardcoded compatibility special case, not an output of
+  this formula.
 - Ticket prefix: `SYRD`.
 - PGU remains the historical archive. Closed PGU tickets stay where they are so
   existing `PGU-NNN` references in comments, bodies, audits, and handoff notes
@@ -85,6 +87,13 @@ For `syrd`, set neutral names:
 
 Checked exceptions:
 
+- `PGU_TICKET_BOARD_BUILD_ID` has no neutral equivalent today. It is
+  load-bearing: the server reads it and emits `window.PGU_TICKET_BOARD_BUILD_ID`
+  for stale-build detection in the client. Until this is renamed, a `syrd` board
+  will still serve a PGU-named browser global for its build identity.
+- `PGU_TICKET_BOARD_REFRESH_IDLE_MS` has no neutral equivalent today. It is also
+  load-bearing: the client reads `window.PGU_TICKET_BOARD_REFRESH_IDLE_MS` to
+  decide when an idle browser may auto-refresh after a build changes.
 - `PGU_TICKET_BOARD_TICKET_PREFIX` has a neutral equivalent:
   `TICKET_BOARD_TICKET_PREFIX`. It is only a legacy fallback in the app; the
   provisioner and launcher emit the neutral variable.
@@ -101,13 +110,22 @@ Checked exceptions:
   `PGU_HOST_WAYLAND_DISPLAY`, `PGU_UPDATE_HOOK_*`, and
   `PGU_INSPECTOR_GIT_GUARD_*` also have neutral forms in the current scripts.
   They are compatibility debt, not a reason to introduce `SYRD_*` variables.
+- `PGU_MERGE_GATE_TRACE_ROOT` and `PGU_MERGE_GATE_TRACE_DIR` have no neutral
+  equivalents in `merge-gate-helper`. They are workflow support diagnostics,
+  not tenant identity or normal board runtime configuration.
+- `PGU_WAYLAND_SERVICE_NAME`, `PGU_WAYLAND_GUI_USER`, and
+  `PGU_WAYLAND_AGENT_USER` have no neutral equivalents in the old Wayland
+  clipboard helper. They are PGU desktop-helper vocabulary, not tenant-critical
+  Switchyard board configuration.
 - Renderer and PGU app diagnostic variables are out of scope for a Switchyard
   tenant and should not be carried into `syrd`.
 
 Conclusion: `syrd` should use the existing neutral `TICKET_BOARD_*`,
 `TEAM_LAUNCHER_*`, `HOST_WAYLAND_DISPLAY`, `UPDATE_HOOK_*`, and
-`ALLOW_MAIN_PUSH` names. No tenant-critical PGU-prefixed variable appears to
-need a new syrd-specific replacement.
+`ALLOW_MAIN_PUSH` names. No `SYRD_*` vocabulary is needed, but the two
+load-bearing build-refresh globals should get neutral `TICKET_BOARD_*` names in
+a small follow-up so the extracted Switchyard UI no longer serves PGU-named
+globals.
 
 ## In-Flight Work at Cutover
 
@@ -192,4 +210,3 @@ Proposed contents:
 
 These files should be part of the handoff because they determine how the new
 team behaves before any director has time to restate the rules verbally.
-

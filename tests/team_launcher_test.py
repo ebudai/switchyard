@@ -5864,7 +5864,9 @@ def test_start_creates_missing_session_once_then_attaches() -> None:
     assert " resume " not in f" {runner.calls[1][-1]} "
     assert runner.calls[2] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_pid}"]
     assert runner.calls[3] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_current_command}"]
-    assert runner.calls[4] == ["tmux", "attach", "-t", "pgu-ops"]
+    assert ["tmux", "set-option", "-t", "pgu-ops", "mouse", "on"] in runner.calls
+    assert ["tmux", "set-option", "-t", "pgu-ops", "history-limit", "200000"] in runner.calls
+    assert ["tmux", "attach", "-t", "pgu-ops"] in runner.calls
 
 
 def test_tmux_new_session_names_window_for_every_role() -> None:
@@ -7342,22 +7344,32 @@ def test_viewer_layout_starts_role_sessions_and_additive_viewer() -> None:
         config = load_project_config("porter", config_path)
         runner = FakeRunner()
         messages: list[str] = []
-
-        assert (
-            launch_project(
-                config,
-                config_path=config_path,
-                mode="start",
-                script_path=ROOT / "scripts" / "team-launcher",
-                runner=runner,
-                layout_output=tmp_path / "layout.json",
-                pane_state_dir=tmp_path / "pane-state",
-                layout_mode="viewer",
-                layout_environ={"XDG_CURRENT_DESKTOP": "KDE"},
-                print_func=messages.append,
+        owner_home = tmp_path / "owner-home"
+        owner_home.mkdir()
+        original_home = os.environ.get("HOME")
+        try:
+            os.environ["HOME"] = str(owner_home)
+            assert (
+                launch_project(
+                    config,
+                    config_path=config_path,
+                    mode="start",
+                    script_path=ROOT / "scripts" / "team-launcher",
+                    runner=runner,
+                    layout_output=tmp_path / "layout.json",
+                    pane_state_dir=tmp_path / "pane-state",
+                    layout_mode="viewer",
+                    layout_environ={"XDG_CURRENT_DESKTOP": "KDE"},
+                    print_func=messages.append,
+                )
+                == 0
             )
-            == 0
-        )
+        finally:
+            if original_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = original_home
+        assert not (owner_home / ".tmux.conf").exists()
 
     role_sessions = ["porter-designer", "porter-director", "porter-audit", "porter-ops", "porter-app", "porter-main"]
     role_new_sessions = [
@@ -7374,8 +7386,12 @@ def test_viewer_layout_starts_role_sessions_and_additive_viewer() -> None:
     viewer_splits = [call for call in runner.calls if call[:2] == ["tmux", "split-window"]]
     assert len(viewer_splits) == 5
     for session in role_sessions:
+        assert ["tmux", "set-option", "-t", session, "mouse", "on"] in runner.calls
+        assert ["tmux", "set-option", "-t", session, "history-limit", "200000"] in runner.calls
         assert ["tmux", "set-option", "-t", session, "status", "off"] in runner.calls
         assert ["tmux", "set-window-option", "-t", f"{session}:0", "pane-border-status", "off"] in runner.calls
+    assert ["tmux", "set-option", "-t", "viewer", "mouse", "on"] in runner.calls
+    assert ["tmux", "set-option", "-t", "viewer", "history-limit", "200000"] in runner.calls
     assert ["tmux", "set-option", "-t", "viewer", "status", "on"] in runner.calls
     assert ["tmux", "set-option", "-t", "viewer", "prefix", "C-a"] in runner.calls
     assert ["tmux", "set-window-option", "-t", "viewer:0", "pane-border-status", "top"] in runner.calls
@@ -9412,7 +9428,9 @@ def test_reload_uses_recorded_resume_uuid_when_recreating_session() -> None:
         assert "--last" not in runner.calls[4][-1]
         assert runner.calls[5] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_pid}"]
         assert runner.calls[6] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_current_command}"]
-        assert runner.calls[7] == ["tmux", "attach", "-t", "pgu-ops"]
+        assert ["tmux", "set-option", "-t", "pgu-ops", "mouse", "on"] in runner.calls
+        assert ["tmux", "set-option", "-t", "pgu-ops", "history-limit", "200000"] in runner.calls
+        assert ["tmux", "attach", "-t", "pgu-ops"] in runner.calls
 
 
 def test_reload_clears_unverified_resume_marker_after_verified_resume() -> None:

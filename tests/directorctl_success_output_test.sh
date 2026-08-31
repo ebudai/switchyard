@@ -8,6 +8,7 @@ trap 'rm -rf "$TMPDIR_T"' EXIT
 TMUX_LOG="$TMPDIR_T/tmux.log"
 CAPTURE_MODE="$TMPDIR_T/capture-mode"
 CAPTURE_COUNT="$TMPDIR_T/capture-count"
+PANE_IN_MODE="$TMPDIR_T/pane-in-mode"
 CANONICAL_DIRECTORCTL="$TMPDIR_T/bin/directorctl"
 : >"$TMUX_LOG"
 
@@ -17,9 +18,18 @@ set -euo pipefail
 LOG_PATH="${TMUX_LOG_PATH:?}"
 MODE_PATH="${TMUX_CAPTURE_MODE_PATH:?}"
 COUNT_PATH="${TMUX_CAPTURE_COUNT_PATH:?}"
+PANE_IN_MODE_PATH="${TMUX_PANE_IN_MODE_PATH:?}"
 cmd="${1:-}"
 shift || true
 case "$cmd" in
+  display-message)
+    if [ "${*: -1}" = "#{pane_in_mode}" ]; then
+      cat "$PANE_IN_MODE_PATH"
+      exit 0
+    fi
+    echo "unexpected tmux display-message args: $*" >&2
+    exit 1
+    ;;
   capture-pane)
     mode="$(cat "$MODE_PATH")"
     count="$(cat "$COUNT_PATH")"
@@ -122,6 +132,7 @@ reset_tmux_state() {
     : >"$TMUX_LOG"
     printf '%s\n' "$1" >"$CAPTURE_MODE"
     printf '0\n' >"$CAPTURE_COUNT"
+    printf '0\n' >"$PANE_IN_MODE"
 }
 
 run_directorctl() {
@@ -129,6 +140,7 @@ run_directorctl() {
     TMUX_LOG_PATH="$TMUX_LOG" \
     TMUX_CAPTURE_MODE_PATH="$CAPTURE_MODE" \
     TMUX_CAPTURE_COUNT_PATH="$CAPTURE_COUNT" \
+    TMUX_PANE_IN_MODE_PATH="$PANE_IN_MODE" \
     DIRECTORCTL_ENTER_DELAY=0 \
     DIRECTORCTL_DIRECTOR_TYPING_MAX_ATTEMPTS=0 \
     "$CANONICAL_DIRECTORCTL" "$@"
@@ -168,6 +180,24 @@ fi
 send_payloads="$(grep -c -- "-l hello world" "$TMUX_LOG" || true)"
 if [ "$send_payloads" -ne 1 ]; then
     echo "FAIL: send did not write the expected direct payload" >&2
+    cat "$TMUX_LOG" >&2
+    exit 1
+fi
+
+reset_tmux_state success
+printf '1\n' >"$PANE_IN_MODE"
+copy_mode_stdout="$(run_directorctl send pgu-ops:0.0 'copy mode survives')"
+if [[ "$copy_mode_stdout" != "directorctl: delivered to pgu-ops:0.0 (18 chars)" ]]; then
+    echo "FAIL: copy-mode send success output mismatch: $copy_mode_stdout" >&2
+    exit 1
+fi
+if ! sed -n '1p' "$TMUX_LOG" | grep -q -- "-t pgu-ops:0.0 -X cancel"; then
+    echo "FAIL: copy-mode send did not cancel copy-mode before payload" >&2
+    cat "$TMUX_LOG" >&2
+    exit 1
+fi
+if ! grep -q -- "-l copy mode survives" "$TMUX_LOG"; then
+    echo "FAIL: copy-mode send did not deliver payload after cancel" >&2
     cat "$TMUX_LOG" >&2
     exit 1
 fi

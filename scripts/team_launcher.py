@@ -121,6 +121,7 @@ LAYOUT_MODE_CHOICES = frozenset({LAYOUT_MODE_AUTO, LAYOUT_MODE_SEPARATE, LAYOUT_
 DEFAULT_VIEWER_SESSION = "viewer"
 DEFAULT_VIEWER_COLUMNS = 240
 DEFAULT_VIEWER_ROWS = 80
+DEFAULT_TMUX_HISTORY_LIMIT = 200_000
 YOLO_ARGS_BY_CLI = {
     "agy": ["--dangerously-skip-permissions"],
     "claude": ["--dangerously-skip-permissions"],
@@ -644,6 +645,26 @@ def tmux_set_status_off_args(role: RoleConfig) -> list[str]:
     return ["tmux", "set-option", "-t", role.tmux_session, "status", "off"]
 
 
+def tmux_set_mouse_args(session: str) -> list[str]:
+    return ["tmux", "set-option", "-t", session, "mouse", "on"]
+
+
+def tmux_set_history_limit_args(session: str) -> list[str]:
+    return ["tmux", "set-option", "-t", session, "history-limit", str(DEFAULT_TMUX_HISTORY_LIMIT)]
+
+
+def configure_tmux_session_options(
+    session: str,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> int:
+    for args in (tmux_set_mouse_args(session), tmux_set_history_limit_args(session)):
+        proc = runner(args)
+        if proc.returncode != 0:
+            return int(proc.returncode)
+    return 0
+
+
 def tmux_set_pane_border_status_off_args(role: RoleConfig) -> list[str]:
     return ["tmux", "set-window-option", "-t", f"{role.tmux_session}:0", "pane-border-status", "off"]
 
@@ -717,6 +738,9 @@ def launch_tmux_viewer_session(
     proc = runner(tmux_viewer_new_session_args(viewer_session, first))
     if proc.returncode != 0:
         return int(proc.returncode)
+    configure_result = configure_tmux_session_options(viewer_session, runner=runner)
+    if configure_result != 0:
+        return configure_result
     for role in rest:
         proc = runner(tmux_viewer_split_window_args(viewer_session, role))
         if proc.returncode != 0:
@@ -3537,15 +3561,24 @@ def _start_role_session(
                 file=sys.stderr,
             )
             return 1
+        configure_result = configure_tmux_session_options(role.tmux_session, runner=runner)
+        if configure_result != 0:
+            return configure_result
         clear_unverified_resume_for_role(role, session_dir)
         seed_initial_pane_idle_state(role, pane_state_dir=pane_state_dir, source=seed_source)
         return 0
     resume_status = _resume_launch_status(role, runner=runner)
     if resume_status == RESUME_LAUNCH_VERIFIED and (post_start_verifier is None or post_start_verifier()):
+        configure_result = configure_tmux_session_options(role.tmux_session, runner=runner)
+        if configure_result != 0:
+            return configure_result
         clear_unverified_resume_for_role(role, session_dir)
         seed_initial_pane_idle_state(role, pane_state_dir=pane_state_dir, source=seed_source)
         return 0
     if resume_status == RESUME_LAUNCH_TIMEOUT:
+        configure_result = configure_tmux_session_options(role.tmux_session, runner=runner)
+        if configure_result != 0:
+            return configure_result
         record_unverified_resume_for_role(role, session_dir, session_id)
         print(
             f"team-launcher: resume for {role.role} using session {session_id} was not verified within "
@@ -3580,6 +3613,9 @@ def _start_role_session(
             file=sys.stderr,
         )
         return 1
+    configure_result = configure_tmux_session_options(role.tmux_session, runner=runner)
+    if configure_result != 0:
+        return configure_result
     clear_unverified_resume_for_role(role, session_dir)
     seed_initial_pane_idle_state(role, pane_state_dir=pane_state_dir, source=f"{seed_source}.fallback")
     print(

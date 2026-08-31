@@ -85,6 +85,18 @@ capture_raw_pane() {
     tmux capture-pane -p -J -t "$target"
 }
 
+exit_copy_mode_if_needed() {
+    local target="$1"
+    local in_mode
+    if ! in_mode="$(tmux display-message -p -t "$target" "#{pane_in_mode}" 2>/dev/null)"; then
+        return 0
+    fi
+    in_mode="${in_mode//$'\n'/}"
+    if [ -n "$in_mode" ] && [ "$in_mode" != "0" ]; then
+        tmux send-keys -t "$target" -X cancel
+    fi
+}
+
 submission_appears_complete() {
     local before_capture="$1"
     local after_capture="$2"
@@ -114,6 +126,7 @@ verify_submission() {
             return 0
         fi
         if [ "$attempt" -lt "$SUBMIT_VERIFY_ATTEMPTS" ]; then
+            exit_copy_mode_if_needed "$target"
             tmux send-keys -t "$target" Enter
         fi
     done
@@ -171,9 +184,11 @@ submit_short_line() {
     local before_capture
 
     settle_delay_ms="$(compute_settle_delay_ms "${#payload}")"
+    exit_copy_mode_if_needed "$target"
     tmux send-keys -t "$target" -l "$payload"
     sleep_milliseconds "$settle_delay_ms"
     before_capture="$(capture_raw_pane "$target")"
+    exit_copy_mode_if_needed "$target"
     tmux send-keys -t "$target" Enter
     verify_submission "$target" "$before_capture"
 }

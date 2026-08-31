@@ -182,6 +182,8 @@ directorctl status                            # which sessions exist
 ```
 
 Targets look like `<project>-ops:0.0`.
+Before sending, `directorctl` exits tmux copy-mode in the target pane, so a
+pane that was scrolled up still receives and submits the message.
 
 **Rules that exist because they were learned the hard way:**
 

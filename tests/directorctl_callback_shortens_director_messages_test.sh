@@ -14,6 +14,14 @@ LOG_PATH="${TMUX_LOG_PATH:?}"
 cmd="${1:-}"
 shift || true
 case "$cmd" in
+  display-message)
+    if [ "${*: -1}" = "#{pane_in_mode}" ]; then
+      printf '0\n'
+      exit 0
+    fi
+    echo "unexpected tmux display-message args: $*" >&2
+    exit 1
+    ;;
   capture-pane)
     cat <<'PANE'
 old output

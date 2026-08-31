@@ -18,6 +18,7 @@ CANONICAL_DIRECTORCTL="$TMPDIR_T/bin/directorctl"
 
 cleanup() {
     "$TMUX_REAL" -L "$SERVER" kill-server >/dev/null 2>&1 || true
+    rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$SERVER"
     rm -rf "$TMPDIR_T"
 }
 trap cleanup EXIT

@@ -26,6 +26,20 @@ core/domain implementation and integration, `ops` for environment, services, too
 and infrastructure, `app` for application/UI work, `research` for investigation and
 design support, and `perf` for measurement and performance work.
 
+To add an implementer role after a project exists, use the Switchyard source
+checkout's role command instead of editing the provision files by hand:
+
+```bash
+switchyard add-role <project> <role> --cli codex
+```
+
+The command appends the launcher role, updates the generated layout, creates the
+role worktree, expands the board's assignee/caller/workflow role registration,
+restarts the tenant board to load the new role environment, and starts the new pane.
+For example, `switchyard add-role mefp ops --cli codex` adds an `ops` implementer
+that can receive implementation tickets and call implementer operations. Existing
+roles are left running.
+
 ---
 
 ## The pipeline

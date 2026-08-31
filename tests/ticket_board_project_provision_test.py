@@ -20,6 +20,7 @@ from scripts.ticket_board.project_provision import (
     build_plan,
     render_board_unit,
     render_database_sql,
+    render_add_role_sql,
     render_listener_unit,
     render_operator_commands,
     render_polkit_rule,
@@ -212,6 +213,36 @@ def test_non_pgu_project_can_omit_audit_role_and_stage() -> None:
         "ADD CONSTRAINT tickets_assignee_check CHECK "
         "(assignee IN ('unassigned', 'code', 'director', 'user'))"
     ) in workflow_sql
+
+
+def test_add_role_sql_expands_existing_project_constraints_and_workflow_roles() -> None:
+    plan = build_plan(
+        project="mefp",
+        owner_user="mefp-agent",
+        port=8878,
+        implementer_roles=("app", "main", "ops"),
+    )
+    sql = render_add_role_sql(plan, "ops")
+
+    assert "Add role ops to the existing project workflow for mefp" in sql
+    assert "DELETE FROM ticket_board.tickets" not in sql
+    assert "DELETE FROM ticket_board.workflow_stages" not in sql
+    assert "DROP CONSTRAINT IF EXISTS tickets_assignee_check" in sql
+    assert (
+        "ADD CONSTRAINT tickets_assignee_check CHECK "
+        "(assignee IN ('unassigned', 'designer', 'app', 'main', 'ops', 'audit', 'director', 'user'))"
+    ) in sql
+    assert (
+        "ADD CONSTRAINT ticket_notification_state_last_implementer_assignee_check\n"
+        "    CHECK (\n"
+        "        last_implementer_assignee = ''\n"
+        "        OR last_implementer_assignee IN ('app', 'main', 'ops')"
+    ) in sql
+    assert "('in_progress', 'Implementation', 2, ARRAY['main', 'app', 'ops']::text[]" in sql
+    assert "('analysis', 'in_progress', 'start_work', ARRAY['app', 'main', 'ops']::text[]" in sql
+    assert "('in_progress', 'audit', 'submit_to_audit', ARRAY['app', 'main', 'ops']::text[]" in sql
+    assert "ON CONFLICT (name) DO UPDATE SET" in sql
+    assert "ON CONFLICT (from_stage, to_stage, action_name) DO UPDATE SET" in sql
 
 
 def test_operator_commands_use_peer_portable_postgres_admin_invocations() -> None:

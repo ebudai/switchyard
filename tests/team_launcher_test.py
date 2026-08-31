@@ -216,6 +216,16 @@ class FakeRunner:
         return subprocess.CompletedProcess(args, 0)
 
 
+class KeywordRecordingFakeRunner(FakeRunner):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.calls_with_kwargs: list[tuple[list[str], dict[str, Any]]] = []
+
+    def __call__(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        self.calls_with_kwargs.append((args, kwargs))
+        return super().__call__(args, **kwargs)
+
+
 class SudoAwareFakeRunner(FakeRunner):
     def __call__(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         if args[:3] == ["sudo", "-u", "agent"]:
@@ -10196,6 +10206,99 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
     assert launch_output_exists
 
 
+def test_add_role_updates_generated_config_board_registration_and_starts_only_new_role() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-add-role.") as tmp:
+        tmp_path = Path(tmp)
+        provision_dir = tmp_path / "project" / ".switchyard" / "provision"
+        provision_dir.mkdir(parents=True)
+        source_repo = tmp_path / "source-repo"
+        project_repo = tmp_path / "project-repo"
+        source_repo.mkdir()
+        project_repo.mkdir()
+        plan = team_launcher.build_plan(
+            project="mefp",
+            owner_user=current_user,
+            port=18811,
+            source_repo=source_repo,
+            implementer_roles=("app", "main"),
+        )
+        (provision_dir / "plan.json").write_text(json.dumps(plan.__dict__, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        (provision_dir / plan.board_unit).write_text(team_launcher.render_board_unit(plan), encoding="utf-8")
+        config_path = provision_dir / "mefp.json"
+        config_path.write_text(
+            json.dumps(
+                team_launcher._new_project_launcher_config_payload(
+                    plan,
+                    repository=project_repo,
+                    implementer_roles=("app", "main"),
+                ),
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        layout_path = provision_dir / "mefp-konsole-layout.json"
+        layout_path.write_text(
+            json.dumps(team_launcher._new_project_layout_payload(5), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("mefp", config_path)
+        runner = KeywordRecordingFakeRunner(existing_sessions={"mefp-director", "mefp-main"})
+        stdout = StringIO()
+
+        with redirect_stdout(stdout):
+            assert (
+                team_launcher.add_project_role_command(
+                    config,
+                    config_path=config_path,
+                    role_name="ops",
+                    cli="codex",
+                    script_path=ROOT / "scripts" / "team-launcher",
+                    runner=runner,
+                )
+                == 0
+            )
+
+        updated_config_json = json.loads(config_path.read_text(encoding="utf-8"))
+        updated_plan = json.loads((provision_dir / "plan.json").read_text(encoding="utf-8"))
+        updated_unit = (provision_dir / "mefp-ticket-board.service").read_text(encoding="utf-8")
+        add_role_sql = (provision_dir / "mefp-add-role.sql").read_text(encoding="utf-8")
+        updated_layout_leaf_count = len(team_launcher._layout_leaves(json.loads(layout_path.read_text(encoding="utf-8"))))
+        updated_config = load_project_config("mefp", config_path)
+
+    assert [role["role"] for role in updated_config_json["roles"]] == ["designer", "director", "audit", "app", "main", "ops"]
+    assert updated_config_json["roles"][-1]["slot"] == 5
+    assert updated_config_json["roles"][-1]["tmux_session"] == "mefp-ops"
+    assert updated_config_json["roles"][-1]["target"] == "mefp-ops:0.0"
+    assert updated_config_json["roles"][-1]["workdir"] == f"/home/{current_user}/mefp-worktrees/ops"
+    assert updated_layout_leaf_count == 6
+    assert updated_plan["implementer_roles"] == ["app", "main", "ops"]
+    assert updated_plan["assignee_roles"] == ["unassigned", "designer", "app", "main", "ops", "audit", "director", "user"]
+    assert updated_plan["caller_roles"] == ["director", "designer", "app", "main", "ops", "audit", "user"]
+    assert "TICKET_BOARD_IMPLEMENTER_ROLES=app,main,ops" in updated_unit
+    assert "TICKET_BOARD_ASSIGNEES=unassigned,designer,app,main,ops,audit,director,user" in updated_unit
+    assert "TICKET_BOARD_CALLER_ROLES=director,designer,app,main,ops,audit,user" in updated_unit
+    assert "('in_progress', 'Implementation', 2, ARRAY['main', 'app', 'ops']::text[]" in add_role_sql
+    assert "('analysis', 'in_progress', 'start_work', ARRAY['app', 'main', 'ops']::text[]" in add_role_sql
+    assert any(call[:5] == ["git", "--git-dir", f"/home/{current_user}/.local/state/switchyard/projects/mefp/control.git", "worktree", "add"] for call in runner.calls)
+    assert any(call == ["sudo", "systemctl", "restart", "mefp-ticket-board.service"] for call in runner.calls)
+    pane_calls = [call for call in runner.calls if call[:3] == [str(ROOT / "scripts" / "team-launcher"), "mefp", "pane"]]
+    assert len(pane_calls) == 1
+    assert pane_calls[0][3:5] == ["attach-or-start", "ops"]
+    psql_calls = [
+        (args, kwargs)
+        for args, kwargs in runner.calls_with_kwargs
+        if args[:4] == ["sudo", "-u", "postgres", "psql"]
+    ]
+    assert len(psql_calls) == 1
+    assert "ARRAY['app', 'main', 'ops']::text[]" in str(psql_calls[0][1]["input"])
+    assert [role.role for role in updated_config.roles] == ["designer", "director", "audit", "app", "main", "ops"]
+    assert updated_config.roles[-1].env["TICKET_BOARD_CALLER_ROLE"] == "ops"
+    assert "team-launcher: added role ops to mefp" in stdout.getvalue()
+
+
 def test_design_writes_artifact_that_new_from_consumes_for_missing_owner_user() -> None:
     missing_owner = "pgu647-missing-agent"
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-design.") as tmp:
@@ -11873,6 +11976,67 @@ def test_switchyard_upgrade_cross_owner_reexec_preserves_flags() -> None:
             team_launcher._switchyard_exec_with_root = original_exec_with_root
 
     assert calls == [argv]
+    assert message == "root required"
+
+
+def test_switchyard_add_role_cross_owner_reexecs_before_config_load() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-cross-owner-add-role.") as tmp:
+        tmp_path = Path(tmp)
+        config_dir = tmp_path / "config"
+        registry_dir = tmp_path / "registry"
+        config_dir.mkdir()
+        registry_dir.mkdir()
+        (registry_dir / "mefp.json").write_text(
+            json.dumps(
+                {
+                    "schema": team_launcher.SWITCHYARD_REGISTRY_SCHEMA,
+                    "slug": "mefp",
+                    "name": "MEFP",
+                    "config_path": "/home/mefp-agent/Projects/mefp/.switchyard/provision/mefp.json",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        calls: list[str] = []
+        argv = ["add-role", "mefp", "ops", "--cli", "codex"]
+        original_config_dir = team_launcher.DEFAULT_CONFIG_DIR
+        original_registry_dir = team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR
+        original_current_user_name = team_launcher.current_user_name
+        original_geteuid = team_launcher.os.geteuid
+        original_load_project_config = team_launcher.load_project_config
+        original_exec_with_root = team_launcher._switchyard_exec_with_root
+        try:
+            team_launcher.DEFAULT_CONFIG_DIR = config_dir
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
+            team_launcher.current_user_name = lambda: "eric"
+            team_launcher.os.geteuid = lambda: 1000  # type: ignore[method-assign]
+
+            def fake_load_project_config(*_args: object, **_kwargs: object) -> team_launcher.ProjectConfig:
+                calls.append("load")
+                raise AssertionError("foreign add-role should not load the config before privilege re-exec")
+
+            def fake_exec_with_root(exec_argv: Sequence[str], **_kwargs: object) -> None:
+                calls.append(f"root:{' '.join(exec_argv)}")
+                raise SystemExit("root required")
+
+            team_launcher.load_project_config = fake_load_project_config
+            team_launcher._switchyard_exec_with_root = fake_exec_with_root
+
+            try:
+                switchyard_main(argv)
+                raise AssertionError("expected foreign add-role to re-exec with root")
+            except SystemExit as exc:
+                message = str(exc)
+        finally:
+            team_launcher.DEFAULT_CONFIG_DIR = original_config_dir
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = original_registry_dir
+            team_launcher.current_user_name = original_current_user_name
+            team_launcher.os.geteuid = original_geteuid  # type: ignore[method-assign]
+            team_launcher.load_project_config = original_load_project_config
+            team_launcher._switchyard_exec_with_root = original_exec_with_root
+
+    assert calls == ["root:add-role mefp ops --cli codex"]
     assert message == "root required"
 
 

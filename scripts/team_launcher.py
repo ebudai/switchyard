@@ -29,6 +29,8 @@ from scripts.ticket_board.project_provision import (
     ProjectBoardProvision,
     ROLE_RE,
     build_plan,
+    render_add_role_sql,
+    render_board_unit,
     validate_ticket_prefix,
     write_artifacts,
 )
@@ -123,7 +125,7 @@ DEFAULT_VIEWER_COLUMNS = 240
 DEFAULT_VIEWER_ROWS = 80
 DEFAULT_TMUX_HISTORY_LIMIT = 200_000
 SWITCHYARD_VERSION = "dev"
-SWITCHYARD_COMMANDS = ("new", "register", "upgrade", "stop", "status", "validate-models")
+SWITCHYARD_COMMANDS = ("new", "register", "upgrade", "add-role", "stop", "status", "validate-models")
 YOLO_ARGS_BY_CLI = {
     "agy": ["--dangerously-skip-permissions"],
     "claude": ["--dangerously-skip-permissions"],
@@ -7560,6 +7562,337 @@ def upgrade_project_command(
     return 0
 
 
+def _configured_implementer_roles(config: ProjectConfig, *, extra_role: str | None = None) -> tuple[str, ...]:
+    roles: list[str] = []
+    for role in config.roles:
+        if role.role in NEW_PROJECT_RESERVED_ROLE_NAMES:
+            continue
+        if role.role not in roles:
+            roles.append(role.role)
+    if extra_role and extra_role not in roles:
+        roles.append(extra_role)
+    return tuple(roles)
+
+
+def _loaded_plan_field(plan_data: dict[str, Any], key: str, default: Any) -> Any:
+    return plan_data[key] if key in plan_data and plan_data[key] not in (None, "") else default
+
+
+def _plan_data_from_config(config: ProjectConfig, config_path: Path) -> dict[str, Any]:
+    plan_path = config_path.parent / "plan.json"
+    try:
+        raw = _load_json(plan_path)
+    except OSError:
+        raw = {}
+    except SystemExit:
+        raw = {}
+    if raw:
+        return raw
+    port = None
+    match = re.search(r":([0-9]{1,5})(?:/|$)", config.board_url)
+    if match:
+        port = int(match.group(1))
+    board_root = _tenant_board_root_from_config(config)
+    return {
+        "project": config.project,
+        "owner_user": config.run_as_user or current_user_name(),
+        "port": port,
+        "database": "pgu" if config.project == "pgu" else f"{config.project}_ticket_board",
+        "ticket_prefix": config.ticket_prefix,
+        "source_repo": str(_repo_root()),
+        "board_root": str(board_root) if board_root else None,
+        "asset_dir": None,
+        "frame_dir": None,
+        "board_service_traversal": True,
+        "operation_allowed_roles": [],
+    }
+
+
+def _vcs_close_role_from_plan_data(plan_data: dict[str, Any]) -> str | None:
+    for item in plan_data.get("operation_allowed_roles") or []:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            continue
+        operation, roles = item
+        if operation != "mark_done" or not isinstance(roles, (list, tuple)) or not roles:
+            continue
+        return str(roles[0])
+    return None
+
+
+def _project_plan_for_added_role(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    role_name: str,
+) -> ProjectBoardProvision:
+    plan_data = _plan_data_from_config(config, config_path)
+    implementer_roles = _configured_implementer_roles(config, extra_role=role_name)
+    include_designer = any(role.role == "designer" for role in config.roles)
+    include_audit = any(role.role == "audit" for role in config.roles)
+    return build_plan(
+        project=config.project,
+        owner_user=str(_loaded_plan_field(plan_data, "owner_user", config.run_as_user or current_user_name())),
+        port=_loaded_plan_field(plan_data, "port", None),
+        database=_loaded_plan_field(plan_data, "database", None),
+        source_repo=Path(str(_loaded_plan_field(plan_data, "source_repo", _repo_root()))),
+        ticket_prefix=str(_loaded_plan_field(plan_data, "ticket_prefix", config.ticket_prefix)),
+        board_root=(
+            Path(str(plan_data["board_root"]))
+            if plan_data.get("board_root")
+            else _tenant_board_root_from_config(config)
+        ),
+        asset_dir=Path(str(plan_data["asset_dir"])) if plan_data.get("asset_dir") else None,
+        frame_dir=Path(str(plan_data["frame_dir"])) if plan_data.get("frame_dir") else None,
+        implementer_roles=implementer_roles,
+        include_designer=include_designer,
+        include_audit=include_audit,
+        board_service_traversal=bool(_loaded_plan_field(plan_data, "board_service_traversal", True)),
+        vcs_close_role=_vcs_close_role_from_plan_data(plan_data),
+    )
+
+
+def _next_visible_role_slot(config: ProjectConfig) -> int:
+    slots = [role.slot for role in config.roles if not role.detached and role.slot is not None]
+    return max(slots) + 1 if slots else 0
+
+
+def _add_role_payload(
+    config: ProjectConfig,
+    *,
+    role_name: str,
+    cli: str,
+    detached: bool,
+    slot: int | None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "cli": [cli],
+        "live_commands": [cli],
+        "role": role_name,
+        "target": f"{config.project}-{role_name}:0.0",
+        "tmux_session": f"{config.project}-{role_name}",
+        "yolo": True,
+    }
+    if not detached:
+        if slot is None:
+            raise ValueError("visible role requires slot")
+        payload["slot"] = slot
+    else:
+        payload["detached"] = True
+    if config.control_repository is not None and config.worktree_base is not None:
+        payload["workdir"] = str(config.worktree_base / role_name)
+    elif config.repository is not None:
+        payload["workdir"] = str(config.repository)
+    return payload
+
+
+def _update_project_design_artifact_for_role(config: ProjectConfig, config_path: Path, *, role_name: str, cli: str) -> Path | None:
+    artifact_path = config_path.parent.parent / f"{config.project}.project.json"
+    try:
+        artifact = _load_json(artifact_path)
+    except OSError:
+        return None
+    project_data = artifact.get("project")
+    if not isinstance(project_data, dict):
+        return None
+    raw_roles = project_data.get("roles")
+    if isinstance(raw_roles, list):
+        roles = [str(item).strip().lower() for item in raw_roles if str(item).strip()]
+    else:
+        roles = []
+    if role_name not in roles:
+        roles.append(role_name)
+        project_data["roles"] = roles
+    raw_role_clis = project_data.get("role_clis")
+    if not isinstance(raw_role_clis, dict):
+        raw_role_clis = {}
+        project_data["role_clis"] = raw_role_clis
+    raw_role_clis[role_name] = cli
+    _write_json_atomic(artifact_path, artifact)
+    return artifact_path
+
+
+def _write_added_role_config(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    role_name: str,
+    cli: str,
+    detached: bool,
+    slot: int | None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> ProjectConfig:
+    if any(role.role == role_name for role in config.roles):
+        raise SystemExit(f"team-launcher: role {role_name!r} already exists in project {config.project}")
+    if slot is not None and slot < 0:
+        raise SystemExit("team-launcher: add-role slot must be non-negative")
+    if not detached:
+        if slot is None:
+            slot = _next_visible_role_slot(config)
+        occupant = next(
+            (role for role in config.roles if not role.detached and role.slot == slot),
+            None,
+        )
+        if occupant is not None:
+            raise SystemExit(f"team-launcher: cannot add {role_name} to slot {slot}; slot is occupied by {occupant.role}")
+        if _is_generated_project_layout_template(config, config_path=config_path):
+            next_slot = _next_visible_role_slot(config)
+            if slot != next_slot:
+                raise SystemExit(f"team-launcher: generated layouts append new visible roles at slot {next_slot}")
+        elif slot >= _layout_slot_count(config):
+            raise SystemExit(
+                f"team-launcher: cannot add {role_name} to slot {slot}; layout {config.layout} has {_layout_slot_count(config)} slot(s)"
+            )
+    raw_config = _load_json(config_path)
+    raw_roles = raw_config.get("roles")
+    if not isinstance(raw_roles, list):
+        raise SystemExit(f"{config_path} must define a roles list")
+    raw_roles.append(_add_role_payload(config, role_name=role_name, cli=cli, detached=detached, slot=slot))
+    _write_json_atomic(config_path, raw_config)
+    ensure_owner_file(config, config_path, runner=runner)
+    updated_config = load_project_config(config.project, config_path)
+    if not detached and _is_generated_project_layout_template(updated_config, config_path=config_path):
+        visible_count = max(
+            (role.slot or 0) for role in updated_config.roles if not role.detached
+        ) + 1
+        updated_config.layout.write_text(
+            json.dumps(_new_project_layout_payload(visible_count), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        ensure_owner_file(updated_config, updated_config.layout, runner=runner)
+    artifact_path = _update_project_design_artifact_for_role(updated_config, config_path, role_name=role_name, cli=cli)
+    if artifact_path is not None:
+        ensure_owner_file(updated_config, artifact_path, runner=runner)
+    return load_project_config(config.project, config_path)
+
+
+def _write_updated_project_plan_artifacts(
+    plan: ProjectBoardProvision,
+    *,
+    role_name: str,
+    provision_dir: Path,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    config: ProjectConfig,
+) -> tuple[Path, Path, Path]:
+    plan_path = provision_dir / "plan.json"
+    board_unit_path = provision_dir / plan.board_unit
+    add_role_sql_path = provision_dir / f"{plan.project}-add-role.sql"
+    _write_json_atomic(plan_path, {key: value for key, value in plan.__dict__.items()})
+    board_unit_path.write_text(render_board_unit(plan), encoding="utf-8")
+    add_role_sql_path.write_text(render_add_role_sql(plan, role_name), encoding="utf-8")
+    for path in (plan_path, board_unit_path, add_role_sql_path):
+        ensure_owner_file(config, path, runner=runner)
+    return plan_path, board_unit_path, add_role_sql_path
+
+
+def _apply_add_role_board_sql(
+    plan: ProjectBoardProvision,
+    *,
+    role_name: str,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> None:
+    sql = render_add_role_sql(plan, role_name)
+    result = runner(
+        ["sudo", "-u", "postgres", "psql", "-X", "-v", "ON_ERROR_STOP=1", plan.admin_database_url, "-f", "-"],
+        input=sql,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        reason = _proc_failure_reason(result, f"psql failed with exit {result.returncode}")
+        raise SystemExit(f"team-launcher: failed to register role {role_name} in board database {plan.database}: {reason}")
+
+
+def _install_and_restart_board_unit(
+    plan: ProjectBoardProvision,
+    *,
+    board_unit_path: Path,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> None:
+    install = runner(["sudo", "install", "-m", "0644", str(board_unit_path), f"/etc/systemd/system/{plan.board_unit}"])
+    if install.returncode != 0:
+        raise SystemExit(f"team-launcher: failed to install updated board unit {plan.board_unit}")
+    daemon_reload = runner(["sudo", "systemctl", "daemon-reload"])
+    if daemon_reload.returncode != 0:
+        raise SystemExit("team-launcher: failed to reload systemd after updating the board unit")
+    restart = runner(["sudo", "systemctl", "restart", plan.board_unit])
+    if restart.returncode != 0:
+        raise SystemExit(f"team-launcher: failed to restart {plan.board_unit}")
+
+
+def add_project_role_command(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    role_name: str,
+    cli: str = "codex",
+    detached: bool = False,
+    slot: int | None = None,
+    start: bool = True,
+    script_path: Path | None = None,
+    pane_state_dir: Path | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    role = _validate_new_project_implementer_role(role_name, context="role")
+    cli_name = _validate_new_project_cli(cli, context=f"CLI for {role}")
+    preflight_plan = _project_plan_for_added_role(config, config_path=config_path, role_name=role)
+    render_add_role_sql(preflight_plan, role)
+    updated_config = _write_added_role_config(
+        config,
+        config_path=config_path,
+        role_name=role,
+        cli=cli_name,
+        detached=detached,
+        slot=slot,
+        runner=runner,
+    )
+    plan = _project_plan_for_added_role(updated_config, config_path=config_path, role_name=role)
+    _plan_path, board_unit_path, _sql_path = _write_updated_project_plan_artifacts(
+        plan,
+        role_name=role,
+        provision_dir=config_path.parent,
+        runner=runner,
+        config=updated_config,
+    )
+    _apply_add_role_board_sql(plan, role_name=role, runner=runner)
+    _install_and_restart_board_unit(plan, board_unit_path=board_unit_path, runner=runner)
+    role_runner = runner
+    if updated_config.run_as_user and current_user_name() != updated_config.run_as_user:
+        role_runner = _owner_project_git_runner(
+            owner_user=updated_config.run_as_user,
+            project_dir=updated_config.repository or updated_config.pane_launcher or Path("/"),
+            owned_roots=_control_repository_owned_roots(updated_config),
+            runner=runner,
+        )
+    worktree_result = ensure_project_worktrees(
+        replace(updated_config, roles=[_role_by_name(updated_config, role)]),
+        refresh=True,
+        runner=role_runner,
+    )
+    if not worktree_result.ok:
+        reason = next(iter(worktree_result.failed_roles.values()), "unknown error")
+        raise SystemExit(f"team-launcher: failed to prepare worktree for {role}: {reason}")
+    if start:
+        pane_role = _role_by_name(updated_config, role)
+        pane_args = pane_command_args(
+            updated_config.project,
+            pane_role,
+            config_path=config_path,
+            mode="attach-or-start",
+            script_path=script_path or Path(__file__).resolve().with_name(TEAM_LAUNCHER_NAME),
+            pane_state_dir=pane_state_dir or default_pane_state_dir_for_user(updated_config.run_as_user, project=updated_config.project),
+            skip_launcher_check=True,
+            no_attach=True,
+            run_as_user=updated_config.run_as_user,
+        )
+        pane_proc = runner(pane_args)
+        if pane_proc.returncode != 0:
+            raise SystemExit(f"team-launcher: added {role}, but failed to start its pane with exit {pane_proc.returncode}")
+    print_func(f"team-launcher: added role {role} to {updated_config.project}")
+    return 0
+
+
 def stop_project(
     config: ProjectConfig,
     *,
@@ -7769,7 +8102,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "command",
         nargs="?",
         default="start",
-        choices=["start", "attach", "reload", "stop", "design", "new", "provision-runtime", "deploy-launcher", "upgrade", "pane"],
+        choices=[
+            "start",
+            "attach",
+            "reload",
+            "stop",
+            "design",
+            "new",
+            "provision-runtime",
+            "deploy-launcher",
+            "upgrade",
+            "add-role",
+            "pane",
+        ],
         help="start is idempotent attach-or-start (resumes tracked session ids when relaunching a stopped pane); reload force-restarts running CLIs with tracked resume ids",
     )
     parser.add_argument("pane_mode", nargs="?")
@@ -7817,6 +8162,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--runtime-user", help="local user whose lingering /run/user/<uid> runtime should be provisioned")
     parser.add_argument("--launcher-repo", type=Path, help="launcher checkout to update or verify (default: this script's repo)")
     parser.add_argument("--deploy-ref", default=DEFAULT_TENANT_RELEASE_DEPLOY_REF, help="board release ref to deploy during upgrade (default: origin/main)")
+    parser.add_argument("--cli", dest="add_role_cli", default="codex", help="CLI runtime for `add-role` (default: codex)")
+    parser.add_argument("--detached", action="store_true", help="configure `add-role` as headless instead of visible")
     parser.add_argument("--clean-launcher", action="store_true", help="run git clean -fdx after updating --launcher-repo")
     parser.add_argument("--force", action="store_true", help="allow reload to kill/relaunch even if live command validation fails")
     parser.add_argument("--allow-stale-launcher", action="store_true", help="emergency override: warn but proceed when the launcher checkout is provably stale")
@@ -7871,6 +8218,17 @@ def _build_switchyard_upgrade_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_switchyard_add_role_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="switchyard add-role", description="Add a role to an existing Switchyard project.")
+    parser.add_argument("project", help="project name or slug")
+    parser.add_argument("role", help="new implementer role name")
+    parser.add_argument("--cli", default="codex", help="CLI runtime for the role (default: codex)")
+    parser.add_argument("--slot", type=int, help="visible layout slot; generated layouts append automatically when omitted")
+    parser.add_argument("--detached", action="store_true", help="start the role as a headless tmux session")
+    parser.add_argument("--no-start", action="store_true", help="register the role without starting its pane")
+    return parser
+
+
 def _build_switchyard_stop_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="switchyard stop", description="Stop a Switchyard project's tmux pane sessions.")
     parser.add_argument("project", nargs="+", help="project name or slug")
@@ -7894,6 +8252,7 @@ Commands:
   new              create and provision a new project
   register         register an existing project config
   upgrade          update generated project artifacts and report release drift
+  add-role         add an implementer role, worktree, pane, and board registration
   stop             stop a project's configured tmux pane sessions
   status           list registered projects and pane liveness
   validate-models  check configured role models without starting panes
@@ -8024,6 +8383,20 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             source_repo=args.source_repo,
             deploy_ref=args.deploy_ref,
         )
+    if argv[0].casefold() == "add-role":
+        args = _build_switchyard_add_role_parser().parse_args(argv[1:])
+        entry = _resolve_switchyard_project(args.project)
+        config = _load_switchyard_project_config_for_command(entry, argv)
+        return add_project_role_command(
+            config,
+            config_path=entry.config_path,
+            role_name=args.role,
+            cli=args.cli,
+            detached=args.detached,
+            slot=args.slot,
+            start=not args.no_start,
+            script_path=Path(__file__).resolve().with_name(TEAM_LAUNCHER_NAME),
+        )
     if argv[0].casefold() == "stop":
         args = _build_switchyard_stop_parser().parse_args(argv[1:])
         project = " ".join(args.project)
@@ -8136,6 +8509,20 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run,
             source_repo=args.source_repo,
             deploy_ref=args.deploy_ref,
+        )
+    if args.command == "add-role":
+        if not args.pane_mode or args.role:
+            raise SystemExit("add-role requires exactly one <role> argument")
+        return add_project_role_command(
+            config,
+            config_path=config_path,
+            role_name=args.pane_mode,
+            cli=args.add_role_cli,
+            detached=args.detached,
+            slot=args.slot,
+            start=not args.no_attach,
+            script_path=args.script_path,
+            pane_state_dir=args.pane_state_dir,
         )
     if args.command == "stop":
         return stop_project(config)

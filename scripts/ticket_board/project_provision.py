@@ -937,6 +937,138 @@ COMMIT;
 """
 
 
+def _workflow_stage_rows_sql(stages: Sequence[WorkflowStageSeed]) -> str:
+    return ",\n".join(
+        "    ("
+        + ", ".join(
+            [
+                sql_literal(stage.name),
+                sql_literal(stage.display_label),
+                str(stage.rank),
+                sql_text_array(stage.owner_roles),
+                "NULL" if stage.entry_gate_field is None else sql_literal(stage.entry_gate_field),
+                "NULL" if stage.gate_skip_to is None else sql_literal(stage.gate_skip_to),
+                "NULL" if stage.exit_signoff_field is None else sql_literal(stage.exit_signoff_field),
+                "true" if stage.is_terminal else "false",
+            ]
+        )
+        + ")"
+        for stage in stages
+    )
+
+
+def _workflow_transition_rows_sql(transitions: Sequence[WorkflowTransitionSeed]) -> str:
+    return ",\n".join(
+        "    ("
+        + ", ".join(
+            [
+                sql_literal(transition.from_stage),
+                sql_literal(transition.to_stage),
+                sql_literal(transition.action_name),
+                sql_text_array(transition.allowed_roles),
+                "true" if transition.owner_scoped else "false",
+                "true" if transition.director_override else "false",
+            ]
+        )
+        + ")"
+        for transition in transitions
+    )
+
+
+def render_add_role_sql(plan: ProjectBoardProvision, role: str, *, schema_sql: str | None = None) -> str:
+    resolved_role = _validate_role(role)
+    if plan.workflow_seed == "pgu-full":
+        raise SystemExit("incremental add-role SQL is only for provisioned project workflows")
+    if resolved_role not in plan.implementer_roles:
+        raise SystemExit("incremental add-role SQL requires the role in plan.implementer_roles")
+    stages = project_workflow_stages(plan, schema_sql=schema_sql)
+    transitions = project_workflow_transitions(plan, schema_sql=schema_sql)
+    stage_rows = _workflow_stage_rows_sql(stages)
+    transition_rows = _workflow_transition_rows_sql(transitions)
+    return f"""-- Add role {resolved_role} to the existing project workflow for {plan.project}.
+-- Run after the launcher config has been updated with the expanded role set.
+BEGIN;
+
+{render_project_role_constraint_sql(plan)}
+
+WITH desired(
+    name,
+    display_label,
+    rank,
+    owner_roles,
+    entry_gate_field,
+    gate_skip_to,
+    exit_signoff_field,
+    is_terminal
+) AS (
+    VALUES
+{stage_rows}
+)
+INSERT INTO ticket_board.workflow_stages (
+    name,
+    display_label,
+    rank,
+    owner_roles,
+    entry_gate_field,
+    gate_skip_to,
+    exit_signoff_field,
+    is_terminal
+)
+SELECT
+    name,
+    display_label,
+    rank,
+    owner_roles,
+    entry_gate_field,
+    gate_skip_to,
+    exit_signoff_field,
+    is_terminal
+FROM desired
+ON CONFLICT (name) DO UPDATE SET
+    display_label = EXCLUDED.display_label,
+    rank = EXCLUDED.rank,
+    owner_roles = EXCLUDED.owner_roles,
+    entry_gate_field = EXCLUDED.entry_gate_field,
+    gate_skip_to = EXCLUDED.gate_skip_to,
+    exit_signoff_field = EXCLUDED.exit_signoff_field,
+    is_terminal = EXCLUDED.is_terminal;
+
+WITH desired(
+    from_stage,
+    to_stage,
+    action_name,
+    allowed_roles,
+    owner_scoped,
+    director_override
+) AS (
+    VALUES
+{transition_rows}
+)
+INSERT INTO ticket_board.workflow_transitions (
+    from_stage,
+    to_stage,
+    action_name,
+    allowed_roles,
+    owner_scoped,
+    director_override
+)
+SELECT
+    from_stage,
+    to_stage,
+    action_name,
+    allowed_roles,
+    owner_scoped,
+    director_override
+FROM desired
+ON CONFLICT (from_stage, to_stage, action_name) DO UPDATE SET
+    allowed_roles = EXCLUDED.allowed_roles,
+    owner_scoped = EXCLUDED.owner_scoped,
+    director_override = EXCLUDED.director_override;
+
+COMMIT;
+"""
+
+
 def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger: bool = True) -> str:
     q_asset = shell_quote(plan.asset_dir)
     q_frame = shell_quote(plan.frame_dir)

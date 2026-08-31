@@ -4100,16 +4100,16 @@ def _legacy_new_project_stacked_layout_payload(role_count: int) -> dict[str, Any
 
 
 def _legacy_new_project_column_major_layout_payload(role_count: int) -> dict[str, Any]:
-    leaves = [
-        {
-            "Command": "",
-            "SessionRestoreId": index,
-            "WorkingDirectory": "",
-        }
-        for index in range(role_count)
-    ]
+    leaves = _new_project_layout_leaves(role_count)
+    if role_count <= NEW_PROJECT_SINGLE_ROW_LAYOUT_MAX_ROLES:
+        return _single_row_layout_payload(leaves)
+    return _legacy_new_project_sqrt_column_major_layout_payload(role_count)
+
+
+def _legacy_new_project_sqrt_column_major_layout_payload(role_count: int) -> dict[str, Any]:
+    leaves = _new_project_layout_leaves(role_count)
     if role_count <= 1:
-        return leaves[0] if leaves else {"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}
+        return _single_row_layout_payload(leaves)
     column_count = math.ceil(math.sqrt(role_count))
     row_count = math.ceil(role_count / column_count)
     columns: list[dict[str, Any]] = []
@@ -4179,6 +4179,7 @@ def upgrade_generated_project_config(
     legacy_layouts = (
         _legacy_new_project_stacked_layout_payload(role_count),
         _legacy_new_project_column_major_layout_payload(role_count),
+        _legacy_new_project_sqrt_column_major_layout_payload(role_count),
     )
     try:
         existing_layout = json.loads(config.layout.read_text(encoding="utf-8"))
@@ -4912,8 +4913,11 @@ def _new_project_worktree_base(project: str, owner_user: str) -> Path:
     return Path("/home") / owner_user / f"{project}-worktrees"
 
 
-def _new_project_layout_payload(role_count: int) -> dict[str, Any]:
-    leaves = [
+NEW_PROJECT_SINGLE_ROW_LAYOUT_MAX_ROLES = 4
+
+
+def _new_project_layout_leaves(role_count: int) -> list[dict[str, Any]]:
+    return [
         {
             "Command": "",
             "SessionRestoreId": index,
@@ -4921,11 +4925,21 @@ def _new_project_layout_payload(role_count: int) -> dict[str, Any]:
         }
         for index in range(role_count)
     ]
-    if role_count <= 1:
+
+
+def _single_row_layout_payload(leaves: list[dict[str, Any]]) -> dict[str, Any]:
+    if len(leaves) <= 1:
         return leaves[0] if leaves else {"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}
-    column_count = math.ceil(math.sqrt(role_count))
+    return {
+        "Orientation": "Horizontal",
+        "Widgets": leaves,
+    }
+
+
+def _row_major_grid_layout_payload(leaves: list[dict[str, Any]]) -> dict[str, Any]:
+    column_count = math.ceil(math.sqrt(len(leaves)))
     rows: list[dict[str, Any]] = []
-    for start in range(0, role_count, column_count):
+    for start in range(0, len(leaves), column_count):
         row = leaves[start : start + column_count]
         if len(row) == 1:
             rows.append(row[0])
@@ -4942,6 +4956,13 @@ def _new_project_layout_payload(role_count: int) -> dict[str, Any]:
         "Orientation": "Vertical",
         "Widgets": rows,
     }
+
+
+def _new_project_layout_payload(role_count: int) -> dict[str, Any]:
+    leaves = _new_project_layout_leaves(role_count)
+    if role_count <= NEW_PROJECT_SINGLE_ROW_LAYOUT_MAX_ROLES:
+        return _single_row_layout_payload(leaves)
+    return _row_major_grid_layout_payload(leaves)
 
 
 def _new_project_launcher_config_payload(

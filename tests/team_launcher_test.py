@@ -302,6 +302,16 @@ FROZEN_COLUMN_MAJOR_SIX_LAYOUT = _literal_layout_from_session_tree(
     }
 )
 
+FROZEN_COLUMN_MAJOR_THREE_LAYOUT = _literal_layout_from_session_tree(
+    {
+        "Orientation": "Horizontal",
+        "Widgets": [
+            {"Orientation": "Vertical", "Widgets": [0, 1]},
+            2,
+        ],
+    }
+)
+
 
 def _write_launcher_config(
     directory: Path,
@@ -385,18 +395,12 @@ def test_generated_new_project_layouts_are_balanced_row_major_grids() -> None:
             "Widgets": [0, 1],
         },
         3: {
-            "Orientation": "Vertical",
-            "Widgets": [
-                {"Orientation": "Horizontal", "Widgets": [0, 1]},
-                2,
-            ],
+            "Orientation": "Horizontal",
+            "Widgets": [0, 1, 2],
         },
         4: {
-            "Orientation": "Vertical",
-            "Widgets": [
-                {"Orientation": "Horizontal", "Widgets": [0, 1]},
-                {"Orientation": "Horizontal", "Widgets": [2, 3]},
-            ],
+            "Orientation": "Horizontal",
+            "Widgets": [0, 1, 2, 3],
         },
         5: {
             "Orientation": "Vertical",
@@ -439,6 +443,34 @@ def test_generated_new_project_layouts_are_balanced_row_major_grids() -> None:
         assert {leaf.get("WorkingDirectory") for leaf in leaves} == {""}
 
 
+def test_new_project_default_layout_prefers_single_row_for_small_role_counts() -> None:
+    assert team_launcher.NEW_PROJECT_SINGLE_ROW_LAYOUT_MAX_ROLES == 4
+    assert _layout_session_tree(team_launcher._new_project_layout_payload(3)) == {
+        "Orientation": "Horizontal",
+        "Widgets": [0, 1, 2],
+    }
+    assert _layout_session_tree(team_launcher._new_project_layout_payload(4)) == {
+        "Orientation": "Horizontal",
+        "Widgets": [0, 1, 2, 3],
+    }
+    assert _layout_session_tree(team_launcher._legacy_new_project_column_major_layout_payload(3)) == {
+        "Orientation": "Horizontal",
+        "Widgets": [0, 1, 2],
+    }
+
+
+def test_new_project_default_layout_falls_back_to_grid_above_single_row_threshold() -> None:
+    assert _layout_session_tree(
+        team_launcher._new_project_layout_payload(team_launcher.NEW_PROJECT_SINGLE_ROW_LAYOUT_MAX_ROLES + 1)
+    ) == {
+        "Orientation": "Vertical",
+        "Widgets": [
+            {"Orientation": "Horizontal", "Widgets": [0, 1, 2]},
+            {"Orientation": "Horizontal", "Widgets": [3, 4]},
+        ],
+    }
+
+
 def test_upgrade_refreshes_legacy_generated_provision_layout() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-launcher-upgrade.") as tmp:
         provision_dir = Path(tmp) / ".switchyard" / "provision"
@@ -478,6 +510,31 @@ def test_upgrade_refreshes_column_major_generated_provision_layout() -> None:
 
         assert result.changed
         assert json.loads(layout_path.read_text(encoding="utf-8")) == team_launcher._new_project_layout_payload(6)
+
+
+def test_upgrade_refreshes_old_three_role_column_major_generated_layout() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-launcher-upgrade.") as tmp:
+        provision_dir = Path(tmp) / ".switchyard" / "provision"
+        provision_dir.mkdir(parents=True)
+        layout_path = provision_dir / "otto-konsole-layout.json"
+        layout_path.write_text(
+            json.dumps(FROZEN_COLUMN_MAJOR_THREE_LAYOUT, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        config_path = _write_launcher_config(provision_dir, role_count=3)
+        config = load_project_config("otto", config_path)
+
+        assert (
+            team_launcher._legacy_new_project_sqrt_column_major_layout_payload(3)
+            == FROZEN_COLUMN_MAJOR_THREE_LAYOUT
+        )
+        result = team_launcher.upgrade_generated_project_layout(config, config_path=config_path)
+
+        assert result.changed
+        assert _layout_session_tree(json.loads(layout_path.read_text(encoding="utf-8"))) == {
+            "Orientation": "Horizontal",
+            "Widgets": [0, 1, 2],
+        }
 
 
 def test_upgrade_repairs_generated_runtime_session_dir_to_durable_owner_state() -> None:

@@ -171,6 +171,36 @@ def test_non_pgu_project_can_insert_vcs_stage_owned_by_ops() -> None:
     assert "('director_review', 'done', 'mark_done', ARRAY['director']::text[]" not in workflow_sql
 
 
+def test_non_pgu_project_can_configure_multiple_audit_roles() -> None:
+    plan = build_plan(
+        project="stellaris",
+        owner_user="stellaris-agent",
+        port=8871,
+        implementer_roles=("main",),
+        audit_roles=("audit_gemini", "audit_gpt"),
+    )
+
+    board_unit = render_board_unit(plan)
+    workflow_sql = render_workflow_sql(plan)
+
+    assert plan.audit_roles == ("audit_gemini", "audit_gpt")
+    assert plan.assignee_roles == ("unassigned", "designer", "main", "audit_gemini", "audit_gpt", "director", "user")
+    assert plan.caller_roles == ("director", "designer", "main", "audit_gemini", "audit_gpt", "user")
+    assert "TICKET_BOARD_ASSIGNEES=unassigned,designer,main,audit_gemini,audit_gpt,director,user" in board_unit
+    assert "TICKET_BOARD_CALLER_ROLES=director,designer,main,audit_gemini,audit_gpt,user" in board_unit
+    assert (
+        "TICKET_BOARD_OPERATION_ALLOWED_ROLES="
+        "file_bug=main,audit_gemini,audit_gpt;"
+        "start_task=main,director,audit_gemini,audit_gpt;"
+        "complete_task=main,director,audit_gemini,audit_gpt;"
+        "audit_sign_off=audit_gemini,audit_gpt;"
+        "audit_kick_back=audit_gemini,audit_gpt"
+    ) in board_unit
+    assert "('audit', 'Audit', 3, ARRAY['audit_gemini', 'audit_gpt']::text[]" in workflow_sql
+    assert "('audit', 'director_review', 'audit_sign_off', ARRAY['audit_gemini', 'audit_gpt']::text[]" in workflow_sql
+    assert "('audit', 'in_progress', 'audit_kick_back', ARRAY['audit_gemini', 'audit_gpt']::text[]" in workflow_sql
+
+
 def test_pgu_plan_rejects_vcs_close_override() -> None:
     try:
         build_plan(project="pgu", owner_user="agent", vcs_close_role="ops")
@@ -179,6 +209,16 @@ def test_pgu_plan_rejects_vcs_close_override() -> None:
         message = str(exc)
 
     assert "--vcs-close-role is only for provisioned projects" in message
+
+
+def test_pgu_plan_rejects_custom_audit_roles() -> None:
+    try:
+        build_plan(project="pgu", owner_user="agent", audit_roles=("audit_gemini", "audit_gpt"))
+        raise AssertionError("expected pgu audit role override rejection")
+    except SystemExit as exc:
+        message = str(exc)
+
+    assert "custom audit roles are only for provisioned projects" in message
 
 
 def test_non_pgu_project_can_omit_audit_role_and_stage() -> None:
@@ -629,6 +669,30 @@ def test_cli_writes_reviewable_artifacts() -> None:
         )
         assert "Seed the default project workflow for porter" in workflow_result.stdout
         assert "ARRAY['builder']::text[]" in workflow_result.stdout
+
+        multi_audit_result = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts" / "ticket-board-provision-project"),
+                "--project",
+                "porter",
+                "--owner-user",
+                "otto-agent",
+                "--implementer-role",
+                "builder",
+                "--audit-role",
+                "audit_gemini",
+                "--audit-role",
+                "audit_gpt",
+                "--render",
+                "workflow-sql",
+            ],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert "ARRAY['audit_gemini', 'audit_gpt']::text[]" in multi_audit_result.stdout
 
 
 def main() -> int:

@@ -81,12 +81,35 @@ FROM (VALUES {values_sql}) AS states(state_name);
     return {str(key): value for key, value in rows.items()}
 
 
-def transition_target_role_case_from_db(conn: str) -> str:
-    definition = function_def(conn, "ticket_board.transition_target_role(text,text)")
-    match = re.search(r"SELECT CASE\n(?P<body>.*?)\n\s+ELSE NULL", definition, re.S)
-    if not match:
-        raise AssertionError(f"could not extract transition_target_role CASE body:\n{definition}")
-    return normalize_sql_body(match.group("body"))
+def sql_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def transition_target_role_values_from_db(
+    conn: str,
+    stages: list[dict[str, object]],
+    assignees_by_state: dict[str, list[str]],
+) -> dict[str, str | None]:
+    values = ", ".join(
+        f"({sql_literal(state)}, {sql_literal(assignee)})"
+        for state, assignees in assignees_by_state.items()
+        for assignee in assignees
+    )
+    rows = json.loads(
+        psql(
+            conn,
+            f"""
+WITH inputs(state_name, assignee) AS (VALUES {values})
+SELECT jsonb_object_agg(
+    state_name || ':' || assignee,
+    ticket_board.transition_target_role(state_name, assignee)
+    ORDER BY state_name, assignee
+)::text
+FROM inputs;
+""",
+        )
+    )
+    return {str(key): value for key, value in rows.items()}
 
 
 def transition_whitelist_from_db(conn: str) -> list[tuple[str, list[str]]]:
@@ -363,17 +386,37 @@ def compile_state_rank(stages: list[dict[str, object]]) -> dict[str, int]:
     return {str(stage["name"]): int(stage["rank"]) for stage in stages}
 
 
-def compile_transition_target_role(stages: list[dict[str, object]]) -> str:
-    lines: list[str] = []
+def transition_target_assignees_by_state(stages: list[dict[str, object]]) -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {}
     for stage in stages:
-        owners = stage["owner_roles"]
-        if stage["name"] == "in_progress":
-            lines.append("        WHEN p_state = 'in_progress' THEN NULLIF(p_assignee, 'unassigned')")
-        elif stage["name"] == "user_review":
-            lines.append("        WHEN p_state = 'user_review' THEN NULL")
-        elif len(owners) == 1:
-            lines.append(f"        WHEN p_state = '{stage['name']}' THEN '{owners[0]}'")
-    return "\n".join(lines)
+        owners = [str(owner) for owner in stage["owner_roles"]]
+        result[str(stage["name"])] = sorted({"unassigned", "main", *owners})
+    return result
+
+
+def compile_transition_target_role_values(
+    stages: list[dict[str, object]],
+    assignees_by_state: dict[str, list[str]],
+) -> dict[str, str | None]:
+    owners_by_stage = {str(stage["name"]): [str(owner) for owner in stage["owner_roles"]] for stage in stages}
+    values: dict[str, str | None] = {}
+    for state, assignees in assignees_by_state.items():
+        owners = owners_by_stage[state]
+        for assignee in assignees:
+            target: str | None = None
+            if state == "in_progress":
+                target = None if assignee == "unassigned" else assignee
+            elif state == "user_review":
+                target = None
+            elif state == "audit":
+                if assignee != "unassigned" and assignee in owners:
+                    target = assignee
+                elif len(owners) == 1:
+                    target = owners[0]
+            elif len(owners) == 1:
+                target = owners[0]
+            values[f"{state}:{assignee}"] = target
+    return values
 
 
 def compile_transition_whitelist(
@@ -496,7 +539,11 @@ def main() -> int:
             assert_default_state_label_generator_tracks_schema_seed()
             assert compile_columns(stages) == app_columns
             assert compile_state_rank(stages) == state_rank_values_from_db(admin_conn, stages)
-            assert compile_transition_target_role(stages) == transition_target_role_case_from_db(admin_conn)
+            transition_target_assignees = transition_target_assignees_by_state(stages)
+            assert compile_transition_target_role_values(
+                stages,
+                transition_target_assignees,
+            ) == transition_target_role_values_from_db(admin_conn, stages, transition_target_assignees)
             assert compile_transition_whitelist(stages, transitions, db_transition_whitelist) == normalize_sql_body(
                 "\n".join(
                     f"            (OLD.state = '{from_stage}' AND NEW.state IN ({', '.join(repr(to_stage) for to_stage in to_stages)}))"

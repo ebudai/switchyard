@@ -192,6 +192,7 @@ NEW_PROJECT_REQUIRED_ROLES = (
 )
 NEW_PROJECT_FIXED_ROLE_NAMES = frozenset({"designer", "director", "audit"})
 NEW_PROJECT_RESERVED_ROLE_NAMES = frozenset({"designer", "director", "audit", "user", "unassigned"})
+NEW_PROJECT_NON_AUDIT_RESERVED_ROLE_NAMES = frozenset({"designer", "director", "user", "unassigned"})
 NEW_PROJECT_DEFAULT_IMPLEMENTER_ROLES = ("main", "ops")
 NEW_PROJECT_CONVENTIONAL_IMPLEMENTER_ROLES = (
     ("main", "core/domain implementation and integration"),
@@ -285,6 +286,7 @@ class ProjectDesignArtifact:
     worktree_policy: str
     design_document: Path
     implementer_roles: tuple[str, ...]
+    audit_roles: tuple[str, ...]
     role_clis: tuple[tuple[str, str], ...]
     include_designer: bool
     include_audit: bool
@@ -915,6 +917,23 @@ def _artifact_role_list(raw: Any, *, path: Path, field: str, defaults: Sequence[
     return tuple(result)
 
 
+def _artifact_audit_role_list(raw: Any, *, path: Path, defaults: Sequence[str]) -> tuple[str, ...]:
+    if raw is None:
+        return tuple(defaults)
+    if not isinstance(raw, list) or not all(isinstance(item, str) and item.strip() for item in raw):
+        raise SystemExit(f"{path} field 'project.audit_roles' must be a JSON string list")
+    result: list[str] = []
+    for item in raw:
+        role = item.strip().lower()
+        if not ROLE_RE.fullmatch(role):
+            raise SystemExit(f"{path} field 'project.audit_roles' role {role!r} must match ^[a-z][a-z0-9_-]{{0,63}}$")
+        if role in NEW_PROJECT_NON_AUDIT_RESERVED_ROLE_NAMES:
+            raise SystemExit(f"{path} field 'project.audit_roles' contains reserved role {role!r}")
+        if role not in result:
+            result.append(role)
+    return tuple(result)
+
+
 def _validate_new_project_cli(value: str, *, context: str = "CLI") -> str:
     cli = value.strip().lower()
     if cli not in SUPPORTED_NEW_PROJECT_CLIS:
@@ -931,18 +950,36 @@ def _validate_new_project_implementer_role(value: str, *, context: str = "role")
     return role
 
 
+def _validate_new_project_audit_role(value: str, *, context: str = "audit role") -> str:
+    role = value.strip().lower()
+    if not ROLE_RE.fullmatch(role):
+        raise SystemExit(f"{context} must match ^[a-z][a-z0-9_-]{{0,63}}$")
+    if role in NEW_PROJECT_NON_AUDIT_RESERVED_ROLE_NAMES:
+        raise SystemExit(f"{context} {role!r} is reserved")
+    return role
+
+
+def _dedupe_role_names(roles: Sequence[str]) -> tuple[str, ...]:
+    result: list[str] = []
+    for role in roles:
+        if role not in result:
+            result.append(role)
+    return tuple(result)
+
+
 def _default_role_cli_pairs(
     implementer_roles: Sequence[str],
     *,
     include_designer: bool,
     include_audit: bool = True,
+    audit_roles: Sequence[str] | None = None,
 ) -> tuple[tuple[str, str], ...]:
     pairs: list[tuple[str, str]] = []
+    resolved_audit_roles = tuple(audit_roles) if audit_roles is not None else (("audit",) if include_audit else ())
     if include_designer:
         pairs.append(("designer", NEW_PROJECT_ROLE_CLI_DEFAULTS["designer"]))
     pairs.append(("director", NEW_PROJECT_ROLE_CLI_DEFAULTS["director"]))
-    if include_audit:
-        pairs.append(("audit", NEW_PROJECT_ROLE_CLI_DEFAULTS["audit"]))
+    pairs.extend((role, NEW_PROJECT_ROLE_CLI_DEFAULTS["audit"]) for role in resolved_audit_roles)
     pairs.extend((role, "codex") for role in implementer_roles)
     return tuple(pairs)
 
@@ -983,11 +1020,13 @@ def _artifact_role_cli_pairs(
     implementer_roles: Sequence[str],
     include_designer: bool,
     include_audit: bool = True,
+    audit_roles: Sequence[str] | None = None,
 ) -> tuple[tuple[str, str], ...]:
     defaults = _default_role_cli_pairs(
         implementer_roles,
         include_designer=include_designer,
         include_audit=include_audit,
+        audit_roles=audit_roles,
     )
     if raw is None:
         return defaults
@@ -1091,12 +1130,23 @@ def load_project_design_artifact(path: Path, *, expected_project: str | None = N
     include_audit_raw = project_raw.get("include_audit", True)
     if not isinstance(include_audit_raw, bool):
         raise SystemExit(f"{artifact_path} field 'project.include_audit' must be a JSON boolean")
+    audit_roles = _artifact_audit_role_list(
+        project_raw.get("audit_roles"),
+        path=artifact_path,
+        defaults=("audit",) if include_audit_raw else (),
+    )
+    role_overlap = set(implementer_roles) & set(audit_roles)
+    if role_overlap:
+        raise SystemExit(
+            f"{artifact_path} roles cannot be both implementers and auditors: {', '.join(sorted(role_overlap))}"
+        )
     role_clis = _artifact_role_cli_pairs(
         project_raw.get("role_clis"),
         path=artifact_path,
         implementer_roles=implementer_roles,
         include_designer=include_designer_raw,
-        include_audit=include_audit_raw,
+        include_audit=bool(audit_roles),
+        audit_roles=audit_roles,
     )
     push_policy = _artifact_string(project_raw, "push_policy", path=artifact_path, default="director-main-only")
     gates = _artifact_bool_mapping(project_raw.get("gates"), path=artifact_path, field="project.gates", defaults=PROJECT_DESIGN_DEFAULT_GATES)
@@ -1112,9 +1162,10 @@ def load_project_design_artifact(path: Path, *, expected_project: str | None = N
         worktree_policy=worktree_policy,
         design_document=design_document,
         implementer_roles=implementer_roles,
+        audit_roles=audit_roles,
         role_clis=role_clis,
         include_designer=include_designer_raw,
-        include_audit=include_audit_raw,
+        include_audit=bool(audit_roles),
         push_policy=push_policy,
         gates=gates,
         capability_grants=capability_grants,
@@ -1135,6 +1186,7 @@ def project_design_artifact_payload(artifact: ProjectDesignArtifact) -> dict[str
             "default_branch": artifact.default_branch,
             "worktree_policy": artifact.worktree_policy,
             "roles": list(artifact.implementer_roles),
+            "audit_roles": list(artifact.audit_roles),
             "include_designer": artifact.include_designer,
             "include_audit": artifact.include_audit,
             "role_clis": _role_cli_map(artifact.role_clis),
@@ -4927,6 +4979,7 @@ def design_project_command(
     implementer_roles: Sequence[str] | None = None,
     push_policy: str | None = None,
     audit_signoff: bool | None = None,
+    audit_roles: Sequence[str] | None = None,
     needs_inspection: bool | None = None,
     needs_user_signoff: bool | None = None,
     board_service_traversal: bool | None = None,
@@ -4959,6 +5012,13 @@ def design_project_command(
         ticket_prefix or _prompt_text("Ticket prefix", default=project_slug.upper(), input_func=input_func)
     )
     resolved_push_policy = push_policy or _prompt_text("Push policy", default="director-main-only", input_func=input_func)
+    resolved_audit_roles = _dedupe_role_names(
+        tuple(_validate_new_project_audit_role(role) for role in (audit_roles or ("audit",)))
+    )
+    resolved_implementer_roles = tuple(implementer_roles or DEFAULT_PROJECT_IMPLEMENTER_ROLES)
+    role_overlap = set(resolved_implementer_roles) & set(resolved_audit_roles)
+    if role_overlap:
+        raise SystemExit(f"roles cannot be both implementers and auditors: {', '.join(sorted(role_overlap))}")
     gates = {
         "audit_signoff": audit_signoff
         if audit_signoff is not None
@@ -4992,14 +5052,16 @@ def design_project_command(
         default_branch=resolved_branch,
         worktree_policy=resolved_policy,
         design_document=target_design_document,
-        implementer_roles=tuple(implementer_roles or DEFAULT_PROJECT_IMPLEMENTER_ROLES),
+        implementer_roles=resolved_implementer_roles,
+        audit_roles=resolved_audit_roles,
         role_clis=_default_role_cli_pairs(
-            implementer_roles or DEFAULT_PROJECT_IMPLEMENTER_ROLES,
+            resolved_implementer_roles,
             include_designer=True,
             include_audit=True,
+            audit_roles=resolved_audit_roles,
         ),
         include_designer=True,
-        include_audit=True,
+        include_audit=bool(resolved_audit_roles),
         push_policy=resolved_push_policy,
         gates=gates,
         capability_grants=grants,
@@ -5097,6 +5159,7 @@ def _new_project_launcher_config_payload(
     role_clis: Sequence[tuple[str, str]] | None = None,
     include_designer: bool = True,
     include_audit: bool = True,
+    audit_roles: Sequence[str] | None = None,
     remote: str = "origin",
     default_branch: str = "main",
     worktree_policy: str = "shared",
@@ -5110,6 +5173,7 @@ def _new_project_launcher_config_payload(
             implementer_roles,
             include_designer=include_designer,
             include_audit=include_audit,
+            audit_roles=audit_roles,
         )
     )
     worktree_base = _new_project_worktree_base(plan.project, plan.owner_user)
@@ -5220,6 +5284,7 @@ def write_new_project_launcher_artifacts(
     role_clis: Sequence[tuple[str, str]] | None = None,
     include_designer: bool = True,
     include_audit: bool = True,
+    audit_roles: Sequence[str] | None = None,
     remote: str = "origin",
     default_branch: str = "main",
     worktree_policy: str = "shared",
@@ -5232,6 +5297,7 @@ def write_new_project_launcher_artifacts(
             implementer_roles,
             include_designer=include_designer,
             include_audit=include_audit,
+            audit_roles=audit_roles,
         )
     )
     role_count = len(role_defs)
@@ -5254,6 +5320,7 @@ def write_new_project_launcher_artifacts(
                 role_clis=role_defs,
                 include_designer=include_designer,
                 include_audit=include_audit,
+                audit_roles=audit_roles,
                 remote=remote,
                 default_branch=default_branch,
                 worktree_policy=worktree_policy,
@@ -5464,6 +5531,7 @@ def new_project_command(
         role_clis = design_artifact.role_clis
         include_designer = design_artifact.include_designer
         include_audit = design_artifact.include_audit
+        audit_roles = design_artifact.audit_roles
         board_service_traversal = bool(design_artifact.capability_grants.get("board_service_traversal", True))
     else:
         if repository is None:
@@ -5480,6 +5548,7 @@ def new_project_command(
         role_clis = _default_role_cli_pairs(implementer_roles, include_designer=True, include_audit=True)
         include_designer = True
         include_audit = True
+        audit_roles = ("audit",)
         board_service_traversal = True
     if worktree_policy not in WORKTREE_POLICIES:
         raise SystemExit(f"team-launcher: worktree policy must be one of {sorted(WORKTREE_POLICIES)}")
@@ -5494,6 +5563,7 @@ def new_project_command(
         board_service_traversal=board_service_traversal,
         include_designer=include_designer,
         include_audit=include_audit,
+        audit_roles=audit_roles,
     )
     precheck_new_project(
         plan,
@@ -5518,6 +5588,7 @@ def new_project_command(
         role_clis=role_clis,
         include_designer=include_designer,
         include_audit=include_audit,
+        audit_roles=audit_roles,
         remote=remote,
         default_branch=default_branch,
         worktree_policy=worktree_policy,
@@ -5910,7 +5981,12 @@ def _write_initial_switchyard_project_artifact(
     role_clis: Sequence[tuple[str, str]] | None = None,
     include_designer: bool = True,
     include_audit: bool = True,
+    audit_roles: Sequence[str] | None = None,
 ) -> None:
+    resolved_audit_roles = tuple(audit_roles) if audit_roles is not None else (("audit",) if include_audit else ())
+    role_overlap = set(implementer_roles) & set(resolved_audit_roles)
+    if role_overlap:
+        raise SystemExit(f"roles cannot be both implementers and auditors: {', '.join(sorted(role_overlap))}")
     artifact = ProjectDesignArtifact(
         project=slug,
         project_name=project_name,
@@ -5922,16 +5998,18 @@ def _write_initial_switchyard_project_artifact(
         worktree_policy="shared",
         design_document=design_document,
         implementer_roles=tuple(implementer_roles),
+        audit_roles=resolved_audit_roles,
         role_clis=_dedupe_role_cli_pairs(
             role_clis
             or _default_role_cli_pairs(
                 implementer_roles,
                 include_designer=include_designer,
                 include_audit=include_audit,
+                audit_roles=resolved_audit_roles,
             )
         ),
         include_designer=include_designer,
-        include_audit=include_audit,
+        include_audit=bool(resolved_audit_roles),
         push_policy="director-main-only",
         gates=dict(PROJECT_DESIGN_DEFAULT_GATES),
         capability_grants={
@@ -7242,6 +7320,7 @@ def switchyard_new_command(
         selected_implementer_roles = artifact.implementer_roles
         include_designer = artifact.include_designer
         include_audit = artifact.include_audit
+        selected_audit_roles = artifact.audit_roles
     else:
         resolved_project_name = (project_name or _prompt_text("Project name", input_func=input_func)).strip()
         if not resolved_project_name:
@@ -7264,6 +7343,7 @@ def switchyard_new_command(
         selected_implementer_roles = ()
         include_designer = True
         include_audit = True
+        selected_audit_roles = ("audit",)
     _check_switchyard_registration_available(
         slug=resolved_slug,
         name=resolved_project_name,
@@ -7299,6 +7379,7 @@ def switchyard_new_command(
             raise SystemExit("switchyard: at least one implementer role is required")
         include_designer = any(role == "designer" for role, _cli in selected_role_clis)
         include_audit = any(role == "audit" for role, _cli in selected_role_clis)
+        selected_audit_roles = ("audit",) if include_audit else ()
 
     artifact_path = (from_artifact or (_switchyard_dir(project_dir) / f"{resolved_slug}.project.json")).expanduser().resolve(strict=False)
     design_document = project_dir / SWITCHYARD_DESIGN_FILE_NAME
@@ -7317,6 +7398,7 @@ def switchyard_new_command(
         implementer_roles=precheck_artifact.implementer_roles if precheck_artifact else selected_implementer_roles,
         include_designer=precheck_artifact.include_designer if precheck_artifact else include_designer,
         include_audit=precheck_artifact.include_audit if precheck_artifact else include_audit,
+        audit_roles=precheck_artifact.audit_roles if precheck_artifact else selected_audit_roles,
         board_service_traversal=(
             bool(precheck_artifact.capability_grants.get("board_service_traversal", True))
             if precheck_artifact
@@ -7366,6 +7448,7 @@ def switchyard_new_command(
             role_clis=selected_role_clis,
             include_designer=include_designer,
             include_audit=include_audit,
+            audit_roles=selected_audit_roles,
         )
         _chown_switchyard_project_files(owner_user=owner_user, project_dir=project_dir, runner=runner)
         if include_designer and design_document.exists():
@@ -7562,16 +7645,35 @@ def upgrade_project_command(
     return 0
 
 
-def _configured_implementer_roles(config: ProjectConfig, *, extra_role: str | None = None) -> tuple[str, ...]:
+def _configured_implementer_roles(
+    config: ProjectConfig,
+    *,
+    plan_data: dict[str, Any] | None = None,
+    extra_role: str | None = None,
+) -> tuple[str, ...]:
     roles: list[str] = []
-    for role in config.roles:
-        if role.role in NEW_PROJECT_RESERVED_ROLE_NAMES:
-            continue
-        if role.role not in roles:
-            roles.append(role.role)
+    raw_plan_roles = (plan_data or {}).get("implementer_roles")
+    if isinstance(raw_plan_roles, list):
+        source_roles = [str(role).strip().lower() for role in raw_plan_roles if str(role).strip()]
+    else:
+        source_roles = [
+            role.role
+            for role in config.roles
+            if role.role not in NEW_PROJECT_RESERVED_ROLE_NAMES
+        ]
+    for role in source_roles:
+        if role not in roles:
+            roles.append(role)
     if extra_role and extra_role not in roles:
         roles.append(extra_role)
     return tuple(roles)
+
+
+def _configured_audit_roles(config: ProjectConfig, *, plan_data: dict[str, Any] | None = None) -> tuple[str, ...]:
+    raw_plan_roles = (plan_data or {}).get("audit_roles")
+    if isinstance(raw_plan_roles, list):
+        return _dedupe_role_names(tuple(str(role).strip().lower() for role in raw_plan_roles if str(role).strip()))
+    return ("audit",) if any(role.role == "audit" for role in config.roles) else ()
 
 
 def _loaded_plan_field(plan_data: dict[str, Any], key: str, default: Any) -> Any:
@@ -7603,6 +7705,7 @@ def _plan_data_from_config(config: ProjectConfig, config_path: Path) -> dict[str
         "board_root": str(board_root) if board_root else None,
         "asset_dir": None,
         "frame_dir": None,
+        "audit_roles": ["audit"] if any(role.role == "audit" for role in config.roles) else [],
         "board_service_traversal": True,
         "operation_allowed_roles": [],
     }
@@ -7626,9 +7729,9 @@ def _project_plan_for_added_role(
     role_name: str,
 ) -> ProjectBoardProvision:
     plan_data = _plan_data_from_config(config, config_path)
-    implementer_roles = _configured_implementer_roles(config, extra_role=role_name)
+    implementer_roles = _configured_implementer_roles(config, plan_data=plan_data, extra_role=role_name)
+    audit_roles = _configured_audit_roles(config, plan_data=plan_data)
     include_designer = any(role.role == "designer" for role in config.roles)
-    include_audit = any(role.role == "audit" for role in config.roles)
     return build_plan(
         project=config.project,
         owner_user=str(_loaded_plan_field(plan_data, "owner_user", config.run_as_user or current_user_name())),
@@ -7645,7 +7748,8 @@ def _project_plan_for_added_role(
         frame_dir=Path(str(plan_data["frame_dir"])) if plan_data.get("frame_dir") else None,
         implementer_roles=implementer_roles,
         include_designer=include_designer,
-        include_audit=include_audit,
+        include_audit=bool(audit_roles),
+        audit_roles=audit_roles,
         board_service_traversal=bool(_loaded_plan_field(plan_data, "board_service_traversal", True)),
         vcs_close_role=_vcs_close_role_from_plan_data(plan_data),
     )

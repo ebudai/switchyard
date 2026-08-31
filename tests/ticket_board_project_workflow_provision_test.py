@@ -457,7 +457,7 @@ WHERE a.name <> b.name
                 ("cancel", "app", "main", "f"),
                 ("audit_kick_back", "director", "main", "f"),
                 ("user_reopen", "user", "main", "t"),
-                ("audit_kick_back", "audit", "main", "t"),
+                ("audit_kick_back", "audit", "audit", "t"),
                 ("audit_kick_back", "main", "main", "f"),
             ]
             for action_name, actor, assignee, expected in aggregate_rbac_expectations:
@@ -597,6 +597,11 @@ SELECT ticket_board.create_ticket('Provisioned workflow audit kickback', 'Body',
             service_call(service_conn, "director", f"SELECT ticket_board.route('{audit_kickback_id}', 'in_progress', 'main');")
             service_call(service_conn, "main", f"SELECT ticket_board.submit_to_audit('{audit_kickback_id}', 'abcdef3');")
             assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{audit_kickback_id}';") == "audit:audit"
+            assert "role main cannot call audit_kick_back" in service_call_fails(
+                service_conn,
+                "main",
+                f"SELECT ticket_board.audit_kick_back('{audit_kickback_id}', 'Wrong owner.', 'main');",
+            )
             service_call_without_shadow_warning(service_conn, "audit", f"SELECT ticket_board.audit_kick_back('{audit_kickback_id}', 'Needs another pass.', 'main');")
             assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{audit_kickback_id}';") == "in_progress:main"
 
@@ -820,6 +825,135 @@ SELECT ticket_board.create_ticket('Audit-less workflow ticket', 'Body', 'analysi
 
             service_call(noaudit_service_conn, "director", f"SELECT ticket_board.mark_done('{noaudit_ticket_id}', '123abcd');")
             assert psql(noaudit_admin_conn, f"SELECT state FROM ticket_board.tickets WHERE id = '{noaudit_ticket_id}';") == "done"
+
+            multi_audit_dbname = "project_workflow_multi_audit"
+            run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", multi_audit_dbname])
+            multi_audit_admin_conn = conninfo(socket_dir, port, multi_audit_dbname)
+            multi_audit_service_conn = conninfo(socket_dir, port, multi_audit_dbname, "ticket_board_service")
+            psql(multi_audit_admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
+            run_migrations(multi_audit_admin_conn)
+            multi_audit_plan = build_plan(
+                project="review",
+                owner_user="review-agent",
+                database=multi_audit_dbname,
+                include_designer=False,
+                implementer_roles=("main",),
+                audit_roles=("audit_gemini", "audit_gpt"),
+            )
+            psql(multi_audit_admin_conn, render_workflow_sql(multi_audit_plan))
+            psql(multi_audit_admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
+
+            assert_project_workflow_matches_schema_projection(multi_audit_admin_conn, multi_audit_plan)
+            assert_tenant_projection_policy(multi_audit_plan)
+            assert (
+                psql(
+                    multi_audit_admin_conn,
+                    "SELECT owner_roles::text FROM ticket_board.workflow_stages WHERE name = 'audit';",
+                )
+                == "{audit_gemini,audit_gpt}"
+            )
+            assert (
+                psql(
+                    multi_audit_admin_conn,
+                    """
+SELECT allowed_roles::text
+FROM ticket_board.workflow_transitions
+WHERE from_stage = 'audit' AND to_stage = 'director_review' AND action_name = 'audit_sign_off';
+""",
+                )
+                == "{audit_gemini,audit_gpt}"
+            )
+
+            multi_audit_ticket_id = service_call(
+                multi_audit_service_conn,
+                "director",
+                """
+SELECT set_config('ticket_board.ticket_prefix', 'REV', false);
+SELECT ticket_board.create_ticket('Partitioned audit workflow ticket', 'Body', 'analysis');
+""",
+            )
+            service_call(multi_audit_service_conn, "director", f"SELECT ticket_board.route('{multi_audit_ticket_id}', 'in_progress', 'main');")
+            service_call(multi_audit_service_conn, "main", f"SELECT ticket_board.submit_to_audit('{multi_audit_ticket_id}', 'abc8120');")
+            multi_audit_state = psql(
+                multi_audit_admin_conn,
+                f"SELECT state || ':' || coalesce(assignee, '') FROM ticket_board.tickets WHERE id = '{multi_audit_ticket_id}';",
+            )
+            assert multi_audit_state == "audit:main", multi_audit_state
+
+            psql(multi_audit_admin_conn, "DELETE FROM ticket_board.ticket_notification_queue;")
+            service_call(
+                multi_audit_service_conn,
+                "director",
+                f"SELECT ticket_board.route('{multi_audit_ticket_id}', 'audit', 'audit_gpt');",
+            )
+            audit_assignment_queue = json.loads(
+                psql(
+                    multi_audit_admin_conn,
+                    f"""
+SELECT jsonb_agg(jsonb_build_object(
+    'target_role', target_role,
+    'kind', kind,
+    'state', payload->>'state',
+    'assignee', payload->>'assignee'
+) ORDER BY id)::text
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = '{multi_audit_ticket_id}';
+""",
+                )
+            )
+            assert audit_assignment_queue == [
+                {
+                    "target_role": "audit_gpt",
+                    "kind": "ticket_update",
+                    "state": "audit",
+                    "assignee": "audit_gpt",
+                }
+            ], audit_assignment_queue
+            assert (
+                psql(
+                    multi_audit_admin_conn,
+                    f"SELECT ticket_board.transition_target_role('audit', assignee) FROM ticket_board.tickets WHERE id = '{multi_audit_ticket_id}';",
+                )
+                == "audit_gpt"
+            )
+            assert "role audit_gemini cannot call audit_sign_off" in service_call_fails(
+                multi_audit_service_conn,
+                "audit_gemini",
+                f"SELECT ticket_board.audit_sign_off('{multi_audit_ticket_id}', 'Wrong partition.');",
+            )
+            service_call(multi_audit_service_conn, "audit_gpt", f"SELECT ticket_board.audit_sign_off('{multi_audit_ticket_id}', 'Audit verified.');")
+            assert (
+                psql(
+                    multi_audit_admin_conn,
+                    f"SELECT state || ':' || assignee || ':' || audit_signoff::text FROM ticket_board.tickets WHERE id = '{multi_audit_ticket_id}';",
+                )
+                == "director_review:director:true"
+            )
+            service_call(multi_audit_service_conn, "director", f"SELECT ticket_board.mark_done('{multi_audit_ticket_id}', 'abc8120');")
+
+            second_multi_audit_ticket_id = service_call(
+                multi_audit_service_conn,
+                "director",
+                """
+SELECT set_config('ticket_board.ticket_prefix', 'REV', false);
+SELECT ticket_board.create_ticket('Second partitioned audit workflow ticket', 'Body', 'analysis');
+""",
+            )
+            service_call(multi_audit_service_conn, "director", f"SELECT ticket_board.route('{second_multi_audit_ticket_id}', 'in_progress', 'main');")
+            service_call(multi_audit_service_conn, "main", f"SELECT ticket_board.submit_to_audit('{second_multi_audit_ticket_id}', 'abc8121');")
+            service_call(
+                multi_audit_service_conn,
+                "director",
+                f"SELECT ticket_board.route('{second_multi_audit_ticket_id}', 'audit', 'audit_gemini');",
+            )
+            service_call(multi_audit_service_conn, "audit_gemini", f"SELECT ticket_board.audit_sign_off('{second_multi_audit_ticket_id}', 'Audit verified.');")
+            assert (
+                psql(
+                    multi_audit_admin_conn,
+                    f"SELECT state || ':' || assignee || ':' || audit_signoff::text FROM ticket_board.tickets WHERE id = '{second_multi_audit_ticket_id}';",
+                )
+                == "director_review:director:true"
+            )
 
             vcs_dbname = "project_workflow_vcs"
             run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", vcs_dbname])

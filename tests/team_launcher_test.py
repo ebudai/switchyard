@@ -13526,6 +13526,86 @@ def test_switchyard_new_from_artifact_initializes_repo_on_configured_worktree_br
         team_launcher.launch_project = original_launch_project
 
 
+def test_new_project_from_artifact_provisions_multiple_audit_roles() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-multi-audit.") as tmp:
+        tmp_path = Path(tmp)
+        project_dir = tmp_path / "project"
+        source_repo = tmp_path / "source"
+        output_dir = tmp_path / "out"
+        design_document = tmp_path / "PROJECT_DESIGN.md"
+        artifact_path = tmp_path / "atlas.project.json"
+        project_dir.mkdir()
+        source_repo.mkdir()
+        artifact_path.write_text(
+            json.dumps(
+                {
+                    "schema": "switchyard.project.v1",
+                    "design_document": str(design_document),
+                    "project": {
+                        "slug": "atlas",
+                        "name": "Atlas Planner",
+                        "ticket_prefix": "ATL",
+                        "owner_user": current_user,
+                        "repository": str(project_dir),
+                        "remote": "origin",
+                        "default_branch": "main",
+                        "worktree_policy": "isolated",
+                        "roles": ["main"],
+                        "audit_roles": ["audit_gemini", "audit_gpt"],
+                        "role_clis": {
+                            "director": "claude",
+                            "audit_gemini": "agy",
+                            "audit_gpt": "codex",
+                            "main": "codex",
+                        },
+                        "include_designer": False,
+                        "include_audit": True,
+                    },
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        assert (
+            new_project_command(
+                "atlas",
+                from_artifact=artifact_path,
+                source_repo=source_repo,
+                output_dir=output_dir,
+                runner=FakeRunner(),
+                port_in_use=lambda _port: False,
+                socket_exists=lambda _path: False,
+                require_owner_user=False,
+            )
+            == 0
+        )
+
+        plan = json.loads((output_dir / "plan.json").read_text(encoding="utf-8"))
+        config = json.loads((output_dir / "atlas.json").read_text(encoding="utf-8"))
+        board_unit = (output_dir / "atlas-ticket-board.service").read_text(encoding="utf-8")
+        workflow_sql = (output_dir / "atlas-workflow.sql").read_text(encoding="utf-8")
+
+    assert plan["audit_roles"] == ["audit_gemini", "audit_gpt"]
+    assert plan["implementer_roles"] == ["main"]
+    assert plan["assignee_roles"] == ["unassigned", "main", "audit_gemini", "audit_gpt", "director", "user"]
+    assert plan["caller_roles"] == ["director", "main", "audit_gemini", "audit_gpt", "user"]
+    assert [role["role"] for role in config["roles"]] == ["director", "audit_gemini", "audit_gpt", "main"]
+    assert {role["role"]: role["cli"] for role in config["roles"]} == {
+        "director": ["claude"],
+        "audit_gemini": ["agy"],
+        "audit_gpt": ["codex"],
+        "main": ["codex"],
+    }
+    assert "TICKET_BOARD_CALLER_ROLES=director,main,audit_gemini,audit_gpt,user" in board_unit
+    assert "audit_sign_off=audit_gemini,audit_gpt" in board_unit
+    assert "('audit', 'Audit', 3, ARRAY['audit_gemini', 'audit_gpt']::text[]" in workflow_sql
+    assert "('audit', 'director_review', 'audit_sign_off', ARRAY['audit_gemini', 'audit_gpt']::text[]" in workflow_sql
+
+
 def test_new_project_git_init_leaves_existing_repo_config_branch_and_head_untouched() -> None:
     current_user = team_launcher.current_user_name()
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-existing-git.") as tmp:
@@ -13839,6 +13919,7 @@ def test_switchyard_new_prompts_roles_and_skips_designer_when_absent() -> None:
     ]
     assert artifact["project"]["include_designer"] is False
     assert artifact["project"]["include_audit"] is False
+    assert artifact["project"]["audit_roles"] == []
     assert artifact["project"]["roles"] == ["code-review", "runtime"]
     assert artifact["project"]["role_clis"] == {
         "director": "claude",
@@ -13847,6 +13928,7 @@ def test_switchyard_new_prompts_roles_and_skips_designer_when_absent() -> None:
     }
     assert plan["draft_roles"] == []
     assert plan["implementer_roles"] == ["code-review", "runtime"]
+    assert plan["audit_roles"] == []
     assert plan["assignee_roles"] == ["unassigned", "code-review", "runtime", "director", "user"]
     assert plan["caller_roles"] == ["director", "code-review", "runtime", "user"]
     assert [role["role"] for role in config["roles"]] == ["director", "code-review", "runtime"]

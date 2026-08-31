@@ -62,6 +62,7 @@ class ProjectBoardProvision:
     workflow_seed: str
     draft_roles: tuple[str, ...]
     implementer_roles: tuple[str, ...]
+    audit_roles: tuple[str, ...]
     assignee_roles: tuple[str, ...]
     caller_roles: tuple[str, ...]
     operation_allowed_roles: tuple[tuple[str, tuple[str, ...]], ...]
@@ -160,6 +161,7 @@ def build_plan(
     board_service_traversal: bool = True,
     include_designer: bool = True,
     include_audit: bool = True,
+    audit_roles: Sequence[str] | None = None,
     vcs_close_role: str | None = None,
 ) -> ProjectBoardProvision:
     project = _validate_project(project)
@@ -179,37 +181,56 @@ def build_plan(
         if not resolved_implementer_roles:
             raise SystemExit("at least one implementer role is required")
     resolved_implementer_roles = _dedupe(resolved_implementer_roles)
+    if audit_roles is None:
+        resolved_audit_roles = ("audit",) if include_audit else ()
+    else:
+        resolved_audit_roles = _dedupe(tuple(_validate_role(role) for role in audit_roles))
+    forbidden_audit_roles = set(resolved_audit_roles) & {"designer", "director", "user", "unassigned"}
+    if forbidden_audit_roles:
+        raise SystemExit(f"audit roles cannot include reserved workflow roles: {', '.join(sorted(forbidden_audit_roles))}")
+    role_overlap = set(resolved_implementer_roles) & set(resolved_audit_roles)
+    if role_overlap:
+        raise SystemExit(f"roles cannot be both implementers and auditors: {', '.join(sorted(role_overlap))}")
     resolved_vcs_close_role = _validate_role(vcs_close_role) if vcs_close_role else ""
     if project == "pgu":
         if resolved_vcs_close_role:
             raise SystemExit("pgu uses the full built-in workflow; --vcs-close-role is only for provisioned projects")
+        if audit_roles is not None and resolved_audit_roles != ("audit",):
+            raise SystemExit("pgu uses the full built-in workflow; custom audit roles are only for provisioned projects")
         draft_roles: tuple[str, ...] = ()
+        resolved_audit_roles = ("audit",)
         assignee_roles = DEFAULT_PGU_ASSIGNEES
         caller_roles = DEFAULT_PGU_CALLER_ROLES
-        resolved_include_audit = True
     else:
         draft_roles = DEFAULT_PROJECT_DRAFT_ROLES if include_designer else ()
-        resolved_include_audit = bool(include_audit)
-        audit_roles = ("audit",) if resolved_include_audit else ()
         assignee_roles = _dedupe(
             (
                 "unassigned",
                 *draft_roles,
                 *DEFAULT_PROJECT_SUPPORT_ROLES,
                 *resolved_implementer_roles,
-                *audit_roles,
+                *resolved_audit_roles,
                 "director",
                 "user",
             )
         )
         caller_roles = _dedupe(
-            ("director", *draft_roles, *DEFAULT_PROJECT_SUPPORT_ROLES, *resolved_implementer_roles, *audit_roles, "user")
+            ("director", *draft_roles, *DEFAULT_PROJECT_SUPPORT_ROLES, *resolved_implementer_roles, *resolved_audit_roles, "user")
         )
     operation_allowed_roles: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    if project != "pgu" and resolved_audit_roles and resolved_audit_roles != ("audit",):
+        task_roles = _dedupe((*resolved_implementer_roles, "director", *resolved_audit_roles))
+        operation_allowed_roles = (
+            ("file_bug", _dedupe((*resolved_implementer_roles, *resolved_audit_roles))),
+            ("start_task", task_roles),
+            ("complete_task", task_roles),
+            ("audit_sign_off", resolved_audit_roles),
+            ("audit_kick_back", resolved_audit_roles),
+        )
     if resolved_vcs_close_role:
         if resolved_vcs_close_role not in assignee_roles or resolved_vcs_close_role not in caller_roles:
             raise SystemExit("--vcs-close-role must be one of the configured project roles")
-        operation_allowed_roles = (("mark_done", (resolved_vcs_close_role,)),)
+        operation_allowed_roles = (*operation_allowed_roles, ("mark_done", (resolved_vcs_close_role,)))
     ident = _identifier_from_project(project)
     unit_prefix = f"{project}-ticket-board"
     runtime_directory = unit_prefix
@@ -260,6 +281,7 @@ def build_plan(
         workflow_seed="pgu-full" if project == "pgu" else "default-project",
         draft_roles=draft_roles,
         implementer_roles=resolved_implementer_roles,
+        audit_roles=resolved_audit_roles,
         assignee_roles=assignee_roles,
         caller_roles=caller_roles,
         operation_allowed_roles=operation_allowed_roles,
@@ -457,6 +479,8 @@ def _project_workflow_owner_roles(stage: WorkflowStageSeed, plan: ProjectBoardPr
         return plan.draft_roles
     if stage.name == "in_progress":
         return _project_implementation_owner_roles(plan)
+    if stage.name == "audit":
+        return plan.audit_roles
     return stage.owner_roles
 
 
@@ -470,6 +494,9 @@ def _project_workflow_allowed_roles(roles: Sequence[str], plan: ProjectBoardProv
             if not inserted_implementers:
                 result.extend(plan.implementer_roles)
                 inserted_implementers = True
+            continue
+        if role == "audit":
+            result.extend(plan.audit_roles)
             continue
         result.append(role)
     return _dedupe(result)
@@ -518,7 +545,7 @@ def project_workflow_stages(
         return source_stages
 
     excluded_stages = set(TENANT_WORKFLOW_EXCLUDED_STAGES)
-    if "audit" not in plan.assignee_roles:
+    if not plan.audit_roles:
         excluded_stages.update({"audit", "dat", "user_review"})
 
     has_vcs_close = bool(dict(plan.operation_allowed_roles).get("mark_done"))
@@ -562,7 +589,7 @@ def project_workflow_transitions(
         return schema_workflow_transitions(schema_sql)
 
     stage_names = {stage.name for stage in project_workflow_stages(plan, schema_sql=schema_sql)}
-    include_audit = "audit" in plan.assignee_roles
+    include_audit = bool(plan.audit_roles)
     mark_done_roles = dict(plan.operation_allowed_roles).get("mark_done", ())
     has_vcs_close = bool(mark_done_roles)
     transitions: list[WorkflowTransitionSeed] = []
@@ -587,6 +614,9 @@ def project_workflow_transitions(
         if from_stage not in stage_names or to_stage not in stage_names:
             continue
         allowed_roles = _project_workflow_allowed_roles(transition.allowed_roles, plan)
+        owner_scoped = transition.owner_scoped
+        if from_stage == "audit" and transition.action_name in {"audit_sign_off", "audit_kick_back"}:
+            owner_scoped = True
         if transition.action_name == "release_draft":
             allowed_roles = _dedupe((*plan.draft_roles, *allowed_roles))
         transitions.append(
@@ -595,7 +625,7 @@ def project_workflow_transitions(
                 to_stage=to_stage,
                 action_name=transition.action_name,
                 allowed_roles=allowed_roles,
-                owner_scoped=transition.owner_scoped,
+                owner_scoped=owner_scoped,
                 director_override=transition.director_override,
             )
         )
@@ -1290,6 +1320,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="include the optional audit role and audit workflow stage",
     )
     parser.add_argument(
+        "--audit-role",
+        action="append",
+        dest="audit_roles",
+        help="audit-stage owner role; repeat for multiple auditors (default: audit when --include-audit)",
+    )
+    parser.add_argument(
         "--vcs-close-role",
         help="insert a VCS stage after final sign-off and allow this role to mark tickets done",
     )
@@ -1322,6 +1358,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         board_service_traversal=args.board_service_traversal,
         include_designer=args.include_designer,
         include_audit=args.include_audit,
+        audit_roles=args.audit_roles,
         vcs_close_role=args.vcs_close_role,
     )
     if args.output_dir:

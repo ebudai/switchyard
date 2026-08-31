@@ -239,11 +239,13 @@ def main() -> int:
     assert "create or replace function ticket_board.ticket_is_implementer_assignee" in executable_schema_lower
     assert "where ws.name = 'in_progress'" in executable_schema_lower
     assert "create or replace function ticket_board.stage_default_assignee" in executable_schema_lower
+    assert "create or replace function ticket_board.stage_entry_assignee" in executable_schema_lower
     assert "create or replace function ticket_board.apply_stage_default_assignee_update" in executable_schema_lower
     assert "tickets_zzzz_stage_default_assignee_update" in executable_schema_lower
-    assert "ticket_board.stage_default_assignee(new.state)" in executable_schema_lower
+    assert "ticket_board.stage_entry_assignee(new.state, new.assignee, new.id)" in executable_schema_lower
     assert "from ticket_board.workflow_stages" in executable_schema_lower
     assert "when cardinality(owner_roles) = 1 then owner_roles[1]" in executable_schema_lower
+    assert "when p_state = 'audit' and cardinality(owner_roles) > 1 then" in executable_schema_lower
     stage_default_function = re.search(
         r"create or replace function ticket_board\.stage_default_assignee\(p_state text\).*?\$\$(.*?)\$\$;",
         executable_schema_lower,
@@ -271,6 +273,12 @@ def main() -> int:
     assert "when cardinality(owner_roles) = 1 then owner_roles[1]" in stage_default_from_workflow_migration
     assert "create or replace function ticket_board.apply_stage_default_assignee_update" in stage_default_from_workflow_migration
     assert "new.state <> 'analysis'" in stage_default_from_workflow_migration
+    multi_audit_entry_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu812_multi_audit_stage_entry_assignee.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert "create or replace function ticket_board.stage_entry_assignee" in multi_audit_entry_migration
+    assert "when p_state = 'audit' and cardinality(owner_roles) > 1 then" in multi_audit_entry_migration
+    assert "ticket_board.stage_entry_assignee(new.state, new.assignee, new.id)" in multi_audit_entry_migration
     assert "add constraint tickets_in_progress_assignee_check" not in schema_lower
     assert re.search(
         r"resolved\s+boolean\s+not null\s+default\s+false",

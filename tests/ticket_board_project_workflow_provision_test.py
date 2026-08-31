@@ -873,19 +873,14 @@ SELECT ticket_board.create_ticket('Partitioned audit workflow ticket', 'Body', '
 """,
             )
             service_call(multi_audit_service_conn, "director", f"SELECT ticket_board.route('{multi_audit_ticket_id}', 'in_progress', 'main');")
+            psql(multi_audit_admin_conn, "DELETE FROM ticket_board.ticket_notification_queue;")
             service_call(multi_audit_service_conn, "main", f"SELECT ticket_board.submit_to_audit('{multi_audit_ticket_id}', 'abc8120');")
             multi_audit_state = psql(
                 multi_audit_admin_conn,
                 f"SELECT state || ':' || coalesce(assignee, '') FROM ticket_board.tickets WHERE id = '{multi_audit_ticket_id}';",
             )
-            assert multi_audit_state == "audit:main", multi_audit_state
+            assert multi_audit_state == "audit:audit_gemini", multi_audit_state
 
-            psql(multi_audit_admin_conn, "DELETE FROM ticket_board.ticket_notification_queue;")
-            service_call(
-                multi_audit_service_conn,
-                "director",
-                f"SELECT ticket_board.route('{multi_audit_ticket_id}', 'audit', 'audit_gpt');",
-            )
             audit_assignment_queue = json.loads(
                 psql(
                     multi_audit_admin_conn,
@@ -893,7 +888,7 @@ SELECT ticket_board.create_ticket('Partitioned audit workflow ticket', 'Body', '
 SELECT jsonb_agg(jsonb_build_object(
     'target_role', target_role,
     'kind', kind,
-    'state', payload->>'state',
+    'new_state', payload->>'new_state',
     'assignee', payload->>'assignee'
 ) ORDER BY id)::text
 FROM ticket_board.ticket_notification_queue
@@ -903,10 +898,10 @@ WHERE ticket_id = '{multi_audit_ticket_id}';
             )
             assert audit_assignment_queue == [
                 {
-                    "target_role": "audit_gpt",
-                    "kind": "ticket_update",
-                    "state": "audit",
-                    "assignee": "audit_gpt",
+                    "target_role": "audit_gemini",
+                    "kind": "transition",
+                    "new_state": "audit",
+                    "assignee": "audit_gemini",
                 }
             ], audit_assignment_queue
             assert (
@@ -914,14 +909,14 @@ WHERE ticket_id = '{multi_audit_ticket_id}';
                     multi_audit_admin_conn,
                     f"SELECT ticket_board.transition_target_role('audit', assignee) FROM ticket_board.tickets WHERE id = '{multi_audit_ticket_id}';",
                 )
-                == "audit_gpt"
+                == "audit_gemini"
             )
-            assert "role audit_gemini cannot call audit_sign_off" in service_call_fails(
+            assert "role audit_gpt cannot call audit_sign_off" in service_call_fails(
                 multi_audit_service_conn,
-                "audit_gemini",
+                "audit_gpt",
                 f"SELECT ticket_board.audit_sign_off('{multi_audit_ticket_id}', 'Wrong partition.');",
             )
-            service_call(multi_audit_service_conn, "audit_gpt", f"SELECT ticket_board.audit_sign_off('{multi_audit_ticket_id}', 'Audit verified.');")
+            service_call(multi_audit_service_conn, "audit_gemini", f"SELECT ticket_board.audit_sign_off('{multi_audit_ticket_id}', 'Audit verified.');")
             assert (
                 psql(
                     multi_audit_admin_conn,
@@ -941,12 +936,14 @@ SELECT ticket_board.create_ticket('Second partitioned audit workflow ticket', 'B
             )
             service_call(multi_audit_service_conn, "director", f"SELECT ticket_board.route('{second_multi_audit_ticket_id}', 'in_progress', 'main');")
             service_call(multi_audit_service_conn, "main", f"SELECT ticket_board.submit_to_audit('{second_multi_audit_ticket_id}', 'abc8121');")
-            service_call(
-                multi_audit_service_conn,
-                "director",
-                f"SELECT ticket_board.route('{second_multi_audit_ticket_id}', 'audit', 'audit_gemini');",
+            assert (
+                psql(
+                    multi_audit_admin_conn,
+                    f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{second_multi_audit_ticket_id}';",
+                )
+                == "audit:audit_gpt"
             )
-            service_call(multi_audit_service_conn, "audit_gemini", f"SELECT ticket_board.audit_sign_off('{second_multi_audit_ticket_id}', 'Audit verified.');")
+            service_call(multi_audit_service_conn, "audit_gpt", f"SELECT ticket_board.audit_sign_off('{second_multi_audit_ticket_id}', 'Audit verified.');")
             assert (
                 psql(
                     multi_audit_admin_conn,

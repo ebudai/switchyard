@@ -12366,6 +12366,128 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
         assert "warning: switchyard: session record missing for designer (porter-designer:0.0)" in output
         assert "warning: switchyard: session record missing for main (porter-main:0.0)" in output
         assert "Konsole Ctrl+Shift+E" in output
+        assert f"switchyard: initialized git repository in {project_dir} on branch main with an initial commit" in output
+
+
+def test_new_project_git_init_creates_main_branch_initial_commit_and_worktrees() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-git-init.") as tmp:
+        tmp_path = Path(tmp)
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+
+        created = team_launcher._ensure_project_git_repository(
+            owner_user=current_user,
+            project_dir=project_dir,
+            branch="main",
+            runner=subprocess.run,
+        )
+
+        role_worktree = tmp_path / "role-worktree"
+        _run_git(["git", "worktree", "add", "--detach", str(role_worktree), "HEAD"], cwd=project_dir)
+        git_listing = subprocess.check_output(["ls", "-ld", str(project_dir / ".git")], text=True)
+
+        assert created is True
+        assert _run_git(["git", "branch", "--show-current"], cwd=project_dir).stdout.strip() == "main"
+        assert _run_git(["git", "rev-list", "--count", "HEAD"], cwd=project_dir).stdout.strip() == "1"
+        assert _run_git(["git", "remote", "get-url", "origin"], cwd=project_dir).stdout.strip() == str(project_dir)
+        assert (role_worktree / ".git").is_file()
+        assert current_user in git_listing
+
+
+def test_new_project_git_init_leaves_existing_repo_config_branch_and_head_untouched() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-existing-git.") as tmp:
+        tmp_path = Path(tmp)
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        _run_git(["git", "init", "-b", "trunk"], cwd=project_dir)
+        (project_dir / "README.md").write_text("Existing project.\n", encoding="utf-8")
+        _run_git(["git", "add", "README.md"], cwd=project_dir)
+        _run_git(["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "Initial"], cwd=project_dir)
+        before_branch = _run_git(["git", "branch", "--show-current"], cwd=project_dir).stdout.strip()
+        before_head = _run_git(["git", "rev-parse", "HEAD"], cwd=project_dir).stdout.strip()
+        before_config = _run_git(["git", "config", "--local", "--list"], cwd=project_dir).stdout
+
+        created = team_launcher._ensure_project_git_repository(
+            owner_user=current_user,
+            project_dir=project_dir,
+            branch="main",
+            runner=subprocess.run,
+        )
+
+        assert created is False
+        assert _run_git(["git", "branch", "--show-current"], cwd=project_dir).stdout.strip() == before_branch
+        assert _run_git(["git", "rev-parse", "HEAD"], cwd=project_dir).stdout.strip() == before_head
+        assert _run_git(["git", "config", "--local", "--list"], cwd=project_dir).stdout == before_config
+        assert subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=project_dir,
+            text=True,
+            capture_output=True,
+        ).returncode != 0
+        assert _run_git(["git", "status", "--porcelain"], cwd=project_dir).stdout == ""
+
+
+def test_switchyard_new_no_git_init_skips_and_refuses_absent_repo() -> None:
+    current_user = team_launcher.current_user_name()
+    original_precheck_new_project = team_launcher.precheck_new_project
+    original_ensure_owner = team_launcher._ensure_owner_user_and_project_dir
+    original_chown_project_files = team_launcher._chown_switchyard_project_files
+    original_chown_project_file = team_launcher._chown_project_file
+    try:
+        with tempfile.TemporaryDirectory(prefix="pgu-switchyard-no-git-init.") as tmp:
+            tmp_path = Path(tmp)
+            project_dir = tmp_path / "project"
+            source_repo = tmp_path / "source"
+            source_repo.mkdir()
+            output: list[str] = []
+
+            team_launcher.precheck_new_project = lambda *_args, **_kwargs: None
+
+            def fake_ensure_owner(
+                _owner_user: str,
+                requested_project_dir: Path,
+                **_kwargs: object,
+            ) -> team_launcher.OwnerUserProvisionResult:
+                requested_project_dir.mkdir(parents=True, exist_ok=True)
+                return team_launcher.OwnerUserProvisionResult(created=False, linger_enabled=False)
+
+            team_launcher._ensure_owner_user_and_project_dir = fake_ensure_owner
+            team_launcher._chown_switchyard_project_files = lambda *_args, **_kwargs: None
+            team_launcher._chown_project_file = lambda *_args, **_kwargs: None
+
+            try:
+                switchyard_new_command(
+                    slug="porter",
+                    agent_name=current_user,
+                    project_name="Porter System",
+                    project_path=project_dir,
+                    source_repo=source_repo,
+                    role_clis=LEGACY_SWITCHYARD_ROLE_CLIS,
+                    yes=True,
+                    allow_existing_owner_user=True,
+                    euid_getter=lambda: 0,
+                    runner=subprocess.run,
+                    git_init=False,
+                    input_func=lambda _prompt: "",
+                    print_func=output.append,
+                    port_in_use=lambda _port: False,
+                    socket_exists=lambda _path: False,
+                    registry_dir=tmp_path / "registry",
+                )
+                raise AssertionError("expected --no-git-init absent-repo failure")
+            except SystemExit as exc:
+                message = str(exc)
+    finally:
+        team_launcher.precheck_new_project = original_precheck_new_project
+        team_launcher._ensure_owner_user_and_project_dir = original_ensure_owner
+        team_launcher._chown_switchyard_project_files = original_chown_project_files
+        team_launcher._chown_project_file = original_chown_project_file
+
+    assert f"switchyard: skipped project git initialization for {project_dir} (--no-git-init)" in output
+    assert "is not a git repository" in message
+    assert not (project_dir / ".git").exists()
 
 
 def test_switchyard_new_validates_models_before_launching_panes() -> None:

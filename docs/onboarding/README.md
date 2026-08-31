@@ -24,6 +24,11 @@ echo "$TICKET_BOARD_URL"
 curl -s "$TICKET_BOARD_URL/api/board"
 ```
 
+When creating a project, `switchyard new` initializes an empty project path as a
+git repository on the configured branch and creates the initial commit needed for
+role worktrees. Existing repositories are left untouched. Use `--no-git-init`
+only for a path that already has a repo with `HEAD`.
+
 ## Not onboarding, but nearby
 
 - `../ticket-board-service.md` — deploying and operating the board service.

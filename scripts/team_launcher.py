@@ -5740,15 +5740,23 @@ def _ensure_project_git_repository(
     project_dir: Path,
     branch: str,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
-) -> None:
-    git_dir = project_dir / ".git"
-    if not git_dir.exists():
+) -> bool:
+    if not (project_dir / ".git").exists():
         init = _run_owner_git(owner_user, project_dir, "init", "-b", branch, runner=runner)
         if init.returncode != 0:
             raise SystemExit(
                 f"switchyard: failed to initialize git repository in {project_dir}: "
                 f"{_proc_failure_reason(init, f'exit {init.returncode}')}"
             )
+        remote = _run_owner_git(owner_user, project_dir, "remote", "get-url", "origin", runner=runner)
+        if remote.returncode != 0:
+            add_remote = _run_owner_git(owner_user, project_dir, "remote", "add", "origin", str(project_dir), runner=runner)
+            if add_remote.returncode != 0:
+                raise SystemExit(
+                    f"switchyard: failed to add local origin remote for {project_dir}: "
+                    f"{_proc_failure_reason(add_remote, f'exit {add_remote.returncode}')}"
+                )
+        created_repository = True
     else:
         check = _run_owner_git(
             owner_user,
@@ -5762,19 +5770,16 @@ def _ensure_project_git_repository(
                 f"switchyard: project path {project_dir} has unusable git metadata: "
                 f"{_proc_failure_reason(check, f'exit {check.returncode}')}"
             )
-
-    remote = _run_owner_git(owner_user, project_dir, "remote", "get-url", "origin", runner=runner)
-    if remote.returncode != 0:
-        add_remote = _run_owner_git(owner_user, project_dir, "remote", "add", "origin", str(project_dir), runner=runner)
-        if add_remote.returncode != 0:
-            raise SystemExit(
-                f"switchyard: failed to add local origin remote for {project_dir}: "
-                f"{_proc_failure_reason(add_remote, f'exit {add_remote.returncode}')}"
-            )
+        created_repository = False
 
     head = _run_owner_git(owner_user, project_dir, "rev-parse", "--verify", "HEAD", runner=runner)
     if head.returncode == 0:
-        return
+        return created_repository
+    if not created_repository:
+        raise SystemExit(
+            f"switchyard: project path {project_dir} is already a git repository but has no initial commit; "
+            "create one yourself, or remove its .git directory and let switchyard initialize it"
+        )
 
     add = _run_owner_git(owner_user, project_dir, "add", ".", runner=runner)
     if add.returncode != 0:
@@ -5799,6 +5804,33 @@ def _ensure_project_git_repository(
         raise SystemExit(
             f"switchyard: failed to create initial git commit in {project_dir}: "
             f"{_proc_failure_reason(commit, f'exit {commit.returncode}')}"
+        )
+    return True
+
+
+def _require_existing_project_git_repository(
+    *,
+    owner_user: str,
+    project_dir: Path,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> None:
+    check = _run_owner_git(
+        owner_user,
+        project_dir,
+        "rev-parse",
+        "--is-inside-work-tree",
+        runner=runner,
+    )
+    if check.returncode != 0:
+        raise SystemExit(
+            f"switchyard: --no-git-init was set, but project path {project_dir} is not a git repository; "
+            "initialize it yourself before running switchyard new"
+        )
+    head = _run_owner_git(owner_user, project_dir, "rev-parse", "--verify", "HEAD", runner=runner)
+    if head.returncode != 0:
+        raise SystemExit(
+            f"switchyard: --no-git-init was set, but project path {project_dir} has no initial commit; "
+            "create one yourself before running switchyard new"
         )
 
 
@@ -6926,6 +6958,7 @@ def switchyard_new_command(
     session_record_poll: float = LAUNCH_SESSION_RECORD_POLL_SECONDS,
     layout_mode: str = LAYOUT_MODE_AUTO,
     layout_environ: dict[str, str] | None = None,
+    git_init: bool = True,
     config_dir: Path | None = None,
     registry_dir: Path | None = None,
     input_func: Callable[[str], str] = input,
@@ -7069,12 +7102,24 @@ def switchyard_new_command(
         _chown_switchyard_project_files(owner_user=owner_user, project_dir=project_dir, runner=runner)
         if include_designer and design_document.exists():
             _chown_project_file(owner_user=owner_user, path=design_document, runner=runner)
-        _ensure_project_git_repository(
-            owner_user=owner_user,
-            project_dir=project_dir,
-            branch="main",
-            runner=runner,
-        )
+        if git_init:
+            created_git_repository = _ensure_project_git_repository(
+                owner_user=owner_user,
+                project_dir=project_dir,
+                branch="main",
+                runner=runner,
+            )
+            if created_git_repository:
+                print_func(f"switchyard: initialized git repository in {project_dir} on branch main with an initial commit")
+            else:
+                print_func(f"switchyard: using existing git repository in {project_dir} without modifying it")
+        else:
+            print_func(f"switchyard: skipped project git initialization for {project_dir} (--no-git-init)")
+            _require_existing_project_git_repository(
+                owner_user=owner_user,
+                project_dir=project_dir,
+                runner=runner,
+            )
     else:
         artifact = load_project_design_artifact(artifact_path)
         _write_switchyard_onboarding_files(
@@ -7088,12 +7133,27 @@ def switchyard_new_command(
             include_designer=artifact.include_designer,
         )
         _chown_switchyard_project_files(owner_user=owner_user, project_dir=project_dir, runner=runner)
-        _ensure_project_git_repository(
-            owner_user=owner_user,
-            project_dir=project_dir,
-            branch=artifact.default_branch,
-            runner=runner,
-        )
+        if git_init:
+            created_git_repository = _ensure_project_git_repository(
+                owner_user=owner_user,
+                project_dir=project_dir,
+                branch=artifact.default_branch,
+                runner=runner,
+            )
+            if created_git_repository:
+                print_func(
+                    f"switchyard: initialized git repository in {project_dir} "
+                    f"on branch {artifact.default_branch} with an initial commit"
+                )
+            else:
+                print_func(f"switchyard: using existing git repository in {project_dir} without modifying it")
+        else:
+            print_func(f"switchyard: skipped project git initialization for {project_dir} (--no-git-init)")
+            _require_existing_project_git_repository(
+                owner_user=owner_user,
+                project_dir=project_dir,
+                runner=runner,
+            )
 
     provision_dir = (output_dir or (_switchyard_dir(project_dir) / "provision")).expanduser().resolve(strict=False)
     result = new_project_command(
@@ -7492,6 +7552,11 @@ def _build_switchyard_new_parser() -> argparse.ArgumentParser:
     parser.add_argument("--database", help="PostgreSQL database; omitted means <slug>_ticket_board")
     parser.add_argument("--yes", action="store_true", help="proceed without the confirmation prompt")
     parser.add_argument(
+        "--no-git-init",
+        action="store_true",
+        help="do not initialize --project-path; it must already be a git repository with an initial commit",
+    )
+    parser.add_argument(
         "--allow-existing-owner-user",
         action="store_true",
         help="reuse an existing owner user without the existing-user confirmation prompt",
@@ -7551,6 +7616,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             yes=args.yes,
             allow_existing_owner_user=args.allow_existing_owner_user,
             layout_mode=args.layout,
+            git_init=not args.no_git_init,
         )
     if argv[0].casefold() == "register":
         args = _build_switchyard_register_parser().parse_args(argv[1:])

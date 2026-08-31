@@ -414,8 +414,12 @@ command; a project literally named "New" must be opened by its slug from the
 project list.
 
 After confirmation, `new` creates the selected agent user, creates the derived
-project directory, provisions the board, runs first-run auth checks for the
-selected CLIs, and launches the configured panes. The default agent user is
+project directory, initializes it as a git repo on the configured worktree branch
+when it is not already one, creates the required initial commit, provisions the
+board, runs first-run auth checks for the selected CLIs, and launches the
+configured panes. Existing git repos are left untouched. Pass `--no-git-init`
+only when the project path already has a usable repo with a `HEAD`; otherwise
+`new` refuses instead of launching a project with broken role worktrees. The default agent user is
 `<slug>-agent`; a typed agent-user value is used verbatim. If that user already
 exists, `new` warns and asks for explicit confirmation, defaulting to No, before
 reusing that account. Pass `--allow-existing-owner-user` to skip that

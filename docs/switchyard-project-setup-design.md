@@ -236,9 +236,11 @@ That forces the sequence, and nothing here is a preference:
 2. create the selected agent user (privileged -- switchyard, not the director;
    the default is `<agent-name>-agent`, typed input is verbatim)
 3. create the derived project directory in that user's home
-4. launch the designer **as that user, in that directory**
+4. initialize it as the owner user's git repo on the configured branch, with the
+   first commit required for role worktrees, unless an existing repo is present
+5. launch the designer **as that user, in that directory**
 
-Steps 2 and 3 cannot move after step 4.
+Steps 2 through 4 cannot move after step 5.
 
 **The cwd is effectively permanent.** Sessions must resume across days, and a session's cwd cannot
 change -- moving it means handing off to a fresh instance and losing the accumulated context. For

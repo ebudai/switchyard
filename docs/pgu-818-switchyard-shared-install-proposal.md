@@ -24,10 +24,14 @@ The wrapper should execute:
   current -> releases/<git-sha>
 ```
 
-This removes every normal invocation from user homes. A caller who cannot
-traverse `/home/eric`, `/home/agent`, or any tenant owner's home can still run
-`switchyard --help`, `switchyard status`, and `switchyard <project>` because the
-entrypoint and code are world-readable/executable host files.
+This removes the executable code path from user homes. A caller who cannot
+traverse `/home/eric`, `/home/agent`, or another tenant owner's home can still
+run `switchyard --help` and `switchyard --version`, and can run commands for a
+project it owns, because the entrypoint and code are world-readable/executable
+host files. Cross-tenant commands such as global `switchyard status` and
+`switchyard <project>` for a project owned by another user still need elevation:
+registered project configs and tenant state live inside tenant homes. That is a
+separate access problem from where the shared CLI is installed.
 
 ## Ownership And Permissions
 
@@ -97,6 +101,17 @@ Existing tenant board deployments can keep serving the board app from
 `<tenant>-ticketboard-live/current`; the launcher code path should no longer be
 coupled to each tenant board release after the migration.
 
+Shared releases should be immutable and should not self-deploy. The current
+launcher freshness probe assumes `scripts/team-launcher` lives inside a git
+checkout and runs `git` against that checkout on every real launch. A
+root-owned exported release under `/opt/switchyard/current` is deliberately not
+a per-tenant git checkout, so the implementation should teach the probe to
+recognize the shared install path and skip git freshness/self-deploy checks
+there. Freshness for shared installs is enforced by the operator upgrade flow
+above: export an explicit tested commit, canary the release directly, then flip
+`current`. The release should include a machine-readable commit marker so
+`switchyard --version` and diagnostics can report which source commit is active.
+
 ## Cutover Breakage And Survival Plan
 
 The live hardcoded wrapper must not be replaced until `/opt/switchyard/current`
@@ -116,11 +131,14 @@ wrapper target change.
 
 For `otto` and `mefp`, perform a two-step migration:
 
-1. Install the shared wrapper and verify `switchyard status` can read registered
-   projects without traversing another user's home.
+1. Install the shared wrapper and verify `switchyard --help` and
+   `switchyard --version` work without traversing another user's home. Verify
+   global status through the existing elevated path because cross-tenant config
+   reads remain privileged.
 2. Run a project upgrade that rewrites generated config `pane_launcher` values to
    `/opt/switchyard/current/scripts/team-launcher`, then verify each project with
-   `switchyard <project> status` before stopping or restarting panes.
+   an elevated or owner-owned `switchyard <project> status` before stopping or
+   restarting panes.
 
 If a tenant fails after step 1 but before step 2, it can still survive because
 its existing config and board release are untouched. If a tenant fails after
@@ -134,12 +152,17 @@ The implementation ticket should update the installer, wrapper tests, generated
 config migration, and docs together. It should explicitly test:
 
 - a user with no traverse access to `/home/eric` or `/home/agent` can run
-  `switchyard --help` and `switchyard status`;
+  `switchyard --help` and `switchyard --version`;
+- a user can run commands for a project it owns without reading another user's
+  home, while global status and cross-tenant project commands still elevate;
 - the wrapper target is `/opt/switchyard/current/switchyard`;
 - missing target help/version fallback does not require sudo;
 - mutating commands fail clearly when the shared target is absent;
 - generated tenants use `/opt/switchyard/current/scripts/team-launcher` as their
   pane launcher after upgrade;
+- launcher freshness/self-deploy probes are skipped for the shared immutable
+  install and diagnostics report the release commit marker instead of requiring
+  `.git`;
 - rollback can repoint `current` without editing tenant project state.
 
 This PGU-818 document intentionally does not change the live wrapper or launcher

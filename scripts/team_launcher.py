@@ -4822,7 +4822,7 @@ def launch_project(
             output_path,
             project=config.project,
             runner=runner,
-            process_launcher=konsole_process_launcher or getattr(runner, "process_launcher", None),
+            process_launcher=konsole_process_launcher,
         )
     if launch_result != 0:
         return launch_result
@@ -7713,7 +7713,7 @@ def switchyard_new_command(
         runner=launch_runner,
         layout_mode=layout_mode,
         layout_environ=layout_environ,
-        konsole_process_launcher=konsole_process_launcher or getattr(runner, "process_launcher", None),
+        konsole_process_launcher=konsole_process_launcher,
     )
     if launch_result != 0:
         return launch_result

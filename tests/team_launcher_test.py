@@ -143,7 +143,6 @@ class FakeRunner:
         self.current_commands = current_commands or {}
         self.pane_pids = pane_pids or {}
         self.calls: list[list[str]] = []
-        self.process_launcher = RecordingProcessLauncher()
 
     @staticmethod
     def _value_for(mapping: dict[str, Any], key: str, default: Any) -> Any:
@@ -214,6 +213,13 @@ class FakeRunner:
         if len(args) >= 6 and args[:6] == ["git", "-C", args[2], "rev-list", "--left-right", "--count"]:
             return subprocess.CompletedProcess(args, 0, stdout="0 0\n")
         return subprocess.CompletedProcess(args, 0)
+
+
+def test_konsole_process_launcher_is_explicit_only() -> None:
+    source = (ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8")
+
+    assert 'getattr(runner, "process_launcher"' not in source
+    assert not hasattr(FakeRunner(), "process_launcher")
 
 
 class KeywordRecordingFakeRunner(FakeRunner):
@@ -2538,6 +2544,7 @@ def test_launch_project_reports_missing_session_record_after_reboot_resume() -> 
                 "porter-main:0.0": "codex",
             }
         )
+        process_launcher = RecordingProcessLauncher()
         messages: list[str] = []
 
         assert (
@@ -2551,6 +2558,7 @@ def test_launch_project_reports_missing_session_record_after_reboot_resume() -> 
                 pane_state_dir=tmp_path / "pane-state",
                 report_session_records=True,
                 session_record_timeout=0,
+                konsole_process_launcher=process_launcher,
                 print_func=messages.append,
             )
             == 0
@@ -2608,22 +2616,18 @@ def test_launch_project_reports_visible_role_resume_fallback_to_operator() -> No
         )
         sidecar = session_dir / f"{session_file_name(role.target)}.superseded"
 
+        detached_launcher = RecordingProcessLauncher()
+
+        def process_launcher(args: list[str], **kwargs: object) -> object:
+            if "konsole" in args and active_record.exists() and not sidecar.exists():
+                active_record.replace(sidecar)
+                active_record.write_text(
+                    json.dumps({"target": role.target, "session_id": "fresh-session"}) + "\n",
+                    encoding="utf-8",
+                )
+            return detached_launcher(args, **kwargs)
+
         class VisibleFallbackRunner(FakeRunner):
-            def __init__(self) -> None:
-                super().__init__()
-                detached_launcher = RecordingProcessLauncher()
-
-                def process_launcher(args: list[str], **kwargs: object) -> object:
-                    if "konsole" in args and active_record.exists() and not sidecar.exists():
-                        active_record.replace(sidecar)
-                        active_record.write_text(
-                            json.dumps({"target": role.target, "session_id": "fresh-session"}) + "\n",
-                            encoding="utf-8",
-                        )
-                    return detached_launcher(args, **kwargs)
-
-                self.process_launcher = process_launcher
-
             def __call__(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
                 return super().__call__(args, **kwargs)
 
@@ -2640,6 +2644,7 @@ def test_launch_project_reports_visible_role_resume_fallback_to_operator() -> No
                 pane_state_dir=tmp_path / "pane-state",
                 report_session_records=True,
                 session_record_timeout=0,
+                konsole_process_launcher=process_launcher,
                 print_func=messages.append,
             )
             == 0
@@ -3019,6 +3024,7 @@ def test_launch_project_uses_configured_owner_readable_pane_launcher() -> None:
             team_launcher._control_repository_owner_home = original_home
         layout_output = tmp_path / "materialized.json"
         runner = FakeRunner()
+        process_launcher = RecordingProcessLauncher()
 
         assert (
             launch_project(
@@ -3029,6 +3035,7 @@ def test_launch_project_uses_configured_owner_readable_pane_launcher() -> None:
                 runner=runner,
                 layout_output=layout_output,
                 pane_state_dir=tmp_path / "pane-state",
+                konsole_process_launcher=process_launcher,
             )
             == 0
         )
@@ -3071,6 +3078,7 @@ def test_launch_project_probes_pane_launcher_as_owner_without_control_repository
         config = load_project_config("porter", config_path)
         layout_output = tmp_path / "materialized.json"
         runner = FakeRunner()
+        process_launcher = RecordingProcessLauncher()
 
         assert (
             launch_project(
@@ -3081,6 +3089,7 @@ def test_launch_project_probes_pane_launcher_as_owner_without_control_repository
                 runner=runner,
                 layout_output=layout_output,
                 pane_state_dir=tmp_path / "pane-state",
+                konsole_process_launcher=process_launcher,
             )
             == 0
         )
@@ -3118,6 +3127,7 @@ def test_launch_project_probes_pane_launcher_as_owner_without_repository() -> No
         config = load_project_config("porter", config_path)
         layout_output = tmp_path / "materialized.json"
         runner = FakeRunner()
+        process_launcher = RecordingProcessLauncher()
 
         assert (
             launch_project(
@@ -3128,6 +3138,7 @@ def test_launch_project_probes_pane_launcher_as_owner_without_repository() -> No
                 runner=runner,
                 layout_output=layout_output,
                 pane_state_dir=tmp_path / "pane-state",
+                konsole_process_launcher=process_launcher,
             )
             == 0
         )
@@ -4671,7 +4682,7 @@ def test_start_auto_fast_forwards_stale_launcher_checkout_once_before_panes() ->
                 return subprocess.CompletedProcess(args, 0)
             return fake(args, **kwargs)
 
-        runner.process_launcher = fake.process_launcher  # type: ignore[attr-defined]
+        process_launcher = RecordingProcessLauncher()
         stderr = StringIO()
         with redirect_stderr(stderr):
             result = launch_project(
@@ -4682,6 +4693,7 @@ def test_start_auto_fast_forwards_stale_launcher_checkout_once_before_panes() ->
                 runner=runner,
                 layout_output=tmp_path / "layout.json",
                 pane_state_dir=tmp_path / "pane-state",
+                konsole_process_launcher=process_launcher,
             )
 
         assert result == 0
@@ -4706,6 +4718,7 @@ def test_launcher_freshness_probe_uses_owner_runner_when_launcher_user_differs()
             launcher_repo.mkdir()
             config = load_project_config("pgu", config_path)
             runner = SudoAwareFakeRunner()
+            process_launcher = RecordingProcessLauncher()
             team_launcher.current_user_name = lambda: "root"
             team_launcher._repo_root = lambda: launcher_repo
 
@@ -4718,6 +4731,7 @@ def test_launcher_freshness_probe_uses_owner_runner_when_launcher_user_differs()
                     runner=runner,
                     layout_output=tmp_path / "launch-layout.json",
                     pane_state_dir=tmp_path / "pane-state",
+                    konsole_process_launcher=process_launcher,
                 )
                 == 0
             )
@@ -6556,6 +6570,7 @@ def test_plain_shared_checkout_git_runs_as_owner_when_launcher_user_differs() ->
         config_path = _write_pgu_config_with_shared_checkout(tmp_path)
         config = load_project_config("pgu", config_path)
         runner = SudoAwareFakeRunner(current_commands={"pgu-research:0.0": "claude"})
+        process_launcher = RecordingProcessLauncher()
         layout_output = tmp_path / "layout.json"
         original_current_user_name = team_launcher.current_user_name
         try:
@@ -6569,6 +6584,7 @@ def test_plain_shared_checkout_git_runs_as_owner_when_launcher_user_differs() ->
                     runner=runner,
                     layout_output=layout_output,
                     pane_state_dir=tmp_path / "pane-state",
+                    konsole_process_launcher=process_launcher,
                 )
                 == 0
             )
@@ -6619,6 +6635,7 @@ def test_plain_shared_checkout_git_stays_direct_when_already_owner() -> None:
         config_path = _write_pgu_config_with_shared_checkout(tmp_path)
         config = load_project_config("pgu", config_path)
         runner = FakeRunner(current_commands={"pgu-research:0.0": "claude"})
+        process_launcher = RecordingProcessLauncher()
         original_current_user_name = team_launcher.current_user_name
         try:
             team_launcher.current_user_name = lambda: "agent"
@@ -6631,6 +6648,7 @@ def test_plain_shared_checkout_git_stays_direct_when_already_owner() -> None:
                     runner=runner,
                     layout_output=tmp_path / "layout.json",
                     pane_state_dir=tmp_path / "pane-state",
+                    konsole_process_launcher=process_launcher,
                 )
                 == 0
             )
@@ -6727,6 +6745,7 @@ def test_control_repository_launch_uses_role_worktrees_and_preserves_repository(
             team_launcher._control_repository_owner_home = lambda _config: tmp_path
             config = load_project_config("porter", config_path)
             runner = ProjectGitRunner(tmp_path)
+            process_launcher = RecordingProcessLauncher()
 
             assert (
                 launch_project(
@@ -6737,6 +6756,7 @@ def test_control_repository_launch_uses_role_worktrees_and_preserves_repository(
                     runner=runner,
                     layout_output=tmp_path / "launch-layout.json",
                     pane_state_dir=tmp_path / "pane-state",
+                    konsole_process_launcher=process_launcher,
                 )
                 == 0
             )
@@ -6763,6 +6783,7 @@ def test_control_repository_launch_uses_role_worktrees_and_preserves_repository(
             (app_worktree / "__pycache__").mkdir()
             (app_worktree / "__pycache__" / "x.pyc").write_bytes(b"pyc\n")
             stderr = StringIO()
+            second_process_launcher = RecordingProcessLauncher()
             with redirect_stderr(stderr):
                 assert (
                     launch_project(
@@ -6773,6 +6794,7 @@ def test_control_repository_launch_uses_role_worktrees_and_preserves_repository(
                         runner=ProjectGitRunner(tmp_path),
                         layout_output=tmp_path / "launch-layout-2.json",
                         pane_state_dir=tmp_path / "pane-state-2",
+                        konsole_process_launcher=second_process_launcher,
                     )
                     == 0
                 )
@@ -7718,6 +7740,7 @@ def test_full_launch_delegates_detached_role_start_to_owner_pane_subcommand() ->
             team_launcher.current_user_name = lambda: "root"
             config = load_project_config("porter", config_path)
             runner = FakeRunner()
+            process_launcher = RecordingProcessLauncher()
             result = launch_project(
                 config,
                 config_path=config_path,
@@ -7725,6 +7748,7 @@ def test_full_launch_delegates_detached_role_start_to_owner_pane_subcommand() ->
                 script_path=ROOT / "scripts" / "team-launcher",
                 runner=runner,
                 layout_output=tmp_path / "layout-output.json",
+                konsole_process_launcher=process_launcher,
             )
         finally:
             team_launcher.pwd.getpwnam = original_getpwnam
@@ -7816,6 +7840,7 @@ def test_launch_warns_before_resetting_dirty_shared_checkout_with_real_git() -> 
         config_path.write_text(json.dumps(raw_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         config = load_project_config("pgu", config_path)
         runner = ProjectGitRunner(repo)
+        process_launcher = RecordingProcessLauncher()
         stderr = StringIO()
 
         (repo / "tracked.txt").write_text("uncommitted tracked edit\n", encoding="utf-8")
@@ -7831,6 +7856,7 @@ def test_launch_warns_before_resetting_dirty_shared_checkout_with_real_git() -> 
                     runner=runner,
                     layout_output=tmp_path / "layout-out.json",
                     pane_state_dir=tmp_path / "pane-state",
+                    konsole_process_launcher=process_launcher,
                 )
                 == 0
             )
@@ -7889,6 +7915,7 @@ def test_clean_launch_does_not_warn_about_shared_checkout_refresh() -> None:
         config = load_project_config("pgu", config_path)
         (repo / "scripts" / "ticket_board" / "__pycache__").mkdir(parents=True)
         (repo / "scripts" / "ticket_board" / "__pycache__" / "team_launcher.cpython-313.pyc").write_bytes(b"pyc\n")
+        process_launcher = RecordingProcessLauncher()
         stderr = StringIO()
 
         with redirect_stderr(stderr):
@@ -7901,6 +7928,7 @@ def test_clean_launch_does_not_warn_about_shared_checkout_refresh() -> None:
                     runner=ProjectGitRunner(repo),
                     layout_output=tmp_path / "layout-out.json",
                     pane_state_dir=tmp_path / "pane-state",
+                    konsole_process_launcher=process_launcher,
                 )
                 == 0
             )
@@ -7951,6 +7979,7 @@ def test_default_layout_does_not_create_untracked_switchyard_in_shared_checkout(
         config_path.write_text(json.dumps(raw_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         config = load_project_config("pgu", config_path)
         runner = ProjectGitRunner(repo)
+        process_launcher = RecordingProcessLauncher()
         stderr = StringIO()
 
         class FakeUserInfo:
@@ -7974,6 +8003,7 @@ def test_default_layout_does_not_create_untracked_switchyard_in_shared_checkout(
                             script_path=ROOT / "scripts" / "team-launcher",
                             runner=runner,
                             pane_state_dir=tmp_path / "pane-state",
+                            konsole_process_launcher=process_launcher,
                         )
                         == 0
                     )
@@ -8133,6 +8163,7 @@ def test_reload_fetches_without_refreshing_shared_checkout() -> None:
         config_path = _write_pgu_config_with_shared_checkout(tmp_path)
         config = load_project_config("pgu", config_path)
         runner = FakeRunner(current_commands={"pgu-research:0.0": "claude"})
+        process_launcher = RecordingProcessLauncher()
         layout_output = tmp_path / "layout.json"
 
         assert (
@@ -8144,6 +8175,7 @@ def test_reload_fetches_without_refreshing_shared_checkout() -> None:
                 runner=runner,
                 layout_output=layout_output,
                 pane_state_dir=tmp_path / "pane-state",
+                konsole_process_launcher=process_launcher,
             )
             == 0
         )
@@ -8188,6 +8220,7 @@ def test_reload_syncs_live_cli_and_model_from_process_argv_before_relaunch() -> 
             encoding="utf-8",
         )
         runner = FakeRunner(existing_sessions={"pgu-research"}, pane_pids={research.target: 1200})
+        process_launcher = RecordingProcessLauncher()
         original_snapshot = _patch_process_snapshot(
             {1200: 6388, 1201: 1200},
             {1200: [1201]},
@@ -8207,6 +8240,7 @@ def test_reload_syncs_live_cli_and_model_from_process_argv_before_relaunch() -> 
                     runner=runner,
                     layout_output=tmp_path / "layout.json",
                     pane_state_dir=tmp_path / "pane-state",
+                    konsole_process_launcher=process_launcher,
                 )
                 == 0
             )
@@ -8388,6 +8422,7 @@ def test_start_does_not_sync_live_cli_or_model() -> None:
             encoding="utf-8",
         )
         runner = FakeRunner(current_commands={"pgu-research:0.0": "codex"})
+        process_launcher = RecordingProcessLauncher()
         before = config_path.read_text(encoding="utf-8")
 
         assert (
@@ -8399,6 +8434,7 @@ def test_start_does_not_sync_live_cli_or_model() -> None:
                 runner=runner,
                 layout_output=tmp_path / "layout.json",
                 pane_state_dir=tmp_path / "pane-state",
+                konsole_process_launcher=process_launcher,
             )
             == 0
         )
@@ -13194,6 +13230,7 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
         provision_dir = project_dir / ".switchyard" / "provision"
         registry_dir = tmp_path / "registry"
         runner = NewProjectRunner(owner_user="otto-agent", project_dir=project_dir)
+        process_launcher = RecordingProcessLauncher()
         stdout = StringIO()
 
         with redirect_stdout(stdout):
@@ -13215,6 +13252,7 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
                     socket_exists=lambda _path: False,
                     session_record_timeout=0,
                     registry_dir=registry_dir,
+                    konsole_process_launcher=process_launcher,
                 )
                 == 0
         )
@@ -13283,8 +13321,8 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
         assert any(call[:6] == ["sudo", "-u", "otto-agent", "git", "-C", str(project_dir)] for call in runner.calls)
         assert "not a git repository" not in runner.git_output
         assert not any(call[:1] in (["env"], ["sh"]) and "konsole" in call for call in runner.calls)
-        assert len(runner.process_launcher.calls) == 1
-        assert runner.process_launcher.calls[0]["kwargs"]["start_new_session"] is True
+        assert len(process_launcher.calls) == 1
+        assert process_launcher.calls[0]["kwargs"]["start_new_session"] is True
         output = stdout.getvalue()
         assert f"switchyard: installed onboarding docs into {project_onboarding_dir}: " in output
         assert "switchyard: full pane window started for porter" in output
@@ -13959,6 +13997,7 @@ def test_switchyard_new_prompts_roles_and_skips_designer_when_absent() -> None:
         prompts: list[str] = []
         answers = iter(["n", "n", "claude", "code-review, runtime", "agy", "codex"])
         runner = PromptedRoleRunner()
+        process_launcher = RecordingProcessLauncher()
         stdout = StringIO()
 
         def input_func(prompt: str) -> str:
@@ -13985,6 +14024,7 @@ def test_switchyard_new_prompts_roles_and_skips_designer_when_absent() -> None:
                     socket_exists=lambda _path: False,
                     session_record_timeout=0,
                     registry_dir=tmp_path / "registry",
+                    konsole_process_launcher=process_launcher,
                 )
                 == 0
             )
@@ -14065,6 +14105,7 @@ def test_switchyard_new_accepts_role_defaults_and_includes_ops() -> None:
         output: list[str] = []
         answers = iter(["", "", "", "", "", "", "", ""])
         runner = PromptedRoleRunner()
+        process_launcher = RecordingProcessLauncher()
 
         def input_func(prompt: str) -> str:
             prompts.append(prompt)
@@ -14090,6 +14131,7 @@ def test_switchyard_new_accepts_role_defaults_and_includes_ops() -> None:
                 socket_exists=lambda _path: False,
                 session_record_timeout=0,
                 registry_dir=tmp_path / "registry",
+                konsole_process_launcher=process_launcher,
             )
             == 0
         )
@@ -14304,6 +14346,7 @@ def test_switchyard_new_reports_project_specific_pane_state_dir_without_override
             tmp_path = Path(tmp)
             source_repo = tmp_path / "source-repo"
             source_repo.mkdir()
+            process_launcher = RecordingProcessLauncher()
             assert (
                 switchyard_new_command(
                     slug="porter",
@@ -14322,6 +14365,7 @@ def test_switchyard_new_reports_project_specific_pane_state_dir_without_override
                     socket_exists=lambda _path: False,
                     session_record_timeout=0,
                     registry_dir=tmp_path / "registry",
+                    konsole_process_launcher=process_launcher,
                 )
                 == 0
             )
@@ -14355,6 +14399,7 @@ def test_switchyard_new_custom_project_path_sets_artifact_repository_and_pane_wo
         source_repo = tmp_path / "source-repo"
         source_repo.mkdir()
         runner = NewProjectRunner()
+        process_launcher = RecordingProcessLauncher()
 
         assert (
             switchyard_new_command(
@@ -14375,6 +14420,7 @@ def test_switchyard_new_custom_project_path_sets_artifact_repository_and_pane_wo
                 socket_exists=lambda _path: False,
                 session_record_timeout=0,
                 registry_dir=tmp_path / "registry",
+                konsole_process_launcher=process_launcher,
             )
             == 0
         )
@@ -14500,6 +14546,7 @@ def test_switchyard_new_creates_absent_zeta_owner_with_linger_and_initial_artifa
         source_repo = tmp_path / "source-repo"
         source_repo.mkdir()
         runner = ZetaRunner()
+        process_launcher = RecordingProcessLauncher()
         stdout = StringIO()
 
         with redirect_stdout(stdout):
@@ -14522,6 +14569,7 @@ def test_switchyard_new_creates_absent_zeta_owner_with_linger_and_initial_artifa
                     socket_exists=lambda _path: False,
                     session_record_timeout=0,
                     registry_dir=tmp_path / "registry",
+                    konsole_process_launcher=process_launcher,
                 )
                 == 0
             )
@@ -14597,6 +14645,7 @@ def test_switchyard_new_reuses_existing_owner_without_account_mutation() -> None
             encoding="utf-8",
         )
         runner = ExistingOwnerRunner()
+        process_launcher = RecordingProcessLauncher()
         marker_before = dict(runner.owner_marker)
         stdout = StringIO()
 
@@ -14615,6 +14664,7 @@ def test_switchyard_new_reuses_existing_owner_without_account_mutation() -> None
                     socket_exists=lambda _path: False,
                     session_record_timeout=0,
                     registry_dir=tmp_path / "registry",
+                    konsole_process_launcher=process_launcher,
                 )
                 == 0
             )

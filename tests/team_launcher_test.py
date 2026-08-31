@@ -10581,6 +10581,194 @@ def test_add_role_updates_generated_config_board_registration_and_starts_only_ne
     assert "team-launcher: added role ops to mefp" in stdout.getvalue()
 
 
+def test_add_role_unrecognized_layout_without_room_refuses_actionably_without_mutation() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-add-role-hand-layout.") as tmp:
+        tmp_path = Path(tmp)
+        provision_dir = tmp_path / "project" / ".switchyard" / "provision"
+        provision_dir.mkdir(parents=True)
+        source_repo = tmp_path / "source-repo"
+        project_repo = tmp_path / "project-repo"
+        source_repo.mkdir()
+        project_repo.mkdir()
+        plan = team_launcher.build_plan(
+            project="mefp",
+            owner_user=current_user,
+            port=18811,
+            source_repo=source_repo,
+            implementer_roles=("app", "main"),
+        )
+        (provision_dir / "plan.json").write_text(json.dumps(plan.__dict__, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        config_path = provision_dir / "mefp.json"
+        config_path.write_text(
+            json.dumps(
+                team_launcher._new_project_launcher_config_payload(
+                    plan,
+                    repository=project_repo,
+                    implementer_roles=("app", "main"),
+                    include_designer=False,
+                    include_audit=False,
+                ),
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        layout_path = provision_dir / "mefp-konsole-layout.json"
+        layout_path.write_text(
+            json.dumps(
+                {
+                    "Orientation": "Vertical",
+                    "Widgets": [
+                        {"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""},
+                        {
+                            "Orientation": "Horizontal",
+                            "Widgets": [
+                                {"Command": "", "SessionRestoreId": 1, "WorkingDirectory": ""},
+                                {"Command": "", "SessionRestoreId": 2, "WorkingDirectory": ""},
+                            ],
+                        },
+                    ],
+                    "SwitchyardEdited": True,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("mefp", config_path)
+        before_config = config_path.read_text(encoding="utf-8")
+        before_layout = layout_path.read_text(encoding="utf-8")
+        before_plan = (provision_dir / "plan.json").read_text(encoding="utf-8")
+        runner = KeywordRecordingFakeRunner()
+
+        try:
+            team_launcher.add_project_role_command(
+                config,
+                config_path=config_path,
+                role_name="ops",
+                cli="codex",
+                runner=runner,
+            )
+            raise AssertionError("expected unrecognized layout without room to be rejected")
+        except SystemExit as exc:
+            message = str(exc)
+
+        after_config = config_path.read_text(encoding="utf-8")
+        after_layout = layout_path.read_text(encoding="utf-8")
+        after_plan = (provision_dir / "plan.json").read_text(encoding="utf-8")
+        add_role_sql_exists = (provision_dir / "mefp-add-role.sql").exists()
+
+    assert "cannot add ops to visible slot 3" in message
+    assert "has 3 slot(s), so no pane exists for the new role" in message
+    assert "use --detached to add it headless" in message
+    assert "pass --relayout to replace the existing layout with a generated 4-pane layout" in message
+    assert after_config == before_config
+    assert after_layout == before_layout
+    assert after_plan == before_plan
+    assert not add_role_sql_exists
+    assert not any(call[:4] == ["sudo", "-u", "postgres", "psql"] for call in runner.calls)
+    assert not any(call == ["sudo", "systemctl", "restart", "mefp-ticket-board.service"] for call in runner.calls)
+    assert not any(call[:1] == ["git"] for call in runner.calls)
+
+
+def test_add_role_relayout_replaces_unrecognized_layout_and_starts_new_role() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-add-role-relayout.") as tmp:
+        tmp_path = Path(tmp)
+        provision_dir = tmp_path / "project" / ".switchyard" / "provision"
+        provision_dir.mkdir(parents=True)
+        source_repo = tmp_path / "source-repo"
+        project_repo = tmp_path / "project-repo"
+        source_repo.mkdir()
+        project_repo.mkdir()
+        plan = team_launcher.build_plan(
+            project="mefp",
+            owner_user=current_user,
+            port=18811,
+            source_repo=source_repo,
+            implementer_roles=("app", "main"),
+        )
+        (provision_dir / "plan.json").write_text(json.dumps(plan.__dict__, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        (provision_dir / plan.board_unit).write_text(team_launcher.render_board_unit(plan), encoding="utf-8")
+        config_path = provision_dir / "mefp.json"
+        config_path.write_text(
+            json.dumps(
+                team_launcher._new_project_launcher_config_payload(
+                    plan,
+                    repository=project_repo,
+                    implementer_roles=("app", "main"),
+                    include_designer=False,
+                    include_audit=False,
+                ),
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        layout_path = provision_dir / "mefp-konsole-layout.json"
+        layout_path.write_text(
+            json.dumps(
+                {
+                    "Orientation": "Vertical",
+                    "Widgets": [
+                        {"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""},
+                        {
+                            "Orientation": "Horizontal",
+                            "Widgets": [
+                                {"Command": "", "SessionRestoreId": 1, "WorkingDirectory": ""},
+                                {"Command": "", "SessionRestoreId": 2, "WorkingDirectory": ""},
+                            ],
+                        },
+                    ],
+                    "SwitchyardEdited": True,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("mefp", config_path)
+        runner = KeywordRecordingFakeRunner(existing_sessions={"mefp-director"})
+        stdout = StringIO()
+
+        with redirect_stdout(stdout):
+            assert (
+                team_launcher.add_project_role_command(
+                    config,
+                    config_path=config_path,
+                    role_name="ops",
+                    cli="codex",
+                    relayout=True,
+                    script_path=ROOT / "scripts" / "team-launcher",
+                    runner=runner,
+                )
+                == 0
+            )
+
+        updated_config_json = json.loads(config_path.read_text(encoding="utf-8"))
+        updated_layout = json.loads(layout_path.read_text(encoding="utf-8"))
+        updated_plan = json.loads((provision_dir / "plan.json").read_text(encoding="utf-8"))
+        output = stdout.getvalue()
+
+    assert [role["role"] for role in updated_config_json["roles"]] == ["director", "app", "main", "ops"]
+    assert updated_config_json["roles"][-1]["slot"] == 3
+    assert updated_layout == team_launcher._new_project_layout_payload(4)
+    assert updated_plan["implementer_roles"] == ["app", "main", "ops"]
+    assert any(call == ["sudo", "systemctl", "restart", "mefp-ticket-board.service"] for call in runner.calls)
+    pane_calls = [call for call in runner.calls if call[:3] == [str(ROOT / "scripts" / "team-launcher"), "mefp", "pane"]]
+    assert len(pane_calls) == 1
+    assert pane_calls[0][3:5] == ["attach-or-start", "ops"]
+    assert "--no-attach" in pane_calls[0]
+    assert "team-launcher: added role ops to mefp; regenerated layout for 4 visible pane(s)" in output
+    assert "started tmux session for the new role" in output
+    assert "relaunch the project window to display newly added visible slots" in output
+
+
 def test_add_role_refuses_seventh_visible_pane_without_mutating_config() -> None:
     current_user = team_launcher.current_user_name()
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-add-role-visible-cap.") as tmp:

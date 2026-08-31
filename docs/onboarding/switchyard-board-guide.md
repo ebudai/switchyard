@@ -33,12 +33,20 @@ checkout's role command instead of editing the provision files by hand:
 switchyard add-role <project> <role> --cli codex
 ```
 
-The command appends the launcher role, updates the generated layout, creates the
-role worktree, expands the board's assignee/caller/workflow role registration,
-restarts the tenant board to load the new role environment, and starts the new pane.
-For example, `switchyard add-role mefp ops --cli codex` adds an `ops` implementer
-that can receive implementation tickets and call implementer operations. Existing
-roles are left running.
+The command appends the launcher role, creates the role worktree, expands the
+board's assignee/caller/workflow role registration, restarts the tenant board to
+load the new role environment, and starts the new role's tmux session. Generated
+layouts extend automatically for the new visible role. Hand-maintained or
+unrecognised layouts are protected: if the requested visible slot does not
+exist, the command refuses before changing the project and tells you to either
+use `--detached` or pass `--relayout` to replace the existing layout with a
+fresh generated layout. A newly created visible slot appears in the terminal
+window after the project window is relaunched; the command does not reshape a
+running Konsole window in place. For example, `switchyard add-role mefp ops
+--cli codex --relayout` adds an `ops` implementer that can receive
+implementation tickets and call implementer operations, regenerating the layout
+only because `--relayout` gives explicit consent. Existing roles are left
+running.
 
 To move the final close after sign-off to an existing role, use:
 

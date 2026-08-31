@@ -470,10 +470,23 @@ artifact. The artifact still must not preconfigure workflow stages or
 transitions.
 
 `switchyard add-role <project> <role> --cli <cli>` adds another implementer role
-after provisioning. By default it creates a visible pane, and it refuses when
-that would become the seventh visible role in the automatic window. Use
-`--detached` for the added role, or detach another visible role first, when the
-project already has six visible panes.
+after provisioning. By default it creates a visible role and starts only that
+role's tmux session. If the project's layout template is a recognised generated
+layout, the command regenerates it for the new visible count. If the layout is
+hand-maintained or otherwise unrecognised, the command does not overwrite it
+silently: the target slot must already exist, or the command refuses before
+mutating config, SQL artifacts, systemd state, or worktrees. The refusal names
+the missing layout capacity and the two choices: use `--detached` to add the
+role headless, or pass `--relayout` to replace the current layout with a fresh
+generated layout. `--relayout` keeps the generated contiguous slot order, so
+omit `--slot` unless you are naming the next append slot exactly.
+
+`add-role` cannot insert a new pane into an already-running Konsole window. It
+starts the new role's tmux session, but newly added visible slots appear after
+the project window is relaunched. The command also refuses when the role would
+become the seventh visible role in the automatic window. Use `--detached` for
+the added role, or detach another visible role first, when the project already
+has six visible panes.
 
 `switchyard set-vcs-close-role <project> <role>` changes an existing
 provisioned project's terminal close role without re-provisioning. The role must

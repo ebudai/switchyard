@@ -10299,6 +10299,62 @@ def test_add_role_updates_generated_config_board_registration_and_starts_only_ne
     assert "team-launcher: added role ops to mefp" in stdout.getvalue()
 
 
+def test_add_role_rejects_duplicate_role_before_privileged_mutation() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-add-role-duplicate.") as tmp:
+        tmp_path = Path(tmp)
+        provision_dir = tmp_path / "project" / ".switchyard" / "provision"
+        provision_dir.mkdir(parents=True)
+        source_repo = tmp_path / "source-repo"
+        project_repo = tmp_path / "project-repo"
+        source_repo.mkdir()
+        project_repo.mkdir()
+        plan = team_launcher.build_plan(
+            project="mefp",
+            owner_user=current_user,
+            port=18811,
+            source_repo=source_repo,
+            implementer_roles=("app", "main"),
+        )
+        (provision_dir / "plan.json").write_text(json.dumps(plan.__dict__, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        config_path = provision_dir / "mefp.json"
+        config_path.write_text(
+            json.dumps(
+                team_launcher._new_project_launcher_config_payload(
+                    plan,
+                    repository=project_repo,
+                    implementer_roles=("app", "main"),
+                ),
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config_before = config_path.read_text(encoding="utf-8")
+        config = load_project_config("mefp", config_path)
+        runner = KeywordRecordingFakeRunner()
+
+        try:
+            team_launcher.add_project_role_command(
+                config,
+                config_path=config_path,
+                role_name="main",
+                cli="codex",
+                runner=runner,
+            )
+            raise AssertionError("expected duplicate role to be rejected")
+        except SystemExit as exc:
+            message = str(exc)
+
+        config_after = config_path.read_text(encoding="utf-8")
+
+    assert "role 'main' already exists in project mefp" in message
+    assert config_after == config_before
+    assert not any(call[:1] == ["sudo"] for call in runner.calls)
+    assert not any(call[:1] == ["git"] for call in runner.calls)
+
+
 def test_design_writes_artifact_that_new_from_consumes_for_missing_owner_user() -> None:
     missing_owner = "pgu647-missing-agent"
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-design.") as tmp:

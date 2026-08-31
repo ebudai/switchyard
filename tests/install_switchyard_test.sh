@@ -239,13 +239,41 @@ chmod 755 "$real_source_dir"
 
 >"$fake_privilege_noexec_log"
 if [[ "$(id -u)" != "0" ]]; then
-    for privileged_args in \
-        "new" \
-        "register $TMPDIR_T/project.json" \
-        "upgrade otto" \
-        "status" \
-        "validate-models otto" \
-        "stop otto"; do
+    mapfile -t switchyard_commands < <(
+        python3 - "$REPO_ROOT/scripts/team_launcher.py" <<'PY'
+import ast
+import sys
+tree = ast.parse(open(sys.argv[1], encoding="utf-8").read())
+for node in tree.body:
+    if isinstance(node, ast.Assign):
+        if any(isinstance(target, ast.Name) and target.id == "SWITCHYARD_COMMANDS" for target in node.targets):
+            value = ast.literal_eval(node.value)
+            for command in value:
+                print(command)
+            break
+else:
+    raise SystemExit("SWITCHYARD_COMMANDS not found")
+PY
+    )
+    for verb in "${switchyard_commands[@]}"; do
+        case "$verb" in
+            new|status)
+                privileged_args="$verb"
+                ;;
+            register)
+                privileged_args="register $TMPDIR_T/project.json"
+                ;;
+            upgrade|validate-models|stop)
+                privileged_args="$verb otto"
+                ;;
+            add-role)
+                privileged_args="add-role otto ops --cli codex"
+                ;;
+            *)
+                echo "FAIL: install-switchyard test has no privileged sample for switchyard $verb" >&2
+                exit 1
+                ;;
+        esac
         privileged_output="$(
             FAKE_PRIVILEGE_LOG="$fake_privilege_noexec_log" \
             PATH="$fake_privilege_noexec_bin:$PATH" \

@@ -109,7 +109,7 @@ switchyard_invocation_requires_root() {
         -h|--help|help|--version|version)
             return 1
             ;;
-        new|register|upgrade|status|validate-models|stop)
+        new|register|upgrade|add-role|status|validate-models|stop)
             if [[ "\${2:-}" == "-h" || "\${2:-}" == "--help" ]]; then
                 return 1
             fi

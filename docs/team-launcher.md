@@ -124,13 +124,20 @@ window name set to the board role (`director`, `main`, `app`, `ops`, `audit`,
 even after the CLI updates its pane title. The launcher also sets `mouse on`
 and `history-limit 200000` on every tmux session it creates, including the
 viewer session, so tenant panes can scroll and select text without relying on
-an owner's personal `.tmux.conf`. Before opening Konsole, `start` fetches
-`origin main`, checks the shared checkout out to `origin/main` with `--force`,
-then runs `git clean -fdx`.
-This is intentionally destructive to uncommitted files in the shared checkout;
-use a ticket worktree for implementation work. A shared checkout refresh failure
-blocks every role: visible panes print the checkout error instead of launching
-the CLI, while detached roles are skipped.
+an owner's personal `.tmux.conf`. Before opening Konsole, `start` fetches the
+configured worktree ref. If no role tmux sessions are running, it also refreshes
+the project checkout: shared-checkout projects are checked out to the ref with
+`--force` and cleaned with `git clean -fdx`, while control-repository projects
+prepare each role worktree. If any role session is already running, `start`
+keeps the existing window-reopen/attach behavior but avoids resetting files
+under live panes: shared-checkout projects fetch only, and control-repository
+projects refresh only roles with no live tmux session. This means `switchyard
+pgu` will normally fetch without force-refreshing `/home/agent/Projects/pgu`,
+because pgu's panes are normally running; update that shared checkout explicitly
+when you need it current. Destructive refresh is intentionally limited to
+checkouts with no live panes; use a ticket worktree for implementation work.
+A shared checkout refresh failure blocks every role: visible panes print the
+checkout error instead of launching the CLI, while detached roles are skipped.
 
 `attach` only attaches visible panes to existing sessions and fails if a role
 session is missing. Detached roles are checked for existence but remain

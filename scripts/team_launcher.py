@@ -7977,7 +7977,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
     if argv[0].casefold() == "upgrade":
         args = _build_switchyard_upgrade_parser().parse_args(argv[1:])
         entry = _resolve_switchyard_project(args.project)
-        config = _load_switchyard_project_config_for_command(entry, ["upgrade", entry.slug])
+        config = _load_switchyard_project_config_for_command(entry, argv)
         return upgrade_project_command(
             config,
             config_path=entry.config_path,
@@ -7989,7 +7989,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         args = _build_switchyard_stop_parser().parse_args(argv[1:])
         project = " ".join(args.project)
         entry = _resolve_switchyard_project(project)
-        config = _load_switchyard_project_config_for_command(entry, ["stop", entry.slug])
+        config = _load_switchyard_project_config_for_command(entry, argv)
         return stop_project(config)
     if argv[0].casefold() == "status":
         args = _build_switchyard_status_parser().parse_args(argv[1:])
@@ -8001,11 +8001,11 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             raise SystemExit("switchyard validate-models requires <project>")
         project = " ".join(argv[1:])
         entry = _resolve_switchyard_project(project)
-        _load_switchyard_project_config_for_command(entry, ["validate-models", entry.slug])
+        _load_switchyard_project_config_for_command(entry, argv)
         return switchyard_validate_models_command(project)
     selection = " ".join(argv)
     entry = _resolve_switchyard_project(selection)
-    config = _load_switchyard_project_config_for_command(entry, [entry.slug])
+    config = _load_switchyard_project_config_for_command(entry, argv)
     # Model validation intentionally runs only for `switchyard new` and the
     # explicit validate-models command. It performs provider API calls, so a
     # routine team start should not depend on provider availability.

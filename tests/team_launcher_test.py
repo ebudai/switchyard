@@ -11822,6 +11822,60 @@ def test_switchyard_bare_cross_owner_project_fails_before_launch_or_auth() -> No
     assert message == "root required"
 
 
+def test_switchyard_upgrade_cross_owner_reexec_preserves_flags() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-cross-owner-upgrade.") as tmp:
+        tmp_path = Path(tmp)
+        config_dir = tmp_path / "config"
+        registry_dir = tmp_path / "registry"
+        config_dir.mkdir()
+        registry_dir.mkdir()
+        (registry_dir / "mefp.json").write_text(
+            json.dumps(
+                {
+                    "schema": team_launcher.SWITCHYARD_REGISTRY_SCHEMA,
+                    "slug": "mefp",
+                    "name": "MEFP",
+                    "config_path": "/home/stellaris-agent/stellaris-bugfix/.switchyard/provision/mefp.json",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        calls: list[list[str]] = []
+        argv = ["upgrade", "mefp", "--dry-run", "--source-repo", "/data/git/pgu", "--deploy-ref", "v9"]
+        original_config_dir = team_launcher.DEFAULT_CONFIG_DIR
+        original_registry_dir = team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR
+        original_current_user_name = team_launcher.current_user_name
+        original_geteuid = team_launcher.os.geteuid
+        original_exec_with_root = team_launcher._switchyard_exec_with_root
+        try:
+            team_launcher.DEFAULT_CONFIG_DIR = config_dir
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
+            team_launcher.current_user_name = lambda: "eric"
+            team_launcher.os.geteuid = lambda: 1000  # type: ignore[method-assign]
+
+            def fake_exec_with_root(exec_argv: Sequence[str], **_kwargs: object) -> None:
+                calls.append(list(exec_argv))
+                raise SystemExit("root required")
+
+            team_launcher._switchyard_exec_with_root = fake_exec_with_root
+
+            try:
+                switchyard_main(argv)
+                raise AssertionError("expected foreign upgrade to re-exec with root")
+            except SystemExit as exc:
+                message = str(exc)
+        finally:
+            team_launcher.DEFAULT_CONFIG_DIR = original_config_dir
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = original_registry_dir
+            team_launcher.current_user_name = original_current_user_name
+            team_launcher.os.geteuid = original_geteuid  # type: ignore[method-assign]
+            team_launcher._switchyard_exec_with_root = original_exec_with_root
+
+    assert calls == [argv]
+    assert message == "root required"
+
+
 def test_switchyard_foreign_home_config_reexecs_before_config_load() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-foreign-home.") as tmp:
         tmp_path = Path(tmp)

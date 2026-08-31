@@ -165,6 +165,13 @@ def _load_toml(path: Path) -> dict[str, Any]:
     return parsed
 
 
+def _write_onboarding_packet(project_dir: Path) -> None:
+    onboarding_dir = project_dir / "docs" / "onboarding"
+    onboarding_dir.mkdir(parents=True)
+    (onboarding_dir / "README.md").write_text("Onboarding packet\n", encoding="utf-8")
+    (onboarding_dir / "switchyard-director-guide.md").write_text("Director guide\n", encoding="utf-8")
+
+
 def _commands(value: Any) -> list[str]:
     if isinstance(value, dict):
         command = value.get("command")
@@ -866,6 +873,156 @@ def test_session_start_resume_injection_is_scoped_to_resume_sources_and_active_t
     assert "Your session was just cleared." not in resume_context
     assert "ACTIVE work: PGU-557 -- Resume compacted work" in resume_context
     assert no_ticket.stdout == ""
+
+
+def test_director_fresh_session_start_injects_onboarding_pointer_when_packet_exists() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        project_dir = Path(tmp) / "project"
+        project_dir.mkdir()
+        _write_onboarding_packet(project_dir)
+        proc = subprocess.run(
+            [
+                str(ROOT / "scripts" / HOOK_NAME),
+                "idle",
+                "--target",
+                "pgu-director:0.0",
+                "--source",
+                "claude.SessionStart",
+                "--state-dir",
+                str(Path(tmp) / "state"),
+                "--session-dir",
+                str(Path(tmp) / "sessions"),
+                "--record-session",
+            ],
+            input=json.dumps({"source": "startup", "session_id": "fresh-director-session"}),
+            text=True,
+            cwd=project_dir,
+            capture_output=True,
+            check=True,
+            env=_hook_env(CODEX_SESSION_ID="fresh-runtime-session"),
+        )
+
+    output = json.loads(proc.stdout)
+    context = output["hookSpecificOutput"]["additionalContext"]
+    assert output["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+    assert "Your director session just started fresh." in context
+    assert "docs/onboarding/" in context
+    assert "docs/onboarding/switchyard-director-guide.md" in context
+    assert "Director guide" not in context
+
+
+def test_director_onboarding_pointer_skips_resumed_launches() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        project_dir = Path(tmp) / "project"
+        project_dir.mkdir()
+        _write_onboarding_packet(project_dir)
+        state_dir = Path(tmp) / "state"
+        session_dir = Path(tmp) / "sessions"
+        with _board_with_tickets([]) as board_url:
+            resume_source = subprocess.run(
+                [
+                    str(ROOT / "scripts" / HOOK_NAME),
+                    "idle",
+                    "--target",
+                    "pgu-director:0.0",
+                    "--source",
+                    "claude.SessionStart",
+                    "--state-dir",
+                    str(state_dir),
+                    "--session-dir",
+                    str(session_dir),
+                    "--record-session",
+                ],
+                input=json.dumps({"source": "resume", "session_id": "resumed-director-session"}),
+                text=True,
+                cwd=project_dir,
+                capture_output=True,
+                check=True,
+                env=_hook_env(TICKET_BOARD_URL=board_url),
+            )
+        resumed_launch = subprocess.run(
+            [
+                str(ROOT / "scripts" / HOOK_NAME),
+                "idle",
+                "--target",
+                "pgu-director:0.0",
+                "--source",
+                "claude.SessionStart",
+                "--state-dir",
+                str(state_dir),
+                "--session-dir",
+                str(session_dir),
+                "--record-session",
+            ],
+            input=json.dumps({"source": "startup", "session_id": "resumed-director-session"}),
+            text=True,
+            cwd=project_dir,
+            capture_output=True,
+            check=True,
+            env=_hook_env(TICKET_BOARD_PANE_SESSION_ID="resumed-director-session"),
+        )
+
+    assert resume_source.stdout == ""
+    assert resumed_launch.stdout == ""
+
+
+def test_director_onboarding_pointer_is_scoped_to_director_role() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        project_dir = Path(tmp) / "project"
+        project_dir.mkdir()
+        _write_onboarding_packet(project_dir)
+        proc = subprocess.run(
+            [
+                str(ROOT / "scripts" / HOOK_NAME),
+                "idle",
+                "--target",
+                "pgu-ops:0.0",
+                "--source",
+                "claude.SessionStart",
+                "--state-dir",
+                str(Path(tmp) / "state"),
+                "--session-dir",
+                str(Path(tmp) / "sessions"),
+                "--record-session",
+            ],
+            input=json.dumps({"source": "startup", "session_id": "fresh-ops-session"}),
+            text=True,
+            cwd=project_dir,
+            capture_output=True,
+            check=True,
+            env=_hook_env(),
+        )
+
+    assert proc.stdout == ""
+
+
+def test_director_onboarding_pointer_is_silent_when_packet_absent() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        project_dir = Path(tmp) / "project"
+        project_dir.mkdir()
+        proc = subprocess.run(
+            [
+                str(ROOT / "scripts" / HOOK_NAME),
+                "idle",
+                "--target",
+                "pgu-director:0.0",
+                "--source",
+                "claude.SessionStart",
+                "--state-dir",
+                str(Path(tmp) / "state"),
+                "--session-dir",
+                str(Path(tmp) / "sessions"),
+                "--record-session",
+            ],
+            input=json.dumps({"source": "startup", "session_id": "fresh-director-session"}),
+            text=True,
+            cwd=project_dir,
+            capture_output=True,
+            check=True,
+            env=_hook_env(),
+        )
+
+    assert proc.stdout == ""
 
 
 def test_clear_session_start_injects_assigned_in_progress_ticket_context() -> None:

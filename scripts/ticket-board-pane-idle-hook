@@ -43,6 +43,9 @@ UUID_RE = re.compile(
 )
 SESSION_START_ACTIVE_WORK_SOURCES = {"clear", "compact", "resume"}
 SESSION_START_HOOK_SOURCES = {"hermes.on_session_start"}
+SESSION_START_FRESH_SOURCE = "startup"
+ONBOARDING_PACKET_DIR = Path("docs") / "onboarding"
+DIRECTOR_ONBOARDING_GUIDE = ONBOARDING_PACKET_DIR / "switchyard-director-guide.md"
 
 
 def _default_board_url(environ: dict[str, str]) -> str:
@@ -249,6 +252,14 @@ def _env_session_id(environ: dict[str, str]) -> str:
     return ""
 
 
+def _launcher_resume_session_id(environ: dict[str, str]) -> str:
+    for key in ("TICKET_BOARD_PANE_SESSION_ID", "PGU_PANE_SESSION_ID"):
+        value = environ.get(key, "").strip()
+        if value:
+            return value
+    return ""
+
+
 def _extract_session_id(payload: object, environ: dict[str, str], explicit_session_id: str = "") -> str:
     if explicit_session_id.strip():
         return explicit_session_id.strip()
@@ -438,17 +449,61 @@ def _is_session_start_hook_source(source: str) -> bool:
     return source.endswith(".SessionStart") or source in SESSION_START_HOOK_SOURCES
 
 
+def _display_path(path: Path, *, root: Path) -> str:
+    try:
+        display = path.relative_to(root)
+    except ValueError:
+        display = path
+    text = display.as_posix()
+    if path.is_dir() and not text.endswith("/"):
+        text += "/"
+    return text
+
+
+def _onboarding_packet_exists(root: Path) -> bool:
+    packet_dir = root / ONBOARDING_PACKET_DIR
+    if not packet_dir.is_dir():
+        return False
+    return any(path.is_file() for path in packet_dir.glob("*.md"))
+
+
+def _director_startup_onboarding_context(root: Path) -> str:
+    packet_dir = root / ONBOARDING_PACKET_DIR
+    guide = root / DIRECTOR_ONBOARDING_GUIDE
+    packet_display = _display_path(packet_dir, root=root)
+    if guide.is_file():
+        guide_display = _display_path(guide, root=root)
+        return (
+            f"Your director session just started fresh. Read the onboarding packet first: {packet_display}. "
+            f"Start with {guide_display}."
+        )
+    return f"Your director session just started fresh. Read the onboarding packet first: {packet_display}"
+
+
 def _session_start_additional_context_output(
     *,
     target: str,
     payload: object,
     environ: dict[str, str],
+    resume_session_id: str = "",
 ) -> dict[str, object] | None:
     session_start_source = _session_start_source(payload)
-    if session_start_source not in SESSION_START_ACTIVE_WORK_SOURCES:
-        return None
     role = _role_for_target(target, environ)
     if not role:
+        return None
+    if (
+        role == "director"
+        and session_start_source == SESSION_START_FRESH_SOURCE
+        and not resume_session_id.strip()
+        and _onboarding_packet_exists(Path.cwd())
+    ):
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": _director_startup_onboarding_context(Path.cwd()),
+            }
+        }
+    if session_start_source not in SESSION_START_ACTIVE_WORK_SOURCES:
         return None
     board_url = _default_board_url(environ)
     ticket = _active_in_progress_ticket_for_role(role, board_url=board_url)
@@ -516,6 +571,7 @@ def main(argv: list[str] | None = None) -> int:
     payload = _read_stdin_json(timeout=args.stdin_timeout if should_wait_for_session_payload else 0.0)
     session_id = _extract_session_id(payload, os.environ, args.session_id)
     launched_session_id = args.session_id.strip() or _env_session_id(os.environ)
+    resume_session_id = args.session_id.strip() or _launcher_resume_session_id(os.environ)
     if _should_write_session(
         target=target,
         existing_session_id=existing_session_id,
@@ -527,7 +583,12 @@ def main(argv: list[str] | None = None) -> int:
     ):
         _write_session(session_dir, target, session_id, source=args.source, payload=payload)
     if args.state == "idle" and _is_session_start_hook_source(args.source):
-        output = _session_start_additional_context_output(target=target, payload=payload, environ=os.environ)
+        output = _session_start_additional_context_output(
+            target=target,
+            payload=payload,
+            environ=os.environ,
+            resume_session_id=resume_session_id,
+        )
         if output is not None:
             print(json.dumps(output, sort_keys=True))
     if args.state == "busy" and args.source == "hermes.pre_llm_call":

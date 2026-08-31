@@ -11787,6 +11787,7 @@ def test_switchyard_bare_cross_owner_project_fails_before_launch_or_auth() -> No
         original_geteuid = team_launcher.os.geteuid
         original_launch_project = team_launcher.launch_project
         original_first_run_auth = team_launcher.run_switchyard_launch_first_run_auth
+        original_exec_with_root = team_launcher._switchyard_exec_with_root
         try:
             team_launcher.DEFAULT_CONFIG_DIR = config_dir
             team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
@@ -11796,6 +11797,12 @@ def test_switchyard_bare_cross_owner_project_fails_before_launch_or_auth() -> No
             team_launcher.run_switchyard_launch_first_run_auth = (
                 lambda *_args, **_kwargs: calls.append("auth") or team_launcher.FirstRunAuthReport({}, [])
             )
+
+            def fake_exec_with_root(argv: Sequence[str], **_kwargs: object) -> None:
+                calls.append(f"root:{' '.join(argv)}")
+                raise SystemExit("root required")
+
+            team_launcher._switchyard_exec_with_root = fake_exec_with_root
 
             try:
                 switchyard_main(["otto"])
@@ -11809,10 +11816,70 @@ def test_switchyard_bare_cross_owner_project_fails_before_launch_or_auth() -> No
             team_launcher.os.geteuid = original_geteuid  # type: ignore[method-assign]
             team_launcher.launch_project = original_launch_project
             team_launcher.run_switchyard_launch_first_run_auth = original_first_run_auth
+            team_launcher._switchyard_exec_with_root = original_exec_with_root
 
-    assert calls == []
-    assert "switchyard: command requires root: switchyard otto" in message
-    assert "project 'otto' is owned by 'otto-agent'" in message
+    assert calls == ["root:otto"]
+    assert message == "root required"
+
+
+def test_switchyard_foreign_home_config_reexecs_before_config_load() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-foreign-home.") as tmp:
+        tmp_path = Path(tmp)
+        config_dir = tmp_path / "config"
+        registry_dir = tmp_path / "registry"
+        config_dir.mkdir()
+        registry_dir.mkdir()
+        (registry_dir / "mefp.json").write_text(
+            json.dumps(
+                {
+                    "schema": team_launcher.SWITCHYARD_REGISTRY_SCHEMA,
+                    "slug": "mefp",
+                    "name": "MEFP",
+                    "config_path": "/home/stellaris-agent/stellaris-bugfix/.switchyard/provision/mefp.json",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        calls: list[str] = []
+        original_config_dir = team_launcher.DEFAULT_CONFIG_DIR
+        original_registry_dir = team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR
+        original_current_user_name = team_launcher.current_user_name
+        original_geteuid = team_launcher.os.geteuid
+        original_load_project_config = team_launcher.load_project_config
+        original_exec_with_root = team_launcher._switchyard_exec_with_root
+        try:
+            team_launcher.DEFAULT_CONFIG_DIR = config_dir
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
+            team_launcher.current_user_name = lambda: "eric"
+            team_launcher.os.geteuid = lambda: 1000  # type: ignore[method-assign]
+
+            def fake_load_project_config(*_args: object, **_kwargs: object) -> team_launcher.ProjectConfig:
+                calls.append("load")
+                raise AssertionError("foreign config should not be loaded before privilege re-exec")
+
+            def fake_exec_with_root(argv: Sequence[str], **_kwargs: object) -> None:
+                calls.append(f"root:{' '.join(argv)}")
+                raise SystemExit("root required")
+
+            team_launcher.load_project_config = fake_load_project_config
+            team_launcher._switchyard_exec_with_root = fake_exec_with_root
+
+            try:
+                switchyard_main(["mefp"])
+                raise AssertionError("expected foreign-home project to re-exec with root")
+            except SystemExit as exc:
+                message = str(exc)
+        finally:
+            team_launcher.DEFAULT_CONFIG_DIR = original_config_dir
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = original_registry_dir
+            team_launcher.current_user_name = original_current_user_name
+            team_launcher.os.geteuid = original_geteuid  # type: ignore[method-assign]
+            team_launcher.load_project_config = original_load_project_config
+            team_launcher._switchyard_exec_with_root = original_exec_with_root
+
+    assert calls == ["root:mefp"]
+    assert message == "root required"
 
 
 def test_switchyard_stop_cross_owner_project_fails_before_tmux_probe() -> None:
@@ -11844,12 +11911,19 @@ def test_switchyard_stop_cross_owner_project_fails_before_tmux_probe() -> None:
         original_current_user_name = team_launcher.current_user_name
         original_geteuid = team_launcher.os.geteuid
         original_stop_project = team_launcher.stop_project
+        original_exec_with_root = team_launcher._switchyard_exec_with_root
         try:
             team_launcher.DEFAULT_CONFIG_DIR = config_dir
             team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
             team_launcher.current_user_name = lambda: "agent"
             team_launcher.os.geteuid = lambda: 1001  # type: ignore[method-assign]
             team_launcher.stop_project = lambda *_args, **_kwargs: calls.append("stop") or 0
+
+            def fake_exec_with_root(argv: Sequence[str], **_kwargs: object) -> None:
+                calls.append(f"root:{' '.join(argv)}")
+                raise SystemExit("root required")
+
+            team_launcher._switchyard_exec_with_root = fake_exec_with_root
 
             try:
                 switchyard_main(["stop", "otto"])
@@ -11862,10 +11936,10 @@ def test_switchyard_stop_cross_owner_project_fails_before_tmux_probe() -> None:
             team_launcher.current_user_name = original_current_user_name
             team_launcher.os.geteuid = original_geteuid  # type: ignore[method-assign]
             team_launcher.stop_project = original_stop_project
+            team_launcher._switchyard_exec_with_root = original_exec_with_root
 
-    assert calls == []
-    assert "switchyard: command requires root: switchyard stop otto" in message
-    assert "project 'otto' is owned by 'otto-agent'" in message
+    assert calls == ["root:stop otto"]
+    assert message == "root required"
 
 
 def test_switchyard_registry_does_not_change_pgu_resolution_or_launch_config() -> None:

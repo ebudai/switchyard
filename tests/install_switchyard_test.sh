@@ -27,7 +27,7 @@ SWITCHYARD_INSTALL_PATH="$install_path" \
     echo "FAIL: installed switchyard must be a trampoline, not a symlink into /home/agent" >&2
     exit 1
 }
-if grep -q "version-one" "$install_path"; then
+if grep -q "printf 'version-one:%s" "$install_path"; then
     echo "FAIL: installer copied launcher source instead of writing a trampoline" >&2
     exit 1
 fi
@@ -71,13 +71,8 @@ help_output="$(
     PATH="$fake_privilege_bin:$PATH" \
         "$install_path" --help
 )"
-grep -q "switchyard <project name or slug>" <<<"$help_output" || {
-    echo "FAIL: installed switchyard did not print embedded --help" >&2
-    echo "$help_output" >&2
-    exit 1
-}
-grep -q "Bare project names start or attach the project" <<<"$help_output" || {
-    echo "FAIL: installed switchyard help does not explain bare project launch" >&2
+[[ "$help_output" == "version-one:--help" ]] || {
+    echo "FAIL: installed switchyard did not execute reachable --help directly" >&2
     echo "$help_output" >&2
     exit 1
 }
@@ -92,6 +87,16 @@ cat >"$source_path" <<'EOF'
 printf 'version-two:%s\n' "$*"
 EOF
 chmod +x "$source_path"
+live_help_output="$(
+    FAKE_PRIVILEGE_LOG="$fake_privilege_log" \
+    PATH="$fake_privilege_bin:$PATH" \
+        "$install_path" --help
+)"
+[[ "$live_help_output" == "version-two:--help" ]] || {
+    echo "FAIL: reachable switchyard --help did not follow the live source" >&2
+    echo "$live_help_output" >&2
+    exit 1
+}
 second_output="$(
     FAKE_PRIVILEGE_LOG="$fake_privilege_log" \
     PATH="$fake_privilege_bin:$PATH" \
@@ -136,9 +141,9 @@ if ! inaccessible_help_output="$(
     echo "$inaccessible_help_output" >&2
     exit 1
 fi
-grep -q "switchyard <project name or slug>" <<<"$inaccessible_help_output" || {
+[[ "$inaccessible_help_output" == "version-one:--help" ]] || {
     chmod 755 "$(dirname "$source_path")"
-    echo "FAIL: inaccessible target --help did not print help" >&2
+    echo "FAIL: inaccessible fake target --help did not print install-time fallback help" >&2
     echo "$inaccessible_help_output" >&2
     exit 1
 }
@@ -190,6 +195,45 @@ chmod 755 "$(dirname "$source_path")"
 grep -q "^$source_path new$" "$fake_privilege_noexec_log" || {
     echo "FAIL: inaccessible source was not delegated to the privilege command" >&2
     cat "$fake_privilege_noexec_log" >&2
+    exit 1
+}
+
+real_source_dir="$TMPDIR_T/real-source"
+real_source="$real_source_dir/switchyard"
+real_install="$TMPDIR_T/bin/switchyard-real"
+mkdir -p "$real_source_dir"
+cat >"$real_source" <<EOF
+#!/usr/bin/env bash
+exec "$REPO_ROOT/scripts/switchyard" "\$@"
+EOF
+chmod +x "$real_source"
+SWITCHYARD_SOURCE_PATH="$real_source" \
+SWITCHYARD_INSTALL_PATH="$real_install" \
+    "$SCRIPT" --apply >"$TMPDIR_T/real-install.log"
+expected_help="$("$REPO_ROOT/scripts/switchyard" --help)"
+expected_version="$("$REPO_ROOT/scripts/switchyard" --version)"
+reachable_help="$("$real_install" --help)"
+reachable_version="$("$real_install" --version)"
+[[ "$reachable_help" == "$expected_help" ]] || {
+    echo "FAIL: reachable wrapper --help does not match switchyard source help" >&2
+    diff -u <(printf '%s\n' "$expected_help") <(printf '%s\n' "$reachable_help") >&2 || true
+    exit 1
+}
+[[ "$reachable_version" == "$expected_version" ]] || {
+    echo "FAIL: reachable wrapper --version does not match switchyard source version" >&2
+    exit 1
+}
+chmod 000 "$real_source_dir"
+fallback_help="$("$real_install" --help)"
+fallback_version="$("$real_install" --version)"
+chmod 755 "$real_source_dir"
+[[ "$fallback_help" == "$expected_help" ]] || {
+    echo "FAIL: inaccessible wrapper --help fallback does not match switchyard source help" >&2
+    diff -u <(printf '%s\n' "$expected_help") <(printf '%s\n' "$fallback_help") >&2 || true
+    exit 1
+}
+[[ "$fallback_version" == "$expected_version" ]] || {
+    echo "FAIL: inaccessible wrapper --version fallback does not match switchyard source version" >&2
     exit 1
 }
 

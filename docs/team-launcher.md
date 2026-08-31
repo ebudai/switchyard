@@ -11,8 +11,10 @@ reserved, so a project literally named `new`, `register`, `upgrade`, `stop`,
 `status`, or `validate-models` collides with the command namespace.
 
 The installed `/usr/local/bin/switchyard` trampoline does not elevate top-level
-discoverability commands: no arguments, `--help`, `--version`, and bare project
-names run directly when the launcher target is reachable. Privileged public
+discoverability commands: no arguments, `--help`, and `--version`. Bare project
+names enter the Python launcher directly when the target is reachable; after
+registry resolution, cross-owner projects re-exec through the same root policy
+before reading tenant-owned config or starting panes. Privileged public
 operations are `new`, `register`, `upgrade`, `status`, `validate-models`, and
 `stop`; they create, mutate, traverse, or act on tenant-owned state. The wrapper
 preflights sudo non-interactively first, so a non-sudo agent gets a clear

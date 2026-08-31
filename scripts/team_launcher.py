@@ -7863,15 +7863,85 @@ Bare project names start or attach the project. Recognized commands: {commands}.
 """
 
 
-def _require_switchyard_project_owner_or_root(config: ProjectConfig, command_display: str) -> None:
+def _switchyard_command_display(argv: Sequence[str]) -> str:
+    if not argv:
+        return "switchyard"
+    return f"switchyard {argv[0]}"
+
+
+def _switchyard_user_can_prompt_for_sudo() -> bool:
+    if not sys.stdin.isatty() or not sys.stderr.isatty():
+        return False
+    try:
+        user = pwd.getpwuid(os.geteuid())
+        group_ids = {user.pw_gid, *os.getgroups()}
+    except KeyError:
+        return False
+    group_names: set[str] = set()
+    for gid in group_ids:
+        try:
+            group_names.add(grp.getgrgid(gid).gr_name)
+        except KeyError:
+            continue
+    return bool({"sudo", "wheel", "admin"} & group_names)
+
+
+def _switchyard_exec_with_root(
+    argv: Sequence[str],
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    exec_func: Callable[[str, Sequence[str]], Any] = os.execvp,
+) -> None:
+    sudo_bin = os.environ.get("SWITCHYARD_SUDO_BIN", "sudo")
+    command_display = _switchyard_command_display(argv)
+    target_argv = [sys.argv[0], *argv]
+    if runner([sudo_bin, "-n", "-v"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+        exec_func(sudo_bin, [sudo_bin, "-n", *target_argv])
+        raise SystemExit(0)
+    if _switchyard_user_can_prompt_for_sudo():
+        exec_func(sudo_bin, [sudo_bin, *target_argv])
+        raise SystemExit(0)
+    raise SystemExit(
+        f"switchyard: command requires root: {command_display}\n"
+        "switchyard: sudo is unavailable for this user or shell; run it as a sudo-capable human or ask an operator"
+    )
+
+
+def _project_config_path_owner_user(path: Path) -> str:
+    expanded = path.expanduser()
+    parts = expanded.parts
+    if len(parts) >= 3 and parts[0] == "/" and parts[1] == "home" and parts[2]:
+        return parts[2]
+    try:
+        return pwd.getpwuid(expanded.stat().st_uid).pw_name
+    except (KeyError, OSError):
+        return ""
+
+
+def _require_switchyard_owner_hint_or_root(entry: SwitchyardProjectEntry, argv: Sequence[str]) -> None:
+    owner = _project_config_path_owner_user(entry.config_path)
+    if not owner or current_user_name() == owner or os.geteuid() == 0:
+        return
+    _switchyard_exec_with_root(argv)
+
+
+def _require_switchyard_project_owner_or_root(config: ProjectConfig, argv: Sequence[str]) -> None:
     owner = (config.run_as_user or "").strip()
     if not owner or current_user_name() == owner or os.geteuid() == 0:
         return
-    raise SystemExit(
-        f"switchyard: command requires root: switchyard {command_display}\n"
-        f"switchyard: project {config.project!r} is owned by {owner!r}; "
-        "run it as a sudo-capable human or ask an operator"
-    )
+    _switchyard_exec_with_root(argv)
+
+
+def _load_switchyard_project_config_for_command(entry: SwitchyardProjectEntry, argv: Sequence[str]) -> ProjectConfig:
+    _require_switchyard_owner_hint_or_root(entry, argv)
+    try:
+        config = load_project_config(entry.slug, entry.config_path)
+    except PermissionError:
+        if os.geteuid() != 0:
+            _switchyard_exec_with_root(argv)
+        raise
+    _require_switchyard_project_owner_or_root(config, argv)
+    return config
 
 
 def switchyard_main(argv: list[str] | None = None) -> int:
@@ -7907,8 +7977,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
     if argv[0].casefold() == "upgrade":
         args = _build_switchyard_upgrade_parser().parse_args(argv[1:])
         entry = _resolve_switchyard_project(args.project)
-        config = load_project_config(entry.slug, entry.config_path)
-        _require_switchyard_project_owner_or_root(config, f"upgrade {entry.slug}")
+        config = _load_switchyard_project_config_for_command(entry, ["upgrade", entry.slug])
         return upgrade_project_command(
             config,
             config_path=entry.config_path,
@@ -7920,24 +7989,23 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         args = _build_switchyard_stop_parser().parse_args(argv[1:])
         project = " ".join(args.project)
         entry = _resolve_switchyard_project(project)
-        config = load_project_config(entry.slug, entry.config_path)
-        _require_switchyard_project_owner_or_root(config, f"stop {entry.slug}")
+        config = _load_switchyard_project_config_for_command(entry, ["stop", entry.slug])
         return stop_project(config)
     if argv[0].casefold() == "status":
         args = _build_switchyard_status_parser().parse_args(argv[1:])
+        if os.geteuid() != 0:
+            _switchyard_exec_with_root(argv)
         return switchyard_status_command(json_output=args.json)
     if argv[0].casefold() == "validate-models":
         if len(argv) < 2:
             raise SystemExit("switchyard validate-models requires <project>")
         project = " ".join(argv[1:])
         entry = _resolve_switchyard_project(project)
-        config = load_project_config(entry.slug, entry.config_path)
-        _require_switchyard_project_owner_or_root(config, f"validate-models {entry.slug}")
+        _load_switchyard_project_config_for_command(entry, ["validate-models", entry.slug])
         return switchyard_validate_models_command(project)
     selection = " ".join(argv)
     entry = _resolve_switchyard_project(selection)
-    config = load_project_config(entry.slug, entry.config_path)
-    _require_switchyard_project_owner_or_root(config, entry.slug)
+    config = _load_switchyard_project_config_for_command(entry, [entry.slug])
     # Model validation intentionally runs only for `switchyard new` and the
     # explicit validate-models command. It performs provider API calls, so a
     # routine team start should not depend on provider availability.

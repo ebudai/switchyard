@@ -736,10 +736,12 @@ def launch_konsole_window(
     project: str,
     gui_user: str | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    process_launcher: Callable[..., Any] | None = None,
 ) -> int:
     args = konsole_launch_args(layout_path, gui_user=gui_user)
-    if args[:2] == ["sh", "-lc"] or runner is not subprocess.run:
+    if args[:2] == ["sh", "-lc"]:
         return runner(args).returncode
+    launch_process = process_launcher or subprocess.Popen
     try:
         with tempfile.NamedTemporaryFile(
             mode="ab",
@@ -749,7 +751,7 @@ def launch_konsole_window(
         ) as handle:
             log_path = Path(handle.name)
             _make_konsole_log_readable(log_path)
-            proc = subprocess.Popen(
+            proc = launch_process(
                 args,
                 stdin=subprocess.DEVNULL,
                 stdout=handle,
@@ -4464,6 +4466,7 @@ def launch_project(
     session_record_poll: float = LAUNCH_SESSION_RECORD_POLL_SECONDS,
     layout_mode: str = LAYOUT_MODE_AUTO,
     layout_environ: dict[str, str] | None = None,
+    konsole_process_launcher: Callable[..., Any] | None = None,
     print_func: Callable[[str], None] = print,
 ) -> int:
     if mode == "start":
@@ -4669,7 +4672,12 @@ def launch_project(
         )
     else:
         ensure_owner_state_dirs(config, pane_state_dir=effective_pane_state_dir, runner=runner)
-        launch_result = launch_konsole_window(output_path, project=config.project, runner=runner)
+        launch_result = launch_konsole_window(
+            output_path,
+            project=config.project,
+            runner=runner,
+            process_launcher=konsole_process_launcher or getattr(runner, "process_launcher", None),
+        )
     if launch_result != 0:
         return launch_result
     if report_session_records:
@@ -7082,6 +7090,7 @@ def switchyard_new_command(
     session_record_poll: float = LAUNCH_SESSION_RECORD_POLL_SECONDS,
     layout_mode: str = LAYOUT_MODE_AUTO,
     layout_environ: dict[str, str] | None = None,
+    konsole_process_launcher: Callable[..., Any] | None = None,
     git_init: bool = True,
     config_dir: Path | None = None,
     registry_dir: Path | None = None,
@@ -7355,6 +7364,7 @@ def switchyard_new_command(
         runner=launch_runner,
         layout_mode=layout_mode,
         layout_environ=layout_environ,
+        konsole_process_launcher=konsole_process_launcher or getattr(runner, "process_launcher", None),
     )
     if launch_result != 0:
         return launch_result

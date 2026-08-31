@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import json
 import os
+import signal
 import shlex
 import shutil
 import subprocess
@@ -112,6 +113,24 @@ LEGACY_SWITCHYARD_ROLE_CLIS = (
 )
 
 
+class RecordingProcessLauncher:
+    def __init__(self, *, pid: int = 424242, poll_result: int | None = None) -> None:
+        self.pid = pid
+        self.poll_result = poll_result
+        self.calls: list[dict[str, object]] = []
+
+    def __call__(self, args: list[str], **kwargs: object) -> object:
+        self.calls.append({"args": args, "kwargs": kwargs})
+
+        class Process:
+            pid = self.pid
+
+            def poll(_self: object) -> int | None:
+                return self.poll_result
+
+        return Process()
+
+
 class FakeRunner:
     def __init__(
         self,
@@ -124,6 +143,7 @@ class FakeRunner:
         self.current_commands = current_commands or {}
         self.pane_pids = pane_pids or {}
         self.calls: list[list[str]] = []
+        self.process_launcher = RecordingProcessLauncher()
 
     @staticmethod
     def _value_for(mapping: dict[str, Any], key: str, default: Any) -> Any:
@@ -906,6 +926,7 @@ def test_launch_auto_upgrades_column_major_layout_before_materializing() -> None
         config = load_project_config("otto", config_path)
         launch_layout = Path(tmp) / "launch-layout.json"
         runner = FakeRunner()
+        process_launcher = RecordingProcessLauncher()
 
         assert (
             launch_project(
@@ -917,10 +938,15 @@ def test_launch_auto_upgrades_column_major_layout_before_materializing() -> None
                 layout_output=launch_layout,
                 no_launcher_self_deploy=True,
                 allow_stale_launcher=True,
+                konsole_process_launcher=process_launcher,
             )
             == 0
         )
 
+        assert len(process_launcher.calls) == 1
+        assert process_launcher.calls[0]["args"] == konsole_launch_args(launch_layout)
+        assert process_launcher.calls[0]["kwargs"]["start_new_session"] is True
+        assert not any(call == konsole_launch_args(launch_layout) for call in runner.calls)
         assert json.loads(layout_path.read_text(encoding="utf-8")) == team_launcher._new_project_layout_payload(6)
         assert _layout_session_tree(json.loads(launch_layout.read_text(encoding="utf-8"))) == {
             "Orientation": "Vertical",
@@ -2496,13 +2522,22 @@ def test_launch_project_reports_visible_role_resume_fallback_to_operator() -> No
         sidecar = session_dir / f"{session_file_name(role.target)}.superseded"
 
         class VisibleFallbackRunner(FakeRunner):
+            def __init__(self) -> None:
+                super().__init__()
+                detached_launcher = RecordingProcessLauncher()
+
+                def process_launcher(args: list[str], **kwargs: object) -> object:
+                    if "konsole" in args and active_record.exists() and not sidecar.exists():
+                        active_record.replace(sidecar)
+                        active_record.write_text(
+                            json.dumps({"target": role.target, "session_id": "fresh-session"}) + "\n",
+                            encoding="utf-8",
+                        )
+                    return detached_launcher(args, **kwargs)
+
+                self.process_launcher = process_launcher
+
             def __call__(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-                if "konsole" in args and active_record.exists() and not sidecar.exists():
-                    active_record.replace(sidecar)
-                    active_record.write_text(
-                        json.dumps({"target": role.target, "session_id": "fresh-session"}) + "\n",
-                        encoding="utf-8",
-                    )
                 return super().__call__(args, **kwargs)
 
         messages: list[str] = []
@@ -4549,6 +4584,7 @@ def test_start_auto_fast_forwards_stale_launcher_checkout_once_before_panes() ->
                 return subprocess.CompletedProcess(args, 0)
             return fake(args, **kwargs)
 
+        runner.process_launcher = fake.process_launcher  # type: ignore[attr-defined]
         stderr = StringIO()
         with redirect_stderr(stderr):
             result = launch_project(
@@ -5376,9 +5412,9 @@ def test_launch_konsole_window_detaches_real_spawn_and_returns_status_line() -> 
     original_popen = team_launcher.subprocess.Popen
     original_sleep = team_launcher.time.sleep
     original_stdout = sys.stdout
-    expected_args: list[str]
     stdout = StringIO()
     popen_calls: list[dict[str, object]] = []
+    expected_args: list[str] = []
 
     class FakePopen:
         def __init__(self, args: list[str], **kwargs: Any) -> None:
@@ -5419,6 +5455,149 @@ def test_launch_konsole_window_detaches_real_spawn_and_returns_status_line() -> 
     assert hasattr(kwargs["stdout"], "name")
     assert kwargs["stderr"] is kwargs["stdout"]
     assert "team-launcher: started pgu in background (Konsole pid 424242; log " in stdout.getvalue()
+
+
+def test_launch_konsole_window_injected_runner_still_detaches_process() -> None:
+    original_host_wayland = os.environ.get("HOST_WAYLAND_DISPLAY")
+    original_legacy_host_wayland = os.environ.get("PGU_HOST_WAYLAND_DISPLAY")
+    original_sleep = team_launcher.time.sleep
+    runner_calls: list[list[str]] = []
+    popen_calls: list[dict[str, object]] = []
+
+    class FakePopen:
+        def __init__(self, args: list[str], **kwargs: Any) -> None:
+            popen_calls.append({"args": args, "kwargs": kwargs})
+            self.pid = 424245
+
+        def poll(self) -> int | None:
+            return None
+
+    def blocking_runner(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        runner_calls.append(args)
+        return subprocess.CompletedProcess(args, 99)
+
+    try:
+        os.environ["HOST_WAYLAND_DISPLAY"] = "/run/user/1000/wayland-0"
+        os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
+        team_launcher.time.sleep = lambda _seconds: None
+        expected_args = konsole_launch_args(Path("/tmp/layout.json"))
+
+        assert (
+            launch_konsole_window(
+                Path("/tmp/layout.json"),
+                project="pgu",
+                runner=blocking_runner,
+                process_launcher=FakePopen,
+            )
+            == 0
+        )
+    finally:
+        team_launcher.time.sleep = original_sleep
+        if original_host_wayland is None:
+            os.environ.pop("HOST_WAYLAND_DISPLAY", None)
+        else:
+            os.environ["HOST_WAYLAND_DISPLAY"] = original_host_wayland
+        if original_legacy_host_wayland is None:
+            os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
+        else:
+            os.environ["PGU_HOST_WAYLAND_DISPLAY"] = original_legacy_host_wayland
+
+    assert runner_calls == []
+    assert len(popen_calls) == 1
+    assert popen_calls[0]["args"] == expected_args
+    assert popen_calls[0]["kwargs"]["start_new_session"] is True
+
+
+def test_launch_konsole_window_real_spawn_returns_promptly_in_own_session() -> None:
+    original_path = os.environ.get("PATH")
+    original_host_wayland = os.environ.get("HOST_WAYLAND_DISPLAY")
+    original_legacy_host_wayland = os.environ.get("PGU_HOST_WAYLAND_DISPLAY")
+    original_stdout = sys.stdout
+    stdout = StringIO()
+    pid: int | None = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="pgu-konsole-detach.") as tmp:
+            tmp_path = Path(tmp)
+            fake_bin = tmp_path / "bin"
+            fake_bin.mkdir()
+            fake_konsole = fake_bin / "konsole"
+            fake_konsole.write_text("#!/bin/sh\nprintf 'fake konsole started\\n'\nsleep 30\n", encoding="utf-8")
+            fake_konsole.chmod(0o755)
+            os.environ["PATH"] = f"{fake_bin}{os.pathsep}{original_path or ''}"
+            os.environ["HOST_WAYLAND_DISPLAY"] = "/run/user/1000/wayland-0"
+            os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
+            sys.stdout = stdout
+
+            start = time.monotonic()
+            result = launch_konsole_window(tmp_path / "layout.json", project="pgu")
+            elapsed = time.monotonic() - start
+            output = stdout.getvalue()
+            marker = "Konsole pid "
+            pid = int(output.split(marker, 1)[1].split(";", 1)[0])
+
+            assert result == 0
+            assert elapsed < 2.0
+            assert os.getsid(pid) == pid
+            assert os.getpgid(pid) == pid
+    finally:
+        sys.stdout = original_stdout
+        if pid is not None:
+            try:
+                os.killpg(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        if original_path is None:
+            os.environ.pop("PATH", None)
+        else:
+            os.environ["PATH"] = original_path
+        if original_host_wayland is None:
+            os.environ.pop("HOST_WAYLAND_DISPLAY", None)
+        else:
+            os.environ["HOST_WAYLAND_DISPLAY"] = original_host_wayland
+        if original_legacy_host_wayland is None:
+            os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
+        else:
+            os.environ["PGU_HOST_WAYLAND_DISPLAY"] = original_legacy_host_wayland
+
+
+def test_launch_konsole_window_fallback_error_remains_synchronous_runner() -> None:
+    original_uid_for_user = team_launcher.uid_for_user
+    original_host_wayland = os.environ.pop("HOST_WAYLAND_DISPLAY", None)
+    original_legacy_host_wayland = os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
+    runner_calls: list[list[str]] = []
+    popen_calls: list[list[str]] = []
+
+    def runner(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        runner_calls.append(args)
+        return subprocess.CompletedProcess(args, 7)
+
+    def process_launcher(args: list[str], **_kwargs: object) -> object:
+        popen_calls.append(args)
+        raise AssertionError("fallback command should not be backgrounded")
+
+    try:
+        team_launcher.uid_for_user = lambda _user_name: None
+
+        assert (
+            launch_konsole_window(
+                Path("/tmp/layout.json"),
+                project="pgu",
+                gui_user="nobody",
+                runner=runner,
+                process_launcher=process_launcher,
+            )
+            == 7
+        )
+    finally:
+        team_launcher.uid_for_user = original_uid_for_user
+        if original_host_wayland is not None:
+            os.environ["HOST_WAYLAND_DISPLAY"] = original_host_wayland
+        if original_legacy_host_wayland is not None:
+            os.environ["PGU_HOST_WAYLAND_DISPLAY"] = original_legacy_host_wayland
+
+    assert len(runner_calls) == 1
+    assert runner_calls[0][:2] == ["sh", "-lc"]
+    assert popen_calls == []
 
 
 def test_launch_konsole_window_prints_captured_output_on_immediate_exit() -> None:
@@ -6234,6 +6413,7 @@ def test_start_runs_research_detached_before_opening_visible_layout() -> None:
         config_path = _write_pgu_config_with_shared_checkout(tmp_path)
         config = load_project_config("pgu", config_path)
         runner = FakeRunner(current_commands={"pgu-research:0.0": "claude"})
+        process_launcher = RecordingProcessLauncher()
         layout_output = tmp_path / "layout.json"
 
         assert (
@@ -6245,6 +6425,7 @@ def test_start_runs_research_detached_before_opening_visible_layout() -> None:
                 runner=runner,
                 layout_output=layout_output,
                 pane_state_dir=tmp_path / "pane-state",
+                konsole_process_launcher=process_launcher,
             )
             == 0
         )
@@ -6273,7 +6454,10 @@ def test_start_runs_research_detached_before_opening_visible_layout() -> None:
         assert state["source"] == "team_launcher.start"
         layout = json.loads(layout_output.read_text(encoding="utf-8"))
         assert {leaf.get("WorkingDirectory") for leaf in team_launcher._layout_leaves(layout)} == {str(tmp_path / "repo")}
-        assert runner.calls[-1] == konsole_launch_args(layout_output)
+        assert len(process_launcher.calls) == 1
+        assert process_launcher.calls[0]["args"] == konsole_launch_args(layout_output)
+        assert process_launcher.calls[0]["kwargs"]["start_new_session"] is True
+        assert not any(call == konsole_launch_args(layout_output) for call in runner.calls)
         assert ["tmux", "attach", "-t", "pgu-research"] not in runner.calls
 
 
@@ -6574,6 +6758,7 @@ def test_control_repository_launch_runs_bootstrap_as_configured_owner() -> None:
         finally:
             team_launcher._control_repository_owner_home = original_home
         runner = OwnerRecordingRunner()
+        process_launcher = RecordingProcessLauncher()
         layout_output = tmp_path / "launch-layout.json"
 
         assert (
@@ -6585,6 +6770,7 @@ def test_control_repository_launch_runs_bootstrap_as_configured_owner() -> None:
                 runner=runner,
                 layout_output=layout_output,
                 pane_state_dir=tmp_path / "pane-state",
+                konsole_process_launcher=process_launcher,
             )
             == 0
         )
@@ -6600,7 +6786,10 @@ def test_control_repository_launch_runs_bootstrap_as_configured_owner() -> None:
         assert team_launcher.git_clone_control_repository_args(config) not in runner.calls
         assert team_launcher.git_control_worktree_add_args(config, config.roles[0]) not in runner.calls
         assert not any(call[:2] == ["chown", "-R"] for call in runner.calls)
-        assert runner.calls[-1] == konsole_launch_args(layout_output)
+        assert len(process_launcher.calls) == 1
+        assert process_launcher.calls[0]["args"] == konsole_launch_args(layout_output)
+        assert process_launcher.calls[0]["kwargs"]["start_new_session"] is True
+        assert not any(call == konsole_launch_args(layout_output) for call in runner.calls)
 
 
 def test_control_repository_bootstrap_failure_aborts_without_opening_window() -> None:
@@ -7044,6 +7233,7 @@ def test_launch_without_control_repository_does_not_owner_wrap_pgu_plan() -> Non
         )
         config = load_project_config("pgu", config_path)
         runner = FakeRunner()
+        process_launcher = RecordingProcessLauncher()
         layout_output = tmp_path / "launch-layout.json"
 
         assert (
@@ -7055,13 +7245,17 @@ def test_launch_without_control_repository_does_not_owner_wrap_pgu_plan() -> Non
                 runner=runner,
                 layout_output=layout_output,
                 pane_state_dir=tmp_path / "pane-state",
+                konsole_process_launcher=process_launcher,
             )
             == 0
         )
 
         assert not any(call[:3] == ["sudo", "-u", "agent"] for call in runner.calls)
         assert not any(call[:2] == ["chown", "-R"] for call in runner.calls)
-        assert runner.calls[-1] == konsole_launch_args(layout_output)
+        assert len(process_launcher.calls) == 1
+        assert process_launcher.calls[0]["args"] == konsole_launch_args(layout_output)
+        assert process_launcher.calls[0]["kwargs"]["start_new_session"] is True
+        assert not any(call == konsole_launch_args(layout_output) for call in runner.calls)
 
 
 def test_viewer_layout_starts_role_sessions_and_additive_viewer() -> None:
@@ -11464,6 +11658,7 @@ def test_legacy_and_switchyard_entrypoints_render_same_plain_konsole_command() -
         layout_output: Path,
     ) -> tuple[list[str], list[str]]:
         runner = FakeRunner()
+        process_launcher = RecordingProcessLauncher()
         original_launch_project = team_launcher.launch_project
         original_config_dir = team_launcher.DEFAULT_CONFIG_DIR
         original_registry_dir = team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR
@@ -11481,6 +11676,7 @@ def test_legacy_and_switchyard_entrypoints_render_same_plain_konsole_command() -
                 kwargs["layout_mode"] = team_launcher.LAYOUT_MODE_SEPARATE
                 kwargs["report_session_records"] = False
                 kwargs["no_launcher_self_deploy"] = True
+                kwargs["konsole_process_launcher"] = process_launcher
                 return original_launch_project(config, **kwargs)
 
             team_launcher.launch_project = launch_with_fake_runner
@@ -11495,10 +11691,11 @@ def test_legacy_and_switchyard_entrypoints_render_same_plain_konsole_command() -
             team_launcher.current_user_name = original_current_user_name
             team_launcher.run_switchyard_launch_first_run_auth = original_first_run_auth
 
-        konsole_calls = [call for call in runner.calls if "konsole" in call]
-        assert len(konsole_calls) == 1
+        assert not any("konsole" in call for call in runner.calls)
+        assert len(process_launcher.calls) == 1
+        assert process_launcher.calls[0]["kwargs"]["start_new_session"] is True
         pane_commands = _leaf_commands(json.loads(layout_output.read_text(encoding="utf-8")))
-        return konsole_calls[0], pane_commands
+        return process_launcher.calls[0]["args"], pane_commands
 
     original_host_wayland = os.environ.get("HOST_WAYLAND_DISPLAY")
     original_legacy_host_wayland = os.environ.get("PGU_HOST_WAYLAND_DISPLAY")
@@ -12464,7 +12661,9 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
         )
         assert any(call[:6] == ["sudo", "-u", "otto-agent", "git", "-C", str(project_dir)] for call in runner.calls)
         assert "not a git repository" not in runner.git_output
-        assert any(call[:1] in (["env"], ["sh"]) for call in runner.calls)
+        assert not any(call[:1] in (["env"], ["sh"]) and "konsole" in call for call in runner.calls)
+        assert len(runner.process_launcher.calls) == 1
+        assert runner.process_launcher.calls[0]["kwargs"]["start_new_session"] is True
         output = stdout.getvalue()
         assert f"switchyard: installed onboarding docs into {project_onboarding_dir}: " in output
         assert "switchyard: full pane window started for porter" in output

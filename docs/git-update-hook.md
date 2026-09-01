@@ -29,15 +29,19 @@ receive-side main guard. The local helper imports path policy from
 `report_file_size_limit.py`; that module remains the optional push reporter and
 the shared scanner rather than orphaned code.
 
-For the bounded host-wide rollout (all `/data/git/*.git`, registered project
-configs, and the two PGU checkouts), run:
+For the bounded host-wide rollout (platform workflow repositories, registered
+project configs, and the two PGU checkouts), run:
 
 ```bash
 sudo scripts/install-all-repository-hooks.sh
 ```
 
 Use `--dry-run` first to enumerate the exact commands. Tenant homes are not
-searched: their paths come from the root-owned Switchyard registry.
+searched: their paths come from the root-owned Switchyard registry. The output
+labels each target as `FILE-SIZE WARNING ONLY`, `MAIN GUARD`, `REGISTERED
+WORKFLOW`, or `NO MAIN GUARD`. Bare repositories without a Switchyard workflow
+are deliberately left without a blocking guard; the rejection message must
+never point an unmanaged project at a workflow it does not have.
 
 ## Legacy PGU installer
 

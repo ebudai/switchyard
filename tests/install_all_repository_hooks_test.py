@@ -38,6 +38,8 @@ def main() -> int:
         bare_root.mkdir()
         registry.mkdir()
         init_repo(bare_root / "legacy.git", bare=True)
+        init_repo(bare_root / "pgu.git", bare=True)
+        init_repo(bare_root / "switchyard.git", bare=True)
         init_repo(shared)
         init_repo(owner)
         init_repo(control, bare=True)
@@ -57,13 +59,38 @@ def main() -> int:
             "SWITCHYARD_PROJECT_REGISTRY_DIR": str(registry),
             "SWITCHYARD_SHARED_CHECKOUTS": str(shared),
         }
-        subprocess.run([str(ROOT / "scripts" / "install-all-repository-hooks.sh")], check=True, env=environment)
-        assert (bare_root / "legacy.git" / "hooks" / "update").exists()
+        installed = subprocess.run(
+            [str(ROOT / "scripts" / "install-all-repository-hooks.sh")],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        assert f"NO MAIN GUARD (no Switchyard workflow): {bare_root / 'legacy.git'}" in installed.stdout
+        assert f"MAIN GUARD (platform workflow): {bare_root / 'pgu.git'}" in installed.stdout
+        assert "FILE-SIZE WARNING ONLY:" in installed.stdout
+        assert "REGISTERED WORKFLOW (warning + main guard):" in installed.stdout
+        assert not (bare_root / "legacy.git" / "hooks" / "update").exists()
+        assert (bare_root / "pgu.git" / "hooks" / "update").exists()
+        assert (bare_root / "switchyard.git" / "hooks" / "update").exists()
         assert (shared / ".git" / "hooks" / "pre-commit").exists()
+        assert not (shared / ".git" / "hooks" / "update").exists()
         assert (owner / ".git" / "hooks" / "pre-commit").exists()
         assert (owner / ".git" / "hooks" / "update").exists()
         assert (control / "hooks" / "pre-commit").exists()
         assert (control / "hooks" / "update").exists()
+
+        dry_run = subprocess.run(
+            [str(ROOT / "scripts" / "install-all-repository-hooks.sh"), "--dry-run"],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        assert f"NO MAIN GUARD (no Switchyard workflow): {bare_root / 'legacy.git'}" in dry_run.stdout
+        assert "--server-only" in dry_run.stdout
+        assert "--local-only" in dry_run.stdout
+        assert "--project-config" in dry_run.stdout
 
     print("install_all_repository_hooks_test: ok")
     return 0

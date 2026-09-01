@@ -11325,7 +11325,17 @@ def test_set_vcs_close_role_updates_generated_artifacts_database_and_unit() -> N
         workflow_sql = (provision_dir / "mefp-vcs-close-role.sql").read_text(encoding="utf-8")
 
     assert updated_plan["operation_allowed_roles"] == [["mark_done", ["archivist"]]]
+    assert updated_plan["implementer_roles"] == ["app", "main"]
+    assert updated_plan["assignee_roles"] == ["unassigned", "designer", "app", "main", "archivist", "audit", "director", "user"]
+    assert updated_plan["caller_roles"] == ["director", "designer", "app", "main", "archivist", "audit", "user"]
+    assert "Environment=TICKET_BOARD_IMPLEMENTER_ROLES=app,main" in updated_unit
+    assert "Environment=TICKET_BOARD_ASSIGNEES=unassigned,designer,app,main,archivist,audit,director,user" in updated_unit
+    assert "Environment=TICKET_BOARD_CALLER_ROLES=director,designer,app,main,archivist,audit,user" in updated_unit
     assert "Environment=TICKET_BOARD_OPERATION_ALLOWED_ROLES=mark_done=archivist" in updated_unit
+    assert "('in_progress', 'Implementation', 2, ARRAY['main', 'app']::text[]" in workflow_sql
+    assert "('in_progress', 'Implementation', 2, ARRAY['main', 'app', 'archivist']::text[]" not in workflow_sql
+    assert "('analysis', 'in_progress', 'start_work', ARRAY['app', 'main']::text[]" in workflow_sql
+    assert "('in_progress', 'audit', 'submit_to_audit', ARRAY['app', 'main']::text[]" in workflow_sql
     assert "('vcs', 'VCS', 7, ARRAY['archivist']::text[]" in workflow_sql
     assert "('director_review', 'vcs', 'route', ARRAY['director']::text[]" in workflow_sql
     assert "('vcs', 'done', 'mark_done', ARRAY['archivist']::text[]" in workflow_sql
@@ -11338,6 +11348,7 @@ def test_set_vcs_close_role_updates_generated_artifacts_database_and_unit() -> N
     ]
     assert len(psql_calls) == 1
     assert "ARRAY['archivist']::text[]" in str(psql_calls[0][1]["input"])
+    assert "ARRAY['main', 'app', 'archivist']::text[]" not in str(psql_calls[0][1]["input"])
     assert "DELETE FROM ticket_board.workflow_transitions\nWHERE action_name = 'mark_done';" in str(psql_calls[0][1]["input"])
     assert any(call == ["sudo", "systemctl", "restart", "mefp-ticket-board.service"] for call in runner.calls)
     assert "team-launcher: set VCS close role for mefp to archivist" in stdout.getvalue()

@@ -996,6 +996,19 @@ SELECT ticket_board.create_ticket('Post-provision VCS close ticket', 'Body', 'an
             assert (
                 psql(
                     post_vcs_admin_conn,
+                    "SELECT owner_roles::text FROM ticket_board.workflow_stages WHERE name = 'in_progress';",
+                )
+                == "{ops}"
+            )
+            assert psql(post_vcs_admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('archivist');") == "f"
+            assert "assignee archivist is not an owner of stage in_progress" in service_call_fails(
+                post_vcs_service_conn,
+                "director",
+                f"SELECT ticket_board.route('{post_vcs_ticket_id}', 'in_progress', 'archivist');",
+            )
+            assert (
+                psql(
+                    post_vcs_admin_conn,
                     """
 SELECT allowed_roles::text
 FROM ticket_board.workflow_transitions
@@ -1039,11 +1052,17 @@ WHERE from_stage = 'director_review' AND to_stage = 'done' AND action_name = 'ma
                 database=vcs_dbname,
                 include_designer=False,
                 include_audit=False,
-                implementer_roles=("ops",),
+                implementer_roles=("app", "main"),
                 vcs_close_role="ops",
             )
             psql(vcs_admin_conn, render_workflow_sql(vcs_plan))
             psql(vcs_admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
+            assert psql(vcs_admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('ops');") == "f"
+            assert psql(vcs_admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('app');") == "t"
+            assert psql(
+                vcs_admin_conn,
+                "SELECT owner_roles::text FROM ticket_board.workflow_stages WHERE name = 'in_progress';",
+            ) == "{main,app}"
             assert psql(
                 vcs_admin_conn,
                 "SELECT owner_roles::text || ':' || rank::text FROM ticket_board.workflow_stages WHERE name = 'vcs';",
@@ -1072,8 +1091,13 @@ SELECT set_config('ticket_board.ticket_prefix', 'SHIP', false);
 SELECT ticket_board.create_ticket('Provisioned VCS close ticket', 'Body', 'analysis');
 """,
             )
-            service_call(vcs_service_conn, "director", f"SELECT ticket_board.route('{vcs_ticket_id}', 'in_progress', 'ops');")
-            service_call(vcs_service_conn, "ops", f"SELECT ticket_board.submit_to_audit('{vcs_ticket_id}', 'abc7690');")
+            assert "assignee ops is not an owner of stage in_progress" in service_call_fails(
+                vcs_service_conn,
+                "director",
+                f"SELECT ticket_board.route('{vcs_ticket_id}', 'in_progress', 'ops');",
+            )
+            service_call(vcs_service_conn, "director", f"SELECT ticket_board.route('{vcs_ticket_id}', 'in_progress', 'app');")
+            service_call(vcs_service_conn, "app", f"SELECT ticket_board.submit_to_audit('{vcs_ticket_id}', 'abc7690');")
             assert (
                 psql(vcs_admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{vcs_ticket_id}';")
                 == "director_review:director"

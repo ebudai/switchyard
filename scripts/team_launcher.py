@@ -8053,8 +8053,7 @@ def _project_plan_for_vcs_close_role(
         raise SystemExit(f"team-launcher: VCS close role {role!r} does not exist in project {config.project}")
     plan_data = _plan_data_from_config(config, config_path)
     audit_roles = _configured_audit_roles(config, plan_data=plan_data)
-    extra_implementer = role if role not in NEW_PROJECT_RESERVED_ROLE_NAMES and role not in audit_roles else None
-    implementer_roles = _configured_implementer_roles(config, plan_data=plan_data, extra_role=extra_implementer)
+    implementer_roles = _configured_implementer_roles(config, plan_data=plan_data)
     include_designer = any(configured.role == "designer" for configured in config.roles)
     return build_plan(
         project=config.project,

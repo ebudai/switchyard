@@ -174,6 +174,7 @@ def build_plan(
             "custom database service/listener roles are not supported yet; "
             "the current schema enforces ticket_board_service and ticket_board_listener"
         )
+    resolved_vcs_close_role = _validate_role(vcs_close_role) if vcs_close_role else ""
     if implementer_roles is None:
         resolved_implementer_roles = DEFAULT_IMPLEMENTER_ROLES if project == "pgu" else DEFAULT_PROJECT_IMPLEMENTER_ROLES
     else:
@@ -181,6 +182,10 @@ def build_plan(
         if not resolved_implementer_roles:
             raise SystemExit("at least one implementer role is required")
     resolved_implementer_roles = _dedupe(resolved_implementer_roles)
+    if resolved_vcs_close_role:
+        resolved_implementer_roles = tuple(role for role in resolved_implementer_roles if role != resolved_vcs_close_role)
+        if not resolved_implementer_roles:
+            raise SystemExit("at least one implementer role is required outside the VCS close role")
     if audit_roles is None:
         resolved_audit_roles = ("audit",) if include_audit else ()
     else:
@@ -191,7 +196,6 @@ def build_plan(
     role_overlap = set(resolved_implementer_roles) & set(resolved_audit_roles)
     if role_overlap:
         raise SystemExit(f"roles cannot be both implementers and auditors: {', '.join(sorted(role_overlap))}")
-    resolved_vcs_close_role = _validate_role(vcs_close_role) if vcs_close_role else ""
     if project == "pgu":
         if resolved_vcs_close_role:
             raise SystemExit("pgu uses the full built-in workflow; --vcs-close-role is only for provisioned projects")
@@ -209,13 +213,22 @@ def build_plan(
                 *draft_roles,
                 *DEFAULT_PROJECT_SUPPORT_ROLES,
                 *resolved_implementer_roles,
+                *((resolved_vcs_close_role,) if resolved_vcs_close_role else ()),
                 *resolved_audit_roles,
                 "director",
                 "user",
             )
         )
         caller_roles = _dedupe(
-            ("director", *draft_roles, *DEFAULT_PROJECT_SUPPORT_ROLES, *resolved_implementer_roles, *resolved_audit_roles, "user")
+            (
+                "director",
+                *draft_roles,
+                *DEFAULT_PROJECT_SUPPORT_ROLES,
+                *resolved_implementer_roles,
+                *((resolved_vcs_close_role,) if resolved_vcs_close_role else ()),
+                *resolved_audit_roles,
+                "user",
+            )
         )
     operation_allowed_roles: tuple[tuple[str, tuple[str, ...]], ...] = ()
     if project != "pgu" and resolved_audit_roles and resolved_audit_roles != ("audit",):

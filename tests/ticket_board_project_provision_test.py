@@ -155,7 +155,7 @@ def test_non_pgu_project_can_insert_vcs_stage_owned_by_ops() -> None:
         project="stellaris",
         owner_user="stellaris-agent",
         port=8871,
-        implementer_roles=("ops",),
+        implementer_roles=("app", "main"),
         vcs_close_role="ops",
     )
 
@@ -163,6 +163,7 @@ def test_non_pgu_project_can_insert_vcs_stage_owned_by_ops() -> None:
     workflow_sql = render_workflow_sql(plan)
 
     assert plan.operation_allowed_roles == (("mark_done", ("ops",)),)
+    assert plan.implementer_roles == ("app", "main")
     assert "Environment=TICKET_BOARD_OPERATION_ALLOWED_ROLES=mark_done=ops" in board_unit
     assert "('vcs', 'VCS', 7, ARRAY['ops']::text[], NULL, NULL, NULL, false)" in workflow_sql
     assert "('done', 'Done', 10, ARRAY[]::text[], NULL, NULL, NULL, true)" in workflow_sql
@@ -170,6 +171,80 @@ def test_non_pgu_project_can_insert_vcs_stage_owned_by_ops() -> None:
     assert "('director_review', 'vcs', 'route', ARRAY['director']::text[]" in workflow_sql
     assert "('vcs', 'done', 'mark_done', ARRAY['ops']::text[]" in workflow_sql
     assert "('director_review', 'done', 'mark_done', ARRAY['director']::text[]" not in workflow_sql
+
+
+def test_vcs_close_role_is_not_an_implementation_owner() -> None:
+    plan = build_plan(
+        project="mefp",
+        owner_user="mefp-agent",
+        port=8878,
+        implementer_roles=("app", "main"),
+        vcs_close_role="archivist",
+    )
+
+    board_unit = render_board_unit(plan)
+    workflow_sql = render_workflow_sql(plan)
+
+    assert plan.implementer_roles == ("app", "main")
+    assert plan.assignee_roles == ("unassigned", "designer", "app", "main", "archivist", "audit", "director", "user")
+    assert plan.caller_roles == ("director", "designer", "app", "main", "archivist", "audit", "user")
+    assert plan.operation_allowed_roles == (("mark_done", ("archivist",)),)
+    assert "Environment=TICKET_BOARD_IMPLEMENTER_ROLES=app,main" in board_unit
+    assert "Environment=TICKET_BOARD_ASSIGNEES=unassigned,designer,app,main,archivist,audit,director,user" in board_unit
+    assert "Environment=TICKET_BOARD_CALLER_ROLES=director,designer,app,main,archivist,audit,user" in board_unit
+    assert "Environment=TICKET_BOARD_OPERATION_ALLOWED_ROLES=mark_done=archivist" in board_unit
+    assert "('in_progress', 'Implementation', 2, ARRAY['main', 'app']::text[]" in workflow_sql
+    assert "('in_progress', 'Implementation', 2, ARRAY['main', 'app', 'archivist']::text[]" not in workflow_sql
+    assert "('analysis', 'in_progress', 'start_work', ARRAY['app', 'main']::text[]" in workflow_sql
+    assert "('analysis', 'in_progress', 'start_work', ARRAY['app', 'main', 'archivist']::text[]" not in workflow_sql
+    assert "('in_progress', 'audit', 'submit_to_audit', ARRAY['app', 'main']::text[]" in workflow_sql
+    assert "('in_progress', 'audit', 'submit_to_audit', ARRAY['app', 'main', 'archivist']::text[]" not in workflow_sql
+    assert "('vcs', 'VCS', 7, ARRAY['archivist']::text[]" in workflow_sql
+    assert "('vcs', 'done', 'mark_done', ARRAY['archivist']::text[]" in workflow_sql
+    assert (
+        "ADD CONSTRAINT ticket_notification_state_last_implementer_assignee_check\n"
+        "    CHECK (\n"
+        "        last_implementer_assignee = ''\n"
+        "        OR last_implementer_assignee IN ('app', 'main')"
+    ) in workflow_sql
+    assert "'archivist')" not in workflow_sql[
+        workflow_sql.index("ticket_notification_state_last_implementer_assignee_check") :
+        workflow_sql.index("ALTER TABLE ticket_board.ticket_notification_queue")
+    ]
+
+
+def test_vcs_close_role_is_removed_from_legacy_implementer_input() -> None:
+    plan = build_plan(
+        project="mefp",
+        owner_user="mefp-agent",
+        port=8878,
+        implementer_roles=("app", "main", "archivist"),
+        vcs_close_role="archivist",
+    )
+
+    workflow_sql = render_workflow_sql(plan)
+
+    assert plan.implementer_roles == ("app", "main")
+    assert "archivist" in plan.assignee_roles
+    assert "archivist" in plan.caller_roles
+    assert "('in_progress', 'Implementation', 2, ARRAY['main', 'app']::text[]" in workflow_sql
+    assert "('vcs', 'VCS', 7, ARRAY['archivist']::text[]" in workflow_sql
+
+
+def test_vcs_close_role_cannot_be_the_only_implementer() -> None:
+    try:
+        build_plan(
+            project="mefp",
+            owner_user="mefp-agent",
+            port=8878,
+            implementer_roles=("archivist",),
+            vcs_close_role="archivist",
+        )
+        raise AssertionError("expected close-only implementer rejection")
+    except SystemExit as exc:
+        message = str(exc)
+
+    assert "at least one implementer role is required outside the VCS close role" in message
 
 
 def test_non_pgu_project_can_configure_multiple_audit_roles() -> None:

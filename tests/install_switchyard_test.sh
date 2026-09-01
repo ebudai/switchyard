@@ -100,6 +100,10 @@ grep -q "readonly SWITCHYARD_DEFAULT_TARGET=$shared_root/current/switchyard" "$i
     echo "FAIL: wrapper target is not the shared current switchyard" >&2
     exit 1
 }
+grep -Fq 'exec "$SWITCHYARD_DEFAULT_TARGET" "$@"' "$install_path" || {
+    echo "FAIL: already-root wrapper branch must ignore SWITCHYARD_TARGET and execute the shared default target" >&2
+    exit 1
+}
 if grep -q "/home/eric/Projects/pgu\\|/home/agent/Projects/pgu" "$install_path"; then
     echo "FAIL: wrapper target must not point under a user's home" >&2
     exit 1
@@ -195,11 +199,16 @@ grep -q "shared target is not executable: $shared_root/current/switchyard" <<<"$
     echo "$missing_output" >&2
     exit 1
 }
-grep -q "scripts/install-switchyard --apply" <<<"$missing_output" || {
+grep -Fq "$SCRIPT --apply" <<<"$missing_output" || {
     echo "FAIL: missing target error did not name the source-checkout recovery command" >&2
     echo "$missing_output" >&2
     exit 1
 }
+if grep -Fq "$first_release/scripts/install-switchyard --apply" <<<"$missing_output"; then
+    echo "FAIL: missing target recovery command must not point into the broken release" >&2
+    echo "$missing_output" >&2
+    exit 1
+fi
 [[ ! -s "$fallback_sudo_log" ]] || {
     echo "FAIL: missing target attempted sudo instead of failing with recovery instructions" >&2
     cat "$fallback_sudo_log" >&2

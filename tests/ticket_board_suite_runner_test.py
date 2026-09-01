@@ -425,7 +425,7 @@ def test_runner_reports_failures_without_stopping_and_strips_live_env() -> None:
         assert "PASS [ticket_board] tests/ticket_board_shell_test.sh" in rendered
 
 
-def test_runner_replaces_live_switchyard_shared_install_root_with_fixture() -> None:
+def test_runner_replaces_live_switchyard_shared_install_root_and_desktop_with_fixtures() -> None:
     runner = load_runner()
     with tempfile.TemporaryDirectory(prefix="ticket-board-suite-shared-root.") as tmpdir:
         root = Path(tmpdir)
@@ -437,6 +437,8 @@ def test_runner_replaces_live_switchyard_shared_install_root_with_fixture() -> N
             "root = Path(os.environ['SWITCHYARD_SHARED_INSTALL_ROOT'])\n"
             "assert root != Path('/opt/switchyard')\n"
             "assert 'switchyard-test-suite-' in str(root)\n"
+            "assert os.environ['XDG_CURRENT_DESKTOP'] == 'GNOME'\n"
+            "assert os.environ['KDE_FULL_SESSION'] == ''\n"
             "print('ticket_board_shared_root_test: ok')\n",
             encoding="utf-8",
         )
@@ -448,6 +450,8 @@ def test_runner_replaces_live_switchyard_shared_install_root_with_fixture() -> N
             env={
                 **os.environ,
                 "SWITCHYARD_SHARED_INSTALL_ROOT": "/opt/switchyard",
+                "XDG_CURRENT_DESKTOP": "KDE",
+                "KDE_FULL_SESSION": "1",
             },
         )
 

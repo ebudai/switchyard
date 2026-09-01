@@ -178,6 +178,7 @@ def test_launch_project_reports_running_attach_or_start_panes_as_attached() -> N
                 pane_state_dir=tmp_path / "pane-state",
                 report_session_records=True,
                 session_record_timeout=0,
+                layout_environ={"XDG_CURRENT_DESKTOP": "KDE"},
                 konsole_process_launcher=process_launcher,
                 print_func=messages.append,
             )
@@ -238,6 +239,7 @@ def test_launch_project_warns_when_session_exists_but_pane_is_not_live() -> None
                 pane_state_dir=tmp_path / "pane-state",
                 report_session_records=True,
                 session_record_timeout=0,
+                layout_environ={"XDG_CURRENT_DESKTOP": "KDE"},
                 konsole_process_launcher=process_launcher,
                 print_func=messages.append,
             )

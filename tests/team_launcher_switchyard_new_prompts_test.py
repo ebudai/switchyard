@@ -421,6 +421,7 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
                     socket_exists=lambda _path: False,
                     session_record_timeout=0,
                     registry_dir=registry_dir,
+                    layout_environ={"XDG_CURRENT_DESKTOP": "KDE"},
                     konsole_process_launcher=process_launcher,
                 )
                 == 0

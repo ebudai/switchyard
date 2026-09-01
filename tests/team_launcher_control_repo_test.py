@@ -102,6 +102,7 @@ def test_control_repository_launch_uses_role_worktrees_and_preserves_repository(
                     runner=runner,
                     layout_output=tmp_path / "launch-layout.json",
                     pane_state_dir=tmp_path / "pane-state",
+                    layout_environ={"XDG_CURRENT_DESKTOP": "KDE"},
                     konsole_process_launcher=process_launcher,
                 )
                 == 0
@@ -228,6 +229,7 @@ def test_control_repository_launch_runs_bootstrap_as_configured_owner() -> None:
                 runner=runner,
                 layout_output=layout_output,
                 pane_state_dir=tmp_path / "pane-state",
+                layout_environ={"XDG_CURRENT_DESKTOP": "KDE"},
                 konsole_process_launcher=process_launcher,
             )
             == 0
@@ -697,6 +699,7 @@ def test_launch_without_control_repository_does_not_owner_wrap_pgu_plan() -> Non
                 runner=runner,
                 layout_output=layout_output,
                 pane_state_dir=tmp_path / "pane-state",
+                layout_environ={"XDG_CURRENT_DESKTOP": "KDE"},
                 konsole_process_launcher=process_launcher,
             )
             == 0

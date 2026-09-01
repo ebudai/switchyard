@@ -259,6 +259,7 @@ def test_start_runs_research_detached_before_opening_visible_layout() -> None:
                 runner=runner,
                 layout_output=layout_output,
                 pane_state_dir=tmp_path / "pane-state",
+                layout_environ={"XDG_CURRENT_DESKTOP": "KDE"},
                 konsole_process_launcher=process_launcher,
             )
             == 0
@@ -317,6 +318,7 @@ def test_plain_shared_checkout_git_runs_as_owner_when_launcher_user_differs() ->
                     runner=runner,
                     layout_output=layout_output,
                     pane_state_dir=tmp_path / "pane-state",
+                    layout_environ={"XDG_CURRENT_DESKTOP": "KDE"},
                     konsole_process_launcher=process_launcher,
                 )
                 == 0
@@ -380,6 +382,7 @@ def test_plain_shared_checkout_git_stays_direct_when_already_owner() -> None:
                     runner=runner,
                     layout_output=tmp_path / "layout.json",
                     pane_state_dir=tmp_path / "pane-state",
+                    layout_environ={"XDG_CURRENT_DESKTOP": "KDE"},
                     konsole_process_launcher=process_launcher,
                 )
                 == 0

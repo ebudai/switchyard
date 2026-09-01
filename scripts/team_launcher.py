@@ -5263,10 +5263,11 @@ def launch_project(
             if result != 0:
                 return result
         ensure_owner_state_dirs(config, pane_state_dir=effective_pane_state_dir, runner=runner)
-        launch_result = launch_tmux_viewer_session(
-            [role for role in viewer_roles if role.role not in failed_roles],
-            runner=runner,
-        )
+        launchable_viewer_roles = [role for role in viewer_roles if role.role not in failed_roles]
+        if launchable_viewer_roles:
+            launch_result = launch_tmux_viewer_session(launchable_viewer_roles, runner=runner)
+        else:
+            launch_result = 0
     else:
         ensure_owner_state_dirs(config, pane_state_dir=effective_pane_state_dir, runner=runner)
         launch_result = launch_konsole_window(

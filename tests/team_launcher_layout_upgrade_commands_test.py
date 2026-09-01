@@ -160,6 +160,7 @@ def test_launch_auto_upgrades_column_major_layout_before_materializing() -> None
                 script_path=ROOT / "scripts" / "team-launcher",
                 runner=runner,
                 layout_output=launch_layout,
+                layout_environ={"XDG_CURRENT_DESKTOP": "KDE"},
                 no_launcher_self_deploy=True,
                 allow_stale_launcher=True,
                 konsole_process_launcher=process_launcher,

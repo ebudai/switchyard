@@ -73,6 +73,8 @@ LIVE_PANE_STATE_PATHS = candidate_live_pane_state_paths()
 strip_ticket_board_pane_env(os.environ)
 TEST_SWITCHYARD_SHARED_INSTALL_ROOT = Path(tempfile.gettempdir()) / f"switchyard-test-{os.getpid()}" / "opt" / "switchyard"
 os.environ["SWITCHYARD_SHARED_INSTALL_ROOT"] = str(TEST_SWITCHYARD_SHARED_INSTALL_ROOT)
+os.environ["XDG_CURRENT_DESKTOP"] = "GNOME"
+os.environ["KDE_FULL_SESSION"] = ""
 
 import scripts.team_launcher as team_launcher
 

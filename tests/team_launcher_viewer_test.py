@@ -378,6 +378,7 @@ def test_full_launch_delegates_detached_role_start_to_owner_pane_subcommand() ->
                 script_path=ROOT / "scripts" / "team-launcher",
                 runner=runner,
                 layout_output=tmp_path / "layout-output.json",
+                layout_environ={"SUDO_USER": "root", "XDG_CURRENT_DESKTOP": "", "KDE_FULL_SESSION": ""},
                 konsole_process_launcher=process_launcher,
             )
         finally:

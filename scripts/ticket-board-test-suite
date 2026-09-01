@@ -95,6 +95,7 @@ LIVE_PANE_ENV_KEYS = {
 }
 SANITIZED_ENV_KEYS = LIVE_BOARD_ENV_KEYS | LIVE_PANE_ENV_KEYS
 SWITCHYARD_SHARED_INSTALL_ENV = "SWITCHYARD_SHARED_INSTALL_ROOT"
+TEST_XDG_CURRENT_DESKTOP = "GNOME"
 TEST_SWITCHYARD_SHARED_INSTALL_ROOT = (
     Path(tempfile.gettempdir()) / f"switchyard-test-suite-{os.getpid()}" / "opt" / "switchyard"
 )
@@ -283,6 +284,8 @@ def sanitized_environment(environ: dict[str, str] | None = None) -> dict[str, st
     for key in SANITIZED_ENV_KEYS:
         clean.pop(key, None)
     clean[SWITCHYARD_SHARED_INSTALL_ENV] = str(TEST_SWITCHYARD_SHARED_INSTALL_ROOT)
+    clean["XDG_CURRENT_DESKTOP"] = TEST_XDG_CURRENT_DESKTOP
+    clean["KDE_FULL_SESSION"] = ""
     return clean
 
 

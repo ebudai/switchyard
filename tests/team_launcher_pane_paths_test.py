@@ -24,6 +24,7 @@ def test_launch_project_with_running_shared_checkout_session_skips_destructive_r
                 script_path=ROOT / "scripts" / "team-launcher",
                 runner=runner,
                 layout_output=tmp_path / "materialized.json",
+                layout_environ={"XDG_CURRENT_DESKTOP": "KDE"},
                 konsole_process_launcher=process_launcher,
             )
             == 0
@@ -102,6 +103,7 @@ def test_launch_project_with_running_control_role_session_refreshes_only_stopped
                 script_path=ROOT / "scripts" / "team-launcher",
                 runner=runner,
                 layout_output=tmp_path / "materialized.json",
+                layout_environ={"XDG_CURRENT_DESKTOP": "KDE"},
                 konsole_process_launcher=process_launcher,
             )
             == 0

@@ -518,6 +518,7 @@ def test_launch_project_reports_missing_session_record_after_reboot_resume() -> 
                 pane_state_dir=tmp_path / "pane-state",
                 report_session_records=True,
                 session_record_timeout=0,
+                layout_environ={"XDG_CURRENT_DESKTOP": "KDE"},
                 konsole_process_launcher=process_launcher,
                 print_func=messages.append,
             )
@@ -603,6 +604,7 @@ def test_launch_project_reports_visible_role_resume_fallback_to_operator() -> No
                 pane_state_dir=tmp_path / "pane-state",
                 report_session_records=True,
                 session_record_timeout=0,
+                layout_environ={"XDG_CURRENT_DESKTOP": "KDE"},
                 konsole_process_launcher=process_launcher,
                 print_func=messages.append,
             )

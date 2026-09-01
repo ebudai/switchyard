@@ -311,8 +311,12 @@ def get_ticket(base_url: str, ticket_id: str) -> dict[str, object]:
 def assert_served_html_contains_write_token(base_url: str) -> None:
     with urllib.request.urlopen(base_url + "/", timeout=5) as response:
         html = response.read().decode("utf-8")
+    with urllib.request.urlopen(base_url + "/api/board", timeout=5) as response:
+        build_id = json.loads(response.read().decode("utf-8"))["build_id"]
     assert "window.PGU_TICKET_BOARD_WRITE_TOKEN" in html
     assert TEST_WRITE_TOKEN and TEST_WRITE_TOKEN in html
+    assert f"window.TICKET_BOARD_BUILD_ID = {json.dumps(build_id)}" in html
+    assert f"window.PGU_TICKET_BOARD_BUILD_ID = {json.dumps(build_id)}" in html
 
 
 def call_arguments(source: str, open_paren: int) -> list[str]:

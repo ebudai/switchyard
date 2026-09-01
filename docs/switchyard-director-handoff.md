@@ -44,8 +44,10 @@ Do not provision `syrd` twice. Before any cutover action, verify the registry,
 systemd units, board port, socket path, ticket prefix, and pane environment.
 Use neutral `TICKET_BOARD_*`, `TEAM_LAUNCHER_*`, `UPDATE_HOOK_*`, and
 `ALLOW_MAIN_PUSH` names. Do not introduce `SYRD_*` vocabulary. The known
-residual cleanup is that `PGU_TICKET_BOARD_BUILD_ID` and
-`PGU_TICKET_BOARD_REFRESH_IDLE_MS` still need neutral browser-global names.
+build-id and refresh-idle browser settings now prefer
+`TICKET_BOARD_BUILD_ID` and `TICKET_BOARD_REFRESH_IDLE_MS`. Their `PGU_`
+forms remain compatibility fallbacks; the server emits both build-id globals
+so older JavaScript remains safe during a rolling deploy.
 
 ## Migration Rule
 

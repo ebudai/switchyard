@@ -87,13 +87,12 @@ For `syrd`, set neutral names:
 
 Checked exceptions:
 
-- `PGU_TICKET_BOARD_BUILD_ID` has no neutral equivalent today. It is
-  load-bearing: the server reads it and emits `window.PGU_TICKET_BOARD_BUILD_ID`
-  for stale-build detection in the client. Until this is renamed, a `syrd` board
-  will still serve a PGU-named browser global for its build identity.
-- `PGU_TICKET_BOARD_REFRESH_IDLE_MS` has no neutral equivalent today. It is also
-  load-bearing: the client reads `window.PGU_TICKET_BOARD_REFRESH_IDLE_MS` to
-  decide when an idle browser may auto-refresh after a build changes.
+- `TICKET_BOARD_BUILD_ID` is the preferred server setting and browser global.
+  `PGU_TICKET_BOARD_BUILD_ID` remains an environment fallback, and the server
+  emits both browser globals so older JavaScript survives a rolling deploy.
+- `TICKET_BOARD_REFRESH_IDLE_MS` is the preferred browser setting for deciding
+  when an idle browser may auto-refresh after a build changes.
+  `PGU_TICKET_BOARD_REFRESH_IDLE_MS` remains a client compatibility fallback.
 - `PGU_TICKET_BOARD_TICKET_PREFIX` has a neutral equivalent:
   `TICKET_BOARD_TICKET_PREFIX`. It is only a legacy fallback in the app; the
   provisioner and launcher emit the neutral variable.

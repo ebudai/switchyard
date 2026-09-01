@@ -350,12 +350,22 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         refresh_open_detail_from_server(page, "PGU-512")
 
         close_detail(page)
-        page.evaluate("""() => { window.PGU_TICKET_BOARD_REFRESH_IDLE_MS = 25; state.lastActivityAt = 0; }""")
+        page.evaluate(
+            """() => {
+              window.TICKET_BOARD_REFRESH_IDLE_MS = 25;
+              window.PGU_TICKET_BOARD_REFRESH_IDLE_MS = 60000;
+              state.lastActivityAt = 0;
+            }"""
+        )
         harness.server.build_id = "pgu-525-idle-build"
         page.evaluate("""async () => { await requestBoardReload(); }""")
         page.wait_for_load_state("domcontentloaded")
         page.locator(".column-title", has_text="Triage").wait_for(timeout=5000)
-        page.wait_for_function("() => window.PGU_TICKET_BOARD_BUILD_ID === 'pgu-525-idle-build'", timeout=5000)
+        page.wait_for_function(
+            """() => window.TICKET_BOARD_BUILD_ID === 'pgu-525-idle-build'
+              && window.PGU_TICKET_BOARD_BUILD_ID === 'pgu-525-idle-build'""",
+            timeout=5000,
+        )
         page.locator("#refreshUpdateBanner").wait_for(state="hidden", timeout=5000)
         page.evaluate("""() => { window.PGU_TICKET_BOARD_REFRESH_IDLE_MS = 25; state.lastActivityAt = 0; }""")
 

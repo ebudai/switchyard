@@ -209,7 +209,10 @@ def board_build_id(
     repo_root: Path = REPO_ROOT,
     module_path: Path = Path(__file__),
 ) -> str:
-    explicit = environ.get("PGU_TICKET_BOARD_BUILD_ID", "").strip()
+    explicit = (
+        environ.get("TICKET_BOARD_BUILD_ID", "").strip()
+        or environ.get("PGU_TICKET_BOARD_BUILD_ID", "").strip()
+    )
     if explicit:
         return explicit
     proc = subprocess.run(
@@ -1064,6 +1067,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         if parsed.path == "/":
             token_script = (
                 f"  <script>window.PGU_TICKET_BOARD_WRITE_TOKEN = {json.dumps(self.write_token)};"
+                f" window.TICKET_BOARD_BUILD_ID = {json.dumps(self.server.build_id)};"
                 f" window.PGU_TICKET_BOARD_BUILD_ID = {json.dumps(self.server.build_id)};</script>\n"
             )
             body = HTML.replace("  <script>\n", token_script + "  <script>\n", 1).encode("utf-8")

@@ -33,8 +33,8 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       loadInFlight: null,
       loadQueued: false,
       loadSequence: 0,
-      loadedBuildId: String(window.PGU_TICKET_BOARD_BUILD_ID || ''),
-      serverBuildId: String(window.PGU_TICKET_BOARD_BUILD_ID || ''),
+      loadedBuildId: String(window.TICKET_BOARD_BUILD_ID || window.PGU_TICKET_BOARD_BUILD_ID || ''),
+      serverBuildId: String(window.TICKET_BOARD_BUILD_ID || window.PGU_TICKET_BOARD_BUILD_ID || ''),
       refreshRequired: false,
       pendingRefreshBuildId: '',
       autoRefreshTimer: null,
@@ -110,7 +110,8 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     }
 
     function refreshIdleMs() {
-      const value = Number(window.PGU_TICKET_BOARD_REFRESH_IDLE_MS || 2500);
+      const configured = window.TICKET_BOARD_REFRESH_IDLE_MS ?? window.PGU_TICKET_BOARD_REFRESH_IDLE_MS ?? 2500;
+      const value = Number(configured);
       return Number.isFinite(value) && value >= 0 ? value : 2500;
     }
 

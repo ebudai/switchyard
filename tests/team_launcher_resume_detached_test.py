@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-# board_url marker keeps this split suite in board-adjacent discovery.
 from team_launcher_test_helpers import *
 
 def test_visible_start_fails_before_attach_when_cli_exits_immediately() -> None:

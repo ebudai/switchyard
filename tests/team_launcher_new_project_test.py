@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-# board_url marker keeps this split suite in board-adjacent discovery.
 from team_launcher_test_helpers import *
 
 def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:

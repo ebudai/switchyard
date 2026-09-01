@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-# board_url marker keeps this split suite in board-adjacent discovery.
 from team_launcher_test_helpers import *
 
 def test_switchyard_new_prompts_roles_and_skips_designer_when_absent() -> None:

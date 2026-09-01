@@ -255,13 +255,15 @@ Ticket board validation:
   frontend` for non-browser standalone tests that import `scripts.ticket_board`,
   `--group browser` for inline Playwright tests that import
   `scripts.ticket_board`, or `--group all` for every group.
-- The adjacent, host, frontend, and browser groups are discovered from test file
-  content, not manifests. Board URLs, sockets, `ticket-board-write`,
-  `ticket_board.write_client`, and `ticket_board_ui_harness` mark adjacent
-  suites. Repository-hook imports and the `install-all-repository-hooks` or
-  `install-switchyard` entrypoints mark host automation. Remaining inline
-  `scripts.ticket_board` importers are split into frontend or browser by
-  Playwright/browser markers.
+- Launcher suites named `tests/team_launcher_*_test.py` are structurally part
+  of the adjacent group; they do not need marker comments or board calls.
+  Other adjacent suites and the host, frontend, and browser groups are
+  discovered from test file content, not manifests. Board URLs, sockets,
+  `ticket-board-write`, `ticket_board.write_client`, and
+  `ticket_board_ui_harness` mark other adjacent suites. Repository-hook imports
+  and the `install-all-repository-hooks` or `install-switchyard` entrypoints
+  mark host automation. Remaining inline `scripts.ticket_board` importers are
+  split into frontend or browser by Playwright/browser markers.
 - A suite that runs useful unprivileged checks while omitting a privileged
   branch prints `COVERAGE REDUCED: <reason>`. The runner keeps it as a passing
   executed suite but reports the reduction on its result and in a dedicated

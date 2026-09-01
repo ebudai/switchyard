@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-# board_url marker keeps this split suite in board-adjacent discovery.
 from team_launcher_test_helpers import *
 
 def test_dry_run_materializes_pgu_layout_with_six_visible_role_commands() -> None:

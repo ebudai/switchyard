@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-# board_url marker keeps this split suite in board-adjacent discovery.
 from team_launcher_test_helpers import *
 
 def test_pane_runtime_hook_source_rejects_stale_codex_state() -> None:

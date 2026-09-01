@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-# board_url marker keeps this split suite in board-adjacent discovery.
 from team_launcher_test_helpers import *
 
 def test_add_role_unrecognized_layout_without_room_refuses_actionably_without_mutation() -> None:

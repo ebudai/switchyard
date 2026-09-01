@@ -83,6 +83,33 @@ def test_discovers_board_adjacent_suites_by_content_property() -> None:
         ]
 
 
+def test_discovers_team_launcher_suites_structurally_without_content_marker() -> None:
+    runner = load_runner()
+    with tempfile.TemporaryDirectory(prefix="ticket-board-suite-launcher-discovery.") as tmpdir:
+        root = Path(tmpdir)
+        tests = root / "tests"
+        tests.mkdir()
+        (tests / "team_launcher_wrapper_test.py").write_text("print('wrapper')\n", encoding="utf-8")
+        (tests / "team_launcher_git_ownership_lint_test.py").write_text("print('lint')\n", encoding="utf-8")
+        (tests / "team_launcher_overlap_test.py").write_text(
+            "from scripts.repository_hooks import install_main_guard\n"
+            "from scripts.ticket_board.server import TicketBoardServer\n"
+            "from playwright.sync_api import sync_playwright\n",
+            encoding="utf-8",
+        )
+        (tests / "team_launcher_helper.py").write_text("print('helper')\n", encoding="utf-8")
+        (tests / "other_launcher_test.py").write_text("print('other')\n", encoding="utf-8")
+
+        assert runner.discover_board_adjacent_suites(root) == [
+            "tests/team_launcher_git_ownership_lint_test.py",
+            "tests/team_launcher_overlap_test.py",
+            "tests/team_launcher_wrapper_test.py",
+        ]
+        assert runner.discover_host_automation_suites(root) == []
+        assert runner.discover_ticket_board_frontend_suites(root) == []
+        assert runner.discover_ticket_board_browser_suites(root) == []
+
+
 def test_discovers_host_automation_suites_by_content_property() -> None:
     runner = load_runner()
     with tempfile.TemporaryDirectory(prefix="ticket-board-suite-host-discovery.") as tmpdir:
@@ -505,6 +532,7 @@ def test_runner_skips_every_browser_suite_when_playwright_is_unavailable() -> No
 def main() -> int:
     test_discovers_python_and_shell_ticket_board_suites_only()
     test_discovers_board_adjacent_suites_by_content_property()
+    test_discovers_team_launcher_suites_structurally_without_content_marker()
     test_discovers_host_automation_suites_by_content_property()
     test_discovers_inline_ticket_board_browser_suites_by_content_property()
     test_discovers_inline_ticket_board_frontend_suites_by_content_property()

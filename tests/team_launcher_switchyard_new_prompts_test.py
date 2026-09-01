@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-# board_url marker keeps this split suite in board-adjacent discovery.
 from team_launcher_test_helpers import *
 
 def test_switchyard_new_unit_without_database_precheck_runs_before_user_and_project_creation() -> None:

@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-# board_url marker keeps this split suite in board-adjacent discovery.
 from team_launcher_test_helpers import *
 
 def test_legacy_and_switchyard_entrypoints_render_same_plain_konsole_command() -> None:

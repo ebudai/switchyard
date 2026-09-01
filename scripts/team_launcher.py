@@ -2689,15 +2689,17 @@ def probe_checkout_against_worktree_ref(
     *,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> LauncherCheckoutProbe:
-    check_proc = runner(
+    check_proc = run_owner_correct_git(
         git_launcher_checkout_check_args(repo),
+        runner=runner,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
     if check_proc.returncode != 0:
         return LauncherCheckoutProbe(error=f"path is not a git checkout: {repo}")
-    head_proc = runner(
+    head_proc = run_owner_correct_git(
         git_launcher_head_args(repo),
+        runner=runner,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -2710,8 +2712,9 @@ def probe_checkout_against_worktree_ref(
             )
         )
     local_head = str(head_proc.stdout or "").strip()
-    remote_proc = runner(
+    remote_proc = run_owner_correct_git(
         git_launcher_ls_remote_ref_args(config, repo),
+        runner=runner,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -2728,15 +2731,17 @@ def probe_checkout_against_worktree_ref(
         return LauncherCheckoutProbe(error=f"could not parse {worktree_ref(config)} from ls-remote output")
     if local_head == remote_head:
         return LauncherCheckoutProbe(ahead=0, behind=0)
-    exists_proc = runner(
+    exists_proc = run_owner_correct_git(
         git_launcher_commit_exists_args(repo, remote_head),
+        runner=runner,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
     if exists_proc.returncode != 0:
         return LauncherCheckoutProbe(ahead=0, behind=1, behind_exact=False)
-    count_proc = runner(
+    count_proc = run_owner_correct_git(
         git_launcher_ahead_behind_args(config, repo, remote_head),
+        runner=runner,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -4563,12 +4568,20 @@ def _current_tenant_release(board_root: Path) -> tuple[Path | None, str]:
     return current_release, current_sha
 
 
-def git_deploy_ref_ls_remote_args(source_repo: Path, deploy_ref: str) -> list[str] | None:
+def _deploy_ref_remote_branch(deploy_ref: str) -> tuple[str, str] | None:
     if deploy_ref.startswith("refs/") or "/" not in deploy_ref:
         return None
     remote, branch = deploy_ref.split("/", 1)
     if not remote or not branch:
         return None
+    return remote, branch
+
+
+def git_deploy_ref_ls_remote_args(source_repo: Path, deploy_ref: str) -> list[str]:
+    remote_branch = _deploy_ref_remote_branch(deploy_ref)
+    if remote_branch is None:
+        raise ValueError(f"deploy ref does not name a remote branch: {deploy_ref}")
+    remote, branch = remote_branch
     return ["git", "-C", str(source_repo), "ls-remote", remote, f"refs/heads/{branch}"]
 
 
@@ -4582,13 +4595,10 @@ def _resolve_deploy_ref_readonly(
     *,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> tuple[str, str]:
-    checkout_runner, owner_error = _launcher_checkout_runner(source_repo, runner=runner)
-    if checkout_runner is None:
-        return "", owner_error or f"cannot determine owner for {source_repo}"
-    ls_remote_args = git_deploy_ref_ls_remote_args(source_repo, deploy_ref)
-    if ls_remote_args is not None:
-        remote_proc = checkout_runner(
-            ls_remote_args,
+    if _deploy_ref_remote_branch(deploy_ref) is not None:
+        remote_proc = run_owner_correct_git(
+            git_deploy_ref_ls_remote_args(source_repo, deploy_ref),
+            runner=runner,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -4599,8 +4609,9 @@ def _resolve_deploy_ref_readonly(
                 return remote_sha, ""
         else:
             return "", _proc_failure_reason(remote_proc, f"git ls-remote exited {remote_proc.returncode}")
-    rev_parse_proc = checkout_runner(
+    rev_parse_proc = run_owner_correct_git(
         git_deploy_ref_rev_parse_args(source_repo, deploy_ref),
+        runner=runner,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,

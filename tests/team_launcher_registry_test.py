@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-# board_url marker keeps this split suite in board-adjacent discovery.
 from team_launcher_test_helpers import *
 
 def test_design_project_command_slug_validation_rejects_dash_and_normalizes_uppercase() -> None:

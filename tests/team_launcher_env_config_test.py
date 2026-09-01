@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-# board_url marker keeps this split suite in board-adjacent discovery.
 from team_launcher_test_helpers import *
 
 def test_owner_state_dir_install_args_take_effect_on_real_filesystem_for_current_user() -> None:

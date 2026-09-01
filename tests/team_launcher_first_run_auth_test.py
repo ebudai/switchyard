@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-# board_url marker keeps this split suite in board-adjacent discovery.
 from team_launcher_test_helpers import *
 
 def test_first_run_auth_phase_is_silent_when_auth_and_trust_already_pass() -> None:

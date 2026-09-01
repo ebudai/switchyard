@@ -123,6 +123,10 @@ def _is_standalone_test(path: Path) -> bool:
     return path.is_file() and path.name.endswith(("_test.py", "_test.sh"))
 
 
+def _is_team_launcher_suite(path: Path) -> bool:
+    return path.is_file() and path.name.startswith("team_launcher_") and path.name.endswith("_test.py")
+
+
 def _mentions_board_endpoint(path: Path) -> bool:
     try:
         text = path.read_text(encoding="utf-8")
@@ -161,7 +165,7 @@ def discover_board_adjacent_suites(root: Path = ROOT) -> list[str]:
         for path in tests_dir.iterdir()
         if _is_standalone_test(path)
         and not path.name.startswith("ticket_board_")
-        and _mentions_board_endpoint(path)
+        and (_is_team_launcher_suite(path) or _mentions_board_endpoint(path))
     )
 
 
@@ -174,6 +178,7 @@ def discover_host_automation_suites(root: Path = ROOT) -> list[str]:
         for path in tests_dir.iterdir()
         if _is_standalone_test(path)
         and not path.name.startswith("ticket_board_")
+        and not _is_team_launcher_suite(path)
         and _mentions_host_automation(path)
         and not _mentions_board_endpoint(path)
         and not _imports_ticket_board_package(path)
@@ -189,6 +194,7 @@ def discover_ticket_board_browser_suites(root: Path = ROOT) -> list[str]:
         for path in tests_dir.iterdir()
         if _is_standalone_test(path)
         and not path.name.startswith("ticket_board_")
+        and not _is_team_launcher_suite(path)
         and not _mentions_board_endpoint(path)
         and _imports_ticket_board_package(path)
         and _uses_browser_runtime(path)
@@ -204,6 +210,7 @@ def discover_ticket_board_frontend_suites(root: Path = ROOT) -> list[str]:
         for path in tests_dir.iterdir()
         if _is_standalone_test(path)
         and not path.name.startswith("ticket_board_")
+        and not _is_team_launcher_suite(path)
         and not _mentions_board_endpoint(path)
         and _imports_ticket_board_package(path)
         and not _uses_browser_runtime(path)

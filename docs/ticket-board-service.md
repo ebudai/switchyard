@@ -102,8 +102,10 @@ namespace, `--group host` for repository-hook and Switchyard installation
 automation, `--group frontend` for non-browser standalone tests that import
 the `scripts.ticket_board` package, `--group browser` for inline Playwright
 tests that import `scripts.ticket_board`, or `--group all` for all five groups.
-These extra groups are discovered from test file content, not a manifest:
-standalone tests that reference board URLs, sockets, `ticket-board-write`,
+Launcher suites named `tests/team_launcher_*_test.py` are structurally included
+in the adjacent group and need no content marker. The remaining extra suites
+are discovered from test file content, not a manifest: standalone tests that
+reference board URLs, sockets, `ticket-board-write`,
 `ticket_board.write_client`, or the `ticket_board_ui_harness` browser harness
 are included as adjacent; repository-hook imports and the
 `install-all-repository-hooks` or `install-switchyard` entrypoints mark host

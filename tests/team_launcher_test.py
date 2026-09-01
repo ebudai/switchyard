@@ -11774,6 +11774,8 @@ def test_switchyard_status_lists_registered_projects_from_process_snapshot() -> 
                     "fish -c env TICKET_BOARD_PANE_TARGET=otto-main:0.0 codex",
                     "python3 /service/ticket-board.py --project otto",
                 ],
+                source_repo=tmp_path / "missing-source",
+                switchyard_install_path=tmp_path / "missing-switchyard",
                 print_func=lines.append,
             )
             == 0
@@ -11830,6 +11832,8 @@ def test_switchyard_status_json_reports_same_project_facts() -> None:
                 registry_dir=registry_dir,
                 json_output=True,
                 process_commands=["fish -c env TICKET_BOARD_PANE_TARGET=atlas-director:0.0 claude"],
+                source_repo=tmp_path / "missing-source",
+                switchyard_install_path=tmp_path / "missing-switchyard",
                 print_func=lines.append,
             )
             == 0
@@ -11848,7 +11852,8 @@ def test_switchyard_status_json_reports_same_project_facts() -> None:
                 "config_path": str(config_path),
                 "error": "",
             }
-        ]
+        ],
+        "runtime_copies": [],
     }
 
 
@@ -11880,6 +11885,8 @@ def test_switchyard_status_lists_unreadable_config_as_unknown() -> None:
                 config_dir=config_dir,
                 registry_dir=registry_dir,
                 process_commands=["fish -c env TICKET_BOARD_PANE_TARGET=private-director:0.0 claude"],
+                source_repo=tmp_path / "missing-source",
+                switchyard_install_path=tmp_path / "missing-switchyard",
                 print_func=lines.append,
             )
             == 0
@@ -11936,6 +11943,8 @@ def test_switchyard_status_ignores_tmux_server_new_session_argv_with_pane_target
                     "tmux new-session -d -s atlas-research -c /repo env TICKET_BOARD_PANE_TARGET=atlas-research:0.0 claude",
                     "tmux: server (/tmp/tmux-1001/default) for atlas",
                 ],
+                source_repo=tmp_path / "missing-source",
+                switchyard_install_path=tmp_path / "missing-switchyard",
                 print_func=lines.append,
             )
             == 0
@@ -11991,10 +12000,181 @@ def test_switchyard_status_default_probe_uses_ps_without_root_or_tmux() -> None:
             return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
 
         lines: list[str] = []
-        assert switchyard_status_command(config_dir=config_dir, registry_dir=registry_dir, runner=runner, print_func=lines.append) == 0
+        assert (
+            switchyard_status_command(
+                config_dir=config_dir,
+                registry_dir=registry_dir,
+                runner=runner,
+                source_repo=tmp_path / "missing-source",
+                switchyard_install_path=tmp_path / "missing-switchyard",
+                print_func=lines.append,
+            )
+            == 0
+        )
 
     assert calls == [["ps", "-eo", "args=", "--no-headers"]]
     assert lines[-1].strip().endswith("running  1/1")
+
+
+def test_switchyard_status_reports_runtime_copy_staleness_without_fetching() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-status-stale.") as tmp:
+        tmp_path = Path(tmp)
+        origin, source_repo = _make_origin_backed_repo(tmp_path)
+        old_sha = _run_git(["git", "rev-parse", "HEAD"], cwd=source_repo).stdout.strip()
+        project_repo = tmp_path / "project-repo"
+        role_worktree = tmp_path / "ops-worktree"
+        updater = tmp_path / "updater"
+        _run_git(["git", "clone", str(origin), str(project_repo)])
+        _run_git(["git", "clone", str(origin), str(role_worktree)])
+        _run_git(["git", "clone", str(origin), str(updater)])
+        _run_git(["git", "config", "user.email", "agent@example.invalid"], cwd=updater)
+        _run_git(["git", "config", "user.name", "PGU Agent"], cwd=updater)
+        (updater / "tracked.txt").write_text("remote update\n", encoding="utf-8")
+        _commit_all(updater, "remote update")
+        subprocess.run(
+            ["git", "push", "origin", "main"],
+            cwd=updater,
+            check=True,
+            text=True,
+            capture_output=True,
+            env={**os.environ, "PGU_ALLOW_MAIN_PUSH": "director"},
+        )
+        target_sha = _run_git(["git", "rev-parse", "HEAD"], cwd=updater).stdout.strip()
+        board_root = tmp_path / "otto-ticketboard-live"
+        release = board_root / "releases" / old_sha
+        release.mkdir(parents=True)
+        (release / ".pgu-deploy-sha").write_text(old_sha + "\n", encoding="utf-8")
+        (board_root / "current").symlink_to(release)
+        installed_wrapper = tmp_path / "bin" / "switchyard"
+        installed_wrapper.parent.mkdir()
+        installed_wrapper.write_text(
+            "#!/usr/bin/env bash\n"
+            f"readonly SWITCHYARD_TARGET={shlex.quote(str(source_repo / 'switchyard'))}\n"
+            "switchyard_invocation_requires_root() { return 1; }\n",
+            encoding="utf-8",
+        )
+        installed_wrapper.chmod(0o755)
+        (source_repo / "switchyard").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        (source_repo / "switchyard").chmod(0o755)
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        config_path = tmp_path / "otto.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "otto",
+                    "project_name": "Otto Scheduler",
+                    "layout": str(layout),
+                    "repository": str(project_repo),
+                    "worktree_remote": "origin",
+                    "worktree_branch": "main",
+                    "pane_launcher": str(board_root / "current" / "scripts" / "team-launcher"),
+                    "roles": [
+                        {
+                            "role": "ops",
+                            "slot": 0,
+                            "target": "otto-ops:0.0",
+                            "tmux_session": "otto-ops",
+                            "workdir": str(role_worktree),
+                            "cli": ["codex"],
+                        }
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        registry_dir = tmp_path / "registry"
+        config_dir = tmp_path / "configs"
+        registry_dir.mkdir()
+        config_dir.mkdir()
+        (registry_dir / "otto.json").write_text(
+            json.dumps(
+                {
+                    "schema": team_launcher.SWITCHYARD_REGISTRY_SCHEMA,
+                    "slug": "otto",
+                    "name": "Otto Scheduler",
+                    "config_path": str(config_path),
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        lines: list[str] = []
+
+        assert (
+            switchyard_status_command(
+                config_dir=config_dir,
+                registry_dir=registry_dir,
+                process_commands=[],
+                source_repo=source_repo,
+                switchyard_install_path=installed_wrapper,
+                print_func=lines.append,
+            )
+            == 0
+        )
+        output = "\n".join(lines)
+        source_head_after = _run_git(["git", "rev-parse", "HEAD"], cwd=source_repo).stdout.strip()
+
+    assert "RUNTIME COPIES" in output
+    assert "switchyard" in output and "installed wrapper" in output and str(installed_wrapper) in output
+    assert "stale: embedded verb classification" in output
+    assert "otto" in output and "invoking checkout" in output and str(source_repo) in output
+    assert "otto" in output and "project checkout" in output and str(project_repo) in output
+    assert "otto" in output and "ops worktree" in output and str(role_worktree) in output
+    assert "behind at least 1 commit(s)" in output
+    assert "otto" in output and "tenant release" in output and str(board_root) in output
+    assert f"stale: {old_sha} -> {target_sha}" in output
+    assert source_head_after == old_sha
+
+
+def test_switchyard_upgrade_warns_when_artifact_source_checkout_is_stale() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-upgrade-stale-source.") as tmp:
+        tmp_path = Path(tmp)
+        origin, source_repo = _make_origin_backed_repo(tmp_path)
+        old_sha = _run_git(["git", "rev-parse", "HEAD"], cwd=source_repo).stdout.strip()
+        updater = tmp_path / "updater"
+        _run_git(["git", "clone", str(origin), str(updater)])
+        _run_git(["git", "config", "user.email", "agent@example.invalid"], cwd=updater)
+        _run_git(["git", "config", "user.name", "PGU Agent"], cwd=updater)
+        (updater / "tracked.txt").write_text("remote update\n", encoding="utf-8")
+        _commit_all(updater, "remote update")
+        subprocess.run(
+            ["git", "push", "origin", "main"],
+            cwd=updater,
+            check=True,
+            text=True,
+            capture_output=True,
+            env={**os.environ, "PGU_ALLOW_MAIN_PUSH": "director"},
+        )
+        project_dir = tmp_path / "project"
+        provision_dir = project_dir / ".switchyard" / "provision"
+        provision_dir.mkdir(parents=True)
+        layout_path = provision_dir / "otto-konsole-layout.json"
+        layout_path.write_text(
+            json.dumps(team_launcher._new_project_layout_payload(6), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        config_path = _write_launcher_config(provision_dir)
+        config = load_project_config("otto", config_path)
+        lines: list[str] = []
+
+        assert (
+            team_launcher.upgrade_project_command(
+                config,
+                config_path=config_path,
+                source_repo=source_repo,
+                print_func=lines.append,
+            )
+            == 0
+        )
+
+        output = "\n".join(lines)
+        source_head_after = _run_git(["git", "rev-parse", "HEAD"], cwd=source_repo).stdout.strip()
+
+    assert source_head_after == old_sha
+    assert f"warning: switchyard: artifact source checkout {source_repo} is at least 1 commit(s) behind origin/main" in output
+    assert "generated files will reflect this checkout, not the remote tip" in output
 
 
 def test_switchyard_known_project_plus_unknown_word_suggests_bare_project() -> None:

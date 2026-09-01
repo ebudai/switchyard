@@ -101,10 +101,39 @@ $version_text
 VERSIONEOF
 }
 
+switchyard_target_invocation_requires_root() {
+    local classification
+    if [[ ! -x "\$SWITCHYARD_TARGET" ]]; then
+        return 2
+    fi
+    if ! classification="\$("\$SWITCHYARD_TARGET" --switchyard-wrapper-requires-root "\$@" 2>/dev/null)"; then
+        return 2
+    fi
+    case "\$classification" in
+        requires-root)
+            return 0
+            ;;
+        no-root)
+            return 1
+            ;;
+        *)
+            return 2
+            ;;
+    esac
+}
+
 switchyard_invocation_requires_root() {
     if [[ "\$#" -eq 0 ]]; then
         return 1
     fi
+    if switchyard_target_invocation_requires_root "\$@"; then
+        return 0
+    fi
+    case "\$?" in
+        1)
+            return 1
+            ;;
+    esac
     case "\$1" in
         -h|--help|help|--version|version)
             return 1

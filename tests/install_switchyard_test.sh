@@ -114,6 +114,57 @@ if [[ "$(id -u)" != "0" ]]; then
     }
 fi
 
+>"$fake_privilege_log"
+cat >"$source_path" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--switchyard-wrapper-requires-root" ]]; then
+    shift
+    case "${1:-}" in
+        brand-new-privileged)
+            printf 'requires-root\n'
+            ;;
+        *)
+            printf 'no-root\n'
+            ;;
+    esac
+    exit 0
+fi
+printf 'version-three:%s\n' "$*"
+EOF
+chmod +x "$source_path"
+dynamic_no_root_output="$(
+    FAKE_PRIVILEGE_LOG="$fake_privilege_log" \
+    PATH="$fake_privilege_bin:$PATH" \
+        "$install_path" brand-new-user
+)"
+[[ "$dynamic_no_root_output" == "version-three:brand-new-user" ]] || {
+    echo "FAIL: dynamic wrapper classification did not allow a new unprivileged verb" >&2
+    echo "$dynamic_no_root_output" >&2
+    exit 1
+}
+if [[ "$(id -u)" != "0" && -s "$fake_privilege_log" ]]; then
+    echo "FAIL: dynamic wrapper classification elevated a new unprivileged verb" >&2
+    cat "$fake_privilege_log" >&2
+    exit 1
+fi
+dynamic_privileged_output="$(
+    FAKE_PRIVILEGE_LOG="$fake_privilege_log" \
+    PATH="$fake_privilege_bin:$PATH" \
+        "$install_path" brand-new-privileged
+)"
+if [[ "$(id -u)" != "0" ]]; then
+    [[ "$dynamic_privileged_output" == "version-three:brand-new-privileged" ]] || {
+        echo "FAIL: dynamic wrapper classification did not execute a new privileged verb" >&2
+        echo "$dynamic_privileged_output" >&2
+        exit 1
+    }
+    grep -q "^$source_path brand-new-privileged$" "$fake_privilege_log" || {
+        echo "FAIL: unmodified trampoline did not acquire privilege for a live-added verb" >&2
+        cat "$fake_privilege_log" >&2
+        exit 1
+    }
+fi
+
 fake_privilege_noexec_bin="$TMPDIR_T/fake-privilege-noexec-bin"
 fake_privilege_noexec="$fake_privilege_noexec_bin/sudo"
 fake_privilege_noexec_log="$TMPDIR_T/fake-privilege-noexec.log"

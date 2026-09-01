@@ -128,6 +128,7 @@ DEFAULT_TMUX_HISTORY_LIMIT = 200_000
 MAX_VISIBLE_PANES_PER_WINDOW = 6
 SWITCHYARD_VERSION = "dev"
 SWITCHYARD_COMMANDS = ("new", "register", "upgrade", "add-role", "set-vcs-close-role", "stop", "status", "validate-models")
+SWITCHYARD_PRIVILEGED_COMMANDS = frozenset(SWITCHYARD_COMMANDS)
 YOLO_ARGS_BY_CLI = {
     "agy": ["--dangerously-skip-permissions"],
     "claude": ["--dangerously-skip-permissions"],
@@ -2678,6 +2679,78 @@ def probe_launcher_checkout(
                 f"{str(count_proc.stdout or '').strip()!r}"
             )
         )
+    ahead, behind = counts
+    return LauncherCheckoutProbe(ahead=ahead, behind=behind)
+
+
+def probe_checkout_against_worktree_ref(
+    config: ProjectConfig,
+    repo: Path,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> LauncherCheckoutProbe:
+    check_proc = runner(
+        git_launcher_checkout_check_args(repo),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if check_proc.returncode != 0:
+        return LauncherCheckoutProbe(error=f"path is not a git checkout: {repo}")
+    head_proc = runner(
+        git_launcher_head_args(repo),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if head_proc.returncode != 0:
+        return LauncherCheckoutProbe(
+            error=(
+                f"failed to read HEAD in {repo}: "
+                f"{_proc_failure_reason(head_proc, f'exit {head_proc.returncode}')}"
+            )
+        )
+    local_head = str(head_proc.stdout or "").strip()
+    remote_proc = runner(
+        git_launcher_ls_remote_ref_args(config, repo),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if remote_proc.returncode != 0:
+        return LauncherCheckoutProbe(
+            error=(
+                f"failed to inspect {worktree_ref(config)} without fetching in {repo}: "
+                f"{_proc_failure_reason(remote_proc, f'exit {remote_proc.returncode}')}"
+            )
+        )
+    remote_head = _parse_ls_remote_head(str(remote_proc.stdout or ""))
+    if not remote_head:
+        return LauncherCheckoutProbe(error=f"could not parse {worktree_ref(config)} from ls-remote output")
+    if local_head == remote_head:
+        return LauncherCheckoutProbe(ahead=0, behind=0)
+    exists_proc = runner(
+        git_launcher_commit_exists_args(repo, remote_head),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if exists_proc.returncode != 0:
+        return LauncherCheckoutProbe(ahead=0, behind=1, behind_exact=False)
+    count_proc = runner(
+        git_launcher_ahead_behind_args(config, repo, remote_head),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if count_proc.returncode != 0:
+        return LauncherCheckoutProbe(
+            error=(
+                f"failed to compare {repo} with {worktree_ref(config)}: "
+                f"{_proc_failure_reason(count_proc, f'exit {count_proc.returncode}')}"
+            )
+        )
+    counts = _parse_ahead_behind(str(count_proc.stdout or ""))
+    if counts is None:
+        return LauncherCheckoutProbe(error=f"could not parse ahead/behind count for {repo}")
     ahead, behind = counts
     return LauncherCheckoutProbe(ahead=ahead, behind=behind)
 
@@ -5737,6 +5810,14 @@ class SwitchyardProjectStatus:
 
 
 @dataclass(frozen=True)
+class SwitchyardRuntimeCopyStatus:
+    project: str
+    copy: str
+    path: Path
+    status: str
+
+
+@dataclass(frozen=True)
 class OwnerUserProvisionResult:
     created: bool
     linger_enabled: bool
@@ -7388,6 +7469,188 @@ def _role_has_pane_process(role: RoleConfig, process_commands: Sequence[str]) ->
     return False
 
 
+def _format_checkout_probe_status(probe: LauncherCheckoutProbe) -> str:
+    if probe.error:
+        return f"unknown: {probe.error}"
+    parts: list[str] = []
+    if probe.behind:
+        parts.append(f"behind {_format_behind_count(probe.behind, exact=probe.behind_exact)}")
+    if probe.ahead:
+        parts.append(f"ahead {probe.ahead} commit(s)")
+    return ", ".join(parts) if parts else "current"
+
+
+def _runtime_checkout_copy_status(
+    config: ProjectConfig,
+    *,
+    project: str,
+    copy: str,
+    path: Path,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> SwitchyardRuntimeCopyStatus | None:
+    if not path.exists():
+        return None
+    probe = probe_checkout_against_worktree_ref(config, path, runner=runner)
+    return SwitchyardRuntimeCopyStatus(
+        project=project,
+        copy=copy,
+        path=path,
+        status=_format_checkout_probe_status(probe),
+    )
+
+
+def _runtime_release_copy_status(
+    config: ProjectConfig,
+    *,
+    source_repo: Path,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> SwitchyardRuntimeCopyStatus | None:
+    status = tenant_release_status(config, source_repo=source_repo, deploy_ref=worktree_ref(config), runner=runner)
+    if status is None:
+        return None
+    if status.resolve_error:
+        summary = f"unknown: unresolved {status.deploy_ref}: {status.resolve_error}"
+    elif not status.current_sha:
+        summary = f"missing release; target {_format_release_sha(status.target_sha)} from {status.deploy_ref}"
+    elif status.unchanged:
+        summary = f"current at {_format_release_sha(status.current_sha)}"
+    else:
+        summary = f"stale: {_format_release_sha(status.current_sha)} -> {_format_release_sha(status.target_sha)}"
+    return SwitchyardRuntimeCopyStatus(
+        project=config.project,
+        copy="tenant release",
+        path=status.board_root,
+        status=summary,
+    )
+
+
+def _parse_switchyard_wrapper_target(text: str) -> str:
+    for line in text.splitlines():
+        if not line.startswith("readonly SWITCHYARD_TARGET="):
+            continue
+        raw_value = line.split("=", 1)[1].strip()
+        try:
+            parts = shlex.split(raw_value)
+        except ValueError:
+            return raw_value
+        return parts[0] if parts else raw_value
+    return ""
+
+
+def switchyard_installed_wrapper_status(install_path: Path | None = None) -> SwitchyardRuntimeCopyStatus | None:
+    path = (
+        install_path
+        or Path(_env_first("SWITCHYARD_INSTALL_PATH", "PGU_SWITCHYARD_INSTALL_PATH") or "/usr/local/bin/switchyard")
+    ).expanduser()
+    if not path.exists():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return SwitchyardRuntimeCopyStatus(
+            project="switchyard",
+            copy="installed wrapper",
+            path=path,
+            status=f"unknown: cannot read wrapper: {exc}",
+        )
+    target = _parse_switchyard_wrapper_target(text)
+    if not target:
+        return SwitchyardRuntimeCopyStatus(
+            project="switchyard",
+            copy="installed wrapper",
+            path=path,
+            status="unknown: not a switchyard trampoline",
+        )
+    target_path = Path(target).expanduser()
+    target_status = "target reachable" if os.access(target_path, os.X_OK) else "target unreachable"
+    if "--switchyard-wrapper-requires-root" not in text:
+        summary = f"stale: embedded verb classification; {target_status}: {target_path}"
+    else:
+        summary = f"current: live verb classification; {target_status}: {target_path}"
+    return SwitchyardRuntimeCopyStatus(
+        project="switchyard",
+        copy="installed wrapper",
+        path=path,
+        status=summary,
+    )
+
+
+def switchyard_runtime_copy_statuses(
+    configs: Sequence[ProjectConfig],
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    source_repo: Path | None = None,
+    switchyard_install_path: Path | None = None,
+) -> list[SwitchyardRuntimeCopyStatus]:
+    source = (source_repo or _repo_root()).expanduser().resolve(strict=False)
+    statuses: list[SwitchyardRuntimeCopyStatus] = []
+    seen: set[tuple[str, str, Path]] = set()
+
+    def add(status: SwitchyardRuntimeCopyStatus | None) -> None:
+        if status is None:
+            return
+        key = (status.project, status.copy, status.path.expanduser().resolve(strict=False))
+        if key in seen:
+            return
+        seen.add(key)
+        statuses.append(status)
+
+    add(switchyard_installed_wrapper_status(switchyard_install_path))
+    for config in configs:
+        add(_runtime_checkout_copy_status(config, project=config.project, copy="invoking checkout", path=source, runner=runner))
+        if config.repository is not None:
+            add(
+                _runtime_checkout_copy_status(
+                    config,
+                    project=config.project,
+                    copy="project checkout",
+                    path=config.repository,
+                    runner=runner,
+                )
+            )
+        for role in config.roles:
+            role_path = Path(role.workdir)
+            if config.repository is not None and role_path.resolve(strict=False) == config.repository.resolve(strict=False):
+                continue
+            add(
+                _runtime_checkout_copy_status(
+                    config,
+                    project=config.project,
+                    copy=f"{role.role} worktree",
+                    path=role_path,
+                    runner=runner,
+                )
+            )
+        add(_runtime_release_copy_status(config, source_repo=source, runner=runner))
+    return statuses
+
+
+def warn_if_artifact_source_checkout_is_stale(
+    config: ProjectConfig,
+    *,
+    source_repo: Path,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    print_func: Callable[[str], None],
+) -> None:
+    if not source_repo.exists():
+        return
+    probe = probe_checkout_against_worktree_ref(config, source_repo, runner=runner)
+    if probe.error:
+        print_func(f"warning: switchyard: cannot determine artifact source checkout freshness for {source_repo}: {probe.error}")
+        return
+    if probe.behind:
+        print_func(
+            f"warning: switchyard: artifact source checkout {source_repo} is "
+            f"{_format_behind_count(probe.behind, exact=probe.behind_exact)} behind {worktree_ref(config)}; "
+            "generated files will reflect this checkout, not the remote tip"
+        )
+    if probe.ahead:
+        print_func(
+            f"warning: switchyard: artifact source checkout {source_repo} is "
+            f"{probe.ahead} commit(s) ahead of {worktree_ref(config)}; generated files may include unmerged changes"
+        )
+
+
 def switchyard_project_statuses(
     *,
     config_dir: Path | None = None,
@@ -7440,6 +7703,15 @@ def _switchyard_project_status_payload(status: SwitchyardProjectStatus) -> dict[
     }
 
 
+def _switchyard_runtime_copy_status_payload(status: SwitchyardRuntimeCopyStatus) -> dict[str, str]:
+    return {
+        "project": status.project,
+        "copy": status.copy,
+        "path": str(status.path),
+        "status": status.status,
+    }
+
+
 def switchyard_status_command(
     *,
     config_dir: Path | None = None,
@@ -7447,16 +7719,42 @@ def switchyard_status_command(
     json_output: bool = False,
     process_commands: Sequence[str] | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    source_repo: Path | None = None,
+    switchyard_install_path: Path | None = None,
     print_func: Callable[[str], None] = print,
 ) -> int:
+    configs: list[ProjectConfig] = []
     statuses = switchyard_project_statuses(
         config_dir=config_dir,
         registry_dir=registry_dir,
         process_commands=process_commands,
         runner=runner,
     )
+    for status in statuses:
+        if status.state == "unknown":
+            continue
+        try:
+            configs.append(load_project_config(status.slug, status.config_path))
+        except (OSError, json.JSONDecodeError, SystemExit):
+            continue
+    runtime_statuses = switchyard_runtime_copy_statuses(
+        configs,
+        runner=runner,
+        source_repo=source_repo,
+        switchyard_install_path=switchyard_install_path,
+    )
     if json_output:
-        print_func(json.dumps({"projects": [_switchyard_project_status_payload(status) for status in statuses]}, indent=2))
+        print_func(
+            json.dumps(
+                {
+                    "projects": [_switchyard_project_status_payload(status) for status in statuses],
+                    "runtime_copies": [
+                        _switchyard_runtime_copy_status_payload(status) for status in runtime_statuses
+                    ],
+                },
+                indent=2,
+            )
+        )
         return 0
     rows = [("NAME", "SLUG", "STATE", "PANES")]
     rows.extend((status.name, status.slug, status.state, status.panes_display) for status in statuses)
@@ -7465,6 +7763,20 @@ def switchyard_status_command(
         print_func(
             f"{row[0]:<{widths[0]}}  {row[1]:<{widths[1]}}  {row[2]:<{widths[2]}}  {row[3]}"
         )
+    if runtime_statuses:
+        print_func("")
+        runtime_rows = [("PROJECT", "COPY", "PATH", "STATUS")]
+        runtime_rows.extend(
+            (status.project, status.copy, str(status.path), status.status) for status in runtime_statuses
+        )
+        runtime_widths = [max(len(str(row[index])) for row in runtime_rows) for index in range(3)]
+        print_func("RUNTIME COPIES")
+        for row in runtime_rows:
+            print_func(
+                f"{row[0]:<{runtime_widths[0]}}  "
+                f"{row[1]:<{runtime_widths[1]}}  "
+                f"{row[2]:<{runtime_widths[2]}}  {row[3]}"
+            )
     return 0
 
 
@@ -7902,11 +8214,17 @@ def upgrade_project_command(
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     print_func: Callable[[str], None] = print,
 ) -> int:
+    effective_source_repo = (source_repo or _repo_root()).expanduser().resolve(strict=False)
+    warn_if_artifact_source_checkout_is_stale(
+        config,
+        source_repo=effective_source_repo,
+        runner=runner,
+        print_func=print_func,
+    )
     result = upgrade_generated_project_layout(config, config_path=config_path, dry_run=dry_run, runner=runner)
     print_func(result.message)
     if result.changed:
         config = load_project_config(config.project, config_path)
-    effective_source_repo = (source_repo or _repo_root()).expanduser().resolve(strict=False)
     project_dir = _project_dir_from_generated_config_path(config_path)
     if project_dir is not None:
         upgrade_switchyard_onboarding_docs(
@@ -8830,6 +9148,17 @@ def _switchyard_command_display(argv: Sequence[str]) -> str:
     return f"switchyard {argv[0]}"
 
 
+def switchyard_invocation_requires_root(argv: Sequence[str]) -> bool:
+    if not argv:
+        return False
+    command = argv[0].casefold()
+    if command in {"-h", "--help", "help", "--version", "version"}:
+        return False
+    if len(argv) >= 2 and argv[1] in {"-h", "--help"}:
+        return False
+    return command in SWITCHYARD_PRIVILEGED_COMMANDS
+
+
 def _switchyard_user_can_prompt_for_sudo() -> bool:
     if not sys.stdin.isatty() or not sys.stderr.isatty():
         return False
@@ -8907,6 +9236,9 @@ def _load_switchyard_project_config_for_command(entry: SwitchyardProjectEntry, a
 
 def switchyard_main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["--switchyard-wrapper-requires-root"]:
+        print("requires-root" if switchyard_invocation_requires_root(argv[1:]) else "no-root")
+        return 0
     if not argv:
         return switchyard_menu_command()
     if argv[0] in {"-h", "--help", "help"}:

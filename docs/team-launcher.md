@@ -2,24 +2,28 @@
 
 `switchyard` is the public project entrypoint. With no arguments it prints
 `new...` followed by configured projects. `switchyard --help` lists the public
-verbs: `new`, `register`, `upgrade`, `stop`, `status`, and
-`validate-models`. `switchyard My Project Name` joins all arguments, matches an
-existing project case-insensitively by display name or slug, and runs today's
-idempotent start/resume behavior. A bare project name is the start/attach form;
-there is no separate `switchyard <project> attach` verb. Leading verbs are
-reserved, so a project literally named `new`, `register`, `upgrade`, `stop`,
-`status`, or `validate-models` collides with the command namespace.
+verbs: `new`, `register`, `upgrade`, `add-role`, `set-vcs-close-role`, `stop`,
+`status`, and `validate-models`. `switchyard My Project Name` joins all
+arguments, matches an existing project case-insensitively by display name or
+slug, and runs today's idempotent start/resume behavior. A bare project name is
+the start/attach form; there is no separate `switchyard <project> attach` verb.
+Leading verbs are reserved, so a project literally named `new`, `register`,
+`upgrade`, `add-role`, `set-vcs-close-role`, `stop`, `status`, or
+`validate-models` collides with the command namespace.
 
 The installed `/usr/local/bin/switchyard` trampoline does not elevate top-level
 discoverability commands: no arguments, `--help`, and `--version`. Bare project
 names enter the Python launcher directly when the target is reachable; after
 registry resolution, cross-owner projects re-exec through the same root policy
 before reading tenant-owned config or starting panes. Privileged public
-operations are `new`, `register`, `upgrade`, `status`, `validate-models`, and
-`stop`; they create, mutate, traverse, or act on tenant-owned state. The wrapper
-preflights sudo non-interactively first, so a non-sudo agent gets a clear
-failure instead of an unanswerable password prompt. A sudo-capable human at a
-TTY still gets the normal sudo prompt for those privileged commands.
+operations are classified by the live target when it is reachable, so adding a
+new privileged verb to the source checkout does not require reinstalling the
+trampoline. If the target cannot be reached, the trampoline falls back to its
+install-time classification list, which is enough to fail politely for known
+privileged verbs. The wrapper preflights sudo non-interactively first, so a
+non-sudo agent gets a clear failure instead of an unanswerable password prompt.
+A sudo-capable human at a TTY still gets the normal sudo prompt for privileged
+commands.
 
 `scripts/team-launcher` remains the compatibility wrapper used by existing PGU
 pane commands. It starts, attaches, or reloads a project team from a JSON config.
@@ -301,6 +305,11 @@ local read-only comparisons, so it does not write fetched objects into the
 launcher checkout during the hot-path probe. If the remote tip is not already in
 the local object database the stale warning reports "at least 1 commit" behind;
 the exact count is available only when the object already exists locally.
+`switchyard status` uses the same no-fetch style for runtime-copy visibility:
+after the project liveness table, it reports the invoking checkout, project
+checkout, visible role worktrees, and tenant board release when those paths can
+be seen. It reports freshness, staleness, or an unknown reason; it never pulls,
+resets, or repairs a checkout.
 
 `deploy-launcher` is the explicit launcher deploy step. It fetches the
 configured ref in the launcher checkout, checks out the configured branch,
@@ -452,8 +461,12 @@ configured panes. It also copies the source checkout's project-agnostic
 each copied file with the source commit and skipping any existing target files
 without clobbering operator edits. `switchyard upgrade` refreshes only copies
 that still match their stamped source commit, installs missing onboarding files,
-and reports each file as refreshed, installed, or skipped. Files with local
-edits or no provenance header are left untouched. Existing git repos are left
+and reports each file as refreshed, installed, or skipped. If the installed
+snapshot commit is newer than the invoking checkout, refresh is skipped rather
+than downgrading the tenant copy. `upgrade` also warns when the artifact source
+checkout is behind its configured remote ref, because generated files reflect
+the checkout being run, not the remote tip. Files with local edits or no
+provenance header are left untouched. Existing git repos are left
 untouched. Pass `--no-git-init` only when the project path already has a
 usable repo with a `HEAD`; otherwise `new` refuses instead of launching a
 project with broken role worktrees. The default agent user is `<slug>-agent`; a

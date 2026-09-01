@@ -14518,6 +14518,101 @@ def test_switchyard_upgrade_refreshes_only_unedited_onboarding_docs() -> None:
             assert sum(f"onboarding doc {name}:" in line for line in output) == 1
 
 
+def test_switchyard_upgrade_refuses_to_downgrade_onboarding_docs_from_stale_checkout() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-onboarding-stale.") as tmp:
+        tmp_path = Path(tmp)
+        source_repo = tmp_path / "source-repo"
+        project_dir = tmp_path / "project"
+        source_repo.mkdir()
+        project_dir.mkdir()
+        old_commit = _write_source_onboarding_docs(source_repo, initialize_git=True)
+        docs_dir = source_repo / "docs" / "onboarding"
+        for name in team_launcher.SWITCHYARD_ONBOARDING_DOC_NAMES:
+            docs_dir.joinpath(name).write_text(f"# {name}\n\nNewer copy for {name}.\n", encoding="utf-8")
+        _run_git(["git", "add", "docs/onboarding"], cwd=source_repo)
+        _run_git(
+            [
+                "git",
+                "-c",
+                "user.name=Switchyard Test",
+                "-c",
+                "user.email=switchyard-test@example.invalid",
+                "commit",
+                "-m",
+                "Update onboarding docs",
+            ],
+            cwd=source_repo,
+        )
+        new_commit = _run_git(["git", "rev-parse", "HEAD"], cwd=source_repo).stdout.strip()
+        output: list[str] = []
+
+        team_launcher._install_switchyard_onboarding_docs(
+            source_repo=source_repo,
+            project_dir=project_dir,
+            owner_user=current_user,
+            runner=_owner_file_install_runner,
+            print_func=output.append,
+        )
+        target_path = project_dir / "docs" / "onboarding" / "README.md"
+        installed_text = target_path.read_text(encoding="utf-8")
+        _run_git(["git", "checkout", "--detach", old_commit], cwd=source_repo)
+
+        output.clear()
+        team_launcher.upgrade_switchyard_onboarding_docs(
+            source_repo=source_repo,
+            project_dir=project_dir,
+            owner_user=current_user,
+            dry_run=False,
+            runner=_owner_file_install_runner,
+            print_func=output.append,
+        )
+
+        assert target_path.read_text(encoding="utf-8") == installed_text
+        assert f"source commit {new_commit}" in installed_text
+        assert f"Newer copy for README.md." in installed_text
+        assert old_commit not in target_path.read_text(encoding="utf-8")
+        assert any("onboarding doc README.md: skipped, installed copy is newer than this checkout" in line for line in output)
+        assert not any("onboarding doc README.md: refreshed" in line for line in output)
+        for name in team_launcher.SWITCHYARD_ONBOARDING_DOC_NAMES:
+            assert sum(f"onboarding doc {name}:" in line for line in output) == 1
+
+
+def test_switchyard_upgrade_still_skips_onboarding_doc_when_stamp_commit_is_missing() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-onboarding-missing-stamp.") as tmp:
+        tmp_path = Path(tmp)
+        source_repo = tmp_path / "source-repo"
+        project_dir = tmp_path / "project"
+        source_repo.mkdir()
+        project_dir.mkdir()
+        _write_source_onboarding_docs(source_repo, initialize_git=True)
+        target_dir = project_dir / "docs" / "onboarding"
+        target_dir.mkdir(parents=True)
+        target_path = target_dir / "README.md"
+        missing_commit = "f" * 40
+        installed_text = team_launcher._stamp_onboarding_doc(
+            source_name="README.md",
+            source_commit=missing_commit,
+            body="# README.md\n\nCopy from a missing source commit.\n",
+        )
+        target_path.write_text(installed_text, encoding="utf-8")
+        output: list[str] = []
+
+        team_launcher.upgrade_switchyard_onboarding_docs(
+            source_repo=source_repo,
+            project_dir=project_dir,
+            owner_user=current_user,
+            dry_run=False,
+            runner=_owner_file_install_runner,
+            print_func=output.append,
+        )
+
+        assert target_path.read_text(encoding="utf-8") == installed_text
+        assert any(f"onboarding doc README.md: skipped, cannot verify source commit {missing_commit}" in line for line in output)
+        assert not any("onboarding doc README.md: refreshed" in line for line in output)
+
+
 def test_install_switchyard_onboarding_docs_warns_and_continues_when_source_missing() -> None:
     current_user = team_launcher.current_user_name()
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-onboarding-missing.") as tmp:

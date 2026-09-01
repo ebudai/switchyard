@@ -6024,6 +6024,42 @@ def _read_source_onboarding_doc_at_commit(
     return str(getattr(proc, "stdout", "") or "")
 
 
+def _source_onboarding_commit_is_ancestor(
+    *,
+    source_repo: Path,
+    source_commit: str,
+    current_source_commit: str,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> bool | None:
+    if (
+        not source_commit
+        or source_commit == "unknown"
+        or not current_source_commit
+        or current_source_commit == "unknown"
+    ):
+        return None
+    proc = run_owner_correct_git(
+        [
+            "git",
+            "-C",
+            str(source_repo),
+            "merge-base",
+            "--is-ancestor",
+            source_commit,
+            current_source_commit,
+        ],
+        runner=runner,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if proc.returncode == 0:
+        return True
+    if proc.returncode == 1:
+        return False
+    return None
+
+
 def _project_dir_from_generated_config_path(config_path: Path) -> Path | None:
     resolved = config_path.expanduser().resolve(strict=False)
     if resolved.parent.name != "provision" or resolved.parent.parent.name != SWITCHYARD_PROJECT_DIR_NAME:
@@ -6114,6 +6150,15 @@ def upgrade_switchyard_onboarding_docs(
             continue
         if existing != _stamp_onboarding_doc(source_name=name, source_commit=source_commit, body=old_body):
             print_func(f"switchyard: onboarding doc {name}: skipped, edited since source commit {source_commit}")
+            continue
+        source_commit_is_ancestor = _source_onboarding_commit_is_ancestor(
+            source_repo=source_repo,
+            source_commit=source_commit,
+            current_source_commit=current_source_commit,
+            runner=runner,
+        )
+        if source_commit_is_ancestor is False:
+            print_func(f"switchyard: onboarding doc {name}: skipped, installed copy is newer than this checkout")
             continue
         if not dry_run:
             target_path.write_text(current_snapshot, encoding="utf-8")

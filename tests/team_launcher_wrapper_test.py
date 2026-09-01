@@ -135,10 +135,27 @@ def test_real_switchyard_target_answers_wrapper_privilege_query() -> None:
         text=True,
         capture_output=True,
     )
+    subcommand_short_help = subprocess.run(
+        [str(SWITCHYARD_WRAPPER_PATH), "--switchyard-wrapper-requires-root", "new", "-h"],
+        text=True,
+        capture_output=True,
+    )
 
     assert (privileged.returncode, privileged.stdout.strip()) == (0, "requires-root")
     assert (unprivileged.returncode, unprivileged.stdout.strip()) == (0, "no-root")
     assert (subcommand_help.returncode, subcommand_help.stdout.strip()) == (0, "no-root")
+    assert (subcommand_short_help.returncode, subcommand_short_help.stdout.strip()) == (0, "no-root")
+
+
+def test_switchyard_version_reports_release_marker() -> None:
+    import scripts.team_launcher as team_launcher
+
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-version-marker.") as tmp:
+        release_root = Path(tmp)
+        marker = release_root / ".switchyard-release.json"
+        marker.write_text(json.dumps({"commit": "abc123def456"}) + "\n", encoding="utf-8")
+
+        assert team_launcher.switchyard_version_text(release_root) == "switchyard abc123def456"
 
 
 def main() -> int:

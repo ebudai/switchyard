@@ -2,7 +2,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SOURCE_PATH="${SWITCHYARD_SOURCE_PATH:-${PGU_SWITCHYARD_SOURCE_PATH:-$REPO_ROOT/switchyard}}"
+SOURCE_REPO="${SWITCHYARD_SOURCE_REPO:-${SWITCHYARD_SOURCE_PATH:-${PGU_SWITCHYARD_SOURCE_PATH:-$REPO_ROOT}}}"
+SOURCE_REF="${SWITCHYARD_SOURCE_REF:-HEAD}"
+SHARED_ROOT="${SWITCHYARD_SHARED_INSTALL_ROOT:-/opt/switchyard}"
 INSTALL_PATH="${SWITCHYARD_INSTALL_PATH:-${PGU_SWITCHYARD_INSTALL_PATH:-/usr/local/bin/switchyard}}"
 SUDO_BIN="${SWITCHYARD_SUDO_BIN:-sudo}"
 
@@ -12,14 +14,17 @@ usage() {
     cat <<'EOF'
 Usage: scripts/install-switchyard [--print-commands|--apply]
 
-Installs the public switchyard command on a system PATH as a tiny trampoline to
-the live checkout entrypoint. The default mode prints the privileged command
-block for an operator to run; --apply performs it and is intended to be run
-under sudo.
+Exports a tested source commit into an immutable shared release under
+/opt/switchyard, repoints /opt/switchyard/current, and installs the public
+switchyard command as a tiny trampoline to /opt/switchyard/current/switchyard.
+The default mode prints the privileged command block for an operator to run;
+--apply performs it and is intended to be run under sudo.
 
 Environment overrides:
-  SWITCHYARD_SOURCE_PATH   source entrypoint, default: <repo>/switchyard
-  SWITCHYARD_INSTALL_PATH  installed command path, default: /usr/local/bin/switchyard
+  SWITCHYARD_SOURCE_REPO           source checkout, default: this repository
+  SWITCHYARD_SOURCE_REF            commit/ref to export, default: HEAD
+  SWITCHYARD_SHARED_INSTALL_ROOT   shared install root, default: /opt/switchyard
+  SWITCHYARD_INSTALL_PATH          installed command path, default: /usr/local/bin/switchyard
 EOF
 }
 
@@ -68,25 +73,29 @@ secure_path_contains_install_dir() {
 }
 
 write_wrapper() {
-    local target="$1"
+    local default_target="$1"
     local destination="$2"
+    local fallback_source="$3"
+    local recovery_command="$4"
     local help_text
     local tmp
     local version_text
-    help_text="$("$target" --help)"
-    version_text="$("$target" --version)"
+    help_text="$("$fallback_source" --help)"
+    version_text="$("$fallback_source" --version)"
     tmp="$(mktemp "${destination}.tmp.XXXXXX")"
     cat >"$tmp" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly SWITCHYARD_TARGET=$(quote "$target")
+readonly SWITCHYARD_DEFAULT_TARGET=$(quote "$default_target")
+readonly SWITCHYARD_USER_TARGET="\${SWITCHYARD_TARGET:-\$SWITCHYARD_DEFAULT_TARGET}"
 readonly SWITCHYARD_SUDO_BIN="\${SWITCHYARD_SUDO_BIN:-sudo}"
+readonly SWITCHYARD_RECOVERY_COMMAND=$(quote "$recovery_command")
 export PYTHONDONTWRITEBYTECODE="\${PYTHONDONTWRITEBYTECODE:-1}"
 
 switchyard_print_help() {
-    if [[ -x "\$SWITCHYARD_TARGET" ]]; then
-        exec "\$SWITCHYARD_TARGET" --help
+    if [[ -x "\$SWITCHYARD_USER_TARGET" ]]; then
+        exec "\$SWITCHYARD_USER_TARGET" --help
     fi
     cat <<'HELPEOF'
 $help_text
@@ -94,8 +103,8 @@ HELPEOF
 }
 
 switchyard_print_version() {
-    if [[ -x "\$SWITCHYARD_TARGET" ]]; then
-        exec "\$SWITCHYARD_TARGET" --version
+    if [[ -x "\$SWITCHYARD_USER_TARGET" ]]; then
+        exec "\$SWITCHYARD_USER_TARGET" --version
     fi
     cat <<'VERSIONEOF'
 $version_text
@@ -104,10 +113,10 @@ VERSIONEOF
 
 switchyard_target_invocation_requires_root() {
     local classification
-    if [[ ! -x "\$SWITCHYARD_TARGET" ]]; then
+    if [[ ! -x "\$SWITCHYARD_DEFAULT_TARGET" ]]; then
         return 2
     fi
-    if ! classification="\$("\$SWITCHYARD_TARGET" --switchyard-wrapper-requires-root "\$@" 2>/dev/null)"; then
+    if ! classification="\$("\$SWITCHYARD_DEFAULT_TARGET" --switchyard-wrapper-requires-root "\$@" 2>/dev/null)"; then
         return 2
     fi
     case "\$classification" in
@@ -161,11 +170,16 @@ switchyard_exec_with_root() {
     if [[ "\$#" -gt 0 ]]; then
         command_display+=" \$1"
     fi
+    if [[ ! -x "\$SWITCHYARD_DEFAULT_TARGET" ]]; then
+        printf 'switchyard: shared target is not executable: %s\n' "\$SWITCHYARD_DEFAULT_TARGET" >&2
+        printf 'switchyard: recover from the source checkout with:\n  %s\n' "\$SWITCHYARD_RECOVERY_COMMAND" >&2
+        exit 126
+    fi
     if "\$SWITCHYARD_SUDO_BIN" -n -v >/dev/null 2>&1; then
-        exec "\$SWITCHYARD_SUDO_BIN" -n env PYTHONDONTWRITEBYTECODE="\$PYTHONDONTWRITEBYTECODE" "\$SWITCHYARD_TARGET" "\$@"
+        exec "\$SWITCHYARD_SUDO_BIN" -n env PYTHONDONTWRITEBYTECODE="\$PYTHONDONTWRITEBYTECODE" "\$SWITCHYARD_DEFAULT_TARGET" "\$@"
     fi
     if switchyard_user_can_prompt_for_sudo; then
-        exec "\$SWITCHYARD_SUDO_BIN" env PYTHONDONTWRITEBYTECODE="\$PYTHONDONTWRITEBYTECODE" "\$SWITCHYARD_TARGET" "\$@"
+        exec "\$SWITCHYARD_SUDO_BIN" env PYTHONDONTWRITEBYTECODE="\$PYTHONDONTWRITEBYTECODE" "\$SWITCHYARD_DEFAULT_TARGET" "\$@"
     fi
     printf 'switchyard: command requires root: %s\n' "\$command_display" >&2
     printf 'switchyard: sudo is unavailable for this user or shell; run it as a sudo-capable human or ask an operator\n' >&2
@@ -186,46 +200,112 @@ if [[ "\${EUID:-\$(id -u)}" -ne 0 ]]; then
     if switchyard_invocation_requires_root "\$@"; then
         switchyard_exec_with_root "\$@"
     fi
-    if [[ ! -x "\$SWITCHYARD_TARGET" ]]; then
+    if [[ ! -x "\$SWITCHYARD_USER_TARGET" ]]; then
         switchyard_exec_with_root "\$@"
     fi
-    exec "\$SWITCHYARD_TARGET" "\$@"
+    exec "\$SWITCHYARD_USER_TARGET" "\$@"
 fi
 
-if [[ ! -x "\$SWITCHYARD_TARGET" ]]; then
-    printf 'switchyard: target is not executable: %s\n' "\$SWITCHYARD_TARGET" >&2
+if [[ ! -x "\$SWITCHYARD_DEFAULT_TARGET" ]]; then
+    printf 'switchyard: shared target is not executable: %s\n' "\$SWITCHYARD_DEFAULT_TARGET" >&2
+    printf 'switchyard: recover from the source checkout with:\n  %s\n' "\$SWITCHYARD_RECOVERY_COMMAND" >&2
     exit 126
 fi
 
-exec "\$SWITCHYARD_TARGET" "\$@"
+exec "\$SWITCHYARD_DEFAULT_TARGET" "\$@"
 EOF
     chmod 0755 "$tmp"
     mv -f "$tmp" "$destination"
 }
 
+resolve_source_commit() {
+    git -C "$SOURCE_REPO" rev-parse --verify "$SOURCE_REF^{commit}"
+}
+
+release_marker_json() {
+    local commit="$1"
+    python3 - "$commit" "$SOURCE_REPO" "$SOURCE_REF" <<'PY'
+import json
+import sys
+
+print(json.dumps({"commit": sys.argv[1], "source_repo": sys.argv[2], "source_ref": sys.argv[3]}, sort_keys=True))
+PY
+}
+
+verify_release_marker() {
+    local release_dir="$1"
+    local commit="$2"
+    local marker="$release_dir/.switchyard-release.json"
+    [[ -f "$marker" ]] || die "release $release_dir is missing .switchyard-release.json"
+    python3 - "$marker" "$commit" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+if payload.get("commit") != sys.argv[2]:
+    raise SystemExit(1)
+PY
+}
+
+export_release() {
+    local commit="$1"
+    local releases_dir="$SHARED_ROOT/releases"
+    local release_dir="$releases_dir/$commit"
+    local tmp_dir
+    install -d -m 0755 "$SHARED_ROOT" "$releases_dir"
+    if [[ ! -d "$release_dir" ]]; then
+        tmp_dir="$(mktemp -d "$releases_dir/.tmp.$commit.XXXXXX")"
+        git -C "$SOURCE_REPO" archive "$commit" | tar -C "$tmp_dir" -x
+        release_marker_json "$commit" >"$tmp_dir/.switchyard-release.json"
+        find "$tmp_dir" -type d -exec chmod 0755 {} +
+        find "$tmp_dir" -type f -exec chmod go-w {} +
+        chmod 0755 "$tmp_dir/switchyard" "$tmp_dir/scripts/team-launcher" "$tmp_dir/scripts/install-switchyard"
+        mv "$tmp_dir" "$release_dir"
+    fi
+    verify_release_marker "$release_dir" "$commit"
+    [[ -x "$release_dir/switchyard" ]] || die "release switchyard is not executable: $release_dir/switchyard"
+    printf '%s\n' "$release_dir"
+}
+
 apply_install() {
-    local install_dir
+    local commit current_target install_dir recovery_command release_dir
     install_dir="$(dirname "$INSTALL_PATH")"
-    [[ -x "$SOURCE_PATH" ]] || die "source is not executable: $SOURCE_PATH"
+    git -C "$SOURCE_REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "source repository is not a git checkout: $SOURCE_REPO"
+    [[ -x "$SOURCE_REPO/switchyard" ]] || die "source switchyard is not executable: $SOURCE_REPO/switchyard"
+    commit="$(resolve_source_commit)"
     if [[ "$install_dir" == /usr || "$install_dir" == /usr/* || "${SWITCHYARD_FORCE_SECURE_PATH_CHECK:-}" == "1" ]]; then
         secure_path_contains_install_dir "$install_dir" || die "$install_dir is not in sudo secure_path"
     fi
+    release_dir="$(export_release "$commit")"
+    "$release_dir/switchyard" --version >/dev/null
+    ln -sfn "$release_dir" "$SHARED_ROOT/current"
+    current_target="$SHARED_ROOT/current/switchyard"
     install -d -m 0755 "$install_dir"
-    write_wrapper "$SOURCE_PATH" "$INSTALL_PATH"
-    printf 'installed switchyard trampoline: %s -> %s\n' "$INSTALL_PATH" "$SOURCE_PATH"
+    recovery_command="sudo env SWITCHYARD_SOURCE_REPO=$(quote "$SOURCE_REPO") SWITCHYARD_SOURCE_REF=$(quote "$commit") SWITCHYARD_SHARED_INSTALL_ROOT=$(quote "$SHARED_ROOT") SWITCHYARD_INSTALL_PATH=$(quote "$INSTALL_PATH") $(quote "$REPO_ROOT/scripts/install-switchyard") --apply"
+    write_wrapper "$current_target" "$INSTALL_PATH" "$release_dir/switchyard" "$recovery_command"
+    printf 'installed switchyard release: %s\n' "$release_dir"
+    printf 'activated switchyard current: %s -> %s\n' "$SHARED_ROOT/current" "$release_dir"
+    printf 'installed switchyard trampoline: %s -> %s\n' "$INSTALL_PATH" "$current_target"
 }
 
 print_commands() {
     local script_path
+    local source_ref
     script_path="$REPO_ROOT/scripts/install-switchyard"
+    source_ref="$(resolve_source_commit 2>/dev/null || printf '%s' "$SOURCE_REF")"
     cat <<EOF
 # Install switchyard on a PATH used by normal shells and sudo secure_path.
-# This writes a tiny trampoline outside /home/agent; it does not copy launcher code, so self-deploy updates are picked up.
-sudo env SWITCHYARD_SOURCE_PATH=$(quote "$SOURCE_PATH") SWITCHYARD_INSTALL_PATH=$(quote "$INSTALL_PATH") $(quote "$script_path") --apply
+# This exports an immutable release into $SHARED_ROOT and repoints current with ln -sfn.
+sudo env SWITCHYARD_SOURCE_REPO=$(quote "$SOURCE_REPO") SWITCHYARD_SOURCE_REF=$(quote "$source_ref") SWITCHYARD_SHARED_INSTALL_ROOT=$(quote "$SHARED_ROOT") SWITCHYARD_INSTALL_PATH=$(quote "$INSTALL_PATH") $(quote "$script_path") --apply
 
 # Verify both the normal shell and sudo can resolve it.
 command -v switchyard
 sudo env sh -c 'command -v switchyard'
+
+# Roll back by repointing current to a previous release; this intentionally stays
+# a plain symlink operation that does not depend on the active release:
+# sudo ln -sfn $SHARED_ROOT/releases/<previous-sha> $SHARED_ROOT/current
 EOF
 }
 

@@ -5,6 +5,51 @@ from __future__ import annotations
 
 from team_launcher_test_helpers import *
 
+def test_shared_install_launcher_freshness_skips_git_probe_and_reports_marker() -> None:
+    original_shared_root = os.environ.get("SWITCHYARD_SHARED_INSTALL_ROOT")
+    try:
+        with tempfile.TemporaryDirectory(prefix="pgu-switchyard-shared-release.") as tmp:
+            tmp_path = Path(tmp)
+            shared_root = tmp_path / "opt" / "switchyard"
+            release = shared_root / "releases" / REMOTE_HEAD
+            release.mkdir(parents=True)
+            (release / ".switchyard-release.json").write_text(
+                json.dumps({"commit": REMOTE_HEAD}) + "\n",
+                encoding="utf-8",
+            )
+            current = shared_root / "current"
+            current.symlink_to(release)
+            config_path = _write_minimal_shared_checkout_config(tmp_path, tmp_path / "project", ["ops"])
+            config = load_project_config("pgu", config_path)
+            calls: list[list[str]] = []
+
+            def runner(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+                calls.append(args)
+                return subprocess.CompletedProcess(args, 0)
+
+            os.environ["SWITCHYARD_SHARED_INSTALL_ROOT"] = str(shared_root)
+            team_launcher.ensure_launcher_checkout_current(config, launcher_repo=current, runner=runner)
+            statuses = team_launcher.switchyard_runtime_copy_statuses(
+                [config],
+                source_repo=current,
+                switchyard_install_path=tmp_path / "missing-wrapper",
+                runner=runner,
+            )
+
+        assert calls == []
+        assert any(
+            status.project == "switchyard"
+            and status.copy == "shared release"
+            and status.status == f"shared install at {REMOTE_HEAD}"
+            for status in statuses
+        )
+    finally:
+        if original_shared_root is None:
+            os.environ.pop("SWITCHYARD_SHARED_INSTALL_ROOT", None)
+        else:
+            os.environ["SWITCHYARD_SHARED_INSTALL_ROOT"] = original_shared_root
+
+
 def test_start_auto_fast_forwards_stale_launcher_checkout_once_before_panes() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
         tmp_path = Path(tmp)

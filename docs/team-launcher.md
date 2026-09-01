@@ -76,24 +76,47 @@ from a different local desktop account or socket name.
 
 ## Installing the Entry Point
 
-The shared checkout keeps the real `switchyard` implementation. Install only a
-system-path trampoline, so launcher self-deploys continue to update the command
-the next time it runs and Eric does not need traverse access to `/home/agent`.
-The privileged host step for Eric is:
+Switchyard is installed as immutable host-level releases under
+`/opt/switchyard`, with `/opt/switchyard/current` as the active symlink and
+`/usr/local/bin/switchyard` as a small wrapper to
+`/opt/switchyard/current/switchyard`. Run the installer from a source checkout,
+not from the active release, so a bad release cannot remove the tool used to fix
+it. The privileged host step is:
 
 ```bash
-sudo env SWITCHYARD_SOURCE_PATH=/home/agent/Projects/pgu/switchyard SWITCHYARD_INSTALL_PATH=/usr/local/bin/switchyard /home/agent/Projects/pgu/scripts/install-switchyard --apply
+sudo env \
+  SWITCHYARD_SOURCE_REPO=/path/to/switchyard-checkout \
+  SWITCHYARD_SOURCE_REF=<audited-commit> \
+  SWITCHYARD_SHARED_INSTALL_ROOT=/opt/switchyard \
+  SWITCHYARD_INSTALL_PATH=/usr/local/bin/switchyard \
+  /path/to/switchyard-checkout/scripts/install-switchyard --apply
 command -v switchyard
 sudo env sh -c 'command -v switchyard'
 ```
+
+The installer exports the requested commit into
+`/opt/switchyard/releases/<commit>`, writes `.switchyard-release.json`, canaries
+the release directly with `switchyard --version`, and then repoints `current`.
+Rollback is deliberately just:
+
+```bash
+sudo ln -sfn /opt/switchyard/releases/<previous-sha> /opt/switchyard/current
+```
+
+That plain symlink operation does not depend on the active release. The
+installed wrapper embeds fallback help and version text so `switchyard --help`
+and `switchyard --version` still work when `current` is missing or broken;
+mutating commands fail with a recovery command that points back to the source
+checkout installer. `SWITCHYARD_TARGET` is accepted only for non-privileged
+direct execution. Privileged commands and root execution always use the compiled
+`/opt/switchyard/current/switchyard` target, so the override cannot become a
+root code-execution path.
 
 `/usr/local/bin` is deliberately used because it is on the host's normal shell
 `PATH` and should also be present in sudo's `secure_path`. When `sudo -V`
 reports a `secure_path`, the installer refuses a system install path that is not
 listed there; when sudo reports no such setting, it proceeds. The installed
-wrapper lives outside `/home/agent`; when invoked without sudo, it re-execs the
-live checkout entrypoint through `sudo`, so traversal into the shared checkout
-happens only after privilege is acquired.
+wrapper lives outside every user's home.
 The wrapper preserves `PYTHONDONTWRITEBYTECODE=1` across that privileged
 re-exec, and the Python entrypoints also set `sys.dont_write_bytecode`, so
 running privileged Switchyard commands from an operator checkout does not leave
@@ -312,8 +335,10 @@ the exact count is available only when the object already exists locally.
 `switchyard status` uses the same no-fetch style for runtime-copy visibility:
 after the project liveness table, it reports the invoking checkout, project
 checkout, visible role worktrees, and tenant board release when those paths can
-be seen. It reports freshness, staleness, or an unknown reason; it never pulls,
-resets, or repairs a checkout.
+be seen. When the invoking launcher is under `/opt/switchyard`, it reports the
+shared release commit marker instead of demanding a `.git` checkout. It reports
+freshness, staleness, or an unknown reason; it never pulls, resets, or repairs a
+checkout.
 
 `deploy-launcher` is the explicit launcher deploy step. It fetches the
 configured ref in the launcher checkout, checks out the configured branch,

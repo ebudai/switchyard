@@ -26,6 +26,42 @@ def test_upgrade_refreshes_legacy_generated_provision_layout() -> None:
         assert not second_result.changed
         assert "already current" in second_result.message
 
+
+def test_upgrade_generated_project_config_moves_pane_launcher_to_shared_install() -> None:
+    original_shared_root = os.environ.get("SWITCHYARD_SHARED_INSTALL_ROOT")
+    try:
+        with tempfile.TemporaryDirectory(prefix="pgu-launcher-shared-pane-launcher.") as tmp:
+            tmp_path = Path(tmp)
+            shared_root = tmp_path / "opt" / "switchyard"
+            provision_dir = tmp_path / ".switchyard" / "provision"
+            provision_dir.mkdir(parents=True)
+            layout_path = provision_dir / "otto-konsole-layout.json"
+            layout_path.write_text(
+                json.dumps(team_launcher._new_project_layout_payload(6), indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            config_path = _write_launcher_config(provision_dir)
+            raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+            raw_config["pane_launcher"] = "/home/otto-agent/otto-ticketboard-live/current/scripts/team-launcher"
+            config_path.write_text(json.dumps(raw_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            os.environ["SWITCHYARD_SHARED_INSTALL_ROOT"] = str(shared_root)
+            config = load_project_config("otto", config_path)
+
+            dry_run = team_launcher.upgrade_generated_project_layout(config, config_path=config_path, dry_run=True)
+            result = team_launcher.upgrade_generated_project_layout(config, config_path=config_path)
+            updated = json.loads(config_path.read_text(encoding="utf-8"))
+
+        assert dry_run.changed is False
+        assert "pane launcher can be upgraded" in dry_run.message
+        assert result.changed
+        assert updated["pane_launcher"] == str(shared_root / "current" / "scripts" / "team-launcher")
+    finally:
+        if original_shared_root is None:
+            os.environ.pop("SWITCHYARD_SHARED_INSTALL_ROOT", None)
+        else:
+            os.environ["SWITCHYARD_SHARED_INSTALL_ROOT"] = original_shared_root
+
+
 def test_upgrade_refreshes_column_major_generated_provision_layout() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-launcher-upgrade.") as tmp:
         provision_dir = Path(tmp) / ".switchyard" / "provision"
@@ -352,7 +388,7 @@ def test_launch_repairs_generated_project_owner_hooks_before_starting_panes() ->
     pane_start_call = next(
         call
         for call in runner.calls
-        if call[:5] == ["sudo", "-u", "otto-agent", "-H", "/home/otto-agent/otto-ticketboard-live/current/scripts/team-launcher"]
+        if call[:5] == ["sudo", "-u", "otto-agent", "-H", "/opt/switchyard/current/scripts/team-launcher"]
         and call[5:8] == ["otto", "pane", "attach-or-start"]
     )
     assert hook_install_call == [
@@ -365,12 +401,12 @@ def test_launch_repairs_generated_project_owner_hooks_before_starting_panes() ->
         "TICKET_BOARD_PROJECT=otto",
         f"TICKET_BOARD_PANE_STATE_DIR={pane_state_dir}",
         f"TICKET_BOARD_PANE_SESSION_DIR={session_dir}",
-        "/home/otto-agent/otto-ticketboard-live/current/scripts/ticket-board-install-pane-hooks",
+        "/opt/switchyard/current/scripts/ticket-board-install-pane-hooks",
         "install",
         "--home",
         "/home/otto-agent",
         "--hook-source",
-        "/home/otto-agent/otto-ticketboard-live/current/scripts/ticket-board-pane-idle-hook",
+        "/opt/switchyard/current/scripts/ticket-board-pane-idle-hook",
         "--bin-path",
         "/home/otto-agent/.local/bin/ticket-board-pane-idle-hook",
     ]
@@ -379,7 +415,7 @@ def test_launch_repairs_generated_project_owner_hooks_before_starting_panes() ->
         "-u",
         "otto-agent",
         "-H",
-        "/home/otto-agent/otto-ticketboard-live/current/scripts/team-launcher",
+        "/opt/switchyard/current/scripts/team-launcher",
         "otto",
         "pane",
         "attach-or-start",

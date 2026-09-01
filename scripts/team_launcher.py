@@ -86,6 +86,8 @@ SWITCHYARD_ONBOARDING_DOC_NAMES = (
     "switchyard-director-guide.md",
 )
 DEFAULT_PANE_BASE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+DEFAULT_SWITCHYARD_SHARED_INSTALL_ROOT = Path("/opt/switchyard")
+SWITCHYARD_RELEASE_MARKER_NAME = ".switchyard-release.json"
 
 
 def _env_first(*names: str) -> str:
@@ -342,6 +344,17 @@ class LauncherCheckoutProbe:
     behind_exact: bool = True
     error: str = ""
 
+
+@dataclass(frozen=True)
+class SharedSwitchyardRelease:
+    root: Path
+    marker_commit: str = ""
+    marker_error: str = ""
+
+    @property
+    def active(self) -> bool:
+        return bool(self.marker_commit)
+
     @property
     def undeterminable(self) -> bool:
         return bool(self.error)
@@ -380,6 +393,56 @@ class LaunchSessionRecordStatus:
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+def switchyard_shared_install_root() -> Path:
+    return Path(os.environ.get("SWITCHYARD_SHARED_INSTALL_ROOT", DEFAULT_SWITCHYARD_SHARED_INSTALL_ROOT)).expanduser()
+
+
+def switchyard_shared_target(root: Path | None = None) -> Path:
+    return (root or switchyard_shared_install_root()) / "current" / SWITCHYARD_NAME
+
+
+def switchyard_shared_pane_launcher(root: Path | None = None) -> Path:
+    return (root or switchyard_shared_install_root()) / "current" / "scripts" / TEAM_LAUNCHER_NAME
+
+
+def _read_switchyard_release_marker(path: Path) -> SharedSwitchyardRelease | None:
+    marker = path / SWITCHYARD_RELEASE_MARKER_NAME
+    if not marker.exists():
+        return None
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return SharedSwitchyardRelease(root=path, marker_error=str(exc))
+    commit = str(payload.get("commit") or "").strip()
+    if not commit:
+        return SharedSwitchyardRelease(root=path, marker_error=f"{marker} has no commit")
+    return SharedSwitchyardRelease(root=path, marker_commit=commit)
+
+
+def shared_switchyard_release_for_path(path: Path, *, install_root: Path | None = None) -> SharedSwitchyardRelease | None:
+    root = (install_root or switchyard_shared_install_root()).expanduser().resolve(strict=False)
+    candidate = path.expanduser().resolve(strict=False)
+    if not _path_is_under(candidate, root):
+        return None
+    for probe in (candidate, *candidate.parents):
+        if not _path_is_under(probe, root):
+            break
+        marker = _read_switchyard_release_marker(probe)
+        if marker is not None:
+            return marker
+    if _path_is_under(candidate, root / "current") or _path_is_under(candidate, root / "releases"):
+        return SharedSwitchyardRelease(root=candidate)
+    return None
+
+
+def switchyard_version_text(repo_root: Path | None = None) -> str:
+    root = repo_root or _repo_root()
+    release = _read_switchyard_release_marker(root)
+    if release is not None and release.marker_commit:
+        return f"switchyard {release.marker_commit}"
+    return f"switchyard {SWITCHYARD_VERSION}"
 
 
 def _allocated_board_port(project: str, *, base: int = 18_770, span: int = 10_000) -> int:
@@ -2983,6 +3046,9 @@ def ensure_launcher_checkout_current(
     allow_stale: bool = False,
 ) -> None:
     repo = launcher_repo or _repo_root()
+    release = shared_switchyard_release_for_path(repo)
+    if release is not None:
+        return
     allow_stale = allow_stale or _env_truthy_any(ALLOW_STALE_LAUNCHER_ENV, LEGACY_ALLOW_STALE_LAUNCHER_ENV)
     checkout_runner, owner_error = _launcher_checkout_runner(repo, runner=runner)
     if checkout_runner is None:
@@ -4576,6 +4642,20 @@ def upgrade_generated_project_config(
     changed_messages: list[str] = []
     durable_session_dir = _generated_project_durable_session_dir(config)
     session_dir_upgrade: Path | None = None
+    shared_pane_launcher = switchyard_shared_pane_launcher()
+    pane_launcher_upgrade: Path | None = None
+    if (
+        config.pane_launcher is not None
+        and config.pane_launcher.expanduser().resolve(strict=False)
+        != shared_pane_launcher.expanduser().resolve(strict=False)
+    ):
+        if dry_run:
+            changed_messages.append(
+                f"pane launcher can be upgraded from {config.pane_launcher} to {shared_pane_launcher}"
+            )
+        else:
+            pane_launcher_upgrade = shared_pane_launcher
+            changed_messages.append(f"upgraded pane launcher to {shared_pane_launcher}")
     if (
         durable_session_dir is not None
         and session_dir_uses_user_runtime(config.session_dir, config.run_as_user)
@@ -4622,9 +4702,12 @@ def upgrade_generated_project_config(
             changed=False,
             message=f"switchyard: {config.project} layout template is already current",
         )
-    if session_dir_upgrade is not None:
+    if session_dir_upgrade is not None or pane_launcher_upgrade is not None:
         raw_config = _load_json(config_path)
-        raw_config["session_dir"] = str(session_dir_upgrade)
+        if session_dir_upgrade is not None:
+            raw_config["session_dir"] = str(session_dir_upgrade)
+        if pane_launcher_upgrade is not None:
+            raw_config["pane_launcher"] = str(pane_launcher_upgrade)
         _write_json_atomic(config_path, raw_config)
         ensure_owner_file(config, config_path, runner=runner)
     return LauncherUpgradeResult(
@@ -4647,6 +4730,8 @@ def _tenant_board_root_from_config(config: ProjectConfig) -> Path | None:
     if config.pane_launcher is None:
         return None
     launcher = config.pane_launcher.expanduser()
+    if shared_switchyard_release_for_path(launcher) is not None:
+        return None
     for parent in launcher.parents:
         if parent.name == "current":
             return parent.parent
@@ -5491,7 +5576,7 @@ def _new_project_launcher_config_payload(
         "board_url": f"http://127.0.0.1:{plan.port}",
         "board_socket": plan.socket_path,
         "session_dir": _new_project_session_dir(plan.project, plan.owner_user),
-        "pane_launcher": str(Path(plan.board_current) / "scripts" / TEAM_LAUNCHER_NAME),
+        "pane_launcher": str(switchyard_shared_pane_launcher()),
         "roles": roles,
     }
     if upstream_report_url:
@@ -7754,9 +7839,35 @@ def _runtime_release_copy_status(
     )
 
 
+def _runtime_shared_release_status(path: Path) -> SwitchyardRuntimeCopyStatus | None:
+    release = shared_switchyard_release_for_path(path)
+    if release is None:
+        return None
+    if release.marker_commit:
+        summary = f"shared install at {release.marker_commit}"
+    elif release.marker_error:
+        summary = f"unknown shared install: {release.marker_error}"
+    else:
+        summary = "unknown shared install: missing release marker"
+    return SwitchyardRuntimeCopyStatus(
+        project="switchyard",
+        copy="shared release",
+        path=release.root,
+        status=summary,
+    )
+
+
 def _parse_switchyard_wrapper_target(text: str) -> str:
+    for prefix in ("readonly SWITCHYARD_DEFAULT_TARGET=", "readonly SWITCHYARD_TARGET="):
+        target = _parse_switchyard_wrapper_target_line(text, prefix)
+        if target:
+            return target
+    return ""
+
+
+def _parse_switchyard_wrapper_target_line(text: str, prefix: str) -> str:
     for line in text.splitlines():
-        if not line.startswith("readonly SWITCHYARD_TARGET="):
+        if not line.startswith(prefix):
             continue
         raw_value = line.split("=", 1)[1].strip()
         try:
@@ -7826,8 +7937,12 @@ def switchyard_runtime_copy_statuses(
         statuses.append(status)
 
     add(switchyard_installed_wrapper_status(switchyard_install_path))
+    shared_status = _runtime_shared_release_status(source)
+    if shared_status is not None:
+        add(shared_status)
     for config in configs:
-        add(_runtime_checkout_copy_status(config, project=config.project, copy="invoking checkout", path=source, runner=runner))
+        if shared_status is None:
+            add(_runtime_checkout_copy_status(config, project=config.project, copy="invoking checkout", path=source, runner=runner))
         if config.repository is not None:
             add(
                 _runtime_checkout_copy_status(
@@ -7851,7 +7966,8 @@ def switchyard_runtime_copy_statuses(
                     runner=runner,
                 )
             )
-        add(_runtime_release_copy_status(config, source_repo=source, runner=runner))
+        if shared_status is None:
+            add(_runtime_release_copy_status(config, source_repo=source, runner=runner))
     return statuses
 
 
@@ -8445,6 +8561,7 @@ def upgrade_project_command(
     print_func: Callable[[str], None] = print,
 ) -> int:
     effective_source_repo = (source_repo or _repo_root()).expanduser().resolve(strict=False)
+    release_report_config = config
     warn_if_artifact_source_checkout_is_stale(
         config,
         source_repo=effective_source_repo,
@@ -8466,7 +8583,7 @@ def upgrade_project_command(
             print_func=print_func,
         )
     report_tenant_release_upgrade(
-        config,
+        release_report_config,
         source_repo=effective_source_repo,
         deploy_ref=deploy_ref,
         runner=runner,
@@ -9530,7 +9647,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         print(switchyard_help_text(), end="")
         return 0
     if argv[0] in {"--version", "version"}:
-        print(f"switchyard {SWITCHYARD_VERSION}")
+        print(switchyard_version_text())
         return 0
     if argv[0].casefold() == "new":
         args = _build_switchyard_new_parser().parse_args(argv[1:])

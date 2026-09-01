@@ -24,8 +24,9 @@ PROJECT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 def _git(repository: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     environment = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull}
+    repository_path = repository.expanduser().resolve(strict=False)
     return subprocess.run(
-        ["git", "-C", str(repository), *args],
+        ["git", "-c", f"safe.directory={repository_path}", "-C", str(repository_path), *args],
         check=check,
         capture_output=True,
         text=True,

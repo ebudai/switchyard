@@ -43,6 +43,16 @@ WORKFLOW`, or `NO MAIN GUARD`. Bare repositories without a Switchyard workflow
 are deliberately left without a blocking guard; the rejection message must
 never point an unmanaged project at a workflow it does not have.
 
+The privileged installer grants Git trust only for the repository currently
+being operated on by passing `-c safe.directory=<exact repository>` to that Git
+process. It never writes `safe.directory` globally and never uses the wildcard
+form. `tests/repository_hooks_foreign_owner_test.py` performs a complete
+foreign-owner installation when run as root. Without root it cannot create or
+mutate a foreign-owned fixture, so it exercises Git's real dubious-ownership
+rejection and the narrow access fix against an existing foreign-owned bare
+repository; writable installation and rerun idempotency remain covered by the
+standard repository-hook regression.
+
 ## Legacy PGU installer
 
 PGU's historical installer maintains its Stage-3b-aware server-side `update`

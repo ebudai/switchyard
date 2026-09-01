@@ -70,16 +70,16 @@ def main() -> int:
         existing_precommit.chmod(0o755)
         remote_update = remote / "hooks" / "update"
         update_marker = temp / "upstream-update-ran"
-        remote_update.write_text(
+        upstream_update_text = (
             "#!/bin/sh\n"
             "if [ \"${1:-}\" = refs/heads/main ] && [ \"${PGU_ALLOW_MAIN_PUSH:-}\" != director ]; then\n"
             "  echo legacy-main-guard-rejected >&2\n"
             "  exit 1\n"
             "fi\n"
             f"echo ran >>{update_marker}\n"
-            "exit 0\n",
-            encoding="utf-8",
+            "exit 0\n"
         )
+        remote_update.write_text(upstream_update_text, encoding="utf-8")
         remote_update.chmod(0o755)
 
         install_repository_policy(client, source_root=REPO_ROOT, project="demo", main_guard=False)
@@ -89,10 +89,13 @@ def main() -> int:
         install_repository_policy(remote, source_root=REPO_ROOT, project="demo", local_warning=False)
         assert MANAGED_MARKER in existing_precommit.read_text(encoding="utf-8")
         assert not any(global_hooks.iterdir())
+        assert "safe.directory" not in global_config.read_text(encoding="utf-8")
         assert run("git", "-C", str(client), "config", "--local", "--get", "core.hooksPath").stdout.strip() == str(hooks.resolve())
         assert run("git", "-C", str(remote), "config", "--local", "--get", "core.hooksPath").stdout.strip() == str((remote / "hooks").resolve())
         assert (hooks / "pre-commit.switchyard-upstream").exists()
-        assert (remote / "hooks" / "update.switchyard-upstream").exists()
+        preserved_update = remote / "hooks" / "update.switchyard-upstream"
+        assert preserved_update.read_text(encoding="utf-8") == upstream_update_text
+        assert not (remote / "hooks" / "update.switchyard-upstream.switchyard-upstream").exists()
 
         oversized = worktree / "oversized.py"
         oversized.write_text("".join(f"line_{index}\n" for index in range(1251)), encoding="utf-8")

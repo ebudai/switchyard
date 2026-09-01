@@ -19,12 +19,20 @@ from typing import TextIO
 ROOT = Path(__file__).resolve().parents[1]
 TICKET_BOARD_GROUP = "ticket_board"
 BOARD_ADJACENT_GROUP = "board_adjacent"
+HOST_AUTOMATION_GROUP = "host_automation"
 TICKET_BOARD_FRONTEND_GROUP = "ticket_board_frontend"
 TICKET_BOARD_BROWSER_GROUP = "ticket_board_browser"
-ALL_GROUPS = (TICKET_BOARD_GROUP, BOARD_ADJACENT_GROUP, TICKET_BOARD_FRONTEND_GROUP, TICKET_BOARD_BROWSER_GROUP)
+ALL_GROUPS = (
+    TICKET_BOARD_GROUP,
+    BOARD_ADJACENT_GROUP,
+    HOST_AUTOMATION_GROUP,
+    TICKET_BOARD_FRONTEND_GROUP,
+    TICKET_BOARD_BROWSER_GROUP,
+)
 GROUP_LABELS = {
     TICKET_BOARD_GROUP: "ticket_board namespace",
     BOARD_ADJACENT_GROUP: "board-adjacent",
+    HOST_AUTOMATION_GROUP: "host hook and launcher automation",
     TICKET_BOARD_FRONTEND_GROUP: "inline ticket-board non-browser",
     TICKET_BOARD_BROWSER_GROUP: "inline ticket-board browser",
 }
@@ -36,6 +44,12 @@ BOARD_ADJACENT_MARKERS = (
     "ticket-board-write",
     "ticket_board.write_client",
     "ticket_board_ui_harness",
+)
+HOST_AUTOMATION_MARKERS = (
+    "scripts.repository_hooks",
+    "repository_hooks.py",
+    "install-all-repository-hooks",
+    "install-switchyard",
 )
 TICKET_BOARD_IMPORT_RE = re.compile(r"(?:from|import)\s+scripts\.ticket_board|scripts\.ticket_board\.")
 BROWSER_TEST_MARKERS = (
@@ -128,6 +142,11 @@ def _imports_ticket_board_package(path: Path) -> bool:
     return bool(TICKET_BOARD_IMPORT_RE.search(_test_text(path)))
 
 
+def _mentions_host_automation(path: Path) -> bool:
+    text = _test_text(path)
+    return any(marker in text for marker in HOST_AUTOMATION_MARKERS)
+
+
 def _uses_browser_runtime(path: Path) -> bool:
     text = _test_text(path)
     return any(marker in text for marker in BROWSER_TEST_MARKERS)
@@ -143,6 +162,21 @@ def discover_board_adjacent_suites(root: Path = ROOT) -> list[str]:
         if _is_standalone_test(path)
         and not path.name.startswith("ticket_board_")
         and _mentions_board_endpoint(path)
+    )
+
+
+def discover_host_automation_suites(root: Path = ROOT) -> list[str]:
+    tests_dir = root / "tests"
+    if not tests_dir.is_dir():
+        return []
+    return sorted(
+        path.relative_to(root).as_posix()
+        for path in tests_dir.iterdir()
+        if _is_standalone_test(path)
+        and not path.name.startswith("ticket_board_")
+        and _mentions_host_automation(path)
+        and not _mentions_board_endpoint(path)
+        and not _imports_ticket_board_package(path)
     )
 
 
@@ -183,6 +217,8 @@ def discover_suites_by_group(root: Path = ROOT, groups: Iterable[str] = (TICKET_
             suites[group] = discover_ticket_board_suites(root)
         elif group == BOARD_ADJACENT_GROUP:
             suites[group] = discover_board_adjacent_suites(root)
+        elif group == HOST_AUTOMATION_GROUP:
+            suites[group] = discover_host_automation_suites(root)
         elif group == TICKET_BOARD_FRONTEND_GROUP:
             suites[group] = discover_ticket_board_frontend_suites(root)
         elif group == TICKET_BOARD_BROWSER_GROUP:
@@ -265,6 +301,12 @@ def run_one_suite(
     skip_marker = f"{Path(path).stem}: skipped".lower()
     if proc.returncode == 0 and skip_marker in combined and ok_marker not in combined:
         status = "SKIP"
+    reduced_reason = ""
+    for line in (proc.stdout + "\n" + proc.stderr).splitlines():
+        prefix, separator, detail = line.partition(":")
+        if separator and prefix.strip().lower() == "coverage reduced":
+            reduced_reason = detail.strip()
+            break
     return SuiteResult(
         group=group,
         path=path,
@@ -273,6 +315,7 @@ def run_one_suite(
         duration_seconds=duration,
         stdout=proc.stdout,
         stderr=proc.stderr,
+        reason=reduced_reason,
     )
 
 
@@ -288,6 +331,12 @@ def report_result(result: SuiteResult, *, out: TextIO, output_lines: int) -> Non
         print(f"SKIP [{result.group}] {result.path} ({result.duration_seconds:.2f}s) - {result.reason}", file=out)
     elif result.status == "SKIP":
         print(f"SKIP [{result.group}] {result.path} ({result.duration_seconds:.2f}s)", file=out)
+    elif result.reason:
+        print(
+            f"{result.status} [{result.group}] {result.path} ({result.duration_seconds:.2f}s) "
+            f"- COVERAGE REDUCED: {result.reason}",
+            file=out,
+        )
     else:
         print(f"{result.status} [{result.group}] {result.path} ({result.duration_seconds:.2f}s)", file=out)
     if result.status == "FAIL":
@@ -343,6 +392,11 @@ def print_summary(results: list[SuiteResult], *, out: TextIO) -> None:
             if result.status == "SKIP":
                 suffix = f" - {result.reason}" if result.reason else ""
                 print(f"  [{result.group}] {result.path}{suffix}", file=out)
+    reduced = [result for result in results if result.status == "PASS" and result.reason]
+    if reduced:
+        print("reduced coverage suites:", file=out)
+        for result in reduced:
+            print(f"  [{result.group}] {result.path} - {result.reason}", file=out)
     if failed:
         print("failed suites:", file=out)
         for result in results:
@@ -355,6 +409,8 @@ def normalize_groups(group: str) -> tuple[str, ...]:
         return ALL_GROUPS
     if group == "adjacent":
         return (BOARD_ADJACENT_GROUP,)
+    if group == "host":
+        return (HOST_AUTOMATION_GROUP,)
     if group == "frontend":
         return (TICKET_BOARD_FRONTEND_GROUP,)
     if group == "browser":
@@ -369,9 +425,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--root", type=Path, default=ROOT, help="repository root to scan")
     parser.add_argument(
         "--group",
-        choices=("ticket-board", "adjacent", "frontend", "browser", "all"),
+        choices=("ticket-board", "adjacent", "host", "frontend", "browser", "all"),
         default="ticket-board",
-        help="suite group to run: ticket-board (default fast set), adjacent, frontend, browser, or all",
+        help="suite group to run: ticket-board (default fast set), adjacent, host, frontend, browser, or all",
     )
     parser.add_argument("--list", action="store_true", help="list discovered suites and prerequisite skips without running")
     parser.add_argument("--fail-on-skip", action="store_true", help="return non-zero when any suite is skipped")

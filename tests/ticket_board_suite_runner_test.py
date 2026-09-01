@@ -83,6 +83,31 @@ def test_discovers_board_adjacent_suites_by_content_property() -> None:
         ]
 
 
+def test_discovers_host_automation_suites_by_content_property() -> None:
+    runner = load_runner()
+    with tempfile.TemporaryDirectory(prefix="ticket-board-suite-host-discovery.") as tmpdir:
+        root = Path(tmpdir)
+        tests = root / "tests"
+        tests.mkdir()
+        (tests / "repository_policy_test.py").write_text(
+            "from scripts.repository_hooks import install_main_guard\n",
+            encoding="utf-8",
+        )
+        (tests / "rollout_test.py").write_text("'install-all-repository-hooks'\n", encoding="utf-8")
+        (tests / "launcher_test.sh").write_text("install-switchyard --apply\n", encoding="utf-8")
+        (tests / "board_overlap_test.py").write_text(
+            "from scripts.repository_hooks import install_main_guard\nboard_url = 'http://example'\n",
+            encoding="utf-8",
+        )
+        (tests / "unrelated_test.py").write_text("print('unrelated')\n", encoding="utf-8")
+
+        assert runner.discover_host_automation_suites(root) == [
+            "tests/launcher_test.sh",
+            "tests/repository_policy_test.py",
+            "tests/rollout_test.py",
+        ]
+
+
 def test_discovers_inline_ticket_board_browser_suites_by_content_property() -> None:
     runner = load_runner()
     with tempfile.TemporaryDirectory(prefix="ticket-board-suite-browser-discovery.") as tmpdir:
@@ -286,15 +311,42 @@ def test_all_group_includes_inline_ticket_board_importer_suites() -> None:
             "print('inline_frontend_test: ok')\n",
             encoding="utf-8",
         )
+        (tests / "host_test.py").write_text(
+            "marker = 'scripts.repository_hooks'\nprint('host_test: ok')\n",
+            encoding="utf-8",
+        )
 
         suites = runner.discover_suites_by_group(root, runner.normalize_groups("all"))
 
         assert suites == {
             runner.TICKET_BOARD_GROUP: ["tests/ticket_board_core_test.py"],
             runner.BOARD_ADJACENT_GROUP: ["tests/adjacent_test.py"],
+            runner.HOST_AUTOMATION_GROUP: ["tests/host_test.py"],
             runner.TICKET_BOARD_FRONTEND_GROUP: ["tests/inline_frontend_test.py"],
             runner.TICKET_BOARD_BROWSER_GROUP: ["tests/inline_browser_test.py"],
         }
+
+
+def test_runner_reports_reduced_coverage_without_skipping_suite() -> None:
+    runner = load_runner()
+    with tempfile.TemporaryDirectory(prefix="ticket-board-suite-reduced.") as tmpdir:
+        root = Path(tmpdir)
+        tests = root / "tests"
+        tests.mkdir()
+        (tests / "host_reduced_test.py").write_text(
+            "marker = 'scripts.repository_hooks'\n"
+            "print('COVERAGE REDUCED: root-only branch not run')\n"
+            "print('host_reduced_test: ok')\n",
+            encoding="utf-8",
+        )
+
+        output = io.StringIO()
+        results = runner.run_suite(root=root, groups=(runner.HOST_AUTOMATION_GROUP,), out=output)
+
+        assert len(results) == 1
+        assert results[0].status == "PASS"
+        assert results[0].reason == "root-only branch not run"
+        assert "COVERAGE REDUCED: root-only branch not run" in output.getvalue()
 
 
 def test_runner_reports_failures_without_stopping_and_strips_live_env() -> None:
@@ -453,12 +505,14 @@ def test_runner_skips_every_browser_suite_when_playwright_is_unavailable() -> No
 def main() -> int:
     test_discovers_python_and_shell_ticket_board_suites_only()
     test_discovers_board_adjacent_suites_by_content_property()
+    test_discovers_host_automation_suites_by_content_property()
     test_discovers_inline_ticket_board_browser_suites_by_content_property()
     test_discovers_inline_ticket_board_frontend_suites_by_content_property()
     test_adjacent_group_runs_only_board_adjacent_suites()
     test_browser_group_runs_only_inline_ticket_board_browser_suites()
     test_frontend_group_runs_only_inline_ticket_board_non_browser_suites()
     test_all_group_includes_inline_ticket_board_importer_suites()
+    test_runner_reports_reduced_coverage_without_skipping_suite()
     test_runner_reports_failures_without_stopping_and_strips_live_env()
     test_runner_names_skipped_suites_with_reasons()
     test_runner_skips_every_browser_suite_when_playwright_is_unavailable()

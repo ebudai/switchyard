@@ -98,14 +98,17 @@ runnable suites without fail-fast, and prints per-group and per-suite
 PASS/FAIL/SKIP results plus a summary.
 
 Use `--group adjacent` for board-adjacent tests outside the `ticket_board_*`
-namespace, `--group frontend` for non-browser standalone tests that import the
-`scripts.ticket_board` package, `--group browser` for inline Playwright tests
-that import `scripts.ticket_board`, or `--group all` for all four groups. These
-extra groups are discovered from test file content, not a manifest: standalone
-tests that reference board URLs, sockets, `ticket-board-write`,
+namespace, `--group host` for repository-hook and Switchyard installation
+automation, `--group frontend` for non-browser standalone tests that import
+the `scripts.ticket_board` package, `--group browser` for inline Playwright
+tests that import `scripts.ticket_board`, or `--group all` for all five groups.
+These extra groups are discovered from test file content, not a manifest:
+standalone tests that reference board URLs, sockets, `ticket-board-write`,
 `ticket_board.write_client`, or the `ticket_board_ui_harness` browser harness
-are included as adjacent, while remaining inline `scripts.ticket_board`
-importers are split by whether they use Playwright/browser markers. PGU-787
+are included as adjacent; repository-hook imports and the
+`install-all-repository-hooks` or `install-switchyard` entrypoints mark host
+automation; remaining inline `scripts.ticket_board` importers are split by
+whether they use Playwright/browser markers. PGU-787
 measured the 14 inline browser importers at 13.14s and the full 52 inline
 importer set at 21.62s, so they are included in `--group all` rather than left
 as manual-only tests. Browser dependency handling is centralized in this
@@ -114,8 +117,12 @@ browser-runtime suite in the selected groups is reported as `SKIP` by name and
 counted in the summary instead of failing inconsistently inside individual test
 files. Use `--fail-on-skip` when the validation environment is expected to have
 every dependency installed; that makes a browser skip a non-zero runner result
-while preserving the explicit skipped-suite summary. Direct invocation of an
-individual browser test is a developer convenience path and may fail with the
+while preserving the explicit skipped-suite summary. Tests that execute useful
+unprivileged coverage but cannot execute a privileged branch print `COVERAGE REDUCED:
+<reason>`; the runner reports the reduction on the PASS line and in its summary
+rather than silently treating partial coverage as complete.
+Direct invocation of an individual browser test is a developer convenience
+path and may fail with the
 raw missing dependency; use the suite runner when the skip-vs-fail convention
 matters.
 

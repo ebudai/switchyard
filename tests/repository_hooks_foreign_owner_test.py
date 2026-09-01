@@ -108,8 +108,8 @@ def unprivileged_access_case() -> None:
         )
     assert_narrow_git_access(repository)
     print(
-        "repository_hooks_foreign_owner_test: unprivileged mode exercised real Git ownership rejection; "
-        "full foreign-owned installation requires root"
+        "COVERAGE REDUCED: root-only foreign-owned installation not run; "
+        "real Git ownership rejection and narrow repository access were exercised"
     )
 
 

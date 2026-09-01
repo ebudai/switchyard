@@ -251,14 +251,21 @@ Ticket board validation:
   runnable suites without fail-fast, and prints per-group and per-suite
   PASS/FAIL/SKIP results plus a summary. Use `--group adjacent` for
   board-adjacent tests outside the `ticket_board_*` namespace, `--group
+  host` for repository-hook and Switchyard installation automation, `--group
   frontend` for non-browser standalone tests that import `scripts.ticket_board`,
   `--group browser` for inline Playwright tests that import
   `scripts.ticket_board`, or `--group all` for every group.
-- The adjacent, frontend, and browser groups are discovered from test file
+- The adjacent, host, frontend, and browser groups are discovered from test file
   content, not manifests. Board URLs, sockets, `ticket-board-write`,
   `ticket_board.write_client`, and `ticket_board_ui_harness` mark adjacent
-  suites. Remaining inline `scripts.ticket_board` importers are split into
-  frontend or browser by Playwright/browser markers.
+  suites. Repository-hook imports and the `install-all-repository-hooks` or
+  `install-switchyard` entrypoints mark host automation. Remaining inline
+  `scripts.ticket_board` importers are split into frontend or browser by
+  Playwright/browser markers.
+- A suite that runs useful unprivileged checks while omitting a privileged
+  branch prints `COVERAGE REDUCED: <reason>`. The runner keeps it as a passing
+  executed suite but reports the reduction on its result and in a dedicated
+  summary section; reduced coverage is never a silent pass or a false skip.
 - PGU-787 measured the 14 inline browser importers at 13.14s and the full 52
   inline importer set at 21.62s, so `--group all` includes both importer groups
   instead of leaving them as manual-only tests.

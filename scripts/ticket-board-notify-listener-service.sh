@@ -76,7 +76,17 @@ systemctl_user() {
         systemctl --user "$@"
 }
 
+source_repo_owner() {
+    stat -c '%U' "$SOURCE_REPO" 2>/dev/null || true
+}
+
 git_source() {
+    local owner
+    owner="$(source_repo_owner)"
+    if [[ "$(id -u)" == "0" && -n "$owner" && "$owner" != "root" && "$owner" != "UNKNOWN" ]]; then
+        sudo -u "$owner" -H git -C "$SOURCE_REPO" "$@"
+        return
+    fi
     git -c "safe.directory=$SOURCE_REPO" -C "$SOURCE_REPO" "$@"
 }
 

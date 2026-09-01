@@ -82,6 +82,7 @@ set -euo pipefail
 
 readonly SWITCHYARD_TARGET=$(quote "$target")
 readonly SWITCHYARD_SUDO_BIN="\${SWITCHYARD_SUDO_BIN:-sudo}"
+export PYTHONDONTWRITEBYTECODE="\${PYTHONDONTWRITEBYTECODE:-1}"
 
 switchyard_print_help() {
     if [[ -x "\$SWITCHYARD_TARGET" ]]; then
@@ -161,10 +162,10 @@ switchyard_exec_with_root() {
         command_display+=" \$1"
     fi
     if "\$SWITCHYARD_SUDO_BIN" -n -v >/dev/null 2>&1; then
-        exec "\$SWITCHYARD_SUDO_BIN" -n "\$SWITCHYARD_TARGET" "\$@"
+        exec "\$SWITCHYARD_SUDO_BIN" -n env PYTHONDONTWRITEBYTECODE="\$PYTHONDONTWRITEBYTECODE" "\$SWITCHYARD_TARGET" "\$@"
     fi
     if switchyard_user_can_prompt_for_sudo; then
-        exec "\$SWITCHYARD_SUDO_BIN" "\$SWITCHYARD_TARGET" "\$@"
+        exec "\$SWITCHYARD_SUDO_BIN" env PYTHONDONTWRITEBYTECODE="\$PYTHONDONTWRITEBYTECODE" "\$SWITCHYARD_TARGET" "\$@"
     fi
     printf 'switchyard: command requires root: %s\n' "\$command_display" >&2
     printf 'switchyard: sudo is unavailable for this user or shell; run it as a sudo-capable human or ask an operator\n' >&2

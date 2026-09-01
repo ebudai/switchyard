@@ -44,6 +44,9 @@ fi
 if [[ "${1:-}" == "-n" ]]; then
     shift
 fi
+if [[ "${1:-}" == "env" && "${2:-}" == PYTHONDONTWRITEBYTECODE=* ]]; then
+    shift 2
+fi
 printf '%s\n' "$*" >>"${FAKE_PRIVILEGE_LOG:?}"
 exec "$@"
 EOF
@@ -176,6 +179,9 @@ if [[ "${1:-}" == "-n" && "${2:-}" == "-v" ]]; then
 fi
 if [[ "${1:-}" == "-n" ]]; then
     shift
+fi
+if [[ "${1:-}" == "env" && "${2:-}" == PYTHONDONTWRITEBYTECODE=* ]]; then
+    shift 2
 fi
 printf '%s\n' "$*" >>"${FAKE_PRIVILEGE_LOG:?}"
 printf 'privileged:%s\n' "$*"
@@ -464,6 +470,10 @@ SWITCHYARD_FORCE_SECURE_PATH_CHECK=1 \
     "$SCRIPT" --apply >"$TMPDIR_T/secure-path-ok.log"
 [[ -x "$secure_path_install" && ! -L "$secure_path_install" ]] || {
     echo "FAIL: installer rejected a directory that sudo secure_path contains" >&2
+    exit 1
+}
+grep -q 'PYTHONDONTWRITEBYTECODE' "$secure_path_install" || {
+    echo "FAIL: installed trampoline does not suppress privileged Python bytecode writes" >&2
     exit 1
 }
 

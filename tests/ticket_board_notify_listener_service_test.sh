@@ -95,6 +95,14 @@ safe_deployed_sha="$(git -C "$SOURCE_REPO" rev-parse --verify HEAD^{commit})"
     echo "FAIL: listener deploy did not succeed through the safe.directory-scoped git wrapper" >&2
     exit 1
 }
+grep -q 'sudo -u "$owner" -H git -C "$SOURCE_REPO"' "$REPO_ROOT/scripts/ticket-board-notify-listener-service.sh" || {
+    echo "FAIL: listener deploy git helper does not delegate privileged SOURCE_REPO git to the checkout owner" >&2
+    exit 1
+}
+if grep -Eq 'chown[[:space:]].*-R.*SOURCE_REPO|chown[[:space:]].*SOURCE_REPO.*-R' "$REPO_ROOT/scripts/ticket-board-notify-listener-service.sh"; then
+    echo "FAIL: listener deploy script must not recursively chown SOURCE_REPO" >&2
+    exit 1
+fi
 
 if BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$TMPDIR_T/absent-source" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
     "$REPO_ROOT/scripts/ticket-board-notify-listener-service.sh" deploy >"$TMPDIR_T/missing-source.out" 2>"$TMPDIR_T/missing-source.err"; then

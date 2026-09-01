@@ -113,6 +113,91 @@ safe_deployed_sha="$(git -C "$SOURCE_REPO" rev-parse --verify HEAD^{commit})"
     exit 1
 }
 
+OWNER_DEPLOY_TMP="$TMPDIR_T/owner-deploy"
+OWNER_ORIGIN="$OWNER_DEPLOY_TMP/origin.git"
+OWNER_SOURCE="$OWNER_DEPLOY_TMP/source"
+OWNER_UPDATER="$OWNER_DEPLOY_TMP/updater"
+OWNER_DEPLOY_ROOT="$OWNER_DEPLOY_TMP/live"
+mkdir -p "$OWNER_DEPLOY_TMP"
+git init --bare "$OWNER_ORIGIN" >/dev/null
+git -C "$OWNER_ORIGIN" symbolic-ref HEAD refs/heads/main
+git clone "$OWNER_ORIGIN" "$OWNER_SOURCE" >/dev/null 2>&1
+git -C "$OWNER_SOURCE" config user.name Test
+git -C "$OWNER_SOURCE" config user.email test@example.com
+mkdir -p "$OWNER_SOURCE/deploy/systemd" "$OWNER_SOURCE/scripts"
+printf '#!/usr/bin/env python3\nprint("owner board")\n' >"$OWNER_SOURCE/scripts/ticket-board.py"
+cat >"$OWNER_SOURCE/deploy/systemd/pgu-ticket-board.service.boardsvc" <<'EOF'
+[Unit]
+Description=PGU Ticket Board Test boardsvc Unit
+
+[Service]
+Type=simple
+User=boardsvc
+WorkingDirectory=/home/agent/pgu-ticketboard-live/current
+RuntimeDirectory=pgu-ticket-board
+ExecStart=/usr/bin/python3 /home/agent/pgu-ticketboard-live/current/scripts/ticket-board.py --host 127.0.0.1 --port 8770 --unix-socket /run/pgu-ticket-board/ticket-board.sock --frames /tmp/pgu-frames --assets /home/agent/.claude/pgu-tickets-assets
+Environment=TICKET_BOARD_PROJECT=pgu
+Environment=TICKET_BOARD_SOCKET=/run/pgu-ticket-board/ticket-board.sock
+Environment=TICKET_BOARD_DATABASE_URL=postgresql:///pgu?host=/var/run/postgresql&user=ticket_board_service
+
+[Install]
+WantedBy=multi-user.target
+EOF
+chmod +x "$OWNER_SOURCE/scripts/ticket-board.py"
+git -C "$OWNER_SOURCE" add deploy/systemd/pgu-ticket-board.service.boardsvc scripts/ticket-board.py
+git -C "$OWNER_SOURCE" commit -m "seed owner deploy" >/dev/null
+PGU_ALLOW_MAIN_PUSH=director git -C "$OWNER_SOURCE" push origin HEAD:main >/dev/null
+git clone "$OWNER_ORIGIN" "$OWNER_UPDATER" >/dev/null 2>&1
+git -C "$OWNER_UPDATER" config user.name Test
+git -C "$OWNER_UPDATER" config user.email test@example.com
+printf '#!/usr/bin/env python3\nprint("owner board updated")\n' >"$OWNER_UPDATER/scripts/ticket-board.py"
+git -C "$OWNER_UPDATER" add scripts/ticket-board.py
+git -C "$OWNER_UPDATER" commit -m "remote owner deploy update" >/dev/null
+PGU_ALLOW_MAIN_PUSH=director git -C "$OWNER_UPDATER" push origin HEAD:main >/dev/null
+SOURCE_OWNER="$(stat -c '%U' "$OWNER_SOURCE")"
+FAKE_ROOT_BIN="$OWNER_DEPLOY_TMP/fake-root-bin"
+FAKE_ROOT_LOG="$OWNER_DEPLOY_TMP/fake-sudo.log"
+mkdir -p "$FAKE_ROOT_BIN"
+cat >"$FAKE_ROOT_BIN/id" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+    -u) printf '0\n' ;;
+    -un) printf 'root\n' ;;
+    *) /usr/bin/id "$@" ;;
+esac
+EOF
+cat >"$FAKE_ROOT_BIN/sudo" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${FAKE_ROOT_LOG:?}"
+if [[ "${1:-}" == "-u" ]]; then
+    shift 2
+fi
+if [[ "${1:-}" == "-H" ]]; then
+    shift
+fi
+exec "$@"
+EOF
+chmod +x "$FAKE_ROOT_BIN/id" "$FAKE_ROOT_BIN/sudo"
+PATH="$FAKE_ROOT_BIN:/usr/bin:/bin" \
+FAKE_ROOT_LOG="$FAKE_ROOT_LOG" \
+BOARD_ROOT="$OWNER_DEPLOY_ROOT" SOURCE_REPO="$OWNER_SOURCE" DEPLOY_REF=origin/main TICKET_BOARD_SKIP_MIGRATIONS=1 \
+    "$REPO_ROOT/scripts/ticket-board-service.sh" deploy >/dev/null
+grep -q -- "-u $SOURCE_OWNER -H git -C $OWNER_SOURCE fetch origin" "$FAKE_ROOT_LOG" || {
+    echo "FAIL: privileged deploy did not fetch SOURCE_REPO as the checkout owner" >&2
+    cat "$FAKE_ROOT_LOG" >&2
+    exit 1
+}
+git -C "$OWNER_SOURCE" pull --ff-only >/dev/null
+if find "$OWNER_SOURCE" ! -user "$SOURCE_OWNER" -print -quit | grep -q .; then
+    echo "FAIL: privileged deploy left files not owned by the source repo owner" >&2
+    find "$OWNER_SOURCE" ! -user "$SOURCE_OWNER" -print >&2
+    exit 1
+fi
+if grep -Eq 'chown[[:space:]].*-R.*SOURCE_REPO|chown[[:space:]].*SOURCE_REPO.*-R' "$REPO_ROOT/scripts/ticket-board-service.sh"; then
+    echo "FAIL: deploy script must not recursively chown SOURCE_REPO" >&2
+    exit 1
+fi
+
 if BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$TMPDIR_T/absent-source" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
     "$REPO_ROOT/scripts/ticket-board-service.sh" deploy >"$TMPDIR_T/missing-source.out" 2>"$TMPDIR_T/missing-source.err"; then
     echo "FAIL: deploy should fail when SOURCE_REPO path is absent" >&2

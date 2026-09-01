@@ -94,6 +94,10 @@ listed there; when sudo reports no such setting, it proceeds. The installed
 wrapper lives outside `/home/agent`; when invoked without sudo, it re-execs the
 live checkout entrypoint through `sudo`, so traversal into the shared checkout
 happens only after privilege is acquired.
+The wrapper preserves `PYTHONDONTWRITEBYTECODE=1` across that privileged
+re-exec, and the Python entrypoints also set `sys.dont_write_bytecode`, so
+running privileged Switchyard commands from an operator checkout does not leave
+root-owned `__pycache__` files next to imported source modules.
 
 Before any real `start`, `reload`, or direct `pane` launch, the launcher checks
 the checkout containing `scripts/team-launcher` against the configured

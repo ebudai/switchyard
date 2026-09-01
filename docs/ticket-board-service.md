@@ -197,6 +197,14 @@ That command:
 10. when the live unit is system-scoped, stops/disables any shadow `--user`
    board unit so it cannot crash-loop on port `8770`
 
+When a deploy helper is itself running as root but `SOURCE_REPO` is a
+non-root operator checkout, Git commands against that checkout are delegated to
+the checkout owner with `sudo -u <owner> -H git -C "$SOURCE_REPO" ...`. This is
+required for the initial `git fetch origin`: otherwise the fetch can create
+root-owned files under `.git/objects` and break the operator's later
+`git pull`. The deploy scripts must not repair that by recursively chowning the
+operator repository.
+
 If the canary fails, `deploy-restart` exits nonzero without touching the live
 `current` symlink or restarting the service. If the post-restart live smoke
 check or live build-id check fails, it repoints `current` back to the previous

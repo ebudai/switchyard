@@ -130,9 +130,15 @@ def test_real_switchyard_target_answers_wrapper_privilege_query() -> None:
         text=True,
         capture_output=True,
     )
+    subcommand_help = subprocess.run(
+        [str(SWITCHYARD_WRAPPER_PATH), "--switchyard-wrapper-requires-root", "new", "--help"],
+        text=True,
+        capture_output=True,
+    )
 
     assert (privileged.returncode, privileged.stdout.strip()) == (0, "requires-root")
     assert (unprivileged.returncode, unprivileged.stdout.strip()) == (0, "no-root")
+    assert (subcommand_help.returncode, subcommand_help.stdout.strip()) == (0, "no-root")
 
 
 def main() -> int:

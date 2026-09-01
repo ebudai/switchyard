@@ -575,6 +575,31 @@ record to the `.superseded` sidecar and launches without `--resume` or
 `TICKET_BOARD_PANE_SESSION_ID`; the active ticket is supplied on the next
 `hermes.pre_llm_call` hook as flat `{"context": "..."}`.
 
+Hermes also exposes a built-in `session_search` tool backed by
+`$HERMES_HOME/state.db`. Because that database contains indexed content from
+every Hermes session under the same home, Switchyard gives each Hermes role its
+own durable `HERMES_HOME` under the project state directory. The launcher
+symlinks the owner user's shared Hermes auth/config entries, including
+`.env`, `auth.json`, `config.yaml`, hooks, and skills, into the per-role home so
+existing credentials and hook configuration still work. Runtime and memory
+state, including `state.db`, `sessions`, `logs`, `cache`, and `memories`, stays
+private to the role-local home. Claude, Codex, and agy continue using their
+existing resume stores and arguments.
+
+The PGU-839 measurement pass used disposable homes. Hermes v0.15.2 can retrieve
+prior-session content through the built-in `session_search` tool from
+`$HERMES_HOME/state.db`; a shared database found a sentinel message from a
+different worker session, while the same search against another role's isolated
+home returned zero results. Codex 0.151.0 exposed explicit `resume` by id/name,
+`--last`, and picker search over its `CODEX_HOME`/`~/.codex` session records,
+but no automatic prior-session search tool in a fresh run. Claude 2.1.251
+exposed explicit `--resume`, `--continue`, and resume search over
+`~/.claude/projects`, but no fresh-session search tool equivalent to Hermes.
+Agy 1.1.22 exposed explicit `--conversation` and `--continue` over its
+`~/.gemini/antigravity-cli` conversation store, but no fresh-session search
+tool. The isolation change is therefore scoped to Hermes and leaves the other
+runtime command lines unchanged.
+
 The same provision path consumes generated and hand-written artifacts:
 
 ```bash

@@ -166,6 +166,38 @@ DEFAULT_RESUME_SUBCOMMAND_BY_CLI = {
 AGY_CONVERSATION_ROOT = Path.home() / ".gemini" / "antigravity-cli"
 CLAUDE_PROJECTS_DIR_NAME = ".claude/projects"
 CODEX_SESSIONS_DIR_NAME = ".codex/sessions"
+HERMES_HOME_DIR_NAME = ".hermes"
+HERMES_SHARED_HOME_ENTRIES = (
+    ".env",
+    "SOUL.md",
+    "auth.json",
+    "bin",
+    "config.yaml",
+    "hooks",
+    "models_dev_cache.json",
+    "shell-hooks-allowlist.json",
+    "skills",
+)
+HERMES_PRIVATE_HOME_ENTRIES = frozenset(
+    {
+        ".hermes_history",
+        ".skills_prompt_snapshot.json",
+        ".update_check",
+        "audio_cache",
+        "auth.lock",
+        "cache",
+        "cron",
+        "image_cache",
+        "logs",
+        "memories",
+        "pairing",
+        "sandboxes",
+        "sessions",
+        "state.db",
+        "state.db-shm",
+        "state.db-wal",
+    }
+)
 RESUME_STARTUP_TIMEOUT_SECONDS = 1.5
 RESUME_STARTUP_POLL_SECONDS = 0.1
 DETACHED_SESSION_STABILITY_SECONDS = 2.0
@@ -2074,6 +2106,11 @@ def _uses_fresh_session_per_ticket(role: RoleConfig) -> bool:
     return cli_name == "hermes"
 
 
+def _uses_hermes(role: RoleConfig) -> bool:
+    cli_name = _command_name(role.cli[0]) if role.cli else ""
+    return cli_name == "hermes"
+
+
 def agy_conversation_store_exists(session_id: str, *, root: Path | None = None) -> bool:
     if not session_id:
         return False
@@ -2088,6 +2125,54 @@ def _home_from_session_dir(session_dir: Path) -> Path:
         if parts[index] == ".local" and parts[index + 1] == "state":
             return Path(*parts[:index])
     return Path.home()
+
+
+def hermes_shared_home_for_session_dir(session_dir: Path) -> Path:
+    return _home_from_session_dir(session_dir) / HERMES_HOME_DIR_NAME
+
+
+def hermes_home_for_role(role: RoleConfig, *, session_dir: Path) -> Path:
+    role_home_name = session_file_name(role.target).removesuffix(".json")
+    return session_dir.expanduser().parent / "hermes-homes" / role_home_name
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    return left.expanduser().resolve(strict=False) == right.expanduser().resolve(strict=False)
+
+
+def _symlink_shared_hermes_entry(source: Path, destination: Path) -> None:
+    if destination.is_symlink():
+        try:
+            if _same_path(destination.resolve(strict=False), source):
+                return
+        except OSError:
+            pass
+        destination.unlink()
+    elif destination.exists():
+        return
+    destination.symlink_to(source)
+
+
+def prepare_hermes_home_for_role(role: RoleConfig, *, session_dir: Path) -> Path | None:
+    if not _uses_hermes(role):
+        return None
+    hermes_home = hermes_home_for_role(role, session_dir=session_dir)
+    _ensure_private_dir(hermes_home)
+    shared_home = hermes_shared_home_for_session_dir(session_dir)
+    for entry in HERMES_SHARED_HOME_ENTRIES:
+        if entry in HERMES_PRIVATE_HOME_ENTRIES:
+            continue
+        source = shared_home / entry
+        if not source.exists():
+            continue
+        _symlink_shared_hermes_entry(source, hermes_home / entry)
+    return hermes_home
+
+
+def hermes_env_for_role(role: RoleConfig, *, session_dir: Path) -> dict[str, str]:
+    if not _uses_hermes(role):
+        return {}
+    return {"HERMES_HOME": str(hermes_home_for_role(role, session_dir=session_dir))}
 
 
 def _session_record_transcript_path(record: dict[str, Any] | None) -> Path | None:
@@ -2203,6 +2288,7 @@ def cli_command_for_role(
         "TICKET_BOARD_PANE_TARGET": role.target,
         "TICKET_BOARD_PANE_SESSION_DIR": str(session_dir.expanduser()),
     }
+    env.update(hermes_env_for_role(role, session_dir=session_dir))
     if pane_state_dir is not None:
         env["TICKET_BOARD_PANE_STATE_DIR"] = str(pane_state_dir.expanduser())
     if session_id:
@@ -3714,6 +3800,7 @@ def _start_role_session(
             prefer_resume = False
     if not prefer_resume:
         clear_session_record_for_role(role, session_dir)
+    prepare_hermes_home_for_role(role, session_dir=session_dir)
     start_proc = runner(
         tmux_new_session_args(
             role,
@@ -3767,6 +3854,7 @@ def _start_role_session(
         if kill_proc.returncode != 0:
             return int(kill_proc.returncode)
     clear_session_record_for_role(role, session_dir)
+    prepare_hermes_home_for_role(role, session_dir=session_dir)
     fresh_proc = runner(
         tmux_new_session_args(
             role,
@@ -8904,6 +8992,7 @@ def attach_role_to_slot(
     )
     updated_role = _role_by_name(updated_config, role.role)
     if not exists:
+        prepare_hermes_home_for_role(updated_role, session_dir=session_dir)
         start_proc = runner(
             tmux_new_session_args(updated_role, session_dir=session_dir, pane_state_dir=pane_state_dir, resume=True)
         )

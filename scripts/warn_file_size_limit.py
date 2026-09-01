@@ -6,10 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-
-DEFAULT_LINE_LIMIT = 1250
-SOURCE_EXTENSIONS = {".cpp", ".cu", ".fish", ".h", ".hpp", ".py", ".sh"}
-SKIP_PREFIXES = ("external/", "third_party/")
+from report_file_size_limit import DEFAULT_LINE_LIMIT, should_check_path
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -50,12 +47,6 @@ def resolve_repo_root(explicit: str) -> Path:
         text=True,
     )
     return Path(proc.stdout.strip()).resolve()
-
-
-def should_check_path(path: str) -> bool:
-    if path.startswith(SKIP_PREFIXES):
-        return False
-    return Path(path).suffix.lower() in SOURCE_EXTENSIONS
 
 
 def staged_paths(repo_root: Path) -> list[str]:

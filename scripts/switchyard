@@ -13,7 +13,19 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.team_launcher import switchyard_main
+from scripts.repository_hooks import install_new_registry_entries, registry_snapshot
 
 
 if __name__ == "__main__":
-    raise SystemExit(switchyard_main(sys.argv[1:]))
+    arguments = sys.argv[1:]
+    new_project = bool(
+        arguments
+        and arguments[0] == "new"
+        and not any(value in {"-h", "--help", "--no-git-init"} for value in arguments[1:])
+    )
+    registry_before = registry_snapshot(arguments) if new_project else frozenset()
+    result = switchyard_main(arguments)
+    if result == 0 and new_project:
+        for installed_hook in install_new_registry_entries(arguments, registry_before, source_root=ROOT):
+            print(f"switchyard: installed repository policy {installed_hook}")
+    raise SystemExit(result)

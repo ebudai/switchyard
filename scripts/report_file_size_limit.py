@@ -7,11 +7,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-try:
-    from ticket_board.write_client import TicketBoardWriteClient
-except ModuleNotFoundError:  # pragma: no cover - package import path
-    from scripts.ticket_board.write_client import TicketBoardWriteClient
-
 DEFAULT_BOARD_URL = "http://127.0.0.1:8770"
 DEFAULT_STATE_DIR = "/data/git/pgu.git/hooks/file-size-ticket-state"
 DEFAULT_LINE_LIMIT = 1250
@@ -133,6 +128,11 @@ def build_ticket_payload(*, path: str, line_count: int, line_limit: int, commit:
 
 
 def create_ticket(board_url: str, payload: dict[str, object]) -> str:
+    try:
+        from ticket_board.write_client import TicketBoardWriteClient
+    except ModuleNotFoundError:  # pragma: no cover - package import path
+        from scripts.ticket_board.write_client import TicketBoardWriteClient
+
     parsed = TicketBoardWriteClient(board_url, "director").create_ticket(
         title=str(payload["title"]),
         body=str(payload["body"]),

@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.machinery
 import importlib.util
 import json
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -116,6 +117,22 @@ def test_switchyard_wrapper_delegates_to_switchyard_main() -> None:
         wrapper.switchyard_main = original_main
 
     assert calls == [["My", "Project"]]
+
+
+def test_real_switchyard_target_answers_wrapper_privilege_query() -> None:
+    privileged = subprocess.run(
+        [str(SWITCHYARD_WRAPPER_PATH), "--switchyard-wrapper-requires-root", "new"],
+        text=True,
+        capture_output=True,
+    )
+    unprivileged = subprocess.run(
+        [str(SWITCHYARD_WRAPPER_PATH), "--switchyard-wrapper-requires-root", "--help"],
+        text=True,
+        capture_output=True,
+    )
+
+    assert (privileged.returncode, privileged.stdout.strip()) == (0, "requires-root")
+    assert (unprivileged.returncode, unprivileged.stdout.strip()) == (0, "no-root")
 
 
 def main() -> int:

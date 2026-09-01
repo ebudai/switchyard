@@ -447,7 +447,7 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
         designer_onboarding = (project_dir / ".switchyard" / "DESIGNER_ONBOARDING.md").read_text(encoding="utf-8")
         project_onboarding_dir = project_dir / "docs" / "onboarding"
         registry_pointer = json.loads((registry_dir / "porter.json").read_text(encoding="utf-8"))
-        expected_pane_launcher = "/opt/switchyard/current/scripts/team-launcher"
+        expected_pane_launcher = str(team_launcher.switchyard_shared_pane_launcher())
 
         assert chown_call_index < next(index for index, call in enumerate(runner.calls) if call == ["sudo", "-v"])
         assert artifact["project"]["repository"] == str(project_dir)

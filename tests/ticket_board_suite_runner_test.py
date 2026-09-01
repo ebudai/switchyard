@@ -425,6 +425,38 @@ def test_runner_reports_failures_without_stopping_and_strips_live_env() -> None:
         assert "PASS [ticket_board] tests/ticket_board_shell_test.sh" in rendered
 
 
+def test_runner_replaces_live_switchyard_shared_install_root_with_fixture() -> None:
+    runner = load_runner()
+    with tempfile.TemporaryDirectory(prefix="ticket-board-suite-shared-root.") as tmpdir:
+        root = Path(tmpdir)
+        tests = root / "tests"
+        tests.mkdir()
+        (tests / "ticket_board_shared_root_test.py").write_text(
+            "import os\n"
+            "from pathlib import Path\n"
+            "root = Path(os.environ['SWITCHYARD_SHARED_INSTALL_ROOT'])\n"
+            "assert root != Path('/opt/switchyard')\n"
+            "assert 'switchyard-test-suite-' in str(root)\n"
+            "print('ticket_board_shared_root_test: ok')\n",
+            encoding="utf-8",
+        )
+
+        output = io.StringIO()
+        results = runner.run_suite(
+            root=root,
+            out=output,
+            env={
+                **os.environ,
+                "SWITCHYARD_SHARED_INSTALL_ROOT": "/opt/switchyard",
+            },
+        )
+
+        assert [(result.path, result.status) for result in results] == [
+            ("tests/ticket_board_shared_root_test.py", "PASS"),
+        ]
+        assert "PASS [ticket_board] tests/ticket_board_shared_root_test.py" in output.getvalue()
+
+
 def test_runner_names_skipped_suites_with_reasons() -> None:
     runner = load_runner()
     with tempfile.TemporaryDirectory(prefix="ticket-board-suite-skip.") as tmpdir:

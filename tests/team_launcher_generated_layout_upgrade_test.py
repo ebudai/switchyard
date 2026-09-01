@@ -382,13 +382,15 @@ def test_launch_repairs_generated_project_owner_hooks_before_starting_panes() ->
         team_launcher.current_user_name = original_current_user_name
         team_launcher.seed_initial_pane_idle_state = original_seed_initial_pane_idle_state
 
+    expected_pane_launcher = team_launcher.switchyard_shared_pane_launcher()
+    expected_shared_scripts = expected_pane_launcher.parent
     hook_install_call = next(
         call for call in runner.calls if "ticket-board-install-pane-hooks" in " ".join(str(part) for part in call)
     )
     pane_start_call = next(
         call
         for call in runner.calls
-        if call[:5] == ["sudo", "-u", "otto-agent", "-H", "/opt/switchyard/current/scripts/team-launcher"]
+        if call[:5] == ["sudo", "-u", "otto-agent", "-H", str(expected_pane_launcher)]
         and call[5:8] == ["otto", "pane", "attach-or-start"]
     )
     assert hook_install_call == [
@@ -401,12 +403,12 @@ def test_launch_repairs_generated_project_owner_hooks_before_starting_panes() ->
         "TICKET_BOARD_PROJECT=otto",
         f"TICKET_BOARD_PANE_STATE_DIR={pane_state_dir}",
         f"TICKET_BOARD_PANE_SESSION_DIR={session_dir}",
-        "/opt/switchyard/current/scripts/ticket-board-install-pane-hooks",
+        str(expected_shared_scripts / "ticket-board-install-pane-hooks"),
         "install",
         "--home",
         "/home/otto-agent",
         "--hook-source",
-        "/opt/switchyard/current/scripts/ticket-board-pane-idle-hook",
+        str(expected_shared_scripts / "ticket-board-pane-idle-hook"),
         "--bin-path",
         "/home/otto-agent/.local/bin/ticket-board-pane-idle-hook",
     ]
@@ -415,7 +417,7 @@ def test_launch_repairs_generated_project_owner_hooks_before_starting_panes() ->
         "-u",
         "otto-agent",
         "-H",
-        "/opt/switchyard/current/scripts/team-launcher",
+        str(expected_pane_launcher),
         "otto",
         "pane",
         "attach-or-start",

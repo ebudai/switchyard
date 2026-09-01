@@ -5,6 +5,12 @@ from __future__ import annotations
 
 from team_launcher_test_helpers import *
 
+def test_team_launcher_tests_use_controlled_shared_install_root() -> None:
+    assert os.environ["SWITCHYARD_SHARED_INSTALL_ROOT"] == str(TEST_SWITCHYARD_SHARED_INSTALL_ROOT)
+    assert team_launcher.switchyard_shared_install_root() == TEST_SWITCHYARD_SHARED_INSTALL_ROOT
+    assert team_launcher.switchyard_shared_install_root() != Path("/opt/switchyard")
+
+
 def test_owner_state_dir_install_args_take_effect_on_real_filesystem_for_current_user() -> None:
     current_user = team_launcher.current_user_name()
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-owner-state-real.") as tmp:

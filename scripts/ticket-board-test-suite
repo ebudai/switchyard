@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -93,6 +94,10 @@ LIVE_PANE_ENV_KEYS = {
     "TICKET_BOARD_PROJECT",
 }
 SANITIZED_ENV_KEYS = LIVE_BOARD_ENV_KEYS | LIVE_PANE_ENV_KEYS
+SWITCHYARD_SHARED_INSTALL_ENV = "SWITCHYARD_SHARED_INSTALL_ROOT"
+TEST_SWITCHYARD_SHARED_INSTALL_ROOT = (
+    Path(tempfile.gettempdir()) / f"switchyard-test-suite-{os.getpid()}" / "opt" / "switchyard"
+)
 
 
 @dataclass(frozen=True)
@@ -277,6 +282,7 @@ def sanitized_environment(environ: dict[str, str] | None = None) -> dict[str, st
     clean = dict(os.environ if environ is None else environ)
     for key in SANITIZED_ENV_KEYS:
         clean.pop(key, None)
+    clean[SWITCHYARD_SHARED_INSTALL_ENV] = str(TEST_SWITCHYARD_SHARED_INSTALL_ROOT)
     return clean
 
 

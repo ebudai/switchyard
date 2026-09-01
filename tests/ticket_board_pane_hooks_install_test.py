@@ -172,6 +172,21 @@ def _write_onboarding_packet(project_dir: Path) -> None:
     (onboarding_dir / "switchyard-director-guide.md").write_text("Director guide\n", encoding="utf-8")
 
 
+def _director_onboarding_paths_from_context(context: str) -> tuple[str, str]:
+    marker = "Read the onboarding packet first: "
+    assert marker in context
+    remainder = context.split(marker, 1)[1]
+    packet_path, guide_remainder = remainder.split(". Start with ", 1)
+    return packet_path, guide_remainder.removesuffix(".")
+
+
+def _resolve_from_cwd(path_text: str, cwd: Path) -> Path:
+    path = Path(path_text.rstrip("/"))
+    if path.is_absolute():
+        return path
+    return cwd / path
+
+
 def _commands(value: Any) -> list[str]:
     if isinstance(value, dict):
         command = value.get("command")
@@ -943,11 +958,14 @@ def test_director_onboarding_pointer_resolves_project_env_from_role_worktree_cwd
             ),
         )
 
-    output = json.loads(proc.stdout)
-    context = output["hookSpecificOutput"]["additionalContext"]
-    assert str(project_dir / "docs" / "onboarding") in context
-    assert str(project_dir / "docs" / "onboarding" / "switchyard-director-guide.md") in context
-    assert str(worktree_dir / "docs" / "onboarding") not in context
+        output = json.loads(proc.stdout)
+        context = output["hookSpecificOutput"]["additionalContext"]
+        packet_path, guide_path = _director_onboarding_paths_from_context(context)
+        assert _resolve_from_cwd(packet_path, worktree_dir).is_dir()
+        assert _resolve_from_cwd(guide_path, worktree_dir).is_file()
+        assert str(project_dir / "docs" / "onboarding") in context
+        assert str(project_dir / "docs" / "onboarding" / "switchyard-director-guide.md") in context
+        assert str(worktree_dir / "docs" / "onboarding") not in context
 
 
 def test_director_onboarding_pointer_skips_resumed_launches() -> None:

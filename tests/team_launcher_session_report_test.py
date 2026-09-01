@@ -66,6 +66,126 @@ def test_launch_session_record_report_waits_and_warns_for_missing_records() -> N
     assert any("session record found for designer (porter-designer:0.0): designer-session" in message for message in messages)
     assert any("warning: switchyard: session record missing for main (porter-main:0.0)" in message for message in messages)
 
+
+def test_launch_session_record_report_attached_roles_without_fresh_record_warnings() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-launch-session-attached.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        session_dir = tmp_path / "sessions"
+        session_dir.mkdir()
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "session_dir": str(session_dir),
+                    "roles": [
+                        {"role": "main", "slot": 0, "cli": ["codex"], "target": "porter-main:0.0"},
+                        {"role": "ops", "slot": 1, "cli": ["codex"], "target": "porter-ops:0.0"},
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+        messages: list[str] = []
+
+        statuses = team_launcher.report_launch_session_records(
+            config,
+            timeout_seconds=0,
+            pane_state_dir=tmp_path / "pane-state",
+            pane_state_updated_since=time.time(),
+            attached_roles=config.roles,
+            print_func=messages.append,
+        )
+
+    assert all(status.attached_to_running for status in statuses)
+    assert messages == [
+        "switchyard: attached to running pane for main (porter-main:0.0)",
+        "switchyard: attached to running pane for ops (porter-ops:0.0)",
+    ]
+    assert not any("session record missing" in message for message in messages)
+    assert not any("codex runtime hook did not report" in message for message in messages)
+
+
+def test_launch_project_reports_running_attach_or_start_panes_as_attached() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-launch-running-attach.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text(
+            json.dumps(
+                {
+                    "Orientation": "Horizontal",
+                    "Widgets": [
+                        {"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""},
+                        {"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""},
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        session_dir = tmp_path / "sessions"
+        session_dir.mkdir()
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "session_dir": str(session_dir),
+                    "roles": [
+                        {"role": "main", "slot": 0, "cli": ["codex"], "target": "porter-main:0.0"},
+                        {"role": "ops", "slot": 1, "cli": ["codex"], "target": "porter-ops:0.0"},
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+        runner = FakeRunner(existing_sessions={"porter-main", "porter-ops"})
+        process_launcher = RecordingProcessLauncher()
+        messages: list[str] = []
+
+        assert (
+            launch_project(
+                config,
+                config_path=config_path,
+                mode="start",
+                script_path=ROOT / "scripts" / "team-launcher",
+                runner=runner,
+                layout_output=tmp_path / "launch-layout.json",
+                pane_state_dir=tmp_path / "pane-state",
+                report_session_records=True,
+                session_record_timeout=0,
+                konsole_process_launcher=process_launcher,
+                print_func=messages.append,
+            )
+            == 0
+        )
+
+    assert any("opened a new window attached to running panes: main, ops" in message for message in messages)
+    assert any("switchyard: attached to running pane for main (porter-main:0.0)" == message for message in messages)
+    assert any("switchyard: attached to running pane for ops (porter-ops:0.0)" == message for message in messages)
+    assert not any("session record missing" in message for message in messages)
+    assert not any("codex runtime hook did not report" in message for message in messages)
+    assert not any(call[:2] == ["tmux", "new-session"] for call in runner.calls)
+
+
 def test_launch_session_record_report_names_recent_resume_fallback() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-launch-session-fallback.") as tmp:
         tmp_path = Path(tmp)

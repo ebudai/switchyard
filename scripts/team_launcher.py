@@ -369,6 +369,7 @@ class LaunchSessionRecordStatus:
     unverified_resume_session_id: str = ""
     pane_state_source: str = ""
     runtime_hook_source: str = ""
+    attached_to_running: bool = False
 
     @property
     def found(self) -> bool:
@@ -384,7 +385,12 @@ class LaunchSessionRecordStatus:
 
     @property
     def pane_launch_reported(self) -> bool:
-        return bool(self.pane_state_source or self.runtime_hook_source or self.unverified_resume_session_id)
+        return bool(
+            self.attached_to_running
+            or self.pane_state_source
+            or self.runtime_hook_source
+            or self.unverified_resume_session_id
+        )
 
     @property
     def runtime_hook_reported(self) -> bool:
@@ -1902,22 +1908,44 @@ def report_launch_session_records(
     fallback_changed_since_ns: int | None = None,
     pane_state_dir: Path | None = None,
     pane_state_updated_since: float | None = None,
+    attached_roles: Sequence[RoleConfig] | None = None,
     print_func: Callable[[str], None] = print,
 ) -> list[LaunchSessionRecordStatus]:
     selected_roles = tuple(roles or config.roles)
-    print_func(
-        f"switchyard: checking session records for {len(selected_roles)} pane(s) "
-        f"(waiting up to {timeout_seconds:g}s)"
-    )
-    statuses = launch_session_record_statuses(
-        config,
-        selected_roles,
-        timeout_seconds=timeout_seconds,
-        poll_seconds=poll_seconds,
-        fallback_changed_since_ns=fallback_changed_since_ns,
-        pane_state_dir=pane_state_dir,
-        pane_state_updated_since=pane_state_updated_since,
-    )
+    attached_role_names = {role.role for role in attached_roles or ()}
+    attached_by_role = {
+        role.role: LaunchSessionRecordStatus(
+            role=role.role,
+            target=role.target,
+            session_id=session_id_for_role(role, config.session_dir),
+            attached_to_running=True,
+        )
+        for role in selected_roles
+        if role.role in attached_role_names
+    }
+    probe_roles = tuple(role for role in selected_roles if role.role not in attached_role_names)
+    for role in selected_roles:
+        if role.role not in attached_by_role:
+            continue
+        print_func(f"switchyard: attached to running pane for {role.role} ({role.target})")
+    probed_statuses: list[LaunchSessionRecordStatus] = []
+    if probe_roles:
+        print_func(
+            f"switchyard: checking session records for {len(probe_roles)} pane(s) "
+            f"(waiting up to {timeout_seconds:g}s)"
+        )
+        probed_statuses = launch_session_record_statuses(
+            config,
+            probe_roles,
+            timeout_seconds=timeout_seconds,
+            poll_seconds=poll_seconds,
+            fallback_changed_since_ns=fallback_changed_since_ns,
+            pane_state_dir=pane_state_dir,
+            pane_state_updated_since=pane_state_updated_since,
+        )
+    statuses_by_role = {status.role: status for status in probed_statuses}
+    statuses_by_role.update(attached_by_role)
+    statuses = [statuses_by_role[role.role] for role in selected_roles if role.role in statuses_by_role]
     roles_by_target = {role.target: role for role in selected_roles}
     codex_runtime_hook_missing_statuses: list[LaunchSessionRecordStatus] = []
     for status in statuses:
@@ -1930,6 +1958,8 @@ def report_launch_session_records(
             and not status.unverified_resume
             and not status.resume_fallback
         )
+        if status.attached_to_running:
+            continue
         if status.found:
             print_func(
                 f"switchyard: session record found for {status.role} ({status.target}): {status.session_id}"
@@ -5185,6 +5215,15 @@ def launch_project(
         )
     if launch_result != 0:
         return launch_result
+    if mode == "attach-or-start" and resolved_layout_mode != LAYOUT_MODE_VIEWER:
+        attached_visible_roles = [role for role in running_roles if not role.detached and role.role not in failed_roles]
+        if attached_visible_roles:
+            attached_names = ", ".join(role.role for role in attached_visible_roles)
+            plural = "pane" if len(attached_visible_roles) == 1 else "panes"
+            print_func(
+                f"switchyard: opened a new window attached to running {plural}: {attached_names}; "
+                "the previous window may be closed if no longer needed"
+            )
     if report_session_records:
         report_launch_session_records(
             config,
@@ -5193,6 +5232,7 @@ def launch_project(
             fallback_changed_since_ns=launch_started_ns,
             pane_state_dir=effective_pane_state_dir,
             pane_state_updated_since=launch_started_at,
+            attached_roles=running_roles if mode == "attach-or-start" else (),
             print_func=print_func,
         )
     return 0

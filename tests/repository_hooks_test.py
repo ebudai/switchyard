@@ -70,7 +70,16 @@ def main() -> int:
         existing_precommit.chmod(0o755)
         remote_update = remote / "hooks" / "update"
         update_marker = temp / "upstream-update-ran"
-        remote_update.write_text(f"#!/bin/sh\necho ran >>{update_marker}\nexit 0\n", encoding="utf-8")
+        remote_update.write_text(
+            "#!/bin/sh\n"
+            "if [ \"${1:-}\" = refs/heads/main ] && [ \"${PGU_ALLOW_MAIN_PUSH:-}\" != director ]; then\n"
+            "  echo legacy-main-guard-rejected >&2\n"
+            "  exit 1\n"
+            "fi\n"
+            f"echo ran >>{update_marker}\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
         remote_update.chmod(0o755)
 
         install_repository_policy(client, source_root=REPO_ROOT, project="demo", main_guard=False)

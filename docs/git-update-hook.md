@@ -3,8 +3,10 @@
 Switchyard-managed repositories use two complementary hooks:
 
 - `update` rejects direct pushes to `refs/heads/main` unless the director sets
-  `ALLOW_MAIN_PUSH=director`. The managed wrapper preserves and invokes any
-  pre-existing update hook, so PGU's Stage-3b refresh remains intact.
+  `ALLOW_MAIN_PUSH=director` (or PGU's legacy `PGU_ALLOW_MAIN_PUSH=director`).
+  The managed wrapper preserves and invokes any pre-existing update hook, so
+  PGU's Stage-3b refresh remains intact. It translates the generic override for
+  the preserved legacy PGU guard.
 - `pre-commit` warns when a staged source file exceeds 1,250 lines. This is the
   deliberate soft limit retained at Eric's direction: it reports maintenance
   risk but never blocks a commit. Existing pre-commit behavior is preserved.

@@ -161,6 +161,12 @@ MESSAGE
     exit 1
 fi
 
+# PGU's preserved July 2026 hook predates the generic override name. Keep its
+# own guard effective while translating the generic director authorization.
+if [[ "${{ALLOW_MAIN_PUSH:-}}" == "director" && "${{PGU_ALLOW_MAIN_PUSH:-}}" != "director" ]]; then
+    export PGU_ALLOW_MAIN_PUSH=director
+fi
+
 if [[ -x "$UPSTREAM_HOOK" ]]; then
     exec "$UPSTREAM_HOOK" "$@"
 fi

@@ -80,6 +80,21 @@ def main() -> int:
         assert (control / "hooks" / "pre-commit").exists()
         assert (control / "hooks" / "update").exists()
 
+        default_environment = dict(environment)
+        default_environment.pop("SWITCHYARD_SHARED_CHECKOUTS")
+        dry_run_without_shared_default = subprocess.run(
+            [str(ROOT / "scripts" / "install-all-repository-hooks.sh"), "--dry-run"],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=default_environment,
+        )
+        assert "FILE-SIZE WARNING ONLY:" not in dry_run_without_shared_default.stdout
+        assert str(shared) not in dry_run_without_shared_default.stdout
+        assert "/home/eric/Projects/pgu" not in dry_run_without_shared_default.stdout
+        assert "/home/agent/Projects/pgu" not in dry_run_without_shared_default.stdout
+        assert "--project-config" in dry_run_without_shared_default.stdout
+
         dry_run = subprocess.run(
             [str(ROOT / "scripts" / "install-all-repository-hooks.sh"), "--dry-run"],
             check=True,

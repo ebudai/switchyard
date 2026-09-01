@@ -40,18 +40,21 @@ receive-side main guard. The local helper imports path policy from
 the shared scanner rather than orphaned code.
 
 For the bounded host-wide rollout (platform workflow repositories, registered
-project configs, and the two PGU checkouts), run:
+project configs, and any explicitly listed shared working checkouts), run:
 
 ```bash
 sudo scripts/install-all-repository-hooks.sh
 ```
 
 Use `--dry-run` first to enumerate the exact commands. Tenant homes are not
-searched: their paths come from the root-owned Switchyard registry. The output
-labels each target as `FILE-SIZE WARNING ONLY`, `MAIN GUARD`, `REGISTERED
-WORKFLOW`, or `NO MAIN GUARD`. Bare repositories without a Switchyard workflow
-are deliberately left without a blocking guard; the rejection message must
-never point an unmanaged project at a workflow it does not have.
+searched: their paths come from the root-owned Switchyard registry. Shared
+working checkouts are not guessed; set `SWITCHYARD_SHARED_CHECKOUTS` to a
+colon-separated list when you want warning-only local hooks installed there.
+The output labels each target as `FILE-SIZE WARNING ONLY`, `MAIN GUARD`,
+`REGISTERED WORKFLOW`, or `NO MAIN GUARD`. Bare repositories without a
+Switchyard workflow are deliberately left without a blocking guard; the
+rejection message must never point an unmanaged project at a workflow it does
+not have.
 
 The privileged installer grants Git trust only for the repository currently
 being operated on by passing `-c safe.directory=<exact repository>` to that Git

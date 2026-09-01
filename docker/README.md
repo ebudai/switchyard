@@ -1,5 +1,10 @@
 # Team Container
 
+Unsupported historical path: the Docker setup predates the move to the bare
+host and is retained only as a record of how the old PGU team container worked.
+Do not use it for a fresh Switchyard install or as public-mirror setup
+guidance; use the host install flow instead.
+
 Runs the director + implementer/auditor/ops/watchdog team in an isolated
 Docker container instead of `--dangerously-skip-permissions` directly on the
 bare host. See `Dockerfile`/`entrypoint.sh` for the mechanics.

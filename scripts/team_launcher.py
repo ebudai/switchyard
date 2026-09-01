@@ -87,6 +87,7 @@ SWITCHYARD_ONBOARDING_DOC_NAMES = (
 )
 DEFAULT_PANE_BASE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 DEFAULT_SWITCHYARD_SHARED_INSTALL_ROOT = Path("/opt/switchyard")
+DEFAULT_SWITCHYARD_BARE_REPO = Path("/data/git/switchyard.git")
 SWITCHYARD_RELEASE_MARKER_NAME = ".switchyard-release.json"
 
 
@@ -310,6 +311,7 @@ class TenantReleaseStatus:
     deploy_ref: str
     source_repo: Path
     resolve_error: str = ""
+    clone_source_repo: Path | None = None
 
     @property
     def unchanged(self) -> bool:
@@ -403,6 +405,10 @@ def _repo_root() -> Path:
 
 def switchyard_shared_install_root() -> Path:
     return Path(os.environ.get("SWITCHYARD_SHARED_INSTALL_ROOT", DEFAULT_SWITCHYARD_SHARED_INSTALL_ROOT)).expanduser()
+
+
+def switchyard_bare_repo() -> Path:
+    return Path(os.environ.get("SWITCHYARD_BARE_REPO", DEFAULT_SWITCHYARD_BARE_REPO)).expanduser()
 
 
 def switchyard_shared_target(root: Path | None = None) -> Path:
@@ -4490,7 +4496,7 @@ def install_generated_project_pane_hooks_args(
     if not config.run_as_user:
         raise ValueError("pane hook repair requires run_as_user")
     owner_home = home_dir_for_user(config.run_as_user) or Path("/home") / config.run_as_user
-    launcher_path = (config.pane_launcher or script_path).expanduser().resolve(strict=False)
+    launcher_path = (config.pane_launcher or script_path).expanduser()
     hook_installer = launcher_path.with_name("ticket-board-install-pane-hooks")
     hook_source = launcher_path.with_name("ticket-board-pane-idle-hook")
     hook_bin = owner_home / ".local" / "bin" / "ticket-board-pane-idle-hook"
@@ -4841,6 +4847,25 @@ def _resolve_deploy_ref_readonly(
     return str(rev_parse_proc.stdout or "").strip(), ""
 
 
+def _resolve_deploy_ref_from_bare_repo(
+    bare_repo: Path,
+    deploy_ref: str,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> tuple[str, str]:
+    remote_branch = _deploy_ref_remote_branch(deploy_ref)
+    ref = f"refs/heads/{remote_branch[1]}" if remote_branch is not None else deploy_ref
+    proc = runner(
+        ["git", f"--git-dir={bare_repo}", "rev-parse", "--verify", f"{ref}^{{commit}}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return "", _proc_failure_reason(proc, f"git rev-parse exited {proc.returncode}")
+    return str(proc.stdout or "").strip(), ""
+
+
 def tenant_release_status(
     config: ProjectConfig,
     *,
@@ -4853,7 +4878,12 @@ def tenant_release_status(
         return None
     resolved_source_repo = (source_repo or _repo_root()).expanduser().resolve(strict=False)
     current_release, current_sha = _current_tenant_release(board_root)
-    target_sha, resolve_error = _resolve_deploy_ref_readonly(resolved_source_repo, deploy_ref, runner=runner)
+    clone_source_repo: Path | None = None
+    if shared_switchyard_release_for_path(resolved_source_repo) is not None:
+        clone_source_repo = switchyard_bare_repo().resolve(strict=False)
+        target_sha, resolve_error = _resolve_deploy_ref_from_bare_repo(clone_source_repo, deploy_ref, runner=runner)
+    else:
+        target_sha, resolve_error = _resolve_deploy_ref_readonly(resolved_source_repo, deploy_ref, runner=runner)
     return TenantReleaseStatus(
         board_root=board_root,
         current_release=current_release,
@@ -4862,10 +4892,25 @@ def tenant_release_status(
         deploy_ref=deploy_ref,
         source_repo=resolved_source_repo,
         resolve_error=resolve_error,
+        clone_source_repo=clone_source_repo,
     )
 
 
 def tenant_release_deploy_command(status: TenantReleaseStatus, project: str) -> str:
+    if status.clone_source_repo is not None:
+        deploy_command = (
+            "sudo env "
+            f"TICKET_BOARD_PROJECT={shlex.quote(project)} "
+            'SOURCE_REPO="$tmpdir" '
+            f"BOARD_ROOT={shlex.quote(str(status.board_root))} "
+            f"DEPLOY_REF={shlex.quote(status.deploy_ref)} "
+            '"$tmpdir/scripts/ticket-board-service.sh" deploy'
+        )
+        return (
+            'tmpdir="$(mktemp -d)"'
+            f" && git clone {shlex.quote(str(status.clone_source_repo))} \"$tmpdir\""
+            f" && {deploy_command}"
+        )
     service_script = status.source_repo / "scripts" / "ticket-board-service.sh"
     return _quote_command(
         [
@@ -8019,6 +8064,24 @@ def warn_if_artifact_source_checkout_is_stale(
     print_func: Callable[[str], None],
 ) -> None:
     if not source_repo.exists():
+        return
+    shared_release = shared_switchyard_release_for_path(source_repo)
+    if shared_release is not None:
+        if shared_release.marker_commit:
+            print_func(
+                f"switchyard: artifact source is shared release {shared_release.root} "
+                f"at {shared_release.marker_commit}"
+            )
+        elif shared_release.marker_error:
+            print_func(
+                f"warning: switchyard: cannot determine artifact source shared release "
+                f"for {shared_release.root}: {shared_release.marker_error}"
+            )
+        else:
+            print_func(
+                f"warning: switchyard: cannot determine artifact source shared release "
+                f"for {shared_release.root}: missing release marker"
+            )
         return
     probe = probe_checkout_against_worktree_ref(config, source_repo, runner=runner)
     if probe.error:

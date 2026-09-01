@@ -336,6 +336,83 @@ def test_switchyard_upgrade_reports_tenant_release_update_command() -> None:
     assert "panes must be restarted after the release update" in rendered
     assert "deploy-restart" not in rendered
 
+
+def test_switchyard_upgrade_from_shared_release_prints_clone_first_tenant_deploy_command() -> None:
+    original_shared_root = os.environ.get("SWITCHYARD_SHARED_INSTALL_ROOT")
+    original_bare_repo = os.environ.get("SWITCHYARD_BARE_REPO")
+    try:
+        with tempfile.TemporaryDirectory(prefix="pgu-switchyard-upgrade-shared-release.") as tmp:
+            root = Path(tmp)
+            origin, _source_repo = _make_origin_backed_repo(root)
+            target_sha = _run_git(["git", "--git-dir", str(origin), "rev-parse", "refs/heads/main"]).stdout.strip()
+            shared_root = root / "opt" / "switchyard"
+            release = shared_root / "releases" / target_sha
+            release.mkdir(parents=True)
+            (release / ".switchyard-release.json").write_text(
+                json.dumps({"commit": target_sha}) + "\n",
+                encoding="utf-8",
+            )
+            (shared_root / "current").symlink_to(release)
+            os.environ["SWITCHYARD_SHARED_INSTALL_ROOT"] = str(shared_root)
+            os.environ["SWITCHYARD_BARE_REPO"] = str(origin)
+            old_sha = "1111111111111111111111111111111111111111"
+            board_root = root / "otto-ticketboard-live"
+            old_release = board_root / "releases" / old_sha
+            old_release.mkdir(parents=True)
+            (old_release / ".pgu-deploy-sha").write_text(old_sha + "\n", encoding="utf-8")
+            (board_root / "current").symlink_to(old_release)
+            provision_dir = root / "otto" / ".switchyard" / "provision"
+            provision_dir.mkdir(parents=True)
+            layout_path = provision_dir / "otto-konsole-layout.json"
+            layout_path.write_text(
+                json.dumps(team_launcher._new_project_layout_payload(6), indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            config_path = _write_launcher_config(
+                provision_dir,
+                pane_launcher=board_root / "current" / "scripts" / "team-launcher",
+            )
+            config = load_project_config("otto", config_path)
+            stdout = StringIO()
+
+            with redirect_stdout(stdout):
+                assert (
+                    team_launcher.upgrade_project_command(
+                        config,
+                        config_path=config_path,
+                        source_repo=release,
+                        deploy_ref="origin/main",
+                    )
+                    == 0
+                )
+
+            rendered = stdout.getvalue()
+
+        assert f"artifact source is shared release {release} at {target_sha}" in rendered
+        assert "cannot determine artifact source checkout freshness" not in rendered
+        assert f"old: {old_sha} at {old_release}" in rendered
+        assert f"new: {target_sha} from origin/main" in rendered
+        assert "privileged release update command for Eric" in rendered
+        assert f"git clone {origin} \"$tmpdir\"" in rendered
+        assert 'SOURCE_REPO="$tmpdir"' in rendered
+        assert f"BOARD_ROOT={board_root}" in rendered
+        assert "DEPLOY_REF=origin/main" in rendered
+        assert '"$tmpdir/scripts/ticket-board-service.sh" deploy' in rendered
+        assert f"SOURCE_REPO={release}" not in rendered
+        assert f"{release}/scripts/ticket-board-service.sh deploy" not in rendered
+        assert "panes must be restarted after the release update" in rendered
+        assert "deploy-restart" not in rendered
+    finally:
+        if original_shared_root is None:
+            os.environ.pop("SWITCHYARD_SHARED_INSTALL_ROOT", None)
+        else:
+            os.environ["SWITCHYARD_SHARED_INSTALL_ROOT"] = original_shared_root
+        if original_bare_repo is None:
+            os.environ.pop("SWITCHYARD_BARE_REPO", None)
+        else:
+            os.environ["SWITCHYARD_BARE_REPO"] = original_bare_repo
+
+
 def test_switchyard_upgrade_reports_unchanged_tenant_release() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-upgrade-release.") as tmp:
         root = Path(tmp)

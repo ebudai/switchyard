@@ -368,9 +368,13 @@ def test_switchyard_upgrade_from_shared_release_prints_clone_first_tenant_deploy
                 json.dumps(team_launcher._new_project_layout_payload(6), indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
             )
+            (provision_dir / "plan.json").write_text(
+                json.dumps({"board_root": str(board_root)}) + "\n",
+                encoding="utf-8",
+            )
             config_path = _write_launcher_config(
                 provision_dir,
-                pane_launcher=board_root / "current" / "scripts" / "team-launcher",
+                pane_launcher=shared_root / "current" / "scripts" / "team-launcher",
             )
             config = load_project_config("otto", config_path)
             stdout = StringIO()

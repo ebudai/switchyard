@@ -4774,6 +4774,15 @@ def _tenant_board_root_from_config(config: ProjectConfig) -> Path | None:
     return None
 
 
+def _tenant_board_root_from_config_or_plan(config: ProjectConfig, config_path: Path | None = None) -> Path | None:
+    if config_path is not None:
+        plan_data = _plan_data_from_config(config, config_path)
+        board_root = plan_data.get("board_root")
+        if board_root:
+            return Path(str(board_root)).expanduser()
+    return _tenant_board_root_from_config(config)
+
+
 def _read_deploy_sha_marker(path: Path) -> str:
     try:
         return (path / ".pgu-deploy-sha").read_text(encoding="utf-8").strip()
@@ -4869,11 +4878,12 @@ def _resolve_deploy_ref_from_bare_repo(
 def tenant_release_status(
     config: ProjectConfig,
     *,
+    config_path: Path | None = None,
     source_repo: Path | None = None,
     deploy_ref: str = DEFAULT_TENANT_RELEASE_DEPLOY_REF,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> TenantReleaseStatus | None:
-    board_root = _tenant_board_root_from_config(config)
+    board_root = _tenant_board_root_from_config_or_plan(config, config_path)
     if board_root is None:
         return None
     resolved_source_repo = (source_repo or _repo_root()).expanduser().resolve(strict=False)
@@ -4937,12 +4947,19 @@ def _format_release_path(path: Path | None) -> str:
 def report_tenant_release_upgrade(
     config: ProjectConfig,
     *,
+    config_path: Path | None = None,
     source_repo: Path | None = None,
     deploy_ref: str = DEFAULT_TENANT_RELEASE_DEPLOY_REF,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     print_func: Callable[[str], None] = print,
 ) -> None:
-    status = tenant_release_status(config, source_repo=source_repo, deploy_ref=deploy_ref, runner=runner)
+    status = tenant_release_status(
+        config,
+        config_path=config_path,
+        source_repo=source_repo,
+        deploy_ref=deploy_ref,
+        runner=runner,
+    )
     if status is None:
         return
     print_func(
@@ -8687,6 +8704,7 @@ def upgrade_project_command(
         )
     report_tenant_release_upgrade(
         release_report_config,
+        config_path=config_path,
         source_repo=effective_source_repo,
         deploy_ref=deploy_ref,
         runner=runner,

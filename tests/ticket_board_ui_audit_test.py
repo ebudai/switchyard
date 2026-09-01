@@ -350,13 +350,7 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         refresh_open_detail_from_server(page, "PGU-512")
 
         close_detail(page)
-        page.evaluate(
-            """() => {
-              window.TICKET_BOARD_REFRESH_IDLE_MS = 25;
-              window.PGU_TICKET_BOARD_REFRESH_IDLE_MS = 60000;
-              state.lastActivityAt = 0;
-            }"""
-        )
+        page.evaluate("""() => { state.lastActivityAt = 0; }""")
         harness.server.build_id = "pgu-525-idle-build"
         page.evaluate("""async () => { await requestBoardReload(); }""")
         page.wait_for_load_state("domcontentloaded")
@@ -367,7 +361,14 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
             timeout=5000,
         )
         page.locator("#refreshUpdateBanner").wait_for(state="hidden", timeout=5000)
-        page.evaluate("""() => { window.PGU_TICKET_BOARD_REFRESH_IDLE_MS = 25; state.lastActivityAt = 0; }""")
+        assert page.evaluate(
+            """() => {
+              window.TICKET_BOARD_REFRESH_IDLE_MS = 25;
+              window.PGU_TICKET_BOARD_REFRESH_IDLE_MS = 60000;
+              state.lastActivityAt = 0;
+              return refreshIdleMs();
+            }"""
+        ) == 25
 
         modal = open_detail(page, "PGU-512")
         comment_box = modal.get_by_placeholder("Add a comment or bounce-back note")
@@ -381,7 +382,14 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         page.wait_for_load_state("domcontentloaded")
         page.locator(".column-title", has_text="Triage").wait_for(timeout=5000)
         page.wait_for_function("() => window.PGU_TICKET_BOARD_BUILD_ID === 'pgu-525-typing-build'", timeout=5000)
-        page.evaluate("""() => { window.PGU_TICKET_BOARD_REFRESH_IDLE_MS = 25; state.lastActivityAt = 0; }""")
+        assert page.evaluate(
+            """() => {
+              delete window.TICKET_BOARD_REFRESH_IDLE_MS;
+              window.PGU_TICKET_BOARD_REFRESH_IDLE_MS = 25;
+              state.lastActivityAt = 0;
+              return refreshIdleMs();
+            }"""
+        ) == 25
         modal = open_detail(page, "PGU-512")
         comment_box = modal.get_by_placeholder("Add a comment or bounce-back note")
         page.wait_for_function(
@@ -401,7 +409,14 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         page.locator(".column-title", has_text="Triage").wait_for(timeout=5000)
         page.wait_for_function("() => window.PGU_TICKET_BOARD_BUILD_ID === 'pgu-525-detail-open-build'", timeout=5000)
         modal = open_detail(page, "PGU-512")
-        page.evaluate("""() => { window.PGU_TICKET_BOARD_REFRESH_IDLE_MS = 25; state.lastActivityAt = 0; }""")
+        assert page.evaluate(
+            """() => {
+              window.TICKET_BOARD_REFRESH_IDLE_MS = 0;
+              window.PGU_TICKET_BOARD_REFRESH_IDLE_MS = 60000;
+              state.lastActivityAt = 0;
+              return refreshIdleMs();
+            }"""
+        ) == 0
         comment_box = modal.get_by_placeholder("Add a comment or bounce-back note")
         comment_box.fill("Submit survives reload replay")
         page.evaluate("""() => { window.__pguNoReloadMarker = 'reload-replay'; }""")

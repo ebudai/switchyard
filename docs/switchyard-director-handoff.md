@@ -47,7 +47,10 @@ Use neutral `TICKET_BOARD_*`, `TEAM_LAUNCHER_*`, `UPDATE_HOOK_*`, and
 build-id and refresh-idle browser settings now prefer
 `TICKET_BOARD_BUILD_ID` and `TICKET_BOARD_REFRESH_IDLE_MS`. Their `PGU_`
 forms remain compatibility fallbacks; the server emits both build-id globals
-so older JavaScript remains safe during a rolling deploy.
+so older JavaScript remains safe during a rolling deploy. The remaining
+browser-global vocabulary residual is `window.PGU_TICKET_BOARD_WRITE_TOKEN`;
+its environment setting is already neutral, but its emitted global and client
+readers still need a separately scoped compatibility rename before handoff.
 
 ## Migration Rule
 

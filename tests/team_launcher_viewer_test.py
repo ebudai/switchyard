@@ -66,6 +66,8 @@ def test_viewer_layout_starts_role_sessions_and_additive_viewer() -> None:
     assert ["tmux", "set-option", "-t", "porter-viewer", "mouse", "on"] in runner.calls
     assert ["tmux", "set-option", "-t", "porter-viewer", "history-limit", "200000"] in runner.calls
     assert ["tmux", "set-option", "-t", "porter-viewer", "status", "on"] in runner.calls
+    assert ["tmux", "set-option", "-t", "porter-viewer", "set-titles", "on"] in runner.calls
+    assert ["tmux", "set-option", "-t", "porter-viewer", "set-titles-string", "porter"] in runner.calls
     assert ["tmux", "set-option", "-t", "porter-viewer", "prefix", "C-a"] in runner.calls
     assert ["tmux", "set-window-option", "-t", "porter-viewer:0", "pane-border-status", "top"] in runner.calls
     assert ["tmux", "set-window-option", "-t", "porter-viewer:0", "pane-border-format", " #{@role} "] in runner.calls
@@ -127,6 +129,36 @@ def test_project_scoped_viewer_sessions_allow_two_projects_and_same_project_repl
     assert [call[-1] for call in kill_calls] == ["porter-viewer"]
     assert "porter-viewer" in runner.existing_sessions
     assert "otto-viewer" in runner.existing_sessions
+    assert ["tmux", "set-option", "-t", "porter-viewer", "set-titles-string", "porter"] in runner.calls
+    assert ["tmux", "set-option", "-t", "otto-viewer", "set-titles-string", "otto"] in runner.calls
+
+def test_viewer_window_title_uses_project_name_and_survives_attach_cycle_options() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-viewer-title.") as tmp:
+        tmp_path = Path(tmp)
+        config_path = _write_six_visible_role_config(tmp_path, project="otto")
+        raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+        raw_config["project_name"] = "Otto Scheduler"
+        config_path.write_text(json.dumps(raw_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        config = load_project_config("otto", config_path)
+        runner = FakeRunner()
+
+        assert (
+            launch_project(
+                config,
+                config_path=config_path,
+                mode="start",
+                script_path=ROOT / "scripts" / "team-launcher",
+                runner=runner,
+                layout_output=tmp_path / "layout.json",
+                pane_state_dir=tmp_path / "pane-state",
+                layout_mode="viewer",
+                layout_environ={"XDG_CURRENT_DESKTOP": "GNOME"},
+            )
+            == 0
+        )
+
+    assert ["tmux", "set-option", "-t", "otto-viewer", "set-titles", "on"] in runner.calls
+    assert ["tmux", "set-option", "-t", "otto-viewer", "set-titles-string", "Otto Scheduler"] in runner.calls
 
 def test_project_scoped_viewer_ignores_legacy_global_viewer_session() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-viewer-legacy.") as tmp:

@@ -49,7 +49,14 @@ tmux before the viewer is built. Projects
 build viewer windows in a project-scoped `<project>-viewer` tmux session, so
 starting or restarting one project does not replace another project's viewer.
 Pre-upgrade sessions named only `viewer` are left alone because the old name has
-no project identity and cannot be safely adopted or killed automatically. Projects
+no project identity and cannot be safely adopted or killed automatically. Visible
+windows are titled with the project's display name when `project_name` is set in
+the config, and fall back to the project slug otherwise. Viewer mode sets tmux
+`set-titles` and `set-titles-string` on the project-scoped viewer session, so
+the title survives role pane restarts and tmux detach/attach cycles. Konsole
+mode passes the same title with `--qwindowtitle` and writes it into every
+materialized layout leaf's tab `Title`, so the window title stays static instead
+of following whichever role pane has focus. Projects
 without `run_as_user` use the invoking user's runtime
 pane-state directory and `$HOME/bin` prepended to pane CLI `PATH`; projects
 with `run_as_user` prepend that runtime user's `$HOME/bin`, not the invoking
@@ -69,7 +76,7 @@ unset:
 env QT_QPA_PLATFORM=wayland \
   QT_LOGGING_RULES=qt.qpa.wayland.warning=false \
   WAYLAND_DISPLAY=/run/user/<uid>/wayland-0 \
-  konsole --layout ...
+  konsole --separate --qwindowtitle "<project name>" --layout ...
 ```
 
 The commands inside the Konsole layout call `scripts/team-launcher pane ...`

@@ -5,6 +5,17 @@ from __future__ import annotations
 
 from team_launcher_test_helpers import *
 
+def _layout_titles(node: object) -> list[str]:
+    if isinstance(node, dict) and isinstance(node.get("Widgets"), list):
+        titles: list[str] = []
+        for child in node["Widgets"]:
+            titles.extend(_layout_titles(child))
+        return titles
+    if isinstance(node, dict):
+        return [str(node.get("Title") or "")]
+    return []
+
+
 def test_generated_project_hook_install_args_match_otto_one_time_repair_command() -> None:
     original_uid_for_user = team_launcher.uid_for_user
     original_current_user_name = team_launcher.current_user_name
@@ -169,17 +180,102 @@ def test_launch_auto_upgrades_column_major_layout_before_materializing() -> None
         )
 
         assert len(process_launcher.calls) == 1
-        assert process_launcher.calls[0]["args"] == konsole_launch_args(launch_layout)
+        assert process_launcher.calls[0]["args"] == konsole_launch_args(launch_layout, window_title="otto")
         assert process_launcher.calls[0]["kwargs"]["start_new_session"] is True
-        assert not any(call == konsole_launch_args(launch_layout) for call in runner.calls)
+        assert not any(call == konsole_launch_args(launch_layout, window_title="otto") for call in runner.calls)
         assert json.loads(layout_path.read_text(encoding="utf-8")) == team_launcher._new_project_layout_payload(6)
-        assert _layout_session_tree(json.loads(launch_layout.read_text(encoding="utf-8"))) == {
+        materialized = json.loads(launch_layout.read_text(encoding="utf-8"))
+        assert _layout_session_tree(materialized) == {
             "Orientation": "Vertical",
             "Widgets": [
                 {"Orientation": "Horizontal", "Widgets": [0, 1, 2]},
                 {"Orientation": "Horizontal", "Widgets": [3, 4, 5]},
             ],
         }
+        assert _layout_titles(materialized) == ["otto"] * 6
+
+def test_konsole_window_title_uses_project_name_for_every_layout_leaf() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-launcher-konsole-title.") as tmp:
+        provision_dir = Path(tmp) / ".switchyard" / "provision"
+        provision_dir.mkdir(parents=True)
+        layout_path = provision_dir / "otto-konsole-layout.json"
+        layout_path.write_text(
+            json.dumps(team_launcher._new_project_layout_payload(6), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        config_path = _write_launcher_config(provision_dir)
+        raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+        raw_config["project_name"] = "Otto Scheduler"
+        config_path.write_text(json.dumps(raw_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        config = load_project_config("otto", config_path)
+        launch_layout = Path(tmp) / "launch-layout.json"
+        runner = FakeRunner()
+        process_launcher = RecordingProcessLauncher()
+
+        assert (
+            launch_project(
+                config,
+                config_path=config_path,
+                mode="start",
+                script_path=ROOT / "scripts" / "team-launcher",
+                runner=runner,
+                layout_output=launch_layout,
+                layout_environ={"XDG_CURRENT_DESKTOP": "KDE"},
+                no_launcher_self_deploy=True,
+                allow_stale_launcher=True,
+                konsole_process_launcher=process_launcher,
+            )
+            == 0
+        )
+
+        materialized = json.loads(launch_layout.read_text(encoding="utf-8"))
+
+    assert process_launcher.calls[0]["args"] == konsole_launch_args(
+        launch_layout,
+        window_title="Otto Scheduler",
+    )
+    assert _layout_titles(materialized) == ["Otto Scheduler"] * 6
+
+def test_two_konsole_projects_get_distinct_window_titles() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-launcher-konsole-two-title.") as tmp:
+        tmp_path = Path(tmp)
+        runner = FakeRunner()
+        process_launcher = RecordingProcessLauncher()
+
+        for project, project_name in (("porter", "Porter System"), ("otto", "Otto Scheduler")):
+            provision_dir = tmp_path / project / ".switchyard" / "provision"
+            provision_dir.mkdir(parents=True)
+            layout_path = provision_dir / f"{project}-konsole-layout.json"
+            layout_path.write_text(
+                json.dumps(team_launcher._new_project_layout_payload(1), indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            config_path = _write_launcher_config(provision_dir, project=project, role_count=1)
+            raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+            raw_config["project_name"] = project_name
+            config_path.write_text(json.dumps(raw_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            config = load_project_config(project, config_path)
+
+            assert (
+                launch_project(
+                    config,
+                    config_path=config_path,
+                    mode="start",
+                    script_path=ROOT / "scripts" / "team-launcher",
+                    runner=runner,
+                    layout_output=tmp_path / f"{project}-launch-layout.json",
+                    layout_environ={"XDG_CURRENT_DESKTOP": "KDE"},
+                    no_launcher_self_deploy=True,
+                    allow_stale_launcher=True,
+                    konsole_process_launcher=process_launcher,
+                )
+                == 0
+            )
+
+    assert [call["args"] for call in process_launcher.calls] == [
+        konsole_launch_args(tmp_path / "porter-launch-layout.json", window_title="Porter System"),
+        konsole_launch_args(tmp_path / "otto-launch-layout.json", window_title="Otto Scheduler"),
+    ]
 
 def test_gnome_auto_layout_starts_with_tmux_viewer_without_konsole() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-launcher-gnome-viewer.") as tmp:
@@ -630,7 +726,7 @@ def test_explicit_separate_layout_still_launches_konsole_when_desktop_is_undetec
         )
 
     assert len(process_launcher.calls) == 1
-    assert process_launcher.calls[0]["args"] == konsole_launch_args(layout_output)
+    assert process_launcher.calls[0]["args"] == konsole_launch_args(layout_output, window_title="otto")
 
 def test_materialize_layout_refuses_more_than_six_visible_roles() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-visible-cap.") as tmp:

@@ -40,6 +40,34 @@ def test_konsole_launch_uses_gui_user_display_environment() -> None:
         else:
             os.environ["SUDO_USER"] = original_sudo_user
 
+def test_konsole_launch_args_can_set_static_window_title() -> None:
+    original_host_wayland = os.environ.get("HOST_WAYLAND_DISPLAY")
+    original_legacy_host_wayland = os.environ.get("PGU_HOST_WAYLAND_DISPLAY")
+    try:
+        os.environ["HOST_WAYLAND_DISPLAY"] = "/run/user/1000/wayland-0"
+        os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
+
+        assert konsole_launch_args(Path("/tmp/layout.json"), gui_user="user", window_title="Otto Scheduler") == [
+            "env",
+            "QT_QPA_PLATFORM=wayland",
+            "WAYLAND_DISPLAY=/run/user/1000/wayland-0",
+            "konsole",
+            "--separate",
+            "--qwindowtitle",
+            "Otto Scheduler",
+            "--layout",
+            "/tmp/layout.json",
+        ]
+    finally:
+        if original_host_wayland is None:
+            os.environ.pop("HOST_WAYLAND_DISPLAY", None)
+        else:
+            os.environ["HOST_WAYLAND_DISPLAY"] = original_host_wayland
+        if original_legacy_host_wayland is None:
+            os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
+        else:
+            os.environ["PGU_HOST_WAYLAND_DISPLAY"] = original_legacy_host_wayland
+
 def test_konsole_launch_normalizes_relative_host_wayland_display() -> None:
     original_uid_for_user = team_launcher.uid_for_user
     original_current_user_name = team_launcher.current_user_name
@@ -346,7 +374,7 @@ def test_launch_konsole_window_detaches_real_spawn_and_returns_status_line() -> 
         team_launcher.subprocess.Popen = FakePopen
         team_launcher.time.sleep = lambda _seconds: None
         sys.stdout = stdout
-        expected_args = konsole_launch_args(Path("/tmp/layout.json"))
+        expected_args = konsole_launch_args(Path("/tmp/layout.json"), window_title="pgu")
 
         assert launch_konsole_window(Path("/tmp/layout.json"), project="pgu") == 0
     finally:
@@ -395,7 +423,7 @@ def test_launch_konsole_window_injected_runner_still_detaches_process() -> None:
         os.environ["HOST_WAYLAND_DISPLAY"] = "/run/user/1000/wayland-0"
         os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
         team_launcher.time.sleep = lambda _seconds: None
-        expected_args = konsole_launch_args(Path("/tmp/layout.json"))
+        expected_args = konsole_launch_args(Path("/tmp/layout.json"), window_title="pgu")
 
         assert (
             launch_konsole_window(

@@ -151,6 +151,10 @@ SUPPORTED_CONFIG_CLI_NAMES = ("agy", "claude", "codex", "hermes")
 
 def viewer_session_for_project(project: str) -> str:
     return f"{project}-viewer"
+
+
+def project_window_title(config: ProjectConfig) -> str:
+    return config.project_name.strip() or config.project
 KNOWN_LIVE_CLI_NAMES = set(SUPPORTED_CONFIG_CLI_NAMES)
 DEFAULT_MODEL_ARG_BY_CLI = {
     "hermes": "-m",
@@ -273,6 +277,7 @@ class RoleConfig:
 @dataclass(frozen=True)
 class ProjectConfig:
     project: str
+    project_name: str
     ticket_prefix: str
     layout: Path
     session_dir: Path
@@ -648,7 +653,7 @@ def normalize_wayland_display(display: str, *, gui_user: str) -> str | None:
     return f"/run/user/{uid}/{name}"
 
 
-def konsole_launch_args(layout_path: Path, *, gui_user: str | None = None) -> list[str]:
+def konsole_launch_args(layout_path: Path, *, gui_user: str | None = None, window_title: str = "") -> list[str]:
     user = (gui_user if gui_user is not None else default_gui_user()).strip()
     wayland_display = None
     host_wayland_display = _env_first(HOST_WAYLAND_ENV, LEGACY_HOST_WAYLAND_ENV)
@@ -663,15 +668,23 @@ def konsole_launch_args(layout_path: Path, *, gui_user: str | None = None) -> li
             "-lc",
             "printf '%s\\n' 'team-launcher: no host Wayland display; run from Eric desktop session' >&2; exit 1",
         ]
-    return [
+    args = [
         "env",
         "QT_QPA_PLATFORM=wayland",
         f"WAYLAND_DISPLAY={wayland_display}",
         "konsole",
         "--separate",
-        "--layout",
-        str(layout_path),
     ]
+    title = window_title.strip()
+    if title:
+        args.extend(["--qwindowtitle", title])
+    args.extend(
+        [
+            "--layout",
+            str(layout_path),
+        ]
+    )
+    return args
 
 
 def _desktop_is_kde(desktop: str) -> bool:
@@ -826,6 +839,14 @@ def tmux_viewer_set_status_args(viewer_session: str) -> list[str]:
     return ["tmux", "set-option", "-t", viewer_session, "status", "on"]
 
 
+def tmux_viewer_set_titles_args(viewer_session: str) -> list[str]:
+    return ["tmux", "set-option", "-t", viewer_session, "set-titles", "on"]
+
+
+def tmux_viewer_set_titles_string_args(viewer_session: str, title: str) -> list[str]:
+    return ["tmux", "set-option", "-t", viewer_session, "set-titles-string", title]
+
+
 def tmux_viewer_set_prefix_args(viewer_session: str) -> list[str]:
     return ["tmux", "set-option", "-t", viewer_session, "prefix", "C-a"]
 
@@ -846,6 +867,7 @@ def launch_tmux_viewer_session(
     roles: Sequence[RoleConfig],
     *,
     viewer_session: str,
+    window_title: str = "",
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> int:
     if not roles:
@@ -874,6 +896,8 @@ def launch_tmux_viewer_session(
     for args in (
         tmux_viewer_select_layout_args(viewer_session),
         tmux_viewer_set_status_args(viewer_session),
+        tmux_viewer_set_titles_args(viewer_session),
+        tmux_viewer_set_titles_string_args(viewer_session, window_title or viewer_session),
         tmux_viewer_set_prefix_args(viewer_session),
         tmux_viewer_set_border_status_args(viewer_session),
         tmux_viewer_set_border_format_args(viewer_session),
@@ -892,11 +916,12 @@ def launch_konsole_window(
     layout_path: Path,
     *,
     project: str,
+    window_title: str = "",
     gui_user: str | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     process_launcher: Callable[..., Any] | None = None,
 ) -> int:
-    args = konsole_launch_args(layout_path, gui_user=gui_user)
+    args = konsole_launch_args(layout_path, gui_user=gui_user, window_title=window_title or project)
     if args[:2] == ["sh", "-lc"]:
         return runner(args).returncode
     launch_process = process_launcher or subprocess.Popen
@@ -1496,6 +1521,7 @@ def load_project_config(project: str, config_path: Path | None = None) -> Projec
     config_project = _validate_project_slug(str(config.get("project") or project_slug))
     if config_project != project_slug:
         raise SystemExit(f"config project {config_project!r} does not match requested project {project_slug!r}")
+    project_name = str(config.get("project_name") or config.get("name") or config_project).strip() or config_project
     roles_raw = config.get("roles")
     if not isinstance(roles_raw, list) or not roles_raw:
         raise SystemExit(f"{path} must define a non-empty roles list")
@@ -1580,6 +1606,7 @@ def load_project_config(project: str, config_path: Path | None = None) -> Projec
         raise SystemExit(f"{path} contains duplicate non-shared role workdir assignments: {', '.join(duplicate_non_shared)}")
     parsed_config = ProjectConfig(
         project=config_project,
+        project_name=project_name,
         ticket_prefix=ticket_prefix,
         layout=layout,
         session_dir=session_dir,
@@ -4358,6 +4385,7 @@ def materialize_layout(
                 run_as_user=config.run_as_user,
             )
             leaf["WorkingDirectory"] = role.workdir
+        leaf["Title"] = project_window_title(config)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(layout, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return output_path
@@ -5084,6 +5112,7 @@ def launch_project(
             )
     effective_pane_state_dir = pane_state_dir or default_pane_state_dir_for_user(config.run_as_user, project=config.project)
     output_path = layout_output or default_layout_output_path(config, config_path=config_path)
+    window_title = project_window_title(config)
     should_assign_layout_owner = layout_output is None if assign_layout_owner is None else assign_layout_owner
     pane_script_path = config.pane_launcher or script_path
     if not dry_run:
@@ -5149,6 +5178,7 @@ def launch_project(
         ensure_layout_output_owner(config, output_path, runner=runner)
     plan = {
         "project": config.project,
+        "window_title": window_title,
         "mode": mode,
         "layout": str(output_path),
         "run_as_user": config.run_as_user or current_user_name(),
@@ -5279,6 +5309,7 @@ def launch_project(
             launch_result = launch_tmux_viewer_session(
                 launchable_viewer_roles,
                 viewer_session=viewer_session_for_project(config.project),
+                window_title=window_title,
                 runner=runner,
             )
         elif viewer_roles:
@@ -5290,6 +5321,7 @@ def launch_project(
         launch_result = launch_konsole_window(
             output_path,
             project=config.project,
+            window_title=window_title,
             runner=runner,
             process_launcher=konsole_process_launcher,
         )

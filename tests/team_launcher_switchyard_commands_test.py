@@ -108,6 +108,8 @@ def test_legacy_and_switchyard_entrypoints_render_same_plain_konsole_command() -
             "WAYLAND_DISPLAY=/run/user/1000/wayland-0",
             "konsole",
             "--separate",
+            "--qwindowtitle",
+            "pgu",
             "--layout",
             str(legacy_layout),
         ]
@@ -117,6 +119,8 @@ def test_legacy_and_switchyard_entrypoints_render_same_plain_konsole_command() -
             "WAYLAND_DISPLAY=/run/user/1000/wayland-0",
             "konsole",
             "--separate",
+            "--qwindowtitle",
+            "pgu",
             "--layout",
             str(switchyard_layout),
         ]

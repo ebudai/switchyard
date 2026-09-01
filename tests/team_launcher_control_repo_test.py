@@ -247,9 +247,9 @@ def test_control_repository_launch_runs_bootstrap_as_configured_owner() -> None:
         assert team_launcher.git_control_worktree_add_args(config, config.roles[0]) not in runner.calls
         assert not any(call[:2] == ["chown", "-R"] for call in runner.calls)
         assert len(process_launcher.calls) == 1
-        assert process_launcher.calls[0]["args"] == konsole_launch_args(layout_output)
+        assert process_launcher.calls[0]["args"] == konsole_launch_args(layout_output, window_title="otto")
         assert process_launcher.calls[0]["kwargs"]["start_new_session"] is True
-        assert not any(call == konsole_launch_args(layout_output) for call in runner.calls)
+        assert not any(call == konsole_launch_args(layout_output, window_title="otto") for call in runner.calls)
 
 def test_control_repository_bootstrap_failure_aborts_without_opening_window() -> None:
     class FailingControlRunner(FakeRunner):
@@ -328,7 +328,7 @@ def test_control_repository_bootstrap_failure_aborts_without_opening_window() ->
         assert "failed to prepare control repository for otto" in stderr.getvalue()
         assert "detected dubious ownership" in stderr.getvalue()
         assert not layout_output.exists()
-        assert not any(call == konsole_launch_args(layout_output) for call in runner.calls)
+        assert not any(call == konsole_launch_args(layout_output, window_title="otto") for call in runner.calls)
 
 def test_control_repository_repairs_owner_mismatch_before_clone() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-control-repair.") as tmp:
@@ -708,9 +708,9 @@ def test_launch_without_control_repository_does_not_owner_wrap_pgu_plan() -> Non
         assert not any(call[:3] == ["sudo", "-u", "agent"] for call in runner.calls)
         assert not any(call[:2] == ["chown", "-R"] for call in runner.calls)
         assert len(process_launcher.calls) == 1
-        assert process_launcher.calls[0]["args"] == konsole_launch_args(layout_output)
+        assert process_launcher.calls[0]["args"] == konsole_launch_args(layout_output, window_title="pgu")
         assert process_launcher.calls[0]["kwargs"]["start_new_session"] is True
-        assert not any(call == konsole_launch_args(layout_output) for call in runner.calls)
+        assert not any(call == konsole_launch_args(layout_output, window_title="pgu") for call in runner.calls)
 
 def main() -> int:
     run_team_launcher_tests(globals(), first=())

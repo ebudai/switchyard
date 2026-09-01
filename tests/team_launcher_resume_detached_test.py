@@ -293,9 +293,9 @@ def test_start_runs_research_detached_before_opening_visible_layout() -> None:
         layout = json.loads(layout_output.read_text(encoding="utf-8"))
         assert {leaf.get("WorkingDirectory") for leaf in team_launcher._layout_leaves(layout)} == {str(tmp_path / "repo")}
         assert len(process_launcher.calls) == 1
-        assert process_launcher.calls[0]["args"] == konsole_launch_args(layout_output)
+        assert process_launcher.calls[0]["args"] == konsole_launch_args(layout_output, window_title="pgu")
         assert process_launcher.calls[0]["kwargs"]["start_new_session"] is True
-        assert not any(call == konsole_launch_args(layout_output) for call in runner.calls)
+        assert not any(call == konsole_launch_args(layout_output, window_title="pgu") for call in runner.calls)
         assert ["tmux", "attach", "-t", "pgu-research"] not in runner.calls
 
 def test_plain_shared_checkout_git_runs_as_owner_when_launcher_user_differs() -> None:

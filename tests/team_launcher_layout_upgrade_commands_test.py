@@ -181,6 +181,43 @@ def test_launch_auto_upgrades_column_major_layout_before_materializing() -> None
             ],
         }
 
+def test_gnome_auto_layout_starts_with_tmux_viewer_without_konsole() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-launcher-gnome-viewer.") as tmp:
+        provision_dir = Path(tmp) / ".switchyard" / "provision"
+        provision_dir.mkdir(parents=True)
+        layout_path = provision_dir / "otto-konsole-layout.json"
+        layout_path.write_text(
+            json.dumps(team_launcher._new_project_layout_payload(6), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        config_path = _write_launcher_config(provision_dir)
+        config = load_project_config("otto", config_path)
+        runner = FakeRunner()
+        process_launcher = RecordingProcessLauncher()
+
+        assert (
+            launch_project(
+                config,
+                config_path=config_path,
+                mode="start",
+                script_path=ROOT / "scripts" / "team-launcher",
+                runner=runner,
+                layout_output=Path(tmp) / "launch-layout.json",
+                layout_environ={"XDG_CURRENT_DESKTOP": "GNOME"},
+                no_launcher_self_deploy=True,
+                allow_stale_launcher=True,
+                konsole_process_launcher=process_launcher,
+            )
+            == 0
+        )
+
+    assert process_launcher.calls == []
+    assert any(
+        call[:2] == ["tmux", "new-session"] and call[call.index("-s") + 1] == "otto-viewer"
+        for call in runner.calls
+    )
+    assert not any("konsole" in " ".join(call) for call in runner.calls)
+
 def test_materialize_layout_places_six_roles_row_major() -> None:
     roles = ["designer", "director", "audit", "ops", "app", "main"]
     with tempfile.TemporaryDirectory(prefix="pgu-launcher-row-major.") as tmp:

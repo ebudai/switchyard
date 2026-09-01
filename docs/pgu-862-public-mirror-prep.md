@@ -170,9 +170,14 @@ and hook-management code.
   `failed to stop <role>: <session>: <reason>`.
 - `konsole` is required only for the KDE/separate-window layout path. The
   launcher builds `konsole --layout <project>-konsole-layout.json`; if Konsole
-  is not installed, that launch path fails at process start.
+  is not installed, that launch path fails at process start. The base
+  `scripts/install-switchyard-prereqs` package set intentionally omits Konsole
+  and prints a KDE-only install line instead. On Zorin 18.1 / Ubuntu 24.04
+  noble, `apt-get install --dry-run konsole` listed 141 packages.
 - A non-GUI or non-KDE environment can use the tmux viewer/headless paths, but
   still needs tmux.
+- `python-is-python3` is not required: Switchyard invokes `python3`, and the
+  bare `python` package name appears only in the pacman package set.
 
 ### Agent CLIs, Auth, Trust, And Models
 

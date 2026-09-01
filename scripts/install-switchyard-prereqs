@@ -69,13 +69,17 @@ run_cmd() {
 manager="$(detect_manager)"
 case "$manager" in
     apt)
+        printf 'Refreshing apt package index with apt-get update before installing packages.\n'
         run_cmd "$SUDO_BIN" apt-get update
         run_cmd "$SUDO_BIN" apt-get install -y \
-            python3 postgresql postgresql-client tmux konsole git curl python3-pip acl
+            python3 postgresql postgresql-client tmux git curl python3-pip acl
+        printf 'KDE/separate layout users also need Konsole: %s apt-get install -y konsole\n' "$SUDO_BIN"
         ;;
     pacman)
+        printf 'Not refreshing pacman package databases automatically; run %s pacman -Syu first on Arch-family systems.\n' "$SUDO_BIN"
         run_cmd "$SUDO_BIN" pacman -S --needed \
-            python postgresql tmux konsole git curl python-pip acl
+            python postgresql tmux git curl python-pip acl
+        printf 'KDE/separate layout users also need Konsole: %s pacman -S --needed konsole\n' "$SUDO_BIN"
         ;;
 esac
 

@@ -1,6 +1,16 @@
 """Board frontend API, event, and boot JavaScript."""
 
-SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
+SCRIPT_APP = """    function ticketBoardWriteToken() {
+      return String(window.TICKET_BOARD_WRITE_TOKEN ?? window.PGU_TICKET_BOARD_WRITE_TOKEN ?? '');
+    }
+
+    function setTicketBoardWriteToken(value) {
+      const token = String(value ?? '');
+      window.TICKET_BOARD_WRITE_TOKEN = token;
+      window.PGU_TICKET_BOARD_WRITE_TOKEN = token;
+    }
+
+    function uploadSetQuery(setOptions = {}) {
       const params = new URLSearchParams();
       const setKind = String(setOptions.set || '').trim();
       const label = String(setOptions.label || '').trim();
@@ -23,8 +33,9 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
 
     async function uploadImageBlob(blob, setOptions = {}) {
       const headers = { 'Content-Type': blob.type || 'image/png' };
-      if (window.PGU_TICKET_BOARD_WRITE_TOKEN) {
-        headers['X-Ticket-Board-Write-Token'] = window.PGU_TICKET_BOARD_WRITE_TOKEN;
+      const writeToken = ticketBoardWriteToken();
+      if (writeToken) {
+        headers['X-Ticket-Board-Write-Token'] = writeToken;
       }
       const response = await fetch(`/api/upload${uploadSetQuery(setOptions)}`, {
         method: 'POST',
@@ -282,8 +293,9 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
 
     function ticketWriteHeaders(callerRole = null) {
       const headers = { 'Content-Type': 'application/json' };
-      if (window.PGU_TICKET_BOARD_WRITE_TOKEN) {
-        headers['X-Ticket-Board-Write-Token'] = window.PGU_TICKET_BOARD_WRITE_TOKEN;
+      const writeToken = ticketBoardWriteToken();
+      if (writeToken) {
+        headers['X-Ticket-Board-Write-Token'] = writeToken;
       }
       const normalizedCaller = callerRole ? callerRole.trim().toLowerCase() : '';
       if (normalizedCaller) {
@@ -340,7 +352,7 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
     }
 
     async function refreshClientConfig() {
-      const previousToken = String(window.PGU_TICKET_BOARD_WRITE_TOKEN || '');
+      const previousToken = ticketBoardWriteToken();
       const response = await fetch('/api/client-config', { cache: 'no-store' });
       if (!response.ok) {
         throw new Error(await response.text());
@@ -348,7 +360,7 @@ SCRIPT_APP = """    function uploadSetQuery(setOptions = {}) {
       const payload = await response.json();
       const nextToken = String(payload.write_token || '');
       if (nextToken) {
-        window.PGU_TICKET_BOARD_WRITE_TOKEN = nextToken;
+        setTicketBoardWriteToken(nextToken);
       }
       updateRefreshRequired(payload.build_id);
       return {

@@ -1066,7 +1066,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/":
             token_script = (
-                f"  <script>window.PGU_TICKET_BOARD_WRITE_TOKEN = {json.dumps(self.write_token)};"
+                f"  <script>window.TICKET_BOARD_WRITE_TOKEN = {json.dumps(self.write_token)};"
+                f" window.PGU_TICKET_BOARD_WRITE_TOKEN = {json.dumps(self.write_token)};"
                 f" window.TICKET_BOARD_BUILD_ID = {json.dumps(self.server.build_id)};"
                 f" window.PGU_TICKET_BOARD_BUILD_ID = {json.dumps(self.server.build_id)};</script>\n"
             )

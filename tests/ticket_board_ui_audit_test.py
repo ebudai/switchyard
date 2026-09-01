@@ -154,7 +154,7 @@ def complete_task_from_browser(page: Any, ticket_id: str, caller_role: str, text
             headers: {
               'Content-Type': 'application/json',
               'X-Ticket-Board-Caller-Role': callerRole,
-              'X-Ticket-Board-Write-Token': window.PGU_TICKET_BOARD_WRITE_TOKEN,
+              'X-Ticket-Board-Write-Token': ticketBoardWriteToken(),
             },
             body: JSON.stringify({ text }),
           });
@@ -260,6 +260,52 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         page.goto(harness.url, wait_until="domcontentloaded")
         page.locator(".column-title", has_text="Triage").wait_for(timeout=5000)
         install_update_ticket_tracker(page)
+        token_behavior = page.evaluate(
+            """async () => {
+              const servedNeutral = window.TICKET_BOARD_WRITE_TOKEN;
+              const servedLegacy = window.PGU_TICKET_BOARD_WRITE_TOKEN;
+              window.TICKET_BOARD_WRITE_TOKEN = 'neutral-token';
+              window.PGU_TICKET_BOARD_WRITE_TOKEN = 'legacy-token';
+              const preferred = ticketBoardWriteToken();
+              const preferredHeader = ticketWriteHeaders('main')['X-Ticket-Board-Write-Token'];
+              window.TICKET_BOARD_WRITE_TOKEN = '';
+              const falsy = ticketBoardWriteToken();
+              const falsyHeaderPresent = 'X-Ticket-Board-Write-Token' in ticketWriteHeaders('main');
+              delete window.TICKET_BOARD_WRITE_TOKEN;
+              const fallback = ticketBoardWriteToken();
+              window.TICKET_BOARD_WRITE_TOKEN = servedNeutral;
+              window.PGU_TICKET_BOARD_WRITE_TOKEN = 'stale-legacy-token';
+              const refreshResult = await refreshClientConfig();
+              const refreshedNeutral = window.TICKET_BOARD_WRITE_TOKEN;
+              const refreshedLegacy = window.PGU_TICKET_BOARD_WRITE_TOKEN;
+              window.TICKET_BOARD_WRITE_TOKEN = servedNeutral;
+              window.PGU_TICKET_BOARD_WRITE_TOKEN = 'invalid-legacy-token';
+              return {
+                servedNeutral,
+                servedLegacy,
+                preferred,
+                preferredHeader,
+                falsy,
+                falsyHeaderPresent,
+                fallback,
+                refreshResult,
+                refreshedNeutral,
+                refreshedLegacy,
+              };
+            }"""
+        )
+        assert token_behavior == {
+            "servedNeutral": harness.server.write_token,
+            "servedLegacy": harness.server.write_token,
+            "preferred": "neutral-token",
+            "preferredHeader": "neutral-token",
+            "falsy": "",
+            "falsyHeaderPresent": False,
+            "fallback": "legacy-token",
+            "refreshResult": {"tokenChanged": False, "buildChanged": False},
+            "refreshedNeutral": harness.server.write_token,
+            "refreshedLegacy": harness.server.write_token,
+        }
         try:
             wait_for_ticket_field(page, harness.url, "PGU-501", "ticket.id === 'NOPE-SENTINEL'", timeout=100)
         except AssertionError:
@@ -281,10 +327,17 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         page.locator("#createStatus", has_text="feedback upload set requires a feedback number").wait_for(timeout=5000)
         assert page.locator("#createPreview .attachment-card").count() == 0
 
+        page.evaluate(
+            """() => {
+              window.PGU_TICKET_BOARD_WRITE_TOKEN = window.TICKET_BOARD_WRITE_TOKEN;
+              delete window.TICKET_BOARD_WRITE_TOKEN;
+            }"""
+        )
         page.locator("#createAttachDropZone [data-attach-attempt]").fill("7")
         page.locator("#createImageInput").set_input_files(str(upload_source))
         page.locator("#createStatus", has_text="Attached image to the new ticket.").wait_for(timeout=5000)
         assert page.locator("#createPreview .attachment-card", has_text="feedback-007-phone-proof__upload-source.png").count() == 1
+        page.evaluate("""() => { setTicketBoardWriteToken(window.PGU_TICKET_BOARD_WRITE_TOKEN); }""")
 
         page.locator("#createImageInput").set_input_files(str(upload_source))
         page.locator("#createStatus", has_text="Attached image to the new ticket.").wait_for(timeout=5000)
@@ -460,7 +513,9 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
                 const result = await originalRefreshClientConfig();
                 window.__pguRefreshClientConfigResults.push({
                   ...result,
-                  token: window.PGU_TICKET_BOARD_WRITE_TOKEN,
+                  token: ticketBoardWriteToken(),
+                  neutralToken: window.TICKET_BOARD_WRITE_TOKEN,
+                  legacyToken: window.PGU_TICKET_BOARD_WRITE_TOKEN,
                 });
                 return result;
               };
@@ -479,6 +534,11 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         assert token_route_state["rotated"]
         assert 403 in add_comment_statuses, add_comment_statuses
         assert any(result.get("tokenChanged") for result in refresh_results), refresh_results
+        assert any(
+            result.get("neutralToken") == "pgu-525-reactive-token"
+            and result.get("legacyToken") == "pgu-525-reactive-token"
+            for result in refresh_results
+        ), refresh_results
         comment_box = modal.get_by_placeholder("Add a comment or bounce-back note")
         page.wait_for_function(
             "(element) => element.value === ''",

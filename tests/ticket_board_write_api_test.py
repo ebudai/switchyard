@@ -313,8 +313,9 @@ def assert_served_html_contains_write_token(base_url: str) -> None:
         html = response.read().decode("utf-8")
     with urllib.request.urlopen(base_url + "/api/board", timeout=5) as response:
         build_id = json.loads(response.read().decode("utf-8"))["build_id"]
-    assert "window.PGU_TICKET_BOARD_WRITE_TOKEN" in html
     assert TEST_WRITE_TOKEN and TEST_WRITE_TOKEN in html
+    assert f"window.TICKET_BOARD_WRITE_TOKEN = {json.dumps(TEST_WRITE_TOKEN)}" in html
+    assert f"window.PGU_TICKET_BOARD_WRITE_TOKEN = {json.dumps(TEST_WRITE_TOKEN)}" in html
     assert f"window.TICKET_BOARD_BUILD_ID = {json.dumps(build_id)}" in html
     assert f"window.PGU_TICKET_BOARD_BUILD_ID = {json.dumps(build_id)}" in html
 
@@ -384,7 +385,7 @@ def assert_frontend_writes_send_auth_token() -> None:
     source = "\n".join(path.read_text(encoding="utf-8") for path in FRONTEND_SCRIPT_PATHS)
     assert "X-Ticket-Board-Write-Token" in source
     assert "X-Ticket-Board-Caller-Role" in source
-    assert "window.PGU_TICKET_BOARD_WRITE_TOKEN" in source
+    assert "ticketBoardWriteToken()" in source
 
 
 def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:

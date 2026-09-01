@@ -43,14 +43,13 @@ been provisioned.
 Do not provision `syrd` twice. Before any cutover action, verify the registry,
 systemd units, board port, socket path, ticket prefix, and pane environment.
 Use neutral `TICKET_BOARD_*`, `TEAM_LAUNCHER_*`, `UPDATE_HOOK_*`, and
-`ALLOW_MAIN_PUSH` names. Do not introduce `SYRD_*` vocabulary. The known
-build-id and refresh-idle browser settings now prefer
-`TICKET_BOARD_BUILD_ID` and `TICKET_BOARD_REFRESH_IDLE_MS`. Their `PGU_`
-forms remain compatibility fallbacks; the server emits both build-id globals
-so older JavaScript remains safe during a rolling deploy. The remaining
-browser-global vocabulary residual is `window.PGU_TICKET_BOARD_WRITE_TOKEN`;
-its environment setting is already neutral, but its emitted global and client
-readers still need a separately scoped compatibility rename before handoff.
+`ALLOW_MAIN_PUSH` names. Do not introduce `SYRD_*` vocabulary. The build-id,
+refresh-idle, and write-token browser settings prefer `TICKET_BOARD_*` names
+with `PGU_TICKET_BOARD_*` compatibility fallbacks. The server emits both the
+neutral and legacy build-id and write-token globals so older JavaScript remains
+safe during a rolling deploy. Remove those legacy forms only after all deployed
+configuration and client code use neutral names and the supported stale-page
+window for pre-change JavaScript has elapsed.
 
 ## Migration Rule
 

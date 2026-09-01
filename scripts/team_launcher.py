@@ -8386,11 +8386,20 @@ def _configured_implementer_roles(
     return tuple(roles)
 
 
-def _configured_audit_roles(config: ProjectConfig, *, plan_data: dict[str, Any] | None = None) -> tuple[str, ...]:
+def _configured_audit_roles(
+    config: ProjectConfig,
+    *,
+    plan_data: dict[str, Any] | None = None,
+    extra_role: str | None = None,
+) -> tuple[str, ...]:
     raw_plan_roles = (plan_data or {}).get("audit_roles")
     if isinstance(raw_plan_roles, list):
-        return _dedupe_role_names(tuple(str(role).strip().lower() for role in raw_plan_roles if str(role).strip()))
-    return ("audit",) if any(role.role == "audit" for role in config.roles) else ()
+        roles = list(_dedupe_role_names(tuple(str(role).strip().lower() for role in raw_plan_roles if str(role).strip())))
+    else:
+        roles = ["audit"] if any(role.role == "audit" for role in config.roles) else []
+    if extra_role and extra_role not in roles:
+        roles.append(extra_role)
+    return tuple(roles)
 
 
 def _loaded_plan_field(plan_data: dict[str, Any], key: str, default: Any) -> Any:
@@ -8444,10 +8453,19 @@ def _project_plan_for_added_role(
     *,
     config_path: Path,
     role_name: str,
+    audit_role: bool = False,
 ) -> ProjectBoardProvision:
     plan_data = _plan_data_from_config(config, config_path)
-    implementer_roles = _configured_implementer_roles(config, plan_data=plan_data, extra_role=role_name)
-    audit_roles = _configured_audit_roles(config, plan_data=plan_data)
+    implementer_roles = _configured_implementer_roles(
+        config,
+        plan_data=plan_data,
+        extra_role=None if audit_role else role_name,
+    )
+    audit_roles = _configured_audit_roles(
+        config,
+        plan_data=plan_data,
+        extra_role=role_name if audit_role else None,
+    )
     include_designer = any(role.role == "designer" for role in config.roles)
     return build_plan(
         project=config.project,
@@ -8547,7 +8565,14 @@ def _add_role_payload(
     return payload
 
 
-def _update_project_design_artifact_for_role(config: ProjectConfig, config_path: Path, *, role_name: str, cli: str) -> Path | None:
+def _update_project_design_artifact_for_role(
+    config: ProjectConfig,
+    config_path: Path,
+    *,
+    role_name: str,
+    cli: str,
+    audit_role: bool = False,
+) -> Path | None:
     artifact_path = config_path.parent.parent / f"{config.project}.project.json"
     try:
         artifact = _load_json(artifact_path)
@@ -8556,14 +8581,17 @@ def _update_project_design_artifact_for_role(config: ProjectConfig, config_path:
     project_data = artifact.get("project")
     if not isinstance(project_data, dict):
         return None
-    raw_roles = project_data.get("roles")
+    roles_key = "audit_roles" if audit_role else "roles"
+    raw_roles = project_data.get(roles_key)
     if isinstance(raw_roles, list):
         roles = [str(item).strip().lower() for item in raw_roles if str(item).strip()]
     else:
         roles = []
     if role_name not in roles:
         roles.append(role_name)
-        project_data["roles"] = roles
+        project_data[roles_key] = roles
+    if audit_role:
+        project_data["include_audit"] = True
     raw_role_clis = project_data.get("role_clis")
     if not isinstance(raw_role_clis, dict):
         raw_role_clis = {}
@@ -8582,6 +8610,7 @@ def _write_added_role_config(
     detached: bool,
     slot: int | None,
     relayout: bool = False,
+    audit_role: bool = False,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
 ) -> tuple[ProjectConfig, bool]:
     if any(role.role == role_name for role in config.roles):
@@ -8646,7 +8675,13 @@ def _write_added_role_config(
             encoding="utf-8",
         )
         ensure_owner_file(updated_config, updated_config.layout, runner=runner)
-    artifact_path = _update_project_design_artifact_for_role(updated_config, config_path, role_name=role_name, cli=cli)
+    artifact_path = _update_project_design_artifact_for_role(
+        updated_config,
+        config_path,
+        role_name=role_name,
+        cli=cli,
+        audit_role=audit_role,
+    )
     if artifact_path is not None:
         ensure_owner_file(updated_config, artifact_path, runner=runner)
     return load_project_config(config.project, config_path), should_regenerate_layout
@@ -8783,15 +8818,25 @@ def add_project_role_command(
     detached: bool = False,
     slot: int | None = None,
     relayout: bool = False,
+    audit_role: bool = False,
     start: bool = True,
     script_path: Path | None = None,
     pane_state_dir: Path | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     print_func: Callable[[str], None] = print,
 ) -> int:
-    role = _validate_new_project_implementer_role(role_name, context="role")
+    role = (
+        _validate_new_project_audit_role(role_name, context="audit role")
+        if audit_role
+        else _validate_new_project_implementer_role(role_name, context="role")
+    )
     cli_name = _validate_new_project_cli(cli, context=f"CLI for {role}")
-    preflight_plan = _project_plan_for_added_role(config, config_path=config_path, role_name=role)
+    preflight_plan = _project_plan_for_added_role(
+        config,
+        config_path=config_path,
+        role_name=role,
+        audit_role=audit_role,
+    )
     render_add_role_sql(preflight_plan, role)
     existing_role = next((candidate for candidate in config.roles if candidate.role == role), None)
     recovering_existing_role = existing_role is not None
@@ -8807,9 +8852,15 @@ def add_project_role_command(
             detached=detached,
             slot=slot,
             relayout=relayout,
+            audit_role=audit_role,
             runner=runner,
         )
-    plan = _project_plan_for_added_role(updated_config, config_path=config_path, role_name=role)
+    plan = _project_plan_for_added_role(
+        updated_config,
+        config_path=config_path,
+        role_name=role,
+        audit_role=audit_role,
+    )
     _plan_path, board_unit_path, _sql_path = _write_updated_project_plan_artifacts(
         plan,
         role_name=role,
@@ -8855,7 +8906,8 @@ def add_project_role_command(
     if recovering_existing_role:
         message = f"team-launcher: role {role} already exists in {updated_config.project}; reapplied board registration"
     else:
-        message = f"team-launcher: added role {role} to {updated_config.project}"
+        role_label = "auditor role" if audit_role else "role"
+        message = f"team-launcher: added {role_label} {role} to {updated_config.project}"
     if not detached:
         visible_count = sum(1 for candidate in updated_config.roles if not candidate.detached)
         if regenerated_layout:
@@ -9148,6 +9200,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--launcher-repo", type=Path, help="launcher checkout to update or verify (default: this script's repo)")
     parser.add_argument("--deploy-ref", default=DEFAULT_TENANT_RELEASE_DEPLOY_REF, help="board release ref to deploy during upgrade (default: origin/main)")
     parser.add_argument("--cli", dest="add_role_cli", default="codex", help="CLI runtime for `add-role` (default: codex)")
+    parser.add_argument("--audit", dest="add_role_audit", action="store_true", help="add the role as an auditor instead of an implementer")
     parser.add_argument("--detached", action="store_true", help="configure `add-role` as headless instead of visible")
     parser.add_argument("--relayout", action="store_true", help="replace the existing layout with a generated layout when adding a visible role")
     parser.add_argument("--clean-launcher", action="store_true", help="run git clean -fdx after updating --launcher-repo")
@@ -9207,8 +9260,9 @@ def _build_switchyard_upgrade_parser() -> argparse.ArgumentParser:
 def _build_switchyard_add_role_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="switchyard add-role", description="Add a role to an existing Switchyard project.")
     parser.add_argument("project", help="project name or slug")
-    parser.add_argument("role", help="new implementer role name")
+    parser.add_argument("role", help="new role name")
     parser.add_argument("--cli", default="codex", help="CLI runtime for the role (default: codex)")
+    parser.add_argument("--audit", action="store_true", help="add the role as an auditor instead of an implementer")
     parser.add_argument("--slot", type=int, help="visible layout slot; generated layouts append automatically when omitted")
     parser.add_argument("--detached", action="store_true", help="start the role as a headless tmux session")
     parser.add_argument("--relayout", action="store_true", help="replace the existing layout with a generated layout when adding a visible role")
@@ -9249,7 +9303,7 @@ Commands:
   new              create and provision a new project
   register         register an existing project config
   upgrade          update generated project artifacts and report release drift
-  add-role         add an implementer role, worktree, pane, and board registration
+  add-role         add an implementer or auditor role, worktree, pane, and board registration
   set-vcs-close-role
                    set which existing project role can mark tickets done
   stop             stop a project's configured tmux pane sessions
@@ -9405,6 +9459,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             config_path=entry.config_path,
             role_name=args.role,
             cli=args.cli,
+            audit_role=args.audit,
             detached=args.detached,
             slot=args.slot,
             relayout=args.relayout,
@@ -9541,6 +9596,7 @@ def main(argv: list[str] | None = None) -> int:
             config_path=config_path,
             role_name=args.pane_mode,
             cli=args.add_role_cli,
+            audit_role=args.add_role_audit,
             detached=args.detached,
             slot=args.slot,
             relayout=args.relayout,

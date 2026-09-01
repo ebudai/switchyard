@@ -340,7 +340,7 @@ def test_add_role_sql_expands_existing_project_constraints_and_workflow_roles() 
     )
     sql = render_add_role_sql(plan, "ops")
 
-    assert "Add role ops to the existing project workflow for mefp" in sql
+    assert "Add implementer role ops to the existing project workflow for mefp" in sql
     assert "DELETE FROM ticket_board.tickets" not in sql
     assert "DELETE FROM ticket_board.workflow_stages" not in sql
     assert "DROP CONSTRAINT IF EXISTS tickets_assignee_check" in sql

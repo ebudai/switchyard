@@ -25,6 +25,7 @@ from scripts.ticket_board.project_provision import (
     project_workflow_stages,
     project_workflow_transitions,
     render_database_sql,
+    render_add_role_sql,
     render_vcs_close_role_sql,
     render_workflow_sql,
     schema_workflow_stages,
@@ -949,6 +950,141 @@ SELECT ticket_board.create_ticket('Second partitioned audit workflow ticket', 'B
                 psql(
                     multi_audit_admin_conn,
                     f"SELECT state || ':' || assignee || ':' || audit_signoff::text FROM ticket_board.tickets WHERE id = '{second_multi_audit_ticket_id}';",
+                )
+                == "director_review:director:true"
+            )
+
+            incremental_audit_dbname = "project_workflow_incremental_audit"
+            run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", incremental_audit_dbname])
+            incremental_audit_admin_conn = conninfo(socket_dir, port, incremental_audit_dbname)
+            incremental_audit_service_conn = conninfo(socket_dir, port, incremental_audit_dbname, "ticket_board_service")
+            psql(incremental_audit_admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
+            run_migrations(incremental_audit_admin_conn)
+            initial_incremental_plan = build_plan(
+                project="reviewinc",
+                owner_user="review-agent",
+                database=incremental_audit_dbname,
+                include_designer=False,
+                implementer_roles=("main",),
+                audit_roles=("audit_gemini",),
+            )
+            psql(incremental_audit_admin_conn, render_workflow_sql(initial_incremental_plan))
+            psql(incremental_audit_admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
+            expanded_incremental_plan = build_plan(
+                project="reviewinc",
+                owner_user="review-agent",
+                database=incremental_audit_dbname,
+                include_designer=False,
+                implementer_roles=("main",),
+                audit_roles=("audit_gemini", "audit_gpt"),
+            )
+            psql(incremental_audit_admin_conn, render_add_role_sql(expanded_incremental_plan, "audit_gpt"))
+
+            assert_project_workflow_matches_schema_projection(incremental_audit_admin_conn, expanded_incremental_plan)
+            assert (
+                psql(
+                    incremental_audit_admin_conn,
+                    "SELECT owner_roles::text FROM ticket_board.workflow_stages WHERE name = 'audit';",
+                )
+                == "{audit_gemini,audit_gpt}"
+            )
+            assert (
+                psql(
+                    incremental_audit_admin_conn,
+                    """
+SELECT allowed_roles::text
+FROM ticket_board.workflow_transitions
+WHERE from_stage = 'audit' AND to_stage = 'director_review' AND action_name = 'audit_sign_off';
+""",
+                )
+                == "{audit_gemini,audit_gpt}"
+            )
+            assert (
+                psql(
+                    incremental_audit_admin_conn,
+                    """
+SELECT count(*)
+FROM ticket_board.ticket_notification_queue
+WHERE target_role NOT IN ('main', 'audit_gemini', 'audit_gpt', 'director');
+""",
+                )
+                == "0"
+            )
+
+            incremental_ticket_id = service_call(
+                incremental_audit_service_conn,
+                "director",
+                """
+SELECT set_config('ticket_board.ticket_prefix', 'RIA', false);
+SELECT ticket_board.create_ticket('Incremental auditor workflow ticket', 'Body', 'analysis');
+""",
+            )
+            service_call(incremental_audit_service_conn, "director", f"SELECT ticket_board.route('{incremental_ticket_id}', 'in_progress', 'main');")
+            psql(incremental_audit_admin_conn, "DELETE FROM ticket_board.ticket_notification_queue;")
+            service_call(incremental_audit_service_conn, "main", f"SELECT ticket_board.submit_to_audit('{incremental_ticket_id}', 'abc8320');")
+            assert (
+                psql(
+                    incremental_audit_admin_conn,
+                    f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{incremental_ticket_id}';",
+                )
+                == "audit:audit_gemini"
+            )
+            assert (
+                psql(
+                    incremental_audit_admin_conn,
+                    f"""
+SELECT jsonb_agg(jsonb_build_object('target_role', target_role, 'kind', kind, 'assignee', payload->>'assignee') ORDER BY id)::text
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = '{incremental_ticket_id}';
+""",
+                )
+                == '[{"kind": "transition", "assignee": "audit_gemini", "target_role": "audit_gemini"}]'
+            )
+            assert "role audit_gpt cannot call audit_sign_off" in service_call_fails(
+                incremental_audit_service_conn,
+                "audit_gpt",
+                f"SELECT ticket_board.audit_sign_off('{incremental_ticket_id}', 'Wrong partition.');",
+            )
+            service_call(
+                incremental_audit_service_conn,
+                "audit_gemini",
+                f"SELECT ticket_board.audit_sign_off('{incremental_ticket_id}', 'Audit verified.');",
+            )
+            assert (
+                psql(
+                    incremental_audit_admin_conn,
+                    f"SELECT state || ':' || assignee || ':' || audit_signoff::text FROM ticket_board.tickets WHERE id = '{incremental_ticket_id}';",
+                )
+                == "director_review:director:true"
+            )
+            service_call(incremental_audit_service_conn, "director", f"SELECT ticket_board.mark_done('{incremental_ticket_id}', 'abc8320');")
+
+            second_incremental_ticket_id = service_call(
+                incremental_audit_service_conn,
+                "director",
+                """
+SELECT set_config('ticket_board.ticket_prefix', 'RIA', false);
+SELECT ticket_board.create_ticket('Second incremental auditor workflow ticket', 'Body', 'analysis');
+""",
+            )
+            service_call(incremental_audit_service_conn, "director", f"SELECT ticket_board.route('{second_incremental_ticket_id}', 'in_progress', 'main');")
+            service_call(incremental_audit_service_conn, "main", f"SELECT ticket_board.submit_to_audit('{second_incremental_ticket_id}', 'abc8321');")
+            assert (
+                psql(
+                    incremental_audit_admin_conn,
+                    f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{second_incremental_ticket_id}';",
+                )
+                == "audit:audit_gpt"
+            )
+            service_call(
+                incremental_audit_service_conn,
+                "audit_gpt",
+                f"SELECT ticket_board.audit_sign_off('{second_incremental_ticket_id}', 'Audit verified.');",
+            )
+            assert (
+                psql(
+                    incremental_audit_admin_conn,
+                    f"SELECT state || ':' || assignee || ':' || audit_signoff::text FROM ticket_board.tickets WHERE id = '{second_incremental_ticket_id}';",
                 )
                 == "director_review:director:true"
             )

@@ -1022,13 +1022,17 @@ def render_add_role_sql(plan: ProjectBoardProvision, role: str, *, schema_sql: s
     resolved_role = _validate_role(role)
     if plan.workflow_seed == "pgu-full":
         raise SystemExit("incremental add-role SQL is only for provisioned project workflows")
-    if resolved_role not in plan.implementer_roles:
-        raise SystemExit("incremental add-role SQL requires the role in plan.implementer_roles")
+    if resolved_role in plan.implementer_roles:
+        role_kind = "implementer"
+    elif resolved_role in plan.audit_roles:
+        role_kind = "auditor"
+    else:
+        raise SystemExit("incremental add-role SQL requires the role in plan.implementer_roles or plan.audit_roles")
     stages = project_workflow_stages(plan, schema_sql=schema_sql)
     transitions = project_workflow_transitions(plan, schema_sql=schema_sql)
     stage_rows = _workflow_stage_rows_sql(stages)
     transition_rows = _workflow_transition_rows_sql(transitions)
-    return f"""-- Add role {resolved_role} to the existing project workflow for {plan.project}.
+    return f"""-- Add {role_kind} role {resolved_role} to the existing project workflow for {plan.project}.
 -- Run after the launcher config has been updated with the expanded role set.
 BEGIN;
 

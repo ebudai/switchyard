@@ -494,16 +494,23 @@ artifact. The artifact still must not preconfigure workflow stages or
 transitions.
 
 `switchyard add-role <project> <role> --cli <cli>` adds another implementer role
-after provisioning. By default it creates a visible role and starts only that
-role's tmux session. If the project's layout template is a recognised generated
-layout, the command regenerates it for the new visible count. If the layout is
-hand-maintained or otherwise unrecognised, the command does not overwrite it
-silently: the target slot must already exist, or the command refuses before
-mutating config, SQL artifacts, systemd state, or worktrees. The refusal names
-the missing layout capacity and the two choices: use `--detached` to add the
-role headless, or pass `--relayout` to replace the current layout with a fresh
-generated layout. `--relayout` keeps the generated contiguous slot order, so
-omit `--slot` unless you are naming the next append slot exactly.
+after provisioning. `switchyard add-role <project> <role> --audit --cli <cli>`
+adds an auditor role instead. Auditor additions widen the Audit stage owners,
+audit sign-off/kick-back role lists, board assignee/caller constraints, and
+notification target constraint; they do not widen implementation ownership or
+implementer operations. By default the command creates a visible role and starts
+only that role's tmux session. If the project's layout template is a recognised
+generated layout, the command regenerates it for the new visible count. If the
+layout is hand-maintained or otherwise unrecognised, the command does not
+overwrite it silently: the target slot must already exist, or the command
+refuses before mutating config, SQL artifacts, systemd state, or worktrees. The
+refusal names the missing layout capacity and the two choices: use `--detached`
+to add the role headless, or pass `--relayout` to replace the current layout
+with a fresh generated layout. `--relayout` keeps the generated contiguous slot
+order, so omit `--slot` unless you are naming the next append slot exactly. For
+example, `switchyard add-role mefp audit_gpt --audit --cli agy --detached` adds
+a second auditor that can receive Audit-stage tickets, participate in round-robin
+audit assignment, and sign off only the audit tickets assigned to it.
 
 `add-role` cannot insert a new pane into an already-running Konsole window. It
 starts the new role's tmux session, but newly added visible slots appear after

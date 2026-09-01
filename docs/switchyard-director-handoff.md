@@ -18,10 +18,9 @@ launcher machinery.
 
 ## Tenant Map
 
-- `pgu` is the ARCHIVE board. It remains available at `http://127.0.0.1:8770`
-  with prefix `PGU` and keeps the historical record, including roughly 800
-  closed tickets. Act on PGU only when the work is still PGU-owned or the
-  archive ticket needs a forward pointer.
+- `pgu` is the ARCHIVE board at `http://127.0.0.1:8770`, prefix `PGU`: 833
+  tickets as of the final pass, 710 done, 98 cancelled, 25 non-terminal. Act
+  on PGU only when work is still PGU-owned or needs an archive pointer.
 - `syrd` is the planned LIVE Switchyard board. Its slug is `syrd`, prefix is
   `SYRD`, port is `23326`, and socket should be
   `/run/syrd-ticket-board/ticket-board.sock`. New Switchyard work goes there
@@ -35,21 +34,33 @@ compatibility special case, not an output of that formula.
 
 ## Current State
 
-The direction is to action the remaining Switchyard backlog on PGU before
-standing up `syrd`, so the final migration set should be small. As of this
-handoff, `/etc/switchyard/projects` lists `mefp` and `otto`; `syrd` has not
-been provisioned.
+As of the final pass, `/etc/switchyard/projects` lists `mefp` and `otto`.
+`syrd` has no registry entry, no loaded systemd unit, and no health response on
+port `23326`. The migration inventory is two non-terminal PGU tickets that
+mention Switchyard/SYRD: this pass and PGU-865, the post-install quickstart.
+
+The repository split is complete: `pgu.git` main is `7418183` with 359 files
+and no Switchyard-named paths; `switchyard.git` main is `8bf66d7` with 366
+files. PGU instruction/crash files still intentionally point to
+`/opt/switchyard` as the shared tool location.
+
+The shared install is live: `/usr/local/bin/switchyard` targets
+`/opt/switchyard/current/switchyard`; current is release `e11bca0`, with
+`8d24ed7` retained for rollback and also used by PGU's board release marker.
+
+The public mirror is `github.com/ebudai/switchyard`, AGPL-3.0, with
+contribution terms preserving the owner's licensing options. It is a read-only
+mirror; the local bare repo remains canonical and GitHub PRs auto-close.
 
 Do not provision `syrd` twice. Before any cutover action, verify the registry,
 systemd units, board port, socket path, ticket prefix, and pane environment.
 Use neutral `TICKET_BOARD_*`, `TEAM_LAUNCHER_*`, `UPDATE_HOOK_*`, and
-`ALLOW_MAIN_PUSH` names. Do not introduce `SYRD_*` vocabulary. The build-id,
-refresh-idle, and write-token browser settings prefer `TICKET_BOARD_*` names
-with `PGU_TICKET_BOARD_*` compatibility fallbacks. The server emits both the
-neutral and legacy build-id and write-token globals so older JavaScript remains
-safe during a rolling deploy. Remove those legacy forms only after all deployed
-configuration and client code use neutral names and the supported stale-page
-window for pre-change JavaScript has elapsed.
+`ALLOW_MAIN_PUSH` names. Do not introduce `SYRD_*` vocabulary. Browser settings
+prefer neutral `TICKET_BOARD_*` names, with PGU compatibility fallbacks still
+present for build-id, refresh-idle, and write-token paths.
+
+`scripts/ticket-board-test-suite --group all` now has 145 runnable suites
+across ticket-board, launcher-adjacent, host, frontend, and browser groups.
 
 ## Migration Rule
 
@@ -68,9 +79,9 @@ leaves existing `PGU-NNN` references untouched.
 
 1. The shared install is immutable releases, not a writable checkout.
    Reason: shared code in `/opt/switchyard` must be auditable and repeatable.
-   Freshness comes from the operator upgrade flow and commit markers; a
-   self-deploying checkout would make production state depend on whoever last
-   ran git in `/opt`.
+   Build from the bare repo through ephemeral clones, run immutable releases,
+   and use commit markers; a self-deploying checkout would make production
+   state depend on whoever last ran git in `/opt`.
 
 2. Workflow vocabulary moves toward FK-over-CHECK, and the rollout is gated.
    Reason: stages and roles are tenant data, but changing that integrity model
@@ -100,13 +111,18 @@ leaves existing `PGU-NNN` references untouched.
 
 7. Hook rollout must never guard repositories without a Switchyard workflow.
    Reason: a push-blocking hook only belongs where the workflow it names
-   exists. Hardcoded repo lists can accidentally guard unrelated operator
-   projects; derive guarded repositories from the Switchyard registry.
+   exists. The two platform repositories are named explicitly by
+   `PLATFORM_WORKFLOW_REPOSITORIES`; tenant repositories are derived from the
+   Switchyard registry, so unrelated operator projects stay unguarded.
 
 8. Privileged operations must not write as root into an operator checkout.
    Reason: root-owned files in a user's repository break their git workflow
    later, far from the command that caused it. Fetch as the repository owner
    and suppress bytecode across sudo with an explicit environment.
+
+9. Repoint deploy sources before removing old paths.
+   Reason: board deploys need a readable source after extraction. Moving them
+   to `switchyard.git` first made PGU path removal routine instead of an outage.
 
 ## Operating Rules
 
@@ -119,22 +135,10 @@ blockers, commit hashes, and sign-off state explicitly.
 ## Agent Instruction Files
 
 The extracted Switchyard repo should have its own `AGENTS.md`, `CLAUDE.md`, and
-`GEMINI.md`. Do not copy PGU's renderer-heavy instructions.
-
-- `AGENTS.md` should be the source of truth for Codex and implementer panes:
-  board read/write commands, branch and submit rules, no hand-edited storage,
-  no provisioning or migration without a ticket, neutral environment names,
-  immutable shared-install policy, owner-of-stage routing, explicit
-  notification policy, and no root-owned writes into operator repositories.
-- `CLAUDE.md` should point at `AGENTS.md` for shared rules and contain only
-  Claude-specific session or hook expectations.
-- `GEMINI.md` should point at `AGENTS.md` for shared rules and add inspector
-  expectations: evidence, regression tests for bug fixes, audit/kickback
-  reporting through tickets, and workflow/notification checks.
-
-Keeping `CLAUDE.md` and `GEMINI.md` as thin role overlays prevents three
-instruction files from drifting while still letting each pane load the file it
-expects.
+`GEMINI.md`, not PGU renderer instructions. Keep `AGENTS.md` as the shared
+source of truth for board commands, branch/submit rules, neutral environment
+names, immutable installs, routing, notification policy, and no root-owned
+writes. Keep `CLAUDE.md` and `GEMINI.md` as thin role overlays.
 
 ## First-Day Checklist
 

@@ -157,7 +157,13 @@ def test_launch_project_reports_running_attach_or_start_panes_as_attached() -> N
             encoding="utf-8",
         )
         config = load_project_config("porter", config_path)
-        runner = FakeRunner(existing_sessions={"porter-main", "porter-ops"})
+        runner = FakeRunner(
+            existing_sessions={"porter-main", "porter-ops"},
+            current_commands={
+                "porter-main:0.0": "codex",
+                "porter-ops:0.0": "codex",
+            },
+        )
         process_launcher = RecordingProcessLauncher()
         messages: list[str] = []
 
@@ -184,6 +190,141 @@ def test_launch_project_reports_running_attach_or_start_panes_as_attached() -> N
     assert not any("session record missing" in message for message in messages)
     assert not any("codex runtime hook did not report" in message for message in messages)
     assert not any(call[:2] == ["tmux", "new-session"] for call in runner.calls)
+
+
+def test_launch_project_warns_when_session_exists_but_pane_is_not_live() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-launch-dead-attached.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text(
+            json.dumps({"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}) + "\n",
+            encoding="utf-8",
+        )
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        session_dir = tmp_path / "sessions"
+        session_dir.mkdir()
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "session_dir": str(session_dir),
+                    "roles": [
+                        {"role": "ops", "slot": 0, "cli": ["codex"], "target": "porter-ops:0.0"},
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+        runner = FakeRunner(existing_sessions={"porter-ops"})
+        process_launcher = RecordingProcessLauncher()
+        messages: list[str] = []
+
+        assert (
+            launch_project(
+                config,
+                config_path=config_path,
+                mode="start",
+                script_path=ROOT / "scripts" / "team-launcher",
+                runner=runner,
+                layout_output=tmp_path / "launch-layout.json",
+                pane_state_dir=tmp_path / "pane-state",
+                report_session_records=True,
+                session_record_timeout=0,
+                konsole_process_launcher=process_launcher,
+                print_func=messages.append,
+            )
+            == 0
+        )
+
+    assert not any("attached to running pane for ops" in message for message in messages)
+    assert not any("opened a new window attached to running" in message for message in messages)
+    assert any("warning: switchyard: session record missing for ops (porter-ops:0.0)" in message for message in messages)
+    assert ["tmux", "has-session", "-t", "porter-ops"] in runner.calls
+    assert ["tmux", "display-message", "-p", "-t", "porter-ops:0.0", "#{pane_pid}"] in runner.calls
+    assert ["tmux", "display-message", "-p", "-t", "porter-ops:0.0", "#{pane_current_command}"] in runner.calls
+
+
+def test_running_project_roles_rejects_dead_pane_in_live_tmux_session() -> None:
+    if shutil.which("tmux") is None:
+        return
+    with tempfile.TemporaryDirectory(prefix="pgu-launch-dead-pane-real.") as tmp:
+        tmp_path = Path(tmp)
+        session = f"pgu860-dead-pane-{os.getpid()}"
+        server = f"{session}-server"
+        exit_sentinel = tmp_path / "exit-now"
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        config_path = tmp_path / "pgu860.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "pgu860",
+                    "layout": str(layout),
+                    "repository": str(tmp_path),
+                    "session_dir": str(tmp_path / "sessions"),
+                    "roles": [
+                        {
+                            "role": "ops",
+                            "slot": 0,
+                            "cli": ["codex"],
+                            "target": f"{session}:0.0",
+                            "tmux_session": session,
+                            "live_commands": ["codex"],
+                        },
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("pgu860", config_path)
+        role = config.roles[0]
+        runner = _isolated_tmux_runner(server)
+        try:
+            _run_isolated_tmux(
+                server,
+                [
+                    "new-session",
+                    "-d",
+                    "-s",
+                    session,
+                    "-n",
+                    role.role,
+                    "sh",
+                    "-c",
+                    f"while [ ! -f {shlex.quote(str(exit_sentinel))} ]; do sleep 0.05; done",
+                ],
+                check=True,
+            )
+            _run_isolated_tmux(server, ["set-option", "-t", session, "remain-on-exit", "on"], check=True)
+            exit_sentinel.write_text("exit\n", encoding="utf-8")
+            for _ in range(50):
+                pane_dead = _run_isolated_tmux(
+                    server,
+                    ["list-panes", "-t", f"{session}:0", "-F", "#{pane_dead}"],
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                ).stdout.strip()
+                if pane_dead == "1":
+                    break
+                time.sleep(0.1)
+            assert pane_dead == "1"
+            _run_isolated_tmux(server, ["has-session", "-t", session], check=True)
+
+            assert team_launcher._running_project_roles(config, runner=runner) == []
+        finally:
+            _cleanup_isolated_tmux_sessions(server, [session])
 
 
 def test_launch_session_record_report_names_recent_resume_fallback() -> None:

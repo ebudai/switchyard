@@ -10,7 +10,10 @@ def test_launch_project_with_running_shared_checkout_session_skips_destructive_r
         tmp_path = Path(tmp)
         config_path = _write_six_visible_role_config(tmp_path, project="porter")
         config = load_project_config("porter", config_path)
-        runner = FakeRunner(existing_sessions={"porter-director"})
+        runner = FakeRunner(
+            existing_sessions={"porter-director"},
+            current_commands={"porter-director:0.0": "claude"},
+        )
         process_launcher = RecordingProcessLauncher()
 
         assert (
@@ -85,7 +88,10 @@ def test_launch_project_with_running_control_role_session_refreshes_only_stopped
             config = load_project_config("porter", config_path)
         finally:
             team_launcher._control_repository_owner_home = original_home
-        runner = FakeRunner(existing_sessions={"porter-director"})
+        runner = FakeRunner(
+            existing_sessions={"porter-director"},
+            current_commands={"porter-director:0.0": "claude"},
+        )
         process_launcher = RecordingProcessLauncher()
 
         assert (

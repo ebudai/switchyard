@@ -4265,7 +4265,7 @@ def _running_project_roles(
     running_roles: list[RoleConfig] = []
     for role in config.roles:
         result = runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if result.returncode == 0:
+        if result.returncode == 0 and live_command_matches_role(role, runner=runner):
             running_roles.append(role)
     return running_roles
 

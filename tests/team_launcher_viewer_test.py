@@ -5,6 +5,11 @@ from __future__ import annotations
 
 from team_launcher_test_helpers import *
 
+def test_viewer_session_argument_is_required_and_has_no_global_default() -> None:
+    signature = inspect.signature(team_launcher.launch_tmux_viewer_session)
+    assert signature.parameters["viewer_session"].default is inspect.Parameter.empty
+    assert "DEFAULT_VIEWER_SESSION" not in (ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8")
+
 def test_viewer_layout_starts_role_sessions_and_additive_viewer() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-viewer.") as tmp:
         tmp_path = Path(tmp)

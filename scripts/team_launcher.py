@@ -124,7 +124,6 @@ LAYOUT_MODE_AUTO = "auto"
 LAYOUT_MODE_SEPARATE = "separate"
 LAYOUT_MODE_VIEWER = "viewer"
 LAYOUT_MODE_CHOICES = frozenset({LAYOUT_MODE_AUTO, LAYOUT_MODE_SEPARATE, LAYOUT_MODE_VIEWER})
-DEFAULT_VIEWER_SESSION = "viewer"
 DEFAULT_VIEWER_COLUMNS = 240
 DEFAULT_VIEWER_ROWS = 80
 DEFAULT_TMUX_HISTORY_LIMIT = 200_000
@@ -846,7 +845,7 @@ def tmux_viewer_set_role_arg(viewer_session: str, pane_index: int, role: str) ->
 def launch_tmux_viewer_session(
     roles: Sequence[RoleConfig],
     *,
-    viewer_session: str = DEFAULT_VIEWER_SESSION,
+    viewer_session: str,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> int:
     if not roles:

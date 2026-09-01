@@ -79,17 +79,20 @@ from a different local desktop account or socket name.
 Switchyard is installed as immutable host-level releases under
 `/opt/switchyard`, with `/opt/switchyard/current` as the active symlink and
 `/usr/local/bin/switchyard` as a small wrapper to
-`/opt/switchyard/current/switchyard`. Run the installer from a source checkout,
-not from the active release, so a bad release cannot remove the tool used to fix
-it. The privileged host step is:
+`/opt/switchyard/current/switchyard`. Run the installer from a fresh clone of
+the bare repository, not from the active release or a standing operator checkout,
+so a bad release cannot remove the tool used to fix it and recovery does not
+depend on traversing a user's home directory. The privileged host step is:
 
 ```bash
+tmpdir="$(mktemp -d)"
+git clone /data/git/switchyard.git "$tmpdir"
 sudo env \
-  SWITCHYARD_SOURCE_REPO=/path/to/switchyard-checkout \
+  SWITCHYARD_SOURCE_REPO="$tmpdir" \
   SWITCHYARD_SOURCE_REF=<audited-commit> \
   SWITCHYARD_SHARED_INSTALL_ROOT=/opt/switchyard \
   SWITCHYARD_INSTALL_PATH=/usr/local/bin/switchyard \
-  /path/to/switchyard-checkout/scripts/install-switchyard --apply
+  "$tmpdir/scripts/install-switchyard" --apply
 command -v switchyard
 sudo env sh -c 'command -v switchyard'
 ```
@@ -106,8 +109,9 @@ sudo ln -sfn /opt/switchyard/releases/<previous-sha> /opt/switchyard/current
 That plain symlink operation does not depend on the active release. The
 installed wrapper embeds fallback help and version text so `switchyard --help`
 and `switchyard --version` still work when `current` is missing or broken;
-mutating commands fail with a recovery command that points back to the source
-checkout installer. `SWITCHYARD_TARGET` is accepted only for non-privileged
+mutating commands fail with a recovery command that clones
+`/data/git/switchyard.git` and runs that clone's installer. `SWITCHYARD_TARGET`
+is accepted only for non-privileged
 direct execution. Privileged commands and root execution always use the compiled
 `/opt/switchyard/current/switchyard` target, so the override cannot become a
 root code-execution path.

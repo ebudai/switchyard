@@ -104,8 +104,8 @@ grep -Fq 'exec "$SWITCHYARD_DEFAULT_TARGET" "$@"' "$install_path" || {
     echo "FAIL: already-root wrapper branch must ignore SWITCHYARD_TARGET and execute the shared default target" >&2
     exit 1
 }
-if grep -q "/home/eric/Projects/pgu\\|/home/agent/Projects/pgu" "$install_path"; then
-    echo "FAIL: wrapper target must not point under a user's home" >&2
+if grep -Fq "/home/" "$install_path"; then
+    echo "FAIL: wrapper must not embed any user's home path" >&2
     exit 1
 fi
 
@@ -199,11 +199,31 @@ grep -q "shared target is not executable: $shared_root/current/switchyard" <<<"$
     echo "$missing_output" >&2
     exit 1
 }
-grep -Fq "$SCRIPT --apply" <<<"$missing_output" || {
-    echo "FAIL: missing target error did not name the source-checkout recovery command" >&2
+grep -Fq 'recover from a fresh clone of the bare repo with:' <<<"$missing_output" || {
+    echo "FAIL: missing target error did not describe bare-repo recovery" >&2
     echo "$missing_output" >&2
     exit 1
 }
+grep -Fq 'git clone /data/git/switchyard.git "$tmpdir"' <<<"$missing_output" || {
+    echo "FAIL: missing target recovery command did not clone the bare repo" >&2
+    echo "$missing_output" >&2
+    exit 1
+}
+grep -Fq 'SWITCHYARD_SOURCE_REPO="$tmpdir"' <<<"$missing_output" || {
+    echo "FAIL: missing target recovery command did not install from the fresh clone" >&2
+    echo "$missing_output" >&2
+    exit 1
+}
+grep -Fq '"$tmpdir/scripts/install-switchyard" --apply' <<<"$missing_output" || {
+    echo "FAIL: missing target recovery command did not run the fresh clone installer" >&2
+    echo "$missing_output" >&2
+    exit 1
+}
+if grep -Fq "/home/" <<<"$missing_output"; then
+    echo "FAIL: missing target recovery command must not reference any user's home" >&2
+    echo "$missing_output" >&2
+    exit 1
+fi
 if grep -Fq "$first_release/scripts/install-switchyard --apply" <<<"$missing_output"; then
     echo "FAIL: missing target recovery command must not point into the broken release" >&2
     echo "$missing_output" >&2

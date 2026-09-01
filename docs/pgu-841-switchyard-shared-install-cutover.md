@@ -6,16 +6,18 @@ approved maintenance window.
 
 ## Build Shared Release
 
-Run as a privileged operator, from a source checkout of `/data/git/switchyard.git`
-at the audited commit:
+Run as a privileged operator. Clone a fresh checkout from the bare repository
+for the audited commit, then run that checkout's installer:
 
 ```bash
+tmpdir="$(mktemp -d)"
+git clone /data/git/switchyard.git "$tmpdir"
 sudo env \
-  SWITCHYARD_SOURCE_REPO=/path/to/switchyard-checkout \
+  SWITCHYARD_SOURCE_REPO="$tmpdir" \
   SWITCHYARD_SOURCE_REF=<audited-commit> \
   SWITCHYARD_SHARED_INSTALL_ROOT=/opt/switchyard \
   SWITCHYARD_INSTALL_PATH=/usr/local/bin/switchyard \
-  /path/to/switchyard-checkout/scripts/install-switchyard --apply
+  "$tmpdir/scripts/install-switchyard" --apply
 ```
 
 This exports `/opt/switchyard/releases/<audited-commit>`, writes

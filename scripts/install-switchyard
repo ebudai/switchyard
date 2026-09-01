@@ -7,6 +7,7 @@ SOURCE_REF="${SWITCHYARD_SOURCE_REF:-HEAD}"
 SHARED_ROOT="${SWITCHYARD_SHARED_INSTALL_ROOT:-/opt/switchyard}"
 INSTALL_PATH="${SWITCHYARD_INSTALL_PATH:-${PGU_SWITCHYARD_INSTALL_PATH:-/usr/local/bin/switchyard}}"
 SUDO_BIN="${SWITCHYARD_SUDO_BIN:-sudo}"
+RECOVERY_BARE_REPO="/data/git/switchyard.git"
 
 mode="print"
 
@@ -172,7 +173,7 @@ switchyard_exec_with_root() {
     fi
     if [[ ! -x "\$SWITCHYARD_DEFAULT_TARGET" ]]; then
         printf 'switchyard: shared target is not executable: %s\n' "\$SWITCHYARD_DEFAULT_TARGET" >&2
-        printf 'switchyard: recover from the source checkout with:\n  %s\n' "\$SWITCHYARD_RECOVERY_COMMAND" >&2
+        printf 'switchyard: recover from a fresh clone of the bare repo with:\n  %s\n' "\$SWITCHYARD_RECOVERY_COMMAND" >&2
         exit 126
     fi
     if "\$SWITCHYARD_SUDO_BIN" -n -v >/dev/null 2>&1; then
@@ -208,7 +209,7 @@ fi
 
 if [[ ! -x "\$SWITCHYARD_DEFAULT_TARGET" ]]; then
     printf 'switchyard: shared target is not executable: %s\n' "\$SWITCHYARD_DEFAULT_TARGET" >&2
-    printf 'switchyard: recover from the source checkout with:\n  %s\n' "\$SWITCHYARD_RECOVERY_COMMAND" >&2
+    printf 'switchyard: recover from a fresh clone of the bare repo with:\n  %s\n' "\$SWITCHYARD_RECOVERY_COMMAND" >&2
     exit 126
 fi
 
@@ -282,7 +283,7 @@ apply_install() {
     ln -sfn "$release_dir" "$SHARED_ROOT/current"
     current_target="$SHARED_ROOT/current/switchyard"
     install -d -m 0755 "$install_dir"
-    recovery_command="sudo env SWITCHYARD_SOURCE_REPO=$(quote "$SOURCE_REPO") SWITCHYARD_SOURCE_REF=$(quote "$commit") SWITCHYARD_SHARED_INSTALL_ROOT=$(quote "$SHARED_ROOT") SWITCHYARD_INSTALL_PATH=$(quote "$INSTALL_PATH") $(quote "$REPO_ROOT/scripts/install-switchyard") --apply"
+    recovery_command="tmpdir=\"\$(mktemp -d)\" && git clone $(quote "$RECOVERY_BARE_REPO") \"\$tmpdir\" && sudo env SWITCHYARD_SOURCE_REPO=\"\$tmpdir\" SWITCHYARD_SOURCE_REF=$(quote "$commit") SWITCHYARD_SHARED_INSTALL_ROOT=$(quote "$SHARED_ROOT") SWITCHYARD_INSTALL_PATH=$(quote "$INSTALL_PATH") \"\$tmpdir/scripts/install-switchyard\" --apply"
     write_wrapper "$current_target" "$INSTALL_PATH" "$release_dir/switchyard" "$recovery_command"
     printf 'installed switchyard release: %s\n' "$release_dir"
     printf 'activated switchyard current: %s -> %s\n' "$SHARED_ROOT/current" "$release_dir"

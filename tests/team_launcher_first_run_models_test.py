@@ -212,6 +212,7 @@ def test_first_run_auth_phase_skips_model_validation_for_unauthenticated_or_miss
             unauthenticated_clis={"codex"},
         )
         runner.login_seen.add("hermes")
+        messages: list[str] = []
 
         report = team_launcher.run_first_run_auth_phase(
             config,
@@ -219,6 +220,7 @@ def test_first_run_auth_phase_skips_model_validation_for_unauthenticated_or_miss
             owner_home=owner_home,
             validate_models=True,
             runner=runner,
+            print_func=messages.append,
         )
 
     assert report.unauthenticated_roles == {"codex": ["ops"]}
@@ -229,6 +231,12 @@ def test_first_run_auth_phase_skips_model_validation_for_unauthenticated_or_miss
     assert not any(call[:5] == ["sudo", "-u", "otto-agent", "codex", "exec"] for call in runner.calls)
     assert not any(call[:4] == ["sudo", "-u", "otto-agent", "agy"] and "-p" in call for call in runner.calls)
     assert ["sudo", "-u", "otto-agent", "hermes", "-m", "openrouter/missing", "-z", team_launcher.MODEL_VALIDATION_PROMPT] in runner.calls
+    assert messages == [
+        "switchyard: first-run setup manifest for owner user otto-agent: "
+        "1 login step(s), 0 folder trust step(s), 0 codex hook approval(s), 1 missing CLI(s)",
+        "switchyard: missing CLI agy: install agy for owner user otto-agent; affected roles: inspector",
+        "switchyard: login codex: roles ops; interactive account setup running codex login as otto-agent",
+    ]
 
 def test_first_run_auth_phase_sequences_distinct_logins_and_skips_visible_worktree_trust() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-first-run-auth.") as tmp:
@@ -264,26 +272,29 @@ def test_first_run_auth_phase_sequences_distinct_logins_and_skips_visible_worktr
     assert runner.calls == [
         ["sudo", "-u", "otto-agent", "claude", "auth", "status", "--json"],
         ["sudo", "-u", "otto-agent", "sh", "-lc", "command -v claude"],
-        ["sudo", "-u", "otto-agent", "claude", "auth", "login"],
-        ["sudo", "-u", "otto-agent", "claude", "auth", "status", "--json"],
         ["sudo", "-u", "otto-agent", "codex", "login", "status"],
         ["sudo", "-u", "otto-agent", "sh", "-lc", "command -v codex"],
-        ["sudo", "-u", "otto-agent", "codex", "login"],
-        ["sudo", "-u", "otto-agent", "codex", "login", "status"],
         ["sudo", "-u", "otto-agent", "agy", "models"],
         ["sudo", "-u", "otto-agent", "sh", "-lc", "command -v agy"],
+        ["sudo", "-u", "otto-agent", "claude", "auth", "login"],
+        ["sudo", "-u", "otto-agent", "claude", "auth", "status", "--json"],
+        ["sudo", "-u", "otto-agent", "codex", "login"],
+        ["sudo", "-u", "otto-agent", "codex", "login", "status"],
         ["sudo", "-u", "otto-agent", "agy"],
         ["sudo", "-u", "otto-agent", "agy", "models"],
     ]
     assert [kwargs.get("cwd") for kwargs in runner.call_kwargs] == [str(owner_home)] * 12
     assert not (owner_home / ".claude.json").exists()
     assert not (owner_home / ".gemini" / "antigravity-cli" / "settings.json").exists()
-    assert messages[:3] == [
-        "switchyard: first-run claude login required for designer, director; running claude auth login as otto-agent",
-        "switchyard: first-run codex login required for ops, main; running codex login as otto-agent",
-        "switchyard: first-run agy login required for inspector; running agy as otto-agent",
+    assert messages == [
+        "switchyard: first-run setup manifest for owner user otto-agent: "
+        "3 login step(s), 0 folder trust step(s), 0 codex hook approval(s), 0 missing CLI(s)",
+        "switchyard: login claude: roles designer, director; "
+        "interactive account setup running claude auth login as otto-agent",
+        "switchyard: login codex: roles ops, main; "
+        "interactive account setup running codex login as otto-agent",
+        "switchyard: login agy: roles inspector; interactive account setup running agy as otto-agent",
     ]
-    assert messages[3:] == []
 
 def test_first_run_auth_phase_handles_hermes_model_setup() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-first-run-auth-hermes.") as tmp:
@@ -319,7 +330,9 @@ def test_first_run_auth_phase_handles_hermes_model_setup() -> None:
         ["sudo", "-u", "otto-agent", "hermes", "config", "check"],
     ]
     assert messages == [
-        "switchyard: first-run hermes login required for bulk; running hermes model as otto-agent",
+        "switchyard: first-run setup manifest for owner user otto-agent: "
+        "1 login step(s), 0 folder trust step(s), 0 codex hook approval(s), 0 missing CLI(s)",
+        "switchyard: login hermes: roles bulk; interactive account setup running hermes model as otto-agent",
     ]
 
 def test_first_run_auth_phase_accepts_hermes_resolved_api_key_without_model_setup() -> None:

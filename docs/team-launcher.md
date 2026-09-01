@@ -543,21 +543,28 @@ additional role set; the launcher does not split a team across windows
 automatically.
 
 The first-run auth phase runs before panes launch. It probes each distinct
-selected CLI as the project owner, invokes that CLI's own login command when it
-is unauthenticated, reports a missing CLI as not installed for that owner user,
-and then walks per-worktree trust prompts. During `switchyard new`, the hook
-installer seeds Codex hook trust only when the owner has no existing
-`~/.codex/hooks.json` and no existing Codex hook trust records. That covers
-hooks Switchyard just authored as part of project creation. If Codex trust
-records already exist, or any Codex hooks file already existed before install,
-seeding is refused and the normal manual `/hooks` report remains. Claude and
-agy folder trust is never pre-seeded because it trusts project-repository
-contents, not Switchyard-authored hook config. Codex hook-trust entries are
-also checked against the installed pane-hook commands. Codex hook trust is
-stored per owner user and hook entry, not per pane role, so missing or stale
-hashes are reported as distinct approvals needed with affected Codex roles
-listed only as context. A new project with no trust records is reported
-separately from a hook-content change that requires re-approval.
+selected CLI, detached-role folder trust, and Codex hook trust as the project
+owner, then prints one upfront setup manifest before it executes any
+interactive command. The manifest states the owner user once, counts missing
+CLIs, login steps, folder-trust steps, and Codex hook approvals, and lists the
+affected roles for context. CLI login and Claude/agy folder trust are
+interactive setup steps that Switchyard can run today; Codex hook approval is a
+manual security approval and remains deliberately outside automation. Folder
+trust is scoped to the workdir, so it recurs for each new project even when the
+owner user is reused.
+
+During `switchyard new`, the hook installer seeds Codex hook trust only when
+the owner has no existing `~/.codex/hooks.json` and no existing Codex hook
+trust records. That covers hooks Switchyard just authored as part of project
+creation. If Codex trust records already exist, or any Codex hooks file already
+existed before install, seeding is refused and the normal manual `/hooks`
+report remains. Claude and agy folder trust is never pre-seeded because it
+trusts project-repository contents, not Switchyard-authored hook config. Codex
+hook-trust entries are also checked against the installed pane-hook commands.
+Codex hook trust is stored per owner user and hook entry, not per pane role, so
+missing or stale hashes are reported as distinct approvals needed with affected
+Codex roles listed only as context. A new project with no trust records is
+reported separately from a hook-content change that requires re-approval.
 During `switchyard new`, the same phase also validates every configured role
 model with that CLI's one-shot prompt mode before panes start. A failed model
 probe happens after the project is created and registered, but before any panes

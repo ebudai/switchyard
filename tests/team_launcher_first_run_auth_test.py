@@ -125,14 +125,17 @@ def test_first_run_auth_phase_reports_stale_codex_hook_trust_without_writing_con
         ["sudo", "-u", "otto-agent", "agy", "models"],
     ]
     assert messages == [
-        "switchyard: first-run codex hook trust needs 2 approvals for owner user otto-agent; "
+        "switchyard: first-run setup manifest for owner user otto-agent: "
+        "0 login step(s), 0 folder trust step(s), 2 codex hook approval(s), 0 missing CLI(s)",
+        "switchyard: manual security approval: "
+        "codex hook trust needs 2 approvals for owner user otto-agent; "
         "run /hooks once in any Codex pane as that owner. "
         "This trust is shared by affected Codex roles: ops, main, app. "
         "Approvals: session_start (new project, never trusted); stop (new project, never trusted)"
     ]
-    assert "director" not in messages[0]
-    assert "inspector" not in messages[0]
-    assert "audit" not in messages[0]
+    assert "director" not in messages[1]
+    assert "inspector" not in messages[1]
+    assert "audit" not in messages[1]
     output: list[str] = []
     team_launcher.report_first_run_auth_warnings(report, print_func=output.append)
     assert output == [
@@ -185,9 +188,9 @@ def test_first_run_auth_phase_distinguishes_changed_codex_hook_trust_from_never_
     assert len(report.stale_codex_hook_trust) == 2
     assert report.stale_codex_hook_trust[0].event == first_event
     assert report.stale_codex_hook_trust[0].trusted_hash == "sha256:old-hook-body"
-    assert "session_start (hooks changed, re-approve)" in messages[0]
-    assert "stop (new project, never trusted)" in messages[0]
-    assert "ops, main" in messages[0]
+    assert "session_start (hooks changed, re-approve)" in messages[1]
+    assert "stop (new project, never trusted)" in messages[1]
+    assert "ops, main" in messages[1]
     assert after_config == original_config
 
 def test_first_run_auth_phase_accepts_matching_codex_hook_trust_without_writing_config() -> None:
@@ -387,8 +390,9 @@ def test_first_run_auth_phase_reports_missing_cli_separately_from_login() -> Non
         assert report.missing_cli_roles == {"agy": ["inspector"]}, status_returncode
         assert report.owner_user == "otto-agent", status_returncode
         assert messages == [
-            "switchyard: first-run agy not installed for owner user otto-agent; "
-            "install agy for owner user otto-agent; affected roles: inspector"
+            "switchyard: first-run setup manifest for owner user otto-agent: "
+            "0 login step(s), 0 folder trust step(s), 0 codex hook approval(s), 1 missing CLI(s)",
+            "switchyard: missing CLI agy: install agy for owner user otto-agent; affected roles: inspector",
         ], status_returncode
         assert runner.calls == [
             ["sudo", "-u", "otto-agent", "agy", "models"],

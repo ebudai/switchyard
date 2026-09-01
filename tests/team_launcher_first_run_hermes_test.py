@@ -64,7 +64,9 @@ def test_first_run_auth_phase_reports_hermes_without_resolved_api_key_as_unauthe
         ["sudo", "-u", "otto-agent", "sh", "-lc", "command -v hermes"],
     ]
     assert messages == [
-        "switchyard: first-run hermes login required for bulk; running hermes model as otto-agent",
+        "switchyard: first-run setup manifest for owner user otto-agent: "
+        "1 login step(s), 0 folder trust step(s), 0 codex hook approval(s), 0 missing CLI(s)",
+        "switchyard: login hermes: roles bulk; interactive account setup running hermes model as otto-agent",
     ]
 
 def test_first_run_trust_handles_detached_roles_and_persists_for_later_launches() -> None:
@@ -130,9 +132,77 @@ def test_first_run_trust_handles_detached_roles_and_persists_for_later_launches(
         ["sudo", "-u", "otto-agent", "claude", "auth", "status", "--json"],
     ]
     assert call_kwargs[1].get("cwd") == str(tmp_path / "worktrees" / "research")
-    assert len(first_messages) == 1
-    assert all("folder trust required" in message and "not account login" in message for message in first_messages)
+    assert first_messages == [
+        "switchyard: first-run setup manifest for owner user otto-agent: "
+        "0 login step(s), 1 folder trust step(s), 0 codex hook approval(s), 0 missing CLI(s)",
+        f"switchyard: folder trust claude: role research at {tmp_path / 'worktrees' / 'research'}; "
+        "recurs per project/workdir even when the owner user is reused; "
+        "interactive repository trust today, not account login",
+    ]
     assert second_messages == []
+
+def test_first_run_setup_manifest_prints_every_step_before_first_interactive_command() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-first-run-manifest-order.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        _write_codex_first_run_hooks(owner_home)
+        config_path = _write_first_run_auth_config(
+            tmp_path,
+            roles=[
+                ("director", "claude"),
+                ("research", "claude"),
+                ("ops", "codex"),
+                ("inspector", "agy"),
+            ],
+        )
+        _mark_first_run_roles_detached(config_path, "research")
+        config = load_project_config("otto", config_path)
+        events: list[tuple[str, list[str] | str]] = []
+
+        class EventRunner(FirstRunAuthRunner):
+            def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                events.append(("run", args))
+                return super().__call__(args, **kwargs)
+
+        runner = EventRunner()
+
+        def print_func(message: str) -> None:
+            events.append(("print", message))
+
+        report = team_launcher.run_first_run_auth_phase(
+            config,
+            owner_user="otto-agent",
+            owner_home=owner_home,
+            runner=runner,
+            print_func=print_func,
+        )
+
+    assert report.unauthenticated_roles == {}
+    assert report.untrusted_roles == [("claude", "research", str(tmp_path / "worktrees" / "research"))]
+    printed = [value for kind, value in events if kind == "print"]
+    assert printed == [
+        "switchyard: first-run setup manifest for owner user otto-agent: "
+        "3 login step(s), 1 folder trust step(s), 2 codex hook approval(s), 0 missing CLI(s)",
+        "switchyard: login claude: roles director, research; "
+        "interactive account setup running claude auth login as otto-agent",
+        "switchyard: login codex: roles ops; interactive account setup running codex login as otto-agent",
+        "switchyard: login agy: roles inspector; interactive account setup running agy as otto-agent",
+        f"switchyard: folder trust claude: role research at {tmp_path / 'worktrees' / 'research'}; "
+        "recurs per project/workdir even when the owner user is reused; "
+        "interactive repository trust today, not account login",
+        "switchyard: manual security approval: "
+        "codex hook trust needs 2 approvals for owner user otto-agent; run /hooks once in any Codex pane as that owner. "
+        "This trust is shared by affected Codex roles: ops. "
+        "Approvals: session_start (new project, never trusted); stop (new project, never trusted)",
+    ]
+    first_interactive_index = next(
+        index
+        for index, (_kind, value) in enumerate(events)
+        if value == ["sudo", "-u", "otto-agent", "claude", "auth", "login"]
+    )
+    last_manifest_print_index = max(index for index, (kind, _value) in enumerate(events) if kind == "print")
+    assert last_manifest_print_index < first_interactive_index
 
 def test_first_run_trust_matches_configured_symlink_path_without_reprompting() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-first-run-trust-path.") as tmp:

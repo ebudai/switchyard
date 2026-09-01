@@ -5978,6 +5978,39 @@ class FirstRunAuthReport:
         )
 
 
+@dataclass(frozen=True)
+class FirstRunAuthLoginStep:
+    cli: str
+    roles: tuple[str, ...]
+    command: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class FirstRunFolderTrustStep:
+    cli: str
+    role: str
+    workdir: Path
+    command: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class FirstRunSetupManifest:
+    owner_user: str
+    login_steps: list[FirstRunAuthLoginStep]
+    folder_trust_steps: list[FirstRunFolderTrustStep]
+    stale_codex_hook_trust: list[CodexHookTrustMismatch]
+    missing_cli_roles: dict[str, list[str]]
+
+    @property
+    def has_steps(self) -> bool:
+        return bool(
+            self.login_steps
+            or self.folder_trust_steps
+            or self.stale_codex_hook_trust
+            or self.missing_cli_roles
+        )
+
+
 FIRST_RUN_AUTH_STATUS_COMMANDS: dict[str, list[str]] = {
     "agy": ["agy", "models"],
     "claude": ["claude", "auth", "status", "--json"],
@@ -7074,6 +7107,113 @@ def _format_codex_hook_trust_report(
     )
 
 
+def build_first_run_setup_manifest(
+    config: ProjectConfig,
+    *,
+    owner_user: str,
+    owner_home: Path,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> FirstRunSetupManifest:
+    roles_by_cli = _roles_by_first_cli(config)
+    login_steps: list[FirstRunAuthLoginStep] = []
+    missing_cli_roles: dict[str, list[str]] = {}
+
+    for cli, roles in roles_by_cli.items():
+        if cli not in FIRST_RUN_AUTH_STATUS_COMMANDS:
+            continue
+        auth_status = _cli_auth_status(cli, owner_user=owner_user, owner_home=owner_home, runner=runner)
+        if auth_status == "authenticated":
+            continue
+        names = _role_names(roles)
+        if auth_status == "not_installed":
+            missing_cli_roles[cli] = names
+            continue
+        login_steps.append(
+            FirstRunAuthLoginStep(
+                cli=cli,
+                roles=tuple(names),
+                command=tuple(FIRST_RUN_AUTH_LOGIN_COMMANDS[cli]),
+            )
+        )
+
+    folder_trust_steps: list[FirstRunFolderTrustStep] = []
+    for role in config.roles:
+        if not role.detached:
+            continue
+        cli = _role_cli_name(role)
+        if cli not in FIRST_RUN_TRUST_CLIS:
+            continue
+        workdir = Path(role.workdir)
+        if _workdir_is_trusted(cli, owner_home=owner_home, workdir=workdir):
+            continue
+        folder_trust_steps.append(
+            FirstRunFolderTrustStep(
+                cli=cli,
+                role=role.role,
+                workdir=workdir,
+                command=tuple(_first_run_trust_command(role)),
+            )
+        )
+
+    return FirstRunSetupManifest(
+        owner_user=owner_user,
+        login_steps=login_steps,
+        folder_trust_steps=folder_trust_steps,
+        stale_codex_hook_trust=stale_codex_hook_trust_for_roles(config.roles, owner_home=owner_home),
+        missing_cli_roles=missing_cli_roles,
+    )
+
+
+def _format_first_run_setup_manifest(manifest: FirstRunSetupManifest) -> list[str]:
+    if not manifest.has_steps:
+        return []
+    missing_cli_count = len(manifest.missing_cli_roles)
+    login_count = len(manifest.login_steps)
+    folder_trust_count = len(manifest.folder_trust_steps)
+    hook_trust_count = len(manifest.stale_codex_hook_trust)
+    lines = [
+        (
+            f"switchyard: first-run setup manifest for owner user {manifest.owner_user}: "
+            f"{login_count} login step(s), {folder_trust_count} folder trust step(s), "
+            f"{hook_trust_count} codex hook approval(s), {missing_cli_count} missing CLI(s)"
+        )
+    ]
+    for cli, roles in manifest.missing_cli_roles.items():
+        lines.append(
+            f"switchyard: missing CLI {cli}: install {cli} for owner user {manifest.owner_user}; "
+            f"affected roles: {', '.join(roles)}"
+        )
+    for step in manifest.login_steps:
+        lines.append(
+            f"switchyard: login {step.cli}: roles {', '.join(step.roles)}; "
+            f"interactive account setup running {shlex.join(step.command)} as {manifest.owner_user}"
+        )
+    for step in manifest.folder_trust_steps:
+        lines.append(
+            f"switchyard: folder trust {step.cli}: role {step.role} at {step.workdir}; "
+            "recurs per project/workdir even when the owner user is reused; "
+            "interactive repository trust today, not account login"
+        )
+    if manifest.stale_codex_hook_trust:
+        lines.append(
+            "switchyard: manual security approval: "
+            + _format_codex_hook_trust_report(
+                manifest.stale_codex_hook_trust,
+                owner_user=manifest.owner_user,
+            )
+        )
+    return lines
+
+
+def print_first_run_setup_manifest(
+    manifest: FirstRunSetupManifest,
+    *,
+    print_func: Callable[[str], None] = print,
+) -> None:
+    for line in _format_first_run_setup_manifest(manifest):
+        print_func(line)
+
+
 def _prepare_first_run_auth_worktrees(
     config: ProjectConfig,
     *,
@@ -7108,69 +7248,42 @@ def run_first_run_auth_phase(
     if not effective_owner:
         return FirstRunAuthReport({}, [])
     effective_home = owner_home or _owner_home_for_auth(effective_owner)
-    roles_by_cli = _roles_by_first_cli(config)
     unauthenticated: dict[str, list[str]] = {}
     missing_cli_roles: dict[str, list[str]] = {}
 
-    for cli, roles in roles_by_cli.items():
-        if cli not in FIRST_RUN_AUTH_STATUS_COMMANDS:
-            continue
-        auth_status = _cli_auth_status(cli, owner_user=effective_owner, owner_home=effective_home, runner=runner)
-        if auth_status == "authenticated":
-            continue
-        if auth_status == "not_installed":
-            names = ", ".join(_role_names(roles))
-            print_func(
-                f"switchyard: first-run {cli} not installed for owner user {effective_owner}; "
-                f"install {cli} for owner user {effective_owner}; affected roles: {names}"
-            )
-            missing_cli_roles[cli] = _role_names(roles)
-            continue
-        login_command = FIRST_RUN_AUTH_LOGIN_COMMANDS[cli]
-        names = ", ".join(_role_names(roles))
-        print_func(
-            f"switchyard: first-run {cli} login required for {names}; "
-            f"running {shlex.join(login_command)} as {effective_owner}"
-        )
+    manifest = build_first_run_setup_manifest(
+        config,
+        owner_user=effective_owner,
+        owner_home=effective_home,
+        runner=runner,
+    )
+    print_first_run_setup_manifest(manifest, print_func=print_func)
+    missing_cli_roles.update(manifest.missing_cli_roles)
+
+    for step in manifest.login_steps:
+        login_command = list(step.command)
         _run_owner_cli_interactive(
             owner_user=effective_owner,
             cwd=effective_home,
             command=login_command,
             runner=runner,
         )
-        auth_status = _cli_auth_status(cli, owner_user=effective_owner, owner_home=effective_home, runner=runner)
+        auth_status = _cli_auth_status(step.cli, owner_user=effective_owner, owner_home=effective_home, runner=runner)
         if auth_status == "not_installed":
-            missing_cli_roles[cli] = _role_names(roles)
+            missing_cli_roles[step.cli] = list(step.roles)
         elif auth_status != "authenticated":
-            unauthenticated[cli] = _role_names(roles)
+            unauthenticated[step.cli] = list(step.roles)
 
     untrusted: list[tuple[str, str, str]] = []
-    for role in config.roles:
-        if not role.detached:
-            continue
-        cli = _role_cli_name(role)
-        if cli not in FIRST_RUN_TRUST_CLIS:
-            continue
-        workdir = Path(role.workdir)
-        if _workdir_is_trusted(cli, owner_home=effective_home, workdir=workdir):
-            continue
-        command = _first_run_trust_command(role)
-        print_func(
-            f"switchyard: first-run folder trust required for {cli} role {role.role} "
-            f"at {workdir}; this is not account login. Accept the folder trust prompt, then exit the CLI"
-        )
+    for step in manifest.folder_trust_steps:
         _run_owner_cli_interactive(
             owner_user=effective_owner,
-            cwd=workdir,
-            command=command,
+            cwd=step.workdir,
+            command=list(step.command),
             runner=runner,
         )
-        if not _workdir_is_trusted(cli, owner_home=effective_home, workdir=workdir):
-            untrusted.append((cli, role.role, str(workdir)))
-
-    stale_codex_hook_trust = stale_codex_hook_trust_for_roles(config.roles, owner_home=effective_home)
-    if stale_codex_hook_trust:
-        print_func(f"switchyard: first-run {_format_codex_hook_trust_report(stale_codex_hook_trust, owner_user=effective_owner)}")
+        if not _workdir_is_trusted(step.cli, owner_home=effective_home, workdir=step.workdir):
+            untrusted.append((step.cli, step.role, str(step.workdir)))
 
     model_validation_failures: list[ModelValidationFailure] = []
     if validate_models:
@@ -7186,10 +7299,10 @@ def run_first_run_auth_phase(
     return FirstRunAuthReport(
         unauthenticated,
         untrusted,
-        stale_codex_hook_trust,
+        manifest.stale_codex_hook_trust,
         missing_cli_roles,
         model_validation_failures,
-        effective_owner if missing_cli_roles or stale_codex_hook_trust else "",
+        effective_owner if missing_cli_roles or manifest.stale_codex_hook_trust else "",
     )
 
 

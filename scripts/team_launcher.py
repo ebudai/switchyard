@@ -5266,6 +5266,8 @@ def launch_project(
         launchable_viewer_roles = [role for role in viewer_roles if role.role not in failed_roles]
         if launchable_viewer_roles:
             launch_result = launch_tmux_viewer_session(launchable_viewer_roles, runner=runner)
+        elif viewer_roles:
+            launch_result = 1
         else:
             launch_result = 0
     else:

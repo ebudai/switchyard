@@ -469,6 +469,40 @@ def test_all_detached_undetected_viewer_launch_still_reports_detached_start_fail
         assert not process_launcher.calls
         assert not any(call[:2] == ["tmux", "new-session"] and call[call.index("-s") + 1] == "viewer" for call in runner.calls)
 
+def test_undetected_viewer_launch_reports_failure_when_every_visible_role_failed() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-visible-failure.") as tmp:
+        tmp_path = Path(tmp)
+        config_path = _write_six_visible_role_config(tmp_path, project="porter")
+        config = load_project_config("porter", config_path)
+
+        class FailingSharedFetchRunner(FakeRunner):
+            def __call__(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+                if args == git_fetch_worktree_ref_args(config):
+                    self.calls.append(args)
+                    return subprocess.CompletedProcess(args, 128, stderr="fatal: could not fetch\n")
+                return super().__call__(args, **kwargs)
+
+        runner = FailingSharedFetchRunner()
+        process_launcher = RecordingProcessLauncher()
+        stderr = StringIO()
+
+        with redirect_stderr(stderr):
+            result = launch_project(
+                config,
+                config_path=config_path,
+                mode="attach-or-start",
+                script_path=ROOT / "scripts" / "team-launcher",
+                runner=runner,
+                layout_output=tmp_path / "layout-output.json",
+                layout_environ={"SUDO_USER": "root", "XDG_CURRENT_DESKTOP": "", "KDE_FULL_SESSION": ""},
+                konsole_process_launcher=process_launcher,
+            )
+
+        assert result == 1
+        assert "skipping visible role main: fatal: could not fetch" in stderr.getvalue()
+        assert not process_launcher.calls
+        assert not any(call[:2] == ["tmux", "new-session"] and call[call.index("-s") + 1] == "viewer" for call in runner.calls)
+
 def test_start_force_refreshes_dirty_shared_checkout_with_real_git() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-git.") as tmp:
         tmp_path = Path(tmp)

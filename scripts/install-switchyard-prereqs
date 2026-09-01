@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DRY_RUN=0
+ASSUME_MANAGER="${SWITCHYARD_PREREQS_ASSUME_MANAGER:-}"
+SUDO_BIN="${SWITCHYARD_SUDO_BIN:-sudo}"
+PYTHON_BIN="${SWITCHYARD_PYTHON_BIN:-python3}"
+PIP_SPEC="psycopg>=3.3,<4"
+
+usage() {
+    cat <<'EOF'
+Usage: scripts/install-switchyard-prereqs [--dry-run]
+
+Installs Switchyard host packages with apt or pacman, installs psycopg with pip,
+and prints the agent CLI requirement.
+EOF
+}
+
+die() {
+    printf 'install-switchyard-prereqs: ERROR: %s\n' "$*" >&2
+    exit 1
+}
+
+while (($#)); do
+    case "$1" in
+        --dry-run)
+            DRY_RUN=1
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            die "unknown argument: $1"
+            ;;
+    esac
+    shift
+done
+
+detect_manager() {
+    if [[ -n "$ASSUME_MANAGER" ]]; then
+        case "$ASSUME_MANAGER" in
+            apt|pacman) printf '%s\n' "$ASSUME_MANAGER" ;;
+            *) die "unsupported SWITCHYARD_PREREQS_ASSUME_MANAGER: $ASSUME_MANAGER" ;;
+        esac
+        return
+    fi
+    if command -v apt-get >/dev/null 2>&1; then
+        printf 'apt\n'
+        return
+    fi
+    if command -v pacman >/dev/null 2>&1; then
+        printf 'pacman\n'
+        return
+    fi
+    die "no supported package manager found; expected apt-get or pacman"
+}
+
+run_cmd() {
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        printf '+'
+        printf ' %q' "$@"
+        printf '\n'
+        return
+    fi
+    "$@"
+}
+
+manager="$(detect_manager)"
+case "$manager" in
+    apt)
+        run_cmd "$SUDO_BIN" apt-get update
+        run_cmd "$SUDO_BIN" apt-get install -y \
+            python3 postgresql postgresql-client tmux konsole git curl python3-pip acl
+        ;;
+    pacman)
+        run_cmd "$SUDO_BIN" pacman -S --needed \
+            python postgresql tmux konsole git curl python-pip acl
+        ;;
+esac
+
+run_cmd "$PYTHON_BIN" -m pip install --user "$PIP_SPEC"
+
+cat <<'EOF'
+
+Still required: install and authenticate at least one agent CLI: claude, codex, agy, or hermes.
+EOF

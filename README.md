@@ -4,8 +4,8 @@ Switchyard coordinates local multi-role project work through a shared ticket
 board, role launchers, repository policy hooks, and install/deploy helpers.
 
 If you want to run it yourself, start with
-[the fresh-machine prerequisites](docs/pgu-862-public-mirror-prep.md) and match
-your setup against the listed failure modes before installing.
+[the fresh-machine install list](docs/fresh-machine-install.md) before
+installing.
 
 ## License
 

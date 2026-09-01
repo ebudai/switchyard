@@ -119,12 +119,15 @@ def test_stop_project_kills_only_configured_sessions_as_owner_and_is_idempotent(
             config = load_project_config("otto", config_path)
             runner = OwnerTmuxRunner(
                 {
+                    "viewer",
+                    "otto-viewer",
                     "otto-designer",
                     "otto-director",
                     "otto-audit",
                     "otto-ops",
                     "otto-app",
                     "otto-main",
+                    "pgu-viewer",
                     "pgu-director",
                     "pgu-ops",
                 }
@@ -137,9 +140,10 @@ def test_stop_project_kills_only_configured_sessions_as_owner_and_is_idempotent(
     finally:
         team_launcher.current_user_name = original_current_user_name
 
-    assert runner.existing_sessions == {"pgu-director", "pgu-ops"}
+    assert runner.existing_sessions == {"viewer", "pgu-viewer", "pgu-director", "pgu-ops"}
     kill_calls = [call for call in runner.calls if call[4:6] == ["tmux", "kill-session"]]
     assert [call[-1] for call in kill_calls] == [
+        "otto-viewer",
         "otto-designer",
         "otto-director",
         "otto-audit",
@@ -152,6 +156,7 @@ def test_stop_project_kills_only_configured_sessions_as_owner_and_is_idempotent(
     forbidden_tmux_server_shutdown = "kill" + "-server"
     assert not any(part == forbidden_tmux_server_shutdown for call in runner.calls for part in call)
     assert first_output == [
+        "stopped viewer: otto-viewer",
         "stopped designer: otto-designer",
         "stopped director: otto-director",
         "stopped audit: otto-audit",
@@ -160,6 +165,7 @@ def test_stop_project_kills_only_configured_sessions_as_owner_and_is_idempotent(
         "stopped main: otto-main",
     ]
     assert second_output == [
+        "already stopped viewer: otto-viewer",
         "already stopped designer: otto-designer",
         "already stopped director: otto-director",
         "already stopped audit: otto-audit",
@@ -219,8 +225,9 @@ def test_stop_project_continues_after_failed_kill_and_reports_all_roles() -> Non
         team_launcher.current_user_name = original_current_user_name
 
     kill_calls = [call for call in runner.calls if call[4:6] == ["tmux", "kill-session"]]
-    assert [call[-1] for call in kill_calls] == ["otto-designer", "otto-director", "otto-audit"]
+    assert [call[-1] for call in kill_calls] == ["otto-viewer", "otto-designer", "otto-director", "otto-audit"]
     assert output == [
+        "stopped viewer: otto-viewer",
         "stopped designer: otto-designer",
         "failed to stop director: otto-director: permission denied",
         "stopped audit: otto-audit",

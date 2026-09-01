@@ -157,6 +157,33 @@ def test_kde_auto_layout_preserves_separate_konsole_plan_shape() -> None:
     ]
     assert len(_leaf_commands(layout)) == 6
 
+def test_viewer_dry_run_reports_project_scoped_viewer_session() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-viewer-plan.") as tmp:
+        tmp_path = Path(tmp)
+        config_path = _write_six_visible_role_config(tmp_path, project="porter")
+        config = load_project_config("porter", config_path)
+        stdout = StringIO()
+
+        with redirect_stdout(stdout):
+            assert (
+                launch_project(
+                    config,
+                    config_path=config_path,
+                    mode="start",
+                    script_path=ROOT / "scripts" / "team-launcher",
+                    runner=FakeRunner(),
+                    dry_run=True,
+                    layout_output=tmp_path / "layout-output.json",
+                    layout_mode="viewer",
+                )
+                == 0
+            )
+
+    plan = json.loads(stdout.getvalue())
+    assert plan["layout_mode"] == "viewer"
+    assert plan["viewer_session"] == "porter-viewer"
+    assert plan["viewer_roles"] == ["designer", "director", "audit", "ops", "app", "main"]
+
 def test_pgu_config_matches_director_supplied_live_role_assignments() -> None:
     config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
     roles = {role.role: role for role in config.roles}

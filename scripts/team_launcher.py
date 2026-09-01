@@ -148,6 +148,10 @@ EFFORT_STYLE_BY_CLI = {
     "hermes": "reasoning",
 }
 SUPPORTED_CONFIG_CLI_NAMES = ("agy", "claude", "codex", "hermes")
+
+
+def viewer_session_for_project(project: str) -> str:
+    return f"{project}-viewer"
 KNOWN_LIVE_CLI_NAMES = set(SUPPORTED_CONFIG_CLI_NAMES)
 DEFAULT_MODEL_ARG_BY_CLI = {
     "hermes": "-m",
@@ -848,8 +852,8 @@ def launch_tmux_viewer_session(
     if not roles:
         print("team-launcher: no visible roles for viewer layout", file=sys.stderr)
         return 1
-    if runner(["tmux", "has-session", "-t", viewer_session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
-        kill_proc = runner(["tmux", "kill-session", "-t", viewer_session])
+    if runner(tmux_has_session_by_name_args(viewer_session), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+        kill_proc = runner(tmux_kill_session_by_name_args(viewer_session))
         if kill_proc.returncode != 0:
             return int(kill_proc.returncode)
     for role in roles:
@@ -2440,6 +2444,14 @@ def tmux_has_session_args(role: RoleConfig) -> list[str]:
 
 def tmux_kill_session_args(role: RoleConfig) -> list[str]:
     return ["tmux", "kill-session", "-t", role.tmux_session]
+
+
+def tmux_has_session_by_name_args(session: str) -> list[str]:
+    return ["tmux", "has-session", "-t", session]
+
+
+def tmux_kill_session_by_name_args(session: str) -> list[str]:
+    return ["tmux", "kill-session", "-t", session]
 
 
 def tmux_detach_clients_args(role: RoleConfig) -> list[str]:
@@ -5188,7 +5200,7 @@ def launch_project(
         )
         if resolved_layout_mode == LAYOUT_MODE_VIEWER:
             plan["layout_mode"] = LAYOUT_MODE_VIEWER
-            plan["viewer_session"] = DEFAULT_VIEWER_SESSION
+            plan["viewer_session"] = viewer_session_for_project(config.project)
             plan["viewer_roles"] = [role.role for role in visible_roles_for_viewer(config)]
         print(json.dumps(plan, indent=2, sort_keys=True))
         return 0
@@ -5265,7 +5277,11 @@ def launch_project(
         ensure_owner_state_dirs(config, pane_state_dir=effective_pane_state_dir, runner=runner)
         launchable_viewer_roles = [role for role in viewer_roles if role.role not in failed_roles]
         if launchable_viewer_roles:
-            launch_result = launch_tmux_viewer_session(launchable_viewer_roles, runner=runner)
+            launch_result = launch_tmux_viewer_session(
+                launchable_viewer_roles,
+                viewer_session=viewer_session_for_project(config.project),
+                runner=runner,
+            )
         elif viewer_roles:
             launch_result = 1
         else:
@@ -6107,6 +6123,7 @@ class SwitchyardProjectStatus:
     panes_up: int | None
     panes_total: int | None
     config_path: Path
+    viewer_session: str | None = None
     error: str = ""
 
     @property
@@ -6114,6 +6131,10 @@ class SwitchyardProjectStatus:
         if self.panes_up is None or self.panes_total is None:
             return "?/?"
         return f"{self.panes_up}/{self.panes_total}"
+
+    @property
+    def viewer_display(self) -> str:
+        return self.viewer_session or "-"
 
 
 @dataclass(frozen=True)
@@ -8141,6 +8162,7 @@ def switchyard_project_statuses(
                     panes_up=None,
                     panes_total=None,
                     config_path=entry.config_path,
+                    viewer_session=None,
                     error=str(exc),
                 )
             )
@@ -8154,6 +8176,7 @@ def switchyard_project_statuses(
                 panes_up=panes_up,
                 panes_total=len(config.roles),
                 config_path=entry.config_path,
+                viewer_session=viewer_session_for_project(config.project),
             )
         )
     return statuses
@@ -8167,6 +8190,7 @@ def _switchyard_project_status_payload(status: SwitchyardProjectStatus) -> dict[
         "panes_up": status.panes_up,
         "panes_total": status.panes_total,
         "panes": status.panes_display,
+        "viewer_session": status.viewer_session,
         "config_path": str(status.config_path),
         "error": status.error,
     }
@@ -8225,12 +8249,16 @@ def switchyard_status_command(
             )
         )
         return 0
-    rows = [("NAME", "SLUG", "STATE", "PANES")]
-    rows.extend((status.name, status.slug, status.state, status.panes_display) for status in statuses)
-    widths = [max(len(str(row[index])) for row in rows) for index in range(4)]
+    rows = [("NAME", "SLUG", "STATE", "PANES", "VIEWER")]
+    rows.extend(
+        (status.name, status.slug, status.state, status.panes_display, status.viewer_display)
+        for status in statuses
+    )
+    widths = [max(len(str(row[index])) for row in rows) for index in range(5)]
     for row in rows:
         print_func(
-            f"{row[0]:<{widths[0]}}  {row[1]:<{widths[1]}}  {row[2]:<{widths[2]}}  {row[3]}"
+            f"{row[0]:<{widths[0]}}  {row[1]:<{widths[1]}}  {row[2]:<{widths[2]}}  "
+            f"{row[3]:<{widths[3]}}  {row[4]}"
         )
     if runtime_statuses:
         print_func("")
@@ -9286,6 +9314,27 @@ def stop_project(
     if config.run_as_user and current_user_name() != config.run_as_user:
         role_runner = _owner_process_runner(owner_user=config.run_as_user, runner=runner)
     exit_code = 0
+    viewer_session = viewer_session_for_project(config.project)
+    viewer_exists = role_runner(
+        tmux_has_session_by_name_args(viewer_session),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ).returncode == 0
+    if viewer_exists:
+        result = role_runner(
+            tmux_kill_session_by_name_args(viewer_session),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if result.returncode != 0:
+            reason = _proc_failure_reason(result, f"tmux kill-session failed with exit {result.returncode}")
+            print_func(f"failed to stop viewer: {viewer_session}: {reason}")
+            exit_code = exit_code or int(result.returncode)
+        else:
+            print_func(f"stopped viewer: {viewer_session}")
+    else:
+        print_func(f"already stopped viewer: {viewer_session}")
     for role in config.roles:
         exists = role_runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
         if not exists:

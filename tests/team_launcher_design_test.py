@@ -316,10 +316,10 @@ def test_switchyard_status_lists_registered_projects_from_process_snapshot() -> 
         )
 
     assert lines == [
-        "NAME            SLUG     STATE    PANES",
-        "Otto Scheduler  otto     running  1/3",
-        "PGU             pgu      running  2/2",
-        "Something Else  stopped  stopped  0/2",
+        "NAME            SLUG     STATE    PANES  VIEWER",
+        "Otto Scheduler  otto     running  1/3    otto-viewer",
+        "PGU             pgu      running  2/2    pgu-viewer",
+        "Something Else  stopped  stopped  0/2    stopped-viewer",
     ]
 
 def test_switchyard_status_json_reports_same_project_facts() -> None:
@@ -382,6 +382,7 @@ def test_switchyard_status_json_reports_same_project_facts() -> None:
                 "panes_up": 1,
                 "panes_total": 1,
                 "panes": "1/1",
+                "viewer_session": "atlas-viewer",
                 "config_path": str(config_path),
                 "error": "",
             }
@@ -425,8 +426,8 @@ def test_switchyard_status_lists_unreadable_config_as_unknown() -> None:
         )
 
     assert lines == [
-        "NAME            SLUG     STATE    PANES",
-        "Private Tenant  private  unknown  ?/?",
+        "NAME            SLUG     STATE    PANES  VIEWER",
+        "Private Tenant  private  unknown  ?/?    -",
     ]
 
 def test_switchyard_status_ignores_tmux_server_new_session_argv_with_pane_target() -> None:
@@ -482,8 +483,8 @@ def test_switchyard_status_ignores_tmux_server_new_session_argv_with_pane_target
         )
 
     assert lines == [
-        "NAME   SLUG   STATE    PANES",
-        "Atlas  atlas  stopped  0/1",
+        "NAME   SLUG   STATE    PANES  VIEWER",
+        "Atlas  atlas  stopped  0/1    atlas-viewer",
     ]
 
 def test_switchyard_status_default_probe_uses_ps_without_root_or_tmux() -> None:
@@ -543,7 +544,7 @@ def test_switchyard_status_default_probe_uses_ps_without_root_or_tmux() -> None:
         )
 
     assert calls == [["ps", "-eo", "args=", "--no-headers"]]
-    assert lines[-1].strip().endswith("running  1/1")
+    assert lines[-1].strip().endswith("running  1/1    atlas-viewer")
 
 def test_switchyard_status_reports_runtime_copy_staleness_without_fetching() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-status-stale.") as tmp:

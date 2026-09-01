@@ -47,7 +47,7 @@ def test_viewer_layout_starts_role_sessions_and_additive_viewer() -> None:
     assert [call[call.index("-s") + 1] for call in role_new_sessions] == role_sessions
     viewer_new_sessions = [
         call for call in runner.calls
-        if call[:2] == ["tmux", "new-session"] and call[call.index("-s") + 1] == "viewer"
+        if call[:2] == ["tmux", "new-session"] and call[call.index("-s") + 1] == "porter-viewer"
     ]
     assert len(viewer_new_sessions) == 1
     assert "env TMUX= tmux attach -t porter-designer" in viewer_new_sessions[0][-1]
@@ -58,18 +58,96 @@ def test_viewer_layout_starts_role_sessions_and_additive_viewer() -> None:
         assert ["tmux", "set-option", "-t", session, "history-limit", "200000"] in runner.calls
         assert ["tmux", "set-option", "-t", session, "status", "off"] in runner.calls
         assert ["tmux", "set-window-option", "-t", f"{session}:0", "pane-border-status", "off"] in runner.calls
-    assert ["tmux", "set-option", "-t", "viewer", "mouse", "on"] in runner.calls
-    assert ["tmux", "set-option", "-t", "viewer", "history-limit", "200000"] in runner.calls
-    assert ["tmux", "set-option", "-t", "viewer", "status", "on"] in runner.calls
-    assert ["tmux", "set-option", "-t", "viewer", "prefix", "C-a"] in runner.calls
-    assert ["tmux", "set-window-option", "-t", "viewer:0", "pane-border-status", "top"] in runner.calls
-    assert ["tmux", "set-window-option", "-t", "viewer:0", "pane-border-format", " #{@role} "] in runner.calls
+    assert ["tmux", "set-option", "-t", "porter-viewer", "mouse", "on"] in runner.calls
+    assert ["tmux", "set-option", "-t", "porter-viewer", "history-limit", "200000"] in runner.calls
+    assert ["tmux", "set-option", "-t", "porter-viewer", "status", "on"] in runner.calls
+    assert ["tmux", "set-option", "-t", "porter-viewer", "prefix", "C-a"] in runner.calls
+    assert ["tmux", "set-window-option", "-t", "porter-viewer:0", "pane-border-status", "top"] in runner.calls
+    assert ["tmux", "set-window-option", "-t", "porter-viewer:0", "pane-border-format", " #{@role} "] in runner.calls
     assert [call for call in runner.calls if call[:4] == ["tmux", "set-option", "-p", "-t"]] == [
-        ["tmux", "set-option", "-p", "-t", f"viewer.{index}", "@role", role]
+        ["tmux", "set-option", "-p", "-t", f"porter-viewer.{index}", "@role", role]
         for index, role in enumerate(["designer", "director", "audit", "ops", "app", "main"])
     ]
     assert not any(call[:2] == ["env", "QT_QPA_PLATFORM=wayland"] for call in runner.calls)
     assert messages == []
+
+def test_project_scoped_viewer_sessions_allow_two_projects_and_same_project_replacement() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-viewer-multi.") as tmp:
+        tmp_path = Path(tmp)
+        porter_dir = tmp_path / "porter"
+        otto_dir = tmp_path / "otto"
+        porter_dir.mkdir()
+        otto_dir.mkdir()
+        porter_config_path = _write_six_visible_role_config(porter_dir, project="porter")
+        otto_config_path = _write_six_visible_role_config(otto_dir, project="otto")
+        porter_config = load_project_config("porter", porter_config_path)
+        otto_config = load_project_config("otto", otto_config_path)
+        runner = FakeRunner()
+
+        for config, config_path in ((porter_config, porter_config_path), (otto_config, otto_config_path)):
+            assert (
+                launch_project(
+                    config,
+                    config_path=config_path,
+                    mode="start",
+                    script_path=ROOT / "scripts" / "team-launcher",
+                    runner=runner,
+                    layout_output=tmp_path / f"{config.project}-layout-output.json",
+                    pane_state_dir=tmp_path / "pane-state",
+                    layout_mode="viewer",
+                    layout_environ={"XDG_CURRENT_DESKTOP": "GNOME"},
+                )
+                == 0
+            )
+
+        assert "porter-viewer" in runner.existing_sessions
+        assert "otto-viewer" in runner.existing_sessions
+
+        assert (
+            launch_project(
+                porter_config,
+                config_path=porter_config_path,
+                mode="start",
+                script_path=ROOT / "scripts" / "team-launcher",
+                runner=runner,
+                layout_output=tmp_path / "porter-layout-output.json",
+                pane_state_dir=tmp_path / "pane-state",
+                layout_mode="viewer",
+                layout_environ={"XDG_CURRENT_DESKTOP": "GNOME"},
+            )
+            == 0
+        )
+
+    kill_calls = [call for call in runner.calls if call[:2] == ["tmux", "kill-session"]]
+    assert [call[-1] for call in kill_calls] == ["porter-viewer"]
+    assert "porter-viewer" in runner.existing_sessions
+    assert "otto-viewer" in runner.existing_sessions
+
+def test_project_scoped_viewer_ignores_legacy_global_viewer_session() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-viewer-legacy.") as tmp:
+        tmp_path = Path(tmp)
+        config_path = _write_six_visible_role_config(tmp_path, project="porter")
+        config = load_project_config("porter", config_path)
+        runner = FakeRunner(existing_sessions={"viewer"})
+
+        assert (
+            launch_project(
+                config,
+                config_path=config_path,
+                mode="start",
+                script_path=ROOT / "scripts" / "team-launcher",
+                runner=runner,
+                layout_output=tmp_path / "layout-output.json",
+                pane_state_dir=tmp_path / "pane-state",
+                layout_mode="viewer",
+                layout_environ={"XDG_CURRENT_DESKTOP": "GNOME"},
+            )
+            == 0
+        )
+
+    assert "viewer" in runner.existing_sessions
+    assert "porter-viewer" in runner.existing_sessions
+    assert ["tmux", "kill-session", "-t", "viewer"] not in runner.calls
 
 def test_viewer_visible_start_verifies_cli_before_reporting_success() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-viewer-visible.") as tmp:
@@ -205,6 +283,54 @@ def test_viewer_pane_death_does_not_change_role_targets_in_real_tmux() -> None:
                 assert marker.read_text(encoding="utf-8") == role
         finally:
             _cleanup_isolated_tmux_sessions(server, [viewer_session, *sessions.values()])
+
+def test_two_project_viewer_sessions_coexist_in_real_isolated_tmux() -> None:
+    if shutil.which("tmux") is None:
+        return
+    roles = ["designer", "director", "audit", "ops", "app", "main"]
+    suffix = f"pgu874_{os.getpid()}"
+    server = f"{suffix}-server"
+    runner = _isolated_tmux_runner(server)
+    created_sessions: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-viewer-two-real.") as tmp:
+        tmp_path = Path(tmp)
+        try:
+            for project in ("porter", "otto"):
+                project_dir = tmp_path / project
+                project_dir.mkdir()
+                config_path = _write_six_visible_role_config(project_dir, project=project)
+                config = load_project_config(project, config_path)
+                for role in roles:
+                    session = f"{project}-{role}"
+                    created_sessions.append(session)
+                    _run_isolated_tmux(server, ["new-session", "-d", "-s", session, "-c", str(project_dir), "/bin/sh"], check=True)
+                viewer_session = team_launcher.viewer_session_for_project(project)
+                created_sessions.append(viewer_session)
+                assert (
+                    team_launcher.launch_tmux_viewer_session(
+                        team_launcher.visible_roles_for_viewer(config),
+                        viewer_session=viewer_session,
+                        runner=runner,
+                    )
+                    == 0
+                )
+
+            _run_isolated_tmux(server, ["has-session", "-t", "porter-viewer"], check=True)
+            _run_isolated_tmux(server, ["has-session", "-t", "otto-viewer"], check=True)
+
+            porter_config = load_project_config("porter", tmp_path / "porter" / "porter.json")
+            assert (
+                team_launcher.launch_tmux_viewer_session(
+                    team_launcher.visible_roles_for_viewer(porter_config),
+                    viewer_session="porter-viewer",
+                    runner=runner,
+                )
+                == 0
+            )
+            _run_isolated_tmux(server, ["has-session", "-t", "porter-viewer"], check=True)
+            _run_isolated_tmux(server, ["has-session", "-t", "otto-viewer"], check=True)
+        finally:
+            _cleanup_isolated_tmux_sessions(server, created_sessions)
 
 def test_detached_research_start_fails_visible_when_session_disappears() -> None:
     config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")

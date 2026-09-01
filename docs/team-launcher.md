@@ -46,6 +46,10 @@ desktops and undetected desktops use the tmux viewer. `--layout separate` still
 forces the Konsole layout explicitly. Viewer launches use an internal no-attach
 pane mode so parent-launched visible role sessions are ensured without attaching
 tmux before the viewer is built. Projects
+build viewer windows in a project-scoped `<project>-viewer` tmux session, so
+starting or restarting one project does not replace another project's viewer.
+Pre-upgrade sessions named only `viewer` are left alone because the old name has
+no project identity and cannot be safely adopted or killed automatically. Projects
 without `run_as_user` use the invoking user's runtime
 pane-state directory and `$HOME/bin` prepended to pane CLI `PATH`; projects
 with `run_as_user` prepend that runtime user's `$HOME/bin`, not the invoking

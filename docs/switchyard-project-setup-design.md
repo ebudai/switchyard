@@ -332,7 +332,7 @@ TWO PATHS, and the KDE one is the status quo by definition:
 |---|---|---|
 | role sessions | 7, one pane each | **identical** |
 | notification address | role session name | **identical** |
-| window layout | Konsole split views (user-arranged) | a `viewer` tmux session, 6 panes |
+| window layout | Konsole split views (user-arranged) | a `<project>-viewer` tmux session, 6 panes |
 | maximize during design | Konsole `Ctrl+Shift+E` (printed) | `Ctrl+a z` (printed) |
 
 The viewer is PURELY ADDITIVE: an extra tmux session whose panes each run

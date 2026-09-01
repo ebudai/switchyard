@@ -50,6 +50,7 @@ HOST_AUTOMATION_MARKERS = (
     "repository_hooks.py",
     "install-all-repository-hooks",
     "install-switchyard",
+    "warn-worktree-count.py",
 )
 TICKET_BOARD_IMPORT_RE = re.compile(r"(?:from|import)\s+scripts\.ticket_board|scripts\.ticket_board\.")
 BROWSER_TEST_MARKERS = (

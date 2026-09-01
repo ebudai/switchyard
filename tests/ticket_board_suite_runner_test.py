@@ -122,6 +122,7 @@ def test_discovers_host_automation_suites_by_content_property() -> None:
         )
         (tests / "rollout_test.py").write_text("'install-all-repository-hooks'\n", encoding="utf-8")
         (tests / "launcher_test.sh").write_text("install-switchyard --apply\n", encoding="utf-8")
+        (tests / "pre_commit_hook_test.sh").write_text("'warn-worktree-count.py'\n", encoding="utf-8")
         (tests / "board_overlap_test.py").write_text(
             "from scripts.repository_hooks import install_main_guard\nboard_url = 'http://example'\n",
             encoding="utf-8",
@@ -130,6 +131,7 @@ def test_discovers_host_automation_suites_by_content_property() -> None:
 
         assert runner.discover_host_automation_suites(root) == [
             "tests/launcher_test.sh",
+            "tests/pre_commit_hook_test.sh",
             "tests/repository_policy_test.py",
             "tests/rollout_test.py",
         ]

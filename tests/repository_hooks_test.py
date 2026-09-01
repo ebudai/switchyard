@@ -93,6 +93,7 @@ def main() -> int:
         assert run("git", "-C", str(client), "config", "--local", "--get", "core.hooksPath").stdout.strip() == str(hooks.resolve())
         assert run("git", "-C", str(remote), "config", "--local", "--get", "core.hooksPath").stdout.strip() == str((remote / "hooks").resolve())
         assert (hooks / "pre-commit.switchyard-upstream").exists()
+        assert (hooks / "warn-worktree-count.py").exists()
         preserved_update = remote / "hooks" / "update.switchyard-upstream"
         assert preserved_update.read_text(encoding="utf-8") == upstream_update_text
         assert not (remote / "hooks" / "update.switchyard-upstream.switchyard-upstream").exists()
@@ -103,6 +104,92 @@ def main() -> int:
         committed = run("git", "-C", str(worktree), "commit", "-m", "oversized from worktree")
         assert "upstream-precommit" in committed.stderr
         assert "warning: oversized.py is 1251 lines (soft limit 1250)" in committed.stderr
+
+        cleanup_marker = temp / "cleanup-planner-runs"
+        fake_cleanup = temp / "fake-cleanup.py"
+        fake_cleanup.write_text(
+            "#!/usr/bin/env python3\n"
+            "from __future__ import annotations\n"
+            "import json\n"
+            "import os\n"
+            "from pathlib import Path\n"
+            "Path(os.environ['CLEANUP_MARKER']).write_text(\n"
+            "    Path(os.environ['CLEANUP_MARKER']).read_text() + 'run\\n'\n"
+            "    if Path(os.environ['CLEANUP_MARKER']).exists() else 'run\\n'\n"
+            ")\n"
+            "print(json.dumps({'remove_candidates': 7, 'skipped': {'dirty': 3}}))\n",
+            encoding="utf-8",
+        )
+        fake_cleanup.chmod(0o755)
+        stamp_path = temp / "worktree-warning-stamp.json"
+
+        below_threshold = worktree / "below-threshold.txt"
+        below_threshold.write_text("below\n", encoding="utf-8")
+        run("git", "-C", str(worktree), "add", "below-threshold.txt")
+        committed_below_threshold = run(
+            "git",
+            "-C",
+            str(worktree),
+            "commit",
+            "-m",
+            "below worktree warning threshold",
+            env={
+                "SWITCHYARD_WORKTREE_TOTAL_WARNING_THRESHOLD": "10",
+                "SWITCHYARD_WORKTREE_CLEANUP_COMMAND": str(fake_cleanup),
+                "SWITCHYARD_WORKTREE_WARNING_STAMP": str(stamp_path),
+                "CLEANUP_MARKER": str(cleanup_marker),
+            },
+        )
+        assert "worktree directory is getting unwieldy" not in committed_below_threshold.stderr
+        assert not cleanup_marker.exists()
+
+        over_threshold = worktree / "over-threshold.txt"
+        over_threshold.write_text("over\n", encoding="utf-8")
+        run("git", "-C", str(worktree), "add", "over-threshold.txt")
+        committed_over_threshold = run(
+            "git",
+            "-C",
+            str(worktree),
+            "commit",
+            "-m",
+            "over worktree warning threshold",
+            env={
+                "SWITCHYARD_WORKTREE_TOTAL_WARNING_THRESHOLD": "1",
+                "SWITCHYARD_WORKTREE_RECLAIMABLE_WARNING_THRESHOLD": "5",
+                "SWITCHYARD_WORKTREE_CLEANUP_COMMAND": str(fake_cleanup),
+                "SWITCHYARD_WORKTREE_WARNING_STAMP": str(stamp_path),
+                "CLEANUP_MARKER": str(cleanup_marker),
+            },
+        )
+        assert committed_over_threshold.returncode == 0
+        assert "repository has 2 git worktrees (soft limit 1)" in committed_over_threshold.stderr
+        assert "cleanup planner found 7 reclaimable clean merged worktrees (soft limit 5)" in committed_over_threshold.stderr
+        assert "cleanup may have stopped working" in committed_over_threshold.stderr
+        assert "skipped 3 dirty worktrees; those are protected as unfinished work" in committed_over_threshold.stderr
+        assert "worktree_cleanup.py" in committed_over_threshold.stderr
+        assert cleanup_marker.read_text(encoding="utf-8") == "run\n"
+
+        rate_limited = worktree / "rate-limited.txt"
+        rate_limited.write_text("quiet\n", encoding="utf-8")
+        run("git", "-C", str(worktree), "add", "rate-limited.txt")
+        committed_rate_limited = run(
+            "git",
+            "-C",
+            str(worktree),
+            "commit",
+            "-m",
+            "rate limited worktree warning",
+            env={
+                "SWITCHYARD_WORKTREE_TOTAL_WARNING_THRESHOLD": "1",
+                "SWITCHYARD_WORKTREE_RECLAIMABLE_WARNING_THRESHOLD": "5",
+                "SWITCHYARD_WORKTREE_CLEANUP_COMMAND": str(fake_cleanup),
+                "SWITCHYARD_WORKTREE_WARNING_STAMP": str(stamp_path),
+                "CLEANUP_MARKER": str(cleanup_marker),
+            },
+        )
+        assert committed_rate_limited.returncode == 0
+        assert "worktree directory is getting unwieldy" not in committed_rate_limited.stderr
+        assert cleanup_marker.read_text(encoding="utf-8") == "run\n"
 
         feature_push = run("git", "-C", str(worktree), "push", "origin", "HEAD:refs/heads/feature/worktree-warning")
         assert feature_push.returncode == 0 and update_marker.exists()

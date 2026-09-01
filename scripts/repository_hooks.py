@@ -17,6 +17,8 @@ from typing import Iterable
 
 
 DEFAULT_LINE_LIMIT = 1250
+DEFAULT_WORKTREE_TOTAL_LIMIT = 300
+DEFAULT_WORKTREE_RECLAIMABLE_LIMIT = 100
 MANAGED_MARKER = "# switchyard-managed-repository-hook-v1"
 DEFAULT_REGISTRY_DIR = Path("/etc/switchyard/projects")
 PROJECT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
@@ -112,8 +114,10 @@ def install_local_warning(repository: Path, *, source_root: Path, line_limit: in
     os.chown(hooks, *owner)
     helper = hooks / "warn-file-size-limit.py"
     shared = hooks / "report_file_size_limit.py"
+    worktree_helper = hooks / "warn-worktree-count.py"
     _install_file(source_root / "scripts" / "warn_file_size_limit.py", helper, owner=owner)
     _install_file(source_root / "scripts" / "report_file_size_limit.py", shared, owner=owner)
+    _install_file(source_root / "scripts" / "warn_worktree_count.py", worktree_helper, owner=owner)
     hook = hooks / "pre-commit"
     upstream = _preserve_existing_hook(hook, replace_warning_only=True)
     text = f"""#!/usr/bin/env bash
@@ -122,6 +126,9 @@ set -u
 
 readonly FILE_SIZE_LIMIT={line_limit}
 readonly FILE_SIZE_HELPER={shlex.quote(str(helper))}
+readonly WORKTREE_TOTAL_LIMIT={DEFAULT_WORKTREE_TOTAL_LIMIT}
+readonly WORKTREE_RECLAIMABLE_LIMIT={DEFAULT_WORKTREE_RECLAIMABLE_LIMIT}
+readonly WORKTREE_COUNT_HELPER={shlex.quote(str(worktree_helper))}
 readonly UPSTREAM_HOOK={shlex.quote(str(upstream))}
 
 upstream_status=0
@@ -130,6 +137,9 @@ if [[ -x "$UPSTREAM_HOOK" ]]; then
 fi
 if [[ -x "$FILE_SIZE_HELPER" ]]; then
     "$FILE_SIZE_HELPER" --line-limit "$FILE_SIZE_LIMIT" || true
+fi
+if [[ -x "$WORKTREE_COUNT_HELPER" ]]; then
+    "$WORKTREE_COUNT_HELPER" --total-threshold "${{SWITCHYARD_WORKTREE_TOTAL_WARNING_THRESHOLD:-$WORKTREE_TOTAL_LIMIT}}" --reclaimable-threshold "${{SWITCHYARD_WORKTREE_RECLAIMABLE_WARNING_THRESHOLD:-$WORKTREE_RECLAIMABLE_LIMIT}}" || true
 fi
 exit "$upstream_status"
 """

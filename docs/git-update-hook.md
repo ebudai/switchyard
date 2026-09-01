@@ -9,7 +9,17 @@ Switchyard-managed repositories use two complementary hooks:
   the preserved legacy PGU guard.
 - `pre-commit` warns when a staged source file exceeds 1,250 lines. This is the
   deliberate soft limit retained at Eric's direction: it reports maintenance
-  risk but never blocks a commit. Existing pre-commit behavior is preserved.
+  risk but never blocks a commit. It also performs a cheap
+  `git worktree list --porcelain` count on every commit and warns when the
+  repository has more than 300 registered worktrees. Only after that total
+  threshold is crossed does it run the slower cleanup planner to report how
+  many worktrees are actually reclaimable, with a separate soft limit of 100
+  reclaimable clean merged worktrees. The warning distinguishes total
+  directory size from reclaimable cleanup candidates, reports dirty worktrees
+  as protected unfinished work, names
+  `scripts/ticket_board/worktree_cleanup.py --execute` as the cleanup command,
+  and is rate-limited to once per day per repository. Existing pre-commit
+  behavior is preserved.
 
 Worktrees share their repository's common Git directory, so one pre-commit
 installation covers every worktree attached to that repository. `switchyard

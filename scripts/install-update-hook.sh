@@ -13,6 +13,7 @@ FILE_SIZE_LIMIT="${FILE_SIZE_LINE_LIMIT:-${PGU_FILE_SIZE_LINE_LIMIT:-1250}}"
 LOCAL_HOOKS_DIR="${UPDATE_HOOK_LOCAL_HOOKS_DIR:-${PGU_UPDATE_HOOK_LOCAL_HOOKS_DIR:-}}"
 LOCAL_PRE_COMMIT_HOOK=""
 LOCAL_WARNING_HELPER=""
+LOCAL_WARNING_SHARED=""
 SERVER_STAGE3B_DEMO_HOOK="$SERVER_HOOKS_DIR/refresh-stage3b-demo.sh"
 SERVER_UPDATE_HOOK="$SERVER_HOOKS_DIR/update"
 LEGACY_SERVER_SIZE_HOOK="$SERVER_HOOKS_DIR/pgu-file-size-ticket.py"
@@ -100,18 +101,27 @@ write_local_pre_commit_hook() {
     mkdir -p "$hooks_dir"
     LOCAL_PRE_COMMIT_HOOK="$hooks_dir/pre-commit"
     LOCAL_WARNING_HELPER="$hooks_dir/warn-file-size-limit.py"
+    LOCAL_WARNING_SHARED="$hooks_dir/report_file_size_limit.py"
+    LOCAL_WORKTREE_WARNING_HELPER="$hooks_dir/warn-worktree-count.py"
     install -m 0755 "$REPO_ROOT/scripts/warn_file_size_limit.py" "$LOCAL_WARNING_HELPER"
+    install -m 0644 "$REPO_ROOT/scripts/report_file_size_limit.py" "$LOCAL_WARNING_SHARED"
+    install -m 0755 "$REPO_ROOT/scripts/warn_worktree_count.py" "$LOCAL_WORKTREE_WARNING_HELPER"
     cat >"$LOCAL_PRE_COMMIT_HOOK" <<EOF
 #!/usr/bin/env bash
 set -u
 
 readonly FILE_SIZE_LIMIT="$FILE_SIZE_LIMIT"
 readonly FILE_SIZE_HELPER="$LOCAL_WARNING_HELPER"
+readonly WORKTREE_TOTAL_LIMIT=300
+readonly WORKTREE_RECLAIMABLE_LIMIT=100
+readonly WORKTREE_COUNT_HELPER="$LOCAL_WORKTREE_WARNING_HELPER"
 
 if [[ -x "\$FILE_SIZE_HELPER" ]]; then
     "\$FILE_SIZE_HELPER" --line-limit "\$FILE_SIZE_LIMIT" || true
 fi
-
+if [[ -x "\$WORKTREE_COUNT_HELPER" ]]; then
+    "\$WORKTREE_COUNT_HELPER" --total-threshold "\${SWITCHYARD_WORKTREE_TOTAL_WARNING_THRESHOLD:-\$WORKTREE_TOTAL_LIMIT}" --reclaimable-threshold "\${SWITCHYARD_WORKTREE_RECLAIMABLE_WARNING_THRESHOLD:-\$WORKTREE_RECLAIMABLE_LIMIT}" || true
+fi
 exit 0
 EOF
     chmod 0755 "$LOCAL_PRE_COMMIT_HOOK"
@@ -131,6 +141,8 @@ main() {
     esac
 
     [[ -f "$REPO_ROOT/scripts/warn_file_size_limit.py" ]] || die "missing pre-commit warning helper script under $REPO_ROOT/scripts"
+    [[ -f "$REPO_ROOT/scripts/report_file_size_limit.py" ]] || die "missing file-size warning shared module under $REPO_ROOT/scripts"
+    [[ -f "$REPO_ROOT/scripts/warn_worktree_count.py" ]] || die "missing worktree-count warning helper script under $REPO_ROOT/scripts"
     [[ -f "$REPO_ROOT/scripts/refresh-stage3b-demo.sh" ]] || die "missing stage3b demo helper script under $REPO_ROOT/scripts"
     write_server_hook
     write_local_pre_commit_hook
@@ -138,6 +150,8 @@ main() {
     printf '[install-update-hook] stage3b helper: %s\n' "$SERVER_STAGE3B_DEMO_HOOK"
     printf '[install-update-hook] local pre-commit hook: %s\n' "$LOCAL_PRE_COMMIT_HOOK"
     printf '[install-update-hook] local warning helper: %s\n' "$LOCAL_WARNING_HELPER"
+    printf '[install-update-hook] local warning shared module: %s\n' "$LOCAL_WARNING_SHARED"
+    printf '[install-update-hook] local worktree warning helper: %s\n' "$LOCAL_WORKTREE_WARNING_HELPER"
 }
 
 main "$@"

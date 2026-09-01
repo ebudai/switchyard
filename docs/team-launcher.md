@@ -40,9 +40,12 @@ set and the invoker is different, the wrapper re-execs through
 production launch keeps the existing agent-owned tmux sessions, pane hook
 state, and shared checkout. Pane subcommands delegate through that runtime user
 before touching tmux, pane hook state, or resume session files, including
-detached roles, `attach-role`/`detach-role`, and the non-KDE viewer path. Viewer
-launches use an internal no-attach pane mode so parent-launched visible role
-sessions are ensured without attaching tmux before the viewer is built. Projects
+detached roles, `attach-role`/`detach-role`, and the viewer path. In auto layout
+mode, KDE/plasma desktops use the separate Konsole layout; known non-KDE
+desktops and undetected desktops use the tmux viewer. `--layout separate` still
+forces the Konsole layout explicitly. Viewer launches use an internal no-attach
+pane mode so parent-launched visible role sessions are ensured without attaching
+tmux before the viewer is built. Projects
 without `run_as_user` use the invoking user's runtime
 pane-state directory and `$HOME/bin` prepended to pane CLI `PATH`; projects
 with `run_as_user` prepend that runtime user's `$HOME/bin`, not the invoking
@@ -159,8 +162,9 @@ window name set to the board role (`director`, `main`, `app`, `ops`, `audit`,
 even after the CLI updates its pane title. The launcher also sets `mouse on`
 and `history-limit 200000` on every tmux session it creates, including the
 viewer session, so tenant panes can scroll and select text without relying on
-an owner's personal `.tmux.conf`. Before opening Konsole, `start` fetches the
-configured worktree ref. If no role tmux sessions are running, it also refreshes
+an owner's personal `.tmux.conf`. Before opening Konsole or the tmux viewer,
+`start` fetches the configured worktree ref. If no role tmux sessions are
+running, it also refreshes
 the project checkout: shared-checkout projects are checked out to the ref with
 `--force` and cleaned with `git clean -fdx`, while control-repository projects
 prepare each role worktree. If any role session is already running, `start`

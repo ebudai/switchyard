@@ -753,7 +753,7 @@ def resolve_layout_mode(
         return requested
     desktop = detected_invoking_desktop(environ=environ, runner=runner)
     if not desktop:
-        return LAYOUT_MODE_SEPARATE
+        return LAYOUT_MODE_VIEWER
     return LAYOUT_MODE_SEPARATE if _desktop_is_kde(desktop) else LAYOUT_MODE_VIEWER
 
 

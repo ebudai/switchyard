@@ -493,7 +493,7 @@ def test_switchyard_upgrade_pgu_without_tenant_release_emits_no_release_report()
     assert "sudo env" not in rendered
     assert "panes must be restarted after the release update" not in rendered
 
-def test_layout_detection_uses_invoking_user_and_falls_back_to_separate() -> None:
+def test_layout_detection_uses_invoking_user_and_falls_back_to_viewer_when_undetected() -> None:
     class DesktopRunner:
         def __init__(self, *, desktop_output: str = "") -> None:
             self.desktop_output = desktop_output
@@ -517,19 +517,82 @@ def test_layout_detection_uses_invoking_user_and_falls_back_to_separate() -> Non
     )
     assert kde_runner.calls[0] == ["loginctl", "show-user", "eric", "-p", "Display", "--value"]
     assert kde_runner.calls[1] == ["loginctl", "show-session", "7", "-p", "Desktop"]
-    assert team_launcher.resolve_layout_mode(
-        "auto",
-        environ={"SUDO_USER": "eric"},
-        runner=kde_runner,
-    ) == "separate"
+    assert team_launcher.resolve_layout_mode("auto", environ={"SUDO_USER": "eric"}, runner=kde_runner) == "separate"
 
     unknown_runner = DesktopRunner(desktop_output="")
-    assert team_launcher.resolve_layout_mode("auto", environ={"SUDO_USER": "eric"}, runner=unknown_runner) == "separate"
+    assert (
+        team_launcher.resolve_layout_mode(
+            "auto",
+            environ={"SUDO_USER": "eric", "XDG_CURRENT_DESKTOP": "", "KDE_FULL_SESSION": ""},
+            runner=unknown_runner,
+        )
+        == "viewer"
+    )
     type_only_runner = DesktopRunner(desktop_output="Type=wayland\n")
-    assert team_launcher.resolve_layout_mode("auto", environ={"SUDO_USER": "eric"}, runner=type_only_runner) == "separate"
-    assert team_launcher.resolve_layout_mode("auto", environ={"XDG_CURRENT_DESKTOP": "GNOME"}, runner=FakeRunner()) == "viewer"
+    assert (
+        team_launcher.resolve_layout_mode(
+            "auto",
+            environ={"SUDO_USER": "eric", "XDG_CURRENT_DESKTOP": "", "KDE_FULL_SESSION": ""},
+            runner=type_only_runner,
+        )
+        == "viewer"
+    )
+    for desktop in ("GNOME", "ubuntu:GNOME", "XFCE"):
+        assert team_launcher.resolve_layout_mode(
+            "auto",
+            environ={"XDG_CURRENT_DESKTOP": desktop},
+            runner=FakeRunner(),
+        ) == "viewer"
+    for desktop in ("KDE", "plasma", "KDE:plasma"):
+        assert team_launcher.resolve_layout_mode(
+            "auto",
+            environ={"XDG_CURRENT_DESKTOP": desktop},
+            runner=FakeRunner(),
+        ) == "separate"
     assert team_launcher.resolve_layout_mode("viewer", environ={"XDG_CURRENT_DESKTOP": "KDE"}, runner=FakeRunner()) == "viewer"
     assert team_launcher.resolve_layout_mode("separate", environ={"XDG_CURRENT_DESKTOP": "GNOME"}, runner=FakeRunner()) == "separate"
+    assert (
+        team_launcher.resolve_layout_mode(
+            "separate",
+            environ={"SUDO_USER": "eric", "XDG_CURRENT_DESKTOP": "", "KDE_FULL_SESSION": ""},
+            runner=DesktopRunner(desktop_output=""),
+        )
+        == "separate"
+    )
+
+def test_explicit_separate_layout_still_launches_konsole_when_desktop_is_undetected() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-launcher-explicit-separate.") as tmp:
+        tmp_path = Path(tmp)
+        layout_path = tmp_path / "otto-konsole-layout.json"
+        layout_path.write_text(
+            json.dumps(team_launcher._new_project_layout_payload(6), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        config_path = _write_launcher_config(tmp_path)
+        config = load_project_config("otto", config_path)
+        layout_output = tmp_path / "layout.json"
+        runner = FakeRunner()
+        process_launcher = RecordingProcessLauncher()
+
+        assert (
+            launch_project(
+                config,
+                config_path=config_path,
+                mode="start",
+                script_path=ROOT / "scripts" / "team-launcher",
+                runner=runner,
+                layout_output=layout_output,
+                layout_mode=team_launcher.LAYOUT_MODE_SEPARATE,
+                layout_environ={"SUDO_USER": "eric", "XDG_CURRENT_DESKTOP": "", "KDE_FULL_SESSION": ""},
+                no_launcher_self_deploy=True,
+                allow_stale_launcher=True,
+                konsole_process_launcher=process_launcher,
+            )
+            == 0
+        )
+
+    assert len(process_launcher.calls) == 1
+    assert process_launcher.calls[0]["args"] == konsole_launch_args(layout_output)
 
 def test_materialize_layout_refuses_more_than_six_visible_roles() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-visible-cap.") as tmp:

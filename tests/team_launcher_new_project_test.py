@@ -415,6 +415,99 @@ def test_add_role_can_add_auditor_to_existing_project() -> None:
     assert "ARRAY['audit_gemini', 'audit_gpt']::text[]" in str(psql_calls[0][1]["input"])
     assert "team-launcher: added auditor role audit_gpt to mefp" in stdout.getvalue()
 
+def test_add_role_can_add_conventional_audit_role_to_auditless_project() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-add-default-audit-role.") as tmp:
+        tmp_path = Path(tmp)
+        project_dir = tmp_path / "project"
+        provision_dir = project_dir / ".switchyard" / "provision"
+        provision_dir.mkdir(parents=True)
+        source_repo = tmp_path / "source-repo"
+        project_repo = tmp_path / "project-repo"
+        source_repo.mkdir()
+        project_repo.mkdir()
+        plan = team_launcher.build_plan(
+            project="mefp",
+            owner_user=current_user,
+            port=18811,
+            source_repo=source_repo,
+            implementer_roles=("app", "main"),
+            include_audit=False,
+            audit_roles=(),
+        )
+        (provision_dir / "plan.json").write_text(json.dumps(plan.__dict__, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        (provision_dir / plan.board_unit).write_text(team_launcher.render_board_unit(plan), encoding="utf-8")
+        artifact_path = project_dir / ".switchyard" / "mefp.project.json"
+        artifact_path.write_text(
+            json.dumps(
+                {
+                    "project": {
+                        "roles": ["app", "main"],
+                        "audit_roles": [],
+                        "include_audit": False,
+                        "role_clis": {"app": "codex", "main": "codex"},
+                    }
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config_path = provision_dir / "mefp.json"
+        config_path.write_text(
+            json.dumps(
+                team_launcher._new_project_launcher_config_payload(
+                    plan,
+                    repository=project_repo,
+                    implementer_roles=("app", "main"),
+                    include_audit=False,
+                    audit_roles=(),
+                ),
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        layout_path = provision_dir / "mefp-konsole-layout.json"
+        layout_path.write_text(
+            json.dumps(team_launcher._new_project_layout_payload(4), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("mefp", config_path)
+        runner = KeywordRecordingFakeRunner()
+
+        assert (
+            team_launcher.add_project_role_command(
+                config,
+                config_path=config_path,
+                role_name="audit",
+                cli="claude",
+                audit_role=True,
+                script_path=ROOT / "scripts" / "team-launcher",
+                runner=runner,
+            )
+            == 0
+        )
+
+        updated_config_json = json.loads(config_path.read_text(encoding="utf-8"))
+        updated_plan = json.loads((provision_dir / "plan.json").read_text(encoding="utf-8"))
+        add_role_sql = (provision_dir / "mefp-add-role.sql").read_text(encoding="utf-8")
+        updated_artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+
+    assert [role["role"] for role in updated_config_json["roles"]] == ["designer", "director", "app", "main", "audit"]
+    assert updated_plan["implementer_roles"] == ["app", "main"]
+    assert updated_plan["audit_roles"] == ["audit"]
+    assert updated_plan["assignee_roles"] == ["unassigned", "designer", "app", "main", "audit", "director", "user"]
+    assert "Add auditor role audit to the existing project workflow for mefp" in add_role_sql
+    assert "('audit', 'Audit', 3, ARRAY['audit']::text[]" in add_role_sql
+    assert "('analysis', 'in_progress', 'start_work', ARRAY['app', 'main']::text[]" in add_role_sql
+    assert updated_artifact["project"]["roles"] == ["app", "main"]
+    assert updated_artifact["project"]["audit_roles"] == ["audit"]
+    assert updated_artifact["project"]["include_audit"] is True
+    assert updated_artifact["project"]["role_clis"]["audit"] == "claude"
+
 def test_add_role_uses_project_pane_launcher_when_run_as_user_differs() -> None:
     original_current_user_name = team_launcher.current_user_name
     try:

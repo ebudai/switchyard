@@ -184,6 +184,111 @@ def test_switchyard_project_name_argv_joins_and_resumes_matching_project() -> No
     assert calls[0]["pane_launcher"] == Path("/home/porter-agent/porter-ticketboard-live/current/scripts/team-launcher")
     assert calls[0]["report_session_records"] is True
 
+def test_switchyard_add_role_audit_flag_reaches_command() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-add-auditor-entrypoint.") as tmp:
+        tmp_path = Path(tmp)
+        config_dir = tmp_path / "config"
+        registry_dir = tmp_path / "registry"
+        layout_path = tmp_path / "layout.json"
+        config_dir.mkdir()
+        registry_dir.mkdir()
+        layout_path.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        config_path = config_dir / "mefp.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "mefp",
+                    "layout": str(layout_path),
+                    "roles": [{"role": "main", "slot": 0, "cli": ["codex"]}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        captured: list[dict[str, object]] = []
+        original_config_dir = team_launcher.DEFAULT_CONFIG_DIR
+        original_registry_dir = team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR
+        original_add_project_role_command = team_launcher.add_project_role_command
+        try:
+            team_launcher.DEFAULT_CONFIG_DIR = config_dir
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
+
+            def fake_add_project_role_command(config: team_launcher.ProjectConfig, **kwargs: object) -> int:
+                captured.append({"project": config.project, **kwargs})
+                return 0
+
+            team_launcher.add_project_role_command = fake_add_project_role_command
+
+            assert switchyard_main(["add-role", "mefp", "audit_gpt", "--audit", "--cli", "agy", "--detached", "--no-start"]) == 0
+        finally:
+            team_launcher.DEFAULT_CONFIG_DIR = original_config_dir
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = original_registry_dir
+            team_launcher.add_project_role_command = original_add_project_role_command
+
+    assert len(captured) == 1
+    assert captured[0]["project"] == "mefp"
+    assert captured[0]["config_path"] == config_path
+    assert captured[0]["role_name"] == "audit_gpt"
+    assert captured[0]["cli"] == "agy"
+    assert captured[0]["audit_role"] is True
+    assert captured[0]["detached"] is True
+    assert captured[0]["start"] is False
+
+def test_team_launcher_add_role_audit_flag_reaches_command() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-add-auditor-entrypoint.") as tmp:
+        tmp_path = Path(tmp)
+        layout_path = tmp_path / "layout.json"
+        layout_path.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        config_path = tmp_path / "mefp.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "mefp",
+                    "layout": str(layout_path),
+                    "roles": [{"role": "main", "slot": 0, "cli": ["codex"]}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        captured: list[dict[str, object]] = []
+        original_add_project_role_command = team_launcher.add_project_role_command
+        try:
+            def fake_add_project_role_command(config: team_launcher.ProjectConfig, **kwargs: object) -> int:
+                captured.append({"project": config.project, **kwargs})
+                return 0
+
+            team_launcher.add_project_role_command = fake_add_project_role_command
+
+            assert (
+                team_launcher.main(
+                    [
+                        "mefp",
+                        "add-role",
+                        "audit_gpt",
+                        "--config",
+                        str(config_path),
+                        "--audit",
+                        "--cli",
+                        "agy",
+                        "--detached",
+                        "--no-attach",
+                    ]
+                )
+                == 0
+            )
+        finally:
+            team_launcher.add_project_role_command = original_add_project_role_command
+
+    assert len(captured) == 1
+    assert captured[0]["project"] == "mefp"
+    assert captured[0]["config_path"] == config_path
+    assert captured[0]["role_name"] == "audit_gpt"
+    assert captured[0]["cli"] == "agy"
+    assert captured[0]["audit_role"] is True
+    assert captured[0]["detached"] is True
+    assert captured[0]["start"] is False
+
 def test_team_launcher_main_resolves_registered_project_for_pane_operations() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-registry-pane.") as tmp:
         tmp_path = Path(tmp)

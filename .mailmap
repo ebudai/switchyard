@@ -1,0 +1,21 @@
+# Canonical author identities.
+#
+# This history was written by Eric and by the agent team under several
+# transient git configs, leaving nine author identities for what is really
+# a handful of actors. This file consolidates them for git shortlog,
+# git log --use-mailmap, and git blame.
+#
+# The agent identities map to addresses under .invalid, which RFC 2606
+# reserves and which therefore can never be registered by anyone. One of
+# the historical placeholders, d@d, turned out to be a real registered
+# address belonging to an unrelated person, who was consequently listed as
+# a contributor to this repository. Do not use a bare or made-up domain as
+# a git author email; use .invalid.
+
+Director <director@switchyard.invalid> <d@pgu.local>
+Director <director@switchyard.invalid> <director@pgu>
+Director <director@switchyard.invalid> <director@pgu.local>
+Director <director@switchyard.invalid> <d@d>
+
+Ops <ops@switchyard.invalid> <agent@example.invalid>
+Ops <ops@switchyard.invalid> <pgu-ops@localhost>

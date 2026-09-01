@@ -580,11 +580,14 @@ Hermes also exposes a built-in `session_search` tool backed by
 every Hermes session under the same home, Switchyard gives each Hermes role its
 own durable `HERMES_HOME` under the project state directory. The launcher
 symlinks the owner user's shared Hermes auth/config entries, including
-`.env`, `auth.json`, `config.yaml`, hooks, and skills, into the per-role home so
-existing credentials and hook configuration still work. Runtime and memory
-state, including `state.db`, `sessions`, `logs`, `cache`, and `memories`, stays
-private to the role-local home. Claude, Codex, and agy continue using their
-existing resume stores and arguments.
+`.env`, `auth.json`, `auth.lock`, `config.yaml`, hooks, skills,
+`shell-hooks-allowlist.json`, and `shell-hooks-allowlist.json.lock`, into the
+per-role home so existing credentials and hook configuration still work. A lock
+file is shared whenever the JSON file it guards is shared; otherwise several
+Hermes panes would take role-local locks while writing one shared file. Runtime
+and memory state, including `state.db`, `sessions`, `logs`, `cache`, and
+`memories`, stays private to the role-local home. Claude, Codex, and agy
+continue using their existing resume stores and arguments.
 
 The PGU-839 measurement pass used disposable homes. Hermes v0.15.2 can retrieve
 prior-session content through the built-in `session_search` tool from

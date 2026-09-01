@@ -171,11 +171,13 @@ HERMES_SHARED_HOME_ENTRIES = (
     ".env",
     "SOUL.md",
     "auth.json",
+    "auth.lock",
     "bin",
     "config.yaml",
     "hooks",
     "models_dev_cache.json",
     "shell-hooks-allowlist.json",
+    "shell-hooks-allowlist.json.lock",
     "skills",
 )
 HERMES_PRIVATE_HOME_ENTRIES = frozenset(
@@ -184,7 +186,6 @@ HERMES_PRIVATE_HOME_ENTRIES = frozenset(
         ".skills_prompt_snapshot.json",
         ".update_check",
         "audio_cache",
-        "auth.lock",
         "cache",
         "cron",
         "image_cache",
@@ -198,6 +199,10 @@ HERMES_PRIVATE_HOME_ENTRIES = frozenset(
         "state.db-wal",
     }
 )
+HERMES_SHARED_LOCK_GUARDS = {
+    "auth.lock": "auth.json",
+    "shell-hooks-allowlist.json.lock": "shell-hooks-allowlist.json",
+}
 RESUME_STARTUP_TIMEOUT_SECONDS = 1.5
 RESUME_STARTUP_POLL_SECONDS = 0.1
 DETACHED_SESSION_STABILITY_SECONDS = 2.0
@@ -2163,6 +2168,14 @@ def prepare_hermes_home_for_role(role: RoleConfig, *, session_dir: Path) -> Path
         if entry in HERMES_PRIVATE_HOME_ENTRIES:
             continue
         source = shared_home / entry
+        # Locks must live with the resource they guard. Hermes derives both
+        # of these lock paths from shared JSON files, so role-local locks would
+        # leave several panes writing the same JSON without mutual exclusion.
+        if not source.exists() and entry in HERMES_SHARED_LOCK_GUARDS:
+            guarded = shared_home / HERMES_SHARED_LOCK_GUARDS[entry]
+            if guarded.exists():
+                shared_home.mkdir(parents=True, exist_ok=True)
+                source.touch(mode=0o600, exist_ok=True)
         if not source.exists():
             continue
         _symlink_shared_hermes_entry(source, hermes_home / entry)

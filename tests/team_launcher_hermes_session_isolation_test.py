@@ -8,6 +8,36 @@ from dataclasses import replace
 from team_launcher_test_helpers import *
 
 
+OBSERVED_HERMES_HOME_ENTRIES = frozenset(
+    {
+        ".env",
+        ".hermes_history",
+        ".skills_prompt_snapshot.json",
+        ".update_check",
+        "SOUL.md",
+        "audio_cache",
+        "auth.json",
+        "auth.lock",
+        "bin",
+        "cache",
+        "config.yaml",
+        "cron",
+        "hooks",
+        "image_cache",
+        "logs",
+        "memories",
+        "models_dev_cache.json",
+        "pairing",
+        "sandboxes",
+        "sessions",
+        "shell-hooks-allowlist.json",
+        "shell-hooks-allowlist.json.lock",
+        "skills",
+        "state.db",
+    }
+)
+
+
 def _hermes_role(role: str, *, home: Path) -> team_launcher.RoleConfig:
     return team_launcher.RoleConfig(
         role=role,
@@ -37,6 +67,20 @@ def _env_value(command: list[str], name: str) -> str:
     return matches[0]
 
 
+def _classified_hermes_home_entries() -> set[str]:
+    return set(team_launcher.HERMES_SHARED_HOME_ENTRIES) | set(team_launcher.HERMES_PRIVATE_HOME_ENTRIES)
+
+
+def test_every_observed_hermes_home_entry_is_classified_shared_or_private() -> None:
+    classified = _classified_hermes_home_entries()
+    assert not (set(team_launcher.HERMES_SHARED_HOME_ENTRIES) & set(team_launcher.HERMES_PRIVATE_HOME_ENTRIES))
+    assert OBSERVED_HERMES_HOME_ENTRIES <= classified
+    live_home = Path.home() / ".hermes"
+    if live_home.exists():
+        live_entries = {path.name for path in live_home.iterdir()}
+        assert not (live_entries - classified), sorted(live_entries - classified)
+
+
 def test_hermes_role_uses_private_home_and_shared_auth_config() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-hermes-home-isolation.") as tmp:
         owner_home = Path(tmp) / "home" / "porter-agent"
@@ -60,10 +104,20 @@ def test_hermes_role_uses_private_home_and_shared_auth_config() -> None:
         assert hermes_home is not None
         assert hermes_home.is_dir()
         assert oct(hermes_home.stat().st_mode & 0o777) == "0o700"
-        for name in (".env", "auth.json", "config.yaml", "shell-hooks-allowlist.json", "skills"):
+        for name in (
+            ".env",
+            "auth.json",
+            "auth.lock",
+            "config.yaml",
+            "shell-hooks-allowlist.json",
+            "shell-hooks-allowlist.json.lock",
+            "skills",
+        ):
             link = hermes_home / name
             assert link.is_symlink(), name
             assert link.resolve(strict=True) == shared_home / name
+        assert (shared_home / "auth.lock").is_file()
+        assert (shared_home / "shell-hooks-allowlist.json.lock").is_file()
         assert not (hermes_home / "state.db").exists()
         assert not (hermes_home / "sessions").exists()
         assert not (hermes_home / "memories").exists()
@@ -114,54 +168,62 @@ def test_hermes_session_search_cannot_read_another_role_database_after_isolation
         assert worker_a_home is not None
         assert worker_b_home is not None
 
-        probe = subprocess.run(
-            [
-                str(hermes_python),
-                "-",
-                str(shared_home),
-                str(worker_a_home),
-                str(worker_b_home),
-            ],
-            input=r'''
+        def run_hermes_home_probe(hermes_home: Path, source: str) -> dict[str, object]:
+            env = {
+                **os.environ,
+                "HOME": str(owner_home),
+                "HERMES_HOME": str(hermes_home),
+            }
+            proc = subprocess.run(
+                [str(hermes_python), "-"],
+                input=source,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            assert proc.returncode == 0, proc.stderr
+            return json.loads(proc.stdout)
+
+        write_script = r'''
 import json
-import sys
-from pathlib import Path
+
+from hermes_state import SessionDB
+
+sentinel = "pgu839-session-search-worker-a-only"
+session_id = "worker-a-session"
+db = SessionDB()
+db.create_session(session_id, "cli")
+db.append_message(session_id, "user", f"secret {sentinel}")
+print(json.dumps({"db_path": str(db.db_path)}))
+'''
+        search_script = r'''
+import json
 
 from hermes_state import SessionDB
 from tools.session_search_tool import session_search
 
-shared_home = Path(sys.argv[1])
-worker_a_home = Path(sys.argv[2])
-worker_b_home = Path(sys.argv[3])
 sentinel = "pgu839-session-search-worker-a-only"
+db = SessionDB()
+result = json.loads(session_search(query=sentinel, limit=3))
+print(json.dumps({"db_path": str(db.db_path), "result": result}, sort_keys=True))
+'''
 
-shared_db = SessionDB(db_path=shared_home / "state.db")
-shared_db.create_session("worker-a-shared-session", "cli")
-shared_db.append_message("worker-a-shared-session", "user", f"secret {sentinel}")
-shared_result = json.loads(session_search(query=sentinel, limit=3, db=shared_db))
-
-worker_a_db = SessionDB(db_path=worker_a_home / "state.db")
-worker_a_db.create_session("worker-a-isolated-session", "cli")
-worker_a_db.append_message("worker-a-isolated-session", "user", f"secret {sentinel}")
-worker_b_db = SessionDB(db_path=worker_b_home / "state.db")
-worker_b_db.create_session("worker-b-isolated-session", "cli")
-isolated_result = json.loads(session_search(query=sentinel, limit=3, db=worker_b_db))
-
-print(json.dumps({"shared": shared_result, "isolated": isolated_result}, sort_keys=True))
-''',
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-        assert probe.returncode == 0, probe.stderr
-        result = json.loads(probe.stdout)
+        shared_write = run_hermes_home_probe(shared_home, write_script)
+        shared_search = run_hermes_home_probe(shared_home, search_script)
+        worker_a_write = run_hermes_home_probe(worker_a_home, write_script)
+        worker_b_search = run_hermes_home_probe(worker_b_home, search_script)
+        assert shared_write["db_path"] == str(shared_home / "state.db")
+        assert shared_search["db_path"] == str(shared_home / "state.db")
+        assert worker_a_write["db_path"] == str(worker_a_home / "state.db")
+        assert worker_b_search["db_path"] == str(worker_b_home / "state.db")
         assert "pgu839-session-search-worker-a-only" not in (worker_b_home / "state.db").read_text(errors="ignore")
 
-    assert result["shared"]["success"] is True
-    assert result["shared"]["count"] >= 1
-    assert result["isolated"]["success"] is True
-    assert result["isolated"]["count"] == 0
+    assert shared_search["result"]["success"] is True
+    assert shared_search["result"]["count"] >= 1
+    assert worker_b_search["result"]["success"] is True
+    assert worker_b_search["result"]["count"] == 0
 
 
 def test_hermes_start_prepares_isolated_home_and_preserves_fresh_session_behavior() -> None:

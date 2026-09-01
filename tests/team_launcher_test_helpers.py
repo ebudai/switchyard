@@ -378,6 +378,13 @@ FROZEN_COLUMN_MAJOR_SIX_LAYOUT = _literal_layout_from_session_tree(
     }
 )
 
+FROZEN_COLUMN_MAJOR_FOUR_LAYOUT = _literal_layout_from_session_tree(
+    {
+        "Orientation": "Horizontal",
+        "Widgets": [0, 1, 2, 3],
+    }
+)
+
 FROZEN_COLUMN_MAJOR_THREE_LAYOUT = _literal_layout_from_session_tree(
     {
         "Orientation": "Horizontal",

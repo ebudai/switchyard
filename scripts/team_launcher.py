@@ -4366,7 +4366,9 @@ def _legacy_new_project_stacked_layout_payload(role_count: int) -> dict[str, Any
 
 def _legacy_new_project_column_major_layout_payload(role_count: int) -> dict[str, Any]:
     leaves = _new_project_layout_leaves(role_count)
-    if role_count <= NEW_PROJECT_SINGLE_ROW_LAYOUT_MAX_ROLES:
+    # Historical recognizer: old generated layouts used a single row through 4 roles.
+    # Do not read the live layout threshold here or existing layouts stop upgrading.
+    if role_count <= 4:
         return _single_row_layout_payload(leaves)
     return _legacy_new_project_sqrt_column_major_layout_payload(role_count)
 
@@ -4397,7 +4399,9 @@ def _legacy_new_project_sqrt_column_major_layout_payload(role_count: int) -> dic
 
 def _legacy_new_project_chunked_row_major_layout_payload(role_count: int) -> dict[str, Any]:
     leaves = _new_project_layout_leaves(role_count)
-    if role_count <= NEW_PROJECT_SINGLE_ROW_LAYOUT_MAX_ROLES:
+    # Historical recognizer: old generated layouts used a single row through 4 roles.
+    # Do not read the live layout threshold here or existing layouts stop upgrading.
+    if role_count <= 4:
         return _single_row_layout_payload(leaves)
     column_count = math.ceil(math.sqrt(len(leaves)))
     rows: list[dict[str, Any]] = []
@@ -5260,7 +5264,8 @@ def _new_project_worktree_base(project: str, owner_user: str) -> Path:
     return Path("/home") / owner_user / f"{project}-worktrees"
 
 
-NEW_PROJECT_SINGLE_ROW_LAYOUT_MAX_ROLES = 4
+NEW_PROJECT_SINGLE_ROW_LAYOUT_MAX_ROLES = 3
+NEW_PROJECT_GRID_PANES_PER_ROW = 3
 
 
 def _new_project_layout_leaves(role_count: int) -> list[dict[str, Any]]:
@@ -5284,7 +5289,7 @@ def _single_row_layout_payload(leaves: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _row_major_grid_layout_payload(leaves: list[dict[str, Any]]) -> dict[str, Any]:
-    row_count = math.ceil(len(leaves) / NEW_PROJECT_SINGLE_ROW_LAYOUT_MAX_ROLES)
+    row_count = math.ceil(len(leaves) / NEW_PROJECT_GRID_PANES_PER_ROW)
     base_row_size, extra = divmod(len(leaves), row_count)
     rows: list[dict[str, Any]] = []
     start = 0

@@ -50,8 +50,11 @@ def test_generated_new_project_layouts_are_balanced_row_major_grids() -> None:
             "Widgets": [0, 1, 2],
         },
         4: {
-            "Orientation": "Horizontal",
-            "Widgets": [0, 1, 2, 3],
+            "Orientation": "Vertical",
+            "Widgets": [
+                {"Orientation": "Horizontal", "Widgets": [0, 1]},
+                {"Orientation": "Horizontal", "Widgets": [2, 3]},
+            ],
         },
         5: {
             "Orientation": "Vertical",
@@ -70,15 +73,17 @@ def test_generated_new_project_layouts_are_balanced_row_major_grids() -> None:
         7: {
             "Orientation": "Vertical",
             "Widgets": [
-                {"Orientation": "Horizontal", "Widgets": [0, 1, 2, 3]},
-                {"Orientation": "Horizontal", "Widgets": [4, 5, 6]},
+                {"Orientation": "Horizontal", "Widgets": [0, 1, 2]},
+                {"Orientation": "Horizontal", "Widgets": [3, 4]},
+                {"Orientation": "Horizontal", "Widgets": [5, 6]},
             ],
         },
         8: {
             "Orientation": "Vertical",
             "Widgets": [
-                {"Orientation": "Horizontal", "Widgets": [0, 1, 2, 3]},
-                {"Orientation": "Horizontal", "Widgets": [4, 5, 6, 7]},
+                {"Orientation": "Horizontal", "Widgets": [0, 1, 2]},
+                {"Orientation": "Horizontal", "Widgets": [3, 4, 5]},
+                {"Orientation": "Horizontal", "Widgets": [6, 7]},
             ],
         },
         9: {
@@ -92,25 +97,28 @@ def test_generated_new_project_layouts_are_balanced_row_major_grids() -> None:
         10: {
             "Orientation": "Vertical",
             "Widgets": [
-                {"Orientation": "Horizontal", "Widgets": [0, 1, 2, 3]},
-                {"Orientation": "Horizontal", "Widgets": [4, 5, 6]},
-                {"Orientation": "Horizontal", "Widgets": [7, 8, 9]},
+                {"Orientation": "Horizontal", "Widgets": [0, 1, 2]},
+                {"Orientation": "Horizontal", "Widgets": [3, 4, 5]},
+                {"Orientation": "Horizontal", "Widgets": [6, 7]},
+                {"Orientation": "Horizontal", "Widgets": [8, 9]},
             ],
         },
         11: {
             "Orientation": "Vertical",
             "Widgets": [
-                {"Orientation": "Horizontal", "Widgets": [0, 1, 2, 3]},
-                {"Orientation": "Horizontal", "Widgets": [4, 5, 6, 7]},
-                {"Orientation": "Horizontal", "Widgets": [8, 9, 10]},
+                {"Orientation": "Horizontal", "Widgets": [0, 1, 2]},
+                {"Orientation": "Horizontal", "Widgets": [3, 4, 5]},
+                {"Orientation": "Horizontal", "Widgets": [6, 7, 8]},
+                {"Orientation": "Horizontal", "Widgets": [9, 10]},
             ],
         },
         12: {
             "Orientation": "Vertical",
             "Widgets": [
-                {"Orientation": "Horizontal", "Widgets": [0, 1, 2, 3]},
-                {"Orientation": "Horizontal", "Widgets": [4, 5, 6, 7]},
-                {"Orientation": "Horizontal", "Widgets": [8, 9, 10, 11]},
+                {"Orientation": "Horizontal", "Widgets": [0, 1, 2]},
+                {"Orientation": "Horizontal", "Widgets": [3, 4, 5]},
+                {"Orientation": "Horizontal", "Widgets": [6, 7, 8]},
+                {"Orientation": "Horizontal", "Widgets": [9, 10, 11]},
             ],
         },
     }
@@ -127,18 +135,40 @@ def test_generated_new_project_layouts_are_balanced_row_major_grids() -> None:
         assert {leaf.get("WorkingDirectory") for leaf in leaves} == {""}
 
 def test_new_project_default_layout_prefers_single_row_for_small_role_counts() -> None:
-    assert team_launcher.NEW_PROJECT_SINGLE_ROW_LAYOUT_MAX_ROLES == 4
+    assert team_launcher.NEW_PROJECT_SINGLE_ROW_LAYOUT_MAX_ROLES == 3
+    assert team_launcher.NEW_PROJECT_GRID_PANES_PER_ROW == 3
     assert _layout_session_tree(team_launcher._new_project_layout_payload(3)) == {
         "Orientation": "Horizontal",
         "Widgets": [0, 1, 2],
     }
-    assert _layout_session_tree(team_launcher._new_project_layout_payload(4)) == {
-        "Orientation": "Horizontal",
-        "Widgets": [0, 1, 2, 3],
-    }
     assert _layout_session_tree(team_launcher._legacy_new_project_column_major_layout_payload(3)) == {
         "Orientation": "Horizontal",
         "Widgets": [0, 1, 2],
+    }
+
+def test_new_project_default_layout_uses_two_by_two_grid_for_four_roles() -> None:
+    assert _layout_session_tree(team_launcher._new_project_layout_payload(4)) == {
+        "Orientation": "Vertical",
+        "Widgets": [
+            {"Orientation": "Horizontal", "Widgets": [0, 1]},
+            {"Orientation": "Horizontal", "Widgets": [2, 3]},
+        ],
+    }
+
+def test_new_project_default_layout_keeps_five_and_six_role_shapes_stable() -> None:
+    assert _layout_session_tree(team_launcher._new_project_layout_payload(5)) == {
+        "Orientation": "Vertical",
+        "Widgets": [
+            {"Orientation": "Horizontal", "Widgets": [0, 1, 2]},
+            {"Orientation": "Horizontal", "Widgets": [3, 4]},
+        ],
+    }
+    assert _layout_session_tree(team_launcher._new_project_layout_payload(6)) == {
+        "Orientation": "Vertical",
+        "Widgets": [
+            {"Orientation": "Horizontal", "Widgets": [0, 1, 2]},
+            {"Orientation": "Horizontal", "Widgets": [3, 4, 5]},
+        ],
     }
 
 def test_new_project_default_layout_falls_back_to_grid_above_single_row_threshold() -> None:
@@ -147,8 +177,8 @@ def test_new_project_default_layout_falls_back_to_grid_above_single_row_threshol
     ) == {
         "Orientation": "Vertical",
         "Widgets": [
-            {"Orientation": "Horizontal", "Widgets": [0, 1, 2]},
-            {"Orientation": "Horizontal", "Widgets": [3, 4]},
+            {"Orientation": "Horizontal", "Widgets": [0, 1]},
+            {"Orientation": "Horizontal", "Widgets": [2, 3]},
         ],
     }
 

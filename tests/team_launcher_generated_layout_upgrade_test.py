@@ -44,6 +44,41 @@ def test_upgrade_refreshes_column_major_generated_provision_layout() -> None:
         assert result.changed
         assert json.loads(layout_path.read_text(encoding="utf-8")) == team_launcher._new_project_layout_payload(6)
 
+def test_four_role_legacy_builders_keep_historical_single_row_cutoff() -> None:
+    assert team_launcher.NEW_PROJECT_SINGLE_ROW_LAYOUT_MAX_ROLES == 3
+    assert (
+        team_launcher._legacy_new_project_column_major_layout_payload(4)
+        == FROZEN_COLUMN_MAJOR_FOUR_LAYOUT
+    )
+    assert (
+        team_launcher._legacy_new_project_chunked_row_major_layout_payload(4)
+        == FROZEN_COLUMN_MAJOR_FOUR_LAYOUT
+    )
+
+def test_upgrade_refreshes_old_four_role_single_row_generated_layout_to_two_by_two() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-launcher-upgrade.") as tmp:
+        provision_dir = Path(tmp) / ".switchyard" / "provision"
+        provision_dir.mkdir(parents=True)
+        layout_path = provision_dir / "otto-konsole-layout.json"
+        layout_path.write_text(
+            json.dumps(FROZEN_COLUMN_MAJOR_FOUR_LAYOUT, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        config_path = _write_launcher_config(provision_dir, role_count=4)
+        config = load_project_config("otto", config_path)
+
+        result = team_launcher.upgrade_generated_project_layout(config, config_path=config_path)
+
+        assert result.changed
+        assert "upgraded generated layout template" in result.message
+        assert _layout_session_tree(json.loads(layout_path.read_text(encoding="utf-8"))) == {
+            "Orientation": "Vertical",
+            "Widgets": [
+                {"Orientation": "Horizontal", "Widgets": [0, 1]},
+                {"Orientation": "Horizontal", "Widgets": [2, 3]},
+            ],
+        }
+
 def test_upgrade_refreshes_chunked_seven_role_generated_provision_layout() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-launcher-upgrade.") as tmp:
         provision_dir = Path(tmp) / ".switchyard" / "provision"
@@ -71,8 +106,9 @@ def test_upgrade_refreshes_chunked_seven_role_generated_provision_layout() -> No
         assert _layout_session_tree(json.loads(layout_path.read_text(encoding="utf-8"))) == {
             "Orientation": "Vertical",
             "Widgets": [
-                {"Orientation": "Horizontal", "Widgets": [0, 1, 2, 3]},
-                {"Orientation": "Horizontal", "Widgets": [4, 5, 6]},
+                {"Orientation": "Horizontal", "Widgets": [0, 1, 2]},
+                {"Orientation": "Horizontal", "Widgets": [3, 4]},
+                {"Orientation": "Horizontal", "Widgets": [5, 6]},
             ],
         }
 

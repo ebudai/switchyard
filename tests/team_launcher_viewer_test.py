@@ -408,6 +408,67 @@ def test_full_launch_delegates_detached_role_start_to_owner_pane_subcommand() ->
         assert not any(call[:2] == ["tmux", "new-session"] for call in runner.calls)
         assert not (tmp_path / "run" / "user" / "0" / "porter-ticket-board" / "pane-state").exists()
 
+def test_all_detached_undetected_viewer_launch_still_reports_detached_start_failure() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-detached-failure.") as tmp:
+        tmp_path = Path(tmp)
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        layout = tmp_path / "layout.json"
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(layout),
+                    "repository": str(repo),
+                    "roles": [
+                        {
+                            "role": "research",
+                            "detached": True,
+                            "cli": ["claude"],
+                            "target": "porter-research:0.0",
+                        }
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        class FailedDetachedStartRunner(FakeRunner):
+            def __call__(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+                self.calls.append(args)
+                if args[:2] == ["tmux", "has-session"]:
+                    return subprocess.CompletedProcess(args, 1)
+                if args[:2] == ["tmux", "new-session"]:
+                    return subprocess.CompletedProcess(args, 0)
+                if args[:3] == ["tmux", "display-message", "-p"]:
+                    return subprocess.CompletedProcess(args, 1, stdout="")
+                return super().__call__(args, **kwargs)
+
+        config = load_project_config("porter", config_path)
+        runner = FailedDetachedStartRunner()
+        process_launcher = RecordingProcessLauncher()
+        stderr = StringIO()
+
+        with redirect_stderr(stderr):
+            result = launch_project(
+                config,
+                config_path=config_path,
+                mode="start",
+                script_path=ROOT / "scripts" / "team-launcher",
+                runner=runner,
+                layout_output=tmp_path / "layout-output.json",
+                layout_environ={"SUDO_USER": "root", "XDG_CURRENT_DESKTOP": "", "KDE_FULL_SESSION": ""},
+                konsole_process_launcher=process_launcher,
+            )
+
+        assert result == 1
+        assert "role research did not leave a live porter-research session" in stderr.getvalue()
+        assert not process_launcher.calls
+        assert not any(call[:2] == ["tmux", "new-session"] and call[call.index("-s") + 1] == "viewer" for call in runner.calls)
+
 def test_start_force_refreshes_dirty_shared_checkout_with_real_git() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-git.") as tmp:
         tmp_path = Path(tmp)

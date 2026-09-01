@@ -476,5 +476,9 @@ grep -q 'PYTHONDONTWRITEBYTECODE' "$secure_path_install" || {
     echo "FAIL: installed trampoline does not suppress privileged Python bytecode writes" >&2
     exit 1
 }
+grep -q 'sys.dont_write_bytecode = True' "$REPO_ROOT/switchyard" || {
+    echo "FAIL: top-level switchyard entrypoint does not suppress Python bytecode writes" >&2
+    exit 1
+}
 
 echo "install_switchyard_test: ok"

@@ -18,9 +18,11 @@ prompted, so bare `--yes` runs all four missing CLI installers and
 installation. If stdin/stdout is not a TTY and `--yes` was not passed, CLI
 installation is skipped instead of blocking.
 
-Authentication cannot be automated. The final output of `sudo ./install` is the
-single next action: run the installed CLI it names and sign in, or install one
-CLI manually if all CLI installers were skipped.
+Authentication cannot be automated. The final output of `sudo ./install` tells
+you which installed CLI to run and sign in to, prints a checklist when more than
+one CLI was installed, or tells you to install one CLI manually if all CLI
+installers were skipped. Hermes signs in with `hermes login`; the other CLIs
+authenticate on first run.
 
 ## System Packages
 

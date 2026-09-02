@@ -22,8 +22,9 @@ host packages, creates the shared `/opt/switchyard/venv` with
 checks, asks whether to run each agent CLI installer, and installs the public
 `switchyard` command, normally at `/usr/local/bin/switchyard`. Pass
 `--cli claude`, `--cli codex`, `--cli agy`, or `--cli hermes` to limit CLI
-installation to one runtime. Its final output is the authentication command
-that still needs a human login.
+installation to one runtime. Its final output names the installed CLI to
+authenticate, or lists the available choices when more than one CLI was
+installed.
 
 For package details, Arch-family notes, and vendor CLI provenance links, see
 [the fresh-machine install list](docs/fresh-machine-install.md).

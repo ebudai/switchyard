@@ -17,7 +17,8 @@ CLI_INSTALL_SUCCEEDED=0
 CLI_INSTALL_FAILED=0
 CLI_SKIPPED_NOTTY=0
 CLI_SKIPPED_BY_USER=0
-AUTH_CLI=""
+AUTH_INSTALLED_CLIS=()
+AUTH_PRESENT_CLIS=()
 
 usage() {
     cat <<'EOF'
@@ -115,6 +116,12 @@ declare -A CLI_INSTALL_COMMANDS=(
     [codex]="${SWITCHYARD_CODEX_INSTALL_COMMAND:-curl -fsSL https://chatgpt.com/codex/install.sh | sh}"
     [agy]="${SWITCHYARD_AGY_INSTALL_COMMAND:-curl -fsSL https://antigravity.google/cli/install.sh | bash}"
     [hermes]="${SWITCHYARD_HERMES_INSTALL_COMMAND:-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash}"
+)
+declare -A CLI_AUTH_COMMANDS=(
+    [claude]="claude"
+    [codex]="codex"
+    [agy]="agy"
+    [hermes]="hermes login"
 )
 CLI_ORDER=(claude codex agy hermes)
 
@@ -226,18 +233,14 @@ install_agent_clis() {
         command="${CLI_INSTALL_COMMANDS[$cli]}"
         if user_command_present "$cli"; then
             printf '%s is already installed; skipping installer.\n' "$cli"
-            if [[ -z "$AUTH_CLI" ]]; then
-                AUTH_CLI="$cli"
-            fi
+            AUTH_PRESENT_CLIS+=("$cli")
             continue
         fi
         if prompt_cli_install "$cli" "$command"; then
             CLI_INSTALL_ATTEMPTED=1
             if run_cli_install_command "$command"; then
                 CLI_INSTALL_SUCCEEDED=1
-                if [[ -z "$AUTH_CLI" ]]; then
-                    AUTH_CLI="$cli"
-                fi
+                AUTH_INSTALLED_CLIS+=("$cli")
             else
                 CLI_INSTALL_FAILED=1
                 printf 'warning: %s installer failed; continuing Switchyard installation.\n' "$cli" >&2
@@ -247,6 +250,31 @@ install_agent_clis() {
             printf '%s installer skipped by user.\n' "$cli"
         fi
     done
+}
+
+array_contains() {
+    local needle="$1"
+    shift
+    local item
+    for item in "$@"; do
+        [[ "$item" == "$needle" ]] && return 0
+    done
+    return 1
+}
+
+print_auth_next_step_for_clis() {
+    local -a clis=("$@")
+    local cli
+    if [[ "${#clis[@]}" -eq 1 ]]; then
+        printf 'Run `%s` and sign in.\n' "${CLI_AUTH_COMMANDS[${clis[0]}]}"
+    elif [[ "${#clis[@]}" -gt 1 ]]; then
+        printf 'Sign in to each installed agent CLI:\n'
+        for cli in "${clis[@]}"; do
+            printf '  %-8s -> run `%s`\n' "$cli" "${CLI_AUTH_COMMANDS[$cli]}"
+        done
+    else
+        return 1
+    fi
 }
 
 dry_run_install() {
@@ -266,8 +294,15 @@ dry_run_install() {
 
 print_final_next_step() {
     printf '\nNEXT STEP\n'
-    if [[ -n "$AUTH_CLI" ]]; then
-        printf 'Run `%s` and sign in.\n' "$AUTH_CLI"
+    if [[ -n "$SELECTED_CLI" ]] && {
+        array_contains "$SELECTED_CLI" "${AUTH_INSTALLED_CLIS[@]}" ||
+            array_contains "$SELECTED_CLI" "${AUTH_PRESENT_CLIS[@]}"
+    }; then
+        printf 'Run `%s` and sign in.\n' "${CLI_AUTH_COMMANDS[$SELECTED_CLI]}"
+    elif [[ "${#AUTH_INSTALLED_CLIS[@]}" -gt 0 ]]; then
+        print_auth_next_step_for_clis "${AUTH_INSTALLED_CLIS[@]}"
+    elif [[ "${#AUTH_PRESENT_CLIS[@]}" -gt 0 ]]; then
+        print_auth_next_step_for_clis "${AUTH_PRESENT_CLIS[@]}"
     elif [[ "$SKIP_CLI" -eq 1 ]]; then
         printf 'CLI installation was skipped; install one agent CLI, then run it and sign in.\n'
     elif [[ "$CLI_SKIPPED_NOTTY" -eq 1 ]]; then

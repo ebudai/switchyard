@@ -103,7 +103,14 @@ def test_yes_installs_every_missing_cli_and_prints_final_auth_step_last() -> Non
         assert "+ sh -lc printf\\ claude\\ \\>\\>" in output
         assert "fake prereqs" in output
         assert "fake release install" in output
-        assert output.rstrip().splitlines()[-2:] == ["NEXT STEP", "Run `claude` and sign in."]
+        assert output.rstrip().splitlines()[-6:] == [
+            "NEXT STEP",
+            "Sign in to each installed agent CLI:",
+            "  claude   -> run `claude`",
+            "  codex    -> run `codex`",
+            "  agy      -> run `agy`",
+            "  hermes   -> run `hermes login`",
+        ]
         assert (tmpdir / "commands.log").read_text(encoding="utf-8").splitlines() == [
             "prereqs:--skip-cli",
             "release:--apply",
@@ -123,6 +130,50 @@ def test_cli_selection_installs_selected_cli_only() -> None:
         assert "Install claude?" not in output
         assert "Install codex?" in output
         assert output.rstrip().splitlines()[-2:] == ["NEXT STEP", "Run `codex` and sign in."]
+
+
+def test_multiple_installed_clis_final_step_lists_choices_instead_of_first_cli() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        tmpdir = Path(tmp)
+        proc = _run_install(tmpdir, input_text="y\ny\nn\nn\n", assume_tty=True)
+        output = proc.stdout
+
+        assert (tmpdir / "claude.installed").read_text(encoding="utf-8") == "claude"
+        assert (tmpdir / "codex.installed").read_text(encoding="utf-8") == "codex"
+        assert not (tmpdir / "agy.installed").exists()
+        assert not (tmpdir / "hermes.installed").exists()
+        assert output.rstrip().splitlines()[-4:] == [
+            "NEXT STEP",
+            "Sign in to each installed agent CLI:",
+            "  claude   -> run `claude`",
+            "  codex    -> run `codex`",
+        ]
+
+
+def test_cli_selection_final_step_names_selected_cli_even_with_earlier_cli_present() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        tmpdir = Path(tmp)
+        env = _env(tmpdir)
+        env.pop("SWITCHYARD_INSTALL_FORCE_MISSING_CLIS", None)
+        _write_executable(tmpdir / "bin" / "claude", "#!/usr/bin/env bash\nexit 0\n")
+        env["PATH"] = f"{tmpdir / 'bin'}{os.pathsep}/bin"
+        env["SWITCHYARD_INSTALL_ASSUME_TTY"] = "1"
+
+        proc = subprocess.run(
+            [str(SCRIPT), "--cli", "hermes"],
+            cwd=ROOT,
+            env=env,
+            input="y\n",
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        output = proc.stdout
+
+        assert "Install claude?" not in output
+        assert "Install hermes?" in output
+        assert (tmpdir / "hermes.installed").read_text(encoding="utf-8") == "hermes"
+        assert output.rstrip().splitlines()[-2:] == ["NEXT STEP", "Run `hermes login` and sign in."]
 
 
 def test_dry_run_renders_real_cli_privilege_wrapper() -> None:
@@ -206,7 +257,13 @@ def test_interactive_prompts_all_clis_and_accepts_invalid_retry_and_eof_default_
         assert (tmpdir / "agy.installed").read_text(encoding="utf-8") == "agy"
         assert (tmpdir / "hermes.installed").read_text(encoding="utf-8") == "hermes"
         assert "Please answer y or n." in output
-        assert output.rstrip().splitlines()[-2:] == ["NEXT STEP", "Run `codex` and sign in."]
+        assert output.rstrip().splitlines()[-5:] == [
+            "NEXT STEP",
+            "Sign in to each installed agent CLI:",
+            "  codex    -> run `codex`",
+            "  agy      -> run `agy`",
+            "  hermes   -> run `hermes login`",
+        ]
 
 
 def test_declining_every_cli_still_succeeds_and_installs_switchyard() -> None:
@@ -281,6 +338,8 @@ def test_non_root_self_elevation_preserves_original_flags() -> None:
 if __name__ == "__main__":
     test_yes_installs_every_missing_cli_and_prints_final_auth_step_last()
     test_cli_selection_installs_selected_cli_only()
+    test_multiple_installed_clis_final_step_lists_choices_instead_of_first_cli()
+    test_cli_selection_final_step_names_selected_cli_even_with_earlier_cli_present()
     test_dry_run_renders_real_cli_privilege_wrapper()
     test_no_cli_skips_prompts_and_finishes_with_manual_cli_action()
     test_non_tty_without_yes_skips_cli_instead_of_blocking()

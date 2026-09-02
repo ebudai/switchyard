@@ -145,9 +145,9 @@ def test_fresh_machine_docs_match_manual_agent_cli_policy() -> None:
     assert "`python3-psycopg` exists but is `3.1.17-2`" in docs
     assert "does not satisfy Switchyard's `psycopg>=3.3,<4` pin" in normalized_docs
     assert "sudo ./install" in docs
-    assert "can run one of the vendor-documented agent CLI installers" in normalized_docs
-    assert "The default CLI is `claude`; pass `--cli codex`, `--cli agy`, or `--cli hermes`" in normalized_docs
-    assert "pass `--cli <name>` to select another CLI" in docs
+    assert "can run the vendor-documented agent CLI installers" in normalized_docs
+    assert "asks before running each missing CLI unless `--yes`, `--cli`, or `--no-cli` was supplied" in normalized_docs
+    assert "Pass `--cli <name>` to install or prompt for only one CLI" in docs
     assert "failed, declined, or skipped CLI install does not roll back" in normalized_docs
     assert "Before running any `curl ... | bash` or `curl ... | sh` command" in normalized_docs
     assert "read the script first" in normalized_docs

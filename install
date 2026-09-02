@@ -11,7 +11,7 @@ ORIGINAL_ARGS=("$@")
 ASSUME_YES=0
 SKIP_CLI=0
 DRY_RUN=0
-SELECTED_CLI="claude"
+SELECTED_CLI=""
 CLI_INSTALL_ATTEMPTED=0
 CLI_INSTALL_SUCCEEDED=0
 CLI_INSTALL_FAILED=0
@@ -26,7 +26,8 @@ Usage: sudo ./install [--dry-run] [--yes|-y] [--cli <claude|codex|agy|hermes>] [
 Installs Switchyard host packages, the shared Python venv, optional agent CLIs,
 and the public switchyard command. Authentication remains manual and is printed
 as the final next step. --dry-run prints the commands that would run and exits
-without changing the system.
+without changing the system. Without --cli, CLI installation prompts for each
+supported CLI in turn; --cli limits prompting or --yes to that one CLI.
 EOF
 }
 
@@ -115,6 +116,7 @@ declare -A CLI_INSTALL_COMMANDS=(
     [agy]="${SWITCHYARD_AGY_INSTALL_COMMAND:-curl -fsSL https://antigravity.google/cli/install.sh | bash}"
     [hermes]="${SWITCHYARD_HERMES_INSTALL_COMMAND:-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash}"
 )
+CLI_ORDER=(claude codex agy hermes)
 
 run_as_original_user() {
     [[ "$ORIGINAL_USER" != "root" ]] || return 1
@@ -189,17 +191,24 @@ prompt_cli_install() {
 }
 
 dry_run_agent_clis() {
+    local cli
     local command
     if [[ "$SKIP_CLI" -eq 1 ]]; then
         printf 'Agent CLI installation would be skipped by --no-cli.\n'
         return
     fi
-    printf '\nAgent CLI installer prompt that would be shown:\n'
-    command="${CLI_INSTALL_COMMANDS[$SELECTED_CLI]}"
-    printf '\nInstall %s?\n%s\nwould ask: [Y/n]\n' "$SELECTED_CLI" "$(cli_display_command "$command")"
+    printf '\nAgent CLI installer prompts that would be shown:\n'
+    for cli in "${CLI_ORDER[@]}"; do
+        if [[ -n "$SELECTED_CLI" && "$cli" != "$SELECTED_CLI" ]]; then
+            continue
+        fi
+        command="${CLI_INSTALL_COMMANDS[$cli]}"
+        printf '\nInstall %s?\n%s\nwould ask: [Y/n]\n' "$cli" "$(cli_display_command "$command")"
+    done
 }
 
 install_agent_clis() {
+    local cli
     local command
     if [[ "$SKIP_CLI" -eq 1 ]]; then
         printf 'Agent CLI installation skipped by --no-cli.\n'
@@ -207,28 +216,37 @@ install_agent_clis() {
     fi
     if ! has_tty; then
         CLI_SKIPPED_NOTTY=1
-        printf 'Agent CLI installation skipped: stdin/stdout is not a TTY. Re-run sudo ./install --yes or run sudo ./install from a terminal to approve vendor installers.\n'
+        printf 'Agent CLI installation skipped: stdin/stdout is not a TTY. Re-run sudo ./install --yes --cli claude to install only Claude, run sudo ./install --yes to install all four CLI installers without prompting, or run sudo ./install from a terminal to approve installers one by one.\n'
         return
     fi
-    command="${CLI_INSTALL_COMMANDS[$SELECTED_CLI]}"
-    if user_command_present "$SELECTED_CLI"; then
-        printf '%s is already installed; skipping installer.\n' "$SELECTED_CLI"
-        AUTH_CLI="$SELECTED_CLI"
-        return
-    fi
-    if prompt_cli_install "$SELECTED_CLI" "$command"; then
-        CLI_INSTALL_ATTEMPTED=1
-        if run_cli_install_command "$command"; then
-            CLI_INSTALL_SUCCEEDED=1
-            AUTH_CLI="$SELECTED_CLI"
-        else
-            CLI_INSTALL_FAILED=1
-            printf 'warning: %s installer failed; continuing Switchyard installation.\n' "$SELECTED_CLI" >&2
+    for cli in "${CLI_ORDER[@]}"; do
+        if [[ -n "$SELECTED_CLI" && "$cli" != "$SELECTED_CLI" ]]; then
+            continue
         fi
-    else
-        CLI_SKIPPED_BY_USER=1
-        printf '%s installer skipped by user.\n' "$SELECTED_CLI"
-    fi
+        command="${CLI_INSTALL_COMMANDS[$cli]}"
+        if user_command_present "$cli"; then
+            printf '%s is already installed; skipping installer.\n' "$cli"
+            if [[ -z "$AUTH_CLI" ]]; then
+                AUTH_CLI="$cli"
+            fi
+            continue
+        fi
+        if prompt_cli_install "$cli" "$command"; then
+            CLI_INSTALL_ATTEMPTED=1
+            if run_cli_install_command "$command"; then
+                CLI_INSTALL_SUCCEEDED=1
+                if [[ -z "$AUTH_CLI" ]]; then
+                    AUTH_CLI="$cli"
+                fi
+            else
+                CLI_INSTALL_FAILED=1
+                printf 'warning: %s installer failed; continuing Switchyard installation.\n' "$cli" >&2
+            fi
+        else
+            CLI_SKIPPED_BY_USER=1
+            printf '%s installer skipped by user.\n' "$cli"
+        fi
+    done
 }
 
 dry_run_install() {
@@ -253,7 +271,7 @@ print_final_next_step() {
     elif [[ "$SKIP_CLI" -eq 1 ]]; then
         printf 'CLI installation was skipped; install one agent CLI, then run it and sign in.\n'
     elif [[ "$CLI_SKIPPED_NOTTY" -eq 1 ]]; then
-        printf 'CLI installation was skipped; re-run `sudo ./install --yes` from this checkout, or install one agent CLI manually and sign in.\n'
+        printf 'CLI installation was skipped; re-run `sudo ./install --yes --cli claude`, or install one agent CLI manually and sign in.\n'
     elif [[ "$CLI_INSTALL_FAILED" -eq 1 ]]; then
         printf 'A CLI installer failed; install one agent CLI manually, then run it and sign in.\n'
     elif [[ "$CLI_SKIPPED_BY_USER" -eq 1 || "$CLI_INSTALL_ATTEMPTED" -eq 0 || "$CLI_INSTALL_SUCCEEDED" -eq 0 ]]; then

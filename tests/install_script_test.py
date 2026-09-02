@@ -90,21 +90,16 @@ def _run_install_dry_run_as_invoking_user(tmpdir: Path) -> subprocess.CompletedP
     )
 
 
-def test_yes_installs_default_cli_only_and_prints_final_auth_step_last() -> None:
+def test_yes_installs_every_missing_cli_and_prints_final_auth_step_last() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmpdir = Path(tmp)
         proc = _run_install(tmpdir, "--yes")
         output = proc.stdout
 
-        assert (tmpdir / "claude.installed").read_text(encoding="utf-8") == "claude"
-        assert not (tmpdir / "codex.installed").exists()
-        assert not (tmpdir / "agy.installed").exists()
-        assert not (tmpdir / "hermes.installed").exists()
-        assert "Install claude?" in output
-        assert "Install codex?" not in output
-        assert "Install agy?" not in output
-        assert "Install hermes?" not in output
-        assert "[Y/n] y" in output
+        for cli in CLIS:
+            assert (tmpdir / f"{cli}.installed").read_text(encoding="utf-8") == cli
+            assert f"Install {cli}?" in output
+        assert output.count("[Y/n] y") == len(CLIS)
         assert "+ sh -lc printf\\ claude\\ \\>\\>" in output
         assert "fake prereqs" in output
         assert "fake release install" in output
@@ -118,7 +113,7 @@ def test_yes_installs_default_cli_only_and_prints_final_auth_step_last() -> None
 def test_cli_selection_installs_selected_cli_only() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmpdir = Path(tmp)
-        proc = _run_install(tmpdir, "--yes", "--cli", "codex")
+        proc = _run_install(tmpdir, "--cli", "codex", input_text="y\n", assume_tty=True)
         output = proc.stdout
 
         assert not (tmpdir / "claude.installed").exists()
@@ -136,7 +131,8 @@ def test_dry_run_renders_real_cli_privilege_wrapper() -> None:
         proc = _run_install_dry_run_as_invoking_user(tmpdir)
         output = proc.stdout
 
-        assert "Install claude?" in output
+        for cli in CLIS:
+            assert f"Install {cli}?" in output
         assert "would ask: [Y/n]" in output
         assert "sudo -u alice -H sh -lc" in output
         assert f"printf\\ claude\\ \\>\\>\\ {tmpdir / 'claude.installed'}" in output
@@ -165,11 +161,15 @@ def test_non_tty_without_yes_skips_cli_instead_of_blocking() -> None:
         output = proc.stdout
 
         assert "Agent CLI installation skipped: stdin/stdout is not a TTY." in output
+        assert (
+            "Re-run sudo ./install --yes --cli claude to install only Claude, "
+            "run sudo ./install --yes to install all four CLI installers without prompting"
+        ) in output
         assert "Install claude?" not in output
         assert not list(tmpdir.glob("*.installed"))
         assert output.rstrip().splitlines()[-2:] == [
             "NEXT STEP",
-            "CLI installation was skipped; re-run `sudo ./install --yes` from this checkout, or install one agent CLI manually and sign in.",
+            "CLI installation was skipped; re-run `sudo ./install --yes --cli claude`, or install one agent CLI manually and sign in.",
         ]
 
 
@@ -182,12 +182,10 @@ def test_dry_run_prints_every_step_without_prompting_or_mutating() -> None:
         assert "DRY RUN: no changes will be made." in output
         assert "fake prereqs" in output
         assert "fake release install" in output
-        assert "Install claude?" in output
-        assert "Install codex?" not in output
-        assert "Install agy?" not in output
-        assert "Install hermes?" not in output
-        assert f"printf\\ claude\\ \\>\\>\\ {tmpdir / 'claude.installed'}" in output
-        assert "would ask: [Y/n]" in output
+        for cli in CLIS:
+            assert f"Install {cli}?" in output
+            assert f"printf\\ {cli}\\ \\>\\>\\ {tmpdir / f'{cli}.installed'}" in output
+        assert output.count("would ask: [Y/n]") == len(CLIS)
         assert "\n[Y/n]\n" not in output
         assert "NEXT STEP" not in output
         assert not list(tmpdir.glob("*.installed"))
@@ -197,24 +195,24 @@ def test_dry_run_prints_every_step_without_prompting_or_mutating() -> None:
         ]
 
 
-def test_interactive_cli_selection_accepts_invalid_retry_and_eof_default_yes() -> None:
+def test_interactive_prompts_all_clis_and_accepts_invalid_retry_and_eof_default_yes() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmpdir = Path(tmp)
-        proc = _run_install(tmpdir, "--cli", "codex", input_text="maybe\n", assume_tty=True)
+        proc = _run_install(tmpdir, input_text="n\nmaybe\ny\n", assume_tty=True)
         output = proc.stdout
 
         assert not (tmpdir / "claude.installed").exists()
         assert (tmpdir / "codex.installed").read_text(encoding="utf-8") == "codex"
-        assert not (tmpdir / "agy.installed").exists()
-        assert not (tmpdir / "hermes.installed").exists()
+        assert (tmpdir / "agy.installed").read_text(encoding="utf-8") == "agy"
+        assert (tmpdir / "hermes.installed").read_text(encoding="utf-8") == "hermes"
         assert "Please answer y or n." in output
         assert output.rstrip().splitlines()[-2:] == ["NEXT STEP", "Run `codex` and sign in."]
 
 
-def test_declining_selected_cli_still_succeeds_and_installs_switchyard() -> None:
+def test_declining_every_cli_still_succeeds_and_installs_switchyard() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmpdir = Path(tmp)
-        proc = _run_install(tmpdir, input_text="n\n", assume_tty=True)
+        proc = _run_install(tmpdir, input_text="n\nn\nn\nn\n", assume_tty=True)
         output = proc.stdout
 
         assert not list(tmpdir.glob("*.installed"))
@@ -223,6 +221,33 @@ def test_declining_selected_cli_still_succeeds_and_installs_switchyard() -> None
             "NEXT STEP",
             "No CLI was installed; install one agent CLI, then run it and sign in.",
         ]
+
+
+def test_already_installed_cli_is_not_prompted() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        tmpdir = Path(tmp)
+        env = _env(tmpdir)
+        env.pop("SWITCHYARD_INSTALL_FORCE_MISSING_CLIS", None)
+        _write_executable(tmpdir / "bin" / "claude", "#!/usr/bin/env bash\nexit 0\n")
+        env["SWITCHYARD_INSTALL_ASSUME_TTY"] = "1"
+
+        proc = subprocess.run(
+            [str(SCRIPT), "--cli", "claude"],
+            cwd=ROOT,
+            env=env,
+            input="",
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        output = proc.stdout
+
+        assert "claude is already installed; skipping installer." in output
+        assert "Install claude?" not in output
+        assert "Install codex?" not in output
+        assert "Install agy?" not in output
+        assert "Install hermes?" not in output
+        assert output.rstrip().splitlines()[-2:] == ["NEXT STEP", "Run `claude` and sign in."]
 
 
 def test_non_root_self_elevation_preserves_original_flags() -> None:
@@ -254,13 +279,14 @@ def test_non_root_self_elevation_preserves_original_flags() -> None:
 
 
 if __name__ == "__main__":
-    test_yes_installs_default_cli_only_and_prints_final_auth_step_last()
+    test_yes_installs_every_missing_cli_and_prints_final_auth_step_last()
     test_cli_selection_installs_selected_cli_only()
     test_dry_run_renders_real_cli_privilege_wrapper()
     test_no_cli_skips_prompts_and_finishes_with_manual_cli_action()
     test_non_tty_without_yes_skips_cli_instead_of_blocking()
     test_dry_run_prints_every_step_without_prompting_or_mutating()
-    test_interactive_cli_selection_accepts_invalid_retry_and_eof_default_yes()
-    test_declining_selected_cli_still_succeeds_and_installs_switchyard()
+    test_interactive_prompts_all_clis_and_accepts_invalid_retry_and_eof_default_yes()
+    test_declining_every_cli_still_succeeds_and_installs_switchyard()
+    test_already_installed_cli_is_not_prompted()
     test_non_root_self_elevation_preserves_original_flags()
     print("install_script_test: ok")

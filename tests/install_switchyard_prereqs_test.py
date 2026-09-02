@@ -106,6 +106,31 @@ def test_pacman_commands() -> None:
     assert "Next step: run scripts/install-switchyard" not in output
 
 
+def test_pacman_pip_deescalates_to_invoking_user_when_run_as_root() -> None:
+    env = {
+        **os.environ,
+        "SWITCHYARD_PREREQS_ASSUME_MANAGER": "pacman",
+        "SWITCHYARD_SUDO_BIN": "sudo",
+        "SWITCHYARD_PYTHON_BIN": "python3",
+        "SWITCHYARD_INSTALL_ORIGINAL_USER": "alice",
+        "SWITCHYARD_PREREQS_TEST_ASSUME_ROOT": "1",
+    }
+    proc = subprocess.run(
+        [str(SCRIPT), "--dry-run", "--skip-cli"],
+        cwd=ROOT,
+        env=env,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    output = proc.stdout
+
+    assert "Installing psycopg for the invoking user with pip on Arch-family systems." in output
+    assert "+ sudo -u alice -H sh -lc python3\\ -m\\ pip\\ install\\ --user\\ " in output
+    assert "psycopg" in output
+    assert "+ python3 -m pip install --user" not in output
+
+
 def test_fresh_machine_docs_match_manual_agent_cli_policy() -> None:
     docs = (ROOT / "docs" / "fresh-machine-install.md").read_text(encoding="utf-8")
     normalized_docs = " ".join(docs.split())
@@ -120,7 +145,9 @@ def test_fresh_machine_docs_match_manual_agent_cli_policy() -> None:
     assert "`python3-psycopg` exists but is `3.1.17-2`" in docs
     assert "does not satisfy Switchyard's `psycopg>=3.3,<4` pin" in normalized_docs
     assert "sudo ./install" in docs
-    assert "can run the vendor-documented agent CLI installers" in normalized_docs
+    assert "can run one of the vendor-documented agent CLI installers" in normalized_docs
+    assert "The default CLI is `claude`; pass `--cli codex`, `--cli agy`, or `--cli hermes`" in normalized_docs
+    assert "pass `--cli <name>` to select another CLI" in docs
     assert "failed, declined, or skipped CLI install does not roll back" in normalized_docs
     assert "Before running any `curl ... | bash` or `curl ... | sh` command" in normalized_docs
     assert "read the script first" in normalized_docs
@@ -213,6 +240,7 @@ def test_system_site_venv_runs_ticket_board_entrypoint() -> None:
 if __name__ == "__main__":
     test_apt_commands()
     test_pacman_commands()
+    test_pacman_pip_deescalates_to_invoking_user_when_run_as_root()
     test_fresh_machine_docs_match_manual_agent_cli_policy()
     test_package_sets_match_the_platform_python_strategy()
     test_system_site_venv_runs_ticket_board_entrypoint()

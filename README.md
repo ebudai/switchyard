@@ -19,9 +19,11 @@ changing the system.
 The installer refreshes apt package metadata on Debian/Ubuntu systems, installs
 host packages, creates the shared `/opt/switchyard/venv` with
 `--system-site-packages`, runs the ticket-board dependency and entry-point
-checks, asks which agent CLI installers to run, and installs the public
-`switchyard` command, normally at `/usr/local/bin/switchyard`. Its final output
-is the authentication command that still needs a human login.
+checks, asks whether to run the selected agent CLI installer, and installs the
+public `switchyard` command, normally at `/usr/local/bin/switchyard`. The
+default CLI is `claude`; pass `--cli codex`, `--cli agy`, or `--cli hermes` to
+choose a different one. Its final output is the authentication command that
+still needs a human login.
 
 For package details, Arch-family notes, and vendor CLI provenance links, see
 [the fresh-machine install list](docs/fresh-machine-install.md).

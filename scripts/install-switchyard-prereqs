@@ -9,6 +9,7 @@ PYTHON_BIN="${SWITCHYARD_PYTHON_BIN:-python3}"
 PIP_SPEC="psycopg>=3.3,<4"
 SWITCHYARD_PYTHON_VENV="${SWITCHYARD_PYTHON_VENV:-/opt/switchyard/venv}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ORIGINAL_USER="${SWITCHYARD_INSTALL_ORIGINAL_USER:-${SUDO_USER:-$(id -un)}}"
 
 usage() {
     cat <<'EOF'
@@ -22,6 +23,10 @@ EOF
 die() {
     printf 'install-switchyard-prereqs: ERROR: %s\n' "$*" >&2
     exit 1
+}
+
+quote() {
+    printf '%q' "$1"
 }
 
 while (($#)); do
@@ -72,11 +77,32 @@ run_cmd() {
     "$@"
 }
 
+as_shell_command() {
+    local arg
+    local command=""
+    for arg in "$@"; do
+        command+="${command:+ }$(quote "$arg")"
+    done
+    printf '%s' "$command"
+}
+
+is_root_context() {
+    [[ "${EUID:-$(id -u)}" -eq 0 || "${SWITCHYARD_PREREQS_TEST_ASSUME_ROOT:-}" == "1" ]]
+}
+
 run_root_cmd() {
-    if [[ "${EUID:-$(id -u)}" -eq 0 && -z "${SWITCHYARD_PREREQS_FORCE_SUDO_PREFIX:-}" ]]; then
+    if is_root_context && [[ -z "${SWITCHYARD_PREREQS_FORCE_SUDO_PREFIX:-}" ]]; then
         run_cmd "$@"
     else
         run_cmd "$SUDO_BIN" "$@"
+    fi
+}
+
+run_invoking_user_cmd() {
+    if is_root_context && [[ "$ORIGINAL_USER" != "root" ]]; then
+        run_cmd "$SUDO_BIN" -u "$ORIGINAL_USER" -H sh -lc "$(as_shell_command "$@")"
+    else
+        run_cmd "$@"
     fi
 }
 
@@ -104,7 +130,7 @@ case "$manager" in
             python postgresql tmux git curl python-pip python-pillow acl
         printf 'KDE/separate layout users also need Konsole: %s pacman -S --needed konsole\n' "$SUDO_BIN"
         printf 'Installing psycopg for the invoking user with pip on Arch-family systems.\n'
-        run_cmd "$PYTHON_BIN" -m pip install --user "$PIP_SPEC"
+        run_invoking_user_cmd "$PYTHON_BIN" -m pip install --user "$PIP_SPEC"
         ;;
 esac
 

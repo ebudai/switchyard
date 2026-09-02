@@ -9,11 +9,12 @@ sudo ./install
 ```
 
 The installer prints each system-changing command before it runs. On a terminal
-it asks about each missing agent CLI with a `[Y/n]` prompt and shows the exact
-vendor installer command before running it. Empty input means yes. `--yes` runs
-all missing CLI installers without prompting; `--no-cli` skips CLI installation.
-If stdin/stdout is not a TTY and `--yes` was not passed, CLI installation is
-skipped instead of blocking.
+it asks about the selected agent CLI with a `[Y/n]` prompt and shows the exact
+vendor installer command before running it. The default CLI is `claude`; pass
+`--cli codex`, `--cli agy`, or `--cli hermes` to select another one. Empty input
+means yes. `--yes` runs the selected CLI installer without prompting; `--no-cli`
+skips CLI installation. If stdin/stdout is not a TTY and `--yes` was not passed,
+CLI installation is skipped instead of blocking.
 
 Authentication cannot be automated. The final output of `sudo ./install` is the
 single next action: run the installed CLI it names and sign in, or install one
@@ -83,10 +84,12 @@ python3 -m pip install --user 'psycopg>=3.3,<4'
 
 ## Agent CLI
 
-`sudo ./install` can run the vendor-documented agent CLI installers below. These
-commands are not distro packages on the target platforms, so the installer asks
-before running each missing CLI unless `--yes` or `--no-cli` was supplied. A
-failed, declined, or skipped CLI install does not roll back the Switchyard host
+`sudo ./install` can run one of the vendor-documented agent CLI installers below.
+These commands are not distro packages on the target platforms, so the installer
+asks before running the selected missing CLI unless `--yes` or `--no-cli` was
+supplied. `claude` is the default because Switchyard's own starter roles are
+built around Claude-compatible panes; pass `--cli <name>` to select another CLI.
+A failed, declined, or skipped CLI install does not roll back the Switchyard host
 install.
 
 Install and authenticate at least one CLI before launching panes:

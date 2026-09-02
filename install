@@ -10,6 +10,7 @@ SUDO_BIN="${SWITCHYARD_SUDO_BIN:-sudo}"
 ORIGINAL_ARGS=("$@")
 ASSUME_YES=0
 SKIP_CLI=0
+DRY_RUN=0
 CLI_INSTALL_ATTEMPTED=0
 CLI_INSTALL_SUCCEEDED=0
 CLI_INSTALL_FAILED=0
@@ -19,11 +20,12 @@ AUTH_CLI=""
 
 usage() {
     cat <<'EOF'
-Usage: sudo ./install [--yes|-y] [--no-cli|--skip-cli]
+Usage: sudo ./install [--dry-run] [--yes|-y] [--no-cli|--skip-cli]
 
 Installs Switchyard host packages, the shared Python venv, optional agent CLIs,
 and the public switchyard command. Authentication remains manual and is printed
-as the final next step.
+as the final next step. --dry-run prints the commands that would run and exits
+without changing the system.
 EOF
 }
 
@@ -55,6 +57,9 @@ while (($#)); do
         --no-cli|--skip-cli)
             SKIP_CLI=1
             ;;
+        --dry-run)
+            DRY_RUN=1
+            ;;
         -h|--help)
             usage
             exit 0
@@ -66,7 +71,7 @@ while (($#)); do
     shift
 done
 
-if [[ "${EUID:-$(id -u)}" -ne 0 && "${SWITCHYARD_INSTALL_TEST_ASSUME_ROOT:-}" != "1" ]]; then
+if [[ "${EUID:-$(id -u)}" -ne 0 && "${SWITCHYARD_INSTALL_TEST_ASSUME_ROOT:-}" != "1" && "$DRY_RUN" -ne 1 ]]; then
     run_cmd "$SUDO_BIN" env \
         SWITCHYARD_INSTALL_ORIGINAL_USER="${SWITCHYARD_INSTALL_ORIGINAL_USER:-$(id -un)}" \
         SWITCHYARD_INSTALL_ORIGINAL_HOME="${SWITCHYARD_INSTALL_ORIGINAL_HOME:-$HOME}" \
@@ -155,6 +160,20 @@ prompt_cli_install() {
     done
 }
 
+dry_run_agent_clis() {
+    local cli
+    local command
+    if [[ "$SKIP_CLI" -eq 1 ]]; then
+        printf 'Agent CLI installation would be skipped by --no-cli.\n'
+        return
+    fi
+    printf '\nAgent CLI installer prompts that would be shown:\n'
+    for cli in "${CLI_ORDER[@]}"; do
+        command="${CLI_INSTALL_COMMANDS[$cli]}"
+        printf '\nInstall %s?\n%s\n[Y/n]\n' "$cli" "$(cli_display_command "$command")"
+    done
+}
+
 install_agent_clis() {
     local cli
     local command
@@ -194,6 +213,18 @@ install_agent_clis() {
     done
 }
 
+dry_run_install() {
+    printf 'DRY RUN: no changes will be made.\n'
+    run_cmd "$PREREQS_SCRIPT" --dry-run --skip-cli
+    dry_run_agent_clis
+    run_cmd env \
+        SWITCHYARD_SOURCE_REPO="$REPO_ROOT" \
+        SWITCHYARD_SOURCE_REF="${SWITCHYARD_SOURCE_REF:-HEAD}" \
+        SWITCHYARD_SHARED_INSTALL_ROOT="${SWITCHYARD_SHARED_INSTALL_ROOT:-/opt/switchyard}" \
+        SWITCHYARD_INSTALL_PATH="${SWITCHYARD_INSTALL_PATH:-/usr/local/bin/switchyard}" \
+        "$SWITCHYARD_INSTALL_SCRIPT" --print-commands
+}
+
 print_final_next_step() {
     printf '\nNEXT STEP\n'
     if [[ -n "$AUTH_CLI" ]]; then
@@ -210,6 +241,11 @@ print_final_next_step() {
         printf 'Run an installed agent CLI and sign in.\n'
     fi
 }
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    dry_run_install
+    exit 0
+fi
 
 run_cmd "$PREREQS_SCRIPT" --skip-cli
 install_agent_clis

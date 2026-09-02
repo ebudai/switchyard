@@ -124,6 +124,27 @@ def test_non_tty_without_yes_skips_cli_instead_of_blocking() -> None:
         ]
 
 
+def test_dry_run_prints_every_step_without_prompting_or_mutating() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        tmpdir = Path(tmp)
+        proc = _run_install(tmpdir, "--dry-run", input_text="n\nn\nn\nn\n", assume_tty=True)
+        output = proc.stdout
+
+        assert "DRY RUN: no changes will be made." in output
+        assert "fake prereqs" in output
+        assert "fake release install" in output
+        for cli in CLIS:
+            assert f"Install {cli}?" in output
+            assert f"printf\\ {cli}\\ \\>\\>\\ {tmpdir / f'{cli}.installed'}" in output
+        assert "[Y/n] y" not in output
+        assert "NEXT STEP" not in output
+        assert not list(tmpdir.glob("*.installed"))
+        assert (tmpdir / "commands.log").read_text(encoding="utf-8").splitlines() == [
+            "prereqs:--dry-run --skip-cli",
+            "release:--print-commands",
+        ]
+
+
 def test_interactive_cli_selection_accepts_invalid_retry_and_eof_default_yes() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmpdir = Path(tmp)
@@ -184,6 +205,7 @@ if __name__ == "__main__":
     test_yes_installs_every_missing_cli_and_prints_final_auth_step_last()
     test_no_cli_skips_prompts_and_finishes_with_manual_cli_action()
     test_non_tty_without_yes_skips_cli_instead_of_blocking()
+    test_dry_run_prints_every_step_without_prompting_or_mutating()
     test_interactive_cli_selection_accepts_invalid_retry_and_eof_default_yes()
     test_declining_every_cli_still_succeeds_and_installs_switchyard()
     test_non_root_self_elevation_preserves_original_flags()

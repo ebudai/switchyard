@@ -13,6 +13,9 @@ cd switchyard
 sudo ./install
 ```
 
+Run `sudo ./install --dry-run` first to see every command it would run without
+changing the system.
+
 The installer refreshes apt package metadata on Debian/Ubuntu systems, installs
 host packages, creates the shared `/opt/switchyard/venv` with
 `--system-site-packages`, runs the ticket-board dependency and entry-point

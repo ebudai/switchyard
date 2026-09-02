@@ -63,7 +63,9 @@ def test_apt_commands() -> None:
     assert "+ sudo install -d -m 0755 /opt/switchyard" in output
     assert "+ sudo python3 -m venv --system-site-packages /opt/switchyard/venv" in output
     assert "+ sudo /opt/switchyard/venv/bin/python -m pip install psycopg\\>=3.3\\,\\<4" in output
-    assert "Verifying the ticket board entry point imports under the shared Switchyard Python venv." in output
+    assert "Verifying ticket board runtime dependencies under the shared Switchyard Python venv." in output
+    assert "+ sudo /opt/switchyard/venv/bin/python -c import\\ psycopg\\,\\ PIL\\;\\ print" in output
+    assert "Verifying the ticket board entry point loads under the shared Switchyard Python venv." in output
     assert f"+ sudo /opt/switchyard/venv/bin/python {ROOT / 'scripts' / 'ticket-board.py'} --help" in output
     assert "pip install --user" not in output
     assert "--break-system-packages" not in output
@@ -112,6 +114,7 @@ def test_fresh_machine_docs_match_manual_agent_cli_policy() -> None:
     assert "python3 -m pip install --user 'psycopg>=3.3,<4'" not in apt_python_section
     assert "sudo python3 -m venv --system-site-packages /opt/switchyard/venv" in docs
     assert "sudo /opt/switchyard/venv/bin/python -m pip install 'psycopg>=3.3,<4'" in docs
+    assert "sudo /opt/switchyard/venv/bin/python -c 'import psycopg, PIL; print(psycopg.__version__, PIL.__version__)'" in docs
     assert "sudo /opt/switchyard/venv/bin/python scripts/ticket-board.py --help" in docs
     assert "`python3-psycopg` exists but is `3.1.17-2`" in docs
     assert "does not satisfy Switchyard's `psycopg>=3.3,<4` pin" in normalized_docs
@@ -182,7 +185,19 @@ def test_system_site_venv_runs_ticket_board_entrypoint() -> None:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        proc = subprocess.run(
+        import_proc = subprocess.run(
+            [
+                str(venv / "bin" / "python"),
+                "-c",
+                "import psycopg, PIL; print(psycopg.__version__, PIL.__version__)",
+            ],
+            cwd=ROOT,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        entrypoint_proc = subprocess.run(
             [str(venv / "bin" / "python"), str(ROOT / "scripts" / "ticket-board.py"), "--help"],
             cwd=ROOT,
             check=True,
@@ -190,7 +205,8 @@ def test_system_site_venv_runs_ticket_board_entrypoint() -> None:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-    assert "usage:" in proc.stdout
+    assert import_proc.stdout.strip()
+    assert "usage:" in entrypoint_proc.stdout
 
 
 if __name__ == "__main__":

@@ -63,10 +63,11 @@ sudo pacman -S python-psycopg
 
 Debian/Ubuntu system Python is PEP-668 externally managed, so avoid plain
 `pip install --user psycopg` and do not use `--break-system-packages`. Verify
-the deployed board interpreter by running the entry point, not only by importing
-Psycopg:
+the deployed board interpreter in two parts: import the runtime dependencies,
+then run the entry point so the board module graph loads:
 
 ```bash
+/opt/switchyard/venv/bin/python -c 'import psycopg, PIL; print(psycopg.__version__, PIL.__version__)'
 /opt/switchyard/venv/bin/python /home/agent/pgu-ticketboard-live/current/scripts/ticket-board.py --help
 ```
 

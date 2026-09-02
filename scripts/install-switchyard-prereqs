@@ -81,7 +81,9 @@ case "$manager" in
         run_cmd "$SUDO_BIN" install -d -m 0755 "$(dirname "$SWITCHYARD_PYTHON_VENV")"
         run_cmd "$SUDO_BIN" "$PYTHON_BIN" -m venv --system-site-packages "$SWITCHYARD_PYTHON_VENV"
         run_cmd "$SUDO_BIN" "$SWITCHYARD_PYTHON_VENV/bin/python" -m pip install "$PIP_SPEC"
-        printf 'Verifying the ticket board entry point imports under the shared Switchyard Python venv.\n'
+        printf 'Verifying ticket board runtime dependencies under the shared Switchyard Python venv.\n'
+        run_cmd "$SUDO_BIN" "$SWITCHYARD_PYTHON_VENV/bin/python" -c "import psycopg, PIL; print(psycopg.__version__, PIL.__version__)"
+        printf 'Verifying the ticket board entry point loads under the shared Switchyard Python venv.\n'
         run_cmd "$SUDO_BIN" "$SWITCHYARD_PYTHON_VENV/bin/python" "$SCRIPT_DIR/ticket-board.py" --help
         ;;
     pacman)

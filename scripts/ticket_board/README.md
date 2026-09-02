@@ -309,7 +309,8 @@ PostgreSQL board backend:
   system-site-packages venv at `/opt/switchyard/venv` and the service renderers
   use that interpreter when it exists and is executable. The board also imports
   Pillow at module scope; install it with apt `python3-pil` or pacman
-  `python-pillow`. Verify runtime imports with
+  `python-pillow`. Verify runtime dependencies and the board entry point with
+  `/opt/switchyard/venv/bin/python -c 'import psycopg, PIL; print(psycopg.__version__, PIL.__version__)'` and
   `/opt/switchyard/venv/bin/python /home/agent/pgu-ticketboard-live/current/scripts/ticket-board.py --help`.
   On Arch/CachyOS, install Psycopg with `sudo pacman -S python-psycopg` or keep
   the user-pip path from the prereq script.

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -193,6 +194,42 @@ def main() -> int:
                 missing_server.server_close()
                 missing_thread.join(timeout=2)
 
+            partial_missing_app = t.TicketBoardApp(
+                frames,
+                assets,
+                commit_git_dir=f"{missing_repo}{os.pathsep}{project_repo}",
+                database_url=t.conninfo(socket_dir, port, dbname, t.SERVICE_ROLE),
+            )
+            assert partial_missing_app._validate_commit_hash(project_commit[:12]) == project_commit
+
+            env_commit_paths = f"{project_repo}{os.pathsep}{other_repo}"
+            old_commit_git_dir = os.environ.get("TICKET_BOARD_COMMIT_GIT_DIR")
+            old_pgu_commit_git_dir = os.environ.get("PGU_TICKET_BOARD_COMMIT_GIT_DIR")
+            try:
+                os.environ["TICKET_BOARD_COMMIT_GIT_DIR"] = env_commit_paths
+                os.environ.pop("PGU_TICKET_BOARD_COMMIT_GIT_DIR", None)
+                env_app = t.TicketBoardApp(
+                    frames,
+                    assets,
+                    commit_git_dir=None,
+                    database_url=t.conninfo(socket_dir, port, dbname, t.SERVICE_ROLE),
+                )
+                assert tuple(env_app.commit_git_dirs) == (
+                    project_repo.resolve(strict=False),
+                    other_repo.resolve(strict=False),
+                ), env_app.commit_git_dirs
+                assert env_app._validate_commit_hash(project_commit[:12]) == project_commit
+                assert env_app._validate_commit_hash(other_commit[:12]) == other_commit
+            finally:
+                if old_commit_git_dir is None:
+                    os.environ.pop("TICKET_BOARD_COMMIT_GIT_DIR", None)
+                else:
+                    os.environ["TICKET_BOARD_COMMIT_GIT_DIR"] = old_commit_git_dir
+                if old_pgu_commit_git_dir is None:
+                    os.environ.pop("PGU_TICKET_BOARD_COMMIT_GIT_DIR", None)
+                else:
+                    os.environ["PGU_TICKET_BOARD_COMMIT_GIT_DIR"] = old_pgu_commit_git_dir
+
             switchyard_repo = Path("/data/git/switchyard.git")
             pgu_repo = Path("/data/git/pgu.git")
             if switchyard_repo.exists() and pgu_repo.exists():
@@ -208,6 +245,29 @@ def main() -> int:
                 )
                 assert pgu_split_app._validate_commit_hash(switchyard_commit[:12]) == switchyard_commit
                 assert pgu_split_app._validate_commit_hash(pgu_commit[:12]) == pgu_commit
+                old_commit_git_dir = os.environ.get("TICKET_BOARD_COMMIT_GIT_DIR")
+                old_pgu_commit_git_dir = os.environ.get("PGU_TICKET_BOARD_COMMIT_GIT_DIR")
+                try:
+                    os.environ["TICKET_BOARD_COMMIT_GIT_DIR"] = pgu_commit_repos
+                    os.environ.pop("PGU_TICKET_BOARD_COMMIT_GIT_DIR", None)
+                    pgu_env_app = t.TicketBoardApp(
+                        frames,
+                        assets,
+                        commit_git_dir=None,
+                        database_url=t.conninfo(socket_dir, port, dbname, t.SERVICE_ROLE),
+                    )
+                    assert tuple(pgu_env_app.commit_git_dirs) == (switchyard_repo, pgu_repo), pgu_env_app.commit_git_dirs
+                    assert pgu_env_app._validate_commit_hash(switchyard_commit[:12]) == switchyard_commit
+                    assert pgu_env_app._validate_commit_hash(pgu_commit[:12]) == pgu_commit
+                finally:
+                    if old_commit_git_dir is None:
+                        os.environ.pop("TICKET_BOARD_COMMIT_GIT_DIR", None)
+                    else:
+                        os.environ["TICKET_BOARD_COMMIT_GIT_DIR"] = old_commit_git_dir
+                    if old_pgu_commit_git_dir is None:
+                        os.environ.pop("PGU_TICKET_BOARD_COMMIT_GIT_DIR", None)
+                    else:
+                        os.environ["PGU_TICKET_BOARD_COMMIT_GIT_DIR"] = old_pgu_commit_git_dir
         finally:
             subprocess.run(
                 ["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"],

@@ -33,10 +33,6 @@ def default_commit_git_dirs(project: str, *, owner_home: Path | str | None = Non
     return (home / ".local" / "state" / "switchyard" / "projects" / project / "control.git",)
 
 
-def default_commit_git_dir(project: str, *, owner_home: Path | str | None = None) -> Path:
-    return default_commit_git_dirs(project, owner_home=owner_home)[0]
-
-
 def format_commit_git_dirs(paths: tuple[Path, ...]) -> str:
     return os.pathsep.join(str(path) for path in paths)
 
@@ -55,15 +51,6 @@ def commit_git_dirs_for_project(
     ).strip() or "pgu"
     resolved_home = owner_home if owner_home is not None else environ.get("HOME", "").strip() or None
     return default_commit_git_dirs(resolved_project, owner_home=resolved_home)
-
-
-def commit_git_dir_for_project(
-    environ: dict[str, str] | os._Environ[str] = os.environ,
-    *,
-    project: str | None = None,
-    owner_home: Path | str | None = None,
-) -> Path:
-    return commit_git_dirs_for_project(environ, project=project, owner_home=owner_home)[0]
 
 
 def commit_git_dir_env_for_project(

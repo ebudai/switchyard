@@ -664,6 +664,26 @@ def test_custom_ticket_prefix_is_rendered_into_board_service_environment() -> No
     assert "Environment=TICKET_BOARD_COMMIT_GIT_DIR=/data/git/otto_scheduler.git" in board_unit
 
 
+def test_project_units_honor_ticket_board_python_override() -> None:
+    old_value = os.environ.get("TICKET_BOARD_PYTHON")
+    os.environ["TICKET_BOARD_PYTHON"] = "/opt/switchyard/venv/bin/python"
+    try:
+        plan = build_plan(project="otto", owner_user="otto-agent")
+        assert (
+            "ExecStart=/opt/switchyard/venv/bin/python "
+            "/home/otto-agent/otto-ticketboard-live/current/scripts/ticket-board.py"
+        ) in render_board_unit(plan)
+        assert (
+            "ExecStart=/opt/switchyard/venv/bin/python "
+            "/home/otto-agent/otto-ticketboard-live/current/scripts/ticket-board-notify-listener"
+        ) in render_listener_unit(plan)
+    finally:
+        if old_value is None:
+            os.environ.pop("TICKET_BOARD_PYTHON", None)
+        else:
+            os.environ["TICKET_BOARD_PYTHON"] = old_value
+
+
 def test_live_legacy_project_commit_repositories_are_rendered() -> None:
     pgu_plan = build_plan(project="pgu", owner_user="agent")
     mefp_plan = build_plan(project="mefp", owner_user="stellaris-agent")

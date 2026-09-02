@@ -50,7 +50,13 @@ readonly BOARD_CANARY_TIMEOUT_SECONDS="${BOARD_CANARY_TIMEOUT_SECONDS:-$SMOKE_TI
 readonly BOARD_CANARY_SOCKET="${BOARD_CANARY_SOCKET:-}"
 readonly BOARD_CANARY_SERVICE_NAME="${BOARD_CANARY_SERVICE_NAME:-$PROJECT_SLUG-ticket-board-canary.service}"
 readonly BOARD_CANARY_ENV_FILE="${BOARD_CANARY_ENV_FILE:-$BOARD_ROOT/canary.env}"
-readonly PYTHON_BIN="${TICKET_BOARD_PYTHON:-/usr/bin/python3}"
+readonly SWITCHYARD_SHARED_PYTHON="${SWITCHYARD_SHARED_PYTHON:-/opt/switchyard/venv/bin/python}"
+DEFAULT_TICKET_BOARD_PYTHON="/usr/bin/python3"
+if [[ -x "$SWITCHYARD_SHARED_PYTHON" ]]; then
+    DEFAULT_TICKET_BOARD_PYTHON="$SWITCHYARD_SHARED_PYTHON"
+fi
+readonly DEFAULT_TICKET_BOARD_PYTHON
+readonly PYTHON_BIN="${TICKET_BOARD_PYTHON:-$DEFAULT_TICKET_BOARD_PYTHON}"
 if [[ -z "${FRAME_ROOT:-}" ]]; then
     if [[ "$PROJECT_SLUG" == "pgu" ]]; then
         FRAME_ROOT="/tmp/pgu-frames"
@@ -741,7 +747,7 @@ WorkingDirectory=$BOARD_CURRENT_LINK
 RuntimeDirectory=$PROJECT_SLUG-ticket-board
 ExecStartPre=/bin/mkdir -p $FRAME_ROOT
 ExecStartPre=/bin/chmod 1777 $FRAME_ROOT
-ExecStart=/usr/bin/python3 $BOARD_SCRIPT --host $BOARD_HOST --port $BOARD_PORT --unix-socket $BOARD_UNIX_SOCKET --frames $FRAME_ROOT
+ExecStart=$PYTHON_BIN $BOARD_SCRIPT --host $BOARD_HOST --port $BOARD_PORT --unix-socket $BOARD_UNIX_SOCKET --frames $FRAME_ROOT
 Restart=on-failure
 RestartSec=2
 EnvironmentFile=-$HOME/.config/$PROJECT_SLUG/ticket-board.env

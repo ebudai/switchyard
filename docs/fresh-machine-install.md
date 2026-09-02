@@ -6,7 +6,7 @@
 
 ```bash
 sudo apt-get update
-sudo apt-get install python3 postgresql postgresql-client tmux git curl python3-pip acl
+sudo apt-get install python3 postgresql postgresql-client tmux git curl python3-venv acl
 ```
 
 ### pacman
@@ -31,6 +31,28 @@ sudo pacman -S konsole
 ```
 
 ## Python Package
+
+Switchyard's ticket board imports Psycopg 3 from the interpreter that runs the
+board service and notify listener. On Ubuntu 24.04 / noble, the distro package
+`python3-psycopg` exists but is `3.1.17-2`, which does not satisfy
+Switchyard's `psycopg>=3.3,<4` pin. Debian/Ubuntu also mark system Python as
+externally managed under PEP 668, so `pip install --user` is refused. Do not use
+`--break-system-packages`.
+
+On apt systems, use the shared Switchyard venv that
+`scripts/install-switchyard-prereqs` creates:
+
+```bash
+sudo install -d -m 0755 /opt/switchyard
+sudo python3 -m venv /opt/switchyard/venv
+sudo /opt/switchyard/venv/bin/python -m pip install 'psycopg>=3.3,<4'
+sudo /opt/switchyard/venv/bin/python -c 'import psycopg; print(psycopg.__version__)'
+```
+
+Board service renderers prefer `/opt/switchyard/venv/bin/python` when it
+exists, so the installed Psycopg is used by the process that imports it.
+
+On Arch-family systems, the current system-user pip path remains:
 
 ```bash
 python3 -m pip install --user 'psycopg>=3.3,<4'

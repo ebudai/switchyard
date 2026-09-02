@@ -48,15 +48,20 @@ For a legacy user-unit install, this does:
 Runtime dependency:
 
 - psycopg 3 is required by `scripts.ticket_board.app`
+- on Ubuntu 24.04 / noble, `python3-psycopg` is packaged as `3.1.17-2`, below
+  the `psycopg>=3.3,<4` runtime pin, so `scripts/install-switchyard-prereqs`
+  creates `/opt/switchyard/venv` and installs Psycopg there instead of using
+  `pip install --user`
 - on Arch/CachyOS, install it for the system Python with:
 
 ```bash
 sudo pacman -S python-psycopg
 ```
 
-The system Python is PEP-668 externally managed, so avoid plain
-`pip install --user psycopg`. For isolated verification runs, create a venv
-with system packages visible, for example:
+Debian/Ubuntu system Python is PEP-668 externally managed, so avoid plain
+`pip install --user psycopg` and do not use `--break-system-packages`. For
+isolated verification runs, create a venv with system packages visible, for
+example:
 
 ```bash
 python3 -m venv --system-site-packages /tmp/pgu-ticket-board-venv
@@ -66,7 +71,7 @@ python3 -m venv --system-site-packages /tmp/pgu-ticket-board-venv
 The service runs:
 
 - working directory: `/home/agent/pgu-ticketboard-live/current`
-- command: `python3 /home/agent/pgu-ticketboard-live/current/scripts/ticket-board.py --host 127.0.0.1 --port 8770 --unix-socket /run/pgu-ticket-board/ticket-board.sock`
+- command: `/opt/switchyard/venv/bin/python /home/agent/pgu-ticketboard-live/current/scripts/ticket-board.py --host 127.0.0.1 --port 8770 --unix-socket /run/pgu-ticket-board/ticket-board.sock` when the shared venv exists; otherwise `/usr/bin/python3` unless `TICKET_BOARD_PYTHON` overrides it
 - logs: `/tmp/pgu-ticket-board.log`
 - default DB URL: `postgresql:///pgu?host=/var/run/postgresql&user=ticket_board_service`
 

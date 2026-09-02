@@ -22,6 +22,13 @@ readonly LISTENER_DATABASE_URL="${TICKET_BOARD_NOTIFY_DATABASE_URL:-${TICKET_BOA
 readonly BOARD_ADMIN_DATABASE_URL="${TICKET_BOARD_ADMIN_DATABASE_URL:-postgresql:///$DEFAULT_DATABASE_NAME?host=/var/run/postgresql&user=postgres}"
 readonly RBAC_SQL="${RBAC_SQL:-$BOARD_CURRENT_LINK/scripts/ticket_board/rbac.sql}"
 readonly MIGRATION_RUNNER="${TICKET_BOARD_MIGRATION_RUNNER:-$BOARD_CURRENT_LINK/scripts/ticket-board-migrate}"
+readonly SWITCHYARD_SHARED_PYTHON="${SWITCHYARD_SHARED_PYTHON:-/opt/switchyard/venv/bin/python}"
+DEFAULT_TICKET_BOARD_PYTHON="/usr/bin/python3"
+if [[ -x "$SWITCHYARD_SHARED_PYTHON" ]]; then
+    DEFAULT_TICKET_BOARD_PYTHON="$SWITCHYARD_SHARED_PYTHON"
+fi
+readonly DEFAULT_TICKET_BOARD_PYTHON
+readonly PYTHON_BIN="${TICKET_BOARD_PYTHON:-$DEFAULT_TICKET_BOARD_PYTHON}"
 
 usage() {
     cat <<EOF
@@ -176,7 +183,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=$BOARD_CURRENT_LINK
-ExecStart=/usr/bin/python3 $LISTENER_SCRIPT
+ExecStart=$PYTHON_BIN $LISTENER_SCRIPT
 Restart=always
 RestartSec=2
 Environment=PYTHONUNBUFFERED=1

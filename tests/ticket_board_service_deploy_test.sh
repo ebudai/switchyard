@@ -220,6 +220,14 @@ grep -q "ExecStart=/usr/bin/python3 $DEPLOY_ROOT/current/scripts/ticket-board.py
     echo "FAIL: unit ExecStart did not point to deploy current script" >&2
     exit 1
 }
+TICKET_BOARD_PYTHON=/opt/switchyard/venv/bin/python \
+BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
+    "$REPO_ROOT/scripts/ticket-board-service.sh" render-unit >"$UNIT_DIR/service-venv.unit"
+
+grep -q "ExecStart=/opt/switchyard/venv/bin/python $DEPLOY_ROOT/current/scripts/ticket-board.py" "$UNIT_DIR/service-venv.unit" || {
+    echo "FAIL: unit ExecStart did not honor TICKET_BOARD_PYTHON for the shared venv" >&2
+    exit 1
+}
 grep -q '^ExecStartPre=/bin/mkdir -p /tmp/pgu-frames$' "$UNIT_DIR/service.unit" || {
     echo "FAIL: unit did not recreate the frame directory before start" >&2
     exit 1

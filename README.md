@@ -19,9 +19,10 @@ Then run the installer scripts in this order:
 
    Installs host packages with `apt` or `pacman`, installs `psycopg`, and
    prints manual agent CLI installation and authentication guidance. On apt
-   systems it refreshes the package index before installing. On Arch-family
-   systems it does not run `pacman -Sy`; run `sudo pacman -Syu` first as
-   described in the fresh-machine install list.
+   systems it refreshes the package index before installing and puts Psycopg in
+   the shared Switchyard venv to avoid PEP 668 system-Python restrictions. On
+   Arch-family systems it does not run `pacman -Sy`; run `sudo pacman -Syu`
+   first as described in the fresh-machine install list.
 
 2. `scripts/install-switchyard`
 

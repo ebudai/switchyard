@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 from dataclasses import asdict, dataclass
@@ -28,6 +29,7 @@ DEFAULT_PROJECT_IMPLEMENTER_ROLES = ("app", "main")
 DEFAULT_PGU_ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "inspector", "agent", "director", "research", "user")
 DEFAULT_PGU_CALLER_ROLES = ("director", "main", "app", "ops", "perf", "audit", "inspector", "research", "user")
 SCHEMA_SQL_PATH = Path(__file__).with_name("schema.sql")
+DEFAULT_SHARED_PYTHON = "/opt/switchyard/venv/bin/python"
 
 # Tenant boards intentionally expose a smaller workflow surface than the pgu
 # operations board. Keep this as a projection policy over schema.sql, not as a
@@ -694,6 +696,16 @@ def owned_directory_command(plan: ProjectBoardProvision, dirs: Sequence[str], *,
     )
 
 
+def default_ticket_board_python() -> str:
+    override = os.environ.get("TICKET_BOARD_PYTHON")
+    if override:
+        return override
+    shared_python = os.environ.get("SWITCHYARD_SHARED_PYTHON", DEFAULT_SHARED_PYTHON)
+    if Path(shared_python).is_file():
+        return shared_python
+    return "/usr/bin/python3"
+
+
 def render_board_unit(plan: ProjectBoardProvision) -> str:
     operation_allowed_roles = env_operation_role_map(plan.operation_allowed_roles)
     operation_allowed_roles_line = (
@@ -711,7 +723,7 @@ Type=simple
 User={plan.service_user}
 WorkingDirectory={plan.board_current}
 RuntimeDirectory={plan.runtime_directory}
-ExecStart=/usr/bin/python3 {plan.board_current}/scripts/ticket-board.py --host 127.0.0.1 --port {plan.port} --unix-socket {plan.socket_path} --frames {plan.frame_dir} --assets {plan.asset_dir}
+ExecStart={default_ticket_board_python()} {plan.board_current}/scripts/ticket-board.py --host 127.0.0.1 --port {plan.port} --unix-socket {plan.socket_path} --frames {plan.frame_dir} --assets {plan.asset_dir}
 Restart=on-failure
 RestartSec=2
 EnvironmentFile=-/home/{plan.owner_user}/.config/{plan.project}/ticket-board.env
@@ -750,7 +762,7 @@ Wants=postgresql.service
 [Service]
 Type=simple
 WorkingDirectory={plan.board_current}
-ExecStart=/usr/bin/python3 {plan.board_current}/scripts/ticket-board-notify-listener
+ExecStart={default_ticket_board_python()} {plan.board_current}/scripts/ticket-board-notify-listener
 Restart=always
 RestartSec=2
 Environment=PYTHONUNBUFFERED=1

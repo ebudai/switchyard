@@ -303,9 +303,13 @@ PostgreSQL board backend:
   rather than expecting the runner to infer dependencies.
 - Tickets are stored in normalized ticket, blocker, comment, and attachment tables.
 - The PostgreSQL backend requires psycopg 3 at runtime and for
-  `tests/ticket_board_postgres_backend_test.py`. On Arch/CachyOS install it
-  with `sudo pacman -S python-psycopg`; for isolated test runs, use a venv
-  that can see that package, such as
+  `tests/ticket_board_postgres_backend_test.py`. Ubuntu 24.04 / noble packages
+  `python3-psycopg` as `3.1.17-2`, below the `psycopg>=3.3,<4` pin, so
+  `scripts/install-switchyard-prereqs` installs Psycopg into
+  `/opt/switchyard/venv` and the service renderers use that interpreter when it
+  exists. On Arch/CachyOS, install it with `sudo pacman -S python-psycopg` or
+  keep the user-pip path from the prereq script. For isolated test runs, use a
+  venv that can see that package, such as
   `python3 -m venv --system-site-packages /tmp/pgu-ticket-board-venv`.
   `scripts/ticket_board/requirements.txt` records the equivalent pip
   dependency for non-system Python environments.

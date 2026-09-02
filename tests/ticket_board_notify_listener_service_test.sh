@@ -126,6 +126,14 @@ grep -q "ExecStart=/usr/bin/python3 $DEPLOY_ROOT/current/scripts/ticket-board-no
     echo "FAIL: unit ExecStart did not point to deployed listener script" >&2
     exit 1
 }
+TICKET_BOARD_PYTHON=/opt/switchyard/venv/bin/python \
+BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD \
+    "$REPO_ROOT/scripts/ticket-board-notify-listener-service.sh" render-unit >"$UNIT_DIR/service-venv.unit"
+
+grep -q "ExecStart=/opt/switchyard/venv/bin/python $DEPLOY_ROOT/current/scripts/ticket-board-notify-listener" "$UNIT_DIR/service-venv.unit" || {
+    echo "FAIL: listener unit ExecStart did not honor TICKET_BOARD_PYTHON for the shared venv" >&2
+    exit 1
+}
 grep -q '^Environment=PGUSER=ticket_board_listener$' "$UNIT_DIR/service.unit" || {
     echo "FAIL: unit did not select ticket_board_listener by default" >&2
     exit 1

@@ -5,6 +5,52 @@ replace `docs/onboarding/`; use onboarding for the generic director method and
 this document for the project state, tenant map, and decisions that should not
 be rediscovered.
 
+## The Import Boundary — Read This First
+
+This is the single fact that will shape your working day, and the one most likely
+to look like a misconfiguration you should fix. It is not. It is deliberate.
+
+**Agents cannot push to `/data/git/switchyard.git`.** A push from an agent fails:
+
+    remote unpack failed: unable to create temporary object directory
+
+The bare repo is owned by the operator. Every tenant installs from it, so nothing
+that runs unattended may write to it. Eric confirmed this twice, in these words:
+*"don't loosen it, polkit for that is fine."* Do not make the repo group-writable,
+do not add an agent to its group, do not "fix" the permissions.
+
+The consequence is a workflow you must plan around:
+
+1. an implementer commits in its own worktree and cannot push
+2. it writes `git bundle` to `/tmp` and posts the path, refspec and sha on the ticket
+3. **you** import it, as the repo owner:
+
+       pkexec --user eric git -C /data/git/switchyard.git \
+         fetch <bundle> '+<source-ref>:refs/heads/<branch>'
+
+   Read the bundle's ref name first — `git bundle list-heads <bundle>` — because
+   implementers build them inconsistently; some head is `HEAD`, some is a branch.
+4. only then can the implementer submit to audit; the board refuses `submit_to_audit`
+   until the commit is on origin
+
+**Every round trip therefore stalls on you, and on you being physically present**,
+because `pkexec` needs a human to approve a prompt. On 2026-09-02 that meant fifteen
+merges, roughly thirty privileged imports, and six director holds.
+
+Two traps that follow from it:
+
+- **The watchdog reads that stall as "implementer may be stuck" and escalates.** It is
+  almost always wrong. Read the pane before acting: an implementer that has finished,
+  bundled, and said so is not stuck, and telling it to try harder wastes its time.
+  There is no board state meaning "waiting on a human" — see *Action Naming* below.
+- **Never use `pkexec` as a liveness probe.** Repeated failed authentications lock the
+  operator out of their own machine. This happened, for nine minutes, because a
+  background watch polled it every two minutes overnight.
+
+Finally: `git clone /data/git/switchyard.git` fails under git's local hardlink
+optimisation, because the packs are operator-owned and mode 444. Use
+`git clone --no-local`. Without knowing that, the repo appears broken.
+
 ## What Switchyard Owns
 
 Switchyard owns the coordination system around the work, not the PGU game
@@ -34,33 +80,35 @@ compatibility special case, not an output of that formula.
 
 ## Current State
 
-As of the final pass, `/etc/switchyard/projects` lists `mefp` and `otto`.
-`syrd` has no registry entry, no loaded systemd unit, and no health response on
-port `23326`. The migration inventory is two non-terminal PGU tickets that
-mention Switchyard/SYRD: this pass and PGU-865, the post-install quickstart.
+Facts that move are stated as how to FIND them, not as values. Values here were
+true on 2026-09-02 and are marked as such.
 
-The repository split is complete: `pgu.git` main is `7418183` with 359 files
-and no Switchyard-named paths; `switchyard.git` main is `8bf66d7` with 366
-files. PGU instruction/crash files still intentionally point to
-`/opt/switchyard` as the shared tool location.
+    switchyard main     git --git-dir=/data/git/switchyard.git rev-parse --short main
+    pgu main            git --git-dir=/data/git/pgu.git rev-parse --short main
+    shared install      readlink -f /opt/switchyard/current
+    live board release  readlink -f /home/agent/pgu-ticketboard-live/current
+    tenants             ls /etc/switchyard/projects/
+    mirror              https://github.com/ebudai/switchyard
 
-The shared install is live: `/usr/local/bin/switchyard` targets
-`/opt/switchyard/current/switchyard`; current is release `e11bca0`, with
-`8d24ed7` retained for rollback and also used by PGU's board release marker.
+CHECK THOSE FOUR AGAINST EACH OTHER BEFORE YOU TRUST ANY OF THEM. On 2026-09-02 all
+three deploy surfaces had drifted from main at once: the shared install was seven
+releases behind, the live board predated the commit-verification work merged that
+morning (so verification was merged but NOT RUNNING), and the mirror was one commit
+behind. Drift is the normal state, not an incident; merging is not deploying.
 
-The public mirror is `github.com/ebudai/switchyard`, AGPL-3.0, with
-contribution terms preserving the owner's licensing options. It is a read-only
-mirror; the local bare repo remains canonical and GitHub PRs auto-close.
+The repository split is complete. `pgu.git` carries no Switchyard-named paths;
+PGU instruction and crash files still intentionally point at `/opt/switchyard` as the
+shared tool location.
 
-Do not provision `syrd` twice. Before any cutover action, verify the registry,
-systemd units, board port, socket path, ticket prefix, and pane environment.
-Use neutral `TICKET_BOARD_*`, `TEAM_LAUNCHER_*`, `UPDATE_HOOK_*`, and
-`ALLOW_MAIN_PUSH` names. Do not introduce `SYRD_*` vocabulary. Browser settings
-prefer neutral `TICKET_BOARD_*` names, with PGU compatibility fallbacks still
-present for build-id, refresh-idle, and write-token paths.
+`syrd` is not provisioned: no registry entry, no systemd unit, nothing on port 23326.
+Do not provision it twice. Before any cutover action, verify registry, systemd units,
+board port, socket path, ticket prefix and pane environment.
 
-`scripts/ticket-board-test-suite --group all` now has 145 runnable suites
-across ticket-board, launcher-adjacent, host, frontend, and browser groups.
+Use neutral `TICKET_BOARD_*`, `TEAM_LAUNCHER_*`, `UPDATE_HOOK_*` and `ALLOW_MAIN_PUSH`
+names. Do not introduce `SYRD_*` vocabulary.
+
+The mirror is AGPL-3.0 with contribution terms preserving the owner's licensing
+options. It is read-only; the local bare repo is canonical and GitHub PRs auto-close.
 
 ## Migration Rule
 
@@ -140,6 +188,63 @@ source of truth for board commands, branch/submit rules, neutral environment
 names, immutable installs, routing, notification policy, and no root-owned
 writes. Keep `CLAUDE.md` and `GEMINI.md` as thin role overlays.
 
+## Installing Switchyard
+
+One command, from a fresh clone:
+
+    git clone https://github.com/ebudai/switchyard && cd switchyard && sudo ./install
+
+`--dry-run` prints every command it would run and changes nothing; run that first if
+you want to see what it does before granting root. `--cli <name>` installs one agent
+CLI, `--no-cli` none, `--yes` answers all prompts. Otherwise it asks per CLI.
+
+**Authentication is manual and always last.** Every agent CLI needs a browser sign-in
+or an API key, and that cannot be scripted — see PGU-889, which established that one
+sign-in cannot front the others and that the only automatable paths are API keys,
+which forfeit the subscription economics the project depends on. The installer's final
+line names what you must still do.
+
+## What The Tests Cannot See
+
+`scripts/ticket-board-test-suite --group all` is the gate, and on 2026-09-02 it was
+green at 148 while four real defects were live. Both blind spots are structural, and
+both are consequences of correct decisions:
+
+1. **The tests fake vendor commands.** They must — we cannot run four third-party
+   installers in CI. So no test can see that a vendor installer prompts, which is why
+   `--yes` was not actually unattended until PGU-890.
+2. **Every developer machine has a git checkout at the deploy path. Every user gets an
+   exported release.** So no test saw that `switchyard new` aborted outright on a
+   correctly-installed machine until PGU-891.
+
+Four of that day's defects were found by the operator running the real thing on a real
+machine. Two of them the reviewer and I had looked directly at and passed.
+
+The lesson, which generalises beyond this project: **ask what rule produced the output,
+not whether this instance looks right.** A rule can be interrogated; an instance can
+only be recognised, and plausible-looking output defeats recognition. The reviewer had
+run the exact failing case, seen `Run \`claude\` and sign in`, and recorded it as
+correct — because it looked reasonable, and nobody asked what was choosing that name.
+
+## Action Naming
+
+Recorded as observation for a future decision, not as a proposal. Almost none of the
+friction on this board is mechanism; nearly all of it is vocabulary. Each of these
+names describes what the system *does* rather than what the user *means*:
+
+- `manually_controlled` — names a mechanism. The state actually needed is "held pending
+  an operator action". Because the name did not say so, it was used as a nudge-mute, and
+  before PGU-876 it *broke* the tickets it was applied to.
+- `await-role` — cannot express "waiting on a human". It accepts only agent roles and
+  refuses the caller's own, so the most common blocked state here has no name.
+- `request-commit-exempt` — an implementer verb the director, who is its natural
+  approver, cannot call.
+- `defer` — moves a ticket to backlog, so "blocked" and "deprioritised" collapse into one
+  word for two states needing opposite responses.
+
+Renaming actions on a board with 890+ tickets of history is its own project with its own
+migration risk. This is here so the decision is made from evidence.
+
 ## First-Day Checklist
 
 1. Read `docs/onboarding/`, then this handoff.
@@ -152,3 +257,10 @@ writes. Keep `CLAUDE.md` and `GEMINI.md` as thin role overlays.
 5. Verify the shared-install release marker and update path.
 6. Review the final migration list immediately before cutover; do not trust an
    old inventory.
+7. Confirm the three deploy surfaces agree with `main`: the shared install, the
+   live board release, and the mirror. On 2026-09-02 all three had drifted at once.
+   Merging is not deploying.
+8. Do one import end to end before you need to: take any implementer bundle, run
+   `git bundle list-heads` on it, import it with `pkexec`, and watch the ticket
+   move. Learning that flow under time pressure on your first real ticket is the
+   worst way to learn it.

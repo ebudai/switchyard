@@ -310,7 +310,7 @@ PostgreSQL board backend:
   `scripts/ticket_board/requirements.txt` records the equivalent pip
   dependency for non-system Python environments.
 - `scripts/ticket_board/rbac.sql` creates the login roles for each board pane/service role without setting passwords and grants minimal table/column permissions; only `director` can update `tickets.manually_controlled`
-- `tickets.manually_controlled` defaults to `false`; PGU-191 transition/notification triggers must no-op when it is `true` so the director can hand-manipulate exceptional tickets
+- `tickets.manually_controlled` defaults to `false`; transition and notification gates must no-op when it is `true` so the director can hand-manipulate exceptional tickets, but state changes still normalize the assignee to the target stage owner before enforcing the stage-owner invariant
 - The PGU-207 trigger layer enforces workflow gates, maintains `ticket_notification_state`, emits `pg_notify('ticket_board_state_transition', ...)` on state transitions, and exposes `notify_due_nudges()` for the 5-minute pg_cron reminder cadence. The notify listener reconciles missed transition notifications on reconnect so listener downtime does not drop implementation/audit/review nudges.
 - Transition notifications are not queued back to the same `ticket_board.caller_role` that caused the transition; the trigger still emits a wake notification for listeners to reconcile state.
 - Notification delivery is traced in `ticket_board.notification_trace`; use `scripts/ticket_board/dump_notification_trace.py --ticket-id PGU-N` to inspect enqueue/send/drop/ack/failure history for spurious-ping reports. High-volume diagnostic rows such as claim/requeue/gate-defer are pruned after a short retention window.

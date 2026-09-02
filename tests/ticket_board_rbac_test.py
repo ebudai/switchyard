@@ -662,14 +662,58 @@ SELECT ticket_board.implementer_kick_back('PGU-7563', 'Please clarify.');
         psql(
             admin_conn,
             """
-SELECT jsonb_build_object('state', state, 'commit_hash', commit_hash, 'last_rejected_commit', last_rejected_commit)::text
+SELECT jsonb_build_object('state', state, 'assignee', assignee, 'commit_hash', commit_hash, 'last_rejected_commit', last_rejected_commit)::text
 FROM ticket_board.tickets WHERE id = 'PGU-400';
 """,
         )
     )
-    assert submitted == {"state": "audit", "commit_hash": "abcdef0", "last_rejected_commit": None}, submitted
+    assert submitted == {"state": "audit", "assignee": "audit", "commit_hash": "abcdef0", "last_rejected_commit": None}, submitted
     psql(admin_conn, "UPDATE ticket_board.tickets SET audit_signoff = true, state = 'director_review' WHERE id = 'PGU-400';")
     psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-400';")
+
+    insert_ticket(
+        admin_conn,
+        "PGU-8760",
+        title="Manual-control submit fixture",
+        state="backlog",
+        assignee="ops",
+        implementation="Done while held.",
+        manually_controlled=True,
+    )
+    psql(admin_conn, "BEGIN; SET LOCAL ticket_board.force_move = 'on'; UPDATE ticket_board.tickets SET state = 'in_progress' WHERE id = 'PGU-8760'; COMMIT;")
+    psql(service_conn, "SELECT set_config('ticket_board.caller_role', 'ops', false); SELECT ticket_board.submit_to_audit('PGU-8760', '8760000');")
+    manual_submitted = json.loads(
+        psql(
+            admin_conn,
+            """
+SELECT jsonb_build_object(
+    'state', state,
+    'assignee', assignee,
+    'commit_hash', commit_hash,
+    'manually_controlled', manually_controlled,
+    'last_rejected_commit', last_rejected_commit
+)::text
+FROM ticket_board.tickets WHERE id = 'PGU-8760';
+""",
+        )
+    )
+    assert manual_submitted == {
+        "state": "audit",
+        "assignee": "audit",
+        "commit_hash": "8760000",
+        "manually_controlled": True,
+        "last_rejected_commit": None,
+    }, manual_submitted
+    assert "assignee ops is not an owner of stage audit (owners: audit)" in psql_error(
+        admin_conn,
+        """
+UPDATE ticket_board.tickets
+SET assignee = 'ops'
+WHERE id = 'PGU-8760';
+""",
+    )
+    psql(admin_conn, "UPDATE ticket_board.tickets SET manually_controlled = false, audit_signoff = true, state = 'director_review' WHERE id = 'PGU-8760';")
+    psql(admin_conn, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-8760';")
 
     insert_ticket(
         admin_conn,

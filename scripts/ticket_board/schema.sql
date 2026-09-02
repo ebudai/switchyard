@@ -928,8 +928,6 @@ BEGIN
     END IF;
 
     IF OLD.state IS DISTINCT FROM NEW.state
-       AND NOT coalesce(OLD.manually_controlled, false)
-       AND NOT coalesce(NEW.manually_controlled, false)
        AND ticket_board.stage_entry_assignee(NEW.state, NEW.assignee, NEW.id) IS NOT NULL
        AND (
            NEW.state <> 'analysis'

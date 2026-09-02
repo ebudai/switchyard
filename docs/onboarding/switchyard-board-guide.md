@@ -311,8 +311,10 @@ its owning stage. Moving it to backlog reads as abandoned.
 **Deferred is not silently parked.** An *assigned* ticket sitting in backlog will be
 nudged. Either unassign it, or set `manually_controlled` for a deliberate hold.
 
-**`manually_controlled` mutes nudges and bypasses gates.** Use it only for deliberate
-holds, never to force work through a gate.
+**`manually_controlled` mutes nudges and bypasses transition gates.** Use it only
+for deliberate holds, never to force work through a gate. State changes still
+normalize the assignee to the target stage owner, so a held ticket can submit to
+audit without leaving an implementation-stage assignee in the audit stage.
 
 **A `commit_hash` on a ticket is not proof the work is on main.** Always verify:
 

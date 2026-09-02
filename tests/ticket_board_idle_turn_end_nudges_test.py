@@ -652,6 +652,190 @@ SELECT jsonb_build_object(
             psql(
                 conninfo,
                 """
+UPDATE ticket_board.tickets
+SET manually_controlled = true;
+DELETE FROM ticket_board.ticket_notification_queue;
+INSERT INTO ticket_board.tickets (
+    id, title, body, state, assignee, implementation, audit_signoff, created_text, updated_text, source_json
+) VALUES (
+    'PGU-8841', 'Reported blocker should not self-nudge', '', 'in_progress', 'ops', 'Done but blocked.', false,
+    '2026-07-13T00:00:00+00:00', '2026-07-13T00:00:00+00:00',
+    jsonb_build_object('id', 'PGU-8841', 'title', 'Reported blocker should not self-nudge', 'body', '', 'state', 'in_progress', 'assignee', 'ops', 'implementation', 'Done but blocked.', 'comments', '[]'::jsonb, 'created', '2026-07-13T00:00:00+00:00', 'updated', '2026-07-13T00:00:00+00:00')
+);
+UPDATE ticket_board.ticket_notification_state
+SET entered_current_state_at = clock_timestamp() - interval '10 minutes',
+    last_activity_at = clock_timestamp() - interval '10 minutes'
+WHERE ticket_id = 'PGU-8841';
+SELECT ticket_board.append_ticket_comment('PGU-8841', 'ops', 'Done, but blocked on director import.');
+DELETE FROM ticket_board.ticket_notification_queue;
+""",
+            )
+            reported_blocker_wave_returned = psql(
+                conninfo,
+                """
+SET ROLE ticket_board_listener;
+WITH params AS (
+    SELECT clock_timestamp() AS now_at
+)
+SELECT ticket_board.notify_idle_turn_end_nudges(
+    jsonb_build_object('ops', (now_at - interval '1 second')::text),
+    now_at
+)
+FROM params;
+RESET ROLE;
+""",
+            ).splitlines()[-2]
+            assert reported_blocker_wave_returned == "0", reported_blocker_wave_returned
+            reported_blocker_rows = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'reported_queue_count', (
+        SELECT count(*)::int
+        FROM ticket_board.ticket_notification_queue
+        WHERE ticket_id = 'PGU-8841'
+    )
+)::text;
+""",
+                )
+            )
+            assert reported_blocker_rows == {
+                "reported_queue_count": 0,
+            }, reported_blocker_rows
+
+            psql(
+                conninfo,
+                """
+UPDATE ticket_board.tickets
+SET manually_controlled = true;
+DELETE FROM ticket_board.ticket_notification_queue;
+INSERT INTO ticket_board.tickets (
+    id, title, body, state, assignee, implementation, audit_signoff, created_text, updated_text, source_json
+) VALUES (
+    'PGU-8842', 'Director comment should not suppress owner nudge', '', 'in_progress', 'ops', 'Still owner-silent.', false,
+    '2026-07-13T00:00:00+00:00', '2026-07-13T00:00:00+00:00',
+    jsonb_build_object('id', 'PGU-8842', 'title', 'Director comment should not suppress owner nudge', 'body', '', 'state', 'in_progress', 'assignee', 'ops', 'implementation', 'Still owner-silent.', 'comments', '[]'::jsonb, 'created', '2026-07-13T00:00:00+00:00', 'updated', '2026-07-13T00:00:00+00:00')
+);
+UPDATE ticket_board.ticket_notification_state
+SET entered_current_state_at = clock_timestamp() - interval '10 minutes',
+    last_activity_at = clock_timestamp() - interval '10 minutes'
+WHERE ticket_id = 'PGU-8842';
+SELECT ticket_board.append_ticket_comment('PGU-8842', 'director', 'Imported the branch; submit when ready.');
+DELETE FROM ticket_board.ticket_notification_queue;
+""",
+            )
+            director_comment_wave_returned = psql(
+                conninfo,
+                """
+SET ROLE ticket_board_listener;
+WITH params AS (
+    SELECT clock_timestamp() AS now_at
+)
+SELECT ticket_board.notify_idle_turn_end_nudges(
+    jsonb_build_object('ops', (now_at - interval '1 second')::text),
+    now_at
+)
+FROM params;
+RESET ROLE;
+""",
+            ).splitlines()[-2]
+            assert director_comment_wave_returned == "1", director_comment_wave_returned
+            director_comment_row = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'target_role', target_role,
+    'kind', kind,
+    'message', message
+)::text
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-8842'
+ORDER BY id DESC
+LIMIT 1;
+""",
+                )
+            )
+            assert director_comment_row == {
+                "target_role": "ops",
+                "kind": "idle_reminder",
+                "message": "PGU-8842 is waiting in your in_progress queue. Advance it or hand it off. If you cannot move it forward, tell the director what is wrong.",
+            }, director_comment_row
+
+            psql(
+                conninfo,
+                """
+UPDATE ticket_board.tickets
+SET manually_controlled = true;
+DELETE FROM ticket_board.ticket_notification_queue;
+INSERT INTO ticket_board.tickets (
+    id, title, body, state, assignee, implementation, audit_signoff, created_text, updated_text, source_json
+) VALUES (
+    'PGU-8843', 'Old comment should not suppress', '', 'in_progress', 'ops', 'Silent after old note.', false,
+    '2026-07-13T00:00:00+00:00', '2026-07-13T00:00:00+00:00',
+    jsonb_build_object('id', 'PGU-8843', 'title', 'Old comment should not suppress', 'body', '', 'state', 'in_progress', 'assignee', 'ops', 'implementation', 'Silent after old note.', 'comments', '[]'::jsonb, 'created', '2026-07-13T00:00:00+00:00', 'updated', '2026-07-13T00:00:00+00:00')
+);
+UPDATE ticket_board.ticket_notification_state
+SET entered_current_state_at = clock_timestamp() - interval '2 hours',
+    last_activity_at = clock_timestamp() - interval '1 hour'
+WHERE ticket_id = 'PGU-8843';
+INSERT INTO ticket_board.ticket_comments (
+    ticket_id, position, who, ts_text, ts, text, urgent, source_json
+) VALUES (
+    'PGU-8843',
+    0,
+    'ops',
+    ticket_board.utc_text(clock_timestamp() - interval '1 hour'),
+    clock_timestamp() - interval '1 hour',
+    'Old blocker report.',
+    false,
+    jsonb_build_object('who', 'ops', 'ts', ticket_board.utc_text(clock_timestamp() - interval '1 hour'), 'text', 'Old blocker report.', 'urgent', false)
+);
+DELETE FROM ticket_board.ticket_notification_queue;
+""",
+            )
+            old_comment_wave_returned = psql(
+                conninfo,
+                """
+SET ROLE ticket_board_listener;
+WITH params AS (
+    SELECT clock_timestamp() AS now_at
+)
+SELECT ticket_board.notify_idle_turn_end_nudges(
+    jsonb_build_object('ops', (now_at - interval '1 second')::text),
+    now_at
+)
+FROM params;
+RESET ROLE;
+""",
+            ).splitlines()[-2]
+            assert old_comment_wave_returned == "1", old_comment_wave_returned
+            old_comment_row = json.loads(
+                psql(
+                    conninfo,
+                    """
+SELECT jsonb_build_object(
+    'target_role', target_role,
+    'kind', kind,
+    'message', message
+)::text
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-8843'
+ORDER BY id DESC
+LIMIT 1;
+""",
+                )
+            )
+            assert old_comment_row == {
+                "target_role": "ops",
+                "kind": "idle_reminder",
+                "message": "PGU-8843 is waiting in your in_progress queue. Advance it or hand it off. If you cannot move it forward, tell the director what is wrong.",
+            }, old_comment_row
+
+            psql(
+                conninfo,
+                """
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation, audit_signoff, created_text, updated_text, source_json
 ) VALUES (

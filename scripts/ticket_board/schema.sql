@@ -3013,6 +3013,20 @@ BEGIN
                       WHERE tb.ticket_id = t.id
                         AND (blocker.id IS NULL OR blocker.state NOT IN ('done', 'cancelled'))
                   )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM ticket_board.ticket_comments c
+                      WHERE c.ticket_id = t.id
+                        AND c.who = ticket_board.transition_target_role(t.state, t.assignee)
+                        AND c.ts IS NOT NULL
+                        AND c.ts >= ns.entered_current_state_at
+                        AND c.ts >= ns.last_activity_at
+                        AND c.ts >= (
+                            (p_idle_since_by_role ->> ticket_board.transition_target_role(t.state, t.assignee))::timestamptz
+                            - interval '5 minutes'
+                        )
+                        AND c.ts <= p_now
+                  )
             ) AS notification_scope
             LEFT JOIN LATERAL (
                 SELECT max(trace.ts) AS last_sent_at

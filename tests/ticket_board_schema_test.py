@@ -641,6 +641,20 @@ def main() -> int:
             work_aware_idle_stall_migration_text,
             function_name,
         )
+    idle_turn_end_comment_suppression_migration_text = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu884_idle_turn_end_recent_comment_suppression.sql"
+    ).read_text(encoding="utf-8")
+    idle_turn_end_comment_suppression_migration = idle_turn_end_comment_suppression_migration_text.lower()
+    assert "from ticket_board.ticket_comments c" in idle_turn_end_comment_suppression_migration
+    assert "c.who = ticket_board.transition_target_role(t.state, t.assignee)" in (
+        idle_turn_end_comment_suppression_migration
+    )
+    assert "c.ts >= ns.last_activity_at" in idle_turn_end_comment_suppression_migration
+    assert "- interval '5 minutes'" in idle_turn_end_comment_suppression_migration
+    assert extract_function(schema, "notify_idle_turn_end_nudges") == extract_function(
+        idle_turn_end_comment_suppression_migration_text,
+        "notify_idle_turn_end_nudges",
+    )
     drop_orphaned_eric_functions_migration = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "pgu593_drop_orphaned_eric_functions.sql"
     ).read_text(encoding="utf-8").lower()

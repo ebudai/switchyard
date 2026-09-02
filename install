@@ -52,6 +52,11 @@ run_cmd() {
     "$@"
 }
 
+run_cmd_stdin_closed() {
+    print_command "$@"
+    "$@" </dev/null
+}
+
 while (($#)); do
     case "$1" in
         --yes|-y)
@@ -117,6 +122,12 @@ declare -A CLI_INSTALL_COMMANDS=(
     [agy]="${SWITCHYARD_AGY_INSTALL_COMMAND:-curl -fsSL https://antigravity.google/cli/install.sh | bash}"
     [hermes]="${SWITCHYARD_HERMES_INSTALL_COMMAND:-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash}"
 )
+declare -A CLI_UNATTENDED_INSTALL_COMMANDS=(
+    [claude]="${SWITCHYARD_CLAUDE_UNATTENDED_INSTALL_COMMAND:-${SWITCHYARD_CLAUDE_INSTALL_COMMAND:-curl -fsSL https://claude.ai/install.sh | bash}}"
+    [codex]="${SWITCHYARD_CODEX_UNATTENDED_INSTALL_COMMAND:-${SWITCHYARD_CODEX_INSTALL_COMMAND:-curl -fsSL https://chatgpt.com/codex/install.sh | sh}}"
+    [agy]="${SWITCHYARD_AGY_UNATTENDED_INSTALL_COMMAND:-${SWITCHYARD_AGY_INSTALL_COMMAND:-curl -fsSL https://antigravity.google/cli/install.sh | bash}}"
+    [hermes]="${SWITCHYARD_HERMES_UNATTENDED_INSTALL_COMMAND:-${SWITCHYARD_HERMES_INSTALL_COMMAND:-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --skip-setup --non-interactive}}"
+)
 declare -A CLI_AUTH_COMMANDS=(
     [claude]="claude"
     [codex]="codex"
@@ -151,8 +162,15 @@ user_command_present() {
 
 cli_display_command() {
     local command="$1"
+    local unattended="${2:-0}"
     if run_as_original_user; then
-        printf '%q -u %q -H sh -lc %q' "$SUDO_BIN" "$ORIGINAL_USER" "$command"
+        if [[ "$unattended" -eq 1 ]]; then
+            printf '%q -u %q -H env CI=1 CODEX_NON_INTERACTIVE=1 sh -lc %q < /dev/null' "$SUDO_BIN" "$ORIGINAL_USER" "$command"
+        else
+            printf '%q -u %q -H sh -lc %q' "$SUDO_BIN" "$ORIGINAL_USER" "$command"
+        fi
+    elif [[ "$unattended" -eq 1 ]]; then
+        printf 'env CI=1 CODEX_NON_INTERACTIVE=1 sh -lc %q < /dev/null' "$command"
     else
         printf 'sh -lc %q' "$command"
     fi
@@ -160,6 +178,14 @@ cli_display_command() {
 
 run_cli_install_command() {
     local command="$1"
+    if [[ "$ASSUME_YES" -eq 1 ]]; then
+        if [[ "${EUID:-$(id -u)}" -eq 0 && "$ORIGINAL_USER" != "root" && -z "${SWITCHYARD_INSTALL_TEST_ASSUME_ROOT:-}" ]]; then
+            run_cmd_stdin_closed "$SUDO_BIN" -u "$ORIGINAL_USER" -H env CI=1 CODEX_NON_INTERACTIVE=1 sh -lc "$command"
+        else
+            run_cmd_stdin_closed env CI=1 CODEX_NON_INTERACTIVE=1 sh -lc "$command"
+        fi
+        return
+    fi
     if [[ "${EUID:-$(id -u)}" -eq 0 && "$ORIGINAL_USER" != "root" && -z "${SWITCHYARD_INSTALL_TEST_ASSUME_ROOT:-}" ]]; then
         run_cmd "$SUDO_BIN" -u "$ORIGINAL_USER" -H sh -lc "$command"
     else
@@ -172,11 +198,12 @@ prompt_cli_install() {
     local command="$2"
     local display
     local answer
-    display="$(cli_display_command "$command")"
     if [[ "$ASSUME_YES" -eq 1 ]]; then
+        display="$(cli_display_command "$command" 1)"
         printf '\nInstall %s?\n%s\n[Y/n] y\n' "$cli" "$display"
         return 0
     fi
+    display="$(cli_display_command "$command")"
     while true; do
         printf '\nInstall %s?\n%s\n[Y/n] ' "$cli" "$display"
         if ! IFS= read -r answer; then
@@ -209,8 +236,13 @@ dry_run_agent_clis() {
         if [[ -n "$SELECTED_CLI" && "$cli" != "$SELECTED_CLI" ]]; then
             continue
         fi
-        command="${CLI_INSTALL_COMMANDS[$cli]}"
-        printf '\nInstall %s?\n%s\nwould ask: [Y/n]\n' "$cli" "$(cli_display_command "$command")"
+        if [[ "$ASSUME_YES" -eq 1 ]]; then
+            command="${CLI_UNATTENDED_INSTALL_COMMANDS[$cli]}"
+            printf '\nInstall %s?\n%s\nwould answer: [Y/n] y\n' "$cli" "$(cli_display_command "$command" 1)"
+        else
+            command="${CLI_INSTALL_COMMANDS[$cli]}"
+            printf '\nInstall %s?\n%s\nwould ask: [Y/n]\n' "$cli" "$(cli_display_command "$command")"
+        fi
     done
 }
 

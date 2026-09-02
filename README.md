@@ -24,7 +24,8 @@ checks, asks whether to run each agent CLI installer, and installs the public
 `--cli claude`, `--cli codex`, `--cli agy`, or `--cli hermes` to limit CLI
 installation to one runtime. Its final output names the installed CLI to
 authenticate, or lists the available choices when more than one CLI was
-installed.
+installed. `--yes` answers Switchyard's own CLI prompts and runs vendor
+installers with stdin closed plus known noninteractive controls.
 
 For package details, Arch-family notes, and vendor CLI provenance links, see
 [the fresh-machine install list](docs/fresh-machine-install.md).

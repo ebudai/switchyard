@@ -14,9 +14,20 @@ vendor installer command before running it. Empty input means yes. Pass
 `--cli claude`, `--cli codex`, `--cli agy`, or `--cli hermes` to limit CLI
 installation to one runtime. `--yes` answers yes to every CLI that would be
 prompted, so bare `--yes` runs all four missing CLI installers and
-`--yes --cli claude` runs only Claude without prompting. `--no-cli` skips CLI
-installation. If stdin/stdout is not a TTY and `--yes` was not passed, CLI
-installation is skipped instead of blocking.
+`--yes --cli claude` runs only Claude without prompting. Under `--yes`,
+Switchyard also runs vendor installers with stdin closed and known
+noninteractive controls enabled, so a vendor prompt cannot block unattended
+provisioning. `--no-cli` skips CLI installation. If stdin/stdout is not a TTY
+and `--yes` was not passed, CLI installation is skipped instead of blocking.
+
+The default installer handling is:
+
+| CLI | Prompt evidence | `--yes` handling |
+| --- | --- | --- |
+| claude | The shell installer has no own prompt; it hands off to the downloaded `claude install` binary. | Run with stdin from `/dev/null` plus `CI=1`; if the binary needs input it must fail cleanly instead of consuming the terminal. |
+| codex | The installer prompts for conflict removal and "Start Codex now?" unless `CODEX_NON_INTERACTIVE` is set. | Run with stdin from `/dev/null` and `CODEX_NON_INTERACTIVE=1`. |
+| agy | The shell installer has no own prompt; it hands off to `agy install`. | Run with stdin from `/dev/null` plus `CI=1`; there is no documented unattended flag in the fetched installer. |
+| hermes | The installer normally runs an interactive setup wizard. | Use `bash -s -- --skip-setup --non-interactive`, with stdin from `/dev/null`. |
 
 Authentication cannot be automated. The final output of `sudo ./install` tells
 you which installed CLI to run and sign in to, prints a checklist when more than

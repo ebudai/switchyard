@@ -100,7 +100,8 @@ def test_yes_installs_every_missing_cli_and_prints_final_auth_step_last() -> Non
             assert (tmpdir / f"{cli}.installed").read_text(encoding="utf-8") == cli
             assert f"Install {cli}?" in output
         assert output.count("[Y/n] y") == len(CLIS)
-        assert "+ sh -lc printf\\ claude\\ \\>\\>" in output
+        assert "+ env CI=1 CODEX_NON_INTERACTIVE=1 sh -lc printf\\ claude\\ \\>\\>" in output
+        assert " < /dev/null" in output
         assert "fake prereqs" in output
         assert "fake release install" in output
         assert output.rstrip().splitlines()[-6:] == [
@@ -115,6 +116,66 @@ def test_yes_installs_every_missing_cli_and_prints_final_auth_step_last() -> Non
             "prereqs:--skip-cli",
             "release:--apply",
         ]
+
+
+def test_yes_runs_vendor_installers_without_stdin_and_with_noninteractive_env() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        tmpdir = Path(tmp)
+        env = _env(tmpdir)
+        for cli in CLIS:
+            result = tmpdir / f"{cli}.stdin"
+            env[f"SWITCHYARD_{cli.upper()}_INSTALL_COMMAND"] = (
+                "if IFS= read -r line; then "
+                f"printf 'read:%s' \"$line\" > {result}; exit 7; "
+                "else "
+                f"printf '%s:%s' \"${{CI:-unset}}\" \"${{CODEX_NON_INTERACTIVE:-unset}}\" > {result}; "
+                "fi"
+            )
+
+        proc = subprocess.run(
+            [str(SCRIPT), "--yes"],
+            cwd=ROOT,
+            env=env,
+            input="vendor input must not be consumed\n" * 4,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+
+        assert "warning:" not in proc.stderr
+        for cli in CLIS:
+            assert (tmpdir / f"{cli}.stdin").read_text(encoding="utf-8") == "1:1"
+
+
+def test_hermes_default_unattended_command_skips_setup_wizard() -> None:
+    script = SCRIPT.read_text(encoding="utf-8")
+
+    assert (
+        "https://hermes-agent.nousresearch.com/install.sh | "
+        "bash -s -- --skip-setup --non-interactive"
+    ) in script
+
+
+def test_dry_run_yes_previews_unattended_hermes_command() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        tmpdir = Path(tmp)
+        env = _env(tmpdir)
+        env.pop("SWITCHYARD_HERMES_INSTALL_COMMAND", None)
+
+        proc = subprocess.run(
+            [str(SCRIPT), "--dry-run", "--yes", "--cli", "hermes"],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        output = proc.stdout
+
+        assert "Install hermes?" in output
+        assert "would answer: [Y/n] y" in output
+        assert "bash\\ -s\\ --\\ --skip-setup\\ --non-interactive" in output
+        assert " < /dev/null" in output
 
 
 def test_cli_selection_installs_selected_cli_only() -> None:
@@ -337,6 +398,9 @@ def test_non_root_self_elevation_preserves_original_flags() -> None:
 
 if __name__ == "__main__":
     test_yes_installs_every_missing_cli_and_prints_final_auth_step_last()
+    test_yes_runs_vendor_installers_without_stdin_and_with_noninteractive_env()
+    test_hermes_default_unattended_command_skips_setup_wizard()
+    test_dry_run_yes_previews_unattended_hermes_command()
     test_cli_selection_installs_selected_cli_only()
     test_multiple_installed_clis_final_step_lists_choices_instead_of_first_cli()
     test_cli_selection_final_step_names_selected_cli_even_with_earlier_cli_present()

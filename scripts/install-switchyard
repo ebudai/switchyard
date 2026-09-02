@@ -39,6 +39,22 @@ quote() {
     printf '%q' "$1"
 }
 
+print_command() {
+    printf '+' >&2
+    printf ' %q' "$@" >&2
+    printf '\n' >&2
+}
+
+run_cmd() {
+    print_command "$@"
+    "$@"
+}
+
+run_shell_cmd() {
+    printf '+ %s\n' "$1" >&2
+    bash -c "$1"
+}
+
 while (($#)); do
     case "$1" in
         --print-commands)
@@ -85,6 +101,7 @@ write_wrapper() {
     help_text="$("$fallback_source" --help)"
     version_text="$("$fallback_source" --version)"
     tmp="$(mktemp "${destination}.tmp.XXXXXX")"
+    printf '+ write switchyard trampoline %q\n' "$destination" >&2
     cat >"$tmp" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -255,15 +272,15 @@ export_release() {
     local releases_dir="$SHARED_ROOT/releases"
     local release_dir="$releases_dir/$commit"
     local tmp_dir
-    install -d -m 0755 "$SHARED_ROOT" "$releases_dir"
+    run_cmd install -d -m 0755 "$SHARED_ROOT" "$releases_dir"
     if [[ ! -d "$release_dir" ]]; then
         tmp_dir="$(mktemp -d "$releases_dir/.tmp.$commit.XXXXXX")"
-        git -C "$SOURCE_REPO" archive "$commit" | tar -C "$tmp_dir" -x
+        run_shell_cmd "git -C $(quote "$SOURCE_REPO") archive $(quote "$commit") | tar -C $(quote "$tmp_dir") -x"
         release_marker_json "$commit" >"$tmp_dir/.switchyard-release.json"
-        find "$tmp_dir" -type d -exec chmod 0755 {} +
-        find "$tmp_dir" -type f -exec chmod go-w {} +
-        chmod 0755 "$tmp_dir/switchyard" "$tmp_dir/scripts/team-launcher" "$tmp_dir/scripts/install-switchyard"
-        mv "$tmp_dir" "$release_dir"
+        run_cmd find "$tmp_dir" -type d -exec chmod 0755 {} +
+        run_cmd find "$tmp_dir" -type f -exec chmod go-w {} +
+        run_cmd chmod 0755 "$tmp_dir/switchyard" "$tmp_dir/scripts/team-launcher" "$tmp_dir/scripts/install-switchyard"
+        run_cmd mv "$tmp_dir" "$release_dir"
     fi
     verify_release_marker "$release_dir" "$commit"
     [[ -x "$release_dir/switchyard" ]] || die "release switchyard is not executable: $release_dir/switchyard"
@@ -281,9 +298,9 @@ apply_install() {
     fi
     release_dir="$(export_release "$commit")"
     "$release_dir/switchyard" --version >/dev/null
-    ln -sfn "$release_dir" "$SHARED_ROOT/current"
+    run_cmd ln -sfn "$release_dir" "$SHARED_ROOT/current"
     current_target="$SHARED_ROOT/current/switchyard"
-    install -d -m 0755 "$install_dir"
+    run_cmd install -d -m 0755 "$install_dir"
     recovery_command="tmpdir=\"\$(mktemp -d)\" && git clone $(quote "$RECOVERY_BARE_REPO") \"\$tmpdir\" && sudo env SWITCHYARD_SOURCE_REPO=\"\$tmpdir\" SWITCHYARD_SOURCE_REF=$(quote "$commit") SWITCHYARD_SHARED_INSTALL_ROOT=$(quote "$SHARED_ROOT") SWITCHYARD_INSTALL_PATH=$(quote "$INSTALL_PATH") \"\$tmpdir/scripts/install-switchyard\" --apply"
     write_wrapper "$current_target" "$INSTALL_PATH" "$release_dir/switchyard" "$recovery_command"
     printf 'installed switchyard release: %s\n' "$release_dir"

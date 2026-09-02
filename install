@@ -1,0 +1,222 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# install-switchyard marker for host-automation suite discovery.
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PREREQS_SCRIPT="${SWITCHYARD_INSTALL_PREREQS_SCRIPT:-$REPO_ROOT/scripts/install-switchyard-prereqs}"
+SWITCHYARD_INSTALL_SCRIPT="${SWITCHYARD_INSTALL_SWITCHYARD_SCRIPT:-$REPO_ROOT/scripts/install-switchyard}"
+SUDO_BIN="${SWITCHYARD_SUDO_BIN:-sudo}"
+ORIGINAL_ARGS=("$@")
+ASSUME_YES=0
+SKIP_CLI=0
+CLI_INSTALL_ATTEMPTED=0
+CLI_INSTALL_SUCCEEDED=0
+CLI_INSTALL_FAILED=0
+CLI_SKIPPED_NOTTY=0
+CLI_SKIPPED_BY_USER=0
+AUTH_CLI=""
+
+usage() {
+    cat <<'EOF'
+Usage: sudo ./install [--yes|-y] [--no-cli|--skip-cli]
+
+Installs Switchyard host packages, the shared Python venv, optional agent CLIs,
+and the public switchyard command. Authentication remains manual and is printed
+as the final next step.
+EOF
+}
+
+die() {
+    printf 'install: ERROR: %s\n' "$*" >&2
+    exit 1
+}
+
+quote() {
+    printf '%q' "$1"
+}
+
+print_command() {
+    printf '+'
+    printf ' %q' "$@"
+    printf '\n'
+}
+
+run_cmd() {
+    print_command "$@"
+    "$@"
+}
+
+while (($#)); do
+    case "$1" in
+        --yes|-y)
+            ASSUME_YES=1
+            ;;
+        --no-cli|--skip-cli)
+            SKIP_CLI=1
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            die "unknown argument: $1"
+            ;;
+    esac
+    shift
+done
+
+if [[ "${EUID:-$(id -u)}" -ne 0 && "${SWITCHYARD_INSTALL_TEST_ASSUME_ROOT:-}" != "1" ]]; then
+    run_cmd "$SUDO_BIN" env \
+        SWITCHYARD_INSTALL_ORIGINAL_USER="${SWITCHYARD_INSTALL_ORIGINAL_USER:-$(id -un)}" \
+        SWITCHYARD_INSTALL_ORIGINAL_HOME="${SWITCHYARD_INSTALL_ORIGINAL_HOME:-$HOME}" \
+        "$REPO_ROOT/install" "${ORIGINAL_ARGS[@]}"
+    exit 0
+fi
+
+ORIGINAL_USER="${SWITCHYARD_INSTALL_ORIGINAL_USER:-${SUDO_USER:-$(id -un)}}"
+ORIGINAL_HOME="${SWITCHYARD_INSTALL_ORIGINAL_HOME:-}"
+if [[ -z "$ORIGINAL_HOME" && -n "$ORIGINAL_USER" ]]; then
+    ORIGINAL_HOME="$(getent passwd "$ORIGINAL_USER" 2>/dev/null | cut -d: -f6 || true)"
+fi
+ORIGINAL_HOME="${ORIGINAL_HOME:-$HOME}"
+
+declare -A CLI_INSTALL_COMMANDS=(
+    [claude]="${SWITCHYARD_CLAUDE_INSTALL_COMMAND:-curl -fsSL https://claude.ai/install.sh | bash}"
+    [codex]="${SWITCHYARD_CODEX_INSTALL_COMMAND:-curl -fsSL https://chatgpt.com/codex/install.sh | sh}"
+    [agy]="${SWITCHYARD_AGY_INSTALL_COMMAND:-curl -fsSL https://antigravity.google/cli/install.sh | bash}"
+    [hermes]="${SWITCHYARD_HERMES_INSTALL_COMMAND:-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash}"
+)
+CLI_ORDER=(claude codex agy hermes)
+
+has_tty() {
+    [[ "$ASSUME_YES" -eq 1 ]] && return 0
+    [[ "${SWITCHYARD_INSTALL_ASSUME_TTY:-}" == "1" ]] && return 0
+    [[ -t 0 && -t 1 ]]
+}
+
+user_command_present() {
+    local cli="$1"
+    if [[ -n "${SWITCHYARD_INSTALL_FORCE_MISSING_CLIS:-}" ]]; then
+        return 1
+    fi
+    if [[ "${EUID:-$(id -u)}" -eq 0 && "$ORIGINAL_USER" != "root" && -z "${SWITCHYARD_INSTALL_TEST_ASSUME_ROOT:-}" ]]; then
+        "$SUDO_BIN" -u "$ORIGINAL_USER" -H sh -lc "command -v $(quote "$cli") >/dev/null 2>&1"
+    else
+        command -v "$cli" >/dev/null 2>&1
+    fi
+}
+
+cli_display_command() {
+    local command="$1"
+    if [[ "${EUID:-$(id -u)}" -eq 0 && "$ORIGINAL_USER" != "root" && -z "${SWITCHYARD_INSTALL_TEST_ASSUME_ROOT:-}" ]]; then
+        printf '%q -u %q -H sh -lc %q' "$SUDO_BIN" "$ORIGINAL_USER" "$command"
+    else
+        printf 'sh -lc %q' "$command"
+    fi
+}
+
+run_cli_install_command() {
+    local command="$1"
+    if [[ "${EUID:-$(id -u)}" -eq 0 && "$ORIGINAL_USER" != "root" && -z "${SWITCHYARD_INSTALL_TEST_ASSUME_ROOT:-}" ]]; then
+        run_cmd "$SUDO_BIN" -u "$ORIGINAL_USER" -H sh -lc "$command"
+    else
+        run_cmd sh -lc "$command"
+    fi
+}
+
+prompt_cli_install() {
+    local cli="$1"
+    local command="$2"
+    local display
+    local answer
+    display="$(cli_display_command "$command")"
+    if [[ "$ASSUME_YES" -eq 1 ]]; then
+        printf '\nInstall %s?\n%s\n[Y/n] y\n' "$cli" "$display"
+        return 0
+    fi
+    while true; do
+        printf '\nInstall %s?\n%s\n[Y/n] ' "$cli" "$display"
+        if ! IFS= read -r answer; then
+            answer=""
+            printf '\n'
+        fi
+        case "${answer,,}" in
+            ""|y|yes)
+                return 0
+                ;;
+            n|no)
+                return 1
+                ;;
+            *)
+                printf "Please answer y or n.\n"
+                ;;
+        esac
+    done
+}
+
+install_agent_clis() {
+    local cli
+    local command
+    if [[ "$SKIP_CLI" -eq 1 ]]; then
+        printf 'Agent CLI installation skipped by --no-cli.\n'
+        return
+    fi
+    if ! has_tty; then
+        CLI_SKIPPED_NOTTY=1
+        printf 'Agent CLI installation skipped: stdin/stdout is not a TTY. Re-run sudo ./install --yes or run sudo ./install from a terminal to approve vendor installers.\n'
+        return
+    fi
+    for cli in "${CLI_ORDER[@]}"; do
+        command="${CLI_INSTALL_COMMANDS[$cli]}"
+        if user_command_present "$cli"; then
+            printf '%s is already installed; skipping installer.\n' "$cli"
+            if [[ -z "$AUTH_CLI" ]]; then
+                AUTH_CLI="$cli"
+            fi
+            continue
+        fi
+        if prompt_cli_install "$cli" "$command"; then
+            CLI_INSTALL_ATTEMPTED=1
+            if run_cli_install_command "$command"; then
+                CLI_INSTALL_SUCCEEDED=1
+                if [[ -z "$AUTH_CLI" ]]; then
+                    AUTH_CLI="$cli"
+                fi
+            else
+                CLI_INSTALL_FAILED=1
+                printf 'warning: %s installer failed; continuing Switchyard installation.\n' "$cli" >&2
+            fi
+        else
+            CLI_SKIPPED_BY_USER=1
+            printf '%s installer skipped by user.\n' "$cli"
+        fi
+    done
+}
+
+print_final_next_step() {
+    printf '\nNEXT STEP\n'
+    if [[ -n "$AUTH_CLI" ]]; then
+        printf 'Run `%s` and sign in.\n' "$AUTH_CLI"
+    elif [[ "$SKIP_CLI" -eq 1 ]]; then
+        printf 'CLI installation was skipped; install one agent CLI, then run it and sign in.\n'
+    elif [[ "$CLI_SKIPPED_NOTTY" -eq 1 ]]; then
+        printf 'CLI installation was skipped; re-run `sudo ./install --yes` from this checkout, or install one agent CLI manually and sign in.\n'
+    elif [[ "$CLI_INSTALL_FAILED" -eq 1 ]]; then
+        printf 'A CLI installer failed; install one agent CLI manually, then run it and sign in.\n'
+    elif [[ "$CLI_SKIPPED_BY_USER" -eq 1 || "$CLI_INSTALL_ATTEMPTED" -eq 0 || "$CLI_INSTALL_SUCCEEDED" -eq 0 ]]; then
+        printf 'No CLI was installed; install one agent CLI, then run it and sign in.\n'
+    else
+        printf 'Run an installed agent CLI and sign in.\n'
+    fi
+}
+
+run_cmd "$PREREQS_SCRIPT" --skip-cli
+install_agent_clis
+run_cmd env \
+    SWITCHYARD_SOURCE_REPO="$REPO_ROOT" \
+    SWITCHYARD_SOURCE_REF="${SWITCHYARD_SOURCE_REF:-HEAD}" \
+    SWITCHYARD_SHARED_INSTALL_ROOT="${SWITCHYARD_SHARED_INSTALL_ROOT:-/opt/switchyard}" \
+    SWITCHYARD_INSTALL_PATH="${SWITCHYARD_INSTALL_PATH:-/usr/local/bin/switchyard}" \
+    "$SWITCHYARD_INSTALL_SCRIPT" --apply
+print_final_next_step

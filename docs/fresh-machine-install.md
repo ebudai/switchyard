@@ -1,4 +1,23 @@
-# Switchyard Fresh-Machine Install List
+# Switchyard Fresh-Machine Install Notes
+
+From a fresh clone, install Switchyard with one command:
+
+```bash
+git clone <repo> switchyard
+cd switchyard
+sudo ./install
+```
+
+The installer prints each system-changing command before it runs. On a terminal
+it asks about each missing agent CLI with a `[Y/n]` prompt and shows the exact
+vendor installer command before running it. Empty input means yes. `--yes` runs
+all missing CLI installers without prompting; `--no-cli` skips CLI installation.
+If stdin/stdout is not a TTY and `--yes` was not passed, CLI installation is
+skipped instead of blocking.
+
+Authentication cannot be automated. The final output of `sudo ./install` is the
+single next action: run the installed CLI it names and sign in, or install one
+CLI manually if all CLI installers were skipped.
 
 ## System Packages
 
@@ -16,10 +35,9 @@ sudo pacman -Syu
 sudo pacman -S python postgresql tmux git curl python-pip python-pillow acl
 ```
 
-`scripts/install-switchyard-prereqs` runs `apt-get update` before apt installs
-and prints that refresh. It does not run `pacman -Sy`; Arch-family systems
-should use the full `pacman -Syu` upgrade first to avoid partial-upgrade
-breakage.
+The installer runs `apt-get update` before apt installs and prints that refresh.
+It does not run `pacman -Sy`; Arch-family systems should use the full
+`pacman -Syu` upgrade first to avoid partial-upgrade breakage.
 
 Konsole is not a base dependency. On KDE or when forcing the separate-window
 layout, also install it explicitly:
@@ -39,10 +57,9 @@ Switchyard's `psycopg>=3.3,<4` pin. Debian/Ubuntu also mark system Python as
 externally managed under PEP 668, so `pip install --user` is refused. Do not use
 `--break-system-packages`.
 
-On apt systems, use the shared Switchyard venv that
-`scripts/install-switchyard-prereqs` creates. The venv includes system site
-packages so the distro `python3-pil` package remains visible while the venv's
-Psycopg shadows noble's older distro Psycopg package:
+On apt systems, `sudo ./install` creates the shared Switchyard venv. The venv
+includes system site packages so the distro `python3-pil` package remains
+visible while the venv's Psycopg shadows noble's older distro Psycopg package:
 
 ```bash
 sudo install -d -m 0755 /opt/switchyard
@@ -66,14 +83,13 @@ python3 -m pip install --user 'psycopg>=3.3,<4'
 
 ## Agent CLI
 
-Agent CLI setup is manual. `scripts/install-switchyard-prereqs` does not
-install any agent CLI, because these tools are not portable distro packages on
-the target platforms and each one still needs account authentication after
-installation. The script prints the same guidance below after the OS and Python
-prereqs finish, and a failed or missing agent CLI install must not fail the host
-package run.
+`sudo ./install` can run the vendor-documented agent CLI installers below. These
+commands are not distro packages on the target platforms, so the installer asks
+before running each missing CLI unless `--yes` or `--no-cli` was supplied. A
+failed, declined, or skipped CLI install does not roll back the Switchyard host
+install.
 
-Install and authenticate at least one of:
+Install and authenticate at least one CLI before launching panes:
 
 Before running any `curl ... | bash` or `curl ... | sh` command, you can fetch
 the script URL without piping it and read the script first.
@@ -85,12 +101,13 @@ the script URL without piping it and read the script first.
 | `agy` | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | Google Antigravity CLI Installation & auth docs: <https://antigravity.google/docs/cli/install/>. |
 | `hermes` | `curl -fsSL https://hermes-agent.nousresearch.com/install.sh \| bash` | `curl -fsSL https://hermes-agent.nousresearch.com/install.sh \| bash` | Nous Research Hermes Agent installation docs: <https://hermes-agent.nousresearch.com/docs/getting-started/installation>. |
 
-After installation, open the chosen CLI and complete authentication. For Codex,
-the official quickstart says to run `codex` from a project directory and sign in
-on first launch. Claude Code similarly requires running `claude` and following
-the login prompts. Antigravity opens a browser sign-in flow for `agy` when no
-saved session exists, and Hermes requires choosing or authenticating a provider,
-for example with `hermes model` or `hermes setup --portal`.
+After installation, open the chosen CLI and complete authentication. `sudo
+./install` leaves this as its final output because it cannot be automated. For
+Codex, the official quickstart says to run `codex` from a project directory and
+sign in on first launch. Claude Code similarly requires running `claude` and
+following the login prompts. Antigravity opens a browser sign-in flow for `agy`
+when no saved session exists, and Hermes requires choosing or authenticating a
+provider, for example with `hermes model` or `hermes setup --portal`.
 
 ## Notes
 
@@ -111,12 +128,11 @@ for example with `hermes model` or `hermes setup --portal`.
 ## Install Scripts
 
 ```bash
-scripts/install-switchyard-prereqs
-scripts/install-switchyard
+sudo ./install
 ```
 
-Run `scripts/install-switchyard-prereqs` first to install the packages and
-Python dependency listed above. Then run `scripts/install-switchyard` to print
-the privileged install command block. Applying that block needs root; a non-root
-user should inspect the printed `sudo env ... --apply` command and have a
-sudo-capable operator run it.
+The top-level installer calls the internal prereq and release installers in the
+right order. For operators who need a reviewable privileged block instead of an
+automatic release install, `scripts/install-switchyard --print-commands` still
+prints the release-install block, and `scripts/install-switchyard --apply`
+performs that internal release step.

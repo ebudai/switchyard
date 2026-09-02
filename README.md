@@ -3,35 +3,28 @@
 Switchyard coordinates local multi-role project work through a shared ticket
 board, role launchers, repository policy hooks, and install/deploy helpers.
 
-If you want to run it yourself, start with
-[the fresh-machine install list](docs/fresh-machine-install.md) before
-installing.
-
 ## From Clone To Installed Command
 
-Start with [the fresh-machine install list](docs/fresh-machine-install.md).
-It names the operating-system packages, Python package, and manual agent CLI
-installation and authentication requirements.
+Start with a fresh clone, then run the one installer command:
 
-Then run the installer scripts in this order:
+```bash
+git clone <repo> switchyard
+cd switchyard
+sudo ./install
+```
 
-1. `scripts/install-switchyard-prereqs`
+The installer refreshes apt package metadata on Debian/Ubuntu systems, installs
+host packages, creates the shared `/opt/switchyard/venv` with
+`--system-site-packages`, runs the ticket-board dependency and entry-point
+checks, asks which agent CLI installers to run, and installs the public
+`switchyard` command, normally at `/usr/local/bin/switchyard`. Its final output
+is the authentication command that still needs a human login.
 
-   Installs host packages with `apt` or `pacman`, installs `psycopg`, and
-   prints manual agent CLI installation and authentication guidance. On apt
-   systems it refreshes the package index before installing and puts Psycopg in
-   the shared Switchyard venv to avoid PEP 668 system-Python restrictions. On
-   Arch-family systems it does not run `pacman -Sy`; run `sudo pacman -Syu`
-   first as described in the fresh-machine install list.
+For package details, Arch-family notes, and vendor CLI provenance links, see
+[the fresh-machine install list](docs/fresh-machine-install.md).
 
-2. `scripts/install-switchyard`
-
-   Prints the privileged command block that exports the current checkout into
-   `/opt/switchyard`, updates `/opt/switchyard/current`, and installs the
-   public `switchyard` command, normally at `/usr/local/bin/switchyard`.
-   Applying that block needs root. A non-root user is expected to run
-   `scripts/install-switchyard`, inspect the printed `sudo env ... --apply`
-   command, and have a sudo-capable operator run it.
+Operator print mode still exists for the internal release step:
+`scripts/install-switchyard --print-commands`.
 
 ## Commands
 

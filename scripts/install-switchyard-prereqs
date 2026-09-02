@@ -2,6 +2,7 @@
 set -euo pipefail
 
 DRY_RUN=0
+SHOW_CLI_GUIDANCE=1
 ASSUME_MANAGER="${SWITCHYARD_PREREQS_ASSUME_MANAGER:-}"
 SUDO_BIN="${SWITCHYARD_SUDO_BIN:-sudo}"
 PYTHON_BIN="${SWITCHYARD_PYTHON_BIN:-python3}"
@@ -11,10 +12,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
     cat <<'EOF'
-Usage: scripts/install-switchyard-prereqs [--dry-run]
+Usage: scripts/install-switchyard-prereqs [--dry-run] [--skip-cli|--no-cli]
 
-Installs Switchyard host packages with apt or pacman, installs psycopg, and
-prints manual agent CLI install/authentication guidance.
+Installs Switchyard host packages with apt or pacman and installs psycopg.
+The top-level ./install wrapper handles agent CLI installation prompts.
 EOF
 }
 
@@ -27,6 +28,9 @@ while (($#)); do
     case "$1" in
         --dry-run)
             DRY_RUN=1
+            ;;
+        --skip-cli|--no-cli)
+            SHOW_CLI_GUIDANCE=0
             ;;
         -h|--help)
             usage
@@ -68,23 +72,31 @@ run_cmd() {
     "$@"
 }
 
+run_root_cmd() {
+    if [[ "${EUID:-$(id -u)}" -eq 0 && -z "${SWITCHYARD_PREREQS_FORCE_SUDO_PREFIX:-}" ]]; then
+        run_cmd "$@"
+    else
+        run_cmd "$SUDO_BIN" "$@"
+    fi
+}
+
 manager="$(detect_manager)"
 case "$manager" in
     apt)
         printf 'Refreshing apt package index with apt-get update before installing packages.\n'
-        run_cmd "$SUDO_BIN" apt-get update
-        run_cmd "$SUDO_BIN" apt-get install -y \
+        run_root_cmd apt-get update
+        run_root_cmd apt-get install -y \
             python3 postgresql postgresql-client tmux git curl python3-venv python3-pil acl
         printf 'KDE/separate layout users also need Konsole: %s apt-get install -y konsole\n' "$SUDO_BIN"
         printf 'Installing psycopg into the shared Switchyard Python venv at %s.\n' "$SWITCHYARD_PYTHON_VENV"
         printf 'Using a system-site-packages venv avoids Debian/Ubuntu PEP 668 restrictions while keeping distro Pillow visible.\n'
-        run_cmd "$SUDO_BIN" install -d -m 0755 "$(dirname "$SWITCHYARD_PYTHON_VENV")"
-        run_cmd "$SUDO_BIN" "$PYTHON_BIN" -m venv --system-site-packages "$SWITCHYARD_PYTHON_VENV"
-        run_cmd "$SUDO_BIN" "$SWITCHYARD_PYTHON_VENV/bin/python" -m pip install "$PIP_SPEC"
+        run_root_cmd install -d -m 0755 "$(dirname "$SWITCHYARD_PYTHON_VENV")"
+        run_root_cmd "$PYTHON_BIN" -m venv --system-site-packages "$SWITCHYARD_PYTHON_VENV"
+        run_root_cmd "$SWITCHYARD_PYTHON_VENV/bin/python" -m pip install "$PIP_SPEC"
         printf 'Verifying ticket board runtime dependencies under the shared Switchyard Python venv.\n'
-        run_cmd "$SUDO_BIN" "$SWITCHYARD_PYTHON_VENV/bin/python" -c "import psycopg, PIL; print(psycopg.__version__, PIL.__version__)"
+        run_root_cmd "$SWITCHYARD_PYTHON_VENV/bin/python" -c "import psycopg, PIL; print(psycopg.__version__, PIL.__version__)"
         printf 'Verifying the ticket board entry point loads under the shared Switchyard Python venv.\n'
-        run_cmd "$SUDO_BIN" "$SWITCHYARD_PYTHON_VENV/bin/python" "$SCRIPT_DIR/ticket-board.py" --help
+        run_root_cmd "$SWITCHYARD_PYTHON_VENV/bin/python" "$SCRIPT_DIR/ticket-board.py" --help
         ;;
     pacman)
         printf 'Not refreshing pacman package databases automatically; run %s pacman -Syu first on Arch-family systems.\n' "$SUDO_BIN"
@@ -96,9 +108,13 @@ case "$manager" in
         ;;
 esac
 
+if [[ "$SHOW_CLI_GUIDANCE" -eq 0 ]]; then
+    exit 0
+fi
+
 cat <<'EOF'
 
-Agent CLI setup is manual; this script does not install agent CLIs.
+Agent CLI installation is handled by the top-level ./install wrapper.
 Switchyard needs at least one installed and authenticated agent CLI before it can run panes.
 
 Established vendor-documented Linux install methods:
@@ -111,5 +127,4 @@ Established vendor-documented Linux install methods:
 See docs/fresh-machine-install.md for vendor documentation links. Before running any curl-piped installer,
 you can fetch the script URL without piping it and read the script first.
 After installing, open the CLI and authenticate at least one of: claude, codex, agy, or hermes.
-Next step: run scripts/install-switchyard to print the privileged install block.
 EOF

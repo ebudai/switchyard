@@ -32,6 +32,7 @@ def run_dry(manager: str) -> str:
         **os.environ,
         "SWITCHYARD_PREREQS_ASSUME_MANAGER": manager,
         "SWITCHYARD_SUDO_BIN": "sudo",
+        "SWITCHYARD_PREREQS_FORCE_SUDO_PREFIX": "1",
         "SWITCHYARD_PYTHON_BIN": "python3",
     }
     proc = subprocess.run(
@@ -69,7 +70,7 @@ def test_apt_commands() -> None:
     assert f"+ sudo /opt/switchyard/venv/bin/python {ROOT / 'scripts' / 'ticket-board.py'} --help" in output
     assert "pip install --user" not in output
     assert "--break-system-packages" not in output
-    assert "Agent CLI setup is manual; this script does not install agent CLIs." in output
+    assert "Agent CLI installation is handled by the top-level ./install wrapper." in output
     assert "Switchyard needs at least one installed and authenticated agent CLI" in output
     assert "https://claude.ai/install.sh | bash" in output
     assert "Debian/Ubuntu package is claude-code, not claude" in output
@@ -79,7 +80,7 @@ def test_apt_commands() -> None:
     assert "See docs/fresh-machine-install.md for vendor documentation links." in output
     assert "fetch the script URL without piping it and read the script first" in output
     assert "authenticate at least one of: claude, codex, agy, or hermes" in output
-    assert "Next step: run scripts/install-switchyard to print the privileged install block." in output
+    assert "Next step: run scripts/install-switchyard" not in output
 
 
 def test_pacman_commands() -> None:
@@ -94,7 +95,7 @@ def test_pacman_commands() -> None:
     assert "Installing psycopg for the invoking user with pip on Arch-family systems." in output
     assert "+ python3 -m pip install --user psycopg\\>=3.3\\,\\<4" in output
     assert "/opt/switchyard/venv" not in output
-    assert "Agent CLI setup is manual; this script does not install agent CLIs." in output
+    assert "Agent CLI installation is handled by the top-level ./install wrapper." in output
     assert "https://claude.ai/install.sh | bash" in output
     assert "https://chatgpt.com/codex/install.sh | sh" in output
     assert "https://antigravity.google/cli/install.sh | bash" in output
@@ -102,7 +103,7 @@ def test_pacman_commands() -> None:
     assert "See docs/fresh-machine-install.md for vendor documentation links." in output
     assert "fetch the script URL without piping it and read the script first" in output
     assert "authenticate at least one of: claude, codex, agy, or hermes" in output
-    assert "Next step: run scripts/install-switchyard to print the privileged install block." in output
+    assert "Next step: run scripts/install-switchyard" not in output
 
 
 def test_fresh_machine_docs_match_manual_agent_cli_policy() -> None:
@@ -118,9 +119,9 @@ def test_fresh_machine_docs_match_manual_agent_cli_policy() -> None:
     assert "sudo /opt/switchyard/venv/bin/python scripts/ticket-board.py --help" in docs
     assert "`python3-psycopg` exists but is `3.1.17-2`" in docs
     assert "does not satisfy Switchyard's `psycopg>=3.3,<4` pin" in normalized_docs
-    assert "Agent CLI setup is manual." in docs
-    assert "does not install any agent CLI" in normalized_docs
-    assert "failed or missing agent CLI install must not fail the host package run" in normalized_docs
+    assert "sudo ./install" in docs
+    assert "can run the vendor-documented agent CLI installers" in normalized_docs
+    assert "failed, declined, or skipped CLI install does not roll back" in normalized_docs
     assert "Before running any `curl ... | bash` or `curl ... | sh` command" in normalized_docs
     assert "read the script first" in normalized_docs
     assert "`claude-code`, not `claude`" in docs

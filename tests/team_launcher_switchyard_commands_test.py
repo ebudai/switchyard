@@ -21,12 +21,11 @@ def test_readme_names_install_path_and_help_text_cannot_drift() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
     assert "[the fresh-machine install list](docs/fresh-machine-install.md)" in readme
-    prereq_index = readme.index("`scripts/install-switchyard-prereqs`")
-    install_index = readme.index("`scripts/install-switchyard`", prereq_index + 1)
+    install_index = readme.index("sudo ./install")
+    print_mode_index = readme.index("`scripts/install-switchyard --print-commands`")
     commands_index = readme.index("## Commands")
-    assert prereq_index < install_index < commands_index
-    assert "Applying that block needs root." in readme
-    assert "sudo env ... --apply" in readme
+    assert install_index < print_mode_index < commands_index
+    assert "Operator print mode still exists" in readme
     assert _readme_switchyard_help_block() == team_launcher.switchyard_help_text().strip()
 
 

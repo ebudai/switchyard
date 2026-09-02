@@ -181,10 +181,12 @@ def assert_director_write_client_self_suppresses_notifications() -> None:
             psql(admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
             create_roles(admin_conn)
             psql(admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
+            commit_hash = run(["git", "-C", str(ROOT), "rev-parse", "HEAD"]).stdout.strip()
 
             app = TicketBoardApp(
                 frames,
                 assets,
+                commit_git_dir=ROOT,
                 database_url=conninfo(socket_dir, port, dbname, SERVICE_ROLE),
             )
             events = TicketBoardEventHub(app)
@@ -285,7 +287,7 @@ def assert_director_write_client_self_suppresses_notifications() -> None:
                     implementation="Ready.",
                 )
                 clear_notifications(admin_conn, "PGU-40503")
-                done_director = client.mark_done("PGU-40503", commit_hash="123abcd")["ticket"]
+                done_director = client.mark_done("PGU-40503", commit_hash=commit_hash)["ticket"]
                 assert done_director["state"] == "done", done_director
                 assert queued_notifications(admin_conn, "PGU-40503") == [], queued_notifications(admin_conn, "PGU-40503")
             finally:

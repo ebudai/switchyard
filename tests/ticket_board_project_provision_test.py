@@ -450,6 +450,7 @@ def test_operator_commands_create_owned_parents_before_systemd_paths() -> None:
     board_root = "sudo install -d -m 0755 -o 'otto-agent' -g 'otto-agent' '/home/otto-agent/otto-ticketboard-live'"
     deploy = (
         "sudo env TICKET_BOARD_PROJECT='otto' "
+        "TICKET_BOARD_COMMIT_GIT_DIR='/data/git/otto_scheduler.git' "
         f"SOURCE_REPO='{ROOT}' "
         "BOARD_ROOT='/home/otto-agent/otto-ticketboard-live'"
     )
@@ -612,6 +613,7 @@ def test_pgu_project_render_matches_live_port_database_and_frame_dir() -> None:
     assert plan.board_root == "/home/agent/pgu-ticketboard-live"
     assert plan.asset_dir == "/home/agent/.claude/pgu-tickets-assets"
     assert plan.frame_dir == "/tmp/pgu-frames"
+    assert plan.commit_git_dir == "/data/git/switchyard.git:/data/git/pgu.git"
     assert plan.workflow_seed == "pgu-full"
     assert plan.implementer_roles == ("main", "app", "ops", "perf", "research")
     assert "--port 8770" in board_unit
@@ -659,6 +661,19 @@ def test_custom_ticket_prefix_is_rendered_into_board_service_environment() -> No
     assert "EnvironmentFile=-/home/otto-agent/.config/otto/ticket-board.env" in board_unit
     assert "Environment=TICKET_BOARD_PROJECT=otto" in board_unit
     assert "Environment=TICKET_BOARD_TICKET_PREFIX=OT" in board_unit
+    assert "Environment=TICKET_BOARD_COMMIT_GIT_DIR=/data/git/otto_scheduler.git" in board_unit
+
+
+def test_live_legacy_project_commit_repositories_are_rendered() -> None:
+    pgu_plan = build_plan(project="pgu", owner_user="agent")
+    mefp_plan = build_plan(project="mefp", owner_user="stellaris-agent")
+    otto_plan = build_plan(project="otto", owner_user="otto-agent")
+    porter_plan = build_plan(project="porter", owner_user="porter-agent")
+
+    assert pgu_plan.commit_git_dir == "/data/git/switchyard.git:/data/git/pgu.git"
+    assert mefp_plan.commit_git_dir == "/data/git/stellaris-fixpatch.git"
+    assert otto_plan.commit_git_dir == "/data/git/otto_scheduler.git"
+    assert porter_plan.commit_git_dir == "/home/porter-agent/.local/state/switchyard/projects/porter/control.git"
 
 
 def test_custom_database_actor_roles_fail_loud_until_schema_supports_them() -> None:

@@ -22,7 +22,7 @@ from scripts.ticket_board import cli as cli_module
 class FakeApp:
     store_backend = "postgres"
 
-    def __init__(self, frame_dir: Path, asset_dir: Path, database_url: str) -> None:
+    def __init__(self, frame_dir: Path, asset_dir: Path, database_url: str, **_kwargs: object) -> None:
         self.frame_dir = frame_dir
         self.asset_dir = asset_dir
         self.database_url = database_url

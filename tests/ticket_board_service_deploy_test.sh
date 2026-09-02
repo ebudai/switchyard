@@ -257,6 +257,10 @@ grep -q '^Environment=TICKET_BOARD_SOCKET=/run/pgu-ticket-board/ticket-board.soc
     echo "FAIL: unit did not export TICKET_BOARD_SOCKET" >&2
     exit 1
 }
+grep -q '^Environment=TICKET_BOARD_COMMIT_GIT_DIR=/data/git/switchyard.git:/data/git/pgu.git$' "$UNIT_DIR/service.unit" || {
+    echo "FAIL: unit did not export the default commit verification repository" >&2
+    exit 1
+}
 grep -q '^Environment=TICKET_BOARD_DATABASE_URL=postgresql:///pgu?host=/var/run/postgresql&user=ticket_board_service$' "$UNIT_DIR/service.unit" || {
     echo "FAIL: unit did not bake the service database URL" >&2
     exit 1
@@ -327,6 +331,15 @@ grep -q '^Environment=TICKET_BOARD_DATABASE_URL=postgresql:///custom_board?host=
     exit 1
 }
 
+TICKET_BOARD_COMMIT_GIT_DIR="$TMPDIR_T/project-control.git" \
+BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
+    "$REPO_ROOT/scripts/ticket-board-service.sh" render-unit >"$UNIT_DIR/service-custom-commit-repo.unit"
+
+grep -q "^Environment=TICKET_BOARD_COMMIT_GIT_DIR=$TMPDIR_T/project-control.git$" "$UNIT_DIR/service-custom-commit-repo.unit" || {
+    echo "FAIL: unit did not bake caller-provided TICKET_BOARD_COMMIT_GIT_DIR" >&2
+    exit 1
+}
+
 TICKET_BOARD_PROJECT=porter \
 BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
     "$REPO_ROOT/scripts/ticket-board-service.sh" render-unit >"$UNIT_DIR/service-porter.unit"
@@ -341,6 +354,40 @@ grep -q '^Environment=TICKET_BOARD_SOCKET=/run/porter-ticket-board/ticket-board.
 }
 grep -q '^Environment=TICKET_BOARD_DATABASE_URL=postgresql:///porter_ticket_board?host=/var/run/postgresql&user=ticket_board_service$' "$UNIT_DIR/service-porter.unit" || {
     echo "FAIL: generic project unit did not parameterize database URL" >&2
+    exit 1
+}
+grep -q "^Environment=TICKET_BOARD_COMMIT_GIT_DIR=$HOME/.local/state/switchyard/projects/porter/control.git$" "$UNIT_DIR/service-porter.unit" || {
+    echo "FAIL: generic project unit did not parameterize commit verification repository" >&2
+    exit 1
+}
+
+TICKET_BOARD_PROJECT=mefp \
+HOME=/home/stellaris-agent \
+BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
+    "$REPO_ROOT/scripts/ticket-board-service.sh" render-unit >"$UNIT_DIR/service-mefp.unit"
+
+grep -q '^Environment=TICKET_BOARD_COMMIT_GIT_DIR=/data/git/stellaris-fixpatch.git$' "$UNIT_DIR/service-mefp.unit" || {
+    echo "FAIL: mefp unit did not use the live legacy commit verification repository" >&2
+    exit 1
+}
+
+TICKET_BOARD_PROJECT=otto \
+HOME=/home/otto-agent \
+BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
+    "$REPO_ROOT/scripts/ticket-board-service.sh" render-unit >"$UNIT_DIR/service-otto.unit"
+
+grep -q '^Environment=TICKET_BOARD_COMMIT_GIT_DIR=/data/git/otto_scheduler.git$' "$UNIT_DIR/service-otto.unit" || {
+    echo "FAIL: otto unit did not use the live legacy commit verification repository" >&2
+    exit 1
+}
+
+TICKET_BOARD_PROJECT=porter \
+HOME=/home/porter-agent \
+BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
+    "$REPO_ROOT/scripts/ticket-board-service.sh" render-unit >"$UNIT_DIR/service-porter-home.unit"
+
+grep -q '^Environment=TICKET_BOARD_COMMIT_GIT_DIR=/home/porter-agent/.local/state/switchyard/projects/porter/control.git$' "$UNIT_DIR/service-porter-home.unit" || {
+    echo "FAIL: generic project unit did not default to the owner's provisioned control repo" >&2
     exit 1
 }
 

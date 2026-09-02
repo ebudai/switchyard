@@ -9,7 +9,31 @@ if [[ "$PROJECT_SLUG" != "pgu" ]]; then
 fi
 readonly PROJECT_SLUG PROJECT_DB_IDENT DEFAULT_DATABASE_NAME
 readonly SERVICE_NAME="${TICKET_BOARD_SERVICE_NAME:-$PROJECT_SLUG-ticket-board.service}"
-readonly SOURCE_REPO="${SOURCE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+readonly SERVICE_SCRIPT_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly SOURCE_REPO="${SOURCE_REPO:-$SERVICE_SCRIPT_REPO}"
+resolve_commit_git_dir() {
+    if [[ -n "${TICKET_BOARD_COMMIT_GIT_DIR:-}" ]]; then
+        printf '%s\n' "$TICKET_BOARD_COMMIT_GIT_DIR"
+        return
+    fi
+    local python_for_resolver
+    python_for_resolver="/usr/bin/python3"
+    if [[ ! -x "$python_for_resolver" ]]; then
+        python_for_resolver="python3"
+    fi
+    PYTHONPATH="$SERVICE_SCRIPT_REPO/scripts:$SOURCE_REPO/scripts${PYTHONPATH:+:$PYTHONPATH}" "$python_for_resolver" - "$PROJECT_SLUG" "${HOME:-}" <<'PY'
+import sys
+from pathlib import Path
+
+from ticket_board.commit_repos import commit_git_dir_env_for_project
+
+project = sys.argv[1]
+home = sys.argv[2] or str(Path.home())
+print(commit_git_dir_env_for_project(project=project, owner_home=home))
+PY
+}
+COMMIT_GIT_DIR="$(resolve_commit_git_dir)"
+readonly COMMIT_GIT_DIR
 readonly BOARD_ROOT="${BOARD_ROOT:-/home/agent/$PROJECT_SLUG-ticketboard-live}"
 readonly BOARD_RELEASES_DIR="$BOARD_ROOT/releases"
 readonly BOARD_CURRENT_LINK="$BOARD_ROOT/current"
@@ -579,6 +603,7 @@ start_canary_direct() {
         PYTHONUNBUFFERED=1 \
         TICKET_BOARD_PROJECT="$PROJECT_SLUG" \
         TICKET_BOARD_SOCKET="$socket_path" \
+        TICKET_BOARD_COMMIT_GIT_DIR="$COMMIT_GIT_DIR" \
         TICKET_BOARD_DATABASE_URL="$BOARD_DATABASE_URL" \
             "$PYTHON_BIN" "$release_dir/scripts/ticket-board.py" \
                 --host "$BOARD_HOST" \
@@ -723,6 +748,7 @@ EnvironmentFile=-$HOME/.config/$PROJECT_SLUG/ticket-board.env
 Environment=PYTHONUNBUFFERED=1
 Environment=TICKET_BOARD_PROJECT=$PROJECT_SLUG
 Environment=TICKET_BOARD_SOCKET=$BOARD_UNIX_SOCKET
+Environment=TICKET_BOARD_COMMIT_GIT_DIR=$COMMIT_GIT_DIR
 Environment=TICKET_BOARD_DATABASE_URL=$BOARD_DATABASE_URL
 StandardOutput=append:$LOG_PATH
 StandardError=append:$LOG_PATH

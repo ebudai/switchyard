@@ -14,10 +14,11 @@ from typing import Any
 
 from PIL import Image
 
+from .commit_repos import commit_git_dirs_for_project
+
 ASSET_DIR_DEFAULT = Path("~/.claude/pgu-tickets-assets").expanduser()
 FRAME_DIR_DEFAULT = Path("/tmp/pgu-frames")
 REPO_ROOT_DEFAULT = Path(__file__).resolve().parents[2]
-COMMIT_GIT_DIR_DEFAULT = Path("/data/git/pgu.git")
 POSTGRES_DSN_DEFAULT = os.environ.get("TICKET_BOARD_DATABASE_URL") or os.environ.get("DATABASE_URL", "")
 DEFAULT_ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "inspector", "agent", "director", "research", "user")
 DEFAULT_CALLER_ROLES = ("director", "main", "app", "ops", "perf", "audit", "inspector", "research", "user")
@@ -127,13 +128,22 @@ class TicketBoardApp:
         frame_dir: Path = FRAME_DIR_DEFAULT,
         asset_dir: Path = ASSET_DIR_DEFAULT,
         repo_root: Path = REPO_ROOT_DEFAULT,
-        commit_git_dir: Path = COMMIT_GIT_DIR_DEFAULT,
+        commit_git_dir: Path | str | None = None,
         database_url: str = POSTGRES_DSN_DEFAULT,
     ) -> None:
         self.frame_dir = frame_dir.resolve()
         self.asset_dir = asset_dir.expanduser().resolve()
         self.repo_root = repo_root.resolve()
-        self.commit_git_dir = commit_git_dir.resolve()
+        if isinstance(commit_git_dir, str):
+            commit_git_dirs = tuple(Path(item) for item in commit_git_dir.split(os.pathsep) if item.strip())
+        elif commit_git_dir is not None:
+            commit_git_dirs = (Path(commit_git_dir),)
+        else:
+            commit_git_dirs = commit_git_dirs_for_project()
+        if not commit_git_dirs:
+            raise ValueError("commit_hash verification repository list is empty")
+        self.commit_git_dirs = tuple(path.expanduser().resolve(strict=False) for path in commit_git_dirs)
+        self.commit_git_dir = self.commit_git_dirs[0]
         self.store_backend = "postgres"
         self.database_url = database_url
         self.ticket_prefix = ticket_prefix_for_project()
@@ -1058,17 +1068,20 @@ ORDER BY rank;
                     elif state == "inspection":
                         self._pg_call(conn, "SELECT ticket_board.submit_to_inspection(%s);", (ticket_id,))
                     elif state == "audit":
+                        commit_hash = self._validate_commit_hash(commit_hash)
                         self._pg_call(conn, "SELECT ticket_board.submit_to_audit(%s, %s);", (ticket_id, commit_hash))
                     elif (
                         state == "director_review"
                         and current["state"] == "in_progress"
                         and self._pg_transition_configured(conn, "in_progress", "director_review", "submit_to_audit")
                     ):
+                        commit_hash = self._validate_commit_hash(commit_hash)
                         self._pg_call(conn, "SELECT ticket_board.submit_to_audit(%s, %s);", (ticket_id, commit_hash))
                     elif state == "user_review" and current["state"] == "dat":
                         self._pg_call(conn, "SELECT ticket_board.director_dat_sign_off(%s, %s);", (ticket_id, comment_text))
                         comment_text = ""
                     elif state == "done":
+                        commit_hash = self._validate_commit_hash(commit_hash)
                         self._pg_call(conn, "SELECT ticket_board.mark_done(%s, %s);", (ticket_id, commit_hash))
                     elif state == "backlog":
                         self._pg_call(conn, "SELECT ticket_board.defer(%s);", (ticket_id,))
@@ -1338,32 +1351,42 @@ SELECT EXISTS (
         value = raw.strip()
         if not value:
             return ""
-        proc = subprocess.run(
-            ["git", f"--git-dir={self.commit_git_dir}", "cat-file", "-e", f"{value}^{{commit}}"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if proc.returncode != 0:
-            raise ValueError(f"unknown commit_hash: {value}")
-        resolved = subprocess.run(
-            ["git", f"--git-dir={self.commit_git_dir}", "rev-parse", "--verify", f"{value}^{{commit}}"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if resolved.returncode != 0 or not resolved.stdout.strip():
-            raise ValueError(f"unknown commit_hash: {value}")
-        return resolved.stdout.strip()
+        if not re.fullmatch(r"[0-9A-Fa-f]{7,40}", value):
+            raise ValueError("commit_hash must be a 7-40 character hex commit")
+        missing_repos: list[Path] = []
+        for commit_git_dir in self.commit_git_dirs:
+            try:
+                git_args = self._commit_repo_git_args(commit_git_dir)
+            except ValueError:
+                missing_repos.append(commit_git_dir)
+                continue
+            proc = subprocess.run(
+                [*git_args, "cat-file", "-e", f"{value}^{{commit}}"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if proc.returncode != 0:
+                continue
+            resolved = subprocess.run(
+                [*git_args, "rev-parse", "--verify", f"{value}^{{commit}}"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if resolved.returncode == 0 and resolved.stdout.strip():
+                return resolved.stdout.strip()
+        if missing_repos and len(missing_repos) == len(self.commit_git_dirs):
+            missing = ", ".join(str(path) for path in missing_repos)
+            raise ValueError(f"commit_hash verification repository not found: {missing}")
+        raise ValueError(f"unknown commit_hash: {value}")
 
-    def _commit_is_on_main(self, commit_hash: str) -> bool:
-        proc = subprocess.run(
-            ["git", f"--git-dir={self.commit_git_dir}", "merge-base", "--is-ancestor", commit_hash, "refs/heads/main"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        return proc.returncode == 0
+    def _commit_repo_git_args(self, commit_git_dir: Path) -> list[str]:
+        if (commit_git_dir / ".git").exists():
+            return ["git", "-C", str(commit_git_dir)]
+        if not commit_git_dir.exists():
+            raise ValueError(f"commit_hash verification repository not found: {commit_git_dir}")
+        return ["git", f"--git-dir={commit_git_dir}"]
 
     def _path_in_allowed_image_dirs(self, path: Path) -> bool:
         return self.frame_dir in path.parents or self.asset_dir in path.parents

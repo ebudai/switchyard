@@ -155,6 +155,7 @@ def make_app(root: Path, socket_dir: Path, port: int, dbname: str, role: str) ->
     return TicketBoardApp(
         root / "frames",
         root / "assets",
+        commit_git_dir=ROOT,
         database_url=conninfo(socket_dir, port, dbname, role),
     )
 
@@ -190,6 +191,8 @@ WHERE table_schema = 'ticket_board'
             ) == "false"
             create_roles(admin_conn)
             psql(admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
+            commit_hash = run(["git", "-C", str(ROOT), "rev-parse", "HEAD"]).stdout.strip()
+            alternate_commit_hash = run(["git", "-C", str(ROOT), "rev-parse", "HEAD^"]).stdout.strip()
 
             service_app = make_app(root, socket_dir, port, dbname, SERVICE_ROLE)
             service_conn = conninfo(socket_dir, port, dbname, SERVICE_ROLE)
@@ -466,15 +469,15 @@ SELECT ticket_board.create_ticket('Cycle blocked', 'Body', 'analysis', ARRAY['PG
             in_progress = service_app.update_ticket("PGU-100", {"state": "in_progress"}, caller_role="ops")
             assert in_progress["state"] == "in_progress", in_progress
             assert in_progress["implementation"] == "", in_progress
-            submitted = service_app.update_ticket("PGU-100", {"state": "audit", "commit_hash": "abcdef1"}, caller_role="ops")
+            submitted = service_app.update_ticket("PGU-100", {"state": "audit", "commit_hash": commit_hash}, caller_role="ops")
             assert submitted["state"] == "audit", submitted
-            assert submitted["commit_hash"] == "abcdef1", submitted
+            assert submitted["commit_hash"] == commit_hash, submitted
             try:
                 service_app.update_ticket("PGU-100", {"commit_hash": "123abcd"}, caller_role="ops")
                 raise AssertionError("expected generic commit_hash edit to be rejected")
             except ValueError as exc:
                 assert "commit_hash must be written with submit_to_audit or mark_done" in str(exc), exc
-            assert psql(admin_conn, "SELECT commit_hash FROM ticket_board.tickets WHERE id = 'PGU-100';") == "abcdef1"
+            assert psql(admin_conn, "SELECT commit_hash FROM ticket_board.tickets WHERE id = 'PGU-100';") == commit_hash
             insert_ticket(admin_conn, "PGU-101", title="Direct final signoff forbidden", state="in_progress", assignee="app")
             try:
                 service_app.update_ticket(
@@ -527,10 +530,10 @@ WHERE id = 'PGU-100';
             )
             assert audit_ready["state"] == "director_review", audit_ready
             assert audit_ready["comments"][-1]["text"] == "Audit verified.", audit_ready
-            done = service_app.update_ticket("PGU-100", {"state": "done", "commit_hash": "abcdef1"}, caller_role="director")
+            done = service_app.update_ticket("PGU-100", {"state": "done", "commit_hash": commit_hash}, caller_role="director")
             assert done["state"] == "done", done
-            corrected_done = service_app.update_ticket("PGU-100", {"state": "done", "commit_hash": "7654321"}, caller_role="director")
-            assert corrected_done["commit_hash"] == "7654321", corrected_done
+            corrected_done = service_app.update_ticket("PGU-100", {"state": "done", "commit_hash": alternate_commit_hash}, caller_role="director")
+            assert corrected_done["commit_hash"] == alternate_commit_hash, corrected_done
 
             insert_ticket(admin_conn, "PGU-200", title="Audit kickback", state="audit", assignee="audit")
             kicked = service_app.update_ticket(

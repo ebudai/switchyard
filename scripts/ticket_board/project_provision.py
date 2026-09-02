@@ -11,6 +11,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Sequence
 
+try:
+    from .commit_repos import commit_git_dir_env_for_project
+except ImportError:  # pragma: no cover - supports direct script execution
+    from commit_repos import commit_git_dir_env_for_project
+
 
 PROJECT_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,39}$")
 USER_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$")
@@ -52,6 +57,7 @@ class ProjectBoardProvision:
     board_root: str
     board_current: str
     source_repo: str
+    commit_git_dir: str
     asset_dir: str
     frame_dir: str
     board_log: str
@@ -154,6 +160,7 @@ def build_plan(
     listener_role: str = "ticket_board_listener",
     board_root: Path | None = None,
     source_repo: Path | None = None,
+    commit_git_dir: Path | None = None,
     asset_dir: Path | None = None,
     frame_dir: Path | None = None,
     implementer_roles: Sequence[str] | None = None,
@@ -250,6 +257,7 @@ def build_plan(
     home = Path("/home") / owner_user
     resolved_board_root = board_root or home / f"{project}-ticketboard-live"
     resolved_source_repo = source_repo or Path(__file__).resolve().parents[2]
+    resolved_commit_git_dir = str(commit_git_dir) if commit_git_dir is not None else commit_git_dir_env_for_project(project=project, owner_home=home)
     resolved_asset_dir = asset_dir or home / ".claude" / f"{project}-tickets-assets"
     if frame_dir is not None:
         resolved_frame_dir = frame_dir
@@ -280,6 +288,7 @@ def build_plan(
         board_root=str(resolved_board_root),
         board_current=str(board_current),
         source_repo=str(resolved_source_repo),
+        commit_git_dir=resolved_commit_git_dir,
         asset_dir=str(resolved_asset_dir),
         frame_dir=str(resolved_frame_dir),
         board_log=f"/var/log/{unit_prefix}.log",
@@ -710,6 +719,7 @@ Environment=PYTHONUNBUFFERED=1
 Environment=HOME=/home/{plan.owner_user}
 Environment=TICKET_BOARD_PROJECT={plan.project}
 Environment=TICKET_BOARD_TICKET_PREFIX={plan.ticket_prefix}
+Environment=TICKET_BOARD_COMMIT_GIT_DIR={plan.commit_git_dir}
 Environment=PGHOST=/var/run/postgresql
 Environment=PGDATABASE={plan.database}
 Environment=PGUSER={plan.service_role}
@@ -1224,6 +1234,7 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
     q_frame = shell_quote(plan.frame_dir)
     q_board_root = shell_quote(plan.board_root)
     q_source_repo = shell_quote(plan.source_repo)
+    q_commit_git_dir = shell_quote(plan.commit_git_dir)
     q_deploy_script = shell_quote(f"{plan.source_repo}/scripts/ticket-board-service.sh")
     q_board_unit = shell_quote(f"/etc/systemd/system/{plan.board_unit}")
     q_tmpfiles = shell_quote(f"/etc/tmpfiles.d/{plan.tmpfiles_name}")
@@ -1339,7 +1350,7 @@ set -euo pipefail
 
 # Review generated artifacts first. These commands require host privileges.
 {install_board_root}
-sudo env TICKET_BOARD_PROJECT={shell_quote(plan.project)} SOURCE_REPO={q_source_repo} BOARD_ROOT={q_board_root} DEPLOY_REF=origin/main TICKET_BOARD_SKIP_MIGRATIONS=1 {q_deploy_script} deploy
+sudo env TICKET_BOARD_PROJECT={shell_quote(plan.project)} TICKET_BOARD_COMMIT_GIT_DIR={q_commit_git_dir} SOURCE_REPO={q_source_repo} BOARD_ROOT={q_board_root} DEPLOY_REF=origin/main TICKET_BOARD_SKIP_MIGRATIONS=1 {q_deploy_script} deploy
 {grant_board_root}
 {install_asset_frame}
 {grant_home_traversal}

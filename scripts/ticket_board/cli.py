@@ -16,6 +16,7 @@ from .app import (
     POSTGRES_DSN_DEFAULT,
     TicketBoardApp,
 )
+from .commit_repos import commit_git_dir_env_for_project
 from .server import CallerRegistry, DirectorNotifier, TicketBoardEventHub, TicketBoardServer, TicketBoardUnixServer
 
 DEFAULT_UNIX_SOCKET = (
@@ -34,6 +35,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--frames", default=str(FRAME_DIR_DEFAULT), help=f"Screenshot directory. Default: {FRAME_DIR_DEFAULT}")
     parser.add_argument("--assets", default=str(ASSET_DIR_DEFAULT), help=f"Uploaded attachment directory. Default: {ASSET_DIR_DEFAULT}")
+    parser.add_argument(
+        "--commit-git-dir",
+        default="",
+        help=f"Git repository path or {os.pathsep}-separated paths used to verify ticket commit hashes. Default: {commit_git_dir_env_for_project()}.",
+    )
     parser.add_argument("--host", default="127.0.0.1", help="Bind host. Default: 127.0.0.1")
     parser.add_argument("--port", type=int, default=8770, help="Bind port. Default: 8770")
     parser.add_argument(
@@ -51,9 +57,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def run_server(args: argparse.Namespace) -> int:
+    commit_git_dir_arg = str(getattr(args, "commit_git_dir", "") or "")
     app = TicketBoardApp(
         frame_dir=Path(args.frames),
         asset_dir=Path(args.assets),
+        commit_git_dir=commit_git_dir_arg if commit_git_dir_arg else None,
         database_url=args.database,
     )
     event_hub = TicketBoardEventHub(app)

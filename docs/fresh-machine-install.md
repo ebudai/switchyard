@@ -47,12 +47,15 @@ package run.
 
 Install and authenticate at least one of:
 
+Before running any `curl ... | bash` or `curl ... | sh` command, you can fetch
+the script URL without piping it and read the script first.
+
 | CLI | Debian/Ubuntu | Arch-family | How this was established |
 | --- | --- | --- | --- |
-| `claude` | `curl -fsSL https://claude.ai/install.sh \| bash`; Anthropic also documents a signed apt repository whose Debian/Ubuntu package is `claude-code`, not `claude`. | `curl -fsSL https://claude.ai/install.sh \| bash`; no official pacman package is documented by Anthropic. | Anthropic Claude Code setup docs, "Install Claude Code" and "Install with Linux package managers". |
-| `codex` | `curl -fsSL https://chatgpt.com/codex/install.sh \| sh` | `curl -fsSL https://chatgpt.com/codex/install.sh \| sh` | Official OpenAI Codex CLI quickstart, "Install Codex". |
-| `agy` | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | Google Antigravity CLI "Installation & auth" docs. |
-| `hermes` | `curl -fsSL https://hermes-agent.nousresearch.com/install.sh \| bash` | `curl -fsSL https://hermes-agent.nousresearch.com/install.sh \| bash` | Nous Research Hermes Agent installation docs. |
+| `claude` | `curl -fsSL https://claude.ai/install.sh \| bash`; Anthropic also documents a signed apt repository whose Debian/Ubuntu package is `claude-code`, not `claude`. | `curl -fsSL https://claude.ai/install.sh \| bash`; no official pacman package is documented by Anthropic. | Anthropic Claude Code setup docs: <https://code.claude.com/docs/en/setup>. |
+| `codex` | `curl -fsSL https://chatgpt.com/codex/install.sh \| sh` | `curl -fsSL https://chatgpt.com/codex/install.sh \| sh` | Official OpenAI Codex CLI quickstart: <https://learn.chatgpt.com/docs/codex/cli>. |
+| `agy` | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | Google Antigravity CLI Installation & auth docs: <https://antigravity.google/docs/cli/install/>. |
+| `hermes` | `curl -fsSL https://hermes-agent.nousresearch.com/install.sh \| bash` | `curl -fsSL https://hermes-agent.nousresearch.com/install.sh \| bash` | Nous Research Hermes Agent installation docs: <https://hermes-agent.nousresearch.com/docs/getting-started/installation>. |
 
 After installation, open the chosen CLI and complete authentication. For Codex,
 the official quickstart says to run `codex` from a project directory and sign in

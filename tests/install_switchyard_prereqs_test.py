@@ -61,6 +61,8 @@ def test_apt_commands() -> None:
     assert "https://chatgpt.com/codex/install.sh | sh" in output
     assert "https://antigravity.google/cli/install.sh | bash" in output
     assert "https://hermes-agent.nousresearch.com/install.sh | bash" in output
+    assert "See docs/fresh-machine-install.md for vendor documentation links." in output
+    assert "fetch the script URL without piping it and read the script first" in output
     assert "authenticate at least one of: claude, codex, agy, or hermes" in output
     assert "Next step: run scripts/install-switchyard to print the privileged install block." in output
 
@@ -80,6 +82,8 @@ def test_pacman_commands() -> None:
     assert "https://chatgpt.com/codex/install.sh | sh" in output
     assert "https://antigravity.google/cli/install.sh | bash" in output
     assert "https://hermes-agent.nousresearch.com/install.sh | bash" in output
+    assert "See docs/fresh-machine-install.md for vendor documentation links." in output
+    assert "fetch the script URL without piping it and read the script first" in output
     assert "authenticate at least one of: claude, codex, agy, or hermes" in output
     assert "Next step: run scripts/install-switchyard to print the privileged install block." in output
 
@@ -90,10 +94,16 @@ def test_fresh_machine_docs_match_manual_agent_cli_policy() -> None:
     assert "Agent CLI setup is manual." in docs
     assert "does not install any agent CLI" in normalized_docs
     assert "failed or missing agent CLI install must not fail the host package run" in normalized_docs
+    assert "Before running any `curl ... | bash` or `curl ... | sh` command" in normalized_docs
+    assert "read the script first" in normalized_docs
     assert "`claude-code`, not `claude`" in docs
+    assert "https://code.claude.com/docs/en/setup" in docs
     assert "https://chatgpt.com/codex/install.sh" in docs
+    assert "https://learn.chatgpt.com/docs/codex/cli" in docs
     assert "https://antigravity.google/cli/install.sh" in docs
+    assert "https://antigravity.google/docs/cli/install/" in docs
     assert "https://hermes-agent.nousresearch.com/install.sh" in docs
+    assert "https://hermes-agent.nousresearch.com/docs/getting-started/installation" in docs
     assert "complete authentication" in docs
 
 

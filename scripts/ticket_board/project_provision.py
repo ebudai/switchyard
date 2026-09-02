@@ -701,7 +701,7 @@ def default_ticket_board_python() -> str:
     if override:
         return override
     shared_python = os.environ.get("SWITCHYARD_SHARED_PYTHON", DEFAULT_SHARED_PYTHON)
-    if Path(shared_python).is_file():
+    if Path(shared_python).is_file() and os.access(shared_python, os.X_OK):
         return shared_python
     return "/usr/bin/python3"
 

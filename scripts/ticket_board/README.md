@@ -305,12 +305,14 @@ PostgreSQL board backend:
 - The PostgreSQL backend requires psycopg 3 at runtime and for
   `tests/ticket_board_postgres_backend_test.py`. Ubuntu 24.04 / noble packages
   `python3-psycopg` as `3.1.17-2`, below the `psycopg>=3.3,<4` pin, so
-  `scripts/install-switchyard-prereqs` installs Psycopg into
-  `/opt/switchyard/venv` and the service renderers use that interpreter when it
-  exists. On Arch/CachyOS, install it with `sudo pacman -S python-psycopg` or
-  keep the user-pip path from the prereq script. For isolated test runs, use a
-  venv that can see that package, such as
-  `python3 -m venv --system-site-packages /tmp/pgu-ticket-board-venv`.
+  `scripts/install-switchyard-prereqs` installs Psycopg into a
+  system-site-packages venv at `/opt/switchyard/venv` and the service renderers
+  use that interpreter when it exists and is executable. The board also imports
+  Pillow at module scope; install it with apt `python3-pil` or pacman
+  `python-pillow`. Verify runtime imports with
+  `/opt/switchyard/venv/bin/python /home/agent/pgu-ticketboard-live/current/scripts/ticket-board.py --help`.
+  On Arch/CachyOS, install Psycopg with `sudo pacman -S python-psycopg` or keep
+  the user-pip path from the prereq script.
   `scripts/ticket_board/requirements.txt` records the equivalent pip
   dependency for non-system Python environments.
 - `scripts/ticket_board/rbac.sql` creates the login roles for each board pane/service role without setting passwords and grants minimal table/column permissions; only `director` can update `tickets.manually_controlled`

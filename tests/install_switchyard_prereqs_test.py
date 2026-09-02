@@ -5,15 +5,17 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "install-switchyard-prereqs"
 APT_BEFORE = "python3 postgresql postgresql-client tmux konsole git curl python3-pip acl"
-APT_AFTER = "python3 postgresql postgresql-client tmux git curl python3-venv acl"
+APT_AFTER = "python3 postgresql postgresql-client tmux git curl python3-venv python3-pil acl"
 PACMAN_BEFORE = "python postgresql tmux konsole git curl python-pip acl"
-PACMAN_AFTER = "python postgresql tmux git curl python-pip acl"
+PACMAN_AFTER = "python postgresql tmux git curl python-pip python-pillow acl"
 AGENT_CLI_PACKAGE_NAMES = {
     "claude",
     "claude-code",
@@ -54,12 +56,15 @@ def test_apt_commands() -> None:
     assert APT_BEFORE not in output
     assert "KDE/separate layout users also need Konsole: sudo apt-get install -y konsole" in output
     assert "Installing psycopg into the shared Switchyard Python venv at /opt/switchyard/venv." in output
-    assert "Using a venv avoids Debian/Ubuntu PEP 668 externally-managed Python restrictions." in output
+    assert (
+        "Using a system-site-packages venv avoids Debian/Ubuntu PEP 668 restrictions "
+        "while keeping distro Pillow visible."
+    ) in output
     assert "+ sudo install -d -m 0755 /opt/switchyard" in output
-    assert "+ sudo python3 -m venv /opt/switchyard/venv" in output
+    assert "+ sudo python3 -m venv --system-site-packages /opt/switchyard/venv" in output
     assert "+ sudo /opt/switchyard/venv/bin/python -m pip install psycopg\\>=3.3\\,\\<4" in output
-    assert "Verifying psycopg imports from the shared Switchyard Python venv." in output
-    assert "+ sudo /opt/switchyard/venv/bin/python -c import\\ psycopg\\;\\ print\\(psycopg.__version__\\)" in output
+    assert "Verifying the ticket board entry point imports under the shared Switchyard Python venv." in output
+    assert f"+ sudo /opt/switchyard/venv/bin/python {ROOT / 'scripts' / 'ticket-board.py'} --help" in output
     assert "pip install --user" not in output
     assert "--break-system-packages" not in output
     assert "Agent CLI setup is manual; this script does not install agent CLIs." in output
@@ -102,10 +107,12 @@ def test_fresh_machine_docs_match_manual_agent_cli_policy() -> None:
     docs = (ROOT / "docs" / "fresh-machine-install.md").read_text(encoding="utf-8")
     normalized_docs = " ".join(docs.split())
     apt_python_section = docs.split("On Arch-family systems, the current system-user pip path remains:")[0]
-    assert "sudo apt-get install python3 postgresql postgresql-client tmux git curl python3-venv acl" in docs
+    assert "sudo apt-get install python3 postgresql postgresql-client tmux git curl python3-venv python3-pil acl" in docs
+    assert "sudo pacman -S python postgresql tmux git curl python-pip python-pillow acl" in docs
     assert "python3 -m pip install --user 'psycopg>=3.3,<4'" not in apt_python_section
-    assert "sudo python3 -m venv /opt/switchyard/venv" in docs
+    assert "sudo python3 -m venv --system-site-packages /opt/switchyard/venv" in docs
     assert "sudo /opt/switchyard/venv/bin/python -m pip install 'psycopg>=3.3,<4'" in docs
+    assert "sudo /opt/switchyard/venv/bin/python scripts/ticket-board.py --help" in docs
     assert "`python3-psycopg` exists but is `3.1.17-2`" in docs
     assert "does not satisfy Switchyard's `psycopg>=3.3,<4` pin" in normalized_docs
     assert "Agent CLI setup is manual." in docs
@@ -144,13 +151,46 @@ def test_package_sets_match_the_platform_python_strategy() -> None:
         "git",
         "curl",
         "python3-venv",
+        "python3-pil",
         "acl",
     ]
     assert PACMAN_BEFORE.split() == ["python", "postgresql", "tmux", "konsole", "git", "curl", "python-pip", "acl"]
-    assert PACMAN_AFTER.split() == ["python", "postgresql", "tmux", "git", "curl", "python-pip", "acl"]
+    assert PACMAN_AFTER.split() == [
+        "python",
+        "postgresql",
+        "tmux",
+        "git",
+        "curl",
+        "python-pip",
+        "python-pillow",
+        "acl",
+    ]
     assert set(APT_BEFORE.split()) - set(APT_AFTER.split()) == {"konsole", "python3-pip"}
-    assert set(APT_AFTER.split()) - set(APT_BEFORE.split()) == {"python3-venv"}
+    assert set(APT_AFTER.split()) - set(APT_BEFORE.split()) == {"python3-venv", "python3-pil"}
     assert set(PACMAN_BEFORE.split()) - set(PACMAN_AFTER.split()) == {"konsole"}
+    assert set(PACMAN_AFTER.split()) - set(PACMAN_BEFORE.split()) == {"python-pillow"}
+
+
+def test_system_site_venv_runs_ticket_board_entrypoint() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        venv = Path(tmpdir) / "venv"
+        subprocess.run(
+            [sys.executable, "-m", "venv", "--system-site-packages", str(venv)],
+            check=True,
+            cwd=ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        proc = subprocess.run(
+            [str(venv / "bin" / "python"), str(ROOT / "scripts" / "ticket-board.py"), "--help"],
+            cwd=ROOT,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    assert "usage:" in proc.stdout
 
 
 if __name__ == "__main__":
@@ -158,4 +198,5 @@ if __name__ == "__main__":
     test_pacman_commands()
     test_fresh_machine_docs_match_manual_agent_cli_policy()
     test_package_sets_match_the_platform_python_strategy()
+    test_system_site_venv_runs_ticket_board_entrypoint()
     print("install_switchyard_prereqs_test: ok")

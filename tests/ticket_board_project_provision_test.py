@@ -684,6 +684,29 @@ def test_project_units_honor_ticket_board_python_override() -> None:
             os.environ["TICKET_BOARD_PYTHON"] = old_value
 
 
+def test_project_units_ignore_non_executable_shared_python() -> None:
+    old_override = os.environ.pop("TICKET_BOARD_PYTHON", None)
+    old_shared = os.environ.get("SWITCHYARD_SHARED_PYTHON")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        candidate = Path(tmpdir) / "python"
+        candidate.write_text("#!/bin/sh\n", encoding="utf-8")
+        candidate.chmod(0o644)
+        os.environ["SWITCHYARD_SHARED_PYTHON"] = str(candidate)
+        try:
+            plan = build_plan(project="otto", owner_user="otto-agent")
+            assert "ExecStart=/usr/bin/python3 " in render_board_unit(plan)
+            assert "ExecStart=/usr/bin/python3 " in render_listener_unit(plan)
+            assert str(candidate) not in render_board_unit(plan)
+            assert str(candidate) not in render_listener_unit(plan)
+        finally:
+            if old_shared is None:
+                os.environ.pop("SWITCHYARD_SHARED_PYTHON", None)
+            else:
+                os.environ["SWITCHYARD_SHARED_PYTHON"] = old_shared
+            if old_override is not None:
+                os.environ["TICKET_BOARD_PYTHON"] = old_override
+
+
 def test_live_legacy_project_commit_repositories_are_rendered() -> None:
     pgu_plan = build_plan(project="pgu", owner_user="agent")
     mefp_plan = build_plan(project="mefp", owner_user="stellaris-agent")

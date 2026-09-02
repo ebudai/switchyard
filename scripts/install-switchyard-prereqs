@@ -7,6 +7,7 @@ SUDO_BIN="${SWITCHYARD_SUDO_BIN:-sudo}"
 PYTHON_BIN="${SWITCHYARD_PYTHON_BIN:-python3}"
 PIP_SPEC="psycopg>=3.3,<4"
 SWITCHYARD_PYTHON_VENV="${SWITCHYARD_PYTHON_VENV:-/opt/switchyard/venv}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
     cat <<'EOF'
@@ -73,20 +74,20 @@ case "$manager" in
         printf 'Refreshing apt package index with apt-get update before installing packages.\n'
         run_cmd "$SUDO_BIN" apt-get update
         run_cmd "$SUDO_BIN" apt-get install -y \
-            python3 postgresql postgresql-client tmux git curl python3-venv acl
+            python3 postgresql postgresql-client tmux git curl python3-venv python3-pil acl
         printf 'KDE/separate layout users also need Konsole: %s apt-get install -y konsole\n' "$SUDO_BIN"
         printf 'Installing psycopg into the shared Switchyard Python venv at %s.\n' "$SWITCHYARD_PYTHON_VENV"
-        printf 'Using a venv avoids Debian/Ubuntu PEP 668 externally-managed Python restrictions.\n'
+        printf 'Using a system-site-packages venv avoids Debian/Ubuntu PEP 668 restrictions while keeping distro Pillow visible.\n'
         run_cmd "$SUDO_BIN" install -d -m 0755 "$(dirname "$SWITCHYARD_PYTHON_VENV")"
-        run_cmd "$SUDO_BIN" "$PYTHON_BIN" -m venv "$SWITCHYARD_PYTHON_VENV"
+        run_cmd "$SUDO_BIN" "$PYTHON_BIN" -m venv --system-site-packages "$SWITCHYARD_PYTHON_VENV"
         run_cmd "$SUDO_BIN" "$SWITCHYARD_PYTHON_VENV/bin/python" -m pip install "$PIP_SPEC"
-        printf 'Verifying psycopg imports from the shared Switchyard Python venv.\n'
-        run_cmd "$SUDO_BIN" "$SWITCHYARD_PYTHON_VENV/bin/python" -c "import psycopg; print(psycopg.__version__)"
+        printf 'Verifying the ticket board entry point imports under the shared Switchyard Python venv.\n'
+        run_cmd "$SUDO_BIN" "$SWITCHYARD_PYTHON_VENV/bin/python" "$SCRIPT_DIR/ticket-board.py" --help
         ;;
     pacman)
         printf 'Not refreshing pacman package databases automatically; run %s pacman -Syu first on Arch-family systems.\n' "$SUDO_BIN"
         run_cmd "$SUDO_BIN" pacman -S --needed \
-            python postgresql tmux git curl python-pip acl
+            python postgresql tmux git curl python-pip python-pillow acl
         printf 'KDE/separate layout users also need Konsole: %s pacman -S --needed konsole\n' "$SUDO_BIN"
         printf 'Installing psycopg for the invoking user with pip on Arch-family systems.\n'
         run_cmd "$PYTHON_BIN" -m pip install --user "$PIP_SPEC"

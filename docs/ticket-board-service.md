@@ -48,10 +48,13 @@ For a legacy user-unit install, this does:
 Runtime dependency:
 
 - psycopg 3 is required by `scripts.ticket_board.app`
+- Pillow is required by module-scope `PIL` imports in `scripts.ticket_board.app`
+  and `scripts.ticket_board.server`; the prereq script installs it as
+  `python3-pil` on apt systems and `python-pillow` on Arch-family systems
 - on Ubuntu 24.04 / noble, `python3-psycopg` is packaged as `3.1.17-2`, below
   the `psycopg>=3.3,<4` runtime pin, so `scripts/install-switchyard-prereqs`
-  creates `/opt/switchyard/venv` and installs Psycopg there instead of using
-  `pip install --user`
+  creates `/opt/switchyard/venv` with system site packages visible and installs
+  Psycopg there instead of using `pip install --user`
 - on Arch/CachyOS, install it for the system Python with:
 
 ```bash
@@ -59,13 +62,12 @@ sudo pacman -S python-psycopg
 ```
 
 Debian/Ubuntu system Python is PEP-668 externally managed, so avoid plain
-`pip install --user psycopg` and do not use `--break-system-packages`. For
-isolated verification runs, create a venv with system packages visible, for
-example:
+`pip install --user psycopg` and do not use `--break-system-packages`. Verify
+the deployed board interpreter by running the entry point, not only by importing
+Psycopg:
 
 ```bash
-python3 -m venv --system-site-packages /tmp/pgu-ticket-board-venv
-/tmp/pgu-ticket-board-venv/bin/python tests/ticket_board_postgres_backend_test.py
+/opt/switchyard/venv/bin/python /home/agent/pgu-ticketboard-live/current/scripts/ticket-board.py --help
 ```
 
 The service runs:

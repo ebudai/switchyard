@@ -6,14 +6,14 @@
 
 ```bash
 sudo apt-get update
-sudo apt-get install python3 postgresql postgresql-client tmux git curl python3-venv acl
+sudo apt-get install python3 postgresql postgresql-client tmux git curl python3-venv python3-pil acl
 ```
 
 ### pacman
 
 ```bash
 sudo pacman -Syu
-sudo pacman -S python postgresql tmux git curl python-pip acl
+sudo pacman -S python postgresql tmux git curl python-pip python-pillow acl
 ```
 
 `scripts/install-switchyard-prereqs` runs `apt-get update` before apt installs
@@ -40,17 +40,21 @@ externally managed under PEP 668, so `pip install --user` is refused. Do not use
 `--break-system-packages`.
 
 On apt systems, use the shared Switchyard venv that
-`scripts/install-switchyard-prereqs` creates:
+`scripts/install-switchyard-prereqs` creates. The venv includes system site
+packages so the distro `python3-pil` package remains visible while the venv's
+Psycopg shadows noble's older distro Psycopg package:
 
 ```bash
 sudo install -d -m 0755 /opt/switchyard
-sudo python3 -m venv /opt/switchyard/venv
+sudo python3 -m venv --system-site-packages /opt/switchyard/venv
 sudo /opt/switchyard/venv/bin/python -m pip install 'psycopg>=3.3,<4'
-sudo /opt/switchyard/venv/bin/python -c 'import psycopg; print(psycopg.__version__)'
+sudo /opt/switchyard/venv/bin/python scripts/ticket-board.py --help
 ```
 
 Board service renderers prefer `/opt/switchyard/venv/bin/python` when it
-exists, so the installed Psycopg is used by the process that imports it.
+exists and is executable, so the installed Psycopg is used by the process that
+imports it. The entry-point help check above exercises the board's module-scope
+imports, including `PIL`.
 
 On Arch-family systems, the current system-user pip path remains:
 

@@ -12,7 +12,7 @@ usage() {
 Usage: scripts/install-switchyard-prereqs [--dry-run]
 
 Installs Switchyard host packages with apt or pacman, installs psycopg with pip,
-and prints the agent CLI requirement.
+and prints manual agent CLI install/authentication guidance.
 EOF
 }
 
@@ -87,6 +87,16 @@ run_cmd "$PYTHON_BIN" -m pip install --user "$PIP_SPEC"
 
 cat <<'EOF'
 
-Still required: install and authenticate at least one agent CLI: claude, codex, agy, or hermes.
+Agent CLI setup is manual; this script does not install agent CLIs.
+Switchyard needs at least one installed and authenticated agent CLI before it can run panes.
+
+Established vendor-documented Linux install methods:
+- claude: curl -fsSL https://claude.ai/install.sh | bash
+  Anthropic also publishes apt/dnf/apk repositories; the Debian/Ubuntu package is claude-code, not claude.
+- codex: curl -fsSL https://chatgpt.com/codex/install.sh | sh
+- agy: curl -fsSL https://antigravity.google/cli/install.sh | bash
+- hermes: curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+
+After installing, open the CLI and authenticate at least one of: claude, codex, agy, or hermes.
 Next step: run scripts/install-switchyard to print the privileged install block.
 EOF

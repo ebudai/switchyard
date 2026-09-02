@@ -38,12 +38,28 @@ python3 -m pip install --user 'psycopg>=3.3,<4'
 
 ## Agent CLI
 
+Agent CLI setup is manual. `scripts/install-switchyard-prereqs` does not
+install any agent CLI, because these tools are not portable distro packages on
+the target platforms and each one still needs account authentication after
+installation. The script prints the same guidance below after the OS and Python
+prereqs finish, and a failed or missing agent CLI install must not fail the host
+package run.
+
 Install and authenticate at least one of:
 
-- `claude`
-- `codex`
-- `agy`
-- `hermes`
+| CLI | Debian/Ubuntu | Arch-family | How this was established |
+| --- | --- | --- | --- |
+| `claude` | `curl -fsSL https://claude.ai/install.sh \| bash`; Anthropic also documents a signed apt repository whose Debian/Ubuntu package is `claude-code`, not `claude`. | `curl -fsSL https://claude.ai/install.sh \| bash`; no official pacman package is documented by Anthropic. | Anthropic Claude Code setup docs, "Install Claude Code" and "Install with Linux package managers". |
+| `codex` | `curl -fsSL https://chatgpt.com/codex/install.sh \| sh` | `curl -fsSL https://chatgpt.com/codex/install.sh \| sh` | Official OpenAI Codex CLI quickstart, "Install Codex". |
+| `agy` | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | Google Antigravity CLI "Installation & auth" docs. |
+| `hermes` | `curl -fsSL https://hermes-agent.nousresearch.com/install.sh \| bash` | `curl -fsSL https://hermes-agent.nousresearch.com/install.sh \| bash` | Nous Research Hermes Agent installation docs. |
+
+After installation, open the chosen CLI and complete authentication. For Codex,
+the official quickstart says to run `codex` from a project directory and sign in
+on first launch. Claude Code similarly requires running `claude` and following
+the login prompts. Antigravity opens a browser sign-in flow for `agy` when no
+saved session exists, and Hermes requires choosing or authenticating a provider,
+for example with `hermes model` or `hermes setup --portal`.
 
 ## Notes
 

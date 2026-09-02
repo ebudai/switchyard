@@ -10,17 +10,18 @@ installing.
 ## From Clone To Installed Command
 
 Start with [the fresh-machine install list](docs/fresh-machine-install.md).
-It names the operating-system packages, Python package, and agent CLI
-authentication requirements.
+It names the operating-system packages, Python package, and manual agent CLI
+installation and authentication requirements.
 
 Then run the installer scripts in this order:
 
 1. `scripts/install-switchyard-prereqs`
 
    Installs host packages with `apt` or `pacman`, installs `psycopg`, and
-   prints the agent CLI requirement. On apt systems it refreshes the package
-   index before installing. On Arch-family systems it does not run `pacman -Sy`;
-   run `sudo pacman -Syu` first as described in the fresh-machine install list.
+   prints manual agent CLI installation and authentication guidance. On apt
+   systems it refreshes the package index before installing. On Arch-family
+   systems it does not run `pacman -Sy`; run `sudo pacman -Syu` first as
+   described in the fresh-machine install list.
 
 2. `scripts/install-switchyard`
 

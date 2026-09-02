@@ -18,6 +18,7 @@ Usage: scripts/install-switchyard [--print-commands|--apply]
 Exports a tested source commit into an immutable shared release under
 /opt/switchyard, repoints /opt/switchyard/current, and installs the public
 switchyard command as a tiny trampoline to /opt/switchyard/current/switchyard.
+Run scripts/install-switchyard-prereqs first on a fresh host.
 The default mode prints the privileged command block for an operator to run;
 --apply performs it and is intended to be run under sudo.
 

@@ -43,6 +43,7 @@ def test_apt_commands() -> None:
     assert "KDE/separate layout users also need Konsole: sudo apt-get install -y konsole" in output
     assert "+ python3 -m pip install --user psycopg\\>=3.3\\,\\<4" in output
     assert "claude, codex, agy, or hermes" in output
+    assert "Next step: run scripts/install-switchyard to print the privileged install block." in output
 
 
 def test_pacman_commands() -> None:
@@ -53,6 +54,7 @@ def test_pacman_commands() -> None:
     assert "KDE/separate layout users also need Konsole: sudo pacman -S --needed konsole" in output
     assert "+ python3 -m pip install --user psycopg\\>=3.3\\,\\<4" in output
     assert "claude, codex, agy, or hermes" in output
+    assert "Next step: run scripts/install-switchyard to print the privileged install block." in output
 
 
 def test_only_konsole_left_the_base_package_sets() -> None:

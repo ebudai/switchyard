@@ -88,4 +88,5 @@ run_cmd "$PYTHON_BIN" -m pip install --user "$PIP_SPEC"
 cat <<'EOF'
 
 Still required: install and authenticate at least one agent CLI: claude, codex, agy, or hermes.
+Next step: run scripts/install-switchyard to print the privileged install block.
 EOF

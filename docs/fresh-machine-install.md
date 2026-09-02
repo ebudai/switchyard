@@ -61,8 +61,15 @@ Install and authenticate at least one of:
   only used in the pacman package set.
 - `PyYAML` is optional for preserving an existing Hermes config.
 
-## Install Script
+## Install Scripts
 
 ```bash
 scripts/install-switchyard-prereqs
+scripts/install-switchyard
 ```
+
+Run `scripts/install-switchyard-prereqs` first to install the packages and
+Python dependency listed above. Then run `scripts/install-switchyard` to print
+the privileged install command block. Applying that block needs root; a non-root
+user should inspect the printed `sudo env ... --apply` command and have a
+sudo-capable operator run it.

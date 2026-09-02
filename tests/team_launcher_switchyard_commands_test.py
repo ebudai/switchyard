@@ -5,6 +5,31 @@ from __future__ import annotations
 
 from team_launcher_test_helpers import *
 
+def _readme_switchyard_help_block() -> str:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    start = "<!-- switchyard-help:start -->"
+    end = "<!-- switchyard-help:end -->"
+    assert start in readme
+    assert end in readme
+    block = readme.split(start, 1)[1].split(end, 1)[0].strip()
+    assert block.startswith("```text\n")
+    assert block.endswith("\n```")
+    return block.removeprefix("```text\n").removesuffix("\n```")
+
+
+def test_readme_names_install_path_and_help_text_cannot_drift() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "[the fresh-machine install list](docs/fresh-machine-install.md)" in readme
+    prereq_index = readme.index("`scripts/install-switchyard-prereqs`")
+    install_index = readme.index("`scripts/install-switchyard`", prereq_index + 1)
+    commands_index = readme.index("## Commands")
+    assert prereq_index < install_index < commands_index
+    assert "Applying that block needs root." in readme
+    assert "sudo env ... --apply" in readme
+    assert _readme_switchyard_help_block() == team_launcher.switchyard_help_text().strip()
+
+
 def test_legacy_and_switchyard_entrypoints_render_same_plain_konsole_command() -> None:
     def run_entrypoint(
         argv: list[str],

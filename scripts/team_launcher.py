@@ -5887,6 +5887,75 @@ def _git_status_porcelain(repo: Path, *, runner: Callable[..., subprocess.Comple
     return str(getattr(result, "stdout", "") or "").rstrip("\n")
 
 
+def _looks_like_switchyard_release_tree(path: Path) -> bool:
+    return (
+        (path / "switchyard").is_file()
+        and (path / "scripts" / TEAM_LAUNCHER_NAME).is_file()
+        and (path / "scripts" / "ticket-board-service.sh").is_file()
+    )
+
+
+def _switchyard_release_source_error(source_repo: Path) -> str:
+    direct_marker = _read_switchyard_release_marker(source_repo)
+    if direct_marker is not None:
+        if direct_marker.marker_error:
+            return (
+                f"deploy source {source_repo} has an invalid {SWITCHYARD_RELEASE_MARKER_NAME}: "
+                f"{direct_marker.marker_error}"
+            )
+        if _looks_like_switchyard_release_tree(source_repo):
+            return ""
+        return (
+            f"deploy source {source_repo} has {SWITCHYARD_RELEASE_MARKER_NAME}, but is missing "
+            "the expected exported launcher files"
+        )
+
+    shared_release = shared_switchyard_release_for_path(source_repo)
+    if shared_release is None:
+        return "not-release"
+    if shared_release.marker_error:
+        return (
+            f"deploy source {source_repo} has an invalid shared release marker "
+            f"at {shared_release.root}: {shared_release.marker_error}"
+        )
+    if shared_release.marker_commit or _looks_like_switchyard_release_tree(source_repo):
+        return ""
+    return (
+        f"deploy source {source_repo} is under the Switchyard shared install, but is missing "
+        f"{SWITCHYARD_RELEASE_MARKER_NAME} and the expected exported launcher files"
+    )
+
+
+def _precheck_deploy_source(
+    source_repo: Path,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> list[str]:
+    if not _path_exists(source_repo):
+        return [f"deploy source {source_repo} does not exist"]
+
+    release_error = _switchyard_release_source_error(source_repo)
+    if release_error == "":
+        return []
+    if release_error != "not-release":
+        return [release_error]
+
+    has_git_metadata = (source_repo / ".git").exists()
+    try:
+        status = _git_status_porcelain(source_repo, runner=runner)
+    except SystemExit:
+        if has_git_metadata:
+            raise
+        return [
+            f"deploy source {source_repo} is neither a git checkout nor a Switchyard release; "
+            f"expected a clean Switchyard source checkout, or an exported release with "
+            f"{SWITCHYARD_RELEASE_MARKER_NAME}"
+        ]
+    if status.strip():
+        return [f"deploy checkout {source_repo} has uncommitted changes"]
+    return []
+
+
 def _system_unit_file_exists(unit: str, *, runner: Callable[..., subprocess.CompletedProcess[Any]]) -> bool:
     try:
         result = runner(
@@ -5976,12 +6045,7 @@ def precheck_new_project(
         errors.append(f"target user {plan.owner_user!r} does not exist")
     if require_repository and not _path_exists(repository):
         errors.append(f"project repository {repository} does not exist")
-    if not _path_exists(source_repo):
-        errors.append(f"deploy checkout {source_repo} does not exist")
-    else:
-        status = _git_status_porcelain(source_repo, runner=runner)
-        if status.strip():
-            errors.append(f"deploy checkout {source_repo} has uncommitted changes")
+    errors.extend(_precheck_deploy_source(source_repo, runner=runner))
     unit_exists = _system_unit_file_exists(plan.board_unit, runner=runner)
     database_exists = _database_exists(plan.database, runner=runner)
     socket_path = Path(plan.socket_path)
@@ -6442,6 +6506,12 @@ def _switchyard_source_commit(
     *,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
 ) -> str:
+    direct_marker = _read_switchyard_release_marker(source_repo)
+    if direct_marker is not None and direct_marker.marker_commit:
+        return direct_marker.marker_commit
+    shared_release = shared_switchyard_release_for_path(source_repo)
+    if shared_release is not None and shared_release.marker_commit:
+        return shared_release.marker_commit
     proc = run_owner_correct_git(
         ["git", "-C", str(source_repo), "rev-parse", "--verify", "HEAD"],
         runner=runner,
@@ -9606,7 +9676,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--owner-user", help="new project owner Unix user (default: <project>-agent)")
     parser.add_argument("--port", type=int, help="new project board port; omitted means deterministic allocation")
     parser.add_argument("--database", help="new project PostgreSQL database; omitted means <project>_ticket_board")
-    parser.add_argument("--source-repo", type=Path, help="source checkout to deploy for new project provisioning")
+    parser.add_argument("--source-repo", type=Path, help="Switchyard source checkout or exported release to deploy")
     parser.add_argument("--repository", type=Path, help="project working checkout opened by generated panes")
     parser.add_argument("--from", dest="from_artifact", type=Path, help="project artifact emitted by the design command")
     parser.add_argument("--new-output-dir", type=Path, help="write new-project artifacts here")
@@ -9652,7 +9722,7 @@ def _build_switchyard_new_parser() -> argparse.ArgumentParser:
     parser.add_argument("--project-name", help="human project name; prompted when omitted")
     parser.add_argument("--project-path", type=Path, help="project working directory; prompted when omitted")
     parser.add_argument("--from", dest="from_artifact", type=Path, help="project artifact emitted by the design session")
-    parser.add_argument("--source-repo", type=Path, help="switchyard source checkout to deploy")
+    parser.add_argument("--source-repo", type=Path, help="Switchyard source checkout or exported release to deploy")
     parser.add_argument("--output-dir", type=Path, help="write provisioning artifacts here")
     parser.add_argument("--port", type=int, help="HTTP port; omitted means deterministic allocation")
     parser.add_argument("--database", help="PostgreSQL database; omitted means <slug>_ticket_board")
@@ -9687,7 +9757,7 @@ def _build_switchyard_upgrade_parser() -> argparse.ArgumentParser:
     parser.add_argument("project", help="project name or slug")
     parser.add_argument("--dry-run", action="store_true", help="report what would change without writing files")
     parser.add_argument("--deploy-ref", default=DEFAULT_TENANT_RELEASE_DEPLOY_REF, help="board release ref to deploy (default: origin/main)")
-    parser.add_argument("--source-repo", type=Path, help="source checkout to export into the tenant board release")
+    parser.add_argument("--source-repo", type=Path, help="Switchyard source checkout or exported release to deploy")
     return parser
 
 

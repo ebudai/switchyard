@@ -5,6 +5,19 @@ from __future__ import annotations
 
 from team_launcher_test_helpers import *
 
+def _write_exported_switchyard_release(source_repo: Path, *, commit: str = REMOTE_HEAD) -> None:
+    source_repo.mkdir(parents=True, exist_ok=True)
+    (source_repo / team_launcher.SWITCHYARD_RELEASE_MARKER_NAME).write_text(
+        json.dumps({"commit": commit}) + "\n",
+        encoding="utf-8",
+    )
+    (source_repo / "switchyard").write_text("#!/bin/sh\n", encoding="utf-8")
+    scripts_dir = source_repo / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / team_launcher.TEAM_LAUNCHER_NAME).write_text("#!/bin/sh\n", encoding="utf-8")
+    (scripts_dir / "ticket-board-service.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+
+
 def test_project_artifact_rejects_stage_configuration() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-design.") as tmp:
         tmp_path = Path(tmp)
@@ -138,6 +151,174 @@ def test_new_project_precheck_fails_before_sudo_when_repo_is_dirty() -> None:
     assert "uncommitted changes" in message
     assert not any(call[:1] == ["sudo"] for call in runner.calls)
     assert not any(call[:1] == ["bash"] for call in runner.calls)
+
+def test_new_project_accepts_exported_switchyard_release_without_git_status() -> None:
+    current_user = team_launcher.current_user_name()
+
+    class NoGitStatusRunner(FakeRunner):
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            if len(args) >= 5 and args[:4] == ["git", "-C", args[2], "status"]:
+                raise AssertionError("exported releases must not run git status")
+            return super().__call__(args, **kwargs)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-release-source.") as tmp:
+        tmp_path = Path(tmp)
+        output_dir = tmp_path / "out"
+        source_repo = tmp_path / "release"
+        _write_exported_switchyard_release(source_repo)
+        project_repo = tmp_path / "project-repo"
+        project_repo.mkdir()
+        runner = NoGitStatusRunner()
+
+        assert (
+            new_project_command(
+                "porter",
+                owner_user=current_user,
+                source_repo=source_repo,
+                repository=project_repo,
+                output_dir=output_dir,
+                runner=runner,
+                port_in_use=lambda _port: False,
+                socket_exists=lambda _path: False,
+            )
+            == 0
+        )
+        assert (output_dir / "plan.json").exists()
+
+    assert not any(call[:1] == ["sudo"] for call in runner.calls)
+
+def test_switchyard_new_accepts_exported_switchyard_release_without_git_status() -> None:
+    class ReleaseInstallRunner(FakeRunner):
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            if len(args) >= 5 and args[:4] == ["git", "-C", args[2], "status"]:
+                raise AssertionError("switchyard new must not dirty-check exported releases")
+            if args[:2] == ["id", "-u"]:
+                return subprocess.CompletedProcess(args, 1)
+            if args[:1] == ["useradd"]:
+                return subprocess.CompletedProcess(args, 0)
+            if args[:1] == ["install"] and args[-1]:
+                target = Path(args[-1])
+                if str(target).startswith(tempfile.gettempdir()):
+                    target.mkdir(parents=True, exist_ok=True)
+                return subprocess.CompletedProcess(args, 0)
+            return super().__call__(args, **kwargs)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new-release-source.") as tmp:
+        tmp_path = Path(tmp)
+        source_repo = tmp_path / "opt" / "switchyard" / "releases" / REMOTE_HEAD
+        _write_exported_switchyard_release(source_repo)
+        project_dir = tmp_path / "home" / "otto-agent" / "Projects" / "porter"
+        output_dir = tmp_path / "out"
+        runner = ReleaseInstallRunner()
+
+        assert (
+            switchyard_new_command(
+                slug="porter",
+                agent_name="otto-agent",
+                project_name="Porter",
+                project_path=project_dir,
+                source_repo=source_repo,
+                output_dir=output_dir,
+                role_clis=LEGACY_SWITCHYARD_ROLE_CLIS,
+                yes=True,
+                allow_existing_owner_user=True,
+                home_base=tmp_path / "home",
+                euid_getter=lambda: 0,
+                runner=runner,
+                input_func=lambda _prompt: "",
+                port_in_use=lambda _port: False,
+                socket_exists=lambda _path: False,
+                session_record_timeout=0,
+                registry_dir=tmp_path / "registry",
+                konsole_process_launcher=RecordingProcessLauncher(),
+            )
+            == 0
+        )
+        assert (output_dir / "plan.json").exists()
+
+def test_new_project_dirty_git_checkout_still_fails_precheck() -> None:
+    current_user = team_launcher.current_user_name()
+
+    class GitAndPrecheckRunner(FakeRunner):
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            if args[:1] == ["git"]:
+                return subprocess.run(args, **kwargs)
+            return super().__call__(args, **kwargs)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-dirty-source.") as tmp:
+        tmp_path = Path(tmp)
+        source_repo = tmp_path / "source-repo"
+        source_repo.mkdir()
+        _run_git(["git", "init", "-b", "main"], cwd=source_repo)
+        _run_git(["git", "config", "user.email", "agent@example.invalid"], cwd=source_repo)
+        _run_git(["git", "config", "user.name", "PGU Agent"], cwd=source_repo)
+        tracked = source_repo / "tracked.txt"
+        tracked.write_text("clean\n", encoding="utf-8")
+        _run_git(["git", "add", "tracked.txt"], cwd=source_repo)
+        _run_git(["git", "commit", "-m", "initial"], cwd=source_repo)
+        tracked.write_text("dirty\n", encoding="utf-8")
+        project_repo = tmp_path / "project-repo"
+        project_repo.mkdir()
+        runner = GitAndPrecheckRunner()
+
+        try:
+            new_project_command(
+                "porter",
+                owner_user=current_user,
+                source_repo=source_repo,
+                repository=project_repo,
+                output_dir=tmp_path / "out",
+                runner=runner,
+                port_in_use=lambda _port: False,
+                socket_exists=lambda _path: False,
+            )
+            raise AssertionError("expected dirty checkout precheck failure")
+        except SystemExit as exc:
+            message = str(exc)
+
+    assert "deploy checkout" in message
+    assert "uncommitted changes" in message
+    assert not any(call[:1] == ["sudo"] for call in runner.calls)
+
+def test_new_project_rejects_source_that_is_neither_checkout_nor_release() -> None:
+    current_user = team_launcher.current_user_name()
+
+    class NotRepoRunner(FakeRunner):
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if len(args) >= 5 and args[:4] == ["git", "-C", args[2], "status"]:
+                return subprocess.CompletedProcess(
+                    args,
+                    128,
+                    stderr="fatal: not a git repository (or any of the parent directories): .git\n",
+                )
+            return super().__call__(args, **kwargs)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-arbitrary-source.") as tmp:
+        tmp_path = Path(tmp)
+        source_repo = tmp_path / "not-switchyard"
+        source_repo.mkdir()
+        project_repo = tmp_path / "project-repo"
+        project_repo.mkdir()
+        runner = NotRepoRunner()
+        try:
+            new_project_command(
+                "porter",
+                owner_user=current_user,
+                source_repo=source_repo,
+                repository=project_repo,
+                output_dir=tmp_path / "out",
+                runner=runner,
+                port_in_use=lambda _port: False,
+                socket_exists=lambda _path: False,
+            )
+            raise AssertionError("expected arbitrary source precheck failure")
+        except SystemExit as exc:
+            message = str(exc)
+
+    assert "neither a git checkout nor a Switchyard release" in message
+    assert "expected a clean Switchyard source checkout" in message
+    assert "fatal: not a git repository" not in message
 
 def test_new_project_precheck_ignores_untracked_checkout_junk() -> None:
     current_user = team_launcher.current_user_name()

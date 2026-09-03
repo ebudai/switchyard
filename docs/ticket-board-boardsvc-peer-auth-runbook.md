@@ -68,9 +68,21 @@ writable by `boardsvc`.
 The user step creates `boardsvc` as a system account with no home directory and
 `/usr/sbin/nologin`, so it exists only to run the board service.
 
-The PostgreSQL step discovers `pg_hba.conf` and `pg_ident.conf` with `SHOW
-hba_file` / `SHOW ident_file`, appends these idempotent rules, and reloads
-Postgres:
+The PostgreSQL step discovers `pg_hba.conf`, `pg_ident.conf`, and
+`server_version_num` with `SHOW`. PostgreSQL HBA rules are first-match-wins, so
+the service rule must be reachable before Debian's stock `local all all peer`
+catch-all. On PostgreSQL 16 and newer the helper creates adjacent
+`switchyard-ticket-board.pg_hba.conf` and
+`switchyard-ticket-board.pg_ident.conf` files, then inserts one
+`include_if_exists /path/to/switchyard-ticket-board.pg_hba.conf` line into the
+main `pg_hba.conf` immediately before the
+first uncommented `local all all` catch-all. PostgreSQL 16 is the version floor
+because that release added HBA/ident include directives. Older PostgreSQL
+clusters fall back to inserting the direct HBA rule at that same point. The
+`local all postgres peer` maintenance rule remains above Switchyard's include or
+direct rule.
+
+The installed rules are idempotent and reload Postgres:
 
 ```text
 local   pgu   ticket_board_service   peer map=pgu_ticket_board_service
@@ -177,8 +189,12 @@ sudo -u agent XDG_RUNTIME_DIR=/run/user/$(id -u agent) \
   systemctl --user enable --now pgu-ticket-board.service
 ```
 
-Remove the peer-auth lines added for `pgu_ticket_board_service` from
-`pg_hba.conf` and `pg_ident.conf`, then reload Postgres:
+Remove the peer-auth include directives added for `pgu_ticket_board_service`
+from `pg_hba.conf` and `pg_ident.conf`, remove
+`switchyard-ticket-board.pg_hba.conf` and
+`switchyard-ticket-board.pg_ident.conf` if they are present, and reload
+Postgres. On older clusters that used the fallback path, remove the direct
+peer-auth lines from `pg_hba.conf` and `pg_ident.conf` instead.
 
 ```bash
 sudo -u postgres psql -Atqc "select pg_reload_conf();"

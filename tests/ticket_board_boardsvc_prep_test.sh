@@ -9,7 +9,17 @@ TMPFILES="$REPO_ROOT/deploy/tmpfiles/pgu-ticket-board.conf"
 POLKIT_RULE="$REPO_ROOT/deploy/polkit/49-pgu-board-deploy.rules"
 RUNBOOK="$REPO_ROOT/docs/ticket-board-boardsvc-peer-auth-runbook.md"
 TMPDIR_T="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR_T"' EXIT
+trap 'if [[ -n "${PGDATA_DIR:-}" && -d "$PGDATA_DIR" ]]; then pg_ctl -D "$PGDATA_DIR" -m fast -w stop >/dev/null 2>&1 || true; fi; rm -rf "$TMPDIR_T"' EXIT
+
+free_port() {
+    python3 - <<'PY'
+import socket
+
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+}
 
 [[ -x "$SCRIPT" ]] || {
     echo "FAIL: setup script is missing or not executable" >&2
@@ -23,6 +33,14 @@ grep -q 'useradd -r -M -d /nonexistent -s /usr/sbin/nologin' "$SCRIPT" || {
 }
 grep -q 'peer map=\$PG_IDENT_MAP' "$SCRIPT" || {
     echo "FAIL: setup script does not configure peer auth with an ident map" >&2
+    exit 1
+}
+grep -q 'insert_block_before_local_catchall_once' "$SCRIPT" || {
+    echo "FAIL: setup script does not place pg_hba auth before local all/all catch-alls" >&2
+    exit 1
+}
+grep -q 'server_version_num' "$SCRIPT" || {
+    echo "FAIL: setup script does not gate pg_hba includes by PostgreSQL version" >&2
     exit 1
 }
 grep -q '\$PG_IDENT_MAP   \$SERVICE_USER   \$SERVICE_ROLE' "$SCRIPT" || {
@@ -94,6 +112,9 @@ case "$*" in
     *"SHOW ident_file"*)
         printf '%s\n' "$FAKE_IDENT_FILE"
         ;;
+    *"SHOW server_version_num"*)
+        printf '%s\n' "${FAKE_SERVER_VERSION_NUM:-160000}"
+        ;;
     *"SELECT pg_reload_conf();"*)
         printf 'reload\n' >>"$FAKE_RELOADS_FILE"
         printf 't\n'
@@ -113,7 +134,12 @@ chmod +x "$FAKE_BIN/id" "$FAKE_BIN/runuser" "$FAKE_BIN/useradd"
 FAKE_HBA="$TMPDIR_T/pg_hba.conf"
 FAKE_IDENT="$TMPDIR_T/pg_ident.conf"
 FAKE_RELOADS="$TMPDIR_T/reloads.log"
-: >"$FAKE_HBA"
+cat >"$FAKE_HBA" <<'HBA'
+# Debian keeps the postgres maintenance rule above the local catch-all.
+local   all             postgres                                peer
+local   all             all                                     peer
+host    all             all             127.0.0.1/32            scram-sha-256
+HBA
 : >"$FAKE_IDENT"
 : >"$FAKE_RELOADS"
 PATH="$FAKE_BIN:$PATH" FAKE_HBA_FILE="$FAKE_HBA" FAKE_IDENT_FILE="$FAKE_IDENT" FAKE_RELOADS_FILE="$FAKE_RELOADS" \
@@ -122,17 +148,127 @@ PATH="$FAKE_BIN:$PATH" FAKE_HBA_FILE="$FAKE_HBA" FAKE_IDENT_FILE="$FAKE_IDENT" F
 PATH="$FAKE_BIN:$PATH" FAKE_HBA_FILE="$FAKE_HBA" FAKE_IDENT_FILE="$FAKE_IDENT" FAKE_RELOADS_FILE="$FAKE_RELOADS" \
     PG_DATABASE=tenant_ticket_board SERVICE_USER=boardsvc SERVICE_ROLE=ticket_board_service PG_IDENT_MAP=pgu_ticket_board_service \
     "$SCRIPT" --apply-peer-auth >/dev/null
-if [ "$(grep -cFx 'local   tenant_ticket_board   ticket_board_service   peer map=pgu_ticket_board_service' "$FAKE_HBA")" != "1" ]; then
-    echo "FAIL: peer-auth hba line should be appended idempotently" >&2
+FAKE_HBA_INCLUDE="$TMPDIR_T/switchyard-ticket-board.pg_hba.conf"
+FAKE_IDENT_INCLUDE="$TMPDIR_T/switchyard-ticket-board.pg_ident.conf"
+if [ "$(grep -cFx "include_if_exists $FAKE_HBA_INCLUDE" "$FAKE_HBA")" != "1" ]; then
+    echo "FAIL: peer-auth hba include should be inserted idempotently" >&2
     exit 1
 fi
-if [ "$(grep -cFx 'pgu_ticket_board_service   boardsvc   ticket_board_service' "$FAKE_IDENT")" != "1" ]; then
-    echo "FAIL: peer-auth ident line should be appended idempotently" >&2
+postgres_line="$(grep -nFx 'local   all             postgres                                peer' "$FAKE_HBA" | cut -d: -f1)"
+include_line="$(grep -nFx "include_if_exists $FAKE_HBA_INCLUDE" "$FAKE_HBA" | cut -d: -f1)"
+catchall_line="$(grep -nFx 'local   all             all                                     peer' "$FAKE_HBA" | cut -d: -f1)"
+if [ "$postgres_line" -ge "$include_line" ] || [ "$include_line" -ge "$catchall_line" ]; then
+    echo "FAIL: peer-auth include must be after local all/postgres and before local all/all" >&2
+    nl -ba "$FAKE_HBA" >&2
+    exit 1
+fi
+if [ "$(grep -cFx 'local   tenant_ticket_board   ticket_board_service   peer map=pgu_ticket_board_service' "$FAKE_HBA_INCLUDE")" != "1" ]; then
+    echo "FAIL: peer-auth hba line should be written idempotently to the include file" >&2
+    exit 1
+fi
+if [ "$(grep -cFx "include_if_exists $FAKE_IDENT_INCLUDE" "$FAKE_IDENT")" != "1" ]; then
+    echo "FAIL: peer-auth ident include should be appended idempotently" >&2
+    exit 1
+fi
+if [ "$(grep -cFx 'pgu_ticket_board_service   boardsvc   ticket_board_service' "$FAKE_IDENT_INCLUDE")" != "1" ]; then
+    echo "FAIL: peer-auth ident line should be written idempotently to the include file" >&2
     exit 1
 fi
 if [ "$(grep -cFx 'reload' "$FAKE_RELOADS")" != "2" ]; then
     echo "FAIL: peer-auth apply should reload PostgreSQL on each run" >&2
     exit 1
+fi
+
+FAKE_HBA_15="$TMPDIR_T/pg15_pg_hba.conf"
+FAKE_IDENT_15="$TMPDIR_T/pg15_pg_ident.conf"
+FAKE_RELOADS_15="$TMPDIR_T/pg15_reloads.log"
+cat >"$FAKE_HBA_15" <<'HBA'
+# Debian keeps the postgres maintenance rule above the local catch-all.
+local   all             postgres                                peer
+local   all             all                                     peer
+host    all             all             127.0.0.1/32            scram-sha-256
+HBA
+: >"$FAKE_IDENT_15"
+: >"$FAKE_RELOADS_15"
+PATH="$FAKE_BIN:$PATH" FAKE_SERVER_VERSION_NUM=150000 FAKE_HBA_FILE="$FAKE_HBA_15" FAKE_IDENT_FILE="$FAKE_IDENT_15" FAKE_RELOADS_FILE="$FAKE_RELOADS_15" \
+    PG_DATABASE=tenant_ticket_board SERVICE_USER=boardsvc SERVICE_ROLE=ticket_board_service PG_IDENT_MAP=pgu_ticket_board_service \
+    "$SCRIPT" --apply-peer-auth >/dev/null
+PATH="$FAKE_BIN:$PATH" FAKE_SERVER_VERSION_NUM=150000 FAKE_HBA_FILE="$FAKE_HBA_15" FAKE_IDENT_FILE="$FAKE_IDENT_15" FAKE_RELOADS_FILE="$FAKE_RELOADS_15" \
+    PG_DATABASE=tenant_ticket_board SERVICE_USER=boardsvc SERVICE_ROLE=ticket_board_service PG_IDENT_MAP=pgu_ticket_board_service \
+    "$SCRIPT" --apply-peer-auth >/dev/null
+if grep -q '^include_if_exists ' "$FAKE_HBA_15"; then
+    echo "FAIL: PostgreSQL 15 fallback should insert the direct hba rule, not an include" >&2
+    nl -ba "$FAKE_HBA_15" >&2
+    exit 1
+fi
+if [ "$(grep -cFx 'local   tenant_ticket_board   ticket_board_service   peer map=pgu_ticket_board_service' "$FAKE_HBA_15")" != "1" ]; then
+    echo "FAIL: PostgreSQL 15 fallback should insert the direct hba rule idempotently" >&2
+    exit 1
+fi
+postgres_line="$(grep -nFx 'local   all             postgres                                peer' "$FAKE_HBA_15" | cut -d: -f1)"
+rule_line="$(grep -nFx 'local   tenant_ticket_board   ticket_board_service   peer map=pgu_ticket_board_service' "$FAKE_HBA_15" | cut -d: -f1)"
+catchall_line="$(grep -nFx 'local   all             all                                     peer' "$FAKE_HBA_15" | cut -d: -f1)"
+if [ "$postgres_line" -ge "$rule_line" ] || [ "$rule_line" -ge "$catchall_line" ]; then
+    echo "FAIL: PostgreSQL 15 fallback hba rule must be after local all/postgres and before local all/all" >&2
+    nl -ba "$FAKE_HBA_15" >&2
+    exit 1
+fi
+if [ "$(grep -cFx 'pgu_ticket_board_service   boardsvc   ticket_board_service' "$FAKE_IDENT_15")" != "1" ]; then
+    echo "FAIL: PostgreSQL 15 fallback should append the direct ident map idempotently" >&2
+    exit 1
+fi
+
+if command -v initdb >/dev/null 2>&1 && command -v pg_ctl >/dev/null 2>&1 && command -v createdb >/dev/null 2>&1 && command -v psql >/dev/null 2>&1; then
+    PGDATA_DIR="$TMPDIR_T/pgdata"
+    SOCKET_DIR="$TMPDIR_T/socket"
+    mkdir -p "$SOCKET_DIR"
+    PORT="$(free_port)"
+    REACHABILITY_DB="switchyard_peer_reachability"
+    CURRENT_OS_USER="$(id -un)"
+
+    initdb -D "$PGDATA_DIR" -A trust --no-locale --username=postgres >/dev/null
+    pg_ctl -D "$PGDATA_DIR" -o "-k $SOCKET_DIR -p $PORT -h ''" -w start >/dev/null
+    createdb -h "$SOCKET_DIR" -p "$PORT" -U postgres "$REACHABILITY_DB"
+    psql -X -v ON_ERROR_STOP=1 -h "$SOCKET_DIR" -p "$PORT" -U postgres "$REACHABILITY_DB" \
+        -c "CREATE ROLE ticket_board_service LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;" >/dev/null
+    pg_ctl -D "$PGDATA_DIR" -m fast -w stop >/dev/null
+
+    cat >"$PGDATA_DIR/pg_hba.conf" <<HBA
+local   all                         postgres                                peer
+include_if_exists $PGDATA_DIR/switchyard-ticket-board.pg_hba.conf
+local   all                         all                                     peer
+HBA
+    cat >"$PGDATA_DIR/switchyard-ticket-board.pg_hba.conf" <<HBA
+local   $REACHABILITY_DB            ticket_board_service                    peer map=pgu_ticket_board_service
+HBA
+    cat >"$PGDATA_DIR/pg_ident.conf" <<IDENT
+include_if_exists $PGDATA_DIR/switchyard-ticket-board.pg_ident.conf
+IDENT
+    cat >"$PGDATA_DIR/switchyard-ticket-board.pg_ident.conf" <<IDENT
+pgu_ticket_board_service            $CURRENT_OS_USER                        ticket_board_service
+IDENT
+
+    pg_ctl -D "$PGDATA_DIR" -o "-k $SOCKET_DIR -p $PORT -h ''" -w start >/dev/null
+    reached_user="$(
+        psql -X -v ON_ERROR_STOP=1 -h "$SOCKET_DIR" -p "$PORT" -U ticket_board_service "$REACHABILITY_DB" -tA \
+            -c "SELECT current_user"
+    )"
+    if [ "$reached_user" != "ticket_board_service" ]; then
+        echo "FAIL: peer-auth reachability returned unexpected current_user: $reached_user" >&2
+        exit 1
+    fi
+    postgres_line="$(grep -n '^local[[:space:]]\+all[[:space:]]\+postgres[[:space:]]\+peer' "$PGDATA_DIR/pg_hba.conf" | cut -d: -f1)"
+    include_line="$(grep -n "^include_if_exists $PGDATA_DIR/switchyard-ticket-board.pg_hba.conf$" "$PGDATA_DIR/pg_hba.conf" | cut -d: -f1)"
+    catchall_line="$(grep -n '^local[[:space:]]\+all[[:space:]]\+all[[:space:]]\+peer' "$PGDATA_DIR/pg_hba.conf" | cut -d: -f1)"
+    if [ "$postgres_line" -ge "$include_line" ] || [ "$include_line" -ge "$catchall_line" ]; then
+        echo "FAIL: reachability cluster did not preserve local all/postgres before the switchyard include" >&2
+        nl -ba "$PGDATA_DIR/pg_hba.conf" >&2
+        exit 1
+    fi
+    pg_ctl -D "$PGDATA_DIR" -m fast -w stop >/dev/null
+    PGDATA_DIR=""
+else
+    echo "ticket_board_boardsvc_prep_test: reachability check skipped, missing PostgreSQL test tools" >&2
 fi
 
 grep -q '^User=boardsvc$' "$UNIT" || {

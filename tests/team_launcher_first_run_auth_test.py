@@ -392,7 +392,10 @@ def test_first_run_auth_phase_reports_missing_cli_separately_from_login() -> Non
         assert messages == [
             "switchyard: first-run setup manifest for owner user otto-agent: "
             "0 login step(s), 0 folder trust step(s), 0 codex hook approval(s), 1 missing CLI(s)",
-            "switchyard: missing CLI agy: install agy for owner user otto-agent; affected roles: inspector",
+            "switchyard: missing CLI agy (affected roles: inspector): install agy for owner user "
+            "otto-agent with: curl -fsSL https://antigravity.google/cli/install.sh | bash",
+            "switchyard: install each one for owner user otto-agent; panes run as that user, so a CLI "
+            "installed only for the user running switchyard is not found.",
         ], status_returncode
         assert runner.calls == [
             ["sudo", "-u", "otto-agent", "agy", "models"],
@@ -403,8 +406,9 @@ def test_first_run_auth_phase_reports_missing_cli_separately_from_login() -> Non
         output: list[str] = []
         team_launcher.report_first_run_auth_warnings(report, print_func=output.append)
         assert output == [
-            "warning: switchyard: agy is not installed for owner user otto-agent; "
-            "install agy for owner user otto-agent; affected roles: inspector"
+            "warning: switchyard: agy is not installed for owner user otto-agent "
+            "(affected roles: inspector); install agy for owner user otto-agent with: "
+            "curl -fsSL https://antigravity.google/cli/install.sh | bash"
         ], status_returncode
 
 

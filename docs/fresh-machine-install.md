@@ -96,7 +96,11 @@ that will own the project** -- a CLI installed only for the human who runs
 Switchyard never runs the commands below. They are recorded here as the
 vendor-documented Linux methods observed when this file was written; check
 each against the vendor's own documentation, which is authoritative and moves
-without telling us. Before running any `curl ... | bash` or `curl ... | sh`
+without telling us. The same four commands are printed by Switchyard when a
+project's role needs a CLI that is not installed, from
+`AGENT_CLI_INSTALL_COMMANDS` in `scripts/team_launcher.py` -- update both
+together. A test asserts this table and that one agree, so they cannot drift
+apart quietly. Before running any `curl ... | bash` or `curl ... | sh`
 command, you can fetch the script URL without piping it and read the script
 first.
 

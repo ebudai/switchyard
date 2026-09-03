@@ -6792,8 +6792,57 @@ FIRST_RUN_AUTH_LOGIN_COMMANDS: dict[str, list[str]] = {
     "codex": ["codex", "login"],
     "hermes": ["hermes", "model"],
 }
+# Vendor install commands, as TEXT for a person to run themselves. Switchyard
+# never executes these. PGU-904 removed agent CLI installation deliberately --
+# the user owns which version of each CLI they run -- and wiring this table to a
+# subprocess would put that straight back. If you are here to "finish the job"
+# by making these runnable, that is the thing this table exists to prevent.
+#
+# These strings WILL drift as vendors change their installers, and that is the
+# accepted trade: a stale command in a message a person reads and can correct is
+# a far smaller failure than a stale command we run on their machine. Verified
+# on 2026-09-03 by fetching each URL without piping it -- every one served a
+# shell script for the expected CLI, and the interpreter matches each script's
+# shebang (claude, agy and hermes are bash; codex is sh).
+#
+# docs/fresh-machine-install.md carries the same four commands for a reader who
+# has not run anything yet. Update both together; a test asserts they agree.
+AGENT_CLI_INSTALL_COMMANDS: dict[str, str] = {
+    "agy": "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+    "claude": "curl -fsSL https://claude.ai/install.sh | bash",
+    "codex": "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+    "hermes": "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
+}
 FIRST_RUN_TRUST_CLIS = frozenset({"agy", "claude"})
 MODEL_VALIDATION_PROMPT = "Reply with exactly: model-ok"
+
+
+def _missing_cli_install_clause(cli: str, owner_user: str = "") -> str:
+    """How to install one missing CLI, as text the reader runs themselves.
+
+    Names the owner user because installing a CLI only for the human running
+    switchyard is the failure people actually hit: panes run as the owner, so a
+    CLI on the invoking user's PATH is invisible to them.
+    """
+    owner = (owner_user or "").strip()
+    target = f" for owner user {owner}" if owner else ""
+    command = AGENT_CLI_INSTALL_COMMANDS.get(cli, "")
+    if not command:
+        return f"install {cli}{target} with that vendor's own installer"
+    return f"install {cli}{target} with: {command}"
+
+
+def _owner_user_cli_reminder(owner_user: str = "") -> str:
+    owner = (owner_user or "").strip()
+    if not owner:
+        return (
+            "switchyard: panes run as the project's owner user, so a CLI installed only "
+            "for the user running switchyard is not found."
+        )
+    return (
+        f"switchyard: install each one for owner user {owner}; panes run as that user, so a CLI "
+        "installed only for the user running switchyard is not found."
+    )
 
 
 def _owner_shell_issue(owner_user: str) -> OwnerShellIssue | None:
@@ -7979,9 +8028,11 @@ def _format_first_run_setup_manifest(manifest: FirstRunSetupManifest) -> list[st
         )
     for cli, roles in manifest.missing_cli_roles.items():
         lines.append(
-            f"switchyard: missing CLI {cli}: install {cli} for owner user {manifest.owner_user}; "
-            f"affected roles: {', '.join(roles)}"
+            f"switchyard: missing CLI {cli} (affected roles: {', '.join(roles)}): "
+            f"{_missing_cli_install_clause(cli, manifest.owner_user)}"
         )
+    if manifest.missing_cli_roles:
+        lines.append(_owner_user_cli_reminder(manifest.owner_user))
     for step in manifest.login_steps:
         lines.append(
             f"switchyard: login {step.cli}: roles {', '.join(step.roles)}; "
@@ -8116,8 +8167,9 @@ def report_first_run_auth_warnings(
     owner_detail = f" for owner user {report.owner_user}" if report.owner_user else ""
     for cli, roles in report.missing_cli_roles.items():
         print_func(
-            f"warning: switchyard: {cli} is not installed{owner_detail}; "
-            f"install {cli}{owner_detail}; affected roles: {', '.join(roles)}"
+            f"warning: switchyard: {cli} is not installed{owner_detail} "
+            f"(affected roles: {', '.join(roles)}); "
+            f"{_missing_cli_install_clause(cli, report.owner_user)}"
         )
     if report.owner_shell_issue:
         issue = report.owner_shell_issue
@@ -8148,10 +8200,20 @@ def _format_missing_cli_launch_failure(report: FirstRunAuthReport) -> str:
     cli_details = "; ".join(
         f"{cli} (roles: {', '.join(roles)})" for cli, roles in report.missing_cli_roles.items()
     )
-    return (
+    lines = [
         f"switchyard: cannot launch panes because required CLI(s) are missing{owner_detail}: "
-        f"{cli_details}. Install the missing CLI(s){owner_detail} and rerun switchyard."
+        f"{cli_details}. Install the missing CLI(s){owner_detail} and rerun switchyard.",
+        _owner_user_cli_reminder(report.owner_user),
+    ]
+    width = max((len(cli) for cli in report.missing_cli_roles), default=0)
+    for cli in report.missing_cli_roles:
+        command = AGENT_CLI_INSTALL_COMMANDS.get(cli, "")
+        detail = command or "see that vendor's own installation documentation"
+        lines.append(f"switchyard:   {cli.ljust(width)}  {detail}")
+    lines.append(
+        "switchyard: these commands are yours to run; switchyard does not install agent CLIs."
     )
+    return "\n".join(lines)
 
 
 def stop_before_launch_for_missing_owner_clis(

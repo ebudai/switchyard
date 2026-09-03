@@ -234,7 +234,10 @@ def test_first_run_auth_phase_skips_model_validation_for_unauthenticated_or_miss
     assert messages == [
         "switchyard: first-run setup manifest for owner user otto-agent: "
         "1 login step(s), 0 folder trust step(s), 0 codex hook approval(s), 1 missing CLI(s)",
-        "switchyard: missing CLI agy: install agy for owner user otto-agent; affected roles: inspector",
+        "switchyard: missing CLI agy (affected roles: inspector): install agy for owner user "
+        "otto-agent with: curl -fsSL https://antigravity.google/cli/install.sh | bash",
+        "switchyard: install each one for owner user otto-agent; panes run as that user, so a CLI "
+        "installed only for the user running switchyard is not found.",
         "switchyard: login codex: roles ops; interactive account setup running codex login as otto-agent",
     ]
 

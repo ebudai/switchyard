@@ -850,7 +850,7 @@ def test_new_project_execute_warms_sudo_once_then_runs_generated_script() -> Non
     assert runner.calls[bash_index] == ["bash", str(output_dir / "operator-commands.sh")]
     assert runner.call_kwargs[bash_index]["cwd"] == str(output_dir)
 
-def test_new_project_rerun_rejects_fully_provisioned_project_before_mutating() -> None:
+def test_new_project_rerun_rejects_partially_provisioned_unregistered_project_before_mutating() -> None:
     current_user = team_launcher.current_user_name()
 
     class FullyProvisionedRunner(FakeRunner):
@@ -886,19 +886,96 @@ def test_new_project_rerun_rejects_fully_provisioned_project_before_mutating() -
                 port_in_use=lambda _port: True,
                 socket_exists=lambda _path: True,
             )
-            raise AssertionError("expected fully provisioned precheck failure")
+            raise AssertionError("expected partially provisioned precheck failure")
         except SystemExit as exc:
             message = str(exc)
 
         assert not (tmp_path / "out").exists()
 
+    assert "project 'porter' is partially provisioned but not registered" in message
+    assert "database porter_ticket_board has 12 ticket_board tables" in message
+    assert "porter-ticket-board.service is installed" in message
+    assert "no usable launch entry exists" in message
+    assert "switchyard cannot launch it until registration is repaired or the partial provision is torn down" in message
+    assert "to launch it:      switchyard porter" not in message
+    assert "to start over:" not in message
+    assert not any(call[:1] == ["sudo"] for call in runner.calls)
+    assert not any(call[:1] == ["bash"] for call in runner.calls)
+
+
+def test_precheck_registered_provisioned_project_names_working_launch_command() -> None:
+    class FullyProvisionedRunner(FakeRunner):
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if args[:3] == ["systemctl", "list-unit-files", "--no-legend"]:
+                return subprocess.CompletedProcess(args, 0, stdout="porter-ticket-board.service enabled\n")
+            if args[:2] == ["psql", "-XAt"] and args[2] == "postgresql:///postgres?host=/var/run/postgresql":
+                return subprocess.CompletedProcess(args, 0, stdout="1\n")
+            if args[:2] == ["psql", "-XAt"] and args[2] == "postgresql:///porter_ticket_board?host=/var/run/postgresql":
+                return subprocess.CompletedProcess(args, 0, stdout="12\n")
+            if len(args) >= 5 and args[:4] == ["git", "-C", args[2], "status"]:
+                return subprocess.CompletedProcess(args, 0, stdout="")
+            return subprocess.CompletedProcess(args, 0)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-new-registered.") as tmp:
+        tmp_path = Path(tmp)
+        source_repo = tmp_path / "repo"
+        source_repo.mkdir()
+        project_repo = tmp_path / "project-repo"
+        project_repo.mkdir()
+        registry_dir = tmp_path / "registry"
+        registry_dir.mkdir()
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "project_name": "Porter",
+                    "roles": [{"role": "director", "slot": 0, "cli": ["claude"], "workdir": str(project_repo)}],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (registry_dir / "porter.json").write_text(
+            json.dumps(
+                {
+                    "schema": team_launcher.SWITCHYARD_REGISTRY_SCHEMA,
+                    "slug": "porter",
+                    "name": "Porter",
+                    "config_path": str(config_path),
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        runner = FullyProvisionedRunner()
+        plan = team_launcher.build_plan(project="porter", owner_user=team_launcher.current_user_name())
+
+        try:
+            team_launcher.precheck_new_project(
+                plan,
+                source_repo=source_repo,
+                repository=project_repo,
+                runner=runner,
+                port_in_use=lambda _port: True,
+                socket_exists=lambda _path: True,
+                config_dir=tmp_path / "configs",
+                registry_dir=registry_dir,
+                require_owner_user=False,
+            )
+            raise AssertionError("expected provisioned project precheck failure")
+        except SystemExit as exc:
+            message = str(exc)
+
     assert "project 'porter' is already provisioned" in message
     assert "database porter_ticket_board has 12 ticket_board tables" in message
     assert "porter-ticket-board.service is installed" in message
     assert "to launch it:      switchyard porter" in message
-    assert "to start over:" in message
-    assert not any(call[:1] == ["sudo"] for call in runner.calls)
-    assert not any(call[:1] == ["bash"] for call in runner.calls)
+    assert "partially provisioned" not in message
+
 
 def test_new_project_rerun_allows_installed_unit_with_empty_database_recovery_path() -> None:
     current_user = team_launcher.current_user_name()

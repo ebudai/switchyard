@@ -6030,6 +6030,25 @@ def _ticket_board_table_count(database: str, *, runner: Callable[..., subprocess
         raise SystemExit(f"team-launcher: cannot parse ticket_board table count for database {database!r}: {raw_count!r}") from exc
 
 
+def _usable_switchyard_entry_for_project(
+    project: str,
+    *,
+    config_dir: Path | None,
+    registry_dir: Path | None,
+) -> tuple[SwitchyardProjectEntry | None, list[str]]:
+    broken_entries: list[str] = []
+    for entry in _switchyard_entries(config_dir=config_dir, registry_dir=registry_dir):
+        if entry.slug.casefold() != project.casefold():
+            continue
+        try:
+            load_project_config(entry.slug, entry.config_path)
+        except (OSError, json.JSONDecodeError, SystemExit) as exc:
+            broken_entries.append(f"{entry.config_path}: {exc}")
+            continue
+        return entry, broken_entries
+    return None, broken_entries
+
+
 def precheck_new_project(
     plan: ProjectBoardProvision,
     *,
@@ -6038,6 +6057,8 @@ def precheck_new_project(
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     port_in_use: Callable[[int], bool] = _tcp_port_in_use,
     socket_exists: Callable[[Path], bool] = _path_exists,
+    config_dir: Path | None = None,
+    registry_dir: Path | None = None,
     require_owner_user: bool = True,
     require_repository: bool = True,
 ) -> None:
@@ -6064,12 +6085,31 @@ def precheck_new_project(
     else:
         table_count = _ticket_board_table_count(plan.database, runner=runner)
         if table_count > 0:
-            errors.append(
-                f"project {plan.project!r} is already provisioned "
-                f"(database {plan.database} has {table_count} ticket_board tables, {plan.board_unit} is installed).\n"
-                f"  to launch it:      switchyard {plan.project}\n"
-                "  to start over:     tear it down first (no teardown command exists yet)"
+            launch_entry, broken_entries = _usable_switchyard_entry_for_project(
+                plan.project,
+                config_dir=config_dir,
+                registry_dir=registry_dir,
             )
+            if launch_entry is not None:
+                errors.append(
+                    f"project {plan.project!r} is already provisioned "
+                    f"(database {plan.database} has {table_count} ticket_board tables, {plan.board_unit} is installed).\n"
+                    f"  to launch it:      switchyard {plan.project}\n"
+                    "  to start over:     tear it down first (no teardown command exists yet)"
+                )
+            else:
+                effective_config_dir = config_dir or DEFAULT_CONFIG_DIR
+                effective_registry_dir = registry_dir or DEFAULT_SWITCHYARD_REGISTRY_DIR
+                broken_entry_detail = f"  unusable launch entry: {broken_entries[0]}\n" if broken_entries else ""
+                errors.append(
+                    f"project {plan.project!r} is partially provisioned but not registered "
+                    f"(database {plan.database} has {table_count} ticket_board tables, "
+                    f"{plan.board_unit} is installed, but no usable launch entry exists in "
+                    f"{effective_config_dir} or {effective_registry_dir}).\n"
+                    f"{broken_entry_detail}"
+                    "  switchyard cannot launch it until registration is repaired or the partial "
+                    "provision is torn down"
+                )
     if errors:
         raise SystemExit("team-launcher: new project precheck failed:\n- " + "\n- ".join(errors))
 
@@ -6156,6 +6196,8 @@ def new_project_command(
         runner=runner,
         port_in_use=port_in_use,
         socket_exists=socket_exists,
+        config_dir=None,
+        registry_dir=None,
         require_owner_user=execute if require_owner_user is None else require_owner_user,
     )
     artifact_dir = (output_dir or _new_project_artifact_dir(plan.project)).expanduser().resolve(strict=False)
@@ -8690,6 +8732,8 @@ def switchyard_new_command(
         runner=runner,
         port_in_use=port_in_use,
         socket_exists=socket_exists,
+        config_dir=config_dir,
+        registry_dir=registry_dir,
         require_owner_user=False,
         require_repository=False,
     )

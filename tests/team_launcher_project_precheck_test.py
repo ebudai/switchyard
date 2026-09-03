@@ -236,6 +236,129 @@ def test_switchyard_new_accepts_exported_switchyard_release_without_git_status()
         )
         assert (output_dir / "plan.json").exists()
 
+
+def test_switchyard_new_creates_missing_board_service_user_before_owner_mutation() -> None:
+    class MissingServiceUserRunner(FakeRunner):
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if args == ["getent", "passwd", "boardsvc"]:
+                return subprocess.CompletedProcess(args, 2)
+            if args == ["id", "-u", "otto-agent"]:
+                return subprocess.CompletedProcess(args, 1)
+            if args[:1] == ["useradd"]:
+                return subprocess.CompletedProcess(args, 0)
+            if args == ["loginctl", "enable-linger", "otto-agent"]:
+                return subprocess.CompletedProcess(args, 0)
+            if args[:1] == ["install"]:
+                target = Path(args[-1])
+                if str(target).startswith(tempfile.gettempdir()):
+                    target.mkdir(parents=True, exist_ok=True)
+                return subprocess.CompletedProcess(args, 0)
+            if args == ["sudo", "-v"]:
+                return subprocess.CompletedProcess(args, 0)
+            if args[:1] == ["bash"]:
+                commands = Path(args[-1]).read_text(encoding="utf-8")
+                assert "if ! getent passwd 'boardsvc' >/dev/null 2>&1; then" in commands
+                assert "sudo useradd -r -M -d /nonexistent -s \"$service_shell\" 'boardsvc'" in commands
+                assert commands.index("if ! getent passwd 'boardsvc'") < commands.index("setfacl -R -m u:boardsvc:rx")
+                return subprocess.CompletedProcess(args, 0)
+            return super().__call__(args, **kwargs)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new-no-boardsvc.") as tmp:
+        tmp_path = Path(tmp)
+        source_repo = tmp_path / "opt" / "switchyard" / "releases" / REMOTE_HEAD
+        _write_exported_switchyard_release(source_repo)
+        project_dir = tmp_path / "home" / "otto-agent" / "Projects" / "porter"
+        output_dir = tmp_path / "out"
+        runner = MissingServiceUserRunner()
+
+        assert (
+            switchyard_new_command(
+                slug="porter",
+                agent_name="otto-agent",
+                project_name="Porter",
+                project_path=project_dir,
+                source_repo=source_repo,
+                output_dir=output_dir,
+                role_clis=LEGACY_SWITCHYARD_ROLE_CLIS,
+                yes=True,
+                allow_existing_owner_user=True,
+                home_base=tmp_path / "home",
+                euid_getter=lambda: 0,
+                runner=runner,
+                input_func=lambda _prompt: "",
+                port_in_use=lambda _port: False,
+                socket_exists=lambda _path: False,
+                session_record_timeout=0,
+                registry_dir=tmp_path / "registry",
+                konsole_process_launcher=RecordingProcessLauncher(),
+            )
+            == 0
+        )
+
+    service_useradd = [
+        "useradd",
+        "-r",
+        "-M",
+        "-d",
+        "/nonexistent",
+        "-s",
+        team_launcher._non_login_shell_path(),
+        "boardsvc",
+    ]
+    owner_useradd = next(call for call in runner.calls if call[:1] == ["useradd"] and call[-1] == "otto-agent")
+    assert service_useradd in runner.calls
+    assert runner.calls.index(service_useradd) < runner.calls.index(["id", "-u", "otto-agent"])
+    assert runner.calls.index(service_useradd) < runner.calls.index(owner_useradd)
+
+
+def test_switchyard_new_missing_board_service_user_failure_names_remedy_before_owner_mutation() -> None:
+    class FailingServiceUserRunner(FakeRunner):
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if args == ["getent", "passwd", "boardsvc"]:
+                return subprocess.CompletedProcess(args, 2)
+            if args[:1] == ["useradd"] and args[-1] == "boardsvc":
+                return subprocess.CompletedProcess(args, 1)
+            return super().__call__(args, **kwargs)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new-boardsvc-fail.") as tmp:
+        tmp_path = Path(tmp)
+        source_repo = tmp_path / "opt" / "switchyard" / "releases" / REMOTE_HEAD
+        _write_exported_switchyard_release(source_repo)
+        project_dir = tmp_path / "home" / "otto-agent" / "Projects" / "porter"
+        runner = FailingServiceUserRunner()
+
+        try:
+            switchyard_new_command(
+                slug="porter",
+                agent_name="otto-agent",
+                project_name="Porter",
+                project_path=project_dir,
+                source_repo=source_repo,
+                output_dir=tmp_path / "out",
+                role_clis=LEGACY_SWITCHYARD_ROLE_CLIS,
+                yes=True,
+                allow_existing_owner_user=True,
+                home_base=tmp_path / "home",
+                euid_getter=lambda: 0,
+                runner=runner,
+                input_func=lambda _prompt: "",
+                port_in_use=lambda _port: False,
+                socket_exists=lambda _path: False,
+                session_record_timeout=0,
+                registry_dir=tmp_path / "registry",
+                konsole_process_launcher=RecordingProcessLauncher(),
+            )
+            raise AssertionError("expected board service user creation failure")
+        except SystemExit as exc:
+            message = str(exc)
+
+    assert "failed to create board service user 'boardsvc'" in message
+    assert "scripts/ticket-board-boardsvc-setup.sh --apply" in message
+    assert not any(call == ["id", "-u", "otto-agent"] for call in runner.calls)
+    assert not any(call[:1] == ["useradd"] and call[-1] == "otto-agent" for call in runner.calls)
+
 def test_new_project_dirty_git_checkout_still_fails_precheck() -> None:
     current_user = team_launcher.current_user_name()
 

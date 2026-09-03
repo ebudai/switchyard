@@ -496,6 +496,7 @@ def test_switchyard_new_validates_models_before_launching_panes() -> None:
     assert result == 1
     assert launch_calls == []
     assert runner.calls == [
+        ["getent", "passwd", "boardsvc"],
         ["sudo", "-u", "porter-agent", "codex", "login", "status"],
         [
             "sudo",

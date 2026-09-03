@@ -330,6 +330,20 @@ def postgres_sql_file_command(sql_file: str, *, database_url: str = "") -> str:
     return command
 
 
+def service_user_command(service_user: str) -> str:
+    q_service_user = shell_quote(service_user)
+    return f"""if ! getent passwd {q_service_user} >/dev/null 2>&1; then
+    service_shell="$(command -v nologin 2>/dev/null || true)"
+    [ -n "$service_shell" ] || service_shell="/usr/sbin/nologin"
+    [ -x "$service_shell" ] || service_shell="/bin/false"
+    if [ ! -x "$service_shell" ]; then
+        echo 'ERROR: neither nologin nor /bin/false is executable; install util-linux or provide a non-login shell before provisioning' >&2
+        exit 1
+    fi
+    sudo useradd -r -M -d /nonexistent -s "$service_shell" {q_service_user}
+fi"""
+
+
 def sql_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
@@ -1361,6 +1375,7 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
 set -euo pipefail
 
 # Review generated artifacts first. These commands require host privileges.
+{service_user_command(plan.service_user)}
 {install_board_root}
 sudo env TICKET_BOARD_PROJECT={shell_quote(plan.project)} TICKET_BOARD_COMMIT_GIT_DIR={q_commit_git_dir} SOURCE_REPO={q_source_repo} BOARD_ROOT={q_board_root} DEPLOY_REF=origin/main TICKET_BOARD_SKIP_MIGRATIONS=1 {q_deploy_script} deploy
 {grant_board_root}

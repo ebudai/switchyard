@@ -107,6 +107,9 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "BOARD_ROOT='/home/stellaris-agent/stellaris-ticketboard-live'" in combined
     assert "TICKET_BOARD_PROJECT='stellaris'" in combined
     assert "TICKET_BOARD_SKIP_MIGRATIONS=1" in combined
+    assert "if ! getent passwd 'boardsvc' >/dev/null 2>&1; then" in combined
+    assert "sudo useradd -r -M -d /nonexistent -s \"$service_shell\" 'boardsvc'" in combined
+    assert combined.index("if ! getent passwd 'boardsvc'") < combined.index("setfacl -R -m u:boardsvc:rx")
     assert "sudo cat 'stellaris-workflow.sql' | sudo -u postgres psql -X -v ON_ERROR_STOP=1 'postgresql:///stellaris_ticket_board?host=/var/run/postgresql' -f -" in combined
     assert combined.index("ticket_board/schema.sql") < combined.index("scripts/ticket-board-migrate")
     assert combined.index("scripts/ticket-board-migrate") < combined.index("sudo cat 'stellaris-workflow.sql'")
@@ -558,6 +561,8 @@ def test_board_service_traversal_capability_controls_owner_home_acls() -> None:
     assert "sudo setfacl -m u:boardsvc:--x '/home/zeta-agent/.claude'" in grant_commands
     assert "sudo setfacl -R -m u:boardsvc:rx '/home/zeta-agent/zeta-ticketboard-live'" in grant_commands
     assert "sudo setfacl -R -m u:boardsvc:rwx '/home/zeta-agent/.claude/zeta-tickets-assets'" in grant_commands
+    assert "if ! getent passwd 'boardsvc' >/dev/null 2>&1; then" in deny_commands
+    assert "sudo useradd -r -M -d /nonexistent -s \"$service_shell\" 'boardsvc'" in deny_commands
     assert "sudo setfacl -m u:boardsvc:--x '/home/zeta-agent'" not in deny_commands
     assert "sudo setfacl -m u:boardsvc:--x '/home/zeta-agent/.claude'" not in deny_commands
     assert "sudo setfacl -R -m u:boardsvc:rx '/home/zeta-agent/zeta-ticketboard-live'" not in deny_commands

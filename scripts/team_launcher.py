@@ -7705,6 +7705,34 @@ def _owner_project_install_args(owner_user: str, project_dir: Path, *, shell: st
     ]
 
 
+def _non_login_shell_path() -> str:
+    for candidate in (shutil.which("nologin"), "/usr/sbin/nologin", "/bin/false"):
+        if candidate and os.access(candidate, os.X_OK):
+            return candidate
+    raise SystemExit(
+        "switchyard: cannot create board service user because neither nologin nor /bin/false "
+        "is executable; install util-linux or provide a non-login shell"
+    )
+
+
+def _ensure_board_service_user(
+    service_user: str,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> None:
+    result = runner(["getent", "passwd", service_user], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if result.returncode == 0:
+        return
+    shell_path = _non_login_shell_path()
+    create_result = runner(["useradd", "-r", "-M", "-d", "/nonexistent", "-s", shell_path, service_user])
+    if create_result.returncode != 0:
+        raise SystemExit(
+            f"switchyard: failed to create board service user {service_user!r}; "
+            "run scripts/ticket-board-boardsvc-setup.sh --apply or create a system account "
+            f"with `sudo useradd -r -M -d /nonexistent -s {shell_path} {service_user}`"
+        )
+
+
 def _enable_owner_linger_args(owner_user: str) -> list[str]:
     return ["loginctl", "enable-linger", owner_user]
 
@@ -8628,6 +8656,7 @@ def switchyard_new_command(
         require_owner_user=False,
         require_repository=False,
     )
+    _ensure_board_service_user(precheck_plan.service_user, runner=runner)
     owner_result = _ensure_owner_user_and_project_dir(
         owner_user,
         project_dir,

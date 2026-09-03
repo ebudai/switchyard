@@ -407,6 +407,93 @@ def test_first_run_auth_phase_reports_missing_cli_separately_from_login() -> Non
             "install agy for owner user otto-agent; affected roles: inspector"
         ], status_returncode
 
+
+def test_first_run_auth_phase_reports_broken_existing_owner_shell_without_mutating() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-first-run-auth-broken-shell.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        broken_shell = tmp_path / "missing-fish"
+        config = load_project_config(
+            "otto",
+            _write_first_run_auth_config(tmp_path, roles=[("ops", "codex")]),
+        )
+        runner = FirstRunAuthRunner()
+        runner.login_seen.add("codex")
+        messages: list[str] = []
+        original_getpwnam = team_launcher.pwd.getpwnam
+
+        class FakeUserInfo:
+            pw_dir = str(owner_home)
+            pw_shell = str(broken_shell)
+
+        try:
+            team_launcher.pwd.getpwnam = lambda user_name: FakeUserInfo() if user_name == "otto-agent" else original_getpwnam(user_name)
+            report = team_launcher.run_first_run_auth_phase(
+                config,
+                owner_user="otto-agent",
+                owner_home=owner_home,
+                runner=runner,
+                print_func=messages.append,
+            )
+        finally:
+            team_launcher.pwd.getpwnam = original_getpwnam
+
+    assert report.owner_shell_issue == team_launcher.OwnerShellIssue(
+        owner_user="otto-agent",
+        shell=str(broken_shell),
+        remedy="sudo usermod -s /bin/bash otto-agent",
+    )
+    assert report.owner_user == "otto-agent"
+    assert messages == [
+        "switchyard: first-run setup manifest for owner user otto-agent: "
+        "0 login step(s), 0 folder trust step(s), 0 codex hook approval(s), 0 missing CLI(s), "
+        "1 owner shell issue(s)",
+        f"switchyard: owner shell for otto-agent is not executable: {broken_shell}; "
+        "repair with `sudo usermod -s /bin/bash otto-agent`",
+    ]
+    assert not any("usermod" in call for command in runner.calls for call in command)
+    output: list[str] = []
+    team_launcher.report_first_run_auth_warnings(report, print_func=output.append)
+    assert output == [
+        f"warning: switchyard: owner shell for otto-agent is not executable: {broken_shell}; "
+        "repair with `sudo usermod -s /bin/bash otto-agent`"
+    ]
+
+
+def test_first_run_auth_phase_silent_for_executable_owner_shell() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-first-run-auth-good-shell.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        config = load_project_config(
+            "otto",
+            _write_first_run_auth_config(tmp_path, roles=[("ops", "codex")]),
+        )
+        runner = FirstRunAuthRunner()
+        runner.login_seen.add("codex")
+        messages: list[str] = []
+        original_getpwnam = team_launcher.pwd.getpwnam
+
+        class FakeUserInfo:
+            pw_dir = str(owner_home)
+            pw_shell = "/bin/sh"
+
+        try:
+            team_launcher.pwd.getpwnam = lambda user_name: FakeUserInfo() if user_name == "otto-agent" else original_getpwnam(user_name)
+            report = team_launcher.run_first_run_auth_phase(
+                config,
+                owner_user="otto-agent",
+                owner_home=owner_home,
+                runner=runner,
+                print_func=messages.append,
+            )
+        finally:
+            team_launcher.pwd.getpwnam = original_getpwnam
+
+    assert report == team_launcher.FirstRunAuthReport({}, [])
+    assert messages == []
+
 def main() -> int:
     run_team_launcher_tests(globals(), first=())
     print("team_launcher_first_run_auth_test: ok")

@@ -670,6 +670,172 @@ def test_switchyard_new_missing_owner_clis_stops_before_launching_panes() -> Non
     assert any("Install the missing CLI(s) for owner user test-agent and rerun switchyard." in line for line in output)
     assert not any("did not leave a live" in line for line in output)
 
+
+def test_switchyard_new_reports_existing_owner_with_broken_shell_without_repairing() -> None:
+    original_uid_for_user = team_launcher.uid_for_user
+    original_getpwnam = team_launcher.pwd.getpwnam
+    original_precheck_project_path = team_launcher._precheck_project_path_before_mutating
+    original_precheck_new_project = team_launcher.precheck_new_project
+    original_ensure_owner = team_launcher._ensure_owner_user_and_project_dir
+    original_ensure_git = team_launcher._ensure_project_git_repository
+    original_chown_project_files = team_launcher._chown_switchyard_project_files
+    original_chown_project_file = team_launcher._chown_project_file
+    original_new_project = team_launcher.new_project_command
+    original_commit_project_git_changes = team_launcher._commit_project_git_changes
+    original_register = team_launcher._register_switchyard_project
+    original_prepare_auth_worktrees = team_launcher._prepare_first_run_auth_worktrees
+    original_launch_project = team_launcher.launch_project
+    try:
+        with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new-broken-owner-shell.") as tmp:
+            tmp_path = Path(tmp)
+            home_base = tmp_path / "home"
+            owner_home = home_base / "test-agent"
+            project_dir = owner_home / "Projects" / "test"
+            source_repo = tmp_path / "source-repo"
+            output_dir = tmp_path / "provision"
+            broken_shell = tmp_path / "missing-fish"
+            source_repo.mkdir()
+            output: list[str] = []
+            launch_calls: list[team_launcher.ProjectConfig] = []
+
+            class FakeUserInfo:
+                pw_dir = str(owner_home)
+                pw_shell = str(broken_shell)
+
+            team_launcher.uid_for_user = lambda user_name: 1005 if user_name == "test-agent" else None
+            team_launcher.pwd.getpwnam = lambda user_name: FakeUserInfo() if user_name == "test-agent" else original_getpwnam(user_name)
+            team_launcher._precheck_project_path_before_mutating = lambda _owner_user, _project_dir: None
+            team_launcher.precheck_new_project = lambda *_args, **_kwargs: None
+
+            def fake_ensure_owner(
+                _owner_user: str,
+                requested_project_dir: Path,
+                **_kwargs: object,
+            ) -> team_launcher.OwnerUserProvisionResult:
+                requested_project_dir.mkdir(parents=True, exist_ok=True)
+                return team_launcher.OwnerUserProvisionResult(created=False, linger_enabled=False)
+
+            def fake_new_project(project: str, **kwargs: object) -> int:
+                provision_dir = Path(kwargs["output_dir"])
+                layout = provision_dir / f"{project}-layout.json"
+                provision_dir.mkdir(parents=True, exist_ok=True)
+                layout.write_text(
+                    '{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n',
+                    encoding="utf-8",
+                )
+                (provision_dir / f"{project}.json").write_text(
+                    json.dumps(
+                        {
+                            "project": project,
+                            "project_name": "Test",
+                            "layout": str(layout),
+                            "repository": str(project_dir),
+                            "run_as_user": "test-agent",
+                            "roles": [
+                                {
+                                    "role": "director",
+                                    "slot": 0,
+                                    "target": "test-director:0.0",
+                                    "tmux_session": "test-director",
+                                    "workdir": str(project_dir / "worktrees" / "director"),
+                                    "cli": ["codex"],
+                                },
+                                {
+                                    "role": "ops",
+                                    "slot": 1,
+                                    "target": "test-ops:0.0",
+                                    "tmux_session": "test-ops",
+                                    "workdir": str(project_dir / "worktrees" / "ops"),
+                                    "cli": ["codex"],
+                                },
+                            ],
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                return 0
+
+            def fake_launch_project(config: team_launcher.ProjectConfig, **_kwargs: object) -> int:
+                launch_calls.append(config)
+                return 0
+
+            team_launcher._ensure_owner_user_and_project_dir = fake_ensure_owner
+            team_launcher._ensure_project_git_repository = lambda *_args, **_kwargs: None
+            team_launcher._chown_switchyard_project_files = lambda *_args, **_kwargs: None
+            team_launcher._chown_project_file = lambda *_args, **_kwargs: None
+            team_launcher.new_project_command = fake_new_project
+            team_launcher._commit_project_git_changes = lambda *_args, **_kwargs: None
+            team_launcher._register_switchyard_project = lambda config_path, **_kwargs: config_path
+            team_launcher._prepare_first_run_auth_worktrees = lambda *_args, **_kwargs: None
+            team_launcher.launch_project = fake_launch_project
+
+            runner = FirstRunAuthRunner()
+            runner.login_seen.add("codex")
+
+            result = switchyard_new_command(
+                slug="test",
+                agent_name="test-agent",
+                project_name="Test",
+                project_path=project_dir,
+                source_repo=source_repo,
+                output_dir=output_dir,
+                role_clis=(("director", "codex"), ("ops", "codex")),
+                yes=True,
+                allow_existing_owner_user=True,
+                home_base=home_base,
+                euid_getter=lambda: 0,
+                runner=runner,
+                input_func=lambda _prompt: "",
+                print_func=output.append,
+                port_in_use=lambda _port: False,
+                socket_exists=lambda _path: False,
+                registry_dir=tmp_path / "registry",
+                session_record_timeout=0,
+            )
+    finally:
+        team_launcher.uid_for_user = original_uid_for_user
+        team_launcher.pwd.getpwnam = original_getpwnam
+        team_launcher._precheck_project_path_before_mutating = original_precheck_project_path
+        team_launcher.precheck_new_project = original_precheck_new_project
+        team_launcher._ensure_owner_user_and_project_dir = original_ensure_owner
+        team_launcher._ensure_project_git_repository = original_ensure_git
+        team_launcher._chown_switchyard_project_files = original_chown_project_files
+        team_launcher._chown_project_file = original_chown_project_file
+        team_launcher.new_project_command = original_new_project
+        team_launcher._commit_project_git_changes = original_commit_project_git_changes
+        team_launcher._register_switchyard_project = original_register
+        team_launcher._prepare_first_run_auth_worktrees = original_prepare_auth_worktrees
+        team_launcher.launch_project = original_launch_project
+
+    assert result == 0
+    assert len(launch_calls) == 1
+    assert any(line == "switchyard: using existing user test-agent (not modifying)" for line in output)
+    assert any(
+        line == (
+            "switchyard: first-run setup manifest for owner user test-agent: "
+            "0 login step(s), 0 folder trust step(s), 0 codex hook approval(s), 0 missing CLI(s), "
+            "1 owner shell issue(s)"
+        )
+        for line in output
+    )
+    assert any(
+        line == (
+            f"switchyard: owner shell for test-agent is not executable: {broken_shell}; "
+            "repair with `sudo usermod -s /bin/bash test-agent`"
+        )
+        for line in output
+    )
+    assert any(
+        line == (
+            f"warning: switchyard: owner shell for test-agent is not executable: {broken_shell}; "
+            "repair with `sudo usermod -s /bin/bash test-agent`"
+        )
+        for line in output
+    )
+    assert not any("usermod" in token for command in runner.calls for token in command)
+
+
 def main() -> int:
     run_team_launcher_tests(globals(), first=())
     print("team_launcher_onboarding_git_test: ok")

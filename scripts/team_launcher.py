@@ -6717,6 +6717,13 @@ class ModelValidationFailure:
 
 
 @dataclass(frozen=True)
+class OwnerShellIssue:
+    owner_user: str
+    shell: str
+    remedy: str
+
+
+@dataclass(frozen=True)
 class FirstRunAuthReport:
     unauthenticated_roles: dict[str, list[str]]
     untrusted_roles: list[tuple[str, str, str]]
@@ -6724,6 +6731,7 @@ class FirstRunAuthReport:
     missing_cli_roles: dict[str, list[str]] = field(default_factory=dict)
     model_validation_failures: list[ModelValidationFailure] = field(default_factory=list)
     owner_user: str = ""
+    owner_shell_issue: OwnerShellIssue | None = None
 
     @property
     def has_warnings(self) -> bool:
@@ -6733,6 +6741,7 @@ class FirstRunAuthReport:
             or self.stale_codex_hook_trust
             or self.missing_cli_roles
             or self.model_validation_failures
+            or self.owner_shell_issue
         )
 
 
@@ -6758,6 +6767,7 @@ class FirstRunSetupManifest:
     folder_trust_steps: list[FirstRunFolderTrustStep]
     stale_codex_hook_trust: list[CodexHookTrustMismatch]
     missing_cli_roles: dict[str, list[str]]
+    owner_shell_issue: OwnerShellIssue | None = None
 
     @property
     def has_steps(self) -> bool:
@@ -6766,6 +6776,7 @@ class FirstRunSetupManifest:
             or self.folder_trust_steps
             or self.stale_codex_hook_trust
             or self.missing_cli_roles
+            or self.owner_shell_issue
         )
 
 
@@ -6783,6 +6794,19 @@ FIRST_RUN_AUTH_LOGIN_COMMANDS: dict[str, list[str]] = {
 }
 FIRST_RUN_TRUST_CLIS = frozenset({"agy", "claude"})
 MODEL_VALIDATION_PROMPT = "Reply with exactly: model-ok"
+
+
+def _owner_shell_issue(owner_user: str) -> OwnerShellIssue | None:
+    try:
+        info = pwd.getpwnam(owner_user)
+    except KeyError:
+        return None
+    shell = str(getattr(info, "pw_shell", "") or "").strip()
+    if not shell or os.access(shell, os.X_OK):
+        return None
+    fallback_shell = "/bin/bash" if os.access("/bin/bash", os.X_OK) else "/bin/sh"
+    remedy = f"sudo usermod -s {fallback_shell} {shlex.quote(owner_user)}"
+    return OwnerShellIssue(owner_user=owner_user, shell=shell, remedy=remedy)
 
 
 def _slug_from_project_name(name: str) -> str:
@@ -7925,6 +7949,7 @@ def build_first_run_setup_manifest(
         folder_trust_steps=folder_trust_steps,
         stale_codex_hook_trust=stale_codex_hook_trust_for_roles(config.roles, owner_home=owner_home),
         missing_cli_roles=missing_cli_roles,
+        owner_shell_issue=_owner_shell_issue(owner_user),
     )
 
 
@@ -7935,13 +7960,23 @@ def _format_first_run_setup_manifest(manifest: FirstRunSetupManifest) -> list[st
     login_count = len(manifest.login_steps)
     folder_trust_count = len(manifest.folder_trust_steps)
     hook_trust_count = len(manifest.stale_codex_hook_trust)
+    owner_shell_issue_count = 1 if manifest.owner_shell_issue else 0
+    summary = (
+        f"switchyard: first-run setup manifest for owner user {manifest.owner_user}: "
+        f"{login_count} login step(s), {folder_trust_count} folder trust step(s), "
+        f"{hook_trust_count} codex hook approval(s), {missing_cli_count} missing CLI(s)"
+    )
+    if owner_shell_issue_count:
+        summary = f"{summary}, {owner_shell_issue_count} owner shell issue(s)"
     lines = [
-        (
-            f"switchyard: first-run setup manifest for owner user {manifest.owner_user}: "
-            f"{login_count} login step(s), {folder_trust_count} folder trust step(s), "
-            f"{hook_trust_count} codex hook approval(s), {missing_cli_count} missing CLI(s)"
-        )
+        summary
     ]
+    if manifest.owner_shell_issue:
+        issue = manifest.owner_shell_issue
+        lines.append(
+            f"switchyard: owner shell for {issue.owner_user} is not executable: {issue.shell}; "
+            f"repair with `{issue.remedy}`"
+        )
     for cli, roles in manifest.missing_cli_roles.items():
         lines.append(
             f"switchyard: missing CLI {cli}: install {cli} for owner user {manifest.owner_user}; "
@@ -8066,7 +8101,10 @@ def run_first_run_auth_phase(
         manifest.stale_codex_hook_trust,
         missing_cli_roles,
         model_validation_failures,
-        effective_owner if missing_cli_roles or manifest.stale_codex_hook_trust else "",
+        owner_user=effective_owner
+        if missing_cli_roles or manifest.stale_codex_hook_trust or manifest.owner_shell_issue
+        else "",
+        owner_shell_issue=manifest.owner_shell_issue,
     )
 
 
@@ -8080,6 +8118,12 @@ def report_first_run_auth_warnings(
         print_func(
             f"warning: switchyard: {cli} is not installed{owner_detail}; "
             f"install {cli}{owner_detail}; affected roles: {', '.join(roles)}"
+        )
+    if report.owner_shell_issue:
+        issue = report.owner_shell_issue
+        print_func(
+            f"warning: switchyard: owner shell for {issue.owner_user} is not executable: "
+            f"{issue.shell}; repair with `{issue.remedy}`"
         )
     for cli, roles in report.unauthenticated_roles.items():
         print_func(

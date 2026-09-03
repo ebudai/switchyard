@@ -608,6 +608,13 @@ setup behavior, so silently running them as a just-created project owner or
 pretending they are system-wide is a bigger host policy decision than the
 launcher should make during pane startup.
 
+An existing owner user whose login shell no longer exists is reported in that
+same first-run manifest, with a `sudo usermod -s <installed-shell> <owner>`
+remedy. Switchyard only reads the passwd entry and checks whether the configured
+shell is executable; it does not repair existing accounts automatically. That
+keeps the existing-user promise intact for operators who deliberately changed a
+tenant account shell.
+
 During `switchyard new`, the hook installer seeds Codex hook trust only when
 the owner has no existing `~/.codex/hooks.json` and no existing Codex hook
 trust records. That covers hooks Switchyard just authored as part of project

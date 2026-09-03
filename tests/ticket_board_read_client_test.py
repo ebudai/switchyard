@@ -58,6 +58,12 @@ class RecordingHandler(BaseHTTPRequestHandler):
         title: str = "Read client fixture",
         awaiting_role: str = "",
     ) -> dict[str, object]:
+        # These are hand-built payloads, so awaiting_role is present here by
+        # construction. That is exactly why this suite could not catch PGU-906,
+        # where the real serializer never emitted the key: the fixture supplied
+        # what production did not. The serializer side is pinned separately by
+        # tests/ticket_board_awaiting_role_visibility_test.py, against a real
+        # database -- keep that one alive if you touch this fixture.
         return {
             "id": ticket_id,
             "title": title,

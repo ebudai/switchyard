@@ -134,7 +134,17 @@ system working, not a bug to route around.
 - `force-move` / `override-move` — last resort; **always narrate in a comment**
 
 **Non-user roles**
-- `await-role` / `clear-awaiting-role` — mark or clear an active ticket as waiting on a role
+- `await-role` / `clear-awaiting-role` — mark or clear an active ticket as waiting on a
+  role. Use it when the next action is genuinely someone else's and there is no ticket to
+  point `blocked_by` at (that field only accepts ticket IDs). It does **two** things:
+  the ticket's nudges are suppressed for four hours, and — for `director` only — the
+  ticket appears in `ticket-board-read director`. Both matter: before PGU-906 only the
+  suppression worked, so escalating made a ticket silent *and* invisible. Note the
+  asymmetry, because it is a real limit and not an oversight in your reading: the
+  per-role queues (`ticket-board-read queue <role>`) filter on assignee alone, so
+  `await-role` at any role other than `director` still only mutes nudges.
+  It does not move or reassign the ticket: the ticket stays in its own stage with its own
+  assignee, which is what you want, because the work is still theirs.
 
 **User (the human)**
 - `user-sign-off` — UAT user_review → director_review

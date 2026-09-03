@@ -167,6 +167,16 @@ def sort_queue_tickets(tickets: Iterable[dict[str, Any]]) -> list[dict[str, Any]
 
 
 def needs_director(ticket: dict[str, Any]) -> bool:
+    """Whether the director is the one who has to act on this ticket.
+
+    The awaiting_role term is the escalation path a non-director pane uses when
+    the next action is the director's and there is no ticket to point blocked_by
+    at. It only works because app.py serves awaiting_role on the ticket payload;
+    before PGU-906 it did not, so this branch was dead and await-role made a
+    ticket invisible here while ALSO suppressing its nudges for four hours. The
+    flag has those two independent consumers -- do not treat either as the only
+    one.
+    """
     state = str(ticket.get("state", ""))
     assignee = str(ticket.get("assignee", ""))
     awaiting = str(ticket.get("awaiting_role", ""))

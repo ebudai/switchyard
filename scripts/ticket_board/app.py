@@ -733,6 +733,7 @@ SELECT
     active_work.owner_role AS active_work_owner_role,
     active_work.active_work_notified_at,
     COALESCE(active_work.active_work_highlight, false) AS active_work_highlight,
+    COALESCE(notification_state.awaiting_role, '') AS awaiting_role,
     COALESCE(
         (SELECT array_agg(b.blocker_ticket_id ORDER BY b.position)
          FROM ticket_board.ticket_blockers b
@@ -760,6 +761,8 @@ SELECT
     ) AS screenshots
 FROM ticket_board.tickets t
 LEFT JOIN active_work ON active_work.id = t.id
+LEFT JOIN ticket_board.ticket_notification_state notification_state
+    ON notification_state.ticket_id = t.id
 {where}
 ORDER BY t.ticket_number
 ;
@@ -836,6 +839,19 @@ ORDER BY rank;
             "active_work_highlight": bool(row["active_work_highlight"]),
             "active_work_owner_role": str(row["active_work_owner_role"] or ""),
             "active_work_notified_at": self._format_optional_datetime(row["active_work_notified_at"]),
+            # awaiting_role has TWO consumers and they are easy to mistake for
+            # one. read_client.needs_director() reads it from here to put a
+            # ticket in the director's attention queue, and the nudge queries in
+            # schema.sql read it straight from ticket_notification_state,
+            # through ticket_awaiting_role_is_active(), to SUPPRESS nudges for
+            # four hours. Dropping this field does not merely hide a queue entry:
+            # it restores the state where a ticket was silenced and invisible at
+            # the same time, which is PGU-906. Two deliberate asymmetries: queue
+            # visibility is not timeout-aware, so an expired flag still shows the
+            # ticket rather than losing it at the moment nudges resume; and
+            # needs_director() is the only queue consumer, so awaiting_role at
+            # any other role still only suppresses nudges.
+            "awaiting_role": str(row["awaiting_role"] or "").strip().lower(),
             "comments": self._validate_comments(comments),
         }
         self._set_screenshot_fields(ticket, self._build_screenshot_entries(list(screenshots)))

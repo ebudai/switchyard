@@ -99,11 +99,10 @@ true on 2026-09-02 and are marked as such.
 
 CHECK THOSE FOUR AGAINST EACH OTHER BEFORE YOU TRUST ANY OF THEM. On 2026-09-02 all
 three deploy surfaces had drifted from main at once: `/opt/switchyard/current` pointed
-at `81dc45f81ec0`, which was 18 commits behind main at audit time; one newer release
-directory was present on disk but not current; the live board predated the
-commit-verification work merged that morning (so verification was merged but NOT
-RUNNING); and the mirror was one commit behind. Drift is the normal state, not an
-incident; merging is not deploying.
+at `81dc45f81ec0`, which was 18 commits behind main at audit time; the live board
+predated the commit-verification work merged that morning (so verification was merged
+but NOT RUNNING); and the mirror was one commit behind. Drift is the normal state, not
+an incident; merging is not deploying.
 
 The repository split is complete. `pgu.git` carries no Switchyard-named paths;
 PGU instruction and crash files still intentionally point at `/opt/switchyard` as the

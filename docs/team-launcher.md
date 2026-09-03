@@ -597,6 +597,17 @@ manual security approval and remains deliberately outside automation. Folder
 trust is scoped to the workdir, so it recurs for each new project even when the
 owner user is reused.
 
+If any configured CLI is missing for the owner user, `switchyard <project>` and
+the final launch step of `switchyard new` stop before opening panes. The
+recommended policy is option (c): refuse to launch and tell the operator what
+must be installed for which owner user. The top-level `./install` command
+intentionally runs vendor CLI installers as the invoking operator, not as root,
+and a newly provisioned tenant owner may not exist yet when that install ran.
+The vendor commands are per-user shell installers with interactive auth and
+setup behavior, so silently running them as a just-created project owner or
+pretending they are system-wide is a bigger host policy decision than the
+launcher should make during pane startup.
+
 During `switchyard new`, the hook installer seeds Codex hook trust only when
 the owner has no existing `~/.codex/hooks.json` and no existing Codex hook
 trust records. That covers hooks Switchyard just authored as part of project

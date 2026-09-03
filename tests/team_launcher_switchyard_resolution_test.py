@@ -149,6 +149,93 @@ def test_switchyard_launch_runs_first_run_auth_before_panes_and_warns_after() ->
     assert events[1][1]["report_session_records"] is True
     assert events[2][1] is report
 
+
+def test_switchyard_launch_missing_owner_clis_stops_before_panes() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-missing-cli-launch.") as tmp:
+        tmp_path = Path(tmp)
+        config_dir = tmp_path / "config"
+        registry_dir = tmp_path / "registry"
+        layout = tmp_path / "layout.json"
+        config_dir.mkdir()
+        registry_dir.mkdir()
+        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+        config_path = config_dir / "otto.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "otto",
+                    "project_name": "Otto System",
+                    "layout": str(layout),
+                    "run_as_user": "otto-agent",
+                    "roles": [
+                        {"role": "designer", "slot": 0, "cli": ["claude"], "workdir": str(tmp_path / "designer")},
+                        {"role": "director", "slot": 1, "cli": ["claude"], "workdir": str(tmp_path / "director")},
+                        {"role": "ops", "slot": 2, "cli": ["codex"], "workdir": str(tmp_path / "ops")},
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        events: list[tuple[str, object]] = []
+        output = StringIO()
+        report = team_launcher.FirstRunAuthReport(
+            {},
+            [],
+            missing_cli_roles={"claude": ["designer", "director"], "codex": ["ops"]},
+            owner_user="otto-agent",
+        )
+        original_config_dir = team_launcher.DEFAULT_CONFIG_DIR
+        original_registry_dir = team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR
+        original_launch_project = team_launcher.launch_project
+        original_run_first_run_auth_phase = team_launcher.run_first_run_auth_phase
+        original_report_first_run_auth_warnings = team_launcher.report_first_run_auth_warnings
+        original_geteuid = team_launcher.os.geteuid
+        try:
+            team_launcher.DEFAULT_CONFIG_DIR = config_dir
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
+            team_launcher.os.geteuid = lambda: 0  # type: ignore[method-assign]
+
+            def fake_run_first_run_auth_phase(
+                config: team_launcher.ProjectConfig,
+                **_kwargs: object,
+            ) -> team_launcher.FirstRunAuthReport:
+                events.append(("auth", config.project))
+                return report
+
+            def fake_launch_project(_config: team_launcher.ProjectConfig, **_kwargs: object) -> int:
+                events.append(("launch", {}))
+                print("team-launcher: role designer did not leave a live otto-designer session")
+                return 1
+
+            def fake_report_first_run_auth_warnings(
+                auth_report: team_launcher.FirstRunAuthReport,
+                **_kwargs: object,
+            ) -> None:
+                events.append(("warn", auth_report))
+
+            team_launcher.run_first_run_auth_phase = fake_run_first_run_auth_phase
+            team_launcher.launch_project = fake_launch_project
+            team_launcher.report_first_run_auth_warnings = fake_report_first_run_auth_warnings
+
+            with redirect_stdout(output):
+                result = switchyard_main(["otto"])
+        finally:
+            team_launcher.DEFAULT_CONFIG_DIR = original_config_dir
+            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = original_registry_dir
+            team_launcher.launch_project = original_launch_project
+            team_launcher.run_first_run_auth_phase = original_run_first_run_auth_phase
+            team_launcher.report_first_run_auth_warnings = original_report_first_run_auth_warnings
+            team_launcher.os.geteuid = original_geteuid  # type: ignore[method-assign]
+
+    rendered = output.getvalue()
+    assert result == 1
+    assert [name for name, _payload in events] == ["auth"]
+    assert "cannot launch panes because required CLI(s) are missing for owner user otto-agent" in rendered
+    assert "claude (roles: designer, director)" in rendered
+    assert "codex (roles: ops)" in rendered
+    assert "did not leave a live" not in rendered
+
 def test_switchyard_validate_models_command_runs_model_validation_on_demand() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-validate-models.") as tmp:
         tmp_path = Path(tmp)

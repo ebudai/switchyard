@@ -8099,6 +8099,28 @@ def report_first_run_auth_warnings(
         )
 
 
+def _format_missing_cli_launch_failure(report: FirstRunAuthReport) -> str:
+    owner_detail = f" for owner user {report.owner_user}" if report.owner_user else ""
+    cli_details = "; ".join(
+        f"{cli} (roles: {', '.join(roles)})" for cli, roles in report.missing_cli_roles.items()
+    )
+    return (
+        f"switchyard: cannot launch panes because required CLI(s) are missing{owner_detail}: "
+        f"{cli_details}. Install the missing CLI(s){owner_detail} and rerun switchyard."
+    )
+
+
+def stop_before_launch_for_missing_owner_clis(
+    report: FirstRunAuthReport,
+    *,
+    print_func: Callable[[str], None] = print,
+) -> bool:
+    if not report.missing_cli_roles:
+        return False
+    print_func(_format_missing_cli_launch_failure(report))
+    return True
+
+
 def run_switchyard_launch_first_run_auth(
     config: ProjectConfig,
     *,
@@ -9300,6 +9322,8 @@ def switchyard_new_command(
         runner=runner,
         print_func=print_func,
     )
+    if stop_before_launch_for_missing_owner_clis(first_run_auth_report, print_func=print_func):
+        return 1
     if first_run_auth_report.model_validation_failures:
         report_first_run_auth_warnings(first_run_auth_report, print_func=print_func)
         return 1
@@ -10627,6 +10651,8 @@ def switchyard_main(argv: list[str] | None = None) -> int:
     # explicit validate-models command. It performs provider API calls, so a
     # routine team start should not depend on provider availability.
     first_run_auth_report = run_switchyard_launch_first_run_auth(config)
+    if stop_before_launch_for_missing_owner_clis(first_run_auth_report):
+        return 1
     launch_result = launch_project(
         config,
         config_path=entry.config_path,

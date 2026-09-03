@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import re
+
 from team_launcher_test_helpers import *
 
 def _write_exported_switchyard_release(source_repo: Path, *, commit: str = REMOTE_HEAD) -> None:
@@ -896,7 +898,7 @@ def test_new_project_rerun_rejects_partially_provisioned_unregistered_project_be
     assert "database porter_ticket_board has 12 ticket_board tables" in message
     assert "porter-ticket-board.service is installed" in message
     assert "no usable launch entry exists" in message
-    assert "switchyard cannot launch it until registration is repaired or the partial provision is torn down" in message
+    assert "to inspect recovery: switchyard teardown porter --dry-run" in message
     assert "to launch it:      switchyard porter" not in message
     assert "to start over:" not in message
     assert not any(call[:1] == ["sudo"] for call in runner.calls)
@@ -974,7 +976,300 @@ def test_precheck_registered_provisioned_project_names_working_launch_command() 
     assert "database porter_ticket_board has 12 ticket_board tables" in message
     assert "porter-ticket-board.service is installed" in message
     assert "to launch it:      switchyard porter" in message
+    assert "to start over:     switchyard teardown porter --dry-run" in message
     assert "partially provisioned" not in message
+
+
+class TeardownRunner(FakeRunner):
+    def __init__(
+        self,
+        *,
+        database_exists: bool = True,
+        ticket_count: int = 0,
+        fail_label: str = "",
+        fail_ticket_count: bool = False,
+    ) -> None:
+        super().__init__()
+        self.database_exists = database_exists
+        self.ticket_count = ticket_count
+        self.fail_label = fail_label
+        self.fail_ticket_count = fail_ticket_count
+
+    def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        self.calls.append(args)
+        if args[:2] == ["psql", "-XAt"] and args[2] == "postgresql:///postgres?host=/var/run/postgresql":
+            return subprocess.CompletedProcess(args, 0, stdout="1\n" if self.database_exists else "\n")
+        if args[:2] == ["psql", "-XAt"] and args[2] == "postgresql:///porter_ticket_board?host=/var/run/postgresql":
+            if self.fail_ticket_count:
+                return subprocess.CompletedProcess(args, 1, stderr="permission denied\n")
+            return subprocess.CompletedProcess(args, 0, stdout=f"{self.ticket_count}\n")
+        command_display = shlex.join(args)
+        if self.fail_label and self.fail_label in command_display:
+            return subprocess.CompletedProcess(args, 1, stderr="simulated failure\n")
+        return subprocess.CompletedProcess(args, 0)
+
+
+def _mutating_teardown_calls(runner: TeardownRunner) -> list[list[str]]:
+    return [
+        call
+        for call in runner.calls
+        if call[:2] != ["psql", "-XAt"]
+    ]
+
+
+def _teardown_action_lines(lines: list[str]) -> list[str]:
+    return [
+        line
+        for line in lines
+        if re.match(r"^  [0-9]+\\. ", line) or line.startswith("     command: ")
+    ]
+
+
+def test_switchyard_teardown_dry_run_lists_partial_project_artifacts_without_mutating() -> None:
+    runner = TeardownRunner(ticket_count=0)
+    lines: list[str] = []
+
+    assert (
+        team_launcher.switchyard_teardown_command(
+            "porter",
+            dry_run=True,
+            runner=runner,
+            print_func=lines.append,
+        )
+        == 0
+    )
+
+    output = "\n".join(lines)
+    assert "switchyard: teardown plan for porter" in output
+    assert "switchyard: owner user: porter-agent" in output
+    assert "remove system board unit /etc/systemd/system/porter-ticket-board.service" in output
+    assert "remove tmpfiles config /etc/tmpfiles.d/porter-ticket-board.conf" in output
+    assert "remove polkit rule /etc/polkit-1/rules.d/49-porter-ticket-board-deploy.rules" in output
+    assert "drop PostgreSQL database porter_ticket_board" in output
+    assert "remove board release root /home/porter-agent/porter-ticketboard-live" in output
+    assert "remove switchyard registry entry /etc/switchyard/projects/porter.json" in output
+    assert "owner user account porter-agent" in output
+    assert "owner home directory /home/porter-agent" in output
+    assert "project checkout /home/porter-agent/Projects/porter" in output
+    assert "dry-run only; no changes made" in output
+    assert _mutating_teardown_calls(runner) == []
+
+
+def test_switchyard_teardown_refuses_nonempty_board_without_explicit_flag() -> None:
+    runner = TeardownRunner(ticket_count=2)
+    lines: list[str] = []
+
+    try:
+        team_launcher.switchyard_teardown_command(
+            "porter",
+            confirm="porter",
+            runner=runner,
+            print_func=lines.append,
+        )
+        raise AssertionError("expected non-empty board refusal")
+    except SystemExit as exc:
+        message = str(exc)
+
+    assert "refusing to drop non-empty board database porter_ticket_board with 2 ticket(s)" in message
+    assert "--drop-nonempty-board" in message
+    assert "non-empty board guard: destructive run requires --drop-nonempty-board" in "\n".join(lines)
+    assert _mutating_teardown_calls(runner) == []
+
+
+def test_switchyard_teardown_refuses_unknown_ticket_count_without_explicit_flag() -> None:
+    runner = TeardownRunner(fail_ticket_count=True)
+    lines: list[str] = []
+
+    try:
+        team_launcher.switchyard_teardown_command(
+            "porter",
+            confirm="porter",
+            runner=runner,
+            print_func=lines.append,
+        )
+        raise AssertionError("expected unknown ticket-count refusal")
+    except SystemExit as exc:
+        message = str(exc)
+
+    assert "cannot determine whether board database porter_ticket_board contains tickets" in message
+    assert "--drop-nonempty-board" in message
+    assert "board ticket count: unknown" in "\n".join(lines)
+    assert "board-count guard: destructive run requires --drop-nonempty-board" in "\n".join(lines)
+    assert _mutating_teardown_calls(runner) == []
+
+
+def test_switchyard_teardown_requires_project_name_confirmation() -> None:
+    runner = TeardownRunner(ticket_count=0)
+
+    try:
+        team_launcher.switchyard_teardown_command(
+            "porter",
+            confirm="wrong",
+            runner=runner,
+            print_func=lambda _line: None,
+        )
+        raise AssertionError("expected confirmation failure")
+    except SystemExit as exc:
+        message = str(exc)
+
+    assert "teardown confirmation failed" in message
+    assert _mutating_teardown_calls(runner) == []
+
+
+def test_switchyard_teardown_destructive_path_runs_guarded_actions_and_preserves_owner_home() -> None:
+    dry_runner = TeardownRunner(ticket_count=1)
+    dry_lines: list[str] = []
+    assert (
+        team_launcher.switchyard_teardown_command(
+            "porter",
+            dry_run=True,
+            drop_nonempty_board=True,
+            runner=dry_runner,
+            print_func=dry_lines.append,
+        )
+        == 0
+    )
+
+    runner = TeardownRunner(ticket_count=1)
+    lines: list[str] = []
+
+    assert (
+        team_launcher.switchyard_teardown_command(
+            "porter",
+            confirm="porter",
+            drop_nonempty_board=True,
+            runner=runner,
+            print_func=lines.append,
+        )
+        == 0
+    )
+
+    mutating = _mutating_teardown_calls(runner)
+    joined = "\n".join(shlex.join(call) for call in mutating)
+    assert "systemctl disable --now porter-ticket-board.service" in joined
+    assert "systemctl --user disable --now porter-ticket-board-notify-listener.service" in joined
+    assert "rm -f /etc/systemd/system/porter-ticket-board.service" in joined
+    assert "rm -f /etc/tmpfiles.d/porter-ticket-board.conf" in joined
+    assert "rm -f /etc/polkit-1/rules.d/49-porter-ticket-board-deploy.rules" in joined
+    assert 'DROP DATABASE IF EXISTS "porter_ticket_board" WITH (FORCE);' in joined
+    assert "rm -rf -- /home/porter-agent/porter-ticketboard-live" in joined
+    assert "rm -f /etc/switchyard/projects/porter.json" in joined
+    assert ["rm", "-rf", "--", "/home/porter-agent"] not in mutating
+    assert ["userdel", "porter-agent"] not in mutating
+    assert "switchyard: teardown complete for porter" in "\n".join(lines)
+    assert _teardown_action_lines(dry_lines) == _teardown_action_lines(lines)
+
+
+def test_switchyard_teardown_clears_partial_state_so_new_precheck_accepts_slug() -> None:
+    class StatefulTeardownRunner(TeardownRunner):
+        def __init__(self) -> None:
+            super().__init__(database_exists=True, ticket_count=0)
+            self.unit_exists = True
+
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            if args[:3] == ["systemctl", "list-unit-files", "--no-legend"]:
+                self.calls.append(args)
+                return subprocess.CompletedProcess(
+                    args,
+                    0,
+                    stdout="porter-ticket-board.service enabled\n" if self.unit_exists else "",
+                )
+            if args[:2] == ["bash", "-lc"] and "systemctl disable --now porter-ticket-board.service" in args[2]:
+                self.unit_exists = False
+            if args[:2] == ["sudo", "-u"] and "DROP DATABASE IF EXISTS" in " ".join(args):
+                self.database_exists = False
+            if len(args) >= 5 and args[:4] == ["git", "-C", args[2], "status"]:
+                self.calls.append(args)
+                return subprocess.CompletedProcess(args, 0, stdout="")
+            return super().__call__(args, **kwargs)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-teardown-retry.") as tmp:
+        tmp_path = Path(tmp)
+        source_repo = tmp_path / "repo"
+        source_repo.mkdir()
+        project_repo = tmp_path / "project-repo"
+        project_repo.mkdir()
+        runner = StatefulTeardownRunner()
+
+        assert (
+            team_launcher.switchyard_teardown_command(
+                "porter",
+                confirm="porter",
+                runner=runner,
+                print_func=lambda _line: None,
+            )
+            == 0
+        )
+        plan = team_launcher.build_plan(project="porter", owner_user=team_launcher.current_user_name())
+        team_launcher.precheck_new_project(
+            plan,
+            source_repo=source_repo,
+            repository=project_repo,
+            runner=runner,
+            port_in_use=lambda _port: False,
+            socket_exists=lambda _path: False,
+            require_owner_user=False,
+        )
+
+
+def test_switchyard_teardown_partial_failure_reports_completed_and_remaining_actions() -> None:
+    runner = TeardownRunner(ticket_count=0, fail_label="/etc/systemd/system/porter-ticket-board.service")
+
+    try:
+        team_launcher.switchyard_teardown_command(
+            "porter",
+            confirm="porter",
+            runner=runner,
+            print_func=lambda _line: None,
+        )
+        raise AssertionError("expected partial teardown failure")
+    except SystemExit as exc:
+        message = str(exc)
+
+    assert "teardown failed while trying to remove system board unit /etc/systemd/system/porter-ticket-board.service" in message
+    assert "completed before failure:" in message
+    assert "stop and disable system board service porter-ticket-board.service" in message
+    assert "stop and disable owner notify-listener service porter-ticket-board-notify-listener.service" in message
+    assert "remaining after failure:" in message
+    assert "drop PostgreSQL database porter_ticket_board" in message
+    joined = "\n".join(shlex.join(call) for call in _mutating_teardown_calls(runner))
+    assert 'DROP DATABASE IF EXISTS "porter_ticket_board" WITH (FORCE);' not in joined
+
+
+def test_switchyard_main_dispatches_teardown_command() -> None:
+    original = team_launcher.switchyard_teardown_command
+    calls: list[dict[str, object]] = []
+
+    def fake_teardown(project: str, **kwargs: object) -> int:
+        calls.append({"project": project, **kwargs})
+        return 0
+
+    try:
+        team_launcher.switchyard_teardown_command = fake_teardown
+        assert (
+            team_launcher.switchyard_main(
+                [
+                    "teardown",
+                    "porter",
+                    "--dry-run",
+                    "--drop-nonempty-board",
+                    "--remove-owner-home",
+                    "--confirm",
+                    "porter",
+                ]
+            )
+            == 0
+        )
+    finally:
+        team_launcher.switchyard_teardown_command = original
+
+    assert calls
+    assert calls[0]["project"] == "porter"
+    assert calls[0]["dry_run"] is True
+    assert calls[0]["drop_nonempty_board"] is True
+    assert calls[0]["remove_owner_home"] is True
+    assert calls[0]["confirm"] == "porter"
+    assert "teardown" in team_launcher.switchyard_help_text()
 
 
 def test_new_project_rerun_allows_installed_unit_with_empty_database_recovery_path() -> None:

@@ -33,6 +33,7 @@ from scripts.ticket_board.project_provision import (
     render_add_role_sql,
     render_board_unit,
     render_vcs_close_role_sql,
+    sql_identifier,
     validate_ticket_prefix,
     write_artifacts,
 )
@@ -130,7 +131,17 @@ DEFAULT_VIEWER_ROWS = 80
 DEFAULT_TMUX_HISTORY_LIMIT = 200_000
 MAX_VISIBLE_PANES_PER_WINDOW = 6
 SWITCHYARD_VERSION = "dev"
-SWITCHYARD_COMMANDS = ("new", "register", "upgrade", "add-role", "set-vcs-close-role", "stop", "status", "validate-models")
+SWITCHYARD_COMMANDS = (
+    "new",
+    "register",
+    "upgrade",
+    "add-role",
+    "set-vcs-close-role",
+    "stop",
+    "teardown",
+    "status",
+    "validate-models",
+)
 SWITCHYARD_PRIVILEGED_COMMANDS = frozenset(SWITCHYARD_COMMANDS)
 YOLO_ARGS_BY_CLI = {
     "agy": ["--dangerously-skip-permissions"],
@@ -6049,6 +6060,347 @@ def _usable_switchyard_entry_for_project(
     return None, broken_entries
 
 
+def _project_board_provision_from_json(path: Path) -> ProjectBoardProvision:
+    raw = _load_json(path)
+    fields: dict[str, Any] = {}
+    for name in ProjectBoardProvision.__dataclass_fields__:
+        if name not in raw:
+            raise SystemExit(f"switchyard: {path} is missing provision field {name!r}")
+        fields[name] = raw[name]
+    return ProjectBoardProvision(**fields)
+
+
+def _port_from_board_url(board_url: str) -> int | None:
+    match = re.fullmatch(r"https?://(?:127\.0\.0\.1|localhost):([0-9]{1,5})(?:/.*)?", board_url.strip())
+    if not match:
+        return None
+    port = int(match.group(1))
+    return port if 1 <= port <= 65535 else None
+
+
+def _teardown_project_context(
+    project: str,
+    *,
+    owner_user: str | None,
+    config_dir: Path | None,
+    registry_dir: Path | None,
+    home_base: Path,
+) -> tuple[ProjectBoardProvision, Path, Path]:
+    project_slug = _validate_project_slug(project)
+    registry_path = (registry_dir or DEFAULT_SWITCHYARD_REGISTRY_DIR) / f"{project_slug}.json"
+    try:
+        entry = _resolve_switchyard_project(project_slug, config_dir=config_dir, registry_dir=registry_dir)
+    except SystemExit:
+        resolved_owner = owner_user or _default_new_project_owner(project_slug)
+        plan = build_plan(project=project_slug, owner_user=resolved_owner)
+        return plan, home_base / resolved_owner / "Projects" / project_slug, registry_path
+
+    config = load_project_config(entry.slug, entry.config_path)
+    project_checkout = _project_dir_from_generated_config_path(entry.config_path) or config.repository
+    if project_checkout is None:
+        project_checkout = home_base / (config.run_as_user or owner_user or _default_new_project_owner(entry.slug)) / "Projects" / entry.slug
+    plan_path = entry.config_path.parent / "plan.json"
+    if plan_path.exists():
+        plan = _project_board_provision_from_json(plan_path)
+    else:
+        resolved_owner = owner_user or config.run_as_user or _default_new_project_owner(entry.slug)
+        plan = build_plan(
+            project=entry.slug,
+            owner_user=resolved_owner,
+            port=_port_from_board_url(config.board_url),
+            source_repo=_repo_root(),
+            ticket_prefix=config.ticket_prefix,
+        )
+    return plan, project_checkout, registry_path
+
+
+def _ticket_board_existing_ticket_count(database: str, *, runner: Callable[..., subprocess.CompletedProcess[Any]]) -> int | None:
+    escaped_database = database.replace("'", "''")
+    command = [
+        "psql",
+        "-XAt",
+        "postgresql:///postgres?host=/var/run/postgresql",
+        "-c",
+        f"SELECT 1 FROM pg_database WHERE datname = '{escaped_database}'",
+    ]
+    if os.geteuid() == 0:
+        command = ["sudo", "-u", "postgres", *command]
+    try:
+        result = runner(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    if str(getattr(result, "stdout", "") or "").strip() != "1":
+        return 0
+
+    count_sql = (
+        "SELECT CASE WHEN to_regclass('ticket_board.tickets') IS NULL "
+        "THEN 0 ELSE (SELECT count(*)::int FROM ticket_board.tickets) END"
+    )
+    command = [
+        "psql",
+        "-XAt",
+        f"postgresql:///{database}?host=/var/run/postgresql",
+        "-c",
+        count_sql,
+    ]
+    if os.geteuid() == 0:
+        command = ["sudo", "-u", "postgres", *command]
+    try:
+        result = runner(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    raw_count = str(getattr(result, "stdout", "") or "").strip()
+    try:
+        return int(raw_count or "0")
+    except ValueError:
+        return None
+
+
+def _bash_action(script: str) -> tuple[str, ...]:
+    return ("bash", "-lc", script)
+
+
+def _drop_database_command(database: str) -> tuple[str, ...]:
+    return (
+        "sudo",
+        "-u",
+        "postgres",
+        "psql",
+        "-X",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "postgresql:///postgres?host=/var/run/postgresql",
+        "-c",
+        f"DROP DATABASE IF EXISTS {sql_identifier(database)} WITH (FORCE);",
+    )
+
+
+def _switchyard_teardown_actions(
+    plan: ProjectBoardProvision,
+    *,
+    registry_path: Path,
+    remove_owner_home: bool,
+    remove_owner_user: bool,
+) -> tuple[SwitchyardTeardownAction, ...]:
+    owner_runtime_script = (
+        f"owner_uid=$(id -u {shlex.quote(plan.owner_user)} 2>/dev/null || true); "
+        'if [ -n "$owner_uid" ] && [ -S "/run/user/$owner_uid/bus" ]; then '
+        f"sudo -u {shlex.quote(plan.owner_user)} env "
+        'XDG_RUNTIME_DIR="/run/user/$owner_uid" '
+        'DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$owner_uid/bus" '
+        f"systemctl --user disable --now {shlex.quote(plan.listener_unit)} || true; "
+        "fi"
+    )
+    board_service_script = (
+        f"if systemctl list-unit-files --no-legend {shlex.quote(plan.board_unit)} | grep -q .; then "
+        f"systemctl disable --now {shlex.quote(plan.board_unit)}; "
+        "fi"
+    )
+    board_root = Path(plan.board_root)
+    owner_home = Path("/home") / plan.owner_user
+    actions = [
+        SwitchyardTeardownAction(
+            f"stop and disable system board service {plan.board_unit}",
+            _bash_action(board_service_script),
+        ),
+        SwitchyardTeardownAction(
+            f"stop and disable owner notify-listener service {plan.listener_unit}",
+            _bash_action(owner_runtime_script),
+        ),
+        SwitchyardTeardownAction(
+            f"remove owner notify-listener unit /home/{plan.owner_user}/.config/systemd/user/{plan.listener_unit}",
+            ("rm", "-f", f"/home/{plan.owner_user}/.config/systemd/user/{plan.listener_unit}"),
+        ),
+        SwitchyardTeardownAction(
+            f"remove system board unit /etc/systemd/system/{plan.board_unit}",
+            ("rm", "-f", f"/etc/systemd/system/{plan.board_unit}"),
+        ),
+        SwitchyardTeardownAction(
+            f"remove tmpfiles config /etc/tmpfiles.d/{plan.tmpfiles_name}",
+            ("rm", "-f", f"/etc/tmpfiles.d/{plan.tmpfiles_name}"),
+        ),
+        SwitchyardTeardownAction(
+            f"remove polkit rule /etc/polkit-1/rules.d/{plan.polkit_name}",
+            ("rm", "-f", f"/etc/polkit-1/rules.d/{plan.polkit_name}"),
+        ),
+        SwitchyardTeardownAction(
+            "reload systemd manager configuration",
+            ("systemctl", "daemon-reload"),
+        ),
+        SwitchyardTeardownAction(
+            f"drop PostgreSQL database {plan.database}",
+            _drop_database_command(plan.database),
+        ),
+        SwitchyardTeardownAction(
+            f"remove board release root {board_root}",
+            ("rm", "-rf", "--", str(board_root)),
+        ),
+        SwitchyardTeardownAction(
+            f"remove switchyard registry entry {registry_path}",
+            ("rm", "-f", str(registry_path)),
+        ),
+    ]
+    if remove_owner_home:
+        actions.append(
+            SwitchyardTeardownAction(
+                f"remove owner home directory {owner_home}",
+                ("rm", "-rf", "--", str(owner_home)),
+            )
+        )
+    if remove_owner_user:
+        actions.append(
+            SwitchyardTeardownAction(
+                f"remove owner user account {plan.owner_user}",
+                ("userdel", plan.owner_user),
+            )
+        )
+    return tuple(actions)
+
+
+def _print_teardown_plan(
+    teardown: SwitchyardTeardownPlan,
+    *,
+    dry_run: bool,
+    drop_nonempty_board: bool,
+    remove_owner_home: bool,
+    remove_owner_user: bool,
+    print_func: Callable[[str], None],
+) -> None:
+    print_func(f"switchyard: teardown plan for {teardown.project}")
+    print_func(f"switchyard: owner user: {teardown.owner_user}")
+    print_func(f"switchyard: owner home: {teardown.owner_home}")
+    print_func(f"switchyard: project checkout: {teardown.project_checkout}")
+    ticket_count = "unknown" if teardown.ticket_count is None else str(teardown.ticket_count)
+    print_func(f"switchyard: board ticket count: {ticket_count}")
+    if teardown.ticket_count is None and not drop_nonempty_board:
+        print_func("switchyard: board-count guard: destructive run requires --drop-nonempty-board")
+    elif teardown.ticket_count and not drop_nonempty_board:
+        print_func("switchyard: non-empty board guard: destructive run requires --drop-nonempty-board")
+    print_func("switchyard: preserved by default:")
+    if not remove_owner_user:
+        print_func(f"  - owner user account {teardown.owner_user}")
+    if not remove_owner_home:
+        print_func(f"  - owner home directory {teardown.owner_home}")
+        print_func(f"  - project checkout {teardown.project_checkout}")
+    print_func("switchyard: actions:")
+    for index, action in enumerate(teardown.actions, start=1):
+        print_func(f"  {index}. {action.label}")
+        print_func(f"     command: {action.command_display}")
+    if dry_run:
+        print_func("switchyard: dry-run only; no changes made")
+
+
+def _confirm_teardown_project(
+    project: str,
+    *,
+    confirmation: str | None,
+    input_func: Callable[[str], str],
+) -> None:
+    expected = project.strip()
+    answer = confirmation
+    if answer is None:
+        answer = _read_prompt(f"Type {expected} to tear down this project: ", input_func=input_func).strip()
+    if answer != expected:
+        raise SystemExit(f"switchyard: teardown confirmation failed; expected {expected!r}")
+
+
+def _run_teardown_actions(
+    actions: Sequence[SwitchyardTeardownAction],
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    print_func: Callable[[str], None],
+) -> None:
+    completed: list[SwitchyardTeardownAction] = []
+    for index, action in enumerate(actions):
+        print_func(f"switchyard: running: {action.label}")
+        result = runner(list(action.command), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if result.returncode == 0:
+            completed.append(action)
+            continue
+        stderr = str(getattr(result, "stderr", "") or "").strip()
+        stdout = str(getattr(result, "stdout", "") or "").strip()
+        detail = stderr or stdout or f"exit status {result.returncode}"
+        remaining = list(actions[index:])
+        message = [
+            f"switchyard: teardown failed while trying to {action.label}: {detail}",
+            "switchyard: completed before failure:",
+        ]
+        message.extend(f"  - {item.label}" for item in completed)
+        if not completed:
+            message.append("  - (none)")
+        message.append("switchyard: remaining after failure:")
+        message.extend(f"  - {item.label}" for item in remaining)
+        raise SystemExit("\n".join(message))
+
+
+def switchyard_teardown_command(
+    project: str,
+    *,
+    dry_run: bool = False,
+    confirm: str | None = None,
+    drop_nonempty_board: bool = False,
+    remove_owner_home: bool = False,
+    remove_owner_user: bool = False,
+    owner_user: str | None = None,
+    config_dir: Path | None = None,
+    registry_dir: Path | None = None,
+    home_base: Path = Path("/home"),
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    input_func: Callable[[str], str] = input,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    plan, project_checkout, registry_path = _teardown_project_context(
+        project,
+        owner_user=owner_user,
+        config_dir=config_dir,
+        registry_dir=registry_dir,
+        home_base=home_base,
+    )
+    ticket_count = _ticket_board_existing_ticket_count(plan.database, runner=runner)
+    teardown = SwitchyardTeardownPlan(
+        project=plan.project,
+        owner_user=plan.owner_user,
+        owner_home=home_base / plan.owner_user,
+        project_checkout=project_checkout,
+        ticket_count=ticket_count,
+        registry_path=registry_path,
+        actions=_switchyard_teardown_actions(
+            plan,
+            registry_path=registry_path,
+            remove_owner_home=remove_owner_home,
+            remove_owner_user=remove_owner_user,
+        ),
+    )
+    _print_teardown_plan(
+        teardown,
+        dry_run=dry_run,
+        drop_nonempty_board=drop_nonempty_board,
+        remove_owner_home=remove_owner_home,
+        remove_owner_user=remove_owner_user,
+        print_func=print_func,
+    )
+    if dry_run:
+        return 0
+    if ticket_count is None and not drop_nonempty_board:
+        raise SystemExit(
+            f"switchyard: cannot determine whether board database {plan.database} contains tickets; "
+            "pass --drop-nonempty-board to confirm dropping it anyway"
+        )
+    if ticket_count and not drop_nonempty_board:
+        raise SystemExit(
+            f"switchyard: refusing to drop non-empty board database {plan.database} "
+            f"with {ticket_count} ticket(s); pass --drop-nonempty-board to confirm that data loss"
+        )
+    _confirm_teardown_project(plan.project, confirmation=confirm, input_func=input_func)
+    _run_teardown_actions(teardown.actions, runner=runner, print_func=print_func)
+    print_func(f"switchyard: teardown complete for {plan.project}")
+    return 0
+
+
 def precheck_new_project(
     plan: ProjectBoardProvision,
     *,
@@ -6095,7 +6447,7 @@ def precheck_new_project(
                     f"project {plan.project!r} is already provisioned "
                     f"(database {plan.database} has {table_count} ticket_board tables, {plan.board_unit} is installed).\n"
                     f"  to launch it:      switchyard {plan.project}\n"
-                    "  to start over:     tear it down first (no teardown command exists yet)"
+                    f"  to start over:     switchyard teardown {plan.project} --dry-run"
                 )
             else:
                 effective_config_dir = config_dir or DEFAULT_CONFIG_DIR
@@ -6107,8 +6459,7 @@ def precheck_new_project(
                     f"{plan.board_unit} is installed, but no usable launch entry exists in "
                     f"{effective_config_dir} or {effective_registry_dir}).\n"
                     f"{broken_entry_detail}"
-                    "  switchyard cannot launch it until registration is repaired or the partial "
-                    "provision is torn down"
+                    f"  to inspect recovery: switchyard teardown {plan.project} --dry-run"
                 )
     if errors:
         raise SystemExit("team-launcher: new project precheck failed:\n- " + "\n- ".join(errors))
@@ -6273,6 +6624,27 @@ class SwitchyardProjectStatus:
     @property
     def viewer_display(self) -> str:
         return self.viewer_session or "-"
+
+
+@dataclass(frozen=True)
+class SwitchyardTeardownAction:
+    label: str
+    command: tuple[str, ...]
+
+    @property
+    def command_display(self) -> str:
+        return shlex.join(self.command)
+
+
+@dataclass(frozen=True)
+class SwitchyardTeardownPlan:
+    project: str
+    owner_user: str
+    owner_home: Path
+    project_checkout: Path
+    ticket_count: int | None
+    registry_path: Path
+    actions: tuple[SwitchyardTeardownAction, ...]
 
 
 @dataclass(frozen=True)
@@ -9807,6 +10179,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "add-role",
             "set-vcs-close-role",
             "pane",
+            "teardown",
         ],
         help="start is idempotent attach-or-start (resumes tracked session ids when relaunching a stopped pane); reload force-restarts running CLIs with tracked resume ids",
     )
@@ -9825,6 +10198,18 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pane-state-dir", type=Path, help=f"write initial pane idle state here (default: {DEFAULT_PANE_STATE_DIR})")
     parser.add_argument("--no-attach", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--dry-run", action="store_true", help="print launch plan without starting Konsole")
+    parser.add_argument("--confirm", help="project slug required for destructive teardown")
+    parser.add_argument(
+        "--drop-nonempty-board",
+        action="store_true",
+        help="allow teardown to drop a board database that still contains tickets",
+    )
+    parser.add_argument(
+        "--remove-owner-home",
+        action="store_true",
+        help="teardown may remove /home/<owner>; off by default because it can contain user work",
+    )
+    parser.add_argument("--remove-owner-user", action="store_true", help="teardown may remove the owner Unix account")
     parser.add_argument("--owner-user", help="new project owner Unix user (default: <project>-agent)")
     parser.add_argument("--port", type=int, help="new project board port; omitted means deterministic allocation")
     parser.add_argument("--database", help="new project PostgreSQL database; omitted means <project>_ticket_board")
@@ -9942,6 +10327,33 @@ def _build_switchyard_stop_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_switchyard_teardown_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="switchyard teardown",
+        description="Remove Switchyard-created provisioning artifacts for a project.",
+    )
+    parser.add_argument("project", help="project slug")
+    parser.add_argument("--dry-run", action="store_true", help="list exactly what would be removed without changing anything")
+    parser.add_argument("--confirm", help="required project slug for the destructive run")
+    parser.add_argument("--owner-user", help="owner user for an unregistered partial provision (default: <project>-agent)")
+    parser.add_argument(
+        "--drop-nonempty-board",
+        action="store_true",
+        help="allow dropping a board database that still contains tickets",
+    )
+    parser.add_argument(
+        "--remove-owner-home",
+        action="store_true",
+        help="also remove /home/<owner>; off by default because it can contain user work",
+    )
+    parser.add_argument(
+        "--remove-owner-user",
+        action="store_true",
+        help="also remove the owner Unix account; off by default",
+    )
+    return parser
+
+
 def _build_switchyard_status_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="switchyard status", description="List registered Switchyard projects and pane liveness.")
     parser.add_argument("--json", action="store_true", help="emit stable machine-readable project status")
@@ -9963,6 +10375,7 @@ Commands:
   set-vcs-close-role
                    set which existing project role can mark tickets done
   stop             stop a project's configured tmux pane sessions
+  teardown         remove project board provisioning artifacts after a dry-run review
   status           list registered projects and pane liveness
   validate-models  check configured role models without starting panes
 
@@ -10137,6 +10550,17 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         entry = _resolve_switchyard_project(project)
         config = _load_switchyard_project_config_for_command(entry, argv)
         return stop_project(config)
+    if argv[0].casefold() == "teardown":
+        args = _build_switchyard_teardown_parser().parse_args(argv[1:])
+        return switchyard_teardown_command(
+            args.project,
+            dry_run=args.dry_run,
+            confirm=args.confirm,
+            drop_nonempty_board=args.drop_nonempty_board,
+            remove_owner_home=args.remove_owner_home,
+            remove_owner_user=args.remove_owner_user,
+            owner_user=args.owner_user,
+        )
     if argv[0].casefold() == "status":
         args = _build_switchyard_status_parser().parse_args(argv[1:])
         if os.geteuid() != 0:
@@ -10271,6 +10695,16 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.command == "stop":
         return stop_project(config)
+    if args.command == "teardown":
+        return switchyard_teardown_command(
+            config_project,
+            dry_run=args.dry_run,
+            confirm=args.confirm,
+            drop_nonempty_board=args.drop_nonempty_board,
+            remove_owner_home=args.remove_owner_home,
+            remove_owner_user=args.remove_owner_user,
+            owner_user=args.owner_user,
+        )
     if args.command == "deploy-launcher":
         return deploy_launcher_checkout(
             config,

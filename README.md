@@ -53,10 +53,11 @@ Commands:
   set-vcs-close-role
                    set which existing project role can mark tickets done
   stop             stop a project's configured tmux pane sessions
+  teardown         remove project board provisioning artifacts after a dry-run review
   status           list registered projects and pane liveness
   validate-models  check configured role models without starting panes
 
-Bare project names start or attach the project. Recognized commands: new, register, upgrade, add-role, set-vcs-close-role, stop, status, validate-models.
+Bare project names start or attach the project. Recognized commands: new, register, upgrade, add-role, set-vcs-close-role, stop, teardown, status, validate-models.
 ```
 <!-- switchyard-help:end -->
 

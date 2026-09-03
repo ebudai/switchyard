@@ -30,26 +30,33 @@ The consequence is a workflow you must plan around:
 
    Read the bundle's ref name first — `git bundle list-heads <bundle>` — because
    implementers build them inconsistently; some head is `HEAD`, some is a branch.
-4. only then can the implementer submit to audit; the board refuses `submit_to_audit`
-   until the commit is on origin
+4. only then can the implementer submit to audit; the write client refuses
+   `submit_to_audit` until the commit is on origin. That check runs before the
+   board request and uses the caller's current working directory, so a Switchyard
+   commit must be submitted from a Switchyard checkout, not from a tenant project
+   or the old PGU checkout.
 
 **Every round trip therefore stalls on you, and on you being physically present**,
-because `pkexec` needs a human to approve a prompt. On 2026-09-02 that meant fifteen
+because `pkexec` needs a human to approve a prompt. On 2026-09-02 that meant thirteen
 merges, roughly thirty privileged imports, and six director holds.
 
 Two traps that follow from it:
 
-- **The watchdog reads that stall as "implementer may be stuck" and escalates.** It is
-  almost always wrong. Read the pane before acting: an implementer that has finished,
-  bundled, and said so is not stuck, and telling it to try harder wastes its time.
-  There is no board state meaning "waiting on a human" — see *Action Naming* below.
+- **The watchdog reads this import-wait stall as "implementer may be stuck" and
+  escalates.** In this specific case it is almost always wrong. Read the pane before
+  acting: an implementer that has finished, bundled, and said so is not stuck, and
+  telling it to try harder wastes its time. There is no board state meaning "waiting
+  on a human" — see *Action Naming* below.
 - **Never use `pkexec` as a liveness probe.** Repeated failed authentications lock the
   operator out of their own machine. This happened, for nine minutes, because a
   background watch polled it every two minutes overnight.
 
-Finally: `git clone /data/git/switchyard.git` fails under git's local hardlink
-optimisation, because the packs are operator-owned and mode 444. Use
-`git clone --no-local`. Without knowing that, the repo appears broken.
+Finally: prefer `git clone --no-local /data/git/switchyard.git` for handoff and
+recovery examples. Plain clones into `/home` and `/tmp` work on this machine because
+they cross from `/data` to another filesystem and Git copies objects instead of
+hardlinking them. Forced local clones can fail across that boundary with
+`Invalid cross-device link`; clones into `/data` can also run into protected-hardlink
+ownership rules. `--no-local` makes the intended copy behavior explicit.
 
 ## What Switchyard Owns
 
@@ -91,10 +98,12 @@ true on 2026-09-02 and are marked as such.
     mirror              https://github.com/ebudai/switchyard
 
 CHECK THOSE FOUR AGAINST EACH OTHER BEFORE YOU TRUST ANY OF THEM. On 2026-09-02 all
-three deploy surfaces had drifted from main at once: the shared install was seven
-releases behind, the live board predated the commit-verification work merged that
-morning (so verification was merged but NOT RUNNING), and the mirror was one commit
-behind. Drift is the normal state, not an incident; merging is not deploying.
+three deploy surfaces had drifted from main at once: `/opt/switchyard/current` pointed
+at `81dc45f81ec0`, which was 18 commits behind main at audit time; one newer release
+directory was present on disk but not current; the live board predated the
+commit-verification work merged that morning (so verification was merged but NOT
+RUNNING); and the mirror was one commit behind. Drift is the normal state, not an
+incident; merging is not deploying.
 
 The repository split is complete. `pgu.git` carries no Switchyard-named paths;
 PGU instruction and crash files still intentionally point at `/opt/switchyard` as the

@@ -46,17 +46,63 @@ def run_dry(manager: str) -> str:
     return proc.stdout
 
 
+AGENT_CLI_NAMES = ("claude", "codex", "agy", "hermes")
+VENDOR_INSTALLER_MARKERS = ("install.sh", "| bash", "| sh")
+
+
+def _without_filesystem_paths(text: str) -> str:
+    """Drop absolute-path tokens so only prose and command names remain.
+
+    The prereq installer echoes every command it would run, and those commands
+    embed this repository's own location. Matching CLI names against the raw
+    output therefore asserted something about the reader's directory name
+    rather than about the installer -- a checkout at ~/wt-codex-fix failed with
+    "prereqs output still mentions codex", blaming the installer for a string
+    the test put there itself. That was PGU-908.
+
+    Paths are the only part of the output the repository location can reach, so
+    dropping them is enough. URLs survive, because a vendor installer URL does
+    not start with a slash -- and it is exactly what these assertions are for.
+    """
+    kept = []
+    for token in text.split():
+        if token.lstrip("+'\"(").startswith("/"):
+            continue
+        kept.append(token)
+    return " ".join(kept)
+
+
 def assert_no_agent_cli_output(output: str) -> None:
     """The prereq installer says nothing about agent CLIs any more.
 
     Installing them is the user's job; naming a vendor installer here is how
-    the previous behaviour started.
+    the previous behaviour started. Checked against what the installer prints,
+    with filesystem paths removed -- see _without_filesystem_paths.
     """
-    lowered = output.lower()
-    for cli in ("claude", "codex", "agy", "hermes"):
-        assert cli not in lowered, f"prereqs output still mentions {cli}"
-    assert "install.sh" not in output
-    assert "| bash" not in output
+    prose = _without_filesystem_paths(output).lower()
+    for cli in AGENT_CLI_NAMES:
+        assert cli not in prose, f"prereqs output still mentions {cli}"
+    for marker in VENDOR_INSTALLER_MARKERS:
+        assert marker not in prose, f"prereqs output still shows a vendor installer: {marker}"
+
+
+def assert_prereqs_script_never_names_an_agent_cli() -> None:
+    """The same guard, against the script itself rather than one dry run.
+
+    This is the stronger half and it has no environment in it at all. The
+    script's own text covers branches a dry run never reaches -- the apt path
+    when the host has pacman, and vice versa -- and it cannot be perturbed by
+    where the repository happens to live.
+    """
+    source = SCRIPT.read_text(encoding="utf-8").lower()
+    for cli in AGENT_CLI_NAMES:
+        assert cli not in source, f"install-switchyard-prereqs mentions {cli}"
+    for marker in VENDOR_INSTALLER_MARKERS:
+        assert marker not in source, f"install-switchyard-prereqs carries a vendor installer: {marker}"
+
+
+def test_prereqs_script_source_names_no_agent_cli() -> None:
+    assert_prereqs_script_never_names_an_agent_cli()
 
 
 def test_apt_commands() -> None:
@@ -273,6 +319,7 @@ def test_system_site_venv_runs_ticket_board_entrypoint() -> None:
 
 
 if __name__ == "__main__":
+    test_prereqs_script_source_names_no_agent_cli()
     test_apt_commands()
     test_pacman_commands()
     test_pacman_pip_deescalates_to_invoking_user_when_run_as_root()

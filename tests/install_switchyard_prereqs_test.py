@@ -46,6 +46,19 @@ def run_dry(manager: str) -> str:
     return proc.stdout
 
 
+def assert_no_agent_cli_output(output: str) -> None:
+    """The prereq installer says nothing about agent CLIs any more.
+
+    Installing them is the user's job; naming a vendor installer here is how
+    the previous behaviour started.
+    """
+    lowered = output.lower()
+    for cli in ("claude", "codex", "agy", "hermes"):
+        assert cli not in lowered, f"prereqs output still mentions {cli}"
+    assert "install.sh" not in output
+    assert "| bash" not in output
+
+
 def test_apt_commands() -> None:
     output = run_dry("apt")
     assert "Refreshing apt package index with apt-get update before installing packages." in output
@@ -70,16 +83,7 @@ def test_apt_commands() -> None:
     assert f"+ sudo /opt/switchyard/venv/bin/python {ROOT / 'scripts' / 'ticket-board.py'} --help" in output
     assert "pip install --user" not in output
     assert "--break-system-packages" not in output
-    assert "Agent CLI installation is handled by the top-level ./install wrapper." in output
-    assert "Switchyard needs at least one installed and authenticated agent CLI" in output
-    assert "https://claude.ai/install.sh | bash" in output
-    assert "Debian/Ubuntu package is claude-code, not claude" in output
-    assert "https://chatgpt.com/codex/install.sh | sh" in output
-    assert "https://antigravity.google/cli/install.sh | bash" in output
-    assert "https://hermes-agent.nousresearch.com/install.sh | bash" in output
-    assert "See docs/fresh-machine-install.md for vendor documentation links." in output
-    assert "fetch the script URL without piping it and read the script first" in output
-    assert "authenticate at least one of: claude, codex, agy, or hermes" in output
+    assert_no_agent_cli_output(output)
     assert "Next step: run scripts/install-switchyard" not in output
 
 
@@ -95,14 +99,7 @@ def test_pacman_commands() -> None:
     assert "Installing psycopg for the invoking user with pip on Arch-family systems." in output
     assert "+ python3 -m pip install --user psycopg\\>=3.3\\,\\<4" in output
     assert "/opt/switchyard/venv" not in output
-    assert "Agent CLI installation is handled by the top-level ./install wrapper." in output
-    assert "https://claude.ai/install.sh | bash" in output
-    assert "https://chatgpt.com/codex/install.sh | sh" in output
-    assert "https://antigravity.google/cli/install.sh | bash" in output
-    assert "https://hermes-agent.nousresearch.com/install.sh | bash" in output
-    assert "See docs/fresh-machine-install.md for vendor documentation links." in output
-    assert "fetch the script URL without piping it and read the script first" in output
-    assert "authenticate at least one of: claude, codex, agy, or hermes" in output
+    assert_no_agent_cli_output(output)
     assert "Next step: run scripts/install-switchyard" not in output
 
 
@@ -116,7 +113,7 @@ def test_pacman_pip_deescalates_to_invoking_user_when_run_as_root() -> None:
         "SWITCHYARD_PREREQS_TEST_ASSUME_ROOT": "1",
     }
     proc = subprocess.run(
-        [str(SCRIPT), "--dry-run", "--skip-cli"],
+        [str(SCRIPT), "--dry-run"],
         cwd=ROOT,
         env=env,
         check=True,
@@ -145,10 +142,24 @@ def test_fresh_machine_docs_match_manual_agent_cli_policy() -> None:
     assert "`python3-psycopg` exists but is `3.1.17-2`" in docs
     assert "does not satisfy Switchyard's `psycopg>=3.3,<4` pin" in normalized_docs
     assert "sudo ./install" in docs
-    assert "can run the vendor-documented agent CLI installers" in normalized_docs
-    assert "asks before running each missing CLI unless `--yes`, `--cli`, or `--no-cli` was supplied" in normalized_docs
-    assert "Pass `--cli <name>` to install or prompt for only one CLI" in docs
-    assert "failed, declined, or skipped CLI install does not roll back" in normalized_docs
+
+    # The CLIs are the user's responsibility, and the docs must say so rather
+    # than describe an installer that offers to do it.
+    assert "Switchyard does not install, download, or upgrade the agent CLIs." in normalized_docs
+    assert "Switchyard supports four agent CLIs and installs none of them." in normalized_docs
+    assert "Switchyard never runs the commands below." in normalized_docs
+    assert "for the user that will own the project" in normalized_docs
+    assert "`switchyard new` detects the CLIs that are present" in normalized_docs
+    for removed in (
+        "can run the vendor-documented agent CLI installers",
+        "asks before running each missing CLI",
+        "Pass `--cli <name>`",
+        "--no-cli",
+        "--skip-cli",
+    ):
+        assert removed not in normalized_docs, removed
+
+    # Vendor provenance stays, as documentation the reader verifies.
     assert "Before running any `curl ... | bash` or `curl ... | sh` command" in normalized_docs
     assert "read the script first" in normalized_docs
     assert "`claude-code`, not `claude`" in docs
@@ -160,6 +171,30 @@ def test_fresh_machine_docs_match_manual_agent_cli_policy() -> None:
     assert "https://hermes-agent.nousresearch.com/install.sh" in docs
     assert "https://hermes-agent.nousresearch.com/docs/getting-started/installation" in docs
     assert "complete authentication" in docs
+
+
+def test_readme_states_the_user_owns_agent_cli_installation() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    normalized = " ".join(readme.split())
+
+    assert "Switchyard does not install the agent CLIs." in normalized
+    assert "for the user that will own the project" in normalized
+    assert "walks their sign-in when you create a project" in normalized
+    assert "--cli" not in readme
+    assert "--no-cli" not in readme
+
+
+def test_prereqs_rejects_the_removed_cli_flags() -> None:
+    for flag in ("--skip-cli", "--no-cli"):
+        proc = subprocess.run(
+            [str(SCRIPT), "--dry-run", flag],
+            cwd=ROOT,
+            env={**os.environ, "SWITCHYARD_PREREQS_ASSUME_MANAGER": "apt"},
+            text=True,
+            capture_output=True,
+        )
+        assert proc.returncode != 0, flag
+        assert f"unknown argument: {flag}" in proc.stderr
 
 
 def test_package_sets_match_the_platform_python_strategy() -> None:
@@ -242,6 +277,8 @@ if __name__ == "__main__":
     test_pacman_commands()
     test_pacman_pip_deescalates_to_invoking_user_when_run_as_root()
     test_fresh_machine_docs_match_manual_agent_cli_policy()
+    test_readme_states_the_user_owns_agent_cli_installation()
+    test_prereqs_rejects_the_removed_cli_flags()
     test_package_sets_match_the_platform_python_strategy()
     test_system_site_venv_runs_ticket_board_entrypoint()
     print("install_switchyard_prereqs_test: ok")

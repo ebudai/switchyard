@@ -203,8 +203,10 @@ One command, from a fresh clone:
     git clone https://github.com/ebudai/switchyard && cd switchyard && sudo ./install
 
 `--dry-run` prints every command it would run and changes nothing; run that first if
-you want to see what it does before granting root. `--cli <name>` installs one agent
-CLI, `--no-cli` none, `--yes` answers all prompts. Otherwise it asks per CLI.
+you want to see what it does before granting root. It installs no agent CLIs and
+asks nothing; `--yes` is accepted for compatibility. Installing claude, codex, agy,
+or hermes is the user's job, for the project's owner user; switchyard detects what
+is present and walks sign-in at project creation.
 
 **Authentication is manual and always last.** Every agent CLI needs a browser sign-in
 or an API key, and that cannot be scripted — see PGU-889, which established that one

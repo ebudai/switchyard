@@ -8,37 +8,27 @@ PREREQS_SCRIPT="${SWITCHYARD_INSTALL_PREREQS_SCRIPT:-$REPO_ROOT/scripts/install-
 SWITCHYARD_INSTALL_SCRIPT="${SWITCHYARD_INSTALL_SWITCHYARD_SCRIPT:-$REPO_ROOT/scripts/install-switchyard}"
 SUDO_BIN="${SWITCHYARD_SUDO_BIN:-sudo}"
 ORIGINAL_ARGS=("$@")
-ASSUME_YES=0
-SKIP_CLI=0
 DRY_RUN=0
-SELECTED_CLI=""
-CLI_INSTALL_ATTEMPTED=0
-CLI_INSTALL_SUCCEEDED=0
-CLI_INSTALL_FAILED=0
-CLI_SKIPPED_NOTTY=0
-CLI_SKIPPED_BY_USER=0
-AUTH_INSTALLED_CLIS=()
-AUTH_PRESENT_CLIS=()
 
 usage() {
     cat <<'EOF'
-Usage: sudo ./install [--dry-run] [--yes|-y] [--cli <claude|codex|agy|hermes>] [--no-cli|--skip-cli]
+Usage: sudo ./install [--dry-run] [--yes|-y]
 
-Installs Switchyard host packages, the shared Python venv, optional agent CLIs,
-and the public switchyard command. Authentication remains manual and is printed
-as the final next step. --dry-run prints the commands that would run and exits
-without changing the system. Without --cli, CLI installation prompts for each
-supported CLI in turn; --cli limits prompting or --yes to that one CLI.
+Installs Switchyard host packages, the shared Python venv, and the public
+switchyard command. --dry-run prints the commands that would run and exits
+without changing the system. --yes is accepted for compatibility; this
+installer does not prompt, so it has nothing to answer.
+
+Switchyard does not install, download, or upgrade agent CLIs. Installing
+claude, codex, agy, or hermes is yours to do with the vendor's own installer,
+for the user that will own the project. Switchyard detects which ones are
+present and walks their sign-in when you create a project.
 EOF
 }
 
 die() {
     printf 'install: ERROR: %s\n' "$*" >&2
     exit 1
-}
-
-quote() {
-    printf '%q' "$1"
 }
 
 print_command() {
@@ -52,43 +42,15 @@ run_cmd() {
     "$@"
 }
 
-run_cmd_stdin_closed() {
-    print_command "$@"
-    "$@" </dev/null
-}
-
 while (($#)); do
     case "$1" in
         --yes|-y)
-            ASSUME_YES=1
-            ;;
-        --no-cli|--skip-cli)
-            SKIP_CLI=1
+            # Accepted so existing invocations keep working. Nothing in this
+            # installer prompts any more: agent CLI installation was the only
+            # interactive step and it is no longer ours to run.
             ;;
         --dry-run)
             DRY_RUN=1
-            ;;
-        --cli)
-            shift
-            [[ $# -gt 0 ]] || die "--cli requires one of: claude, codex, agy, hermes"
-            case "$1" in
-                claude|codex|agy|hermes)
-                    SELECTED_CLI="$1"
-                    ;;
-                *)
-                    die "unsupported --cli value: $1"
-                    ;;
-            esac
-            ;;
-        --cli=*)
-            SELECTED_CLI="${1#--cli=}"
-            case "$SELECTED_CLI" in
-                claude|codex|agy|hermes)
-                    ;;
-                *)
-                    die "unsupported --cli value: $SELECTED_CLI"
-                    ;;
-            esac
             ;;
         -h|--help)
             usage
@@ -116,206 +78,12 @@ if [[ -z "$ORIGINAL_HOME" && -n "$ORIGINAL_USER" ]]; then
 fi
 ORIGINAL_HOME="${ORIGINAL_HOME:-$HOME}"
 
-declare -A CLI_INSTALL_COMMANDS=(
-    [claude]="${SWITCHYARD_CLAUDE_INSTALL_COMMAND:-curl -fsSL https://claude.ai/install.sh | bash}"
-    [codex]="${SWITCHYARD_CODEX_INSTALL_COMMAND:-curl -fsSL https://chatgpt.com/codex/install.sh | sh}"
-    [agy]="${SWITCHYARD_AGY_INSTALL_COMMAND:-curl -fsSL https://antigravity.google/cli/install.sh | bash}"
-    [hermes]="${SWITCHYARD_HERMES_INSTALL_COMMAND:-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash}"
-)
-declare -A CLI_UNATTENDED_INSTALL_COMMANDS=(
-    [claude]="${SWITCHYARD_CLAUDE_UNATTENDED_INSTALL_COMMAND:-${SWITCHYARD_CLAUDE_INSTALL_COMMAND:-curl -fsSL https://claude.ai/install.sh | bash}}"
-    [codex]="${SWITCHYARD_CODEX_UNATTENDED_INSTALL_COMMAND:-${SWITCHYARD_CODEX_INSTALL_COMMAND:-curl -fsSL https://chatgpt.com/codex/install.sh | sh}}"
-    [agy]="${SWITCHYARD_AGY_UNATTENDED_INSTALL_COMMAND:-${SWITCHYARD_AGY_INSTALL_COMMAND:-curl -fsSL https://antigravity.google/cli/install.sh | bash}}"
-    [hermes]="${SWITCHYARD_HERMES_UNATTENDED_INSTALL_COMMAND:-${SWITCHYARD_HERMES_INSTALL_COMMAND:-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --skip-setup --non-interactive}}"
-)
-declare -A CLI_AUTH_COMMANDS=(
-    [claude]="claude"
-    [codex]="codex"
-    [agy]="agy"
-    [hermes]="hermes login"
-)
-CLI_ORDER=(claude codex agy hermes)
-
-run_as_original_user() {
-    [[ "$ORIGINAL_USER" != "root" ]] || return 1
-    [[ -z "${SWITCHYARD_INSTALL_TEST_ASSUME_ROOT:-}" ]] || return 1
-    [[ "${EUID:-$(id -u)}" -eq 0 || "$DRY_RUN" -eq 1 ]]
-}
-
-has_tty() {
-    [[ "$ASSUME_YES" -eq 1 ]] && return 0
-    [[ "${SWITCHYARD_INSTALL_ASSUME_TTY:-}" == "1" ]] && return 0
-    [[ -t 0 && -t 1 ]]
-}
-
-user_command_present() {
-    local cli="$1"
-    if [[ -n "${SWITCHYARD_INSTALL_FORCE_MISSING_CLIS:-}" ]]; then
-        return 1
-    fi
-    if [[ "${EUID:-$(id -u)}" -eq 0 && "$ORIGINAL_USER" != "root" && -z "${SWITCHYARD_INSTALL_TEST_ASSUME_ROOT:-}" ]]; then
-        "$SUDO_BIN" -u "$ORIGINAL_USER" -H sh -lc "command -v $(quote "$cli") >/dev/null 2>&1"
-    else
-        command -v "$cli" >/dev/null 2>&1
-    fi
-}
-
-cli_display_command() {
-    local command="$1"
-    local unattended="${2:-0}"
-    if run_as_original_user; then
-        if [[ "$unattended" -eq 1 ]]; then
-            printf '%q -u %q -H env CI=1 CODEX_NON_INTERACTIVE=1 sh -lc %q < /dev/null' "$SUDO_BIN" "$ORIGINAL_USER" "$command"
-        else
-            printf '%q -u %q -H sh -lc %q' "$SUDO_BIN" "$ORIGINAL_USER" "$command"
-        fi
-    elif [[ "$unattended" -eq 1 ]]; then
-        printf 'env CI=1 CODEX_NON_INTERACTIVE=1 sh -lc %q < /dev/null' "$command"
-    else
-        printf 'sh -lc %q' "$command"
-    fi
-}
-
-run_cli_install_command() {
-    local command="$1"
-    if [[ "$ASSUME_YES" -eq 1 ]]; then
-        if [[ "${EUID:-$(id -u)}" -eq 0 && "$ORIGINAL_USER" != "root" && -z "${SWITCHYARD_INSTALL_TEST_ASSUME_ROOT:-}" ]]; then
-            run_cmd_stdin_closed "$SUDO_BIN" -u "$ORIGINAL_USER" -H env CI=1 CODEX_NON_INTERACTIVE=1 sh -lc "$command"
-        else
-            run_cmd_stdin_closed env CI=1 CODEX_NON_INTERACTIVE=1 sh -lc "$command"
-        fi
-        return
-    fi
-    if [[ "${EUID:-$(id -u)}" -eq 0 && "$ORIGINAL_USER" != "root" && -z "${SWITCHYARD_INSTALL_TEST_ASSUME_ROOT:-}" ]]; then
-        run_cmd "$SUDO_BIN" -u "$ORIGINAL_USER" -H sh -lc "$command"
-    else
-        run_cmd sh -lc "$command"
-    fi
-}
-
-prompt_cli_install() {
-    local cli="$1"
-    local command="$2"
-    local display
-    local answer
-    if [[ "$ASSUME_YES" -eq 1 ]]; then
-        display="$(cli_display_command "$command" 1)"
-        printf '\nInstall %s?\n%s\n[Y/n] y\n' "$cli" "$display"
-        return 0
-    fi
-    display="$(cli_display_command "$command")"
-    while true; do
-        printf '\nInstall %s?\n%s\n[Y/n] ' "$cli" "$display"
-        if ! IFS= read -r answer; then
-            answer=""
-            printf '\n'
-        fi
-        case "${answer,,}" in
-            ""|y|yes)
-                return 0
-                ;;
-            n|no)
-                return 1
-                ;;
-            *)
-                printf "Please answer y or n.\n"
-                ;;
-        esac
-    done
-}
-
-dry_run_agent_clis() {
-    local cli
-    local command
-    if [[ "$SKIP_CLI" -eq 1 ]]; then
-        printf 'Agent CLI installation would be skipped by --no-cli.\n'
-        return
-    fi
-    printf '\nAgent CLI installer prompts that would be shown:\n'
-    for cli in "${CLI_ORDER[@]}"; do
-        if [[ -n "$SELECTED_CLI" && "$cli" != "$SELECTED_CLI" ]]; then
-            continue
-        fi
-        if [[ "$ASSUME_YES" -eq 1 ]]; then
-            command="${CLI_UNATTENDED_INSTALL_COMMANDS[$cli]}"
-            printf '\nInstall %s?\n%s\nwould answer: [Y/n] y\n' "$cli" "$(cli_display_command "$command" 1)"
-        else
-            command="${CLI_INSTALL_COMMANDS[$cli]}"
-            printf '\nInstall %s?\n%s\nwould ask: [Y/n]\n' "$cli" "$(cli_display_command "$command")"
-        fi
-    done
-}
-
-install_agent_clis() {
-    local cli
-    local command
-    if [[ "$SKIP_CLI" -eq 1 ]]; then
-        printf 'Agent CLI installation skipped by --no-cli.\n'
-        return
-    fi
-    if ! has_tty; then
-        CLI_SKIPPED_NOTTY=1
-        printf 'Agent CLI installation skipped: stdin/stdout is not a TTY. Re-run sudo ./install --yes --cli claude to install only Claude, run sudo ./install --yes to install all four CLI installers without prompting, or run sudo ./install from a terminal to approve installers one by one.\n'
-        return
-    fi
-    for cli in "${CLI_ORDER[@]}"; do
-        if [[ -n "$SELECTED_CLI" && "$cli" != "$SELECTED_CLI" ]]; then
-            continue
-        fi
-        command="${CLI_INSTALL_COMMANDS[$cli]}"
-        if user_command_present "$cli"; then
-            printf '%s is already installed; skipping installer.\n' "$cli"
-            AUTH_PRESENT_CLIS+=("$cli")
-            continue
-        fi
-        if prompt_cli_install "$cli" "$command"; then
-            CLI_INSTALL_ATTEMPTED=1
-            if run_cli_install_command "$command"; then
-                CLI_INSTALL_SUCCEEDED=1
-                AUTH_INSTALLED_CLIS+=("$cli")
-            else
-                CLI_INSTALL_FAILED=1
-                printf 'warning: %s installer failed; continuing Switchyard installation.\n' "$cli" >&2
-            fi
-        else
-            CLI_SKIPPED_BY_USER=1
-            printf '%s installer skipped by user.\n' "$cli"
-        fi
-    done
-}
-
-array_contains() {
-    local needle="$1"
-    shift
-    local item
-    for item in "$@"; do
-        [[ "$item" == "$needle" ]] && return 0
-    done
-    return 1
-}
-
-print_auth_next_step_for_clis() {
-    local -a clis=("$@")
-    local cli
-    if [[ "${#clis[@]}" -eq 1 ]]; then
-        printf 'Run `%s` and sign in.\n' "${CLI_AUTH_COMMANDS[${clis[0]}]}"
-    elif [[ "${#clis[@]}" -gt 1 ]]; then
-        printf 'Sign in to each installed agent CLI:\n'
-        for cli in "${clis[@]}"; do
-            printf '  %-8s -> run `%s`\n' "$cli" "${CLI_AUTH_COMMANDS[$cli]}"
-        done
-    else
-        return 1
-    fi
-}
-
 dry_run_install() {
     printf 'DRY RUN: no changes will be made.\n'
     run_cmd env \
         SWITCHYARD_INSTALL_ORIGINAL_USER="$ORIGINAL_USER" \
         SWITCHYARD_INSTALL_ORIGINAL_HOME="$ORIGINAL_HOME" \
-        "$PREREQS_SCRIPT" --dry-run --skip-cli
-    dry_run_agent_clis
+        "$PREREQS_SCRIPT" --dry-run
     run_cmd env \
         SWITCHYARD_SOURCE_REPO="$REPO_ROOT" \
         SWITCHYARD_SOURCE_REF="${SWITCHYARD_SOURCE_REF:-HEAD}" \
@@ -326,26 +94,8 @@ dry_run_install() {
 
 print_final_next_step() {
     printf '\nNEXT STEP\n'
-    if [[ -n "$SELECTED_CLI" ]] && {
-        array_contains "$SELECTED_CLI" "${AUTH_INSTALLED_CLIS[@]}" ||
-            array_contains "$SELECTED_CLI" "${AUTH_PRESENT_CLIS[@]}"
-    }; then
-        printf 'Run `%s` and sign in.\n' "${CLI_AUTH_COMMANDS[$SELECTED_CLI]}"
-    elif [[ "${#AUTH_INSTALLED_CLIS[@]}" -gt 0 ]]; then
-        print_auth_next_step_for_clis "${AUTH_INSTALLED_CLIS[@]}"
-    elif [[ "${#AUTH_PRESENT_CLIS[@]}" -gt 0 ]]; then
-        print_auth_next_step_for_clis "${AUTH_PRESENT_CLIS[@]}"
-    elif [[ "$SKIP_CLI" -eq 1 ]]; then
-        printf 'CLI installation was skipped; install one agent CLI, then run it and sign in.\n'
-    elif [[ "$CLI_SKIPPED_NOTTY" -eq 1 ]]; then
-        printf 'CLI installation was skipped; re-run `sudo ./install --yes --cli claude`, or install one agent CLI manually and sign in.\n'
-    elif [[ "$CLI_INSTALL_FAILED" -eq 1 ]]; then
-        printf 'A CLI installer failed; install one agent CLI manually, then run it and sign in.\n'
-    elif [[ "$CLI_SKIPPED_BY_USER" -eq 1 || "$CLI_INSTALL_ATTEMPTED" -eq 0 || "$CLI_INSTALL_SUCCEEDED" -eq 0 ]]; then
-        printf 'No CLI was installed; install one agent CLI, then run it and sign in.\n'
-    else
-        printf 'Run an installed agent CLI and sign in.\n'
-    fi
+    printf 'Switchyard does not install agent CLIs. Install at least one of claude, codex, agy, or hermes yourself, with that vendor'"'"'s own installer, for the user that will own the project.\n'
+    printf 'Then run `switchyard new`: it detects which agent CLIs are installed and walks you through signing in to each one before any pane starts.\n'
 }
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -356,8 +106,7 @@ fi
 run_cmd env \
     SWITCHYARD_INSTALL_ORIGINAL_USER="$ORIGINAL_USER" \
     SWITCHYARD_INSTALL_ORIGINAL_HOME="$ORIGINAL_HOME" \
-    "$PREREQS_SCRIPT" --skip-cli
-install_agent_clis
+    "$PREREQS_SCRIPT"
 run_cmd env \
     SWITCHYARD_SOURCE_REPO="$REPO_ROOT" \
     SWITCHYARD_SOURCE_REF="${SWITCHYARD_SOURCE_REF:-HEAD}" \

@@ -2,7 +2,6 @@
 set -euo pipefail
 
 DRY_RUN=0
-SHOW_CLI_GUIDANCE=1
 ASSUME_MANAGER="${SWITCHYARD_PREREQS_ASSUME_MANAGER:-}"
 SUDO_BIN="${SWITCHYARD_SUDO_BIN:-sudo}"
 PYTHON_BIN="${SWITCHYARD_PYTHON_BIN:-python3}"
@@ -13,10 +12,10 @@ ORIGINAL_USER="${SWITCHYARD_INSTALL_ORIGINAL_USER:-${SUDO_USER:-$(id -un)}}"
 
 usage() {
     cat <<'EOF'
-Usage: scripts/install-switchyard-prereqs [--dry-run] [--skip-cli|--no-cli]
+Usage: scripts/install-switchyard-prereqs [--dry-run]
 
 Installs Switchyard host packages with apt or pacman and installs psycopg.
-The top-level ./install wrapper handles agent CLI installation prompts.
+Agent CLIs are not installed by Switchyard; the user installs those.
 EOF
 }
 
@@ -33,9 +32,6 @@ while (($#)); do
     case "$1" in
         --dry-run)
             DRY_RUN=1
-            ;;
-        --skip-cli|--no-cli)
-            SHOW_CLI_GUIDANCE=0
             ;;
         -h|--help)
             usage
@@ -133,24 +129,3 @@ case "$manager" in
         run_invoking_user_cmd "$PYTHON_BIN" -m pip install --user "$PIP_SPEC"
         ;;
 esac
-
-if [[ "$SHOW_CLI_GUIDANCE" -eq 0 ]]; then
-    exit 0
-fi
-
-cat <<'EOF'
-
-Agent CLI installation is handled by the top-level ./install wrapper.
-Switchyard needs at least one installed and authenticated agent CLI before it can run panes.
-
-Established vendor-documented Linux install methods:
-- claude: curl -fsSL https://claude.ai/install.sh | bash
-  Anthropic also publishes apt/dnf/apk repositories; the Debian/Ubuntu package is claude-code, not claude.
-- codex: curl -fsSL https://chatgpt.com/codex/install.sh | sh
-- agy: curl -fsSL https://antigravity.google/cli/install.sh | bash
-- hermes: curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
-
-See docs/fresh-machine-install.md for vendor documentation links. Before running any curl-piped installer,
-you can fetch the script URL without piping it and read the script first.
-After installing, open the CLI and authenticate at least one of: claude, codex, agy, or hermes.
-EOF

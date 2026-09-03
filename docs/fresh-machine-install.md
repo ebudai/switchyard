@@ -8,32 +8,21 @@ cd switchyard
 sudo ./install
 ```
 
-The installer prints each system-changing command before it runs. On a terminal
-it asks about each missing agent CLI with a `[Y/n]` prompt and shows the exact
-vendor installer command before running it. Empty input means yes. Pass
-`--cli claude`, `--cli codex`, `--cli agy`, or `--cli hermes` to limit CLI
-installation to one runtime. `--yes` answers yes to every CLI that would be
-prompted, so bare `--yes` runs all four missing CLI installers and
-`--yes --cli claude` runs only Claude without prompting. Under `--yes`,
-Switchyard also runs vendor installers with stdin closed and known
-noninteractive controls enabled, so a vendor prompt cannot block unattended
-provisioning. `--no-cli` skips CLI installation. If stdin/stdout is not a TTY
-and `--yes` was not passed, CLI installation is skipped instead of blocking.
+The installer prints each system-changing command before it runs. It is
+non-interactive: it installs host packages, creates the shared Python venv,
+and installs the public `switchyard` command, and it asks nothing. `--yes` is
+accepted for compatibility and has no prompts to answer. `--dry-run` prints
+every command it would run and exits without changing the system.
 
-The default installer handling is:
+Switchyard does not install, download, or upgrade the agent CLIs. Installing
+`claude`, `codex`, `agy`, or `hermes` is yours to do, with that vendor's own
+installer, for the user that will own the project. Switchyard detects which
+ones are present and walks their sign-in when you create a project, so the
+final output of `sudo ./install` points you at `switchyard new` rather than
+naming a CLI.
 
-| CLI | Prompt evidence | `--yes` handling |
-| --- | --- | --- |
-| claude | The shell installer has no own prompt; it hands off to the downloaded `claude install` binary. | Run with stdin from `/dev/null` plus `CI=1`; if the binary needs input it must fail cleanly instead of consuming the terminal. |
-| codex | The installer prompts for conflict removal and "Start Codex now?" unless `CODEX_NON_INTERACTIVE` is set. | Run with stdin from `/dev/null` and `CODEX_NON_INTERACTIVE=1`. |
-| agy | The shell installer has no own prompt; it hands off to `agy install`. | Run with stdin from `/dev/null` plus `CI=1`; there is no documented unattended flag in the fetched installer. |
-| hermes | The installer normally runs an interactive setup wizard. | Use `bash -s -- --skip-setup --non-interactive`, with stdin from `/dev/null`. |
-
-Authentication cannot be automated. The final output of `sudo ./install` tells
-you which installed CLI to run and sign in to, prints a checklist when more than
-one CLI was installed, or tells you to install one CLI manually if all CLI
-installers were skipped. Hermes signs in with `hermes login`; the other CLIs
-authenticate on first run.
+Authentication cannot be automated and is not attempted at install time. It
+happens once per detected CLI at project creation.
 
 ## System Packages
 
@@ -99,31 +88,29 @@ python3 -m pip install --user 'psycopg>=3.3,<4'
 
 ## Agent CLI
 
-`sudo ./install` can run the vendor-documented agent CLI installers below. These
-commands are not distro packages on the target platforms, so the installer asks
-before running each missing CLI unless `--yes`, `--cli`, or `--no-cli` was
-supplied. Pass `--cli <name>` to install or prompt for only one CLI. A failed,
-declined, or skipped CLI install does not roll back the Switchyard host install.
+Switchyard supports four agent CLIs and installs none of them. Install at
+least one yourself before creating a project, and install it **for the user
+that will own the project** -- a CLI installed only for the human who runs
+`switchyard` will not be found.
 
-Install and authenticate at least one CLI before launching panes:
+Switchyard never runs the commands below. They are recorded here as the
+vendor-documented Linux methods observed when this file was written; check
+each against the vendor's own documentation, which is authoritative and moves
+without telling us. Before running any `curl ... | bash` or `curl ... | sh`
+command, you can fetch the script URL without piping it and read the script
+first.
 
-Before running any `curl ... | bash` or `curl ... | sh` command, you can fetch
-the script URL without piping it and read the script first.
+| CLI | Vendor-documented Linux install | Vendor documentation |
+| --- | --- | --- |
+| `claude` | `curl -fsSL https://claude.ai/install.sh \| bash`; Anthropic also documents a signed apt repository whose Debian/Ubuntu package is `claude-code`, not `claude`. No official pacman package is documented. | <https://code.claude.com/docs/en/setup> |
+| `codex` | `curl -fsSL https://chatgpt.com/codex/install.sh \| sh` | <https://learn.chatgpt.com/docs/codex/cli> |
+| `agy` | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | <https://antigravity.google/docs/cli/install/> |
+| `hermes` | `curl -fsSL https://hermes-agent.nousresearch.com/install.sh \| bash` | <https://hermes-agent.nousresearch.com/docs/getting-started/installation> |
 
-| CLI | Debian/Ubuntu | Arch-family | How this was established |
-| --- | --- | --- | --- |
-| `claude` | `curl -fsSL https://claude.ai/install.sh \| bash`; Anthropic also documents a signed apt repository whose Debian/Ubuntu package is `claude-code`, not `claude`. | `curl -fsSL https://claude.ai/install.sh \| bash`; no official pacman package is documented by Anthropic. | Anthropic Claude Code setup docs: <https://code.claude.com/docs/en/setup>. |
-| `codex` | `curl -fsSL https://chatgpt.com/codex/install.sh \| sh` | `curl -fsSL https://chatgpt.com/codex/install.sh \| sh` | Official OpenAI Codex CLI quickstart: <https://learn.chatgpt.com/docs/codex/cli>. |
-| `agy` | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | Google Antigravity CLI Installation & auth docs: <https://antigravity.google/docs/cli/install/>. |
-| `hermes` | `curl -fsSL https://hermes-agent.nousresearch.com/install.sh \| bash` | `curl -fsSL https://hermes-agent.nousresearch.com/install.sh \| bash` | Nous Research Hermes Agent installation docs: <https://hermes-agent.nousresearch.com/docs/getting-started/installation>. |
-
-After installation, open the chosen CLI and complete authentication. `sudo
-./install` leaves this as its final output because it cannot be automated. For
-Codex, the official quickstart says to run `codex` from a project directory and
-sign in on first launch. Claude Code similarly requires running `claude` and
-following the login prompts. Antigravity opens a browser sign-in flow for `agy`
-when no saved session exists, and Hermes requires choosing or authenticating a
-provider, for example with `hermes model` or `hermes setup --portal`.
+After installing, `switchyard new` detects the CLIs that are present and walks
+you through each one's sign-in before any pane starts; that is where you
+complete authentication. Hermes signs in with `hermes login`; the others
+authenticate on first run.
 
 ## Notes
 

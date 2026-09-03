@@ -19,13 +19,15 @@ changing the system.
 The installer refreshes apt package metadata on Debian/Ubuntu systems, installs
 host packages, creates the shared `/opt/switchyard/venv` with
 `--system-site-packages`, runs the ticket-board dependency and entry-point
-checks, asks whether to run each agent CLI installer, and installs the public
-`switchyard` command, normally at `/usr/local/bin/switchyard`. Pass
-`--cli claude`, `--cli codex`, `--cli agy`, or `--cli hermes` to limit CLI
-installation to one runtime. Its final output names the installed CLI to
-authenticate, or lists the available choices when more than one CLI was
-installed. `--yes` answers Switchyard's own CLI prompts and runs vendor
-installers with stdin closed plus known noninteractive controls.
+checks, and installs the public `switchyard` command, normally at
+`/usr/local/bin/switchyard`. It is non-interactive and asks nothing; `--yes`
+is accepted for compatibility and has no prompts to answer.
+
+Switchyard does not install the agent CLIs. Installing `claude`, `codex`,
+`agy`, or `hermes` is yours to do, with that vendor's own installer, for the
+user that will own the project. Switchyard detects which ones are present and
+walks their sign-in when you create a project, so the installer's final output
+points you at `switchyard new` rather than naming a CLI.
 
 For package details, Arch-family notes, and vendor CLI provenance links, see
 [the fresh-machine install list](docs/fresh-machine-install.md).

@@ -312,6 +312,7 @@ def test_new_project_git_init_leaves_existing_repo_config_branch_and_head_untouc
 def test_switchyard_new_no_git_init_skips_and_refuses_absent_repo() -> None:
     current_user = team_launcher.current_user_name()
     original_precheck_new_project = team_launcher.precheck_new_project
+    original_ensure_peer_auth = team_launcher._ensure_board_service_peer_auth
     original_ensure_owner = team_launcher._ensure_owner_user_and_project_dir
     original_chown_project_files = team_launcher._chown_switchyard_project_files
     original_chown_project_file = team_launcher._chown_project_file
@@ -324,6 +325,7 @@ def test_switchyard_new_no_git_init_skips_and_refuses_absent_repo() -> None:
             output: list[str] = []
 
             team_launcher.precheck_new_project = lambda *_args, **_kwargs: None
+            team_launcher._ensure_board_service_peer_auth = lambda *_args, **_kwargs: None
 
             def fake_ensure_owner(
                 _owner_user: str,
@@ -361,6 +363,7 @@ def test_switchyard_new_no_git_init_skips_and_refuses_absent_repo() -> None:
                 message = str(exc)
     finally:
         team_launcher.precheck_new_project = original_precheck_new_project
+        team_launcher._ensure_board_service_peer_auth = original_ensure_peer_auth
         team_launcher._ensure_owner_user_and_project_dir = original_ensure_owner
         team_launcher._chown_switchyard_project_files = original_chown_project_files
         team_launcher._chown_project_file = original_chown_project_file
@@ -497,6 +500,7 @@ def test_switchyard_new_validates_models_before_launching_panes() -> None:
     assert launch_calls == []
     assert runner.calls == [
         ["getent", "passwd", "boardsvc"],
+        [str(source_repo / "scripts" / "ticket-board-boardsvc-setup.sh"), "--apply-peer-auth"],
         ["sudo", "-u", "porter-agent", "codex", "login", "status"],
         [
             "sudo",

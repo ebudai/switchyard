@@ -30,6 +30,7 @@ DEFAULT_PGU_ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "i
 DEFAULT_PGU_CALLER_ROLES = ("director", "main", "app", "ops", "perf", "audit", "inspector", "research", "user")
 SCHEMA_SQL_PATH = Path(__file__).with_name("schema.sql")
 DEFAULT_SHARED_PYTHON = "/opt/switchyard/venv/bin/python"
+DEFAULT_PG_IDENT_MAP = "pgu_ticket_board_service"
 
 # Tenant boards intentionally expose a smaller workflow surface than the pgu
 # operations board. Keep this as a projection policy over schema.sql, not as a
@@ -342,6 +343,18 @@ def service_user_command(service_user: str) -> str:
     fi
     sudo useradd -r -M -d /nonexistent -s "$service_shell" {q_service_user}
 fi"""
+
+
+def peer_auth_command(plan: ProjectBoardProvision) -> str:
+    q_setup_script = shell_quote(f"{plan.source_repo}/scripts/ticket-board-boardsvc-setup.sh")
+    return (
+        "sudo env "
+        f"PG_DATABASE={shell_quote(plan.database)} "
+        f"PG_IDENT_MAP={shell_quote(DEFAULT_PG_IDENT_MAP)} "
+        f"SERVICE_USER={shell_quote(plan.service_user)} "
+        f"SERVICE_ROLE={shell_quote(plan.service_role)} "
+        f"{q_setup_script} --apply-peer-auth"
+    )
 
 
 def sql_literal(value: str) -> str:
@@ -1376,6 +1389,7 @@ set -euo pipefail
 
 # Review generated artifacts first. These commands require host privileges.
 {service_user_command(plan.service_user)}
+{peer_auth_command(plan)}
 {install_board_root}
 sudo env TICKET_BOARD_PROJECT={shell_quote(plan.project)} TICKET_BOARD_COMMIT_GIT_DIR={q_commit_git_dir} SOURCE_REPO={q_source_repo} BOARD_ROOT={q_board_root} DEPLOY_REF=origin/main TICKET_BOARD_SKIP_MIGRATIONS=1 {q_deploy_script} deploy
 {grant_board_root}

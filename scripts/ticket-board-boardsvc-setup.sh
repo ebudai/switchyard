@@ -17,6 +17,7 @@ usage() {
     cat <<EOF
 Usage:
   $0 --print-root-commands
+  sudo PG_DATABASE=<db> $0 --apply-peer-auth
   sudo PG_DATABASE=<db> $0 --apply
 
 Creates the $SERVICE_USER OS user, appends peer-auth pg_hba/pg_ident rules for
@@ -81,12 +82,16 @@ grant_write_acl() {
     find "$path" -type d -exec setfacl -m "d:u:$SERVICE_USER:rwx" {} +
 }
 
-apply_setup() {
-    require_root
-
+ensure_service_user() {
     if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
         useradd -r -M -d /nonexistent -s /usr/sbin/nologin "$SERVICE_USER"
     fi
+}
+
+apply_peer_auth() {
+    require_root
+
+    ensure_service_user
 
     local hba_file ident_file hba_line ident_line
     hba_file="$(postgres_setting hba_file)"
@@ -99,6 +104,10 @@ apply_setup() {
     append_once "# PGU ticket board service peer auth: $SERVICE_USER -> $SERVICE_ROLE" "$ident_file"
     append_once "$ident_line" "$ident_file"
     runuser -u postgres -- psql -Atqc "SELECT pg_reload_conf();"
+}
+
+apply_setup() {
+    apply_peer_auth
 
     if ! command -v setfacl >/dev/null 2>&1; then
         printf 'ERROR: setfacl is required; install the acl package or apply equivalent ownership manually.\n' >&2
@@ -121,6 +130,9 @@ main() {
     case "${1:-}" in
         --print-root-commands)
             print_root_commands
+            ;;
+        --apply-peer-auth)
+            apply_peer_auth
             ;;
         --apply)
             apply_setup

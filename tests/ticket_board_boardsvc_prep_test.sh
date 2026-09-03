@@ -54,6 +54,14 @@ grep -q '^set -euo pipefail$' "$TMPDIR_T/root-commands.out" || {
     echo "FAIL: printed root commands must stop on the first failed step" >&2
     exit 1
 }
+grep -q -- '--apply-peer-auth)' "$SCRIPT" || {
+    echo "FAIL: setup script does not expose a peer-auth-only apply mode" >&2
+    exit 1
+}
+grep -q 'apply_peer_auth' "$SCRIPT" || {
+    echo "FAIL: setup script does not factor peer-auth setup for reuse" >&2
+    exit 1
+}
 if grep -q 'pgu-tickets"' "$SCRIPT"; then
     echo "FAIL: setup script should not grant boardsvc access to the JSON ticket store" >&2
     exit 1
@@ -62,6 +70,70 @@ grep -q 'find "\$path" -type d -exec setfacl -m "d:u:\$SERVICE_USER:rx"' "$SCRIP
     echo "FAIL: setup script does not set default ACLs only on directories" >&2
     exit 1
 }
+
+FAKE_BIN="$TMPDIR_T/bin"
+mkdir -p "$FAKE_BIN"
+cat >"$FAKE_BIN/id" <<'SH'
+#!/bin/sh
+if [ "$#" -eq 1 ] && [ "$1" = "-u" ]; then
+    printf '0\n'
+    exit 0
+fi
+if [ "$#" -eq 2 ] && [ "$1" = "-u" ] && [ "$2" = "boardsvc" ]; then
+    printf '944\n'
+    exit 0
+fi
+exec /usr/bin/id "$@"
+SH
+cat >"$FAKE_BIN/runuser" <<'SH'
+#!/bin/sh
+case "$*" in
+    *"SHOW hba_file"*)
+        printf '%s\n' "$FAKE_HBA_FILE"
+        ;;
+    *"SHOW ident_file"*)
+        printf '%s\n' "$FAKE_IDENT_FILE"
+        ;;
+    *"SELECT pg_reload_conf();"*)
+        printf 'reload\n' >>"$FAKE_RELOADS_FILE"
+        printf 't\n'
+        ;;
+    *)
+        printf 'unexpected runuser call: %s\n' "$*" >&2
+        exit 64
+        ;;
+esac
+SH
+cat >"$FAKE_BIN/useradd" <<'SH'
+#!/bin/sh
+printf 'unexpected useradd call: %s\n' "$*" >&2
+exit 65
+SH
+chmod +x "$FAKE_BIN/id" "$FAKE_BIN/runuser" "$FAKE_BIN/useradd"
+FAKE_HBA="$TMPDIR_T/pg_hba.conf"
+FAKE_IDENT="$TMPDIR_T/pg_ident.conf"
+FAKE_RELOADS="$TMPDIR_T/reloads.log"
+: >"$FAKE_HBA"
+: >"$FAKE_IDENT"
+: >"$FAKE_RELOADS"
+PATH="$FAKE_BIN:$PATH" FAKE_HBA_FILE="$FAKE_HBA" FAKE_IDENT_FILE="$FAKE_IDENT" FAKE_RELOADS_FILE="$FAKE_RELOADS" \
+    PG_DATABASE=tenant_ticket_board SERVICE_USER=boardsvc SERVICE_ROLE=ticket_board_service PG_IDENT_MAP=pgu_ticket_board_service \
+    "$SCRIPT" --apply-peer-auth >/dev/null
+PATH="$FAKE_BIN:$PATH" FAKE_HBA_FILE="$FAKE_HBA" FAKE_IDENT_FILE="$FAKE_IDENT" FAKE_RELOADS_FILE="$FAKE_RELOADS" \
+    PG_DATABASE=tenant_ticket_board SERVICE_USER=boardsvc SERVICE_ROLE=ticket_board_service PG_IDENT_MAP=pgu_ticket_board_service \
+    "$SCRIPT" --apply-peer-auth >/dev/null
+if [ "$(grep -cFx 'local   tenant_ticket_board   ticket_board_service   peer map=pgu_ticket_board_service' "$FAKE_HBA")" != "1" ]; then
+    echo "FAIL: peer-auth hba line should be appended idempotently" >&2
+    exit 1
+fi
+if [ "$(grep -cFx 'pgu_ticket_board_service   boardsvc   ticket_board_service' "$FAKE_IDENT")" != "1" ]; then
+    echo "FAIL: peer-auth ident line should be appended idempotently" >&2
+    exit 1
+fi
+if [ "$(grep -cFx 'reload' "$FAKE_RELOADS")" != "2" ]; then
+    echo "FAIL: peer-auth apply should reload PostgreSQL on each run" >&2
+    exit 1
+fi
 
 grep -q '^User=boardsvc$' "$UNIT" || {
     echo "FAIL: proposed unit does not run as boardsvc" >&2

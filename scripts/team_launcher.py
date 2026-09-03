@@ -26,6 +26,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from scripts.ticket_board.project_provision import (
     DEFAULT_PROJECT_IMPLEMENTER_ROLES,
+    DEFAULT_PG_IDENT_MAP,
     ProjectBoardProvision,
     ROLE_RE,
     build_plan,
@@ -7733,6 +7734,42 @@ def _ensure_board_service_user(
         )
 
 
+def _ensure_board_service_peer_auth(
+    plan: ProjectBoardProvision,
+    *,
+    source_repo: Path,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> None:
+    setup_script = source_repo / "scripts" / "ticket-board-boardsvc-setup.sh"
+    env = {
+        **os.environ,
+        "PG_DATABASE": plan.database,
+        "PG_IDENT_MAP": DEFAULT_PG_IDENT_MAP,
+        "SERVICE_USER": plan.service_user,
+        "SERVICE_ROLE": plan.service_role,
+    }
+    try:
+        result = runner([str(setup_script), "--apply-peer-auth"], env=env)
+    except OSError as exc:
+        raise SystemExit(
+            "switchyard: failed to install PostgreSQL peer-auth mapping "
+            f"for OS user {plan.service_user!r} to database role {plan.service_role!r} "
+            f"on database {plan.database!r}; setup helper {setup_script} is not executable "
+            "or is missing. Run scripts/ticket-board-boardsvc-setup.sh --apply or install "
+            "the pg_hba/pg_ident mapping manually before provisioning"
+        ) from exc
+    if result.returncode != 0:
+        stderr = str(getattr(result, "stderr", "") or "").strip()
+        detail = f": {stderr}" if stderr else ""
+        raise SystemExit(
+            "switchyard: failed to install PostgreSQL peer-auth mapping "
+            f"for OS user {plan.service_user!r} to database role {plan.service_role!r} "
+            f"on database {plan.database!r}; run scripts/ticket-board-boardsvc-setup.sh --apply "
+            "or install the pg_hba/pg_ident mapping manually before provisioning"
+            f"{detail}"
+        )
+
+
 def _enable_owner_linger_args(owner_user: str) -> list[str]:
     return ["loginctl", "enable-linger", owner_user]
 
@@ -8657,6 +8694,7 @@ def switchyard_new_command(
         require_repository=False,
     )
     _ensure_board_service_user(precheck_plan.service_user, runner=runner)
+    _ensure_board_service_peer_auth(precheck_plan, source_repo=effective_source_repo, runner=runner)
     owner_result = _ensure_owner_user_and_project_dir(
         owner_user,
         project_dir,

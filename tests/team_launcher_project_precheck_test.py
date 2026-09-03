@@ -16,6 +16,7 @@ def _write_exported_switchyard_release(source_repo: Path, *, commit: str = REMOT
     scripts_dir.mkdir()
     (scripts_dir / team_launcher.TEAM_LAUNCHER_NAME).write_text("#!/bin/sh\n", encoding="utf-8")
     (scripts_dir / "ticket-board-service.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    (scripts_dir / "ticket-board-boardsvc-setup.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
 
 
 def test_project_artifact_rejects_stage_configuration() -> None:
@@ -243,6 +244,8 @@ def test_switchyard_new_creates_missing_board_service_user_before_owner_mutation
             self.calls.append(args)
             if args == ["getent", "passwd", "boardsvc"]:
                 return subprocess.CompletedProcess(args, 2)
+            if len(args) >= 2 and Path(args[-2]).name == "ticket-board-boardsvc-setup.sh" and args[-1] == "--apply-peer-auth":
+                return subprocess.CompletedProcess(args, 0)
             if args == ["id", "-u", "otto-agent"]:
                 return subprocess.CompletedProcess(args, 1)
             if args[:1] == ["useradd"]:
@@ -307,9 +310,85 @@ def test_switchyard_new_creates_missing_board_service_user_before_owner_mutation
         "boardsvc",
     ]
     owner_useradd = next(call for call in runner.calls if call[:1] == ["useradd"] and call[-1] == "otto-agent")
+    peer_auth_call = next(call for call in runner.calls if call[-1:] == ["--apply-peer-auth"])
     assert service_useradd in runner.calls
     assert runner.calls.index(service_useradd) < runner.calls.index(["id", "-u", "otto-agent"])
+    assert runner.calls.index(peer_auth_call) < runner.calls.index(["id", "-u", "otto-agent"])
     assert runner.calls.index(service_useradd) < runner.calls.index(owner_useradd)
+
+
+def test_switchyard_new_installs_board_peer_auth_before_owner_mutation() -> None:
+    class PeerAuthRunner(FakeRunner):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls_with_kwargs: list[tuple[list[str], dict[str, object]]] = []
+
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls_with_kwargs.append((args, dict(kwargs)))
+            self.calls.append(args)
+            if args == ["getent", "passwd", "boardsvc"]:
+                return subprocess.CompletedProcess(args, 0)
+            if args[-1:] == ["--apply-peer-auth"]:
+                return subprocess.CompletedProcess(args, 0)
+            if args == ["id", "-u", "otto-agent"]:
+                return subprocess.CompletedProcess(args, 1)
+            if args[:1] == ["useradd"]:
+                return subprocess.CompletedProcess(args, 0)
+            if args == ["loginctl", "enable-linger", "otto-agent"]:
+                return subprocess.CompletedProcess(args, 0)
+            if args[:1] == ["install"]:
+                target = Path(args[-1])
+                if str(target).startswith(tempfile.gettempdir()):
+                    target.mkdir(parents=True, exist_ok=True)
+                return subprocess.CompletedProcess(args, 0)
+            if args == ["sudo", "-v"]:
+                return subprocess.CompletedProcess(args, 0)
+            if args[:1] == ["bash"]:
+                return subprocess.CompletedProcess(args, 0)
+            return super().__call__(args, **kwargs)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new-peer-auth.") as tmp:
+        tmp_path = Path(tmp)
+        source_repo = tmp_path / "opt" / "switchyard" / "releases" / REMOTE_HEAD
+        _write_exported_switchyard_release(source_repo)
+        runner = PeerAuthRunner()
+
+        assert (
+            switchyard_new_command(
+                slug="porter",
+                agent_name="otto-agent",
+                project_name="Porter",
+                project_path=tmp_path / "home" / "otto-agent" / "Projects" / "porter",
+                source_repo=source_repo,
+                output_dir=tmp_path / "out",
+                role_clis=LEGACY_SWITCHYARD_ROLE_CLIS,
+                yes=True,
+                allow_existing_owner_user=True,
+                home_base=tmp_path / "home",
+                euid_getter=lambda: 0,
+                runner=runner,
+                input_func=lambda _prompt: "",
+                port_in_use=lambda _port: False,
+                socket_exists=lambda _path: False,
+                session_record_timeout=0,
+                registry_dir=tmp_path / "registry",
+                konsole_process_launcher=RecordingProcessLauncher(),
+            )
+            == 0
+        )
+
+    setup_script = str(source_repo / "scripts" / "ticket-board-boardsvc-setup.sh")
+    peer_auth_call = [setup_script, "--apply-peer-auth"]
+    owner_lookup = ["id", "-u", "otto-agent"]
+    assert peer_auth_call in runner.calls
+    assert runner.calls.index(peer_auth_call) < runner.calls.index(owner_lookup)
+    kwargs = next(kwargs for call, kwargs in runner.calls_with_kwargs if call == peer_auth_call)
+    env = kwargs["env"]
+    assert isinstance(env, dict)
+    assert env["PG_DATABASE"] == "porter_ticket_board"
+    assert env["PG_IDENT_MAP"] == "pgu_ticket_board_service"
+    assert env["SERVICE_USER"] == "boardsvc"
+    assert env["SERVICE_ROLE"] == "ticket_board_service"
 
 
 def test_switchyard_new_missing_board_service_user_failure_names_remedy_before_owner_mutation() -> None:
@@ -355,6 +434,106 @@ def test_switchyard_new_missing_board_service_user_failure_names_remedy_before_o
             message = str(exc)
 
     assert "failed to create board service user 'boardsvc'" in message
+    assert "scripts/ticket-board-boardsvc-setup.sh --apply" in message
+    assert not any(call == ["id", "-u", "otto-agent"] for call in runner.calls)
+    assert not any(call[:1] == ["useradd"] and call[-1] == "otto-agent" for call in runner.calls)
+
+
+def test_switchyard_new_peer_auth_failure_names_remedy_before_owner_mutation() -> None:
+    class FailingPeerAuthRunner(FakeRunner):
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if args == ["getent", "passwd", "boardsvc"]:
+                return subprocess.CompletedProcess(args, 0)
+            if args[-1:] == ["--apply-peer-auth"]:
+                return subprocess.CompletedProcess(args, 1, stderr="pg_hba.conf is not writable")
+            return super().__call__(args, **kwargs)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new-peer-auth-fail.") as tmp:
+        tmp_path = Path(tmp)
+        source_repo = tmp_path / "opt" / "switchyard" / "releases" / REMOTE_HEAD
+        _write_exported_switchyard_release(source_repo)
+        runner = FailingPeerAuthRunner()
+
+        try:
+            switchyard_new_command(
+                slug="porter",
+                agent_name="otto-agent",
+                project_name="Porter",
+                project_path=tmp_path / "home" / "otto-agent" / "Projects" / "porter",
+                source_repo=source_repo,
+                output_dir=tmp_path / "out",
+                role_clis=LEGACY_SWITCHYARD_ROLE_CLIS,
+                yes=True,
+                allow_existing_owner_user=True,
+                home_base=tmp_path / "home",
+                euid_getter=lambda: 0,
+                runner=runner,
+                input_func=lambda _prompt: "",
+                port_in_use=lambda _port: False,
+                socket_exists=lambda _path: False,
+                session_record_timeout=0,
+                registry_dir=tmp_path / "registry",
+                konsole_process_launcher=RecordingProcessLauncher(),
+            )
+            raise AssertionError("expected peer-auth setup failure")
+        except SystemExit as exc:
+            message = str(exc)
+
+    assert "failed to install PostgreSQL peer-auth mapping" in message
+    assert "OS user 'boardsvc'" in message
+    assert "database role 'ticket_board_service'" in message
+    assert "database 'porter_ticket_board'" in message
+    assert "scripts/ticket-board-boardsvc-setup.sh --apply" in message
+    assert "pg_hba.conf is not writable" in message
+    assert not any(call == ["id", "-u", "otto-agent"] for call in runner.calls)
+    assert not any(call[:1] == ["useradd"] and call[-1] == "otto-agent" for call in runner.calls)
+
+
+def test_switchyard_new_missing_peer_auth_helper_names_remedy_before_owner_mutation() -> None:
+    class MissingPeerAuthHelperRunner(FakeRunner):
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if args == ["getent", "passwd", "boardsvc"]:
+                return subprocess.CompletedProcess(args, 0)
+            if args[-1:] == ["--apply-peer-auth"]:
+                raise FileNotFoundError(args[0])
+            return super().__call__(args, **kwargs)
+
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new-peer-auth-missing.") as tmp:
+        tmp_path = Path(tmp)
+        source_repo = tmp_path / "opt" / "switchyard" / "releases" / REMOTE_HEAD
+        _write_exported_switchyard_release(source_repo)
+        runner = MissingPeerAuthHelperRunner()
+
+        try:
+            switchyard_new_command(
+                slug="porter",
+                agent_name="otto-agent",
+                project_name="Porter",
+                project_path=tmp_path / "home" / "otto-agent" / "Projects" / "porter",
+                source_repo=source_repo,
+                output_dir=tmp_path / "out",
+                role_clis=LEGACY_SWITCHYARD_ROLE_CLIS,
+                yes=True,
+                allow_existing_owner_user=True,
+                home_base=tmp_path / "home",
+                euid_getter=lambda: 0,
+                runner=runner,
+                input_func=lambda _prompt: "",
+                port_in_use=lambda _port: False,
+                socket_exists=lambda _path: False,
+                session_record_timeout=0,
+                registry_dir=tmp_path / "registry",
+                konsole_process_launcher=RecordingProcessLauncher(),
+            )
+            raise AssertionError("expected missing peer-auth helper failure")
+        except SystemExit as exc:
+            message = str(exc)
+
+    assert "failed to install PostgreSQL peer-auth mapping" in message
+    assert "setup helper" in message
+    assert "ticket-board-boardsvc-setup.sh" in message
     assert "scripts/ticket-board-boardsvc-setup.sh --apply" in message
     assert not any(call == ["id", "-u", "otto-agent"] for call in runner.calls)
     assert not any(call[:1] == ["useradd"] and call[-1] == "otto-agent" for call in runner.calls)

@@ -18,6 +18,7 @@ readonly LOG_PATH="${LOG_PATH:-/tmp/$PROJECT_SLUG-ticket-board-notify-listener.l
 readonly UNIT_DIR="${UNIT_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}"
 readonly UNIT_PATH="$UNIT_DIR/$SERVICE_NAME"
 readonly DEPLOY_REF="${DEPLOY_REF:-origin/main}"
+readonly SWITCHYARD_RELEASE_MARKER_NAME=".switchyard-release.json"
 readonly LISTENER_DATABASE_URL="${TICKET_BOARD_NOTIFY_DATABASE_URL:-${TICKET_BOARD_DATABASE_URL:-postgresql:///$DEFAULT_DATABASE_NAME?host=/var/run/postgresql&user=ticket_board_listener}}"
 readonly BOARD_ADMIN_DATABASE_URL="${TICKET_BOARD_ADMIN_DATABASE_URL:-postgresql:///$DEFAULT_DATABASE_NAME?host=/var/run/postgresql&user=postgres}"
 readonly RBAC_SQL="${RBAC_SQL:-$BOARD_CURRENT_LINK/scripts/ticket_board/rbac.sql}"
@@ -102,8 +103,31 @@ ensure_source_repo() {
     local output
     if ! output="$(git_source rev-parse --show-toplevel 2>&1)"; then
         [[ -z "$output" ]] || printf '%s\n' "$output" >&2
-        die "source repo is not a readable git checkout: $SOURCE_REPO"
+        die "source repo is not a readable git checkout or Switchyard release: $SOURCE_REPO"
     fi
+}
+
+source_release_commit() {
+    local marker="$SOURCE_REPO/$SWITCHYARD_RELEASE_MARKER_NAME"
+    [[ -f "$marker" ]] || return 1
+    python3 - "$marker" <<'PY'
+import json
+import sys
+
+marker = sys.argv[1]
+try:
+    with open(marker, encoding="utf-8") as handle:
+        payload = json.load(handle)
+except (OSError, json.JSONDecodeError) as exc:
+    print(exc, file=sys.stderr)
+    raise SystemExit(2)
+
+commit = str(payload.get("commit") or "").strip()
+if not commit:
+    print(f"{marker} has no commit", file=sys.stderr)
+    raise SystemExit(2)
+print(commit)
+PY
 }
 
 maybe_fetch_origin() {
@@ -132,17 +156,29 @@ verify_current_release_sha() {
 }
 
 deploy_export() {
-    local resolved_ref release_dir tmp_dir
-    ensure_source_repo
-    maybe_fetch_origin
-    resolved_ref="$(git_source rev-parse --verify "$DEPLOY_REF^{commit}")" || die "failed to resolve $DEPLOY_REF in $SOURCE_REPO"
+    local release_commit release_commit_status=0 resolved_ref release_dir source_kind tmp_dir
+    release_commit="$(source_release_commit)" || release_commit_status=$?
+    if [[ "$release_commit_status" == "0" ]]; then
+        resolved_ref="$release_commit"
+        source_kind="release"
+    else
+        [[ "$release_commit_status" == "1" ]] || die "source release marker is invalid: $SOURCE_REPO/$SWITCHYARD_RELEASE_MARKER_NAME"
+        ensure_source_repo
+        maybe_fetch_origin
+        resolved_ref="$(git_source rev-parse --verify "$DEPLOY_REF^{commit}")" || die "failed to resolve $DEPLOY_REF in $SOURCE_REPO"
+        source_kind="git"
+    fi
     mkdir -p "$BOARD_RELEASES_DIR"
     release_dir="$BOARD_RELEASES_DIR/$resolved_ref"
     if [[ ! -d "$release_dir" ]]; then
         tmp_dir="$BOARD_RELEASES_DIR/.tmp-$resolved_ref.$$"
         rm -rf "$tmp_dir"
         mkdir -p "$tmp_dir"
-        git_source archive "$resolved_ref" | tar -x -C "$tmp_dir"
+        if [[ "$source_kind" == "release" ]]; then
+            tar -C "$SOURCE_REPO" --exclude='./.git' -cf - . | tar -x -C "$tmp_dir"
+        else
+            git_source archive "$resolved_ref" | tar -x -C "$tmp_dir"
+        fi
         printf '%s\n' "$resolved_ref" >"$tmp_dir/.pgu-deploy-sha"
         mv "$tmp_dir" "$release_dir"
     fi

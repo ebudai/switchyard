@@ -40,6 +40,35 @@ if [[ -d "$DEPLOY_ROOT/current/.git" ]]; then
     exit 1
 fi
 
+SWITCHYARD_RELEASE_SOURCE="$TMPDIR_T/switchyard-release"
+RELEASE_DEPLOY_ROOT="$TMPDIR_T/release-live"
+mkdir -p "$SWITCHYARD_RELEASE_SOURCE"
+git -C "$SOURCE_REPO" archive "$deployed_sha" | tar -x -C "$SWITCHYARD_RELEASE_SOURCE"
+printf '{"commit":"%s"}\n' "$deployed_sha" >"$SWITCHYARD_RELEASE_SOURCE/.switchyard-release.json"
+NO_GIT_BIN="$TMPDIR_T/no-git-bin"
+mkdir -p "$NO_GIT_BIN"
+cat >"$NO_GIT_BIN/git" <<'EOF'
+#!/usr/bin/env bash
+echo "FAIL: git must not be invoked for an exported Switchyard release source" >&2
+exit 99
+EOF
+chmod +x "$NO_GIT_BIN/git"
+PATH="$NO_GIT_BIN:/usr/bin:/bin" \
+BOARD_ROOT="$RELEASE_DEPLOY_ROOT" SOURCE_REPO="$SWITCHYARD_RELEASE_SOURCE" DEPLOY_REF=origin/main TICKET_BOARD_SKIP_MIGRATIONS=1 \
+    "$REPO_ROOT/scripts/ticket-board-notify-listener-service.sh" deploy >/dev/null
+[[ "$(cat "$RELEASE_DEPLOY_ROOT/current/.pgu-deploy-sha")" == "$deployed_sha" ]] || {
+    echo "FAIL: listener release-source deploy did not use the Switchyard release marker commit" >&2
+    exit 1
+}
+[[ -x "$RELEASE_DEPLOY_ROOT/current/scripts/ticket-board-notify-listener" ]] || {
+    echo "FAIL: listener release-source deploy did not copy the exported listener script" >&2
+    exit 1
+}
+if [[ -d "$RELEASE_DEPLOY_ROOT/current/.git" ]]; then
+    echo "FAIL: listener release-source deploy copied git metadata" >&2
+    exit 1
+fi
+
 printf 'stale\n' >"$DEPLOY_ROOT/releases/$deployed_sha/.pgu-deploy-sha"
 if BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
     "$REPO_ROOT/scripts/ticket-board-notify-listener-service.sh" deploy >"$TMPDIR_T/marker.out" 2>"$TMPDIR_T/marker.err"; then
@@ -114,6 +143,24 @@ grep -q 'missing source repo path' "$TMPDIR_T/missing-source.err" || {
     cat "$TMPDIR_T/missing-source.err" >&2
     exit 1
 }
+
+NON_GIT_SOURCE="$TMPDIR_T/not-git-not-release"
+mkdir -p "$NON_GIT_SOURCE/scripts"
+if BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$NON_GIT_SOURCE" DEPLOY_REF=HEAD TICKET_BOARD_SKIP_MIGRATIONS=1 \
+    "$REPO_ROOT/scripts/ticket-board-notify-listener-service.sh" deploy >"$TMPDIR_T/non-git.out" 2>"$TMPDIR_T/non-git.err"; then
+    echo "FAIL: listener deploy should fail when SOURCE_REPO is neither a git checkout nor a Switchyard release" >&2
+    exit 1
+fi
+grep -q 'source repo is not a readable git checkout or Switchyard release' "$TMPDIR_T/non-git.err" || {
+    echo "FAIL: listener non-git release-source error did not name the primary source problem" >&2
+    cat "$TMPDIR_T/non-git.err" >&2
+    exit 1
+}
+if grep -Eq 'ln:|missing deploy sha marker' "$TMPDIR_T/non-git.err"; then
+    echo "FAIL: listener source repo fatal cascaded into derived deploy errors" >&2
+    cat "$TMPDIR_T/non-git.err" >&2
+    exit 1
+fi
 
 BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD \
     "$REPO_ROOT/scripts/ticket-board-notify-listener-service.sh" render-unit >"$UNIT_DIR/service.unit"

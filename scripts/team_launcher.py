@@ -44,6 +44,7 @@ from scripts.ticket_board.codex_hook_trust import (
     codex_hook_timeout as _codex_hook_timeout,
     codex_trusted_hashes as _codex_trusted_hashes,
 )
+from scripts.ticket_board.commit_repos import commit_git_dir_env_for_project
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "team-launcher"
 DEFAULT_SWITCHYARD_REGISTRY_DIR = Path("/etc/switchyard/projects")
@@ -6085,15 +6086,33 @@ def _teardown_project_context(
     config_dir: Path | None,
     registry_dir: Path | None,
     home_base: Path,
-) -> tuple[ProjectBoardProvision, Path, Path]:
+) -> tuple[ProjectBoardProvision, Path, Path, bool]:
     project_slug = _validate_project_slug(project)
     registry_path = (registry_dir or DEFAULT_SWITCHYARD_REGISTRY_DIR) / f"{project_slug}.json"
-    try:
-        entry = _resolve_switchyard_project(project_slug, config_dir=config_dir, registry_dir=registry_dir)
-    except SystemExit:
+    entry, broken_entries = _usable_switchyard_entry_for_project(
+        project_slug,
+        config_dir=config_dir,
+        registry_dir=registry_dir,
+    )
+    if entry is None:
+        if broken_entries:
+            detail = "\n  - ".join(broken_entries)
+            raise SystemExit(
+                f"switchyard: refusing to infer teardown artifacts for registered project {project_slug!r} "
+                f"because its launch entry cannot be loaded:\n  - {detail}\n"
+                "switchyard: rerun teardown with permissions that can read the project config, or repair the registry entry first"
+            )
         resolved_owner = owner_user or _default_new_project_owner(project_slug)
-        plan = build_plan(project=project_slug, owner_user=resolved_owner)
-        return plan, home_base / resolved_owner / "Projects" / project_slug, registry_path
+        owner_home = home_base / resolved_owner
+        plan = build_plan(
+            project=project_slug,
+            owner_user=resolved_owner,
+            board_root=owner_home / f"{project_slug}-ticketboard-live",
+            commit_git_dir=commit_git_dir_env_for_project(project=project_slug, owner_home=owner_home),
+            asset_dir=owner_home / ".claude" / f"{project_slug}-tickets-assets",
+            frame_dir=owner_home / ".claude" / f"{project_slug}-ticket-frames",
+        )
+        return plan, owner_home / "Projects" / project_slug, registry_path, False
 
     config = load_project_config(entry.slug, entry.config_path)
     project_checkout = _project_dir_from_generated_config_path(entry.config_path) or config.repository
@@ -6111,7 +6130,7 @@ def _teardown_project_context(
             source_repo=_repo_root(),
             ticket_prefix=config.ticket_prefix,
         )
-    return plan, project_checkout, registry_path
+    return plan, project_checkout, registry_path, True
 
 
 def _ticket_board_existing_ticket_count(database: str, *, runner: Callable[..., subprocess.CompletedProcess[Any]]) -> int | None:
@@ -6183,9 +6202,12 @@ def _switchyard_teardown_actions(
     plan: ProjectBoardProvision,
     *,
     registry_path: Path,
+    home_base: Path,
     remove_owner_home: bool,
     remove_owner_user: bool,
 ) -> tuple[SwitchyardTeardownAction, ...]:
+    owner_home = home_base / plan.owner_user
+    listener_unit_path = owner_home / ".config" / "systemd" / "user" / plan.listener_unit
     owner_runtime_script = (
         f"owner_uid=$(id -u {shlex.quote(plan.owner_user)} 2>/dev/null || true); "
         'if [ -n "$owner_uid" ] && [ -S "/run/user/$owner_uid/bus" ]; then '
@@ -6201,7 +6223,6 @@ def _switchyard_teardown_actions(
         "fi"
     )
     board_root = Path(plan.board_root)
-    owner_home = Path("/home") / plan.owner_user
     actions = [
         SwitchyardTeardownAction(
             f"stop and disable system board service {plan.board_unit}",
@@ -6212,8 +6233,8 @@ def _switchyard_teardown_actions(
             _bash_action(owner_runtime_script),
         ),
         SwitchyardTeardownAction(
-            f"remove owner notify-listener unit /home/{plan.owner_user}/.config/systemd/user/{plan.listener_unit}",
-            ("rm", "-f", f"/home/{plan.owner_user}/.config/systemd/user/{plan.listener_unit}"),
+            f"remove owner notify-listener unit {listener_unit_path}",
+            ("rm", "-f", str(listener_unit_path)),
         ),
         SwitchyardTeardownAction(
             f"remove system board unit /etc/systemd/system/{plan.board_unit}",
@@ -6266,6 +6287,7 @@ def _print_teardown_plan(
     *,
     dry_run: bool,
     drop_nonempty_board: bool,
+    destroy_registered_tenant: bool,
     remove_owner_home: bool,
     remove_owner_user: bool,
     print_func: Callable[[str], None],
@@ -6276,6 +6298,10 @@ def _print_teardown_plan(
     print_func(f"switchyard: project checkout: {teardown.project_checkout}")
     ticket_count = "unknown" if teardown.ticket_count is None else str(teardown.ticket_count)
     print_func(f"switchyard: board ticket count: {ticket_count}")
+    registered_health = "yes" if teardown.registered_healthy else "no"
+    print_func(f"switchyard: registered and launchable: {registered_health}")
+    if teardown.registered_healthy and not destroy_registered_tenant:
+        print_func("switchyard: live-tenant guard: destructive run requires --destroy-registered-tenant")
     if teardown.ticket_count is None and not drop_nonempty_board:
         print_func("switchyard: board-count guard: destructive run requires --drop-nonempty-board")
     elif teardown.ticket_count and not drop_nonempty_board:
@@ -6343,6 +6369,7 @@ def switchyard_teardown_command(
     dry_run: bool = False,
     confirm: str | None = None,
     drop_nonempty_board: bool = False,
+    destroy_registered_tenant: bool = False,
     remove_owner_home: bool = False,
     remove_owner_user: bool = False,
     owner_user: str | None = None,
@@ -6353,7 +6380,7 @@ def switchyard_teardown_command(
     input_func: Callable[[str], str] = input,
     print_func: Callable[[str], None] = print,
 ) -> int:
-    plan, project_checkout, registry_path = _teardown_project_context(
+    plan, project_checkout, registry_path, registered_healthy = _teardown_project_context(
         project,
         owner_user=owner_user,
         config_dir=config_dir,
@@ -6367,10 +6394,12 @@ def switchyard_teardown_command(
         owner_home=home_base / plan.owner_user,
         project_checkout=project_checkout,
         ticket_count=ticket_count,
+        registered_healthy=registered_healthy,
         registry_path=registry_path,
         actions=_switchyard_teardown_actions(
             plan,
             registry_path=registry_path,
+            home_base=home_base,
             remove_owner_home=remove_owner_home,
             remove_owner_user=remove_owner_user,
         ),
@@ -6379,12 +6408,18 @@ def switchyard_teardown_command(
         teardown,
         dry_run=dry_run,
         drop_nonempty_board=drop_nonempty_board,
+        destroy_registered_tenant=destroy_registered_tenant,
         remove_owner_home=remove_owner_home,
         remove_owner_user=remove_owner_user,
         print_func=print_func,
     )
     if dry_run:
         return 0
+    if registered_healthy and not destroy_registered_tenant:
+        raise SystemExit(
+            f"switchyard: refusing to tear down registered launchable tenant {plan.project!r}; "
+            "pass --destroy-registered-tenant to confirm removing its board unit, database, release root, and registry entry"
+        )
     if ticket_count is None and not drop_nonempty_board:
         raise SystemExit(
             f"switchyard: cannot determine whether board database {plan.database} contains tickets; "
@@ -6643,6 +6678,7 @@ class SwitchyardTeardownPlan:
     owner_home: Path
     project_checkout: Path
     ticket_count: int | None
+    registered_healthy: bool
     registry_path: Path
     actions: tuple[SwitchyardTeardownAction, ...]
 
@@ -10205,6 +10241,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="allow teardown to drop a board database that still contains tickets",
     )
     parser.add_argument(
+        "--destroy-registered-tenant",
+        action="store_true",
+        help="allow teardown to remove a registered launchable tenant; off by default",
+    )
+    parser.add_argument(
         "--remove-owner-home",
         action="store_true",
         help="teardown may remove /home/<owner>; off by default because it can contain user work",
@@ -10340,6 +10381,11 @@ def _build_switchyard_teardown_parser() -> argparse.ArgumentParser:
         "--drop-nonempty-board",
         action="store_true",
         help="allow dropping a board database that still contains tickets",
+    )
+    parser.add_argument(
+        "--destroy-registered-tenant",
+        action="store_true",
+        help="allow removing a registered launchable tenant; off by default",
     )
     parser.add_argument(
         "--remove-owner-home",
@@ -10557,6 +10603,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run,
             confirm=args.confirm,
             drop_nonempty_board=args.drop_nonempty_board,
+            destroy_registered_tenant=args.destroy_registered_tenant,
             remove_owner_home=args.remove_owner_home,
             remove_owner_user=args.remove_owner_user,
             owner_user=args.owner_user,
@@ -10701,6 +10748,7 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run,
             confirm=args.confirm,
             drop_nonempty_board=args.drop_nonempty_board,
+            destroy_registered_tenant=args.destroy_registered_tenant,
             remove_owner_home=args.remove_owner_home,
             remove_owner_user=args.remove_owner_user,
             owner_user=args.owner_user,

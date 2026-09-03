@@ -999,7 +999,7 @@ class TeardownRunner(FakeRunner):
         self.calls.append(args)
         if args[:2] == ["psql", "-XAt"] and args[2] == "postgresql:///postgres?host=/var/run/postgresql":
             return subprocess.CompletedProcess(args, 0, stdout="1\n" if self.database_exists else "\n")
-        if args[:2] == ["psql", "-XAt"] and args[2] == "postgresql:///porter_ticket_board?host=/var/run/postgresql":
+        if args[:2] == ["psql", "-XAt"] and args[2].startswith("postgresql:///") and args[2].endswith("?host=/var/run/postgresql"):
             if self.fail_ticket_count:
                 return subprocess.CompletedProcess(args, 1, stderr="permission denied\n")
             return subprocess.CompletedProcess(args, 0, stdout=f"{self.ticket_count}\n")
@@ -1098,6 +1098,108 @@ def test_switchyard_teardown_refuses_unknown_ticket_count_without_explicit_flag(
     assert _mutating_teardown_calls(runner) == []
 
 
+def test_switchyard_teardown_refuses_registered_healthy_empty_board_without_destroy_flag() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-teardown-registered.") as tmp:
+        tmp_path = Path(tmp)
+        config_dir = tmp_path / "configs"
+        registry_dir = tmp_path / "registry"
+        config_dir.mkdir()
+        registry_dir.mkdir()
+        for project in ("mefp", "otto"):
+            config_path = config_dir / f"{project}.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "project": project,
+                        "project_name": project.upper(),
+                        "run_as_user": f"{project}-agent",
+                        "roles": [{"role": "director", "slot": 0, "cli": ["claude"], "workdir": f"/work/{project}"}],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (registry_dir / f"{project}.json").write_text(
+                json.dumps(
+                    {
+                        "schema": team_launcher.SWITCHYARD_REGISTRY_SCHEMA,
+                        "slug": project,
+                        "name": project.upper(),
+                        "config_path": str(config_path),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+        for project in ("mefp", "otto"):
+            runner = TeardownRunner(ticket_count=0)
+            lines: list[str] = []
+            try:
+                team_launcher.switchyard_teardown_command(
+                    project,
+                    confirm=project,
+                    config_dir=tmp_path / "missing-configs",
+                    registry_dir=registry_dir,
+                    runner=runner,
+                    print_func=lines.append,
+                )
+                raise AssertionError("expected registered tenant refusal")
+            except SystemExit as exc:
+                message = str(exc)
+
+            output = "\n".join(lines)
+            assert f"refusing to tear down registered launchable tenant '{project}'" in message
+            assert "--destroy-registered-tenant" in message
+            assert "board ticket count: 0" in output
+            assert "registered and launchable: yes" in output
+            assert "live-tenant guard: destructive run requires --destroy-registered-tenant" in output
+            assert _mutating_teardown_calls(runner) == []
+
+
+def test_switchyard_teardown_refuses_unusable_registered_entry_before_inferred_cleanup() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-teardown-broken-registry.") as tmp:
+        tmp_path = Path(tmp)
+        registry_dir = tmp_path / "registry"
+        registry_dir.mkdir()
+        (registry_dir / "mefp.json").write_text(
+            json.dumps(
+                {
+                    "schema": team_launcher.SWITCHYARD_REGISTRY_SCHEMA,
+                    "slug": "mefp",
+                    "name": "MEFP",
+                    "config_path": str(tmp_path / "missing" / "mefp.json"),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        runner = TeardownRunner(ticket_count=0)
+
+        try:
+            team_launcher.switchyard_teardown_command(
+                "mefp",
+                confirm="mefp",
+                config_dir=tmp_path / "missing-configs",
+                registry_dir=registry_dir,
+                runner=runner,
+                print_func=lambda _line: None,
+            )
+            raise AssertionError("expected unusable registry refusal")
+        except SystemExit as exc:
+            message = str(exc)
+
+    assert "refusing to infer teardown artifacts for registered project 'mefp'" in message
+    assert "rerun teardown with permissions that can read the project config" in message
+    assert runner.calls == []
+
+
 def test_switchyard_teardown_requires_project_name_confirmation() -> None:
     runner = TeardownRunner(ticket_count=0)
 
@@ -1158,6 +1260,82 @@ def test_switchyard_teardown_destructive_path_runs_guarded_actions_and_preserves
     assert ["userdel", "porter-agent"] not in mutating
     assert "switchyard: teardown complete for porter" in "\n".join(lines)
     assert _teardown_action_lines(dry_lines) == _teardown_action_lines(lines)
+
+
+def test_switchyard_teardown_destroy_registered_tenant_flag_keeps_empty_board_behavior() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-teardown-destroy-registered.") as tmp:
+        tmp_path = Path(tmp)
+        config_dir = tmp_path / "configs"
+        registry_dir = tmp_path / "registry"
+        config_dir.mkdir()
+        registry_dir.mkdir()
+        config_path = config_dir / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "project_name": "Porter",
+                    "run_as_user": "porter-agent",
+                    "roles": [{"role": "director", "slot": 0, "cli": ["claude"], "workdir": "/work/porter"}],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (registry_dir / "porter.json").write_text(
+            json.dumps(
+                {
+                    "schema": team_launcher.SWITCHYARD_REGISTRY_SCHEMA,
+                    "slug": "porter",
+                    "name": "Porter",
+                    "config_path": str(config_path),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        runner = TeardownRunner(ticket_count=0)
+
+        assert (
+            team_launcher.switchyard_teardown_command(
+                "porter",
+                confirm="porter",
+                destroy_registered_tenant=True,
+                config_dir=tmp_path / "missing-configs",
+                registry_dir=registry_dir,
+                runner=runner,
+                print_func=lambda _line: None,
+            )
+            == 0
+        )
+
+    assert _mutating_teardown_calls(runner)
+
+
+def test_switchyard_teardown_remove_owner_home_uses_injected_home_base_in_action() -> None:
+    runner = TeardownRunner(ticket_count=0)
+    home_base = Path("/srv/switchyard-home")
+
+    assert (
+        team_launcher.switchyard_teardown_command(
+            "porter",
+            confirm="porter",
+            remove_owner_home=True,
+            home_base=home_base,
+            runner=runner,
+            print_func=lambda _line: None,
+        )
+        == 0
+    )
+
+    mutating = _mutating_teardown_calls(runner)
+    assert ["rm", "-f", "/srv/switchyard-home/porter-agent/.config/systemd/user/porter-ticket-board-notify-listener.service"] in mutating
+    assert ["rm", "-rf", "--", "/srv/switchyard-home/porter-agent"] in mutating
+    assert ["rm", "-rf", "--", "/home/porter-agent"] not in mutating
 
 
 def test_switchyard_teardown_clears_partial_state_so_new_precheck_accepts_slug() -> None:
@@ -1253,6 +1431,7 @@ def test_switchyard_main_dispatches_teardown_command() -> None:
                     "porter",
                     "--dry-run",
                     "--drop-nonempty-board",
+                    "--destroy-registered-tenant",
                     "--remove-owner-home",
                     "--confirm",
                     "porter",
@@ -1267,6 +1446,7 @@ def test_switchyard_main_dispatches_teardown_command() -> None:
     assert calls[0]["project"] == "porter"
     assert calls[0]["dry_run"] is True
     assert calls[0]["drop_nonempty_board"] is True
+    assert calls[0]["destroy_registered_tenant"] is True
     assert calls[0]["remove_owner_home"] is True
     assert calls[0]["confirm"] == "porter"
     assert "teardown" in team_launcher.switchyard_help_text()

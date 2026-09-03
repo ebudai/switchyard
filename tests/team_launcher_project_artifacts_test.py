@@ -277,6 +277,149 @@ def test_switchyard_new_creates_absent_zeta_owner_with_linger_and_initial_artifa
     assert "sudo loginctl enable-linger 'zeta-agent'" not in commands
     assert "loginctl show-user 'zeta-agent' -p Linger --value" in commands
 
+def test_switchyard_new_missing_default_fish_falls_back_to_bash_shell() -> None:
+    class MissingFishRunner(FakeRunner):
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if args == ["id", "-u", "zeta-agent"]:
+                return subprocess.CompletedProcess(args, 1)
+            if args[:1] == ["useradd"]:
+                return subprocess.CompletedProcess(args, 0)
+            if args == ["loginctl", "enable-linger", "zeta-agent"]:
+                return subprocess.CompletedProcess(args, 0)
+            if args[:1] == ["install"]:
+                return subprocess.CompletedProcess(args, 0)
+            return super().__call__(args, **kwargs)
+
+    original_which = team_launcher.shutil.which
+    try:
+        team_launcher.shutil.which = lambda command: None if command == "fish" else original_which(command)
+        with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new-no-fish.") as tmp:
+            tmp_path = Path(tmp)
+            home_base = tmp_path / "home"
+            output_dir = tmp_path / "out"
+            source_repo = tmp_path / "source-repo"
+            source_repo.mkdir()
+            runner = MissingFishRunner()
+            process_launcher = RecordingProcessLauncher()
+            stdout = StringIO()
+
+            with redirect_stdout(stdout):
+                assert (
+                    switchyard_new_command(
+                        slug="zeta",
+                        agent_name="zeta-agent",
+                        project_name="Zeta System",
+                        source_repo=source_repo,
+                        output_dir=output_dir,
+                        role_clis=LEGACY_SWITCHYARD_ROLE_CLIS,
+                        yes=True,
+                        allow_existing_owner_user=True,
+                        home_base=home_base,
+                        euid_getter=lambda: 0,
+                        runner=runner,
+                        pane_state_dir=tmp_path / "pane-state",
+                        input_func=lambda _prompt: "",
+                        port_in_use=lambda _port: False,
+                        socket_exists=lambda _path: False,
+                        session_record_timeout=0,
+                        registry_dir=tmp_path / "registry",
+                        konsole_process_launcher=process_launcher,
+                    )
+                    == 0
+                )
+
+            project_dir = home_base / "zeta-agent" / "Projects" / "zeta_system"
+            useradd_call = next(call for call in runner.calls if call[:1] == ["useradd"])
+            verify_call = [
+                "sudo",
+                "-u",
+                "zeta-agent",
+                "sh",
+                "-lc",
+                f"test -d {shlex.quote(str(project_dir))} && test -r {shlex.quote(str(project_dir))} && test -w {shlex.quote(str(project_dir))} && test -x {shlex.quote(str(project_dir))}",
+            ]
+
+        assert useradd_call == ["useradd", "-m", "-s", "/bin/bash", "zeta-agent"]
+        assert verify_call in runner.calls
+        assert "missing or non-executable shell '/usr/bin/fish'" not in stdout.getvalue()
+        assert "switchyard: created user zeta-agent with shell /bin/bash (fish unavailable); linger enabled" in stdout.getvalue()
+    finally:
+        team_launcher.shutil.which = original_which
+
+def test_switchyard_new_explicit_missing_owner_shell_fails_loudly() -> None:
+    class MissingOwnerRunner(FakeRunner):
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if args == ["id", "-u", "zeta-agent"]:
+                return subprocess.CompletedProcess(args, 1)
+            return super().__call__(args, **kwargs)
+
+    original_which = team_launcher.shutil.which
+    try:
+        team_launcher.shutil.which = lambda command: None if command == "zsh" else original_which(command)
+        with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new-missing-shell.") as tmp:
+            tmp_path = Path(tmp)
+            source_repo = tmp_path / "source-repo"
+            output_dir = tmp_path / "out"
+            project_dir = tmp_path / "home" / "zeta-agent" / "Projects" / "zeta_system"
+            source_repo.mkdir()
+            artifact_path = tmp_path / "zeta.project.json"
+            artifact_path.write_text(
+                json.dumps(
+                    {
+                        "schema": "switchyard.project.v1",
+                        "design_document": str(tmp_path / "PROJECT_DESIGN.md"),
+                        "project": {
+                            "slug": "zeta",
+                            "name": "Zeta System",
+                            "ticket_prefix": "ZETA",
+                            "owner_user": "zeta-agent",
+                            "repository": str(project_dir),
+                            "capability_grants": {
+                                "board_service_traversal": True,
+                                "supplementary_groups": [],
+                                "linger": True,
+                                "shell": "zsh",
+                            },
+                            "roles": ["ops"],
+                            "role_clis": {"ops": "codex"},
+                        },
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            runner = MissingOwnerRunner()
+
+            try:
+                switchyard_new_command(
+                    from_artifact=artifact_path,
+                    source_repo=source_repo,
+                    output_dir=output_dir,
+                    yes=True,
+                    allow_existing_owner_user=True,
+                    home_base=tmp_path / "home",
+                    euid_getter=lambda: 0,
+                    runner=runner,
+                    pane_state_dir=tmp_path / "pane-state",
+                    port_in_use=lambda _port: False,
+                    socket_exists=lambda _path: False,
+                    session_record_timeout=0,
+                    registry_dir=tmp_path / "registry",
+                    konsole_process_launcher=RecordingProcessLauncher(),
+                )
+                raise AssertionError("expected missing explicit owner shell failure")
+            except SystemExit as exc:
+                message = str(exc)
+
+        assert "owner shell 'zsh' was not found on PATH" in message
+        assert not any(call[:1] == ["useradd"] for call in runner.calls)
+    finally:
+        team_launcher.shutil.which = original_which
+
 def test_switchyard_new_reuses_existing_owner_without_account_mutation() -> None:
     class ExistingOwnerRunner(FakeRunner):
         def __init__(self) -> None:

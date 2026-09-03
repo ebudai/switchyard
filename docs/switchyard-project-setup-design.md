@@ -113,7 +113,7 @@ So the real questions are a short list of capability grants:
 | Board service traversal into the home? | Only if that project's board serves its assets/frames |
 | Supplementary groups (`kvm`, `docker`, `video`) | Case by case; do not grant by default |
 | Linger enabled? | Required for the user-level notify-listener |
-| Shell | fish/bash; affects any operator block written for that user |
+| Shell | fish/bash; fish is a preference, and missing default fish falls back to an installed POSIX shell |
 
 If board-service traversal is declined, `new` does not grant `boardsvc` ACLs on the owner home,
 board release, assets, or frame directories. The operator must then choose paths already accessible

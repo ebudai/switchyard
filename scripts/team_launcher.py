@@ -6244,6 +6244,7 @@ class SwitchyardRuntimeCopyStatus:
 class OwnerUserProvisionResult:
     created: bool
     linger_enabled: bool
+    shell_path: str = ""
 
 
 @dataclass(frozen=True)
@@ -7667,8 +7668,36 @@ def run_switchyard_launch_first_run_auth(
     )
 
 
+def _resolve_owner_shell_path(shell: str) -> str:
+    requested = shell.strip()
+    if not requested:
+        raise SystemExit("switchyard: owner shell cannot be empty")
+    if "/" in requested:
+        if os.access(requested, os.X_OK):
+            return requested
+        raise SystemExit(
+            f"switchyard: owner shell {requested!r} is not executable; "
+            "install it or choose an installed shell"
+        )
+    resolved = shutil.which(requested)
+    if resolved:
+        return resolved
+    if requested == PROJECT_DESIGN_DEFAULT_CAPABILITY_GRANTS["shell"]:
+        for fallback in ("/bin/bash", "/bin/sh"):
+            if os.access(fallback, os.X_OK):
+                return fallback
+        raise SystemExit(
+            "switchyard: default owner shell 'fish' is unavailable and no fallback shell "
+            "(/bin/bash or /bin/sh) is executable"
+        )
+    raise SystemExit(
+        f"switchyard: owner shell {requested!r} was not found on PATH; "
+        "install it or choose an installed shell"
+    )
+
+
 def _owner_project_install_args(owner_user: str, project_dir: Path, *, shell: str = "fish") -> list[list[str]]:
-    shell_path = shell if "/" in shell else (shutil.which(shell) or f"/usr/bin/{shell}")
+    shell_path = _resolve_owner_shell_path(shell)
     return [
         ["id", "-u", owner_user],
         ["useradd", "-m", "-s", shell_path, owner_user],
@@ -7778,11 +7807,15 @@ def _ensure_owner_user_and_project_dir(
 ) -> OwnerUserProvisionResult:
     existed = project_dir.exists()
     _precheck_project_path_before_mutating(owner_user, project_dir)
-    id_args, useradd_args, install_args = _owner_project_install_args(owner_user, project_dir, shell=shell)
+    id_args = ["id", "-u", owner_user]
+    install_args = ["install", "-d", "-m", "0755", "-o", owner_user, "-g", owner_user, str(project_dir)]
     id_result = runner(id_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     created_user = False
     linger_enabled = False
+    shell_path = ""
     if id_result.returncode != 0:
+        _id_args, useradd_args, _install_args = _owner_project_install_args(owner_user, project_dir, shell=shell)
+        shell_path = useradd_args[useradd_args.index("-s") + 1]
         useradd_result = runner(useradd_args)
         if useradd_result.returncode != 0:
             raise SystemExit(f"switchyard: failed to create user {owner_user!r}")
@@ -7802,7 +7835,7 @@ def _ensure_owner_user_and_project_dir(
             raise SystemExit(f"switchyard: failed to create project directory {project_dir}")
         project_dir.mkdir(parents=True, exist_ok=True)
     _verify_project_path_writable_by_owner(owner_user, project_dir, runner=runner)
-    return OwnerUserProvisionResult(created=created_user, linger_enabled=linger_enabled)
+    return OwnerUserProvisionResult(created=created_user, linger_enabled=linger_enabled, shell_path=shell_path)
 
 
 def _project_entries(config_dir: Path | None = None) -> list[SwitchyardProjectEntry]:
@@ -8602,7 +8635,15 @@ def switchyard_new_command(
         shell=owner_shell,
     )
     if owner_result.created:
-        print_func(f"switchyard: created user {owner_user} with shell {owner_shell}; linger enabled")
+        created_shell = owner_result.shell_path or owner_shell
+        if owner_shell == PROJECT_DESIGN_DEFAULT_CAPABILITY_GRANTS["shell"] and Path(created_shell).name != owner_shell:
+            print_func(
+                f"switchyard: created user {owner_user} with shell {created_shell} "
+                f"({owner_shell} unavailable); linger enabled"
+            )
+        else:
+            display_shell = created_shell if "/" in owner_shell else owner_shell
+            print_func(f"switchyard: created user {owner_user} with shell {display_shell}; linger enabled")
     else:
         print_func(f"switchyard: using existing user {owner_user} (not modifying)")
     if from_artifact is None:

@@ -279,6 +279,46 @@ def _run_git(args: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["git", *args], capture_output=True, text=True, check=False)
 
 
+def _searched_repository() -> str:
+    """The repository _run_git actually looked in, for error messages.
+
+    _run_git passes no -C and no --git-dir, so it resolves against the current
+    working directory. That is fine until the commit lives in a different
+    checkout, at which point the caller needs to be told WHERE we looked.
+    """
+    toplevel = _run_git(["rev-parse", "--show-toplevel"])
+    if toplevel.returncode == 0 and toplevel.stdout.strip():
+        return toplevel.stdout.strip()
+    return ""
+
+
+def _unresolved_commit_message(commit_hash: str) -> str:
+    """Say where we looked, because "unknown" is a claim we cannot support.
+
+    git cannot distinguish "this hash is wrong" from "this hash is right and
+    lives in another checkout", and the client resolves against the current
+    working directory. The old message picked the first reading and stated it
+    as fact, which sent the reader off to check a sha that was fine. Both
+    readings go in the message, with the searched repository named so the
+    reader can tell which one applies.
+    """
+    repo = _searched_repository()
+    if repo:
+        where = f"in the repository this command searched: {repo}"
+    else:
+        where = (
+            "in any repository: the working directory is not a git checkout "
+            f"({os.getcwd()})"
+        )
+    return (
+        f"commit {commit_hash} was not found {where}. "
+        "Commit hashes are resolved by running git in the current working "
+        "directory, so a real commit that lives in a different checkout fails "
+        "here exactly like a bad hash does. Rerun this from the checkout that "
+        "holds the commit, or correct the hash."
+    )
+
+
 def _git_error_detail(proc: subprocess.CompletedProcess[str]) -> str:
     return proc.stderr.strip() or proc.stdout.strip() or f"git exited with status {proc.returncode}"
 
@@ -441,7 +481,7 @@ class TicketBoardWriteClient:
             return
         resolved = _run_git(["rev-parse", "--verify", f"{normalized}^{{commit}}"])
         if resolved.returncode != 0 or not resolved.stdout.strip():
-            raise TicketBoardWriteError(f"unknown commit_hash: {normalized}")
+            raise TicketBoardWriteError(_unresolved_commit_message(normalized))
         fetch = _run_git(["fetch", "origin"])
         if fetch.returncode != 0:
             raise TicketBoardWriteError(

@@ -59,6 +59,10 @@ The ones you'll use most:
   work; requires a real commit hash resolvable against origin (or the
   ambient repo HEAD if the ticket made no code change — say so explicitly in
   a follow-up comment so it isn't mistaken for a real delivery commit).
+  The hash is resolved by running git in your **current directory**, so run
+  this from the checkout that holds the commit. When a ticket's code lives in
+  a different repository than the board serves, that is that repository's
+  worktree, not the pane's default cwd.
 - `audit-sign-off` / `inspector-sign-off` / `eric-sign-off`
 - `audit-kick-back` / `inspector-kick-back` / `eric-reopen --reason "..."`
 - `mark-done --commit-hash <sha>`, `defer`, `cancel --reason "..."`,

@@ -70,6 +70,7 @@ DEFAULT_OPERATION_ALLOWED_ROLES = {
     "start_work": IMPLEMENTER_ROLES,
     "submit_to_inspection": IMPLEMENTER_ROLES,
     "submit_to_audit": IMPLEMENTER_ROLES,
+    "submit_to_audit_without_commit": IMPLEMENTER_ROLES,
     "implementer_kick_back": IMPLEMENTER_ROLES,
     "request_commit_exempt": IMPLEMENTER_ROLES,
     "start_task": TASK_ROLES,
@@ -663,6 +664,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             "start_work",
             "submit_to_inspection",
             "submit_to_audit",
+            "submit_to_audit_without_commit",
             "implementer_kick_back",
             "request_commit_exempt",
             "start_task",
@@ -935,6 +937,14 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             if not comment_text:
                 raise ValueError("implementer_kick_back requires a non-empty reason")
             updated = self.app.implementer_kick_back(ticket_id, comment_text, caller_role=caller)
+            self.events.notify_change(self.app.store_signature())
+            self.send_json({"ticket": updated})
+            return
+        elif operation == "submit_to_audit_without_commit":
+            reason = self.action_comment_text(payload)
+            if not reason:
+                raise ValueError("submit_to_audit_without_commit requires a non-empty reason")
+            updated = self.app.submit_to_audit_without_commit(ticket_id, reason, caller_role=caller)
             self.events.notify_change(self.app.store_signature())
             self.send_json({"ticket": updated})
             return

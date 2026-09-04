@@ -348,6 +348,7 @@ VALUES
     ('analysis', 'cancelled', 'cancel', ARRAY['director']::text[], false, false),
     ('in_progress', 'inspection', 'submit_to_inspection', ARRAY['main', 'app', 'ops', 'perf', 'research']::text[], true, false),
     ('in_progress', 'audit', 'submit_to_audit', ARRAY['main', 'app', 'ops', 'perf', 'research']::text[], false, false),
+    ('in_progress', 'audit', 'submit_to_audit_without_commit', ARRAY['main', 'app', 'ops', 'perf', 'research']::text[], true, false),
     ('in_progress', 'analysis', 'request_commit_exempt', ARRAY['main', 'app', 'ops', 'perf', 'research']::text[], true, false),
     ('in_progress', 'analysis', 'implementer_kick_back', ARRAY['main', 'app', 'ops', 'perf', 'research']::text[], true, false),
     ('in_progress', 'analysis', 'route', ARRAY['director']::text[], false, false),
@@ -5038,6 +5039,62 @@ BEGIN
         assignee = 'inspector'
     WHERE tickets.id = submit_to_inspection.id;
     PERFORM ticket_board.touch_ticket(id);
+END;
+$$;
+
+-- Submit finished work that produced no commit.
+--
+-- submit_to_audit already accepts an empty hash when commit_exempt is set; the
+-- gap PGU-913 closes is that an implementer could not set it. The alternative
+-- on offer was request_commit_exempt, which throws the ticket back to analysis
+-- and unassigns it -- correct for "I cannot do this", wrong for "this is done
+-- and there is no diff". With no usable path, three tickets reached audit
+-- carrying a BORROWED hash pointing at unrelated work (PGU-889, PGU-903,
+-- PGU-911), which is worse than an empty one: it resolves, looks
+-- authoritative, and sends a reviewer into someone else's change.
+--
+-- This does NOT hand implementers the commit_exempt field. The exemption can
+-- only be set as part of submitting, it requires a reason, and the reason is
+-- recorded as an attributed comment before the transition, so audit sees an
+-- explicit claim and who made it rather than an absence. Audit can kick it
+-- back like any other submission.
+CREATE OR REPLACE FUNCTION ticket_board.submit_to_audit_without_commit(
+    id text,
+    reason text
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    actor text;
+    normalized_reason text := btrim(coalesce(reason, ''));
+BEGIN
+    IF normalized_reason = '' THEN
+        RAISE EXCEPTION 'submit_to_audit_without_commit requires a non-empty reason';
+    END IF;
+    -- Authorized on its OWN action, owner_scoped, rather than borrowing
+    -- submit_to_audit's config. submit_to_audit is owner_scoped = false -- any
+    -- implementer can submit any ticket, with the assignee gate applied at the
+    -- server -- but waiving the commit requirement is a claim about your own
+    -- work, so it is scoped in the database the way request_commit_exempt is.
+    -- submit_to_audit re-checks its own looser rule below, which a caller who
+    -- passed this one always satisfies.
+    actor := ticket_board.require_workflow_transition_actor('submit_to_audit_without_commit', id);
+    PERFORM ticket_board.append_ticket_comment(
+        id,
+        actor,
+        'Submitted to audit with no commit: ' || normalized_reason
+    );
+    UPDATE ticket_board.tickets
+    SET commit_exempt = true
+    WHERE tickets.id = submit_to_audit_without_commit.id;
+    -- Everything else -- state machine, kicked-back-commit rule, signoff reset --
+    -- stays in submit_to_audit. If it refuses, this whole call rolls back and no
+    -- exemption is left behind on a ticket that never moved.
+    PERFORM ticket_board.submit_to_audit(id, '');
 END;
 $$;
 

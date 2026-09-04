@@ -107,7 +107,14 @@ system working, not a bug to route around.
 - `submit-to-audit` — in_progress → audit (with `--commit-hash`)
 - `submit-to-inspection` — in_progress → inspection
 - `implementer-kick-back` — in_progress → analysis, when the ask is not implementable
-- `request-commit-exempt` — in_progress → analysis, for work with no commit
+- `submit-to-audit-without-commit` — in_progress → audit, for FINISHED work that
+  produced no commit; requires `--reason`, which is recorded as an attributed
+  comment so audit sees the claim. Use this rather than borrowing a hash from
+  unrelated work
+- `request-commit-exempt` — in_progress → analysis, to hand the ticket back for
+  a decision about whether it needs a commit at all. Note it UNASSIGNS the
+  ticket: it is for "this needs rethinking", not for "this is done and there is
+  no diff"
 - `file-bug` — create a defect ticket without going through the director. The new ticket
   is linked to the source ticket and lands in `analysis`.
 

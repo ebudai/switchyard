@@ -56,13 +56,19 @@ The ones you'll use most:
   ticket. `force-move` is a rare override, not the everyday path.
 - `add-comment PGU-123 --text "..."`
 - `submit-to-audit PGU-123 --commit-hash <sha>` — hand off your completed
-  work; requires a real commit hash resolvable against origin (or the
-  ambient repo HEAD if the ticket made no code change — say so explicitly in
-  a follow-up comment so it isn't mistaken for a real delivery commit).
+  work; requires a real commit hash resolvable against origin.
   The hash is resolved by running git in your **current directory**, so run
   this from the checkout that holds the commit. When a ticket's code lives in
   a different repository than the board serves, that is that repository's
   worktree, not the pane's default cwd.
+- `submit-to-audit-without-commit PGU-123 --reason "..."` — for finished work
+  that produced no commit: a spike whose deliverable is the finding, an
+  investigation that concluded "not reproduced", a decision recorded on the
+  ticket. **Do not borrow a hash.** Pointing the commit field at unrelated
+  work is worse than leaving it empty — it resolves, looks authoritative, and
+  sends a reviewer into somebody else's diff. The reason is recorded as an
+  attributed comment and audit reviews the claim like any other submission
+  (PGU-913).
 - `audit-sign-off` / `inspector-sign-off` / `eric-sign-off`
 - `audit-kick-back` / `inspector-kick-back` / `eric-reopen --reason "..."`
 - `mark-done --commit-hash <sha>`, `defer`, `cancel --reason "..."`,

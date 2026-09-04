@@ -641,6 +641,20 @@ class TicketBoardWriteClient:
         self._require_commit_pushed_to_origin(commit_hash, operation="submit_to_audit")
         return self._ticket_action(ticket_id, "submit_to_audit", {"commit_hash": commit_hash}, caller_role=caller_role)
 
+    def submit_to_audit_without_commit(
+        self, ticket_id: str, *, reason: str, caller_role: str | None = None
+    ) -> dict[str, Any]:
+        """Submit finished work that produced no commit, with a stated reason.
+
+        Deliberately not a flag on submit_to_audit: this skips the commit
+        requirement, so it should read as its own act in the CLI, in the RBAC
+        table and in the ticket's comment trail rather than as an option on the
+        ordinary path.
+        """
+        return self._ticket_action(
+            ticket_id, "submit_to_audit_without_commit", {"reason": reason}, caller_role=caller_role
+        )
+
     def submit_to_inspection(self, ticket_id: str, *, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "submit_to_inspection", caller_role=caller_role)
 
@@ -902,6 +916,10 @@ def _build_parser() -> argparse.ArgumentParser:
     submit.add_argument("ticket_id")
     submit.add_argument("--commit-hash", default="")
 
+    submit_no_commit = subparsers.add_parser("submit-to-audit-without-commit")
+    submit_no_commit.add_argument("ticket_id")
+    submit_no_commit.add_argument("--reason", required=True)
+
     submit_inspection = subparsers.add_parser("submit-to-inspection")
     submit_inspection.add_argument("ticket_id")
 
@@ -1048,6 +1066,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif command == "submit_to_audit":
             response = client.submit_to_audit(args.ticket_id, commit_hash=args.commit_hash)
+        elif command == "submit_to_audit_without_commit":
+            response = client.submit_to_audit_without_commit(args.ticket_id, reason=args.reason)
         elif command == "submit_to_inspection":
             response = client.submit_to_inspection(args.ticket_id)
         elif command == "implementer_kick_back":

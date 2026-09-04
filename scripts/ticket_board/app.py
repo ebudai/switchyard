@@ -1119,6 +1119,19 @@ ORDER BY rank;
                     self._pg_call(conn, "SELECT ticket_board.add_comment(%s, %s, %s);", (ticket_id, comment_text, comment_urgent))
                 return self._pg_get_ticket(ticket_id, conn)
 
+    def submit_to_audit_without_commit(self, ticket_id: str, reason: str, *, caller_role: str) -> dict[str, Any]:
+        ticket_id = str(ticket_id).strip().upper()
+        reason = self._require_text(reason, "reason").strip()
+        with self._pg_connect() as conn:
+            with conn.transaction():
+                self._pg_set_caller_role(conn, caller_role)
+                self._pg_call(
+                    conn,
+                    "SELECT ticket_board.submit_to_audit_without_commit(%s, %s);",
+                    (ticket_id, reason),
+                )
+                return self._pg_get_ticket(ticket_id, conn)
+
     def request_commit_exempt(self, ticket_id: str, reason: str, *, caller_role: str) -> dict[str, Any]:
         ticket_id = str(ticket_id).strip().upper()
         reason = self._require_text(reason, "reason").strip()

@@ -214,6 +214,18 @@ def target_for_transition(transition: Transition) -> str | None:
 
 
 def message_for_transition(transition: Transition) -> str | None:
+    """Fallback wording for a payload that carries no message of its own.
+
+    This is NOT where live notifications get their text. The queued path takes
+    `message` straight from the row, and that row is written by
+    ticket_board.transition_message in schema.sql -- which is why PGU-912's
+    re-entry wording lives there and not here. Changing this function alone
+    changes nothing a pane will ever see; a fix applied here would pass every
+    test and fix no behaviour.
+
+    Nor can this function distinguish first entry from re-entry: it is pure on
+    the payload, and the payload carries no delivery history.
+    """
     if target_for_transition(transition) is None:
         return None
     if not transition.ticket_id:

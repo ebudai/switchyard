@@ -1229,7 +1229,17 @@ BEGIN
         IF ticket_board.ticket_has_unresolved_blockers(NEW.id) THEN
             RETURN NULL;
         END IF;
-        message := ticket_board.transition_message(NEW.id, NEW.title, OLD.state, NEW.state);
+        message := ticket_board.transition_message(
+            NEW.id,
+            NEW.title,
+            OLD.state,
+            NEW.state,
+            ticket_board.ticket_state_already_announced(
+                NEW.id,
+                ticket_board.transition_target_role(NEW.state, NEW.assignee),
+                NEW.state
+            )
+        );
         IF OLD.state = 'inspection' AND NEW.state = 'in_progress' THEN
             SELECT c.text
             INTO recommendation
@@ -1282,7 +1292,7 @@ BEGIN
                 NEW.assignee,
                 NEW.updated_at,
                 NEW.ticket_number,
-                ticket_board.transition_message(NEW.id, NEW.title, NULL, NEW.state)
+                ticket_board.transition_message(NEW.id, NEW.title, NULL, NEW.state, false)
             );
         END IF;
         RETURN NULL;
@@ -1931,11 +1941,42 @@ AS $$
     WHERE name = p_state;
 $$;
 
+-- Has this role already been told, at some point, that the ticket entered this
+-- state? Reads only `send` rows, which prune_notification_trace never deletes --
+-- it removes claim/listener_claim/requeue/gate_defer only -- so this is durable
+-- rather than a window into recent logs. Matches notification_trace_send_lookup_idx
+-- (ticket_id, target_role, ticket_state_at_event) exactly, so it is an index probe
+-- and not a scan of history.
+CREATE OR REPLACE FUNCTION ticket_board.ticket_state_already_announced(
+    p_ticket_id text,
+    p_target_role text,
+    p_state text
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT EXISTS (
+        SELECT 1
+        FROM ticket_board.notification_trace nt
+        WHERE nt.ticket_id = p_ticket_id
+          AND nt.target_role = p_target_role
+          AND nt.ticket_state_at_event = p_state
+          AND nt.kind = 'transition'
+          AND nt.event = 'send'
+    );
+$$;
+
+-- The 4-argument form is dropped rather than overloaded: a 5th argument with a
+-- DEFAULT would make every existing 4-argument call ambiguous.
+DROP FUNCTION IF EXISTS ticket_board.transition_message(text, text, text, text);
+
 CREATE OR REPLACE FUNCTION ticket_board.transition_message(
     p_ticket_id text,
     p_title text,
     p_old_state text,
-    p_new_state text
+    p_new_state text,
+    p_already_announced boolean
 )
 RETURNS text
 LANGUAGE sql
@@ -1948,6 +1989,8 @@ AS $$
             THEN p_ticket_id || CASE WHEN p_title <> '' THEN ' -- ' || p_title ELSE '' END || ' kicked back to you'
         WHEN p_new_state = 'analysis'
             THEN 'New ticket for you: ' || p_ticket_id || CASE WHEN p_title <> '' THEN ' -- ' || p_title ELSE '' END
+        WHEN p_new_state = 'in_progress' AND p_already_announced
+            THEN p_ticket_id || CASE WHEN p_title <> '' THEN ' -- ' || p_title ELSE '' END || ' is active again'
         WHEN p_new_state = 'in_progress'
             THEN 'New ticket for you: ' || p_ticket_id || CASE WHEN p_title <> '' THEN ' -- ' || p_title ELSE '' END
         WHEN p_new_state = 'inspection'
@@ -2081,7 +2124,7 @@ AS $$
     SELECT CASE
         WHEN p_new_state = 'backlog'
             THEN 'New ticket for you: ' || p_ticket_id || CASE WHEN p_title <> '' THEN ' -- ' || p_title ELSE '' END
-        ELSE ticket_board.transition_message(p_ticket_id, p_title, NULL, p_new_state)
+        ELSE ticket_board.transition_message(p_ticket_id, p_title, NULL, p_new_state, false)
     END;
 $$;
 

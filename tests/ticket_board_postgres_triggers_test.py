@@ -2468,7 +2468,7 @@ SELECT ticket_board.enqueue_transition_notification(
     'director',
     clock_timestamp(),
     47100,
-    ticket_board.transition_message('PGU-47100', 'Create auto activate duplicate', NULL, 'analysis')
+    ticket_board.transition_message('PGU-47100', 'Create auto activate duplicate', NULL, 'analysis', false)
 );
 SELECT ticket_board.enqueue_transition_notification(
     'PGU-47100',
@@ -2478,7 +2478,7 @@ SELECT ticket_board.enqueue_transition_notification(
     'director',
     clock_timestamp(),
     47100,
-    ticket_board.transition_message('PGU-47100', 'Create auto activate duplicate', 'analysis', 'in_progress')
+    ticket_board.transition_message('PGU-47100', 'Create auto activate duplicate', 'analysis', 'in_progress', false)
 );
 COMMIT;
 """,

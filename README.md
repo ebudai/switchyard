@@ -16,12 +16,15 @@ sudo ./install
 Run `sudo ./install --dry-run` first to see every command it would run without
 changing the system.
 
-The installer refreshes apt package metadata on Debian/Ubuntu systems, installs
-host packages, creates the shared `/opt/switchyard/venv` with
-`--system-site-packages`, runs the ticket-board dependency and entry-point
-checks, and installs the public `switchyard` command, normally at
-`/usr/local/bin/switchyard`. It is non-interactive and asks nothing; `--yes`
-is accepted for compatibility and has no prompts to answer.
+The installer supports Debian/Ubuntu (apt) and Arch-family (pacman) hosts, and
+stops if it finds neither. It installs host packages, creates the shared
+`/opt/switchyard/venv` with `--system-site-packages`, runs the ticket-board
+dependency and entry-point checks, and installs the public `switchyard`
+command, normally at `/usr/local/bin/switchyard`. It is non-interactive and
+asks nothing; `--yes` is accepted for compatibility and has no prompts to
+answer. It refreshes package metadata itself on apt hosts but not on
+Arch-family ones, where `pacman -Sy` without `-u` would leave a partial
+upgrade: run `sudo pacman -Syu` yourself before `sudo ./install`.
 
 Switchyard does not install the agent CLIs. Installing `claude`, `codex`,
 `agy`, or `hermes` is yours to do, with that vendor's own installer, for the

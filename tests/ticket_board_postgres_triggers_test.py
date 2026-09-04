@@ -3707,7 +3707,14 @@ FROM params;
 RESET ROLE;
 """,
             )
-            resumed_after_role_activity = json.loads(
+            # PGU-909: perf commenting its measurement no longer clears the flag.
+            # Until PGU-909 this asserted the opposite -- a comment by the awaited
+            # role cleared awaiting_role and let nudges resume. That convenience is
+            # what let a director's "seen, still blocked" silently drop an
+            # escalation, so the awaited role now clears explicitly with
+            # clear_awaiting_role. The flag holding also holds the suppression,
+            # which is the property PGU-453 was really protecting.
+            still_awaiting_after_role_comment = json.loads(
                 psql(
                     conninfo,
                     """
@@ -3732,13 +3739,13 @@ WHERE ns.ticket_id = 'PGU-4531';
 """,
                 ).stdout
             )
-            assert resumed_after_role_activity == {
-                "awaiting_role": "",
-                "awaiting_since_cleared": True,
-                "queued": {"nudge:director": 1},
-                "last_nudged": True,
-                "nudge_count": 1,
-            }, resumed_after_role_activity
+            assert still_awaiting_after_role_comment == {
+                "awaiting_role": "perf",
+                "awaiting_since_cleared": False,
+                "queued": None,
+                "last_nudged": False,
+                "nudge_count": 0,
+            }, still_awaiting_after_role_comment
             psql(
                 conninfo,
                 """

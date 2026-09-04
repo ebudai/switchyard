@@ -145,6 +145,11 @@ system working, not a bug to route around.
   `await-role` at any role other than `director` still only mutes nudges.
   It does not move or reassign the ticket: the ticket stays in its own stage with its own
   assignee, which is what you want, because the work is still theirs.
+  The marker clears when the awaited role ACTS -- a state change or a reassignment -- and
+  not when they comment. Replying "seen, still blocked" leaves the escalation standing,
+  which is the point: before PGU-909 that acknowledgement cleared it and the ticket
+  dropped out of the queue while still blocked. If your reply IS the thing that was
+  awaited, clear it yourself with `clear-awaiting-role`.
 
 **User (the human)**
 - `user-sign-off` — UAT user_review → director_review

@@ -1518,17 +1518,32 @@ AS $$
 DECLARE
     activity_at timestamptz := coalesce(NEW.ts, clock_timestamp());
 BEGIN
+    -- Deliberately does NOT clear awaiting_role. Until PGU-909 this cleared it
+    -- whenever the awaited role commented (`WHEN awaiting_role = NEW.who`), on
+    -- the theory that the awaited role's comment IS the awaited deliverable --
+    -- PGU-453 built it for perf posting a measurement.
+    --
+    -- That theory is right about half the comments and wrong about the other
+    -- half, and the wrong half fails silently. A director replying "seen, still
+    -- blocked" cleared the escalation while the blocking condition was entirely
+    -- unchanged: the ticket vanished from the director's own queue and its nudges
+    -- resumed, naming the implementer as stuck. An acknowledgement is not an
+    -- action, and nothing here can tell the two apart.
+    --
+    -- So the awaited role now clears the flag explicitly, with
+    -- clear_awaiting_role. The cost is a stale flag when someone forgets, and
+    -- that is the better failure: it is visible, because the ticket stays in that
+    -- role's queue, and it stops suppressing nudges by itself once
+    -- ticket_awaiting_role_is_active's window expires. A dropped escalation is
+    -- visible to nobody and expires never.
+    --
+    -- Note for anyone tracing this: clear_awaiting_role_from_ticket_activity
+    -- also has an `actor = awaiting_role` term, but that trigger is on
+    -- ticket_board.tickets and does not fire on comments. Verified against a
+    -- live database, not read off the source.
     UPDATE ticket_board.ticket_notification_state
     SET last_activity_at = activity_at,
-        nudge_count = 0,
-        awaiting_role = CASE
-            WHEN awaiting_role = NEW.who THEN ''
-            ELSE awaiting_role
-        END,
-        awaiting_since_at = CASE
-            WHEN awaiting_role = NEW.who THEN NULL
-            ELSE awaiting_since_at
-        END
+        nudge_count = 0
     WHERE ticket_id = NEW.ticket_id;
     RETURN NULL;
 END;

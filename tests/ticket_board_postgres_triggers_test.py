@@ -3691,7 +3691,10 @@ DELETE FROM ticket_board.ticket_notification_queue;
 UPDATE ticket_board.ticket_notification_state
 SET last_nudged_at = clock_timestamp() + interval '1 hour'
 WHERE ticket_id <> 'PGU-4531';
-SELECT ticket_board.append_ticket_comment('PGU-4531', 'perf', 'Perf measurement posted.');
+SET ROLE ticket_board_service;
+SELECT set_config('ticket_board.caller_role', 'perf', false);
+SELECT ticket_board.add_comment('PGU-4531', 'Perf measurement posted.');
+RESET ROLE;
 SET ROLE ticket_board_listener;
 WITH params AS (
     SELECT clock_timestamp() AS now_at

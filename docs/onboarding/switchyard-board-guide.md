@@ -152,6 +152,8 @@ system working, not a bug to route around.
   `await-role` at any role other than `director` still only mutes nudges.
   It does not move or reassign the ticket: the ticket stays in its own stage with its own
   assignee, which is what you want, because the work is still theirs.
+  Do not `await-role` your own role: the normal write path rejects it, and a direct
+  same-actor marker would be self-defeating because the same ticket-activity rule clears it.
   The marker clears when the awaited role ACTS -- a state change or a reassignment -- and
   not when they comment. Replying "seen, still blocked" leaves the escalation standing,
   which is the point: before PGU-909 that acknowledgement cleared it and the ticket

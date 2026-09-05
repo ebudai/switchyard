@@ -491,6 +491,13 @@ def seed_fixtures(seed_ticket: object, commit_hash: str) -> None:
         implementation="No repo changes.",
     )
     seed_ticket(
+        "PGU-9150",
+        title="Awaiting role survives comment through HTTP action",
+        state="audit",
+        assignee="audit",
+        implementation="Waiting for director input.",
+    )
+    seed_ticket(
         "PGU-121",
         title="Non-exempt submit",
         state="in_progress",
@@ -1223,6 +1230,34 @@ WHERE id = 'PGU-141';
         expect=403,
     )
     assert "user cannot call await_role" in str(user_await_forbidden), user_await_forbidden
+    awaiting_set = post_json(
+        base_url,
+        "/api/tickets/PGU-9150/actions/await_role",
+        {"role": "director"},
+        caller="audit",
+    )
+    assert awaiting_set["ticket"]["awaiting_role"] == "director", awaiting_set  # type: ignore[index]
+    awaited_comment = post_json(
+        base_url,
+        "/api/tickets/PGU-9150/actions/add_comment",
+        {"text": "Seen, still blocked."},
+        caller="director",
+    )
+    assert awaited_comment["ticket"]["awaiting_role"] == "director", awaited_comment  # type: ignore[index]
+    other_comment = post_json(
+        base_url,
+        "/api/tickets/PGU-9150/actions/add_comment",
+        {"text": "Noted."},
+        caller="audit",
+    )
+    assert other_comment["ticket"]["awaiting_role"] == "director", other_comment  # type: ignore[index]
+    awaited_edit = post_json(
+        base_url,
+        "/api/tickets/PGU-9150/actions/edit_fields",
+        {"title": "Awaited role edited metadata"},
+        caller="director",
+    )
+    assert awaited_edit["ticket"]["awaiting_role"] == "", awaited_edit  # type: ignore[index]
     user_clear_awaiting_forbidden = post_json(
         base_url,
         "/api/tickets/PGU-120/actions/clear_awaiting_role",

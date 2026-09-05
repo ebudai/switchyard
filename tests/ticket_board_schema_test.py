@@ -636,11 +636,10 @@ def main() -> int:
     assert "old.state = 'backlog' or old.parked" in work_aware_idle_stall_migration
     assert "p_work_observed_at_by_role jsonb default '{}'::jsonb" in executable_schema_lower
     assert "coalesce(candidate.work_observed_at, '-infinity'::timestamptz) <= candidate.last_nudged_at" in executable_schema_lower
-    for function_name in ("upsert_ticket_notification_state", "notify_idle_stall_nudges"):
-        assert extract_function(schema, function_name) == extract_function(
-            work_aware_idle_stall_migration_text,
-            function_name,
-        )
+    assert extract_function(schema, "notify_idle_stall_nudges") == extract_function(
+        work_aware_idle_stall_migration_text,
+        "notify_idle_stall_nudges",
+    )
     idle_turn_end_comment_suppression_migration_text = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "pgu884_idle_turn_end_recent_comment_suppression.sql"
     ).read_text(encoding="utf-8")
@@ -655,6 +654,22 @@ def main() -> int:
         idle_turn_end_comment_suppression_migration_text,
         "notify_idle_turn_end_nudges",
     )
+    awaiting_role_comment_touch_migration_text = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu915_awaiting_role_ignores_comment_touch.sql"
+    ).read_text(encoding="utf-8")
+    awaiting_role_comment_touch_migration = awaiting_role_comment_touch_migration_text.lower()
+    assert "ticket_board.awaiting_role_comment_touch" in awaiting_role_comment_touch_migration
+    assert "clear_awaiting_role_from_ticket_activity" in awaiting_role_comment_touch_migration
+    for function_name in (
+        "upsert_ticket_notification_state",
+        "touch_ticket_notification_activity",
+        "clear_awaiting_role_from_ticket_activity",
+        "add_comment",
+    ):
+        assert extract_function(schema, function_name) == extract_function(
+            awaiting_role_comment_touch_migration_text,
+            function_name,
+        )
     drop_orphaned_eric_functions_migration = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "pgu593_drop_orphaned_eric_functions.sql"
     ).read_text(encoding="utf-8").lower()

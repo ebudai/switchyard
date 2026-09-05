@@ -1396,6 +1396,7 @@ DECLARE
     activity_at timestamptz := coalesce(NEW.updated_at, NEW.row_updated_at, clock_timestamp());
     reset_idle_reminder boolean := false;
     activation_reset boolean := false;
+    comment_touch boolean := false;
 BEGIN
     IF TG_OP = 'INSERT' THEN
         INSERT INTO ticket_board.ticket_notification_state (
@@ -1440,6 +1441,7 @@ BEGIN
         AND NEW.state IN ('analysis', 'in_progress', 'inspection', 'audit', 'dat', 'user_review', 'director_review')
     );
     reset_idle_reminder := OLD.state IS DISTINCT FROM NEW.state OR OLD.assignee IS DISTINCT FROM NEW.assignee OR activation_reset;
+    comment_touch := current_setting('ticket_board.awaiting_role_comment_touch', true) = 'on';
 
     INSERT INTO ticket_board.ticket_notification_state (
         ticket_id,
@@ -1504,12 +1506,14 @@ BEGIN
         END,
         awaiting_role = CASE
             WHEN reset_idle_reminder THEN ''
-            WHEN nullif(current_setting('ticket_board.caller_role', true), '') = ticket_board.ticket_notification_state.awaiting_role THEN ''
+            WHEN NOT comment_touch
+                 AND nullif(current_setting('ticket_board.caller_role', true), '') = ticket_board.ticket_notification_state.awaiting_role THEN ''
             ELSE ticket_board.ticket_notification_state.awaiting_role
         END,
         awaiting_since_at = CASE
             WHEN reset_idle_reminder THEN NULL
-            WHEN nullif(current_setting('ticket_board.caller_role', true), '') = ticket_board.ticket_notification_state.awaiting_role THEN NULL
+            WHEN NOT comment_touch
+                 AND nullif(current_setting('ticket_board.caller_role', true), '') = ticket_board.ticket_notification_state.awaiting_role THEN NULL
             ELSE ticket_board.ticket_notification_state.awaiting_since_at
         END,
         last_implementer_assignee = CASE
@@ -1548,10 +1552,10 @@ BEGIN
     -- ticket_awaiting_role_is_active's window expires. A dropped escalation is
     -- visible to nobody and expires never.
     --
-    -- Note for anyone tracing this: clear_awaiting_role_from_ticket_activity
-    -- also has an `actor = awaiting_role` term, but that trigger is on
-    -- ticket_board.tickets and does not fire on comments. Verified against a
-    -- live database, not read off the source.
+    -- Note for anyone tracing this: add_comment touches ticket_board.tickets to
+    -- refresh updated_at after inserting the comment. The tickets trigger uses
+    -- ticket_board.awaiting_role_comment_touch to distinguish that bookkeeping
+    -- touch from a real non-transition ticket edit by the awaited role.
     UPDATE ticket_board.ticket_notification_state
     SET last_activity_at = activity_at,
         nudge_count = 0
@@ -1649,6 +1653,10 @@ AS $$
 DECLARE
     actor text := nullif(current_setting('ticket_board.caller_role', true), '');
 BEGIN
+    IF current_setting('ticket_board.awaiting_role_comment_touch', true) = 'on' THEN
+        RETURN NULL;
+    END IF;
+
     UPDATE ticket_board.ticket_notification_state
     SET awaiting_role = '',
         awaiting_since_at = NULL
@@ -5779,7 +5787,9 @@ BEGIN
     actor := ticket_board.require_actor(ARRAY['director', 'user', 'main', 'app', 'ops', 'audit', 'inspector', 'perf', 'research'], 'add_comment');
     comment_actor := ticket_board.current_app_actor();
     PERFORM ticket_board.append_ticket_comment(id, comment_actor, text, urgent);
+    PERFORM set_config('ticket_board.awaiting_role_comment_touch', 'on', true);
     PERFORM ticket_board.touch_ticket(id);
+    PERFORM set_config('ticket_board.awaiting_role_comment_touch', '', true);
     IF urgent OR comment_actor IN ('director', 'user') THEN
         PERFORM ticket_board.notify_ticket_owner_in_place_change(id, 'new comment');
     END IF;

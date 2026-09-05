@@ -115,22 +115,22 @@ def run_checks(svc: str, admin: str) -> None:
     assert awaiting(admin, "PGU-1") == "director"
     assert suppressed(admin, "PGU-1") is True
 
-    as_role(svc, "director", "SELECT ticket_board.append_ticket_comment('PGU-1', 'director', 'Seen, still blocked.');")
+    as_role(svc, "director", "SELECT ticket_board.add_comment('PGU-1', 'Seen, still blocked.');")
     assert awaiting(admin, "PGU-1") == "director", "an acknowledgement cleared the escalation"
 
     # ACCEPTANCE 4 -- the flag still governs suppression while it stands.
     assert suppressed(admin, "PGU-1") is True
 
     # A comment from anyone else must not clear it either, and never did.
-    as_role(svc, "audit", "SELECT ticket_board.append_ticket_comment('PGU-1', 'audit', 'Passing by.');")
+    as_role(svc, "audit", "SELECT ticket_board.add_comment('PGU-1', 'Passing by.');")
     assert awaiting(admin, "PGU-1") == "director"
 
-    # ACCEPTANCE 3 -- the explicit clear still works.
+    # ACCEPTANCE 5 -- the explicit clear still works.
     as_role(svc, "director", "SELECT ticket_board.clear_awaiting_role('PGU-1');")
     assert awaiting(admin, "PGU-1") == ""
     assert suppressed(admin, "PGU-1") is False
 
-    # ACCEPTANCE 2a -- a state change still clears it.
+    # ACCEPTANCE 3a -- a state change still clears it.
     as_role(svc, "research", "SELECT ticket_board.set_awaiting_role('PGU-1', 'director');")
     assert awaiting(admin, "PGU-1") == "director"
     as_role(
@@ -141,22 +141,30 @@ def run_checks(svc: str, admin: str) -> None:
     )
     assert awaiting(admin, "PGU-1") == "", "a state change no longer clears the escalation"
 
-    # ACCEPTANCE 2b -- a reassignment still clears it.
+    # ACCEPTANCE 3b -- a reassignment still clears it.
     # A different assignee, because the serial-focus rule would push a second
     # in_progress ticket for the same role straight to backlog.
     insert_ticket(admin, "PGU-2", state="in_progress", assignee="app")
     as_role(svc, "app", "SELECT ticket_board.set_awaiting_role('PGU-2', 'director');")
     assert awaiting(admin, "PGU-2") == "director"
-    as_role(svc, "director", "SELECT ticket_board.route('PGU-2', 'in_progress', 'app');")
+    as_role(svc, "director", "SELECT ticket_board.route('PGU-2', 'in_progress', 'ops');")
     assert awaiting(admin, "PGU-2") == "", "a reassignment no longer clears the escalation"
+
+    # ACCEPTANCE 4 -- the awaited role making a real non-transition ticket edit
+    # still clears it. Comments are bookkeeping touches; edit_fields is activity.
+    insert_ticket(admin, "PGU-3", state="audit", assignee="audit")
+    as_role(svc, "audit", "SELECT ticket_board.set_awaiting_role('PGU-3', 'director');")
+    assert awaiting(admin, "PGU-3") == "director"
+    as_role(svc, "director", "SELECT ticket_board.edit_fields('PGU-3', '{\"title\": \"Director supplied title\"}'::jsonb);")
+    assert awaiting(admin, "PGU-3") == "", "awaited role edit_fields no longer clears the escalation"
 
     # The regression in its exact original shape: the director's own reply must
     # not drop the ticket out of the director's queue.
-    insert_ticket(admin, "PGU-3", state="audit", assignee="audit")
-    as_role(svc, "audit", "SELECT ticket_board.set_awaiting_role('PGU-3', 'director');")
-    before = awaiting(admin, "PGU-3")
-    as_role(svc, "director", "SELECT ticket_board.append_ticket_comment('PGU-3', 'director', 'Verified, awaiting import.');")
-    after = awaiting(admin, "PGU-3")
+    insert_ticket(admin, "PGU-4", state="audit", assignee="audit")
+    as_role(svc, "audit", "SELECT ticket_board.set_awaiting_role('PGU-4', 'director');")
+    before = awaiting(admin, "PGU-4")
+    as_role(svc, "director", "SELECT ticket_board.add_comment('PGU-4', 'Verified, awaiting import.');")
+    after = awaiting(admin, "PGU-4")
     assert before == after == "director", (before, after)
 
 

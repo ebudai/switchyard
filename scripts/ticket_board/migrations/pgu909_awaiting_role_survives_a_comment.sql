@@ -1,8 +1,8 @@
 -- PGU-909: a comment by the awaited role must not clear awaiting_role.
 --
--- The clearing lived in the ticket_comments trigger, not in
--- clear_awaiting_role_from_ticket_activity's `actor = awaiting_role` clause,
--- which does not fire on comments. See schema.sql for the reasoning.
+-- PGU-915 later found the second path: add_comment touches
+-- ticket_board.tickets(updated_at), so clear_awaiting_role_from_ticket_activity
+-- also has to distinguish comment bookkeeping from real ticket activity.
 
 CREATE OR REPLACE FUNCTION ticket_board.touch_ticket_notification_activity()
 RETURNS trigger

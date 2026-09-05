@@ -275,7 +275,7 @@ def test_cli_command_with_explicit_owner_uses_owner_bin_and_drops_invoker_privat
         team_launcher.current_user_name = original_current_user_name
 
     path = next(entry.split("=", 1)[1] for entry in _env_entries(command) if entry.startswith("PATH="))
-    assert path.startswith("/home/porter-agent/bin:")
+    assert path.startswith("/home/porter-agent/bin:/home/porter-agent/.local/bin:")
     assert "/root/bin" not in path.split(":")
 
 def test_modern_env_names_win_over_legacy_aliases_with_legacy_fallback() -> None:
@@ -462,6 +462,7 @@ def test_owner_cli_probe_and_interactive_strip_caller_pane_identity() -> None:
             )
             interactive = team_launcher._run_owner_cli_interactive(
                 owner_user=owner,
+                owner_home=owner_home,
                 cwd=owner_home,
                 command=["claude", "login"],
                 runner=runner,
@@ -475,9 +476,18 @@ def test_owner_cli_probe_and_interactive_strip_caller_pane_identity() -> None:
 
     assert probe.returncode == 0
     assert interactive.returncode == 0
-    assert calls == [
-        ["agy", "--model", "gemini-3.7-flash-high", "-p", "model-ok"],
-        ["claude", "login"],
+    owner_path = team_launcher._prepend_paths(
+        team_launcher.DEFAULT_PANE_BASE_PATH,
+        [str(owner_home / "bin"), str(owner_home / ".local" / "bin")],
+    )
+    assert calls[0][:4] == ["env", f"HOME={owner_home}", f"PATH={owner_path}", "agy"]
+    assert calls[0][4:] == ["--model", "gemini-3.7-flash-high", "-p", "model-ok"]
+    assert calls[1] == [
+        "env",
+        f"HOME={owner_home}",
+        f"PATH={owner_path}",
+        "claude",
+        "login",
     ]
     assert len(call_kwargs) == 2
     for kwargs in call_kwargs:

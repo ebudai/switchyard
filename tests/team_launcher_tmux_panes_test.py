@@ -189,6 +189,79 @@ def test_tmux_role_window_name_survives_cli_pane_title_write() -> None:
         finally:
             _cleanup_isolated_tmux_sessions(server, [role.tmux_session for role in roles])
 
+
+def test_tmux_pane_starts_cli_from_owner_local_bin_path() -> None:
+    if shutil.which("tmux") is None:
+        return
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-owner-local-bin.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "porter-agent"
+        owner_bin = owner_home / ".local" / "bin"
+        owner_bin.mkdir(parents=True)
+        marker = tmp_path / "home-only-cli.started"
+        helper = owner_bin / "home-only-cli"
+        helper.write_text(
+            "#!/bin/sh\n"
+            "touch \"$1\"\n"
+            "trap 'exit 0' TERM INT\n"
+            "while :; do sleep 1; done\n",
+            encoding="utf-8",
+        )
+        helper.chmod(0o755)
+        session = f"pgu919-owner-local-bin-{os.getpid()}"
+        role = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json").roles[0]
+        role = role.__class__(
+            role="ops",
+            slot=0,
+            detached=False,
+            tmux_session=session,
+            target=f"{session}:0.0",
+            workdir=str(tmp_path),
+            cli=["home-only-cli", str(marker)],
+            model="",
+            model_arg=role.model_arg,
+            effort="",
+            yolo=False,
+            extra_args=[],
+            resume_mode=role.resume_mode,
+            resume_flag=role.resume_flag,
+            resume_subcommand=role.resume_subcommand,
+            fresh_session_per_ticket=role.fresh_session_per_ticket,
+            live_commands=["home-only-cli"],
+            env={},
+        )
+        server = f"pgu919-owner-local-bin-{os.getpid()}"
+        runner = _isolated_tmux_runner(server)
+        original_home_dir_for_user = team_launcher.home_dir_for_user
+        try:
+            team_launcher.home_dir_for_user = lambda user: owner_home if user == "porter-agent" else original_home_dir_for_user(user)
+            proc = runner(
+                team_launcher.tmux_new_session_args(
+                    role,
+                    session_dir=tmp_path / "sessions",
+                    bin_user="porter-agent",
+                ),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            assert proc.returncode == 0, proc.stderr
+            for _ in range(50):
+                if marker.exists():
+                    break
+                time.sleep(0.1)
+            assert marker.exists(), "role CLI in owner .local/bin was not found by pane PATH"
+            live = _run_isolated_tmux(
+                server,
+                ["has-session", "-t", role.tmux_session],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            assert live.returncode == 0
+        finally:
+            team_launcher.home_dir_for_user = original_home_dir_for_user
+            _cleanup_isolated_tmux_sessions(server, [role.tmux_session])
+
 def test_pane_start_from_another_pane_uses_target_session_and_clears_caller_tmux_env() -> None:
     config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
     role = next(role for role in config.roles if role.role == "research")

@@ -796,9 +796,14 @@ class FirstRunAuthRunner:
         return subprocess.CompletedProcess(args, 0, stdout="model-ok\n")
 
     def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        self.calls.append(args)
         self.call_kwargs.append(dict(kwargs))
         command = args[3:] if args[:2] == ["sudo", "-u"] else args
+        if command and command[0] == "env":
+            index = 1
+            while index < len(command) and "=" in command[index]:
+                index += 1
+            command = command[index:]
+        self.calls.append([*args[:3], *command] if args[:2] == ["sudo", "-u"] else list(command))
         if command[:2] == ["sh", "-lc"] and len(command) == 3 and command[2].startswith("command -v "):
             cli = command[2].removeprefix("command -v ").strip()
             if cli in self.missing_clis:

@@ -629,13 +629,26 @@ def ensure_configured_runtime_user(
 
 
 def default_user_bin(user_name: str = "") -> str:
+    return default_user_bin_dirs(user_name)[0]
+
+
+def default_user_bin_dirs(user_name: str = "") -> list[str]:
     configured = _env_first(USER_BIN_ENV, LEGACY_USER_BIN_ENV)
     if configured:
-        return str(Path(configured).expanduser())
+        return [str(Path(configured).expanduser())]
     owner_home = home_dir_for_user(user_name) if user_name.strip() else None
     if owner_home is not None:
-        return str(owner_home / "bin")
-    return str(Path.home() / "bin")
+        return [str(owner_home / "bin"), str(owner_home / ".local" / "bin")]
+    home = Path.home()
+    return [str(home / "bin"), str(home / ".local" / "bin")]
+
+
+def _owner_home_bin_dirs(owner_home: Path) -> list[str]:
+    configured = _env_first(USER_BIN_ENV, LEGACY_USER_BIN_ENV)
+    if configured:
+        return [str(Path(configured).expanduser())]
+    home = owner_home.expanduser()
+    return [str(home / "bin"), str(home / ".local" / "bin")]
 
 
 def default_pane_base_path(user_name: str = "") -> str:
@@ -1685,9 +1698,15 @@ def _env_unset_prefix(keys: Sequence[str]) -> list[str]:
 
 
 def _prepend_path(path_value: str, directory: str) -> str:
+    return _prepend_paths(path_value, [directory])
+
+
+def _prepend_paths(path_value: str, directories: Sequence[str]) -> str:
     parts = [part for part in path_value.split(":") if part]
-    parts = [part for part in parts if part != directory]
-    return ":".join([directory, *parts])
+    for directory in reversed([item for item in directories if item]):
+        parts = [part for part in parts if part != directory]
+        parts.insert(0, directory)
+    return ":".join(parts)
 
 
 def session_file_name(target: str) -> str:
@@ -2460,7 +2479,10 @@ def cli_command_for_role(
             env.setdefault("PGU_TICKET_BOARD_PANE_STATE_DIR", str(pane_state_dir.expanduser()))
         if session_id:
             env.setdefault("PGU_PANE_SESSION_ID", session_id)
-    env["PATH"] = _prepend_path(env.get("PATH") or default_pane_base_path(bin_user), default_user_bin(bin_user))
+    env["PATH"] = _prepend_paths(
+        env.get("PATH") or default_pane_base_path(bin_user),
+        default_user_bin_dirs(bin_user),
+    )
     return ["env", *_env_unset_prefix(PANE_TARGET_ENV_KEYS), *_env_prefix(env), *command]
 
 
@@ -7608,6 +7630,11 @@ def _owner_command_args(owner_user: str, command: Sequence[str]) -> list[str]:
     return ["sudo", "-u", owner_user, *command]
 
 
+def _owner_command_env_args(owner_user: str, owner_home: Path, command: Sequence[str]) -> list[str]:
+    path = _prepend_paths(DEFAULT_PANE_BASE_PATH, _owner_home_bin_dirs(owner_home))
+    return _owner_command_args(owner_user, ["env", f"HOME={owner_home}", f"PATH={path}", *command])
+
+
 def _pane_identity_scrubbed_env(source: Mapping[str, str] | None = None) -> dict[str, str]:
     env = dict(os.environ if source is None else source)
     for key in PROBE_IDENTITY_ENV_KEYS:
@@ -7639,7 +7666,7 @@ def _run_owner_cli_probe(
     command: Sequence[str],
     runner: Callable[..., subprocess.CompletedProcess[Any]],
 ) -> subprocess.CompletedProcess[Any]:
-    args = _owner_command_args(owner_user, command)
+    args = _owner_command_env_args(owner_user, owner_home, command)
     try:
         return runner(
             args,
@@ -7656,11 +7683,12 @@ def _run_owner_cli_probe(
 def _run_owner_cli_interactive(
     *,
     owner_user: str,
+    owner_home: Path,
     cwd: Path,
     command: Sequence[str],
     runner: Callable[..., subprocess.CompletedProcess[Any]],
 ) -> subprocess.CompletedProcess[Any]:
-    args = _owner_command_args(owner_user, command)
+    args = _owner_command_env_args(owner_user, owner_home, command)
     try:
         return runner(args, cwd=str(cwd), env=_pane_identity_scrubbed_env())
     except OSError as exc:
@@ -8119,6 +8147,7 @@ def run_first_run_auth_phase(
         login_command = list(step.command)
         _run_owner_cli_interactive(
             owner_user=effective_owner,
+            owner_home=effective_home,
             cwd=effective_home,
             command=login_command,
             runner=runner,
@@ -8133,6 +8162,7 @@ def run_first_run_auth_phase(
     for step in manifest.folder_trust_steps:
         _run_owner_cli_interactive(
             owner_user=effective_owner,
+            owner_home=effective_home,
             cwd=step.workdir,
             command=list(step.command),
             runner=runner,

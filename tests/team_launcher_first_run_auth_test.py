@@ -412,6 +412,84 @@ def test_first_run_auth_phase_reports_missing_cli_separately_from_login() -> Non
         ], status_returncode
 
 
+def test_first_run_auth_invokes_owner_home_cli_with_same_path_as_presence_check() -> None:
+    class HomeOnlyCliRunner:
+        def __init__(self, owner_local_bin: Path) -> None:
+            self.owner_local_bin = str(owner_local_bin)
+            self.calls: list[list[str]] = []
+            self.returncodes: list[int] = []
+            self.login_seen = False
+
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            command = args[3:] if args[:2] == ["sudo", "-u"] else list(args)
+            path = ""
+            if command and command[0] == "env":
+                env_end = 1
+                while env_end < len(command) and "=" in command[env_end]:
+                    key, value = command[env_end].split("=", 1)
+                    if key == "PATH":
+                        path = value
+                    env_end += 1
+                command = command[env_end:]
+            has_owner_cli_path = self.owner_local_bin in path.split(":")
+            if command[:2] == ["sh", "-lc"] and command[2] == "command -v codex":
+                returncode = 0 if has_owner_cli_path else 1
+                self.returncodes.append(returncode)
+                return subprocess.CompletedProcess(args, returncode, stdout=f"{self.owner_local_bin}/codex\n", stderr="")
+            if command == ["codex", "login", "status"]:
+                if not has_owner_cli_path:
+                    self.returncodes.append(127)
+                    return subprocess.CompletedProcess(args, 127, stdout="", stderr="codex: command not found\n")
+                if self.login_seen:
+                    self.returncodes.append(0)
+                    return subprocess.CompletedProcess(args, 0, stdout="Logged in using ChatGPT\n", stderr="")
+                self.returncodes.append(1)
+                return subprocess.CompletedProcess(args, 1, stdout="", stderr="Not logged in\n")
+            if command == ["codex", "login"]:
+                if not has_owner_cli_path:
+                    self.returncodes.append(127)
+                    return subprocess.CompletedProcess(args, 127, stdout="", stderr="codex: command not found\n")
+                self.login_seen = True
+                self.returncodes.append(0)
+                return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+            self.returncodes.append(0)
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    with tempfile.TemporaryDirectory(prefix="pgu-first-run-auth-home-cli.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_local_bin = owner_home / ".local" / "bin"
+        owner_local_bin.mkdir(parents=True)
+        config = load_project_config(
+            "otto",
+            _write_first_run_auth_config(tmp_path, roles=[("ops", "codex")]),
+        )
+        runner = HomeOnlyCliRunner(owner_local_bin)
+        messages: list[str] = []
+
+        report = team_launcher.run_first_run_auth_phase(
+            config,
+            owner_user="otto-agent",
+            owner_home=owner_home,
+            runner=runner,
+            print_func=messages.append,
+        )
+
+    assert report == team_launcher.FirstRunAuthReport({}, [])
+    assert messages == [
+        "switchyard: first-run setup manifest for owner user otto-agent: "
+        "1 login step(s), 0 folder trust step(s), 0 codex hook approval(s), 0 missing CLI(s)",
+        "switchyard: login codex: roles ops; interactive account setup running codex login as otto-agent",
+    ]
+    assert 127 not in runner.returncodes
+    assert all(
+        any(part.startswith("PATH=") and str(owner_local_bin) in part.split("=", 1)[1].split(":") for part in call)
+        for call in runner.calls
+        if call[:3] == ["sudo", "-u", "otto-agent"]
+    )
+
+
 def test_first_run_auth_phase_reports_broken_existing_owner_shell_without_mutating() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-first-run-auth-broken-shell.") as tmp:
         tmp_path = Path(tmp)

@@ -85,9 +85,14 @@ def test_first_run_trust_handles_detached_roles_and_persists_for_later_launches(
         call_kwargs: list[dict[str, object]] = []
 
         def runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-            calls.append(args)
             call_kwargs.append(dict(kwargs))
             command = args[3:] if args[:2] == ["sudo", "-u"] else args
+            if command and command[0] == "env":
+                index = 1
+                while index < len(command) and "=" in command[index]:
+                    index += 1
+                command = command[index:]
+            calls.append([*args[:3], *command] if args[:2] == ["sudo", "-u"] else list(command))
             if command == ["claude", "auth", "status", "--json"]:
                 return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"loggedIn": True}) + "\n")
             if command == ["claude"]:
@@ -199,7 +204,7 @@ def test_first_run_setup_manifest_prints_every_step_before_first_interactive_com
     first_interactive_index = next(
         index
         for index, (_kind, value) in enumerate(events)
-        if value == ["sudo", "-u", "otto-agent", "claude", "auth", "login"]
+        if isinstance(value, list) and value[-3:] == ["claude", "auth", "login"]
     )
     last_manifest_print_index = max(index for index, (kind, _value) in enumerate(events) if kind == "print")
     assert last_manifest_print_index < first_interactive_index

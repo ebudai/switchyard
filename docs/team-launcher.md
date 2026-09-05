@@ -423,7 +423,10 @@ Each role entry contains:
   `gemini` launcher name, are rejected while parsing project artifacts or prompt
   answers, before provisioning or launch mutates the project. The configured
   CLI must be executable by the project's owner user, not just installed
-  somewhere on the host.
+  somewhere on the host. First-run auth/model probes, interactive setup
+  commands, and pane launches all invoke CLIs with the same explicit owner
+  search path: the owner's `~/bin`, the owner's `~/.local/bin`, then the stable
+  system path.
 - `model`: optional model selector. The launcher passes it with the role's
   `model_arg` at process launch so the pane starts on its configured model.
 - `model_arg`: optional model flag, defaulting to `--model`.

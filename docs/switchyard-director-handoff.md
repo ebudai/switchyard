@@ -5,73 +5,69 @@ replace `docs/onboarding/`; use onboarding for the generic director method and
 this document for the project state, tenant map, and decisions that should not
 be rediscovered.
 
-## The Import Boundary — Read This First
+## Canonical Repository And Review Boundary
 
-This is the single fact that will shape your working day, and the one most likely
-to look like a misconfiguration you should fix. It is not. It is deliberate.
+[GitHub](https://github.com/ebudai/switchyard) is the canonical Switchyard
+repository under SYRD-6. The following is the target workflow; the director
+must complete and verify the coordinated cutover before using it. Source edits
+do not disable an installed mirror job, change GitHub settings, or update a
+running board.
 
-**Agents cannot push to `/data/git/switchyard.git`.** A push from an agent fails:
+1. Clone `https://github.com/ebudai/switchyard.git` into a separate source
+   checkout and work on a named feature branch. The existing SYRD seed/control
+   repo has unrelated provisioning history: preserve it and its worktrees;
+   never repoint them blindly to Switchyard source.
+2. Push only the intended feature branch to GitHub using the authorized
+   account's credential. Open a pull request with the ticket, exact commit,
+   behavior change, and validation. Keep contribution terms in
+   `CONTRIBUTING.md` intact. Do not force-push or publish private backup refs,
+   unrelated topic branches, or all local refs.
+3. Before audit submission, ensure the board's read-only source cache has
+   fetched the feature branch. The `syrd` compatibility default is
+   `/data/git/switchyard.git`; its provisioning control repo cannot verify
+   real source commits. Explicit commit-repository settings override that
+   default, and installed units need a separately reviewed update/restart.
+   See [commit verification](ticket-board-project-provisioning.md#switchyard-source-commit-verification).
+4. Submit the exact commit to audit from the real source checkout whose
+   `origin` is GitHub. The write client checks origin reachability; the server
+   independently checks its configured repository. Neither check should be
+   bypassed to hide a publication or cache-refresh blocker.
+5. After audit, the director checks the current GitHub main is an ancestor of
+   the reviewed PR head and merges through GitHub's protected PR workflow.
+   Record the actual merged commit and refresh the cache. Merging is separate
+   from deploying the immutable shared and board releases.
 
-    remote unpack failed: unable to create temporary object directory
+During cutover, identify the outgoing mirror writer and record its owner,
+command, schedule, and force/refspec behavior before disabling it. Stop that
+writer before GitHub accepts new work. Disable the old **Close Mirror Pull
+Requests** workflow in GitHub before opening the first PR: deleting its file in
+that PR cannot stop the copy still active on the base branch. Review branch
+protection and credentials separately; retain independent audit and director
+merge authority. Never loosen local repository permissions or copy another
+account's private key.
 
-The bare repo is owned by the operator. Every tenant installs from it, so nothing
-that runs unattended may write to it. Eric confirmed this twice, in these words:
-*"don't loosen it, polkit for that is fine."* Do not make the repo group-writable,
-do not add an agent to its group, do not "fix" the permissions.
+`/data/git/switchyard.git` remains operator-owned recovery storage and a
+one-way GitHub fetch cache. Its `origin/main` must follow GitHub for shared
+upgrades; advance local `main` only after a successful fetch and a blocking
+fast-forward ancestry check with compare-and-swap ref update. Preserve private
+local branches and bundles. Cache refresh must never push back to GitHub.
+Checkout-based board deployments likewise fetch their checkout's `origin/main`;
+verify that origin is GitHub and deploy only the reviewed merged commit.
 
-The consequence is a workflow you must plan around:
+Until branch publication and verification are available, commit locally and
+write a named-branch bundle to durable storage such as
+`/var/tmp/switchyard-handoff/` or the project owner's state directory. Record
+its path, ref, hash, tests, and precise submission blocker on the ticket for
+the director. Do not use `/tmp` for pending review artifacts: a reboot erased
+five pending bundles on 2026-09-05. Do not probe operator authentication in a
+retry loop; repeated failed `pkexec` attempts previously locked the owner out.
 
-1. an implementer commits in its own worktree and cannot push
-2. it writes a named-branch `git bundle` under
-   `/var/tmp/switchyard-handoff/` and posts the path, refspec and sha on the
-   ticket. Do not use `/tmp`: it is tmpfs, and a reboot on 2026-09-05 erased
-   five pending bundles. The work was recoverable only because the worktrees
-   survived (PGU-907 through PGU-913).
-3. read the bundle's ref name with `git bundle list-heads <bundle>`, then
-   **you** import it as the repo owner:
-
-       pkexec --user eric git -C /data/git/switchyard.git \
-         fetch <bundle> '+<source-ref>:refs/heads/<branch>'
-
-   `pkexec` is intermittent and its failure can be completely silent even with
-   polkit and the owner's session healthy. On 2026-09-05 it failed repeatedly
-   with no output between successful imports. Do not poll it or keep retrying:
-   that locked the owner out for nine minutes on 2026-09-03. The cause remains
-   uncharacterised (PGU-912). The fallback is
-   `/var/tmp/switchyard-handoff/switchyard-merge.sh`, run by the repo owner with
-   no sudo. That script is generated for a particular handoff or batch: read it
-   before use and regenerate it when the queued bundles change.
-4. only then can the implementer submit to audit; the write client refuses
-   `submit_to_audit` until the commit is on origin. That check runs before the
-   board request and uses the caller's current working directory, so a Switchyard
-   commit must be submitted from a Switchyard checkout, not from a tenant project
-   or the old PGU checkout.
-5. after audit, before moving `main`, run the blocking ancestry gate described
-   in *Operating Rules*. Use `/var/tmp/switchyard-handoff/safe-merge.sh`; do not
-   substitute a command sequence that merely prints the check.
-
-**Every round trip therefore stalls on an operator being physically present.**
-`pkexec` normally needs a human to approve a prompt, and its owner-run fallback is
-also deliberately not available to unattended agents. On 2026-09-02 that meant
-thirteen merges, roughly thirty privileged imports, and six director holds.
-
-Two traps that follow from it:
-
-- **The watchdog reads this import-wait stall as "implementer may be stuck" and
-  escalates.** In this specific case it is almost always wrong. Read the pane before
-  acting: an implementer that has finished, bundled, and said so is not stuck, and
-  telling it to try harder wastes its time. There is no board state meaning "waiting
-  on a human" — see *Action Naming* below.
-- **Never use `pkexec` as a liveness probe.** Repeated failed authentications lock the
-  operator out of their own machine. This happened, for nine minutes, because a
-  background watch polled it every two minutes overnight.
-
-Finally: prefer `git clone --no-local /data/git/switchyard.git` for handoff and
-recovery examples. Plain clones into `/home` and `/tmp` work on this machine because
-they cross from `/data` to another filesystem and Git copies objects instead of
-hardlinking them. Forced local clones can fail across that boundary with
-`Invalid cross-device link`; clones into `/data` can also run into protected-hardlink
-ownership rules. `--no-local` makes the intended copy behavior explicit.
+For rollback, freeze new GitHub merges and preserve any new GitHub commits in
+local refs and bundles before changing the source configuration. Never rewind
+GitHub main or restore an outgoing force-push job. Existing immutable release
+symlinks remain the deployment rollback mechanism. Offline recovery clones
+from the local cache should use `git clone --no-local` to avoid hardlink and
+cross-filesystem ownership failures.
 
 ## What Switchyard Owns
 
@@ -105,15 +101,15 @@ compatibility special case, not an output of that formula.
 Facts that move are stated as how to FIND them, not as values. Values here were
 true on 2026-09-02 and are marked as such.
 
-    switchyard main     git --git-dir=/data/git/switchyard.git rev-parse --short main
+    GitHub main         git ls-remote https://github.com/ebudai/switchyard.git refs/heads/main
+    source cache main   git --git-dir=/data/git/switchyard.git rev-parse main
     pgu main            git --git-dir=/data/git/pgu.git rev-parse --short main
     shared install      readlink -f /opt/switchyard/current
     live board release  readlink -f /home/agent/pgu-ticketboard-live/current
     tenants             ls /etc/switchyard/projects/
-    mirror              https://github.com/ebudai/switchyard
 
-CHECK THOSE FOUR AGAINST EACH OTHER BEFORE YOU TRUST ANY OF THEM. On 2026-09-02 all
-three deploy surfaces had drifted from main at once: `/opt/switchyard/current` pointed
+Compare GitHub main, the cache, and release markers before trusting source
+freshness. On 2026-09-02 all three deploy surfaces had drifted from main at once: `/opt/switchyard/current` pointed
 at `81dc45f81ec0`, which was 18 commits behind main at audit time; the live board
 predated the commit-verification work merged that morning (so verification was merged
 but NOT RUNNING); and the mirror was one commit behind. Drift is the normal state, not
@@ -130,8 +126,8 @@ board port, socket path, ticket prefix and pane environment.
 Use neutral `TICKET_BOARD_*`, `TEAM_LAUNCHER_*`, `UPDATE_HOOK_*` and `ALLOW_MAIN_PUSH`
 names. Do not introduce `SYRD_*` vocabulary.
 
-The mirror is AGPL-3.0 with contribution terms preserving the owner's licensing
-options. It is read-only; the local bare repo is canonical and GitHub PRs auto-close.
+Switchyard remains AGPL-3.0 with the contribution terms in `CONTRIBUTING.md`.
+SYRD-6 supersedes the former mirror-only contribution policy.
 
 ## Migration Rule
 
@@ -150,8 +146,8 @@ leaves existing `PGU-NNN` references untouched.
 
 1. The shared install is immutable releases, not a writable checkout.
    Reason: shared code in `/opt/switchyard` must be auditable and repeatable.
-   Build from the bare repo through ephemeral clones, run immutable releases,
-   and use commit markers; a self-deploying checkout would make production
+   Build from reviewed GitHub commits through ephemeral clones, run immutable
+   releases, and use commit markers; a self-deploying checkout would make production
    state depend on whoever last ran git in `/opt`.
 
 2. Workflow vocabulary moves toward FK-over-CHECK, and the rollout is gated.
@@ -197,19 +193,23 @@ leaves existing `PGU-NNN` references untouched.
 
 ## Operating Rules
 
-**Gate every move of Switchyard `main`.** Since 2026-08-31 the history has been
-strictly linear and merging has been a fast-forward ref move. A stale branch
-does not conflict in that model; it silently drops everything that landed after
-its base. `git rev-list --count origin/main..HEAD` can still report one and does
-not detect the loss. Before every merge, require:
+**Gate every move of Switchyard `main`.** Refresh GitHub refs and require the
+reviewed PR head to descend from current `origin/main` before the director
+merges. In a source checkout with `origin` pointing at GitHub, use a blocking
+sequence (replace `<reviewed-sha>` with the audited PR head):
 
-    git merge-base --is-ancestor main <sha>     # exit 0 only
+```bash
+git fetch origin &&
+  git merge-base --is-ancestor origin/main <reviewed-sha>
+```
 
-Use `/var/tmp/switchyard-handoff/safe-merge.sh`. It refuses a failed ancestry
-check and exits non-zero. This gate exists because the director saw the check
-print `NO` and merged anyway on PGU-915, reverting PGU-913; PGU-909 had already
-measured the same hazard across four pending branches. A check that can be read
-past is not a gate.
+A nonzero result blocks the merge. Rebase or integrate current main on the
+feature branch and repeat affected review/validation; never move main to a
+stale tip. Confirm the PR head still matches the reviewed hash and main has
+not advanced when merging. The old local `safe-merge.sh` was an operator import
+gate, not a replacement for GitHub PR protections. The ancestry requirement
+remains: a previous local merge proceeded after the check printed `NO` and
+reverted accepted work (PGU-915).
 
 Use the board tools, not direct JSON edits, for ticket changes. Route work
 through tickets and preserve origin metadata for cross-tenant records. Do not
@@ -359,15 +359,9 @@ migration risk. This is here so the decision is made from evidence.
 5. Verify the shared-install release marker and update path.
 6. Review the final migration list immediately before cutover; do not trust an
    old inventory.
-7. Confirm the three deploy surfaces agree with `main`: the shared install, the
-   separately deployed live board release, and the mirror. On 2026-09-02 all
-   three had drifted at once. Merging is not deploying; for board code, run
-   `scripts/ticket-board-service.sh deploy-restart` and verify the behavior and
-   `build_id`.
-8. Do one import end to end before you need to: take a reviewed implementer
-   bundle, run `git bundle list-heads` on it, import it from
-   `/var/tmp/switchyard-handoff/`, run the blocking ancestry gate through
-   `safe-merge.sh` after audit, and watch the ticket move. Try `pkexec` once; if
-   it fails silently, stop and prepare the narrow `switchyard-merge.sh` for the
-   repo owner. Learning that flow under time pressure on your first real ticket
-   is the worst way to learn it.
+7. Compare canonical GitHub main, the source cache, shared install, and live
+   board release. Merging is not deploying; confirm any intended deployment by
+   its behavior and `build_id`, not merely a healthy process.
+8. Verify the GitHub branch/PR/audit flow and both commit-verification checks
+   end to end. During migration, preserve pending bundles and record any
+   credential, workflow, or cache blocker for coordinated director action.

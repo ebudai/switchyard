@@ -112,3 +112,23 @@ map unchanged. The setting can only decide which callers are allowed past the
 HTTP route check; PostgreSQL `workflow_transitions.allowed_roles` remains the
 authority for ticket state changes, so the env map cannot grant a transition
 the workflow table rejects.
+
+## Switchyard source commit verification
+
+For the `syrd` and legacy `switchyard` slugs, generated board units default
+`TICKET_BOARD_COMMIT_GIT_DIR` to `/data/git/switchyard.git`. This is an
+operator-owned, locally readable cache of the canonical GitHub repository,
+not the SYRD provisioning control repo, which has unrelated seed history.
+Other tenants keep their existing repository resolution. An explicit
+`--commit-git-dir` or commit-repository environment setting takes precedence,
+including on hosts with a different cache path.
+
+This default does not modify installed units or fetch any commits. During the
+coordinated cutover, review both generated and installed settings, install the
+updated SYRD unit, and restart that board. The cache must fetch GitHub feature
+branches before audit submission so the server can resolve their commits.
+The write client separately requires the submitted commit to be pushed to the
+caller's `origin`; run it from the real source checkout. Test that a fetched
+feature-branch commit is accepted and a nonexistent hash is rejected. Keep
+permissions and audit gates intact; GitHub publication and cache refresh are
+director/operator actions.

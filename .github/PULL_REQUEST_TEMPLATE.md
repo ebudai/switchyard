@@ -1,8 +1,10 @@
-# Pull Requests
+## Change
 
-Thanks for taking the time to prepare a change. This GitHub repository is a
-read-only mirror; development and review happen in a private canonical
-repository, so pull requests here cannot be accepted.
+Describe the problem and the resulting behavior. Link the relevant ticket or issue.
 
-Please contact the maintainer through the same route that pointed you to this
-mirror before preparing changes.
+## Validation
+
+List the checks run and their results, including any limitations.
+
+- [ ] I have read and accept the contribution terms in [CONTRIBUTING.md](../CONTRIBUTING.md).
+- [ ] This change is ready for review; any required ticket audit is recorded before merge.

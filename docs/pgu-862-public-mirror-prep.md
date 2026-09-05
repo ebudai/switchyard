@@ -1,5 +1,10 @@
 # PGU-862 Public Mirror And Fresh-Machine Prep
 
+> Historical preparation record. SYRD-6 supersedes the mirror-only policy and
+> local recovery URL below: GitHub is now canonical. See
+> [the director handoff](switchyard-director-handoff.md) for the current workflow
+> and [installation guidance](team-launcher.md#installing-the-entry-point) for recovery.
+
 This note covers the layer below PGU-795's first-run manifest. PGU-795 tells
 an operator which interactive account/model/trust steps are coming after
 Switchyard can run; this note lists what a fresh machine needs before those

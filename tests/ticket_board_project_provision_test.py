@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -733,6 +734,30 @@ def test_live_legacy_project_commit_repositories_are_rendered() -> None:
     assert mefp_plan.commit_git_dir == "/data/git/stellaris-fixpatch.git"
     assert otto_plan.commit_git_dir == "/data/git/otto_scheduler.git"
     assert porter_plan.commit_git_dir == "/home/porter-agent/.local/state/switchyard/projects/porter/control.git"
+
+
+def test_syrd_verifies_source_cache_and_preserves_explicit_overrides() -> None:
+    # Do not inherit this pane's live board setting into generated-default checks.
+    clean_env = {key: value for key, value in os.environ.items() if key not in (
+        "TICKET_BOARD_COMMIT_GIT_DIR", "PGU_TICKET_BOARD_COMMIT_GIT_DIR",
+    )}
+    with patch.dict(os.environ, clean_env, clear=True):
+        plan = build_plan(project="syrd", owner_user="switchyard-agent")
+        unit = render_board_unit(plan)
+        assert "Environment=TICKET_BOARD_COMMIT_GIT_DIR=/data/git/switchyard.git\n" in unit
+        assert "/projects/syrd/control.git" not in unit
+        assert "TICKET_BOARD_COMMIT_GIT_DIR='/data/git/switchyard.git'" in render_operator_commands(plan)
+
+        explicit = build_plan(project="syrd", owner_user="switchyard-agent",
+                              commit_git_dir=Path("/srv/git/source-cache.git"))
+        assert "Environment=TICKET_BOARD_COMMIT_GIT_DIR=/srv/git/source-cache.git\n" in render_board_unit(explicit)
+        tenant = build_plan(project="porter", owner_user="porter-agent")
+        assert tenant.commit_git_dir == "/home/porter-agent/.local/state/switchyard/projects/porter/control.git"
+
+        for key in ("TICKET_BOARD_COMMIT_GIT_DIR", "PGU_TICKET_BOARD_COMMIT_GIT_DIR"):
+            with patch.dict(os.environ, {key: "/srv/git/env-cache.git"}):
+                overridden = build_plan(project="syrd", owner_user="switchyard-agent")
+                assert "Environment=TICKET_BOARD_COMMIT_GIT_DIR=/srv/git/env-cache.git\n" in render_board_unit(overridden)
 
 
 def test_custom_database_actor_roles_fail_loud_until_schema_supports_them() -> None:

@@ -399,7 +399,7 @@ def test_first_run_auth_phase_reports_missing_cli_separately_from_login() -> Non
         ], status_returncode
         assert runner.calls == [
             ["sudo", "-u", "otto-agent", "agy", "models"],
-            ["sudo", "-u", "otto-agent", "sh", "-lc", "command -v agy"],
+            ["sudo", "-u", "otto-agent", "sh", "-c", "command -v agy"],
             ["sudo", "-u", "otto-agent", "codex", "login", "status"],
         ], status_returncode
         assert not any(call == ["sudo", "-u", "otto-agent", "agy"] for call in runner.calls), status_returncode
@@ -433,7 +433,7 @@ def test_first_run_auth_invokes_owner_home_cli_with_same_path_as_presence_check(
                     env_end += 1
                 command = command[env_end:]
             has_owner_cli_path = self.owner_local_bin in path.split(":")
-            if command[:2] == ["sh", "-lc"] and command[2] == "command -v codex":
+            if command[:2] == ["sh", "-c"] and command[2] == "command -v codex":
                 returncode = 0 if has_owner_cli_path else 1
                 self.returncodes.append(returncode)
                 return subprocess.CompletedProcess(args, returncode, stdout=f"{self.owner_local_bin}/codex\n", stderr="")
@@ -488,6 +488,84 @@ def test_first_run_auth_invokes_owner_home_cli_with_same_path_as_presence_check(
         for call in runner.calls
         if call[:3] == ["sudo", "-u", "otto-agent"]
     )
+
+
+def test_first_run_auth_reports_profile_only_cli_missing_with_real_shell_probe() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-first-run-auth-profile-only.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        profile_only_bin = owner_home / ".nvm" / "bin"
+        sandbox_bin = tmp_path / "sandbox-bin"
+        profile_only_bin.mkdir(parents=True)
+        sandbox_bin.mkdir()
+        (profile_only_bin / "codex").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (profile_only_bin / "codex").chmod(0o755)
+        (owner_home / ".profile").write_text(
+            f"PATH={profile_only_bin}:$PATH\nexport PATH\n",
+            encoding="utf-8",
+        )
+        (sandbox_bin / "sh").symlink_to("/bin/sh")
+        config = load_project_config(
+            "otto",
+            _write_first_run_auth_config(tmp_path, roles=[("ops", "codex")]),
+        )
+        original_base_path = team_launcher.DEFAULT_PANE_BASE_PATH
+        calls: list[list[str]] = []
+
+        def runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            command = args[3:] if args[:2] == ["sudo", "-u"] else list(args)
+            calls.append(command)
+            return subprocess.run(
+                command,
+                cwd=str(kwargs.get("cwd") or owner_home),
+                env={},
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+        messages: list[str] = []
+        try:
+            team_launcher.DEFAULT_PANE_BASE_PATH = str(sandbox_bin)
+            report = team_launcher.run_first_run_auth_phase(
+                config,
+                owner_user="otto-agent",
+                owner_home=owner_home,
+                runner=runner,
+                print_func=messages.append,
+            )
+        finally:
+            team_launcher.DEFAULT_PANE_BASE_PATH = original_base_path
+
+    assert report.unauthenticated_roles == {}
+    assert report.missing_cli_roles == {"codex": ["ops"]}
+    assert calls == [
+        [
+            "env",
+            f"HOME={owner_home}",
+            f"PATH={owner_home / 'bin'}:{owner_home / '.local' / 'bin'}:{sandbox_bin}",
+            "codex",
+            "login",
+            "status",
+        ],
+        [
+            "env",
+            f"HOME={owner_home}",
+            f"PATH={owner_home / 'bin'}:{owner_home / '.local' / 'bin'}:{sandbox_bin}",
+            "sh",
+            "-c",
+            "command -v codex",
+        ],
+    ]
+    assert messages == [
+        "switchyard: first-run setup manifest for owner user otto-agent: "
+        "0 login step(s), 0 folder trust step(s), 0 codex hook approval(s), 1 missing CLI(s)",
+        "switchyard: missing CLI codex (affected roles: ops): install codex for owner user "
+        "otto-agent with: curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+        "switchyard: install each one for owner user otto-agent; panes run as that user, so a CLI "
+        "installed only for the user running switchyard is not found.",
+    ]
 
 
 def test_first_run_auth_phase_reports_broken_existing_owner_shell_without_mutating() -> None:

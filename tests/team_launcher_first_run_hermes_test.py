@@ -58,10 +58,10 @@ def test_first_run_auth_phase_reports_hermes_without_resolved_api_key_as_unauthe
     assert report.missing_cli_roles == {}
     assert runner.calls == [
         ["sudo", "-u", "otto-agent", "hermes", "config", "check"],
-        ["sudo", "-u", "otto-agent", "sh", "-lc", "command -v hermes"],
+        ["sudo", "-u", "otto-agent", "sh", "-c", "command -v hermes"],
         ["sudo", "-u", "otto-agent", "hermes", "model"],
         ["sudo", "-u", "otto-agent", "hermes", "config", "check"],
-        ["sudo", "-u", "otto-agent", "sh", "-lc", "command -v hermes"],
+        ["sudo", "-u", "otto-agent", "sh", "-c", "command -v hermes"],
     ]
     assert messages == [
         "switchyard: first-run setup manifest for owner user otto-agent: "

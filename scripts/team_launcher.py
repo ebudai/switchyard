@@ -7732,7 +7732,7 @@ def _owner_cli_is_installed(
     proc = _run_owner_cli_probe(
         owner_user=owner_user,
         owner_home=owner_home,
-        command=["sh", "-lc", f"command -v {shlex.quote(binary)}"],
+        command=["sh", "-c", f"command -v {shlex.quote(binary)}"],
         runner=runner,
     )
     return proc.returncode == 0

@@ -804,7 +804,7 @@ class FirstRunAuthRunner:
                 index += 1
             command = command[index:]
         self.calls.append([*args[:3], *command] if args[:2] == ["sudo", "-u"] else list(command))
-        if command[:2] == ["sh", "-lc"] and len(command) == 3 and command[2].startswith("command -v "):
+        if command[:2] == ["sh", "-c"] and len(command) == 3 and command[2].startswith("command -v "):
             cli = command[2].removeprefix("command -v ").strip()
             if cli in self.missing_clis:
                 return subprocess.CompletedProcess(args, 1, stdout="", stderr="")

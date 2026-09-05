@@ -274,11 +274,11 @@ def test_first_run_auth_phase_sequences_distinct_logins_and_skips_visible_worktr
     assert report.untrusted_roles == []
     assert runner.calls == [
         ["sudo", "-u", "otto-agent", "claude", "auth", "status", "--json"],
-        ["sudo", "-u", "otto-agent", "sh", "-lc", "command -v claude"],
+        ["sudo", "-u", "otto-agent", "sh", "-c", "command -v claude"],
         ["sudo", "-u", "otto-agent", "codex", "login", "status"],
-        ["sudo", "-u", "otto-agent", "sh", "-lc", "command -v codex"],
+        ["sudo", "-u", "otto-agent", "sh", "-c", "command -v codex"],
         ["sudo", "-u", "otto-agent", "agy", "models"],
-        ["sudo", "-u", "otto-agent", "sh", "-lc", "command -v agy"],
+        ["sudo", "-u", "otto-agent", "sh", "-c", "command -v agy"],
         ["sudo", "-u", "otto-agent", "claude", "auth", "login"],
         ["sudo", "-u", "otto-agent", "claude", "auth", "status", "--json"],
         ["sudo", "-u", "otto-agent", "codex", "login"],
@@ -328,7 +328,7 @@ def test_first_run_auth_phase_handles_hermes_model_setup() -> None:
     assert report.untrusted_roles == []
     assert runner.calls == [
         ["sudo", "-u", "otto-agent", "hermes", "config", "check"],
-        ["sudo", "-u", "otto-agent", "sh", "-lc", "command -v hermes"],
+        ["sudo", "-u", "otto-agent", "sh", "-c", "command -v hermes"],
         ["sudo", "-u", "otto-agent", "hermes", "model"],
         ["sudo", "-u", "otto-agent", "hermes", "config", "check"],
     ]

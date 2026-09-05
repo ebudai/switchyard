@@ -194,6 +194,9 @@ def run_browser_check(playwright: object, server: TicketBoardServer, app: Tenant
                 'pgu-ticket-board:comment-draft:SYRD-2',
                 'existing Switchyard draft before upgrade'
               );
+              // ORB-2 is opened only after the app switches to ORB below. This
+              // fixture exercises ticket access/call-site isolation, rather than
+              // independently pinning the defensive prefix predicate.
               localStorage.setItem(
                 'pgu-ticket-board:comment-draft:ORB-2',
                 'existing Orbital draft before upgrade'
@@ -249,6 +252,56 @@ def run_browser_check(playwright: object, server: TicketBoardServer, app: Tenant
         assert page.locator("textarea[placeholder='Add a comment or bounce-back note']").input_value() == "Switchyard draft survives reload"
         assert page.evaluate("localStorage.getItem('pgu-ticket-board:comment-draft:PGU-2')") is None
         save_evidence(page, "switchyard-identity-and-draft.png")
+
+        page.evaluate(
+            """() => {
+              localStorage.setItem(
+                'ticket-board:syrd:SYRD:comment-draft:SYRD-2',
+                'current draft'
+              );
+              localStorage.setItem(
+                'pgu-ticket-board:comment-draft:SYRD-2',
+                'STALE pre-upgrade text'
+              );
+            }"""
+        )
+        assert page.evaluate(
+            "localStorage.getItem('ticket-board:syrd:SYRD:comment-draft:SYRD-2')"
+        ) == "current draft"
+        assert page.evaluate(
+            "localStorage.getItem('pgu-ticket-board:comment-draft:SYRD-2')"
+        ) == "STALE pre-upgrade text"
+
+        page.reload(wait_until="domcontentloaded")
+        page.locator(".card-id", has_text="SYRD-2").wait_for(timeout=5000)
+        open_ticket(page, "SYRD-2")
+        comment = page.locator("textarea[placeholder='Add a comment or bounce-back note']")
+        assert comment.input_value() == "current draft"
+        assert page.evaluate(
+            "localStorage.getItem('pgu-ticket-board:comment-draft:SYRD-2')"
+        ) == "STALE pre-upgrade text"
+
+        comment.fill("")
+        page.wait_for_timeout(300)
+        assert page.evaluate(
+            "localStorage.getItem('ticket-board:syrd:SYRD:comment-draft:SYRD-2')"
+        ) is None
+        assert page.evaluate(
+            "localStorage.getItem('pgu-ticket-board:comment-draft:SYRD-2')"
+        ) is None
+
+        page.reload(wait_until="domcontentloaded")
+        page.locator(".card-id", has_text="SYRD-2").wait_for(timeout=5000)
+        open_ticket(page, "SYRD-2")
+        assert page.locator(
+            "textarea[placeholder='Add a comment or bounce-back note']"
+        ).input_value() == ""
+        assert page.evaluate(
+            "localStorage.getItem('ticket-board:syrd:SYRD:comment-draft:SYRD-2')"
+        ) is None
+        assert page.evaluate(
+            "localStorage.getItem('pgu-ticket-board:comment-draft:SYRD-2')"
+        ) is None
 
         page.once("dialog", lambda dialog: dialog.accept())
         page.get_by_label("Merge target ticket").fill("syrd-10")

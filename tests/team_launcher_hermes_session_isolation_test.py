@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import inspect
+
 from dataclasses import replace
 
 from team_launcher_test_helpers import *
@@ -55,6 +57,7 @@ def _hermes_role(role: str, *, home: Path) -> team_launcher.RoleConfig:
         resume_mode="flag",
         resume_flag="--resume",
         resume_subcommand="resume",
+        fresh_session_per_ticket=False,
         live_commands=["hermes"],
         env={},
     )
@@ -226,7 +229,13 @@ print(json.dumps({"db_path": str(db.db_path), "result": result}, sort_keys=True)
     assert worker_b_search["result"]["count"] == 0
 
 
-def test_hermes_start_prepares_isolated_home_and_preserves_fresh_session_behavior() -> None:
+def test_fresh_session_decision_is_not_cli_name_based() -> None:
+    source = inspect.getsource(team_launcher._uses_fresh_session_per_ticket)
+    assert "hermes" not in source
+    assert "fresh_session_per_ticket" in source
+
+
+def test_hermes_start_prepares_isolated_home_and_resumes_by_default() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-hermes-start.") as tmp:
         owner_home = Path(tmp) / "home" / "porter-agent"
         shared_home = owner_home / ".hermes"
@@ -259,9 +268,46 @@ def test_hermes_start_prepares_isolated_home_and_preserves_fresh_session_behavio
         assert hermes_home.is_dir()
         assert (hermes_home / "config.yaml").resolve(strict=True) == shared_home / "config.yaml"
         assert f"HERMES_HOME={hermes_home}" in new_session[-1]
+        assert "--resume previous-hermes-session" in new_session[-1]
+        assert "uses hermes, which has no dependable reset" not in stderr.getvalue()
+
+
+def test_configured_fresh_session_per_ticket_starts_fresh_for_hermes() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-hermes-fresh-opt-in.") as tmp:
+        owner_home = Path(tmp) / "home" / "porter-agent"
+        shared_home = owner_home / ".hermes"
+        shared_home.mkdir(parents=True)
+        (shared_home / "config.yaml").write_text("hooks: {}\n", encoding="utf-8")
+        session_dir = owner_home / ".local" / "state" / "porter-ticket-board" / "pane-sessions"
+        session_dir.mkdir(parents=True)
+        role = replace(_hermes_role("bulk", home=owner_home), fresh_session_per_ticket=True)
+        session_path = session_dir / session_file_name(role.target)
+        session_path.write_text(
+            json.dumps({"target": role.target, "session_id": "previous-hermes-session"}) + "\n",
+            encoding="utf-8",
+        )
+        runner = FakeRunner(existing_sessions={role.tmux_session}, current_commands={role.target: "hermes"})
+        stderr = StringIO()
+
+        with redirect_stderr(stderr):
+            assert (
+                run_role_pane(
+                    role,
+                    mode="reload",
+                    session_dir=session_dir,
+                    pane_state_dir=owner_home / ".local" / "state" / "porter-ticket-board" / "pane-state",
+                    runner=runner,
+                )
+                == 0
+            )
+
+        new_session = next(call for call in runner.calls if call[:5] == ["tmux", "new-session", "-d", "-s", "porter-bulk"])
+        assert not session_path.exists()
+        sidecar = json.loads((session_dir / f"{session_file_name(role.target)}.superseded").read_text(encoding="utf-8"))
+        assert sidecar["session_id"] == "previous-hermes-session"
         assert "previous-hermes-session" not in new_session[-1]
         assert "--resume" not in new_session[-1]
-        assert "uses hermes, which has no dependable reset" in stderr.getvalue()
+        assert "configured for fresh sessions per ticket" in stderr.getvalue()
 
 
 def main() -> int:

@@ -282,8 +282,8 @@ def test_reload_uses_recorded_resume_uuid_when_recreating_session() -> None:
         assert ["tmux", "set-option", "-t", "pgu-ops", "history-limit", "200000"] in runner.calls
         assert ["tmux", "attach", "-t", "pgu-ops"] in runner.calls
 
-def test_hermes_reload_supersedes_recorded_session_and_starts_fresh() -> None:
-    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-hermes-fresh.") as tmp:
+def test_configured_fresh_session_reload_supersedes_recorded_session_and_starts_fresh() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-fresh-session.") as tmp:
         tmp_path = Path(tmp)
         layout = tmp_path / "layout.json"
         layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
@@ -306,6 +306,7 @@ def test_hermes_reload_supersedes_recorded_session_and_starts_fresh() -> None:
                             "cli": ["hermes"],
                             "model": "zai/glm-5.3",
                             "yolo": True,
+                            "fresh_session_per_ticket": True,
                         }
                     ],
                 },
@@ -341,7 +342,7 @@ def test_hermes_reload_supersedes_recorded_session_and_starts_fresh() -> None:
         sidecar_path = session_dir / f"{session_file_name(role.target)}.superseded"
         sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
         assert sidecar["session_id"] == "previous-hermes-ticket-session"
-        assert "uses hermes, which has no dependable reset" in stderr.getvalue()
+        assert "configured for fresh sessions per ticket" in stderr.getvalue()
         new_session = next(call for call in runner.calls if call[:2] == ["tmux", "new-session"])
         assert "--resume" not in new_session[-1]
         assert "previous-hermes-ticket-session" not in new_session[-1]
@@ -907,6 +908,7 @@ def test_reload_guard_matches_cli_child_under_shell_in_real_tmux() -> None:
             resume_mode=role.resume_mode,
             resume_flag=role.resume_flag,
             resume_subcommand=role.resume_subcommand,
+            fresh_session_per_ticket=role.fresh_session_per_ticket,
             live_commands=["codex"],
             env={},
         )

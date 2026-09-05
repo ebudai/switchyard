@@ -439,6 +439,11 @@ Each role entry contains:
   `--pass-session-id` so the installed pane-state hooks can run non-interactively
   and the agent can see its own resumable session id.
 - `extra_args`: optional additional argv entries appended after the yolo flag.
+- `fresh_session_per_ticket`: optional boolean, defaulting to false. When true,
+  `start`/`reload` ignore a recorded session id for that role, move the previous
+  record to the `.superseded` sidecar, and launch a fresh CLI session. Use it
+  only for roles where carrying context between tickets is more dangerous than
+  losing continuity; it is a role policy, not a CLI policy.
 - `resume_flag`: flag used by that CLI for context resume.
 - `live_commands`: optional command names accepted as the live pane process
   before destructive reload.
@@ -643,13 +648,16 @@ runnable shape the launcher accepts. Agy failures include suggestions from
 `agy models` when that catalogue is available; Claude, Codex, and Hermes report
 that no model list is available and use only the one-shot validation result.
 
-Hermes panes intentionally start a fresh session instead of using a recorded
-`--resume` id. Hermes has no dependable clear/reset operation, and resuming a
-worker after a completed ticket can carry old ticket context into the next one.
-When the launcher is asked to resume or reload Hermes, it moves the old session
-record to the `.superseded` sidecar and launches without `--resume` or
-`TICKET_BOARD_PANE_SESSION_ID`; the active ticket is supplied on the next
-`hermes.pre_llm_call` hook as flat `{"context": "..."}`.
+By default every role, including Hermes roles, resumes from the recorded session
+id when one is available and passes that id through
+`TICKET_BOARD_PANE_SESSION_ID`. A director can opt a specific role into
+`fresh_session_per_ticket` when the role should not inherit previous ticket
+context. That policy is deliberately explicit: Hermes `/clear` is available for
+interactive use, but this ticket did not establish a reliable automatic
+ticket-boundary reset protocol that can be delivered to a pane mid-flight and
+verified as equivalent to launching without a recorded session id. Until such a
+protocol exists, automatic reset means opting the role into a fresh process
+session.
 
 Hermes also exposes a built-in `session_search` tool backed by
 `$HERMES_HOME/state.db`. Because that database contains indexed content from

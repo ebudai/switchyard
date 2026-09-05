@@ -159,6 +159,7 @@ def test_tmux_role_window_name_survives_cli_pane_title_write() -> None:
                     resume_mode=base_role.resume_mode,
                     resume_flag=base_role.resume_flag,
                     resume_subcommand=base_role.resume_subcommand,
+                    fresh_session_per_ticket=base_role.fresh_session_per_ticket,
                     live_commands=["fake-cli"],
                     env={},
                 )

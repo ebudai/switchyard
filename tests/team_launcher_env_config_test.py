@@ -790,10 +790,13 @@ def test_project_config_accepts_hermes_runtime_defaults() -> None:
     tail = _command_tail(command)
     assert role.model_arg == "-m"
     assert (role.resume_mode, role.resume_flag) == ("flag", "--resume")
-    assert not any(entry.startswith("TICKET_BOARD_PANE_SESSION_ID=") for entry in entries)
+    assert role.fresh_session_per_ticket is False
+    assert f"TICKET_BOARD_PANE_SESSION_ID={session_id}" in entries
     assert not any(entry.startswith("PGU_PANE_SESSION_ID=") for entry in entries)
     assert tail == [
         "/home/eric/.local/bin/hermes",
+        "--resume",
+        session_id,
         "-m",
         "zai/glm-5.3",
         "--reasoning",
@@ -802,6 +805,66 @@ def test_project_config_accepts_hermes_runtime_defaults() -> None:
         "--accept-hooks",
         "--pass-session-id",
     ]
+
+
+def test_project_config_fresh_session_per_ticket_is_explicit_per_role_policy() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-fresh-session-policy.") as tmp:
+        tmp_path = Path(tmp)
+        config_path = tmp_path / "porter.json"
+        session_dir = tmp_path / "sessions"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": str(tmp_path / "layout.json"),
+                    "session_dir": str(session_dir),
+                    "roles": [
+                        {
+                            "role": "ops",
+                            "slot": 0,
+                            "target": "porter-ops:0.0",
+                            "workdir": str(tmp_path / "ops-workdir"),
+                            "cli": ["codex"],
+                            "resume_mode": "subcommand",
+                            "resume_subcommand": "resume",
+                            "fresh_session_per_ticket": True,
+                        },
+                        {
+                            "role": "app",
+                            "slot": 1,
+                            "target": "porter-app:0.0",
+                            "workdir": str(tmp_path / "app-workdir"),
+                            "cli": ["codex"],
+                            "resume_mode": "subcommand",
+                            "resume_subcommand": "resume",
+                        },
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        config = load_project_config("porter", config_path)
+        session_dir.mkdir()
+        for role in config.roles:
+            (session_dir / session_file_name(role.target)).write_text(
+                json.dumps({"target": role.target, "session_id": f"{role.role}-session"}) + "\n",
+                encoding="utf-8",
+            )
+
+        fresh_role, resume_role = config.roles
+        fresh_command = cli_command_for_role(fresh_role, session_dir=session_dir, resume=True)
+        resume_command = cli_command_for_role(resume_role, session_dir=session_dir, resume=True)
+
+    assert fresh_role.fresh_session_per_ticket is True
+    assert resume_role.fresh_session_per_ticket is False
+    assert "ops-session" not in fresh_command
+    assert "resume" not in fresh_command
+    assert f"TICKET_BOARD_PANE_SESSION_ID=app-session" in resume_command
+    assert resume_command[-3:] == ["codex", "resume", "app-session"]
 
 def test_effort_config_translates_to_cli_specific_args() -> None:
     config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")

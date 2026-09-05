@@ -283,6 +283,7 @@ class RoleConfig:
     resume_mode: str
     resume_flag: str
     resume_subcommand: str
+    fresh_session_per_ticket: bool
     live_commands: list[str]
     env: dict[str, str]
 
@@ -1491,6 +1492,11 @@ def _role_from_json(project: str, raw: dict[str, Any], *, base: Path, default_wo
         resume_mode=resume_mode,
         resume_flag=resume_flag,
         resume_subcommand=resume_subcommand,
+        fresh_session_per_ticket=_bool_value(
+            raw.get("fresh_session_per_ticket"),
+            field="fresh_session_per_ticket",
+            role=role,
+        ),
         live_commands=_string_list(raw.get("live_commands"), field="live_commands", role=role),
         env={str(key): str(value) for key, value in env_raw.items()},
     )
@@ -2249,8 +2255,7 @@ def _uses_codex_resume(role: RoleConfig) -> bool:
 
 
 def _uses_fresh_session_per_ticket(role: RoleConfig) -> bool:
-    cli_name = _command_name(role.cli[0]) if role.cli else ""
-    return cli_name == "hermes"
+    return role.fresh_session_per_ticket
 
 
 def _uses_hermes(role: RoleConfig) -> bool:
@@ -3954,7 +3959,7 @@ def _start_role_session(
         prefer_resume = False
     if prefer_resume and _uses_fresh_session_per_ticket(role):
         print(
-            f"team-launcher: {role.role} uses hermes, which has no dependable reset; "
+            f"team-launcher: {role.role} is configured for fresh sessions per ticket; "
             "starting a fresh session instead of inheriting the previous ticket context",
             file=sys.stderr,
         )

@@ -18,7 +18,7 @@ MARKUP = """  <div class="layout">
       <div id="createSectionContent" class="mobile-section-content">
         <div class="panel-head">
           <h2>New Ticket</h2>
-          <div class="subtle">Local JSON board on localhost. Director can edit the same ticket files from the shell.</div>
+          <div class="subtle">Create and manage tickets for this project.</div>
         </div>
         <div class="panel-body">
           <label>
@@ -93,7 +93,7 @@ MARKUP = """  <div class="layout">
     <section class="shell">
       <div class="topbar">
         <div class="topbar-main">
-          <h1>PGU Ticket Board</h1>
+          <h1>__TICKET_BOARD_HEADING__</h1>
           <div class="topbar-controls">
             <label class="check compact">
               <input id="showDeferredInput" type="checkbox">

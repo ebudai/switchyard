@@ -305,7 +305,11 @@ SCRIPT_APP = """    function ticketBoardWriteToken() {
     }
 
     function pendingWriteStorageKey() {
-      return 'pgu-ticket-board:pending-write';
+      return `${BOARD_STORAGE_NAMESPACE}:pending-write`;
+    }
+
+    function legacyPendingWriteStorageKey() {
+      return `${LEGACY_PGU_STORAGE_NAMESPACE}:pending-write`;
     }
 
     function pendingWriteMetadata(path) {
@@ -328,6 +332,8 @@ SCRIPT_APP = """    function ticketBoardWriteToken() {
           callerRole,
           ticketId: metadata.ticketId,
           operation: metadata.operation,
+          project: BOARD_IDENTITY.project,
+          ticketPrefix: BOARD_IDENTITY.ticketPrefix,
         }));
       } catch (error) {
         throw new Error('A newer board version is deployed; refresh before submitting.');
@@ -337,6 +343,9 @@ SCRIPT_APP = """    function ticketBoardWriteToken() {
     function clearPendingWriteForRefresh() {
       try {
         window.localStorage.removeItem(pendingWriteStorageKey());
+        if (IS_LEGACY_PGU_BOARD) {
+          window.localStorage.removeItem(legacyPendingWriteStorageKey());
+        }
       } catch (error) {
         // localStorage can be unavailable in private or locked-down browsers.
       }
@@ -344,8 +353,30 @@ SCRIPT_APP = """    function ticketBoardWriteToken() {
 
     function readPendingWriteForRefresh() {
       try {
-        const raw = window.localStorage.getItem(pendingWriteStorageKey()) || '';
-        return raw ? JSON.parse(raw) : null;
+        const key = pendingWriteStorageKey();
+        let raw = window.localStorage.getItem(key) || '';
+        let fromLegacyKey = false;
+        if (!raw && IS_LEGACY_PGU_BOARD) {
+          raw = window.localStorage.getItem(legacyPendingWriteStorageKey()) || '';
+          fromLegacyKey = !!raw;
+        }
+        if (!raw) {
+          return null;
+        }
+        const pending = JSON.parse(raw);
+        const identityMatches = fromLegacyKey
+          ? IS_LEGACY_PGU_BOARD
+          : pending.project === BOARD_IDENTITY.project && pending.ticketPrefix === BOARD_IDENTITY.ticketPrefix;
+        if (!identityMatches) {
+          return null;
+        }
+        if (fromLegacyKey) {
+          pending.project = BOARD_IDENTITY.project;
+          pending.ticketPrefix = BOARD_IDENTITY.ticketPrefix;
+          window.localStorage.setItem(key, JSON.stringify(pending));
+          window.localStorage.removeItem(legacyPendingWriteStorageKey());
+        }
+        return pending;
       } catch (error) {
         return null;
       }

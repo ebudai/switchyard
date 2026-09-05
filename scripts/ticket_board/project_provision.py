@@ -44,6 +44,7 @@ TENANT_WORKFLOW_EXCLUDED_ACTIONS = frozenset(
 @dataclass(frozen=True)
 class ProjectBoardProvision:
     project: str
+    project_name: str
     ticket_prefix: str
     owner_user: str
     service_user: str
@@ -107,6 +108,15 @@ def _validate_project(value: str) -> str:
     return project
 
 
+def _validate_project_name(value: str) -> str:
+    project_name = value.strip()
+    if not project_name:
+        raise SystemExit("project name must not be empty")
+    if len(project_name) > 200 or any(not char.isprintable() for char in project_name):
+        raise SystemExit("project name must be at most 200 printable characters")
+    return project_name
+
+
 def _validate_user(value: str) -> str:
     user = value.strip()
     if not USER_RE.fullmatch(user):
@@ -155,6 +165,7 @@ def allocated_port(project: str, *, base: int = 18_770, span: int = 10_000) -> i
 def build_plan(
     *,
     project: str,
+    project_name: str | None = None,
     owner_user: str,
     port: int | None = None,
     database: str | None = None,
@@ -175,6 +186,7 @@ def build_plan(
     vcs_close_role: str | None = None,
 ) -> ProjectBoardProvision:
     project = _validate_project(project)
+    resolved_project_name = _validate_project_name(project_name or ("PGU" if project == "pgu" else project))
     owner_user = _validate_user(owner_user)
     resolved_ticket_prefix = validate_ticket_prefix(ticket_prefix or project)
     if service_user:
@@ -275,6 +287,7 @@ def build_plan(
     board_current = resolved_board_root / "current"
     return ProjectBoardProvision(
         project=project,
+        project_name=resolved_project_name,
         ticket_prefix=resolved_ticket_prefix,
         owner_user=owner_user,
         service_user=service_user,
@@ -316,6 +329,11 @@ def build_plan(
 
 def shell_quote(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def systemd_environment(name: str, value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    return f'Environment="{name}={escaped}"'
 
 
 def sql_identifier(value: str) -> str:
@@ -757,6 +775,7 @@ EnvironmentFile=-/home/{plan.owner_user}/.config/{plan.project}/ticket-board.env
 Environment=PYTHONUNBUFFERED=1
 Environment=HOME=/home/{plan.owner_user}
 Environment=TICKET_BOARD_PROJECT={plan.project}
+{systemd_environment("TICKET_BOARD_PROJECT_NAME", plan.project_name)}
 Environment=TICKET_BOARD_TICKET_PREFIX={plan.ticket_prefix}
 Environment=TICKET_BOARD_COMMIT_GIT_DIR={plan.commit_git_dir}
 Environment=PGHOST=/var/run/postgresql
@@ -1456,6 +1475,7 @@ def write_artifacts(plan: ProjectBoardProvision, output_dir: Path, *, enable_own
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Render per-project ticket-board provisioning artifacts.")
     parser.add_argument("--project", required=True, help="project slug, e.g. pgu or stellaris")
+    parser.add_argument("--project-name", help="display name shown by the ticket board")
     parser.add_argument("--owner-user", required=True, help="Unix user that owns this project/team")
     parser.add_argument("--port", type=int, help="HTTP port; omitted means deterministic allocation")
     parser.add_argument("--database", help="PostgreSQL database name; omitted means <project>_ticket_board")
@@ -1515,6 +1535,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     plan = build_plan(
         project=args.project,
+        project_name=args.project_name,
         owner_user=args.owner_user,
         port=args.port,
         database=args.database,

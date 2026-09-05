@@ -28,7 +28,7 @@ from PIL import Image
 
 from .app import CALLER_ROLES as APP_CALLER_ROLES
 from .app import TicketBoardApp, iso_now
-from .frontend import HTML
+from .frontend import render_html
 
 LOGGER = logging.getLogger(__name__)
 DIRECTOR_TARGET = "pgu-director:0.0"
@@ -1081,7 +1081,12 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 f" window.TICKET_BOARD_BUILD_ID = {json.dumps(self.server.build_id)};"
                 f" window.PGU_TICKET_BOARD_BUILD_ID = {json.dumps(self.server.build_id)};</script>\n"
             )
-            body = HTML.replace("  <script>\n", token_script + "  <script>\n", 1).encode("utf-8")
+            page = render_html(
+                project=getattr(self.app, "project", "pgu"),
+                project_name=getattr(self.app, "project_name", "PGU"),
+                ticket_prefix=getattr(self.app, "ticket_prefix", "PGU"),
+            )
+            body = page.replace("  <script>\n", token_script + "  <script>\n", 1).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_no_cache_headers()
@@ -1091,11 +1096,20 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/board":
             payload = self.app.snapshot()
+            payload.setdefault("project", getattr(self.app, "project", "pgu"))
+            payload.setdefault("project_name", getattr(self.app, "project_name", "PGU"))
+            payload.setdefault("ticket_prefix", getattr(self.app, "ticket_prefix", "PGU"))
             payload["build_id"] = self.server.build_id
             self.send_json(payload)
             return
         if parsed.path == "/api/client-config":
-            self.send_json({"build_id": self.server.build_id, "write_token": self.write_token})
+            self.send_json({
+                "build_id": self.server.build_id,
+                "write_token": self.write_token,
+                "project": getattr(self.app, "project", "pgu"),
+                "project_name": getattr(self.app, "project_name", "PGU"),
+                "ticket_prefix": getattr(self.app, "ticket_prefix", "PGU"),
+            })
             return
         if parsed.path == "/events":
             self.serve_events()

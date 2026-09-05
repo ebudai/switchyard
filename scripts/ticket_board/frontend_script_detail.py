@@ -215,7 +215,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       const parentLinkInput = document.createElement('input');
       parentLinkInput.type = 'text';
       parentLinkInput.value = ticket.parent_id || '';
-      parentLinkInput.placeholder = 'PGU-123';
+      parentLinkInput.placeholder = `${BOARD_IDENTITY.ticketPrefix}-123`;
       bindDetailDraftField(draftFields, parentLinkInput, 'parentId', parentLinkInput.value);
       const parentLinkActions = document.createElement('div');
       parentLinkActions.className = 'inline-actions';
@@ -311,7 +311,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       titleActions.appendChild(saveTitleButton);
       const mergeTargetInput = document.createElement('input');
       mergeTargetInput.type = 'text';
-      mergeTargetInput.placeholder = 'PGU-123';
+      mergeTargetInput.placeholder = `${BOARD_IDENTITY.ticketPrefix}-123`;
       mergeTargetInput.setAttribute('aria-label', 'Merge target ticket');
       bindDetailDraftField(draftFields, mergeTargetInput, 'mergeTarget', '');
       const mergeButton = document.createElement('button');

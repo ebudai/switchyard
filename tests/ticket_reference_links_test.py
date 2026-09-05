@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression test: PGU-N references render as clickable ticket links."""
+"""Regression test: tenant and qualified cross-tenant references render as ticket links."""
 
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ from scripts.ticket_board.frontend import HTML
 
 
 def main() -> int:
-    assert r"const TICKET_REF_PATTERN = /\b(PGU-\d+)\b/ig;" in HTML
-    assert "function buildTicketReference(ticketId)" in HTML
+    assert r"const TICKET_REF_PATTERN = /\b(?:[a-z0-9_]+:)?([A-Z][A-Z0-9]*-\d+)\b/ig;" in HTML
+    assert "function buildTicketReference(ticketId, label = ticketId)" in HTML
     assert "openDetail(normalizedId);" in HTML
     assert "function appendLinkedTicketText(container, text)" in HTML
     assert r"const lines = source.split(/\r?\n/);" in HTML
@@ -31,6 +31,7 @@ def main() -> int:
     assert "urgent: !!patch.comment.urgent" in HTML
     assert "comment-urgent-marker" in HTML
     assert "reference.disabled = true;" in HTML
+    assert "buildTicketReference(match[1], match[0])" in HTML
     start = HTML.index("const lines = source.split(")
     segment = HTML[start:start + 40]
     assert "\r" not in segment

@@ -1518,6 +1518,7 @@ def _role_from_json(project: str, raw: dict[str, Any], *, base: Path, default_wo
 def _role_board_env(config: ProjectConfig, role: RoleConfig, session_role_map: dict[str, str]) -> dict[str, str]:
     env = {
         "TICKET_BOARD_PROJECT": config.project,
+        "TICKET_BOARD_PROJECT_NAME": config.project_name,
         "TICKET_BOARD_TICKET_PREFIX": config.ticket_prefix,
         "TICKET_BOARD_URL": config.board_url,
         "TICKET_BOARD_SOCKET": config.board_socket,
@@ -6092,6 +6093,10 @@ def _project_board_provision_from_json(path: Path) -> ProjectBoardProvision:
     raw = _load_json(path)
     fields: dict[str, Any] = {}
     for name in ProjectBoardProvision.__dataclass_fields__:
+        if name == "project_name" and name not in raw:
+            raw_project = str(raw.get("project") or "pgu")
+            fields[name] = "PGU" if raw_project == "pgu" else raw_project
+            continue
         if name not in raw:
             raise SystemExit(f"switchyard: {path} is missing provision field {name!r}")
         fields[name] = raw[name]
@@ -6133,6 +6138,7 @@ def _teardown_project_context(
         owner_home = home_base / resolved_owner
         plan = build_plan(
             project=project_slug,
+            project_name=project_slug,
             owner_user=resolved_owner,
             board_root=owner_home / f"{project_slug}-ticketboard-live",
             commit_git_dir=commit_git_dir_env_for_project(project=project_slug, owner_home=owner_home),
@@ -6152,6 +6158,7 @@ def _teardown_project_context(
         resolved_owner = owner_user or config.run_as_user or _default_new_project_owner(entry.slug)
         plan = build_plan(
             project=entry.slug,
+            project_name=config.project_name,
             owner_user=resolved_owner,
             port=_port_from_board_url(config.board_url),
             source_repo=_repo_root(),
@@ -6591,6 +6598,7 @@ def new_project_command(
         raise SystemExit(f"team-launcher: worktree policy must be one of {sorted(WORKTREE_POLICIES)}")
     plan = build_plan(
         project=project,
+        project_name=project_name,
         owner_user=effective_owner,
         port=port,
         database=database,
@@ -9281,6 +9289,7 @@ def switchyard_new_command(
     worktree_branch = precheck_artifact.default_branch if precheck_artifact else "main"
     precheck_plan = build_plan(
         project=resolved_slug,
+        project_name=precheck_artifact.project_name if precheck_artifact else resolved_project_name,
         owner_user=owner_user,
         port=port,
         database=database,
@@ -9677,6 +9686,7 @@ def _project_plan_for_added_role(
     include_designer = any(role.role == "designer" for role in config.roles)
     return build_plan(
         project=config.project,
+        project_name=config.project_name,
         owner_user=str(_loaded_plan_field(plan_data, "owner_user", config.run_as_user or current_user_name())),
         port=_loaded_plan_field(plan_data, "port", None),
         database=_loaded_plan_field(plan_data, "database", None),
@@ -9718,6 +9728,7 @@ def _project_plan_for_vcs_close_role(
     include_designer = any(configured.role == "designer" for configured in config.roles)
     return build_plan(
         project=config.project,
+        project_name=config.project_name,
         owner_user=str(_loaded_plan_field(plan_data, "owner_user", config.run_as_user or current_user_name())),
         port=_loaded_plan_field(plan_data, "port", None),
         database=_loaded_plan_field(plan_data, "database", None),

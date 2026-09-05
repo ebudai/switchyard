@@ -13,7 +13,10 @@ def default_state_labels(stages: tuple[WorkflowStageSeed, ...] | None = None) ->
 
 DEFAULT_STATE_LABELS_JSON = json.dumps(default_state_labels(), sort_keys=True)
 
-SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
+SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(?:[a-z0-9_]+:)?([A-Z][A-Z0-9]*-\\d+)\\b/ig;
+    const BOARD_STORAGE_NAMESPACE = `ticket-board:${encodeURIComponent(BOARD_IDENTITY.project)}:${encodeURIComponent(BOARD_IDENTITY.ticketPrefix)}`;
+    const LEGACY_PGU_STORAGE_NAMESPACE = 'pgu-ticket-board';
+    const IS_LEGACY_PGU_BOARD = BOARD_IDENTITY.project === 'pgu' && BOARD_IDENTITY.ticketPrefix === 'PGU';
     const state = {
       tickets: [],
       screenshots: [],
@@ -125,7 +128,11 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     }
 
     function scrollPositionStorageKey(buildId) {
-      return `pgu-ticket-board:scroll:${buildId || 'latest'}`;
+      return `${BOARD_STORAGE_NAMESPACE}:scroll:${buildId || 'latest'}`;
+    }
+
+    function legacyScrollPositionStorageKey(buildId) {
+      return `${LEGACY_PGU_STORAGE_NAMESPACE}:scroll:${buildId || 'latest'}`;
     }
 
     function rememberScrollPositionForRefresh() {
@@ -146,9 +153,16 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     function restoreScrollPositionAfterRefresh() {
       let raw = '';
       try {
-        raw = window.sessionStorage.getItem(scrollPositionStorageKey(state.loadedBuildId)) || '';
+        const key = scrollPositionStorageKey(state.loadedBuildId);
+        raw = window.sessionStorage.getItem(key) || '';
         if (raw) {
-          window.sessionStorage.removeItem(scrollPositionStorageKey(state.loadedBuildId));
+          window.sessionStorage.removeItem(key);
+        } else if (IS_LEGACY_PGU_BOARD) {
+          const legacyKey = legacyScrollPositionStorageKey(state.loadedBuildId);
+          raw = window.sessionStorage.getItem(legacyKey) || '';
+          if (raw) {
+            window.sessionStorage.removeItem(legacyKey);
+          }
         }
       } catch (error) {
         return;
@@ -523,12 +537,27 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     }
 
     function commentDraftStorageKey(ticketId) {
-      return `pgu-ticket-board:comment-draft:${ticketId}`;
+      return `${BOARD_STORAGE_NAMESPACE}:comment-draft:${ticketId}`;
+    }
+
+    function legacyCommentDraftStorageKey(ticketId) {
+      return `${LEGACY_PGU_STORAGE_NAMESPACE}:comment-draft:${ticketId}`;
     }
 
     function readPersistentCommentDraft(ticketId) {
       try {
-        return window.localStorage.getItem(commentDraftStorageKey(ticketId)) || '';
+        const key = commentDraftStorageKey(ticketId);
+        const current = window.localStorage.getItem(key) || '';
+        if (current || !IS_LEGACY_PGU_BOARD) {
+          return current;
+        }
+        const legacyKey = legacyCommentDraftStorageKey(ticketId);
+        const legacy = window.localStorage.getItem(legacyKey) || '';
+        if (legacy) {
+          window.localStorage.setItem(key, legacy);
+          window.localStorage.removeItem(legacyKey);
+        }
+        return legacy;
       } catch (error) {
         return '';
       }
@@ -542,6 +571,9 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
           window.localStorage.setItem(key, text);
         } else {
           window.localStorage.removeItem(key);
+        }
+        if (IS_LEGACY_PGU_BOARD) {
+          window.localStorage.removeItem(legacyCommentDraftStorageKey(ticketId));
         }
       } catch (error) {
         // localStorage can be unavailable in private or locked-down browsers; the in-memory draft still works.
@@ -1307,12 +1339,12 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
       return state.tickets.find((ticket) => ticket.id === normalizedId) || null;
     }
 
-    function buildTicketReference(ticketId) {
+    function buildTicketReference(ticketId, label = ticketId) {
       const normalizedId = String(ticketId || '').toUpperCase();
       const reference = document.createElement('button');
       reference.type = 'button';
       reference.className = 'ticket-ref';
-      reference.textContent = normalizedId;
+      reference.textContent = String(label || normalizedId);
       if (ticketById(normalizedId)) {
         reference.addEventListener('click', (event) => {
           event.preventDefault();
@@ -1382,8 +1414,8 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
           if (match.index > cursor) {
             container.appendChild(document.createTextNode(line.slice(cursor, match.index)));
           }
-          container.appendChild(buildTicketReference(match[1]));
-          cursor = match.index + match[1].length;
+          container.appendChild(buildTicketReference(match[1], match[0]));
+          cursor = match.index + match[0].length;
           match = TICKET_REF_PATTERN.exec(line);
         }
         if (cursor < line.length) {
@@ -1429,7 +1461,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(PGU-\\d+)\\b/ig;
     }
 
     function ticketNumber(ticketId) {
-      const match = /^PGU-(\\d+)$/.exec(ticketId || '');
+      const match = /^[A-Z][A-Z0-9]*-(\\d+)$/.exec(ticketId || '');
       return match ? Number.parseInt(match[1], 10) : Number.MAX_SAFE_INTEGER;
     }
 

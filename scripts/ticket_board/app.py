@@ -65,9 +65,24 @@ def project_slug(environ: dict[str, str] | os._Environ[str] = os.environ) -> str
     return environ.get("TICKET_BOARD_PROJECT", "").strip() or environ.get("PGU_TICKET_BOARD_PROJECT", "").strip() or "pgu"
 
 
+def project_name_for_project(
+    project: str | None = None,
+    environ: dict[str, str] | os._Environ[str] = os.environ,
+) -> str:
+    explicit = environ.get("TICKET_BOARD_PROJECT_NAME", "").strip() or environ.get("PGU_TICKET_BOARD_PROJECT_NAME", "").strip()
+    if explicit:
+        return explicit
+    resolved_project = (project if project is not None else project_slug(environ)).strip()
+    return "PGU" if resolved_project.lower() == "pgu" else resolved_project
+
+
 def ticket_prefix_for_project(project: str | None = None, environ: dict[str, str] | os._Environ[str] = os.environ) -> str:
     explicit = environ.get("TICKET_BOARD_TICKET_PREFIX", "").strip() or environ.get("PGU_TICKET_BOARD_TICKET_PREFIX", "").strip()
     raw = explicit or (project if project is not None else project_slug(environ))
+    return normalize_ticket_prefix(raw)
+
+
+def normalize_ticket_prefix(raw: str) -> str:
     normalized = re.sub(r"[^A-Za-z0-9]+", "", raw).upper()
     if not normalized:
         normalized = "PGU"
@@ -130,6 +145,9 @@ class TicketBoardApp:
         repo_root: Path = REPO_ROOT_DEFAULT,
         commit_git_dir: Path | str | None = None,
         database_url: str = POSTGRES_DSN_DEFAULT,
+        project: str | None = None,
+        project_name: str | None = None,
+        ticket_prefix: str | None = None,
     ) -> None:
         self.frame_dir = frame_dir.resolve()
         self.asset_dir = asset_dir.expanduser().resolve()
@@ -146,7 +164,9 @@ class TicketBoardApp:
         self.commit_git_dir = self.commit_git_dirs[0]
         self.store_backend = "postgres"
         self.database_url = database_url
-        self.ticket_prefix = ticket_prefix_for_project()
+        self.project = (project or project_slug()).strip().lower() or "pgu"
+        self.project_name = (project_name or project_name_for_project(self.project)).strip() or self.project
+        self.ticket_prefix = ticket_prefix_for_project(self.project) if ticket_prefix is None else normalize_ticket_prefix(ticket_prefix)
         self._workflow_states_cache: tuple[str, ...] | None = None
         self.asset_dir.mkdir(parents=True, exist_ok=True)
 
@@ -159,6 +179,9 @@ class TicketBoardApp:
             columns = [{"key": state, "label": state} for state in STATES]
         states = [column["key"] for column in columns] or list(STATES)
         return {
+            "project": self.project,
+            "project_name": self.project_name,
+            "ticket_prefix": self.ticket_prefix,
             "tickets": tickets,
             "errors": errors,
             "states": states,

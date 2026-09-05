@@ -190,6 +190,14 @@ def run_browser_check(playwright: object, server: TicketBoardServer, app: Tenant
                 callerRole: 'director', ticketId: 'PGU-2', operation: 'edit_fields',
                 project: 'pgu', ticketPrefix: 'PGU'
               }));
+              localStorage.setItem(
+                'pgu-ticket-board:comment-draft:SYRD-2',
+                'existing Switchyard draft before upgrade'
+              );
+              localStorage.setItem(
+                'pgu-ticket-board:comment-draft:ORB-2',
+                'existing Orbital draft before upgrade'
+              );
             }"""
         )
         page.goto(url, wait_until="domcontentloaded")
@@ -218,6 +226,12 @@ def run_browser_check(playwright: object, server: TicketBoardServer, app: Tenant
         assert page.get_by_role("button", name="SYRD-10").count() == 1
         assert page.get_by_role("button", name="pgu:PGU-919").count() == 1
         assert page.get_by_role("button", name="pgu:PGU-919").is_disabled()
+        comment = page.locator("textarea[placeholder='Add a comment or bounce-back note']")
+        assert comment.input_value() == "existing Switchyard draft before upgrade"
+        assert page.evaluate("localStorage.getItem('ticket-board:syrd:SYRD:comment-draft:SYRD-2')") == "existing Switchyard draft before upgrade"
+        assert page.evaluate("localStorage.getItem('pgu-ticket-board:comment-draft:SYRD-2')") is None
+        assert page.evaluate("localStorage.getItem('pgu-ticket-board:comment-draft:ORB-2')") == "existing Orbital draft before upgrade"
+        assert page.evaluate("localStorage.getItem('ticket-board:syrd:SYRD:comment-draft:ORB-2')") is None
 
         parent_input.fill("syrd-10")
         page.get_by_role("button", name="Save Parent Link").click()
@@ -228,7 +242,6 @@ def run_browser_check(playwright: object, server: TicketBoardServer, app: Tenant
         page.wait_for_timeout(500)
         assert app.update_calls[-1] == ("SYRD-2", {"parent_id": ""}, "director")
 
-        comment = page.locator("textarea[placeholder='Add a comment or bounce-back note']")
         comment.fill("Switchyard draft survives reload")
         page.reload(wait_until="domcontentloaded")
         page.locator(".card-id", has_text="SYRD-2").wait_for(timeout=5000)
@@ -252,6 +265,9 @@ def run_browser_check(playwright: object, server: TicketBoardServer, app: Tenant
         save_evidence(page, "arbitrary-tenant-board.png")
         open_ticket(page, "ORB-2")
         assert page.get_by_label("Merge target ticket").get_attribute("placeholder") == "ORB-123"
+        assert page.locator("textarea[placeholder='Add a comment or bounce-back note']").input_value() == "existing Orbital draft before upgrade"
+        assert page.evaluate("localStorage.getItem('ticket-board:orbit:ORB:comment-draft:ORB-2')") == "existing Orbital draft before upgrade"
+        assert page.evaluate("localStorage.getItem('pgu-ticket-board:comment-draft:ORB-2')") is None
         save_evidence(page, "arbitrary-tenant.png")
     finally:
         browser.close()

@@ -544,11 +544,17 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(?:[a-z0-9_]+:)?([A-Z][A-Z0-
       return `${LEGACY_PGU_STORAGE_NAMESPACE}:comment-draft:${ticketId}`;
     }
 
+    function ticketIdMatchesBoardIdentity(ticketId) {
+      const normalizedId = String(ticketId || '').trim().toUpperCase();
+      const prefix = `${BOARD_IDENTITY.ticketPrefix}-`;
+      return normalizedId.startsWith(prefix) && /^\\d+$/.test(normalizedId.slice(prefix.length));
+    }
+
     function readPersistentCommentDraft(ticketId) {
       try {
         const key = commentDraftStorageKey(ticketId);
         const current = window.localStorage.getItem(key) || '';
-        if (current || !IS_LEGACY_PGU_BOARD) {
+        if (current || !ticketIdMatchesBoardIdentity(ticketId)) {
           return current;
         }
         const legacyKey = legacyCommentDraftStorageKey(ticketId);
@@ -572,7 +578,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(?:[a-z0-9_]+:)?([A-Z][A-Z0-
         } else {
           window.localStorage.removeItem(key);
         }
-        if (IS_LEGACY_PGU_BOARD) {
+        if (ticketIdMatchesBoardIdentity(ticketId)) {
           window.localStorage.removeItem(legacyCommentDraftStorageKey(ticketId));
         }
       } catch (error) {

@@ -22,23 +22,38 @@ do not add an agent to its group, do not "fix" the permissions.
 The consequence is a workflow you must plan around:
 
 1. an implementer commits in its own worktree and cannot push
-2. it writes `git bundle` to `/tmp` and posts the path, refspec and sha on the ticket
-3. **you** import it, as the repo owner:
+2. it writes a named-branch `git bundle` under
+   `/var/tmp/switchyard-handoff/` and posts the path, refspec and sha on the
+   ticket. Do not use `/tmp`: it is tmpfs, and a reboot on 2026-09-05 erased
+   five pending bundles. The work was recoverable only because the worktrees
+   survived (PGU-907 through PGU-913).
+3. read the bundle's ref name with `git bundle list-heads <bundle>`, then
+   **you** import it as the repo owner:
 
        pkexec --user eric git -C /data/git/switchyard.git \
          fetch <bundle> '+<source-ref>:refs/heads/<branch>'
 
-   Read the bundle's ref name first — `git bundle list-heads <bundle>` — because
-   implementers build them inconsistently; some head is `HEAD`, some is a branch.
+   `pkexec` is intermittent and its failure can be completely silent even with
+   polkit and the owner's session healthy. On 2026-09-05 it failed repeatedly
+   with no output between successful imports. Do not poll it or keep retrying:
+   that locked the owner out for nine minutes on 2026-09-03. The cause remains
+   uncharacterised (PGU-912). The fallback is
+   `/var/tmp/switchyard-handoff/switchyard-merge.sh`, run by the repo owner with
+   no sudo. That script is generated for a particular handoff or batch: read it
+   before use and regenerate it when the queued bundles change.
 4. only then can the implementer submit to audit; the write client refuses
    `submit_to_audit` until the commit is on origin. That check runs before the
    board request and uses the caller's current working directory, so a Switchyard
    commit must be submitted from a Switchyard checkout, not from a tenant project
    or the old PGU checkout.
+5. after audit, before moving `main`, run the blocking ancestry gate described
+   in *Operating Rules*. Use `/var/tmp/switchyard-handoff/safe-merge.sh`; do not
+   substitute a command sequence that merely prints the check.
 
-**Every round trip therefore stalls on you, and on you being physically present**,
-because `pkexec` needs a human to approve a prompt. On 2026-09-02 that meant thirteen
-merges, roughly thirty privileged imports, and six director holds.
+**Every round trip therefore stalls on an operator being physically present.**
+`pkexec` normally needs a human to approve a prompt, and its owner-run fallback is
+also deliberately not available to unattended agents. On 2026-09-02 that meant
+thirteen merges, roughly thirty privileged imports, and six director holds.
 
 Two traps that follow from it:
 
@@ -182,11 +197,87 @@ leaves existing `PGU-NNN` references untouched.
 
 ## Operating Rules
 
+**Gate every move of Switchyard `main`.** The history is strictly linear, one
+commit per ticket, and merging is a fast-forward ref move. A stale branch does
+not conflict in that model; it silently drops everything that landed after its
+base. `git rev-list --count origin/main..HEAD` can still report one and does not
+detect the loss. Before every merge, require:
+
+    git merge-base --is-ancestor main <sha>     # exit 0 only
+
+Use `/var/tmp/switchyard-handoff/safe-merge.sh`. It refuses a failed ancestry
+check and exits non-zero. This gate exists because the director saw the check
+print `NO` and merged anyway on PGU-915, reverting PGU-913; PGU-909 had already
+measured the same hazard across four pending branches. A check that can be read
+past is not a gate.
+
 Use the board tools, not direct JSON edits, for ticket changes. Route work
 through tickets and preserve origin metadata for cross-tenant records. Do not
 self-deploy shared releases. Do not create notification behavior by omission.
 Do not move review obligations across tenants without carrying findings,
 blockers, commit hashes, and sign-off state explicitly.
+
+## Deploying Changes
+
+Treat the shared install and the live PGU board as separate deploy surfaces.
+`/opt/switchyard/current` is the shared release and needs root to update. The
+board service runs code from `/home/agent/pgu-ticketboard-live/current`; deploy
+that agent-owned release, without sudo, from a Switchyard checkout:
+
+    scripts/ticket-board-service.sh deploy-restart
+
+Installing the shared release and restarting the board unit does not deploy
+board code. PGU-906 was declared live after that sequence and an HTTP 200, but
+the expected payload field was still absent because the board release remained
+old. Verify the changed behavior and the board `build_id`, not merely process
+health.
+
+Prefer the board clients under
+`/home/agent/pgu-ticketboard-live/current/scripts/`. The client under
+`/opt/switchyard/current` can remain usable while silently lagging several
+tickets behind; PGU-913 exposed that only because the live client had a new verb
+the shared client lacked. Check rather than assume:
+
+    readlink -f /opt/switchyard/current
+    readlink -f /home/agent/pgu-ticketboard-live/current
+    git --git-dir=/data/git/switchyard.git rev-parse main
+
+## Commitless Deliverables
+
+Use `submit-to-audit-without-commit` when the ticket's deliverable is not a diff:
+
+    ticket-board-write submit-to-audit-without-commit PGU-N --reason "<what was delivered>"
+
+That includes spikes and investigations whose result is a finding, verification
+passes, and operator actions whose change lives in a database, systemd unit or
+tenant configuration. PGU-823 is an operator-action example, PGU-828 a live
+verification, and PGU-752 an umbrella whose implementation was carried by
+separately audited tickets. Do not borrow another ticket's hash: it resolves,
+looks authoritative and sends audit into the wrong diff. PGU-913 added this path
+after that happened three times. `request-commit-exempt` is different: it sends
+unfinished or unimplementable work back to `analysis` and unassigns it.
+
+## Awaiting Another Role
+
+Use `await-role` when the next action belongs to another agent role and there is
+no blocker ticket to name. The escalation now works as one mechanism: it reaches
+the director queue (PGU-906), survives an acknowledgement comment (PGU-915),
+does not relabel a returning ticket as new (PGU-912), and is not contradicted by
+a turn-end reminder (PGU-916).
+
+The marker expires after four hours, so a genuine stall behind a forgotten flag
+resurfaces. It clears when the awaited role acts by changing state or assignee,
+or explicitly calls `clear-awaiting-role`; a comment alone is not action. Never
+await your own role. The normal write path rejects it, and a same-actor marker
+written by another path would clear immediately under the ticket-activity rule.
+
+## Known Post-Handoff Direction
+
+Do not replace commit exemptions during this handoff. Eric's recorded direction
+from 2026-09-05 is to introduce ticket types later, with the commit-hash
+requirement attached only to types whose deliverable should be a repository
+change. This is explicitly post-handoff work; preserve the direction so the next
+director neither re-derives it nor builds a conflicting mechanism.
 
 ## Agent Instruction Files
 
@@ -268,9 +359,14 @@ migration risk. This is here so the decision is made from evidence.
 6. Review the final migration list immediately before cutover; do not trust an
    old inventory.
 7. Confirm the three deploy surfaces agree with `main`: the shared install, the
-   live board release, and the mirror. On 2026-09-02 all three had drifted at once.
-   Merging is not deploying.
-8. Do one import end to end before you need to: take any implementer bundle, run
-   `git bundle list-heads` on it, import it with `pkexec`, and watch the ticket
-   move. Learning that flow under time pressure on your first real ticket is the
-   worst way to learn it.
+   separately deployed live board release, and the mirror. On 2026-09-02 all
+   three had drifted at once. Merging is not deploying; for board code, run
+   `scripts/ticket-board-service.sh deploy-restart` and verify the behavior and
+   `build_id`.
+8. Do one import end to end before you need to: take a reviewed implementer
+   bundle, run `git bundle list-heads` on it, import it from
+   `/var/tmp/switchyard-handoff/`, run the blocking ancestry gate through
+   `safe-merge.sh` after audit, and watch the ticket move. Try `pkexec` once; if
+   it fails silently, stop and prepare the narrow `switchyard-merge.sh` for the
+   repo owner. Learning that flow under time pressure on your first real ticket
+   is the worst way to learn it.

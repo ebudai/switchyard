@@ -100,6 +100,21 @@ def test_exported_release_acl_lifecycle():
                 assert env['XDG_RUNTIME_DIR']==str(tenant_runtime)
                 assert env['DBUS_SESSION_BUS_ADDRESS']==f'unix:path={tenant_runtime}/bus'
             server.accept()[0].close()
+            # Real receipt modes; account identities and GUI sessions remain fixtures.
+            # This does not exercise ownership enforcement across real accounts.
+            receipt_mode=receipt.stat().st_mode & 0o7777
+            for hostile_mode in (0o664,0o646):
+                try:
+                    receipt.chmod(hostile_mode)
+                    with patch.object(mod.os,'geteuid',return_value=tenant.pw_uid), patch.object(mod,'runtime_for',side_effect=lambda user: gui_runtime if user==gui else tenant_runtime):
+                        try:
+                            mod.verify(p)
+                        except mod.DesktopAccessError as exc:
+                            assert str(exc)=='Desktop readiness record is not protected by the GUI owner', str(exc)
+                        else:
+                            raise AssertionError(f'writable readiness receipt accepted: {hostile_mode:o}')
+                finally:
+                    receipt.chmod(receipt_mode)
             # A second independent tenant's grant survives first-tenant rollback.
             p2=policy(second.pw_name,'amber');mod.apply(p2)
             mod.rollback(p)

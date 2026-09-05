@@ -29,7 +29,7 @@ def test_konsole_log_is_readable_by_sudo_invoking_user() -> None:
         assert log_path.stat().st_mode & 0o777 == 0o644
 
 def test_start_is_attach_or_start_and_never_duplicates_existing_session() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "ops")
     runner = FakeRunner(existing_sessions={"pgu-ops"})
 
@@ -56,7 +56,7 @@ def test_start_is_attach_or_start_and_never_duplicates_existing_session() -> Non
     ]
 
 def test_start_creates_missing_session_once_then_attaches() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "ops")
     runner = FakeRunner()
 
@@ -101,7 +101,7 @@ def test_start_creates_missing_session_once_then_attaches() -> None:
     assert ["tmux", "attach", "-t", "pgu-ops"] in runner.calls
 
 def test_tmux_new_session_names_window_for_every_role() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-role-window.") as tmp:
         session_dir = Path(tmp) / "sessions"
         for role in config.roles:
@@ -263,7 +263,7 @@ def test_tmux_pane_starts_cli_from_owner_local_bin_path() -> None:
             _cleanup_isolated_tmux_sessions(server, [role.tmux_session])
 
 def test_pane_start_from_another_pane_uses_target_session_and_clears_caller_tmux_env() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "research")
     runner = FakeRunner()
     ambient_env_keys = [
@@ -332,7 +332,7 @@ def test_pane_start_from_another_pane_uses_target_session_and_clears_caller_tmux
     assert "-u TMUX_PANE" not in new_session[-1]
 
 def test_pane_reload_refuses_conflicting_ambient_session_id_before_killing_target() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "research")
     runner = FakeRunner(existing_sessions={role.tmux_session}, current_commands={role.target: "claude"})
     original_env = {
@@ -367,7 +367,7 @@ def test_pane_reload_refuses_conflicting_ambient_session_id_before_killing_targe
     assert not any(call[:2] == ["tmux", "new-session"] for call in runner.calls)
 
 def test_visible_pane_reload_refuses_conflicting_ambient_session_id_before_killing_target() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "ops")
     runner = FakeRunner(existing_sessions={role.tmux_session}, current_commands={role.target: "codex"})
     original_env = {
@@ -501,7 +501,7 @@ def test_attach_headless_role_refuses_conflicting_ambient_session_id_before_muta
     assert not any(call[:2] == ["tmux", "attach"] for call in runner.calls)
 
 def test_pane_start_without_recorded_session_ignores_ambient_session_and_starts_fresh() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "ops")
     runner = FakeRunner()
     original_env = {

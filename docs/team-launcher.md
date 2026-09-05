@@ -67,6 +67,15 @@ linger enabled and a `/run/user/<uid>` directory before starting tmux panes. If
 host policy denies that setup, the launcher fails before touching panes and
 prints the `sudo loginctl enable-linger <user>` command an operator must run.
 
+Project startup also requires an explicit desktop policy. Use
+`switchyard new --desktop-policy headless` for no clipboard, or supply a recorded
+Wayland consent file. Existing projects use `switchyard upgrade <project>
+--desktop-policy ...` before starting new role processes. The same pre-launch
+path installs persistent scoped access and verifies tenant-safe environment;
+see [desktop access](desktop-access.md). Upgrading the policy does not restart
+working roles. This policy concerns worker clipboard access; the window display
+selection below still controls the invoking desktop's Konsole window.
+
 When opening the visible Konsole window, the launcher uses
 `PGU_HOST_WAYLAND_DISPLAY` if it is set. Otherwise it resolves the display for
 `PGU_TEAM_LAUNCHER_GUI_USER`, or for the invoking user when that variable is

@@ -6,7 +6,7 @@ from __future__ import annotations
 from team_launcher_test_helpers import *
 
 def test_pane_runtime_hook_source_rejects_stale_codex_state() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "ops")
 
     with tempfile.TemporaryDirectory(prefix="pgu-launch-session-stale-codex-state.") as tmp:
@@ -34,7 +34,7 @@ def test_pane_runtime_hook_source_rejects_stale_codex_state() -> None:
     assert source == ""
 
 def test_pane_launch_outcome_source_rejects_stale_launcher_state() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "ops")
 
     with tempfile.TemporaryDirectory(prefix="pgu-launch-session-stale-launcher-state.") as tmp:
@@ -62,7 +62,7 @@ def test_pane_launch_outcome_source_rejects_stale_launcher_state() -> None:
     assert source == ""
 
 def test_pane_runtime_hook_source_rejects_wrong_target_codex_state() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "ops")
 
     with tempfile.TemporaryDirectory(prefix="pgu-launch-session-wrong-target-codex-state.") as tmp:
@@ -90,7 +90,7 @@ def test_pane_runtime_hook_source_rejects_wrong_target_codex_state() -> None:
     assert source == ""
 
 def test_pane_launch_outcome_source_rejects_wrong_target_launcher_state() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "ops")
 
     with tempfile.TemporaryDirectory(prefix="pgu-launch-session-wrong-target-launcher-state.") as tmp:
@@ -130,6 +130,7 @@ def test_launch_session_record_report_ignores_stale_resume_fallback_sidecars() -
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "repository": str(repo),
@@ -185,6 +186,7 @@ def test_launch_session_record_statuses_wait_for_late_visible_fallback_outcome()
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "repository": str(repo),
@@ -255,6 +257,7 @@ def test_launch_session_record_statuses_ignore_stale_pane_state_before_late_fall
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "repository": str(repo),
@@ -331,6 +334,7 @@ def test_launch_session_record_statuses_ignore_non_launcher_pane_state_before_la
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "repository": str(repo),
@@ -411,6 +415,7 @@ def test_superseded_session_freshness_uses_rename_ctime_not_record_mtime() -> No
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "repository": str(repo),
@@ -477,6 +482,7 @@ def test_launch_project_reports_missing_session_record_after_reboot_resume() -> 
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "repository": str(repo),
@@ -553,6 +559,7 @@ def test_launch_project_reports_visible_role_resume_fallback_to_operator() -> No
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "repository": str(repo),

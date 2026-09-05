@@ -39,6 +39,7 @@ def test_switchyard_new_prompts_roles_and_skips_designer_when_absent() -> None:
         with redirect_stdout(stdout):
             assert (
                 switchyard_new_command(
+                    desktop_policy=Path("headless"),
                     slug="mycoolthing",
                     agent_name="otto-agent",
                     project_name="My Cool Thing",
@@ -144,6 +145,7 @@ def test_switchyard_new_accepts_role_defaults_and_includes_ops() -> None:
 
         assert (
             switchyard_new_command(
+                desktop_policy=Path("headless"),
                 slug="porter",
                 agent_name="otto-agent",
                 project_name="Porter System",
@@ -316,6 +318,7 @@ def test_switchyard_new_rejects_role_choices_without_required_director() -> None
         output_dir = tmp_path / "out"
         try:
             switchyard_new_command(
+                desktop_policy=Path("headless"),
                 slug="atlas",
                 agent_name="atlas",
                 project_name="Atlas Project",

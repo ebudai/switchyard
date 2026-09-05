@@ -51,6 +51,7 @@ def test_launch_project_with_running_control_role_session_refreshes_only_stopped
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout_path),
                     "repository": str(repo),
@@ -185,7 +186,7 @@ def test_viewer_dry_run_reports_project_scoped_viewer_session() -> None:
     assert plan["viewer_roles"] == ["designer", "director", "audit", "ops", "app", "main"]
 
 def test_pgu_config_matches_director_supplied_live_role_assignments() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     roles = {role.role: role for role in config.roles}
     layout = json.loads(config.layout.read_text(encoding="utf-8"))
     expected_repository = Path("/home/agent/Projects/pgu")
@@ -264,7 +265,7 @@ def test_pgu_config_keeps_live_agent_repository_with_foreign_home() -> None:
     original_home = os.environ.get("HOME")
     try:
         os.environ["HOME"] = "/home/user"
-        config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+        config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     finally:
         if original_home is None:
             os.environ.pop("HOME", None)
@@ -288,6 +289,7 @@ def test_default_session_dir_uses_run_as_user_home_when_launcher_default_is_fore
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "run_as_user": "porter-agent",
                     "layout": str(layout),
@@ -339,6 +341,7 @@ def test_explicit_session_dir_env_beats_run_as_user_default() -> None:
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "run_as_user": "porter-agent",
                     "layout": str(layout),
@@ -399,6 +402,7 @@ def test_configured_session_dir_beats_inherited_session_dir_env() -> None:
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "run_as_user": "porter-agent",
                     "layout": str(layout),
@@ -446,6 +450,7 @@ def test_launch_project_default_pane_state_dir_uses_run_as_user_runtime_when_lau
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "run_as_user": "porter-agent",
                     "layout": str(layout),
@@ -549,6 +554,7 @@ def test_root_created_owner_state_dirs_are_owned_by_run_as_user() -> None:
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "run_as_user": "porter-agent",
                     "layout": str(layout),

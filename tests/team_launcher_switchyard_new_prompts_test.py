@@ -43,6 +43,7 @@ def test_switchyard_new_unit_without_database_precheck_runs_before_user_and_proj
 
         try:
             switchyard_new_command(
+                desktop_policy=Path("headless"),
                 slug="porter",
                 agent_name="otto-agent",
                 project_name="Porter System",
@@ -87,6 +88,7 @@ def test_switchyard_new_prompts_name_first_and_derives_defaults() -> None:
 
         try:
             switchyard_new_command(
+                desktop_policy=Path("headless"),
                 yes=True,
                 home_base=home_base,
                 euid_getter=lambda: 1000,
@@ -130,6 +132,7 @@ def test_switchyard_new_typed_agent_user_is_verbatim_not_suffixed() -> None:
 
             try:
                 switchyard_new_command(
+                    desktop_policy=Path("headless"),
                     yes=True,
                     home_base=home_base,
                     euid_getter=lambda: 1000,
@@ -166,6 +169,7 @@ def test_switchyard_new_agent_name_argument_is_verbatim_not_suffixed() -> None:
 
             try:
                 switchyard_new_command(
+                    desktop_policy=Path("headless"),
                     slug="otto",
                     agent_name="eric",
                     project_name="Otto Scheduler",
@@ -235,6 +239,7 @@ def test_switchyard_new_existing_owner_decline_aborts_before_mutating() -> None:
 
             try:
                 switchyard_new_command(
+                    desktop_policy=Path("headless"),
                     slug="otto",
                     agent_name="eric",
                     project_name="Otto Scheduler",
@@ -275,6 +280,7 @@ def test_switchyard_new_existing_owner_noninteractive_requires_explicit_opt_in()
 
             try:
                 switchyard_new_command(
+                    desktop_policy=Path("headless"),
                     slug="otto",
                     agent_name="eric",
                     project_name="Otto Scheduler",
@@ -293,6 +299,7 @@ def test_switchyard_new_existing_owner_noninteractive_requires_explicit_opt_in()
 
             try:
                 switchyard_new_command(
+                    desktop_policy=Path("headless"),
                     slug="atlas",
                     agent_name="eric",
                     project_name="Atlas",
@@ -325,6 +332,7 @@ def test_switchyard_new_edited_slug_does_not_change_name_derived_default_path() 
 
         try:
             switchyard_new_command(
+                desktop_policy=Path("headless"),
                 project_name="Otto Scheduler",
                 slug="otto",
                 agent_name="otto-agent",
@@ -405,6 +413,7 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
         with redirect_stdout(stdout):
             assert (
                 switchyard_new_command(
+                    desktop_policy=Path("headless"),
                     slug="porter",
                     agent_name="otto-agent",
                     project_name="Porter System",

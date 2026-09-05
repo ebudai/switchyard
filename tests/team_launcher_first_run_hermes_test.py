@@ -89,8 +89,13 @@ def test_first_run_trust_handles_detached_roles_and_persists_for_later_launches(
             command = args[3:] if args[:2] == ["sudo", "-u"] else args
             if command and command[0] == "env":
                 index = 1
-                while index < len(command) and "=" in command[index]:
-                    index += 1
+                while index < len(command):
+                    if command[index] == "-u":
+                        index += 2
+                    elif "=" in command[index]:
+                        index += 1
+                    else:
+                        break
                 command = command[index:]
             calls.append([*args[:3], *command] if args[:2] == ["sudo", "-u"] else list(command))
             if command == ["claude", "auth", "status", "--json"]:

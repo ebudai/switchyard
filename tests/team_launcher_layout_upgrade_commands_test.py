@@ -753,6 +753,7 @@ def test_materialize_layout_refuses_more_than_six_visible_roles() -> None:
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout_path),
                     "repository": str(repo),

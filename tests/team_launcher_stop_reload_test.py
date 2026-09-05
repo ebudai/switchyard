@@ -28,6 +28,7 @@ def test_detach_visible_role_updates_config_and_leaves_session_running() -> None
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "repository": str(repo),
@@ -100,6 +101,7 @@ def test_stop_project_kills_only_configured_sessions_as_owner_and_is_idempotent(
             config_path.write_text(
                 json.dumps(
                     {
+                        "desktop_access": {"mode": "headless"},
                         "project": "otto",
                         "layout": str(layout),
                         "run_as_user": "otto-agent",
@@ -203,6 +205,7 @@ def test_stop_project_continues_after_failed_kill_and_reports_all_roles() -> Non
             config_path.write_text(
                 json.dumps(
                     {
+                        "desktop_access": {"mode": "headless"},
                         "project": "otto",
                         "layout": str(layout),
                         "run_as_user": "otto-agent",
@@ -234,7 +237,7 @@ def test_stop_project_continues_after_failed_kill_and_reports_all_roles() -> Non
     ]
 
 def test_reload_uses_recorded_resume_uuid_when_recreating_session() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "ops")
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
         session_dir = Path(tmp)
@@ -293,6 +296,7 @@ def test_configured_fresh_session_reload_supersedes_recorded_session_and_starts_
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "repository": str(repo),
@@ -349,7 +353,7 @@ def test_configured_fresh_session_reload_supersedes_recorded_session_and_starts_
         assert "TICKET_BOARD_PANE_SESSION_ID=previous-hermes-ticket-session" not in new_session[-1]
 
 def test_reload_clears_unverified_resume_marker_after_verified_resume() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "ops")
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
         session_dir = Path(tmp)
@@ -376,7 +380,7 @@ def test_reload_clears_unverified_resume_marker_after_verified_resume() -> None:
         assert not timeout_path.exists()
 
 def test_resume_commands_use_cli_specific_shapes_and_front_position() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     roles = {role.role: role for role in config.roles}
     session_id = "12345678-1234-5678-9abc-def012345678"
 
@@ -406,7 +410,7 @@ def test_resume_commands_use_cli_specific_shapes_and_front_position() -> None:
         assert _command_tail(inspector_command)[3:5] == ["--model", "gemini-3.7-flash-high"]
 
 def test_reload_without_recorded_resume_id_logs_fresh_start() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "ops")
     runner = FakeRunner(existing_sessions={"pgu-ops"}, current_commands={"pgu-ops:0.0": "codex"})
     stderr = StringIO()
@@ -430,7 +434,7 @@ def test_reload_without_recorded_resume_id_logs_fresh_start() -> None:
     assert "--resume" not in runner.calls[4][-1]
 
 def test_claude_reload_skips_missing_local_transcript_instead_of_exiting() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "director")
     runner = FakeRunner(existing_sessions={"pgu-director"}, current_commands={"pgu-director:0.0": "claude"})
     stderr = StringIO()
@@ -478,7 +482,7 @@ def test_claude_reload_skips_missing_local_transcript_instead_of_exiting() -> No
     assert session_id not in new_sessions[0][-1]
 
 def test_claude_reload_uses_recorded_id_when_local_transcript_exists() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "director")
     runner = FakeRunner(existing_sessions={"pgu-director"}, current_commands={"pgu-director:0.0": "claude"})
 
@@ -517,7 +521,7 @@ def test_claude_reload_uses_recorded_id_when_local_transcript_exists() -> None:
     assert f"claude --resume {session_id}" in new_sessions[0][-1]
 
 def test_claude_no_transcript_path_record_uses_project_key_fallback() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "director")
     assert role.workdir == "/home/agent/Projects/pgu"
 
@@ -589,7 +593,7 @@ def test_claude_no_transcript_path_record_uses_project_key_fallback() -> None:
     assert session_id not in new_sessions[0][-1]
 
 def test_codex_reload_skips_missing_local_transcript_instead_of_passing_resume() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "ops")
     runner = FakeRunner(existing_sessions={"pgu-ops"}, current_commands={"pgu-ops:0.0": "codex"})
     stderr = StringIO()
@@ -631,7 +635,7 @@ def test_codex_reload_skips_missing_local_transcript_instead_of_passing_resume()
     assert f"codex resume {session_id}" not in new_sessions[0][-1]
 
 def test_claude_start_falls_back_fresh_when_resume_attempt_exits_immediately() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "director")
     runner = ResumeExitFakeRunner()
     stderr = StringIO()
@@ -680,7 +684,7 @@ def test_claude_start_falls_back_fresh_when_resume_attempt_exits_immediately() -
     assert "--resume" not in new_sessions[1][-1]
 
 def test_reload_preserves_session_record_when_resume_cli_is_slow_to_exec() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "ops")
     stderr = StringIO()
     original_timeout = team_launcher.RESUME_STARTUP_TIMEOUT_SECONDS
@@ -748,7 +752,7 @@ def test_reload_preserves_session_record_when_resume_cli_is_slow_to_exec() -> No
         team_launcher.RESUME_STARTUP_POLL_SECONDS = original_poll
 
 def test_agy_reload_skips_missing_local_conversation_store_instead_of_silent_fallback() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "inspector")
     runner = FakeRunner(existing_sessions={"pgu-inspector"}, current_commands={"pgu-inspector:0.0": "agy"})
     stderr = StringIO()
@@ -792,7 +796,7 @@ def test_agy_reload_skips_missing_local_conversation_store_instead_of_silent_fal
     assert session_id not in new_sessions[0][-1]
 
 def test_agy_reload_uses_recorded_id_when_local_conversation_store_exists() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "inspector")
     runner = FakeRunner(existing_sessions={"pgu-inspector"}, current_commands={"pgu-inspector:0.0": "agy"})
     original_root = team_launcher.AGY_CONVERSATION_ROOT
@@ -829,7 +833,7 @@ def test_agy_reload_uses_recorded_id_when_local_conversation_store_exists() -> N
     assert f"agy --conversation {session_id}" in new_sessions[0][-1]
 
 def test_reload_refuses_to_kill_session_when_live_command_mismatches_config() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "ops")
     runner = FakeRunner(existing_sessions={"pgu-ops"}, current_commands={"pgu-ops:0.0": "claude"})
 
@@ -853,7 +857,7 @@ def test_reload_refuses_to_kill_session_when_live_command_mismatches_config() ->
     ]
 
 def test_reload_force_bypasses_live_command_guard() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "ops")
     runner = FakeRunner(existing_sessions={"pgu-ops"}, current_commands={"pgu-ops:0.0": "claude"})
 

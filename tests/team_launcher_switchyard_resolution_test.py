@@ -19,6 +19,7 @@ def test_switchyard_register_cli_enables_launch_by_name_without_config_flag() ->
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "otto",
                     "project_name": "Otto System",
                     "layout": str(layout),
@@ -73,6 +74,7 @@ def test_switchyard_launch_runs_first_run_auth_before_panes_and_warns_after() ->
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "otto",
                     "project_name": "Otto System",
                     "layout": str(layout),
@@ -163,6 +165,7 @@ def test_switchyard_launch_missing_owner_clis_stops_before_panes() -> None:
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "otto",
                     "project_name": "Otto System",
                     "layout": str(layout),
@@ -249,6 +252,7 @@ def test_switchyard_validate_models_command_runs_model_validation_on_demand() ->
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "otto",
                     "project_name": "Otto System",
                     "layout": str(layout),
@@ -315,6 +319,7 @@ def test_switchyard_stop_resolves_project_without_launching_or_authenticating() 
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "otto",
                     "project_name": "Otto System",
                     "layout": str(layout),
@@ -377,6 +382,7 @@ def test_switchyard_bare_cross_owner_project_fails_before_launch_or_auth() -> No
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "otto",
                     "project_name": "Otto System",
                     "layout": str(layout),
@@ -613,6 +619,7 @@ def test_switchyard_stop_cross_owner_project_fails_before_tmux_probe() -> None:
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "otto",
                     "project_name": "Otto System",
                     "layout": str(layout),

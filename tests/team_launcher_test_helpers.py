@@ -411,6 +411,7 @@ def _write_launcher_config(
     role_names = roles or [f"role{index}" for index in range(role_count)]
     layout_name = layout or f"{project}-konsole-layout.json"
     payload: dict[str, Any] = {
+        "desktop_access": {"mode": "headless"},
         "project": project,
         "layout": layout_name,
         "roles": [
@@ -444,6 +445,7 @@ def _pgu_project_root() -> Path:
 
 def _write_pgu_config_with_shared_checkout(tmp: Path) -> Path:
     source = json.loads((ROOT / "config" / "team-launcher" / "pgu.json").read_text(encoding="utf-8"))
+    source["desktop_access"] = {"mode": "headless"}
     source["layout"] = str(ROOT / "config" / "team-launcher" / "pgu-konsole-layout.json")
     source["repository"] = str(tmp / "repo")
     source["worktree_base"] = str(tmp / "worktrees")
@@ -469,6 +471,7 @@ def _write_six_visible_role_config(tmp: Path, project: str = "porter") -> Path:
     config_path.write_text(
         json.dumps(
             {
+                "desktop_access": {"mode": "headless"},
                 "project": project,
                 "layout": str(layout_path),
                 "repository": str(repo),
@@ -590,6 +593,7 @@ def _write_minimal_shared_checkout_config(
     layout_path = tmp / "layout.json"
     layout_path.write_text(json.dumps(layout, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     config = {
+        "desktop_access": {"mode": "headless"},
         "project": "pgu",
         "layout": str(layout_path),
         "repository": str(repo),
@@ -713,6 +717,7 @@ def _write_first_run_auth_config(
     config_path.write_text(
         json.dumps(
             {
+                "desktop_access": {"mode": "headless"},
                 "project": "otto",
                 "layout": str(layout_path),
                 "repository": str(repo),
@@ -800,8 +805,13 @@ class FirstRunAuthRunner:
         command = args[3:] if args[:2] == ["sudo", "-u"] else args
         if command and command[0] == "env":
             index = 1
-            while index < len(command) and "=" in command[index]:
-                index += 1
+            while index < len(command):
+                if command[index] == "-u":
+                    index += 2
+                elif "=" in command[index]:
+                    index += 1
+                else:
+                    break
             command = command[index:]
         self.calls.append([*args[:3], *command] if args[:2] == ["sudo", "-u"] else list(command))
         if command[:2] == ["sh", "-c"] and len(command) == 3 and command[2].startswith("command -v "):

@@ -216,6 +216,7 @@ def test_switchyard_new_accepts_exported_switchyard_release_without_git_status()
 
         assert (
             switchyard_new_command(
+                desktop_policy=Path("headless"),
                 slug="porter",
                 agent_name="otto-agent",
                 project_name="Porter",
@@ -279,6 +280,7 @@ def test_switchyard_new_creates_missing_board_service_user_before_owner_mutation
 
         assert (
             switchyard_new_command(
+                desktop_policy=Path("headless"),
                 slug="porter",
                 agent_name="otto-agent",
                 project_name="Porter",
@@ -357,6 +359,7 @@ def test_switchyard_new_installs_board_peer_auth_before_owner_mutation() -> None
 
         assert (
             switchyard_new_command(
+                desktop_policy=Path("headless"),
                 slug="porter",
                 agent_name="otto-agent",
                 project_name="Porter",
@@ -412,6 +415,7 @@ def test_switchyard_new_missing_board_service_user_failure_names_remedy_before_o
 
         try:
             switchyard_new_command(
+                desktop_policy=Path("headless"),
                 slug="porter",
                 agent_name="otto-agent",
                 project_name="Porter",
@@ -459,6 +463,7 @@ def test_switchyard_new_peer_auth_failure_names_remedy_before_owner_mutation() -
 
         try:
             switchyard_new_command(
+                desktop_policy=Path("headless"),
                 slug="porter",
                 agent_name="otto-agent",
                 project_name="Porter",
@@ -510,6 +515,7 @@ def test_switchyard_new_missing_peer_auth_helper_names_remedy_before_owner_mutat
 
         try:
             switchyard_new_command(
+                desktop_policy=Path("headless"),
                 slug="porter",
                 agent_name="otto-agent",
                 project_name="Porter",
@@ -931,6 +937,7 @@ def test_precheck_registered_provisioned_project_names_working_launch_command() 
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "project_name": "Porter",
                     "roles": [{"role": "director", "slot": 0, "cli": ["claude"], "workdir": str(project_repo)}],
@@ -1110,6 +1117,7 @@ def test_switchyard_teardown_refuses_registered_healthy_empty_board_without_dest
             config_path.write_text(
                 json.dumps(
                     {
+                        "desktop_access": {"mode": "headless"},
                         "project": project,
                         "project_name": project.upper(),
                         "run_as_user": f"{project}-agent",
@@ -1273,6 +1281,7 @@ def test_switchyard_teardown_destroy_registered_tenant_flag_keeps_empty_board_be
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "project_name": "Porter",
                     "run_as_user": "porter-agent",

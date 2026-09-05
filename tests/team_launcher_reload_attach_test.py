@@ -82,7 +82,7 @@ def test_start_does_not_sync_live_cli_or_model() -> None:
         assert "claude-sonnet-5" not in research_new_session[-1]
 
 def test_detached_research_attach_checks_session_without_attaching() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "research")
     runner = FakeRunner(existing_sessions={"pgu-research"})
 
@@ -116,6 +116,7 @@ def test_pane_start_reexecs_as_owner_before_detached_tmux_or_state_work() -> Non
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "run_as_user": "porter-agent",
                     "layout": str(layout),
@@ -225,6 +226,7 @@ def test_pane_attach_role_reexecs_as_owner_with_slot_before_tmux_or_state_work()
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "run_as_user": "porter-agent",
                     "layout": str(layout),
@@ -322,6 +324,7 @@ def test_pane_no_attach_uses_viewer_ensure_path_without_tmux_attach() -> None:
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "repository": str(repo),
@@ -404,6 +407,7 @@ def test_attach_role_config_write_failure_does_not_start_or_attach_session() -> 
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "repository": str(repo),
@@ -498,6 +502,7 @@ def test_attach_headless_role_to_free_slot_resumes_without_touching_neighbours()
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "repository": str(repo),
@@ -563,6 +568,7 @@ def test_attach_headless_role_refuses_occupied_slot_without_mutating_config() ->
         repo = tmp_path / "repo"
         repo.mkdir()
         payload = {
+            "desktop_access": {"mode": "headless"},
             "project": "porter",
             "layout": str(layout),
             "repository": str(repo),
@@ -652,6 +658,7 @@ def test_attach_headless_role_without_live_session_or_record_refuses_fresh_start
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "repository": str(repo),
@@ -720,6 +727,7 @@ def test_attach_headless_role_failed_start_rolls_config_back_to_detached() -> No
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "repository": str(repo),
@@ -800,6 +808,7 @@ def test_attach_headless_role_unverified_resume_does_not_mutate_config() -> None
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "repository": str(repo),

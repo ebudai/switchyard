@@ -216,7 +216,7 @@ def test_viewer_visible_start_verifies_cli_before_reporting_success() -> None:
         assert "did not leave a live" not in stderr.getvalue()
 
 def test_viewer_visible_start_fails_when_cli_exits_immediately() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "app")
 
     class VanishedViewerRunner:
@@ -370,7 +370,7 @@ def test_two_project_viewer_sessions_coexist_in_real_isolated_tmux() -> None:
             _cleanup_isolated_tmux_sessions(server, created_sessions)
 
 def test_detached_research_start_fails_visible_when_session_disappears() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "research")
 
     class VanishingDetachedRunner:
@@ -411,7 +411,7 @@ def test_detached_research_start_fails_visible_when_session_disappears() -> None
     assert "role research did not leave a live pgu-research session" in stderr.getvalue()
 
 def test_detached_research_resume_falls_back_when_failed_session_is_already_gone() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "research")
     stderr = StringIO()
 
@@ -495,6 +495,7 @@ def test_full_launch_delegates_detached_role_start_to_owner_pane_subcommand() ->
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "run_as_user": "porter-agent",
                     "layout": str(layout),
@@ -582,6 +583,7 @@ def test_all_detached_undetected_viewer_launch_still_reports_detached_start_fail
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "repository": str(repo),
@@ -914,6 +916,7 @@ def test_root_materialized_owner_state_layout_is_owner_writable_on_next_launch()
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout_template),
                     "run_as_user": "porter-agent",

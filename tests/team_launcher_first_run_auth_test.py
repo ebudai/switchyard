@@ -426,7 +426,12 @@ def test_first_run_auth_invokes_owner_home_cli_with_same_path_as_presence_check(
             path = ""
             if command and command[0] == "env":
                 env_end = 1
-                while env_end < len(command) and "=" in command[env_end]:
+                while env_end < len(command):
+                    if command[env_end] == "-u":
+                        env_end += 2
+                        continue
+                    if "=" not in command[env_end]:
+                        break
                     key, value = command[env_end].split("=", 1)
                     if key == "PATH":
                         path = value
@@ -543,6 +548,7 @@ def test_first_run_auth_reports_profile_only_cli_missing_with_real_shell_probe()
     assert calls == [
         [
             "env",
+            *team_launcher._env_unset_prefix(team_launcher.DESKTOP_ENV_KEYS),
             f"HOME={owner_home}",
             f"PATH={owner_home / 'bin'}:{owner_home / '.local' / 'bin'}:{sandbox_bin}",
             "codex",
@@ -551,6 +557,7 @@ def test_first_run_auth_reports_profile_only_cli_missing_with_real_shell_probe()
         ],
         [
             "env",
+            *team_launcher._env_unset_prefix(team_launcher.DESKTOP_ENV_KEYS),
             f"HOME={owner_home}",
             f"PATH={owner_home / 'bin'}:{owner_home / '.local' / 'bin'}:{sandbox_bin}",
             "sh",

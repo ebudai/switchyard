@@ -70,6 +70,7 @@ def test_control_repository_launch_uses_role_worktrees_and_preserves_repository(
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout_path),
                     "repository": str(repo),
@@ -193,6 +194,7 @@ def test_control_repository_launch_runs_bootstrap_as_configured_owner() -> None:
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "otto",
                     "layout": str(layout_path),
                     "repository": str(repo),
@@ -289,6 +291,7 @@ def test_control_repository_bootstrap_failure_aborts_without_opening_window() ->
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "otto",
                     "layout": str(layout_path),
                     "repository": str(repo),
@@ -346,6 +349,7 @@ def test_control_repository_repairs_owner_mismatch_before_clone() -> None:
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "otto",
                     "layout": str(tmp_path / "layout.json"),
                     "repository": str(repo),
@@ -419,6 +423,7 @@ def test_control_repository_chown_failure_names_actual_and_expected_owner() -> N
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "otto",
                     "layout": str(tmp_path / "layout.json"),
                     "repository": str(repo),
@@ -484,6 +489,7 @@ def test_control_repository_repair_requires_existing_target_user() -> None:
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "otto",
                     "layout": str(tmp_path / "layout.json"),
                     "repository": str(repo),
@@ -535,6 +541,7 @@ def test_control_repository_repair_refuses_unmanaged_or_slugless_paths() -> None
                 config_path.write_text(
                     json.dumps(
                         {
+                            "desktop_access": {"mode": "headless"},
                             "project": "otto",
                             "layout": str(tmp_path / "layout.json"),
                             "repository": str(repo),
@@ -570,6 +577,7 @@ def test_control_repository_load_rejects_unmanaged_path_with_expected_prefix() -
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "otto",
                     "layout": str(tmp_path / "layout.json"),
                     "repository": str(repo),
@@ -610,6 +618,7 @@ def test_control_repository_load_accepts_generated_prefix_and_pgu_without_contro
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "otto",
                     "layout": str(tmp_path / "layout.json"),
                     "repository": str(repo),
@@ -628,6 +637,7 @@ def test_control_repository_load_accepts_generated_prefix_and_pgu_without_contro
         pgu_config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "pgu",
                     "layout": str(tmp_path / "layout.json"),
                     "repository": str(repo),
@@ -673,6 +683,7 @@ def test_launch_without_control_repository_does_not_owner_wrap_pgu_plan() -> Non
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "pgu",
                     "layout": str(layout_path),
                     "repository": str(repo),

@@ -23,6 +23,7 @@ def test_owner_state_dir_install_args_take_effect_on_real_filesystem_for_current
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "run_as_user": current_user,
                     "layout": str(layout_path),
@@ -61,6 +62,7 @@ def test_owner_state_dir_install_is_skipped_when_already_running_as_owner() -> N
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "run_as_user": "porter-agent",
                     "layout": str(layout_path),
@@ -118,6 +120,7 @@ def test_explicit_pane_state_dir_env_beats_run_as_user_runtime_default() -> None
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "run_as_user": "porter-agent",
                     "layout": str(layout),
@@ -219,7 +222,7 @@ def test_cli_command_prepends_invoking_user_bin() -> None:
     original_bin_dir = os.environ.pop("PGU_TEAM_LAUNCHER_BIN_DIR", None)
     try:
         os.environ["HOME"] = "/home/otto-agent"
-        config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+        config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
         role = next(role for role in config.roles if role.role == "ops")
 
         command = cli_command_for_role(role, session_dir=config.session_dir)
@@ -236,7 +239,7 @@ def test_cli_command_prepends_invoking_user_bin() -> None:
     assert any(entry.startswith("PATH=/home/otto-agent/bin:") for entry in _env_entries(command))
 
 def test_cli_command_with_explicit_owner_uses_owner_bin_and_drops_invoker_private_path() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "research")
     original_path = os.environ.get("PATH")
     original_generic_bin_dir = os.environ.pop("TEAM_LAUNCHER_BIN_DIR", None)
@@ -374,7 +377,7 @@ def test_modern_env_names_win_over_legacy_aliases_with_legacy_fallback() -> None
                 os.environ[key] = value
 
 def test_cli_command_exports_durable_session_dir_for_pane_hooks() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "ops")
 
     command = cli_command_for_role(role, session_dir=config.session_dir)
@@ -388,7 +391,7 @@ def test_cli_command_exports_durable_session_dir_for_pane_hooks() -> None:
     assert not any(entry.startswith("TICKET_BOARD_PANE_SESSION_ID=") for entry in entries)
 
 def test_cli_command_exports_known_resume_session_id_for_hooks() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "ops")
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
         session_dir = Path(tmp)
@@ -409,7 +412,7 @@ def test_cli_command_exports_known_resume_session_id_for_hooks() -> None:
     assert _command_tail(command)[:3] == ["codex", "resume", session_id]
 
 def test_cli_command_clears_ambient_pane_identity_before_target_identity() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "research")
     with tempfile.TemporaryDirectory(prefix="pgu-cli-command-pane-identity.") as tmp:
         tmp_path = Path(tmp)
@@ -508,6 +511,7 @@ def test_custom_config_without_run_as_user_tracks_invoking_home() -> None:
             config_path.write_text(
                 json.dumps(
                     {
+                        "desktop_access": {"mode": "headless"},
                         "project": "porter",
                         "layout": str(layout_path),
                         "repository": "$HOME/Projects/porter",
@@ -541,6 +545,7 @@ def test_custom_project_pane_env_is_wired_to_project_board_and_role_map() -> Non
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "otto",
                     "layout": str(layout_path),
                     "repository": "/home/otto-agent/Projects/otto",
@@ -701,7 +706,7 @@ def test_provision_runtime_command_uses_configured_project_user() -> None:
     assert calls == ["otto-agent"]
 
 def test_yolo_config_translates_to_cli_specific_bypass_flags() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     roles = {role.role: role for role in config.roles}
 
     expected_flags = {
@@ -728,6 +733,7 @@ def test_project_config_rejects_unsupported_cli_names() -> None:
             config_path.write_text(
                 json.dumps(
                     {
+                        "desktop_access": {"mode": "headless"},
                         "project": "porter",
                         "layout": str(tmp_path / "layout.json"),
                         "roles": [
@@ -762,6 +768,7 @@ def test_project_config_accepts_hermes_runtime_defaults() -> None:
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(tmp_path / "layout.json"),
                     "session_dir": str(tmp_path / "sessions"),
@@ -825,6 +832,7 @@ def test_project_config_fresh_session_per_ticket_is_explicit_per_role_policy() -
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(tmp_path / "layout.json"),
                     "session_dir": str(session_dir),
@@ -877,7 +885,7 @@ def test_project_config_fresh_session_per_ticket_is_explicit_per_role_policy() -
     assert resume_command[-3:] == ["codex", "resume", "app-session"]
 
 def test_effort_config_translates_to_cli_specific_args() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     roles = {role.role: role for role in config.roles}
 
     for role_name in ("director", "research", "audit"):
@@ -898,7 +906,7 @@ def test_effort_config_translates_to_cli_specific_args() -> None:
     assert "reasoning_effort=high" not in inspector_command
 
 def test_inspector_agy_cli_stays_in_first_run_trust_phase() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     inspector = next(role for role in config.roles if role.role == "inspector")
 
     assert team_launcher._role_cli_name(inspector) == "agy"
@@ -906,7 +914,7 @@ def test_inspector_agy_cli_stays_in_first_run_trust_phase() -> None:
     assert "gemini" not in team_launcher.FIRST_RUN_TRUST_CLIS
 
 def test_pgu_launch_commands_include_model_and_bypass_flags() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     roles = {role.role: role for role in config.roles}
     expected_by_role = {
         "director": ["claude", "--model", "claude-opus-5", "--effort", "high", "--dangerously-skip-permissions"],

@@ -18,6 +18,7 @@ def test_launch_session_record_report_waits_and_warns_for_missing_records() -> N
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "repository": str(repo),
@@ -80,6 +81,7 @@ def test_launch_session_record_report_attached_roles_without_fresh_record_warnin
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "repository": str(repo),
@@ -141,6 +143,7 @@ def test_launch_project_reports_running_attach_or_start_panes_as_attached() -> N
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "repository": str(repo),
@@ -209,6 +212,7 @@ def test_launch_project_warns_when_session_exists_but_pane_is_not_live() -> None
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "repository": str(repo),
@@ -268,6 +272,7 @@ def test_running_project_roles_rejects_dead_pane_in_live_tmux_session() -> None:
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "pgu860",
                     "layout": str(layout),
                     "repository": str(tmp_path),
@@ -342,6 +347,7 @@ def test_launch_session_record_report_names_recent_resume_fallback() -> None:
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "repository": str(repo),
@@ -396,6 +402,7 @@ def test_launch_session_record_report_names_recent_unverified_resume_timeout() -
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "repository": str(repo),
@@ -448,6 +455,7 @@ def test_launch_session_record_report_ignores_stale_unverified_resume_timeout() 
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "repository": str(repo),
@@ -500,6 +508,7 @@ def test_launch_session_record_statuses_treat_unverified_resume_as_reported_outc
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "repository": str(repo),
@@ -553,6 +562,7 @@ def test_launch_session_record_report_aggregates_expected_idle_codex_startup_war
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "repository": str(repo),
@@ -606,6 +616,7 @@ def test_launch_session_record_report_aggregates_codex_warning_with_existing_rec
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "repository": str(repo),
@@ -662,6 +673,7 @@ def test_launch_session_record_report_warns_when_codex_runtime_hook_never_report
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "repository": str(repo),
@@ -712,6 +724,7 @@ def test_launch_session_record_statuses_wait_for_codex_runtime_hook_after_launch
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "repository": str(repo),

@@ -116,6 +116,7 @@ def test_project_entry_readers_skip_invalid_slugs_with_warning() -> None:
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "bad-project",
                     "layout": str(layout),
                     "roles": [{"role": "director", "slot": 0, "cli": ["claude"], "workdir": str(tmp_path)}],
@@ -172,6 +173,7 @@ def test_switchyard_registry_registers_pointer_and_survives_checkout_clean() -> 
         pgu_config.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "pgu",
                     "layout": str(layout),
                     "roles": [{"role": "director", "slot": 0, "cli": ["claude"], "workdir": str(tmp_path / "pgu")}],
@@ -184,6 +186,7 @@ def test_switchyard_registry_registers_pointer_and_survives_checkout_clean() -> 
         otto_config.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "otto",
                     "project_name": "Otto System",
                     "layout": str(layout),
@@ -234,6 +237,7 @@ def test_switchyard_register_skips_the_config_file_being_registered() -> None:
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "pgu",
                     "project_name": "pgu",
                     "layout": str(layout),
@@ -259,6 +263,7 @@ def test_switchyard_register_rejects_dashed_slug() -> None:
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "bad-project",
                     "project_name": "Bad Project",
                     "layout": str(layout),
@@ -302,6 +307,7 @@ def test_switchyard_register_rejects_duplicate_slug_without_overwriting_pointer(
         duplicate_config.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "otto",
                     "project_name": "Different Otto",
                     "layout": str(layout),
@@ -345,6 +351,7 @@ def test_switchyard_register_refuses_existing_unparseable_registry_pointer() -> 
             config_path.write_text(
                 json.dumps(
                     {
+                        "desktop_access": {"mode": "headless"},
                         "project": "otto",
                         "project_name": "Otto New",
                         "layout": str(layout),
@@ -391,6 +398,7 @@ def test_switchyard_register_rejects_duplicate_project_name_without_writing_poin
         duplicate_config.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "atlas",
                     "project_name": "Otto Scheduler",
                     "layout": str(layout),
@@ -426,6 +434,7 @@ def test_switchyard_new_rejects_config_dir_project_slug_before_mutating() -> Non
         (config_dir / "pgu.json").write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "pgu",
                     "project_name": "pgu",
                     "layout": str(layout),
@@ -440,6 +449,7 @@ def test_switchyard_new_rejects_config_dir_project_slug_before_mutating() -> Non
 
         try:
             switchyard_new_command(
+                desktop_policy=Path("headless"),
                 slug="pgu",
                 agent_name="pgu2",
                 project_name="PGU Two",
@@ -489,6 +499,7 @@ def test_switchyard_new_rejects_duplicate_slug_before_mutating() -> None:
 
         try:
             switchyard_new_command(
+                desktop_policy=Path("headless"),
                 slug="otto",
                 agent_name="atlas",
                 project_name="Atlas",
@@ -535,6 +546,7 @@ def test_switchyard_new_rejects_duplicate_project_name_before_mutating() -> None
 
         try:
             switchyard_new_command(
+                desktop_policy=Path("headless"),
                 slug="atlas",
                 agent_name="atlas",
                 project_name="Otto Scheduler",

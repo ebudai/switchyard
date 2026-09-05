@@ -151,6 +151,7 @@ def test_switchyard_new_from_artifact_initializes_repo_on_configured_worktree_br
             with redirect_stdout(StringIO()):
                 assert (
                     switchyard_new_command(
+                        desktop_policy=Path("headless"),
                         from_artifact=artifact_path,
                         source_repo=source_repo,
                         output_dir=output_dir,
@@ -341,6 +342,7 @@ def test_switchyard_new_no_git_init_skips_and_refuses_absent_repo() -> None:
 
             try:
                 switchyard_new_command(
+                    desktop_policy=Path("headless"),
                     slug="porter",
                     agent_name=current_user,
                     project_name="Porter System",
@@ -421,6 +423,7 @@ def test_switchyard_new_validates_models_before_launching_panes() -> None:
                 (provision_dir / f"{project}.json").write_text(
                     json.dumps(
                         {
+                            "desktop_access": {"mode": "headless"},
                             "project": project,
                             "project_name": "Porter System",
                             "layout": str(layout),
@@ -464,6 +467,7 @@ def test_switchyard_new_validates_models_before_launching_panes() -> None:
             runner.login_seen.add("codex")
 
             result = switchyard_new_command(
+                desktop_policy=Path("headless"),
                 slug="porter",
                 agent_name="porter-agent",
                 project_name="Porter System",
@@ -576,6 +580,7 @@ def test_switchyard_new_missing_owner_clis_stops_before_launching_panes() -> Non
                 (provision_dir / f"{project}.json").write_text(
                     json.dumps(
                         {
+                            "desktop_access": {"mode": "headless"},
                             "project": project,
                             "project_name": "Test",
                             "layout": str(layout),
@@ -617,6 +622,7 @@ def test_switchyard_new_missing_owner_clis_stops_before_launching_panes() -> Non
             runner = FirstRunAuthRunner(missing_clis={"claude", "codex"})
 
             result = switchyard_new_command(
+                desktop_policy=Path("headless"),
                 slug="test",
                 agent_name="test-agent",
                 project_name="Test",
@@ -726,6 +732,7 @@ def test_switchyard_new_reports_existing_owner_with_broken_shell_without_repairi
                 (provision_dir / f"{project}.json").write_text(
                     json.dumps(
                         {
+                            "desktop_access": {"mode": "headless"},
                             "project": project,
                             "project_name": "Test",
                             "layout": str(layout),
@@ -774,6 +781,7 @@ def test_switchyard_new_reports_existing_owner_with_broken_shell_without_repairi
             runner.login_seen.add("codex")
 
             result = switchyard_new_command(
+                desktop_policy=Path("headless"),
                 slug="test",
                 agent_name="test-agent",
                 project_name="Test",

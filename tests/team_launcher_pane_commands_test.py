@@ -39,7 +39,7 @@ def test_dry_run_materializes_pgu_layout_with_six_visible_role_commands() -> Non
         assert not any(" perf " in f" {command} " for command in commands)
 
 def test_pane_command_sudos_to_configured_owner_when_launcher_user_differs() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "ops")
     original_current_user_name = team_launcher.current_user_name
     try:
@@ -70,7 +70,7 @@ def test_pane_command_sudos_to_configured_owner_when_launcher_user_differs() -> 
     ]
 
 def test_pane_command_does_not_sudo_when_already_owner() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "ops")
     original_current_user_name = team_launcher.current_user_name
     try:
@@ -102,6 +102,7 @@ def test_visible_layout_command_stays_owner_wrapped_without_forcing_pane_state_d
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "run_as_user": "porter-agent",
                     "layout": str(layout),
@@ -237,6 +238,7 @@ def test_launch_project_uses_configured_owner_readable_pane_launcher() -> None:
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "pane_launcher": str(owner_launcher),
@@ -297,6 +299,7 @@ def test_launch_project_probes_pane_launcher_as_owner_without_control_repository
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "pane_launcher": str(owner_launcher),
@@ -346,6 +349,7 @@ def test_launch_project_probes_pane_launcher_as_owner_without_repository() -> No
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "pane_launcher": str(owner_launcher),
@@ -394,6 +398,7 @@ def test_launch_project_refuses_missing_configured_pane_launcher() -> None:
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "pane_launcher": str(owner_launcher),

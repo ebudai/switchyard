@@ -6,7 +6,7 @@ from __future__ import annotations
 from team_launcher_test_helpers import *
 
 def test_visible_start_fails_before_attach_when_cli_exits_immediately() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "ops")
 
     class DeadFreshRunner:
@@ -51,7 +51,7 @@ def test_visible_start_fails_before_attach_when_cli_exits_immediately() -> None:
     assert "role ops did not leave a live pgu-ops session" in stderr.getvalue()
 
 def test_clear_session_record_preserves_superseded_history_after_second_fallback() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "ops")
 
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
@@ -90,7 +90,7 @@ def test_clear_session_record_preserves_superseded_history_after_second_fallback
         assert json.loads(previous_sidecar_path.read_text(encoding="utf-8"))["session_id"] == first_session_id
 
 def test_start_seeds_initial_idle_state_for_codex_agy_and_claude_panes() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     roles = {role.role: role for role in config.roles}
     expected_cli_by_role = {
         "ops": "codex",
@@ -126,7 +126,7 @@ def test_start_seeds_initial_idle_state_for_codex_agy_and_claude_panes() -> None
 def test_start_resumes_recorded_session_when_recreating_missing_pane() -> None:
     # start (attach-or-start) must resume a tracked session id when relaunching a
     # stopped pane -- resume is not reload-only. A cold restart uses start mode.
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "ops")
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
         session_dir = Path(tmp)
@@ -165,7 +165,7 @@ def test_start_resumes_recorded_session_when_recreating_missing_pane() -> None:
     assert runner.calls[-1] == ["tmux", "attach", "-t", "pgu-ops"]
 
 def test_seed_session_dir_from_legacy_sources_copies_valid_records_once() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     roles = {role.role: role for role in config.roles}
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:
         tmp_path = Path(tmp)
@@ -204,7 +204,7 @@ def test_seed_session_dir_from_legacy_sources_copies_valid_records_once() -> Non
         assert session_id_for_role(roles["main"], durable) == ""
 
 def test_start_resumes_from_durable_session_dir_after_runtime_tmpfs_is_cleared() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     role = next(role for role in config.roles if role.role == "ops")
     runner = FakeRunner(current_commands={"pgu-ops:0.0": "codex"})
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:

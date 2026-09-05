@@ -286,6 +286,7 @@ class RoleConfig:
     fresh_session_per_ticket: bool
     live_commands: list[str]
     env: dict[str, str]
+    unset_env: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -307,6 +308,7 @@ class ProjectConfig:
     worktree_remote: str
     worktree_branch: str
     roles: list[RoleConfig]
+    desktop_access: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -1655,6 +1657,7 @@ def load_project_config(project: str, config_path: Path | None = None) -> Projec
         worktree_remote=worktree_remote,
         worktree_branch=worktree_branch,
         roles=roles,
+        desktop_access=config.get("desktop_access"),
     )
     boundary_error = _control_repository_boundary_error(parsed_config, require_existing_user=False)
     if boundary_error is not None:
@@ -2484,7 +2487,7 @@ def cli_command_for_role(
         env.get("PATH") or default_pane_base_path(bin_user),
         default_user_bin_dirs(bin_user),
     )
-    return ["env", *_env_unset_prefix(PANE_TARGET_ENV_KEYS), *_env_prefix(env), *command]
+    return ["env", *_env_unset_prefix((*PANE_TARGET_ENV_KEYS, *role.unset_env)), *_env_prefix(env), *command]
 
 
 def tmux_new_session_args(
@@ -4079,6 +4082,17 @@ def _start_role_session(
     return 0
 
 
+def desktop_reload_is_safe(role: RoleConfig, pane_state_dir: Path) -> bool:
+    if not role.unset_env:
+        return True
+    from scripts.ticket_board.notify_listener import PaneActivityGate, PaneHookStateStore
+    gate = PaneActivityGate(state_store=PaneHookStateStore(pane_state_dir))
+    if gate.is_busy(role.target):
+        print(f"switchyard: {role.target} is busy; wait for an idle checkpoint before reloading desktop environment", file=sys.stderr)
+        return False
+    return True
+
+
 def run_role_pane(
     role: RoleConfig,
     *,
@@ -4100,6 +4114,8 @@ def run_role_pane(
         print(conflict, file=sys.stderr)
         return 1
     if mode == "reload":
+        if exists and not desktop_reload_is_safe(role, pane_state_dir):
+            return 1
         if exists:
             if not force_reload and not live_command_matches_role(role, runner=runner):
                 print(
@@ -4162,6 +4178,8 @@ def run_detached_role(
         print(conflict, file=sys.stderr)
         return 1
     if mode == "reload":
+        if exists and not desktop_reload_is_safe(role, pane_state_dir):
+            return 1
         if exists:
             if not force_reload and not live_command_matches_role(role, runner=runner):
                 print(
@@ -4220,6 +4238,8 @@ def ensure_visible_role_session_for_viewer(
         print(conflict, file=sys.stderr)
         return 1
     if mode == "reload":
+        if exists and not desktop_reload_is_safe(role, pane_state_dir):
+            return 1
         if exists:
             if not force_reload and not live_command_matches_role(role, runner=runner):
                 print(
@@ -5112,6 +5132,78 @@ def sync_reload_config_to_live_sessions(
     return replace(config, roles=updated_roles)
 
 
+DESKTOP_ENV_KEYS = ("DISPLAY", "XAUTHORITY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")
+
+
+def prepare_project_desktop(config: ProjectConfig, *, install: bool = False,
+                            helper: Path | None = None,
+                            runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run) -> ProjectConfig:
+    from scripts import desktop_access as desktop
+    tenant = config.run_as_user or current_user_name()
+    try:
+        policy = desktop.validate_policy(config.desktop_access, project=config.project, tenant=tenant)
+        env: dict[str, str] = {}
+        if policy["mode"] == "wayland":
+            helper = helper or Path(__file__).resolve().with_name("desktop_access.py")
+            if install:
+                desktop.install(policy, helper=helper)
+            # Invoke the verifier with the tenant's actual uid, never a GUI runtime
+            # masquerading as the tenant. The protected GUI receipt is authoritative.
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as stream:
+                json.dump(policy, stream)
+                stream.flush()
+                os.chmod(stream.name, 0o644)
+                args = [sys.executable, str(helper), "verify", stream.name]
+                result = runner(_owner_command_args(tenant, args), text=True, capture_output=True)
+            if result.returncode:
+                raise desktop.DesktopAccessError(str(result.stderr).strip())
+            env = json.loads(result.stdout)
+        roles = [replace(role,
+                         env={**{k:v for k,v in role.env.items() if k not in DESKTOP_ENV_KEYS}, **env},
+                         unset_env=DESKTOP_ENV_KEYS) for role in config.roles]
+        return replace(config, desktop_access=policy, roles=roles)
+    except (desktop.DesktopAccessError, OSError, ValueError) as exc:
+        raise SystemExit(f"switchyard: desktop setup incomplete before launch: {exc}") from exc
+
+
+def configure_project_desktop(config: ProjectConfig, *, config_path: Path,
+                              policy_path: Path | None = None, dry_run: bool = False,
+                              helper: Path | None = None,
+                              runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run) -> ProjectConfig:
+    from scripts import desktop_access as desktop
+    raw = ({"mode": "headless"} if str(policy_path) == "headless" else _load_json(policy_path)) if policy_path else config.desktop_access
+    try:
+        policy = desktop.validate_policy(raw, project=config.project, tenant=config.run_as_user or current_user_name())
+    except desktop.DesktopAccessError as exc:
+        raise SystemExit(f"switchyard: {exc}") from exc
+    if dry_run:
+        print(f"switchyard: desktop policy for {config.project}: {json.dumps(policy, sort_keys=True)}; no access changed")
+        return config
+    # Complete privileged setup and tenant readiness before persisting the launch
+    # choice; failures leave the previous project config intact.
+    previous = (desktop.validate_policy(config.desktop_access, project=config.project, tenant=config.run_as_user or current_user_name())
+                if config.desktop_access is not None else None)
+    if previous and previous.get("mode") == "wayland" and previous != policy:
+        desktop.uninstall(previous)
+    installed_new = False
+    try:
+        if policy["mode"] == "wayland":
+            desktop.install(policy, helper=helper or Path(__file__).resolve().with_name("desktop_access.py"))
+            installed_new = previous != policy
+        configured = prepare_project_desktop(replace(config, desktop_access=policy), runner=runner)
+        payload = _load_json(config_path)
+        payload["desktop_access"] = policy
+        _write_json_atomic(config_path, payload)
+        _write_json_atomic(config_path.parent / "desktop-policy.json", policy)
+        return configured
+    except (Exception, SystemExit):
+        if installed_new:
+            desktop.uninstall(policy)
+        if previous and previous.get("mode") == "wayland" and previous != policy:
+            desktop.install(previous, helper=helper or Path(__file__).resolve().with_name("desktop_access.py"))
+        raise
+
+
 def launch_project(
     config: ProjectConfig,
     *,
@@ -5161,6 +5253,8 @@ def launch_project(
         if upgrade_result.changed:
             print_func(upgrade_result.message)
             config = load_project_config(config.project, config_path)
+    if not dry_run and mode != "attach":
+        config = prepare_project_desktop(config, runner=runner)
     if not dry_run:
         pane_script_path = _verify_pane_launcher_path(config, script_path=script_path, runner=worktree_runner)
     failed_roles: dict[str, str] = {}
@@ -5205,6 +5299,7 @@ def launch_project(
         elif mode == "reload":
             fetch_project_worktree_ref(config, runner=worktree_runner)
             config = sync_reload_config_to_live_sessions(config, config_path=config_path, runner=runner)
+            config = prepare_project_desktop(config, runner=runner)
     materialize_layout(
         config,
         config_path=config_path,
@@ -5892,6 +5987,12 @@ def write_new_project_launcher_artifacts(
         + "\n",
         encoding="utf-8",
     )
+    policy_file = output_dir / "desktop-policy.json"
+    if policy_file.exists():
+        from scripts.desktop_access import validate_policy
+        payload = _load_json(config_path)
+        payload["desktop_access"] = validate_policy(_load_json(policy_file), project=plan.project, tenant=plan.owner_user)
+        _write_json_atomic(config_path, payload)
     return config_path
 
 
@@ -6539,6 +6640,7 @@ def new_project_command(
     *,
     from_artifact: Path | None = None,
     owner_user: str | None = None,
+    desktop_policy: Path | None = None,
     port: int | None = None,
     database: str | None = None,
     source_repo: Path | None = None,
@@ -6622,6 +6724,12 @@ def new_project_command(
         require_owner_user=execute if require_owner_user is None else require_owner_user,
     )
     artifact_dir = (output_dir or _new_project_artifact_dir(plan.project)).expanduser().resolve(strict=False)
+    if desktop_policy is not None:
+        from scripts.desktop_access import validate_policy
+        selected = {"mode": "headless"} if str(desktop_policy) == "headless" else _load_json(desktop_policy)
+        selected = validate_policy(selected, project=plan.project, tenant=plan.owner_user)
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        _write_json_atomic(artifact_dir / "desktop-policy.json", selected)
     write_artifacts(plan, artifact_dir, enable_owner_linger=enable_owner_linger)
     config_path = write_new_project_launcher_artifacts(
         plan,
@@ -6663,6 +6771,10 @@ def new_project_command(
     result = runner(["bash", str(commands_path)], cwd=str(artifact_dir))
     if result.returncode != 0:
         raise SystemExit(f"team-launcher: provisioning failed with exit status {result.returncode}")
+    config = load_project_config(plan.project, config_path)
+    if config.desktop_access is not None:
+        configure_project_desktop(config, config_path=config_path,
+            helper=effective_source_repo / "scripts/desktop_access.py", runner=runner)
     print_func(f"team-launcher: provisioned {plan.project}; launcher config {config_path}")
     return 0
 
@@ -8135,6 +8247,21 @@ def run_first_run_auth_phase(
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     print_func: Callable[[str], None] = print,
 ) -> FirstRunAuthReport:
+    if config.desktop_access is not None:
+        config = prepare_project_desktop(config, runner=runner)
+        desktop_env = {k:v for k,v in config.roles[0].env.items() if k in DESKTOP_ENV_KEYS}
+        base_runner = runner
+        def runner(args, **kwargs):
+            args = list(args)
+            if "env" in args:
+                position = args.index("env") + 1
+                args[position:position] = [*_env_unset_prefix(DESKTOP_ENV_KEYS), *_env_prefix(desktop_env)]
+            environment = dict(kwargs.get("env", os.environ))
+            for key in DESKTOP_ENV_KEYS:
+                environment.pop(key, None)
+            environment.update(desktop_env)
+            kwargs["env"] = environment
+            return base_runner(args, **kwargs)
     effective_owner = (owner_user or config.run_as_user or current_user_name()).strip()
     if not effective_owner:
         return FirstRunAuthReport({}, [])
@@ -9189,6 +9316,7 @@ def switchyard_new_command(
     database: str | None = None,
     role_clis: Sequence[tuple[str, str]] | None = None,
     yes: bool = False,
+    desktop_policy: Path | None = None,
     allow_existing_owner_user: bool = False,
     home_base: Path = Path("/home"),
     euid_getter: Callable[[], int] = os.geteuid,
@@ -9243,6 +9371,20 @@ def switchyard_new_command(
         include_designer = True
         include_audit = True
         selected_audit_roles = ("audit",)
+    if desktop_policy is None:
+        if yes:
+            raise SystemExit("switchyard: --yes does not grant desktop access; provide --desktop-policy FILE (explicit headless or approved Wayland policy)")
+        choice = input_func("Desktop policy file, or 'headless' for no clipboard: ").strip()
+        if choice == "headless":
+            selected_desktop_policy = {"mode": "headless"}
+        elif choice:
+            selected_desktop_policy = _load_json(Path(choice).expanduser())
+        else:
+            raise SystemExit("switchyard: choose a desktop policy before provisioning")
+    else:
+        selected_desktop_policy = {"mode": "headless"} if str(desktop_policy) == "headless" else _load_json(desktop_policy)
+    from scripts.desktop_access import validate_policy
+    selected_desktop_policy = validate_policy(selected_desktop_policy, project=resolved_slug, tenant=owner_user)
     _check_switchyard_registration_available(
         slug=resolved_slug,
         name=resolved_project_name,
@@ -9436,6 +9578,8 @@ def switchyard_new_command(
             )
 
     provision_dir = (output_dir or (_switchyard_dir(project_dir) / "provision")).expanduser().resolve(strict=False)
+    provision_dir.mkdir(parents=True, exist_ok=True)
+    _write_json_atomic(provision_dir / "desktop-policy.json", selected_desktop_policy)
     result = new_project_command(
         resolved_slug,
         from_artifact=artifact_path,
@@ -9462,6 +9606,7 @@ def switchyard_new_command(
     )
     config_path = provision_dir / f"{resolved_slug}.json"
     config = load_project_config(resolved_slug, config_path)
+    config = prepare_project_desktop(config, runner=runner)
     _register_switchyard_project(config_path, registry_dir=registry_dir)
     _prepare_first_run_auth_worktrees(config, runner=runner)
     first_run_auth_report = run_first_run_auth_phase(
@@ -9541,12 +9686,16 @@ def upgrade_project_command(
     *,
     config_path: Path,
     dry_run: bool = False,
+    desktop_policy: Path | None = None,
     source_repo: Path | None = None,
     deploy_ref: str = DEFAULT_TENANT_RELEASE_DEPLOY_REF,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     print_func: Callable[[str], None] = print,
 ) -> int:
     effective_source_repo = (source_repo or _repo_root()).expanduser().resolve(strict=False)
+    if desktop_policy is not None or config.desktop_access is not None:
+        config = configure_project_desktop(config, config_path=config_path, policy_path=desktop_policy,
+            dry_run=dry_run, helper=effective_source_repo / "scripts/desktop_access.py", runner=runner)
     release_report_config = config
     warn_if_artifact_source_checkout_is_stale(
         config,
@@ -10466,6 +10615,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow-stale-launcher", action="store_true", help="emergency override: warn but proceed when the launcher checkout is provably stale")
     parser.add_argument("--no-launcher-self-deploy", action="store_true", help="restore refuse-only behavior instead of automatically fast-forwarding a stale launcher checkout")
     parser.add_argument("--skip-launcher-check", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--desktop-policy", type=Path, help="approved Wayland JSON policy or headless; installed before launch")
     return parser
 
 
@@ -10497,6 +10647,7 @@ def _build_switchyard_new_parser() -> argparse.ArgumentParser:
         default=LAYOUT_MODE_AUTO,
         help="window layout mode: auto detects the invoking desktop, separate keeps the KDE/Konsole path, viewer forces the tmux viewer",
     )
+    parser.add_argument("--desktop-policy", type=Path, help="headless, or a JSON file recording scoped Wayland consent; installed before role launch")
     return parser
 
 
@@ -10512,6 +10663,7 @@ def _build_switchyard_upgrade_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true", help="report what would change without writing files")
     parser.add_argument("--deploy-ref", default=DEFAULT_TENANT_RELEASE_DEPLOY_REF, help="board release ref to deploy (default: origin/main)")
     parser.add_argument("--source-repo", type=Path, help="Switchyard source checkout or exported release to deploy")
+    parser.add_argument("--desktop-policy", type=Path, help="headless, or a JSON file recording scoped Wayland consent; installed before role launch")
     return parser
 
 
@@ -10723,6 +10875,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             port=args.port,
             database=args.database,
             yes=args.yes,
+            desktop_policy=args.desktop_policy,
             allow_existing_owner_user=args.allow_existing_owner_user,
             layout_mode=args.layout,
             git_init=not args.no_git_init,
@@ -10740,6 +10893,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run,
             source_repo=args.source_repo,
             deploy_ref=args.deploy_ref,
+            desktop_policy=args.desktop_policy,
         )
     if argv[0].casefold() == "add-role":
         args = _build_switchyard_add_role_parser().parse_args(argv[1:])
@@ -10802,6 +10956,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
     # Model validation intentionally runs only for `switchyard new` and the
     # explicit validate-models command. It performs provider API calls, so a
     # routine team start should not depend on provider availability.
+    config = prepare_project_desktop(config)
     first_run_auth_report = run_switchyard_launch_first_run_auth(config)
     if stop_before_launch_for_missing_owner_clis(first_run_auth_report):
         return 1
@@ -10859,6 +11014,7 @@ def main(argv: list[str] | None = None) -> int:
             args.project,
             from_artifact=args.from_artifact,
             owner_user=args.owner_user,
+            desktop_policy=args.desktop_policy,
             port=args.port,
             database=args.database,
             source_repo=args.source_repo,
@@ -10892,6 +11048,7 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run,
             source_repo=args.source_repo,
             deploy_ref=args.deploy_ref,
+            desktop_policy=args.desktop_policy,
         )
     if args.command == "add-role":
         if not args.pane_mode or args.role:
@@ -10944,6 +11101,8 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit("pane mode requires <start|attach|attach-or-start|reload|attach-role|detach-role> and <role>")
         if args.pane_mode not in {"start", "attach", "attach-or-start", "reload", "attach-role", "detach-role"}:
             raise SystemExit(f"unknown pane mode: {args.pane_mode}")
+        if args.pane_mode not in {"attach", "detach-role"}:
+            config = prepare_project_desktop(config)
         role = _role_by_name(config, args.role)
         pane_state_dir = args.pane_state_dir or default_pane_state_dir_for_user(config.run_as_user, project=config.project)
         if config.run_as_user and current_user_name() != config.run_as_user:

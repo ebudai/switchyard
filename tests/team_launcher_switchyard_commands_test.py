@@ -172,6 +172,7 @@ def test_switchyard_project_name_argv_joins_and_resumes_matching_project() -> No
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "project_name": "My Project Name",
                     "layout": str(layout),
@@ -225,6 +226,7 @@ def test_switchyard_add_role_audit_flag_reaches_command() -> None:
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "mefp",
                     "layout": str(layout_path),
                     "roles": [{"role": "main", "slot": 0, "cli": ["codex"]}],
@@ -271,6 +273,7 @@ def test_team_launcher_add_role_audit_flag_reaches_command() -> None:
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "mefp",
                     "layout": str(layout_path),
                     "roles": [{"role": "main", "slot": 0, "cli": ["codex"]}],
@@ -336,6 +339,7 @@ def test_team_launcher_main_resolves_registered_project_for_pane_operations() ->
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "otto",
                     "project_name": "Otto System",
                     "layout": str(layout),
@@ -416,6 +420,7 @@ def test_team_launcher_main_resolves_registered_project_for_stop() -> None:
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "otto",
                     "project_name": "Otto System",
                     "layout": str(layout),
@@ -491,6 +496,7 @@ def test_team_launcher_main_prefers_checkout_config_before_registry_for_pgu() ->
             path.write_text(
                 json.dumps(
                     {
+                        "desktop_access": {"mode": "headless"},
                         "project": "pgu",
                         "layout": str(layout),
                         "roles": [{"role": role, "slot": 0, "cli": ["codex"], "workdir": str(workdir)}],
@@ -572,6 +578,7 @@ def test_main_start_and_reload_enable_session_record_report() -> None:
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
                     "roles": [{"role": "director", "slot": 0, "cli": ["claude"]}],
@@ -606,6 +613,7 @@ def test_switchyard_new_without_sudo_fails_before_writing() -> None:
 
         try:
             switchyard_new_command(
+                desktop_policy=Path("headless"),
                 slug="porter",
                 agent_name="otto-agent",
                 project_name="Porter System",
@@ -635,6 +643,7 @@ def test_switchyard_new_rejects_dashed_slug_before_mutating() -> None:
 
         try:
             switchyard_new_command(
+                desktop_policy=Path("headless"),
                 slug="otto-scheduler",
                 agent_name="otto-agent",
                 project_name="Otto Scheduler",

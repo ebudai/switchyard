@@ -165,6 +165,7 @@ def test_launcher_freshness_probe_uses_launcher_checkout_owner_for_generated_pro
             config_path.write_text(
                 json.dumps(
                     {
+                        "desktop_access": {"mode": "headless"},
                         "project": "otto",
                         "layout": str(layout),
                         "pane_launcher": str(pane_launcher),
@@ -260,7 +261,7 @@ def test_owner_correct_git_skips_command_without_target_path() -> None:
     assert "does not declare a target path" in str(result.stderr)
 
 def test_launcher_freshness_probe_skips_when_checkout_owner_is_unknown() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     launcher_repo = Path("/tmp/pgu-launcher-owner-unknown")
     calls: list[list[str]] = []
     original_getpwuid = team_launcher.pwd.getpwuid
@@ -329,7 +330,7 @@ def test_deploy_launcher_checkout_uses_launcher_checkout_owner() -> None:
         team_launcher.current_user_name = original_current_user_name
 
 def test_start_no_self_deploy_refuses_stale_launcher_checkout() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     calls: list[list[str]] = []
 
     def runner(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -371,7 +372,7 @@ def test_start_no_self_deploy_refuses_stale_launcher_checkout() -> None:
     ]
 
 def test_allow_stale_launcher_override_warns_and_continues_without_fast_forward() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     calls: list[list[str]] = []
 
     def runner(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -519,7 +520,7 @@ def test_auto_fast_forward_launcher_checkout_refuses_tracked_modifications() -> 
         assert (launcher_repo / "tracked.txt").read_text(encoding="utf-8") == "local edit\n"
 
 def test_undeterminable_launcher_checkout_warns_and_continues() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     calls: list[list[str]] = []
 
     def runner(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -537,7 +538,7 @@ def test_undeterminable_launcher_checkout_warns_and_continues() -> None:
     assert calls == [git_launcher_checkout_check_args(ROOT)]
 
 def test_deploy_launcher_checkout_updates_and_verifies_configured_ref() -> None:
-    config = load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json")
+    config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-deploy-current-owner.") as tmp:
         launcher_repo = Path(tmp) / "pgu"
         launcher_repo.mkdir()

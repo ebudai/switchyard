@@ -185,6 +185,7 @@ def test_switchyard_menu_lists_new_first_then_projects() -> None:
         (tmp_path / "porter.json").write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "project_name": "Porter System",
                     "layout": str(layout),
@@ -231,6 +232,7 @@ def test_switchyard_status_lists_registered_projects_from_process_snapshot() -> 
         pgu_config.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "pgu",
                     "project_name": "PGU",
                     "layout": str(layout),
@@ -248,6 +250,7 @@ def test_switchyard_status_lists_registered_projects_from_process_snapshot() -> 
         otto_config.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "otto",
                     "project_name": "Otto Scheduler",
                     "layout": str(layout),
@@ -266,6 +269,7 @@ def test_switchyard_status_lists_registered_projects_from_process_snapshot() -> 
         stopped_config.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "stopped",
                     "project_name": "Something Else",
                     "layout": str(layout),
@@ -335,6 +339,7 @@ def test_switchyard_status_json_reports_same_project_facts() -> None:
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "atlas",
                     "project_name": "Atlas",
                     "layout": str(layout),
@@ -443,6 +448,7 @@ def test_switchyard_status_ignores_tmux_server_new_session_argv_with_pane_target
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "atlas",
                     "project_name": "Atlas",
                     "layout": str(layout),
@@ -500,6 +506,7 @@ def test_switchyard_status_default_probe_uses_ps_without_root_or_tmux() -> None:
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "atlas",
                     "project_name": "Atlas",
                     "layout": str(layout),
@@ -592,6 +599,7 @@ def test_switchyard_status_reports_runtime_copy_staleness_without_fetching() -> 
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "otto",
                     "project_name": "Otto Scheduler",
                     "layout": str(layout),
@@ -829,6 +837,7 @@ def test_project_config_slug_validation_rejects_dash_and_normalizes_uppercase() 
         dashed.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "bad-project",
                     "layout": str(layout),
                     "roles": [{"role": "director", "slot": 0, "cli": ["claude"], "workdir": str(tmp_path)}],
@@ -841,6 +850,7 @@ def test_project_config_slug_validation_rejects_dash_and_normalizes_uppercase() 
         uppercase.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "OTTO",
                     "layout": str(layout),
                     "roles": [{"role": "director", "slot": 0, "cli": ["claude"], "workdir": str(tmp_path)}],
@@ -870,6 +880,7 @@ def test_project_config_default_path_normalizes_requested_slug() -> None:
         (config_dir / "pgu.json").write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "pgu",
                     "layout": str(layout),
                     "roles": [{"role": "director", "slot": 0, "cli": ["claude"], "workdir": str(tmp_path)}],

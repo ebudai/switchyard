@@ -539,6 +539,7 @@ def test_add_role_uses_project_pane_launcher_when_run_as_user_differs() -> None:
             config_path.write_text(
                 json.dumps(
                     {
+                        "desktop_access": {"mode": "headless"},
                         "project": "mefp",
                         "run_as_user": "porter-agent",
                         "layout": str(layout_path),
@@ -627,6 +628,7 @@ def test_add_role_can_recover_half_added_role_without_reappending_config() -> No
             config_path.write_text(
                 json.dumps(
                     {
+                        "desktop_access": {"mode": "headless"},
                         "project": "mefp",
                         "run_as_user": "porter-agent",
                         "layout": str(layout_path),

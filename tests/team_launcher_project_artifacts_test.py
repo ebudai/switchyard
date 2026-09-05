@@ -43,6 +43,7 @@ def test_switchyard_new_reports_project_specific_pane_state_dir_without_override
             process_launcher = RecordingProcessLauncher()
             assert (
                 switchyard_new_command(
+                    desktop_policy=Path("headless"),
                     slug="porter",
                     agent_name="otto-agent",
                     project_name="Porter System",
@@ -96,6 +97,7 @@ def test_switchyard_new_custom_project_path_sets_artifact_repository_and_pane_wo
 
         assert (
             switchyard_new_command(
+                desktop_policy=Path("headless"),
                 project_name="Otto Scheduler",
                 slug="otto",
                 agent_name="otto-agent",
@@ -191,6 +193,7 @@ def test_project_config_rejects_inline_upstream_report_token() -> None:
         config_path.write_text(
             json.dumps(
                 {
+                    "desktop_access": {"mode": "headless"},
                     "project": "mefp",
                     "layout": str(layout),
                     "repository": str(repo),
@@ -242,6 +245,7 @@ def test_switchyard_new_creates_absent_zeta_owner_with_linger_and_initial_artifa
         with redirect_stdout(stdout):
             assert (
                 switchyard_new_command(
+                    desktop_policy=Path("headless"),
                     slug="zeta",
                     agent_name="zeta-agent",
                     project_name="Zeta System",
@@ -307,6 +311,7 @@ def test_switchyard_new_missing_default_fish_falls_back_to_bash_shell() -> None:
             with redirect_stdout(stdout):
                 assert (
                     switchyard_new_command(
+                        desktop_policy=Path("headless"),
                         slug="zeta",
                         agent_name="zeta-agent",
                         project_name="Zeta System",
@@ -396,6 +401,7 @@ def test_switchyard_new_explicit_missing_owner_shell_fails_loudly() -> None:
 
             try:
                 switchyard_new_command(
+                    desktop_policy=Path("headless"),
                     from_artifact=artifact_path,
                     source_repo=source_repo,
                     output_dir=output_dir,
@@ -484,6 +490,7 @@ def test_switchyard_new_reuses_existing_owner_without_account_mutation() -> None
         with redirect_stdout(stdout):
             assert (
                 switchyard_new_command(
+                    desktop_policy=Path("headless"),
                     from_artifact=artifact_path,
                     source_repo=source_repo,
                     output_dir=output_dir,
@@ -523,6 +530,7 @@ def test_switchyard_new_unwritable_existing_project_path_refuses_before_mutating
         try:
             try:
                 switchyard_new_command(
+                    desktop_policy=Path("headless"),
                     project_name="Otto Scheduler",
                     slug="otto",
                     agent_name="otto-agent",

@@ -174,6 +174,7 @@ def test_launch_auto_upgrades_column_major_layout_before_materializing() -> None
                 layout_environ={"XDG_CURRENT_DESKTOP": "KDE"},
                 no_launcher_self_deploy=True,
                 allow_stale_launcher=True,
+                pane_state_dir=Path(tmp) / "pane-state",
                 konsole_process_launcher=process_launcher,
             )
             == 0
@@ -223,6 +224,7 @@ def test_konsole_window_title_uses_project_name_for_every_layout_leaf() -> None:
                 layout_environ={"XDG_CURRENT_DESKTOP": "KDE"},
                 no_launcher_self_deploy=True,
                 allow_stale_launcher=True,
+                pane_state_dir=Path(tmp) / "pane-state",
                 konsole_process_launcher=process_launcher,
             )
             == 0
@@ -267,6 +269,7 @@ def test_two_konsole_projects_get_distinct_window_titles() -> None:
                     layout_environ={"XDG_CURRENT_DESKTOP": "KDE"},
                     no_launcher_self_deploy=True,
                     allow_stale_launcher=True,
+                    pane_state_dir=tmp_path / project / "pane-state",
                     konsole_process_launcher=process_launcher,
                 )
                 == 0
@@ -290,6 +293,7 @@ def test_gnome_auto_layout_starts_with_tmux_viewer_without_konsole() -> None:
         config = load_project_config("otto", config_path)
         runner = FakeRunner()
         process_launcher = RecordingProcessLauncher()
+        pane_state_dir = Path(tmp) / "pane-state"
 
         assert (
             launch_project(
@@ -302,10 +306,15 @@ def test_gnome_auto_layout_starts_with_tmux_viewer_without_konsole() -> None:
                 layout_environ={"XDG_CURRENT_DESKTOP": "GNOME"},
                 no_launcher_self_deploy=True,
                 allow_stale_launcher=True,
+                pane_state_dir=pane_state_dir,
                 konsole_process_launcher=process_launcher,
             )
             == 0
         )
+
+        assert {path.name for path in pane_state_dir.iterdir()} == {
+            pane_state_file_name(f"otto-role{index}:0.0") for index in range(6)
+        }
 
     assert process_launcher.calls == []
     assert any(
@@ -720,6 +729,7 @@ def test_explicit_separate_layout_still_launches_konsole_when_desktop_is_undetec
                 layout_environ={"SUDO_USER": "eric", "XDG_CURRENT_DESKTOP": "", "KDE_FULL_SESSION": ""},
                 no_launcher_self_deploy=True,
                 allow_stale_launcher=True,
+                pane_state_dir=tmp_path / "pane-state",
                 konsole_process_launcher=process_launcher,
             )
             == 0

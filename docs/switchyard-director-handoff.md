@@ -197,11 +197,11 @@ leaves existing `PGU-NNN` references untouched.
 
 ## Operating Rules
 
-**Gate every move of Switchyard `main`.** The history is strictly linear, one
-commit per ticket, and merging is a fast-forward ref move. A stale branch does
-not conflict in that model; it silently drops everything that landed after its
-base. `git rev-list --count origin/main..HEAD` can still report one and does not
-detect the loss. Before every merge, require:
+**Gate every move of Switchyard `main`.** Since 2026-08-31 the history has been
+strictly linear and merging has been a fast-forward ref move. A stale branch
+does not conflict in that model; it silently drops everything that landed after
+its base. `git rev-list --count origin/main..HEAD` can still report one and does
+not detect the loss. Before every merge, require:
 
     git merge-base --is-ancestor main <sha>     # exit 0 only
 
@@ -266,10 +266,11 @@ does not relabel a returning ticket as new (PGU-912), and is not contradicted by
 a turn-end reminder (PGU-916).
 
 The marker expires after four hours, so a genuine stall behind a forgotten flag
-resurfaces. It clears when the awaited role acts by changing state or assignee,
-or explicitly calls `clear-awaiting-role`; a comment alone is not action. Never
-await your own role. The normal write path rejects it, and a same-actor marker
-written by another path would clear immediately under the ticket-activity rule.
+resurfaces. It clears on any state or assignee change, whoever makes it, and on
+any other ticket edit made by the awaited role; a comment alone is not action,
+and `clear-awaiting-role` always works. Never await your own role. The normal
+write path rejects it, and a same-actor marker written by another path would
+clear immediately under the ticket-activity rule.
 
 ## Known Post-Handoff Direction
 

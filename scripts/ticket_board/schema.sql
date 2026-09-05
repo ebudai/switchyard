@@ -3073,6 +3073,13 @@ BEGIN
                         ns.entered_current_state_at,
                         (p_idle_since_by_role ->> ticket_board.transition_target_role(t.state, t.assignee))::timestamptz
                       ) <= p_now
+                  -- await-role means the owner has explicitly handed this off.
+                  -- Do not tell that same owner they may be stuck while the wait is active.
+                  AND NOT ticket_board.ticket_awaiting_role_is_active(
+                      ns.awaiting_role,
+                      ns.awaiting_since_at,
+                      p_now
+                  )
                   AND NOT EXISTS (
                       SELECT 1
                       FROM ticket_board.ticket_blockers tb

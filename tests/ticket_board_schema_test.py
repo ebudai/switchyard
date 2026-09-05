@@ -650,8 +650,15 @@ def main() -> int:
     )
     assert "c.ts >= ns.last_activity_at" in idle_turn_end_comment_suppression_migration
     assert "- interval '5 minutes'" in idle_turn_end_comment_suppression_migration
+    idle_turn_end_awaiting_role_migration_text = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu916_idle_turn_end_awaiting_role_suppression.sql"
+    ).read_text(encoding="utf-8")
+    idle_turn_end_awaiting_role_migration = idle_turn_end_awaiting_role_migration_text.lower()
+    assert "ticket_board.ticket_awaiting_role_is_active" in idle_turn_end_awaiting_role_migration
+    assert "ns.awaiting_role" in idle_turn_end_awaiting_role_migration
+    assert "ns.awaiting_since_at" in idle_turn_end_awaiting_role_migration
     assert extract_function(schema, "notify_idle_turn_end_nudges") == extract_function(
-        idle_turn_end_comment_suppression_migration_text,
+        idle_turn_end_awaiting_role_migration_text,
         "notify_idle_turn_end_nudges",
     )
     awaiting_role_comment_touch_migration_text = (

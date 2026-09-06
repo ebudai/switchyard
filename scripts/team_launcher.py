@@ -2666,17 +2666,6 @@ def cli_command_for_role(
         "TICKET_BOARD_PANE_SESSION_DIR": str(session_dir.expanduser()),
     }
     env.update(hermes_env_for_role(role, session_dir=session_dir))
-    if _uses_hermes(role):
-        # Sourced by the ROLE's own shell, so the key is read from the role's
-        # private 0600 file by the account that owns it; nothing else can read
-        # it and it never passes through another account's environment.
-        command = [
-            "sh",
-            "-c",
-            f'. "$HOME/{HERMES_PROVIDER_ENV_RELATIVE_PATH}" && exec "$@"',
-            "switchyard-hermes",
-            *command,
-        ]
     if pane_state_dir is not None:
         env["TICKET_BOARD_PANE_STATE_DIR"] = str(pane_state_dir.expanduser())
     if session_id:
@@ -7402,6 +7391,26 @@ def new_project_command(
         print_func=print_func,
     )
     commands_path = artifact_dir / "operator-commands.sh"
+    # The complete role-isolation handoff -- accounts, ownership, runtime,
+    # tooling AND credential seeding -- is written beside the other artifacts, so
+    # an operator who follows the printed instruction once has everything. It
+    # used to be produced only by a later failed start, which meant doing exactly
+    # what provisioning said still left the credential gaps open (SYRD-39).
+    try:
+        handoff_config = load_project_config(plan.project, config_path)
+    except SystemExit:
+        handoff_config = None
+    if handoff_config is not None and role_isolation_gaps(handoff_config):
+        handoff_path = config_path.with_name(f"{plan.project}-role-accounts.sh")
+        try:
+            handoff_path.write_text(render_role_account_migration(handoff_config), encoding="utf-8")
+            handoff_path.chmod(0o755)
+            print_func(
+                f"team-launcher: roles are not isolated yet; run {handoff_path} as an operator "
+                "(safe to re-run) before starting them"
+            )
+        except OSError as exc:
+            print_func(f"team-launcher: could not write {handoff_path}: {exc}")
     if not execute:
         print_func(f"team-launcher: dry-run for {plan.project}; artifacts in {artifact_dir}")
         print_func(f"team-launcher: launcher config {config_path}")
@@ -9641,17 +9650,39 @@ def switchyard_seed_role_credentials_command(
                 f"switchyard: no credential allowlist for {cli_name or 'unknown cli'} used by "
                 f"{role.role}; refusing to guess what to copy"
             )
+        seeded_for_role = 0
         for artifact in artifacts:
             if seed_role_credential(
                 account=account,
                 owner_user=owner_user,
                 artifact=artifact,
+                target=_role_credential_target(config, role, artifact, home_base=home_base),
                 home_base=home_base,
                 reseed=reseed,
                 runner=runner,
                 print_func=print_func,
             ):
                 seeded += 1
+                seeded_for_role += 1
+        if not seeded_for_role and all(not artifact.required for artifact in artifacts):
+            # Nothing was copied. That is fine when the role already holds one
+            # of the alternatives -- this command is idempotent -- and a failure
+            # when it holds none, because the owner is then not authenticated
+            # for this CLI and the role must not start.
+            already_held = any(
+                not _credential_state(
+                    *_role_credential_target(config, role, artifact, home_base=home_base),
+                    account,
+                    private=True,
+                )
+                for artifact in artifacts
+            )
+            if not already_held:
+                raise SystemExit(
+                    f"switchyard: {owner_user} has none of "
+                    + ", ".join(artifact.relative_path for artifact in artifacts)
+                    + f"; authenticate {cli_name} as {owner_user} first"
+                )
     print_func(
         f"switchyard: seeded {seeded} credential file(s); every role now acts as the same "
         "model-provider account as the owner, and shares that account's quota, while keeping "
@@ -9761,9 +9792,12 @@ def _require_owner_traversable(dir_fd: int, owner_user: str, component: str, tar
         )
 
 
-# One private file holding the provider API keys hermes resolves from the
-# environment, as `KEY=value` lines. Owner-owned and 0600, seeded per role.
-HERMES_PROVIDER_ENV_RELATIVE_PATH = ".hermes/provider.env"
+# Hermes reads provider keys from its own home. The owner's authenticated state
+# lives in ~/.hermes; a role reads the same two files from the per-role
+# HERMES_HOME the launcher already gives it, so nothing has to be injected into
+# the environment and no shell file is ever sourced (SYRD-39).
+HERMES_OWNER_CREDENTIAL_DIR = ".hermes"
+HERMES_CREDENTIAL_FILES = (".env", "auth.json")
 
 
 @dataclass(frozen=True)
@@ -9795,8 +9829,42 @@ ROLE_CREDENTIAL_ARTIFACTS: dict[str, tuple[RoleCredentialArtifact, ...]] = {
     # an ambient environment does not survive sudo -u into a separate account.
     # The owner therefore keeps its key in one private file, which is seeded
     # like any other credential and sourced by the role's own shell at start.
-    "hermes": (RoleCredentialArtifact("hermes", HERMES_PROVIDER_ENV_RELATIVE_PATH),),
+    # Targets are inside the role's own HERMES_HOME rather than its home root,
+    # so they are resolved per role rather than listed here.
+    "hermes": (
+        RoleCredentialArtifact("hermes", f"{HERMES_OWNER_CREDENTIAL_DIR}/.env", required=False),
+        RoleCredentialArtifact("hermes", f"{HERMES_OWNER_CREDENTIAL_DIR}/auth.json", required=False),
+    ),
 }
+
+
+def hermes_credential_target(config: ProjectConfig, role: RoleConfig, artifact: RoleCredentialArtifact) -> Path:
+    """Where a hermes role reads one credential from.
+
+    Its own HERMES_HOME, which the launcher already points it at, so the file is
+    read by hermes itself out of a directory the role owns. Nothing is injected
+    into the environment and no shell file is sourced.
+    """
+    base, relative = _role_credential_target(config, role, artifact)
+    return base / relative
+
+
+def validate_hermes_env_contents(text: str) -> str:
+    """Empty when the file is a plain KEY=value environment file.
+
+    Validated rather than trusted: this content ends up as provider credentials,
+    and accepting arbitrary shell would make seeding a way to run code.
+    """
+    for number, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        name, separator, _value = line.partition("=")
+        if not separator:
+            return f"line {number} is not KEY=value"
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name.strip()):
+            return f"line {number} does not name a valid environment variable"
+    return ""
 
 
 def role_credential_artifacts(role: RoleConfig) -> tuple[RoleCredentialArtifact, ...]:
@@ -9804,46 +9872,109 @@ def role_credential_artifacts(role: RoleConfig) -> tuple[RoleCredentialArtifact,
     return ROLE_CREDENTIAL_ARTIFACTS.get(cli_name, ())
 
 
-def _credential_state(path: Path, expected_user: str, *, private: bool) -> str:
-    """Empty when the file is safe to rely on, otherwise why it is not.
+def _walk_no_follow(base: Path, relative: Path) -> tuple[int, str]:
+    """Open `base/relative`'s parent by walking components with O_NOFOLLOW.
 
-    `is_file` was not enough: it follows symlinks and says nothing about who
-    owns the file or who else can read it, so a wrong-owner, group-readable,
-    world-readable or symlinked credential was treated as ready (SYRD-39).
+    Returns (dir_fd, problem). lstat on the leaf and its immediate parent was
+    not enough: an ancestor several levels up can be a symlink, and the whole
+    subtree then belongs to wherever it points (SYRD-39).
     """
     try:
-        info = path.lstat()
+        fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except FileNotFoundError:
-        return "missing"
+        return -1, "missing"
     except OSError as exc:
-        return f"unreadable ({exc.strerror})"
-    if stat.S_ISLNK(info.st_mode):
-        return "is a symlink; credentials must be private regular files"
-    if not stat.S_ISREG(info.st_mode):
-        return "is not a regular file"
+        return -1, f"cannot open {base} ({exc.strerror})"
+    for component in relative.parent.parts:
+        parent_fd_for_report = fd
+        try:
+            child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.EMLINK, errno.ENOTDIR):
+                # O_DIRECTORY|O_NOFOLLOW reports ENOTDIR for a symlinked
+                # directory on Linux and ELOOP elsewhere. Either way it is
+                # refused; name it accurately so the manifest is actionable.
+                # This is the ancestor case lstat on the leaf could not see.
+                try:
+                    kind = os.lstat(component, dir_fd=parent_fd_for_report)
+                    if stat.S_ISLNK(kind.st_mode):
+                        os.close(fd)
+                        return -1, f"ancestor {component} is a symlink"
+                except OSError:
+                    pass
+                os.close(fd)
+                return -1, f"ancestor {component} is not a directory"
+            os.close(fd)
+            if exc.errno == errno.ENOENT:
+                # Nothing there yet: absent, not unsafe.
+                return -1, "missing"
+            return -1, f"ancestor {component} is unusable ({exc.strerror})"
+        os.close(fd)
+        fd = child
+    return fd, ""
+
+
+def _credential_state(
+    base: Path,
+    relative: Path | str,
+    expected_user: str,
+    *,
+    private: bool,
+) -> str:
+    """Empty when the credential is safe to rely on, otherwise why it is not.
+
+    Every component from the home downwards is opened with O_NOFOLLOW, so a
+    symlinked ancestor is refused rather than silently followed, and the leaf is
+    inspected through that anchored descriptor rather than by path.
+    """
+    relative_path = Path(relative)
     expected_uid = uid_for_user(expected_user)
     if expected_uid is None:
         return f"cannot be checked: {expected_user} is not a local account"
-    if info.st_uid != expected_uid:
-        return f"is owned by uid {info.st_uid}, not {expected_user}"
-    if info.st_mode & 0o077:
-        return f"is readable beyond its owner (mode {oct(stat.S_IMODE(info.st_mode))})"
-    if private:
-        parent = path.parent
+    dir_fd, problem = _walk_no_follow(base, relative_path)
+    if problem:
+        return problem
+    try:
         try:
-            parent_info = parent.lstat()
+            info = os.stat(relative_path.name, dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return "missing"
         except OSError as exc:
-            return f"parent {parent} is unreadable ({exc.strerror})"
-        if stat.S_ISLNK(parent_info.st_mode):
-            return f"parent {parent} is a symlink"
-        if parent_info.st_uid != expected_uid:
-            return f"parent {parent} is owned by uid {parent_info.st_uid}, not {expected_user}"
-        if parent_info.st_mode & 0o077:
-            return (
-                f"parent {parent} is reachable beyond its owner "
-                f"(mode {oct(stat.S_IMODE(parent_info.st_mode))})"
-            )
+            return f"unreadable ({exc.strerror})"
+        if stat.S_ISLNK(info.st_mode):
+            return "is a symlink; credentials must be private regular files"
+        if not stat.S_ISREG(info.st_mode):
+            return "is not a regular file"
+        if info.st_uid != expected_uid:
+            return f"is owned by uid {info.st_uid}, not {expected_user}"
+        if info.st_mode & 0o077:
+            return f"is readable beyond its owner (mode {oct(stat.S_IMODE(info.st_mode))})"
+        if private:
+            parent = os.fstat(dir_fd)
+            if parent.st_uid != expected_uid:
+                return (
+                    f"its directory is owned by uid {parent.st_uid}, not {expected_user}"
+                )
+            if parent.st_mode & 0o077:
+                return (
+                    "its directory is reachable beyond its owner "
+                    f"(mode {oct(stat.S_IMODE(parent.st_mode))})"
+                )
+    finally:
+        os.close(dir_fd)
     return ""
+
+
+def _open_credential_source(base: Path, relative: Path | str) -> int:
+    """Open a credential for reading with every component anchored."""
+    relative_path = Path(relative)
+    dir_fd, problem = _walk_no_follow(base, relative_path)
+    if problem:
+        raise SystemExit(f"switchyard: cannot read {base / relative_path}: {problem}")
+    try:
+        return os.open(relative_path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 def _artifact_present(home: Path, artifact: RoleCredentialArtifact) -> bool:
@@ -9852,6 +9983,37 @@ def _artifact_present(home: Path, artifact: RoleCredentialArtifact) -> bool:
         return candidate.is_file()
     except OSError:
         return False
+
+
+def _role_credential_target(
+    config: ProjectConfig,
+    role: RoleConfig,
+    artifact: RoleCredentialArtifact,
+    *,
+    home_base: Path | None = None,
+) -> tuple[Path, Path]:
+    """(base, relative) for where a role reads one credential.
+
+    Most CLIs read from a fixed place under the role's home. Hermes reads from
+    the per-role HERMES_HOME the launcher already points it at, so its target is
+    resolved per role rather than assumed to mirror the owner's layout.
+    """
+    account = role_run_as_user(config, role)
+    role_home = (
+        home_base / account if home_base is not None else home_dir_for_user(account) or Path("/home") / account
+    )
+    if artifact.cli == "hermes":
+        # Always expressed relative to the role's home so every component is
+        # created and anchored under it, whatever base is in use.
+        session_relative = Path(".local/state") / f"{config.project}-ticket-board"
+        home_name = session_file_name(role.target).removesuffix(".json")
+        return role_home, (
+            session_relative
+            / "hermes-homes"
+            / home_name
+            / Path(artifact.relative_path).name
+        )
+    return role_home, Path(artifact.relative_path)
 
 
 def role_credential_manifest(config: ProjectConfig) -> list[str]:
@@ -9874,45 +10036,66 @@ def role_credential_manifest(config: ProjectConfig) -> list[str]:
         if not artifacts:
             lines.append(f"{role.role} ({cli_name or 'unknown cli'}): no known credential artifact")
             continue
+        optional_group = all(not artifact.required for artifact in artifacts)
+        satisfied = False
+        pending: list[str] = []
         for artifact in artifacts:
             if role_home is not None:
+                target_base, target_relative = _role_credential_target(config, role, artifact)
                 target_problem = _credential_state(
-                    role_home / artifact.relative_path, account, private=True
+                    target_base, target_relative, account, private=True
                 )
                 if not target_problem:
+                    satisfied = True
                     continue
                 if target_problem != "missing":
                     # Present but unsafe is worse than absent: say so instead of
                     # treating it as ready.
+                    # Present but unsafe is worse than absent, for an
+                    # alternative as much as a required artifact.
                     lines.append(
                         f"{role.role} ({cli_name}): {artifact.relative_path} in /home/{account} "
                         f"{target_problem}; reseed it with "
                         f"`switchyard seed-role-credentials {config.project} --role {role.role} --reseed`"
                     )
+                    satisfied = True
                     continue
             owner_problem = (
                 "missing"
                 if owner_home is None
-                else _credential_state(owner_home / artifact.relative_path, owner_user, private=False)
+                else _credential_state(owner_home, artifact.relative_path, owner_user, private=False)
             )
             if owner_problem:
-                lines.append(
+                if owner_problem == "missing" and optional_group:
+                    # One of several alternatives; only report if none exist.
+                    continue
+                pending.append(
                     f"{role.role} ({cli_name}): the owner's {artifact.relative_path} "
                     f"{owner_problem}, so it cannot be seeded; authenticate {cli_name} as "
                     f"{owner_user} first"
                 )
                 continue
-            lines.append(
+            pending.append(
                 f"{role.role} ({cli_name}): {artifact.relative_path} not yet seeded into "
                 f"/home/{account}"
             )
+        if optional_group and satisfied:
+            continue
+        if optional_group and not pending:
+            lines.append(
+                f"{role.role} ({cli_name}): the owner has none of "
+                + ", ".join(artifact.relative_path for artifact in artifacts)
+                + f"; authenticate {cli_name} as {owner_user} first"
+            )
+            continue
+        lines.extend(pending)
     return lines
 
 
 def _open_role_credential_parent(
     account: str,
-    home_base: Path,
-    relative_path: str,
+    base: Path,
+    relative_path: Path | str,
     *,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
 ) -> int:
@@ -9924,12 +10107,13 @@ def _open_role_credential_parent(
     and a component that already existed is proven to belong to the role rather
     than assumed to (SYRD-39).
     """
-    target_dir = home_base / account / str(Path(relative_path).parent)
-    fd = os.open(home_base, os.O_RDONLY | os.O_DIRECTORY)
+    relative = Path(relative_path)
+    target_dir = base / relative.parent
+    fd = os.open(base.parent, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        fd = _openat_no_follow(fd, account, target_dir)
-        _require_owner_home_traversable(fd, account, home_base / account)
-        for component in Path(relative_path).parent.parts:
+        fd = _openat_no_follow(fd, base.name, target_dir)
+        _require_owner_home_traversable(fd, account, base)
+        for component in relative.parent.parts:
             created = False
             try:
                 os.mkdir(component, 0o700, dir_fd=fd)
@@ -9971,6 +10155,7 @@ def seed_role_credential(
     account: str,
     owner_user: str,
     artifact: RoleCredentialArtifact,
+    target: tuple[Path, Path] | None = None,
     home_base: Path = Path("/home"),
     reseed: bool = False,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
@@ -9983,11 +10168,14 @@ def seed_role_credential(
     access does not touch another's. Returns False when the role already has it
     and reseed was not requested, which is what makes repair idempotent.
     """
-    target_name = Path(artifact.relative_path).name
     role_home = home_base / account
     owner_home = home_base / owner_user
+    target_base, target_relative = target or (role_home, Path(artifact.relative_path))
+    target_name = target_relative.name
     source_path = owner_home / artifact.relative_path
-    source_problem = _credential_state(source_path, owner_user, private=False)
+    source_problem = _credential_state(owner_home, artifact.relative_path, owner_user, private=False)
+    if source_problem == "missing" and not artifact.required:
+        return False
     if source_problem == "missing":
         raise SystemExit(
             f"switchyard: {owner_user} has no {artifact.relative_path} to seed for {account}; "
@@ -10000,8 +10188,21 @@ def seed_role_credential(
             f"switchyard: {owner_user}'s {artifact.relative_path} {source_problem}; refusing to "
             "seed it"
         )
-    dir_fd = _open_role_credential_parent(account, home_base, artifact.relative_path, runner=runner)
-    source_fd = os.open(source_path, os.O_RDONLY | os.O_NOFOLLOW)
+    if artifact.cli == "hermes" and target_relative.name == ".env":
+        problem = validate_hermes_env_contents(
+            source_path.read_text(encoding="utf-8", errors="replace")
+        )
+        if problem:
+            # Validated, not sourced: this content becomes provider credentials,
+            # and accepting arbitrary shell would make seeding a way to run code.
+            raise SystemExit(
+                f"switchyard: {owner_user}'s {artifact.relative_path} is not a plain "
+                f"KEY=value environment file ({problem}); refusing to seed it"
+            )
+    dir_fd = _open_role_credential_parent(
+        account, target_base, target_relative, runner=runner
+    )
+    source_fd = _open_credential_source(owner_home, artifact.relative_path)
     created_target = False
     try:
         flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | (os.O_TRUNC if reseed else os.O_EXCL)
@@ -11271,10 +11472,20 @@ def switchyard_new_command(
     # and the artifacts say what to run next (SYRD-39).
     pending_isolation = role_isolation_gaps(config)
     if pending_isolation:
+        # The complete handoff -- accounts, ownership, runtime, tooling AND
+        # credential seeding -- is written here, not left to a later failed
+        # start, so following the printed instruction once is enough to make the
+        # next start operable (SYRD-39).
+        handoff_path = config_path.with_name(f"{resolved_slug}-role-accounts.sh")
+        try:
+            handoff_path.write_text(render_role_account_migration(config), encoding="utf-8")
+            handoff_path.chmod(0o755)
+        except OSError as exc:
+            print_func(f"switchyard: could not write {handoff_path}: {exc}")
         print_func(
             f"switchyard: provisioned {resolved_slug}. Its roles are not isolated yet, so they "
             "were not started:\n  " + "\n  ".join(pending_isolation)
-            + f"\nRun the operator commands emitted for {resolved_slug}, then start it with "
+            + f"\nRun {handoff_path} as an operator (safe to re-run), then start it with "
             f"`switchyard {resolved_slug}`."
         )
         return 0

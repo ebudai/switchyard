@@ -1065,11 +1065,18 @@ def test_role_credentials_are_private_copies_of_an_allowlist_only() -> None:
             ".claude/.credentials.json",
             ".codex/auth.json",
             ".gemini/antigravity-cli/antigravity-oauth-token",
-            ".hermes/provider.env",
+            ".hermes/.env",
         ):
             path = owner_home / relative
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(f"secret for {relative}", encoding="utf-8")
+            # Hermes reads a plain KEY=value environment file; the others are
+            # opaque token blobs.
+            body = (
+                "OPENROUTER_API_KEY=secret\n"
+                if relative.endswith(".hermes/.env")
+                else f"secret for {relative}"
+            )
+            path.write_text(body, encoding="utf-8")
             path.chmod(0o600)
         for noise in (".claude/sessions/a.jsonl", ".codex/session_index.jsonl", ".claude/settings.json"):
             path = owner_home / noise
@@ -1104,24 +1111,39 @@ def test_role_credentials_are_private_copies_of_an_allowlist_only() -> None:
                 "director": ".claude/.credentials.json",
                 "ops": ".codex/auth.json",
                 "app": ".gemini/antigravity-cli/antigravity-oauth-token",
-                # Hermes resolves keys from the environment, and an ambient
-                # environment does not survive sudo -u into another account, so
-                # its key is a private file seeded like any other.
-                "perf": ".hermes/provider.env",
+                # Hermes reads its keys from its own HERMES_HOME, which the
+                # launcher already points the role at, so nothing is injected
+                # into the environment and no shell file is sourced.
+                "perf": ".hermes/.env",
             }
             for role_name, relative in expected.items():
-                seeded = home_base / f"porter-{role_name}" / relative
+                role = next(item for item in config.roles if item.role == role_name)
+                artifact = next(
+                    item
+                    for item in team_launcher.role_credential_artifacts(role)
+                    if item.relative_path.endswith(Path(relative).name)
+                )
+                base, target_relative = team_launcher._role_credential_target(
+                    config, role, artifact, home_base=home_base
+                )
+                seeded = base / target_relative
                 assert seeded.is_file(), (role_name, seeded)
                 assert not seeded.is_symlink(), role_name
                 assert stat.S_IMODE(seeded.stat().st_mode) == 0o600, (role_name, oct(seeded.stat().st_mode))
                 assert stat.S_IMODE(seeded.parent.stat().st_mode) == 0o700, (role_name, oct(seeded.parent.stat().st_mode))
-                assert seeded.read_text(encoding="utf-8") == f"secret for {relative}"
+                expected_body = (
+                    "OPENROUTER_API_KEY=secret\n"
+                    if relative.endswith(".hermes/.env")
+                    else f"secret for {relative}"
+                )
+                assert seeded.read_text(encoding="utf-8") == expected_body, role_name
 
             # Nothing outside the allowlist crossed over.
             for role_name in expected:
                 role_home = home_base / f"porter-{role_name}"
                 copied = {str(path.relative_to(role_home)) for path in role_home.rglob("*") if path.is_file()}
-                assert copied == {expected[role_name]}, (role_name, copied)
+                assert len(copied) == 1, (role_name, copied)
+                assert next(iter(copied)).endswith(Path(expected[role_name]).name), (role_name, copied)
 
             # Every copy is assigned to its own role, by file descriptor.
             assigned = {args[1] for args in chowns if args and args[0] == "chown"}
@@ -1168,7 +1190,11 @@ def test_missing_owner_credential_fails_closed_with_a_manifest() -> None:
         _fake_home(home_base, "porter-ops")
 
         original_home_dir_for_user = team_launcher.home_dir_for_user
+        original_uid_for_user_outer = team_launcher.uid_for_user
         team_launcher.home_dir_for_user = lambda user: home_base / user
+        # The fixture's accounts do not exist on the test host; the ownership
+        # check is still exercised, against a uid it can observe.
+        team_launcher.uid_for_user = lambda _user: os.getuid()
         try:
             manifest = team_launcher.role_credential_manifest(config)
             assert any(
@@ -1208,6 +1234,37 @@ def test_missing_owner_credential_fails_closed_with_a_manifest() -> None:
                 assert any("readable beyond its owner" in line for line in loose), loose
                 seeded.chmod(0o600)
                 assert team_launcher.role_credential_manifest(config) == []
+
+                # An ancestor symlink several levels up is refused. lstat on the
+                # leaf and its immediate parent could not see this: the whole
+                # subtree belongs to wherever the ancestor points (SYRD-39).
+                seeded.unlink()
+                seeded.parent.rmdir()
+                elsewhere = home_base / "elsewhere"
+                (elsewhere / "codex").mkdir(parents=True)
+                (elsewhere / "codex").chmod(0o700)
+                planted = elsewhere / "codex" / "auth.json"
+                planted.write_text("attacker", encoding="utf-8")
+                planted.chmod(0o600)
+                (role_home / ".codex").symlink_to(elsewhere / "codex")
+                via_symlink = team_launcher.role_credential_manifest(config)
+                assert any("ancestor .codex is a symlink" in line for line in via_symlink), via_symlink
+
+                # The same ancestor symlink is refused on the OWNER side, where
+                # the check was weaker still.
+                (role_home / ".codex").unlink()
+                owner_codex = owner_home / ".codex"
+                for child in list(owner_codex.iterdir()):
+                    child.unlink()
+                owner_codex.rmdir()
+                owner_codex.symlink_to(elsewhere / "codex")
+                owner_symlinked = team_launcher.role_credential_manifest(config)
+                assert any(
+                    "ancestor .codex is a symlink" in line for line in owner_symlinked
+                ), owner_symlinked
+                # Restore the fixture so the fail-closed assertion below sees
+                # the state it is about.
+                owner_codex.unlink()
             finally:
                 team_launcher.uid_for_user = original_uid_for_user
                 auth.unlink(missing_ok=True)
@@ -1221,6 +1278,7 @@ def test_missing_owner_credential_fails_closed_with_a_manifest() -> None:
                 raise AssertionError("seeding must fail closed when the owner has no credential")
         finally:
             team_launcher.home_dir_for_user = original_home_dir_for_user
+            team_launcher.uid_for_user = original_uid_for_user_outer
 
 
 def test_role_publishing_is_bound_to_the_role_and_cannot_use_its_own_git_config() -> None:
@@ -1251,13 +1309,22 @@ def test_role_publishing_is_bound_to_the_role_and_cannot_use_its_own_git_config(
         ):
             subprocess.run(args, check=True)
 
+        # The owner's own checkout is where the remote NAME resolves from; the
+        # role's checkout must never be consulted for it.
+        owner_checkout = tmp_path / "owner-repo"
+        subprocess.run(["git", "init", "-q", str(owner_checkout)], check=True)
+        subprocess.run(
+            ["git", "-C", str(owner_checkout), "remote", "add", "origin", str(origin)], check=True
+        )
+
         config_path = tmp_path / "porter.json"
         config_path.write_text(
             json.dumps(
                 {
                     "project": "porter",
                     "run_as_user": "porter-agent",
-                    "worktree_remote": str(origin),
+                    "worktree_remote": "origin",
+                    "repository": str(owner_checkout),
                     "roles": [
                         {
                             "role": "ops",
@@ -1334,6 +1401,104 @@ def test_role_publishing_is_bound_to_the_role_and_cannot_use_its_own_git_config(
         ).stdout
         assert "refs/heads/ops/topic" in listed, listed
         assert "refs/heads/main" not in listed, listed
+
+        # The project identifier is validated before any path is built: a
+        # traversal used to load a role-written document, and with it a
+        # role-chosen role mapping and remote (SYRD-39).
+        forged = tmp_path / "forged.json"
+        forged.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "worktree_remote": str(tmp_path / "attacker.git"),
+                    "roles": [{"role": "ops", "run_as_user": caller, "workdir": str(work)}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        traversal = subprocess.run(
+            [
+                sys.executable,
+                str(helper),
+                "--project",
+                f"../../{forged.parent.name}/forged",
+                "--ref",
+                "ops/topic",
+                "--bundle",
+                str(bundle),
+            ],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "SUDO_USER": caller, "HOME": str(tmp_path / "ownerhome")},
+        )
+        assert traversal.returncode != 0, traversal.stdout
+        assert "is not a valid project name" in traversal.stderr + traversal.stdout
+
+        # A configuration that does not claim to be this project is refused too.
+        mismatched = tmp_path / "mismatched.json"
+        mismatched.write_text(json.dumps({"project": "other", "roles": []}), encoding="utf-8")
+        wrong_identity = subprocess.run(
+            [sys.executable, str(helper), "--project", "porter", "--ref", "ops/topic", "--bundle", str(bundle)],
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "SUDO_USER": caller,
+                "HOME": str(tmp_path / "ownerhome"),
+                "SWITCHYARD_PUBLISH_CONFIG": str(mismatched),
+            },
+        )
+        assert wrong_identity.returncode != 0
+        assert "not the configuration for project porter" in wrong_identity.stderr + wrong_identity.stdout
+
+
+
+def test_fresh_provisioning_emits_one_complete_handoff() -> None:
+    """SYRD-39: following the printed instruction once must be enough.
+
+    The complete artifact -- accounts, ownership, runtime, tooling AND
+    credential seeding -- used to be written only by a later failed start, so an
+    operator who did exactly what provisioning told them still could not close
+    the credential gaps.
+    """
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="switchyard-handoff.") as tmp:
+        tmp_path = Path(tmp)
+        output_dir = tmp_path / "out"
+        source_repo = tmp_path / "source-repo"
+        project_repo = tmp_path / "project-repo"
+        source_repo.mkdir()
+        project_repo.mkdir()
+        printed: list[str] = []
+
+        with redirect_stdout(StringIO()):
+            assert (
+                new_project_command(
+                    "porter",
+                    owner_user=current_user,
+                    source_repo=source_repo,
+                    commit_git_dir="/srv/git/review-cache.git",
+                    repository=project_repo,
+                    output_dir=output_dir,
+                    runner=FakeRunner(),
+                    port_in_use=lambda _port: False,
+                    socket_exists=lambda _path: False,
+                    print_func=printed.append,
+                )
+                == 0
+            )
+
+        handoff = output_dir / "porter-role-accounts.sh"
+        assert handoff.is_file(), sorted(path.name for path in output_dir.iterdir())
+        body = handoff.read_text(encoding="utf-8")
+        assert any(str(handoff) in line for line in printed), printed
+
+    # Accounts, ownership, tooling and seeding are all in the one artifact.
+    assert "getent passwd 'porter-director'" in body
+    assert "chown -R 'porter-director':" in body
+    assert "ticket-board-install-pane-hooks' install --home '/home/porter-director'" in body
+    assert "switchyard seed-role-credentials porter" in body
+    assert "systemctl restart porter-ticket-board.service" in body
 
 
 def main() -> int:

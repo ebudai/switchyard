@@ -502,13 +502,14 @@ start authenticated, from the already-authenticated owner:
 | `claude` | `.claude/.credentials.json` |
 | `codex` | `.codex/auth.json` |
 | `agy` | `.gemini/antigravity-cli/antigravity-oauth-token` |
-| `hermes` | `.hermes/provider.env` -- it resolves keys from the environment, and an ambient environment does not survive `sudo -u` into another account, so the owner keeps its keys in one private file which the role's own shell sources at start |
+| `hermes` | `.hermes/.env` and/or `.hermes/auth.json` -- whichever the owner has. They are seeded into the role's own `HERMES_HOME`, which the launcher already points it at, so hermes reads them itself: nothing is injected into the environment and no shell file is sourced. A `.env` is validated as plain `KEY=value` before it is copied |
 
 **What is never copied:** an entire CLI home, conversations, histories, caches,
 hooks, or general settings. Credentials are never symlinked and never placed in
 a directory readable by the roles group. Each role gets a **private copy**: owned
 by that role, mode `0600`, under a `0700` directory it owns, inside a role home
-that is itself `0700` -- the roles group exists to reach the board socket and
+that is itself `0700`, and **every path component** from the home downwards is
+opened with `O_NOFOLLOW`, so a symlinked ancestor is refused rather than followed -- the roles group exists to reach the board socket and
 never makes one role's home readable to another. Copying reuses the
 anchored `openat`/`O_NOFOLLOW` model from SYRD-28, so no privileged step is
 handed a whole path a symlink could redirect, and ownership is assigned to the
@@ -543,7 +544,13 @@ A role publishes its own feature ref through `switchyard-publish-ref`, run via
 `sudo` as the project owner. The sudoers grant allows any arguments, so nothing
 about *where* is caller-supplied: the calling role comes from `SUDO_USER`, and
 its worktree and the remote come from the project's own configuration, found
-relative to the effective uid.
+relative to the effective uid. The project identifier is validated as a slug
+before any path is built and the resolved path must stay inside the directory it
+was built from, and the configuration must itself claim to be that project --
+otherwise `--project ../../tmp/forged` loads a role-written document, and with it
+a role-chosen role mapping and remote. The configured remote is a NAME, resolved
+to a URL from the **owner's** checkout and set on the staging repository before
+the push.
 
 Refs are namespaced to the calling role -- `ops` publishes under `ops/` -- so a
 role cannot write, move or delete another role's refs, and the integration

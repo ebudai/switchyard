@@ -31,6 +31,11 @@ import sys
 from pathlib import Path
 
 PROTECTED_REFS = frozenset({"main", "master", "trunk", "release", "head"})
+# The sudoers grant allows any arguments, so the project identifier is validated
+# before it is used to build any path. Without this, --project ../../tmp/forged
+# loaded a role-written document and with it a role-chosen role mapping and
+# remote (SYRD-39).
+PROJECT_SLUG = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 REF_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # The owner's staging repository. Owner-owned, so its configuration -- including
 # the remote and any transport settings -- is never role-controlled.
@@ -48,6 +53,21 @@ def calling_role_account() -> str:
     return account
 
 
+def validate_project(project: str) -> str:
+    name = project.strip()
+    if not PROJECT_SLUG.fullmatch(name):
+        fail(f"{project!r} is not a valid project name")
+    return name
+
+
+def _contained(path: Path, root: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(root.resolve(strict=False))
+    except ValueError:
+        return False
+    return True
+
+
 def load_project(project: str) -> dict:
     """Find the project configuration without trusting the caller.
 
@@ -63,19 +83,32 @@ def load_project(project: str) -> dict:
 
     override = os.environ.get("SWITCHYARD_PUBLISH_CONFIG", "").strip()
     owner_home = Path(_pwd.getpwuid(os.geteuid()).pw_dir)
-    candidates = [Path(override)] if override else []
-    candidates.extend(
-        (
-            owner_home / "Projects" / project / ".switchyard" / "provision" / f"{project}.json",
-            Path(f"/etc/switchyard/{project}.json"),
-        )
+    projects_root = owner_home / "Projects"
+    etc_root = Path("/etc/switchyard")
+    candidates: list[tuple[Path, Path | None]] = []
+    if override:
+        candidates.append((Path(override), None))
+    candidates.append(
+        (projects_root / project / ".switchyard" / "provision" / f"{project}.json", projects_root)
     )
-    for candidate in candidates:
-        if candidate.is_file():
-            try:
-                return json.loads(candidate.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
-                fail(f"cannot read {candidate}: {exc}")
+    candidates.append((etc_root / f"{project}.json", etc_root))
+    for candidate, root in candidates:
+        # Anchored: even with a validated slug the resolved path must stay inside
+        # the directory it was built from.
+        if root is not None and not _contained(candidate, root):
+            continue
+        if not candidate.is_file():
+            continue
+        try:
+            document = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            fail(f"cannot read {candidate}: {exc}")
+        if not isinstance(document, dict):
+            fail(f"{candidate} is not a project configuration")
+        # The document must agree it is the project that was asked for.
+        if str(document.get("project") or "") != project:
+            fail(f"{candidate} is not the configuration for project {project}")
+        return document
     fail(f"no configuration found for project {project}")
 
 
@@ -126,6 +159,25 @@ def require_role_owned_file(path: Path, account: str) -> None:
         fail(f"bundle {path} is not owned by {account}")
 
 
+def resolve_remote_url(config: dict, remote_name: str) -> str:
+    """Turn the configured remote NAME into a URL from an owner-owned checkout.
+
+    Generated configuration stores a name such as "origin". A freshly created
+    staging repository has no remotes, so pushing by name fails; and the URL must
+    not come from the role's checkout, whose configuration the role controls.
+    """
+    if "://" in remote_name or remote_name.startswith("/") or ":" in remote_name:
+        # Already a URL or an scp-style location.
+        return remote_name
+    repository = str(config.get("repository") or "").strip()
+    if not repository:
+        fail(f"project configuration names remote {remote_name} but no owner repository")
+    resolved = git(["-C", repository, "remote", "get-url", remote_name])
+    if resolved.returncode != 0 or not resolved.stdout.strip():
+        fail(f"{repository} has no remote named {remote_name}")
+    return resolved.stdout.strip()
+
+
 def git(args: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
     # System and global git configuration are ignored so the push cannot be
     # redirected by anything outside this program's control.
@@ -150,7 +202,8 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv[1:])
 
     account = calling_role_account()
-    config = load_project(args.project)
+    project = validate_project(args.project)
+    config = load_project(project)
     role = role_for_account(config, account)
     role_name = str(role.get("role") or "")
     ref = validate_ref(args.ref, role_name)
@@ -162,8 +215,12 @@ def main(argv: list[str]) -> int:
         sys.stderr.write(verify.stderr)
         fail("bundle did not verify")
 
-    remote = str(config.get("worktree_remote") or "origin")
-    staging = Path.home() / STAGING_DIR_NAME / args.project
+    # worktree_remote is a remote NAME in generated configuration, so it is
+    # resolved to a URL from the owner's own project checkout. A fresh staging
+    # repository has no remotes at all, which is why pushing by name failed.
+    remote_name = str(config.get("worktree_remote") or "origin")
+    remote_url = resolve_remote_url(config, remote_name)
+    staging = Path.home() / STAGING_DIR_NAME / project
     if not (staging / "HEAD").exists():
         staging.mkdir(parents=True, exist_ok=True)
         staging.chmod(0o700)
@@ -177,7 +234,16 @@ def main(argv: list[str]) -> int:
         sys.stderr.write(fetch.stderr)
         fail(f"bundle does not contain refs/heads/{ref}")
 
-    push = git(["-C", str(staging), "push", remote, f"refs/heads/{ref}:refs/heads/{ref}"])
+    configure = git(["-C", str(staging), "remote", "set-url", "publish", remote_url])
+    if configure.returncode != 0:
+        added = git(["-C", str(staging), "remote", "add", "publish", remote_url])
+        if added.returncode != 0:
+            sys.stderr.write(added.stderr)
+            fail("could not configure the staging remote")
+    verify_remote = git(["-C", str(staging), "remote", "get-url", "publish"])
+    if verify_remote.returncode != 0 or verify_remote.stdout.strip() != remote_url:
+        fail("staging remote did not resolve to the configured URL")
+    push = git(["-C", str(staging), "push", "publish", f"refs/heads/{ref}:refs/heads/{ref}"])
     sys.stdout.write(push.stdout)
     sys.stderr.write(push.stderr)
     if push.returncode != 0:

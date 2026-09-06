@@ -267,9 +267,9 @@ class CallerRegistry:
             return True
         return True
 
-    def register(self, credentials: PeerCredentials, role: str) -> None:
+    def register(self, credentials: PeerCredentials, role: str, *, allowed_roles: set[str] | None = None) -> None:
         normalized_role = role.strip().lower()
-        if normalized_role not in CALLER_ROLES - {"user"}:
+        if normalized_role not in (allowed_roles if allowed_roles is not None else CALLER_ROLES) - {"user", "unassigned"}:
             raise ValueError(f"invalid local caller role: {role}")
         with self._lock:
             self._drop_stale_locked()
@@ -621,7 +621,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         role = raw.strip().lower()
         if not role:
             raise ValueError(f"missing {CALLER_ROLE_HEADER}")
-        if role not in CALLER_ROLES:
+        if role not in getattr(self.app, "workflow_roles", lambda: list(CALLER_ROLES))():
             raise ValueError(f"invalid caller role: {raw}")
         return role
 
@@ -651,11 +651,26 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 raise PermissionError(f"connection is already registered as {current_role}")
             self.send_json({"role": current_role, "pid": self._registered_local_pid})
             return
-        self.caller_registry.register(self._local_peer_credentials, role)
+        if role not in getattr(self.app, "workflow_roles", lambda: list(CALLER_ROLES))() or role == "user":
+            raise ValueError(f"invalid local caller role: {role}")
+        self.caller_registry.register(self._local_peer_credentials, role, allowed_roles=set(getattr(self.app, "workflow_roles", lambda: list(CALLER_ROLES))()))
         self._registered_local_pid = self._local_peer_credentials.pid
         self.send_json({"role": role, "pid": self._local_peer_credentials.pid})
 
     def require_operation_allowed(self, operation: str, caller_role: str, ticket_id: str | None = None) -> None:
+        cfg = getattr(self.app, "workflow_configuration", lambda: None)()
+        if cfg:
+            role = next((r for r in cfg["roles"] if r["name"] == caller_role and r["active"]), None)
+            if role is None:
+                raise PermissionError("inactive or unknown workflow actor")
+            if ticket_id:
+                ticket = self.app.get_ticket(ticket_id)
+                from .workflow_config import available_transitions
+                if any(t["action"] == operation for t in available_transitions(cfg, ticket, caller_role)):
+                    return
+            if operation not in role["capabilities"]:
+                raise PermissionError(f"{caller_role} cannot call {operation}")
+            return
         allowed = OPERATION_ALLOWED_ROLES.get(operation)
         if allowed is None:
             raise ValueError(f"unknown ticket operation: {operation}")
@@ -822,7 +837,24 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
 
     def handle_ticket_action(self, operation: str, payload: dict[str, object], ticket_id: str | None = None) -> None:
         caller = self.caller_role()
+        if operation == "configure_workflow" and ticket_id is None:
+            if type(payload.get("expected_revision")) is not int or type(payload.get("dry_run", False)) is not bool:
+                raise ValueError("workflow apply requires integer expected_revision and boolean dry_run")
+            self.send_json(self.app.apply_workflow(payload.get("document"), expected_revision=payload["expected_revision"], dry_run=payload.get("dry_run",False), caller_role=caller))
+            return
+        if operation == "set_workflow_flags" and ticket_id is not None:
+            if caller != "director": raise PermissionError("only director may set gates")
+            self.send_json({"ticket": self.app.set_workflow_flags(ticket_id, payload, caller_role=caller)})
+            return
         self.require_operation_allowed(operation, caller, ticket_id)
+
+        cfg = getattr(self.app, "workflow_configuration", lambda: None)()
+        if cfg and ticket_id and any(t["action"] == operation for t in cfg["transitions"]):
+            payload = dict(payload)
+            if "state" in payload:
+                payload["target"] = payload.pop("state")
+            self.send_json({"ticket": self.app.perform_workflow_action(ticket_id, operation, payload, caller_role=caller)})
+            return
 
         if operation == "create_ticket":
             before_signature = self.app.store_signature()
@@ -1103,6 +1135,9 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             payload["build_id"] = self.server.build_id
             self.send_json(payload)
             return
+        if parsed.path == "/api/workflow":
+            self.send_json(self.app.workflow_document())
+            return
         if parsed.path == "/api/client-config":
             self.send_json({
                 "build_id": self.server.build_id,
@@ -1207,6 +1242,12 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             payload = json.loads(body or b"{}")
             if parsed.path == "/api/register-caller":
                 self.handle_register_caller(payload)
+                return
+            if parsed.path == "/api/workflow":
+                caller = self.caller_role()
+                if set(payload) - {"document", "expected_revision", "dry_run"} or type(payload.get("expected_revision")) is not int or type(payload.get("dry_run", False)) is not bool:
+                    raise ValueError("workflow apply requires document, integer expected_revision and boolean dry_run")
+                self.send_json(self.app.apply_workflow(payload.get("document"), expected_revision=payload["expected_revision"], dry_run=payload.get("dry_run", False), caller_role=caller))
                 return
             if parsed.path.startswith("/api/tickets/actions/"):
                 operation = urllib.parse.unquote(parsed.path.removeprefix("/api/tickets/actions/").strip("/"))

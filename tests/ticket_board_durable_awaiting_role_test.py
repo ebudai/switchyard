@@ -295,6 +295,9 @@ def run(svc: str, admin: str) -> None:
     fixture.psql(admin, "DELETE FROM ticket_board.ticket_notification_queue WHERE kind='awaiting_role'")
     fixture.psql(admin, MIGRATION.read_text())
     assert fixture.psql(admin, "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE kind='awaiting_role'").strip() == '0'
+    # The opt-in foundation generalizes only recipient/stage lookup; compare
+    # current fresh schema after both reviewed incremental layers.
+    fixture.psql(admin, (ROOT / "scripts/ticket_board/migrations/pgu921_syrd11_declarative_workflow.sql").read_text())
     assert fixture.psql(admin, "SELECT pg_get_functiondef('ticket_board.set_awaiting_role(text,text)'::regprocedure)") == fresh
     fixture.psql(admin, "DELETE FROM ticket_board.tickets")
     checks(svc, admin)

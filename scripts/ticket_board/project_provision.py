@@ -79,6 +79,7 @@ class ProjectBoardProvision:
     caller_roles: tuple[str, ...]
     operation_allowed_roles: tuple[tuple[str, tuple[str, ...]], ...]
     board_service_traversal: bool
+    workflow: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -168,6 +169,7 @@ def build_plan(
     *,
     project: str,
     project_name: str | None = None,
+    workflow: dict | None = None,
     owner_user: str,
     owner_home: Path | None = None,
     port: int | None = None,
@@ -276,6 +278,12 @@ def build_plan(
     if not home.is_absolute():
         raise SystemExit("owner home must be an absolute path")
     resolved_board_root = board_root or home / f"{project}-ticketboard-live"
+    if workflow is not None:
+        try:
+            from .workflow_config import validate
+        except ImportError:
+            from workflow_config import validate
+        workflow = validate(workflow,project=project)
     resolved_source_repo = source_repo or Path(__file__).resolve().parents[2]
     resolved_commit_git_dir = str(commit_git_dir) if commit_git_dir is not None else commit_git_dir_env_for_project(project=project, owner_home=home)
     resolved_asset_dir = asset_dir or home / ".claude" / f"{project}-tickets-assets"
@@ -318,6 +326,7 @@ def build_plan(
         board_root=str(resolved_board_root),
         board_current=str(board_current),
         source_repo=str(resolved_source_repo),
+        workflow=workflow,
         commit_git_dir=resolved_commit_git_dir,
         asset_dir=str(resolved_asset_dir),
         frame_dir=str(resolved_frame_dir),
@@ -979,6 +988,9 @@ ALTER TABLE ticket_board.ticket_notification_queue
 
 
 def render_workflow_sql(plan: ProjectBoardProvision, *, schema_sql: str | None = None) -> str:
+    if plan.workflow is not None:
+        document = json.dumps(plan.workflow).replace("'", "''")
+        return "BEGIN;\nSET LOCAL ROLE ticket_board_service;\nSELECT set_config('ticket_board.project','" + plan.project + "',true);\nSELECT set_config('ticket_board.caller_role','director',true);\nSELECT ticket_board.apply_declared_workflow('" + document + "'::jsonb);\nCOMMIT;\n"
     if plan.workflow_seed == "pgu-full":
         return f"""-- {plan.project} keeps the full workflow seeded by schema.sql.
 -- No per-project workflow override is applied.
@@ -1517,6 +1529,7 @@ def write_artifacts(plan: ProjectBoardProvision, output_dir: Path, *, enable_own
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Render per-project ticket-board provisioning artifacts.")
     parser.add_argument("--project", required=True, help="project slug, e.g. pgu or stellaris")
+    parser.add_argument("--workflow-config", type=Path, help="validated declarative roles/stages document")
     parser.add_argument("--project-name", help="display name shown by the ticket board")
     parser.add_argument("--owner-user", required=True, help="Unix user that owns this project/team")
     parser.add_argument("--owner-home", type=Path, help="absolute owner home; default /home/<owner-user>")
@@ -1579,6 +1592,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     plan = build_plan(
         project=args.project,
         project_name=args.project_name,
+        workflow=json.loads(args.workflow_config.read_text()) if args.workflow_config else None,
         owner_user=args.owner_user,
         owner_home=args.owner_home,
         port=args.port,

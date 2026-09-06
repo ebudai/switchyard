@@ -637,6 +637,17 @@ class TicketBoardWriteClient:
     def start_work(self, ticket_id: str, *, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "start_work", caller_role=caller_role)
 
+    def configure_workflow(self, document: dict[str, Any], *, expected_revision: int, dry_run: bool = False) -> dict[str, Any]:
+        return self._post("/actions/configure_workflow", {"document": document, "expected_revision": expected_revision, "dry_run": dry_run})
+
+    def workflow_action(self, ticket_id: str, action: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload.get("commit_hash"):
+            self._require_commit_pushed_to_origin(payload["commit_hash"], operation=action)
+        return self._ticket_action(ticket_id, action, payload)
+
+    def set_workflow_flags(self, ticket_id: str, patch: dict[str, bool]) -> dict[str, Any]:
+        return self._ticket_action(ticket_id, "set_workflow_flags", patch)
+
     def submit_to_audit(self, ticket_id: str, *, commit_hash: str = "", caller_role: str | None = None) -> dict[str, Any]:
         self._require_commit_pushed_to_origin(commit_hash, operation="submit_to_audit")
         return self._ticket_action(ticket_id, "submit_to_audit", {"commit_hash": commit_hash}, caller_role=caller_role)
@@ -655,8 +666,10 @@ class TicketBoardWriteClient:
             ticket_id, "submit_to_audit_without_commit", {"reason": reason}, caller_role=caller_role
         )
 
-    def submit_to_inspection(self, ticket_id: str, *, caller_role: str | None = None) -> dict[str, Any]:
-        return self._ticket_action(ticket_id, "submit_to_inspection", caller_role=caller_role)
+    def submit_to_inspection(self, ticket_id: str, *, commit_hash: str = "", caller_role: str | None = None) -> dict[str, Any]:
+        if commit_hash:
+            self._require_commit_pushed_to_origin(commit_hash, operation="submit_to_inspection")
+        return self._ticket_action(ticket_id, "submit_to_inspection", {"commit_hash": commit_hash} if commit_hash else {}, caller_role=caller_role)
 
     def implementer_kick_back(self, ticket_id: str, *, reason: str, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "implementer_kick_back", {"reason": reason}, caller_role=caller_role)
@@ -849,6 +862,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    workflow_action = subparsers.add_parser("workflow-action")
+    workflow_action.add_argument("ticket_id")
+    workflow_action.add_argument("action")
+    workflow_action.add_argument("--payload-json", default="{}")
+    workflow_flags = subparsers.add_parser("set-workflow-flags")
+    workflow_flags.add_argument("ticket_id")
+    workflow_flags.add_argument("--patch-json", required=True)
+
     create = subparsers.add_parser("create-ticket")
     create.add_argument("--title", required=True)
     create.add_argument("--body", required=True)
@@ -922,6 +943,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     submit_inspection = subparsers.add_parser("submit-to-inspection")
     submit_inspection.add_argument("ticket_id")
+    submit_inspection.add_argument("--commit-hash", default="")
 
     implementer_kick = subparsers.add_parser("implementer-kick-back")
     implementer_kick.add_argument("ticket_id")
@@ -1064,12 +1086,16 @@ def main(argv: list[str] | None = None) -> int:
                 assignee=args.assignee,
                 notify=not args.no_notify,
             )
+        elif command == "workflow_action":
+            response = client.workflow_action(args.ticket_id, args.action, json.loads(args.payload_json))
+        elif command == "set_workflow_flags":
+            response = client.set_workflow_flags(args.ticket_id, json.loads(args.patch_json))
         elif command == "submit_to_audit":
             response = client.submit_to_audit(args.ticket_id, commit_hash=args.commit_hash)
         elif command == "submit_to_audit_without_commit":
             response = client.submit_to_audit_without_commit(args.ticket_id, reason=args.reason)
         elif command == "submit_to_inspection":
-            response = client.submit_to_inspection(args.ticket_id)
+            response = client.submit_to_inspection(args.ticket_id, commit_hash=args.commit_hash)
         elif command == "implementer_kick_back":
             response = client.implementer_kick_back(args.ticket_id, reason=args.reason)
         elif command == "request_commit_exempt":

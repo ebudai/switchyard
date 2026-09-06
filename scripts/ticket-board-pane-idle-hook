@@ -385,11 +385,15 @@ def _active_in_progress_ticket_for_role(
     tickets = parsed.get("tickets")
     if not isinstance(tickets, list):
         return None
+    cfg = parsed.get("workflow")
+    active_states = {"in_progress"}
+    if isinstance(cfg, dict):
+        active_states = {stage["name"] for stage in cfg.get("stages", []) if not stage["terminal"] and stage["kind"] != "draft" and role in stage["owners"]}
     matches = [
         ticket
         for ticket in tickets
         if isinstance(ticket, dict)
-        and str(ticket.get("state", "")).strip() == "in_progress"
+        and str(ticket.get("state", "")).strip() in active_states
         and str(ticket.get("assignee", "")).strip().lower() == role
     ]
     if not matches:
@@ -405,7 +409,7 @@ def _resume_context_for_ticket(ticket: dict[str, object], *, board_url: str, sou
     opening = _session_start_active_work_opening(source)
     return (
         f"{opening} You have ACTIVE work: {ticket_id}{title_suffix} "
-        f"(in_progress, assigned to you). Re-read it: curl {ticket_url} . "
+        f"({ticket.get('state', 'in_progress')}, assigned to you). Re-read it: curl {ticket_url} . "
         "Resume where you left off; do NOT wait for a new prompt."
     )
 
@@ -419,7 +423,7 @@ def _active_work_full_context_for_ticket(ticket: dict[str, object], *, board_url
     title = _ticket_text_field(ticket, "title")
     ticket_url = f"{_board_root_url(board_url)}/api/tickets/{ticket_id}"
     lines = [
-        f"You have ACTIVE work: {ticket_id}{f' -- {title}' if title else ''} (in_progress, assigned to you).",
+        f"You have ACTIVE work: {ticket_id}{f' -- {title}' if title else ''} ({ticket.get('state', 'in_progress')}, assigned to you).",
         f"Read the full ticket before acting: curl {ticket_url} .",
         "Do not inherit assumptions, scope, or implementation context from any previous ticket.",
     ]
@@ -524,6 +528,12 @@ def _session_start_additional_context_output(
     role = _role_for_target(target, environ)
     if not role:
         return None
+    onboarding = environ.get("TICKET_BOARD_ROLE_ONBOARDING", "").strip()
+    if onboarding and session_start_source == SESSION_START_FRESH_SOURCE and not resume_session_id.strip():
+        path = Path(onboarding)
+        if not path.is_absolute() or not path.is_file():
+            raise ValueError(f"configured role onboarding is unavailable: {path}")
+        return {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": f"Your {role} session started. Read your role remit at {path}.\n\n" + path.read_text()}}
     if (
         role == "director"
         and session_start_source == SESSION_START_FRESH_SOURCE

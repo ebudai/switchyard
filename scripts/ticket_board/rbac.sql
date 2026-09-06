@@ -121,3 +121,20 @@ GRANT EXECUTE ON FUNCTION ticket_board.notify_idle_turn_end_nudges(jsonb, timest
 GRANT EXECUTE ON FUNCTION ticket_board.ticket_has_unresolved_blockers(text) TO ticket_board_listener;
 
 COMMIT;
+
+DO $workflow_grants$ BEGIN
+IF to_regclass('ticket_board.workflow_configuration') IS NOT NULL THEN
+    GRANT EXECUTE ON FUNCTION ticket_board.transition_target_role(text,text),ticket_board.legacy_transition_target_role(text,text) TO ticket_board_service;
+
+    GRANT EXECUTE ON FUNCTION ticket_board.workflow_wait_stage(text) TO ticket_board_service, ticket_board_listener;
+REVOKE ALL ON ticket_board.workflow_configuration,ticket_board.workflow_revisions,ticket_board.workflow_roles FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.apply_declared_workflow(jsonb),ticket_board.perform_workflow_action(text,text,jsonb) FROM PUBLIC;
+GRANT SELECT ON ticket_board.workflow_configuration,ticket_board.workflow_revisions,ticket_board.workflow_roles TO ticket_board_service,ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.apply_declared_workflow(jsonb),ticket_board.perform_workflow_action(text,text,jsonb) TO ticket_board_service;
+
+GRANT EXECUTE ON FUNCTION ticket_board.apply_declared_workflow(jsonb,bigint), ticket_board.declared_workflow(), ticket_board.workflow_flag(jsonb,text,jsonb), ticket_board.set_workflow_flag(jsonb,text,boolean), ticket_board.enforce_declared_ticket_update(ticket_board.tickets,ticket_board.tickets) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.declared_workflow() TO ticket_board_listener;
+
+GRANT EXECUTE ON FUNCTION ticket_board.set_declared_flags(text,jsonb) TO ticket_board_service;
+END IF;
+END $workflow_grants$;

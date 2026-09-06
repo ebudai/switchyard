@@ -6040,6 +6040,9 @@ def _new_project_launcher_config_payload(
         payload["upstream_report_url"] = upstream_report_url
     if upstream_report_token_file:
         payload["upstream_report_token_file"] = upstream_report_token_file
+    if plan.workflow is not None:
+        from scripts.workflow_launcher import project_roles
+        payload = project_roles(payload, plan.workflow)
     return payload
 
 
@@ -6158,6 +6161,14 @@ def write_new_project_launcher_artifacts(
         + "\n",
         encoding="utf-8",
     )
+    if plan.workflow:
+        projected = _load_json(config_path)
+        visible_role_count = max(1, 1 + max((role.get("slot", -1) for role in projected["roles"]), default=-1))
+        _write_json_atomic(layout_path, _new_project_layout_payload(visible_role_count))
+        if artifact_path and artifact_path.exists():
+            artifact_data = _load_json(artifact_path)
+            artifact_data["workflow"] = plan.workflow
+            _write_json_atomic(artifact_path, artifact_data)
     policy_file = output_dir / "desktop-policy.json"
     if policy_file.exists():
         from scripts.desktop_access import validate_policy
@@ -6368,6 +6379,9 @@ def _project_board_provision_from_json(path: Path) -> ProjectBoardProvision:
         if name == "project_name" and name not in raw:
             raw_project = str(raw.get("project") or "pgu")
             fields[name] = "PGU" if raw_project == "pgu" else raw_project
+            continue
+        if name == "workflow" and name not in raw:
+            fields[name] = None
             continue
         if name == "owner_home" and name not in raw:
             raw_project = str(raw.get("project") or "").strip()
@@ -6829,6 +6843,7 @@ def new_project_command(
     port: int | None = None,
     database: str | None = None,
     source_repo: Path | None = None,
+    workflow_config: Path | None = None,
     repository: Path | None = None,
     output_dir: Path | None = None,
     director_onboarding: Path | None = None,
@@ -6886,6 +6901,7 @@ def new_project_command(
     plan = build_plan(
         project=project,
         project_name=project_name,
+        workflow=(json.loads(workflow_config.read_text()) if workflow_config else _load_json(from_artifact).get("workflow") if from_artifact else None),
         owner_user=effective_owner,
         owner_home=owner_home,
         port=port,
@@ -6961,6 +6977,9 @@ def new_project_command(
     if config.desktop_access is not None:
         configure_project_desktop(config, config_path=config_path,
             helper=effective_source_repo / "scripts/desktop_access.py", runner=runner)
+    if plan.workflow is not None:
+        from scripts.workflow_launcher import assign_projection_owner
+        assign_projection_owner(config, config_path, runner=runner)
     print_func(f"team-launcher: provisioned {plan.project}; launcher config {config_path}")
     return 0
 
@@ -9498,6 +9517,7 @@ def switchyard_new_command(
     project_path: Path | None = None,
     from_artifact: Path | None = None,
     source_repo: Path | None = None,
+    workflow_config: Path | None = None,
     output_dir: Path | None = None,
     port: int | None = None,
     database: str | None = None,
@@ -9773,6 +9793,7 @@ def switchyard_new_command(
         from_artifact=artifact_path,
         owner_home=home_base / owner_user,
         source_repo=source_repo,
+        workflow_config=workflow_config,
         output_dir=provision_dir,
         director_onboarding=director_onboarding,
         port=port,
@@ -10018,6 +10039,8 @@ def _project_plan_for_added_role(
     audit_role: bool = False,
 ) -> ProjectBoardProvision:
     plan_data = _plan_data_from_config(config, config_path)
+    if plan_data.get("workflow") or _load_json(config_path).get("workflow"):
+        raise SystemExit("use ticket-board-workflow apply to update configured roles and stages")
     implementer_roles = _configured_implementer_roles(
         config,
         plan_data=plan_data,
@@ -10069,6 +10092,8 @@ def _project_plan_for_vcs_close_role(
     if role not in configured_roles:
         raise SystemExit(f"team-launcher: VCS close role {role!r} does not exist in project {config.project}")
     plan_data = _plan_data_from_config(config, config_path)
+    if plan_data.get("workflow") or _load_json(config_path).get("workflow"):
+        raise SystemExit("use ticket-board-workflow apply to update configured roles and stages")
     audit_roles = _configured_audit_roles(config, plan_data=plan_data)
     implementer_roles = _configured_implementer_roles(config, plan_data=plan_data)
     include_designer = any(configured.role == "designer" for configured in config.roles)
@@ -10828,6 +10853,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-launcher-self-deploy", action="store_true", help="restore refuse-only behavior instead of automatically fast-forwarding a stale launcher checkout")
     parser.add_argument("--skip-launcher-check", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--desktop-policy", type=Path, help="approved Wayland JSON policy or headless; installed before launch")
+    parser.add_argument("--workflow-config", type=Path, help="declarative roles/stages JSON for the new project")
     return parser
 
 
@@ -10860,6 +10886,7 @@ def _build_switchyard_new_parser() -> argparse.ArgumentParser:
         help="window layout mode: auto detects the invoking desktop, separate keeps the KDE/Konsole path, viewer forces the tmux viewer",
     )
     parser.add_argument("--desktop-policy", type=Path, help="headless, or a JSON file recording scoped Wayland consent; installed before role launch")
+    parser.add_argument("--workflow-config", type=Path, help="declarative roles/stages JSON for the new project")
     return parser
 
 
@@ -11083,6 +11110,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             project_path=args.project_path,
             from_artifact=args.from_artifact,
             source_repo=args.source_repo,
+            workflow_config=args.workflow_config,
             output_dir=args.output_dir,
             port=args.port,
             database=args.database,
@@ -11230,6 +11258,7 @@ def main(argv: list[str] | None = None) -> int:
             port=args.port,
             database=args.database,
             source_repo=args.source_repo,
+            workflow_config=args.workflow_config,
             repository=args.repository,
             output_dir=args.new_output_dir,
             execute=args.execute,

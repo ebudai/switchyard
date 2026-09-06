@@ -208,6 +208,7 @@ SCRIPT_APP = """    function ticketBoardWriteToken() {
       state.columns = normalizeBoardColumns(payload.columns || [], state.states);
       state.assignees = payload.assignees;
       state.callerRoles = payload.caller_roles || [];
+      state.workflow = payload.workflow || null;
       if (state.selectedId && !state.tickets.some((ticket) => ticket.id === state.selectedId)) {
         clearDetailDraft();
         state.selectedId = null;

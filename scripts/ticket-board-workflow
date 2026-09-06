@@ -1,0 +1,7 @@
+#!/usr/bin/env python3
+"""Review/apply declarative board and launcher configuration as the director."""
+from pathlib import Path
+import sys
+sys.path.insert(0,str(Path(__file__).resolve().parent.parent))
+from scripts.workflow_manage import main
+raise SystemExit(main())

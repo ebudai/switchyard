@@ -807,22 +807,32 @@ def presentation_action(
             raise SystemExit("switchyard: bootstrap layout must be viewer or separate")
         return state
     if action == "recover":
-        role = _role_by_name(config, role_name or "")
+        # Recovery is a new worker launch entry. Reuse the launcher's desktop
+        # readiness validation and its prepared per-role environment before a
+        # start/resume attempt; presentation must not invent a parallel setup
+        # or consent path.
+        prepared_config = team_launcher.prepare_project_desktop(config, runner=runner)
+        _validate_role_namespace(prepared_config)
+        role = _role_by_name(prepared_config, role_name or "")
         if role is None:
             raise SystemExit(f"switchyard: unknown role {role_name!r}")
+        prepared_owner_runner = _tmux_runner(prepared_config, runner)
         result = team_launcher.ensure_visible_role_session_for_viewer(
             role,
             mode="attach-or-start",
-            session_dir=config.session_dir,
-            pane_state_dir=team_launcher.default_pane_state_dir_for_user(config.run_as_user, project=config.project),
-            bin_user=config.run_as_user,
-            runner=owner_runner,
+            session_dir=prepared_config.session_dir,
+            pane_state_dir=team_launcher.default_pane_state_dir_for_user(
+                prepared_config.run_as_user, project=prepared_config.project
+            ),
+            bin_user=prepared_config.run_as_user,
+            runner=prepared_owner_runner,
         )
         if result != 0:
             raise SystemExit(f"switchyard: recovery failed for {role.role} (exit {result})")
         return _mutate(
-            config, config_path=config_path, state_path=state_path, actor=actor, action=action,
-            detail={"role": role.role}, transform=lambda _state: None, runner=owner_runner, file_runner=runner,
+            prepared_config, config_path=config_path, state_path=state_path, actor=actor, action=action,
+            detail={"role": role.role}, transform=lambda _state: None, runner=prepared_owner_runner,
+            file_runner=runner,
         )
     raise SystemExit(f"switchyard: unknown presentation action {action!r}")
 

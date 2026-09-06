@@ -5586,6 +5586,18 @@ def launch_project(
             plan["viewer_roles"] = [role.role for role in visible_roles_for_viewer(config)]
         print(json.dumps(plan, indent=2, sort_keys=True))
         return 0
+    from scripts import presentation_controller
+
+    use_runtime_presentation = presentation_controller.presentation_enabled(config, config_path=config_path)
+    worker_start_exit_code = 0
+
+    def record_worker_start_failure(role: RoleConfig, result: int) -> None:
+        nonlocal worker_start_exit_code
+        worker_start_exit_code = worker_start_exit_code or int(result)
+        reason = f"pane start failed with exit {result}"
+        failed_roles[role.role] = reason
+        print(f"team-launcher: {reason} for {role.role}; leaving presentation recovery status", file=sys.stderr)
+
     launch_started_at = time.time()
     launch_started_ns = time.time_ns()
     for role in config.roles:
@@ -5620,11 +5632,10 @@ def launch_project(
                 runner=role_process_runner,
             )
         if result != 0:
-            return result
+            if not use_runtime_presentation:
+                return result
+            record_worker_start_failure(role, result)
     resolved_layout_mode = resolve_layout_mode(layout_mode, environ=layout_environ, runner=runner)
-    from scripts import presentation_controller
-
-    use_runtime_presentation = presentation_controller.presentation_enabled(config, config_path=config_path)
     if resolved_layout_mode == LAYOUT_MODE_VIEWER:
         viewer_roles = visible_roles_for_viewer(config)
         for role in viewer_roles:
@@ -5658,7 +5669,9 @@ def launch_project(
                     runner=role_process_runner,
                 )
             if result != 0:
-                return result
+                if not use_runtime_presentation:
+                    return result
+                record_worker_start_failure(role, result)
         ensure_owner_state_dirs(config, pane_state_dir=effective_pane_state_dir, runner=runner)
         launchable_viewer_roles = [role for role in viewer_roles if role.role not in failed_roles]
         if use_runtime_presentation:
@@ -5713,7 +5726,7 @@ def launch_project(
                         runner=role_process_runner,
                     )
                 if result != 0:
-                    return result
+                    record_worker_start_failure(role, result)
             launch_result = presentation_controller.launch_presentation(
                 config,
                 config_path=config_path,
@@ -5752,7 +5765,7 @@ def launch_project(
             attached_roles=running_roles if mode == "attach-or-start" else (),
             print_func=print_func,
         )
-    return 0
+    return worker_start_exit_code
 
 
 def _default_new_project_owner(project: str) -> str:

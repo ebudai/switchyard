@@ -317,6 +317,178 @@ def test_existing_state_grows_safely_when_role_projection_adds_a_visible_slot() 
         assert "porter-display-2" in runner.sessions
 
 
+def test_full_launch_keeps_starting_workers_and_builds_recovery_slots_after_failures() -> None:
+    for layout_mode in (team_launcher.LAYOUT_MODE_VIEWER, team_launcher.LAYOUT_MODE_SEPARATE):
+        with tempfile.TemporaryDirectory(prefix=f"switchyard-presentation-entry-{layout_mode}.") as tmp:
+            root = Path(tmp)
+            config_path = _write_presentation_config(root)
+            raw = json.loads(config_path.read_text(encoding="utf-8"))
+            (root / "research").mkdir()
+            raw["desktop_access"] = {"mode": "headless"}
+            raw["roles"].append(
+                {
+                    "role": "research", "detached": True, "tmux_session": "porter-research",
+                    "target": "porter-research:0.0", "workdir": str(root / "research"),
+                    "cli": ["codex"], "live_commands": ["codex"],
+                }
+            )
+            config_path.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            config = load_project_config("porter", config_path)
+            attempts: list[str] = []
+            runner = FakeRunner()
+            process_launcher = RecordingProcessLauncher()
+            original_detached = team_launcher.run_detached_role
+            original_visible = team_launcher.ensure_visible_role_session_for_viewer
+            original_freshness = team_launcher.ensure_launcher_checkout_current
+            try:
+                def detached(role: team_launcher.RoleConfig, **_kwargs: Any) -> int:
+                    attempts.append(role.role)
+                    return 7
+
+                def visible(role: team_launcher.RoleConfig, **_kwargs: Any) -> int:
+                    attempts.append(role.role)
+                    if role.role == "director":
+                        return 7
+                    runner.existing_sessions.add(role.tmux_session)
+                    return 0
+
+                team_launcher.run_detached_role = detached
+                team_launcher.ensure_visible_role_session_for_viewer = visible
+                team_launcher.ensure_launcher_checkout_current = lambda *_args, **_kwargs: None
+                errors = StringIO()
+                with redirect_stderr(errors):
+                    result = launch_project(
+                        config,
+                        config_path=config_path,
+                        mode="attach-or-start",
+                        script_path=ROOT / "scripts" / "team-launcher",
+                        runner=runner,
+                        layout_output=root / "materialized.json",
+                        pane_state_dir=root / "pane-state",
+                        layout_mode=layout_mode,
+                        report_session_records=False,
+                        konsole_process_launcher=process_launcher,
+                    )
+            finally:
+                team_launcher.run_detached_role = original_detached
+                team_launcher.ensure_visible_role_session_for_viewer = original_visible
+                team_launcher.ensure_launcher_checkout_current = original_freshness
+
+            assert result == 7
+            assert attempts == ["research", "director", "app"]
+            assert {"porter-display-0", "porter-display-1"} <= runner.existing_sessions
+            assert any(
+                call[:2] == ["tmux", "new-session"] and "director is missing" in call[-1]
+                for call in runner.calls
+            )
+            if layout_mode == team_launcher.LAYOUT_MODE_VIEWER:
+                assert "porter-viewer" in runner.existing_sessions
+                assert process_launcher.calls == []
+            else:
+                assert "porter-viewer" not in runner.existing_sessions
+                assert len(process_launcher.calls) == 1
+            assert "pane start failed with exit 7 for research" in errors.getvalue()
+            assert "pane start failed with exit 7 for director" in errors.getvalue()
+
+
+def test_recover_command_requires_desktop_readiness_and_uses_prepared_role_environment() -> None:
+    with tempfile.TemporaryDirectory(prefix="switchyard-presentation-recover-entry.") as tmp:
+        root = Path(tmp)
+        config_path = _write_presentation_config(root)
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
+        raw["desktop_access"] = {"mode": "headless"}
+        config_path.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        config = load_project_config("porter", config_path)
+        runner = PresentationRunner()
+        args = team_launcher._build_switchyard_present_parser().parse_args(["porter", "recover", "app"])
+        prepare_calls = 0
+        start_calls = 0
+        prior_caller = os.environ.get("TICKET_BOARD_CALLER_ROLE")
+        prior_project = os.environ.get("TICKET_BOARD_PROJECT")
+        original_prepare = team_launcher.prepare_project_desktop
+        original_start = team_launcher.ensure_visible_role_session_for_viewer
+        original_auth = team_launcher.run_switchyard_launch_first_run_auth
+        try:
+            os.environ.update(DIRECTOR_ENV)
+
+            def reject_readiness(_config: team_launcher.ProjectConfig, **_kwargs: Any) -> team_launcher.ProjectConfig:
+                nonlocal prepare_calls
+                prepare_calls += 1
+                raise SystemExit("desktop readiness rejected")
+
+            def unexpected_start(*_args: Any, **_kwargs: Any) -> int:
+                nonlocal start_calls
+                start_calls += 1
+                return 0
+
+            team_launcher.prepare_project_desktop = reject_readiness
+            team_launcher.ensure_visible_role_session_for_viewer = unexpected_start
+            try:
+                team_launcher.switchyard_present_command(
+                    config, config_path=config_path, args=args, runner=runner,
+                )
+            except SystemExit as exc:
+                assert "desktop readiness rejected" in str(exc)
+            else:
+                raise AssertionError("recovery bypassed rejected desktop readiness")
+            assert prepare_calls == 1
+            assert start_calls == 0
+
+            prepared_env: dict[str, str] = {}
+
+            def prepare_environment(
+                candidate: team_launcher.ProjectConfig, **_kwargs: Any
+            ) -> team_launcher.ProjectConfig:
+                nonlocal prepare_calls
+                prepare_calls += 1
+                return team_launcher.replace(
+                    candidate,
+                    roles=[
+                        team_launcher.replace(
+                            role,
+                            env={**role.env, "WAYLAND_DISPLAY": "wayland-ready"},
+                        )
+                        for role in candidate.roles
+                    ],
+                )
+
+            def capture_start(role: team_launcher.RoleConfig, **_kwargs: Any) -> int:
+                nonlocal start_calls
+                start_calls += 1
+                prepared_env.update(role.env)
+                return 0
+
+            team_launcher.prepare_project_desktop = prepare_environment
+            team_launcher.ensure_visible_role_session_for_viewer = capture_start
+            team_launcher.run_switchyard_launch_first_run_auth = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("recovery repeated interactive first-run consent")
+            )
+            output = StringIO()
+            with redirect_stdout(output):
+                result = team_launcher.switchyard_present_command(
+                    config, config_path=config_path, args=args, runner=runner,
+                )
+            state_path = presentation.presentation_state_path(config, config_path=config_path)
+            recovered = json.loads(state_path.read_text(encoding="utf-8"))
+            assert result == 0
+            assert recovered["history"][-1]["action"] == "recover"
+            assert prepared_env["WAYLAND_DISPLAY"] == "wayland-ready"
+            assert prepare_calls == 2
+            assert start_calls == 1
+        finally:
+            team_launcher.prepare_project_desktop = original_prepare
+            team_launcher.ensure_visible_role_session_for_viewer = original_start
+            team_launcher.run_switchyard_launch_first_run_auth = original_auth
+            if prior_caller is None:
+                os.environ.pop("TICKET_BOARD_CALLER_ROLE", None)
+            else:
+                os.environ["TICKET_BOARD_CALLER_ROLE"] = prior_caller
+            if prior_project is None:
+                os.environ.pop("TICKET_BOARD_PROJECT", None)
+            else:
+                os.environ["TICKET_BOARD_PROJECT"] = prior_project
+
+
 def test_failed_proxy_update_rolls_back_mapping_and_revision() -> None:
     with tempfile.TemporaryDirectory(prefix="switchyard-presentation-rollback.") as tmp:
         root = Path(tmp)

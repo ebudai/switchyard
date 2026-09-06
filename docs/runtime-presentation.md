@@ -49,8 +49,15 @@ project owner's tmux server.
 `list` distinguishes missing or dead workers from disconnected display
 clients, reports whether a resume record exists, and lists configured roles
 that are hidden. `recover` is the only presentation operation that may make one
-bounded call into the existing launcher start/resume path. Display slots do not
-make background model calls.
+bounded call into the existing launcher start/resume path. It rechecks the
+configured desktop readiness and uses the prepared role environment, without
+repeating interactive first-run consent. Display slots do not make background
+model calls.
+
+During an ordinary presentation-enabled launch, one worker start failure does
+not prevent other independent workers or the display clients from starting.
+Each failed visible role's slot shows its recovery status, while the launcher still
+returns the first worker failure code for automation and operator reporting.
 
 State mutations hold an advisory lock, preflight the full mapping, update every
 proxy, then atomically write the next revision. A partial tmux failure reapplies

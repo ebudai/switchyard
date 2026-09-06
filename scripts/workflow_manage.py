@@ -129,6 +129,28 @@ def _hand_projection_to_tenant(config_path: Path, *extra: Path) -> None:
             launcher.ensure_owner_file(config, path, runner=subprocess.run)
 
 
+PHASE_ONE_BOARD_REQUIRED = "board predates the phase-one schema"
+
+
+def _board_predates_phase_one(board_url: str, cfg: dict, expected_revision: int) -> bool:
+    """Whether the running board rejects the phase-one schema.
+
+    Asked with a dry run, so nothing is written to a board that cannot accept it. Only a
+    schema rejection counts: any other failure is a real error and must surface.
+    """
+    try:
+        TicketBoardWriteClient(board_url=board_url).configure_workflow(
+            cfg, expected_revision=expected_revision, dry_run=True
+        )
+    except Exception as exc:
+        message = str(exc).lower()
+        return (
+            "unknown workflow configuration field" in message
+            or "unknown role field" in message
+        )
+    return False
+
+
 def _reconcile_projection(config_path: Path, document: dict) -> bool:
     """Rewrite the projection when it does not match the board's document.
 
@@ -326,6 +348,24 @@ def main(argv=None):
         # persisted. Short-circuiting on "nothing seeded" would drop it, and a later
         # clear would then look like a legacy gap and be refilled.
         cfg = validate(candidate)
+        # Preflight against the board that is actually running. A pre-phase-one release
+        # rejects the new fields, and there is no write we can make it accept: the
+        # correct next step is to deploy phase one, not to fail the upgrade that would
+        # have told the operator to do so.
+        if _board_predates_phase_one(args.board_url, cfg, current["revision"]):
+            print(
+                json.dumps(
+                    {
+                        "migrated": False,
+                        "reason": PHASE_ONE_BOARD_REQUIRED,
+                        "action_required": (
+                            "deploy the phase-one board release, then rerun switchyard "
+                            "upgrade to migrate this tenant"
+                        ),
+                    }
+                )
+            )
+            return 0
         files = projection_files(args.config, cfg)
     elif args.operation in {"set-role-prompt", "clear-role-prompt"}:
         # The whole document is rewritten, but the director edits one field through a

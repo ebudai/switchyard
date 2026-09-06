@@ -256,17 +256,63 @@ def test_director_without_stored_onboarding_gets_no_special_context() -> None:
     assert "just started fresh" not in text
 
 
-def test_the_removed_director_branch_is_gone_from_the_hook() -> None:
-    """Asserted against the source, so it cannot be reintroduced quietly."""
-    source = (ROOT / "scripts" / "ticket-board-pane-idle-hook").read_text(encoding="utf-8")
-    assert 'role == "director"' not in source
-    for helper in (
-        "_director_startup_onboarding_context",
-        "_onboarding_project_root",
-        "_onboarding_packet_exists",
-        "ONBOARDING_PACKET_DIR",
-    ):
-        assert helper not in source, helper
+def test_the_legacy_bridge_is_gated_on_the_migration_marker() -> None:
+    """Phase one keeps the packet lookup, but only for a tenant that has not migrated.
+
+    This is the exact contract: no stored onboarding *and* no marker means the tenant
+    predates the feature and the old lookup still serves it. Once the marker is present,
+    an empty prompt and path mean the director cleared it deliberately, and the answer is
+    no role-specific onboarding. SYRD-40 removes the branch entirely.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        project_dir = Path(tmp) / "project"
+        packet = project_dir / "docs" / "onboarding"
+        packet.mkdir(parents=True)
+        (packet / "README.md").write_text("packet\n", encoding="utf-8")
+        (packet / "switchyard-director-guide.md").write_text("guide\n", encoding="utf-8")
+        env = {"SWITCHYARD_PROJECT_DIR": str(project_dir)}
+
+        unmigrated = _context_text(_director_start(env))
+        migrated = _context_text(
+            _director_start({**env, "TICKET_BOARD_ROLE_ONBOARDING_MIGRATED": "1"})
+        )
+
+    assert "Read the onboarding packet first:" in unmigrated, unmigrated
+    # Migrated and cleared: the bridge must not answer for this director.
+    assert "Read the onboarding packet first:" not in migrated, migrated
+    assert "onboarding packet" not in migrated
+
+
+def test_a_migrated_director_with_a_prompt_still_gets_the_prompt() -> None:
+    text = _context_text(
+        _director_start(
+            {
+                "TICKET_BOARD_ROLE_ONBOARDING_MIGRATED": "1",
+                "TICKET_BOARD_ROLE_ONBOARDING_PROMPT": "Director remit body.",
+            }
+        )
+    )
+    assert "Director remit body." in text
+
+
+def test_the_marker_is_projected_only_once_the_document_carries_it() -> None:
+    document = _minimal_document()
+    raw = {"project": PROJECT, "roles": [{"role": "ops", "env": {}}], "layout": "layout.json"}
+
+    before = next(
+        r for r in project_roles(raw, validate(json.loads(json.dumps(document))))["roles"]
+        if r["role"] == "ops"
+    )["env"]
+    assert "TICKET_BOARD_ROLE_ONBOARDING_MIGRATED" not in before
+
+    document["migrations"] = {"director_onboarding": True}
+    after = next(
+        r for r in project_roles(raw, validate(json.loads(json.dumps(document))))["roles"]
+        if r["role"] == "ops"
+    )["env"]
+    assert after["TICKET_BOARD_ROLE_ONBOARDING_MIGRATED"] == "1"
 
 
 def test_provisioning_seeds_the_director_and_leaves_other_roles_alone() -> None:

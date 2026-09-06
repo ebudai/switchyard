@@ -60,6 +60,12 @@ def project_roles(raw: dict[str, Any], document: dict[str, Any]) -> dict[str, An
         env.pop("TICKET_BOARD_ROLE_ONBOARDING_PROMPT", None)
         if spec.get("onboarding_prompt"):
             env["TICKET_BOARD_ROLE_ONBOARDING_PROMPT"] = spec["onboarding_prompt"]
+        # Phase-one bridge (SYRD-36): the hook never reads the workflow document, so the
+        # migration marker is projected alongside the prompt. Without it the hook cannot
+        # tell a tenant that predates stored onboarding from a director who cleared theirs.
+        env.pop("TICKET_BOARD_ROLE_ONBOARDING_MIGRATED", None)
+        if cfg.get("migrations", {}).get("director_onboarding"):
+            env["TICKET_BOARD_ROLE_ONBOARDING_MIGRATED"] = "1"
         projected.append(role)
         retired.pop(name, None)
     active = {r["role"] for r in projected}

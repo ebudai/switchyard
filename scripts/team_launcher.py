@@ -10971,6 +10971,15 @@ def migrate_declarative_director_onboarding(
         report = json.loads(captured.getvalue() or "{}")
     except json.JSONDecodeError:
         return True
+    if report.get("reason") == "board predates the phase-one schema":
+        # Expected during rollout, and not a failure: the upgrade must still report the
+        # deployment commands, because deploying phase one is what unblocks the migration.
+        print_func(
+            "switchyard: the running board predates this release's workflow schema, so "
+            "the director onboarding migration was not attempted. Deploy the release "
+            "below, then rerun switchyard upgrade to migrate this tenant."
+        )
+        return False
     if report.get("migrated") is False:
         return False
     print_func(

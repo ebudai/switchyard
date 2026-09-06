@@ -68,6 +68,8 @@ def _skill_instruction_for_role(role: str) -> str:
         return DIRECTOR_SKILL_INSTRUCTION
     return BOARD_SKILL_INSTRUCTION
 SWITCHYARD_PROJECT_DIR_NAME = ".switchyard"
+ONBOARDING_PACKET_DIR = Path("docs") / "onboarding"
+DIRECTOR_ONBOARDING_GUIDE = ONBOARDING_PACKET_DIR / "switchyard-director-guide.md"
 
 
 def _default_board_url(environ: dict[str, str]) -> str:
@@ -475,6 +477,87 @@ def _is_session_start_hook_source(source: str) -> bool:
     return source.endswith(".SessionStart") or source in SESSION_START_HOOK_SOURCES
 
 
+# Phase-one compatibility bridge (SYRD-36). These serve a director whose tenant has
+# not yet been migrated: no stored onboarding and no migration marker. SYRD-40
+# removes them once every registered tenant carries the marker.
+def _display_path(path: Path, *, root: Path) -> str:
+    try:
+        display = path.relative_to(root)
+    except ValueError:
+        display = path
+    text = display.as_posix()
+    if path.is_dir() and not text.endswith("/"):
+        text += "/"
+    return text
+
+
+def _onboarding_packet_exists(root: Path) -> bool:
+    packet_dir = root / ONBOARDING_PACKET_DIR
+    if not packet_dir.is_dir():
+        return False
+    return any(path.is_file() for path in packet_dir.glob("*.md"))
+
+
+def _candidate_project_roots(environ: dict[str, str], cwd: Path) -> list[Path]:
+    candidates: list[Path] = []
+    for key in ("SWITCHYARD_PROJECT_DIR", "TICKET_BOARD_PROJECT_DIR", "PGU_TICKET_BOARD_PROJECT_DIR"):
+        value = environ.get(key, "").strip()
+        if value:
+            candidates.append(Path(value).expanduser())
+    design_path = environ.get("SWITCHYARD_PROJECT_DESIGN", "").strip()
+    if design_path:
+        candidates.append(Path(design_path).expanduser().parent)
+    director_onboarding = environ.get("SWITCHYARD_DIRECTOR_ONBOARDING", "").strip()
+    if director_onboarding:
+        parent = Path(director_onboarding).expanduser().parent
+        candidates.append(parent.parent if parent.name == SWITCHYARD_PROJECT_DIR_NAME else parent)
+    candidates.append(cwd)
+
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        normalized = str(candidate.resolve(strict=False))
+        if normalized not in seen:
+            seen.add(normalized)
+            deduped.append(candidate)
+    return deduped
+
+
+def _onboarding_project_root(environ: dict[str, str], cwd: Path) -> Path | None:
+    for root in _candidate_project_roots(environ, cwd):
+        if _onboarding_packet_exists(root):
+            return root
+    return None
+
+
+def _director_startup_onboarding_context(root: Path, *, cwd: Path) -> str:
+    packet_dir = root / ONBOARDING_PACKET_DIR
+    guide = root / DIRECTOR_ONBOARDING_GUIDE
+    packet_display = _display_path(packet_dir, root=cwd)
+    if guide.is_file():
+        guide_display = _display_path(guide, root=cwd)
+        return (
+            f"Your director session just started fresh. Read the onboarding packet first: {packet_display}. "
+            f"Start with {guide_display}."
+        )
+    return f"Your director session just started fresh. Read the onboarding packet first: {packet_display}"
+
+
+
+def _director_onboarding_migrated(environ: dict[str, str]) -> bool:
+    """Whether this tenant's document already carries the director onboarding marker.
+
+    Projected into the pane environment because the hook never reads the workflow
+    document. Its absence is what distinguishes a tenant that predates stored onboarding
+    from a director who deliberately cleared their prompt.
+    """
+    return _env_first(environ, "TICKET_BOARD_ROLE_ONBOARDING_MIGRATED").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
 def _with_board_skill_instruction(context: str, role: str = "") -> str:
     instruction = _skill_instruction_for_role(role)
     if instruction in context:
@@ -537,10 +620,19 @@ def _session_start_additional_context_output(
             f"Your {role} session started. Read your role remit at {path}.\n\n" + path.read_text(),
             role,
         )
-    # The director used to have its own branch here, discovering the onboarding packet at
-    # session start. That remit is now ordinary role data: provisioning seeds it as an
-    # onboarding_prompt, the director changes it with `switchyard role-prompt`, and
-    # clearing it leaves the same generic fallback every other role has.
+    # Phase-one bridge, gated on the migration marker rather than on the role alone.
+    # An unmigrated tenant has no stored onboarding *and* no marker, so the old packet
+    # lookup still serves its director. Once the marker is persisted, an empty prompt and
+    # path mean the director cleared it deliberately, and the generic fallback -- nothing
+    # role-specific -- is the correct answer. SYRD-40 deletes this branch outright.
+    if role == DIRECTOR_ROLE and fresh_start and not _director_onboarding_migrated(environ):
+        cwd = Path.cwd()
+        onboarding_root = _onboarding_project_root(environ, cwd)
+        if onboarding_root is None:
+            return _session_start_context("", role)
+        return _session_start_context(
+            _director_startup_onboarding_context(onboarding_root, cwd=cwd), role
+        )
     if session_start_source not in SESSION_START_ACTIVE_WORK_SOURCES:
         # A fresh role session with nothing else to say is exactly the one that
         # would otherwise reach for the board unaided.

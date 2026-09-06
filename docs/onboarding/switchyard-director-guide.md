@@ -174,6 +174,15 @@ So setting a prompt never interrupts work in progress. If you need a role to pic
 one up now, restart that role rather than expecting the running conversation to
 change under it.
 
+**Your own prompt, during rollout.** Until this project has been migrated, a
+director with no stored prompt still gets the old onboarding-packet pointer, which
+is found at session start rather than stored. The migration runs by itself on the
+first apply, upgrade or reload after the release is deployed, and records a marker
+on the project. After that marker exists, clearing your prompt means what it means
+for any other role: no role-specific onboarding at all. If your board still runs
+the previous release, `switchyard upgrade` will say so and print the deployment to
+run first rather than attempting a change that board would reject.
+
 The change itself is applied atomically against the board's current workflow
 revision: if the configuration moved since you read it, your write is rejected
 rather than silently overwriting someone else's. A rollback journal is written

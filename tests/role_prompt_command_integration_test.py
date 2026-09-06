@@ -254,6 +254,62 @@ def main() -> int:
                 )
                 assert seeded_roles == ["director", "ops"], seeded_roles
 
+                # --- upgrading a tenant whose board predates phase one --------
+                # The running board is made to validate with main's pre-feature schema,
+                # which is the release actually deployed today. It rejects the new fields,
+                # so the migration must detect that and stage the deployment rather than
+                # attempt a write the board cannot accept.
+                import importlib.util as _ilu
+                import subprocess as _sp
+
+                old_schema = _sp.run(
+                    ["git", "show", "origin/main:scripts/ticket_board/workflow_config.py"],
+                    cwd=str(ROOT), capture_output=True, text=True,
+                )
+                if old_schema.returncode == 0:
+                    old_path = root / "old_workflow_config.py"
+                    old_path.write_text(old_schema.stdout, encoding="utf-8")
+                    old_spec = _ilu.spec_from_file_location("old_wc", old_path)
+                    old_module = _ilu.module_from_spec(old_spec)
+                    old_spec.loader.exec_module(old_module)
+
+                    # Put the tenant back into the unmigrated state a real pre-phase-one
+                    # board would be in, while the new validator is still active.
+                    unmigrated = copy.deepcopy(_board_document(base)["document"])
+                    unmigrated.pop("migrations", None)
+                    for role in unmigrated["roles"]:
+                        if role["name"] == "director":
+                            role.pop("onboarding_prompt", None)
+                            role["onboarding"] = None
+                    t.post_json(
+                        base,
+                        "/api/tickets/actions/configure_workflow",
+                        {"document": unmigrated,
+                         "expected_revision": _board_document(base)["revision"]},
+                        caller="director",
+                    )
+                    assert "migrations" not in _board_document(base)["document"]
+
+                    wc = importlib.import_module("scripts.ticket_board.workflow_config")
+                    current_validate = wc.validate
+                    revision_before_probe = _board_document(base)["revision"]
+                    wc.validate = old_module.validate  # the board now speaks the old schema
+                    try:
+                        staged = _run(
+                            wm,
+                            ["migrate-director-onboarding", *base_args,
+                             "--journal", str(launcher_dir / "journal-oldboard.json")],
+                        )
+                    finally:
+                        wc.validate = current_validate
+
+                    assert staged["migrated"] is False, staged
+                    assert staged["reason"] == wm.PHASE_ONE_BOARD_REQUIRED, staged
+                    assert "deploy the phase-one board release" in staged["action_required"]
+                    # Nothing was written to a board that could not accept it.
+                    assert _board_document(base)["revision"] == revision_before_probe
+                    assert not (launcher_dir / "journal-oldboard.json").exists()
+
                 # --- board committed, projection failed, then retried ---------
                 # configure_workflow commits before the projection is written, so a
                 # failure between them leaves the board ahead of the files. The retry

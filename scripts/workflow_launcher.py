@@ -139,7 +139,7 @@ def projection_files(config_path: Path, document: dict[str, Any]) -> dict[Path, 
     if plan_path.exists():
         plan = json.loads(plan_path.read_text())
         plan["workflow"] = validate(document)
-        files.update(refreshed_role_account_artifacts(plan, projected, provision_dir=config_path.parent))
+        refresh_plan_role_accounts(plan, projected)
         files[plan_path] = json.dumps(plan, indent=2, sort_keys=True) + "\n"
     artifact_path = config_path.parent.parent / f'{projected["project"]}.project.json'
     if artifact_path.exists():
@@ -149,20 +149,23 @@ def projection_files(config_path: Path, document: dict[str, Any]) -> dict[Path, 
     return files
 
 
-def refreshed_role_account_artifacts(
-    plan: dict[str, Any], projected: dict[str, Any], *, provision_dir: Path
-) -> dict[Path, str]:
+def refresh_plan_role_accounts(plan: dict[str, Any], projected: dict[str, Any]) -> list[str]:
     """Carry declarative role changes into the plan's role->account table.
 
     The board resolves authority from that table, and the rollout hands each
     role the tree it works in, so a role added by a workflow document has
-    neither until both are refreshed here. `plan` is updated in place; the
-    regenerated board unit is returned for the caller to write with the rest of
-    the projection. A project that never opted into per-role identities keeps
-    an empty table (SYRD-39).
+    neither until both are refreshed here. `plan` is updated in place and the
+    roles the table gained are returned.
+
+    The generated systemd unit is deliberately NOT rewritten. Privileged
+    provisioning keeps that artifact out of tenant ownership on purpose -- it is
+    installed as root, so a tenant that could edit it could choose what root
+    runs -- and this projection runs unprivileged as the tenant. Regenerating it
+    is `switchyard upgrade`, which renders it from this plan. A project that
+    never opted into per-role identities keeps an empty table (SYRD-39).
     """
     if not plan.get("role_accounts"):
-        return {}
+        return []
     accounts = [
         (role["role"], str(role["run_as_user"]).strip())
         for role in projected["roles"]
@@ -173,6 +176,7 @@ def refreshed_role_account_artifacts(
     # actually is, which the board then refuses as inactive. Dropping the row
     # would leave a live account unattributed instead.
     named = {role for role, _account in accounts}
+    known = {str(entry[0]) for entry in plan["role_accounts"]}
     for entry in plan["role_accounts"]:
         role, account = str(entry[0]), str(entry[1])
         if role not in named:
@@ -184,26 +188,33 @@ def refreshed_role_account_artifacts(
             if role.get("workdir") and role["role"] in named:
                 worktrees[role["role"]] = str(role["workdir"])
         plan["role_worktrees"] = [[role, path] for role, path in sorted(worktrees.items())]
-    unit_name = str(plan.get("board_unit") or "").strip()
-    if not unit_name:
-        return {}
-    from dataclasses import replace as _replace
-    from scripts.ticket_board.project_provision import ProjectBoardProvision, render_board_unit
-    from scripts import team_launcher as launcher
+    return sorted(role for role in named if role not in known)
 
+
+def board_unit_role_account_gap(plan: dict[str, Any], provision_dir: Path) -> list[str]:
+    """Roles the generated board unit cannot resolve a uid to yet.
+
+    The unit carries the authoritative table, and only an operator can rewrite
+    and install it, so a role added by a workflow document is configured on the
+    board before the board can recognise its account. Saying which roles are in
+    that state is the difference between a documented next step and a role that
+    silently cannot write (SYRD-39).
+    """
+    unit_name = str(plan.get("board_unit") or "").strip()
+    if not unit_name or not plan.get("role_accounts"):
+        return []
     try:
-        current = launcher._project_board_provision_from_json(provision_dir / "plan.json")
-    except SystemExit:
-        # A plan too old to load as a provision record still gets its table
-        # refreshed above; regenerating its unit is the operator's rollout step.
-        return {}
-    refreshed = _replace(
-        current,
-        role_accounts=tuple(tuple(entry) for entry in plan["role_accounts"]),
-        role_worktrees=tuple(tuple(entry) for entry in plan.get("role_worktrees", ())),
-    )
-    assert isinstance(refreshed, ProjectBoardProvision)
-    return {provision_dir / unit_name: render_board_unit(refreshed)}
+        unit = (provision_dir / unit_name).read_text(encoding="utf-8")
+    except OSError:
+        return []
+    declared = ""
+    for line in unit.splitlines():
+        stripped = line.strip()
+        for prefix in ('Environment=TICKET_BOARD_ROLE_ACCOUNTS=', 'Environment="TICKET_BOARD_ROLE_ACCOUNTS='):
+            if stripped.startswith(prefix):
+                declared = stripped[len(prefix):].rstrip('"')
+    present = {pair.split("=", 1)[0] for pair in declared.split(",") if "=" in pair}
+    return [str(entry[0]) for entry in plan["role_accounts"] if str(entry[0]) not in present]
 
 
 def prepare_role(config_path: Path, role_name: str, *, runner=None) -> None:

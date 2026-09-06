@@ -18,12 +18,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from scripts.ticket_board.workflow_config import validate
 from scripts.workflow_launcher import (
+    board_unit_role_account_gap,
     project_roles,
     projection_files,
     prepare_role,
     assign_projection_owner,
 )
-from scripts.workflow_manage import apply_files
+from scripts import workflow_launcher
+from scripts.workflow_manage import apply_files, assert_projection_writable
 from scripts import team_launcher as launcher
 
 
@@ -106,6 +108,14 @@ def provisioning_ownership(owner):
             assert receipt.read_text() == "protected receipt"
             # The owner can atomically update controls and add its first
             # workflow after privileged setup, without another chown.
+            # Provisioning hands the project's .switchyard directory to the
+            # tenant with a recursive chown that this fixture simulates, so the
+            # artifact's parent is tenant-owned in production. Reproduce that,
+            # or the projection below is judged against a shape no real tenant
+            # has.
+            os.chown(output.parent, identity.pw_uid, identity.pw_gid)
+            unit = output / json.loads((output / "plan.json").read_text())["board_unit"]
+            assert unit.is_file() and unit.stat().st_uid == 0, unit
             child = os.fork()
             if child == 0:
                 try:
@@ -115,6 +125,31 @@ def provisioning_ownership(owner):
                     replacement.write_bytes((output / "plan.json").read_bytes())
                     replacement.replace(output / "plan.json")
                     (output / "workflow.json").write_text(policy.read_text())
+                    # SYRD-39 x SYRD-36: the tenant, not root, runs role-prompt
+                    # and workflow apply. Root installs the board unit, so the
+                    # tenant cannot write it -- and must not have to. The whole
+                    # projection has to pass the same writability preflight the
+                    # apply path runs before it touches the board, and the
+                    # role-account table has to be updated by that same
+                    # unprivileged write.
+                    document = json.loads(policy.read_text())
+                    assert not os.access(unit, os.W_OK), unit
+                    files = projection_files(config, document)
+                    assert unit not in files, sorted(f.name for f in files)
+                    assert_projection_writable(files)
+                    apply_files(files)
+                    written = json.loads((output / "plan.json").read_text())
+                    accounts = {role: account for role, account in written["role_accounts"]}
+                    assert accounts["inspector"] == "cerulean-inspector", accounts
+                    assert len(set(accounts.values())) == len(accounts), accounts
+                    assert (
+                        json.loads(config.read_text())["roles"]
+                        == project_roles(json.loads(config.read_text()), document)["roles"]
+                    )
+                    # The roles the still-unrefreshed unit cannot resolve are
+                    # named, so the operator step is stated rather than found
+                    # later as a role that silently cannot write.
+                    assert "inspector" in board_unit_role_account_gap(written, output)
                 except BaseException:
                     import traceback
 
@@ -310,9 +345,25 @@ def main():
                 assert ["inspector", str(root / "worktrees/inspector")] in [
                     list(entry) for entry in refreshed["role_worktrees"]
                 ], refreshed["role_worktrees"]
+                # The generated systemd unit is NOT part of the projection.
+                # Provisioning keeps it out of tenant ownership because root
+                # installs it, and this projection runs unprivileged as the
+                # tenant: including it would make every role-prompt and workflow
+                # apply on a root-provisioned project fail its writability
+                # preflight. The refresh is an operator step, and the roles
+                # waiting on it are named rather than left to be discovered.
                 unit_path = iso_dir / iso_plan["board_unit"]
-                assert unit_path in iso_files, sorted(f.name for f in iso_files)
-                assert "inspector=cerulean-inspector" in iso_files[unit_path]
+                assert unit_path.exists()
+                assert unit_path not in iso_files, sorted(f.name for f in iso_files)
+                assert "inspector=cerulean-inspector" not in unit_path.read_text()
+                # ops is declared by the document too and was never in the
+                # CLI-derived table the unit was generated from, so both roles
+                # are waiting on the same operator refresh.
+                assert sorted(
+                    workflow_launcher.board_unit_role_account_gap(refreshed, iso_dir)
+                ) == ["inspector", "ops"], workflow_launcher.board_unit_role_account_gap(
+                    refreshed, iso_dir
+                )
             foreign = copy.deepcopy(document)
             next(r for r in foreign["roles"] if r["name"] == "main")[
                 "target"

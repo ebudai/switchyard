@@ -10,7 +10,11 @@ import tempfile
 import urllib.request
 from scripts.ticket_board.workflow_config import validate
 from scripts.ticket_board.write_client import TicketBoardWriteClient
-from scripts.workflow_launcher import projection_files, prepare_role
+from scripts.workflow_launcher import (
+    board_unit_role_account_gap,
+    prepare_role,
+    projection_files,
+)
 
 
 def atomic(path: Path, content: str) -> None:
@@ -149,6 +153,41 @@ def _board_predates_phase_one(board_url: str, cfg: dict, expected_revision: int)
             or "unknown role field" in message
         )
     return False
+
+
+def assert_projection_writable(files: dict[Path, str]) -> None:
+    """Refuse before the board write if any projected file cannot be replaced.
+
+    The board commits first, so a projection that fails afterwards leaves the
+    board ahead of the files. Everything the projection writes must therefore be
+    tenant-owned; anything root installs -- the generated systemd unit -- is
+    deliberately not part of it.
+    """
+    for path in files:
+        parent = path.parent
+        while not parent.exists():
+            parent = parent.parent
+        if not os.access(parent, os.W_OK) or (
+            path.exists() and not os.access(path, os.W_OK)
+        ):
+            raise PermissionError(f"projection path is not writable: {path}")
+
+
+def _project_slug(config_path: Path) -> str:
+    try:
+        return str(json.loads(config_path.read_text()).get("project") or "").strip() or "<project>"
+    except (OSError, ValueError):
+        return "<project>"
+
+
+def _pending_board_unit_roles(config_path: Path) -> list[str]:
+    """Roles the generated board unit cannot resolve yet, if this is a generated project."""
+    plan_path = config_path.parent / "plan.json"
+    try:
+        plan = json.loads(plan_path.read_text())
+    except (OSError, ValueError):
+        return []
+    return board_unit_role_account_gap(plan, config_path.parent)
 
 
 def _reconcile_projection(config_path: Path, document: dict) -> bool:
@@ -391,14 +430,7 @@ def main(argv=None):
         rollback_baseline = {**current, "document": baseline}
     cfg = _migrate_director_onboarding(args.config, cfg)
     files = projection_files(args.config, cfg)
-    for path in files:
-        parent = path.parent
-        while not parent.exists():
-            parent = parent.parent
-        if not os.access(parent, os.W_OK) or (
-            path.exists() and not os.access(path, os.W_OK)
-        ):
-            raise PermissionError(f"projection path is not writable: {path}")
+    assert_projection_writable(files)
     expected = (
         args.expected_revision
         if args.expected_revision is not None
@@ -463,12 +495,27 @@ def main(argv=None):
         raise RuntimeError(
             f'board revision {result["revision"]} applied; local projection pending. Preserve {journal} and rerun apply with the same document: {exc}'
         ) from exc
+    # A role the document added now has a Unix account in the plan, but only an
+    # operator can rewrite and install the board unit that carries the table the
+    # board resolves uids through. Until that happens the role is configured on
+    # the board and unrecognised on the socket, so say which roles and what to
+    # run rather than leaving it to be discovered as a role that cannot write.
+    pending_roles = _pending_board_unit_roles(args.config)
+    if pending_roles:
+        print(
+            f"workflow: {', '.join(pending_roles)} now run as their own Unix accounts, but the "
+            f"board unit still carries the previous table. An operator must run "
+            f"`switchyard upgrade {_project_slug(args.config)}` to regenerate and install it "
+            "before those roles can write to the board.",
+            file=sys.stderr,
+        )
     print(
         json.dumps(
             {
                 "revision": result["revision"],
                 "journal": str(journal),
                 "files": [str(p) for p in files],
+                "role_account_refresh_required": pending_roles,
                 "sessions_started": False,
             },
             indent=2,

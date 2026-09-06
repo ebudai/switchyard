@@ -492,14 +492,24 @@ the log, rather than resolving to whichever was configured first.
 A role can also arrive later, from the workflow document rather than from
 provisioning. On a tenant that has opted into per-role identities such a role is
 projected with its own `<project>-<role>` account, from the same naming function
-provisioning uses, and the generated plan and board unit have their role-account
-table refreshed with it. It is deliberately never given the account of the role
-it was templated from: the board resolves authority from the uid, so an
-inherited account would make the new role answer as the role it was copied from
-and unable to act as itself. On a tenant that has not opted in, nothing is
-assigned -- projection does not opt a project into isolation it never asked for.
-Applying the document updates generated artifacts only; creating the account and
-installing the refreshed unit is still an operator rollout step.
+provisioning uses, and the generated plan's role-account and worktree tables are
+refreshed with it. It is deliberately never given the account of the role it was
+templated from: the board resolves authority from the uid, so an inherited
+account would make the new role answer as the role it was copied from and unable
+to act as itself. On a tenant that has not opted in, nothing is assigned --
+projection does not opt a project into isolation it never asked for.
+
+The generated systemd unit is **not** rewritten by that projection. Applying a
+workflow document, setting a role prompt and every other projection path runs
+unprivileged as the tenant, while the unit is installed by root -- a tenant that
+could edit it could choose what root runs. It is therefore left out of the
+projection entirely, and out of the ownership handoff, so an unprivileged apply
+neither needs to write it nor is refused for not being able to. `switchyard
+upgrade <project>` renders it from the refreshed plan and installs it. Until an
+operator does that, the new role is configured on the board but its account is
+not in the unit's table, so the board cannot resolve it: apply names exactly
+those roles, both on stderr and as `role_account_refresh_required` in its JSON
+result.
 
 ### Role credentials, and the boundary they do and do not draw
 

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import stat
+
 from team_launcher_test_helpers import *
 
 def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
@@ -1004,6 +1006,214 @@ def test_add_role_prepares_the_new_role_before_it_can_be_started() -> None:
     # And the control interface is refreshed so the director can drive it.
     assert "role-control-sudoers" in commands
     assert "visudo -c" in commands
+
+
+
+def _isolated_project_config(tmp_path: Path, clis: dict[str, str]) -> "team_launcher.ProjectConfig":
+    """A migrated project: every role has its own account and its own worktree."""
+    roles = []
+    for index, (name, cli) in enumerate(sorted(clis.items())):
+        workdir = tmp_path / "worktrees" / name
+        workdir.mkdir(parents=True)
+        roles.append(
+            {
+                "role": name,
+                "slot": index,
+                "tmux_session": f"porter-{name}",
+                "target": f"porter-{name}:0.0",
+                "cli": [cli],
+                "workdir": str(workdir),
+                "run_as_user": f"porter-{name}",
+            }
+        )
+    config_path = tmp_path / "porter.json"
+    config_path.write_text(
+        json.dumps({"project": "porter", "run_as_user": "porter-agent", "roles": roles}, indent=2, sort_keys=True)
+        + "\n",
+        encoding="utf-8",
+    )
+    return load_project_config("porter", config_path)
+
+
+def _fake_home(home_base: Path, user: str) -> Path:
+    home = home_base / user
+    home.mkdir(parents=True, exist_ok=True)
+    return home
+
+
+def test_role_credentials_are_private_copies_of_an_allowlist_only() -> None:
+    """SYRD-39: seed the minimum each CLI needs, as the role's own private file.
+
+    Never a whole CLI home, never a symlink, never a shared readable directory.
+    Every supported CLI is covered here so a new one cannot be added silently.
+    """
+    chowns: list[list[str]] = []
+
+    def runner(args, **_kwargs):
+        chowns.append(list(args))
+        return subprocess.CompletedProcess(list(args), 0)
+
+    with tempfile.TemporaryDirectory(prefix="switchyard-role-creds.") as tmp:
+        home_base = Path(tmp)
+        config = _isolated_project_config(
+            home_base / "project", {"director": "claude", "ops": "codex", "app": "agy", "perf": "hermes"}
+        )
+        owner_home = _fake_home(home_base, "porter-agent")
+        # The owner is authenticated for the three file-based CLIs, plus a pile
+        # of things that must never be copied.
+        for relative in (
+            ".claude/.credentials.json",
+            ".codex/auth.json",
+            ".gemini/antigravity-cli/antigravity-oauth-token",
+        ):
+            path = owner_home / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"secret for {relative}", encoding="utf-8")
+        for noise in (".claude/sessions/a.jsonl", ".codex/session_index.jsonl", ".claude/settings.json"):
+            path = owner_home / noise
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("must not be copied", encoding="utf-8")
+
+        for role in config.roles:
+            _fake_home(home_base, f"porter-{role.role}")
+
+        # The SYRD-28 reachability proof requires the accounts to exist on the
+        # host, which a test cannot create. Its own suite covers that check; this
+        # one covers what is seeded, where, and with what ownership and modes.
+        original_home_check = team_launcher._require_owner_home_traversable
+        original_component_check = team_launcher._require_owner_traversable
+        team_launcher._require_owner_home_traversable = lambda *_args, **_kwargs: None
+        team_launcher._require_owner_traversable = lambda *_args, **_kwargs: None
+        try:
+            messages: list[str] = []
+            assert (
+                team_launcher.switchyard_seed_role_credentials_command(
+                    config, home_base=home_base, runner=runner, print_func=messages.append
+                )
+                == 0
+            )
+
+            expected = {
+                "director": ".claude/.credentials.json",
+                "ops": ".codex/auth.json",
+                "app": ".gemini/antigravity-cli/antigravity-oauth-token",
+            }
+            for role_name, relative in expected.items():
+                seeded = home_base / f"porter-{role_name}" / relative
+                assert seeded.is_file(), (role_name, seeded)
+                assert not seeded.is_symlink(), role_name
+                assert stat.S_IMODE(seeded.stat().st_mode) == 0o600, (role_name, oct(seeded.stat().st_mode))
+                assert stat.S_IMODE(seeded.parent.stat().st_mode) == 0o700, (role_name, oct(seeded.parent.stat().st_mode))
+                assert seeded.read_text(encoding="utf-8") == f"secret for {relative}"
+
+            # Nothing outside the allowlist crossed over.
+            for role_name in expected:
+                role_home = home_base / f"porter-{role_name}"
+                copied = {str(path.relative_to(role_home)) for path in role_home.rglob("*") if path.is_file()}
+                assert copied == {expected[role_name]}, (role_name, copied)
+
+            # Hermes has no file to seed and says so rather than seeding nothing quietly.
+            hermes_home = home_base / "porter-perf"
+            assert not any(hermes_home.rglob("*")), list(hermes_home.rglob("*"))
+            assert any("hermes" in message and "environment" in message for message in messages), messages
+
+            # Every copy is assigned to its own role, by file descriptor.
+            assigned = {args[1] for args in chowns if args and args[0] == "chown"}
+            assert {"porter-director:porter-director", "porter-ops:porter-ops", "porter-app:porter-app"} <= assigned, assigned
+            assert all(args[2].startswith("/proc/") for args in chowns if args and args[0] == "chown"), chowns
+
+            # Idempotent: a second run changes nothing.
+            second: list[str] = []
+            assert (
+                team_launcher.switchyard_seed_role_credentials_command(
+                    config, home_base=home_base, runner=runner, print_func=second.append
+                )
+                == 0
+            )
+            assert any("already has" in message for message in second), second
+            assert (home_base / "porter-ops/.codex/auth.json").read_text(encoding="utf-8") == "secret for .codex/auth.json"
+
+            # --reseed is the deliberate repair path.
+            (owner_home / ".codex/auth.json").write_text("rotated", encoding="utf-8")
+            assert (
+                team_launcher.switchyard_seed_role_credentials_command(
+                    config, role_name="ops", reseed=True, home_base=home_base, runner=runner, print_func=lambda _m: None
+                )
+                == 0
+            )
+            assert (home_base / "porter-ops/.codex/auth.json").read_text(encoding="utf-8") == "rotated"
+        finally:
+            team_launcher._require_owner_home_traversable = original_home_check
+            team_launcher._require_owner_traversable = original_component_check
+
+
+def test_missing_owner_credential_fails_closed_with_a_manifest() -> None:
+    """A role must not launch unauthenticated; the manifest says exactly why."""
+    with tempfile.TemporaryDirectory(prefix="switchyard-cred-manifest.") as tmp:
+        home_base = Path(tmp)
+        config = _isolated_project_config(home_base / "project", {"ops": "codex"})
+        _fake_home(home_base, "porter-agent")
+        _fake_home(home_base, "porter-ops")
+
+        original_home_dir_for_user = team_launcher.home_dir_for_user
+        team_launcher.home_dir_for_user = lambda user: home_base / user
+        try:
+            manifest = team_launcher.role_credential_manifest(config)
+            assert any("missing from the owner" in line and "ops" in line for line in manifest), manifest
+            try:
+                team_launcher.switchyard_seed_role_credentials_command(
+                    config, home_base=home_base, runner=lambda *a, **k: None, print_func=lambda _m: None
+                )
+            except SystemExit as exc:
+                assert "authenticate codex" in str(exc), str(exc)
+            else:
+                raise AssertionError("seeding must fail closed when the owner has no credential")
+        finally:
+            team_launcher.home_dir_for_user = original_home_dir_for_user
+
+
+def test_roles_publish_feature_refs_without_the_owner_ssh_key() -> None:
+    """SYRD-39: a role publishes its own ref; main stays Director-integrated."""
+    helper = ROOT / "scripts" / "switchyard-publish-ref"
+    refused = subprocess.run(
+        [sys.executable, str(helper), "--repository", "/tmp", "--ref", "main"],
+        capture_output=True,
+        text=True,
+    )
+    assert refused.returncode != 0
+    assert "integration branch" in refused.stderr + refused.stdout
+
+    with tempfile.TemporaryDirectory(prefix="switchyard-publish.") as tmp:
+        tmp_path = Path(tmp)
+        origin = tmp_path / "origin.git"
+        work = tmp_path / "work"
+        subprocess.run(["git", "init", "--bare", "-q", str(origin)], check=True)
+        subprocess.run(["git", "init", "-q", str(work)], check=True)
+        (work / "file.txt").write_text("content", encoding="utf-8")
+        for args in (
+            ["git", "-C", str(work), "config", "user.email", "role@example.invalid"],
+            ["git", "-C", str(work), "config", "user.name", "role"],
+            ["git", "-C", str(work), "add", "file.txt"],
+            ["git", "-C", str(work), "commit", "-q", "-m", "work"],
+            ["git", "-C", str(work), "remote", "add", "origin", str(origin)],
+        ):
+            subprocess.run(args, check=True)
+
+        published = subprocess.run(
+            [sys.executable, str(helper), "--repository", str(work), "--ref", "feature/syrd-39-demo"],
+            capture_output=True,
+            text=True,
+        )
+        assert published.returncode == 0, published.stderr
+        listed = subprocess.run(
+            ["git", "-C", str(origin), "for-each-ref", "--format=%(refname)"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        assert "refs/heads/feature/syrd-39-demo" in listed, listed
+        # The integration branch is untouched by the role's publish.
+        assert "refs/heads/main" not in listed, listed
 
 
 def main() -> int:

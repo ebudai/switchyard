@@ -151,6 +151,7 @@ SWITCHYARD_COMMANDS = (
     "present",
     "set-vcs-close-role",
     "agy-credential",
+    "seed-role-credentials",
     "stop",
     "teardown",
     "status",
@@ -9589,6 +9590,68 @@ def write_host_agy_credential_source(
     return path
 
 
+def switchyard_seed_role_credentials_command(
+    config: ProjectConfig,
+    *,
+    role_name: str = "",
+    reseed: bool = False,
+    home_base: Path = Path("/home"),
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    """Give each role its own private copy of the credentials its CLI needs.
+
+    Idempotent: a role that already has a credential is left alone unless
+    --reseed is passed, which is the deliberate repair/sync path. Nothing here
+    changes how the board derives a role -- that stays SO_PEERCRED uid -- and
+    nothing is shared between roles: each copy is owned by that role, 0600,
+    under a 0700 directory (SYRD-39).
+    """
+    owner_user = config.run_as_user or current_user_name()
+    roles = [role for role in config.roles if not role_name or role.role == role_name]
+    if role_name and not roles:
+        raise SystemExit(f"switchyard: {config.project} has no role {role_name}")
+    seeded = 0
+    hermes_roles: list[str] = []
+    for role in roles:
+        account = role_run_as_user(config, role)
+        if not account or account == owner_user:
+            print_func(f"switchyard: {role.role} has no Unix account of its own; nothing to seed")
+            continue
+        cli_name = _command_name(role.cli[0]) if role.cli else ""
+        artifacts = role_credential_artifacts(role)
+        if cli_name == "hermes" and not artifacts:
+            hermes_roles.append(role.role)
+            continue
+        if not artifacts:
+            raise SystemExit(
+                f"switchyard: no credential allowlist for {cli_name or 'unknown cli'} used by "
+                f"{role.role}; refusing to guess what to copy"
+            )
+        for artifact in artifacts:
+            if seed_role_credential(
+                account=account,
+                owner_user=owner_user,
+                artifact=artifact,
+                home_base=home_base,
+                reseed=reseed,
+                runner=runner,
+                print_func=print_func,
+            ):
+                seeded += 1
+    if hermes_roles:
+        print_func(
+            "switchyard: " + ", ".join(sorted(hermes_roles)) + " use hermes -- "
+            + HERMES_ENVIRONMENT_CREDENTIAL_NOTE
+        )
+    print_func(
+        f"switchyard: seeded {seeded} credential file(s); every role now acts as the same "
+        "model-provider account as the owner, and shares that account's quota, while keeping "
+        "its own filesystem and its own board role"
+    )
+    return 0
+
+
 def switchyard_agy_credential_command(
     action: str,
     *,
@@ -9688,6 +9751,221 @@ def _require_owner_traversable(dir_fd: int, owner_user: str, component: str, tar
             f"(uid {owner_uid}) could not enter it and agy could not read a credential "
             "below it; remove or fix that directory and rerun"
         )
+
+
+@dataclass(frozen=True)
+class RoleCredentialArtifact:
+    """One file a CLI needs in a role's own home to start authenticated.
+
+    An allowlist, deliberately narrow. Whole CLI homes are never copied: they
+    carry conversations, histories, caches, hooks and general settings, and
+    sharing those between roles would hand every role the others' work as well
+    as their tokens (SYRD-39).
+    """
+
+    cli: str
+    relative_path: str
+    required: bool = True
+
+
+# What each supported CLI needs, and nothing else. Anything not listed here is
+# never copied into a role home.
+ROLE_CREDENTIAL_ARTIFACTS: dict[str, tuple[RoleCredentialArtifact, ...]] = {
+    "claude": (RoleCredentialArtifact("claude", ".claude/.credentials.json"),),
+    "codex": (RoleCredentialArtifact("codex", ".codex/auth.json"),),
+    "agy": (
+        RoleCredentialArtifact(
+            "agy", f"{AGY_CREDENTIAL_DIR_NAME}/{AGY_CREDENTIAL_TOKEN_NAME}"
+        ),
+    ),
+    # Hermes resolves provider keys from the environment rather than a token
+    # file, so there is nothing to copy; the role's environment must carry the
+    # key and the manifest says so instead of silently seeding nothing.
+    "hermes": (),
+}
+HERMES_ENVIRONMENT_CREDENTIAL_NOTE = (
+    "hermes resolves provider API keys from the environment, so no file is seeded; "
+    "the role's pane environment must carry the same *_API_KEY the owner uses"
+)
+
+
+def role_credential_artifacts(role: RoleConfig) -> tuple[RoleCredentialArtifact, ...]:
+    cli_name = _command_name(role.cli[0]) if role.cli else ""
+    return ROLE_CREDENTIAL_ARTIFACTS.get(cli_name, ())
+
+
+def _artifact_present(home: Path, artifact: RoleCredentialArtifact) -> bool:
+    candidate = home / artifact.relative_path
+    try:
+        return candidate.is_file()
+    except OSError:
+        return False
+
+
+def role_credential_manifest(config: ProjectConfig) -> list[str]:
+    """What still has to be true before each role can start authenticated.
+
+    Fails closed by being explicit: every line names the role, the CLI, and the
+    exact artifact that is missing from the role's own home or absent from the
+    owner's, rather than letting a role launch and fail at the provider.
+    """
+    owner_home = home_dir_for_user(config.run_as_user or current_user_name())
+    lines: list[str] = []
+    for role in config.roles:
+        account = role_run_as_user(config, role)
+        cli_name = _command_name(role.cli[0]) if role.cli else ""
+        if not account or account == config.run_as_user:
+            continue
+        role_home = home_dir_for_user(account)
+        if cli_name == "hermes":
+            lines.append(f"{role.role} ({cli_name}): {HERMES_ENVIRONMENT_CREDENTIAL_NOTE}")
+            continue
+        artifacts = role_credential_artifacts(role)
+        if not artifacts:
+            lines.append(f"{role.role} ({cli_name or 'unknown cli'}): no known credential artifact")
+            continue
+        for artifact in artifacts:
+            if role_home is not None and _artifact_present(role_home, artifact):
+                continue
+            if owner_home is None or not _artifact_present(owner_home, artifact):
+                lines.append(
+                    f"{role.role} ({cli_name}): {artifact.relative_path} is missing from the "
+                    f"owner, so it cannot be seeded; authenticate the owner first"
+                )
+                continue
+            lines.append(
+                f"{role.role} ({cli_name}): {artifact.relative_path} not yet seeded into "
+                f"/home/{account}"
+            )
+    return lines
+
+
+def _open_role_credential_parent(
+    account: str,
+    home_base: Path,
+    relative_path: str,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> int:
+    """Open the role-owned directory that will hold one credential.
+
+    Extends the SYRD-28 model: every component is created with mkdirat 0700 and
+    opened with openat/O_NOFOLLOW relative to the descriptor above it, so no
+    privileged step is ever handed a whole path that a symlink could redirect,
+    and a component that already existed is proven to belong to the role rather
+    than assumed to (SYRD-39).
+    """
+    target_dir = home_base / account / str(Path(relative_path).parent)
+    fd = os.open(home_base, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fd = _openat_no_follow(fd, account, target_dir)
+        _require_owner_home_traversable(fd, account, home_base / account)
+        for component in Path(relative_path).parent.parts:
+            created = False
+            try:
+                os.mkdir(component, 0o700, dir_fd=fd)
+                created = True
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                raise SystemExit(
+                    f"switchyard: failed to create {target_dir} for {account} ({exc.strerror})"
+                ) from exc
+            parent_fd = fd
+            child_fd = _openat_no_follow_keep_parent(parent_fd, component, target_dir)
+            try:
+                if created:
+                    os.fchmod(child_fd, 0o700)
+                    own = runner(["chown", f"{account}:{account}", f"/proc/{os.getpid()}/fd/{child_fd}"])
+                    if own.returncode != 0:
+                        raise SystemExit(f"switchyard: failed to assign {target_dir} to {account}")
+                else:
+                    _require_owner_traversable(child_fd, account, component, target_dir)
+            except BaseException:
+                os.close(child_fd)
+                if created:
+                    try:
+                        os.rmdir(component, dir_fd=parent_fd)
+                    except OSError:
+                        pass
+                raise
+            os.close(parent_fd)
+            fd = child_fd
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def seed_role_credential(
+    *,
+    account: str,
+    owner_user: str,
+    artifact: RoleCredentialArtifact,
+    home_base: Path = Path("/home"),
+    reseed: bool = False,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> bool:
+    """Give one role its own private copy of one credential.
+
+    A copy, never a symlink and never a shared directory: the role owns the
+    file, refreshes rotate its own copy, and revoking one role's filesystem
+    access does not touch another's. Returns False when the role already has it
+    and reseed was not requested, which is what makes repair idempotent.
+    """
+    target_name = Path(artifact.relative_path).name
+    role_home = home_base / account
+    owner_home = home_base / owner_user
+    source_path = owner_home / artifact.relative_path
+    if not source_path.is_file():
+        raise SystemExit(
+            f"switchyard: {owner_user} has no {artifact.relative_path} to seed for {account}; "
+            f"authenticate {artifact.cli} as {owner_user} first"
+        )
+    dir_fd = _open_role_credential_parent(account, home_base, artifact.relative_path, runner=runner)
+    source_fd = os.open(source_path, os.O_RDONLY | os.O_NOFOLLOW)
+    created_target = False
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | (os.O_TRUNC if reseed else os.O_EXCL)
+        try:
+            target_fd = os.open(target_name, flags, 0o600, dir_fd=dir_fd)
+        except FileExistsError:
+            print_func(
+                f"switchyard: {account} already has {artifact.relative_path}; leaving it alone "
+                "(pass --reseed to replace it)"
+            )
+            return False
+        except OSError as exc:
+            raise SystemExit(
+                f"switchyard: failed to seed {artifact.relative_path} for {account} "
+                f"({exc.strerror})"
+            ) from exc
+        created_target = not reseed
+        try:
+            os.fchmod(target_fd, 0o600)
+            _copy_fd_contents(source_fd, target_fd)
+            # Ownership is assigned to the open description rather than the
+            # path, so nothing can be substituted between copy and chown.
+            own = runner(["chown", f"{account}:{account}", f"/proc/{os.getpid()}/fd/{target_fd}"])
+            if own.returncode != 0:
+                raise SystemExit(
+                    f"switchyard: failed to assign {artifact.relative_path} to {account}"
+                )
+        finally:
+            os.close(target_fd)
+    except BaseException:
+        if created_target:
+            try:
+                os.unlink(target_name, dir_fd=dir_fd)
+            except OSError:
+                pass
+        raise
+    finally:
+        os.close(source_fd)
+        os.close(dir_fd)
+    print_func(f"switchyard: seeded {artifact.relative_path} for {account} from {owner_user}")
+    return True
 
 
 def _open_owner_credential_dir(
@@ -10991,6 +11269,10 @@ def role_isolation_gaps(config: ProjectConfig) -> list[str]:
             continue
         if owner_uid != account_uid:
             gaps.append(f"{role.role}: worktree {workdir} is not owned by {account}")
+    # A role that starts without its CLI credentials fails at the provider
+    # instead of at launch, so the manifest is part of the gate rather than a
+    # separate check nobody runs (SYRD-39).
+    gaps.extend(role_credential_manifest(config))
     return gaps
 
 
@@ -11089,6 +11371,13 @@ def render_role_account_migration(config: ProjectConfig) -> str:
         f"sudo mv /etc/sudoers.d/49-{config.project}-role-control.staged "
         f"/etc/sudoers.d/49-{config.project}-role-control"
     )
+    lines.append(
+        "# Give each role its own private copy of the credentials its CLI needs."
+    )
+    lines.append(
+        "# Idempotent: a role that already has one is left alone; --reseed replaces it."
+    )
+    lines.append(f"sudo switchyard seed-role-credentials {config.project}")
     lines.append(f"sudo systemctl restart {config.project}-ticket-board.service")
     return "\n".join(lines) + "\n"
 
@@ -12521,6 +12810,21 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         if args.action == "set" and not args.user:
             raise SystemExit("switchyard: agy-credential set requires a user name")
         return switchyard_agy_credential_command(args.action, source_user=args.user)
+    if argv[0].casefold() == "seed-role-credentials":
+        parser = argparse.ArgumentParser(prog="switchyard seed-role-credentials")
+        parser.add_argument("project", help="registered project name or slug")
+        parser.add_argument("--role", default="", help="seed only this role")
+        parser.add_argument(
+            "--reseed",
+            action="store_true",
+            help="replace credentials a role already has; the deliberate repair path",
+        )
+        args = parser.parse_args(argv[1:])
+        entry = _resolve_switchyard_project(args.project)
+        config = _load_switchyard_project_config_for_command(entry, argv)
+        return switchyard_seed_role_credentials_command(
+            config, role_name=args.role, reseed=args.reseed
+        )
     if argv[0].casefold() == "register":
         args = _build_switchyard_register_parser().parse_args(argv[1:])
         return switchyard_register_command(args.config_path)

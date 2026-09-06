@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Publish one role's feature ref without handing that role the owner's SSH key.
+
+A role account runs this through sudo as the project owner. The owner's SSH
+identity does the push; the role never gains read access to the key files, and
+gets no other command. The ref is validated here rather than trusted, so the
+narrow grant stays narrow: a role may publish its own feature branch and may not
+touch an integration branch (SYRD-39).
+
+Ordinary role work needs no polkit and no root: this is a plain sudo -u grant
+between two unprivileged accounts.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+# Integration branches belong to the Director's merge path. A role publishes a
+# feature ref and asks for review; it never writes these.
+PROTECTED_REFS = frozenset({"main", "master", "trunk", "release"})
+FEATURE_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,190}$")
+
+
+def validate_ref(ref: str) -> str:
+    name = ref.strip()
+    if not name:
+        raise SystemExit("switchyard-publish-ref: a ref name is required")
+    if name.startswith("refs/"):
+        raise SystemExit(
+            "switchyard-publish-ref: pass a branch name, not a full ref path"
+        )
+    if not FEATURE_REF.fullmatch(name):
+        raise SystemExit(f"switchyard-publish-ref: {name!r} is not a valid branch name")
+    if name.casefold() in PROTECTED_REFS:
+        raise SystemExit(
+            f"switchyard-publish-ref: {name} is an integration branch; roles publish "
+            "feature refs and the Director integrates them"
+        )
+    if ".." in name or name.endswith(".lock"):
+        raise SystemExit(f"switchyard-publish-ref: {name!r} is not a valid branch name")
+    return name
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="switchyard-publish-ref")
+    parser.add_argument("--repository", required=True, help="the role's worktree to publish from")
+    parser.add_argument("--ref", required=True, help="feature branch name to publish")
+    parser.add_argument("--remote", default="origin")
+    parser.add_argument("--commit", default="HEAD", help="commit to publish as that ref")
+    args = parser.parse_args(argv[1:])
+
+    ref = validate_ref(args.ref)
+    repository = Path(args.repository).expanduser()
+    if not (repository / ".git").exists() and not repository.joinpath("HEAD").exists():
+        raise SystemExit(f"switchyard-publish-ref: {repository} is not a git checkout")
+
+    push = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "push",
+            args.remote,
+            f"{args.commit}:refs/heads/{ref}",
+        ],
+        text=True,
+        capture_output=True,
+    )
+    sys.stderr.write(push.stderr)
+    sys.stdout.write(push.stdout)
+    if push.returncode != 0:
+        return push.returncode
+    print(f"switchyard-publish-ref: published {ref} from {repository} as {os.getlogin() if sys.stdin.isatty() else 'the project owner'}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

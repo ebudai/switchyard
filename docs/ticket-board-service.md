@@ -489,6 +489,58 @@ Until a tenant has been migrated its roles still share one account. The board
 does not pretend otherwise -- it refuses roles that share a uid and says so in
 the log, rather than resolving to whichever was configured first.
 
+### Role credentials, and the boundary they do and do not draw
+
+Each role runs as its own Unix account with its own home, so its CLI starts with
+no credentials. Switchyard seeds them, and what it seeds is deliberately narrow.
+
+**What is copied.** Only the specific artifacts each supported CLI needs to
+start authenticated, from the already-authenticated owner:
+
+| CLI | Seeded artifact |
+|---|---|
+| `claude` | `.claude/.credentials.json` |
+| `codex` | `.codex/auth.json` |
+| `agy` | `.gemini/antigravity-cli/antigravity-oauth-token` |
+| `hermes` | nothing -- it resolves provider keys from the environment, so the role's pane environment must carry the same key |
+
+**What is never copied:** an entire CLI home, conversations, histories, caches,
+hooks, or general settings. Credentials are never symlinked and never placed in
+a directory readable by the roles group. Each role gets a **private copy**: owned
+by that role, mode `0600`, under a `0700` directory it owns. Copying reuses the
+anchored `openat`/`O_NOFOLLOW` model from SYRD-28, so no privileged step is
+handed a whole path a symlink could redirect, and ownership is assigned to the
+open file description rather than to a path.
+
+`switchyard seed-role-credentials <project>` performs it and is idempotent: a
+role that already has a credential is left alone, and `--reseed` is the
+deliberate repair and re-sync path. Token refresh afterwards rotates the role's
+own copy. If the owner has not authenticated a CLI, seeding **fails closed** and
+the role is not launched: `role_isolation_gaps` reports a precise per-role,
+per-artifact manifest at launch and at upgrade.
+
+**The boundary this draws, plainly.** All roles of a project act as **the same
+model-provider identity** and share that account's quota. That is deliberate:
+repeated interactive login per role is not the default, especially for ephemeral
+workers. A tenant wanting provider-level separation can give each role its own
+provider login later.
+
+**What it does not share.** Roles share no filesystem access: each copy is
+private, and one role cannot read another's home, worktree, session records or
+credentials. It has **no influence on board authority**, which remains derived
+from `SO_PEERCRED`'s uid; seeding a credential grants no board permission.
+
+### Publishing from an isolated role
+
+A role publishes its own feature ref through `switchyard-publish-ref`, run via
+`sudo` as the project owner. The owner's git identity performs the push; the role
+never gains read access to the owner's SSH key files, and the grant covers that
+one command and nothing else. The helper validates the ref and refuses
+integration branches (`main`, `master`, `trunk`, `release`), so a role publishes
+`feature/...` for review while the Director keeps integrating. No polkit is
+involved in ordinary role work: it is a plain `sudo -u` grant between two
+unprivileged accounts.
+
 ### What this does and does not cover
 
 It covers: another tenant's Unix account reaching this board, any local process

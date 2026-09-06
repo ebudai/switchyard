@@ -520,6 +520,7 @@ def role_tooling_staging_commands(project: str, board_current: str) -> list[str]
         "ticket-board-pane-idle-hook",
         "ticket-board-install-pane-hooks",
         "switchyard-board-skill",
+        "switchyard-publish-ref",
     ):
         commands.append(
             f"sudo install -m 0755 -o root -g root "
@@ -680,12 +681,19 @@ def role_control_sudoers(plan: ProjectBoardProvision) -> str:
         "",
     )
     role_targets = ",".join(account for _role, account in plan.role_accounts)
+    publish_helper = f"/usr/local/lib/switchyard/{plan.project}/switchyard-publish-ref"
     lines = [
-        f"# {plan.project}: role control interface. Each entry grants tmux and nothing",
-        "# else, so a holder can drive another account's tmux server but gains no other",
-        "# command and no root.",
+        f"# {plan.project}: role control interface. Each entry grants one command and",
+        "# nothing else, so a holder can drive another account's tmux server or publish a",
+        "# feature ref, and gains no other command and no root.",
         f"{owner} ALL=({role_targets}) NOPASSWD: /usr/bin/tmux",
     ]
+    # Roles publish their own feature refs through the owner's git identity. The
+    # helper validates the ref and refuses integration branches, so the grant
+    # cannot be used to write main, and the owner's SSH key files stay
+    # unreadable by every role (SYRD-39).
+    for _role, account in plan.role_accounts:
+        lines.append(f"{account} ALL=({owner}) NOPASSWD: {publish_helper}")
     if director_account:
         director_targets = ",".join(
             account for _role, account in plan.role_accounts if account != director_account

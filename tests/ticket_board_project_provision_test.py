@@ -957,26 +957,30 @@ def test_role_control_interface_covers_every_control_path_narrowly() -> None:
     accounts = dict(plan.role_accounts)
     director_account = accounts["director"]
 
-    grants = {}
+    tmux_grants: dict[str, set[str]] = {}
+    publish_grants: dict[str, set[str]] = {}
     for line in sudoers.splitlines():
         if "ALL=(" not in line:
             continue
         who = line.split()[0]
         targets = set(line.split("ALL=(")[1].split(")")[0].split(","))
-        grants.setdefault(who, set()).update(targets)
+        command = line.split("NOPASSWD:")[1].strip()
+        if command == "/usr/bin/tmux":
+            tmux_grants.setdefault(who, set()).update(targets)
+        else:
+            publish_grants.setdefault(who, set()).update(targets)
+        # Never a blanket grant, never root, always exactly one command.
+        assert "ALL=(ALL" not in line, line
+        assert command in {"/usr/bin/tmux", f"/usr/local/lib/switchyard/{plan.project}/switchyard-publish-ref"}, line
 
     # The listener runs as the owner and must reach every role pane.
-    assert grants["otto-agent"] == set(accounts.values()), grants["otto-agent"]
+    assert tmux_grants["otto-agent"] == set(accounts.values()), tmux_grants["otto-agent"]
     # The director drives the other roles, and the owner's display/viewer server.
-    assert director_account in grants
-    assert grants[director_account] == (set(accounts.values()) - {director_account}) | {"otto-agent"}, grants[director_account]
-
-    # Every grant is tmux only: no root, no other command, no blanket target.
-    for line in sudoers.splitlines():
-        if "ALL=(" not in line:
-            continue
-        assert line.endswith("NOPASSWD: /usr/bin/tmux"), line
-        assert "ALL=(ALL" not in line, line
+    assert tmux_grants[director_account] == (set(accounts.values()) - {director_account}) | {"otto-agent"}, tmux_grants[director_account]
+    # Every role may publish its own feature ref as the owner, and that is the
+    # only thing it may do as the owner: the SSH key files stay unreadable.
+    assert set(publish_grants) == set(accounts.values()), publish_grants
+    assert all(targets == {"otto-agent"} for targets in publish_grants.values()), publish_grants
     assert sudoers.startswith("#"), sudoers
 
 

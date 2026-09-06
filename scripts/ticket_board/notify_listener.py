@@ -1372,9 +1372,19 @@ WHERE id = %s
                 and not parked
                 and not has_unresolved_blockers
             )
+        required_final_review_handoff = (
+            kind == "transition"
+            and expected_state == "director_review"
+            and current_state == "director_review"
+            and expected_assignee == "director"
+            and current_assignee == "director"
+            and target_role == "director"
+        )
         if kind in {"transition", "idle_reminder", "nudge"} and (
             manually_controlled or parked or has_unresolved_blockers
-        ):
+        ) and not required_final_review_handoff:
+            # Scheduling flags hold owner work and optional reminders. They do
+            # not undo a completed handoff to the Director's final review.
             return False
 
         current_target_role = self._current_target_role(kind, current_state, current_assignee)

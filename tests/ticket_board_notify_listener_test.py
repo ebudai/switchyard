@@ -435,6 +435,11 @@ def hook_gate(tmp_path: Path) -> tuple[PaneHookStateStore, PaneActivityGate]:
     )
 
 
+def _handed_off(message: str) -> str:
+    """What a pane actually receives for a hand-off: the wording plus the pointer."""
+    return notify_listener.with_board_skill_instruction(message, kind="transition")
+
+
 def test_hook_state_writer_and_gate_idle_before_arrival_delivers_immediately() -> None:
     sent: list[tuple[str, str]] = []
     with TemporaryStateDir() as tmp_path:
@@ -455,7 +460,7 @@ def test_hook_state_writer_and_gate_idle_before_arrival_delivers_immediately() -
 
     assert delivered == 1
     assert elapsed < 1.0
-    assert sent == [("pgu-ops:0.0", "New ticket for you: PGU-304 -- Queue")]
+    assert sent == [("pgu-ops:0.0", _handed_off("New ticket for you: PGU-304 -- Queue"))]
     assert conn.requeued == []
     assert conn.acked == [1]
     assert conn.traces[1][5] == "idle"
@@ -484,7 +489,7 @@ def test_hermes_turn_end_idle_delivers_without_foreign_runtime_trace() -> None:
 
         assert listener.listen_once(max_notifications=1) == 1
 
-    assert sent == [("pgu-inspector:0.0", "PGU-774 -- Hermes notification")]
+    assert sent == [("pgu-inspector:0.0", _handed_off("PGU-774 -- Hermes notification"))]
     assert conn.requeued == []
     assert conn.acked == [774]
     assert conn.traces[1][5] == "idle"
@@ -540,7 +545,7 @@ def test_real_idle_cursor_position_delivers_instead_of_wedging() -> None:
 
         assert listener.listen_once(max_notifications=1) == 1
 
-    assert sent == [("pgu-ops:0.0", "PGU-365 -- Ops notification")]
+    assert sent == [("pgu-ops:0.0", _handed_off("PGU-365 -- Ops notification"))]
     assert conn.requeued == []
     assert conn.acked == [79]
     assert conn.traces[1][6] == "hook_idle"
@@ -568,7 +573,7 @@ def test_cursor_home_delivers_regardless_of_row() -> None:
 
             assert listener.listen_once(max_notifications=1) == 1
 
-        assert sent == [("pgu-ops:0.0", "PGU-365A -- Ops notification")]
+        assert sent == [("pgu-ops:0.0", _handed_off("PGU-365A -- Ops notification"))]
         assert conn.acked == [80]
         assert conn.traces[1][6] == "hook_idle"
 
@@ -626,7 +631,7 @@ def test_pre_send_recheck_delivers_when_cursor_stays_home() -> None:
 
         assert listener.process_due_notifications(conn, max_notifications=1) == 1
 
-    assert sent == [("pgu-ops:0.0", "PGU-364A -- Ops notification")]
+    assert sent == [("pgu-ops:0.0", _handed_off("PGU-364A -- Ops notification"))]
     assert sleep_calls == [0.5]
     assert conn.requeued == []
     assert conn.acked == [86]
@@ -792,7 +797,7 @@ def test_idle_role_resets_busy_backoff_before_claiming_due_notifications() -> No
 
         assert listener.listen_once(max_notifications=1) == 1
 
-    assert sent == [("pgu-ops:0.0", "New ticket for you: PGU-627 -- Queue")]
+    assert sent == [("pgu-ops:0.0", _handed_off("New ticket for you: PGU-627 -- Queue"))]
     assert conn.requeued == []
     assert conn.acked == [32]
     executed_sql = [str(statement) for statement, _params in conn.executed]
@@ -1274,7 +1279,7 @@ def test_stale_codex_busy_state_recovers_and_delivers() -> None:
         assert listener.listen_once(max_notifications=1) == 1
         recovered = store.read("pgu-ops:0.0")
 
-    assert sent == [("pgu-ops:0.0", "New ticket for you: PGU-558 -- Queue")]
+    assert sent == [("pgu-ops:0.0", _handed_off("New ticket for you: PGU-558 -- Queue"))]
     assert conn.requeued == []
     assert conn.acked == [89]
     assert recovered is not None
@@ -2003,7 +2008,7 @@ def test_two_in_progress_tickets_do_not_mutually_finish_current_deadlock() -> No
 
         assert listener.listen_once(max_notifications=2) == 1
 
-    assert sent == [("pgu-ops:0.0", "New ticket for you: PGU-334 -- Queue")]
+    assert sent == [("pgu-ops:0.0", _handed_off("New ticket for you: PGU-334 -- Queue"))]
     assert conn.acked == [623]
     assert [row[0] for row in conn.requeued] == [625]
     assert conn.requeued[0][1][2] == FINISH_CURRENT_REQUEUE_ERROR
@@ -2037,7 +2042,7 @@ def test_finish_current_releases_next_oldest_after_oldest_leaves_in_progress() -
 
         assert listener.listen_once(max_notifications=1) == 1
 
-    assert sent == [("pgu-ops:0.0", "New ticket for you: PGU-336 -- Queue")]
+    assert sent == [("pgu-ops:0.0", _handed_off("New ticket for you: PGU-336 -- Queue"))]
     assert conn.acked == [625]
     assert conn.requeued == []
 
@@ -2069,7 +2074,7 @@ def test_three_in_progress_tickets_deliver_oldest_first_one_at_a_time() -> None:
 
         assert listener.listen_once(max_notifications=3) == 1
 
-    assert sent == [("pgu-ops:0.0", "New ticket for you: PGU-100 -- Queue")]
+    assert sent == [("pgu-ops:0.0", _handed_off("New ticket for you: PGU-100 -- Queue"))]
     assert conn.acked == [100]
     assert [row[0] for row in conn.requeued] == [102, 101]
 
@@ -2186,7 +2191,7 @@ def test_director_client_activity_latches_no_clobber_until_busy_idle_cycle() -> 
         )
         assert delivered_listener.listen_once(max_notifications=1) == 1
 
-    assert sent == [("pgu-director:0.0", "PGU-306 -- Director notification")]
+    assert sent == [("pgu-director:0.0", _handed_off("PGU-306 -- Director notification"))]
 
 
 def test_director_restart_window_holds_stale_idle_until_busy_idle_cycle() -> None:
@@ -2264,7 +2269,7 @@ def test_director_restart_window_holds_stale_idle_until_busy_idle_cycle() -> Non
         )
         assert delivered_listener.listen_once(max_notifications=1) == 1
 
-    assert sent == [("pgu-director:0.0", "PGU-355 -- Director notification")]
+    assert sent == [("pgu-director:0.0", _handed_off("PGU-355 -- Director notification"))]
 
 
 def test_director_restart_window_timeout_releases_flat_idle_without_busy_cycle() -> None:
@@ -2318,7 +2323,7 @@ def test_director_restart_window_timeout_releases_flat_idle_without_busy_cycle()
         )
         assert released_listener.listen_once(max_notifications=1) == 1
 
-    assert sent == [("pgu-director:0.0", "PGU-358 -- Director notification")]
+    assert sent == [("pgu-director:0.0", _handed_off("PGU-358 -- Director notification"))]
     assert released_conn.traces[1][6] == "hook_idle"
 
 
@@ -2729,15 +2734,15 @@ def test_director_delivery_matrix_for_trusted_and_untrusted_claude_idle_sources(
         capture_pane_runner=targeted_alternating_capture_runner("pgu-director:0.0", ""),
     )
 
-    assert trusted_idle_sent == [("pgu-director:0.0", "PGU-360 -- Director notification")]
+    assert trusted_idle_sent == [("pgu-director:0.0", _handed_off("PGU-360 -- Director notification"))]
     assert trace_events(trusted_idle_conn) == ["listener_claim", "send", "listener_ack"]
     assert trusted_idle_conn.traces[1][6] == "hook_idle"
 
-    assert trusted_static_interrupt_sent == [("pgu-director:0.0", "PGU-360 -- Director notification")]
+    assert trusted_static_interrupt_sent == [("pgu-director:0.0", _handed_off("PGU-360 -- Director notification"))]
     assert trace_events(trusted_static_interrupt_conn) == ["listener_claim", "send", "listener_ack"]
     assert trusted_static_interrupt_conn.traces[1][6] == "hook_idle"
 
-    assert untrusted_idle_sent == [("pgu-director:0.0", "PGU-360 -- Director notification")]
+    assert untrusted_idle_sent == [("pgu-director:0.0", _handed_off("PGU-360 -- Director notification"))]
     assert trace_events(untrusted_idle_conn) == ["listener_claim", "send", "listener_ack"]
     assert untrusted_idle_conn.traces[1][6] == "working_timer_idle"
 
@@ -2783,7 +2788,7 @@ def test_idle_nudge_enumeration_does_not_touch_director_composing_latch() -> Non
         )
         assert listener.listen_once(max_notifications=1) == 1
 
-    assert sent == [("pgu-director:0.0", "PGU-359 -- Director notification")]
+    assert sent == [("pgu-director:0.0", _handed_off("PGU-359 -- Director notification"))]
     assert conn.acked == [76]
     assert conn.traces[1][6] == "hook_idle"
 
@@ -3154,7 +3159,7 @@ def test_long_idle_live_pane_still_delivers() -> None:
 
         assert listener.listen_once(max_notifications=1) == 1
 
-    assert sent == [("pgu-research:0.0", "New ticket for you: PGU-778 -- Queue")]
+    assert sent == [("pgu-research:0.0", _handed_off("New ticket for you: PGU-778 -- Queue"))]
     assert conn.requeued == []
     assert conn.dead_lettered == []
     assert conn.acked == [51]
@@ -3182,7 +3187,7 @@ def test_busy_existing_pane_holds_then_delivers_when_idle() -> None:
     gate_busy[0] = False
     conn.queue_rows.append(queue_row(50, "PGU-776", attempts=2, assignee="ops", target_role="ops"))
     assert listener.listen_once(max_notifications=1) == 1
-    assert sent == [("pgu-ops:0.0", "New ticket for you: PGU-776 -- Queue")]
+    assert sent == [("pgu-ops:0.0", _handed_off("New ticket for you: PGU-776 -- Queue"))]
     assert conn.acked == [50]
     assert conn.dead_lettered == []
 
@@ -3234,7 +3239,7 @@ def test_final_review_handoff_survives_busy_retry_and_manual_control() -> None:
     gate_busy[0] = False
 
     assert listener.listen_once(max_notifications=1) == 1
-    assert sent == [("pgu-director:0.0", message)]
+    assert sent == [("pgu-director:0.0", _handed_off(message))]
     assert conn.acked == [52]
 
 
@@ -3268,7 +3273,7 @@ def test_final_review_handoff_ignores_only_scheduling_flags() -> None:
         )
 
         assert listener.listen_once(max_notifications=1) == 1
-        assert sent == [("pgu-director:0.0", f"New ticket for you: {ticket_id} -- Queue")]
+        assert sent == [("pgu-director:0.0", _handed_off(f"New ticket for you: {ticket_id} -- Queue"))]
         assert conn.acked == [notification_id]
 
 
@@ -3381,7 +3386,7 @@ def test_terminal_transition_notification_is_delivered_to_prior_owner() -> None:
     )
 
     assert listener.listen_once(max_notifications=1) == 1
-    assert sent == [("pgu-ops:0.0", message)]
+    assert sent == [("pgu-ops:0.0", _handed_off(message))]
     assert conn.acked == [9]
 
 

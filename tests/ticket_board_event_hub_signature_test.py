@@ -37,12 +37,17 @@ def reconciler_survives_and_reports_a_failing_scan() -> None:
     hub = TicketBoardEventHub(app, scan_interval_seconds=0.02)
     try:
         listener, _version = hub.register()
-        app.failure = RuntimeError("postgres is unreachable")
+        secret = "postgresql://board_user:hunter2@/tenant_db?host=/run/postgresql"
+        app.failure = RuntimeError(f"connection failed: {secret}")
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline and not hub.degraded_reason:
             time.sleep(0.02)
         assert hub._thread.is_alive(), "a failing scan killed the reconciler"
-        assert hub.degraded_reason == "postgres is unreachable", hub.degraded_reason
+        # A database error's text routinely carries the conninfo, and this
+        # reason is sent to every open browser.
+        assert hub.degraded_reason == TicketBoardEventHub.DEGRADED_REASON, hub.degraded_reason
+        for leaked in (secret, "hunter2", "board_user", "tenant_db", "connection failed"):
+            assert leaked not in hub.degraded_reason, leaked
         # Open clients are woken so they can say the board may be stale.
         assert listener.get(timeout=1.0)
 

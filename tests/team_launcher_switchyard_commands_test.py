@@ -75,7 +75,7 @@ def test_legacy_and_switchyard_entrypoints_render_same_plain_konsole_command() -
             team_launcher.os.geteuid = original_geteuid  # type: ignore[method-assign]
             team_launcher.run_switchyard_launch_first_run_auth = original_first_run_auth
 
-        assert not any("konsole" in call for call in runner.calls)
+        assert not any(any(Path(part).name == "konsole" for part in call) for call in runner.calls)
         assert len(process_launcher.calls) == 1
         assert process_launcher.calls[0]["kwargs"]["start_new_session"] is True
         pane_commands = _leaf_commands(json.loads(layout_output.read_text(encoding="utf-8")))
@@ -143,14 +143,19 @@ def test_legacy_and_switchyard_entrypoints_render_same_plain_konsole_command() -
             "-H",
             "--",
             "env",
+            "-i",
+            f"PATH={team_launcher.DEFAULT_PANE_BASE_PATH}",
+            f"HOME={Path.home()}",
+            f"USER={desktop_user}",
+            f"LOGNAME={desktop_user}",
+            f"XDG_RUNTIME_DIR=/run/user/{os.getuid()}",
             "QT_QPA_PLATFORM=wayland",
             "WAYLAND_DISPLAY=/run/user/1000/wayland-0",
-            f"XDG_RUNTIME_DIR=/run/user/{os.getuid()}",
-            f"HOME={Path.home()}",
         ]
+        konsole_program = team_launcher.gui_program_path("konsole")
         assert legacy_command == [
             *expected_prefix,
-            "konsole",
+            konsole_program,
             "--separate",
             "--qwindowtitle",
             "pgu",
@@ -159,7 +164,7 @@ def test_legacy_and_switchyard_entrypoints_render_same_plain_konsole_command() -
         ], legacy_command
         assert switchyard_command == [
             *expected_prefix,
-            "konsole",
+            konsole_program,
             "--separate",
             "--qwindowtitle",
             "pgu",

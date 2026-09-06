@@ -509,7 +509,10 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
         )
         assert any(call[:6] == ["sudo", "-u", "otto-agent", "git", "-C", str(project_dir)] for call in runner.calls)
         assert "not a git repository" not in runner.git_output
-        assert not any(call[:1] in (["env"], ["sh"]) and "konsole" in call for call in runner.calls)
+        assert not any(
+            call[:1] in (["env"], ["sh"]) and any(Path(part).name == "konsole" for part in call)
+            for call in runner.calls
+        )
         assert len(process_launcher.calls) == 1
         assert process_launcher.calls[0]["kwargs"]["start_new_session"] is True
         output = stdout.getvalue()

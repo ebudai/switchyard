@@ -53,17 +53,111 @@ def test_a_root_invocation_crosses_to_the_desktop_account_before_konsole() -> No
         team_launcher.os.geteuid = original
 
     assert args[:4] == ["sudo", "-u", desktop_user, "-H"], args
-    assert "konsole" in args, args
-    assert args.index("sudo") < args.index("konsole"), args
-    # Nothing of root's environment crosses: sudo resets it and every variable
-    # the GUI gets is named here.
+    konsole = next(index for index, part in enumerate(args) if Path(part).name == "konsole")
+    assert args.index("sudo") < konsole, args
+    # The environment is emptied at the transition and rebuilt from the
+    # allowlist; the execution-level case proves nothing survives it.
+    assert args[args.index("env") + 1] == "-i", args
     assignments = [part for part in args if "=" in part and not part.startswith("-")]
-    assert {name.split("=", 1)[0] for name in assignments} <= {
-        "QT_QPA_PLATFORM",
-        "WAYLAND_DISPLAY",
-        "XDG_RUNTIME_DIR",
-        "HOME",
-    }, assignments
+    assert {name.split("=", 1)[0] for name in assignments} <= set(
+        team_launcher.GUI_ENVIRONMENT_ALLOWLIST
+    ), assignments
+    assert any(name.startswith("PATH=") for name in assignments), assignments
+
+
+def test_no_privileged_variable_survives_the_identity_transition() -> None:
+    """Execute the launch and read the desktop process's real environment.
+
+    Inspecting argv cannot see what is inherited. sudo's env_reset is the
+    host's policy, not this project's: a site whose sudoers keeps variables
+    would carry them from root into the desktop account, and -H leaves more
+    set. The command therefore empties the environment itself, and this proves
+    it by running a permissive stand-in for sudo -- one that preserves
+    everything, which is the worst case -- and dumping what the program at the
+    end actually receives.
+    """
+    with tempfile.TemporaryDirectory(prefix="gui-env-boundary.") as tmp:
+        tmp_path = Path(tmp)
+        stub_bin = tmp_path / "bin"
+        stub_bin.mkdir()
+        sudo_env = tmp_path / "sudo.env"
+        konsole_env = tmp_path / "konsole.env"
+        (stub_bin / "sudo").write_text(
+            "#!/bin/sh\n"
+            "# Permissive stand-in: keeps the whole environment, as a host's\n"
+            "# sudoers env_keep may. Nothing here resets anything.\n"
+            f"/usr/bin/env > {shlex.quote(str(sudo_env))}\n"
+            "while [ $# -gt 0 ]; do\n"
+            "  case \"$1\" in\n"
+            "    -u) shift 2 ;;\n"
+            "    -H) shift ;;\n"
+            "    --) shift; break ;;\n"
+            "    *) break ;;\n"
+            "  esac\n"
+            "done\n"
+            'exec "$@"\n',
+            encoding="utf-8",
+        )
+        (stub_bin / "konsole").write_text(
+            "#!/bin/sh\n"
+            # Absolute: the emptied PATH is the point of this case, so the stub
+            # cannot rely on finding anything itself.
+            f"/usr/bin/env > {shlex.quote(str(konsole_env))}\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        for name in ("sudo", "konsole"):
+            (stub_bin / name).chmod(0o755)
+
+        desktop_user = team_launcher.current_user_name()
+        sentinels = {
+            "SWITCHYARD_ROOT_SENTINEL": "must-not-cross",
+            "AWS_SECRET_ACCESS_KEY": "must-not-cross",
+            "SUDO_ASKPASS": "/root/askpass",
+            "LD_PRELOAD": "/root/evil.so",
+            "XAUTHORITY": "/root/.Xauthority",
+        }
+        original_geteuid = team_launcher.os.geteuid
+        original_base_path = team_launcher.DEFAULT_PANE_BASE_PATH
+        try:
+            team_launcher.os.geteuid = lambda: 0
+            team_launcher.DEFAULT_PANE_BASE_PATH = str(stub_bin)
+            args = team_launcher.konsole_launch_args(
+                tmp_path / "layout.json", gui_user=desktop_user, window_title="porter"
+            )
+        finally:
+            team_launcher.os.geteuid = original_geteuid
+            team_launcher.DEFAULT_PANE_BASE_PATH = original_base_path
+
+        assert args[0] == "sudo", args
+        assert args[args.index("env") + 1] == "-i", args
+        environment = {**os.environ, **sentinels, "PATH": f"{stub_bin}:{os.environ.get('PATH', '')}"}
+        result = subprocess.run(args, env=environment, capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+
+        assert konsole_env.exists(), result.stderr
+        assert sudo_env.exists(), result.stderr
+
+        def parsed(path: Path) -> dict[str, str]:
+            values: dict[str, str] = {}
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if "=" in line:
+                    name, value = line.split("=", 1)
+                    values[name] = value
+            return values
+
+        # The sentinels really were present at the transition, so their absence
+        # afterwards is the command's doing and not the fixture's.
+        crossing = parsed(sudo_env)
+        assert all(crossing.get(name) == value for name, value in sentinels.items()), crossing
+
+        received = parsed(konsole_env)
+        for name in sentinels:
+            assert name not in received, (name, received)
+        assert set(received) <= set(team_launcher.GUI_ENVIRONMENT_ALLOWLIST) | {"_", "PWD", "SHLVL"}, received
+        assert received["HOME"] == team_launcher._gui_home(desktop_user), received
+        assert received["USER"] == desktop_user and received["LOGNAME"] == desktop_user, received
+        assert received["QT_QPA_PLATFORM"] == "wayland", received
 
 
 def test_a_root_invocation_without_a_desktop_account_refuses_to_open_anything() -> None:

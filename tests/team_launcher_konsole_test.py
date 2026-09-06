@@ -5,6 +5,10 @@ from __future__ import annotations
 
 from team_launcher_test_helpers import *
 
+# SYRD-43: the terminal is named by absolute path so it still resolves when the
+# environment is emptied across a root-to-desktop transition. These cases are
+# unprivileged, so only the program name changes for them.
+
 def test_konsole_launch_uses_gui_user_display_environment() -> None:
     original_uid_for_user = team_launcher.uid_for_user
     original_host_wayland = os.environ.get("HOST_WAYLAND_DISPLAY")
@@ -20,7 +24,7 @@ def test_konsole_launch_uses_gui_user_display_environment() -> None:
             "env",
             "QT_QPA_PLATFORM=wayland",
             "WAYLAND_DISPLAY=/run/user/1000/wayland-0",
-            "konsole",
+            team_launcher.gui_program_path("konsole"),
             "--separate",
             "--layout",
             "/tmp/layout.json",
@@ -51,7 +55,7 @@ def test_konsole_launch_args_can_set_static_window_title() -> None:
             "env",
             "QT_QPA_PLATFORM=wayland",
             "WAYLAND_DISPLAY=/run/user/1000/wayland-0",
-            "konsole",
+            team_launcher.gui_program_path("konsole"),
             "--separate",
             "--qwindowtitle",
             "Otto Scheduler",
@@ -91,7 +95,7 @@ def test_konsole_launch_normalizes_relative_host_wayland_display() -> None:
             "env",
             "QT_QPA_PLATFORM=wayland",
             "WAYLAND_DISPLAY=/run/user/1000/wayland-0",
-            "konsole",
+            team_launcher.gui_program_path("konsole"),
             "--separate",
             "--layout",
             "/tmp/layout.json",
@@ -131,7 +135,7 @@ def test_konsole_launch_can_fallback_to_gui_user_uid_without_host_var() -> None:
             "env",
             "QT_QPA_PLATFORM=wayland",
             "WAYLAND_DISPLAY=/run/user/4242/wayland-test",
-            "konsole",
+            team_launcher.gui_program_path("konsole"),
             "--separate",
             "--layout",
             "/tmp/layout.json",
@@ -169,7 +173,7 @@ def test_konsole_launch_prefers_host_wayland_over_configured_wayland_name() -> N
             "env",
             "QT_QPA_PLATFORM=wayland",
             "WAYLAND_DISPLAY=/run/user/1000/wayland-host",
-            "konsole",
+            team_launcher.gui_program_path("konsole"),
             "--separate",
             "--layout",
             "/tmp/layout.json",
@@ -202,7 +206,7 @@ def test_konsole_launch_prefers_legacy_host_wayland_over_legacy_configured_wayla
             "env",
             "QT_QPA_PLATFORM=wayland",
             "WAYLAND_DISPLAY=/run/user/1000/wayland-legacy-host",
-            "konsole",
+            team_launcher.gui_program_path("konsole"),
             "--separate",
             "--layout",
             "/tmp/layout.json",
@@ -234,7 +238,7 @@ def test_konsole_launch_defaults_to_invoking_user_uid_without_host_var() -> None
             "env",
             "QT_QPA_PLATFORM=wayland",
             "WAYLAND_DISPLAY=/run/user/4242/wayland-test",
-            "konsole",
+            team_launcher.gui_program_path("konsole"),
             "--separate",
             "--layout",
             "/tmp/layout.json",
@@ -279,7 +283,7 @@ def test_konsole_launch_defaults_to_sudo_user_uid_without_host_var() -> None:
             "env",
             "QT_QPA_PLATFORM=wayland",
             "WAYLAND_DISPLAY=/run/user/1000/wayland-0",
-            "konsole",
+            team_launcher.gui_program_path("konsole"),
             "--separate",
             "--layout",
             "/tmp/layout.json",

@@ -817,23 +817,27 @@ def konsole_launch_args(layout_path: Path, *, gui_user: str | None = None, windo
         return _refusal_command(
             "team-launcher: no host Wayland display; run from Eric desktop session"
         )
-    environment = [
-        "env",
-        "QT_QPA_PLATFORM=wayland",
-        f"WAYLAND_DISPLAY={wayland_display}",
-    ]
     if privilege_drop:
-        # Crossing accounts loses the session bus and runtime directory sudo
-        # just reset, and the GUI needs them. They are named rather than
-        # inherited so nothing else of root's comes along.
-        runtime_dir = _gui_runtime_dir(user)
-        if runtime_dir:
-            environment.append(f"XDG_RUNTIME_DIR={runtime_dir}")
-        environment.append(f"HOME={_gui_home(user)}")
+        # Crossing from root is an environment boundary, so the environment is
+        # emptied rather than filtered. sudo's env_reset is the host's policy,
+        # not ours: any variable a site's env_keep preserves would otherwise
+        # cross into the desktop account, and so would anything -H leaves set.
+        # `env -i` discards all of it and the GUI is given exactly the variables
+        # it needs, PATH included so an emptied environment can still resolve a
+        # program (SYRD-43).
+        environment = gui_environment_args(user, wayland_display=wayland_display)
+    else:
+        # An unprivileged invocation is already the caller's own session; there
+        # is no boundary to cross and its desktop integration is its own.
+        environment = [
+            "env",
+            "QT_QPA_PLATFORM=wayland",
+            f"WAYLAND_DISPLAY={wayland_display}",
+        ]
     args = [
         *privilege_drop,
         *environment,
-        "konsole",
+        gui_program_path("konsole"),
         "--separate",
     ]
     title = window_title.strip()
@@ -846,6 +850,44 @@ def konsole_launch_args(layout_path: Path, *, gui_user: str | None = None, windo
         ]
     )
     return args
+
+
+# The complete environment a presentation window is given after crossing from
+# root. Anything not here does not reach it, including anything a host's sudoers
+# env_keep would have preserved (SYRD-43).
+GUI_ENVIRONMENT_ALLOWLIST = (
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "XDG_RUNTIME_DIR",
+    "QT_QPA_PLATFORM",
+    "WAYLAND_DISPLAY",
+)
+
+
+def gui_program_path(program: str) -> str:
+    """An absolute program, so an emptied environment still resolves it."""
+    resolved = shutil.which(program, path=DEFAULT_PANE_BASE_PATH) or shutil.which(program)
+    return resolved or program
+
+
+def gui_environment_args(gui_user: str, *, wayland_display: str) -> list[str]:
+    """`env -i` plus exactly the variables the desktop process is allowed."""
+    values = {
+        "PATH": DEFAULT_PANE_BASE_PATH,
+        "HOME": _gui_home(gui_user),
+        "USER": gui_user,
+        "LOGNAME": gui_user,
+        "XDG_RUNTIME_DIR": _gui_runtime_dir(gui_user),
+        "QT_QPA_PLATFORM": "wayland",
+        "WAYLAND_DISPLAY": wayland_display,
+    }
+    return [
+        "env",
+        "-i",
+        *[f"{name}={values[name]}" for name in GUI_ENVIRONMENT_ALLOWLIST if values.get(name)],
+    ]
 
 
 def _gui_runtime_dir(gui_user: str) -> str:

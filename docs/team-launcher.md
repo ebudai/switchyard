@@ -172,11 +172,16 @@ Two things prevent it, and both have to hold.
 
 A root invocation crosses to the desktop account before any GUI process starts.
 The account comes from `TEAM_LAUNCHER_GUI_USER`, else `SUDO_USER`, else the
-invoking user; `sudo` resets the environment, and the few variables the GUI needs
--- the Wayland display, the runtime directory, the home -- are named explicitly
-rather than inherited, so no privileged environment or credential crosses with
-it. If no unprivileged account can be identified, no window opens at all: a
-refused launch is a recoverable inconvenience and a root terminal is not.
+invoking user. The environment is **emptied** at that transition rather than
+filtered: `sudo`'s `env_reset` is the host's policy and not this project's, so a
+site whose sudoers keeps variables would carry them across, and `-H` leaves more
+set. The command is `env -i` plus exactly `PATH`, `HOME`, `USER`, `LOGNAME`,
+`XDG_RUNTIME_DIR`, `QT_QPA_PLATFORM` and `WAYLAND_DISPLAY`; the terminal is named
+by absolute path so an emptied environment still resolves it. Nothing else
+reaches the desktop process, which is checked by running the launch with a
+sentinel variable set and reading the program's actual environment, not its argv.
+If no unprivileged account can be identified, no window opens at all: a refused
+launch is a recoverable inconvenience and a root terminal is not.
 
 The tab's program is `scripts/switchyard-pane-window`, not the attach command
 itself. It runs the pane's client, and when that ends it says why and `exec`s an

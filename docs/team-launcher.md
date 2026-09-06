@@ -415,6 +415,19 @@ controls, which is its own escape, so a path carrying `..` -- or one that is not
 absolute at all -- is refused before any command is derived from it. `.` and
 repeated separators name the same directory and are not an escape.
 
+**An ACL cannot name an account that does not exist yet.** The generated
+role-accounts script both creates the per-role accounts and grants the ACLs
+those accounts need, so the order between the two is the script's own
+responsibility. `setfacl` rejects a principal the host does not know, with
+`Option -m: Invalid argument near character 3` -- a message that names neither
+the account nor the reason -- and under `set -euo pipefail` that aborts the
+migration part-way through. Group principals are safe early, because the group
+is created in the first few lines; named-user grants are emitted only after the
+loop that creates the accounts, and each is preceded by a guard that says which
+account is missing rather than leaving setfacl to say nothing useful. The
+control role is still resolved from the workflow's capabilities, so the grant
+follows whichever role holds them rather than a literal name.
+
 **Role accounts can reach the board clients.** They cannot traverse the owner's
 0710 home, so `ticket-board-write`, `ticket-board-read`, `directorctl` and the
 `ticket_board` package they import are staged root-owned under

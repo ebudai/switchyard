@@ -24,6 +24,10 @@ from scripts import team_launcher
 PRESENTATION_SCHEMA = "switchyard.presentation.v1"
 PRESENTATION_HISTORY_LIMIT = 100
 DIRECTOR_ROLE = "director"
+# The viewer aggregates display slots that other clients may already be showing
+# at their own size, so its clients never contribute to slot geometry.  tmux
+# still sizes a slot from such a client when it is that slot's only one.
+VIEWER_OBSERVER_CLIENT_FLAGS = "ignore-size"
 
 
 def display_session_name(project: str, slot: int) -> str:
@@ -330,7 +334,83 @@ def _role_status(
     return {"role": role_name, "state": state, "live": live and not pane_dead, "resumable": resumable}
 
 
-def _proxy_command(config: team_launcher.ProjectConfig, role_name: str | None, role_status: Mapping[str, Any]) -> tuple[str, str]:
+def _session_pane_ttys(
+    session: str,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> set[str]:
+    """Terminals owned by a presentation session's own panes."""
+    proc = runner(
+        [
+            "tmux", "list-panes", "-s", "-t", _exact_tmux_target(session),
+            "-F", "#{pane_tty}",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return set()
+    return {line.strip() for line in str(getattr(proc, "stdout", "") or "").splitlines() if line.strip()}
+
+
+def _presentation_client_ttys(
+    config: team_launcher.ProjectConfig,
+    slot_count: int,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> set[str]:
+    """Terminals that presentation itself drives, so worker clients can be told apart."""
+    ttys: set[str] = set()
+    for slot in range(slot_count):
+        ttys |= _session_pane_ttys(display_session_name(config.project, slot), runner=runner)
+    ttys |= _session_pane_ttys(team_launcher.viewer_session_for_project(config.project), runner=runner)
+    return ttys
+
+
+def _worker_has_independent_client(
+    role: team_launcher.RoleConfig,
+    *,
+    presentation_ttys: set[str],
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> bool:
+    """True when a client outside presentation already displays this worker."""
+    proc = runner(
+        [
+            "tmux", "list-clients", "-t", _exact_tmux_target(role.tmux_session),
+            "-F", "#{client_tty}",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return False
+    return any(
+        tty.strip() and tty.strip() not in presentation_ttys
+        for tty in str(getattr(proc, "stdout", "") or "").splitlines()
+    )
+
+
+def _proxy_client_flags(observer: bool) -> str:
+    # A display slot is the worker's only client in the ordinary presentation
+    # topology, so it must keep sizing that worker: otherwise the worker stops
+    # following the presentation window and leaves unused space in the slot.
+    # When the worker is already visible in a client of its own, the slot is a
+    # second observer instead and must not resize what that client shows.
+    flags = ["!no-detach-on-destroy"]
+    if observer:
+        flags.insert(0, "ignore-size")
+    return ",".join(flags)
+
+
+def _proxy_command(
+    config: team_launcher.ProjectConfig,
+    role_name: str | None,
+    role_status: Mapping[str, Any],
+    *,
+    observer: bool = False,
+) -> tuple[str, str]:
     if role_name is None:
         message = f"{config.project}: display slot hidden"
         return str(Path.home()), _status_command(message)
@@ -340,7 +420,7 @@ def _proxy_command(config: team_launcher.ProjectConfig, role_name: str | None, r
         message = f"{config.project}: {role_name} disconnected; use `{recovery}`"
         attach = shlex.join(
             [
-                "env", "TMUX=", "tmux", "attach", "-f", "!no-detach-on-destroy",
+                "env", "TMUX=", "tmux", "attach", "-f", _proxy_client_flags(observer),
                 "-t", _exact_tmux_target(role.tmux_session),
             ]
         )
@@ -400,6 +480,7 @@ def _configure_display_session(
     role_name: str | None,
     *,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
+    presentation_ttys: set[str] | None = None,
 ) -> None:
     session = display_session_name(config.project, slot)
     status = _role_status(config, role_name, runner=runner) if role_name else {"state": "hidden", "live": False}
@@ -413,7 +494,16 @@ def _configure_display_session(
         )
         if detach_proc.returncode != 0:
             raise RuntimeError(f"tmux could not configure recovery for {role_name} (exit {detach_proc.returncode})")
-    workdir, command = _proxy_command(config, role_name, status)
+    observer = bool(
+        role is not None
+        and status.get("live")
+        and _worker_has_independent_client(
+            role,
+            presentation_ttys=presentation_ttys if presentation_ttys is not None else set(),
+            runner=runner,
+        )
+    )
+    workdir, command = _proxy_command(config, role_name, status, observer=observer)
     if _session_exists(session, runner=runner):
         proc = runner(
             ["tmux", "respawn-pane", "-k", "-t", _exact_tmux_target(f"{session}:0.0"), "-c", workdir, command]
@@ -430,7 +520,10 @@ def _configure_display_session(
     label = role_name or "hidden"
     commands = (
         ["tmux", "set-window-option", "-t", _exact_tmux_target(f"{session}:0"), "remain-on-exit", "on"],
-        ["tmux", "set-option", "-t", _exact_tmux_target(f"{session}:"), "status", "on"],
+        # The slot is a frame around a worker that draws its own status line.
+        # Leaving this one on stacks two status bars in every presentation
+        # client, so the label lives in the window title and pane options.
+        ["tmux", "set-option", "-t", _exact_tmux_target(f"{session}:"), "status", "off"],
         [
             "tmux", "set-option", "-t", _exact_tmux_target(f"{session}:"),
             "status-left", f" slot {slot}: {label} ",
@@ -460,16 +553,81 @@ def _configure_display_session(
     _configure_recovery_hook(config, slot, role_name, status, runner=runner)
 
 
+def _viewer_observer_attach(session: str) -> str:
+    """Viewer pane command that attaches to a display slot as an observer.
+
+    tmux runs a pane command through `default-shell`, so the exact-target `=`
+    prefix has to reach tmux quoted: a zsh default-shell would otherwise read
+    `=<session>` as an equals expansion and the pane would die instead of
+    attaching.
+    """
+    attach = shlex.join(
+        [
+            "env", "TMUX=", "tmux", "attach", "-f", VIEWER_OBSERVER_CLIENT_FLAGS,
+            "-t", _exact_tmux_target(session),
+        ]
+    )
+    return shlex.join(["sh", "-lc", attach])
+
+
+def _viewer_frame_commands(viewer: str) -> tuple[list[str], ...]:
+    return (
+        # Each viewer pane already shows the worker's own status line, so the
+        # frame carries slot labels on the pane borders instead of adding a
+        # second status bar of its own.
+        ["tmux", "set-option", "-t", _exact_tmux_target(f"{viewer}:"), "status", "off"],
+        [
+            "tmux", "set-window-option", "-t", _exact_tmux_target(f"{viewer}:0"),
+            "pane-border-status", "top",
+        ],
+        [
+            "tmux", "set-window-option", "-t", _exact_tmux_target(f"{viewer}:0"),
+            "pane-border-format", " slot #{@switchyard_slot}: #{@switchyard_role} ",
+        ],
+    )
+
+
+def _reconcile_viewer_observers(
+    config: team_launcher.ProjectConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> None:
+    """Keep an already-running viewer from resizing the slots it watches.
+
+    Bootstrap attaches these panes with ``ignore-size``.  Reconciliation
+    repeats the flag on the live clients so a viewer started by an earlier
+    build, or reattached since, also stops shrinking display slots that a
+    separate window is showing at its own size.
+    """
+    viewer = team_launcher.viewer_session_for_project(config.project)
+    for tty in sorted(_session_pane_ttys(viewer, runner=runner)):
+        # A viewer pane may have detached between listing and refresh; the
+        # attach flag already covers every client the viewer creates later.
+        runner(
+            ["tmux", "refresh-client", "-f", VIEWER_OBSERVER_CLIENT_FLAGS, "-t", tty],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+
 def _apply_mapping(
     config: team_launcher.ProjectConfig,
     mapping: Mapping[str, str | None],
     *,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
 ) -> None:
+    presentation_ttys = _presentation_client_ttys(config, len(mapping), runner=runner)
     for slot in range(len(mapping)):
-        _configure_display_session(config, slot, mapping[str(slot)], runner=runner)
+        _configure_display_session(
+            config, slot, mapping[str(slot)], runner=runner, presentation_ttys=presentation_ttys
+        )
     viewer = team_launcher.viewer_session_for_project(config.project)
     if _session_exists(viewer, runner=runner):
+        for args in _viewer_frame_commands(viewer):
+            proc = runner(args)
+            if proc.returncode != 0:
+                raise RuntimeError(f"tmux could not configure viewer {viewer} (exit {proc.returncode})")
+        _reconcile_viewer_observers(config, runner=runner)
         for slot in range(len(mapping)):
             label = mapping[str(slot)] or "hidden"
             for option, value in (("@switchyard_slot", str(slot)), ("@switchyard_role", label)):
@@ -623,7 +781,7 @@ def _launch_viewer(
             raise SystemExit(f"switchyard: could not replace viewer {viewer}")
     sessions = [display_session_name(config.project, slot) for slot in range(state["slot_count"])]
     first, *rest = sessions
-    attach = shlex.join(["env", "TMUX=", "tmux", "attach", "-t", _exact_tmux_target(first)])
+    attach = _viewer_observer_attach(first)
     proc = runner([
         "tmux", "new-session", "-d", "-x", str(team_launcher.DEFAULT_VIEWER_COLUMNS),
         "-y", str(team_launcher.DEFAULT_VIEWER_ROWS), "-s", viewer, attach,
@@ -633,26 +791,19 @@ def _launch_viewer(
     for session in rest:
         proc = runner([
             "tmux", "split-window", "-t", _exact_tmux_target(f"{viewer}:0"),
-            shlex.join(["env", "TMUX=", "tmux", "attach", "-t", _exact_tmux_target(session)]),
+            _viewer_observer_attach(session),
         ])
         if proc.returncode != 0:
             raise SystemExit(f"switchyard: could not populate viewer {viewer}")
     commands = (
         ["tmux", "select-layout", "-t", _exact_tmux_target(f"{viewer}:0"), "tiled"],
-        ["tmux", "set-option", "-t", _exact_tmux_target(f"{viewer}:"), "status", "on"],
-        [
-            "tmux", "set-window-option", "-t", _exact_tmux_target(f"{viewer}:0"),
-            "pane-border-status", "top",
-        ],
-        [
-            "tmux", "set-window-option", "-t", _exact_tmux_target(f"{viewer}:0"),
-            "pane-border-format", " slot #{@switchyard_slot}: #{@switchyard_role} ",
-        ],
+        *_viewer_frame_commands(viewer),
     )
     for args in commands:
         proc = runner(args)
         if proc.returncode != 0:
             raise SystemExit(f"switchyard: could not configure viewer {viewer}")
+    _reconcile_viewer_observers(config, runner=runner)
     for slot in range(state["slot_count"]):
         role = state["slots"][str(slot)] or "hidden"
         for option, value in (("@switchyard_slot", str(slot)), ("@switchyard_role", role)):

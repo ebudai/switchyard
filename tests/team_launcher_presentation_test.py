@@ -5,6 +5,11 @@ from __future__ import annotations
 
 from team_launcher_test_helpers import *
 
+import fcntl
+import pty
+import struct
+import termios
+
 from scripts import presentation_controller as presentation
 
 
@@ -59,6 +64,10 @@ class PresentationRunner:
         self.fail_next_respawn_target = ""
         self.fail_next_select_target = ""
         self.worker_pids = {f"{project}-director": 4101, f"{project}-app": 4102}
+        # tty -> session, for the presentation-owned panes and any client that
+        # already displays a worker session on its own.
+        self.pane_ttys: dict[str, list[str]] = {}
+        self.session_clients: dict[str, list[str]] = {}
 
     @staticmethod
     def _session(target: str) -> str:
@@ -86,6 +95,18 @@ class PresentationRunner:
         if command == "select-pane" and target == self.fail_next_select_target:
             self.fail_next_select_target = ""
             return subprocess.CompletedProcess(args, 8, stderr="injected focus failure")
+        if command == "list-panes":
+            if session not in self.sessions:
+                return subprocess.CompletedProcess(args, 1, stdout="")
+            return subprocess.CompletedProcess(
+                args, 0, stdout="".join(f"{tty}\n" for tty in self.pane_ttys.get(session, []))
+            )
+        if command == "list-clients":
+            if session not in self.sessions:
+                return subprocess.CompletedProcess(args, 1, stdout="")
+            return subprocess.CompletedProcess(
+                args, 0, stdout="".join(f"{tty}\n" for tty in self.session_clients.get(session, []))
+            )
         if command == "display-message":
             template = args[-1]
             if template == "#{pane_dead}":
@@ -600,6 +621,229 @@ def test_separate_bootstrap_attaches_konsole_leaves_to_stable_slots() -> None:
             "=porter-display-0", "=porter-display-1"
         ]
         assert {"porter-display-0", "porter-display-1"} <= runner.sessions
+
+
+def _proxy_attach_argv(pane_command: str) -> list[str]:
+    """The attach the display slot runs inside its `sh -lc` proxy script."""
+    shell, flag, script = shlex.split(pane_command)
+    assert [shell, flag] == ["sh", "-lc"], pane_command
+    return shlex.split(script.split(";", 1)[0])
+
+
+def _status_options(runner: PresentationRunner) -> dict[str, str]:
+    return {
+        call[call.index("-t") + 1]: call[-1]
+        for call in runner.calls
+        if call[:2] == ["tmux", "set-option"] and call[-2] == "status"
+    }
+
+
+def test_presentation_frames_drop_their_status_bar_and_yield_worker_geometry() -> None:
+    with tempfile.TemporaryDirectory(prefix="switchyard-presentation-observers.") as tmp:
+        root = Path(tmp)
+        config_path = _write_presentation_config(root)
+        config = load_project_config("porter", config_path)
+        state_path = root / "presentation.json"
+        runner = PresentationRunner()
+
+        presentation.presentation_action(
+            config, config_path=config_path, state_path=state_path, action="bootstrap",
+            layout="viewer", environ=DIRECTOR_ENV, runner=runner,
+        )
+        # Both presentation frames are chrome around a worker that draws its own
+        # status line, so neither adds a second bar.
+        assert _status_options(runner) == {
+            "=porter-display-0:": "off",
+            "=porter-display-1:": "off",
+            "=porter-viewer:": "off",
+        }
+        viewer_panes = [
+            call[-1] for call in runner.calls
+            if (call[:2] == ["tmux", "new-session"] and "porter-viewer" in call)
+            or call[:2] == ["tmux", "split-window"]
+        ]
+        assert [shlex.split(command)[:2] for command in viewer_panes] == [["sh", "-lc"], ["sh", "-lc"]]
+        assert [shlex.split(shlex.split(command)[2]) for command in viewer_panes] == [
+            ["env", "TMUX=", "tmux", "attach", "-f", "ignore-size", "-t", "=porter-display-0"],
+            ["env", "TMUX=", "tmux", "attach", "-f", "ignore-size", "-t", "=porter-display-1"],
+        ]
+        # No worker is displayed anywhere else yet, so each slot stays the
+        # client that sizes the worker it presents.
+        proxy_commands = [
+            call[-1] for call in runner.calls
+            if call[:2] == ["tmux", "new-session"]
+            and call[call.index("-s") + 1].startswith("porter-display-")
+        ]
+        assert [_proxy_attach_argv(command) for command in proxy_commands] == [
+            ["env", "TMUX=", "tmux", "attach", "-f", "!no-detach-on-destroy", "-t", "=porter-director"],
+            ["env", "TMUX=", "tmux", "attach", "-f", "!no-detach-on-destroy", "-t", "=porter-app"],
+        ]
+
+        # The director worker is only on its slot; the app worker is also open
+        # in a window of its own.
+        runner.pane_ttys = {
+            "porter-display-0": ["/dev/pts/100"],
+            "porter-display-1": ["/dev/pts/101"],
+            "porter-viewer": ["/dev/pts/200", "/dev/pts/201"],
+        }
+        runner.session_clients = {
+            "porter-director": ["/dev/pts/100"],
+            "porter-app": ["/dev/pts/101", "/dev/pts/9"],
+        }
+        runner.calls.clear()
+        presentation.presentation_action(
+            config, config_path=config_path, state_path=state_path, action="restore",
+            layout="default", environ=DIRECTOR_ENV, runner=runner,
+        )
+        respawned = {
+            call[call.index("-t") + 1]: call[-1]
+            for call in runner.calls
+            if call[1] == "respawn-pane"
+        }
+        assert _proxy_attach_argv(respawned["=porter-display-0:0.0"]) == [
+            "env", "TMUX=", "tmux", "attach", "-f", "!no-detach-on-destroy", "-t", "=porter-director",
+        ]
+        assert _proxy_attach_argv(respawned["=porter-display-1:0.0"]) == [
+            "env", "TMUX=", "tmux", "attach", "-f", "ignore-size,!no-detach-on-destroy", "-t", "=porter-app",
+        ]
+        # Reconciliation repeats the policy on the live viewer instead of
+        # waiting for the next bootstrap.
+        assert _status_options(runner) == {
+            "=porter-display-0:": "off",
+            "=porter-display-1:": "off",
+            "=porter-viewer:": "off",
+        }
+        for tty in ("/dev/pts/200", "/dev/pts/201"):
+            assert ["tmux", "refresh-client", "-f", "ignore-size", "-t", tty] in runner.calls
+
+
+def test_isolated_tmux_clients_preserve_visible_sizes_and_a_single_status_bar() -> None:
+    if shutil.which("tmux") is None:
+        return
+    with tempfile.TemporaryDirectory(prefix="switchyard-presentation-clients.") as tmp:
+        root = Path(tmp)
+        tmux_tmp = root / "tmux"
+        tmux_tmp.mkdir(mode=0o700)
+        config_path = _write_presentation_config(root)
+        config = load_project_config("porter", config_path)
+        state_path = root / "presentation.json"
+        tmux_env = dict(os.environ)
+        tmux_env.pop("TMUX", None)
+        tmux_env.pop("TMUX_PANE", None)
+        tmux_env["TMUX_TMPDIR"] = str(tmux_tmp)
+
+        def runner(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+            call_env = dict(tmux_env)
+            supplied_env = kwargs.pop("env", None)
+            if supplied_env:
+                call_env.update(supplied_env)
+            return subprocess.run(args, env=call_env, **kwargs)
+
+        def tmux(*args: str) -> str:
+            proc = runner(list(args), text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            return str(proc.stdout or "").strip()
+
+        def window_size(session: str) -> str:
+            return tmux("tmux", "display-message", "-p", "-t", f"={session}:0", "#{window_width}x#{window_height}")
+
+        def status(session: str) -> str:
+            # -A resolves the inherited global default for a session that never
+            # set the option itself.
+            return tmux("tmux", "show-options", "-A", "-v", "-t", f"={session}:", "status")
+
+        def client_flags(session: str) -> dict[str, str]:
+            listed = tmux("tmux", "list-clients", "-t", f"={session}", "-F", "#{client_tty} #{client_flags}")
+            return dict(line.split(" ", 1) for line in listed.splitlines() if " " in line)
+
+        def wait_for(predicate: Callable[[], bool], message: str) -> None:
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline:
+                if predicate():
+                    return
+                time.sleep(0.05)
+            raise AssertionError(message)
+
+        clients: list[tuple[subprocess.Popen[bytes], int]] = []
+
+        def attach(session: str, columns: int, rows: int) -> None:
+            before = len(client_flags(session))
+            master, slave = pty.openpty()
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+            proc = subprocess.Popen(
+                ["tmux", "attach", "-t", f"={session}"],
+                stdin=slave, stdout=slave, stderr=slave, env=tmux_env, start_new_session=True,
+            )
+            os.close(slave)
+            clients.append((proc, master))
+            wait_for(lambda: len(client_flags(session)) > before, f"no client attached to {session}")
+
+        try:
+            for role in ("director", "app"):
+                runner(["tmux", "new-session", "-d", "-x", "240", "-y", "80", "-s", f"porter-{role}", "sleep", "600"], check=True)
+            # The app worker is already visible in a window of its own, at the
+            # size the operator actually sees.
+            attach("porter-app", 106, 44)
+            assert window_size("porter-app") == "106x43"
+
+            presentation.launch_presentation(
+                config, config_path=config_path, state_path=state_path, layout="viewer", runner=runner,
+            )
+            for slot in (0, 1):
+                attach(f"porter-display-{slot}", 106, 44)
+            watched = ("porter-display-0", "porter-display-1", "porter-app", "porter-director")
+            wait_for(
+                lambda: all(window_size(session).startswith("106x") for session in watched),
+                "display slots never took the size of the windows showing them",
+            )
+            visible_sizes = {session: window_size(session) for session in watched}
+
+            # A secondary viewer, smaller than every window it aggregates.
+            attach("porter-viewer", 119, 25)
+
+            viewer_ttys = set(tmux("tmux", "list-panes", "-s", "-t", "=porter-viewer", "-F", "#{pane_tty}").split())
+            assert len(viewer_ttys) == 2
+            for slot in (0, 1):
+                observers = {
+                    tty: flags for tty, flags in client_flags(f"porter-display-{slot}").items()
+                    if tty in viewer_ttys
+                }
+                assert len(observers) == 1
+                assert all("ignore-size" in flags for flags in observers.values())
+
+            def sizes_preserved() -> bool:
+                return {session: window_size(session) for session in watched} == visible_sizes
+
+            # The viewer client is settled; nothing it observes may have moved.
+            time.sleep(0.5)
+            assert {session: window_size(session) for session in watched} == visible_sizes
+            # Each frame drops its own status line, so a slot shows its whole
+            # client and the worker keeps the row its own status line needs.
+            assert visible_sizes == {
+                "porter-display-0": "106x44",
+                "porter-display-1": "106x44",
+                "porter-app": "106x43",
+                "porter-director": "106x43",
+            }
+            # One status bar per visible worker: the frames carry none, and the
+            # worker session keeps its own.
+            assert status("porter-display-0") == "off"
+            assert status("porter-display-1") == "off"
+            assert status("porter-viewer") == "off"
+            assert status("porter-app") == "on"
+
+            presentation.presentation_action(
+                config, config_path=config_path, state_path=state_path, action="swap",
+                slot=0, other_slot=1, environ=DIRECTOR_ENV, runner=runner,
+            )
+            wait_for(sizes_preserved, "reconciliation resized a visible window")
+            assert status("porter-display-0") == "off"
+            assert status("porter-viewer") == "off"
+            assert status("porter-app") == "on"
+        finally:
+            for proc, master in clients:
+                proc.kill()
+                os.close(master)
+            runner(["tmux", "kill-server"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def test_isolated_tmux_exact_targets_preserve_prefix_collision_sessions() -> None:

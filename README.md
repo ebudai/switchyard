@@ -58,6 +58,7 @@ Commands:
   register         register an existing project config
   upgrade          update generated project artifacts and report release drift
   add-role         add an implementer or auditor role, worktree, pane, and board registration
+  present          map persistent role sessions into stable display slots at runtime
   set-vcs-close-role
                    set which existing project role can mark tickets done
   stop             stop a project's configured tmux pane sessions
@@ -65,7 +66,7 @@ Commands:
   status           list registered projects and pane liveness
   validate-models  check configured role models without starting panes
 
-Bare project names start or attach the project. Recognized commands: new, register, upgrade, add-role, set-vcs-close-role, stop, teardown, status, validate-models.
+Bare project names start or attach the project. Recognized commands: new, register, upgrade, add-role, present, set-vcs-close-role, stop, teardown, status, validate-models.
 ```
 <!-- switchyard-help:end -->
 

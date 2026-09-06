@@ -38,9 +38,24 @@ merged today can silently revert everything that landed in between. Diff the bra
 against main and look at the *shape* of the change: a stat showing thousands of deletions
 on a small ticket means the branch is stale, not that the work is large.
 
-**Run the tests yourself, on the merged tree.** Not the implementer's numbers, not audit's
-— yours, in a throwaway worktree at the exact commit. Green on the branch is not green on
-main.
+**Reuse audit's evidence, but prove it is about your tree first.** An independently
+recorded audit result is evidence for the exact commit and tree it names, and repeating
+that suite against an unchanged commit buys nothing. So spend the effort on identity
+instead: confirm the commit audit recorded is the commit you are integrating — the tree,
+not just the ticket field — and read what audit actually ran and where. Then run focused
+checks where their evidence leaves a gap. The implementer's numbers are never evidence;
+only an independently recorded result is.
+
+Re-run the broader suite yourself when the tree changed after audit recorded its result,
+when the recorded environment or result is inadequate for what you are integrating, when
+a focused check of yours contradicts their evidence, or when repository policy requires
+the run. Then it is yours, in a throwaway worktree at the exact commit — green on the
+branch is not green on main. After a merge commit, a short integration smoke check is
+enough unless the merge needed real resolution or pulled in changed dependencies.
+
+**Say which is which.** Name what you ran yourself and what you reused, with the commit
+the reused result covers. "Audit's suite passed at `<sha>`, which is the tree I merged; I
+ran the mutation myself" is a record. "Tests pass" over someone else's run is not.
 
 **Kill a mutant of your own.** The single most valuable review technique. Break the thing
 the ticket claims to fix and confirm the suite catches it. Choose a different mutation

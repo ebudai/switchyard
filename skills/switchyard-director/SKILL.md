@@ -154,9 +154,35 @@ git merge-base --is-ancestor <commit> origin/main   # after integration: it land
 git diff --stat origin/main...<commit>
 ```
 
-Run the tests yourself, at that commit, on the merged tree - not the
-implementer's numbers and not the reviewer's. Then close with the workflow's
-completion action, which requires the commit hash.
+### Reusing Audit's evidence
+
+An independently recorded Audit result is evidence for the exact commit and tree
+it names. Re-running the same suite against an unchanged commit spends time and
+tokens to learn what is already known.
+
+So: verify identity first, then judge. Confirm the commit Audit recorded is the
+commit you are integrating - the tree, not just the ticket field - and read what
+Audit actually ran. Then look at provenance and the boundaries the change
+touches, and run focused checks only where you see a risk their evidence does not
+cover. Killing a mutant of your own is such a check, and it is usually worth more
+than repeating their suite.
+
+Re-run broader tests when, and only when, one of these holds:
+
+- the tree changed after Audit recorded its result;
+- the recorded environment or result is inadequate for what you are integrating;
+- a focused check of yours contradicts their evidence;
+- repository policy requires the run.
+
+After a merge commit, a short integration smoke check is enough unless the merge
+needed real resolution or pulled in changed dependencies.
+
+**Report which is which.** Say what you ran yourself and what you reused from
+Audit, naming the commit their result covers. "Audit's suite passed at <sha>, and
+I ran the focused X check myself" is an honest record; "tests pass" over reused
+evidence is not.
+
+Then close with the workflow's completion action, which requires the commit hash.
 
 ## Release, upgrade and rollback
 

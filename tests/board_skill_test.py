@@ -37,6 +37,19 @@ def _load_pane_hook():
     return module
 
 
+def _release_tree(root: Path, commit: str) -> Path:
+    """A release-shaped tree carrying every canonical skill and naming its commit."""
+    tree = root / f"tree-{commit}"
+    for skill in board_skill.CANONICAL_SKILLS:
+        source = tree / skill.relative_source
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes((ROOT / skill.relative_source).read_bytes())
+    (tree / board_skill.RELEASE_MARKER_NAME).write_text(
+        json.dumps({"commit": commit}) + "\n", encoding="utf-8"
+    )
+    return tree
+
+
 def _release_source(root: Path, commit: str) -> Path:
     """A canonical source in a release-shaped tree, which names its own commit.
 
@@ -73,17 +86,16 @@ def _frontmatter(text: str) -> dict[str, str]:
     return fields
 
 
-def test_canonical_skill_is_the_only_body_and_names_its_own_directory() -> None:
-    assert CANONICAL.is_file()
-    fields = _frontmatter(CANONICAL.read_text(encoding="utf-8"))
-    assert fields["name"] == board_skill.SKILL_NAME == CANONICAL.parent.name
-    assert fields["description"]
-    others = [
-        path
-        for path in ROOT.rglob("SKILL.md")
-        if ".git" not in path.parts and path != CANONICAL
-    ]
-    assert others == [], f"a second skill body would drift from the canonical one: {others}"
+def test_each_canonical_skill_is_one_body_that_names_its_own_directory() -> None:
+    canonical = {ROOT / skill.relative_source for skill in board_skill.CANONICAL_SKILLS}
+    for skill in board_skill.CANONICAL_SKILLS:
+        source = ROOT / skill.relative_source
+        assert source.is_file(), skill.name
+        fields = _frontmatter(source.read_text(encoding="utf-8"))
+        assert fields["name"] == skill.name == source.parent.name
+        assert fields["description"]
+    others = [path for path in ROOT.rglob("SKILL.md") if ".git" not in path.parts and path not in canonical]
+    assert others == [], f"a second body for a canonical skill would drift from it: {others}"
 
 
 def test_canonical_skill_hardcodes_no_tenant_detail() -> None:
@@ -117,6 +129,52 @@ def test_every_supported_cli_has_a_skill_adapter() -> None:
     assert covered == set(team_launcher.SUPPORTED_NEW_PROJECT_CLIS)
 
 
+def test_the_director_overlay_is_a_role_scoped_pointer_not_a_second_body() -> None:
+    director = (ROOT / board_skill.DIRECTOR_SKILL.relative_source).read_text(encoding="utf-8")
+    board = CANONICAL.read_text(encoding="utf-8")
+
+    # It applies only to the Director, and says so before anything else.
+    head = director.split("## ", 2)[1]
+    assert "TICKET_BOARD_CALLER_ROLE" in head
+    assert "director" in head.lower()
+    assert "stop reading this skill" in head.lower()
+    # And it is honest about why: the file is readable either way.
+    assert "board authorizes" in head.lower() or "board refuses" in head.lower()
+
+    # A thin overlay, not a fork of the shared body.
+    assert board_skill.BOARD_SKILL.name in director
+    shared = {
+        line.strip()
+        for line in board.splitlines()
+        if len(line.strip()) > 60 and not line.strip().startswith(("#", "-", "`"))
+    }
+    duplicated = sorted(line for line in shared if line in director)
+    assert duplicated == [], f"the overlay repeats the shared body: {duplicated[:3]}"
+
+    # Only the Director is told to load it.
+    assert board_skill.skills_for_role("director") == board_skill.CANONICAL_SKILLS
+    for role in ("app", "audit", "inspector", "user", "", "Director-ish"):
+        assert board_skill.skills_for_role(role) == (board_skill.BOARD_SKILL,), role
+    assert board_skill.skills_for_role("DIRECTOR") == board_skill.CANONICAL_SKILLS
+
+
+def test_the_overlay_hardcodes_no_tenant_detail_either() -> None:
+    text = (ROOT / board_skill.DIRECTOR_SKILL.relative_source).read_text(encoding="utf-8")
+    forbidden = {
+        "project prefix": r"\bPGU-\d|\bSYRD-\d|\bpgu\b",
+        "port or host": r"127\.0\.0\.1|localhost|:\d{4,5}\b",
+        "home path": r"/home/|~/\.",
+        "database": r"postgresql://|ticket_board_service",
+        "named stage sequence": r"in_progress|director_review|user_review\b",
+    }
+    found = {label: re.findall(pattern, text) for label, pattern in forbidden.items()}
+    assert not any(found.values()), f"overlay hardcodes tenant detail: { {k: v for k, v in found.items() if v} }"
+    # It has to teach discovery of the live workflow instead.
+    assert "/api/workflow" in text
+    for key in ("capabilities", "transitions", "actors"):
+        assert key in text
+
+
 def test_adapter_paths_are_the_runtime_discovery_locations() -> None:
     home = Path("/nowhere")
     assert dict(board_skill.adapter_paths(home)) == {
@@ -124,6 +182,12 @@ def test_adapter_paths_are_the_runtime_discovery_locations() -> None:
         "codex": home / ".codex" / "skills" / "switchyard-board" / "SKILL.md",
         "agy": home / ".gemini" / "config" / "skills" / "switchyard-board" / "SKILL.md",
         "hermes": home / ".hermes" / "skills" / "switchyard-board" / "SKILL.md",
+    }
+    assert dict(board_skill.adapter_paths(home, board_skill.DIRECTOR_SKILL)) == {
+        "claude": home / ".claude" / "skills" / "switchyard-director" / "SKILL.md",
+        "codex": home / ".codex" / "skills" / "switchyard-director" / "SKILL.md",
+        "agy": home / ".gemini" / "config" / "skills" / "switchyard-director" / "SKILL.md",
+        "hermes": home / ".hermes" / "skills" / "switchyard-director" / "SKILL.md",
     }
 
 
@@ -170,18 +234,29 @@ def test_recovery_runs_through_the_public_switchyard_command() -> None:
 
     with tempfile.TemporaryDirectory(prefix="switchyard-board-skill-public.") as tmp:
         home = Path(tmp)
+        # A release-shaped tree, so provenance is deterministic and an
+        # uncommitted edit to a skill body cannot turn this red.
+        tree = _release_tree(home, "d00d")
         public = subprocess.run(
-            [sys.executable, str(PUBLIC_SWITCHYARD), "board-skill", "install", "--home", str(home)],
+            [
+                sys.executable, str(PUBLIC_SWITCHYARD), "board-skill", "install",
+                "--home", str(home), "--tree-root", str(tree),
+            ],
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         assert public.returncode == 0, public.stderr
-        assert public.stdout.count(": installed ") == 4
+        assert public.stdout.count(": installed ") == 4 * len(board_skill.CANONICAL_SKILLS)
+        for skill in board_skill.CANONICAL_SKILLS:
+            assert public.stdout.count(f"{skill.name} ") == 4
         verified = subprocess.run(
-            [sys.executable, str(PUBLIC_SWITCHYARD), "board-skill", "verify", "--home", str(home)],
+            [
+                sys.executable, str(PUBLIC_SWITCHYARD), "board-skill", "verify",
+                "--home", str(home), "--source-commit", "d00d",
+            ],
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         assert verified.returncode == 0, verified.stderr
-        assert verified.stdout.count(": present ") == 4
+        assert verified.stdout.count(": present ") == 4 * len(board_skill.CANONICAL_SKILLS)
 
 
 def test_a_checkout_only_claims_a_commit_that_carries_this_body() -> None:
@@ -233,7 +308,7 @@ def test_an_unprovenanced_copy_is_reported_rather_than_counted_as_installed() ->
 
         verified = _run_installer("verify", "--home", str(home))
         assert verified.returncode == 1
-        assert verified.stdout.count(": unprovenanced ") == 4
+        assert verified.stdout.count(": unprovenanced ") == 4 * len(board_skill.CANONICAL_SKILLS)
         assert board_skill.failed_runtimes(board_skill.verify_board_skill(home=home)) == [
             runtime for runtime, _root in board_skill.SKILL_ADAPTERS
         ]
@@ -253,9 +328,10 @@ def test_install_projects_one_identical_body_into_every_runtime() -> None:
         assert board_skill.parse_provenance(installed) == ("c0ffee", str(board_skill.CANONICAL_RELATIVE_SOURCE))
         assert installed.startswith(CANONICAL.read_text(encoding="utf-8").rstrip("\n"))
 
-        verified = _run_installer("verify", "--home", str(home), "--source-commit", "c0ffee")
-        assert verified.returncode == 0, verified.stderr
-        assert verified.stdout.count(": present ") == 4
+        assert board_skill.verify_board_skill(home=home, expected_commit="c0ffee") == [
+            board_skill.AdapterResult(runtime, path, "present", "c0ffee")
+            for runtime, path in board_skill.adapter_paths(home)
+        ]
 
         again = _run_installer("install", "--home", str(home), "--source", str(source))
         assert again.returncode == 0
@@ -268,9 +344,9 @@ def test_upgrade_refreshes_managed_copies_and_reports_stale_ones() -> None:
         old_source = _release_source(home, "old")
         new_source = _release_source(home, "new")
         assert _run_installer("install", "--home", str(home), "--source", str(old_source)).returncode == 0
-        stale = _run_installer("verify", "--home", str(home), "--source-commit", "new")
-        assert stale.returncode == 1
-        assert stale.stdout.count(": stale ") == 4
+        assert [result.action for result in board_skill.verify_board_skill(home=home, expected_commit="new")] == [
+            "stale"
+        ] * 4
 
         planned = _run_installer("install", "--home", str(home), "--source", str(new_source), "--dry-run")
         assert planned.stdout.count(": would refresh ") == 4
@@ -279,7 +355,9 @@ def test_upgrade_refreshes_managed_copies_and_reports_stale_ones() -> None:
         ) == ("old", str(board_skill.CANONICAL_RELATIVE_SOURCE))
 
         assert _run_installer("install", "--home", str(home), "--source", str(new_source)).returncode == 0
-        assert _run_installer("verify", "--home", str(home), "--source-commit", "new").returncode == 0
+        assert [result.action for result in board_skill.verify_board_skill(home=home, expected_commit="new")] == [
+            "present"
+        ] * 4
 
 
 def test_a_skill_switchyard_did_not_write_is_never_overwritten() -> None:
@@ -313,10 +391,24 @@ def test_every_pointer_names_the_skill_that_is_actually_installed() -> None:
     path -- so its copy of the name is pinned here instead of shared.
     """
     hook = _load_pane_hook()
-    assert hook.BOARD_SKILL_NAME == board_skill.SKILL_NAME
-    assert board_skill.SKILL_NAME in hook.BOARD_SKILL_INSTRUCTION
-    assert notify_listener.BOARD_SKILL_NAME == board_skill.SKILL_NAME
-    assert board_skill.SKILL_NAME in notify_listener.BOARD_SKILL_INSTRUCTION
+    assert hook.BOARD_SKILL_NAME == board_skill.BOARD_SKILL.name
+    assert hook.DIRECTOR_SKILL_NAME == board_skill.DIRECTOR_SKILL.name
+    assert hook.DIRECTOR_ROLE == board_skill.DIRECTOR_ROLE
+    assert notify_listener.BOARD_SKILL_NAME == board_skill.BOARD_SKILL.name
+
+    # Both pointer sites name exactly the skills the projection installs for
+    # that role, so a rename cannot leave one of them chasing an old name.
+    for role in ("director", "ops", ""):
+        expected = [skill.name for skill in board_skill.skills_for_role(role)]
+        hook_line = hook._skill_instruction_for_role(role)
+        listener_line = notify_listener.board_skill_instruction_for_role(role)
+        for line in (hook_line, listener_line):
+            assert [name for name in expected if name in line] == expected, (role, line)
+        absent = [
+            skill.name for skill in board_skill.CANONICAL_SKILLS if skill.name not in expected
+        ]
+        for name in absent:
+            assert name not in hook_line and name not in listener_line, (role, name)
 
 
 def test_only_real_handoffs_carry_the_skill_pointer() -> None:
@@ -364,9 +456,10 @@ def _deployed_tree(root: Path) -> Path:
         destination = tree / relative
         destination.write_bytes((ROOT / relative).read_bytes())
         destination.chmod((ROOT / relative).stat().st_mode)
-    source = tree / board_skill.CANONICAL_RELATIVE_SOURCE
-    source.parent.mkdir(parents=True)
-    source.write_bytes(CANONICAL.read_bytes())
+    for skill in board_skill.CANONICAL_SKILLS:
+        source = tree / skill.relative_source
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes((ROOT / skill.relative_source).read_bytes())
     _git(tree, "init", "-q", "-b", "main")
     _git(tree, "add", "-A")
     _git(tree, "commit", "-q", "-m", "deployed tree")
@@ -409,6 +502,75 @@ def _launcher_config(root: Path) -> tuple[Any, Path]:
         encoding="utf-8",
     )
     return team_launcher.load_project_config("porter", config_path), config_path
+
+
+def test_a_copy_from_the_first_release_is_still_ours_and_gets_refreshed() -> None:
+    """The first release wrote a differently worded footer.
+
+    Tightening the wording must not orphan the copies already installed in every
+    tenant home: an orphaned copy is reported unmanaged and then never updated
+    again, which is the one failure mode that hides itself.
+    """
+    with tempfile.TemporaryDirectory(prefix="switchyard-board-skill-footer.") as tmp:
+        home = Path(tmp)
+        legacy_footer = (
+            "\n<!-- Switchyard board skill snapshot: source commit b0a4d; "
+            f"source {board_skill.BOARD_SKILL.relative_source}. -->\n"
+        )
+        legacy = CANONICAL.read_text(encoding="utf-8").rstrip("\n") + "\n" + legacy_footer
+        assert board_skill.parse_provenance(legacy) == ("b0a4d", str(board_skill.BOARD_SKILL.relative_source))
+
+        for _runtime, path in board_skill.adapter_paths(home):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(legacy, encoding="utf-8")
+
+        source = _release_source(home, "c0ffee")
+        result = _run_installer("install", "--home", str(home), "--source", str(source))
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.count(": refreshed ") == 4, result.stdout
+        assert ": unmanaged " not in result.stdout
+        for _runtime, path in board_skill.adapter_paths(home):
+            assert board_skill.parse_provenance(path.read_text(encoding="utf-8")) == (
+                "c0ffee",
+                str(board_skill.BOARD_SKILL.relative_source),
+            )
+
+
+def test_the_launcher_installs_every_canonical_skill() -> None:
+    from scripts import team_launcher
+
+    with tempfile.TemporaryDirectory(prefix="switchyard-board-skill-both.") as tmp:
+        root = Path(tmp)
+        tree = _deployed_tree(root)
+        config, config_path = _launcher_config(root)
+        home = root / "home"
+        home.mkdir()
+
+        def runner(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+            command = [str(part) for part in args]
+            if command[:1] == ["git"]:
+                return subprocess.run(command, **kwargs)
+            if command[:1] == ["sudo"]:
+                command = command[4:]
+            index = command.index("--home")
+            command[index + 1] = str(home)
+            return subprocess.run([sys.executable, *command], **kwargs)
+
+        team_launcher.ensure_generated_project_board_skill(
+            config,
+            config_path=config_path,
+            script_path=tree / "scripts" / "team-launcher",
+            source_repo=tree,
+            runner=runner,
+            print_func=lambda _line: None,
+        )
+
+        committed = _git(tree, "rev-parse", "HEAD")
+        for skill in board_skill.CANONICAL_SKILLS:
+            assert board_skill.verify_board_skill(home=home, expected_commit=committed, skill=skill) == [
+                board_skill.AdapterResult(runtime, path, "present", committed)
+                for runtime, path in board_skill.adapter_paths(home, skill)
+            ], skill.name
 
 
 def test_the_launcher_cannot_stamp_a_commit_that_lost_the_body() -> None:

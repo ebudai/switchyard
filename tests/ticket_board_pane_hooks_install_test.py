@@ -49,6 +49,14 @@ from scripts.ticket_board.codex_hook_trust import codex_command_hook_trust_entri
 INSTALLER = ROOT / "scripts" / "ticket-board-install-pane-hooks"
 HOOK_NAME = "ticket-board-pane-idle-hook"
 LEGACY_HOOK_NAME = "pgu-ticket-board-pane-idle-hook"
+DIRECTOR_SKILL_NAME = "switchyard-director"
+
+
+def _skill_instruction(role: str) -> str:
+    """The pointer a role's fresh session receives, taken from the hook itself."""
+    return _load_hook_module()._skill_instruction_for_role(role)
+
+
 BOARD_SKILL_INSTRUCTION = (
     "Load the switchyard-board skill before reading from or writing to the ticket board."
 )
@@ -1056,7 +1064,8 @@ def test_director_onboarding_pointer_is_scoped_to_director_role() -> None:
         )
 
     context = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
-    assert context == BOARD_SKILL_INSTRUCTION
+    assert context == _skill_instruction("ops") == BOARD_SKILL_INSTRUCTION
+    assert DIRECTOR_SKILL_NAME not in context
     assert "onboarding packet" not in context
 
 
@@ -1087,7 +1096,9 @@ def test_director_onboarding_pointer_is_silent_when_packet_absent() -> None:
         )
 
     context = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
-    assert context == BOARD_SKILL_INSTRUCTION
+    # The Director is the one role pointed at the overlay as well.
+    assert context == _skill_instruction("director")
+    assert DIRECTOR_SKILL_NAME in context
     assert "onboarding packet" not in context
 
 

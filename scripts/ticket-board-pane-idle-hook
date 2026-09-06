@@ -47,12 +47,28 @@ SESSION_START_FRESH_SOURCE = "startup"
 ONBOARDING_PACKET_DIR = Path("docs") / "onboarding"
 DIRECTOR_ONBOARDING_GUIDE = ONBOARDING_PACKET_DIR / "switchyard-director-guide.md"
 BOARD_SKILL_NAME = "switchyard-board"
+DIRECTOR_SKILL_NAME = "switchyard-director"
+DIRECTOR_ROLE = "director"
 # A pointer, not the skill: every runtime already has the body installed in its
 # own skills directory, and pasting it into each session would crowd out the
 # thing the session was started to do.
 BOARD_SKILL_INSTRUCTION = (
     f"Load the {BOARD_SKILL_NAME} skill before reading from or writing to the ticket board."
 )
+# The Director overlay is named only to the Director. Every role's home holds
+# the file -- panes share a home -- so this decides which session is told to
+# read it, not which session can. The board refuses privileged operations from
+# any other caller either way.
+DIRECTOR_SKILL_INSTRUCTION = (
+    f"Load the {BOARD_SKILL_NAME} and {DIRECTOR_SKILL_NAME} skills before reading from or "
+    "writing to the ticket board."
+)
+
+
+def _skill_instruction_for_role(role: str) -> str:
+    if role.strip().lower() == DIRECTOR_ROLE:
+        return DIRECTOR_SKILL_INSTRUCTION
+    return BOARD_SKILL_INSTRUCTION
 SWITCHYARD_PROJECT_DIR_NAME = ".switchyard"
 
 
@@ -524,19 +540,20 @@ def _director_startup_onboarding_context(root: Path, *, cwd: Path) -> str:
     return f"Your director session just started fresh. Read the onboarding packet first: {packet_display}"
 
 
-def _with_board_skill_instruction(context: str) -> str:
-    if BOARD_SKILL_INSTRUCTION in context:
+def _with_board_skill_instruction(context: str, role: str = "") -> str:
+    instruction = _skill_instruction_for_role(role)
+    if instruction in context:
         return context
     if not context.strip():
-        return BOARD_SKILL_INSTRUCTION
-    return f"{BOARD_SKILL_INSTRUCTION}\n\n{context}"
+        return instruction
+    return f"{instruction}\n\n{context}"
 
 
-def _session_start_context(context: str) -> dict[str, object]:
+def _session_start_context(context: str, role: str = "") -> dict[str, object]:
     return {
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": _with_board_skill_instruction(context),
+            "additionalContext": _with_board_skill_instruction(context, role),
         }
     }
 
@@ -571,24 +588,25 @@ def _session_start_additional_context_output(
         if not path.is_absolute() or not path.is_file():
             raise ValueError(f"configured role onboarding is unavailable: {path}")
         return _session_start_context(
-            f"Your {role} session started. Read your role remit at {path}.\n\n" + path.read_text()
+            f"Your {role} session started. Read your role remit at {path}.\n\n" + path.read_text(),
+            role,
         )
     if role == "director" and fresh_start:
         cwd = Path.cwd()
         onboarding_root = _onboarding_project_root(environ, cwd)
         if onboarding_root is None:
-            return _session_start_context("")
-        return _session_start_context(_director_startup_onboarding_context(onboarding_root, cwd=cwd))
+            return _session_start_context("", role)
+        return _session_start_context(_director_startup_onboarding_context(onboarding_root, cwd=cwd), role)
     if session_start_source not in SESSION_START_ACTIVE_WORK_SOURCES:
         # A fresh role session with nothing else to say is exactly the one that
         # would otherwise reach for the board unaided.
-        return _session_start_context("") if fresh_start else None
+        return _session_start_context("", role) if fresh_start else None
     board_url = _default_board_url(environ)
     ticket = _active_in_progress_ticket_for_role(role, board_url=board_url)
     if ticket is None:
         return None
     return _session_start_context(
-        _resume_context_for_ticket(ticket, board_url=board_url, source=session_start_source)
+        _resume_context_for_ticket(ticket, board_url=board_url, source=session_start_source), role
     )
 
 

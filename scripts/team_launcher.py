@@ -13913,6 +13913,33 @@ def upgrade_project_command(
     reported rather than attempted (SYRD-45).
     """
     effective_source_repo = (source_repo or _repo_root()).expanduser().resolve(strict=False)
+
+    # Before anything else, because everything else depends on it. The identities
+    # transaction stops the roles and then talks to this manager; against a wedged
+    # one it would hang there indefinitely, with the roles down. Recovering it is
+    # part of the ordered upgrade rather than a command an operator has to know
+    # about (SYRD-54).
+    manager_state, manager_detail = owner_user_manager_state(
+        config, runner=runner, config_path=config_path
+    )
+    if manager_state == MANAGER_WEDGED:
+        print_func(
+            f"switchyard: {config.run_as_user or current_user_name()}'s user manager is not "
+            f"answering ({manager_detail}); its units, including this tenant's notify listener, "
+            "cannot be started or stopped until it is recovered."
+        )
+        problems = repair_owner_user_manager(
+            config, runner=runner, config_path=config_path, dry_run=dry_run, print_func=print_func
+        )
+        if problems:
+            for problem in problems:
+                print_func(f"switchyard: {problem}")
+            print_func(
+                f"switchyard: stopping before any phase runs: moving {config.project} onto per-role "
+                "identities would stop its roles and then wait on that manager."
+            )
+            return 1
+
     if desktop_policy is not None or config.desktop_access is not None:
         config = configure_project_desktop(config, config_path=config_path, policy_path=desktop_policy,
             dry_run=dry_run, helper=effective_source_repo / "scripts/desktop_access.py", runner=runner)
@@ -14194,7 +14221,10 @@ def _owner_user_systemctl(
     """Drive the owner's user manager the way the rest of the launcher does."""
     owner = config.run_as_user or current_user_name()
     home = _tenant_owner_home(config, config_path)
-    operation = f"systemctl --user {action} {shlex.quote(unit)}"
+    # Some questions are asked of the manager itself rather than of a unit.
+    operation = f"systemctl --user {action}"
+    if unit:
+        operation = f"{operation} {shlex.quote(unit)}"
     if action in {"start", "restart"}:
         operation = f"systemctl --user daemon-reload && {operation}"
     script = (
@@ -14203,6 +14233,138 @@ def _owner_user_systemctl(
         + operation
     )
     return _owner_command_env_args(owner, home, ["sh", "-c", script])
+
+
+OWNER_USER_MANAGER_TIMEOUT_SECONDS = 20.0
+OWNER_USER_MANAGER_RESTART_TIMEOUT_SECONDS = 60.0
+# The conventional exit status for "gave up waiting", as `timeout(1)` uses.
+OWNER_USER_MANAGER_TIMED_OUT = 124
+MANAGER_RESPONDING = "responding"
+MANAGER_WEDGED = "wedged"
+MANAGER_UNREACHABLE = "unreachable"
+
+
+def _run_owner_user_systemctl(
+    config: ProjectConfig,
+    action: str,
+    unit: str,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    config_path: Path | None = None,
+    timeout: float = OWNER_USER_MANAGER_TIMEOUT_SECONDS,
+) -> subprocess.CompletedProcess[Any]:
+    """Ask the owner's user manager something, and never wait on it forever.
+
+    A wedged user manager answers nothing at all -- the incident behind this had
+    one spinning at 97% of a core for hours, with every `systemctl --user` call
+    against it hanging indefinitely. Unbounded, that hangs the identities
+    transaction with the roles already stopped, which is the worst point in the
+    upgrade to stop at (SYRD-54).
+    """
+    args = _owner_user_systemctl(config, action, unit, config_path=config_path)
+    try:
+        return runner(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            args,
+            OWNER_USER_MANAGER_TIMED_OUT,
+            "",
+            f"the user manager did not answer within {timeout:g}s",
+        )
+
+
+def owner_user_manager_state(
+    config: ProjectConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    config_path: Path | None = None,
+    timeout: float = OWNER_USER_MANAGER_TIMEOUT_SECONDS,
+) -> tuple[str, str]:
+    """Whether the owner's user manager can serve a request. Returns (state, detail).
+
+    `is-system-running` is asked rather than anything about a unit: it is answered
+    by the manager itself, so a manager that cannot answer is distinguishable from
+    a unit that is simply not running.
+
+    Only silence is `wedged`. A manager that is not there at all answers quickly
+    with a bus error and is reported `unreachable` -- that is a tenant that has
+    never had one, which starting it on demand fixes and a restart does not.
+    """
+    result = _run_owner_user_systemctl(
+        config, "is-system-running", "", runner=runner, config_path=config_path, timeout=timeout
+    )
+    detail = (str(getattr(result, "stdout", "") or "").strip()
+              or str(getattr(result, "stderr", "") or "").strip())
+    if result.returncode == OWNER_USER_MANAGER_TIMED_OUT:
+        return MANAGER_WEDGED, detail or "no answer"
+    if result.returncode == 0:
+        return MANAGER_RESPONDING, detail or "running"
+    # `degraded` answers non-zero and is still a manager that answers.
+    if detail and "connect" not in detail.casefold() and "bus" not in detail.casefold():
+        return MANAGER_RESPONDING, detail
+    return MANAGER_UNREACHABLE, detail or f"exit {result.returncode}"
+
+
+def repair_owner_user_manager(
+    config: ProjectConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    config_path: Path | None = None,
+    dry_run: bool = False,
+    settle_timeout: float | None = None,
+    print_func: Callable[[str], None] = print,
+) -> list[str]:
+    """Restart the owner's wedged user manager and prove it answers again.
+
+    Only the system manager can restart `user@<uid>.service`, so this is root's
+    step and is reported rather than attempted otherwise. It takes down that
+    manager's own units -- the tenant's notify listener among them, which is why
+    the listener is started again here and checked. It does not touch the role
+    sessions: those are hosted by whatever started them, not by this manager.
+    """
+    owner = config.run_as_user or current_user_name()
+    uid = _uid_for_user(owner)
+    if uid is None:
+        return [f"cannot resolve a uid for {owner}, so its user manager cannot be named"]
+    unit = f"user@{uid}.service"
+    if dry_run:
+        print_func(f"switchyard: would restart {unit} to recover {owner}'s wedged user manager")
+        return []
+    if os.geteuid() != 0:
+        return [
+            f"{owner}'s user manager is wedged and only root can restart {unit}; "
+            f"run `sudo switchyard upgrade {config.project}`"
+        ]
+    print_func(f"switchyard: restarting {unit}: {owner}'s user manager is not answering")
+    restart = runner(
+        ["systemctl", "restart", unit],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if restart.returncode != 0:
+        return [f"could not restart {unit} (exit {restart.returncode})"]
+    # Read at call time so the wait is one knob, settable by a caller and by a
+    # test that must not spend a minute proving a manager stayed wedged.
+    settle = OWNER_USER_MANAGER_RESTART_TIMEOUT_SECONDS if settle_timeout is None else settle_timeout
+    deadline = time.monotonic() + settle
+    state, detail = owner_user_manager_state(config, runner=runner, config_path=config_path)
+    while state != MANAGER_RESPONDING and time.monotonic() < deadline:
+        time.sleep(1.0)
+        state, detail = owner_user_manager_state(config, runner=runner, config_path=config_path)
+    if state != MANAGER_RESPONDING:
+        return [f"{unit} was restarted but {owner}'s user manager still does not answer ({detail})"]
+    print_func(f"switchyard: {owner}'s user manager is answering again ({detail})")
+    # The manager took its own units down with it, so the listener is started
+    # again and its state read back rather than assumed.
+    problems = start_owner_listener(config, runner=runner, config_path=config_path)
+    if problems:
+        return problems
+    listener_state = capture_listener_state(config, runner=runner, config_path=config_path)
+    if listener_state != "active":
+        return [f"{_listener_user_unit(config)} is {listener_state} after the user manager restart"]
+    print_func(f"switchyard: {_listener_user_unit(config)} is active again")
+    return []
 
 
 def capture_installed_units(
@@ -14235,12 +14397,13 @@ def capture_listener_state(
     config_path: Path | None = None,
 ) -> str:
     """Whether the owner's listener is running now, so it can be put back."""
-    result = runner(
-        _owner_user_systemctl(config, "is-active", _listener_user_unit(config), config_path=config_path),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+    result = _run_owner_user_systemctl(
+        config, "is-active", _listener_user_unit(config), runner=runner, config_path=config_path
     )
+    if result.returncode == OWNER_USER_MANAGER_TIMED_OUT:
+        # Not "inactive": nothing was learned, and reporting a guess here is what
+        # would let the transaction proceed on it (SYRD-54).
+        return MANAGER_WEDGED
     return str(result.stdout).strip() or ("active" if result.returncode == 0 else "inactive")
 
 
@@ -14258,14 +14421,16 @@ def stop_owner_listener(
     (SYRD-45).
     """
     unit = _listener_user_unit(config)
-    result = runner(
-        _owner_user_systemctl(config, "stop", unit, config_path=config_path),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+    result = _run_owner_user_systemctl(
+        config, "stop", unit, runner=runner, config_path=config_path
     )
+    if result.returncode == OWNER_USER_MANAGER_TIMED_OUT:
+        return [f"{unit} could not be stopped: the owner's user manager is not answering"]
     if result.returncode != 0:
         return [f"could not stop {unit} (exit {result.returncode})"]
     state = capture_listener_state(config, runner=runner, config_path=config_path)
+    if state == MANAGER_WEDGED:
+        return [f"{unit} cannot be confirmed stopped: the owner's user manager is not answering"]
     if state == "active":
         return [f"{unit} is still active after being stopped"]
     return []
@@ -14277,11 +14442,13 @@ def start_owner_listener(
     runner: Callable[..., subprocess.CompletedProcess[Any]],
     config_path: Path | None = None,
 ) -> list[str]:
-    result = runner(
-        _owner_user_systemctl(config, "restart", _listener_user_unit(config), config_path=config_path),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+    result = _run_owner_user_systemctl(
+        config, "restart", _listener_user_unit(config), runner=runner, config_path=config_path
     )
+    if result.returncode == OWNER_USER_MANAGER_TIMED_OUT:
+        return [
+            f"could not start {_listener_user_unit(config)}: the owner's user manager is not answering"
+        ]
     if result.returncode != 0:
         return [f"could not start {_listener_user_unit(config)} (exit {result.returncode})"]
     return []

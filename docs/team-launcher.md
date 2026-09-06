@@ -318,6 +318,18 @@ an interrupted upgrade resumes rather than repeats and a partial state is
 visible rather than inferred. Every phase is idempotent; rerunning is the
 supported way to continue.
 
+**A wedged user manager stops the upgrade before it starts.** Everything the
+launcher does to the listener goes through the owner's `systemd --user`, and a
+manager that is spinning answers nothing -- so an unbounded call inside the
+identities transaction would hang with the roles already stopped. Every call to
+that manager is therefore bounded, silence is reported as `wedged` rather than
+guessed at as "inactive", and the upgrade asks before it does anything. As root
+it recovers it: `systemctl restart user@<uid>.service`, wait for the manager to
+answer, restart the tenant's listener and read its state back. That restart takes
+down only that manager's own units; the role sessions belong to whatever started
+them. Unprivileged, the upgrade says which unit needs restarting and stops
+without running a phase.
+
 **The configuration is not written before the accounts exist.** A configuration
 naming per-role accounts that do not exist is not a migration in progress: those
 roles cannot start, and installing the matching authority table would stop the

@@ -1057,10 +1057,12 @@ FROM ticket_board.claim_notification()
             ticket_id=ticket_id,
             target_role=target_role,
             kind=kind,
-            event="listener_ack",
+            event="listener_discard",
             detail={"reason": "stale_reminder_work_observed", "phase": phase},
         )
-        self._ack_notification(conn, notification_id)
+        # Never ack here: this reminder was suppressed, not delivered, and
+        # ack_notification would credit it as a completed reminder round.
+        self._discard_notification(conn, notification_id, "stale_reminder_work_observed")
         self._traced_gate_defer_notifications.discard(notification_id)
 
     def _delivery_diagnostic_detail(
@@ -1149,6 +1151,18 @@ SELECT ticket_board.record_notification_trace(
 
     def _ack_notification(self, conn: Any, notification_id: int) -> None:
         conn.execute("SELECT ticket_board.ack_notification(%s::bigint)", (notification_id,))
+
+    def _discard_notification(self, conn: Any, notification_id: int, reason: str) -> None:
+        """Remove a queued notification that was never delivered.
+
+        Not an ack: ack_notification records delivery accounting, and for an
+        idle_reminder that means incrementing idle_reminder_count, which turns
+        the next idle wave into an escalation to the director (SYRD-32).
+        """
+        conn.execute(
+            "SELECT ticket_board.discard_notification(%s::bigint, %s::text)",
+            (notification_id, reason),
+        )
 
     def _requeue_notification(
         self,

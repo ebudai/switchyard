@@ -104,6 +104,7 @@ class FakeConnection:
         self.idle_turn_end_result = idle_turn_end_result
         self.idle_stall_result = idle_stall_result
         self.acked: list[int] = []
+        self.discarded: list[tuple[int, str]] = []
         self.requeued: list[tuple[int, tuple[Any, ...] | None]] = []
         self.dead_lettered: list[tuple[int, tuple[Any, ...] | None]] = []
         self.traces: list[tuple[Any, ...] | None] = []
@@ -174,7 +175,12 @@ class FakeConnection:
             if row is not None and len(row) == 4:
                 row = (row[0], row[1], row[2], row[3], False)
             return FakeResult([] if row is None else [row])
-        if "ack_notification" in statement_text:
+        if "discard_notification" in statement_text:
+            # Must stay distinct from ack: ack_notification carries delivery
+            # accounting (idle_reminder_count), discard_notification does not.
+            assert params is not None
+            self.discarded.append((int(params[0]), str(params[1])))
+        elif "ack_notification" in statement_text:
             assert params is not None
             self.acked.append(int(params[0]))
         if "dead_letter_notification" in statement_text:
@@ -2413,7 +2419,8 @@ def test_pre_send_recheck_drops_reminder_when_agy_turn_starts_after_idle_check()
 
     assert sent == []
     assert conn.requeued == []
-    assert conn.acked == [901]
+    assert conn.acked == []
+    assert conn.discarded == [(901, "stale_reminder_work_observed")]
     assert conn.traces[1][6] == "stale_reminder_work_observed"
     detail = json.loads(conn.traces[1][8])
     assert detail["phase"] == "pre_send_recheck"
@@ -2494,7 +2501,8 @@ def test_queued_inspector_reminder_goes_stale_once_agy_is_observed_working() -> 
 
     assert sent == []
     assert conn.requeued == []
-    assert conn.acked == [903]
+    assert conn.acked == []
+    assert conn.discarded == [(903, "stale_reminder_work_observed")]
     assert conn.traces[1][6] == "stale_reminder_work_observed"
     detail = json.loads(conn.traces[1][8])
     assert detail["phase"] == "activity_gate"

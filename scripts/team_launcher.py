@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import grp
 import hashlib
 import json
@@ -9084,6 +9085,88 @@ def _ensure_owner_user_and_project_dir(
     return OwnerUserProvisionResult(created=created_user, linger_enabled=linger_enabled, shell_path=shell_path)
 
 
+def _agy_source_token_path(source_user: str, home_base: Path) -> Path:
+    return home_base / source_user / AGY_CREDENTIAL_DIR_NAME / AGY_CREDENTIAL_TOKEN_NAME
+
+
+def _uid_for_user(user_name: str) -> int | None:
+    try:
+        return int(pwd.getpwnam(user_name).pw_uid)
+    except KeyError:
+        return None
+
+
+def _open_agy_source_token(source_user: str, home_base: Path) -> int:
+    """Open the opted-in source token and return a validated read-only fd.
+
+    Opened with O_NOFOLLOW and validated by fstat on the fd rather than by stat on the
+    path. Both matter: the source home is writable by an unprivileged account, so a
+    path-based check would let that account swap the token for a symlink to any
+    root-readable file between the check and a root-run copy. The caller closes the fd.
+    """
+    source_token = _agy_source_token_path(source_user, home_base)
+    try:
+        fd = os.open(source_token, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise SystemExit(
+                f"switchyard: {source_token} is a symlink; agy credential seeding copies only a "
+                "regular file from the source user's own home and will not follow a link out of it"
+            ) from exc
+        raise SystemExit(
+            f"switchyard: agy credential seeding was requested from {source_user!r}, but "
+            f"{source_token} could not be read ({exc.strerror}); sign in to agy as "
+            f"{source_user} first, or clear capability_grants.agy_credential_source"
+        ) from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise SystemExit(
+                f"switchyard: {source_token} is not a regular file; refusing to seed from it"
+            )
+        # Skipped when the source user has no passwd entry, which happens only under a
+        # fabricated home base; a real provision resolves the uid and enforces this.
+        expected_uid = _uid_for_user(source_user)
+        if expected_uid is not None and info.st_uid != expected_uid:
+            raise SystemExit(
+                f"switchyard: {source_token} is owned by uid {info.st_uid}, not {source_user} "
+                f"(uid {expected_uid}); refusing to copy a token that user does not own"
+            )
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _validate_agy_credential_source(source_user: str, owner_user: str, home_base: Path) -> None:
+    """Reject an unusable credential source before provisioning mutates anything.
+
+    Called ahead of the first mutation so a bad source cannot leave a half-provisioned
+    project behind: the owner user would then exist, and seeding deliberately refuses to
+    touch an existing owner, so the retry could never reach the requested end state.
+    """
+    if not _is_valid_owner_user_name(source_user):
+        raise SystemExit(
+            f"switchyard: agy_credential_source {source_user!r} is not a plain Unix user name"
+        )
+    if source_user == owner_user:
+        raise SystemExit(
+            f"switchyard: agy_credential_source {source_user!r} is the project owner user itself; "
+            "seeding needs a different source account"
+        )
+    os.close(_open_agy_source_token(source_user, home_base))
+
+
+def _copy_fd_contents(source_fd: int, target_fd: int) -> None:
+    """Copy fd to fd in the kernel, so the token's bytes never enter this process."""
+    offset = 0
+    while True:
+        sent = os.sendfile(target_fd, source_fd, offset, 1 << 20)
+        if not sent:
+            return
+        offset += sent
+
+
 def _seed_agy_credential_for_owner(
     *,
     owner_user: str,
@@ -9095,25 +9178,10 @@ def _seed_agy_credential_for_owner(
     """Copy one agy OAuth token into a freshly created owner home.
 
     Opt-in only, and only for a newly created owner: an existing owner user is never
-    modified. The copy goes through `install`, so the token's bytes never enter this
-    process and cannot reach a log or an error message.
+    modified. The source is re-validated here on the fd actually copied, so this does not
+    rely on the earlier precheck still being true.
     """
-    if not _is_valid_owner_user_name(source_user):
-        raise SystemExit(
-            f"switchyard: agy_credential_source {source_user!r} is not a plain Unix user name"
-        )
-    if source_user == owner_user:
-        raise SystemExit(
-            f"switchyard: agy_credential_source {source_user!r} is the project owner user itself; "
-            "seeding needs a different source account"
-        )
-    source_token = home_base / source_user / AGY_CREDENTIAL_DIR_NAME / AGY_CREDENTIAL_TOKEN_NAME
-    if not source_token.is_file():
-        raise SystemExit(
-            f"switchyard: agy credential seeding was requested from {source_user!r}, but "
-            f"{source_token} does not exist; sign in to agy as {source_user} first, or clear "
-            "capability_grants.agy_credential_source"
-        )
+    _validate_agy_credential_source(source_user, owner_user, home_base)
     target_dir = home_base / owner_user / AGY_CREDENTIAL_DIR_NAME
     target_token = target_dir / AGY_CREDENTIAL_TOKEN_NAME
     dir_result = runner(
@@ -9121,21 +9189,28 @@ def _seed_agy_credential_for_owner(
     )
     if dir_result.returncode != 0:
         raise SystemExit(f"switchyard: failed to create {target_dir} for {owner_user}")
-    copy_result = runner(
-        [
-            "install",
-            "-m",
-            "0600",
-            "-o",
-            owner_user,
-            "-g",
-            owner_user,
-            str(source_token),
-            str(target_token),
-        ]
-    )
-    if copy_result.returncode != 0:
-        raise SystemExit(f"switchyard: failed to seed agy credential into {target_token}")
+    source_fd = _open_agy_source_token(source_user, home_base)
+    try:
+        try:
+            target_fd = os.open(target_token, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError as exc:
+            raise SystemExit(
+                f"switchyard: {target_token} already exists; refusing to overwrite it"
+            ) from exc
+        except OSError as exc:
+            raise SystemExit(
+                f"switchyard: failed to seed agy credential into {target_token} ({exc.strerror})"
+            ) from exc
+        try:
+            os.fchmod(target_fd, 0o600)
+            _copy_fd_contents(source_fd, target_fd)
+        finally:
+            os.close(target_fd)
+    finally:
+        os.close(source_fd)
+    own_result = runner(["chown", f"{owner_user}:{owner_user}", str(target_token)])
+    if own_result.returncode != 0:
+        raise SystemExit(f"switchyard: failed to assign {target_token} to {owner_user}")
     print_func(f"switchyard: seeded agy credential for {owner_user} from {source_user}")
     print_func(
         f"switchyard: {owner_user} can now act as the Google account that {source_user} signed "
@@ -9966,6 +10041,8 @@ def switchyard_new_command(
         require_owner_user=False,
         require_repository=False,
     )
+    if resolved_agy_credential_source:
+        _validate_agy_credential_source(resolved_agy_credential_source, owner_user, home_base)
     _ensure_board_service_user(precheck_plan.service_user, runner=runner)
     _ensure_board_service_peer_auth(precheck_plan, source_repo=effective_source_repo, runner=runner)
     owner_result = _ensure_owner_user_and_project_dir(

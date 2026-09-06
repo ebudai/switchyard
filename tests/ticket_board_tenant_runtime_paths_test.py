@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
+import stat
 import subprocess
+import tarfile
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -154,6 +157,65 @@ def test_release_sender_executes_only_selected_directorctl() -> None:
             "orbit-main:0.0",
             "New ticket for you: ORB-1 -- Delivery",
         ]
+
+
+def test_git_archive_release_directorctl_is_executable_and_delivers() -> None:
+    with tempfile.TemporaryDirectory(prefix="switchyard-archive-send.") as tmp:
+        root = Path(tmp)
+        archive = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(ROOT),
+                "archive",
+                "--format=tar",
+                "HEAD",
+                "scripts/directorctl",
+                "scripts/ticket_notification_journal.py",
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+        ).stdout
+        release = root / "release"
+        release.mkdir()
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as exported:
+            exported.extractall(release, filter="data")
+
+        tool = release / "scripts" / "directorctl"
+        assert tool.stat().st_mode & stat.S_IXUSR
+
+        fake_bin = root / "bin"
+        fake_bin.mkdir()
+        tmux_log = root / "tmux.log"
+        fake_tmux = fake_bin / "tmux"
+        fake_tmux.write_text(
+            "#!/bin/sh\n"
+            "case \"$1\" in\n"
+            "  capture-pane) printf 'Working\\n' ;;\n"
+            "  display-message) printf '0\\n' ;;\n"
+            "  send-keys) printf '%s\\n' \"$*\" >>\"$TMUX_LOG\" ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        fake_tmux.chmod(0o755)
+        sender = DirectorctlSender(str(tool), timeout_seconds=5)
+        with patch.dict(
+            os.environ,
+            {
+                "PATH": f"{fake_bin}:/usr/bin:/bin",
+                "TMUX_LOG": str(tmux_log),
+                "DIRECTORCTL_ENTER_DELAY": "0",
+                "DIRECTORCTL_TICKET_NOTIFICATION_JOURNAL": str(root / "journal.jsonl"),
+            },
+            clear=False,
+        ):
+            result = sender("orbit-main:0.0", "Release delivery")
+
+        assert result["target"] == "orbit-main:0.0"
+        assert result["delivery_mode"] == "direct"
+        calls = tmux_log.read_text(encoding="utf-8").splitlines()
+        assert "send-keys -t orbit-main:0.0 -l Release delivery" in calls
+        assert "send-keys -t orbit-main:0.0 Enter" in calls
 
 
 def test_service_helpers_fail_closed_without_tenant_root() -> None:

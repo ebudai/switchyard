@@ -473,7 +473,10 @@ def role_accounts_command(plan: ProjectBoardProvision) -> str:
                 f"    sudo useradd -m -d {q_home} -s /bin/bash {q_account}",
                 "fi",
                 f"sudo gpasswd -a {q_account} {q_group} >/dev/null",
-                f"sudo install -d -m 0750 -o {q_account} -g {q_group} {q_home}",
+                # 0700 and the role's own group: the roles group exists for
+                # the board socket, and must not make one role's home readable
+                # to another (SYRD-39).
+                f"sudo install -d -m 0700 -o {q_account} -g {q_account} {q_home}",
                 f"sudo loginctl enable-linger {q_account} >/dev/null 2>&1 || true",
             ]
         )
@@ -554,9 +557,10 @@ def role_runtime_commands(
         f"    sudo useradd -m -d {q_home} -s /bin/bash {q_account}",
         "fi",
         f"sudo gpasswd -a {q_account} {q_group} >/dev/null",
-        # Roles read the shared board install and write only their own home;
-        # the tenant owner keeps group access for operations.
-        f"sudo install -d -m 0750 -o {q_account} -g {q_group} {q_home}",
+        # 0700 and the role's own group. Membership of the roles group is for
+        # reaching the board socket; it must never make one role's home
+        # readable to another (SYRD-39).
+        f"sudo install -d -m 0700 -o {q_account} -g {q_account} {q_home}",
         f"sudo loginctl enable-linger {q_account} >/dev/null 2>&1 || true",
     ]
     if worktree:

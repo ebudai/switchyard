@@ -1065,10 +1065,12 @@ def test_role_credentials_are_private_copies_of_an_allowlist_only() -> None:
             ".claude/.credentials.json",
             ".codex/auth.json",
             ".gemini/antigravity-cli/antigravity-oauth-token",
+            ".hermes/provider.env",
         ):
             path = owner_home / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f"secret for {relative}", encoding="utf-8")
+            path.chmod(0o600)
         for noise in (".claude/sessions/a.jsonl", ".codex/session_index.jsonl", ".claude/settings.json"):
             path = owner_home / noise
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -1082,8 +1084,13 @@ def test_role_credentials_are_private_copies_of_an_allowlist_only() -> None:
         # one covers what is seeded, where, and with what ownership and modes.
         original_home_check = team_launcher._require_owner_home_traversable
         original_component_check = team_launcher._require_owner_traversable
+        original_uid_for_user = team_launcher.uid_for_user
         team_launcher._require_owner_home_traversable = lambda *_args, **_kwargs: None
         team_launcher._require_owner_traversable = lambda *_args, **_kwargs: None
+        # The seeded files are created by this test process, so every account in
+        # the fixture resolves to it; the ownership CHECK is still exercised,
+        # against a uid it can actually observe.
+        team_launcher.uid_for_user = lambda _user: os.getuid()
         try:
             messages: list[str] = []
             assert (
@@ -1097,6 +1104,10 @@ def test_role_credentials_are_private_copies_of_an_allowlist_only() -> None:
                 "director": ".claude/.credentials.json",
                 "ops": ".codex/auth.json",
                 "app": ".gemini/antigravity-cli/antigravity-oauth-token",
+                # Hermes resolves keys from the environment, and an ambient
+                # environment does not survive sudo -u into another account, so
+                # its key is a private file seeded like any other.
+                "perf": ".hermes/provider.env",
             }
             for role_name, relative in expected.items():
                 seeded = home_base / f"porter-{role_name}" / relative
@@ -1112,14 +1123,14 @@ def test_role_credentials_are_private_copies_of_an_allowlist_only() -> None:
                 copied = {str(path.relative_to(role_home)) for path in role_home.rglob("*") if path.is_file()}
                 assert copied == {expected[role_name]}, (role_name, copied)
 
-            # Hermes has no file to seed and says so rather than seeding nothing quietly.
-            hermes_home = home_base / "porter-perf"
-            assert not any(hermes_home.rglob("*")), list(hermes_home.rglob("*"))
-            assert any("hermes" in message and "environment" in message for message in messages), messages
-
             # Every copy is assigned to its own role, by file descriptor.
             assigned = {args[1] for args in chowns if args and args[0] == "chown"}
-            assert {"porter-director:porter-director", "porter-ops:porter-ops", "porter-app:porter-app"} <= assigned, assigned
+            assert {
+                "porter-director:porter-director",
+                "porter-ops:porter-ops",
+                "porter-app:porter-app",
+                "porter-perf:porter-perf",
+            } <= assigned, assigned
             assert all(args[2].startswith("/proc/") for args in chowns if args and args[0] == "chown"), chowns
 
             # Idempotent: a second run changes nothing.
@@ -1145,6 +1156,7 @@ def test_role_credentials_are_private_copies_of_an_allowlist_only() -> None:
         finally:
             team_launcher._require_owner_home_traversable = original_home_check
             team_launcher._require_owner_traversable = original_component_check
+            team_launcher.uid_for_user = original_uid_for_user
 
 
 def test_missing_owner_credential_fails_closed_with_a_manifest() -> None:
@@ -1159,7 +1171,46 @@ def test_missing_owner_credential_fails_closed_with_a_manifest() -> None:
         team_launcher.home_dir_for_user = lambda user: home_base / user
         try:
             manifest = team_launcher.role_credential_manifest(config)
-            assert any("missing from the owner" in line and "ops" in line for line in manifest), manifest
+            assert any(
+                "the owner's .codex/auth.json missing" in line and "ops" in line
+                for line in manifest
+            ), manifest
+
+            # Present but UNSAFE is refused too, not treated as ready: a
+            # wrong-mode, wrong-owner or symlinked credential used to pass the
+            # gate because it only asked whether a file existed (SYRD-39).
+            owner_home = home_base / "porter-agent"
+            auth = owner_home / ".codex/auth.json"
+            auth.parent.mkdir(parents=True, exist_ok=True)
+            auth.write_text("secret", encoding="utf-8")
+            auth.chmod(0o644)
+            original_uid_for_user = team_launcher.uid_for_user
+            team_launcher.uid_for_user = lambda _user: os.getuid()
+            try:
+                unsafe = team_launcher.role_credential_manifest(config)
+                assert any("readable beyond its owner" in line for line in unsafe), unsafe
+
+                auth.chmod(0o600)
+                role_home = home_base / "porter-ops"
+                seeded = role_home / ".codex/auth.json"
+                seeded.parent.mkdir(parents=True, exist_ok=True)
+                seeded.parent.chmod(0o700)
+                # A symlink where the private copy should be must not count.
+                seeded.symlink_to(auth)
+                linked = team_launcher.role_credential_manifest(config)
+                assert any("is a symlink" in line for line in linked), linked
+                seeded.unlink()
+
+                # A world-readable private copy must not count either.
+                seeded.write_text("secret", encoding="utf-8")
+                seeded.chmod(0o644)
+                loose = team_launcher.role_credential_manifest(config)
+                assert any("readable beyond its owner" in line for line in loose), loose
+                seeded.chmod(0o600)
+                assert team_launcher.role_credential_manifest(config) == []
+            finally:
+                team_launcher.uid_for_user = original_uid_for_user
+                auth.unlink(missing_ok=True)
             try:
                 team_launcher.switchyard_seed_role_credentials_command(
                     config, home_base=home_base, runner=lambda *a, **k: None, print_func=lambda _m: None
@@ -1172,38 +1223,108 @@ def test_missing_owner_credential_fails_closed_with_a_manifest() -> None:
             team_launcher.home_dir_for_user = original_home_dir_for_user
 
 
-def test_roles_publish_feature_refs_without_the_owner_ssh_key() -> None:
-    """SYRD-39: a role publishes its own ref; main stays Director-integrated."""
+def test_role_publishing_is_bound_to_the_role_and_cannot_use_its_own_git_config() -> None:
+    """SYRD-39: the sudo grant allows any arguments, so the helper must not
+    accept a caller-chosen repository, remote or commit, and must never run git
+    inside the role's own checkout as the owner.
+
+    A role controls its repository configuration, and core.sshCommand,
+    uploadpack.packObjectsHook or an ext:: remote turn "run git there" into
+    "run the role's command as the owner". The role hands over a bundle it made
+    as itself; the owner only reads that.
+    """
     helper = ROOT / "scripts" / "switchyard-publish-ref"
-    refused = subprocess.run(
-        [sys.executable, str(helper), "--repository", "/tmp", "--ref", "main"],
-        capture_output=True,
-        text=True,
-    )
-    assert refused.returncode != 0
-    assert "integration branch" in refused.stderr + refused.stdout
+    caller = team_launcher.current_user_name()
 
     with tempfile.TemporaryDirectory(prefix="switchyard-publish.") as tmp:
         tmp_path = Path(tmp)
         origin = tmp_path / "origin.git"
         work = tmp_path / "work"
         subprocess.run(["git", "init", "--bare", "-q", str(origin)], check=True)
-        subprocess.run(["git", "init", "-q", str(work)], check=True)
+        subprocess.run(["git", "init", "-q", "-b", "ops/topic", str(work)], check=True)
         (work / "file.txt").write_text("content", encoding="utf-8")
         for args in (
             ["git", "-C", str(work), "config", "user.email", "role@example.invalid"],
             ["git", "-C", str(work), "config", "user.name", "role"],
             ["git", "-C", str(work), "add", "file.txt"],
             ["git", "-C", str(work), "commit", "-q", "-m", "work"],
-            ["git", "-C", str(work), "remote", "add", "origin", str(origin)],
         ):
             subprocess.run(args, check=True)
 
-        published = subprocess.run(
-            [sys.executable, str(helper), "--repository", str(work), "--ref", "feature/syrd-39-demo"],
-            capture_output=True,
-            text=True,
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "run_as_user": "porter-agent",
+                    "worktree_remote": str(origin),
+                    "roles": [
+                        {
+                            "role": "ops",
+                            "cli": ["codex"],
+                            "tmux_session": "porter-ops",
+                            "target": "porter-ops:0.0",
+                            "workdir": str(work),
+                            "run_as_user": caller,
+                        }
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
         )
+
+        # The role makes the bundle as itself; the owner never runs git in the
+        # role's checkout.
+        bundle = tmp_path / "publish.bundle"
+        subprocess.run(
+            ["git", "-C", str(work), "bundle", "create", str(bundle), "refs/heads/ops/topic"],
+            check=True,
+            capture_output=True,
+        )
+
+        def run_helper(*extra: str, sudo_user: str | None = caller) -> subprocess.CompletedProcess[str]:
+            env = {
+                **os.environ,
+                "SWITCHYARD_PUBLISH_CONFIG": str(config_path),
+                "HOME": str(tmp_path / "ownerhome"),
+            }
+            if sudo_user is None:
+                env.pop("SUDO_USER", None)
+            else:
+                env["SUDO_USER"] = sudo_user
+            (tmp_path / "ownerhome").mkdir(exist_ok=True)
+            return subprocess.run(
+                [sys.executable, str(helper), "--project", "porter", *extra],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        # Nothing about where is caller-supplied: those flags do not exist.
+        rejected_flags = run_helper("--ref", "ops/topic", "--bundle", str(bundle), "--repository", "/tmp")
+        assert rejected_flags.returncode != 0, rejected_flags.stdout
+        assert "unrecognized arguments" in rejected_flags.stderr, rejected_flags.stderr
+
+        # Must arrive through sudo; an unattributed caller has no role.
+        no_sudo = run_helper("--ref", "ops/topic", "--bundle", str(bundle), sudo_user=None)
+        assert no_sudo.returncode != 0
+        assert "run through sudo" in no_sudo.stderr + no_sudo.stdout
+
+        # The integration branch is refused.
+        protected = run_helper("--ref", "main", "--bundle", str(bundle))
+        assert protected.returncode != 0
+        assert "integration branch" in protected.stderr + protected.stdout
+
+        # Another role's namespace is refused.
+        foreign = run_helper("--ref", "director/topic", "--bundle", str(bundle))
+        assert foreign.returncode != 0
+        assert "may only publish refs under ops/" in foreign.stderr + foreign.stdout
+
+        # Its own namespaced ref publishes, and main is untouched.
+        published = run_helper("--ref", "ops/topic", "--bundle", str(bundle))
         assert published.returncode == 0, published.stderr
         listed = subprocess.run(
             ["git", "-C", str(origin), "for-each-ref", "--format=%(refname)"],
@@ -1211,8 +1332,7 @@ def test_roles_publish_feature_refs_without_the_owner_ssh_key() -> None:
             text=True,
             check=True,
         ).stdout
-        assert "refs/heads/feature/syrd-39-demo" in listed, listed
-        # The integration branch is untouched by the role's publish.
+        assert "refs/heads/ops/topic" in listed, listed
         assert "refs/heads/main" not in listed, listed
 
 

@@ -502,15 +502,22 @@ start authenticated, from the already-authenticated owner:
 | `claude` | `.claude/.credentials.json` |
 | `codex` | `.codex/auth.json` |
 | `agy` | `.gemini/antigravity-cli/antigravity-oauth-token` |
-| `hermes` | nothing -- it resolves provider keys from the environment, so the role's pane environment must carry the same key |
+| `hermes` | `.hermes/provider.env` -- it resolves keys from the environment, and an ambient environment does not survive `sudo -u` into another account, so the owner keeps its keys in one private file which the role's own shell sources at start |
 
 **What is never copied:** an entire CLI home, conversations, histories, caches,
 hooks, or general settings. Credentials are never symlinked and never placed in
 a directory readable by the roles group. Each role gets a **private copy**: owned
-by that role, mode `0600`, under a `0700` directory it owns. Copying reuses the
+by that role, mode `0600`, under a `0700` directory it owns, inside a role home
+that is itself `0700` -- the roles group exists to reach the board socket and
+never makes one role's home readable to another. Copying reuses the
 anchored `openat`/`O_NOFOLLOW` model from SYRD-28, so no privileged step is
 handed a whole path a symlink could redirect, and ownership is assigned to the
 open file description rather than to a path.
+
+Presence is not enough to count as ready: a credential that is a symlink,
+owned by the wrong account, or readable beyond its owner is reported as unsafe
+and refused, on the owner's side as well as the role's, so an unsafe credential
+is never propagated.
 
 `switchyard seed-role-credentials <project>` performs it and is idempotent: a
 role that already has a credential is left alone, and `--reseed` is the
@@ -533,13 +540,24 @@ from `SO_PEERCRED`'s uid; seeding a credential grants no board permission.
 ### Publishing from an isolated role
 
 A role publishes its own feature ref through `switchyard-publish-ref`, run via
-`sudo` as the project owner. The owner's git identity performs the push; the role
-never gains read access to the owner's SSH key files, and the grant covers that
-one command and nothing else. The helper validates the ref and refuses
-integration branches (`main`, `master`, `trunk`, `release`), so a role publishes
-`feature/...` for review while the Director keeps integrating. No polkit is
-involved in ordinary role work: it is a plain `sudo -u` grant between two
-unprivileged accounts.
+`sudo` as the project owner. The sudoers grant allows any arguments, so nothing
+about *where* is caller-supplied: the calling role comes from `SUDO_USER`, and
+its worktree and the remote come from the project's own configuration, found
+relative to the effective uid.
+
+Refs are namespaced to the calling role -- `ops` publishes under `ops/` -- so a
+role cannot write, move or delete another role's refs, and the integration
+branches (`main`, `master`, `trunk`, `release`) are refused outright.
+
+The owner never runs git inside the role's checkout. A role controls its own
+repository configuration, and `core.sshCommand`, `uploadpack.packObjectsHook` or
+an `ext::` remote would turn "run git there" into "run the role's command as the
+owner". Instead the role creates a **bundle** as itself and the owner fetches
+from that bundle into an owner-owned staging repository whose configuration the
+role cannot touch, then pushes from there.
+
+No polkit is involved in ordinary role work: it is a plain `sudo -u` grant
+between two unprivileged accounts.
 
 ### What this does and does not cover
 

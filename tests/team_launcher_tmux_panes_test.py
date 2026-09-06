@@ -698,6 +698,62 @@ def test_role_runner_isolates_even_when_the_project_owner_invokes_switchyard() -
     assert calls[2][0] == "tmux", calls[2]
 
 
+
+def test_launch_refuses_when_isolation_or_credentials_are_incomplete() -> None:
+    """SYRD-39: the gate must refuse, not warn.
+
+    It previously computed the gaps, printed them, and then materialized the
+    layout and started every worker anyway, so a fresh or partly migrated
+    project launched roles that could not be told apart.
+
+    A project where no role declares an account is an unmigrated tenant and
+    still launches; opting in is per project, and a PARTIAL opt-in is the
+    dangerous state that must fail closed.
+    """
+    def unmigrated_and_migrating(tmp_path: Path) -> tuple[object, object]:
+        configs = []
+        for name, accounts in (("legacy", False), ("migrating", True)):
+            root = tmp_path / name
+            root.mkdir()
+            roles = []
+            for index, role_name in enumerate(("director", "ops")):
+                workdir = root / role_name
+                workdir.mkdir()
+                role = {
+                    "role": role_name,
+                    "slot": index,
+                    "tmux_session": f"porter-{role_name}",
+                    "target": f"porter-{role_name}:0.0",
+                    "cli": ["codex"],
+                    "workdir": str(workdir),
+                }
+                if accounts:
+                    # Declared but never created on this host, which is exactly
+                    # the state after provisioning and before the rollout.
+                    role["run_as_user"] = f"porter-{role_name}"
+                roles.append(role)
+            config_path = root / "porter.json"
+            config_path.write_text(
+                json.dumps({"project": "porter", "run_as_user": "porter-agent", "roles": roles}, indent=2, sort_keys=True)
+                + "\n",
+                encoding="utf-8",
+            )
+            configs.append(load_project_config("porter", config_path))
+        return configs[0], configs[1]
+
+    with tempfile.TemporaryDirectory(prefix="switchyard-launch-gate.") as tmp:
+        legacy, migrating = unmigrated_and_migrating(Path(tmp))
+
+        # An unmigrated tenant is untouched: nothing has opted in.
+        assert team_launcher.role_isolation_gaps(legacy) == []
+
+        # A project that has opted in but is not finished refuses, and names
+        # every reason.
+        gaps = team_launcher.role_isolation_gaps(migrating)
+        assert gaps, gaps
+        assert any("does not exist" in gap for gap in gaps), gaps
+
+
 def main() -> int:
     run_team_launcher_tests(globals(), first=())
     print("team_launcher_tmux_panes_test: ok")

@@ -2666,6 +2666,17 @@ def cli_command_for_role(
         "TICKET_BOARD_PANE_SESSION_DIR": str(session_dir.expanduser()),
     }
     env.update(hermes_env_for_role(role, session_dir=session_dir))
+    if _uses_hermes(role):
+        # Sourced by the ROLE's own shell, so the key is read from the role's
+        # private 0600 file by the account that owns it; nothing else can read
+        # it and it never passes through another account's environment.
+        command = [
+            "sh",
+            "-c",
+            f'. "$HOME/{HERMES_PROVIDER_ENV_RELATIVE_PATH}" && exec "$@"',
+            "switchyard-hermes",
+            *command,
+        ]
     if pane_state_dir is not None:
         env["TICKET_BOARD_PANE_STATE_DIR"] = str(pane_state_dir.expanduser())
     if session_id:
@@ -5807,11 +5818,17 @@ def launch_project(
                 handoff_path.chmod(0o755)
             except OSError:
                 pass
+            # Refuse rather than warn. A partially migrated project that starts
+            # anyway runs roles under the wrong uid or without credentials, and
+            # the board then either denies them or -- worse, before this was
+            # closed -- cannot tell them apart at all (SYRD-39).
             print_func(
-                "team-launcher: roles are not isolated yet, so the board cannot tell them "
-                "apart:\n  " + "\n  ".join(isolation_gaps)
+                "team-launcher: refusing to launch " + config.project
+                + "; its roles are not isolated yet, so they cannot be told apart:\n  "
+                + "\n  ".join(isolation_gaps)
                 + f"\nAn operator must run {handoff_path} (safe to re-run) and then relaunch."
             )
+            return 1
     materialize_layout(
         config,
         config_path=config_path,
@@ -9612,7 +9629,6 @@ def switchyard_seed_role_credentials_command(
     if role_name and not roles:
         raise SystemExit(f"switchyard: {config.project} has no role {role_name}")
     seeded = 0
-    hermes_roles: list[str] = []
     for role in roles:
         account = role_run_as_user(config, role)
         if not account or account == owner_user:
@@ -9620,9 +9636,6 @@ def switchyard_seed_role_credentials_command(
             continue
         cli_name = _command_name(role.cli[0]) if role.cli else ""
         artifacts = role_credential_artifacts(role)
-        if cli_name == "hermes" and not artifacts:
-            hermes_roles.append(role.role)
-            continue
         if not artifacts:
             raise SystemExit(
                 f"switchyard: no credential allowlist for {cli_name or 'unknown cli'} used by "
@@ -9639,11 +9652,6 @@ def switchyard_seed_role_credentials_command(
                 print_func=print_func,
             ):
                 seeded += 1
-    if hermes_roles:
-        print_func(
-            "switchyard: " + ", ".join(sorted(hermes_roles)) + " use hermes -- "
-            + HERMES_ENVIRONMENT_CREDENTIAL_NOTE
-        )
     print_func(
         f"switchyard: seeded {seeded} credential file(s); every role now acts as the same "
         "model-provider account as the owner, and shares that account's quota, while keeping "
@@ -9753,6 +9761,11 @@ def _require_owner_traversable(dir_fd: int, owner_user: str, component: str, tar
         )
 
 
+# One private file holding the provider API keys hermes resolves from the
+# environment, as `KEY=value` lines. Owner-owned and 0600, seeded per role.
+HERMES_PROVIDER_ENV_RELATIVE_PATH = ".hermes/provider.env"
+
+
 @dataclass(frozen=True)
 class RoleCredentialArtifact:
     """One file a CLI needs in a role's own home to start authenticated.
@@ -9778,20 +9791,59 @@ ROLE_CREDENTIAL_ARTIFACTS: dict[str, tuple[RoleCredentialArtifact, ...]] = {
             "agy", f"{AGY_CREDENTIAL_DIR_NAME}/{AGY_CREDENTIAL_TOKEN_NAME}"
         ),
     ),
-    # Hermes resolves provider keys from the environment rather than a token
-    # file, so there is nothing to copy; the role's environment must carry the
-    # key and the manifest says so instead of silently seeding nothing.
-    "hermes": (),
+    # Hermes resolves provider keys from the environment, not a token file, and
+    # an ambient environment does not survive sudo -u into a separate account.
+    # The owner therefore keeps its key in one private file, which is seeded
+    # like any other credential and sourced by the role's own shell at start.
+    "hermes": (RoleCredentialArtifact("hermes", HERMES_PROVIDER_ENV_RELATIVE_PATH),),
 }
-HERMES_ENVIRONMENT_CREDENTIAL_NOTE = (
-    "hermes resolves provider API keys from the environment, so no file is seeded; "
-    "the role's pane environment must carry the same *_API_KEY the owner uses"
-)
 
 
 def role_credential_artifacts(role: RoleConfig) -> tuple[RoleCredentialArtifact, ...]:
     cli_name = _command_name(role.cli[0]) if role.cli else ""
     return ROLE_CREDENTIAL_ARTIFACTS.get(cli_name, ())
+
+
+def _credential_state(path: Path, expected_user: str, *, private: bool) -> str:
+    """Empty when the file is safe to rely on, otherwise why it is not.
+
+    `is_file` was not enough: it follows symlinks and says nothing about who
+    owns the file or who else can read it, so a wrong-owner, group-readable,
+    world-readable or symlinked credential was treated as ready (SYRD-39).
+    """
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return "missing"
+    except OSError as exc:
+        return f"unreadable ({exc.strerror})"
+    if stat.S_ISLNK(info.st_mode):
+        return "is a symlink; credentials must be private regular files"
+    if not stat.S_ISREG(info.st_mode):
+        return "is not a regular file"
+    expected_uid = uid_for_user(expected_user)
+    if expected_uid is None:
+        return f"cannot be checked: {expected_user} is not a local account"
+    if info.st_uid != expected_uid:
+        return f"is owned by uid {info.st_uid}, not {expected_user}"
+    if info.st_mode & 0o077:
+        return f"is readable beyond its owner (mode {oct(stat.S_IMODE(info.st_mode))})"
+    if private:
+        parent = path.parent
+        try:
+            parent_info = parent.lstat()
+        except OSError as exc:
+            return f"parent {parent} is unreadable ({exc.strerror})"
+        if stat.S_ISLNK(parent_info.st_mode):
+            return f"parent {parent} is a symlink"
+        if parent_info.st_uid != expected_uid:
+            return f"parent {parent} is owned by uid {parent_info.st_uid}, not {expected_user}"
+        if parent_info.st_mode & 0o077:
+            return (
+                f"parent {parent} is reachable beyond its owner "
+                f"(mode {oct(stat.S_IMODE(parent_info.st_mode))})"
+            )
+    return ""
 
 
 def _artifact_present(home: Path, artifact: RoleCredentialArtifact) -> bool:
@@ -9809,7 +9861,8 @@ def role_credential_manifest(config: ProjectConfig) -> list[str]:
     exact artifact that is missing from the role's own home or absent from the
     owner's, rather than letting a role launch and fail at the provider.
     """
-    owner_home = home_dir_for_user(config.run_as_user or current_user_name())
+    owner_user = config.run_as_user or current_user_name()
+    owner_home = home_dir_for_user(owner_user)
     lines: list[str] = []
     for role in config.roles:
         account = role_run_as_user(config, role)
@@ -9817,20 +9870,36 @@ def role_credential_manifest(config: ProjectConfig) -> list[str]:
         if not account or account == config.run_as_user:
             continue
         role_home = home_dir_for_user(account)
-        if cli_name == "hermes":
-            lines.append(f"{role.role} ({cli_name}): {HERMES_ENVIRONMENT_CREDENTIAL_NOTE}")
-            continue
         artifacts = role_credential_artifacts(role)
         if not artifacts:
             lines.append(f"{role.role} ({cli_name or 'unknown cli'}): no known credential artifact")
             continue
         for artifact in artifacts:
-            if role_home is not None and _artifact_present(role_home, artifact):
-                continue
-            if owner_home is None or not _artifact_present(owner_home, artifact):
+            if role_home is not None:
+                target_problem = _credential_state(
+                    role_home / artifact.relative_path, account, private=True
+                )
+                if not target_problem:
+                    continue
+                if target_problem != "missing":
+                    # Present but unsafe is worse than absent: say so instead of
+                    # treating it as ready.
+                    lines.append(
+                        f"{role.role} ({cli_name}): {artifact.relative_path} in /home/{account} "
+                        f"{target_problem}; reseed it with "
+                        f"`switchyard seed-role-credentials {config.project} --role {role.role} --reseed`"
+                    )
+                    continue
+            owner_problem = (
+                "missing"
+                if owner_home is None
+                else _credential_state(owner_home / artifact.relative_path, owner_user, private=False)
+            )
+            if owner_problem:
                 lines.append(
-                    f"{role.role} ({cli_name}): {artifact.relative_path} is missing from the "
-                    f"owner, so it cannot be seeded; authenticate the owner first"
+                    f"{role.role} ({cli_name}): the owner's {artifact.relative_path} "
+                    f"{owner_problem}, so it cannot be seeded; authenticate {cli_name} as "
+                    f"{owner_user} first"
                 )
                 continue
             lines.append(
@@ -9918,10 +9987,18 @@ def seed_role_credential(
     role_home = home_base / account
     owner_home = home_base / owner_user
     source_path = owner_home / artifact.relative_path
-    if not source_path.is_file():
+    source_problem = _credential_state(source_path, owner_user, private=False)
+    if source_problem == "missing":
         raise SystemExit(
             f"switchyard: {owner_user} has no {artifact.relative_path} to seed for {account}; "
             f"authenticate {artifact.cli} as {owner_user} first"
+        )
+    if source_problem:
+        # Refuse to propagate a credential that is already unsafe, rather than
+        # copying it into every role home.
+        raise SystemExit(
+            f"switchyard: {owner_user}'s {artifact.relative_path} {source_problem}; refusing to "
+            "seed it"
         )
     dir_fd = _open_role_credential_parent(account, home_base, artifact.relative_path, runner=runner)
     source_fd = os.open(source_path, os.O_RDONLY | os.O_NOFOLLOW)
@@ -11188,6 +11265,19 @@ def switchyard_new_command(
         owned_roots=_control_repository_owned_roots(config),
         runner=runner,
     )
+    # A newly provisioned project declares per-role accounts that the operator
+    # has not created yet, so its roles cannot start with their own identities.
+    # Provisioning itself succeeded; the launch is deferred rather than failed,
+    # and the artifacts say what to run next (SYRD-39).
+    pending_isolation = role_isolation_gaps(config)
+    if pending_isolation:
+        print_func(
+            f"switchyard: provisioned {resolved_slug}. Its roles are not isolated yet, so they "
+            "were not started:\n  " + "\n  ".join(pending_isolation)
+            + f"\nRun the operator commands emitted for {resolved_slug}, then start it with "
+            f"`switchyard {resolved_slug}`."
+        )
+        return 0
     launch_started_at = time.time()
     launch_started_ns = time.time_ns()
     launch_result = launch_project(
@@ -11250,6 +11340,14 @@ def role_isolation_gaps(config: ProjectConfig) -> list[str]:
     closed. Fresh projects hit this too, because their worktrees are created
     after the operator artifact has already run (SYRD-39).
     """
+    # Isolation is opt-in per project: a config where no role declares its own
+    # account is an unmigrated tenant, which keeps working as before. Once ANY
+    # role opts in, the whole project must be complete, because a partial
+    # migration is the dangerous state -- some roles isolated, some sharing.
+    if not any(
+        role_run_as_user(config, role) not in ("", config.run_as_user) for role in config.roles
+    ):
+        return []
     gaps: list[str] = []
     for role in config.roles:
         account = role_run_as_user(config, role)

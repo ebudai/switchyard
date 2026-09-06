@@ -892,9 +892,11 @@ def test_role_accounts_rollout_is_idempotent_and_doubles_as_migration() -> None:
     for role, account in plan.role_accounts:
         assert f"if ! getent passwd '{account}'" in commands, role
         assert f"sudo gpasswd -a '{account}' 'otto-roles'" in commands, role
-        # Each role's home is its own: one role cannot read another's worktree,
-        # config or credentials.
-        assert f"sudo install -d -m 0750 -o '{account}' -g 'otto-roles' '/home/{account}'" in commands, role
+        # Each role's home is PRIVATE: 0700 and its own group. Membership of the
+        # roles group is for reaching the board socket, and must not make one
+        # role's home readable to another (SYRD-39).
+        assert f"sudo install -d -m 0700 -o '{account}' -g '{account}' '/home/{account}'" in commands, role
+        assert f"-m 0750 -o '{account}'" not in commands, role
     # The board service and the tenant owner reach the socket through the group.
     assert "sudo gpasswd -a 'boardsvc' 'otto-roles'" in commands
     assert "sudo gpasswd -a 'otto-agent' 'otto-roles'" in commands

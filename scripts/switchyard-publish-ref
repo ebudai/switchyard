@@ -1,81 +1,188 @@
 #!/usr/bin/env python3
-"""Publish one role's feature ref without handing that role the owner's SSH key.
+"""Publish one role's feature ref as the project owner, safely.
 
-A role account runs this through sudo as the project owner. The owner's SSH
-identity does the push; the role never gains read access to the key files, and
-gets no other command. The ref is validated here rather than trusted, so the
-narrow grant stays narrow: a role may publish its own feature branch and may not
-touch an integration branch (SYRD-39).
+A role account runs this through sudo as the project owner so the owner's git
+identity performs the push and the role never gains read access to the owner's
+SSH key files. Three things make the grant genuinely narrow (SYRD-39):
 
-Ordinary role work needs no polkit and no root: this is a plain sudo -u grant
-between two unprivileged accounts.
+* Nothing about WHERE is caller-supplied. The calling role comes from SUDO_USER,
+  and its worktree and the remote come from the project's own configuration, so
+  a role cannot aim the owner's credentials at another repository or remote.
+* The ref is namespaced to the calling role and integration branches are
+  refused, so a role publishes its own feature refs and cannot write the branch
+  the Director integrates.
+* The owner never runs git inside the role's checkout. A role controls its own
+  repository configuration, and knobs such as core.sshCommand,
+  uploadpack.packObjectsHook and ext:: remote URLs turn "run git there" into
+  "run the role's command as the owner". The role hands over a bundle instead --
+  which it creates as itself -- and the owner fetches from that bundle into an
+  owner-owned staging repository whose config the role cannot touch.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
+import stat
 import subprocess
 import sys
 from pathlib import Path
 
-# Integration branches belong to the Director's merge path. A role publishes a
-# feature ref and asks for review; it never writes these.
-PROTECTED_REFS = frozenset({"main", "master", "trunk", "release"})
-FEATURE_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,190}$")
+PROTECTED_REFS = frozenset({"main", "master", "trunk", "release", "head"})
+REF_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# The owner's staging repository. Owner-owned, so its configuration -- including
+# the remote and any transport settings -- is never role-controlled.
+STAGING_DIR_NAME = ".local/state/switchyard/publish-staging"
 
 
-def validate_ref(ref: str) -> str:
+def fail(message: str) -> "NoReturn":  # type: ignore[valid-type]
+    raise SystemExit(f"switchyard-publish-ref: {message}")
+
+
+def calling_role_account() -> str:
+    account = (os.environ.get("SUDO_USER") or "").strip()
+    if not account:
+        fail("must be run through sudo by a role account")
+    return account
+
+
+def load_project(project: str) -> dict:
+    """Find the project configuration without trusting the caller.
+
+    The location is derived from the effective uid -- the owner this is running
+    as -- rather than from an argument, because the sudoers grant allows any
+    arguments and a caller-supplied path would let a role aim the owner's
+    credentials at a configuration of its own making.
+
+    SWITCHYARD_PUBLISH_CONFIG is a test seam only. sudo runs with env_reset, so
+    a role invoking this through the grant cannot set it.
+    """
+    import pwd as _pwd
+
+    override = os.environ.get("SWITCHYARD_PUBLISH_CONFIG", "").strip()
+    owner_home = Path(_pwd.getpwuid(os.geteuid()).pw_dir)
+    candidates = [Path(override)] if override else []
+    candidates.extend(
+        (
+            owner_home / "Projects" / project / ".switchyard" / "provision" / f"{project}.json",
+            Path(f"/etc/switchyard/{project}.json"),
+        )
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            try:
+                return json.loads(candidate.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                fail(f"cannot read {candidate}: {exc}")
+    fail(f"no configuration found for project {project}")
+
+
+def role_for_account(config: dict, account: str) -> dict:
+    for role in config.get("roles", []):
+        if isinstance(role, dict) and str(role.get("run_as_user") or "") == account:
+            return role
+    fail(f"{account} is not a configured role account of this project")
+
+
+def validate_ref(ref: str, role_name: str) -> str:
     name = ref.strip()
     if not name:
-        raise SystemExit("switchyard-publish-ref: a ref name is required")
+        fail("a ref name is required")
     if name.startswith("refs/"):
-        raise SystemExit(
-            "switchyard-publish-ref: pass a branch name, not a full ref path"
+        fail("pass a branch name, not a full ref path")
+    segments = name.split("/")
+    if any(not REF_SEGMENT.fullmatch(segment) or segment.endswith(".lock") for segment in segments):
+        fail(f"{name!r} is not a valid branch name")
+    if segments[0].casefold() in PROTECTED_REFS or name.casefold() in PROTECTED_REFS:
+        fail(
+            f"{name} is an integration branch; roles publish their own feature refs and the "
+            "Director integrates them"
         )
-    if not FEATURE_REF.fullmatch(name):
-        raise SystemExit(f"switchyard-publish-ref: {name!r} is not a valid branch name")
-    if name.casefold() in PROTECTED_REFS:
-        raise SystemExit(
-            f"switchyard-publish-ref: {name} is an integration branch; roles publish "
-            "feature refs and the Director integrates them"
-        )
-    if ".." in name or name.endswith(".lock"):
-        raise SystemExit(f"switchyard-publish-ref: {name!r} is not a valid branch name")
+    # Bound to the caller: a role publishes under its own namespace and cannot
+    # write, move or delete another role's refs.
+    if segments[0] != role_name:
+        fail(f"{role_name} may only publish refs under {role_name}/, not {name}")
+    if len(segments) < 2:
+        fail(f"{role_name} must publish a ref below its namespace, such as {role_name}/my-work")
     return name
+
+
+def require_role_owned_file(path: Path, account: str) -> None:
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        fail(f"cannot read bundle {path}: {exc.strerror}")
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        fail(f"bundle {path} must be a regular file, not a link")
+    import pwd
+
+    try:
+        expected = pwd.getpwnam(account).pw_uid
+    except KeyError:
+        fail(f"{account} is not a local account")
+    if info.st_uid != expected:
+        fail(f"bundle {path} is not owned by {account}")
+
+
+def git(args: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+    # System and global git configuration are ignored so the push cannot be
+    # redirected by anything outside this program's control.
+    env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    return subprocess.run(["git", *args], text=True, capture_output=True, env=env, **kwargs)
 
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="switchyard-publish-ref")
-    parser.add_argument("--repository", required=True, help="the role's worktree to publish from")
-    parser.add_argument("--ref", required=True, help="feature branch name to publish")
-    parser.add_argument("--remote", default="origin")
-    parser.add_argument("--commit", default="HEAD", help="commit to publish as that ref")
+    parser.add_argument("--project", required=True)
+    parser.add_argument("--ref", required=True, help="branch to publish, under <role>/")
+    parser.add_argument(
+        "--bundle",
+        required=True,
+        help="git bundle the role created, containing the commits to publish",
+    )
     args = parser.parse_args(argv[1:])
 
-    ref = validate_ref(args.ref)
-    repository = Path(args.repository).expanduser()
-    if not (repository / ".git").exists() and not repository.joinpath("HEAD").exists():
-        raise SystemExit(f"switchyard-publish-ref: {repository} is not a git checkout")
+    account = calling_role_account()
+    config = load_project(args.project)
+    role = role_for_account(config, account)
+    role_name = str(role.get("role") or "")
+    ref = validate_ref(args.ref, role_name)
+    bundle = Path(args.bundle).expanduser()
+    require_role_owned_file(bundle, account)
 
-    push = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(repository),
-            "push",
-            args.remote,
-            f"{args.commit}:refs/heads/{ref}",
-        ],
-        text=True,
-        capture_output=True,
-    )
-    sys.stderr.write(push.stderr)
+    verify = git(["bundle", "verify", str(bundle)])
+    if verify.returncode != 0:
+        sys.stderr.write(verify.stderr)
+        fail("bundle did not verify")
+
+    remote = str(config.get("worktree_remote") or "origin")
+    staging = Path.home() / STAGING_DIR_NAME / args.project
+    if not (staging / "HEAD").exists():
+        staging.mkdir(parents=True, exist_ok=True)
+        staging.chmod(0o700)
+        init = git(["init", "--bare", "-q", str(staging)])
+        if init.returncode != 0:
+            sys.stderr.write(init.stderr)
+            fail("could not create the owner staging repository")
+
+    fetch = git(["-C", str(staging), "fetch", str(bundle), f"refs/heads/{ref}:refs/heads/{ref}", "--force"])
+    if fetch.returncode != 0:
+        sys.stderr.write(fetch.stderr)
+        fail(f"bundle does not contain refs/heads/{ref}")
+
+    push = git(["-C", str(staging), "push", remote, f"refs/heads/{ref}:refs/heads/{ref}"])
     sys.stdout.write(push.stdout)
+    sys.stderr.write(push.stderr)
     if push.returncode != 0:
         return push.returncode
-    print(f"switchyard-publish-ref: published {ref} from {repository} as {os.getlogin() if sys.stdin.isatty() else 'the project owner'}")
+    print(f"switchyard-publish-ref: published {ref} for {role_name}")
     return 0
 
 

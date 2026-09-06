@@ -600,20 +600,10 @@ if not serving:
     print("ticket-board Unix socket verification failed for %s: %s" % (socket_path, last_error), file=sys.stderr)
     sys.exit(1)
 
-# SYRD-39: a peer outside every role pane must not be able to claim a role.
-# Asserted only when this probe really is outside one -- an operator deploying
-# from inside their own pane legitimately has a role session, and failing the
-# deploy for that would be wrong.
-try:
-    from ticket_board.peer_identity import session_identity
-except Exception as exc:
-    print("ticket-board socket role-binding check skipped: %s" % exc)
-    sys.exit(0)
-
-if session_identity(os.getpid()) is not None:
-    print("ticket-board socket role-binding check skipped: deploy runs inside a role session")
-    sys.exit(0)
-
+# SYRD-39: role authority is the peer's Unix account. This deploy probe does
+# not run as one of the project's role accounts, so the board must refuse to
+# give it a role. A 200 here means the board is handing out roles to accounts
+# that do not hold them, which is the outage this check exists to catch.
 body = json.dumps({"role": "director"}).encode("utf-8")
 claim = (
     b"POST /api/register-caller HTTP/1.1\r\n"
@@ -630,12 +620,12 @@ except OSError as exc:
     sys.exit(1)
 if " 200 " in line:
     print(
-        "ticket-board socket role-binding check FAILED: a peer outside every role session "
-        "was granted director (%s)" % line,
+        "ticket-board socket role-binding check FAILED: an account that is not a configured "
+        "role was granted director (%s)" % line,
         file=sys.stderr,
     )
     sys.exit(1)
-print("ticket-board socket role binding refused an unbound peer as expected (%s)" % line)
+print("ticket-board role binding refused a non-role account as expected (%s)" % line)
 SMOKEPY
     then
         return 1

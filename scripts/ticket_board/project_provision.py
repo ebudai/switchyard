@@ -32,6 +32,8 @@ DEFAULT_PGU_ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "i
 DEFAULT_PGU_CALLER_ROLES = ("director", "main", "app", "ops", "perf", "audit", "inspector", "research", "user")
 SCHEMA_SQL_PATH = Path(__file__).with_name("schema.sql")
 DEFAULT_SHARED_PYTHON = "/opt/switchyard/venv/bin/python"
+# The account the board service itself runs as.
+DEFAULT_SERVICE_USER = "boardsvc"
 DEFAULT_PG_IDENT_MAP = "pgu_ticket_board_service"
 
 # Tenant boards intentionally expose a smaller workflow surface than the pgu
@@ -181,7 +183,7 @@ def build_plan(
     owner_home: Path | None = None,
     port: int | None = None,
     database: str | None = None,
-    service_user: str = "boardsvc",
+    service_user: str = DEFAULT_SERVICE_USER,
     service_role: str = "ticket_board_service",
     listener_role: str = "ticket_board_listener",
     board_root: Path | None = None,
@@ -480,6 +482,41 @@ def role_account_home(plan: ProjectBoardProvision, role: str) -> str:
     """Where one role account lives. Its worktree, config and credentials sit
     under here, owned by that account, so one role cannot read another's."""
     return f"/home/{role_account_name(plan.project, role)}"
+
+
+def role_account_commands(project: str, role: str, owner_user: str, service_user: str) -> str:
+    """Operator commands to add ONE role's Unix account to an existing project.
+
+    Adding a role after provisioning needs a new account, and the launcher does
+    not hold root. Emitting exactly these keeps `switchyard add-role` honest:
+    the role is not started until the account it must run as exists, because a
+    role started under the wrong account has the wrong uid and therefore no
+    board authority (SYRD-39).
+    """
+    group = roles_group_name(project)
+    account = role_account_name(project, role)
+    q_group, q_account = shell_quote(group), shell_quote(account)
+    home = shell_quote(f"/home/{account}")
+    return "\n".join(
+        [
+            f"if ! getent group {q_group} >/dev/null 2>&1; then",
+            f"    sudo groupadd -r {q_group}",
+            "fi",
+            f"sudo gpasswd -a {shell_quote(service_user)} {q_group} >/dev/null",
+            f"sudo gpasswd -a {shell_quote(owner_user)} {q_group} >/dev/null",
+            f"if ! getent passwd {q_account} >/dev/null 2>&1; then",
+            f"    sudo useradd -m -d {home} -s /bin/bash {q_account}",
+            "fi",
+            f"sudo gpasswd -a {q_account} {q_group} >/dev/null",
+            f"sudo install -d -m 0750 -o {q_account} -g {q_group} {home}",
+            f"sudo loginctl enable-linger {q_account} >/dev/null 2>&1 || true",
+            "# Refresh the director control interface so it can drive the new role:",
+            f"switchyard provision {project} --render role-control-sudoers > /tmp/{project}-role-control",
+            f"sudo install -m 0440 -o root -g root /tmp/{project}-role-control /etc/sudoers.d/49-{project}-role-control.staged",
+            f"sudo visudo -c -f /etc/sudoers.d/49-{project}-role-control.staged",
+            f"sudo mv /etc/sudoers.d/49-{project}-role-control.staged /etc/sudoers.d/49-{project}-role-control",
+        ]
+    )
 
 
 def role_control_sudoers(plan: ProjectBoardProvision) -> str:

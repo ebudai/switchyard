@@ -61,6 +61,8 @@ class PresentationRunner:
         self.sessions = {f"{project}-director", f"{project}-app"}
         self.proxy_roles: dict[str, str] = {}
         self.calls: list[list[str]] = []
+        # (account, tmux subcommand) for every call, '' when run directly.
+        self.ran_as: list[tuple[str, str]] = []
         self.fail_next_respawn_target = ""
         self.fail_next_select_target = ""
         self.worker_pids = {f"{project}-director": 4101, f"{project}-app": 4102}
@@ -75,7 +77,17 @@ class PresentationRunner:
 
     def __call__(self, args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         self.calls.append(args)
-        assert args[0] == "tmux"
+        # With one Unix account per role there is no shared tmux server, so a
+        # role's session is reached through the generated role-control
+        # interface: sudo -u <role account> tmux. Record which account was used
+        # and then behave like that account's tmux server (SYRD-39).
+        if args[:2] == ["sudo", "-u"] and "tmux" in args:
+            account = args[2]
+            args = args[args.index("tmux") :]
+            self.ran_as.append((account, args[1] if len(args) > 1 else ""))
+        else:
+            self.ran_as.append(("", args[1] if len(args) > 1 else ""))
+        assert args[0] == "tmux", args
         command = args[1]
         target = args[args.index("-t") + 1] if "-t" in args else ""
         session = self._session(target)

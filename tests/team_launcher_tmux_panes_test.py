@@ -539,6 +539,82 @@ def test_pane_start_without_recorded_session_ignores_ambient_session_and_starts_
     assert "-u TICKET_BOARD_PANE_SESSION_ID" in new_session[-1]
     assert "no recorded session id for ops; starting fresh session" in stderr.getvalue()
 
+
+def test_presentation_reaches_each_role_through_its_own_account() -> None:
+    """SYRD-39: with one account per role there is no shared tmux server.
+
+    Director presentation must reach a role's session through the generated
+    role-control interface (sudo -u <role account> tmux) and must not assume
+    ambient access. Display and viewer sessions stay with the project owner.
+    """
+    import subprocess as _subprocess
+
+    from scripts import presentation_controller
+
+    calls: list[list[str]] = []
+
+    def record(args, **_kwargs):
+        calls.append(list(args))
+        return _subprocess.CompletedProcess(list(args), 0, stdout="")
+
+    with tempfile.TemporaryDirectory(prefix="switchyard-present-routing.") as tmp:
+        tmp_path = Path(tmp)
+        (tmp_path / "director").mkdir()
+        (tmp_path / "app").mkdir()
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "run_as_user": "porter-agent",
+                    "roles": [
+                        {
+                            "role": "director",
+                            "cli": ["codex"],
+                            "slot": 0,
+                            "tmux_session": "porter-director",
+                            "target": "porter-director:0.0",
+                            "workdir": str(tmp_path / "director"),
+                            "run_as_user": "porter-director",
+                        },
+                        {
+                            "role": "app",
+                            "cli": ["codex"],
+                            "slot": 1,
+                            "tmux_session": "porter-app",
+                            "target": "porter-app:0.0",
+                            "workdir": str(tmp_path / "app"),
+                            "run_as_user": "porter-app",
+                        },
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+
+        original_current_user_name = team_launcher.current_user_name
+        team_launcher.current_user_name = lambda: "porter-director"
+        try:
+            runner = presentation_controller._tmux_runner(config, record)
+            runner(["tmux", "has-session", "-t", "porter-app"])
+            runner(["tmux", "has-session", "-t", "=porter-display-0"])
+            runner(["tmux", "has-session", "-t", "porter-director"])
+        finally:
+            team_launcher.current_user_name = original_current_user_name
+
+    # Another role's session is reached as that role's account.
+    assert calls[0][:3] == ["sudo", "-u", "porter-app"], calls[0]
+    assert "tmux" in calls[0]
+    # A display slot belongs to the project owner, not to any role.
+    assert calls[1][:3] == ["sudo", "-u", "porter-agent"], calls[1]
+    # The director's own session needs no privileged hop.
+    assert calls[2][0] == "tmux", calls[2]
+
+
 def main() -> int:
     run_team_launcher_tests(globals(), first=())
     print("team_launcher_tmux_panes_test: ok")

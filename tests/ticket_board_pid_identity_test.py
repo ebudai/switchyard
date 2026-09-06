@@ -349,6 +349,63 @@ def assert_forged_role_claim_is_refused_over_the_socket() -> None:
             thread.join(timeout=2)
 
 
+def assert_rendered_unit_environment_admits_roles_and_refuses_other_tenants() -> None:
+    """The composition check that the isolated tests missed (SYRD-39).
+
+    A rendered board unit sets TICKET_BOARD_TENANT_USER and
+    TICKET_BOARD_ROLE_ACCOUNTS. Deriving the admitted uids only from the former
+    locked every role account out of its own board while the focused socket
+    tests still passed, because they left the allowlist empty and so disabled
+    the check entirely. This exercises both together.
+    """
+    with tempfile.TemporaryDirectory(prefix="ticket-board-unitenv.") as tmpdir:
+        root = Path(tmpdir)
+        frames, assets = root / "frames", root / "assets"
+        frames.mkdir()
+        assets.mkdir()
+        socket_path = root / "board.sock"
+        app = MemoryBoardApp(
+            [ticket_payload("PGU-500", title="Ops work", state="in_progress", assignee="ops", implementation="Ready.")],
+            frames,
+            assets,
+        )
+        events = TicketBoardEventHub(app)
+        auth = authority_as("ops")
+        server = TicketBoardUnixServer(
+            socket_path, app, events=events, director_notifier=QuietNotifier(), role_authority=auth
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        # A unit-equivalent environment: the tenant owner is named, the role
+        # accounts are not in the allowlist, exactly as the rendered unit has it.
+        previous = os.environ.get("TICKET_BOARD_ALLOWED_PEER_UIDS")
+        os.environ["TICKET_BOARD_ALLOWED_PEER_UIDS"] = str(STRANGER_UID)
+        try:
+            # This process is the ops account and must still be served.
+            status, body = request_unix(socket_path, "/api/register-caller", {"role": "ops"})
+            assert status == 200, (status, body)
+            assert '"role": "ops"' in body, body
+            status, body = request_unix(socket_path, "/api/tickets/PGU-500/actions/add_comment", {"text": "ops note"})
+            assert status == 200, (status, body)
+
+            # A uid that is neither the tenant nor a role account is refused.
+            assert allowed_peer_uids({"TICKET_BOARD_ALLOWED_PEER_UIDS": str(STRANGER_UID)}) | auth.uids() == {
+                STRANGER_UID,
+                os.getuid(),
+                *auth.uids(),
+            }
+            assert 9999 not in auth.uids()
+        finally:
+            if previous is None:
+                os.environ.pop("TICKET_BOARD_ALLOWED_PEER_UIDS", None)
+            else:
+                os.environ["TICKET_BOARD_ALLOWED_PEER_UIDS"] = previous
+            server.shutdown()
+            server.server_close()
+            events.close()
+            thread.join(timeout=2)
+
+
 def assert_peer_from_an_unconfigured_account_cannot_write() -> None:
     with tempfile.TemporaryDirectory(prefix="ticket-board-stranger.") as tmpdir:
         root = Path(tmpdir)
@@ -372,7 +429,16 @@ def assert_peer_from_an_unconfigured_account_cannot_write() -> None:
                 caller_header="director",
             )
             assert status == 403, (status, body)
-            assert "not a configured role" in body, body
+            # Refused at the connection check, which now knows this project's
+            # role accounts and admits none of them for this uid. The role
+            # lookup refuses it as well.
+            assert "does not serve that local user" in body, body
+            try:
+                authority().role_for_uid(os.getuid())
+            except CallerIdentityError:
+                pass
+            else:
+                raise AssertionError("an unconfigured uid must not resolve to a role either")
         finally:
             server.shutdown()
             server.server_close()
@@ -491,6 +557,7 @@ def main() -> int:
     assert_peer_uid_allowlist_admits_only_the_tenant()
     assert_forged_role_claim_is_refused_over_the_socket()
     assert_peer_from_an_unconfigured_account_cannot_write()
+    assert_rendered_unit_environment_admits_roles_and_refuses_other_tenants()
     assert_unix_socket_replaces_stale_socket_file()
     print("ticket_board_pid_identity_test: ok")
     return 0

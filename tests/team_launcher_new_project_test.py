@@ -243,6 +243,8 @@ def test_add_role_updates_generated_config_board_registration_and_starts_only_ne
             assert (
                 team_launcher.add_project_role_command(
                     config,
+                    # The role's Unix account must exist before it can be started.
+                    account_exists=lambda _account: True,
                     config_path=config_path,
                     role_name="ops",
                     cli="codex",
@@ -275,7 +277,13 @@ def test_add_role_updates_generated_config_board_registration_and_starts_only_ne
     assert "('analysis', 'in_progress', 'start_work', ARRAY['app', 'main', 'ops']::text[]" in add_role_sql
     assert any(call[:5] == ["git", "--git-dir", f"/home/{current_user}/.local/state/switchyard/projects/mefp/control.git", "worktree", "add"] for call in runner.calls)
     assert any(call == ["sudo", "systemctl", "restart", "mefp-ticket-board.service"] for call in runner.calls)
-    pane_calls = [call for call in runner.calls if call[1:5] == ["mefp", "pane", "attach-or-start", "ops"]]
+    pane_calls = [
+        call
+        for call in runner.calls
+        if call[:3] == ["sudo", "-u", "mefp-ops"]
+        and call[call.index("pane") - 1 : call.index("pane") + 3]
+        == ["mefp", "pane", "attach-or-start", "ops"]
+    ]
     assert len(pane_calls) == 1
     psql_calls = [
         (args, kwargs)
@@ -353,6 +361,8 @@ def test_add_role_can_add_auditor_to_existing_project() -> None:
             assert (
                 team_launcher.add_project_role_command(
                     config,
+                    # The role's Unix account must exist before it can be started.
+                    account_exists=lambda _account: True,
                     config_path=config_path,
                     role_name="audit_gpt",
                     cli="agy",
@@ -408,7 +418,13 @@ def test_add_role_can_add_auditor_to_existing_project() -> None:
     assert updated_artifact["project"]["include_audit"] is True
     assert updated_artifact["project"]["role_clis"]["audit_gpt"] == "agy"
     assert any(call == ["sudo", "systemctl", "restart", "mefp-ticket-board.service"] for call in runner.calls)
-    pane_calls = [call for call in runner.calls if call[1:5] == ["mefp", "pane", "attach-or-start", "audit_gpt"]]
+    pane_calls = [
+        call
+        for call in runner.calls
+        if call[:3] == ["sudo", "-u", "mefp-audit_gpt"]
+        and call[call.index("pane") - 1 : call.index("pane") + 3]
+        == ["mefp", "pane", "attach-or-start", "audit_gpt"]
+    ]
     assert len(pane_calls) == 1
     psql_calls = [
         (args, kwargs)
@@ -485,6 +501,8 @@ def test_add_role_can_add_conventional_audit_role_to_auditless_project() -> None
         assert (
             team_launcher.add_project_role_command(
                 config,
+                # The role's Unix account must exist before it can be started.
+                account_exists=lambda _account: True,
                 config_path=config_path,
                 role_name="audit",
                 cli="claude",
@@ -566,6 +584,8 @@ def test_add_role_uses_project_pane_launcher_when_run_as_user_differs() -> None:
             assert (
                 team_launcher.add_project_role_command(
                     config,
+                    # The role's Unix account must exist before it can be started.
+                    account_exists=lambda _account: True,
                     config_path=config_path,
                     role_name="ops",
                     cli="codex",
@@ -579,7 +599,10 @@ def test_add_role_uses_project_pane_launcher_when_run_as_user_differs() -> None:
         pane_calls = [
             call
             for call in runner.calls
-            if call[:4] == ["sudo", "-u", "porter-agent", "-H"] and call[5:8] == ["mefp", "pane", "attach-or-start"]
+            # The pane now runs as the role's own account rather than the
+            # project owner; the project pane_launcher choice is what this
+            # test is about and is unchanged (SYRD-39).
+            if call[:4] == ["sudo", "-u", "mefp-ops", "-H"] and call[5:8] == ["mefp", "pane", "attach-or-start"]
         ]
     finally:
         team_launcher.current_user_name = original_current_user_name
@@ -658,6 +681,8 @@ def test_add_role_can_recover_half_added_role_without_reappending_config() -> No
                 assert (
                     team_launcher.add_project_role_command(
                         config,
+                        # The role's Unix account must exist before it can be started.
+                        account_exists=lambda _account: True,
                         config_path=config_path,
                         role_name="ops",
                         cli="codex",
@@ -745,6 +770,141 @@ def test_generated_roles_each_run_as_their_own_unix_account() -> None:
 
     for role in loaded.roles:
         assert team_launcher.role_run_as_user(loaded, role) == f"porter-{role.role}", role.role
+
+
+
+def test_every_role_lifecycle_path_runs_as_that_role_account() -> None:
+    """SYRD-39: the uid the board sees must be the role's, on every path.
+
+    The regression this pins is precise: the layout selected the role account,
+    then the pane dispatcher re-exec'd as the shared project owner, so the CLI
+    that finally ran -- and therefore every board write -- carried the wrong
+    uid while the generated config looked correct.
+    """
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="switchyard-role-lifecycle.") as tmp:
+        tmp_path = Path(tmp)
+        output_dir = tmp_path / "out"
+        source_repo = tmp_path / "source-repo"
+        project_repo = tmp_path / "project-repo"
+        source_repo.mkdir()
+        project_repo.mkdir()
+
+        with redirect_stdout(StringIO()):
+            assert (
+                new_project_command(
+                    "porter",
+                    owner_user=current_user,
+                    source_repo=source_repo,
+                    commit_git_dir="/srv/git/review-cache.git",
+                    repository=project_repo,
+                    output_dir=output_dir,
+                    runner=FakeRunner(),
+                    port_in_use=lambda _port: False,
+                    socket_exists=lambda _path: False,
+                )
+                == 0
+            )
+        config_path = output_dir / "porter.json"
+        config = load_project_config("porter", config_path)
+
+        for role in config.roles:
+            account = team_launcher.role_run_as_user(config, role)
+            assert account == f"porter-{role.role}", (role.role, account)
+
+            # The command the launcher hands the window manager.
+            outer = team_launcher.pane_command_args(
+                config.project,
+                role,
+                config_path=config_path,
+                mode="attach-or-start",
+                script_path=Path("/opt/switchyard/current/scripts/team-launcher"),
+                run_as_user=account,
+            )
+            assert outer[:3] == ["sudo", "-u", account], (role.role, outer[:4])
+
+            # And the command the pane dispatcher re-execs when it is not
+            # already that account. This is the step that used to drop back to
+            # the shared owner.
+            dispatch = team_launcher.pane_command_args(
+                config.project,
+                role,
+                config_path=config_path,
+                mode="attach-or-start",
+                script_path=Path("/opt/switchyard/current/scripts/team-launcher"),
+                run_as_user=team_launcher.role_run_as_user(config, role),
+            )
+            assert dispatch[:3] == ["sudo", "-u", account], (role.role, dispatch[:4])
+            assert config.run_as_user not in dispatch[:3], (role.role, dispatch[:4])
+
+            # Runtime state is per account too, so a role can still write it
+            # once it stops running as the project owner.
+            state_dir = team_launcher.default_pane_state_dir_for_user(account, project=config.project)
+            assert account in str(state_dir) or str(state_dir).startswith("/run/user/"), (role.role, state_dir)
+
+
+def test_upgrade_gives_an_existing_shared_uid_tenant_per_role_accounts() -> None:
+    """SYRD-39: a tenant provisioned before per-role identities must migrate.
+
+    Its config has no run_as_user at all, so without this every role keeps
+    launching as the shared owner and the board cannot tell them apart.
+    """
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="switchyard-role-upgrade.") as tmp:
+        tmp_path = Path(tmp)
+        output_dir = tmp_path / "out"
+        source_repo = tmp_path / "source-repo"
+        project_repo = tmp_path / "project-repo"
+        source_repo.mkdir()
+        project_repo.mkdir()
+
+        with redirect_stdout(StringIO()):
+            assert (
+                new_project_command(
+                    "porter",
+                    owner_user=current_user,
+                    source_repo=source_repo,
+                    commit_git_dir="/srv/git/review-cache.git",
+                    repository=project_repo,
+                    output_dir=output_dir,
+                    runner=FakeRunner(),
+                    port_in_use=lambda _port: False,
+                    socket_exists=lambda _path: False,
+                )
+                == 0
+            )
+        config_path = output_dir / "porter.json"
+
+        # Age the config back to the pre-migration shape.
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+        for role in payload["roles"]:
+            role.pop("run_as_user", None)
+        config_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        legacy = load_project_config("porter", config_path)
+        assert all(not role.run_as_user for role in legacy.roles)
+        # Before migration every role resolves to the one shared account, which
+        # is exactly what the board refuses to tell apart.
+        assert len({team_launcher.role_run_as_user(legacy, role) for role in legacy.roles}) == 1
+
+        changed, message = team_launcher.upgrade_role_accounts_in_config(config_path)
+        assert changed, message
+        upgraded = load_project_config("porter", config_path)
+        accounts = {role.role: role.run_as_user for role in upgraded.roles}
+        assert all(account == f"porter-{name}" for name, account in accounts.items()), accounts
+        assert len(set(accounts.values())) == len(accounts), accounts
+
+        # Re-running is a no-op rather than a rewrite.
+        changed_again, _ = team_launcher.upgrade_role_accounts_in_config(config_path)
+        assert not changed_again
+
+        # And the operator artifact moves ownership of what each role uses.
+        migration = team_launcher.render_role_account_migration(upgraded)
+        for role in upgraded.roles:
+            account = f"porter-{role.role}"
+            assert f"if ! getent passwd '{account}'" in migration, role.role
+            assert f"sudo chown -R '{account}': '{role.workdir}'" in migration, role.role
+        assert "visudo -c" in migration
+        assert "systemctl restart porter-ticket-board.service" in migration
 
 
 def main() -> int:

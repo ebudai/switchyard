@@ -1598,6 +1598,25 @@ def _role_from_json(project: str, raw: dict[str, Any], *, base: Path, default_wo
     )
 
 
+def local_account_exists(account: str) -> bool:
+    """Whether a Unix account exists on this host."""
+    name = (account or "").strip()
+    if not name:
+        return False
+    try:
+        pwd.getpwnam(name)
+    except KeyError:
+        return False
+    return True
+
+
+def board_service_user(config: ProjectConfig) -> str:
+    """The account the board service runs as, for operator command rendering."""
+    from scripts.ticket_board.project_provision import DEFAULT_SERVICE_USER
+
+    return DEFAULT_SERVICE_USER
+
+
 def role_account_name(project: str, role: str) -> str:
     """The Unix account a role runs as. Defined once, in provisioning."""
     from scripts.ticket_board.project_provision import role_account_name as _name
@@ -5724,7 +5743,7 @@ def launch_project(
                         pane_state_dir=pane_state_dir,
                         force_reload=force_reload,
                         skip_launcher_check=True,
-                        run_as_user=config.run_as_user,
+                        run_as_user=role_run_as_user(config, role),
                     )
                 ),
                 "worktree_error": failed_roles.get(role.role, ""),
@@ -5787,7 +5806,7 @@ def launch_project(
                     force_reload=force_reload,
                     skip_launcher_check=True,
                     allow_stale_launcher=allow_stale_launcher,
-                    run_as_user=config.run_as_user,
+                    run_as_user=role_run_as_user(config, role),
                 )
             ).returncode
         else:
@@ -5797,7 +5816,7 @@ def launch_project(
                 session_dir=config.session_dir,
                 pane_state_dir=effective_pane_state_dir,
                 force_reload=force_reload,
-                bin_user=config.run_as_user,
+                bin_user=role_run_as_user(config, role),
                 runner=role_process_runner,
             )
         if result != 0:
@@ -5824,7 +5843,7 @@ def launch_project(
                         skip_launcher_check=True,
                         allow_stale_launcher=allow_stale_launcher,
                         no_attach=True,
-                        run_as_user=config.run_as_user,
+                        run_as_user=role_run_as_user(config, role),
                     )
                 ).returncode
             else:
@@ -5834,7 +5853,7 @@ def launch_project(
                     session_dir=config.session_dir,
                     pane_state_dir=effective_pane_state_dir,
                     force_reload=force_reload,
-                    bin_user=config.run_as_user,
+                    bin_user=role_run_as_user(config, role),
                     runner=role_process_runner,
                 )
             if result != 0:
@@ -5881,7 +5900,7 @@ def launch_project(
                             skip_launcher_check=True,
                             allow_stale_launcher=allow_stale_launcher,
                             no_attach=True,
-                            run_as_user=config.run_as_user,
+                            run_as_user=role_run_as_user(config, role),
                         )
                     ).returncode
                 else:
@@ -5891,7 +5910,7 @@ def launch_project(
                         session_dir=config.session_dir,
                         pane_state_dir=effective_pane_state_dir,
                         force_reload=force_reload,
-                        bin_user=config.run_as_user,
+                        bin_user=role_run_as_user(config, role),
                         runner=role_process_runner,
                     )
                 if result != 0:
@@ -10829,6 +10848,106 @@ def provision_runtime_command(user_name: str | None, config: ProjectConfig | Non
     return 0
 
 
+def upgrade_role_accounts_in_config(config_path: Path, *, dry_run: bool = False) -> tuple[bool, str]:
+    """Give every role in an existing config its own Unix account.
+
+    A tenant provisioned before per-role identities has no run_as_user on its
+    roles, so every role would keep launching as the shared project owner and
+    the board could not tell them apart. Upgrade fills it in from the same
+    naming provisioning uses (SYRD-39).
+    """
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return False, f"team-launcher: cannot read {config_path} to add role accounts: {exc}"
+    project = str(payload.get("project") or "").strip()
+    roles = payload.get("roles")
+    if not project or not isinstance(roles, list):
+        return False, "team-launcher: config has no project roles to give Unix accounts"
+    added: list[str] = []
+    for role in roles:
+        if not isinstance(role, dict):
+            continue
+        name = str(role.get("role") or "").strip()
+        if not name or str(role.get("run_as_user") or "").strip():
+            continue
+        role["run_as_user"] = role_account_name(project, name)
+        added.append(name)
+    if not added:
+        return False, "team-launcher: every role already has its own Unix account"
+    if dry_run:
+        return True, "team-launcher: would give " + ", ".join(sorted(added)) + " their own Unix accounts"
+    config_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return True, "team-launcher: gave " + ", ".join(sorted(added)) + " their own Unix accounts"
+
+
+def render_role_account_migration(config: ProjectConfig) -> str:
+    """Operator commands that move an existing tenant onto per-role accounts.
+
+    Creating the accounts is not enough on its own: a role also has to own the
+    working tree and runtime state it uses, or it cannot write them once it
+    stops running as the project owner. Every step is guarded or idempotent so
+    the artifact is safe to re-run.
+    """
+    from scripts.ticket_board.project_provision import (
+        DEFAULT_SERVICE_USER,
+        roles_group_name,
+        shell_quote,
+    )
+
+    owner = config.run_as_user or current_user_name()
+    group = roles_group_name(config.project)
+    lines = [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        f"# Migrate {config.project} onto one Unix account per role (SYRD-39).",
+        "# Safe to re-run: every creating step is guarded.",
+        f"if ! getent group {shell_quote(group)} >/dev/null 2>&1; then",
+        f"    sudo groupadd -r {shell_quote(group)}",
+        "fi",
+        f"sudo gpasswd -a {shell_quote(DEFAULT_SERVICE_USER)} {shell_quote(group)} >/dev/null",
+        f"sudo gpasswd -a {shell_quote(owner)} {shell_quote(group)} >/dev/null",
+    ]
+    for role in config.roles:
+        account = role_run_as_user(config, role)
+        if not account or account == owner:
+            continue
+        q_account = shell_quote(account)
+        home = shell_quote(f"/home/{account}")
+        lines.extend(
+            [
+                f"if ! getent passwd {q_account} >/dev/null 2>&1; then",
+                f"    sudo useradd -m -d {home} -s /bin/bash {q_account}",
+                "fi",
+                f"sudo gpasswd -a {q_account} {shell_quote(group)} >/dev/null",
+                f"sudo install -d -m 0750 -o {q_account} -g {shell_quote(group)} {home}",
+                f"sudo loginctl enable-linger {q_account} >/dev/null 2>&1 || true",
+                # The role must own what it works in and writes to, or it loses
+                # access the moment it stops running as the project owner.
+                f"sudo chown -R {q_account}: {shell_quote(role.workdir)}",
+                f"sudo install -d -m 0700 -o {q_account} -g {q_account} "
+                + shell_quote(str(default_session_dir_for_user(account))),
+                f"sudo install -d -m 0700 -o {q_account} -g {q_account} "
+                + shell_quote(str(default_pane_state_dir_for_user(account, project=config.project))),
+            ]
+        )
+    lines.append(
+        "# Refresh the director control interface for the current role set:"
+    )
+    lines.append(
+        f"switchyard provision {config.project} --render role-control-sudoers "
+        f"| sudo install -m 0440 -o root -g root /dev/stdin "
+        f"/etc/sudoers.d/49-{config.project}-role-control.staged"
+    )
+    lines.append(f"sudo visudo -c -f /etc/sudoers.d/49-{config.project}-role-control.staged")
+    lines.append(
+        f"sudo mv /etc/sudoers.d/49-{config.project}-role-control.staged "
+        f"/etc/sudoers.d/49-{config.project}-role-control"
+    )
+    lines.append(f"sudo systemctl restart {config.project}-ticket-board.service")
+    return "\n".join(lines) + "\n"
+
+
 def upgrade_project_command(
     config: ProjectConfig,
     *,
@@ -10856,6 +10975,21 @@ def upgrade_project_command(
     print_func(result.message)
     if result.changed:
         config = load_project_config(config.project, config_path)
+    accounts_changed, accounts_message = upgrade_role_accounts_in_config(config_path, dry_run=dry_run)
+    print_func(accounts_message)
+    if accounts_changed and not dry_run:
+        config = load_project_config(config.project, config_path)
+    if any(role_run_as_user(config, role) and not local_account_exists(role_run_as_user(config, role))
+           for role in config.roles):
+        migration_path = config_path.with_name(f"{config.project}-role-accounts.sh")
+        if not dry_run:
+            migration_path.write_text(render_role_account_migration(config), encoding="utf-8")
+            migration_path.chmod(0o755)
+        print_func(
+            "team-launcher: roles do not yet have their own Unix accounts, so the board cannot "
+            f"tell them apart. An operator must run {migration_path} before those roles are "
+            "restarted."
+        )
     runtime_artifacts = refresh_generated_project_runtime_artifacts(
         config,
         config_path=config_path,
@@ -11408,6 +11542,9 @@ def add_project_role_command(
     pane_state_dir: Path | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     print_func: Callable[[str], None] = print,
+    # A new role can only be started once the Unix account it must run as
+    # exists; injectable so tests can state that precondition explicitly.
+    account_exists: Callable[[str], bool] = local_account_exists,
 ) -> int:
     role = (
         _validate_new_project_audit_role(role_name, context="audit role")
@@ -11470,28 +11607,50 @@ def add_project_role_command(
     if not worktree_result.ok:
         reason = next(iter(worktree_result.failed_roles.values()), "unknown error")
         raise SystemExit(f"team-launcher: failed to prepare worktree for {role}: {reason}")
+    pending_account_commands = ""
     if start:
         pane_role = _role_by_name(updated_config, role)
-        pane_script_path = updated_config.pane_launcher or script_path or Path(__file__).resolve().with_name(TEAM_LAUNCHER_NAME)
-        pane_args = pane_command_args(
-            updated_config.project,
-            pane_role,
-            config_path=config_path,
-            mode="attach-or-start",
-            script_path=pane_script_path,
-            pane_state_dir=pane_state_dir or default_pane_state_dir_for_user(updated_config.run_as_user, project=updated_config.project),
-            skip_launcher_check=True,
-            no_attach=True,
-            run_as_user=updated_config.run_as_user,
-        )
-        pane_proc = runner(pane_args)
-        if pane_proc.returncode != 0:
-            raise SystemExit(f"team-launcher: added {role}, but failed to start its pane with exit {pane_proc.returncode}")
+        pane_user = role_run_as_user(updated_config, pane_role)
+        # A role started under the wrong account has the wrong uid, and the
+        # board would give it either no authority or another role's. Refuse to
+        # start it and hand the operator the commands that create the account,
+        # rather than starting something that looks fine and is not (SYRD-39).
+        if pane_user and not account_exists(pane_user):
+            from scripts.ticket_board.project_provision import role_account_commands
+
+            pending_account_commands = role_account_commands(
+                updated_config.project,
+                role,
+                updated_config.run_as_user or current_user_name(),
+                board_service_user(updated_config),
+            )
+        else:
+            pane_script_path = updated_config.pane_launcher or script_path or Path(__file__).resolve().with_name(TEAM_LAUNCHER_NAME)
+            pane_args = pane_command_args(
+                updated_config.project,
+                pane_role,
+                config_path=config_path,
+                mode="attach-or-start",
+                script_path=pane_script_path,
+                pane_state_dir=pane_state_dir or default_pane_state_dir_for_user(pane_user, project=updated_config.project),
+                skip_launcher_check=True,
+                no_attach=True,
+                run_as_user=pane_user,
+            )
+            pane_proc = runner(pane_args)
+            if pane_proc.returncode != 0:
+                raise SystemExit(f"team-launcher: added {role}, but failed to start its pane with exit {pane_proc.returncode}")
     if recovering_existing_role:
         message = f"team-launcher: role {role} already exists in {updated_config.project}; reapplied board registration"
     else:
         role_label = "auditor role" if audit_role else "role"
         message = f"team-launcher: added {role_label} {role} to {updated_config.project}"
+    if pending_account_commands:
+        message += (
+            f"; its Unix account {role_run_as_user(updated_config, _role_by_name(updated_config, role))} "
+            "does not exist yet, so the role was not started. Run these as an operator, then start it:\n"
+            + pending_account_commands
+        )
     if not detached:
         visible_count = sum(1 for candidate in updated_config.roles if not candidate.detached)
         if regenerated_layout:
@@ -12445,8 +12604,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.pane_mode not in {"attach", "detach-role"}:
             config = prepare_project_desktop(config)
         role = _role_by_name(config, args.role)
-        pane_state_dir = args.pane_state_dir or default_pane_state_dir_for_user(config.run_as_user, project=config.project)
-        if config.run_as_user and current_user_name() != config.run_as_user:
+        # Every lifecycle path for this role runs as the role's own account, so
+        # its tmux server, pane processes and board writes all carry that uid.
+        # Re-execing as the shared project owner here is what previously undid
+        # the per-role accounts the layout had already selected (SYRD-39).
+        pane_user = role_run_as_user(config, role)
+        pane_state_dir = args.pane_state_dir or default_pane_state_dir_for_user(pane_user, project=config.project)
+        if pane_user and current_user_name() != pane_user:
             return subprocess.run(
                 pane_command_args(
                     config.project,
@@ -12460,7 +12624,7 @@ def main(argv: list[str] | None = None) -> int:
                     skip_launcher_check=args.skip_launcher_check,
                     allow_stale_launcher=args.allow_stale_launcher,
                     no_attach=args.no_attach,
-                    run_as_user=config.run_as_user,
+                    run_as_user=pane_user,
                 )
             ).returncode
         if not args.skip_launcher_check:
@@ -12496,7 +12660,7 @@ def main(argv: list[str] | None = None) -> int:
                 session_dir=config.session_dir,
                 pane_state_dir=pane_state_dir,
                 force_reload=args.force,
-                bin_user=config.run_as_user,
+                bin_user=pane_user,
             )
         if role.detached:
             return run_detached_role(
@@ -12505,7 +12669,7 @@ def main(argv: list[str] | None = None) -> int:
                 session_dir=config.session_dir,
                 pane_state_dir=pane_state_dir,
                 force_reload=args.force,
-                bin_user=config.run_as_user,
+                bin_user=pane_user,
             )
         return run_role_pane(
             role,
@@ -12513,7 +12677,7 @@ def main(argv: list[str] | None = None) -> int:
             session_dir=config.session_dir,
             pane_state_dir=pane_state_dir,
             force_reload=args.force,
-            bin_user=config.run_as_user,
+            bin_user=pane_user,
         )
     return launch_project(
         config,

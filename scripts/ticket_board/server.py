@@ -391,6 +391,10 @@ class LocalRoleAuthority:
     def roles(self) -> list[str]:
         return sorted(self._by_role)
 
+    def uids(self) -> set[int]:
+        """Every uid this table resolves to a role."""
+        return set(self._by_uid)
+
     def shared_accounts(self) -> dict[str, list[str]]:
         """Accounts backing more than one role; those roles are unauthorizable."""
         return {account: sorted(roles) for account, roles in self._shared_accounts.items()}
@@ -617,18 +621,28 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         super().finish()
 
     def require_allowed_peer(self) -> PeerCredentials:
-        """Refuse local peers that are not this tenant.
+        """Refuse local peers from outside this tenant.
 
-        Socket permissions are the enforcing boundary; this is the second check
-        that makes a misconfigured socket fail closed and leaves a log line
-        naming the uid that tried (SYRD-39).
+        Socket group membership is the enforcing boundary; this is the second
+        check that makes a misconfigured socket fail closed and leaves a log
+        line naming the uid that tried.
+
+        The project's own role accounts are admitted here by construction: they
+        come from the same authoritative table the role is then resolved
+        against, so this check can never refuse a role the board would go on to
+        authorize. Deriving them separately is what made a rendered unit admit
+        only the legacy owner and lock every role out (SYRD-39).
         """
         if self._local_peer_credentials is None:
             raise ValueError("local socket request missing peer credentials")
         allowed = allowed_peer_uids()
+        authority = self.role_authority
+        if authority is not None:
+            allowed = allowed | authority.uids()
         if allowed and self._local_peer_credentials.uid not in allowed:
             LOGGER.warning(
-                "Rejected local board connection from uid=%s pid=%s: not a permitted tenant peer",
+                "Rejected local board connection from uid=%s pid=%s: not this tenant's account "
+                "or one of its role accounts",
                 self._local_peer_credentials.uid,
                 self._local_peer_credentials.pid,
             )

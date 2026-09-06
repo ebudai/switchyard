@@ -71,6 +71,8 @@ def test_add_role_unrecognized_layout_without_room_refuses_actionably_without_mu
         try:
             team_launcher.add_project_role_command(
                 config,
+                # The role's Unix account must exist before it can be started.
+                account_exists=lambda _account: True,
                 config_path=config_path,
                 role_name="ops",
                 cli="codex",
@@ -164,6 +166,8 @@ def test_add_role_relayout_replaces_unrecognized_layout_and_starts_new_role() ->
             assert (
                 team_launcher.add_project_role_command(
                     config,
+                    # The role's Unix account must exist before it can be started.
+                    account_exists=lambda _account: True,
                     config_path=config_path,
                     role_name="ops",
                     cli="codex",
@@ -185,7 +189,13 @@ def test_add_role_relayout_replaces_unrecognized_layout_and_starts_new_role() ->
     assert updated_plan["implementer_roles"] == ["app", "main", "ops"]
     assert updated_plan["commit_git_dir"] == "/srv/git/review-cache.git"
     assert any(call == ["sudo", "systemctl", "restart", "mefp-ticket-board.service"] for call in runner.calls)
-    pane_calls = [call for call in runner.calls if call[1:5] == ["mefp", "pane", "attach-or-start", "ops"]]
+    pane_calls = [
+        call
+        for call in runner.calls
+        if call[:3] == ["sudo", "-u", "mefp-ops"]
+        and call[call.index("pane") - 1 : call.index("pane") + 3]
+        == ["mefp", "pane", "attach-or-start", "ops"]
+    ]
     assert len(pane_calls) == 1
     assert "--no-attach" in pane_calls[0]
     assert "team-launcher: added role ops to mefp; regenerated layout for 4 visible pane(s)" in output
@@ -237,6 +247,8 @@ def test_add_role_refuses_seventh_visible_pane_without_mutating_config() -> None
         try:
             team_launcher.add_project_role_command(
                 config,
+                # The role's Unix account must exist before it can be started.
+                account_exists=lambda _account: True,
                 config_path=config_path,
                 role_name="perf",
                 cli="codex",
@@ -295,6 +307,8 @@ def test_add_role_existing_role_reapplies_registration_without_reappending_confi
             assert (
                 team_launcher.add_project_role_command(
                     config,
+                    # The role's Unix account must exist before it can be started.
+                    account_exists=lambda _account: True,
                     config_path=config_path,
                     role_name="main",
                     cli="codex",
@@ -310,7 +324,10 @@ def test_add_role_existing_role_reapplies_registration_without_reappending_confi
     assert any(call[:4] == ["sudo", "-u", "postgres", "psql"] for call in runner.calls)
     assert any(call == ["sudo", "systemctl", "restart", "mefp-ticket-board.service"] for call in runner.calls)
     assert any(
-        call[1:5] == ["mefp", "pane", "attach-or-start", "main"]
+        call[:3] == ["sudo", "-u", "mefp-main"]
+        and "pane" in call
+        and call[call.index("pane") - 1 : call.index("pane") + 3]
+        == ["mefp", "pane", "attach-or-start", "main"]
         for call in runner.calls
     )
     assert "role main already exists in mefp; reapplied board registration" in output
@@ -362,6 +379,8 @@ def test_add_role_seventh_visible_role_rejects_before_privileged_mutation() -> N
         try:
             team_launcher.add_project_role_command(
                 config,
+                # The role's Unix account must exist before it can be started.
+                account_exists=lambda _account: True,
                 config_path=config_path,
                 role_name="build",
                 cli="codex",

@@ -1,0 +1,250 @@
+#!/usr/bin/env python3
+"""Run one tenant's lifecycle command as its owner, for one recorded human.
+
+A tenant's owner account exists so the project's files, sessions and board
+credentials belong to nobody else. That leaves the human who provisioned it
+unable to start their own project without sudo, and the obvious fixes are worse
+than the problem: a stored password is a reusable credential, and a broad sudo
+grant hands over every command the owner could ever run.
+
+This is the narrow alternative. It is root-owned and reached through one
+NOPASSWD grant naming this exact program, and everything it does is decided by
+root-owned data rather than by its caller:
+
+* WHO. The caller is SUDO_UID, which the kernel sets and the caller cannot
+  choose. It is checked against the authorized user recorded in this tenant's
+  root-owned grant file. A caller who is not that user is refused, and no other
+  tenant's grant can be reached because the file is chosen by the pinned project.
+* WHAT. One operation from a fixed list, and nothing else on the command line.
+  No executable, no config path, no source path, no shell fragment, no role.
+* WHERE. The project, the owner account and the launcher come from the grant
+  file. Nothing about the destination is caller-supplied, so this cannot be
+  aimed at another tenant or another program. The launcher is the shared
+  root-controlled release entrypoint, and every directory and symlink on the
+  way to it must belong to root: a path whose parents the tenant owner can
+  replace is not pinned, however root-owned its last component happens to be.
+* HOW. The environment is rebuilt rather than inherited, because a caller who
+  chooses PATH, PYTHONPATH or SWITCHYARD_* chooses what the owner executes.
+
+It never runs anything as a role account and never touches the board, so role
+UIDs and the board's peer-credential checks mean exactly what they did before.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import pwd
+import re
+import stat
+import sys
+from pathlib import Path
+from typing import NoReturn
+
+#: The lifecycle verbs this bridge will run, and the launcher argv each becomes.
+#: A verb that is not here cannot be reached, whatever the caller writes.
+OPERATIONS: dict[str, tuple[str, ...]] = {
+    "start": (),          # bare `switchyard <project>` starts or attaches
+    "stop": ("stop",),
+    "status": ("status",),
+}
+PROJECT_SLUG = re.compile(r"^[a-z0-9][a-z0-9_]{0,39}$")
+GRANT_ROOT = Path("/usr/local/lib/switchyard")
+GRANT_NAME = "control-grant.json"
+PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+#: A pinned path may pass through this many symlinks before we call it a loop.
+MAX_LINK_DEPTH = 8
+
+
+def fail(message: str) -> NoReturn:
+    raise SystemExit(f"switchyard-tenant-control: {message}")
+
+
+def grant_path(project: str) -> Path:
+    return GRANT_ROOT / project / GRANT_NAME
+
+
+def calling_user() -> str:
+    """The invoking account, from the kernel rather than from the caller.
+
+    SUDO_USER is a string sudo copies from the environment it was given;
+    SUDO_UID is the numeric id sudo resolved. Resolving the name from the id
+    means a caller cannot present someone else's name.
+    """
+    raw = (os.environ.get("SUDO_UID") or "").strip()
+    if not raw.isdigit():
+        fail("must be run through the tenant control sudo grant")
+    try:
+        return pwd.getpwuid(int(raw)).pw_name
+    except KeyError:
+        fail("the calling account no longer exists")
+
+
+def load_grant(project: str) -> dict[str, str]:
+    path = grant_path(project)
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        fail(f"no control grant is installed for {project}")
+    except OSError as exc:
+        fail(f"cannot read the control grant for {project}: {exc}")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        fail(f"the control grant for {project} is unreadable: {exc}")
+    if not isinstance(payload, dict):
+        fail(f"the control grant for {project} is not an object")
+    # Root writes this file; a tenant that could rewrite it would choose its own
+    # owner and launcher, so refuse anything not owned by root or writable by
+    # anyone else rather than trusting the contents.
+    try:
+        info = path.stat()
+    except OSError as exc:
+        fail(f"cannot inspect the control grant for {project}: {exc}")
+    if info.st_uid != 0:
+        fail(f"the control grant for {project} is not root-owned")
+    if info.st_mode & 0o022:
+        fail(f"the control grant for {project} is writable by non-root")
+    missing = [key for key in ("project", "owner", "authorized_user", "launcher") if not payload.get(key)]
+    if missing:
+        fail(f"the control grant for {project} is missing {', '.join(missing)}")
+    if payload["project"] != project:
+        fail("the control grant names a different project")
+    return {key: str(value) for key, value in payload.items()}
+
+
+def check_root_controlled(path: Path, info: os.stat_result) -> None:
+    """One component nobody but root can replace."""
+    if info.st_uid != 0:
+        fail(f"the pinned launcher path {path} is not root-owned")
+    if stat.S_ISLNK(info.st_mode):
+        # A symlink's own bits are always lrwxrwxrwx and mean nothing; whether
+        # it can be replaced is decided by the directory holding it, which is
+        # checked as its own component, and by its owner, checked above.
+        return
+    if info.st_mode & 0o022:
+        fail(f"the pinned launcher path {path} is writable by group or other")
+
+
+def resolve_root_controlled(declared: str, depth: int = 0) -> Path:
+    """Walk one absolute path, proving every step of it belongs to root.
+
+    Checking the final file is not enough. A path is only as pinned as the
+    directories and symlinks leading to it: if the tenant owner can replace any
+    of them -- a `current` symlink in the owner's home is the obvious one --
+    then the owner picks what runs, and "the pinned lifecycle entrypoint"
+    becomes whatever they point it at. So every component is checked, and a
+    symlink is followed and its target walked the same way before the rest of
+    the path is applied to it.
+
+    Returns where the path really lands, with no component the tenant owner
+    could have chosen.
+    """
+    if depth > MAX_LINK_DEPTH:
+        fail("the pinned launcher resolves through too many symlinks")
+    # Checked as written, before pathlib is allowed near it: constructing a Path
+    # silently drops "." components, and what is walked should be what root
+    # wrote rather than a tidied version of it.
+    if not declared.startswith("/"):
+        fail("the pinned launcher must be an absolute path")
+    segments = declared.split("/")[1:]
+    if any(segment in {"", ".", ".."} for segment in segments):
+        fail("the pinned launcher must not contain empty, . or .. components")
+    path = Path(declared)
+    current = Path(path.root)
+    try:
+        check_root_controlled(current, current.lstat())
+    except OSError as exc:
+        fail(f"cannot inspect {current}: {exc}")
+    for part in path.parts[1:]:
+        current = current / part
+        try:
+            info = current.lstat()
+        except OSError as exc:
+            fail(f"the pinned launcher path {current} is unavailable: {exc}")
+        check_root_controlled(current, info)
+        if stat.S_ISLNK(info.st_mode):
+            try:
+                raw_target = os.readlink(current)
+            except OSError as exc:
+                fail(f"cannot read the link {current}: {exc}")
+            target = os.path.normpath(
+                raw_target if raw_target.startswith("/") else str(current.parent / raw_target)
+            )
+            # The link itself is root's; where it points has its own chain, and
+            # the rest of the path is then applied to whatever that resolves to.
+            current = resolve_root_controlled(target, depth + 1)
+    return current
+
+
+def pinned_launcher(declared: str) -> Path:
+    """The launcher, proved to be a program only root can choose.
+
+    The tenant owner is deliberately not trusted here even though the program
+    runs as the owner. Being pinned is the property this grant promises to the
+    human who invoked it: they asked to start their project, not to run whatever
+    the owner account most recently pointed that path at.
+    """
+    resolved = resolve_root_controlled(declared)
+    try:
+        info = resolved.stat()
+    except OSError as exc:
+        fail(f"the pinned launcher {resolved} is unavailable: {exc}")
+    if not stat.S_ISREG(info.st_mode):
+        fail(f"the pinned launcher {resolved} is not a regular file")
+    if not info.st_mode & 0o111:
+        fail(f"the pinned launcher {resolved} is not executable")
+    return resolved
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 2:
+        fail("usage: switchyard-tenant-control <project> <start|stop|status>")
+    project, operation = argv
+    if not PROJECT_SLUG.fullmatch(project):
+        fail("project must be a plain slug")
+    if operation not in OPERATIONS:
+        fail(f"operation must be one of {', '.join(sorted(OPERATIONS))}")
+
+    grant = load_grant(project)
+    caller = calling_user()
+    if caller != grant["authorized_user"]:
+        # Named, so the person can see whose grant this is; refused, because
+        # being able to read the grant is not being named by it.
+        fail(f"{caller} is not the authorized control user for {project}")
+
+    owner = grant["owner"]
+    try:
+        owner_entry = pwd.getpwnam(owner)
+    except KeyError:
+        fail(f"the owner account {owner} for {project} does not exist")
+
+    launcher = pinned_launcher(grant["launcher"])
+
+    if os.geteuid() != 0:
+        fail("must run as root through the tenant control sudo grant")
+
+    # Built, not inherited: PATH, PYTHONPATH and SWITCHYARD_* from the caller
+    # would choose what the owner runs.
+    environ = {
+        "PATH": PATH,
+        "HOME": owner_entry.pw_dir,
+        "USER": owner,
+        "LOGNAME": owner,
+        "SHELL": "/bin/sh",
+        "LANG": "C.UTF-8",
+        "SWITCHYARD_TENANT_CONTROL_CALLER": caller,
+    }
+    command = [str(launcher), project, *OPERATIONS[operation]]
+
+    os.setgroups([])
+    os.initgroups(owner, owner_entry.pw_gid)
+    os.setgid(owner_entry.pw_gid)
+    os.setuid(owner_entry.pw_uid)
+    if os.geteuid() != owner_entry.pw_uid or os.getuid() != owner_entry.pw_uid:
+        fail("could not drop to the owner account")
+    os.execve(command[0], command, environ)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

@@ -42,7 +42,10 @@ from scripts.ticket_board.project_provision import (
     render_board_unit,
     render_canary_unit,
     render_vcs_close_role_sql,
+    invoking_human,
+    resolve_control_user,
     sql_identifier,
+    tenant_control_helper_path,
     validate_ticket_prefix,
     write_artifacts,
 )
@@ -5722,6 +5725,7 @@ def _validated_role_names(value: Any, field: str, objections: list[str]) -> tupl
 # about them is the intended behaviour rather than a divergence to report.
 REGENERATED_PLAN_FIELDS: tuple[str, ...] = (
     "owner_user",
+    "control_user",
     "owner_home",
     "service_user",
     "service_role",
@@ -5799,6 +5803,7 @@ def reconstruct_privileged_baseline(
         project=project,
         owner_user=owner_user,
         owner_home=owner_home,
+        control_user=resolve_control_user(project, owner_user=owner_user),
         source_repo=resolved_source_repo,
     )
     port = tenant_data.get("port")
@@ -7848,6 +7853,20 @@ def _switchyard_teardown_actions(
             ("rm", "-f", f"/etc/tmpfiles.d/{plan.tmpfiles_name}"),
         ),
         SwitchyardTeardownAction(
+            f"remove tenant control grant /etc/sudoers.d/{plan.tenant_control_sudoers_name}",
+            ("rm", "-f", f"/etc/sudoers.d/{plan.tenant_control_sudoers_name}"),
+        ),
+        SwitchyardTeardownAction(
+            f"remove tenant control data /usr/local/lib/switchyard/{plan.project}/control-grant.json",
+            ("rm", "-f", f"/usr/local/lib/switchyard/{plan.project}/control-grant.json"),
+        ),
+        # The helper is inert without its grant, but a torn-down tenant should
+        # leave no part of its bridge behind for a later project to inherit.
+        SwitchyardTeardownAction(
+            f"remove tenant control helper {tenant_control_helper_path(plan.project)}",
+            ("rm", "-f", tenant_control_helper_path(plan.project)),
+        ),
+        SwitchyardTeardownAction(
             f"remove polkit rule /etc/polkit-1/rules.d/{plan.polkit_name}",
             ("rm", "-f", f"/etc/polkit-1/rules.d/{plan.polkit_name}"),
         ),
@@ -8182,6 +8201,11 @@ def new_project_command(
         )[0],
         owner_user=effective_owner,
         owner_home=owner_home,
+        # The human at the keyboard, so they can run `switchyard <project>`
+        # afterwards without sudo and without becoming the owner account.
+        control_user=resolve_control_user(
+            project, invoking_user=invoking_human(), owner_user=effective_owner
+        ),
         port=port,
         database=database,
         source_repo=effective_source_repo,
@@ -12973,6 +12997,19 @@ def render_role_account_migration(config: ProjectConfig) -> str:
         f"sudo mv /etc/sudoers.d/49-{config.project}-role-control.staged "
         f"/etc/sudoers.d/49-{config.project}-role-control"
     )
+    # Repair reinstalls the lifecycle bridge too, so a tenant provisioned before
+    # it existed gains one, and an existing one is rewritten to the same bytes.
+    from scripts.ticket_board.project_provision import tenant_control_commands
+
+    lines.extend(
+        tenant_control_commands(
+            config.project,
+            owner,
+            resolve_control_user(
+                config.project, invoking_user=invoking_human(), owner_user=owner
+            ),
+        )
+    )
     lines.append(
         "# Give each role its own private copy of the credentials its CLI needs."
     )
@@ -14699,6 +14736,20 @@ def _configured_audit_roles(
     return tuple(roles)
 
 
+def _regenerated_control_user(config: ProjectConfig, plan_data: dict[str, Any]) -> str:
+    """Regenerated, never read from plan.json.
+
+    The controller decides who may cross into the owner account, so taking it
+    from a document the tenant can write would let the tenant name whoever it
+    liked. It comes from the installed root-owned grant instead, which is also
+    why re-rendering a tenant's artifacts reproduces the grant it already has.
+    """
+    owner = str(
+        _loaded_plan_field(plan_data, "owner_user", config.run_as_user or current_user_name())
+    )
+    return resolve_control_user(config.project, invoking_user=invoking_human(), owner_user=owner)
+
+
 def _loaded_plan_field(plan_data: dict[str, Any], key: str, default: Any) -> Any:
     return plan_data[key] if key in plan_data and plan_data[key] not in (None, "") else default
 
@@ -14790,6 +14841,7 @@ def _project_plan_for_added_role(
         project_name=config.project_name,
         owner_user=str(_loaded_plan_field(plan_data, "owner_user", config.run_as_user or current_user_name())),
         owner_home=_owner_home_from_plan_data(config, plan_data),
+        control_user=_regenerated_control_user(config, plan_data),
         port=_loaded_plan_field(plan_data, "port", None),
         database=_loaded_plan_field(plan_data, "database", None),
         source_repo=Path(str(_loaded_plan_field(plan_data, "source_repo", _repo_root()))),
@@ -14836,6 +14888,7 @@ def _project_plan_for_vcs_close_role(
         project_name=config.project_name,
         owner_user=str(_loaded_plan_field(plan_data, "owner_user", config.run_as_user or current_user_name())),
         owner_home=_owner_home_from_plan_data(config, plan_data),
+        control_user=_regenerated_control_user(config, plan_data),
         port=_loaded_plan_field(plan_data, "port", None),
         database=_loaded_plan_field(plan_data, "database", None),
         source_repo=Path(str(_loaded_plan_field(plan_data, "source_repo", _repo_root()))),
@@ -16120,6 +16173,71 @@ def _switchyard_user_can_prompt_for_sudo() -> bool:
     return bool({"sudo", "wheel", "admin"} & group_names)
 
 
+#: Lifecycle verbs the tenant control bridge will run. Everything else keeps
+#: the operator path: the bridge exists for start/stop/status, not for
+#: provisioning, upgrade or teardown.
+TENANT_CONTROL_OPERATIONS = {"start", "stop", "status"}
+TENANT_CONTROL_ROOT = Path("/usr/local/lib/switchyard")
+
+
+def _tenant_control_grant(project: str, *, root: Path | None = None) -> dict[str, str]:
+    """The root-owned record of who may drive this tenant without sudo.
+
+    Read here only to decide whether to use the bridge and to refuse an
+    unauthorized caller without a password prompt. The bridge re-reads and
+    re-validates it as root; nothing is trusted on the strength of this read.
+    """
+    base = root or TENANT_CONTROL_ROOT
+    try:
+        payload = json.loads((base / project / "control-grant.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict) or payload.get("project") != project:
+        return {}
+    return {str(key): str(value) for key, value in payload.items()}
+
+
+def _tenant_control_operation(argv: Sequence[str], project_argument: str) -> str:
+    """Which lifecycle verb this invocation is, if the bridge can run it."""
+    if not argv:
+        return ""
+    head = argv[0].casefold()
+    if head == project_argument.casefold():
+        # `switchyard <slug>` with nothing else is the ordinary start/attach.
+        return "start" if len(argv) == 1 else ""
+    if head in TENANT_CONTROL_OPERATIONS and len(argv) == 2 and argv[1].casefold() == project_argument.casefold():
+        return head
+    return ""
+
+
+def _switchyard_exec_through_tenant_control(
+    project: str,
+    operation: str,
+    *,
+    grant: dict[str, str],
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    exec_func: Callable[[str, Sequence[str]], Any] = os.execvp,
+) -> None:
+    """Run one lifecycle verb as the owner, without a password.
+
+    Only the project and the verb cross the boundary. The bridge decides the
+    owner, the launcher and whether this caller is allowed, from root-owned
+    data, so nothing here can widen what it will do.
+    """
+    sudo_bin = os.environ.get("SWITCHYARD_SUDO_BIN", "sudo")
+    helper = str(TENANT_CONTROL_ROOT / project / "switchyard-tenant-control")
+    caller = current_user_name()
+    authorized = grant.get("authorized_user", "")
+    if caller != authorized:
+        # Refused here, so an unauthorized local user never sees a prompt.
+        raise SystemExit(
+            f"switchyard: {caller} may not control {project}; it is registered to {authorized}\n"
+            "switchyard: ask that user, or run this as the project owner or an operator"
+        )
+    exec_func(sudo_bin, [sudo_bin, "-n", helper, project, operation])
+    raise SystemExit(0)
+
+
 def _switchyard_exec_with_root(
     argv: Sequence[str],
     *,
@@ -16172,6 +16290,21 @@ def _switchyard_command_is_unprivileged(argv: Sequence[str]) -> bool:
     return bool(argv) and argv[0].casefold() in SWITCHYARD_UNPRIVILEGED_COMMANDS
 
 
+def _switchyard_cross_account(project: str, argv: Sequence[str]) -> None:
+    """Reach the owner's account, by the narrowest route that is installed.
+
+    The bridge first: it needs no password and can run only this tenant's
+    lifecycle verbs. Sudo remains for everything else, and for tenants that
+    have no bridge at all.
+    """
+    grant = _tenant_control_grant(project)
+    if grant:
+        operation = _tenant_control_operation(argv, project)
+        if operation:
+            _switchyard_exec_through_tenant_control(project, operation, grant=grant)
+    _switchyard_exec_with_root(argv)
+
+
 def _require_switchyard_owner_hint_or_root(entry: SwitchyardProjectEntry, argv: Sequence[str]) -> None:
     owner = _project_config_path_owner_user(entry.config_path)
     if not owner or current_user_name() == owner or os.geteuid() == 0:
@@ -16183,7 +16316,7 @@ def _require_switchyard_owner_hint_or_root(entry: SwitchyardProjectEntry, argv: 
         # commands that matter then refuse, leaving no way to run them at all
         # (SYRD-49).
         return
-    _switchyard_exec_with_root(argv)
+    _switchyard_cross_account(entry.slug, argv)
 
 
 def _require_switchyard_project_owner_or_root(config: ProjectConfig, argv: Sequence[str]) -> None:
@@ -16192,7 +16325,7 @@ def _require_switchyard_project_owner_or_root(config: ProjectConfig, argv: Seque
         return
     if _switchyard_command_is_unprivileged(argv) and _configured_role_account_caller(config):
         return
-    _switchyard_exec_with_root(argv)
+    _switchyard_cross_account(config.project, argv)
 
 
 def _load_switchyard_project_config_for_command(entry: SwitchyardProjectEntry, argv: Sequence[str]) -> ProjectConfig:

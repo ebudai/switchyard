@@ -20,7 +20,7 @@ from typing import Any, Callable
 import psycopg
 from psycopg import sql
 
-from .board_skill import SKILL_NAME as BOARD_SKILL_NAME
+from .board_skill import SKILL_NAME as BOARD_SKILL_NAME, skills_for_role
 from .runtime_paths import directorctl_path
 
 CHANNEL = "ticket_board_state_transition"
@@ -188,6 +188,18 @@ def pane_content_digest(pane_text: str) -> str:
 BOARD_SKILL_INSTRUCTION = f"Load the {BOARD_SKILL_NAME} skill, then read the whole ticket before acting."
 
 
+def board_skill_instruction_for_role(role: str = "") -> str:
+    """Name the skills this role should load, in one line.
+
+    A Director is pointed at the overlay as well. That is a pointer, not a
+    permission: the board authorizes by caller role whatever a session has read.
+    """
+    names = [skill.name for skill in skills_for_role(role)]
+    joined = " and ".join(names) if len(names) > 1 else names[0]
+    plural = "skills" if len(names) > 1 else "skill"
+    return f"Load the {joined} {plural}, then read the whole ticket before acting."
+
+
 def parse_transition_payload(payload: str) -> Transition:
     parsed = json.loads(payload)
     if not isinstance(parsed, dict):
@@ -272,8 +284,8 @@ def display_message(message: str) -> str:
     )
 
 
-def with_board_skill_instruction(message: str, *, kind: str = "transition") -> str:
-    """Point a handed-off pane at the board skill without pasting its body.
+def with_board_skill_instruction(message: str, *, kind: str = "transition", role: str = "") -> str:
+    """Point a handed-off pane at its skills without pasting their bodies.
 
     Only real hand-offs get the line. Nudges, idle reminders and escalations go
     to a pane that is already working the ticket, and repeating the pointer
@@ -281,9 +293,10 @@ def with_board_skill_instruction(message: str, *, kind: str = "transition") -> s
     """
     if kind != "transition" or not message.strip():
         return message
-    if BOARD_SKILL_INSTRUCTION in message:
+    instruction = board_skill_instruction_for_role(role)
+    if instruction in message:
         return message
-    return f"{message} {BOARD_SKILL_INSTRUCTION}"
+    return f"{message} {instruction}"
 
 
 def composer_snapshot_from_pane_text(pane_text: str) -> ComposerSnapshot:
@@ -913,7 +926,12 @@ class TicketBoardNotifyListener:
         if self.activity_gate(target):
             self.logger.info("Deferred notification for active pane %s", target)
             return False
-        self.sender(target, with_board_skill_instruction(display_message(message), kind=transition.kind))
+        self.sender(
+            target,
+            with_board_skill_instruction(
+                display_message(message), kind=transition.kind, role=transition.target_role
+            ),
+        )
         self.delivered_count += 1
         self.logger.info("Delivered %s transition to %s", transition.ticket_id, target)
         return True
@@ -1848,7 +1866,8 @@ SELECT EXISTS (
             directorctl_diagnostic: dict[str, Any] = {}
             try:
                 sender_result = self.sender(
-                    target, with_board_skill_instruction(display_message(message), kind=kind)
+                    target,
+                    with_board_skill_instruction(display_message(message), kind=kind, role=target_role),
                 )
                 if isinstance(sender_result, dict):
                     directorctl_diagnostic = sender_result

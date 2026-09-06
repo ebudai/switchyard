@@ -1,11 +1,18 @@
-# The portable board skill
+# The portable board skills
 
 Every Switchyard pane runs one of four agent CLIs, and each of them reads skills
-from a different directory. Switchyard keeps **one** canonical board skill and
+from a different directory. Switchyard keeps **one** canonical body per skill and
 projects it into all four, so a pane's instructions do not depend on which
 runtime it happens to be.
 
-## The canonical source
+Two skills ship:
+
+| Skill | Who is told to load it |
+|---|---|
+| `switchyard-board` | every role |
+| `switchyard-director` | the Director, in addition to the shared one |
+
+## The canonical sources
 
 `skills/switchyard-board/SKILL.md` in the Switchyard source tree. It is the only
 copy that is edited. It is deliberately tenant-neutral: it names no project
@@ -16,17 +23,39 @@ environment (`TICKET_BOARD_URL`, `TICKET_BOARD_SOCKET`, `TICKET_BOARD_CALLER_ROL
 `TICKET_BOARD_TICKET_PREFIX`) and to read the legal transitions for a ticket out
 of that ticket's own `workflow_actions`.
 
+`skills/switchyard-director/SKILL.md` is the Director overlay: triage and
+routing, gate flags, holds, runtime role and pane control, integration, release
+and rollback, UAT preparation, notification recovery, and narrated overrides. It
+is an overlay, not a fork — it assumes the shared skill and repeats none of it,
+and it defers to the project's director guide for the judgment behind each
+control.
+
+### Why the overlay is not hidden
+
+Role panes commonly share one Unix home, so both files land in every session's
+skill directory and any pane can read either. That is deliberate, and the
+correctness of the arrangement does not depend on hiding a file:
+
+- The overlay's first section is a runtime identity check on
+  `TICKET_BOARD_CALLER_ROLE`, telling any other role to stop and use the shared
+  skill.
+- Only a Director session is *told* to load it, by the startup and hand-off
+  pointers below.
+- The board authorizes every operation by caller role. Reading the overlay
+  grants nothing; a non-Director calling a Director operation is refused by the
+  server, and that refusal — not the skill text — is the security boundary.
+
 ## Adapter locations
 
 `switchyard board-skill install` writes the same file, byte for byte, to each
 runtime's own discovery path under the project owner's home:
 
-| Runtime | Installed path |
+| Runtime | Skills root under the owner's home |
 |---|---|
-| Claude | `~/.claude/skills/switchyard-board/SKILL.md` |
-| Codex | `~/.codex/skills/switchyard-board/SKILL.md` |
-| agy | `~/.gemini/config/skills/switchyard-board/SKILL.md` |
-| Hermes | `~/.hermes/skills/switchyard-board/SKILL.md` |
+| Claude | `~/.claude/skills/<skill>/SKILL.md` |
+| Codex | `~/.codex/skills/<skill>/SKILL.md` |
+| agy | `~/.gemini/config/skills/<skill>/SKILL.md` |
+| Hermes | `~/.hermes/skills/<skill>/SKILL.md` |
 
 These are per-user, not per-checkout, so a pane discovers the skill from any
 working directory — which matters because role panes run in worktrees, not in the
@@ -63,6 +92,11 @@ copy stamped `unknown` is reported by `verify` as `unprovenanced` and fails it �
 so a hand-projected copy can never be mistaken for evidence that a release
 shipped the skill.
 
+Copies installed by the first release carry the older wording
+`Switchyard board skill snapshot`. They are still recognised as ours and are
+refreshed in place, because orphaning them would leave a tenant with a copy that
+is never updated again.
+
 That footer is also the ownership marker:
 
 - a copy carrying it is Switchyard-managed and is refreshed in place on upgrade,
@@ -85,7 +119,8 @@ files belong to the tenant, not to root.
 The body is installed once; sessions get a pointer, never a paste.
 
 - **Startup** — the pane idle hook's `SessionStart` output opens with one line
-  naming the skill, alongside whatever else that session needed to hear. Only
+  naming the skills for that role — the shared one, plus the overlay for a
+  Director — alongside whatever else that session needed to hear. Only
   some runtimes label the kind of start in the payload: Claude sends
   `startup`/`resume`/`clear`/`compact`, while Hermes and agy send a session id
   and no label at all. On a session-start event an absent label is treated as a
@@ -93,7 +128,8 @@ The body is installed once; sessions get a pointer, never a paste.
   detected, because it comes from the launcher's tracked session id rather than
   from the payload.
 - **Hand-off** — the notify listener appends one line to `transition`
-  notifications, the ones that hand a ticket to a role. Nudges, idle reminders and
+  notifications, the ones that hand a ticket to a role, naming that role's
+  skills. Nudges, idle reminders and
   escalations go to a pane already working the ticket and do not repeat it.
 
 ## Recovery

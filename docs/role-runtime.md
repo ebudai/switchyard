@@ -53,6 +53,22 @@ Then, journalling each step so it can be undone in reverse:
 A detached role, or one no slot is showing, simply skips the last step; that is
 reported as "no display slot showed it" rather than passed over in silence.
 
+## A role that is not running
+
+It stays not running. Changing a runtime is a configuration change, and starting
+a role nobody asked to start would alter the running shape of the team as a side
+effect; an operator who wants it up launches the project, and it comes up under
+the new runtime when they do. The command says so — "it was not running, and
+will start as `<runtime>` at the next launch" — because that is a different fact
+from "nothing happened" to someone deciding what to do next.
+
+The resume record is cleared even then. It belongs to the runtime being left
+behind, and a stopped role that kept it would hand the old CLI's session id to a
+new CLI that cannot read it at the next launch.
+
+Steps 7 and 8 are therefore skipped: there is no session to replace, and nothing
+for a slot to reconnect to.
+
 ## When something fails
 
 Every applied step is undone and the command says the switch was undone. The

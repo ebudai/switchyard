@@ -102,7 +102,11 @@ class RuntimeSwitchResult:
     def describe(self) -> str:
         if not self.configured_changed:
             return f"switchyard: {self.role} already runs {self.runtime}; nothing to change"
-        live = "restarted its session" if self.live_session_changed else "left its session untouched"
+        live = (
+            "restarted its session"
+            if self.live_session_changed
+            else f"it was not running, and will start as {self.runtime} at the next launch"
+        )
         slots = (
             "reconnected slot " + ", ".join(str(slot) for slot in self.reconnected_slots)
             if self.reconnected_slots
@@ -383,21 +387,29 @@ def _restart_worker(
     start: Callable[..., int] = _default_start,
     on_stopped: Callable[[], None] | None = None,
 ) -> bool:
-    """Replace the role's session with one running the configured runtime.
+    """Replace the role's session, if it has one, with the configured runtime.
 
-    The recorded resume id belongs to the runtime being left behind, so it is
-    cleared rather than handed to a CLI that cannot read it. Returns whether a
-    live session was actually replaced, which is what tells a later reader
-    configured state from live state.
+    A role that is not running stays not running. Changing a runtime is a
+    configuration change; starting a role nobody asked to start would alter the
+    running shape of the team as a side effect, and an operator who wanted it up
+    launches the project. It will come up under the new runtime when it next
+    does.
+
+    Either way the recorded resume id is cleared: it belongs to the runtime being
+    left behind, and a stopped role that kept it would have the old CLI's session
+    handed to a new CLI that cannot read it at the next launch.
 
     ``on_stopped`` fires between the stop and the start. A stop that is not
     recorded the moment it happens is invisible to rollback if the start then
     fails, which leaves the role down while the command reports the switch
     cleanly undone.
+
+    Returns whether a live session was actually replaced, which is what tells a
+    later reader configured state from live state.
     """
     role = team_launcher._role_by_name(config, role_name)
-    existed = _session_is_live(role, runner=runner)
-    if existed:
+    was_live = _session_is_live(role, runner=runner)
+    if was_live:
         kill = runner(team_launcher.tmux_kill_session_args(role))
         if kill.returncode != 0:
             raise RuntimeError(f"could not stop {role.tmux_session} (exit {kill.returncode})")
@@ -405,12 +417,30 @@ def _restart_worker(
             on_stopped()
     team_launcher.clear_session_record_for_role(role, config.session_dir)
     team_launcher.clear_pane_idle_state_for_role(role, pane_state_dir=pane_state_dir)
+    if not was_live:
+        return False
+    _start_and_prove(role, config=config, pane_state_dir=pane_state_dir, runner=runner, start=start)
+    return True
+
+
+def _start_and_prove(
+    role: team_launcher.RoleConfig,
+    *,
+    config: team_launcher.ProjectConfig,
+    pane_state_dir: Path,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    start: Callable[..., int] = _default_start,
+) -> None:
+    """Start the role and confirm it is really up.
+
+    A start's exit code says the launcher was happy, not that a session exists.
+    Trusting it is how a blank pane gets reported as a success.
+    """
     result = start(role, config=config, pane_state_dir=pane_state_dir, runner=runner)
     if result != 0:
-        raise RuntimeError(f"{role_name} did not come back up under its new runtime (exit {result})")
+        raise RuntimeError(f"{role.role} did not come up under {team_launcher._role_cli_name(role)} (exit {result})")
     if not _session_is_live(role, runner=runner):
-        raise RuntimeError(f"{role_name} reported a successful start but left no live session")
-    return existed
+        raise RuntimeError(f"{role.role} reported a successful start but left no live session")
 
 
 def journal_path_for(config: team_launcher.ProjectConfig, *, config_path: Path, role_name: str) -> Path:
@@ -468,17 +498,15 @@ def _rollback(
         # The role is down right now. Bringing it back is the whole point of the
         # rollback, so a clean report is only honest once its session is live.
         def restart_previous() -> None:
+            # Unlike the forward path, this is not "replace it if it is running":
+            # the journal records that it *was* running, and bringing it back is
+            # the whole point of the rollback.
             config = team_launcher.load_project_config(journal.project, config_path)
-            _restart_worker(
-                config,
-                role_name=journal.role,
-                pane_state_dir=pane_state_dir,
-                runner=runner,
-                start=start,
-            )
             role = team_launcher._role_by_name(config, journal.role)
-            if not _session_is_live(role, runner=runner):
-                raise RuntimeError(f"{journal.role} is still not running {journal.previous_runtime}")
+            team_launcher.clear_session_record_for_role(role, config.session_dir)
+            _start_and_prove(
+                role, config=config, pane_state_dir=pane_state_dir, runner=runner, start=start
+            )
 
         restored_worker = attempt("worker", restart_previous)
 
@@ -614,7 +642,7 @@ def switch_role_runtime(
 
         # Only now: a slot reconnected into the gap between kill and start
         # attaches to nothing and parks itself again.
-        if presentation_controller.presentation_enabled(updated, config_path=config_path):
+        if live_changed and presentation_controller.presentation_enabled(updated, config_path=config_path):
             reconnected = presentation_controller.reconnect_role_slots(
                 updated, config_path=config_path, role_name=role_name, runner=runner
             )

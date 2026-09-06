@@ -483,6 +483,54 @@ def test_a_rollback_that_cannot_finish_is_reported_with_the_journal_that_repairs
             assert recorded["steps_applied"]
 
 
+def test_a_role_that_is_not_running_stays_that_way_and_is_reported_as_such() -> None:
+    """Reported by Director against 36437d5.
+
+    The old code started a stopped role and then reported that it had left the
+    session untouched. Changing a runtime is a configuration change; starting a
+    role nobody asked to start alters the running shape of the team as a side
+    effect, so the stopped state is preserved -- and said out loud, because
+    "nothing happened" and "it will come up as agy next launch" are different
+    facts to an operator deciding what to do next.
+    """
+    with tempfile.TemporaryDirectory(prefix="switchyard-role-runtime-stopped.") as tmp:
+        root = Path(tmp)
+        config_path = _write_config(root)
+        _idle_state(config_path)
+        board = FakeBoard()
+        # audit is configured, but nothing is running it.
+        runner = RuntimeRunner(live={"porter-director", "porter-research"})
+        role_runtime._readiness_blockers = _ready
+
+        config = team_launcher.load_project_config("porter", config_path)
+        audit = team_launcher._role_by_name(config, "audit")
+        config.session_dir.mkdir(parents=True, exist_ok=True)
+        record = config.session_dir / team_launcher.session_file_name(audit.target)
+        record.write_text(json.dumps({"target": audit.target, "session_id": "claude-era"}), encoding="utf-8")
+
+        result = _switch(config_path, role="audit", runtime="agy", board=board, runner=runner)
+
+        # Configured, and honest about the live side.
+        assert result.configured_changed and result.runtime == "agy"
+        assert result.live_session_changed is False
+        assert "was not running" in result.describe()
+        assert "will start as agy at the next launch" in result.describe()
+        # It was neither started nor stopped.
+        assert runner.starts == [], "a stopped role was started as a side effect"
+        assert "porter-audit" not in runner.live
+        assert runner.sessions_killed() == []
+        # Nothing was reconnected, because there is no session to reconnect to.
+        assert result.reconnected_slots == ()
+        assert not any("respawn-pane" in " ".join(call) for call in runner.calls)
+        # The resume record from the runtime being left behind is gone, so the
+        # next launch does not hand a claude session id to agy.
+        assert not record.exists()
+        # Both durable records moved.
+        assert board.runtime_of("audit") == "agy"
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
+        assert next(role["cli"] for role in raw["roles"] if role["role"] == "audit") == ["agy"]
+
+
 def test_a_detached_role_switches_without_a_slot_to_reconnect() -> None:
     with tempfile.TemporaryDirectory(prefix="switchyard-role-runtime-detached.") as tmp:
         root = Path(tmp)
@@ -495,6 +543,7 @@ def test_a_detached_role_switches_without_a_slot_to_reconnect() -> None:
         result = _switch(config_path, role="research", runtime="hermes", board=board, runner=runner)
 
         assert result.configured_changed and result.runtime == "hermes"
+        assert result.live_session_changed, "the detached role was running and should be restarted"
         assert result.reconnected_slots == (), "a detached role has no slot to reconnect"
         assert "no display slot showed it" in result.describe()
         assert board.runtime_of("research") == "hermes"

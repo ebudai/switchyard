@@ -261,6 +261,11 @@ def test_exported_new_project_before_first_role():
                          '_install_switchyard_onboarding_docs','_require_existing_project_git_repository',
                          '_commit_project_git_changes','_prepare_first_run_auth_worktrees','report_launch_session_records']:
                 stack.enter_context(patch.object(mod,name,return_value=None))
+            # SYRD-39: a fresh project defers its launch until an operator has
+            # created the per-role Unix accounts. This case is about what the
+            # FIRST role process inherits when it does start, so isolation is
+            # stated as a precondition rather than asserted past.
+            stack.enter_context(patch.object(mod,'role_isolation_gaps',return_value=[]))
             stack.enter_context(patch.object(mod,'_ensure_owner_user_and_project_dir',return_value=mod.OwnerUserProvisionResult(False,False)))
             stack.enter_context(patch.object(mod,'_owner_home_for_auth',return_value=owner_home))
             stack.enter_context(patch.object(mod,'run_first_run_auth_phase',side_effect=first_auth))

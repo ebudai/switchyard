@@ -1649,6 +1649,75 @@ def test_fresh_provisioning_emits_one_complete_handoff() -> None:
     assert "systemctl restart porter-ticket-board.service" in body
 
 
+def test_a_deferred_launch_is_not_reported_as_a_started_window() -> None:
+    """SYRD-39: provisioning must not claim a launch it deliberately skipped.
+
+    A fresh project's roles cannot start until an operator has created their
+    Unix accounts, so provisioning defers the launch and prints the handoff.
+    Announcing a started pane window anyway told the operator panes existed
+    that do not, and polling for the session records those panes would have
+    written spent the whole timeout waiting for records nothing was going to
+    write. The closing design guidance still has to be printed: provisioning
+    itself succeeded.
+    """
+
+    class NewProjectRunner(FakeRunner):
+        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if args[:2] == ["id", "-u"]:
+                return subprocess.CompletedProcess(args, 1)
+            if args[:1] == ["useradd"]:
+                return subprocess.CompletedProcess(args, 0)
+            if args[:1] == ["install"] and args[-1]:
+                target = Path(args[-1])
+                if str(target).startswith(tempfile.gettempdir()):
+                    target.mkdir(parents=True, exist_ok=True)
+                return subprocess.CompletedProcess(args, 0)
+            return super().__call__(args, **kwargs)
+
+    polled: list[object] = []
+    printed: list[str] = []
+    original_report = team_launcher.report_launch_session_records
+    try:
+        team_launcher.report_launch_session_records = lambda *a, **kw: polled.append(kw) or []
+        with tempfile.TemporaryDirectory(prefix="switchyard-deferred-launch.") as tmp:
+            tmp_path = Path(tmp)
+            source_repo = tmp_path / "source-repo"
+            source_repo.mkdir()
+            with redirect_stdout(StringIO()):
+                assert (
+                    switchyard_new_command(
+                        desktop_policy=Path("headless"),
+                        slug="porter",
+                        agent_name="otto-agent",
+                        project_name="Porter System",
+                        source_repo=source_repo,
+                        output_dir=tmp_path / "out",
+                        role_clis=LEGACY_SWITCHYARD_ROLE_CLIS,
+                        yes=True,
+                        allow_existing_owner_user=True,
+                        home_base=tmp_path / "home",
+                        euid_getter=lambda: 0,
+                        runner=NewProjectRunner(),
+                        input_func=lambda _prompt: "",
+                        port_in_use=lambda _port: False,
+                        socket_exists=lambda _path: False,
+                        registry_dir=tmp_path / "registry",
+                        konsole_process_launcher=RecordingProcessLauncher(),
+                        print_func=printed.append,
+                    )
+                    == 0
+                )
+    finally:
+        team_launcher.report_launch_session_records = original_report
+
+    assert any("were not started" in line for line in printed), printed
+    assert any("porter-role-accounts.sh" in line for line in printed), printed
+    assert not any("full pane window started" in line for line in printed), printed
+    assert polled == [], polled
+    assert any("design" in line for line in printed), printed
+
+
 def main() -> int:
     run_team_launcher_tests(globals(), first=())
     print("team_launcher_new_project_test: ok")

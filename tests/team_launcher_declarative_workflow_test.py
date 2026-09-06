@@ -257,6 +257,62 @@ def main():
                 assert roles["inspector"]["workdir"] == str(
                     root / "worktrees/inspector"
                 )
+                # SYRD-39: inspector is introduced from the designer TEMPLATE.
+                # Deep-copying that template carried the designer's Unix account
+                # over, so on an isolated tenant the board -- which resolves
+                # authority from the peer uid -- would have read every inspector
+                # write as the designer, and the inspector could not have acted
+                # as itself at all. Identity is never inherited.
+                isolated_raw = copy.deepcopy(raw)
+                isolated_raw["roles"][0]["run_as_user"] = "cerulean-designer"
+                isolated = project_roles(isolated_raw, document)
+                accounts = {
+                    r["role"]: r.get("run_as_user") for r in isolated["roles"]
+                }
+                assert accounts["inspector"] == "cerulean-inspector", accounts
+                assert "cerulean-designer" not in accounts.values(), accounts
+                assert all(accounts.values()), accounts
+                assert len(set(accounts.values())) == len(accounts), accounts
+                assert project_roles(isolated, document) == isolated
+                # Two roles on one account is refused rather than written: the
+                # board refuses both roles when a uid backs two, so writing it
+                # would take the colliding roles off the board entirely.
+                collided = copy.deepcopy(isolated_raw)
+                collided["roles"].append(
+                    {"role": "main", "run_as_user": "cerulean-inspector"}
+                )
+                rejects(lambda: project_roles(collided, document))
+                # The declarative addition must also reach the table the board
+                # resolves uids through and the trees the rollout hands out.
+                iso_dir = root / "isolated-provision"
+                shutil.copytree(output, iso_dir)
+                iso_plan_path = iso_dir / "plan.json"
+                iso_plan = json.loads(iso_plan_path.read_text())
+                # A plan generated before the role was declared has no row for it.
+                iso_plan["role_accounts"] = [
+                    entry
+                    for entry in iso_plan["role_accounts"]
+                    if entry[0] != "inspector"
+                ]
+                iso_plan["role_worktrees"] = [
+                    [role, str(root / "worktrees" / role)]
+                    for role, _account in iso_plan["role_accounts"]
+                ]
+                iso_plan_path.write_text(json.dumps(iso_plan))
+                iso_config = iso_dir / "cerulean.json"
+                iso_config.write_text(json.dumps(isolated_raw))
+                (iso_dir / "layout.json").write_text("{}")
+                iso_files = projection_files(iso_config, document)
+                refreshed = json.loads(iso_files[iso_plan_path])
+                assert ["inspector", "cerulean-inspector"] in [
+                    list(entry) for entry in refreshed["role_accounts"]
+                ], refreshed["role_accounts"]
+                assert ["inspector", str(root / "worktrees/inspector")] in [
+                    list(entry) for entry in refreshed["role_worktrees"]
+                ], refreshed["role_worktrees"]
+                unit_path = iso_dir / iso_plan["board_unit"]
+                assert unit_path in iso_files, sorted(f.name for f in iso_files)
+                assert "inspector=cerulean-inspector" in iso_files[unit_path]
             foreign = copy.deepcopy(document)
             next(r for r in foreign["roles"] if r["name"] == "main")[
                 "target"

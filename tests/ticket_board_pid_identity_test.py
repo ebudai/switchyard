@@ -547,6 +547,91 @@ def assert_all_pane_roles_write_through_socket() -> None:
             thread.join(timeout=2)
 
 
+def assert_deploy_probe_matches_what_the_tenant_actually_enforces() -> None:
+    """SYRD-39: the deploy smoke must judge the tenant it is deploying to.
+
+    The post-restart probe claims `director` from an account that is not a role
+    and expects a refusal. That is only true once the tenant has a role-account
+    table; before the rollout the board still honours a claimed role, and an
+    unconditional probe failed every unmigrated tenant's deploy -- turning a
+    known-open state into an outage. It must report the open state and pass,
+    and it must still catch a MIGRATED tenant that hands out roles.
+    """
+    import http.server
+    import socketserver
+    import subprocess
+
+    service = (ROOT / "scripts" / "ticket-board-service.sh").read_text(encoding="utf-8")
+    probe = service.split("<<'SMOKEPY'\n", 1)[1].split("\nSMOKEPY", 1)[0]
+
+    class PermissiveBoard(http.server.BaseHTTPRequestHandler):
+        """A board that grants whatever role it is asked for."""
+
+        protocol_version = "HTTP/1.1"
+
+        def _ok(self) -> None:
+            body = b'{"role": "director"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self) -> None:  # noqa: N802 - http.server API
+            self._ok()
+
+        def do_POST(self) -> None:  # noqa: N802 - http.server API
+            length = int(self.headers.get("Content-Length") or 0)
+            self.rfile.read(length)
+            self._ok()
+
+        def log_message(self, *_args: object) -> None:
+            return
+
+    class UnixBoard(socketserver.ThreadingUnixStreamServer):
+        allow_reuse_address = True
+
+        def handle_error(self, request: object, client_address: object) -> None:
+            # The probe closes as soon as it has the status line, which is a
+            # broken pipe here and not a test failure.
+            return
+
+    with tempfile.TemporaryDirectory(prefix="deploy-probe.") as tmp:
+        socket_path = str(Path(tmp) / "board.sock")
+        script_path = Path(tmp) / "probe.py"
+        script_path.write_text(probe, encoding="utf-8")
+        server = UnixBoard(socket_path, PermissiveBoard)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            unmigrated = subprocess.run(
+                [sys.executable, str(script_path), socket_path, "5", str(ROOT), ""],
+                capture_output=True,
+                text=True,
+            )
+            migrated = subprocess.run(
+                [
+                    sys.executable,
+                    str(script_path),
+                    socket_path,
+                    "5",
+                    str(ROOT),
+                    "director=porter-director,main=porter-main",
+                ],
+                capture_output=True,
+                text=True,
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    assert unmigrated.returncode == 0, (unmigrated.returncode, unmigrated.stdout, unmigrated.stderr)
+    assert "NOT enforced yet" in unmigrated.stdout, unmigrated.stdout
+    assert migrated.returncode == 1, (migrated.returncode, migrated.stdout, migrated.stderr)
+    assert "was granted director" in migrated.stderr, migrated.stderr
+
+
 def main() -> int:
     assert_uid_decides_the_role()
     assert_unconfigured_account_gets_no_role()
@@ -559,6 +644,7 @@ def main() -> int:
     assert_peer_from_an_unconfigured_account_cannot_write()
     assert_rendered_unit_environment_admits_roles_and_refuses_other_tenants()
     assert_unix_socket_replaces_stale_socket_file()
+    assert_deploy_probe_matches_what_the_tenant_actually_enforces()
     print("ticket_board_pid_identity_test: ok")
     return 0
 

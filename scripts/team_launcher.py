@@ -11793,17 +11793,22 @@ def switchyard_new_command(
     )
     if launch_result != 0:
         return launch_result
-    print_func(f"switchyard: full pane window started for {resolved_slug}")
+    # Only a launch that actually happened may be reported as one, and only
+    # then are there session records to wait for. Polling a deferred launch
+    # would burn the full timeout on panes that were never started (SYRD-39).
+    if not launch_deferred:
+        print_func(f"switchyard: full pane window started for {resolved_slug}")
     report_first_run_auth_warnings(first_run_auth_report, print_func=print_func)
-    report_launch_session_records(
-        config,
-        timeout_seconds=session_record_timeout,
-        poll_seconds=session_record_poll,
-        fallback_changed_since_ns=launch_started_ns,
-        pane_state_dir=pane_state_dir or default_pane_state_dir_for_user(config.run_as_user, project=config.project),
-        pane_state_updated_since=launch_started_at,
-        print_func=print_func,
-    )
+    if not launch_deferred:
+        report_launch_session_records(
+            config,
+            timeout_seconds=session_record_timeout,
+            poll_seconds=session_record_poll,
+            fallback_changed_since_ns=launch_started_ns,
+            pane_state_dir=pane_state_dir or default_pane_state_dir_for_user(config.run_as_user, project=config.project),
+            pane_state_updated_since=launch_started_at,
+            print_func=print_func,
+        )
     resolved_layout_mode = resolve_layout_mode(layout_mode, environ=layout_environ, runner=runner)
     if resolved_layout_mode == LAYOUT_MODE_VIEWER:
         if include_designer:

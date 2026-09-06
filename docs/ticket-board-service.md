@@ -480,7 +480,7 @@ command, and it is validated with `visudo -c` before installation.
 
 `role_accounts_command` in the provisioning artifacts creates the roles group
 and one account per role, adds each to the group, and gives each role a home it
-owns at `0750`, so one role cannot read another's worktree, config or
+owns at `0700`, so one role cannot read another's worktree, config or
 credentials. Every step is guarded by an existence check, which is what makes
 the same artifact the **migration** for a tenant that previously ran every role
 under one account: re-running it creates only what is missing.
@@ -488,6 +488,18 @@ under one account: re-running it creates only what is missing.
 Until a tenant has been migrated its roles still share one account. The board
 does not pretend otherwise -- it refuses roles that share a uid and says so in
 the log, rather than resolving to whichever was configured first.
+
+A role can also arrive later, from the workflow document rather than from
+provisioning. On a tenant that has opted into per-role identities such a role is
+projected with its own `<project>-<role>` account, from the same naming function
+provisioning uses, and the generated plan and board unit have their role-account
+table refreshed with it. It is deliberately never given the account of the role
+it was templated from: the board resolves authority from the uid, so an
+inherited account would make the new role answer as the role it was copied from
+and unable to act as itself. On a tenant that has not opted in, nothing is
+assigned -- projection does not opt a project into isolation it never asked for.
+Applying the document updates generated artifacts only; creating the account and
+installing the refreshed unit is still an operator rollout step.
 
 ### Role credentials, and the boundary they do and do not draw
 
@@ -580,6 +592,17 @@ role cannot touch, then pushes from there.
 
 No polkit is involved in ordinary role work: it is a plain `sudo -u` grant
 between two unprivileged accounts.
+
+### What a deploy checks
+
+The post-restart smoke claims `director` over the socket from an account that is
+not a role, and expects the board to refuse it. That assertion only holds once
+the tenant has a role-account table to resolve a uid through, so the probe reads
+the installed unit's `TICKET_BOARD_ROLE_ACCOUNTS` first. A tenant that has not
+run the rollout is reported plainly -- role binding is not enforced yet, the
+board still honours the role a caller claims -- and the deploy continues. That
+is the open state this work closes, not a deploy regression, and failing the
+release would not have closed it.
 
 ### What this does and does not cover
 

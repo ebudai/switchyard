@@ -552,7 +552,13 @@ verify_local_socket_available() {
         log "post-deploy socket verification failed: missing Unix socket $BOARD_UNIX_SOCKET"
         return 1
     fi
-    if ! "$PYTHON_BIN" - "$BOARD_UNIX_SOCKET" "$SMOKE_TIMEOUT_SECONDS" "$BOARD_CURRENT_LINK" <<'SMOKEPY'
+    local configured_role_accounts=""
+    # SYRD-39: the board can only derive a role from the peer uid once this
+    # tenant has per-role accounts. Before the rollout it still honours the role
+    # a caller claims, so the probe below must not treat that as a regression
+    # and fail every unmigrated tenant's deploy.
+    configured_role_accounts="$(systemctl show "$SERVICE_NAME" -p Environment --value 2>/dev/null | tr ' ' '\n' | sed -n 's/^TICKET_BOARD_ROLE_ACCOUNTS=//p' | head -n 1 || true)"
+    if ! "$PYTHON_BIN" - "$BOARD_UNIX_SOCKET" "$SMOKE_TIMEOUT_SECONDS" "$BOARD_CURRENT_LINK" "$configured_role_accounts" <<'SMOKEPY'
 import json
 import os
 import socket
@@ -604,6 +610,20 @@ if not serving:
 # not run as one of the project's role accounts, so the board must refuse to
 # give it a role. A 200 here means the board is handing out roles to accounts
 # that do not hold them, which is the outage this check exists to catch.
+#
+# A tenant that has not run the role-account rollout has no table to resolve a
+# uid through, and the board still honours the claimed role for it. That is the
+# open state this ticket exists to close, not a deploy regression, so say so
+# plainly and let the deploy finish rather than blocking every unmigrated
+# tenant's release.
+role_accounts = sys.argv[4].strip() if len(sys.argv) > 4 else ""
+if not role_accounts:
+    print(
+        "ticket-board role binding is NOT enforced yet: this tenant has no per-role "
+        "Unix accounts configured, so the board still accepts the role a caller "
+        "claims. Run the role-account rollout to close it."
+    )
+    sys.exit(0)
 body = json.dumps({"role": "director"}).encode("utf-8")
 claim = (
     b"POST /api/register-caller HTTP/1.1\r\n"

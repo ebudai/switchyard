@@ -69,7 +69,7 @@ Commands:
   status           list registered projects and pane liveness
   validate-models  check configured role models without starting panes
 
-Bare project names start or attach the project. Recognized commands: board-skill, new, register, upgrade, add-role, present, set-vcs-close-role, agy-credential, role-prompt, stop, teardown, status, validate-models.
+Bare project names start or attach the project. Recognized commands: board-skill, new, register, upgrade, add-role, present, set-vcs-close-role, agy-credential, seed-role-credentials, role-prompt, stop, teardown, status, validate-models.
 ```
 <!-- switchyard-help:end -->
 

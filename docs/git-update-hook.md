@@ -24,7 +24,18 @@ Switchyard-managed repositories use two complementary hooks:
 Worktrees share their repository's common Git directory, so one pre-commit
 installation covers every worktree attached to that repository. `switchyard
 new` installs policy into both the owner checkout and the shared control
-repository after provisioning. The installer pins that common hook directory
+repository after provisioning. A fresh source clone gets the same policy from
+the top-level `sudo ./install`, which installs it into that checkout after the
+rest of the install succeeds -- previously a fresh clone was left without the
+hook until a project was provisioned. It is installed as the human who ran the
+installer rather than as root, so the hooks and the local Git configuration stay
+theirs to change; a `--dry-run` install reports the command and installs nothing.
+
+`switchyard upgrade` repairs the same policy for a project's repositories,
+reinstalling hooks that are missing or stale. The repair is idempotent -- running
+it over an already-correct checkout leaves the hook byte-identical and does not
+accumulate preserved copies -- and it is warning-only, so a repair that cannot
+run warns rather than failing the upgrade. The installer pins that common hook directory
 in the repository's local `core.hooksPath`; a caller's global Git configuration
 therefore cannot bypass or redirect repository policy.
 

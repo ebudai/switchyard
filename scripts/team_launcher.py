@@ -12049,6 +12049,37 @@ def migrate_declarative_director_onboarding(
     return True
 
 
+def repair_repository_policy_hooks(
+    config_path: Path,
+    *,
+    source_repo: Path,
+    dry_run: bool = False,
+    print_func: Callable[[str], None] = print,
+) -> tuple[Path, ...]:
+    """Reinstall this project's managed Git policy hooks, missing or stale.
+
+    Idempotent: the installer rewrites its own managed hook and preserves any
+    pre-existing one, so repeated upgrades converge rather than accumulate. Ownership is
+    taken from the existing hooks directory, so a root-run upgrade leaves the tenant's
+    hooks owned by the tenant. Only the repositories named in this project's config are
+    touched -- no global hooksPath, no scanning of arbitrary homes.
+    """
+    if dry_run:
+        print_func(f"switchyard: would reinstall managed Git policy hooks for {config_path}")
+        return ()
+    from scripts import repository_hooks
+
+    try:
+        installed = repository_hooks.install_project_config(config_path, source_root=source_repo)
+    except Exception as exc:
+        # Warning-only policy: a repair failure must not fail an otherwise good upgrade.
+        print_func(f"warning: switchyard: could not repair Git policy hooks: {exc}")
+        return ()
+    for path in installed:
+        print_func(f"switchyard: reinstalled managed Git policy hook {path}")
+    return installed
+
+
 def upgrade_project_command(
     config: ProjectConfig,
     *,
@@ -12133,6 +12164,14 @@ def upgrade_project_command(
     # onboarding by the time anyone acts on that report.
     migrate_declarative_director_onboarding(
         config, config_path=config_path, dry_run=dry_run, print_func=print_func
+    )
+    # Repairs a checkout whose managed hooks are missing or stale, including one
+    # provisioned before the policy was installed at all.
+    repair_repository_policy_hooks(
+        config_path,
+        source_repo=effective_source_repo,
+        dry_run=dry_run,
+        print_func=print_func,
     )
     report_tenant_release_upgrade(
         release_report_config,

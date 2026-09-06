@@ -7173,7 +7173,14 @@ def new_project_command(
     plan = build_plan(
         project=project,
         project_name=project_name,
-        workflow=(json.loads(workflow_config.read_text()) if workflow_config else _load_json(from_artifact).get("workflow") if from_artifact else None),
+        workflow=seed_director_onboarding(
+            json.loads(workflow_config.read_text())
+            if workflow_config
+            else _load_json(from_artifact).get("workflow")
+            if from_artifact
+            else None,
+            effective_repository,
+        ),
         owner_user=effective_owner,
         owner_home=owner_home,
         port=port,
@@ -7605,6 +7612,40 @@ def _resolve_project_path(raw_path: Path | str) -> Path:
 
 def _switchyard_dir(project_dir: Path) -> Path:
     return project_dir / SWITCHYARD_PROJECT_DIR_NAME
+
+
+def director_onboarding_seed_text(project_dir: Path) -> str:
+    """The director's remit, as ordinary role data rather than a special case.
+
+    The hook used to build this at session start for the director alone, searching for
+    the onboarding packet and printing paths relative to the pane's cwd. Storing it makes
+    the director the same shape as every other role, at the cost of the paths being fixed
+    at provisioning rather than rediscovered. It is stored as prompt text rather than as
+    an `onboarding` file path because the generic path branch refuses to start when the
+    file is missing, where the director previously degraded quietly.
+    """
+    packet = project_dir / "docs" / "onboarding"
+    guide = packet / "switchyard-director-guide.md"
+    return (
+        f"Your director session just started fresh. Read the onboarding packet first: {packet}. "
+        f"Start with {guide}."
+    )
+
+
+def seed_director_onboarding(document, project_dir: Path):
+    """Give the director role stored onboarding when it has none.
+
+    Only fills a gap: a director that already carries a prompt or a remit path is left
+    alone, so this cannot overwrite what an operator set.
+    """
+    if not document:
+        return document
+    for role in document.get("roles", []):
+        if role.get("name") != "director":
+            continue
+        if not role.get("onboarding_prompt") and not role.get("onboarding"):
+            role["onboarding_prompt"] = director_onboarding_seed_text(project_dir)
+    return document
 
 
 def _write_switchyard_onboarding_files(

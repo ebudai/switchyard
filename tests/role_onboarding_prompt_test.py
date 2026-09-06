@@ -225,6 +225,71 @@ def test_the_board_skill_instruction_is_present_exactly_once() -> None:
     assert text.count(hook.BOARD_SKILL_INSTRUCTION) == 1
 
 
+# --- the director is no longer a special case --------------------------------
+
+
+def _director_start(environ: dict[str, str]) -> Any:
+    hook = _load_hook_module()
+    return hook._session_start_additional_context_output(
+        target=f"{PROJECT}-director:0.0",
+        payload={"source": "startup"},
+        environ={"TICKET_BOARD_PROJECT": PROJECT, **environ},
+    )
+
+
+def test_director_receives_a_stored_prompt_through_the_generic_path() -> None:
+    seeded = team_launcher.director_onboarding_seed_text(Path("/srv/porter"))
+    text = _context_text(_director_start({"TICKET_BOARD_ROLE_ONBOARDING_PROMPT": seeded}))
+    assert "Read the onboarding packet first: /srv/porter/docs/onboarding." in text
+    assert "/srv/porter/docs/onboarding/switchyard-director-guide.md" in text
+
+
+def test_director_without_stored_onboarding_gets_no_special_context() -> None:
+    """The removed special case, pinned as removed.
+
+    A director with neither a prompt nor a remit path now behaves like any other role in
+    the same state. This is also where a cleared director prompt lands, which is what
+    makes clearing generic rather than a return to a private code path.
+    """
+    text = _context_text(_director_start({}))
+    assert "onboarding packet" not in text
+    assert "just started fresh" not in text
+
+
+def test_the_removed_director_branch_is_gone_from_the_hook() -> None:
+    """Asserted against the source, so it cannot be reintroduced quietly."""
+    source = (ROOT / "scripts" / "ticket-board-pane-idle-hook").read_text(encoding="utf-8")
+    assert 'role == "director"' not in source
+    for helper in (
+        "_director_startup_onboarding_context",
+        "_onboarding_project_root",
+        "_onboarding_packet_exists",
+        "ONBOARDING_PACKET_DIR",
+    ):
+        assert helper not in source, helper
+
+
+def test_provisioning_seeds_the_director_and_leaves_other_roles_alone() -> None:
+    document = {"roles": [{"name": "director"}, {"name": "ops"}]}
+    seeded = team_launcher.seed_director_onboarding(document, Path("/srv/porter"))
+    director = next(r for r in seeded["roles"] if r["name"] == "director")
+    ops = next(r for r in seeded["roles"] if r["name"] == "ops")
+    assert "docs/onboarding" in director["onboarding_prompt"]
+    assert "onboarding_prompt" not in ops
+
+
+def test_provisioning_never_overwrites_onboarding_an_operator_already_set() -> None:
+    for existing in ({"onboarding_prompt": "mine"}, {"onboarding": "/etc/remit.md"}):
+        document = {"roles": [{"name": "director", **existing}]}
+        seeded = team_launcher.seed_director_onboarding(document, Path("/srv/porter"))
+        director = seeded["roles"][0]
+        assert director == {"name": "director", **existing}, director
+
+
+def test_seeding_tolerates_a_project_with_no_workflow_document() -> None:
+    assert team_launcher.seed_director_onboarding(None, Path("/srv/porter")) is None
+
+
 # --- the mutation the command performs ---------------------------------------
 
 

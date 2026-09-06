@@ -7,8 +7,11 @@ SUDO_BIN="${SWITCHYARD_SUDO_BIN:-sudo}"
 PYTHON_BIN="${SWITCHYARD_PYTHON_BIN:-python3}"
 PIP_SPEC="psycopg>=3.3,<4"
 SWITCHYARD_PYTHON_VENV="${SWITCHYARD_PYTHON_VENV:-/opt/switchyard/venv}"
+# Matches ticket-board-service.sh: the shared venv when it is executable, /usr/bin/python3
+# otherwise. Verification has to run under the interpreter the services will actually use,
+# not merely under some python3 on PATH.
+SWITCHYARD_SERVICE_FALLBACK_PYTHON="${SWITCHYARD_SERVICE_FALLBACK_PYTHON:-/usr/bin/python3}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ORIGINAL_USER="${SWITCHYARD_INSTALL_ORIGINAL_USER:-${SUDO_USER:-$(id -un)}}"
 
 usage() {
     cat <<'EOF'
@@ -22,10 +25,6 @@ EOF
 die() {
     printf 'install-switchyard-prereqs: ERROR: %s\n' "$*" >&2
     exit 1
-}
-
-quote() {
-    printf '%q' "$1"
 }
 
 while (($#)); do
@@ -73,13 +72,12 @@ run_cmd() {
     "$@"
 }
 
-as_shell_command() {
-    local arg
-    local command=""
-    for arg in "$@"; do
-        command+="${command:+ }$(quote "$arg")"
-    done
-    printf '%s' "$command"
+service_python() {
+    if [[ -x "$SWITCHYARD_PYTHON_VENV/bin/python" ]]; then
+        printf '%s\n' "$SWITCHYARD_PYTHON_VENV/bin/python"
+    else
+        printf '%s\n' "$SWITCHYARD_SERVICE_FALLBACK_PYTHON"
+    fi
 }
 
 is_root_context() {
@@ -91,14 +89,6 @@ run_root_cmd() {
         run_cmd "$@"
     else
         run_cmd "$SUDO_BIN" "$@"
-    fi
-}
-
-run_invoking_user_cmd() {
-    if is_root_context && [[ "$ORIGINAL_USER" != "root" ]]; then
-        run_cmd "$SUDO_BIN" -u "$ORIGINAL_USER" -H sh -lc "$(as_shell_command "$@")"
-    else
-        run_cmd "$@"
     fi
 }
 
@@ -123,9 +113,14 @@ case "$manager" in
     pacman)
         printf 'Not refreshing pacman package databases automatically; run %s pacman -Syu first on Arch-family systems.\n' "$SUDO_BIN"
         run_cmd "$SUDO_BIN" pacman -S --needed \
-            python postgresql tmux git curl python-pip python-pillow acl
+            python postgresql tmux git curl python-pillow python-psycopg acl
         printf 'KDE/separate layout users also need Konsole: %s pacman -S --needed konsole\n' "$SUDO_BIN"
-        printf 'Installing psycopg for the invoking user with pip on Arch-family systems.\n'
-        run_invoking_user_cmd "$PYTHON_BIN" -m pip install --user "$PIP_SPEC"
+        printf 'Installing psycopg from the distribution package python-psycopg, which satisfies %s.\n' "$PIP_SPEC"
+        printf 'Arch-family Python is externally managed under PEP 668, so a user pip install is refused rather than merely discouraged.\n'
+        verify_python="$(service_python)"
+        printf 'Verifying ticket board runtime dependencies with %s, the interpreter generated services use.\n' "$verify_python"
+        run_cmd "$verify_python" -c "import psycopg, PIL; print(psycopg.__version__, PIL.__version__)"
+        printf 'Verifying the ticket board entry point loads with %s.\n' "$verify_python"
+        run_cmd "$verify_python" "$SCRIPT_DIR/ticket-board.py" --help
         ;;
 esac

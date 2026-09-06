@@ -1407,20 +1407,37 @@ def _resolve_launcher_project_config(
         raise
 
 
-def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+def _write_json_atomic(
+    path: Path, payload: dict[str, Any], *, owner_user: str | None = None,
+) -> None:
+    owner = pwd.getpwnam(owner_user) if owner_user and os.geteuid() == 0 else None
+    mode = 0o600
+    if owner_user and path.exists():
+        mode = stat.S_IMODE(path.stat().st_mode) & 0o777
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
+    handle = tempfile.NamedTemporaryFile(
         "w",
         encoding="utf-8",
         dir=path.parent,
         prefix=f".{path.name}.",
         suffix=".tmp",
         delete=False,
-    ) as handle:
-        json.dump(payload, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-        temp_path = Path(handle.name)
-    temp_path.replace(path)
+    )
+    temp_path = Path(handle.name)
+    try:
+        with handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            # Publish tenant controls with the correct owner already attached;
+            # never leave a root-owned replacement for a later repair step.
+            if owner is not None:
+                os.fchown(handle.fileno(), owner.pw_uid, owner.pw_gid)
+            if owner_user:
+                os.fchmod(handle.fileno(), mode)
+        temp_path.replace(path)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def _ensure_private_dir(path: Path) -> None:
@@ -5410,8 +5427,9 @@ def configure_project_desktop(config: ProjectConfig, *, config_path: Path,
         configured = prepare_project_desktop(replace(config, desktop_access=policy), runner=runner)
         payload = _load_json(config_path)
         payload["desktop_access"] = policy
-        _write_json_atomic(config_path, payload)
-        _write_json_atomic(config_path.parent / "desktop-policy.json", policy)
+        owner_user = config.run_as_user or current_user_name()
+        _write_json_atomic(config_path, payload, owner_user=owner_user)
+        _write_json_atomic(config_path.parent / "desktop-policy.json", policy, owner_user=owner_user)
         return configured
     except (Exception, SystemExit):
         if installed_new:

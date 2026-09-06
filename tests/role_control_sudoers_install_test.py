@@ -305,6 +305,41 @@ def _tenant_config(workdir: Path, project: str) -> Path:
     return config_path
 
 
+def test_both_grants_survive_together_in_both_artifacts() -> None:
+    """SYRD-50's lifecycle bridge and this role-control document are separate files.
+
+    They are emitted next to each other by the same two artifacts, so a refresh
+    that keeps one and drops the other is exactly the mistake to guard against.
+    A recorded control user is forced here because a tenant whose only caller is
+    its own account deliberately gets no bridge at all.
+    """
+    add_role = provision.role_account_commands(
+        "otto", "app", OWNER, "boardsvc", role_accounts=ROLE_ACCOUNTS
+    )
+    assert "49-otto-role-control" in add_role, add_role
+    assert "49-otto-tenant-control" in add_role, add_role
+    assert add_role.index("49-otto-role-control") < add_role.index("49-otto-tenant-control")
+    assert "switchyard-tenant-control" in add_role
+
+    original = team_launcher.invoking_human
+    with tempfile.TemporaryDirectory(prefix="syrd51-both-grants.") as tmp:
+        workdir = Path(tmp)
+        config_path = _tenant_config(workdir, "porter")
+        config = team_launcher.load_project_config("porter", config_path)
+        try:
+            team_launcher.invoking_human = lambda: "eric"
+            artifact = team_launcher.render_role_account_migration(config)
+        finally:
+            team_launcher.invoking_human = original
+
+    assert "49-porter-role-control" in artifact, artifact
+    assert "49-porter-tenant-control" in artifact, artifact
+    assert artifact.index("49-porter-role-control") < artifact.index("49-porter-tenant-control")
+    assert "eric" in artifact
+    # And each is still installed the safe way, on its own file.
+    assert artifact.count("visudo -c -f") == 2, artifact
+
+
 def main() -> int:
     run_module_tests(globals())
     print("role_control_sudoers_install_test: ok")

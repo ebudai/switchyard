@@ -247,16 +247,137 @@ def test_a_dry_run_repair_reports_without_installing() -> None:
 # --- the top-level installer seam --------------------------------------------
 
 
-def test_the_top_level_installer_installs_the_policy_into_the_source_checkout() -> None:
-    """The gap this ticket exists to close: a fresh clone plus ./install had no hook."""
+def _disposable_clone(root: Path) -> Path:
+    """A real clone of this repository, carrying the working tree under test.
+
+    `git clone` copies the committed tree, so a clone alone would exercise HEAD rather
+    than the change being tested -- which is how the first version of this test silently
+    ran the old installer. The tracked files are overlaid from the working tree
+    afterwards so the clone is what this checkout actually says.
+    """
+    import shutil
+
+    clone = root / "clone"
+    subprocess.run(
+        ["git", "clone", "-q", str(ROOT), str(clone)], check=True,
+        capture_output=True, text=True,
+    )
+    tracked = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files"], capture_output=True, text=True, check=True
+    ).stdout.split()
+    for relative in tracked:
+        source = ROOT / relative
+        if not source.is_file():
+            continue
+        destination = clone / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+    return clone
+
+
+def _stub(path: Path, body: str = "#!/bin/sh\nexit 0\n") -> Path:
+    path.write_text(body, encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def test_a_fresh_clone_and_top_level_install_ends_up_with_the_policy() -> None:
+    """The seam this ticket exists to close, run rather than read.
+
+    A disposable clone is installed into with the two privileged sub-installers stubbed
+    out, then the checkout itself is inspected. Reading the installer's source cannot
+    show this: the policy step is deliberately warning-only, so a broken or no-op command
+    would leave the text unchanged and the hook absent.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        clone = _disposable_clone(root)
+        assert not (clone / ".git" / "hooks" / "pre-commit").exists()
+
+        stubs = root / "stubs"
+        stubs.mkdir()
+        recorder = root / "sudo-invocations"
+        fake_sudo = _stub(
+            stubs / "sudo",
+            "#!/bin/sh\n"
+            f'printf "%s\\n" "$*" >> {recorder}\n'
+            '# Drop the "-u <user>" prefix and run the command, standing in for the\n'
+            '# de-escalation this test cannot really perform.\n'
+            'shift 2\n'
+            'exec "$@"\n',
+        )
+        user = subprocess.run(["id", "-un"], capture_output=True, text=True).stdout.strip()
+
+        proc = subprocess.run(
+            [str(clone / "install")],
+            cwd=str(root), capture_output=True, text=True,
+            env={
+                **os.environ,
+                "SWITCHYARD_INSTALL_PREREQS_SCRIPT": str(_stub(stubs / "prereqs")),
+                "SWITCHYARD_INSTALL_SWITCHYARD_SCRIPT": str(_stub(stubs / "install-switchyard")),
+                "SWITCHYARD_INSTALL_TEST_ASSUME_ROOT": "1",
+                "SWITCHYARD_INSTALL_ORIGINAL_USER": user,
+                "SWITCHYARD_SUDO_BIN": str(fake_sudo),
+            },
+        )
+
+        hook = clone / ".git" / "hooks" / "pre-commit"
+        installed = hook.exists()
+        hooks_path = subprocess.run(
+            ["git", "-C", str(clone), "config", "--local", "--get", "core.hooksPath"],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        owners = {
+            path.name: (path.stat().st_uid, path.stat().st_gid)
+            for path in (clone / ".git" / "hooks").iterdir()
+            if path.is_file() and not path.name.endswith(".sample")
+        }
+        recorded = recorder.read_text(encoding="utf-8") if recorder.exists() else ""
+        body = hook.read_text(encoding="utf-8") if installed else ""
+
+    assert proc.returncode == 0, proc.stderr
+    assert installed, f"the installer left the clone without a hook\n{proc.stdout}\n{proc.stderr}"
+    # Repository-local configuration, pointing inside the clone and nowhere else.
+    assert hooks_path == str(clone / ".git" / "hooks"), hooks_path
+    # Installed as the original invoking user, not left owned by the privileged caller.
+    for name, (uid, gid) in owners.items():
+        assert uid == os.getuid() and gid == os.getgid(), f"{name} owned by {uid}:{gid}"
+    # The exact root-to-original-user invocation, not merely that something ran.
+    assert f"-u {user}" in recorded, recorded
+    assert "repository_hooks.py" in recorded and "--local-only" in recorded, recorded
+    assert f"--repository {clone}" in recorded, recorded
+    # And the policy that landed is the real one.
+    assert f"FILE_SIZE_LIMIT={THRESHOLD}" in body, body
+
+
+def test_a_dry_run_top_level_install_leaves_a_fresh_clone_untouched() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        clone = _disposable_clone(root)
+        proc = subprocess.run(
+            [str(clone / "install"), "--dry-run"],
+            cwd=str(root), capture_output=True, text=True,
+            env={**os.environ, "SWITCHYARD_SUDO_BIN": "sudo"},
+        )
+        installed = (clone / ".git" / "hooks" / "pre-commit").exists()
+        hooks_path = subprocess.run(
+            ["git", "-C", str(clone), "config", "--local", "--get", "core.hooksPath"],
+            capture_output=True, text=True,
+        ).stdout.strip()
+
+    assert proc.returncode == 0, proc.stderr
+    assert "repository_hooks.py" in proc.stdout
+    assert not installed, "a dry run installed the hook"
+    assert hooks_path == "", hooks_path
+
+
+def test_the_installer_never_writes_global_git_configuration() -> None:
+    """The one claim behaviour cannot show: absence across branches never taken.
+
+    The end-to-end tests above prove what the installer does; this proves what it must
+    never do, including on paths a single run does not reach.
+    """
     installer = (ROOT / "install").read_text(encoding="utf-8")
-    assert "install_source_checkout_policy" in installer
-    # Called on the real path and on the dry-run path, so neither silently skips it.
-    assert installer.count("install_source_checkout_policy") >= 3
-    assert "--local-only" in installer, "the source checkout takes the warning policy only"
-    # The prohibition is on *global* configuration; the installer delegates the
-    # repository-local hooksPath to repository_hooks.py. Matching the bare string would
-    # only catch the comment that explains this.
     assert "config --global" not in installer
     assert "--global core.hooksPath" not in installer
     for line in installer.splitlines():

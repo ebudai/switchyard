@@ -113,7 +113,10 @@ install_source_checkout_policy() {
     local -a policy_cmd=(
         "$installer" --repository "$REPO_ROOT" --project switchyard --local-only
     )
-    if [[ "$ORIGINAL_USER" != "root" && "${EUID:-$(id -u)}" -eq 0 ]]; then
+    # Same assume-root seam the installer already uses for its privilege gate, so the
+    # root-to-original-user invocation is exercisable without actually being root.
+    if [[ "$ORIGINAL_USER" != "root" ]] \
+        && { [[ "${EUID:-$(id -u)}" -eq 0 ]] || [[ "${SWITCHYARD_INSTALL_TEST_ASSUME_ROOT:-}" == "1" ]]; }; then
         policy_cmd=("$SUDO_BIN" -u "$ORIGINAL_USER" "${policy_cmd[@]}")
     fi
     if [[ "$DRY_RUN" -eq 1 ]]; then

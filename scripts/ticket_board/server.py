@@ -27,12 +27,11 @@ from typing import Callable, Mapping
 from PIL import Image
 
 from .app import CALLER_ROLES as APP_CALLER_ROLES
-from .app import TicketBoardApp, iso_now
+from .app import TicketBoardApp, iso_now, project_slug
 from .frontend import render_html
 from .runtime_paths import directorctl_path
 
 LOGGER = logging.getLogger(__name__)
-DIRECTOR_TARGET = "pgu-director:0.0"
 DEFAULT_DIRECTORCTL = directorctl_path(__file__)
 DIRECTOR_NOTIFICATION_BATCH_WINDOW_SECONDS = 0.35
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -356,9 +355,14 @@ def peer_credentials(connection: socket.socket) -> PeerCredentials:
     return PeerCredentials(pid=pid, uid=uid, gid=gid)
 
 
-def send_director_message(payload: str, target: str = DIRECTOR_TARGET) -> None:
+def director_target(project: str | None = None) -> str:
+    resolved_project = (project or project_slug()).strip().lower() or "pgu"
+    return f"{resolved_project}-director:0.0"
+
+
+def send_director_message(payload: str, target: str | None = None) -> None:
     subprocess.run(
-        [DEFAULT_DIRECTORCTL, "send", target, payload],
+        [DEFAULT_DIRECTORCTL, "send", target or director_target(), payload],
         check=True,
         capture_output=True,
         text=True,
@@ -370,9 +374,11 @@ class DirectorNotifier:
         self,
         *,
         sender: Callable[[str], None] | None = None,
+        project: str | None = None,
         batch_window_seconds: float = DIRECTOR_NOTIFICATION_BATCH_WINDOW_SECONDS,
     ) -> None:
-        self.sender = sender or send_director_message
+        target = director_target(project)
+        self.sender = sender or (lambda payload: send_director_message(payload, target))
         self.batch_window_seconds = batch_window_seconds
         self._lock = threading.Lock()
         self._pending_created: list[tuple[str, str]] = []
@@ -779,8 +785,11 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
     ) -> None:
         after_signature = self.verify_created_ticket_persisted(created, before_signature)
         self.events.notify_change(after_signature)
+        # PostgreSQL inserts already enqueue durable transition delivery. The
+        # direct sender is only a fallback for stores without that queue.
         if (
-            notification_source_role != "director"
+            getattr(self.app, "store_backend", "") != "postgres"
+            and notification_source_role != "director"
             and str(created.get("state", "")).strip() == "analysis"
             and not list(created.get("blocked_by") or [])
         ):
@@ -1245,7 +1254,7 @@ class TicketBoardServer(ThreadingHTTPServer):
         self.app = app
         self.events = events or TicketBoardEventHub(app)
         self._owns_events = events is None
-        self.director_notifier = director_notifier or DirectorNotifier()
+        self.director_notifier = director_notifier or DirectorNotifier(project=getattr(app, "project", None))
         self._owns_director_notifier = director_notifier is None
         self.caller_registry = caller_registry
         self.build_id = board_build_id()

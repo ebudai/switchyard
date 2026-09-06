@@ -11,12 +11,14 @@ import time
 import urllib.request
 from urllib.error import HTTPError
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.ticket_board.app import ASSIGNEES, STATES, iso_now
+from scripts.ticket_board import server as server_module
 from scripts.ticket_board.server import CALLER_ROLE_HEADER, WRITE_TOKEN_HEADER, DirectorNotifier, TicketBoardServer
 from standalone_test_runner import run_module_tests
 
@@ -33,7 +35,7 @@ class FakeNotifier:
 
 
 class MemoryCreateApp:
-    store_backend = "postgres"
+    store_backend = "memory"
 
     def __init__(self, frames: Path, assets: Path, *, persist: bool = True) -> None:
         self.frame_dir = frames.resolve()
@@ -310,6 +312,24 @@ def test_director_notifier_batches_quick_creates() -> None:
     time.sleep(0.2)
     notifier.close()
     assert sent == ["New tickets for you: PGU-75 -- Alpha; PGU-76 -- Beta"], sent
+
+
+def test_non_pgu_director_notifier_targets_configured_project() -> None:
+    with patch.object(server_module.subprocess, "run") as run_mock:
+        notifier = DirectorNotifier(project="orbit", batch_window_seconds=0.01)
+        notifier.notify_ticket_created({"id": "ORB-75", "title": "Orbit fallback"})
+        time.sleep(0.05)
+        notifier.close()
+
+    run_mock.assert_called_once()
+    command = run_mock.call_args.args[0]
+    assert command == [
+        server_module.DEFAULT_DIRECTORCTL,
+        "send",
+        "orbit-director:0.0",
+        "New ticket for you: ORB-75 -- Orbit fallback",
+    ], command
+    assert all("pgu-director" not in str(part) for part in command), command
 
 
 def main() -> int:

@@ -29,6 +29,55 @@ from scripts.ticket_board.workflow_config import validate  # noqa: E402
 PROMPT = "Ops remit.\n\n- Verify staging first.\n- Never deploy on Friday.\n"
 
 
+PRE_FEATURE_SCHEMA_REF = "d63734d00e990241618c6108da73ebade4e1fe50"
+
+
+def _load_pre_feature_validator(scratch: Path):
+    """Load the workflow validator from the release this ticket must upgrade from.
+
+    Mandatory, not best-effort: a previous version of this test skipped its whole
+    old-board section when the ref did not resolve, and still reported success. The
+    pinned commit is the required pre-feature main; origin/main is a fallback only, and
+    whichever is used must actually reject the new fields or this test is not testing
+    anything and says so.
+    """
+    import importlib.util as ilu
+    import subprocess as sp
+
+    source = ""
+    for ref in (PRE_FEATURE_SCHEMA_REF, "origin/main"):
+        proc = sp.run(
+            ["git", "show", f"{ref}:scripts/ticket_board/workflow_config.py"],
+            cwd=str(ROOT), capture_output=True, text=True,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            source = proc.stdout
+            break
+    assert source, (
+        "could not load the pre-feature workflow validator from "
+        f"{PRE_FEATURE_SCHEMA_REF} or origin/main; fetch the required main before "
+        "running this suite"
+    )
+    path = scratch / "pre_feature_workflow_config.py"
+    path.write_text(source, encoding="utf-8")
+    spec = ilu.spec_from_file_location("pre_feature_wc", path)
+    module = ilu.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    # Self-check: if the pinned ref ever contains this feature, the staging test below
+    # would pass while proving nothing. Fail loudly instead.
+    probe = json.loads((ROOT / "examples/workflows/inspection.json").read_text())
+    probe["migrations"] = {"director_onboarding": True}
+    try:
+        module.validate(probe)
+    except ValueError:
+        return module
+    raise AssertionError(
+        "the pre-feature validator accepts the phase-one schema; this test would pass "
+        "without exercising the old-board path"
+    )
+
+
 def rejected(fn, reason=""):
     """Return the refusal text.
 
@@ -262,17 +311,8 @@ def main() -> int:
                 import importlib.util as _ilu
                 import subprocess as _sp
 
-                old_schema = _sp.run(
-                    ["git", "show", "origin/main:scripts/ticket_board/workflow_config.py"],
-                    cwd=str(ROOT), capture_output=True, text=True,
-                )
-                if old_schema.returncode == 0:
-                    old_path = root / "old_workflow_config.py"
-                    old_path.write_text(old_schema.stdout, encoding="utf-8")
-                    old_spec = _ilu.spec_from_file_location("old_wc", old_path)
-                    old_module = _ilu.module_from_spec(old_spec)
-                    old_spec.loader.exec_module(old_module)
-
+                old_module = _load_pre_feature_validator(root)
+                if True:
                     # Put the tenant back into the unmigrated state a real pre-phase-one
                     # board would be in, while the new validator is still active.
                     unmigrated = copy.deepcopy(_board_document(base)["document"])
@@ -309,6 +349,42 @@ def main() -> int:
                     # Nothing was written to a board that could not accept it.
                     assert _board_document(base)["revision"] == revision_before_probe
                     assert not (launcher_dir / "journal-oldboard.json").exists()
+
+                    # And through the upgrade boundary itself -- the function
+                    # upgrade_project_command calls -- so the staged deployment report a
+                    # real upgrade prints is asserted, not just the JSON underneath it.
+                    launcher_module = importlib.import_module("scripts.team_launcher")
+                    tenant_config = launcher_module.load_project_config("cerulean", config_path)
+                    said: list[str] = []
+                    journals_before = sorted(
+                        path.name for path in launcher_dir.iterdir()
+                        if path.name.startswith("workflow-before-")
+                    )
+                    wc.validate = old_module.validate
+                    try:
+                        migrated_now = launcher_module.migrate_declarative_director_onboarding(
+                            tenant_config, config_path=config_path, print_func=said.append
+                        )
+                    finally:
+                        wc.validate = current_validate
+
+                    assert migrated_now is False
+                    staged_message = "\n".join(said)
+                    assert "predates this release's workflow schema" in staged_message, staged_message
+                    assert "Deploy the release below" in staged_message, staged_message
+                    assert _board_document(base)["revision"] == revision_before_probe
+                    # No new journal: a staged attempt writes nothing at all.
+                    assert sorted(
+                        path.name for path in launcher_dir.iterdir()
+                        if path.name.startswith("workflow-before-")
+                    ) == journals_before
+
+                    # Restore the migrated state the later sections expect.
+                    _run(
+                        wm,
+                        ["migrate-director-onboarding", *base_args,
+                         "--journal", str(launcher_dir / "journal-remigrate.json")],
+                    )
 
                 # --- board committed, projection failed, then retried ---------
                 # configure_workflow commits before the projection is written, so a

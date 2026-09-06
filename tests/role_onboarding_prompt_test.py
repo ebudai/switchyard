@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import importlib.machinery
 import importlib.util
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -228,6 +231,35 @@ def test_the_board_skill_instruction_is_present_exactly_once() -> None:
 # --- the director is no longer a special case --------------------------------
 
 
+@contextlib.contextmanager
+def _controlled_project_root(packet: bool):
+    """Run with every onboarding-root candidate under this test's control.
+
+    The legacy bridge searches several environment roots and finally the process cwd, so
+    a test that leaves cwd alone reads whatever directory it happens to run from -- this
+    suite passed from tests/ and failed from the repository root, which has its own
+    docs/onboarding. Both the environment roots and cwd are pinned here.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "project"
+        root.mkdir()
+        if packet:
+            onboarding = root / "docs" / "onboarding"
+            onboarding.mkdir(parents=True)
+            (onboarding / "README.md").write_text("packet\n", encoding="utf-8")
+            (onboarding / "switchyard-director-guide.md").write_text("guide\n", encoding="utf-8")
+        previous = os.getcwd()
+        os.chdir(root)
+        try:
+            yield {
+                "SWITCHYARD_PROJECT_DIR": str(root),
+                "TICKET_BOARD_PROJECT_DIR": str(root),
+                "PGU_TICKET_BOARD_PROJECT_DIR": str(root),
+            }
+        finally:
+            os.chdir(previous)
+
+
 def _director_start(environ: dict[str, str]) -> Any:
     hook = _load_hook_module()
     return hook._session_start_additional_context_output(
@@ -244,18 +276,6 @@ def test_director_receives_a_stored_prompt_through_the_generic_path() -> None:
     assert "/srv/porter/docs/onboarding/switchyard-director-guide.md" in text
 
 
-def test_director_without_stored_onboarding_gets_no_special_context() -> None:
-    """The removed special case, pinned as removed.
-
-    A director with neither a prompt nor a remit path now behaves like any other role in
-    the same state. This is also where a cleared director prompt lands, which is what
-    makes clearing generic rather than a return to a private code path.
-    """
-    text = _context_text(_director_start({}))
-    assert "onboarding packet" not in text
-    assert "just started fresh" not in text
-
-
 def test_the_legacy_bridge_is_gated_on_the_migration_marker() -> None:
     """Phase one keeps the packet lookup, but only for a tenant that has not migrated.
 
@@ -264,16 +284,7 @@ def test_the_legacy_bridge_is_gated_on_the_migration_marker() -> None:
     an empty prompt and path mean the director cleared it deliberately, and the answer is
     no role-specific onboarding. SYRD-40 removes the branch entirely.
     """
-    import tempfile
-
-    with tempfile.TemporaryDirectory() as tmp:
-        project_dir = Path(tmp) / "project"
-        packet = project_dir / "docs" / "onboarding"
-        packet.mkdir(parents=True)
-        (packet / "README.md").write_text("packet\n", encoding="utf-8")
-        (packet / "switchyard-director-guide.md").write_text("guide\n", encoding="utf-8")
-        env = {"SWITCHYARD_PROJECT_DIR": str(project_dir)}
-
+    with _controlled_project_root(packet=True) as env:
         unmigrated = _context_text(_director_start(env))
         migrated = _context_text(
             _director_start({**env, "TICKET_BOARD_ROLE_ONBOARDING_MIGRATED": "1"})
@@ -283,6 +294,11 @@ def test_the_legacy_bridge_is_gated_on_the_migration_marker() -> None:
     # Migrated and cleared: the bridge must not answer for this director.
     assert "Read the onboarding packet first:" not in migrated, migrated
     assert "onboarding packet" not in migrated
+
+    # And with no packet anywhere, an unmigrated director simply gets nothing extra.
+    with _controlled_project_root(packet=False) as env:
+        bare = _context_text(_director_start(env))
+    assert "onboarding packet" not in bare, bare
 
 
 def test_a_migrated_director_with_a_prompt_still_gets_the_prompt() -> None:

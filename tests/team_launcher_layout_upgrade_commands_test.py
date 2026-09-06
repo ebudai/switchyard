@@ -448,7 +448,8 @@ def test_switchyard_upgrade_reports_tenant_release_update_command() -> None:
                 owner_user=team_launcher.current_user_name(),
                 owner_home=root,
                 board_root=board_root,
-                source_repo=source_repo,
+                source_repo=root / "obsolete-source",
+                commit_git_dir="/srv/git/obsolete-cache.git",
             ),
             provision_dir,
             enable_owner_linger=False,
@@ -471,12 +472,16 @@ def test_switchyard_upgrade_reports_tenant_release_update_command() -> None:
                     config,
                     config_path=config_path,
                     source_repo=source_repo,
+                    commit_git_dir="/srv/git/review-cache.git",
                     deploy_ref="origin/main",
                 )
                 == 0
             )
 
         rendered = stdout.getvalue()
+        updated_plan = json.loads((provision_dir / "plan.json").read_text(encoding="utf-8"))
+        updated_unit = (provision_dir / "otto-ticket-board.service").read_text(encoding="utf-8")
+        updated_commands = (provision_dir / "operator-commands.sh").read_text(encoding="utf-8")
 
     assert f"old: {old_sha} at {old_release}" in rendered
     assert f"new: {target_sha} from origin/main" in rendered
@@ -490,12 +495,18 @@ def test_switchyard_upgrade_reports_tenant_release_update_command() -> None:
     assert f"BOARD_ROOT={board_root}" in rendered
     assert "DEPLOY_REF=origin/main" in rendered
     assert f"TICKET_BOARD_PROVISIONED_SYSTEM_UNIT={provision_dir / 'otto-ticket-board.service'}" in rendered
+    assert "TICKET_BOARD_COMMIT_GIT_DIR=/srv/git/review-cache.git" in rendered
     assert f"{source_repo}/scripts/ticket-board-service.sh deploy-restart" in rendered
+    assert updated_plan["source_repo"] == str(source_repo)
+    assert updated_plan["commit_git_dir"] == "/srv/git/review-cache.git"
+    assert "Environment=TICKET_BOARD_COMMIT_GIT_DIR=/srv/git/review-cache.git" in updated_unit
+    assert f"SOURCE_REPO='{source_repo}'" in updated_commands
+    assert "TICKET_BOARD_COMMIT_GIT_DIR='/srv/git/review-cache.git'" in updated_commands
     assert "panes must be restarted after the release update" in rendered
     assert "deploy-restart" in rendered
 
 
-def test_switchyard_upgrade_from_shared_release_prints_clone_first_tenant_deploy_command() -> None:
+def test_switchyard_upgrade_from_shared_release_prints_exact_cache_export_deploy_command() -> None:
     original_shared_root = os.environ.get("SWITCHYARD_SHARED_INSTALL_ROOT")
     original_bare_repo = os.environ.get("SWITCHYARD_BARE_REPO")
     try:
@@ -503,6 +514,14 @@ def test_switchyard_upgrade_from_shared_release_prints_clone_first_tenant_deploy
             root = Path(tmp)
             origin, _source_repo = _make_origin_backed_repo(root)
             target_sha = _run_git(["git", "--git-dir", str(origin), "rev-parse", "refs/heads/main"]).stdout.strip()
+            cache = root / "cache.git"
+            _run_git(["git", "init", "--bare", str(cache)])
+            _run_git(["git", "--git-dir", str(cache), "remote", "add", "origin", str(origin)])
+            _run_git([
+                "git", "--git-dir", str(cache), "config", "remote.origin.fetch",
+                "+refs/heads/*:refs/remotes/origin/*",
+            ])
+            _run_git(["git", "--git-dir", str(cache), "fetch", "origin"])
             shared_root = root / "opt" / "switchyard"
             release = shared_root / "releases" / target_sha
             release.mkdir(parents=True)
@@ -512,7 +531,7 @@ def test_switchyard_upgrade_from_shared_release_prints_clone_first_tenant_deploy
             )
             (shared_root / "current").symlink_to(release)
             os.environ["SWITCHYARD_SHARED_INSTALL_ROOT"] = str(shared_root)
-            os.environ["SWITCHYARD_BARE_REPO"] = str(origin)
+            os.environ["SWITCHYARD_BARE_REPO"] = str(cache)
             old_sha = "1111111111111111111111111111111111111111"
             board_root = root / "otto-ticketboard-live"
             old_release = board_root / "releases" / old_sha
@@ -563,7 +582,8 @@ def test_switchyard_upgrade_from_shared_release_prints_clone_first_tenant_deploy
         assert f"new: {target_sha} from origin/main" in rendered
         assert "matching-release deployment sequence" in rendered
         assert f"TICKET_BOARD_OWNER_HOME={root}" in rendered
-        assert f"git clone {origin} \"$tmpdir\"" in rendered
+        assert f"git --git-dir={cache} archive {target_sha}" in rendered
+        assert f'{{"commit":"{target_sha}"}}' in rendered
         assert 'SOURCE_REPO="$tmpdir"' in rendered
         assert f"BOARD_ROOT={board_root}" in rendered
         assert "DEPLOY_REF=origin/main" in rendered
@@ -581,6 +601,89 @@ def test_switchyard_upgrade_from_shared_release_prints_clone_first_tenant_deploy
         if original_bare_repo is None:
             os.environ.pop("SWITCHYARD_BARE_REPO", None)
         else:
+            os.environ["SWITCHYARD_BARE_REPO"] = original_bare_repo
+
+
+def test_bare_source_cache_resolves_remote_tracking_origin_main_before_stale_local_main() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-origin-main-cache.") as tmp:
+        root = Path(tmp)
+        origin, source_repo = _make_origin_backed_repo(root)
+        stale_sha = _run_git(["git", "rev-parse", "HEAD"], cwd=source_repo).stdout.strip()
+        (source_repo / "tracked.txt").write_text("current\n", encoding="utf-8")
+        _commit_all(source_repo, "current")
+        _run_git(["git", "push", "origin", "HEAD:main"], cwd=source_repo)
+        current_sha = _run_git(["git", "rev-parse", "HEAD"], cwd=source_repo).stdout.strip()
+
+        cache = root / "cache.git"
+        _run_git(["git", "init", "--bare", str(cache)])
+        _run_git(["git", "--git-dir", str(cache), "remote", "add", "origin", str(origin)])
+        _run_git([
+            "git", "--git-dir", str(cache), "config", "remote.origin.fetch",
+            "+refs/heads/*:refs/remotes/origin/*",
+        ])
+        _run_git(["git", "--git-dir", str(cache), "fetch", "origin"])
+        _run_git(["git", "--git-dir", str(cache), "update-ref", "refs/heads/main", stale_sha])
+
+        resolved, error = team_launcher._resolve_deploy_ref_from_bare_repo(cache, "origin/main")
+
+    assert error == ""
+    assert resolved == current_sha
+    assert resolved != stale_sha
+
+
+def test_shared_release_requires_explicit_source_cache_instead_of_data_default() -> None:
+    original_shared_root = os.environ.get("SWITCHYARD_SHARED_INSTALL_ROOT")
+    original_bare_repo = os.environ.pop("SWITCHYARD_BARE_REPO", None)
+    try:
+        with tempfile.TemporaryDirectory(prefix="pgu-switchyard-explicit-cache.") as tmp:
+            root = Path(tmp)
+            shared_root = root / "opt" / "switchyard"
+            release = shared_root / "releases" / ("a" * 40)
+            release.mkdir(parents=True)
+            (release / ".switchyard-release.json").write_text(
+                json.dumps({"commit": "a" * 40}) + "\n",
+                encoding="utf-8",
+            )
+            (shared_root / "current").symlink_to(release)
+            os.environ["SWITCHYARD_SHARED_INSTALL_ROOT"] = str(shared_root)
+            board_root = root / "otto-ticketboard-live"
+            provision_dir = root / "otto" / ".switchyard" / "provision"
+            provision_dir.mkdir(parents=True)
+            team_launcher.write_artifacts(
+                team_launcher.build_plan(
+                    project="otto",
+                    owner_user=team_launcher.current_user_name(),
+                    owner_home=root,
+                    board_root=board_root,
+                    source_repo=release,
+                ),
+                provision_dir,
+                enable_owner_linger=False,
+            )
+            config_path = _write_launcher_config(
+                provision_dir,
+                pane_launcher=shared_root / "current" / "scripts" / "team-launcher",
+            )
+            config = load_project_config("otto", config_path)
+            stdout = StringIO()
+
+            with redirect_stdout(stdout):
+                team_launcher.report_tenant_release_upgrade(
+                    config,
+                    config_path=config_path,
+                    source_repo=release,
+                )
+            rendered = stdout.getvalue()
+
+        assert "require an explicit source cache in SWITCHYARD_BARE_REPO" in rendered
+        assert "matching-release deployment sequence" not in rendered
+        assert "/data/git/switchyard.git" not in rendered
+    finally:
+        if original_shared_root is None:
+            os.environ.pop("SWITCHYARD_SHARED_INSTALL_ROOT", None)
+        else:
+            os.environ["SWITCHYARD_SHARED_INSTALL_ROOT"] = original_shared_root
+        if original_bare_repo is not None:
             os.environ["SWITCHYARD_BARE_REPO"] = original_bare_repo
 
 

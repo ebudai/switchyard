@@ -23,6 +23,7 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
                     "porter",
                     owner_user=current_user,
                     source_repo=source_repo,
+                    commit_git_dir="/srv/git/review-cache.git",
                     repository=project_repo,
                     output_dir=output_dir,
                     runner=runner,
@@ -62,6 +63,7 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
     assert plan["project"] == "porter"
     assert plan["ticket_prefix"] == "PORTER"
     assert plan["owner_user"] == current_user
+    assert plan["commit_git_dir"] == "/srv/git/review-cache.git"
     assert plan["port"] == 23682
     assert config["project"] == "porter"
     assert config["ticket_prefix"] == "PORTER"
@@ -123,6 +125,8 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
     assert commands.splitlines()[:2] == ["#!/usr/bin/env bash", "set -euo pipefail"]
     assert "Environment=TICKET_BOARD_PROJECT=porter" in board_unit
     assert "Environment=TICKET_BOARD_TICKET_PREFIX=PORTER" in board_unit
+    assert "Environment=TICKET_BOARD_COMMIT_GIT_DIR=/srv/git/review-cache.git" in board_unit
+    assert "TICKET_BOARD_COMMIT_GIT_DIR='/srv/git/review-cache.git'" in commands
     assert f"team-launcher: dry-run for porter; artifacts in {output_dir}" in rendered
     assert "  sudo -v\n" in rendered
     assert "  bash operator-commands.sh\n" in rendered

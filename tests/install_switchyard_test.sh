@@ -199,13 +199,13 @@ grep -q "shared target is not executable: $shared_root/current/switchyard" <<<"$
     echo "$missing_output" >&2
     exit 1
 }
-grep -Fq 'recover from a fresh clone of the bare repo with:' <<<"$missing_output" || {
-    echo "FAIL: missing target error did not describe bare-repo recovery" >&2
+grep -Fq 'recover from a fresh clone of the canonical GitHub repository with:' <<<"$missing_output" || {
+    echo "FAIL: missing target error did not describe canonical GitHub recovery" >&2
     echo "$missing_output" >&2
     exit 1
 }
-grep -Fq 'git clone /data/git/switchyard.git "$tmpdir"' <<<"$missing_output" || {
-    echo "FAIL: missing target recovery command did not clone the bare repo" >&2
+grep -Fq 'git clone https://github.com/ebudai/switchyard.git "$tmpdir"' <<<"$missing_output" || {
+    echo "FAIL: missing target recovery command did not clone the canonical GitHub repository" >&2
     echo "$missing_output" >&2
     exit 1
 }
@@ -219,6 +219,11 @@ grep -Fq '"$tmpdir/scripts/install-switchyard" --apply' <<<"$missing_output" || 
     echo "$missing_output" >&2
     exit 1
 }
+if grep -Fq "/data/git/" <<<"$missing_output"; then
+    echo "FAIL: missing target recovery command must not reference the local cache" >&2
+    echo "$missing_output" >&2
+    exit 1
+fi
 if grep -Fq "/home/" <<<"$missing_output"; then
     echo "FAIL: missing target recovery command must not reference any user's home" >&2
     echo "$missing_output" >&2

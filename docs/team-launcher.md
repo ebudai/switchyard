@@ -103,13 +103,13 @@ Switchyard is installed as immutable host-level releases under
 `/opt/switchyard`, with `/opt/switchyard/current` as the active symlink and
 `/usr/local/bin/switchyard` as a small wrapper to
 `/opt/switchyard/current/switchyard`. Run the installer from a fresh clone of
-the bare repository, not from the active release or a standing operator checkout,
+the canonical GitHub repository, not from the active release or a standing operator checkout,
 so a bad release cannot remove the tool used to fix it and recovery does not
 depend on traversing a user's home directory. The privileged host step is:
 
 ```bash
 tmpdir="$(mktemp -d)"
-git clone /data/git/switchyard.git "$tmpdir"
+git clone https://github.com/ebudai/switchyard.git "$tmpdir"
 sudo env \
   SWITCHYARD_SOURCE_REPO="$tmpdir" \
   SWITCHYARD_SOURCE_REF=<audited-commit> \
@@ -133,7 +133,7 @@ That plain symlink operation does not depend on the active release. The
 installed wrapper embeds fallback help and version text so `switchyard --help`
 and `switchyard --version` still work when `current` is missing or broken;
 mutating commands fail with a recovery command that clones
-`/data/git/switchyard.git` and runs that clone's installer. `SWITCHYARD_TARGET`
+`https://github.com/ebudai/switchyard.git` and runs that clone's installer. `SWITCHYARD_TARGET`
 is accepted only for non-privileged
 direct execution. Privileged commands and root execution always use the compiled
 `/opt/switchyard/current/switchyard` target, so the override cannot become a
@@ -293,12 +293,19 @@ is a clean no-op.
 checks the provisioned tenant board release. For generated projects whose pane
 launcher comes from `<project>-ticketboard-live/current`, it reports the old
 deployed release, resolves the target release ref (default `origin/main`), and
-prints the privileged `ticket-board-service.sh deploy` command an operator can
-run to advance the tenant's `current` symlink. Running it again after that
-deploy reports the release unchanged. The command deliberately does not restart
-the board service or any panes; panes must be restarted after a release update
-to pick up hook installer, hook binary, or pane launcher changes because hook
-installation runs at pane launch.
+prints the ordered listener/unit/`deploy-restart` commands an operator can run
+to advance the tenant's `current` symlink. An installed shared release has no
+implicit source repository: select a fetch cache with `SWITCHYARD_BARE_REPO`,
+or pass a GitHub checkout with `--source-repo`. A normal fetch cache resolves
+`origin/main` from `refs/remotes/origin/main`, ahead of any stale local `main`.
+Its `remote.origin.fetch` must map GitHub branches to
+`refs/remotes/origin/*`; refresh it with `git --git-dir=<cache> fetch --prune origin`.
+
+`--source-repo` and `--commit-git-dir` replace and persist those choices in
+the generated plan, units, and operator commands. With no option, upgrade
+preserves the recorded values. Running upgrade again after deployment reports
+the release unchanged. Panes still need a separate restart after a release
+update to pick up hook installer, hook binary, or pane launcher changes.
 
 Resume records are preflighted against each CLI's local transcript store before
 the launcher passes them to the CLI. Claude uses the recorded

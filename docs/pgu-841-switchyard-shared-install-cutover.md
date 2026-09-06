@@ -1,5 +1,10 @@
 # PGU-841 Switchyard Shared Install Cutover Plan
 
+> Historical cutover record. GitHub is now canonical; current installation,
+> source-cache, and recovery guidance is in
+> [the director handoff](switchyard-director-handoff.md) and
+> [the team launcher guide](team-launcher.md).
+
 This plan intentionally separates installation from live repointing. Build and
 canary `/opt/switchyard` first; then repoint each live surface only in an
 approved maintenance window.

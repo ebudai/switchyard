@@ -112,3 +112,28 @@ map unchanged. The setting can only decide which callers are allowed past the
 HTTP route check; PostgreSQL `workflow_transitions.allowed_roles` remains the
 authority for ticket state changes, so the env map cannot grant a transition
 the workflow table rejects.
+
+## Switchyard source commit verification
+
+The `syrd` provisioning control repo has unrelated seed history and cannot
+verify Switchyard source commits. Select the GitHub fetch cache explicitly
+when provisioning it:
+
+    switchyard new ... --commit-git-dir /path/to/switchyard-source-cache.git
+
+The standalone renderer accepts the same `--commit-git-dir` option. The value
+is persisted in `plan.json`, the board unit, and operator commands. `add-role`
+and `set-vcs-close-role` preserve it. To repair or change an existing tenant,
+use `switchyard upgrade <project> --commit-git-dir <path>`; this refreshes the
+generated plan and units and includes the same value in the printed deployment
+command. With no option, upgrade preserves the recorded selection.
+
+There is no implicit `/data` source choice for new SYRD or `switchyard` tenants.
+Legacy PGU, MEFP, and Otto compatibility mappings remain until their archive
+dependencies are retired separately. The selected cache must fetch GitHub
+feature branches before audit submission so the server can resolve their commits.
+The write client separately requires the submitted commit to be pushed to the
+caller's `origin`; run it from the real source checkout. Test that a fetched
+feature-branch commit is accepted and a nonexistent hash is rejected. Keep
+permissions and audit gates intact; GitHub publication and cache refresh are
+director/operator actions.

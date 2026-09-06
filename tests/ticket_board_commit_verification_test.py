@@ -49,6 +49,16 @@ def main() -> int:
         project_commit = make_repo(project_repo, "project")
         other_commit = make_repo(other_repo, "other")
 
+        # Model a read-only GitHub cache: a new feature commit is unavailable
+        # until the cache fetches it, and need not be merged into main for audit.
+        cache_repo = root / "github-cache.git"
+        git(["clone", "--bare", "--no-local", str(project_repo), str(cache_repo)], root)
+        git(["switch", "-c", "feature/syrd-6"], project_repo)
+        (project_repo / "feature.txt").write_text("reviewed feature\n", encoding="utf-8")
+        git(["add", "feature.txt"], project_repo)
+        git(["commit", "-m", "Feature awaiting audit"], project_repo)
+        feature_commit = git(["rev-parse", "HEAD"], project_repo)
+
         data_dir = root / "pgdata"
         socket_dir = root / "socket"
         frames = root / "frames"
@@ -93,9 +103,17 @@ def main() -> int:
             app = t.TicketBoardApp(
                 frames,
                 assets,
-                commit_git_dir=project_repo,
+                commit_git_dir=cache_repo,
                 database_url=t.conninfo(socket_dir, port, dbname, t.SERVICE_ROLE),
             )
+            try:
+                app._validate_commit_hash(feature_commit)
+                raise AssertionError("unfetched feature commit was accepted")
+            except ValueError as exc:
+                assert f"unknown commit_hash: {feature_commit}" in str(exc), exc
+            git_bare(["fetch", "origin", "refs/heads/feature/syrd-6:refs/remotes/origin/feature/syrd-6"], cache_repo)
+            assert git_bare(["rev-parse", "HEAD"], cache_repo) == project_commit
+            assert app._validate_commit_hash(feature_commit[:12]) == feature_commit
             server = t.TicketBoardServer(
                 ("127.0.0.1", 0),
                 app,
@@ -138,10 +156,10 @@ def main() -> int:
                 accepted = t.post_json(
                     base_url,
                     "/api/tickets/PGU-87103/actions/submit_to_audit",
-                    {"commit_hash": project_commit[:12]},
+                    {"commit_hash": feature_commit[:12]},
                     caller="perf",
                 )
-                assert accepted["ticket"]["commit_hash"] == project_commit, accepted
+                assert accepted["ticket"]["commit_hash"] == feature_commit, accepted
                 assert (
                     t.psql(admin_conn, "SELECT state || ':' || commit_hash FROM ticket_board.tickets WHERE id = 'PGU-87101';")
                     == "in_progress:"

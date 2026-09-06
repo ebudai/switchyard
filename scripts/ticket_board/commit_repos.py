@@ -10,7 +10,6 @@ LEGACY_PROJECT_COMMIT_REPOS: dict[str, tuple[Path, ...]] = {
     "pgu": (Path("/data/git/switchyard.git"), Path("/data/git/pgu.git")),
     "mefp": (Path("/data/git/stellaris-fixpatch.git"),),
     "otto": (Path("/data/git/otto_scheduler.git"),),
-    "switchyard": (Path("/data/git/switchyard.git"),),
 }
 
 

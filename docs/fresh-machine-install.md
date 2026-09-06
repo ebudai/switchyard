@@ -3,7 +3,7 @@
 From a fresh clone, install Switchyard with one command:
 
 ```bash
-git clone <repo> switchyard
+git clone https://github.com/ebudai/switchyard.git switchyard
 cd switchyard
 sudo ./install
 ```

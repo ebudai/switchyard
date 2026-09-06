@@ -1,11 +1,10 @@
 # Contributing
 
-The public GitHub repository is a read-only mirror. Development and review
-happen in a private canonical repository, so pull requests opened on GitHub are
-closed automatically.
+[GitHub](https://github.com/ebudai/switchyard) is the canonical Switchyard
+repository. Open pull requests there for development and review.
 
-If you want to discuss a change, contact the maintainer through the same route
-that pointed you to this mirror before preparing a pull request.
+Describe the problem, the resulting behavior, and relevant validation in your
+pull request. Changes require review before a maintainer merges them.
 
 Contributions are accepted only on terms that preserve the project owner's
 ability to maintain, distribute, relicense, and offer alternate licenses for

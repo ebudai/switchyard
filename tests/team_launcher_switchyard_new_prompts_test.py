@@ -418,6 +418,7 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
                     agent_name="otto-agent",
                     project_name="Porter System",
                     source_repo=source_repo,
+                    commit_git_dir="/srv/git/review-cache.git",
                     role_clis=LEGACY_SWITCHYARD_ROLE_CLIS,
                     yes=True,
                     allow_existing_owner_user=True,
@@ -466,6 +467,7 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
         assert registry_pointer["slug"] == "porter"
         assert artifact["project"]["roles"] == ["ops", "app", "main"]
         assert plan["implementer_roles"] == ["ops", "app", "main"]
+        assert plan["commit_git_dir"] == "/srv/git/review-cache.git"
         assert config["pane_launcher"] == expected_pane_launcher
         assert [role["role"] for role in config["roles"]] == ["designer", "director", "audit", "ops", "app", "main"]
         assert designer_env["SWITCHYARD_PROJECT_ARTIFACT"] == str(project_dir / ".switchyard" / "porter.project.json")

@@ -3,12 +3,15 @@
 Switchyard coordinates local multi-role project work through a shared ticket
 board, role launchers, repository policy hooks, and install/deploy helpers.
 
+[GitHub](https://github.com/ebudai/switchyard) is the canonical repository.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for pull requests and contribution terms.
+
 ## From Clone To Installed Command
 
 Start with a fresh clone, then run the one installer command:
 
 ```bash
-git clone <repo> switchyard
+git clone https://github.com/ebudai/switchyard.git switchyard
 cd switchyard
 sudo ./install
 ```

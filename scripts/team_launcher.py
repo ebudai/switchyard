@@ -10548,10 +10548,16 @@ def switchyard_seed_role_credentials_command(
         raise SystemExit(f"switchyard: {config.project} has no role {role_name}")
     seeded = 0
     for role in roles:
-        account = role_run_as_user(config, role)
+        # Seeding is preparation, and preparation happens BEFORE the active
+        # configuration names the accounts -- naming them early is what breaks
+        # the running roles. The pending plan is what says where to seed
+        # (SYRD-45).
+        identity = pending_identity_for(config, role)
+        account = identity.get("account", "")
         if not account or account == owner_user:
             print_func(f"switchyard: {role.role} has no Unix account of its own; nothing to seed")
             continue
+        role_home = Path(identity.get("home") or "") if identity.get("home") else None
         cli_name = _command_name(role.cli[0]) if role.cli else ""
         artifacts = role_credential_artifacts(role)
         if not artifacts:
@@ -10565,7 +10571,9 @@ def switchyard_seed_role_credentials_command(
                 account=account,
                 owner_user=owner_user,
                 artifact=artifact,
-                target=_role_credential_target(config, role, artifact, home_base=home_base),
+                target=_role_credential_target(
+                    config, role, artifact, home_base=home_base, account=account, role_home=role_home
+                ),
                 home_base=home_base,
                 reseed=reseed,
                 runner=runner,
@@ -10967,6 +10975,8 @@ def _role_credential_target(
     artifact: RoleCredentialArtifact,
     *,
     home_base: Path | None = None,
+    account: str = "",
+    role_home: Path | None = None,
 ) -> tuple[Path, Path]:
     """(base, relative) for where a role reads one credential.
 
@@ -10974,10 +10984,13 @@ def _role_credential_target(
     the per-role HERMES_HOME the launcher already points it at, so its target is
     resolved per role rather than assumed to mirror the owner's layout.
     """
-    account = role_run_as_user(config, role)
-    role_home = (
-        home_base / account if home_base is not None else home_dir_for_user(account) or Path("/home") / account
-    )
+    account = account or role_run_as_user(config, role)
+    if role_home is None or home_base is not None:
+        role_home = (
+            home_base / account
+            if home_base is not None
+            else home_dir_for_user(account) or Path("/home") / account
+        )
     if artifact.cli == "hermes":
         # Always expressed relative to the role's home so every component is
         # created and anchored under it, whatever base is in use.
@@ -12755,7 +12768,11 @@ def render_role_account_migration(config: ProjectConfig) -> str:
                 roles_group=group,
                 account=account,
                 home=f"/home/{account}",
-                worktree=role.workdir,
+                # Deliberately not the worktree. Handing a tree to the new
+                # account while the old one is still working in it takes write
+                # access away from a live implementer mid-task; ownership moves
+                # inside the cutover, after the workers are stopped (SYRD-45).
+                worktree="",
             )
         )
     lines.append(
@@ -12806,6 +12823,106 @@ UPGRADE_PHASES: tuple[tuple[str, str, str], ...] = (
     ("activate", "operator", "install the per-role authority table and deploy the matching release"),
 )
 UPGRADE_PHASE_OWNERS = {name: owner for name, owner, _detail in UPGRADE_PHASES}
+
+
+PENDING_IDENTITIES_SCHEMA = "switchyard.pending-identities.v1"
+
+
+def pending_identities_path(config: ProjectConfig) -> Path:
+    """Root's record of the accounts a tenant is moving onto, before it moves.
+
+    Preparation -- creating accounts and homes, staging tooling, seeding
+    credentials -- has to know the accounts before the active configuration
+    names them, because naming them early is what breaks the running roles. The
+    plan is root's, so preparation reads an identity list the tenant did not
+    write (SYRD-45).
+    """
+    return privileged_provision_dir(
+        config.project, root=switchyard_privileged_provision_root()
+    ) / "pending-identities.json"
+
+
+def canonical_role_identities(config: ProjectConfig) -> dict[str, dict[str, str]]:
+    """The accounts, homes and worktrees this tenant's roles will move onto."""
+    owner = config.run_as_user or current_user_name()
+    identities: dict[str, dict[str, str]] = {}
+    for role in config.roles:
+        account = role.run_as_user or role_account_name(config.project, role.role)
+        if not account or account == owner:
+            continue
+        identities[role.role] = {
+            "account": account,
+            "home": str(home_dir_for_user(account) or Path("/home") / account),
+            "worktree": role.workdir,
+        }
+    return identities
+
+
+def write_pending_identities(config: ProjectConfig) -> dict[str, dict[str, str]]:
+    """Publish the pending plan where only root can write it."""
+    identities = canonical_role_identities(config)
+    if os.geteuid() != 0:
+        return identities
+    path = pending_identities_path(config)
+    payload = {
+        "schema": PENDING_IDENTITIES_SCHEMA,
+        "project": config.project,
+        "owner": config.run_as_user or current_user_name(),
+        "roles": identities,
+    }
+    try:
+        for directory in (*reversed(path.parent.parents), path.parent):
+            if not directory.exists():
+                directory.mkdir(mode=0o755)
+        staged = path.with_name(f".{path.name}.new")
+        descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+        try:
+            os.write(descriptor, (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+            os.fchmod(descriptor, 0o644)
+            try:
+                os.fchown(descriptor, 0, 0)
+            except OSError:
+                pass
+        finally:
+            os.close(descriptor)
+        staged.replace(path)
+    except OSError as exc:
+        print(f"switchyard: could not record {config.project} pending identities: {exc}", file=sys.stderr)
+    return identities
+
+
+def read_pending_identities(config: ProjectConfig) -> dict[str, dict[str, str]]:
+    """Root's pending plan, or the canonical derivation when none is recorded."""
+    try:
+        payload = json.loads(pending_identities_path(config).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return canonical_role_identities(config)
+    if str(payload.get("schema") or "") != PENDING_IDENTITIES_SCHEMA:
+        return canonical_role_identities(config)
+    roles = payload.get("roles")
+    if not isinstance(roles, dict):
+        return canonical_role_identities(config)
+    return {
+        str(role): {
+            "account": str(entry.get("account") or ""),
+            "home": str(entry.get("home") or ""),
+            "worktree": str(entry.get("worktree") or ""),
+        }
+        for role, entry in roles.items()
+        if isinstance(entry, dict) and str(entry.get("account") or "")
+    }
+
+
+def pending_identity_for(config: ProjectConfig, role: RoleConfig) -> dict[str, str]:
+    """The account a role runs as now, or the one it is being prepared for."""
+    owner = config.run_as_user or current_user_name()
+    if role.run_as_user and role.run_as_user != owner:
+        return {
+            "account": role.run_as_user,
+            "home": str(home_dir_for_user(role.run_as_user) or Path("/home") / role.run_as_user),
+            "worktree": role.workdir,
+        }
+    return read_pending_identities(config).get(role.role, {})
 
 
 @dataclass(frozen=True)
@@ -13375,6 +13492,10 @@ def upgrade_project_command(
     repair_repository_policy_hooks(
         config_path, source_repo=effective_source_repo, dry_run=dry_run, print_func=print_func,
     )
+    if not dry_run:
+        # Preparation needs the accounts before the active configuration names
+        # them, and it must not read that list from the tenant (SYRD-45).
+        write_pending_identities(config)
     record_upgrade_phase(config, config_path=config_path, phase="artifacts", state="done", dry_run=dry_run)
 
     accounts_ready = _role_accounts_ready(config)
@@ -13522,6 +13643,25 @@ def _role_accounts_ready(config: ProjectConfig) -> bool:
     return bool(candidates) and all(local_account_exists(account) for account in candidates)
 
 
+def _worktree_ownership(config: ProjectConfig) -> dict[str, tuple[int, int]]:
+    """Who owns each role's tree right now, so it can be put back exactly."""
+    owners: dict[str, tuple[int, int]] = {}
+    for role in config.roles:
+        path = Path(role.workdir)
+        try:
+            info = os.stat(path, follow_symlinks=False)
+        except OSError:
+            continue
+        owners[str(path)] = (info.st_uid, info.st_gid)
+    return owners
+
+
+def _chown_tree(
+    path: str, spec: str, *, runner: Callable[..., subprocess.CompletedProcess[Any]]
+) -> bool:
+    return runner(["chown", "-R", spec, path], stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode == 0
+
+
 def cutover_role_identities_command(
     config: ProjectConfig,
     *,
@@ -13533,15 +13673,15 @@ def cutover_role_identities_command(
     proc_root: Path | None = None,
     print_func: Callable[[str], None] = print,
 ) -> int:
-    """Move a running tenant onto per-role identities, or leave it where it was.
+    """Move a running tenant onto per-role identities as one transaction.
 
-    Creating the accounts does not move a running worker: the pane keeps the uid
-    it started with, so a tenant whose accounts exist can still be serving every
-    role from the shared account. Installing the authority table then rejects
-    exactly the processes doing the work. The workers therefore have to be
-    quiesced, restarted under their own accounts, reconnected and checked -- and
-    if any of that does not hold, put back the way it was rather than left in
-    between (SYRD-45).
+    Everything that changes what the live workers can do happens between the
+    stop and the verified restart: the worktrees change hands, the
+    configuration names the accounts, the roles come back under them, and every
+    role process's uid is read from the kernel. If any of that does not hold,
+    the trees, the configuration and the workers all go back to what they were
+    -- restoring the configuration alone would leave the old workers running
+    without write access to their own repositories (SYRD-45).
     """
     start = launcher or (
         lambda cfg: launch_project(
@@ -13555,8 +13695,8 @@ def cutover_role_identities_command(
     )
     stop = stopper or (lambda cfg: stop_project(cfg, runner=runner, print_func=print_func))
 
-    ready = _role_accounts_ready(config)
-    if not ready:
+    identities = read_pending_identities(config)
+    if not identities or not _role_accounts_ready(config):
         print_func(
             f"switchyard: {config.project}'s per-role accounts do not all exist yet; run the "
             "role-account artifact first."
@@ -13565,50 +13705,78 @@ def cutover_role_identities_command(
     before = [role.role for role in _running_project_roles(config, runner=runner)]
     if dry_run:
         print_func(
-            f"switchyard: would stop {', '.join(before) or 'no running roles'}, move "
-            f"{config.project}'s configuration onto per-role accounts, restart each role under its "
-            "own account and verify every role process uid before anything authorizes them"
+            f"switchyard: would stop {', '.join(before) or 'no running roles'}, transfer each "
+            f"role's worktree to its own account, move {config.project}'s configuration onto those "
+            "accounts, restart every role under its own account and verify each role process uid "
+            "before anything authorizes them"
         )
         return 0
+
     previous_config = config_path.read_bytes()
+    previous_ownership = _worktree_ownership(config)
     print_func(
         f"switchyard: stopping {', '.join(before) or 'no running roles'} to move {config.project} "
         "onto per-role accounts"
     )
     stop(config)
+
+    # Only now, with nothing running in them, do the trees change hands.
+    ownership_failures: list[str] = []
+    for role in config.roles:
+        identity = identities.get(role.role)
+        if not identity or not Path(role.workdir).exists():
+            continue
+        if not _chown_tree(role.workdir, f"{identity['account']}:", runner=runner):
+            ownership_failures.append(f"{role.role}: could not transfer {role.workdir}")
+
     changed, message = upgrade_role_accounts_in_config(config_path)
     print_func(message)
     if changed:
         config = load_project_config(config.project, config_path)
-    start_result = start(config)
-    identity_gaps = role_process_identity_gaps(config, runner=runner, proc_root=proc_root)
+    start_result = 0 if ownership_failures else start(config)
+    identity_gaps = (
+        role_process_identity_gaps(config, runner=runner, proc_root=proc_root)
+        if not ownership_failures
+        else []
+    )
     restarted = [role.role for role in _running_project_roles(config, runner=runner)]
     missing_workers = [role for role in before if role not in restarted]
-    if start_result != 0 or identity_gaps or missing_workers:
-        print_func(
-            f"switchyard: rolling {config.project} back to the project account: "
-            + "; ".join(
-                [f"launch exited {start_result}"] * (1 if start_result else 0)
-                + identity_gaps
-                + [f"{role} did not come back" for role in missing_workers]
-            )
+    if ownership_failures or start_result != 0 or identity_gaps or missing_workers:
+        reasons = (
+            ownership_failures
+            + ([f"launch exited {start_result}"] if start_result else [])
+            + identity_gaps
+            + [f"{role} did not come back" for role in missing_workers]
         )
+        print_func(f"switchyard: rolling {config.project} back: " + "; ".join(reasons))
         stop(config)
+        restored: list[str] = []
+        for path, (uid, gid) in previous_ownership.items():
+            if not _chown_tree(path, f"{uid}:{gid}", runner=runner):
+                restored.append(f"could not restore ownership of {path}")
         config_path.write_bytes(previous_config)
         config = load_project_config(config.project, config_path)
+        # The generated authority projection follows the configuration back, so
+        # nothing is left describing identities the tenant is not using.
+        refresh_generated_project_runtime_artifacts(
+            config, config_path=config_path, runner=runner, print_func=print_func
+        )
         rollback_result = start(config)
         record_upgrade_phase(
-            config,
-            config_path=config_path,
-            phase="identities",
-            state="rolled back",
-            detail="; ".join(identity_gaps + [f"{role} did not come back" for role in missing_workers]),
+            config, config_path=config_path, phase="identities", state="rolled back",
+            detail="; ".join(reasons + restored),
         )
+        if restored:
+            print_func(
+                "switchyard: the rollback could not put every worktree back: "
+                + "; ".join(restored)
+                + ". Those trees must be returned to the project account before the roles can write."
+            )
         if rollback_result != 0:
             print_func(
                 f"switchyard: {config.project} could not be restarted after the rollback (exit "
-                f"{rollback_result}); its configuration is back on the project account and "
-                f"`switchyard {config.project}` will start it."
+                f"{rollback_result}); its configuration and worktrees are back on the project "
+                f"account and `switchyard {config.project}` will start it."
             )
         return 1
     print_func(
@@ -13617,7 +13785,7 @@ def cutover_role_identities_command(
     )
     record_upgrade_phase(
         config, config_path=config_path, phase="identities", state="done",
-        detail=f"verified {len(restarted)} role process uid(s)",
+        detail=f"verified {len(restarted)} role process uid(s) and {len(previous_ownership)} worktree(s)",
     )
     return 0
 

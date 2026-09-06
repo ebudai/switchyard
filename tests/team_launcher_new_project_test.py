@@ -899,12 +899,18 @@ def test_upgrade_gives_an_existing_shared_uid_tenant_per_role_accounts() -> None
         changed_again, _ = team_launcher.upgrade_role_accounts_in_config(config_path)
         assert not changed_again
 
-        # And the operator artifact moves ownership of what each role uses.
+        # The operator artifact creates each role's account and everything it
+        # needs -- but deliberately NOT its worktree. SYRD-45: handing the tree
+        # over while the old account is still working in it takes write access
+        # from a live implementer mid-task, so ownership moves inside the
+        # cutover, after the workers are stopped.
         migration = team_launcher.render_role_account_migration(upgraded)
         for role in upgraded.roles:
             account = f"porter-{role.role}"
             assert f"if ! getent passwd '{account}'" in migration, role.role
-            assert f"sudo chown -R '{account}': '{role.workdir}'" in migration, role.role
+            assert f"sudo install -d -m 0700 -o '{account}'" in migration, role.role
+            assert role.workdir not in migration, role.role
+        assert "switchyard cutover-roles porter" in migration
         assert "visudo -c" in migration
         assert "systemctl restart porter-ticket-board.service" in migration
 
@@ -1641,9 +1647,13 @@ def test_fresh_provisioning_emits_one_complete_handoff() -> None:
         body = handoff.read_text(encoding="utf-8")
         assert any(str(handoff) in line for line in printed), printed
 
-    # Accounts, ownership, tooling and seeding are all in the one artifact.
+    # Accounts, homes, tooling and seeding are all in the one artifact, and the
+    # worktree handover is not: SYRD-45 moves that inside the cutover, after the
+    # workers are stopped, so a live role does not lose write access mid-task.
     assert "getent passwd 'porter-director'" in body
-    assert "chown -R 'porter-director':" in body
+    assert "install -d -m 0700 -o 'porter-director'" in body
+    assert "chown -R 'porter-director':" not in body
+    assert "switchyard cutover-roles porter" in body
     assert "ticket-board-install-pane-hooks' install --home '/home/porter-director'" in body
     assert "switchyard seed-role-credentials porter" in body
     assert "systemctl restart porter-ticket-board.service" in body

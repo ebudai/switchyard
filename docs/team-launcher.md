@@ -229,14 +229,31 @@ provisioned project is the other case -- it names its accounts before the
 operator creates them and has nothing running -- so it is left as provisioned
 and simply waits.
 
+**Preparation reads a plan the tenant did not write.** Credentials, homes and
+tooling have to be prepared for accounts the active configuration does not name
+yet -- naming them early is what breaks the running roles. Root records the
+pending accounts, homes and worktrees at
+`/etc/switchyard/provision/<project>/pending-identities.json`, and preparation
+targets that. `switchyard seed-role-credentials` therefore seeds into the
+canonical role homes while the tenant is still running as the project account.
+
+**Nothing changes hands before the workers stop.** The preparation artifact
+creates accounts, homes, runtime paths, tooling and credentials, and
+deliberately does *not* chown any worktree: handing a tree to the new account
+while the old one is still working in it takes write access from a live
+implementer mid-task. Ownership moves inside the cutover, after the quiesce.
+
 **Creating the accounts does not move a running worker.** A pane keeps the uid
 it started with, so a tenant whose accounts all exist can still be serving every
 role from the shared account -- and installing the authority table then rejects
 exactly the processes doing the work. `cutover-roles` therefore stops the roles,
 moves the configuration, restarts them under their own accounts, reconnects the
 presentation and reads back the uid each role's process is *actually* running as
-from the kernel. If any of that does not hold it puts the configuration back and
-restarts the roles as they were, and records the rollback. Account existence is
+from the kernel. If any of that does not hold it puts the worktrees back to the uid
+and gid they had, restores the configuration, re-renders the generated authority
+projection and restarts the roles as they were, then records the rollback --
+restoring the file alone would leave the old workers running without write
+access to their own repositories. Account existence is
 never taken as evidence of process identity.
 
 **A board that cannot accept the migration is not the director having nothing to

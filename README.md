@@ -62,6 +62,7 @@ Commands:
   present          map persistent role sessions into stable display slots at runtime
   set-vcs-close-role
                    set which existing project role can mark tickets done
+  set-role-runtime change an existing role's agent runtime and reconnect its panes
   agy-credential   show, set, or clear this host's agy credential source
   role-prompt      show, set, or clear a role's onboarding prompt
   stop             stop a project's configured tmux pane sessions
@@ -69,7 +70,7 @@ Commands:
   status           list registered projects and pane liveness
   validate-models  check configured role models without starting panes
 
-Bare project names start or attach the project. Recognized commands: board-skill, new, register, upgrade, add-role, present, set-vcs-close-role, agy-credential, seed-role-credentials, role-prompt, stop, teardown, status, validate-models.
+Bare project names start or attach the project. Recognized commands: board-skill, new, register, upgrade, add-role, present, set-vcs-close-role, set-role-runtime, agy-credential, seed-role-credentials, role-prompt, stop, teardown, status, validate-models.
 ```
 <!-- switchyard-help:end -->
 

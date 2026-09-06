@@ -155,6 +155,7 @@ SWITCHYARD_COMMANDS = (
     "add-role",
     "present",
     "set-vcs-close-role",
+    "set-role-runtime",
     "agy-credential",
     "seed-role-credentials",
     "role-prompt",
@@ -168,7 +169,9 @@ SWITCHYARD_COMMANDS = (
 # writes the tenant's own configuration through the board's workflow API as the
 # invoking user, which is the point: the director sets a role's remit without root
 # and without hand-editing a generated artifact.
-SWITCHYARD_UNPRIVILEGED_COMMANDS = frozenset({"present", "board-skill", "role-prompt"})
+SWITCHYARD_UNPRIVILEGED_COMMANDS = frozenset(
+    {"present", "board-skill", "role-prompt", "set-role-runtime"}
+)
 SWITCHYARD_PRIVILEGED_COMMANDS = frozenset(
     command for command in SWITCHYARD_COMMANDS if command not in SWITCHYARD_UNPRIVILEGED_COMMANDS
 )
@@ -13799,6 +13802,68 @@ def _build_switchyard_status_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_switchyard_set_role_runtime_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="switchyard set-role-runtime",
+        description="Change an existing role's agent runtime and reconnect the panes showing it.",
+    )
+    parser.add_argument("project", help="registered project name or slug")
+    parser.add_argument("role", help="existing role whose runtime changes")
+    parser.add_argument(
+        "--cli",
+        required=True,
+        choices=sorted(SUPPORTED_CONFIG_CLI_NAMES),
+        help="agent runtime the role should run from now on",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="switch even though the role is mid-turn; requires --reason",
+    )
+    parser.add_argument("--reason", default="", help="why a busy role was interrupted; recorded with the change")
+    parser.add_argument("--dry-run", action="store_true", help="run every check, change nothing")
+    return parser
+
+
+def set_project_role_runtime_command(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    role_name: str,
+    runtime: str,
+    force: bool = False,
+    reason: str = "",
+    dry_run: bool = False,
+    pane_state_dir: Path | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    from scripts import role_runtime
+
+    result = role_runtime.switch_role_runtime(
+        config,
+        config_path=config_path,
+        role_name=role_name,
+        runtime=runtime,
+        force=force,
+        reason=reason,
+        dry_run=dry_run,
+        pane_state_dir=pane_state_dir,
+        runner=runner,
+        print_func=print_func,
+    )
+    if dry_run and result.configured_changed:
+        print_func(
+            f"switchyard: would move {result.role} from {result.previous_runtime} to {result.runtime}; "
+            "every check passed and nothing was changed"
+        )
+        return 0
+    print_func(result.describe())
+    if result.forced and result.reason:
+        print_func(f"switchyard: forced past a busy role: {result.reason}")
+    return 0
+
+
 def _build_switchyard_present_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="switchyard present",
@@ -13876,6 +13941,7 @@ Commands:
   present          map persistent role sessions into stable display slots at runtime
   set-vcs-close-role
                    set which existing project role can mark tickets done
+  set-role-runtime change an existing role's agent runtime and reconnect its panes
   agy-credential   show, set, or clear this host's agy credential source
   role-prompt      show, set, or clear a role's onboarding prompt
   stop             stop a project's configured tmux pane sessions
@@ -14120,6 +14186,19 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         if args.prompt_file is not None:
             forwarded += ["--prompt-file", str(args.prompt_file)]
         return workflow_manage.main(forwarded)
+    if argv[0].casefold() == "set-role-runtime":
+        args = _build_switchyard_set_role_runtime_parser().parse_args(argv[1:])
+        entry = _resolve_switchyard_project(args.project)
+        config = _load_switchyard_project_config_for_command(entry, argv)
+        return set_project_role_runtime_command(
+            config,
+            config_path=entry.config_path,
+            role_name=args.role,
+            runtime=args.cli,
+            force=args.force,
+            reason=args.reason,
+            dry_run=args.dry_run,
+        )
     if argv[0].casefold() == "present":
         args = _build_switchyard_present_parser().parse_args(argv[1:])
         entry = _resolve_switchyard_project(args.project)

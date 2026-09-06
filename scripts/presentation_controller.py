@@ -757,6 +757,66 @@ def _actual_proxy_role(
     return actual, "connected"
 
 
+def slots_showing_role(
+    config: team_launcher.ProjectConfig,
+    *,
+    config_path: Path,
+    role_name: str,
+    state_path: Path | None = None,
+) -> tuple[int, ...]:
+    """Display slots currently mapped to ``role_name``, in slot order.
+
+    A detached role, or one nobody is showing, yields an empty tuple; callers
+    use that to distinguish "nothing to reconnect" from "reconnect failed".
+    """
+    state_path = state_path or presentation_state_path(config, config_path=config_path)
+    state = _read_state(state_path, config=config, config_path=config_path)
+    return tuple(
+        slot
+        for slot in range(state["slot_count"])
+        if state["slots"].get(str(slot)) == role_name
+    )
+
+
+def reconnect_role_slots(
+    config: team_launcher.ProjectConfig,
+    *,
+    config_path: Path,
+    role_name: str,
+    state_path: Path | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> tuple[int, ...]:
+    """Re-attach the display slots showing ``role_name`` to its live session.
+
+    A slot's proxy is an attach to a worker session. When that session is
+    replaced -- a runtime switch, a crash and restart -- the proxy's own
+    session-closed hook parks it on a recovery message, and nothing re-attaches
+    it afterwards: the operator is left looking at a blank pane while the
+    replacement worker runs perfectly well behind it.
+
+    Call this only once the replacement session is proven live. Reconnecting
+    into the gap between kill and start attaches the proxy to nothing, which
+    parks it again for the same reason.
+    """
+    _validate_role_namespace(config)
+    state_path = state_path or presentation_state_path(config, config_path=config_path)
+    owner_runner = _tmux_runner(config, runner)
+    slots = slots_showing_role(config, config_path=config_path, role_name=role_name, state_path=state_path)
+    if not slots:
+        return ()
+    presentation_ttys = _presentation_client_ttys(config, _slot_count(config, config_path, state_path), runner=owner_runner)
+    for slot in slots:
+        _configure_display_session(
+            config, slot, role_name, runner=owner_runner, presentation_ttys=presentation_ttys
+        )
+    _reconcile_viewer_observers(config, runner=owner_runner)
+    return slots
+
+
+def _slot_count(config: team_launcher.ProjectConfig, config_path: Path, state_path: Path) -> int:
+    return int(_read_state(state_path, config=config, config_path=config_path)["slot_count"])
+
+
 def presentation_report(
     config: team_launcher.ProjectConfig,
     *,

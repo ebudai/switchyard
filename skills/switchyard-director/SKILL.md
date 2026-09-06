@@ -125,6 +125,13 @@ These reshape the running team rather than a ticket, so they belong to you:
   to regenerate one, and a new visible slot appears only after the project
   window is relaunched.
 - `switchyard set-vcs-close-role <project> <role>` moves the final close.
+- `switchyard set-role-runtime <project> <role> --cli <runtime>` moves an
+  existing role to a different agent CLI, restarts only that worker, and
+  reconnects the display slots showing it. `--dry-run` runs every check and
+  changes nothing. It refuses while the role is mid-turn; `--force` needs
+  `--reason`, which is recorded. If a step fails it undoes the rest and says so,
+  and if it cannot undo them it names what is left and where the repair journal
+  is - so a blank pane is never reported as success.
 - `switchyard present <project> ...` maps role sessions into display slots at
   runtime without touching worker sessions. `list` first, then `show`, `swap`,
   `hide`, `focus`, `restore`, and `recover` for a worker that died.

@@ -141,6 +141,15 @@ ALTER TABLE ticket_board.tickets
     ADD COLUMN IF NOT EXISTS origin_project text NOT NULL DEFAULT '';
 ALTER TABLE ticket_board.tickets
     ADD COLUMN IF NOT EXISTS external_source_ref text NOT NULL DEFAULT '';
+-- SYRD-31: when serial focus redirects a route away from a reserved
+-- implementer, remember which implementer the router actually asked for.
+-- Without it the redirect is indistinguishable from a no-op: the configured
+-- queue destination is the stage the ticket already sat in, so the action
+-- returned the unchanged ticket and the intent was lost.
+ALTER TABLE ticket_board.tickets
+    ADD COLUMN IF NOT EXISTS queued_for_assignee text NOT NULL DEFAULT '';
+ALTER TABLE ticket_board.tickets
+    ADD COLUMN IF NOT EXISTS queued_behind_ticket text NOT NULL DEFAULT '';
 ALTER TABLE ticket_board.tickets
     DROP CONSTRAINT IF EXISTS tickets_state_check;
 ALTER TABLE ticket_board.tickets
@@ -3794,6 +3803,55 @@ DROP TRIGGER IF EXISTS tickets_zzzzx_reset_finish_current_notifications ON ticke
 DROP TRIGGER IF EXISTS tickets_zzzzz_release_implementer ON ticket_board.tickets;
 DROP TRIGGER IF EXISTS ticket_blockers_sync_resolved ON ticket_board.ticket_blockers;
 
+
+CREATE OR REPLACE FUNCTION ticket_board.announce_serial_focus_queue()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    queued jsonb;
+    queued_for text;
+    reserved_by text;
+    actor text;
+    notice text;
+BEGIN
+    queued := nullif(current_setting('ticket_board.serial_focus_queued', true), '')::jsonb;
+    IF queued IS NULL OR queued->>'queued_for' IS NULL THEN
+        RETURN NEW;
+    END IF;
+    -- Clear before writing. append_ticket_comment touches the ticket, which
+    -- re-enters this trigger; the cleared marker makes that pass a no-op.
+    PERFORM set_config('ticket_board.serial_focus_queued', '', true);
+    queued_for := queued->>'queued_for';
+    reserved_by := coalesce(nullif(queued->>'reserved_by', ''), 'active work');
+    actor := coalesce(nullif(ticket_board.current_app_actor(), ''), 'director');
+
+    notice := NEW.id || ' is queued for ' || queued_for || ': serial focus is held by '
+        || reserved_by || '. It is waiting in ' || (queued->>'stage') || '/' || (queued->>'assignee')
+        || '. Route it again once ' || reserved_by || ' leaves that implementer, or route it to a free implementer now.';
+
+    PERFORM ticket_board.append_ticket_comment(NEW.id, actor, notice);
+    PERFORM ticket_board.enqueue_notification(
+        NEW.id,
+        'ticket_update',
+        'director',
+        notice,
+        jsonb_build_object(
+            'kind', 'ticket_update',
+            'id', NEW.id,
+            'state', NEW.state,
+            'assignee', NEW.assignee,
+            'target_role', 'director',
+            'queued_for', queued_for,
+            'reserved_by', reserved_by,
+            'message', notice
+        ),
+        'serial-focus-queued:' || NEW.id || ':' || queued_for || ':' || reserved_by
+    );
+    RETURN NEW;
+END;
+$$;
+
 DROP TRIGGER IF EXISTS tickets_notification_state_insert ON ticket_board.tickets;
 CREATE TRIGGER tickets_notification_state_insert
 AFTER INSERT ON ticket_board.tickets
@@ -3811,6 +3869,12 @@ CREATE TRIGGER tickets_zz_auto_advance_analysis
 AFTER INSERT OR UPDATE ON ticket_board.tickets
 FOR EACH ROW
 EXECUTE FUNCTION ticket_board.auto_advance_analysis_ticket();
+
+DROP TRIGGER IF EXISTS tickets_zzzzzz_serial_focus_queue ON ticket_board.tickets;
+CREATE TRIGGER tickets_zzzzzz_serial_focus_queue
+AFTER UPDATE ON ticket_board.tickets
+FOR EACH ROW
+EXECUTE FUNCTION ticket_board.announce_serial_focus_queue();
 
 CREATE TRIGGER tickets_zzz_notify_transition
 AFTER INSERT OR UPDATE ON ticket_board.tickets
@@ -4237,6 +4301,8 @@ BEGIN
         'origin_project', ticket_row.origin_project,
         'external_source_ref', ticket_row.external_source_ref,
         'blocked_reason', ticket_row.blocked_reason,
+        'queued_for_assignee', ticket_row.queued_for_assignee,
+        'queued_behind_ticket', ticket_row.queued_behind_ticket,
         'implementation', ticket_row.implementation,
         'audit_prompt', ticket_row.audit_prompt,
         'audit_signoff', ticket_row.audit_signoff,
@@ -6550,6 +6616,7 @@ RETURNS ticket_board.tickets LANGUAGE plpgsql AS $$
 DECLARE cfg jsonb:=ticket_board.declared_workflow(); doc jsonb:=to_jsonb(proposed); tr jsonb; source_stage jsonb; dest jsonb;
     action_name text:=current_setting('ticket_board.workflow_action',true); actor text:=ticket_board.current_app_actor(); target text;
     reset text; flag record; owners text[]; fallback text; loops int:=0;
+    queued_for text; reserved_by text;
 BEGIN
     IF actor IS NULL THEN RAISE EXCEPTION 'configured ticket writes require a registered actor' USING ERRCODE='42501'; END IF;
     IF previous.state=proposed.state THEN
@@ -6612,8 +6679,23 @@ BEGIN
     PERFORM ticket_board.require_stage_owner_assignee(proposed.state,proposed.assignee);
     IF dest->>'kind'='implementation' AND ticket_board.ticket_current_reserved_ticket(proposed.assignee,proposed.id) IS NOT NULL AND NOT proposed.manually_controlled THEN
         IF cfg->'queue' IS NULL OR cfg->'queue'='null'::jsonb THEN RAISE EXCEPTION 'implementer already owns reserved work; configure a holding destination'; END IF;
+        queued_for:=proposed.assignee;
+        reserved_by:=ticket_board.ticket_current_reserved_ticket(proposed.assignee,proposed.id);
         proposed.state:=cfg->'queue'->>'stage'; proposed.assignee:=cfg->'queue'->>'assignee';
         PERFORM ticket_board.require_stage_owner_assignee(proposed.state,proposed.assignee);
+        -- Serial focus still holds the ticket, but the outcome is now legible.
+        -- The queue destination is frequently the stage the ticket came from,
+        -- so without these the caller sees an unchanged ticket and a success.
+        proposed.queued_for_assignee:=queued_for;
+        proposed.queued_behind_ticket:=coalesce(reserved_by,'');
+        PERFORM set_config('ticket_board.serial_focus_queued',
+            jsonb_build_object('queued_for',queued_for,'reserved_by',reserved_by,
+                'stage',proposed.state,'assignee',proposed.assignee)::text,true);
+    ELSE
+        -- Any move that is not held clears the marker, so it never outlives the
+        -- reservation that caused it.
+        proposed.queued_for_assignee:='';
+        proposed.queued_behind_ticket:='';
     END IF;
     RETURN proposed;
 END;

@@ -74,12 +74,22 @@ DEFAULT_ROLE_RUNTIMES = {
     "audit": "claude",
     "inspector": "gemini",
 }
-IMMEDIATE_DELIVERY_KINDS = frozenset({"ticket_update"})
+# Nothing bypasses the activity gate any more. A ticket_update used to, on the
+# reasoning that a pane working *this* ticket wants to know it changed. In
+# practice that is precisely the pane mid-turn, and the update landed in a
+# running composer: SYRD-32 saw it as an Inspector reminder, SYRD-46 saw the
+# same delivery interrupt Main mid-implementation. An update is not lost by
+# waiting -- it is requeued and retried once the role is idle.
+IMMEDIATE_DELIVERY_KINDS: frozenset[str] = frozenset()
 # Reminders addressed to the same role they are about. Their whole claim is
 # "you appear idle on this ticket", so observing that role work voids them.
 # 'escalation' is deliberately absent: it goes to the director about someone
 # else's stall, so the director's own pane says nothing about that stall.
 SELF_REMINDER_KINDS = frozenset({"nudge", "idle_reminder"})
+#: A runtime is named one way in the workflow document and another by the hook
+#: source it writes. This is the whole of that vocabulary difference, in one
+#: place, so neither name is special-cased at a decision site.
+HOOK_RUNTIME_NAMES = {"agy": "gemini"}
 DEFAULT_PRE_SEND_RECHECK_DELAY_SECONDS = 0.5
 DEFAULT_DIRECTOR_COMPOSER_HOME_X = 2
 DEFAULT_WORKING_TIMER_SAMPLE_DELAY_SECONDS = 0.0
@@ -1001,27 +1011,24 @@ FROM ticket_board.claim_notification()
         return ComposerSnapshot(False, error="snapshot_unavailable")
 
     def _activity_state_for_notification(self, kind: str, target: str, *, pre_send_recheck: bool = False) -> tuple[bool, ActivityTrace]:
-        gate_owner = getattr(self.activity_gate, "__self__", None)
+        """Whether this destination is working, for any kind and any role.
+
+        One gate for everything. The anti-clobber gate reports a working agent
+        as free -- it only guards a human's half-typed line -- so any kind
+        allowed to use it is a kind that can be typed into a running turn. That
+        exemption is what put "please read /tmp/directorctl_payload..." into
+        Main's composer mid-implementation, and it is gone.
+
+        Nothing here reads a role name, a project, a port or a CLI name. The
+        activity gate resolves the destination's runtime from the declared
+        workflow and reads that runtime's own hook state, so a role added or
+        re-hosted later is covered without being named.
+        """
         if pre_send_recheck:
-            # The pre-send recheck must not be weaker than the gate that already
-            # admitted this notification. Only immediate kinds may fall back to
-            # the anti-clobber gate, which reports a working agent as free.
-            # SYRD-32: applying that gate to every kind meant a reminder claimed
-            # during a turn gap was still sent after the pane went busy again.
-            if kind in IMMEDIATE_DELIVERY_KINDS:
-                pre_send_busy = getattr(gate_owner, "pre_send_anti_clobber_busy", None)
-                if callable(pre_send_busy):
-                    pane_busy = bool(pre_send_busy(target))
-                    return pane_busy, self._activity_trace(target, pane_busy)
-            else:
-                pre_send_full_busy = getattr(gate_owner, "pre_send_busy", None)
-                if callable(pre_send_full_busy):
-                    pane_busy = bool(pre_send_full_busy(target))
-                    return pane_busy, self._activity_trace(target, pane_busy)
-        if kind in IMMEDIATE_DELIVERY_KINDS:
-            anti_clobber_busy = getattr(gate_owner, "anti_clobber_busy", None)
-            if callable(anti_clobber_busy):
-                pane_busy = bool(anti_clobber_busy(target))
+            gate_owner = getattr(self.activity_gate, "__self__", None)
+            pre_send_full_busy = getattr(gate_owner, "pre_send_busy", None)
+            if callable(pre_send_full_busy):
+                pane_busy = bool(pre_send_full_busy(target))
                 return pane_busy, self._activity_trace(target, pane_busy)
         pane_busy = self.activity_gate(target)
         return pane_busy, self._activity_trace(target, pane_busy)
@@ -1621,7 +1628,11 @@ SELECT EXISTS (
             gate = getattr(self.activity_gate, "__self__", None)
             if isinstance(gate, PaneActivityGate):
                 gate.role_targets = self.role_targets.copy()
-                gate.role_runtimes = {r["name"]: ("gemini" if r["runtime"] == "agy" else r["runtime"]) for r in self.workflow["roles"] if r["active"] and r.get("runtime")}
+                gate.role_runtimes = {
+                    r["name"]: HOOK_RUNTIME_NAMES.get(r["runtime"], r["runtime"])
+                    for r in self.workflow["roles"]
+                    if r["active"] and r.get("runtime")
+                }
                 gate.director_target = self.role_targets.get("director", gate.director_target)
 
     def process_due_notifications(self, conn: Any, *, max_notifications: int | None = None) -> int:

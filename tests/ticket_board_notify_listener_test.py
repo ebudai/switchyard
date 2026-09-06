@@ -1756,7 +1756,16 @@ def test_stale_turn_end_idle_uses_content_hash_probe() -> None:
     assert gate._last_working_timer_by_target == {}
 
 
-def test_ticket_update_delivers_immediately_to_busy_worker_with_empty_composer() -> None:
+def test_ticket_update_waits_for_a_working_owner_rather_than_interrupting_it() -> None:
+    """SYRD-46 reverses this case deliberately.
+
+    A ticket_update used to bypass the activity gate on the reasoning that a
+    pane working *this* ticket wants to know it changed. That pane is exactly
+    the one mid-turn, and the update landed in a running composer -- reported
+    for the Inspector in SYRD-32 and again for Main mid-implementation. Waiting
+    costs nothing: the notification is requeued and retried once the role is
+    idle, and nothing is dropped.
+    """
     sent: list[tuple[str, str]] = []
     with TemporaryStateDir() as tmp_path:
         store, gate = hook_gate(tmp_path)
@@ -1783,17 +1792,12 @@ def test_ticket_update_delivers_immediately_to_busy_worker_with_empty_composer()
             poll_seconds=0,
         )
 
-        assert listener.process_due_notifications(conn, max_notifications=1) == 1
+        listener.process_due_notifications(conn, max_notifications=1)
 
-    assert sent == [
-        (
-            "pgu-ops:0.0",
-            "PGU-361 (in in_progress, that you own) was changed by director: spec updated -- re-read it before continuing.",
-        )
-    ]
-    assert conn.requeued == []
-    assert conn.acked == [82]
-    assert trace_events(conn) == ["listener_claim", "send", "listener_ack"]
+    # Nothing was typed into the running turn, and nothing was lost either.
+    assert sent == []
+    assert conn.acked == []
+    assert conn.requeued == [(82, (82, f"{DEFAULT_REQUEUE_BASE_SECONDS:g} seconds", "pane busy"))]
 
 
 def test_ticket_update_waits_for_worker_human_composing_to_clear() -> None:
@@ -1901,7 +1905,10 @@ def test_ticket_update_holds_busy_worker_with_advanced_cursor() -> None:
 
     assert sent == []
     assert conn.requeued == [(88, (88, f"{DEFAULT_REQUEUE_BASE_SECONDS:g} seconds", "pane busy"))]
-    assert conn.traces[1][6] == "human_composing"
+    # SYRD-46: one gate for every kind, so a pane running a tool is held for
+    # that evidence rather than only for the half-typed line the anti-clobber
+    # gate looked at. The hold itself is what this test is about.
+    assert conn.traces[1][6] == "hook_busy"
 
 
 def test_hook_busy_traces_only_first_gate_defer_per_notification() -> None:
@@ -2551,9 +2558,14 @@ def test_busy_director_escalation_requeues_instead_of_going_stale() -> None:
     assert conn.traces[1][6] == "hook_busy"
 
 
-def test_ticket_update_still_reaches_a_working_agy_inspector() -> None:
-    """The anti-clobber gate keeps its narrower meaning for immediate kinds:
-    an update to the ticket in hand is wanted even mid-turn."""
+def test_ticket_update_waits_for_a_working_agy_inspector() -> None:
+    """SYRD-46 reverses this case too, and for the role that reported it.
+
+    An agy Inspector mid-review used to receive a ticket_update in its
+    composer, because ticket_update skipped the activity gate. The same
+    delivery reached Main mid-implementation. The update is requeued and
+    retried once the pane is idle; the idle case below is unchanged.
+    """
     sent: list[tuple[str, str]] = []
     with TemporaryStateDir() as tmp_path:
         store = PaneHookStateStore(tmp_path)
@@ -2575,9 +2587,99 @@ def test_ticket_update_still_reaches_a_working_agy_inspector() -> None:
         )
         listener = _agy_listener(gate, conn, sent)
 
-        assert listener.listen_once(max_notifications=1) == 1
+        listener.listen_once(max_notifications=1)
 
-    assert [target for target, _message in sent] == ["pgu-inspector:0.0"]
+    assert sent == [], "an agy Inspector mid-review was interrupted"
+    assert conn.acked == []
+    assert [entry[0] for entry in conn.requeued] == [905]
+
+
+def test_ticket_update_waits_for_a_working_claude_implementer() -> None:
+    """The case SYRD-46 was filed for.
+
+    Main was implementing with a visible Claude turn running when a Director
+    comment queued a ticket_update, and the listener typed it into the live
+    composer. The pane state here is what claude's own hook writes for a turn
+    in progress, so this fails again if any kind is exempted from the gate.
+    """
+    sent: list[tuple[str, str]] = []
+    with TemporaryStateDir() as tmp_path:
+        store, gate = hook_gate(tmp_path)
+        store.write("pgu-main:0.0", "busy", source="claude.UserPromptSubmit", now=100.0)
+        conn = FakeConnection(
+            [
+                queue_row(
+                    461,
+                    "PGU-45",
+                    kind="ticket_update",
+                    state="in_progress",
+                    assignee="main",
+                    target_role="main",
+                    message="PGU-45 (in in_progress, that you own) was changed by director: please read it.",
+                )
+            ],
+            ticket_rows={"PGU-45": ("in_progress", "main", False, False)},
+        )
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=gate.is_working,
+            connector=lambda *args, **kwargs: conn,
+            poll_seconds=0,
+        )
+
+        listener.process_due_notifications(conn, max_notifications=1)
+
+    assert sent == [], "an implementer mid-turn was interrupted"
+    assert conn.acked == [], "the update must be retried, not dropped"
+    assert conn.requeued == [(461, (461, f"{DEFAULT_REQUEUE_BASE_SECONDS:g} seconds", "pane busy"))]
+
+
+def test_a_ticket_update_claimed_while_idle_is_held_when_the_turn_starts() -> None:
+    """The race the pre-send recheck exists for.
+
+    The destination is idle when the notification is claimed and busy by the
+    time it would be sent. Without the recheck the update lands in a turn that
+    began microseconds too late to be seen.
+    """
+    sent: list[tuple[str, str]] = []
+    with TemporaryStateDir() as tmp_path:
+        store, gate = hook_gate(tmp_path)
+        store.write("pgu-main:0.0", "idle", source="claude.Stop", now=100.0)
+        conn = FakeConnection(
+            [
+                queue_row(
+                    462,
+                    "PGU-45",
+                    kind="ticket_update",
+                    state="in_progress",
+                    assignee="main",
+                    target_role="main",
+                    message="PGU-45 (in in_progress, that you own) was changed by director: please read it.",
+                )
+            ],
+            ticket_rows={"PGU-45": ("in_progress", "main", False, False)},
+        )
+
+        def start_the_turn(seconds: float) -> None:
+            # Between the claim and the send, exactly as a real turn would.
+            store.write("pgu-main:0.0", "busy", source="claude.UserPromptSubmit", now=200.0)
+
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=gate.is_working,
+            connector=lambda *args, **kwargs: conn,
+            poll_seconds=0,
+            sleeper=start_the_turn,
+            pre_send_recheck_delay_seconds=0.01,
+        )
+
+        listener.process_due_notifications(conn, max_notifications=1)
+
+    assert sent == [], "the update landed in a turn that started after the claim"
+    assert conn.acked == []
+    assert [entry[0] for entry in conn.requeued] == [462]
 
 
 def test_inspection_transition_still_reaches_an_idle_agy_inspector() -> None:

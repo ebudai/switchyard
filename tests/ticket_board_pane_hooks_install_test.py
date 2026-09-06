@@ -49,6 +49,9 @@ from scripts.ticket_board.codex_hook_trust import codex_command_hook_trust_entri
 INSTALLER = ROOT / "scripts" / "ticket-board-install-pane-hooks"
 HOOK_NAME = "ticket-board-pane-idle-hook"
 LEGACY_HOOK_NAME = "pgu-ticket-board-pane-idle-hook"
+BOARD_SKILL_INSTRUCTION = (
+    "Load the switchyard-board skill before reading from or writing to the ticket board."
+)
 PANE_TARGETS = (
     "pgu-director:0.0",
     "pgu-main:0.0",
@@ -881,7 +884,9 @@ def test_session_start_resume_injection_is_scoped_to_resume_sources_and_active_t
                 env=_hook_env(TICKET_BOARD_URL=board_url),
             )
 
-    assert startup.stdout == ""
+    # A fresh start carries the board-skill pointer and nothing else; the
+    # resume paths are what inject active work.
+    assert json.loads(startup.stdout)["hookSpecificOutput"]["additionalContext"] == BOARD_SKILL_INSTRUCTION
     resume_context = json.loads(resume.stdout)["hookSpecificOutput"]["additionalContext"]
     assert "Your session just resumed." in resume_context
     assert "Your context was just compacted." not in resume_context
@@ -1050,7 +1055,9 @@ def test_director_onboarding_pointer_is_scoped_to_director_role() -> None:
             env=_hook_env(),
         )
 
-    assert proc.stdout == ""
+    context = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert context == BOARD_SKILL_INSTRUCTION
+    assert "onboarding packet" not in context
 
 
 def test_director_onboarding_pointer_is_silent_when_packet_absent() -> None:
@@ -1079,7 +1086,9 @@ def test_director_onboarding_pointer_is_silent_when_packet_absent() -> None:
             env=_hook_env(),
         )
 
-    assert proc.stdout == ""
+    context = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert context == BOARD_SKILL_INSTRUCTION
+    assert "onboarding packet" not in context
 
 
 def test_clear_session_start_injects_assigned_in_progress_ticket_context() -> None:
@@ -2001,7 +2010,10 @@ def test_gemini_installed_hooks_embed_project_state_and_session_dirs() -> None:
 
         session = json.loads((session_dir / "otto-inspector_0.0.json").read_text(encoding="utf-8"))
         state = json.loads((state_dir / "otto-inspector_0.0.json").read_text(encoding="utf-8"))
-        assert start.stdout == "{}"
+        # agy names no start kind either, and its wrapper passes hook JSON
+        # through, printing "{}" only when the hook stays silent.
+        start_context = json.loads(start.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert start_context == BOARD_SKILL_INSTRUCTION
         assert session["session_id"] == "gemini_otto_session_456"
         assert session["source"] == "gemini.SessionStart"
         assert state["state"] == "idle"
@@ -2060,7 +2072,11 @@ def test_hermes_installed_hooks_embed_project_state_and_session_dirs() -> None:
 
         session = json.loads((session_dir / "otto-bulk_0.0.json").read_text(encoding="utf-8"))
         state = json.loads((state_dir / "otto-bulk_0.0.json").read_text(encoding="utf-8"))
-        assert start.stdout == ""
+        # The real Hermes payload names no start kind, and a Hermes pane still
+        # has to be told which skill to load before it touches the board.
+        start_context = json.loads(start.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert start_context == BOARD_SKILL_INSTRUCTION
+        assert "switchyard-board" in start_context
         assert session["session_id"] == "20260823_140512_b49a1a"
         assert session["source"] == "hermes.on_session_start"
         assert busy_state["state"] == "busy"

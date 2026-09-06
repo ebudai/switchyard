@@ -1385,6 +1385,7 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
     q_hook_installer = shell_quote(f"{plan.board_current}/scripts/ticket-board-install-pane-hooks")
     q_hook_source = shell_quote(f"{plan.board_current}/scripts/ticket-board-pane-idle-hook")
     q_hook_bin = shell_quote(f"{plan.owner_home}/.local/bin/ticket-board-pane-idle-hook")
+    q_board_skill_installer = shell_quote(f"{plan.board_current}/scripts/switchyard-board-skill")
     q_pane_session_dir = shell_quote(
         f"{plan.owner_home}/.local/state/{plan.runtime_directory}/pane-sessions"
     )
@@ -1533,6 +1534,7 @@ if [ ! -S "$owner_bus" ]; then
 fi
 sudo -u {q_owner_user} env XDG_RUNTIME_DIR="$owner_runtime_dir" DBUS_SESSION_BUS_ADDRESS="unix:path=$owner_bus" systemctl --user daemon-reload
 sudo -u {q_owner_user} -H env XDG_RUNTIME_DIR="$owner_runtime_dir" TICKET_BOARD_PROJECT={shell_quote(plan.project)} TICKET_BOARD_PANE_STATE_DIR="$owner_runtime_dir/{plan.runtime_directory}/pane-state" TICKET_BOARD_PANE_SESSION_DIR={q_pane_session_dir} {q_hook_installer} install --home {q_owner_home} --hook-source {q_hook_source} --bin-path {q_hook_bin} --seed-codex-hook-trust-if-new
+sudo -u {q_owner_user} -H {q_board_skill_installer} install --home {q_owner_home}
 sudo -u {q_owner_user} env XDG_RUNTIME_DIR="$owner_runtime_dir" DBUS_SESSION_BUS_ADDRESS="unix:path=$owner_bus" systemctl --user enable --now {plan.listener_unit}
 curl -fsS http://127.0.0.1:{plan.port}/api/board >/dev/null
 """

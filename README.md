@@ -54,6 +54,7 @@ Usage:
   switchyard <command> [options]
 
 Commands:
+  board-skill      install or verify the portable board skill for every agent CLI
   new              create and provision a new project
   register         register an existing project config
   upgrade          update generated project artifacts and report release drift
@@ -67,7 +68,7 @@ Commands:
   status           list registered projects and pane liveness
   validate-models  check configured role models without starting panes
 
-Bare project names start or attach the project. Recognized commands: new, register, upgrade, add-role, present, set-vcs-close-role, agy-credential, stop, teardown, status, validate-models.
+Bare project names start or attach the project. Recognized commands: board-skill, new, register, upgrade, add-role, present, set-vcs-close-role, agy-credential, stop, teardown, status, validate-models.
 ```
 <!-- switchyard-help:end -->
 

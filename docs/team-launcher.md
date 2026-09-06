@@ -413,6 +413,50 @@ the project looks stopped while its sessions are running under the project
 account. Liveness is therefore asked of both identities before anything concludes
 that there is nothing to preserve.
 
+**An older plan is migrated, not rejected.** The generated `plan.json` gains
+fields as the product does, and it was parsed straight into the current strict
+shape before anything could regenerate it -- so every already provisioned tenant
+became unupgradable the moment a field was added, stopping at `plan.json is
+missing provision field 'role_control_sudoers_name'`. The missing fields are now
+filled in first, and the rule is derived rather than a growing ladder of
+per-field special cases: a field the plan declares a default for takes that
+default, and a field without one is a generated name taken from a reference plan
+built by the same `build_plan` provisioning uses, from the identity and choices
+the document already records.
+
+The distinction matters. A field with a declared default -- `control_user`,
+`role_accounts`, `roles_group`, `role_worktrees` -- is one this tenant has not
+configured, and its default is the "not configured" state. Filling those from
+the reference would install a control bridge nobody asked for and assert a
+role-to-account table for accounts that do not exist. Only names are derived.
+
+Migration completes an older plan; it does not invent a tenant. A document
+missing any field a plan has always carried -- where its board root, database,
+release and logs live -- is refused exactly as before, because completing it
+would fabricate a tenant that was never provisioned. Fields added after that
+point are absent from that baseline set by construction, so a release that adds
+one has no list to update.
+
+Nothing here decides what root installs. Root still renders from its own
+root-owned baseline, still regenerates the role table, and still refuses rather
+than silently replacing any generated name a tenant document records
+differently. Root judges the document as it found it: the tenant's copy is read
+once, before the refresh republishes it, so a value the refresh corrects cannot
+be laundered past that refusal. `switchyard upgrade --dry-run` reports which
+fields it would migrate and writes nothing, at root and as the tenant alike.
+
+**The controller comes from the installed grant, on every pass.** A legacy
+tenant reaches its bridge in two passes: the first reconstructs a baseline with
+no controller, and the operator's generated script then installs the root-owned
+grant for a human. The durable plan has to learn that on the second pass, or the
+bridge works until its files need repair and an ordinary upgrade cannot recreate
+them. So `control_user` is re-derived on every refresh from the installed grant
+alone -- root-owned, not group- or world-writable, or it is not an authority.
+Not from the tenant's document, which would let the tenant name its own
+controller, and not from whoever ran the upgrade: repairing a bridge and handing
+one out are different things, and only the first is what an upgrade does. With
+no grant the value is empty, which renders no tenant-control artifacts at all.
+
 **Withholding the authority table is not a compatibility mode.** The board
 resolves every local peer through that table, so an empty one grants no role to
 anyone. Safety comes from *when* the unit is installed and the release deployed,

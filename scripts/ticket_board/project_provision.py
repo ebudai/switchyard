@@ -10,9 +10,9 @@ import os
 import pwd
 import re
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import MISSING, asdict, dataclass
 from pathlib import Path, PurePosixPath
-from typing import Sequence
+from typing import Mapping, Sequence
 
 try:
     from .commit_repos import commit_git_dir_env_for_project
@@ -99,6 +99,117 @@ class ProjectBoardProvision:
     # tree each role actually works in.
     role_worktrees: tuple[tuple[str, str], ...] = ()
     workflow: dict | None = None
+
+
+def plan_field_names() -> tuple[str, ...]:
+    """Every field a current plan document carries, in declaration order."""
+    return tuple(ProjectBoardProvision.__dataclass_fields__)
+
+
+def plan_field_defaults() -> dict[str, object]:
+    """The fields the plan declares a safe default for, and that default.
+
+    A field with a declared default is one a project can legitimately not have
+    configured yet -- no control bridge, no role accounts, no roles group. That
+    default is what an older plan means by not carrying it, so a migration must
+    fill it in rather than invent a value, which for these fields would be
+    inventing authority (SYRD-52).
+    """
+    defaults: dict[str, object] = {}
+    for name, field in ProjectBoardProvision.__dataclass_fields__.items():
+        if field.default is not MISSING:
+            defaults[name] = field.default
+        elif field.default_factory is not MISSING:  # pragma: no cover - none today
+            defaults[name] = field.default_factory()
+    return defaults
+
+
+#: What a generated plan has carried since before this migration begins.
+#:
+#: A document missing one of these is not an older plan; it is not a plan, and
+#: completing it from a reference would invent a tenant -- a board root, a
+#: database and a release path for a project that never recorded them. Fields
+#: added after this point are absent from the set by construction, so a release
+#: that adds one has nothing to update here (SYRD-52).
+#:
+#: `project_name`, `canary_unit`, `owner_home` and every field with a declared
+#: default are deliberately absent: each was already derived or defaulted when
+#: missing before this migration existed, and that stays true.
+PLAN_BASELINE_FIELDS = frozenset(
+    {
+        "admin_database_url",
+        "asset_dir",
+        "assignee_roles",
+        "audit_roles",
+        "board_current",
+        "board_database_url",
+        "board_log",
+        "board_root",
+        "board_service_traversal",
+        "board_unit",
+        "caller_roles",
+        "commit_git_dir",
+        "database",
+        "draft_roles",
+        "frame_dir",
+        "implementer_roles",
+        "listener_database_url",
+        "listener_log",
+        "listener_role",
+        "listener_unit",
+        "operation_allowed_roles",
+        "owner_user",
+        "polkit_name",
+        "port",
+        "project",
+        "runtime_directory",
+        "service_role",
+        "service_user",
+        "socket_path",
+        "source_repo",
+        "ticket_prefix",
+        "tmpfiles_name",
+        "workflow_seed",
+    }
+)
+
+
+def migrate_plan_document(
+    raw: Mapping[str, object], *, reference: ProjectBoardProvision | None
+) -> tuple[dict[str, object], tuple[str, ...], tuple[str, ...]]:
+    """Bring a plan written by an older release up to the current field set.
+
+    Every release that adds a field to the plan otherwise makes every already
+    provisioned tenant unupgradable, because the document is parsed into the
+    current strict shape before anything can regenerate it. The rule is
+    data-driven rather than a growing ladder of per-field special cases: a
+    field the plan declares a default for takes that default, and a field
+    without one is a generated name or path, taken from a reference plan built
+    by the same `build_plan` provisioning uses. Nothing is taken from the
+    document that the document does not already carry (SYRD-52).
+
+    Returns the completed document, the fields that were filled in, and the
+    fields that could not be -- which the caller reports rather than guesses at.
+    """
+    defaults = plan_field_defaults()
+    document = dict(raw)
+    added: list[str] = []
+    unresolved: list[str] = []
+    for name in plan_field_names():
+        if name in document:
+            continue
+        if name in PLAN_BASELINE_FIELDS:
+            unresolved.append(name)
+            continue
+        if name in defaults:
+            document[name] = defaults[name]
+        elif reference is not None:
+            document[name] = getattr(reference, name)
+        else:
+            unresolved.append(name)
+            continue
+        added.append(name)
+    return document, tuple(added), tuple(unresolved)
 
 
 @dataclass(frozen=True)

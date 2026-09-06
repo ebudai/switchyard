@@ -5446,7 +5446,7 @@ def launch_project(
                 launchable_viewer_roles,
                 viewer_session=viewer_session_for_project(config.project),
                 window_title=window_title,
-                runner=runner,
+                runner=role_process_runner,
             )
         elif viewer_roles:
             launch_result = 1

@@ -107,11 +107,12 @@ def _provision(
     owner_exists: bool = False,
     failing_install_fragment: str = "",
     failing_chown_fragment: str = "",
+    allow_existing_owner_user: bool = True,
 ) -> tuple[object, _SeedingRunner, str, Path, Path]:
     """Run a fresh noninteractive provision; returns (result_or_exit, runner, stdout, home_base, project_dir)."""
     home_base = tmp_path / "home"
     source_repo = tmp_path / "source-repo"
-    source_repo.mkdir()
+    source_repo.mkdir(exist_ok=True)
     _write_source_onboarding_docs(source_repo)
     project_dir = home_base / "otto-agent" / "Projects" / "porter_system"
     runner = _SeedingRunner(
@@ -135,7 +136,7 @@ def _provision(
                 commit_git_dir="/srv/git/review-cache.git",
                 role_clis=LEGACY_SWITCHYARD_ROLE_CLIS,
                 yes=True,
-                allow_existing_owner_user=True,
+                allow_existing_owner_user=allow_existing_owner_user,
                 agy_credential_source=agy_credential_source,
                 home_base=home_base,
                 euid_getter=lambda: 0,
@@ -324,18 +325,127 @@ def test_source_user_absent_from_passwd_is_refused() -> None:
     assert _mutated(runner) == []
 
 
-def test_failed_ownership_assignment_aborts_provisioning() -> None:
+def test_failed_ownership_assignment_rolls_back_the_partial_token() -> None:
+    """A token of unverified ownership must not survive: it would read as already
+    present on the retry and suppress the seed that fixes it."""
     with tempfile.TemporaryDirectory(prefix="pgu-agy-seed.") as tmp:
         tmp_path = Path(tmp)
         _seed_source_token(tmp_path / "home")
-        outcome, _runner, _output, _home_base, _project_dir = _provision(
+        outcome, _runner, _output, home_base, _project_dir = _provision(
             tmp_path,
             agy_credential_source=SEED_SOURCE_USER,
             failing_chown_fragment=TOKEN_NAME,
         )
+        leftover = _seeded_token_path(home_base).exists()
 
     assert isinstance(outcome, SystemExit)
     assert "failed to assign" in str(outcome)
+    assert not leftover
+
+
+def test_failed_seed_leaves_the_credential_absent_for_the_retry() -> None:
+    """After a failed seed the state a retry starts from must be 'absent', not 'installed'.
+
+    Paired with test_existing_owner_with_absent_credential_is_seeded below, this is the
+    retry invariant: the failure rolls back to absent, and absent-plus-existing-owner
+    seeds. The two are asserted separately because a single end-to-end retry is not
+    reproducible here -- _existing_project_path_is_usable is a real uid check against the
+    project directory the first attempt left behind, and the fixture's owner user is not
+    a real account, so the second run is refused before it reaches the seeding decision.
+    """
+    with tempfile.TemporaryDirectory(prefix="pgu-agy-seed.") as tmp:
+        tmp_path = Path(tmp)
+        _seed_source_token(tmp_path / "home")
+        outcome, _runner, _output, home_base, _project_dir = _provision(
+            tmp_path,
+            agy_credential_source=SEED_SOURCE_USER,
+            failing_chown_fragment=TOKEN_NAME,
+        )
+        state = team_launcher._agy_credential_state("otto-agent", home_base)
+
+    assert isinstance(outcome, SystemExit)
+    assert state == team_launcher.AGY_CREDENTIAL_ABSENT
+
+
+def test_existing_owner_with_absent_credential_is_seeded() -> None:
+    """The state a retry resumes from: owner already exists, credential not installed."""
+    with tempfile.TemporaryDirectory(prefix="pgu-agy-seed.") as tmp:
+        tmp_path = Path(tmp)
+        _seed_source_token(tmp_path / "home")
+        outcome, runner, output, home_base, project_dir = _provision(
+            tmp_path, agy_credential_source=SEED_SOURCE_USER, owner_exists=True
+        )
+        seeded = _seeded_token_path(home_base)
+        seeded_text = seeded.read_text(encoding="utf-8") if seeded.exists() else ""
+        artifact = json.loads(
+            (project_dir / ".switchyard" / "porter.project.json").read_text(encoding="utf-8")
+        )
+        chown_calls = _token_chown_calls(runner)
+
+    assert outcome == 0
+    assert seeded_text == SEED_TOKEN_TEXT
+    assert chown_calls, "an existing owner without a credential must be seeded, not skipped"
+    assert artifact["project"]["capability_grants"]["agy_credential_source"] == SEED_SOURCE_USER
+    assert f"seeded agy credential for otto-agent from {SEED_SOURCE_USER}" in output
+
+
+def test_existing_owner_without_reuse_consent_never_reaches_seeding() -> None:
+    """Consent to reuse an existing owner is enforced upstream, before the seeding step."""
+    with tempfile.TemporaryDirectory(prefix="pgu-agy-seed.") as tmp:
+        tmp_path = Path(tmp)
+        _seed_source_token(tmp_path / "home")
+        outcome, runner, _output, home_base, _project_dir = _provision(
+            tmp_path,
+            agy_credential_source=SEED_SOURCE_USER,
+            owner_exists=True,
+            allow_existing_owner_user=False,
+        )
+        seeded_exists = _seeded_token_path(home_base).exists()
+
+    assert isinstance(outcome, SystemExit)
+    assert "cancelled" in str(outcome)
+    assert not seeded_exists
+    assert _mutated(runner) == []
+
+
+def test_already_installed_credential_is_left_in_place() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-agy-seed.") as tmp:
+        tmp_path = Path(tmp)
+        home_base = tmp_path / "home"
+        _seed_source_token(home_base)
+        existing = _seeded_token_path(home_base)
+        existing.parent.mkdir(parents=True, exist_ok=True)
+        existing.write_text("already-installed\n", encoding="utf-8")
+        existing.chmod(0o600)
+
+        outcome, runner, output, home_base, _project_dir = _provision(
+            tmp_path, agy_credential_source=SEED_SOURCE_USER, owner_exists=True
+        )
+        preserved = _seeded_token_path(home_base).read_text(encoding="utf-8")
+
+    assert outcome == 0
+    assert preserved == "already-installed\n"
+    assert not _token_chown_calls(runner)
+    assert "already present for otto-agent" in output
+
+
+def test_unusable_existing_target_is_refused() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-agy-seed.") as tmp:
+        tmp_path = Path(tmp)
+        home_base = tmp_path / "home"
+        _seed_source_token(home_base)
+        existing = _seeded_token_path(home_base)
+        existing.parent.mkdir(parents=True, exist_ok=True)
+        existing.write_text("world-readable\n", encoding="utf-8")
+        existing.chmod(0o644)
+
+        outcome, runner, _output, _home_base, _project_dir = _provision(
+            tmp_path, agy_credential_source=SEED_SOURCE_USER, owner_exists=True
+        )
+
+    assert isinstance(outcome, SystemExit)
+    assert "is not a private regular file" in str(outcome)
+    assert not _token_chown_calls(runner)
 
 
 def test_failed_private_directory_creation_aborts_before_copying() -> None:
@@ -352,20 +462,6 @@ def test_failed_private_directory_creation_aborts_before_copying() -> None:
     assert isinstance(outcome, SystemExit)
     assert "failed to create" in str(outcome)
     assert not seeded_exists
-
-
-def test_existing_owner_user_is_never_modified() -> None:
-    with tempfile.TemporaryDirectory(prefix="pgu-agy-seed.") as tmp:
-        tmp_path = Path(tmp)
-        _seed_source_token(tmp_path / "home")
-        _outcome, runner, output, home_base, _project_dir = _provision(
-            tmp_path, agy_credential_source=SEED_SOURCE_USER, owner_exists=True
-        )
-        seeded_exists = _seeded_token_path(home_base).exists()
-
-    assert not seeded_exists
-    assert not _token_chown_calls(runner)
-    assert "not seeding agy credential into existing user otto-agent" in output
 
 
 def test_source_user_must_be_a_plain_user_name() -> None:

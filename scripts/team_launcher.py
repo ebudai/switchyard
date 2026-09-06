@@ -9163,6 +9163,35 @@ def _validate_agy_credential_source(source_user: str, owner_user: str, home_base
     os.close(_open_agy_source_token(source_user, home_base))
 
 
+AGY_CREDENTIAL_INSTALLED = "installed"
+AGY_CREDENTIAL_ABSENT = "absent"
+AGY_CREDENTIAL_UNUSABLE = "unusable"
+
+
+def _agy_credential_state(owner_user: str, home_base: Path) -> str:
+    """Whether the owner already holds a usable seeded token.
+
+    The seeding decision is made on this, not on whether this run created the owner: a
+    seed that failed after owner creation must still be completable by a retry, and a
+    retry that skipped seeding would let provisioning finish and record a credential
+    source that was never installed.
+    """
+    target = home_base / owner_user / AGY_CREDENTIAL_DIR_NAME / AGY_CREDENTIAL_TOKEN_NAME
+    try:
+        fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return AGY_CREDENTIAL_ABSENT
+    except OSError:
+        return AGY_CREDENTIAL_UNUSABLE
+    try:
+        info = os.fstat(fd)
+    finally:
+        os.close(fd)
+    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+        return AGY_CREDENTIAL_UNUSABLE
+    return AGY_CREDENTIAL_INSTALLED
+
+
 def _copy_fd_contents(source_fd: int, target_fd: int) -> None:
     """Copy fd to fd in the kernel, so the token's bytes never enter this process."""
     offset = 0
@@ -9196,6 +9225,7 @@ def _seed_agy_credential_for_owner(
     if dir_result.returncode != 0:
         raise SystemExit(f"switchyard: failed to create {target_dir} for {owner_user}")
     source_fd = _open_agy_source_token(source_user, home_base)
+    created_target = False
     try:
         try:
             target_fd = os.open(target_token, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -9207,16 +9237,26 @@ def _seed_agy_credential_for_owner(
             raise SystemExit(
                 f"switchyard: failed to seed agy credential into {target_token} ({exc.strerror})"
             ) from exc
+        created_target = True
         try:
             os.fchmod(target_fd, 0o600)
             _copy_fd_contents(source_fd, target_fd)
         finally:
             os.close(target_fd)
+        own_result = runner(["chown", f"{owner_user}:{owner_user}", str(target_token)])
+        if own_result.returncode != 0:
+            raise SystemExit(f"switchyard: failed to assign {target_token} to {owner_user}")
+    except BaseException:
+        # Leave nothing half-installed: a token with unverified ownership would read as
+        # already present on the retry and suppress the seed that fixes it.
+        if created_target:
+            try:
+                os.unlink(target_token)
+            except OSError:
+                pass
+        raise
     finally:
         os.close(source_fd)
-    own_result = runner(["chown", f"{owner_user}:{owner_user}", str(target_token)])
-    if own_result.returncode != 0:
-        raise SystemExit(f"switchyard: failed to assign {target_token} to {owner_user}")
     print_func(f"switchyard: seeded agy credential for {owner_user} from {source_user}")
     print_func(
         f"switchyard: {owner_user} can now act as the Google account that {source_user} signed "
@@ -10070,18 +10110,28 @@ def switchyard_new_command(
     else:
         print_func(f"switchyard: using existing user {owner_user} (not modifying)")
     if resolved_agy_credential_source:
-        if owner_result.created:
+        credential_state = _agy_credential_state(owner_user, home_base)
+        if credential_state == AGY_CREDENTIAL_INSTALLED:
+            print_func(
+                f"switchyard: agy credential already present for {owner_user}; leaving it in place"
+            )
+        elif credential_state == AGY_CREDENTIAL_UNUSABLE:
+            raise SystemExit(
+                f"switchyard: {home_base / owner_user / AGY_CREDENTIAL_DIR_NAME / AGY_CREDENTIAL_TOKEN_NAME} "
+                "exists but is not a private regular file; remove it and rerun, or clear "
+                "capability_grants.agy_credential_source"
+            )
+        else:
+            # Not gated on owner_result.created. Reaching here with a pre-existing owner
+            # already required consent to reuse that account, and gating on creation is
+            # what made a failed seed unrecoverable: the retry would skip and then let
+            # provisioning record a credential source that was never installed.
             _seed_agy_credential_for_owner(
                 owner_user=owner_user,
                 source_user=resolved_agy_credential_source,
                 home_base=home_base,
                 runner=runner,
                 print_func=print_func,
-            )
-        else:
-            print_func(
-                f"switchyard: not seeding agy credential into existing user {owner_user}; "
-                "switchyard does not modify an existing owner user"
             )
     if from_artifact is None:
         _write_switchyard_onboarding_files(

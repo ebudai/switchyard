@@ -1378,7 +1378,7 @@ WHERE id = %s
         if kind == "awaiting_role":
             # Wait identity, not delivery ACK or comments, controls resolution.
             # Expired windows prevent a restart from delivering a reminder burst.
-            if (self.workflow and not any(stage["name"] == current_state and not stage["terminal"] and stage["kind"] != "draft" for stage in self.workflow["stages"])) or (not self.workflow and current_state not in {"in_progress", "inspection", "audit"}):
+            if (self.workflow and not any(stage["name"] == current_state and not stage["terminal"] and stage["kind"] != "draft" for stage in self.workflow["stages"])) or (not self.workflow and current_state not in {"in_progress", "inspection", "audit", "user_review"}):
                 return False
             expected_target = "director" if parsed.get("step") == 4 else parsed.get("awaiting_role")
             if target_role != expected_target:

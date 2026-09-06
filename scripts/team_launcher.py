@@ -10044,18 +10044,6 @@ def _credential_state(
     return ""
 
 
-def _open_credential_source(base: Path, relative: Path | str) -> int:
-    """Open a credential for reading with every component anchored."""
-    relative_path = Path(relative)
-    dir_fd, problem = _walk_no_follow(base, relative_path)
-    if problem:
-        raise SystemExit(f"switchyard: cannot read {base / relative_path}: {problem}")
-    try:
-        return os.open(relative_path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
-    finally:
-        os.close(dir_fd)
-
-
 def _artifact_present(home: Path, artifact: RoleCredentialArtifact) -> bool:
     candidate = home / artifact.relative_path
     try:
@@ -10229,6 +10217,69 @@ def _open_role_credential_parent(
     return fd
 
 
+def _try_open_credential_source(base: Path, relative: Path | str) -> tuple[int, str]:
+    """Open a credential for reading with every component anchored.
+
+    Returns (fd, problem); fd is -1 when problem is set. Unlike the raising
+    variant this lets an optional artifact be absent without aborting.
+    """
+    relative_path = Path(relative)
+    dir_fd, problem = _walk_no_follow(base, relative_path)
+    if problem:
+        return -1, problem
+    try:
+        try:
+            return os.open(relative_path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd), ""
+        except FileNotFoundError:
+            return -1, "missing"
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.EMLINK):
+                return -1, "is a symlink; credentials must be private regular files"
+            return -1, f"cannot be opened ({exc.strerror})"
+    finally:
+        os.close(dir_fd)
+
+
+def _fd_credential_state(fd: int, expected_user: str) -> str:
+    """Validate the OPEN FILE, not a path that may have changed since.
+
+    Validating by path and then reading by path leaves a window in which the
+    name can be repointed at another file, and the privileged seeding command
+    would read outside the approved artifact. Everything here is decided on the
+    descriptor the bytes are actually read from (SYRD-39).
+    """
+    expected_uid = uid_for_user(expected_user)
+    if expected_uid is None:
+        return f"cannot be checked: {expected_user} is not a local account"
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+        return "is not a regular file"
+    if info.st_uid != expected_uid:
+        return f"is owned by uid {info.st_uid}, not {expected_user}"
+    if info.st_mode & 0o077:
+        return f"is readable beyond its owner (mode {oct(stat.S_IMODE(info.st_mode))})"
+    return ""
+
+
+def _read_fd_bytes(fd: int) -> bytes:
+    """Read a whole file from an already-open descriptor."""
+    os.lseek(fd, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _write_all(fd: int, payload: bytes) -> None:
+    """Write every byte; os.write may write fewer than requested."""
+    written = 0
+    while written < len(payload):
+        written += os.write(fd, payload[written:])
+
+
 def seed_role_credential(
     *,
     account: str,
@@ -10251,8 +10302,11 @@ def seed_role_credential(
     owner_home = home_base / owner_user
     target_base, target_relative = target or (role_home, Path(artifact.relative_path))
     target_name = target_relative.name
-    source_path = owner_home / artifact.relative_path
-    source_problem = _credential_state(owner_home, artifact.relative_path, owner_user, private=False)
+    # Open the source ONCE, through anchored components, and decide everything
+    # from that descriptor. Validating a path and then reading the same path
+    # leaves a window in which the name can be repointed at another file
+    # (SYRD-39).
+    source_fd, source_problem = _try_open_credential_source(owner_home, artifact.relative_path)
     if source_problem == "missing" and not artifact.required:
         return False
     if source_problem == "missing":
@@ -10261,36 +10315,48 @@ def seed_role_credential(
             f"authenticate {artifact.cli} as {owner_user} first"
         )
     if source_problem:
-        # Refuse to propagate a credential that is already unsafe, rather than
-        # copying it into every role home.
         raise SystemExit(
             f"switchyard: {owner_user}'s {artifact.relative_path} {source_problem}; refusing to "
             "seed it"
         )
     constructed: bytes | None = None
-    if artifact.cli == "hermes" and target_relative.name == ".env":
-        content, omitted, problem = select_hermes_provider_env(
-            source_path.read_text(encoding="utf-8", errors="replace")
-        )
-        if problem:
+    try:
+        state_problem = _fd_credential_state(source_fd, owner_user)
+        if state_problem:
+            # Refuse to propagate a credential that is already unsafe, rather
+            # than copying it into every role home.
             raise SystemExit(
-                f"switchyard: {owner_user}'s {artifact.relative_path} cannot be seeded "
-                f"({problem})"
+                f"switchyard: {owner_user}'s {artifact.relative_path} {state_problem}; refusing "
+                "to seed it"
             )
-        constructed = content.encode("utf-8")
-        if omitted:
-            # Named, so the omission is visible rather than silent: these are the
-            # owner's other secrets and settings, which roles must not receive.
-            print_func(
-                f"switchyard: not sharing {len(omitted)} non-provider entr"
-                + ("y" if len(omitted) == 1 else "ies")
-                + f" from {owner_user}'s {artifact.relative_path} with {account}: "
-                + ", ".join(sorted(omitted))
+        if artifact.cli == "hermes" and target_relative.name == ".env":
+            # Filtered from the bytes of the descriptor that was just validated,
+            # never from a fresh read of the name.
+            content, omitted, problem = select_hermes_provider_env(
+                _read_fd_bytes(source_fd).decode("utf-8", errors="replace")
             )
+            if problem:
+                raise SystemExit(
+                    f"switchyard: {owner_user}'s {artifact.relative_path} cannot be seeded "
+                    f"({problem})"
+                )
+            constructed = content.encode("utf-8")
+            if omitted:
+                # Named, so the omission is visible rather than silent: these are
+                # the owner's other secrets and settings, which roles must not
+                # receive.
+                print_func(
+                    f"switchyard: not sharing {len(omitted)} non-provider entr"
+                    + ("y" if len(omitted) == 1 else "ies")
+                    + f" from {owner_user}'s {artifact.relative_path} with {account}: "
+                    + ", ".join(sorted(omitted))
+                )
+    except BaseException:
+        os.close(source_fd)
+        raise
     dir_fd = _open_role_credential_parent(
         account, target_base, target_relative, runner=runner
     )
-    source_fd = _open_credential_source(owner_home, artifact.relative_path)
     created_target = False
     try:
         flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | (os.O_TRUNC if reseed else os.O_EXCL)
@@ -10311,10 +10377,11 @@ def seed_role_credential(
         try:
             os.fchmod(target_fd, 0o600)
             if constructed is None:
+                os.lseek(source_fd, 0, os.SEEK_SET)
                 _copy_fd_contents(source_fd, target_fd)
             else:
-                # A newly built file, never the source bytes.
-                os.write(target_fd, constructed)
+                # A newly built file, never the source bytes, written in full.
+                _write_all(target_fd, constructed)
             # Ownership is assigned to the open description rather than the
             # path, so nothing can be substituted between copy and chown.
             own = runner(["chown", f"{account}:{account}", f"/proc/{os.getpid()}/fd/{target_fd}"])

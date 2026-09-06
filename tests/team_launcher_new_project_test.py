@@ -1253,6 +1253,82 @@ def test_role_credentials_are_private_copies_of_an_allowlist_only() -> None:
             team_launcher.uid_for_user = original_uid_for_user
 
 
+def test_seeding_content_cannot_be_redirected_after_validation() -> None:
+    """SYRD-39: validate and read the same open file, never the same name twice.
+
+    Reproduces the reported race: the owner artifact is validated, then swapped
+    for a symlink to an outside file, then restored. A pathname read between
+    those two points hands the privileged command bytes from outside the
+    approved artifact; reading from the already-validated descriptor cannot.
+    """
+    chowns: list[list[str]] = []
+
+    def runner(args, **_kwargs):
+        chowns.append(list(args))
+        return subprocess.CompletedProcess(list(args), 0)
+
+    with tempfile.TemporaryDirectory(prefix="switchyard-cred-swap.") as tmp:
+        home_base = Path(tmp)
+        config = _isolated_project_config(home_base / "project", {"perf": "hermes"})
+        owner_home = _fake_home(home_base, "porter-agent")
+        _fake_home(home_base, "porter-perf")
+        source = owner_home / ".hermes/.env"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("OPENROUTER_API_KEY=approved-secret\n", encoding="utf-8")
+        source.chmod(0o600)
+
+        outside = home_base / "outside.env"
+        outside.write_text("OPENAI_API_KEY=redirected-secret\n", encoding="utf-8")
+        outside.chmod(0o600)
+
+        swapped: list[bool] = []
+        real_open = os.open
+
+        def swapping_open(path, flags, *args, **kwargs):
+            # Swap the name for a symlink to the attacker's file the moment the
+            # approved artifact has been opened, then restore it. A later read
+            # by pathname would follow the swap.
+            result = real_open(path, flags, *args, **kwargs)
+            if not swapped and isinstance(path, str) and path.endswith(".env"):
+                try:
+                    source.unlink()
+                    source.symlink_to(outside)
+                    swapped.append(True)
+                except OSError:
+                    pass
+            return result
+
+        original_home_check = team_launcher._require_owner_home_traversable
+        original_component_check = team_launcher._require_owner_traversable
+        original_uid_for_user = team_launcher.uid_for_user
+        team_launcher._require_owner_home_traversable = lambda *_a, **_k: None
+        team_launcher._require_owner_traversable = lambda *_a, **_k: None
+        team_launcher.uid_for_user = lambda _user: os.getuid()
+        os.open = swapping_open
+        try:
+            team_launcher.switchyard_seed_role_credentials_command(
+                config, home_base=home_base, runner=runner, print_func=lambda _m: None
+            )
+        finally:
+            os.open = real_open
+            team_launcher._require_owner_home_traversable = original_home_check
+            team_launcher._require_owner_traversable = original_component_check
+            team_launcher.uid_for_user = original_uid_for_user
+
+        assert swapped, "the swap never fired; the test would prove nothing"
+        role = config.roles[0]
+        artifact = team_launcher.role_credential_artifacts(role)[0]
+        base, relative = team_launcher._role_credential_target(
+            config, role, artifact, home_base=home_base
+        )
+        seeded = base / relative
+        body = seeded.read_text(encoding="utf-8") if seeded.exists() else ""
+        # Either the approved bytes, or nothing at all. Never the outside file.
+        assert "redirected-secret" not in body, body
+        if body:
+            assert "approved-secret" in body, body
+
+
 def test_missing_owner_credential_fails_closed_with_a_manifest() -> None:
     """A role must not launch unauthenticated; the manifest says exactly why."""
     with tempfile.TemporaryDirectory(prefix="switchyard-cred-manifest.") as tmp:

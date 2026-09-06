@@ -3,10 +3,18 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SOURCE_PATH="${DIRECTORCTL_SOURCE_PATH:-${PGU_DIRECTORCTL_SOURCE_PATH:-$REPO_ROOT/scripts/directorctl}}"
-INSTALL_PATH="${DIRECTORCTL_INSTALL_PATH:-${PGU_DIRECTORCTL_INSTALL_PATH:-/home/agent/bin/directorctl}}"
+INSTALL_PATH="${DIRECTORCTL_INSTALL_PATH:-${PGU_DIRECTORCTL_INSTALL_PATH:-}}"
 
 if [[ ! -f "$SOURCE_PATH" ]]; then
     printf 'install-directorctl: source not found: %s\n' "$SOURCE_PATH" >&2
+    exit 1
+fi
+if [[ -z "$INSTALL_PATH" ]]; then
+    printf '%s\n' 'install-directorctl: DIRECTORCTL_INSTALL_PATH is required; provisioned panes and services use scripts/directorctl from their selected immutable release' >&2
+    exit 1
+fi
+if [[ "$INSTALL_PATH" != /* ]]; then
+    printf 'install-directorctl: install path must be absolute: %s\n' "$INSTALL_PATH" >&2
     exit 1
 fi
 

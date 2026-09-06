@@ -32,6 +32,7 @@ from scripts.ticket_board.project_provision import (
     build_plan,
     render_add_role_sql,
     render_board_unit,
+    render_canary_unit,
     render_vcs_close_role_sql,
     sql_identifier,
     validate_ticket_prefix,
@@ -329,6 +330,10 @@ class LauncherUpgradeResult:
 @dataclass(frozen=True)
 class TenantReleaseStatus:
     board_root: Path
+    owner_user: str
+    owner_home: Path
+    provisioned_system_unit: Path | None
+    commit_git_dir: str
     current_release: Path | None
     current_sha: str
     target_sha: str
@@ -2483,10 +2488,17 @@ def cli_command_for_role(
             env.setdefault("PGU_TICKET_BOARD_PANE_STATE_DIR", str(pane_state_dir.expanduser()))
         if session_id:
             env.setdefault("PGU_PANE_SESSION_ID", session_id)
-    env["PATH"] = _prepend_paths(
-        env.get("PATH") or default_pane_base_path(bin_user),
-        default_user_bin_dirs(bin_user),
-    )
+    pane_path_dirs = default_user_bin_dirs(bin_user)
+    configured_directorctl = env.get("TICKET_BOARD_DIRECTORCTL", "").strip()
+    if configured_directorctl:
+        directorctl_path = Path(configured_directorctl).expanduser()
+        if not directorctl_path.is_absolute():
+            raise SystemExit(
+                f"team-launcher: TICKET_BOARD_DIRECTORCTL must be absolute for {role.role}: "
+                f"{configured_directorctl}"
+            )
+        pane_path_dirs.insert(0, str(directorctl_path.parent))
+    env["PATH"] = _prepend_paths(env.get("PATH") or default_pane_base_path(bin_user), pane_path_dirs)
     return ["env", *_env_unset_prefix((*PANE_TARGET_ENV_KEYS, *role.unset_env)), *_env_prefix(env), *command]
 
 
@@ -4780,6 +4792,16 @@ def upgrade_generated_project_config(
     session_dir_upgrade: Path | None = None
     shared_pane_launcher = switchyard_shared_pane_launcher()
     pane_launcher_upgrade: Path | None = None
+    board_root = _tenant_board_root_from_config_or_plan(config, config_path)
+    directorctl_upgrade = str(board_root / "current" / "scripts" / "directorctl") if board_root is not None else ""
+    roles_need_directorctl_upgrade = bool(directorctl_upgrade) and any(
+        role.env.get("TICKET_BOARD_DIRECTORCTL") != directorctl_upgrade for role in config.roles
+    )
+    if roles_need_directorctl_upgrade:
+        if dry_run:
+            changed_messages.append(f"pane directorctl can be pinned to {directorctl_upgrade}")
+        else:
+            changed_messages.append(f"pinned pane directorctl to {directorctl_upgrade}")
     if (
         config.pane_launcher is not None
         and config.pane_launcher.expanduser().resolve(strict=False)
@@ -4838,12 +4860,21 @@ def upgrade_generated_project_config(
             changed=False,
             message=f"switchyard: {config.project} layout template is already current",
         )
-    if session_dir_upgrade is not None or pane_launcher_upgrade is not None:
+    if session_dir_upgrade is not None or pane_launcher_upgrade is not None or roles_need_directorctl_upgrade:
         raw_config = _load_json(config_path)
         if session_dir_upgrade is not None:
             raw_config["session_dir"] = str(session_dir_upgrade)
         if pane_launcher_upgrade is not None:
             raw_config["pane_launcher"] = str(pane_launcher_upgrade)
+        if roles_need_directorctl_upgrade:
+            for raw_role in raw_config.get("roles", []):
+                if not isinstance(raw_role, dict):
+                    continue
+                raw_env = raw_role.get("env")
+                if not isinstance(raw_env, dict):
+                    raw_env = {}
+                    raw_role["env"] = raw_env
+                raw_env["TICKET_BOARD_DIRECTORCTL"] = directorctl_upgrade
         _write_json_atomic(config_path, raw_config)
         ensure_owner_file(config, config_path, runner=runner)
     return LauncherUpgradeResult(
@@ -4860,6 +4891,51 @@ def upgrade_generated_project_layout(
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> LauncherUpgradeResult:
     return upgrade_generated_project_config(config, config_path=config_path, dry_run=dry_run, runner=runner)
+
+
+def refresh_generated_project_runtime_artifacts(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    dry_run: bool = False,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> LauncherUpgradeResult:
+    provision_dir = config_path.expanduser().resolve(strict=False).parent
+    plan_path = provision_dir / "plan.json"
+    if not plan_path.is_file():
+        return LauncherUpgradeResult(False, f"switchyard: {config.project} has no generated runtime plan; leaving artifacts unchanged")
+    try:
+        plan = _project_board_provision_from_json(plan_path)
+    except SystemExit as exc:
+        return LauncherUpgradeResult(
+            False,
+            f"switchyard: {config.project} runtime plan is incomplete and cannot be refreshed automatically: {exc}",
+        )
+    with tempfile.TemporaryDirectory(prefix=f"switchyard-{config.project}-runtime-artifacts.") as tmp:
+        staged = Path(tmp)
+        write_artifacts(plan, staged, enable_owner_linger=False)
+        changed_names = sorted(
+            path.name
+            for path in staged.iterdir()
+            if not (provision_dir / path.name).is_file()
+            or (provision_dir / path.name).read_bytes() != path.read_bytes()
+        )
+        if not changed_names:
+            return LauncherUpgradeResult(False, f"switchyard: {config.project} generated runtime artifacts are already current")
+        if dry_run:
+            return LauncherUpgradeResult(
+                False,
+                f"switchyard: {config.project} generated runtime artifacts can be refreshed: {', '.join(changed_names)}",
+            )
+        for name in changed_names:
+            target = provision_dir / name
+            shutil.copyfile(staged / name, target)
+            target.chmod((staged / name).stat().st_mode & 0o777)
+            ensure_owner_file(config, target, runner=runner)
+    return LauncherUpgradeResult(
+        True,
+        f"switchyard: refreshed {config.project} generated runtime artifacts: {', '.join(changed_names)}",
+    )
 
 
 def _tenant_board_root_from_config(config: ProjectConfig) -> Path | None:
@@ -4986,6 +5062,33 @@ def tenant_release_status(
     board_root = _tenant_board_root_from_config_or_plan(config, config_path)
     if board_root is None:
         return None
+    plan_data = _plan_data_from_config(config, config_path) if config_path is not None else {}
+    owner_user = str(plan_data.get("owner_user") or config.run_as_user or current_user_name()).strip()
+    if not owner_user:
+        raise SystemExit(f"switchyard: cannot determine tenant owner for {config.project}")
+    raw_owner_home = str(plan_data.get("owner_home") or "").strip()
+    if raw_owner_home:
+        owner_home = Path(raw_owner_home).expanduser()
+    elif board_root.name == f"{config.project}-ticketboard-live":
+        owner_home = board_root.parent
+    else:
+        raise SystemExit(
+            f"switchyard: provision plan for {config.project} is missing owner_home and it cannot be "
+            f"derived from board_root {board_root}"
+        )
+    if not owner_home.is_absolute():
+        raise SystemExit(f"switchyard: tenant owner_home must be absolute: {owner_home}")
+    provisioned_system_unit = None
+    if config_path is not None:
+        candidate = (config_path.parent / f"{config.project}-ticket-board.service").resolve(strict=False)
+        required_units = (
+            candidate,
+            candidate.parent / f"{config.project}-ticket-board-canary.service",
+            candidate.parent / f"{config.project}-ticket-board-notify-listener.service",
+        )
+        if all(path.is_file() for path in required_units):
+            provisioned_system_unit = candidate
+    commit_git_dir = str(plan_data.get("commit_git_dir") or "").strip()
     resolved_source_repo = (source_repo or _repo_root()).expanduser().resolve(strict=False)
     current_release, current_sha = _current_tenant_release(board_root)
     clone_source_repo: Path | None = None
@@ -4996,6 +5099,10 @@ def tenant_release_status(
         target_sha, resolve_error = _resolve_deploy_ref_readonly(resolved_source_repo, deploy_ref, runner=runner)
     return TenantReleaseStatus(
         board_root=board_root,
+        owner_user=owner_user,
+        owner_home=owner_home,
+        provisioned_system_unit=provisioned_system_unit,
+        commit_git_dir=commit_git_dir,
         current_release=current_release,
         current_sha=current_sha,
         target_sha=target_sha,
@@ -5007,31 +5114,82 @@ def tenant_release_status(
 
 
 def tenant_release_deploy_command(status: TenantReleaseStatus, project: str) -> str:
+    deploy_env = [
+        f"TICKET_BOARD_OWNER_HOME={status.owner_home}",
+        f"TICKET_BOARD_PROJECT={project}",
+        f"BOARD_ROOT={status.board_root}",
+        f"DEPLOY_REF={status.deploy_ref}",
+    ]
+    if status.provisioned_system_unit is not None:
+        deploy_env.append(f"TICKET_BOARD_PROVISIONED_SYSTEM_UNIT={status.provisioned_system_unit}")
+    if status.commit_git_dir:
+        deploy_env.append(f"TICKET_BOARD_COMMIT_GIT_DIR={status.commit_git_dir}")
     if status.clone_source_repo is not None:
-        deploy_command = (
-            "sudo env "
-            f"TICKET_BOARD_PROJECT={shlex.quote(project)} "
-            'SOURCE_REPO="$tmpdir" '
-            f"BOARD_ROOT={shlex.quote(str(status.board_root))} "
-            f"DEPLOY_REF={shlex.quote(status.deploy_ref)} "
-            '"$tmpdir/scripts/ticket-board-service.sh" deploy'
-        )
-        return (
+        script = (
             'tmpdir="$(mktemp -d)"'
             f" && git clone {shlex.quote(str(status.clone_source_repo))} \"$tmpdir\""
-            f" && {deploy_command}"
+            " && env "
+            + " ".join(shlex.quote(value) for value in deploy_env)
+            + ' SOURCE_REPO="$tmpdir" "$tmpdir/scripts/ticket-board-service.sh" deploy-restart'
         )
+        return _quote_command(_owner_command_env_args(status.owner_user, status.owner_home, ["sh", "-c", script]))
     service_script = status.source_repo / "scripts" / "ticket-board-service.sh"
     return _quote_command(
+        _owner_command_env_args(
+            status.owner_user,
+            status.owner_home,
+            ["env", *deploy_env, f"SOURCE_REPO={status.source_repo}", str(service_script), "deploy-restart"],
+        )
+    )
+
+
+def tenant_release_listener_command(status: TenantReleaseStatus, project: str, action: str) -> str:
+    if action not in {"stop", "start"}:
+        raise ValueError(f"unsupported listener action: {action}")
+    listener_unit = f"{project}-ticket-board-notify-listener.service"
+    operation = f"systemctl --user {action} {shlex.quote(listener_unit)}"
+    if action == "start":
+        operation = f"systemctl --user daemon-reload && {operation}"
+    script = (
+        'runtime="/run/user/$(id -u)"; '
+        'XDG_RUNTIME_DIR="$runtime" DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus" '
+        + operation
+    )
+    command = _owner_command_env_args(
+        status.owner_user,
+        status.owner_home,
+        ["sh", "-c", script],
+    )
+    return _quote_command(command)
+
+
+def tenant_release_unit_install_command(status: TenantReleaseStatus, project: str) -> str:
+    if status.provisioned_system_unit is None:
+        return ""
+    provision_dir = status.provisioned_system_unit.parent
+    board_unit = status.provisioned_system_unit
+    canary_unit = provision_dir / f"{project}-ticket-board-canary.service"
+    listener_unit = provision_dir / f"{project}-ticket-board-notify-listener.service"
+    listener_target = status.owner_home / ".config" / "systemd" / "user" / listener_unit.name
+    return " && ".join(
         [
-            "sudo",
-            "env",
-            f"TICKET_BOARD_PROJECT={project}",
-            f"SOURCE_REPO={status.source_repo}",
-            f"BOARD_ROOT={status.board_root}",
-            f"DEPLOY_REF={status.deploy_ref}",
-            str(service_script),
-            "deploy",
+            _quote_command(["sudo", "install", "-m", "0644", str(board_unit), f"/etc/systemd/system/{board_unit.name}"]),
+            _quote_command(["sudo", "install", "-m", "0644", str(canary_unit), f"/etc/systemd/system/{canary_unit.name}"]),
+            _quote_command(
+                [
+                    "sudo",
+                    "install",
+                    "-m",
+                    "0644",
+                    "-o",
+                    status.owner_user,
+                    "-g",
+                    status.owner_user,
+                    str(listener_unit),
+                    str(listener_target),
+                ]
+            ),
+            _quote_command(["sudo", "systemctl", "daemon-reload"]),
         ]
     )
 
@@ -5076,8 +5234,19 @@ def report_tenant_release_upgrade(
     if status.unchanged:
         print_func(f"switchyard: {config.project} deployed board release unchanged; no release deploy needed")
     else:
-        print_func("switchyard: privileged release update command for Eric:")
+        if status.provisioned_system_unit is None:
+            print_func(
+                f"switchyard: cannot produce a safe release update for {config.project}: generated board, "
+                "canary, and listener units are incomplete"
+            )
+            return
+        print_func("switchyard: matching-release deployment sequence (keep the listener stopped through migrations):")
+        print_func(f"  {tenant_release_listener_command(status, config.project, 'stop')}")
+        unit_install = tenant_release_unit_install_command(status, config.project)
+        if unit_install:
+            print_func(f"  {unit_install}")
         print_func(f"  {tenant_release_deploy_command(status, config.project)}")
+        print_func(f"  {tenant_release_listener_command(status, config.project, 'start')}")
         print_func(
             "switchyard: panes must be restarted after the release update to pick up hook installer, "
             "hook binary, or pane launcher changes; this command does not restart panes"
@@ -5894,7 +6063,9 @@ def _new_project_role_env(
     design_document: Path | None = None,
     director_onboarding: Path | None = None,
 ) -> dict[str, str]:
-    env: dict[str, str] = {}
+    env: dict[str, str] = {
+        "TICKET_BOARD_DIRECTORCTL": f"{plan.board_current}/scripts/directorctl",
+    }
     if role == "designer" and design_document is not None:
         project_dir = design_document.parent
         env.update(
@@ -6197,6 +6368,19 @@ def _project_board_provision_from_json(path: Path) -> ProjectBoardProvision:
         if name == "project_name" and name not in raw:
             raw_project = str(raw.get("project") or "pgu")
             fields[name] = "PGU" if raw_project == "pgu" else raw_project
+            continue
+        if name == "owner_home" and name not in raw:
+            raw_project = str(raw.get("project") or "").strip()
+            raw_board_root = Path(str(raw.get("board_root") or "")).expanduser()
+            if raw_project and raw_board_root.name == f"{raw_project}-ticketboard-live":
+                fields[name] = str(raw_board_root.parent)
+                continue
+            raise SystemExit(
+                f"switchyard: {path} is missing provision field 'owner_home' and it cannot be "
+                "derived from board_root"
+            )
+        if name == "canary_unit" and name not in raw:
+            fields[name] = f"{raw.get('project')}-ticket-board-canary.service"
             continue
         if name not in raw:
             raise SystemExit(f"switchyard: {path} is missing provision field {name!r}")
@@ -6640,6 +6824,7 @@ def new_project_command(
     *,
     from_artifact: Path | None = None,
     owner_user: str | None = None,
+    owner_home: Path | None = None,
     desktop_policy: Path | None = None,
     port: int | None = None,
     database: str | None = None,
@@ -6702,6 +6887,7 @@ def new_project_command(
         project=project,
         project_name=project_name,
         owner_user=effective_owner,
+        owner_home=owner_home,
         port=port,
         database=database,
         source_repo=effective_source_repo,
@@ -7477,6 +7663,7 @@ def _write_initial_switchyard_project_artifact(
         project_name=project_name,
         ticket_prefix=validate_ticket_prefix(slug),
         owner_user=owner_user,
+        owner_home=home_base / owner_user,
         repository=project_dir,
         remote="origin",
         default_branch="main",
@@ -9433,6 +9620,7 @@ def switchyard_new_command(
         project=resolved_slug,
         project_name=precheck_artifact.project_name if precheck_artifact else resolved_project_name,
         owner_user=owner_user,
+        owner_home=home_base / owner_user,
         port=port,
         database=database,
         source_repo=effective_source_repo,
@@ -9583,6 +9771,7 @@ def switchyard_new_command(
     result = new_project_command(
         resolved_slug,
         from_artifact=artifact_path,
+        owner_home=home_base / owner_user,
         source_repo=source_repo,
         output_dir=provision_dir,
         director_onboarding=director_onboarding,
@@ -9707,6 +9896,13 @@ def upgrade_project_command(
     print_func(result.message)
     if result.changed:
         config = load_project_config(config.project, config_path)
+    runtime_artifacts = refresh_generated_project_runtime_artifacts(
+        config,
+        config_path=config_path,
+        dry_run=dry_run,
+        runner=runner,
+    )
+    print_func(runtime_artifacts.message)
     project_dir = _project_dir_from_generated_config_path(config_path)
     if project_dir is not None:
         upgrade_switchyard_onboarding_docs(
@@ -9837,6 +10033,7 @@ def _project_plan_for_added_role(
         project=config.project,
         project_name=config.project_name,
         owner_user=str(_loaded_plan_field(plan_data, "owner_user", config.run_as_user or current_user_name())),
+        owner_home=Path(str(_loaded_plan_field(plan_data, "owner_home", _owner_home_for_auth(config.run_as_user or current_user_name())))),
         port=_loaded_plan_field(plan_data, "port", None),
         database=_loaded_plan_field(plan_data, "database", None),
         source_repo=Path(str(_loaded_plan_field(plan_data, "source_repo", _repo_root()))),
@@ -9879,6 +10076,7 @@ def _project_plan_for_vcs_close_role(
         project=config.project,
         project_name=config.project_name,
         owner_user=str(_loaded_plan_field(plan_data, "owner_user", config.run_as_user or current_user_name())),
+        owner_home=Path(str(_loaded_plan_field(plan_data, "owner_home", _owner_home_for_auth(config.run_as_user or current_user_name())))),
         port=_loaded_plan_field(plan_data, "port", None),
         database=_loaded_plan_field(plan_data, "database", None),
         source_repo=Path(str(_loaded_plan_field(plan_data, "source_repo", _repo_root()))),
@@ -9911,6 +10109,7 @@ def _add_role_payload(
     cli: str,
     detached: bool,
     slot: int | None,
+    directorctl: str = "",
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "cli": [cli],
@@ -9920,6 +10119,8 @@ def _add_role_payload(
         "tmux_session": f"{config.project}-{role_name}",
         "yolo": True,
     }
+    if directorctl:
+        payload["env"] = {"TICKET_BOARD_DIRECTORCTL": directorctl}
     if not detached:
         if slot is None:
             raise ValueError("visible role requires slot")
@@ -10030,7 +10231,18 @@ def _write_added_role_config(
     raw_roles = raw_config.get("roles")
     if not isinstance(raw_roles, list):
         raise SystemExit(f"{config_path} must define a roles list")
-    raw_roles.append(_add_role_payload(config, role_name=role_name, cli=cli, detached=detached, slot=slot))
+    board_root = _tenant_board_root_from_config_or_plan(config, config_path)
+    directorctl = str(board_root / "current" / "scripts" / "directorctl") if board_root is not None else ""
+    raw_roles.append(
+        _add_role_payload(
+            config,
+            role_name=role_name,
+            cli=cli,
+            detached=detached,
+            slot=slot,
+            directorctl=directorctl,
+        )
+    )
     _write_json_atomic(config_path, raw_config)
     ensure_owner_file(config, config_path, runner=runner)
     updated_config = load_project_config(config.project, config_path)

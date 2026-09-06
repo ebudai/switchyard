@@ -36,6 +36,8 @@ from scripts.ticket_board.project_provision import (
     NON_PROCESS_ROLES,
     TENANT_ARTIFACT_NAMES,
     build_plan,
+    migrate_plan_document,
+    plan_field_names,
     privileged_artifact_names,
     privileged_provision_dir,
     render_add_role_sql,
@@ -5564,13 +5566,23 @@ def refresh_generated_project_runtime_artifacts(
     replacements = _plan_replacements(source_repo, commit_git_dir)
     changed: list[str] = []
 
+    migrated_fields: list[str] = []
     try:
-        tenant_plan = _project_board_provision_from_json(tenant_plan_path)
+        tenant_plan = _project_board_provision_from_json(tenant_plan_path, migrated=migrated_fields)
     except SystemExit as exc:
         return LauncherUpgradeResult(
             False,
             f"switchyard: {config.project} runtime plan is incomplete and cannot be refreshed automatically: {exc}",
         )
+    # A plan written before these fields existed is migrated, not rejected. Say
+    # so in every outcome below, including the dry run, which reports it without
+    # writing anything (SYRD-52).
+    migration_note = (
+        f"; migrated {config.project} plan fields added since it was provisioned: "
+        + ", ".join(sorted(migrated_fields))
+        if migrated_fields
+        else ""
+    )
     # The staged unit always carries the real table. Withholding it is not a
     # compatibility authority: the current server resolves every local peer
     # through that table, so an empty one grants no role to anybody. Safety
@@ -5596,17 +5608,25 @@ def refresh_generated_project_runtime_artifacts(
 
     target = privileged_provision_dir(config.project, root=switchyard_privileged_provision_root())
     if os.geteuid() != 0:
-        message = (
-            f"switchyard: refreshed {config.project} generated runtime artifacts: {', '.join(changed)}"
-            if changed
-            else f"switchyard: {config.project} generated runtime artifacts are already current"
-        )
+        if not changed:
+            message = f"switchyard: {config.project} generated runtime artifacts are already current"
+        elif dry_run:
+            # Nothing above wrote anything in a dry run, so this must not say it
+            # did: an operator reading "refreshed" would take the migration as
+            # already applied (SYRD-52).
+            message = (
+                f"switchyard: {config.project} generated runtime artifacts can be refreshed: "
+                f"{', '.join(changed)}"
+            )
+        else:
+            message = f"switchyard: refreshed {config.project} generated runtime artifacts: {', '.join(changed)}"
+        message += migration_note
         if not target.is_dir():
             message += (
                 f"; run `switchyard upgrade {config.project}` as root to stage the units, grants "
                 "and SQL root installs"
             )
-        return LauncherUpgradeResult(bool(changed), message)
+        return LauncherUpgradeResult(bool(changed) and not dry_run, message)
 
     baseline, reason = _privileged_baseline_plan(
         config,
@@ -5632,12 +5652,16 @@ def refresh_generated_project_runtime_artifacts(
         if not (target / name).is_file() or (target / name).read_bytes() != body
     )
     if not changed and not privileged_changed:
-        return LauncherUpgradeResult(False, f"switchyard: {config.project} generated runtime artifacts are already current")
+        return LauncherUpgradeResult(
+            False,
+            f"switchyard: {config.project} generated runtime artifacts are already current" + migration_note,
+        )
     if dry_run:
         return LauncherUpgradeResult(
             False,
             f"switchyard: {config.project} generated runtime artifacts can be refreshed: "
-            + ", ".join(sorted({*changed, *privileged_changed})),
+            + ", ".join(sorted({*changed, *privileged_changed}))
+            + migration_note,
         )
     if privileged_changed:
         try:
@@ -5654,6 +5678,7 @@ def refresh_generated_project_runtime_artifacts(
     if privileged_changed:
         parts.append(f"root installs {', '.join(privileged_changed)} from {target}")
     message = f"switchyard: refreshed {config.project} generated runtime artifacts; " + "; ".join(parts)
+    message += migration_note
     if added_roles:
         message += f"; role accounts added from the workflow projection: {', '.join(added_roles)}"
     return LauncherUpgradeResult(True, message)
@@ -5746,6 +5771,11 @@ REGENERATED_PLAN_FIELDS: tuple[str, ...] = (
     "tmpfiles_name",
     "polkit_name",
     "role_control_sudoers_name",
+    # SYRD-50 added this one and did not list it here, so a tenant document
+    # could record a different sudoers file name and be silently regenerated
+    # rather than refused. Every generated name root installs belongs here
+    # (SYRD-52).
+    "tenant_control_sudoers_name",
 )
 
 
@@ -7647,34 +7677,87 @@ def _usable_switchyard_entry_for_project(
     return None, broken_entries
 
 
-def _project_board_provision_from_json(path: Path) -> ProjectBoardProvision:
+def _recorded_owner_home(raw: Mapping[str, Any]) -> str:
+    """The owner home a plan records, or the one its board root discloses.
+
+    Every other generated path is anchored on this, so it is established before
+    a reference plan can be built and is never guessed at.
+    """
+    recorded = str(raw.get("owner_home") or "").strip()
+    if recorded:
+        return recorded
+    project = str(raw.get("project") or "").strip()
+    board_root = Path(str(raw.get("board_root") or "")).expanduser()
+    if project and board_root.name == f"{project}-ticketboard-live":
+        return str(board_root.parent)
+    return ""
+
+
+def _plan_migration_reference(raw: Mapping[str, Any]) -> ProjectBoardProvision | None:
+    """A current plan for the same project, to take generated names from.
+
+    Built by the same `build_plan` provisioning uses, from the identity and the
+    tenant-specific choices the document already records, so a field added
+    after the document was written gets the value provisioning would have given
+    it rather than an invented one. Nothing here decides what root installs:
+    root renders from its own baseline, and a value taken from this reference
+    is one the document was missing entirely (SYRD-52).
+    """
+    project = str(raw.get("project") or "").strip()
+    owner_user = str(raw.get("owner_user") or "").strip()
+    owner_home = _recorded_owner_home(raw)
+    if not project or not owner_user or not owner_home:
+        return None
+    recorded: dict[str, Any] = {}
+    for name in ("project_name", "ticket_prefix", "database"):
+        value = str(raw.get(name) or "").strip()
+        if value:
+            recorded[name] = value
+    port = raw.get("port")
+    if isinstance(port, int) and not isinstance(port, bool):
+        recorded["port"] = port
+    try:
+        return build_plan(
+            project=project,
+            owner_user=owner_user,
+            owner_home=Path(owner_home),
+            **recorded,
+        )
+    except SystemExit:
+        return None
+
+
+def _project_board_provision_from_json(
+    path: Path, *, migrated: list[str] | None = None
+) -> ProjectBoardProvision:
+    """Parse a plan written by this release, or by an older one.
+
+    A plan gains fields as the product does, and parsing straight into the
+    current strict shape made every already provisioned tenant unupgradable the
+    moment one was added. Fields the document predates are filled in first, and
+    the caller is told which ones so it can report the migration (SYRD-52).
+    """
     raw = _load_json(path)
-    fields: dict[str, Any] = {}
-    for name in ProjectBoardProvision.__dataclass_fields__:
-        if name == "project_name" and name not in raw:
-            raw_project = str(raw.get("project") or "pgu")
-            fields[name] = "PGU" if raw_project == "pgu" else raw_project
-            continue
-        if name == "workflow" and name not in raw:
-            fields[name] = None
-            continue
-        if name == "owner_home" and name not in raw:
-            raw_project = str(raw.get("project") or "").strip()
-            raw_board_root = Path(str(raw.get("board_root") or "")).expanduser()
-            if raw_project and raw_board_root.name == f"{raw_project}-ticketboard-live":
-                fields[name] = str(raw_board_root.parent)
-                continue
-            raise SystemExit(
-                f"switchyard: {path} is missing provision field 'owner_home' and it cannot be "
-                "derived from board_root"
-            )
-        if name == "canary_unit" and name not in raw:
-            fields[name] = f"{raw.get('project')}-ticket-board-canary.service"
-            continue
-        if name not in raw:
-            raise SystemExit(f"switchyard: {path} is missing provision field {name!r}")
-        fields[name] = raw[name]
-    return ProjectBoardProvision(**fields)
+    document = dict(raw)
+    owner_home = _recorded_owner_home(document)
+    if owner_home:
+        document.setdefault("owner_home", owner_home)
+    fields, added, unresolved = migrate_plan_document(
+        document, reference=_plan_migration_reference(document)
+    )
+    if "owner_home" in unresolved:
+        raise SystemExit(
+            f"switchyard: {path} is missing provision field 'owner_home' and it cannot be "
+            "derived from board_root"
+        )
+    if unresolved:
+        raise SystemExit(
+            f"switchyard: {path} is missing provision field {unresolved[0]!r} and no reference "
+            "plan can be built for it; re-provision the project"
+        )
+    if migrated is not None:
+        migrated.extend(added)
+    return ProjectBoardProvision(**{name: fields[name] for name in plan_field_names()})
 
 
 def _port_from_board_url(board_url: str) -> int | None:

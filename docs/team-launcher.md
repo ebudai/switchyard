@@ -278,6 +278,52 @@ a unit without installing it would leave the workers moved and the authority
 not. Account existence is
 never taken as evidence of process identity.
 
+**Owning a path is not reaching it.** A role's worktree lives beneath an owner
+home that is 0710, and a linked worktree's `.git` points into the owner's
+control repository, so chowning the leaf leaves the role unable to open either.
+Provisioning therefore grants the roles group `--x` on the owner home and on
+each directory between it and the control repository -- traversal only, never
+read -- and `rwX` with default entries on the control repository itself, which
+every role's commit writes objects and refs into. The owner's credential
+directories are 0700, are not named in any grant, and stay unreadable.
+
+**The director can run its own commands.** Its configuration is a 0600 file
+under that same home, so the entrypoint used to see a foreign owner, escalate to
+root, and hand `finish-upgrade` to the one identity it refuses. The configured
+director account is granted traversal to the provisioning directory and `rwX`
+inside it, with default entries so an atomically written replacement keeps the
+contract; `finish-upgrade` is classified unprivileged so the wrapper never
+escalates it; and the entrypoint does not escalate an unprivileged command for a
+caller that can already read the configuration. The exception is bound to the
+account the configuration names, never to a role the caller claims, and the
+board still decides authority from the peer uid on its own.
+
+**The control role is what a role can do, not what it is called.** A tenant
+chooses its own role names, so a grant bound to the literal name `director`
+either misses the real control role or lands on a role that merely borrowed the
+name. For a declarative tenant the control role is the active role whose
+workflow capabilities include `set_manually_controlled` and `merge`, and it must
+resolve to exactly one configured role: zero matches and more than one both
+refuse and grant nothing, because a privileged grant is not something to guess
+at. Only a tenant with no workflow document falls back to the historical name.
+
+**Containment is by path component, not by string prefix.** `/home/foobar`
+starts with `/home/foo`, and a grant computed from that coincidence would be
+written against somebody else's home. Every path a grant is derived from is
+checked with `PurePath` containment before any command is rendered. A path kept
+genuinely elsewhere is an ordinary configuration and simply receives no grant on
+the owner's home; a path that shares the home's prefix without sharing its
+components is refused, and because the artifact is run as root the refusal is
+reported rather than raised.
+
+Component containment is still lexical, so it is not enough on its own:
+`/home/foo/../foobar` *is* relative to `/home/foo`, and the interior sliced out
+of it begins `/home/foo/..`, which a root-run artifact would grant on `/home`.
+Normalizing the path here would mean resolving through directories the tenant
+controls, which is its own escape, so a path carrying `..` -- or one that is not
+absolute at all -- is refused before any command is derived from it. `.` and
+repeated separators name the same directory and are not an escape.
+
 **Role accounts can reach the board clients.** They cannot traverse the owner's
 0710 home, so `ticket-board-write`, `ticket-board-read`, `directorctl` and the
 `ticket_board` package they import are staged root-owned under

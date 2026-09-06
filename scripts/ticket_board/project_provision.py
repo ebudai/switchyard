@@ -559,6 +559,180 @@ def role_tooling_staging_commands(project: str, release_root: str) -> list[str]:
     return commands
 
 
+class PathContainmentError(ValueError):
+    """A path that is not where a privileged grant was told it would be."""
+
+
+def _refuse_unnormalized(path: str, *, what: str) -> None:
+    """Refuse a path that is not already an absolute path in normal form.
+
+    Component containment is still lexical: `/home/foo/../foobar` *is*
+    relative to `/home/foo` as far as `PurePath` is concerned, and the
+    interior sliced out of it is `/home/foo/..`, so a root-run artifact would
+    write the grant against `/home`. Normalizing here would mean resolving
+    through directories the tenant controls, which is its own escape, so a
+    path carrying `..` -- or one that is not absolute at all -- is refused
+    instead. `.` and repeated separators are dropped by `PurePosixPath`
+    without changing which directory is named, and are not an escape (SYRD-49).
+    """
+    if not path:
+        return
+    candidate = PurePosixPath(path)
+    if not candidate.is_absolute():
+        raise PathContainmentError(
+            f"{what} {path} is not an absolute path; refusing to grant access to it"
+        )
+    if ".." in candidate.parts:
+        raise PathContainmentError(
+            f"{what} {path} is not in normal form; refusing to grant access to a path "
+            "that walks back out of itself"
+        )
+
+
+def _is_within(root: str, candidate: str) -> bool:
+    """Containment by path components, not by string prefix.
+
+    `/home/foobar` starts with `/home/foo`, and a grant computed from that
+    coincidence would be written against somebody else's home (SYRD-49).
+    """
+    try:
+        return PurePosixPath(candidate).is_relative_to(PurePosixPath(root))
+    except ValueError:
+        return False
+
+
+def _refuse_prefix_coincidence(root: str, candidate: str) -> None:
+    """Refuse a path that only looks contained because of a shared prefix.
+
+    A path outside the owner home is an ordinary configuration -- a project
+    repository kept elsewhere needs no grant on that home. A path that shares
+    the home's string prefix without sharing its components is not: it is
+    `/home/foobar` read as if it were inside `/home/foo`, and a privileged
+    grant computed from that coincidence would be written against somebody
+    else's home. Refuse before emitting the command (SYRD-49).
+    """
+    _refuse_unnormalized(root, what="the owner home")
+    _refuse_unnormalized(candidate, what="the granted path")
+    if not root or not candidate or _is_within(root, candidate):
+        return
+    if str(candidate).startswith(str(root)):
+        raise PathContainmentError(
+            f"{candidate} is not inside {root}; refusing to grant access to a "
+            "path that only shares its prefix"
+        )
+
+
+def _interior_directories(root: str, leaf: str) -> list[str]:
+    """Directories strictly between a root and a leaf inside it.
+
+    A leaf that is not inside the root has no interior, and refuses outright
+    when it is inside only by string prefix.
+    """
+    _refuse_prefix_coincidence(root, leaf)
+    if not _is_within(root, leaf):
+        return []
+    relative = PurePosixPath(leaf).relative_to(PurePosixPath(root))
+    directories: list[str] = []
+    current = PurePosixPath(root)
+    for part in relative.parts[:-1]:
+        current = current / part
+        directories.append(str(current))
+    return directories
+
+
+def owner_home_traversal_commands(owner_home: str, principal: str) -> list[str]:
+    """Let one principal walk THROUGH the owner's home without reading it.
+
+    The owner home is 0710 and holds the owner's credentials, so it must stay
+    unreadable; but a role that owns a worktree beneath it still cannot reach
+    that worktree without traversal. `--x` grants exactly that and nothing else,
+    which is the same grant the board service already holds (SYRD-49).
+    """
+    _refuse_unnormalized(owner_home, what="the owner home")
+    return [f"sudo setfacl -m {principal}:--x {shell_quote(owner_home)}"]
+
+
+def role_worktree_access_commands(
+    *,
+    owner_home: str,
+    roles_group: str,
+    worktree_base: str,
+    control_repository: str,
+) -> list[str]:
+    """Make each role's own worktree and its git metadata reachable.
+
+    Chowning a worktree leaf does not make it reachable: every directory above
+    it has to be traversable, and a linked worktree's gitdir lives inside the
+    owner's control repository, which the role must also read and write to
+    record a commit. Neither grant exposes the owner's credentials, which stay
+    0700 and are not named here (SYRD-49).
+    """
+    _refuse_unnormalized(owner_home, what="the owner home")
+    _refuse_unnormalized(worktree_base, what="the worktree base")
+    _refuse_unnormalized(control_repository, what="the control repository")
+    group = f"g:{roles_group}"
+    interior = _interior_directories(owner_home, worktree_base)
+    # Every component between the home and the control repository, so the
+    # gitdir a linked worktree points at can be opened at all.
+    interior += _interior_directories(owner_home, control_repository)
+    commands: list[str] = []
+    # The home is granted only when something a role must reach is actually
+    # beneath it; a worktree base or control repository kept elsewhere needs no
+    # access to the owner's home at all.
+    if _is_within(owner_home, worktree_base) or _is_within(owner_home, control_repository):
+        commands.extend(owner_home_traversal_commands(owner_home, group))
+    for directory in interior + [worktree_base]:
+        command = f"sudo setfacl -m {group}:--x {shell_quote(directory)}"
+        if command not in commands:
+            commands.append(command)
+    # The repository itself is shared: a commit made in any role's worktree
+    # writes objects, refs and logs here. Default entries so the objects git
+    # creates later inherit the same access.
+    commands.append(f"sudo setfacl -R -m {group}:rwX {shell_quote(control_repository)}")
+    commands.append(f"sudo setfacl -R -m d:{group}:rwX {shell_quote(control_repository)}")
+    return commands
+
+
+def director_control_access_commands(
+    *,
+    owner_home: str,
+    director_account: str,
+    provision_dir: str,
+    project_dir: str,
+) -> list[str]:
+    """Let the configured director account use its own unprivileged commands.
+
+    The director's board write is authorized by the board from its peer uid, and
+    the command that makes it has to read and update the durable control
+    artifacts -- the launcher config, the workflow projection, the plan and the
+    upgrade record. Those live in a 0600 file under the 0710 owner home, so the
+    director could not read them and the entrypoint escalated to root, which
+    that command then correctly refuses. The grant is bound to the configured
+    account and reaches only the provisioning directory (SYRD-49).
+    """
+    _refuse_unnormalized(owner_home, what="the owner home")
+    _refuse_unnormalized(provision_dir, what="the provisioning directory")
+    _refuse_unnormalized(project_dir, what="the project directory")
+    principal = f"u:{director_account}"
+    interior = _interior_directories(owner_home, provision_dir)
+    commands: list[str] = []
+    if _is_within(owner_home, provision_dir):
+        commands.extend(owner_home_traversal_commands(owner_home, principal))
+    for directory in interior:
+        command = f"sudo setfacl -m {principal}:--x {shell_quote(directory)}"
+        if command not in commands:
+            commands.append(command)
+    _refuse_prefix_coincidence(owner_home, project_dir)
+    project_grant = f"sudo setfacl -m {principal}:--x {shell_quote(project_dir)}"
+    if project_dir and _is_within(owner_home, project_dir) and project_grant not in commands:
+        commands.append(project_grant)
+    commands.append(f"sudo setfacl -R -m {principal}:rwX {shell_quote(provision_dir)}")
+    # Default entries so an atomically written replacement keeps the contract:
+    # every projection writes a new file and renames it into place.
+    commands.append(f"sudo setfacl -R -m d:{principal}:rwX {shell_quote(provision_dir)}")
+    return commands
+
+
 def role_runtime_commands(
     *,
     project: str,
@@ -645,6 +819,9 @@ def role_account_commands(
     runtime_directory: str = "",
     board_current: str = "",
     worktree: str = "",
+    owner_home: str = "",
+    worktree_base: str = "",
+    control_repository: str = "",
 ) -> str:
     """Operator commands to add ONE role's Unix account to an existing project.
 
@@ -677,6 +854,18 @@ def role_account_commands(
             worktree=worktree,
         )
     )
+    resolved_owner_home = owner_home or f"/home/{owner_user}"
+    if control_repository:
+        # A role added later needs the same reachability as one provisioned with
+        # the project: owning the leaf is not reaching it (SYRD-49).
+        lines.extend(
+            role_worktree_access_commands(
+                owner_home=resolved_owner_home,
+                roles_group=group,
+                worktree_base=worktree_base or str(PurePosixPath(worktree).parent) if worktree else resolved_owner_home,
+                control_repository=control_repository,
+            )
+        )
     lines.extend(
         [
             "# Refresh the director control interface so it can drive the new role:",

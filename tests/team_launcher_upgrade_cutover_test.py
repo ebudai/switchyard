@@ -203,7 +203,25 @@ def _declarative_tenant(
     # A real account: the privileged paths chown generated files to the project
     # owner, and this suite runs the root branch.
     payload["run_as_user"] = team_launcher.current_user_name()
-    payload["workflow"] = {"roles": [{"name": role["role"], "active": True} for role in payload["roles"]]}
+    # A real workflow document declares each role's capabilities, and the
+    # control role is the one holding them -- not the one named "director"
+    # (SYRD-49). This tenant's control role keeps that name; a tenant whose
+    # control role is named something else is covered by the role path access
+    # regression.
+    payload["workflow"] = {
+        "roles": [
+            {
+                "name": role["role"],
+                "active": True,
+                "capabilities": (
+                    ["add_comment", "set_manually_controlled", "merge"]
+                    if role["role"] == "director"
+                    else ["add_comment"]
+                ),
+            }
+            for role in payload["roles"]
+        ]
+    }
     # Liveness is a real probe: it reads the pane's pid and looks for the role's
     # command in that process's actual tree. Naming this interpreter makes the
     # test's own pid a genuinely live role rather than a claimed one.
@@ -1187,7 +1205,11 @@ def test_the_operator_artifact_describes_the_sequence_that_exists() -> None:
         for role in config.roles:
             account = f"porter-{role.role}"
             assert f"if ! getent passwd '{account}'" in artifact, role.role
-            assert role.workdir not in artifact, role.role
+            # By the quoted path, not by substring: a role whose workdir is the
+            # project repository is a prefix of the provisioning directory the
+            # director is granted, and a bare `in` reads that as a move of the
+            # worktree (SYRD-49).
+            assert f"'{role.workdir}'" not in artifact, role.role
         assert "sudo switchyard seed-role-credentials porter" in commands, commands
 
 

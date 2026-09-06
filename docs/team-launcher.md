@@ -40,7 +40,9 @@ set and the invoker is different, the wrapper re-execs through
 production launch keeps the existing agent-owned tmux sessions, pane hook
 state, and shared checkout. Pane subcommands delegate through that runtime user
 before touching tmux, pane hook state, or resume session files, including
-detached roles, `attach-role`/`detach-role`, and the viewer path. In auto layout
+detached roles, `attach-role`/`detach-role`, and the viewer path. For runtime
+director-controlled display slots, see [runtime presentation](runtime-presentation.md).
+In auto layout
 mode, KDE/plasma desktops use the separate Konsole layout; known non-KDE
 desktops and undetected desktops use the tmux viewer. `--layout separate` still
 forces the Konsole layout explicitly. Viewer launches use an internal no-attach

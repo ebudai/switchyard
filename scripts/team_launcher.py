@@ -151,14 +151,18 @@ SWITCHYARD_COMMANDS = (
     "present",
     "set-vcs-close-role",
     "agy-credential",
+    "role-prompt",
     "stop",
     "teardown",
     "status",
     "validate-models",
 )
 # `present` and `board-skill` act on the caller's own runtime -- display slots
-# and the caller's CLI skill trees -- so neither needs to escalate.
-SWITCHYARD_UNPRIVILEGED_COMMANDS = frozenset({"present", "board-skill"})
+# and the caller's CLI skill trees -- so neither needs to escalate. `role-prompt`
+# writes the tenant's own configuration through the board's workflow API as the
+# invoking user, which is the point: the director sets a role's remit without root
+# and without hand-editing a generated artifact.
+SWITCHYARD_UNPRIVILEGED_COMMANDS = frozenset({"present", "board-skill", "role-prompt"})
 SWITCHYARD_PRIVILEGED_COMMANDS = frozenset(
     command for command in SWITCHYARD_COMMANDS if command not in SWITCHYARD_UNPRIVILEGED_COMMANDS
 )
@@ -12036,6 +12040,7 @@ Commands:
   set-vcs-close-role
                    set which existing project role can mark tickets done
   agy-credential   show, set, or clear this host's agy credential source
+  role-prompt      show, set, or clear a role's onboarding prompt
   stop             stop a project's configured tmux pane sessions
   teardown         remove project board provisioning artifacts after a dry-run review
   status           list registered projects and pane liveness
@@ -12216,6 +12221,53 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         from scripts import board_skill_cli
 
         return board_skill_cli.main(argv[1:], prog="switchyard board-skill")
+    if argv[0].casefold() == "role-prompt":
+        parser = argparse.ArgumentParser(
+            prog="switchyard role-prompt",
+            description=(
+                "Show, set, or clear the onboarding prompt a role receives when its next "
+                "conversation starts fresh. A running conversation is never interrupted or "
+                "rewritten: a changed prompt is used by the next fresh session or an "
+                "explicit role restart."
+            ),
+        )
+        parser.add_argument("action", choices=("show", "set", "clear"))
+        parser.add_argument("role")
+        parser.add_argument(
+            "--project",
+            default=os.environ.get("TICKET_BOARD_PROJECT", ""),
+            help="project name or slug; defaults to TICKET_BOARD_PROJECT in the caller's pane",
+        )
+        parser.add_argument("--prompt", help="prompt text; use --prompt-file for anything long")
+        parser.add_argument(
+            "--prompt-file",
+            type=Path,
+            help="read the prompt from a file, or from stdin when given as -",
+        )
+        args = parser.parse_args(argv[1:])
+        if not args.project.strip():
+            raise SystemExit(
+                "switchyard: no project selected; pass --project or run where "
+                "TICKET_BOARD_PROJECT is set"
+            )
+        entry = _resolve_switchyard_project(args.project)
+        config = _load_switchyard_project_config_for_command(entry, argv)
+        from scripts import workflow_manage
+
+        forwarded = [
+            f"{args.action}-role-prompt",
+            "--role",
+            args.role,
+            "--board-url",
+            config.board_url,
+        ]
+        if args.action != "show":
+            forwarded += ["--config", str(entry.config_path)]
+        if args.prompt is not None:
+            forwarded += ["--prompt", args.prompt]
+        if args.prompt_file is not None:
+            forwarded += ["--prompt-file", str(args.prompt_file)]
+        return workflow_manage.main(forwarded)
     if argv[0].casefold() == "present":
         args = _build_switchyard_present_parser().parse_args(argv[1:])
         entry = _resolve_switchyard_project(args.project)

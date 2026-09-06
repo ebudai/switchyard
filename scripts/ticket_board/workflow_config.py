@@ -13,6 +13,9 @@ ROLE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 KINDS = {"system", "draft", "implementer", "reviewer", "support", "user"}
 PRIMITIVES = {"move", "approve", "return", "reopen"}
 RUNTIMES = {"claude", "codex", "agy", "hermes"}
+# A role remit, not a document. Bounded so a stored prompt cannot grow the tenant
+# configuration without limit, and so it stays small enough to prepend to a session.
+ONBOARDING_PROMPT_MAX_CHARS = 16384
 CAPABILITIES = {
     "create_ticket",
     "file_bug",
@@ -141,6 +144,7 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
                 "target",
                 "slot",
                 "onboarding",
+                "onboarding_prompt",
                 "template_role",
             },
             "unknown role field",
@@ -204,6 +208,21 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
                 and "\n" not in role["onboarding"],
                 "onboarding must be an absolute file path",
             )
+        if role.get("onboarding_prompt") is not None:
+            # Prompt text, not a path: multiline is the point, so newlines are allowed
+            # here where `onboarding` forbids them. A cleared prompt is an absent key
+            # rather than an empty string, so that "set" and "clear" cannot be confused
+            # when reading the document back.
+            prompt = role["onboarding_prompt"]
+            need(
+                isinstance(prompt, str) and bool(prompt.strip()),
+                f"onboarding_prompt must be non-empty text: {name}",
+            )
+            need(
+                len(prompt) <= ONBOARDING_PROMPT_MAX_CHARS,
+                f"onboarding_prompt must be at most {ONBOARDING_PROMPT_MAX_CHARS} characters: {name}",
+            )
+            need("\x00" not in prompt, f"onboarding_prompt must not contain NUL: {name}")
         if role.get("template_role") is not None:
             need(
                 isinstance(role["template_role"], str)

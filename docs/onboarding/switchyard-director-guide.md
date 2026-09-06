@@ -144,6 +144,41 @@ comment explaining why. Never fake a signoff.
 
 ---
 
+## Setting a role's onboarding prompt
+
+Each role can carry its own onboarding prompt: the remit it is given when its next
+conversation starts. You set it yourself, without root and without editing the
+workflow JSON:
+
+```bash
+switchyard role-prompt show ops
+switchyard role-prompt set ops --prompt-file remit.md
+switchyard role-prompt set ops --prompt-file -      # read from stdin
+switchyard role-prompt clear ops
+```
+
+`--project` defaults to the project of the pane you run it in. The text may be
+multiline. Clearing removes the prompt rather than blanking it, so a role with no
+prompt falls back to whatever packaged remit file it was configured with.
+
+**When a live role sees a change.** Not immediately, and that is deliberate.
+The prompt is delivered at the start of a *fresh* conversation, so:
+
+- a role whose conversation is running keeps the context it already has;
+- the new prompt is used by that role's next fresh conversation, or after an
+  explicit restart of the role;
+- resuming or continuing an existing conversation does **not** pick it up, because
+  re-injecting a remit into a session that already has one only crowds it.
+
+So setting a prompt never interrupts work in progress. If you need a role to pick
+one up now, restart that role rather than expecting the running conversation to
+change under it.
+
+The change itself is applied atomically against the board's current workflow
+revision: if the configuration moved since you read it, your write is rejected
+rather than silently overwriting someone else's. A rollback journal is written
+alongside, exactly as for `ticket-board-workflow apply`.
+
 ## Escalating to the human
 
 Escalate **decisions**, not technical direction the team can reason out. Product choices,

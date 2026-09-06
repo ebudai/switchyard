@@ -565,6 +565,17 @@ def _session_start_additional_context_output(
         session_start_source in {"", SESSION_START_FRESH_SOURCE}
         and not resume_session_id.strip()
     )
+    # A stored prompt is the director's own words for this role, so it wins over the
+    # packaged remit file. Both are gated on fresh_start: a prompt changed mid-session
+    # is picked up by the next fresh conversation or an explicit restart, never by
+    # interrupting or silently rewriting the one that is running.
+    onboarding_prompt = environ.get("TICKET_BOARD_ROLE_ONBOARDING_PROMPT", "").strip()
+    if onboarding_prompt and fresh_start:
+        # The board-skill instruction is prepended by _session_start_context, so the
+        # role body is passed on its own rather than carrying its own copy.
+        return _session_start_context(
+            f"Your {role} session started.\n\n{onboarding_prompt}"
+        )
     onboarding = environ.get("TICKET_BOARD_ROLE_ONBOARDING", "").strip()
     if onboarding and fresh_start:
         path = Path(onboarding)

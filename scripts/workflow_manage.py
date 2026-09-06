@@ -1,7 +1,9 @@
 from __future__ import annotations
 import argparse
+import copy
 import json
 import os
+import sys
 from pathlib import Path
 import tempfile
 import urllib.request
@@ -37,10 +39,68 @@ def apply_files(files: dict[Path, str]) -> None:
         raise
 
 
+def _role_named(current: dict, name: str, parser: argparse.ArgumentParser) -> dict:
+    document = current.get("document")
+    if not document:
+        parser.error("no workflow configuration is active for this board")
+    for role in document["roles"]:
+        if role.get("name") == name:
+            return role
+    known = ", ".join(sorted(r.get("name", "") for r in document["roles"]))
+    parser.error(f"unknown role: {name} (configured roles: {known})")
+
+
+def _requested_prompt(args, parser: argparse.ArgumentParser) -> str:
+    if args.prompt is not None and args.prompt_file is not None:
+        parser.error("give --prompt or --prompt-file, not both")
+    if args.prompt is not None:
+        text = args.prompt
+    elif args.prompt_file is not None:
+        text = (
+            sys.stdin.read()
+            if str(args.prompt_file) == "-"
+            else args.prompt_file.read_text(encoding="utf-8")
+        )
+    else:
+        parser.error("set-role-prompt requires --prompt or --prompt-file")
+    if not text.strip():
+        parser.error("onboarding prompt is empty; use clear-role-prompt to remove one")
+    return text
+
+
+def _document_with_role_prompt(current: dict, args, parser: argparse.ArgumentParser) -> dict:
+    if not args.role:
+        parser.error(f"{args.operation} requires --role")
+    document = copy.deepcopy(current["document"]) if current.get("document") else None
+    if document is None:
+        parser.error("no workflow configuration is active for this board")
+    _role_named({"document": document}, args.role, parser)
+    for role in document["roles"]:
+        if role.get("name") != args.role:
+            continue
+        if args.operation == "clear-role-prompt":
+            # Absent, not empty: the schema treats an empty prompt as invalid so that
+            # "set" and "clear" cannot be confused when the document is read back.
+            role.pop("onboarding_prompt", None)
+        else:
+            role["onboarding_prompt"] = _requested_prompt(args, parser)
+    return validate(document)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "operation", choices=["show", "validate", "apply", "rollback", "prepare-role"]
+        "operation",
+        choices=[
+            "show",
+            "validate",
+            "apply",
+            "rollback",
+            "prepare-role",
+            "show-role-prompt",
+            "set-role-prompt",
+            "clear-role-prompt",
+        ],
     )
     parser.add_argument("--document", type=Path)
     parser.add_argument(
@@ -61,6 +121,12 @@ def main(argv=None):
         "--journal", type=Path, help="saved apply journal (required for rollback)"
     )
     parser.add_argument("--role")
+    parser.add_argument("--prompt", help="onboarding prompt text for set-role-prompt")
+    parser.add_argument(
+        "--prompt-file",
+        type=Path,
+        help="read the onboarding prompt from a file, or from stdin when given as -",
+    )
     args = parser.parse_args(argv)
     if args.operation == "prepare-role":
         if not args.config or not args.role:
@@ -97,8 +163,24 @@ def main(argv=None):
     if args.operation == "show":
         print(json.dumps(current, indent=2))
         return 0
+    if args.operation == "show-role-prompt":
+        if not args.role:
+            parser.error("show-role-prompt requires --role")
+        role = _role_named(current, args.role, parser)
+        print(
+            json.dumps(
+                {
+                    "role": args.role,
+                    "revision": current["revision"],
+                    "onboarding_prompt": role.get("onboarding_prompt"),
+                    "onboarding": role.get("onboarding"),
+                },
+                indent=2,
+            )
+        )
+        return 0
     if not args.config:
-        parser.error("apply/rollback requires --config")
+        parser.error(f"{args.operation} requires --config")
     if args.operation == "rollback":
         if not args.journal:
             parser.error("rollback requires --journal")
@@ -120,6 +202,14 @@ def main(argv=None):
         }
         # Persist the rollback document too, including retained historical identities.
         files.update(projection_files(args.config, cfg))
+    elif args.operation in {"set-role-prompt", "clear-role-prompt"}:
+        # The whole document is rewritten, but the director edits one field through a
+        # command rather than hand-editing generated JSON. Everything below -- schema
+        # validation, the writability precheck, optimistic concurrency on
+        # expected_revision, the rollback journal and the atomic projection write -- is
+        # the same path `apply` takes, so this cannot drift from it.
+        cfg = _document_with_role_prompt(current, args, parser)
+        files = projection_files(args.config, cfg)
     else:
         if not args.document:
             parser.error("apply requires --document")

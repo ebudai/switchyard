@@ -55,6 +55,11 @@ def project_roles(raw: dict[str, Any], document: dict[str, Any]) -> dict[str, An
         env.pop("TICKET_BOARD_ROLE_ONBOARDING", None)
         if spec.get("onboarding"):
             env["TICKET_BOARD_ROLE_ONBOARDING"] = spec["onboarding"]
+        # Popped unconditionally so clearing a prompt actually removes it from the
+        # projected environment rather than leaving the previous one behind.
+        env.pop("TICKET_BOARD_ROLE_ONBOARDING_PROMPT", None)
+        if spec.get("onboarding_prompt"):
+            env["TICKET_BOARD_ROLE_ONBOARDING_PROMPT"] = spec["onboarding_prompt"]
         projected.append(role)
         retired.pop(name, None)
     active = {r["role"] for r in projected}

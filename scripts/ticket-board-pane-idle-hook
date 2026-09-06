@@ -555,7 +555,16 @@ def _session_start_additional_context_output(
     # A fresh start is the one that knows nothing yet, so it is the one that
     # always hears about the skill. A resumed or continued session keeps what
     # it already had; re-injecting there would only crowd its context.
-    fresh_start = session_start_source == SESSION_START_FRESH_SOURCE and not resume_session_id.strip()
+    #
+    # Only some runtimes label the kind of start in the payload. Hermes's
+    # on_session_start carries a session id and nothing else, so on a
+    # session-start event an absent label means a plain start, not an unknown
+    # one. Resumption is still detected: it comes from the launcher's tracked
+    # id, not from the payload.
+    fresh_start = (
+        session_start_source in {"", SESSION_START_FRESH_SOURCE}
+        and not resume_session_id.strip()
+    )
     onboarding = environ.get("TICKET_BOARD_ROLE_ONBOARDING", "").strip()
     if onboarding and fresh_start:
         path = Path(onboarding)

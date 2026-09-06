@@ -259,6 +259,41 @@ def default_source(tree_root: Path) -> Path:
     return Path(tree_root).expanduser() / CANONICAL_RELATIVE_SOURCE
 
 
+def effective_source_commit(
+    source: Path,
+    supplied: str = "",
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> str:
+    """The commit that may honestly be stamped on the body at ``source``.
+
+    A caller that supplies a commit does not get to assert it. The launcher, for
+    one, resolves a release commit the same way it does for onboarding docs, and
+    over a working checkout that resolution is just `rev-parse HEAD` -- which
+    says nothing about whether HEAD carries this body. Validating here rather
+    than at each call site means every path into the installer gets the same
+    guarantee.
+
+    A release export is self-describing and immutable, so its marker wins over
+    anything a caller passes.
+    """
+    source = Path(source).expanduser()
+    root = source_root_for(source)
+    marker_commit = _release_marker_commit(root)
+    if marker_commit:
+        return marker_commit
+    supplied = supplied.strip()
+    if not supplied:
+        return resolve_source_commit(source, runner=runner)
+    try:
+        body = source.read_text(encoding="utf-8")
+    except OSError:
+        return UNKNOWN_COMMIT
+    if not _commit_carries_source(root, supplied, body, runner=runner):
+        return UNKNOWN_COMMIT
+    return supplied
+
+
 def install_command(
     *,
     home: Path,
@@ -273,7 +308,7 @@ def install_command(
     if not source.is_file():
         error_func(f"switchyard: canonical board skill {source} is missing")
         return 1
-    commit = source_commit.strip() or resolve_source_commit(source)
+    commit = effective_source_commit(source, source_commit)
     results = install_board_skill(
         home=home, source=source, source_commit=commit, force=force, dry_run=dry_run
     )
@@ -312,4 +347,3 @@ def verify_command(
         )
         return 1
     return 0
-

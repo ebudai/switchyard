@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import getpass
 import importlib.machinery
 import json
 import os
@@ -34,6 +35,22 @@ def _load_pane_hook():
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
     return module
+
+
+def _release_source(root: Path, commit: str) -> Path:
+    """A canonical source in a release-shaped tree, which names its own commit.
+
+    A supplied commit is validated against the tree it came from, so a test that
+    wants a specific provenance has to provide a tree that genuinely carries it.
+    """
+    release = root / f"release-{commit}"
+    source = release / board_skill.CANONICAL_RELATIVE_SOURCE
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(CANONICAL.read_bytes())
+    (release / board_skill.RELEASE_MARKER_NAME).write_text(
+        json.dumps({"commit": commit}) + "\n", encoding="utf-8"
+    )
+    return source
 
 
 def _run_installer(*args: str) -> subprocess.CompletedProcess[str]:
@@ -225,7 +242,8 @@ def test_an_unprovenanced_copy_is_reported_rather_than_counted_as_installed() ->
 def test_install_projects_one_identical_body_into_every_runtime() -> None:
     with tempfile.TemporaryDirectory(prefix="switchyard-board-skill.") as tmp:
         home = Path(tmp)
-        first = _run_installer("install", "--home", str(home), "--source-commit", "c0ffee")
+        source = _release_source(home, "c0ffee")
+        first = _run_installer("install", "--home", str(home), "--source", str(source))
         assert first.returncode == 0, first.stderr
         assert first.stdout.count(": installed ") == 4
 
@@ -239,7 +257,7 @@ def test_install_projects_one_identical_body_into_every_runtime() -> None:
         assert verified.returncode == 0, verified.stderr
         assert verified.stdout.count(": present ") == 4
 
-        again = _run_installer("install", "--home", str(home), "--source-commit", "c0ffee")
+        again = _run_installer("install", "--home", str(home), "--source", str(source))
         assert again.returncode == 0
         assert again.stdout.count(": current ") == 4, again.stdout
 
@@ -247,18 +265,20 @@ def test_install_projects_one_identical_body_into_every_runtime() -> None:
 def test_upgrade_refreshes_managed_copies_and_reports_stale_ones() -> None:
     with tempfile.TemporaryDirectory(prefix="switchyard-board-skill-upgrade.") as tmp:
         home = Path(tmp)
-        assert _run_installer("install", "--home", str(home), "--source-commit", "old").returncode == 0
+        old_source = _release_source(home, "old")
+        new_source = _release_source(home, "new")
+        assert _run_installer("install", "--home", str(home), "--source", str(old_source)).returncode == 0
         stale = _run_installer("verify", "--home", str(home), "--source-commit", "new")
         assert stale.returncode == 1
         assert stale.stdout.count(": stale ") == 4
 
-        planned = _run_installer("install", "--home", str(home), "--source-commit", "new", "--dry-run")
+        planned = _run_installer("install", "--home", str(home), "--source", str(new_source), "--dry-run")
         assert planned.stdout.count(": would refresh ") == 4
         assert board_skill.parse_provenance(
             dict(board_skill.adapter_paths(home))["claude"].read_text(encoding="utf-8")
         ) == ("old", str(board_skill.CANONICAL_RELATIVE_SOURCE))
 
-        assert _run_installer("install", "--home", str(home), "--source-commit", "new").returncode == 0
+        assert _run_installer("install", "--home", str(home), "--source", str(new_source)).returncode == 0
         assert _run_installer("verify", "--home", str(home), "--source-commit", "new").returncode == 0
 
 
@@ -268,8 +288,9 @@ def test_a_skill_switchyard_did_not_write_is_never_overwritten() -> None:
         codex = dict(board_skill.adapter_paths(home))["codex"]
         codex.parent.mkdir(parents=True)
         codex.write_text("---\nname: switchyard-board\n---\n\nHand written.\n", encoding="utf-8")
+        source = _release_source(home, "c0ffee")
 
-        result = _run_installer("install", "--home", str(home), "--source-commit", "c0ffee")
+        result = _run_installer("install", "--home", str(home), "--source", str(source))
         assert result.returncode == 0
         assert ": unmanaged " in result.stdout
         assert codex.read_text(encoding="utf-8") == "---\nname: switchyard-board\n---\n\nHand written.\n"
@@ -280,7 +301,7 @@ def test_a_skill_switchyard_did_not_write_is_never_overwritten() -> None:
         assert "codex" in verified.stderr
         assert "switchyard board-skill install" in verified.stderr
 
-        forced = _run_installer("install", "--home", str(home), "--source-commit", "c0ffee", "--force")
+        forced = _run_installer("install", "--home", str(home), "--source", str(source), "--force")
         assert forced.returncode == 0
         assert board_skill.parse_provenance(codex.read_text(encoding="utf-8")) is not None
 
@@ -328,6 +349,132 @@ def test_every_session_start_context_names_the_skill() -> None:
     assert context.startswith(hook.BOARD_SKILL_INSTRUCTION)
     assert "Read your role remit" in context
     assert hook._with_board_skill_instruction(context) == context
+
+
+def _deployed_tree(root: Path) -> Path:
+    """A minimal tree shaped like a deployment: the installer plus the skill."""
+    tree = root / "tree"
+    (tree / "scripts" / "ticket_board").mkdir(parents=True)
+    for relative in (
+        Path("scripts") / "switchyard-board-skill",
+        Path("scripts") / "board_skill_cli.py",
+        Path("scripts") / "ticket_board" / "__init__.py",
+        Path("scripts") / "ticket_board" / "board_skill.py",
+    ):
+        destination = tree / relative
+        destination.write_bytes((ROOT / relative).read_bytes())
+        destination.chmod((ROOT / relative).stat().st_mode)
+    source = tree / board_skill.CANONICAL_RELATIVE_SOURCE
+    source.parent.mkdir(parents=True)
+    source.write_bytes(CANONICAL.read_bytes())
+    _git(tree, "init", "-q", "-b", "main")
+    _git(tree, "add", "-A")
+    _git(tree, "commit", "-q", "-m", "deployed tree")
+    return tree
+
+
+def _launcher_config(root: Path) -> tuple[Any, Path]:
+    from scripts import team_launcher
+
+    # ensure_generated_project_board_skill only acts on a generated layout, so
+    # the fixture has to sit where provisioning puts one.
+    provision = root / ".switchyard" / "provision"
+    provision.mkdir(parents=True)
+    layout = provision / "porter-konsole-layout.json"
+    layout.write_text(
+        json.dumps(team_launcher._new_project_layout_payload(1), sort_keys=True) + "\n", encoding="utf-8"
+    )
+    config_path = provision / "porter.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "project": "porter",
+                "layout": str(layout),
+                "run_as_user": getpass.getuser(),
+                "session_dir": str(root / "sessions"),
+                "roles": [
+                    {
+                        "role": "director",
+                        "slot": 0,
+                        "target": "porter-director:0.0",
+                        "tmux_session": "porter-director",
+                        "workdir": str(root),
+                        "cli": ["claude"],
+                    }
+                ],
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return team_launcher.load_project_config("porter", config_path), config_path
+
+
+def test_the_launcher_cannot_stamp_a_commit_that_lost_the_body() -> None:
+    """The launcher resolves a release commit; only the installer can vouch for it.
+
+    Over a working checkout that resolution is `rev-parse HEAD`, which says
+    nothing about whether HEAD still carries the skill -- reachable through
+    `switchyard upgrade --source-repo <working-checkout>`.
+    """
+    from scripts import team_launcher
+
+    with tempfile.TemporaryDirectory(prefix="switchyard-board-skill-launcher.") as tmp:
+        root = Path(tmp)
+        tree = _deployed_tree(root)
+        config, config_path = _launcher_config(root)
+        home = root / "home"
+        home.mkdir()
+
+        printed: list[str] = []
+
+        def runner(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+            command = [str(part) for part in args]
+            if command[:1] == ["git"]:
+                return subprocess.run(command, **kwargs)
+            # The launcher writes into the owner's own home here, so drop the
+            # sudo prefix rather than escalating inside a test.
+            if command[:1] == ["sudo"]:
+                command = command[4:]
+            index = command.index("--home")
+            command[index + 1] = str(home)
+            return subprocess.run([sys.executable, *command], **kwargs)
+
+        def install() -> None:
+            printed.clear()
+            team_launcher.ensure_generated_project_board_skill(
+                config,
+                config_path=config_path,
+                script_path=tree / "scripts" / "team-launcher",
+                source_repo=tree,
+                runner=runner,
+                print_func=printed.append,
+            )
+
+        # Committed: the launcher's commit is real and survives validation.
+        install()
+        committed = _git(tree, "rev-parse", "HEAD")
+        assert board_skill.verify_board_skill(home=home, expected_commit=committed) == [
+            board_skill.AdapterResult(runtime, path, "present", committed)
+            for runtime, path in board_skill.adapter_paths(home)
+        ]
+
+        # Edited after that commit: the same launcher value now describes bytes
+        # the commit does not contain, and must not be stamped.
+        (tree / board_skill.CANONICAL_RELATIVE_SOURCE).write_text(
+            CANONICAL.read_text(encoding="utf-8") + "\nLocal edit.\n", encoding="utf-8"
+        )
+        assert team_launcher._switchyard_source_commit(tree, runner=subprocess.run) == committed
+        install()
+        assert board_skill.failed_runtimes(board_skill.verify_board_skill(home=home)) == [
+            runtime for runtime, _root in board_skill.SKILL_ADAPTERS
+        ]
+        for _runtime, path in board_skill.adapter_paths(home):
+            assert board_skill.parse_provenance(path.read_text(encoding="utf-8")) == (
+                board_skill.UNKNOWN_COMMIT,
+                str(board_skill.CANONICAL_RELATIVE_SOURCE),
+            )
 
 
 def test_launcher_installs_the_skill_as_the_project_owner() -> None:

@@ -2010,7 +2010,10 @@ def test_gemini_installed_hooks_embed_project_state_and_session_dirs() -> None:
 
         session = json.loads((session_dir / "otto-inspector_0.0.json").read_text(encoding="utf-8"))
         state = json.loads((state_dir / "otto-inspector_0.0.json").read_text(encoding="utf-8"))
-        assert start.stdout == "{}"
+        # agy names no start kind either, and its wrapper passes hook JSON
+        # through, printing "{}" only when the hook stays silent.
+        start_context = json.loads(start.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert start_context == BOARD_SKILL_INSTRUCTION
         assert session["session_id"] == "gemini_otto_session_456"
         assert session["source"] == "gemini.SessionStart"
         assert state["state"] == "idle"
@@ -2069,7 +2072,11 @@ def test_hermes_installed_hooks_embed_project_state_and_session_dirs() -> None:
 
         session = json.loads((session_dir / "otto-bulk_0.0.json").read_text(encoding="utf-8"))
         state = json.loads((state_dir / "otto-bulk_0.0.json").read_text(encoding="utf-8"))
-        assert start.stdout == ""
+        # The real Hermes payload names no start kind, and a Hermes pane still
+        # has to be told which skill to load before it touches the board.
+        start_context = json.loads(start.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert start_context == BOARD_SKILL_INSTRUCTION
+        assert "switchyard-board" in start_context
         assert session["session_id"] == "20260823_140512_b49a1a"
         assert session["source"] == "hermes.on_session_start"
         assert busy_state["state"] == "busy"

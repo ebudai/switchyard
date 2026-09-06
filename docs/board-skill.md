@@ -50,7 +50,15 @@ A deployed tree is an export of exactly one commit, so its release marker
 (`.switchyard-release.json`) is the answer and is trusted. A working checkout is
 not: `HEAD` there can be any commit, including one that predates this file. The
 installer therefore claims a checkout's `HEAD` only when that commit actually
-contains these bytes, and otherwise stamps `unknown` and says so on stderr. A
+contains these bytes, and otherwise stamps `unknown` and says so on stderr.
+
+A commit passed in with `--source-commit` gets the same treatment. The launcher
+supplies one — it resolves a release commit the way it does for onboarding docs
+— but over a working checkout that resolution is only `rev-parse HEAD`, which
+says nothing about whether HEAD carries this body. Validating inside the
+installer rather than at each call site means `switchyard upgrade
+--source-repo <working-checkout>` cannot stamp a commit the body has moved on
+from. A
 copy stamped `unknown` is reported by `verify` as `unprovenanced` and fails it —
 so a hand-projected copy can never be mistaken for evidence that a release
 shipped the skill.
@@ -77,7 +85,13 @@ files belong to the tenant, not to root.
 The body is installed once; sessions get a pointer, never a paste.
 
 - **Startup** — the pane idle hook's `SessionStart` output opens with one line
-  naming the skill, alongside whatever else that session needed to hear.
+  naming the skill, alongside whatever else that session needed to hear. Only
+  some runtimes label the kind of start in the payload: Claude sends
+  `startup`/`resume`/`clear`/`compact`, while Hermes and agy send a session id
+  and no label at all. On a session-start event an absent label is treated as a
+  plain start, so those panes are told about the skill too. Resumption is still
+  detected, because it comes from the launcher's tracked session id rather than
+  from the payload.
 - **Hand-off** — the notify listener appends one line to `transition`
   notifications, the ones that hand a ticket to a role. Nudges, idle reminders and
   escalations go to a pane already working the ticket and do not repeat it.

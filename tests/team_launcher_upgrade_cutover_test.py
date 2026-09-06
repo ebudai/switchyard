@@ -19,7 +19,99 @@ from pathlib import Path
 from team_launcher_test_helpers import *
 
 
+class _RunningTenant:
+    """Model the part the mocks kept out: processes with real uids.
+
+    Each role's pane is a real pid whose uid the kernel reports, and the
+    verification compares that to the uid the account resolves to. Nothing here
+    stands in for the uid read itself.
+    """
+
+    def __init__(self, config_path: Path, *, account_uid: int):
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+        self.targets = [role["target"] for role in payload["roles"]]
+        self.sessions = {role["tmux_session"] for role in payload["roles"]}
+        self.commands = {role["target"]: role["cli"][0] for role in payload["roles"]}
+        self.account_uid = account_uid
+        self.pane_pid = os.getpid()
+        self.launches: list[str] = []
+        self.stops: list[str] = []
+
+    def runner(self) -> FakeRunner:
+        return _AnyRoleSudoRunner(
+            existing_sessions=set(self.sessions),
+            current_commands=dict(self.commands),
+            pane_pids={target: self.pane_pid for target in self.targets},
+        )
+
+    def __enter__(self):
+        self._uid = team_launcher.uid_for_user
+        self._launch = team_launcher.launch_project
+        self._stop = team_launcher.stop_project
+        self._exists = team_launcher.local_account_exists
+        team_launcher.local_account_exists = lambda account: account.startswith("porter-")
+        team_launcher.uid_for_user = lambda name: (
+            self.account_uid if name.startswith("porter-") else self._uid(name)
+        )
+        team_launcher.launch_project = lambda config, **kwargs: (
+            self.launches.append(config.project) or 0
+        )
+        team_launcher.stop_project = lambda config, **kwargs: (self.stops.append(config.project) or 0)
+        return self
+
+    def __exit__(self, *_exc):
+        team_launcher.uid_for_user = self._uid
+        team_launcher.launch_project = self._launch
+        team_launcher.stop_project = self._stop
+        team_launcher.local_account_exists = self._exists
+        return False
+
+
+class _FakeBoard:
+    """Stand in for the running board's /api/workflow, which decides completion."""
+
+    def __init__(self, document):
+        self.document = document
+
+    def __call__(self, url):
+        board = self
+
+        class _Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def read(self, *_args):
+                return json.dumps({"revision": 8, "document": board.document})
+
+        return _Response()
+
+
+def _board_with_marker(migrated: bool):
+    return _FakeBoard({"roles": [], "migrations": {"director_onboarding": migrated}})
+
+
+def _unreachable_board(url):
+    raise OSError("connection refused")
+
+
+def _mark_projection_migrated(config_path: Path) -> None:
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["workflow"]["migrations"] = {"director_onboarding": True}
+    config_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _privileged_root(tmp: Path) -> Path:
+    """Point root's own phase record at a sandbox instead of /etc."""
+    root = tmp / "etc-switchyard"
+    os.environ["SWITCHYARD_PRIVILEGED_PROVISION_ROOT"] = str(root)
+    return root
+
+
 def _declarative_tenant(tmp: Path, *, project: str = "porter", accounts: bool = False) -> tuple[Path, Path]:
+    _privileged_root(tmp)
     config_path = _write_six_visible_role_config(tmp, project=project)
     payload = json.loads(config_path.read_text(encoding="utf-8"))
     # A real account: the privileged paths chown generated files to the project
@@ -63,6 +155,7 @@ def _upgrade(
     exists: set[str] | None = None,
     dry_run: bool = False,
     runner: FakeRunner | None = None,
+    board=None,
 ):
     """Run the privileged upgrade with the host facts stated explicitly."""
     printed: list[str] = []
@@ -70,8 +163,12 @@ def _upgrade(
     original_euid = team_launcher.os.geteuid
     original_exists = team_launcher.local_account_exists
     original_migrate = team_launcher.migrate_declarative_director_onboarding
+    original_opener = team_launcher._open_board_url
+    original_compat = team_launcher._board_needs_compatibility_release
     migrations: list[str] = []
     try:
+        team_launcher._open_board_url = board or _unreachable_board
+        team_launcher._board_needs_compatibility_release = lambda config, **kwargs: False
         team_launcher.os.geteuid = (lambda: 0) if as_root else original_euid
         team_launcher.local_account_exists = lambda account: account in known
         team_launcher.migrate_declarative_director_onboarding = (
@@ -91,6 +188,8 @@ def _upgrade(
         team_launcher.os.geteuid = original_euid
         team_launcher.local_account_exists = original_exists
         team_launcher.migrate_declarative_director_onboarding = original_migrate
+        team_launcher._open_board_url = original_opener
+        team_launcher._board_needs_compatibility_release = original_compat
     return result, "\n".join(printed), migrations
 
 
@@ -128,19 +227,79 @@ def test_the_director_write_refuses_root_and_records_the_director() -> None:
         finally:
             team_launcher.os.geteuid = original_euid
 
-        # The director's own process performs it and the journal records who.
+        # The director's own process performs it, and completion is read from
+        # the board and the projection rather than from the call's return value.
         printed.clear()
         original_migrate = team_launcher.migrate_declarative_director_onboarding
+        original_opener = team_launcher._open_board_url
         try:
-            team_launcher.migrate_declarative_director_onboarding = lambda config, **kwargs: True
+            team_launcher.migrate_declarative_director_onboarding = (
+                lambda config, **kwargs: _mark_projection_migrated(config_path) or True
+            )
+            team_launcher._open_board_url = _board_with_marker(True)
             assert team_launcher.finish_upgrade_command(
                 config, config_path=config_path, runner=FakeRunner(), print_func=printed.append
             ) == 0
         finally:
             team_launcher.migrate_declarative_director_onboarding = original_migrate
+            team_launcher._open_board_url = original_opener
         journal = team_launcher.read_upgrade_journal(config, config_path=config_path)
         assert team_launcher.upgrade_phase_state(journal, "director") == "done", journal
-        assert team_launcher.current_user_name() in journal["phases"]["director"]["detail"]
+
+
+def test_a_board_that_cannot_accept_the_migration_is_not_recorded_as_done() -> None:
+    """`migrated=False` is also what a board too old to accept the document returns."""
+    with tempfile.TemporaryDirectory(prefix="director-pre-phase-one.") as tmp:
+        config_path, _ = _declarative_tenant(Path(tmp))
+        config = team_launcher.load_project_config("porter", config_path)
+        printed: list[str] = []
+        original_migrate = team_launcher.migrate_declarative_director_onboarding
+        original_opener = team_launcher._open_board_url
+        try:
+            # The real behaviour on a pre-phase-one board: it reports nothing
+            # migrated and the document keeps no marker.
+            team_launcher.migrate_declarative_director_onboarding = lambda config, **kwargs: False
+            team_launcher._open_board_url = _board_with_marker(False)
+            result = team_launcher.finish_upgrade_command(
+                config, config_path=config_path, runner=FakeRunner(), print_func=printed.append
+            )
+        finally:
+            team_launcher.migrate_declarative_director_onboarding = original_migrate
+            team_launcher._open_board_url = original_opener
+        output = "\n".join(printed)
+        assert result == 1, output
+        assert "has not landed" in output, output
+        assert "deploy-restart" not in output, output
+        journal = team_launcher.read_upgrade_journal(config, config_path=config_path)
+        assert team_launcher.upgrade_phase_state(journal, "director") == "pending", journal
+
+
+def test_a_root_upgrade_names_the_compatibility_release_before_the_director_phase() -> None:
+    with tempfile.TemporaryDirectory(prefix="compatibility-phase.") as tmp:
+        config_path, _ = _declarative_tenant(Path(tmp))
+        printed: list[str] = []
+        original_euid = team_launcher.os.geteuid
+        original_opener = team_launcher._open_board_url
+        original_compat = team_launcher._board_needs_compatibility_release
+        original_exists = team_launcher.local_account_exists
+        try:
+            team_launcher.os.geteuid = lambda: 0
+            team_launcher._open_board_url = _board_with_marker(False)
+            team_launcher._board_needs_compatibility_release = lambda config, **kwargs: True
+            team_launcher.local_account_exists = lambda account: False
+            config = team_launcher.load_project_config("porter", config_path)
+            assert team_launcher.upgrade_project_command(
+                config, config_path=config_path, runner=FakeRunner(), print_func=printed.append
+            ) == 0
+        finally:
+            team_launcher.os.geteuid = original_euid
+            team_launcher._open_board_url = original_opener
+            team_launcher._board_needs_compatibility_release = original_compat
+            team_launcher.local_account_exists = original_exists
+        output = "\n".join(printed)
+        assert "cannot accept the director migration yet" in output, output
+        assert "compatibility" in output, output
+        assert "withholding" in output, output
 
 
 def test_the_observed_partial_state_is_detected_and_reverted() -> None:
@@ -191,11 +350,43 @@ def test_the_cutover_happens_only_once_every_account_exists() -> None:
         )
         assert (config_path.with_name("porter-role-accounts.sh")).is_file()
 
-        # Once they exist, the same command cuts over.
+        # Once they exist, the same command stops the workers, moves the
+        # configuration, restarts them and checks the uid each role's process is
+        # actually running as before anything authorizes it.
         accounts = {f"porter-{role}" for role in roles}
-        _result, output, _m = _upgrade(config_path, as_root=True, exists=accounts)
+        with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
+            _result, output, _m = _upgrade(
+                config_path, as_root=True, exists=accounts, runner=tenant.runner()
+            )
         after = json.loads(config_path.read_text(encoding="utf-8"))
         assert all(role.get("run_as_user") == f"porter-{role['role']}" for role in after["roles"]), after
+        assert tenant.stops and tenant.launches, (tenant.stops, tenant.launches)
+        assert "running under per-role identities" in output, output
+
+
+def test_a_cutover_whose_processes_keep_the_old_uid_is_rolled_back() -> None:
+    """Accounts existing is not the same as the workers running as them."""
+    with tempfile.TemporaryDirectory(prefix="upgrade-rollback.") as tmp:
+        config_path, _ = _declarative_tenant(Path(tmp))
+        roles = [role["role"] for role in json.loads(config_path.read_text(encoding="utf-8"))["roles"]]
+        accounts = {f"porter-{role}" for role in roles}
+        before = config_path.read_bytes()
+        # The accounts resolve to a uid nothing is running as: the panes kept
+        # the shared identity, which is exactly the state that would have made
+        # the board reject every live role.
+        with _RunningTenant(config_path, account_uid=os.getuid() + 4242) as tenant:
+            result = team_launcher.cutover_role_identities_command(
+                team_launcher.load_project_config("porter", config_path),
+                config_path=config_path,
+                runner=tenant.runner(),
+                print_func=lambda _text: None,
+            )
+        assert result == 1
+        assert config_path.read_bytes() == before, "the configuration was not put back"
+        assert len(tenant.stops) == 2 and len(tenant.launches) == 2, (tenant.stops, tenant.launches)
+        config = team_launcher.load_project_config("porter", config_path)
+        journal = team_launcher.read_upgrade_journal(config, config_path=config_path)
+        assert team_launcher.upgrade_phase_state(journal, "identities") == "rolled back", journal
 
 
 def test_the_deploy_instruction_is_withheld_until_every_phase_is_ready() -> None:
@@ -206,7 +397,7 @@ def test_the_deploy_instruction_is_withheld_until_every_phase_is_ready() -> None
         # stands, so only the outstanding director phase withholds the deploy.
         _result, output, _m = _upgrade(config_path, as_root=True, exists=set())
         assert "withholding" in output, output
-        assert "director phase has not run" in output, output
+        assert "director phase has not completed" in output, output
         assert "deploy-restart" not in output, output
 
         # A tenant part-way onto per-role accounts withholds it for that too:
@@ -245,10 +436,19 @@ def test_an_interrupted_upgrade_resumes_and_is_safe_to_retry() -> None:
         _result, _output, _m = _upgrade(config_path, as_root=True, exists=set())
         assert config_path.read_bytes() == first
 
-        _result, _output, _m = _upgrade(config_path, as_root=True, exists=accounts)
-        cut = config_path.read_bytes()
-        _result, output, _m = _upgrade(config_path, as_root=True, exists=accounts)
-        assert config_path.read_bytes() == cut, output
+        with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
+            _result, _output, _m = _upgrade(
+                config_path, as_root=True, exists=accounts, runner=tenant.runner()
+            )
+            cut = config_path.read_bytes()
+            # Interrupted after the cutover: rerunning neither repeats the stop
+            # and restart nor rewrites anything.
+            stops_after_cutover = len(tenant.stops)
+            _result, output, _m = _upgrade(
+                config_path, as_root=True, exists=accounts, runner=tenant.runner()
+            )
+            assert config_path.read_bytes() == cut, output
+            assert len(tenant.stops) == stops_after_cutover, tenant.stops
 
 
 def test_each_tenant_carries_its_own_director_phase() -> None:
@@ -262,10 +462,16 @@ def test_each_tenant_carries_its_own_director_phase() -> None:
         second_path, _ = _declarative_tenant(second_dir, project="atlas")
         migrated: list[str] = []
         original_migrate = team_launcher.migrate_declarative_director_onboarding
+        original_opener = team_launcher._open_board_url
+
+        def _migrate(config, **kwargs):
+            migrated.append(config.project)
+            _mark_projection_migrated(first_path if config.project == "porter" else second_path)
+            return True
+
         try:
-            team_launcher.migrate_declarative_director_onboarding = (
-                lambda config, **kwargs: migrated.append(config.project) or True
-            )
+            team_launcher.migrate_declarative_director_onboarding = _migrate
+            team_launcher._open_board_url = _board_with_marker(True)
             for path, project in ((first_path, "porter"), (second_path, "atlas")):
                 config = team_launcher.load_project_config(project, path)
                 assert team_launcher.finish_upgrade_command(
@@ -273,12 +479,52 @@ def test_each_tenant_carries_its_own_director_phase() -> None:
                 ) == 0
         finally:
             team_launcher.migrate_declarative_director_onboarding = original_migrate
+            team_launcher._open_board_url = original_opener
         assert migrated == ["porter", "atlas"], migrated
         for path, project in ((first_path, "porter"), (second_path, "atlas")):
             config = team_launcher.load_project_config(project, path)
             journal = team_launcher.read_upgrade_journal(config, config_path=path)
             assert journal["project"] == project, journal
             assert team_launcher.upgrade_phase_state(journal, "director") == "done", journal
+
+
+def test_a_forged_tenant_journal_cannot_release_the_activation() -> None:
+    """The tenant's copy of the phase record is readable, not authoritative."""
+    with tempfile.TemporaryDirectory(prefix="forged-journal.") as tmp:
+        config_path, _ = _declarative_tenant(Path(tmp))
+        config = team_launcher.load_project_config("porter", config_path)
+        forged = {
+            "schema": team_launcher.UPGRADE_JOURNAL_SCHEMA,
+            "project": "porter",
+            "phases": {
+                "director": {"state": "done", "owner": "director", "at": "now", "detail": "forged"},
+                "identities": {"state": "done", "owner": "root", "at": "now", "detail": "forged"},
+            },
+        }
+        team_launcher.upgrade_journal_path(config, config_path=config_path).write_text(
+            json.dumps(forged), encoding="utf-8"
+        )
+        # The board says otherwise, and the board is what is asked.
+        original_opener = team_launcher._open_board_url
+        try:
+            team_launcher._open_board_url = _board_with_marker(False)
+            state, reason = team_launcher.director_onboarding_state(config, config_path=config_path)
+        finally:
+            team_launcher._open_board_url = original_opener
+        assert state == "pending", (state, reason)
+
+        _result, output, _m = _upgrade(
+            config_path, as_root=True, exists=set(), board=_board_with_marker(False)
+        )
+        assert "withholding" in output, output
+        assert "deploy-restart" not in output, output
+        trusted = team_launcher.read_upgrade_journal(config, config_path=config_path, trusted=True)
+        assert team_launcher.upgrade_phase_state(trusted, "director") != "done", trusted
+        # Root's record is a different file in a directory the tenant does not own.
+        root_record = team_launcher.privileged_upgrade_journal_path(config)
+        assert root_record.is_file(), root_record
+        assert root_record != team_launcher.upgrade_journal_path(config, config_path=config_path)
+        assert json.loads(root_record.read_text())["phases"]["director"]["detail"] != "forged"
 
 
 def main() -> int:

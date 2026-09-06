@@ -208,10 +208,11 @@ not own. The order exists because the failure modes do.
 | phase | owner | what it does |
 | --- | --- | --- |
 | `artifacts` | root | regenerate what is safe while the current roles keep running |
-| `accounts` | operator | run `<project>-role-accounts.sh` to create the per-role accounts, ownership and credentials |
-| `identities` | root | write those accounts into the configuration and refresh the board authority table |
+| `compatibility` | operator | deploy the release the running board needs before it can accept the director migration |
 | `director` | director | `switchyard finish-upgrade <project>`, the one board write only the director may make |
-| `deploy` | operator | deploy the matching board release |
+| `accounts` | operator | run `<project>-role-accounts.sh` to create the per-role accounts, ownership and credentials |
+| `identities` | root | `switchyard cutover-roles <project>`: stop, restart and verify every role under its own account |
+| `activate` | operator | install the per-role authority table and deploy the matching release |
 
 Each phase is recorded in `<project>-upgrade.json` beside the configuration, so
 an interrupted upgrade resumes rather than repeats and a partial state is
@@ -227,6 +228,31 @@ account, which is the identity the running sessions actually have. A freshly
 provisioned project is the other case -- it names its accounts before the
 operator creates them and has nothing running -- so it is left as provisioned
 and simply waits.
+
+**Creating the accounts does not move a running worker.** A pane keeps the uid
+it started with, so a tenant whose accounts all exist can still be serving every
+role from the shared account -- and installing the authority table then rejects
+exactly the processes doing the work. `cutover-roles` therefore stops the roles,
+moves the configuration, restarts them under their own accounts, reconnects the
+presentation and reads back the uid each role's process is *actually* running as
+from the kernel. If any of that does not hold it puts the configuration back and
+restarts the roles as they were, and records the rollback. Account existence is
+never taken as evidence of process identity.
+
+**A board that cannot accept the migration is not the director having nothing to
+do.** A board predating the phase-one schema returns "not migrated" for the same
+call that returns "not migrated" when there was nothing to do. Completion is
+therefore read from the board's own workflow document and the local projection,
+never from that return value, and the release that makes the migration possible
+is its own `compatibility` phase -- the one deploy instruction that *is* printed
+while the rest is withheld.
+
+**Phase records: two files, one authority.** `<project>-upgrade.json` beside the
+configuration is the tenant's readable copy and is published as untrusted
+output. Root keeps its own at `/etc/switchyard/provision/<project>/upgrade.json`.
+No privileged gate reads either as evidence: the account state comes from the
+host, the process identities from the kernel, and the director phase from the
+board. A tenant that writes `director: done` into its copy changes nothing.
 
 **Root does not make the director's board write.** The declarative onboarding
 migration is authorized by the board from the caller's uid. Root has no role

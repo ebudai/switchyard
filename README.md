@@ -61,12 +61,13 @@ Commands:
   present          map persistent role sessions into stable display slots at runtime
   set-vcs-close-role
                    set which existing project role can mark tickets done
+  agy-credential   show, set, or clear this host's agy credential source
   stop             stop a project's configured tmux pane sessions
   teardown         remove project board provisioning artifacts after a dry-run review
   status           list registered projects and pane liveness
   validate-models  check configured role models without starting panes
 
-Bare project names start or attach the project. Recognized commands: new, register, upgrade, add-role, present, set-vcs-close-role, stop, teardown, status, validate-models.
+Bare project names start or attach the project. Recognized commands: new, register, upgrade, add-role, present, set-vcs-close-role, agy-credential, stop, teardown, status, validate-models.
 ```
 <!-- switchyard-help:end -->
 

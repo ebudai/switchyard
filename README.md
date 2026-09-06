@@ -58,6 +58,8 @@ Commands:
   new              create and provision a new project
   register         register an existing project config
   upgrade          update generated project artifacts and report release drift
+  finish-upgrade   run the director-owned phase of an upgrade from the director's session
+  cutover-roles    stop, restart and verify every role under its own Unix account
   add-role         add an implementer or auditor role, worktree, pane, and board registration
   present          map persistent role sessions into stable display slots at runtime
   replace-window   replace a root-owned presentation window without stopping any worker
@@ -73,7 +75,7 @@ Commands:
   status           list registered projects and pane liveness
   validate-models  check configured role models without starting panes
 
-Bare project names start or attach the project. Recognized commands: board-skill, new, register, upgrade, add-role, present, replace-window, set-vcs-close-role, set-role-runtime, agy-credential, seed-role-credentials, role-prompt, onboarding-readiness, stop, teardown, status, validate-models.
+Bare project names start or attach the project. Recognized commands: board-skill, new, register, upgrade, finish-upgrade, cutover-roles, add-role, present, replace-window, set-vcs-close-role, set-role-runtime, agy-credential, seed-role-credentials, role-prompt, onboarding-readiness, stop, teardown, status, validate-models.
 ```
 <!-- switchyard-help:end -->
 

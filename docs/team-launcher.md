@@ -200,6 +200,133 @@ a role's session loses that role's work, which is worse than the window -- and i
 lists what was running before and after so that is checkable rather than
 promised.
 
+## Upgrading a tenant
+
+`switchyard upgrade` is ordered, journaled, and stops at the phases root does
+not own. The order exists because the failure modes do.
+
+| phase | owner | what it does |
+| --- | --- | --- |
+| `artifacts` | root | regenerate what is safe while the current roles keep running |
+| `accounts` | operator | run `<project>-role-accounts.sh` to create the per-role accounts, homes, tooling and credentials |
+| `identities` | root | `switchyard cutover-roles <project>`: one transaction over workers, trees, configuration, installed units and services |
+| `release` | operator | deploy the board release that enforces the per-role table |
+| `director` | director | `switchyard finish-upgrade <project>`, the one board write only the director may make |
+
+The order is forced by what each phase leaves true. The identities transaction
+ends with every role proved able to write **as its own account**, against the
+board that is running at that moment. Only then is it safe to deploy the release
+whose board enforces the per-role table, because by then the table and the
+processes already agree. The director's write comes last, from its own account,
+on a board that recognises it. Moving the director phase earlier does not help:
+it would run before its own identity exists, or the cutover would restart it
+under an identity the running board does not yet authorize.
+
+Each phase is recorded in `<project>-upgrade.json` beside the configuration, so
+an interrupted upgrade resumes rather than repeats and a partial state is
+visible rather than inferred. Every phase is idempotent; rerunning is the
+supported way to continue.
+
+**The configuration is not written before the accounts exist.** A configuration
+naming per-role accounts that do not exist is not a migration in progress: those
+roles cannot start, and installing the matching authority table would stop the
+board recognising the panes that *are* running. If an upgrade finds that state
+on a tenant with live sessions it says so and returns those roles to the project
+account, which is the identity the running sessions actually have. A freshly
+provisioned project is the other case -- it names its accounts before the
+operator creates them and has nothing running -- so it is left as provisioned
+and simply waits.
+
+**Preparation reads a plan the tenant did not write.** Credentials, homes and
+tooling have to be prepared for accounts the active configuration does not name
+yet -- naming them early is what breaks the running roles. Root records the
+pending accounts, homes and worktrees at
+`/etc/switchyard/provision/<project>/pending-identities.json`, and preparation
+targets that. `switchyard seed-role-credentials` therefore seeds into the
+canonical role homes while the tenant is still running as the project account.
+
+**Nothing changes hands before the workers stop.** The preparation artifact
+creates accounts, homes, runtime paths, tooling and credentials, and
+deliberately does *not* chown any worktree: handing a tree to the new account
+while the old one is still working in it takes write access from a live
+implementer mid-task. Ownership moves inside the cutover, after the quiesce.
+
+**Creating the accounts does not move a running worker.** A pane keeps the uid
+it started with, so a tenant whose accounts all exist can still be serving every
+role from the shared account -- and installing the authority table then rejects
+exactly the processes doing the work. `cutover-roles` therefore stops the roles,
+moves the configuration, restarts them under their own accounts, reconnects the
+presentation and reads back the uid each role's process is *actually* running as
+from the kernel. The transaction is: prove the workers are quiescent, transfer the
+worktrees, write the configuration, re-render the projection, **stop the owner's
+notify listener and prove it stopped**, **switch the board release**, **install**
+the generated units -- the board's as a system unit, the listener's as the
+owner's user unit in the owner's own home -- reload, restart and health-check the
+board, restart every role under its own account without opening a window, read
+each role process's uid back from the kernel, have each role make a real write to
+the board as itself, reconnect the display slots in place, and only then start the
+listener again if it was running before. The release switch is inside it because an old board does not group-own
+its runtime directory for the roles group, so strict units in front of an old
+binary can leave the role accounts unable to reach the socket at all. If any of that does not hold -- including the display slots
+failing to reconnect -- the worktrees go back to the uid and gid they had, the
+configuration is restored, the projection is re-rendered, the release pointer and
+the release pointer and the previously installed units are put back, the board is
+restarted onto them, the listener is returned to exactly the active or inactive
+state it was in, and the roles are started as they were. Restoring the file alone would leave the
+old workers running without write access to their own repositories; regenerating
+a unit without installing it would leave the workers moved and the authority
+not. Account existence is
+never taken as evidence of process identity.
+
+**Role accounts can reach the board clients.** They cannot traverse the owner's
+0710 home, so `ticket-board-write`, `ticket-board-read`, `directorctl` and the
+`ticket_board` package they import are staged root-owned under
+`/usr/local/lib/switchyard/<project>`, from the pinned shared release rather
+than from the board being replaced, and each role's PATH points there. Without
+that a role has no board access at all, however correct the authority is.
+
+**Sessions are found under either identity.** A tenant part-way onto per-role
+accounts names accounts that do not exist, so every probe through them fails and
+the project looks stopped while its sessions are running under the project
+account. Liveness is therefore asked of both identities before anything concludes
+that there is nothing to preserve.
+
+**Withholding the authority table is not a compatibility mode.** The board
+resolves every local peer through that table, so an empty one grants no role to
+anyone. Safety comes from *when* the unit is installed and the release deployed,
+not from what the staged unit omits.
+
+**A board that cannot accept the migration is not the director having nothing to
+do.** A board predating the phase-one schema returns "not migrated" for the same
+call that returns "not migrated" when there was nothing to do. Completion is
+therefore read from the board's own workflow document and the local projection,
+never from that return value, and the release that makes the migration possible
+is its own `compatibility` phase -- the one deploy instruction that *is* printed
+while the rest is withheld.
+
+**Phase records: two files, one authority.** `<project>-upgrade.json` beside the
+configuration is the tenant's readable copy and is published as untrusted
+output. Root keeps its own at `/etc/switchyard/provision/<project>/upgrade.json`.
+No privileged gate reads either as evidence: the account state comes from the
+host, the process identities from the kernel, and the director phase from the
+board. A tenant that writes `director: done` into its copy changes nothing.
+
+**Root does not make the director's board write.** The declarative onboarding
+migration is authorized by the board from the caller's uid. Root has no role
+there, and manufacturing `TICKET_BOARD_CALLER_ROLE=director` would be
+impersonation, so root reports the phase and the director runs `switchyard
+finish-upgrade <project>` from their own session. That command refuses to run as
+root. If the migration fails, the message says to resolve it: clearing the
+director's configured onboarding is not a recovery for an error, and is no
+longer offered as one.
+
+**The deploy instruction is withheld until it is safe to follow.** Installing
+the generated unit is what makes the role-account table authoritative, so the
+release deploy commands are not printed while a tenant's configuration names
+accounts that do not all exist, or while the director phase is outstanding. A
+tenant that never opted into per-role accounts is consistent as it stands and is
+not withheld from ordinary release upgrades.
+
 ## Modes
 
 ```bash

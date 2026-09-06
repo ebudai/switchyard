@@ -421,6 +421,29 @@ class TicketBoardWriteClient:
             raise TicketBoardWriteError("ticket board response was not an object")
         return parsed
 
+    def verify_caller(self) -> dict[str, Any]:
+        """Ask the board which role this process is, and change nothing.
+
+        The same request every socket write begins with, on its own. Both the
+        board that resolves a role from the peer uid and the one that accepts a
+        claimed role answer it, so it is the probe a cutover can use to prove a
+        role can actually write before anything depends on it (SYRD-45).
+        """
+        socket_path = self.effective_socket_path
+        if not socket_path:
+            raise TicketBoardWriteError(
+                "verify-caller checks local socket authority; pass --socket or set TICKET_BOARD_SOCKET"
+            )
+        conn = UnixHTTPConnection(socket_path, self.timeout)
+        try:
+            return self._request_unix_json(
+                conn, "/api/register-caller", {"role": self.caller_role}, expected_status=200
+            )
+        except OSError as exc:
+            raise TicketBoardWriteError(f"cannot reach {socket_path}: {exc}") from exc
+        finally:
+            conn.close()
+
     def _post_unix(self, path: str, payload: dict[str, Any], role: str, socket_path: str) -> dict[str, Any]:
         body = json.dumps(payload).encode("utf-8")
         conn = UnixHTTPConnection(socket_path, self.timeout)
@@ -862,6 +885,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    subparsers.add_parser(
+        "verify-caller",
+        help="ask the board which role this process is, over the local socket; changes nothing",
+    )
     workflow_action = subparsers.add_parser("workflow-action")
     workflow_action.add_argument("ticket_id")
     workflow_action.add_argument("action")
@@ -1036,7 +1063,9 @@ def main(argv: list[str] | None = None) -> int:
             report_board_url=args.report_board_url,
             report_token_file=args.report_token_file,
         )
-        if command == "create_ticket":
+        if command == "verify_caller":
+            response = client.verify_caller()
+        elif command == "create_ticket":
             response = client.create_ticket(
                 title=args.title,
                 body=args.body,
@@ -1155,7 +1184,7 @@ def main(argv: list[str] | None = None) -> int:
     except TicketBoardWriteError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    if command in {"merge", "dismiss_notification"}:
+    if command in {"merge", "dismiss_notification", "verify_caller"}:
         print(json.dumps(response))
     else:
         print(json.dumps(_ticket_from_response(response)))

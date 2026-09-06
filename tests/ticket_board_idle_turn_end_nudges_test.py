@@ -51,6 +51,10 @@ def psql(conninfo: str, sql: str) -> str:
     return run(["psql", "-X", "-v", "ON_ERROR_STOP=1", "-tA", conninfo], input_text=sql).stdout.strip()
 
 
+def _as_text(value: object) -> str:
+    return value.decode("utf-8") if isinstance(value, bytes) else str(value)
+
+
 def _main_body() -> int:
     with tempfile.TemporaryDirectory(prefix="ticket-board-idle-turn-end.") as tmpdir:
         root = Path(tmpdir)
@@ -75,6 +79,7 @@ GRANT USAGE ON SCHEMA ticket_board TO ticket_board_listener;
 GRANT SELECT ON ALL TABLES IN SCHEMA ticket_board TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.notify_idle_turn_end_nudges(jsonb, timestamptz) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.ack_notification(bigint) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.discard_notification(bigint, text) TO ticket_board_listener;
 
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation, audit_signoff, created_text, updated_text, source_json
@@ -911,6 +916,102 @@ WHERE ticket_id = 'PGU-9001'
 """
                 ).fetchone()[0]
                 assert repeated_escalation_count == 0, repeated_escalation_count
+
+            # SYRD-32 cross-layer contract: suppressing a reminder because its
+            # owner started working must not spend that owner's reminder round.
+            # ack_notification bumps idle_reminder_count, which the generator
+            # reads as "already reminded" and answers with an escalation to the
+            # director; discard_notification must not.
+            # Fixture writes need the owning connection; the listener role holds
+            # only SELECT plus the gated notification functions.
+            psql(
+                conninfo,
+                """
+INSERT INTO ticket_board.tickets (
+    id, title, body, state, assignee, implementation, audit_signoff, created_text, updated_text, source_json
+) VALUES (
+    'PGU-9032', 'Inspector reminder suppressed by real work', '', 'inspection', 'inspector', 'Inspect.', false,
+    '2026-07-13T00:00:00+00:00', '2026-07-13T00:00:00+00:00',
+    jsonb_build_object('id', 'PGU-9032', 'title', 'Inspector reminder suppressed by real work', 'body', '', 'state', 'inspection', 'assignee', 'inspector', 'implementation', 'Inspect.', 'comments', '[]'::jsonb, 'created', '2026-07-13T00:00:00+00:00', 'updated', '2026-07-13T00:00:00+00:00')
+);
+UPDATE ticket_board.tickets
+SET manually_controlled = true
+WHERE id <> 'PGU-9032';
+
+UPDATE ticket_board.ticket_notification_state
+SET entered_current_state_at = clock_timestamp() - interval '10 minutes',
+    last_activity_at = clock_timestamp() - interval '10 minutes'
+WHERE ticket_id = 'PGU-9032';
+
+DELETE FROM ticket_board.ticket_notification_queue;
+""",
+            )
+            with psycopg.connect(listener_conninfo, autocommit=True) as stale_conn:
+                def inspector_wave(minutes_ago: int) -> tuple[int, str, str]:
+                    stale_conn.execute(
+                        """
+SELECT ticket_board.notify_idle_turn_end_nudges(
+    jsonb_build_object('inspector', (clock_timestamp() - make_interval(mins => %s))::text),
+    clock_timestamp()
+)
+""",
+                        (minutes_ago,),
+                    )
+                    row = stale_conn.execute(
+                        """
+SELECT id, kind, target_role
+FROM ticket_board.ticket_notification_queue
+WHERE ticket_id = 'PGU-9032'
+ORDER BY id DESC
+LIMIT 1
+"""
+                    ).fetchone()
+                    assert row is not None, "no reminder was queued"
+                    # This connection returns text columns unconverted, the same
+                    # reason notify_listener carries _decode_text.
+                    return int(row[0]), _as_text(row[1]), _as_text(row[2])
+
+                def reminder_count() -> int:
+                    return stale_conn.execute(
+                        "SELECT idle_reminder_count FROM ticket_board.ticket_notification_state WHERE ticket_id = 'PGU-9032'"
+                    ).fetchone()[0]
+
+                first_id, first_kind, first_target = inspector_wave(9)
+                assert (first_kind, first_target) == ("idle_reminder", "inspector"), (first_kind, first_target)
+                assert reminder_count() == 0, reminder_count()
+
+                # The Inspector resumed work before delivery, so the listener
+                # suppresses the pane nudge and discards the queue row.
+                stale_conn.execute(
+                    "SELECT ticket_board.discard_notification(%s::bigint, %s::text)",
+                    (first_id, "stale_reminder_work_observed"),
+                )
+                assert reminder_count() == 0, reminder_count()
+                assert stale_conn.execute(
+                    "SELECT count(*)::int FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-9032'"
+                ).fetchone()[0] == 0
+                assert stale_conn.execute(
+                    """
+SELECT count(*)::int
+FROM ticket_board.notification_trace
+WHERE ticket_id = 'PGU-9032' AND event = 'discard' AND busy_reason = 'stale_reminder_work_observed'
+"""
+                ).fetchone()[0] == 1
+
+                # The next wave must still be the Inspector's own first
+                # reminder, not an escalation telling the director the
+                # Inspector was reminded and ignored it.
+                second_id, second_kind, second_target = inspector_wave(8)
+                assert (second_kind, second_target) == ("idle_reminder", "inspector"), (second_kind, second_target)
+                assert reminder_count() == 0, reminder_count()
+
+                # A genuinely delivered reminder still spends the round and
+                # escalates on the following wave, so the ladder is intact and
+                # the discard path is the only difference.
+                stale_conn.execute("SELECT ticket_board.ack_notification(%s::bigint)", (second_id,))
+                assert reminder_count() == 1, reminder_count()
+                _third_id, third_kind, third_target = inspector_wave(7)
+                assert (third_kind, third_target) == ("escalation", "director"), (third_kind, third_target)
         finally:
             run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], capture=False)
 

@@ -563,6 +563,32 @@ class PathContainmentError(ValueError):
     """A path that is not where a privileged grant was told it would be."""
 
 
+def _refuse_unnormalized(path: str, *, what: str) -> None:
+    """Refuse a path that is not already an absolute path in normal form.
+
+    Component containment is still lexical: `/home/foo/../foobar` *is*
+    relative to `/home/foo` as far as `PurePath` is concerned, and the
+    interior sliced out of it is `/home/foo/..`, so a root-run artifact would
+    write the grant against `/home`. Normalizing here would mean resolving
+    through directories the tenant controls, which is its own escape, so a
+    path carrying `..` -- or one that is not absolute at all -- is refused
+    instead. `.` and repeated separators are dropped by `PurePosixPath`
+    without changing which directory is named, and are not an escape (SYRD-49).
+    """
+    if not path:
+        return
+    candidate = PurePosixPath(path)
+    if not candidate.is_absolute():
+        raise PathContainmentError(
+            f"{what} {path} is not an absolute path; refusing to grant access to it"
+        )
+    if ".." in candidate.parts:
+        raise PathContainmentError(
+            f"{what} {path} is not in normal form; refusing to grant access to a path "
+            "that walks back out of itself"
+        )
+
+
 def _is_within(root: str, candidate: str) -> bool:
     """Containment by path components, not by string prefix.
 
@@ -585,6 +611,8 @@ def _refuse_prefix_coincidence(root: str, candidate: str) -> None:
     grant computed from that coincidence would be written against somebody
     else's home. Refuse before emitting the command (SYRD-49).
     """
+    _refuse_unnormalized(root, what="the owner home")
+    _refuse_unnormalized(candidate, what="the granted path")
     if not root or not candidate or _is_within(root, candidate):
         return
     if str(candidate).startswith(str(root)):
@@ -620,6 +648,7 @@ def owner_home_traversal_commands(owner_home: str, principal: str) -> list[str]:
     that worktree without traversal. `--x` grants exactly that and nothing else,
     which is the same grant the board service already holds (SYRD-49).
     """
+    _refuse_unnormalized(owner_home, what="the owner home")
     return [f"sudo setfacl -m {principal}:--x {shell_quote(owner_home)}"]
 
 
@@ -638,6 +667,9 @@ def role_worktree_access_commands(
     record a commit. Neither grant exposes the owner's credentials, which stay
     0700 and are not named here (SYRD-49).
     """
+    _refuse_unnormalized(owner_home, what="the owner home")
+    _refuse_unnormalized(worktree_base, what="the worktree base")
+    _refuse_unnormalized(control_repository, what="the control repository")
     group = f"g:{roles_group}"
     interior = _interior_directories(owner_home, worktree_base)
     # Every component between the home and the control repository, so the
@@ -678,6 +710,9 @@ def director_control_access_commands(
     that command then correctly refuses. The grant is bound to the configured
     account and reaches only the provisioning directory (SYRD-49).
     """
+    _refuse_unnormalized(owner_home, what="the owner home")
+    _refuse_unnormalized(provision_dir, what="the provisioning directory")
+    _refuse_unnormalized(project_dir, what="the project directory")
     principal = f"u:{director_account}"
     interior = _interior_directories(owner_home, provision_dir)
     commands: list[str] = []

@@ -388,6 +388,85 @@ def test_containment_is_by_component_not_by_prefix() -> None:
     assert any("/srv/porter/.switchyard/provision'" in command for command in elsewhere), elsewhere
 
 
+def test_a_dot_dot_escape_is_refused_for_both_grants() -> None:
+    """Component containment is lexical: /home/foo/../foobar is "inside" /home/foo."""
+    from scripts.ticket_board.project_provision import (
+        PathContainmentError,
+        _is_within,
+        director_control_access_commands,
+        role_worktree_access_commands,
+    )
+
+    # The exact hole: containment says yes, and the interior sliced out of it
+    # is /home/foo/.., so a root-run artifact grants on /home.
+    assert _is_within("/home/foo", "/home/foo/../foobar")
+
+    escapes = (
+        # The role grant, through each path it derives a command from.
+        lambda: role_worktree_access_commands(
+            owner_home="/home/foo",
+            roles_group="porter-roles",
+            worktree_base="/home/foo/porter-worktrees",
+            control_repository="/home/foo/../foobar/.local/state/porter/control.git",
+        ),
+        lambda: role_worktree_access_commands(
+            owner_home="/home/foo",
+            roles_group="porter-roles",
+            worktree_base="/home/foo/../foobar/porter-worktrees",
+            control_repository="/home/foo/.local/state/porter/control.git",
+        ),
+        lambda: role_worktree_access_commands(
+            owner_home="/home/bar/../foo",
+            roles_group="porter-roles",
+            worktree_base="/home/foo/porter-worktrees",
+            control_repository="/home/foo/.local/state/porter/control.git",
+        ),
+        # And the control-role grant, through each of its own.
+        lambda: director_control_access_commands(
+            owner_home="/home/foo",
+            director_account="porter-conductor",
+            provision_dir="/home/foo/../foobar/Projects/porter/.switchyard/provision",
+            project_dir="/home/foo/Projects/porter",
+        ),
+        lambda: director_control_access_commands(
+            owner_home="/home/foo",
+            director_account="porter-conductor",
+            provision_dir="/home/foo/Projects/porter/.switchyard/provision",
+            project_dir="/home/foo/../foobar/Projects/porter",
+        ),
+        lambda: director_control_access_commands(
+            owner_home="/home/bar/../foo",
+            director_account="porter-conductor",
+            provision_dir="/home/foo/Projects/porter/.switchyard/provision",
+            project_dir="/home/foo/Projects/porter",
+        ),
+        # A relative path names no directory a privileged command can be sure of.
+        lambda: role_worktree_access_commands(
+            owner_home="home/foo",
+            roles_group="porter-roles",
+            worktree_base="home/foo/porter-worktrees",
+            control_repository="home/foo/.local/state/porter/control.git",
+        ),
+    )
+    for index, builder in enumerate(escapes):
+        try:
+            commands = builder()
+        except PathContainmentError as exc:
+            assert "refusing" in str(exc), exc
+            continue
+        raise AssertionError(f"escape {index} was granted: {commands}")
+
+    # `.` and repeated separators name the same directory and are not an escape.
+    ordinary = role_worktree_access_commands(
+        owner_home="/home/foo",
+        roles_group="porter-roles",
+        worktree_base="/home/foo/./porter-worktrees",
+        control_repository="/home/foo//.local/state/porter/control.git",
+    )
+    assert any("/home/foo/.local/state'" in command for command in ordinary), ordinary
+    assert not any(".." in command for command in ordinary), ordinary
+
+
 def test_a_refused_path_is_reported_rather_than_rendered() -> None:
     """The artifact runs as root, so a refusal must not arrive as a traceback."""
     import types
@@ -417,6 +496,7 @@ def test_a_refused_path_is_reported_rather_than_rendered() -> None:
 
 def main() -> int:
     test_containment_is_by_component_not_by_prefix()
+    test_a_dot_dot_escape_is_refused_for_both_grants()
     test_a_refused_path_is_reported_rather_than_rendered()
     owner = pwd.getpwuid(os.geteuid()).pw_name
     command = [sys.executable, str(Path(__file__).resolve()), "--namespace-child", owner]

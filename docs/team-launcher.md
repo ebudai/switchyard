@@ -316,6 +316,14 @@ the owner's home; a path that shares the home's prefix without sharing its
 components is refused, and because the artifact is run as root the refusal is
 reported rather than raised.
 
+Component containment is still lexical, so it is not enough on its own:
+`/home/foo/../foobar` *is* relative to `/home/foo`, and the interior sliced out
+of it begins `/home/foo/..`, which a root-run artifact would grant on `/home`.
+Normalizing the path here would mean resolving through directories the tenant
+controls, which is its own escape, so a path carrying `..` -- or one that is not
+absolute at all -- is refused before any command is derived from it. `.` and
+repeated separators name the same directory and are not an escape.
+
 **Role accounts can reach the board clients.** They cannot traverse the owner's
 0710 home, so `ticket-board-write`, `ticket-board-read`, `directorctl` and the
 `ticket_board` package they import are staged root-owned under

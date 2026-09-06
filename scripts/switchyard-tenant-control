@@ -41,12 +41,28 @@ import sys
 from pathlib import Path
 from typing import NoReturn
 
-#: The lifecycle verbs this bridge will run, and the launcher argv each becomes.
-#: A verb that is not here cannot be reached, whatever the caller writes.
-OPERATIONS: dict[str, tuple[str, ...]] = {
-    "start": (),          # bare `switchyard <project>` starts or attaches
-    "stop": ("stop",),
-    "status": ("status",),
+class ProjectArgument:
+    """Marker for where the validated project slug goes in a command line."""
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "<project>"
+
+
+PROJECT_ARGUMENT = ProjectArgument()
+
+#: The lifecycle verbs this bridge will run, and the exact public command line
+#: each becomes. A verb that is not here cannot be reached, whatever the caller
+#: writes.
+#:
+#: These are written out in full rather than as a suffix appended to the project
+#: because the CLI does not take the project in the same place for each one: a
+#: start is the bare project, while stop and status take it AFTER the verb.
+#: Appending produced `switchyard <project> stop`, which the dispatcher reads as
+#: a two-word project selector and refuses (SYRD-50 rollout review).
+OPERATIONS: dict[str, tuple[object, ...]] = {
+    "start": (PROJECT_ARGUMENT,),           # bare `switchyard <project>` starts or attaches
+    "stop": ("stop", PROJECT_ARGUMENT),     # `switchyard stop <project>`
+    "status": ("status", PROJECT_ARGUMENT), # `switchyard status <project>`
 }
 PROJECT_SLUG = re.compile(r"^[a-z0-9][a-z0-9_]{0,39}$")
 GRANT_ROOT = Path("/usr/local/lib/switchyard")
@@ -235,7 +251,10 @@ def main(argv: list[str]) -> int:
         "LANG": "C.UTF-8",
         "SWITCHYARD_TENANT_CONTROL_CALLER": caller,
     }
-    command = [str(launcher), project, *OPERATIONS[operation]]
+    command = [
+        str(launcher),
+        *(project if part is PROJECT_ARGUMENT else str(part) for part in OPERATIONS[operation]),
+    ]
 
     os.setgroups([])
     os.initgroups(owner, owner_entry.pw_gid)

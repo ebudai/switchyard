@@ -272,6 +272,144 @@ def test_a_tenant_with_no_bridge_still_reaches_the_owner_through_sudo() -> None:
         assert team_launcher._tenant_control_grant(PROJECT, root=root) == {}
 
 
+def _register(root: Path, slug: str, name: str) -> None:
+    provision = root / "provision"
+    provision.mkdir(parents=True, exist_ok=True)
+    layout = provision / f"{slug}-layout.json"
+    layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+    config_path = provision / f"{slug}.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "desktop_access": {"mode": "headless"},
+                "project": slug,
+                "project_name": name,
+                "layout": str(layout),
+                "run_as_user": f"{slug}-agent",
+                "pane_launcher": "/opt/switchyard/current/scripts/team-launcher",
+                "roles": [{"role": "director", "slot": 0, "cli": ["claude"]}],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    registry = root / "registry"
+    registry.mkdir(parents=True, exist_ok=True)
+    (registry / f"{slug}.json").write_text(
+        json.dumps(
+            {
+                "config_path": str(config_path),
+                "name": name,
+                "schema": "switchyard.project-registry.v1",
+                "slug": slug,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_a_scoped_status_reports_only_that_project() -> None:
+    """`switchyard status <project>` is what the bridge runs, so it has to scope.
+
+    The unscoped listing reads every tenant, which is why it takes the root
+    path. Scoping is what makes the command answerable by one project's own
+    owner -- and therefore reachable by the recorded human over the bridge
+    without a password. A "scoped" status that still listed every project would
+    both leak other tenants to that human and defeat the reason it needs no root.
+    """
+    with tempfile.TemporaryDirectory(prefix="switchyard-status-scope.") as tmp:
+        root = Path(tmp)
+        _register(root, "demo", "Demo Project")
+        _register(root, "other", "Other Project")
+        registry = root / "registry"
+
+        def lines(project: str) -> list[str]:
+            printed: list[str] = []
+            code = team_launcher.switchyard_status_command(
+                config_dir=root / "none",
+                registry_dir=registry,
+                project=project,
+                process_commands=[],
+                runner=lambda *a, **k: subprocess.CompletedProcess([], 0, "", ""),
+                print_func=printed.append,
+            )
+            assert code == 0, project
+            return printed
+
+        everything = "\n".join(lines(""))
+        assert "demo" in everything and "other" in everything
+
+        scoped = "\n".join(lines("demo"))
+        assert "demo" in scoped
+        assert "other" not in scoped, scoped
+        assert "Other Project" not in scoped, scoped
+
+        # And the other way round, so this cannot pass by naming the first row.
+        scoped_other = "\n".join(lines("other"))
+        assert "other" in scoped_other
+        assert "demo" not in scoped_other, scoped_other
+
+
+def test_the_bridge_argv_is_a_command_line_the_cli_accepts() -> None:
+    """Each verb's command line parses, and names the project the bridge meant.
+
+    The bridge used to append the verb after the project, producing
+    `switchyard <project> stop`, which the dispatcher reads as a two-word
+    project selector and refuses. The shapes below are the CLI's own parsers
+    answering (SYRD-50 rollout review).
+    """
+    assert team_launcher._build_switchyard_stop_parser().parse_args(["demo"]).project == ["demo"]
+    assert team_launcher._build_switchyard_status_parser().parse_args(["demo"]).project == ["demo"]
+    # Unscoped status still parses, so the operator listing is unchanged.
+    assert team_launcher._build_switchyard_status_parser().parse_args([]).project == []
+
+    # The bridge's own table, read back from the script, in the same shapes.
+    source = BRIDGE.read_text(encoding="utf-8")
+    assert '"stop": ("stop", PROJECT_ARGUMENT)' in source
+    assert '"status": ("status", PROJECT_ARGUMENT)' in source
+    assert '"start": (PROJECT_ARGUMENT,)' in source
+
+
+def test_the_classifier_defers_only_for_a_grant_that_names_the_caller() -> None:
+    """The trampoline escalates before any routing runs, so it decides too.
+
+    If it says root is required, the caller meets a sudo prompt and never
+    reaches the bridge -- which is the whole thing the ticket forbids.
+    """
+    me = pwd.getpwuid(os.getuid()).pw_name
+    original = team_launcher._tenant_control_grant
+    try:
+        team_launcher._tenant_control_grant = lambda project, root=None: (  # type: ignore[assignment]
+            {"project": PROJECT, "authorized_user": me} if project == PROJECT else {}
+        )
+        assert not team_launcher.switchyard_invocation_requires_root(["stop", PROJECT])
+        assert not team_launcher.switchyard_invocation_requires_root(["status", PROJECT])
+        # Only this project, only these verbs, only this exact shape.
+        assert team_launcher.switchyard_invocation_requires_root(["stop", "other"])
+        assert team_launcher.switchyard_invocation_requires_root(["upgrade", PROJECT])
+        assert team_launcher.switchyard_invocation_requires_root(["teardown", PROJECT])
+        assert team_launcher.switchyard_invocation_requires_root(["status"])
+        assert team_launcher.switchyard_invocation_requires_root(["stop", PROJECT, "--force"])
+        assert team_launcher.switchyard_invocation_requires_root(["stop", "../etc"])
+
+        # A grant naming somebody else is not this caller's grant.
+        team_launcher._tenant_control_grant = lambda project, root=None: {  # type: ignore[assignment]
+            "project": PROJECT,
+            "authorized_user": "somebody-else",
+        }
+        assert team_launcher.switchyard_invocation_requires_root(["stop", PROJECT])
+
+        # A classifier that raised would break every invocation, so it cannot.
+        def exploding(project: str, root: Path | None = None) -> dict[str, str]:
+            raise OSError("the grant store is unreadable")
+
+        team_launcher._tenant_control_grant = exploding  # type: ignore[assignment]
+        assert team_launcher.switchyard_invocation_requires_root(["stop", PROJECT])
+    finally:
+        team_launcher._tenant_control_grant = original  # type: ignore[assignment]
+
+
 def test_only_lifecycle_verbs_take_the_bridge() -> None:
     for argv, expected in (
         ([PROJECT], "start"),

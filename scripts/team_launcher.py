@@ -12201,6 +12201,7 @@ def switchyard_status_command(
     config_dir: Path | None = None,
     registry_dir: Path | None = None,
     json_output: bool = False,
+    project: str = "",
     process_commands: Sequence[str] | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     source_repo: Path | None = None,
@@ -12214,6 +12215,8 @@ def switchyard_status_command(
         process_commands=process_commands,
         runner=runner,
     )
+    if project:
+        statuses = [status for status in statuses if status.slug == project]
     for status in statuses:
         if status.state == "unknown":
             continue
@@ -16021,6 +16024,9 @@ def _build_switchyard_teardown_parser() -> argparse.ArgumentParser:
 
 def _build_switchyard_status_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="switchyard status", description="List registered Switchyard projects and pane liveness.")
+    # Optional, and joined like `stop`'s, so a project whose name has spaces
+    # selects the same way it does everywhere else. Omit it for every project.
+    parser.add_argument("project", nargs="*", help="registered project name or slug (default: all)")
     parser.add_argument("--json", action="store_true", help="emit stable machine-readable project status")
     return parser
 
@@ -16300,7 +16306,36 @@ def switchyard_invocation_requires_root(argv: Sequence[str]) -> bool:
         return False
     if len(argv) >= 2 and argv[1] in {"-h", "--help"}:
         return False
-    return command in SWITCHYARD_PRIVILEGED_COMMANDS
+    if command not in SWITCHYARD_PRIVILEGED_COMMANDS:
+        return False
+    # A lifecycle verb this caller can reach over their tenant's control bridge
+    # needs no root at all. Saying otherwise here escalates at the trampoline,
+    # before any of the routing below runs -- which would put a sudo prompt in
+    # front of exactly the human the bridge exists to spare (SYRD-50 rollout
+    # review). A bare project name is already unprivileged, which is why only
+    # `stop` and `status` needed this.
+    return not _tenant_control_can_serve(argv)
+
+
+def _tenant_control_can_serve(argv: Sequence[str]) -> bool:
+    """Whether this exact invocation is one the caller's control bridge runs.
+
+    Deliberately narrow and quiet: an unrecognised shape, an unknown project or
+    any error means "no", so the answer can only ever remove an escalation that
+    the bridge is about to make unnecessary, never add one.
+    """
+    if len(argv) != 2:
+        return False
+    project = argv[1]
+    if argv[0].casefold() not in TENANT_CONTROL_OPERATIONS:
+        return False
+    if not PROJECT_SLUG_RE.fullmatch(project):
+        return False
+    try:
+        grant = _tenant_control_grant(project)
+        return bool(grant) and grant.get("authorized_user") == current_user_name()
+    except Exception:  # pragma: no cover - classification must never raise
+        return False
 
 
 def _switchyard_user_can_prompt_for_sudo() -> bool:
@@ -16703,6 +16738,17 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         )
     if argv[0].casefold() == "status":
         args = _build_switchyard_status_parser().parse_args(argv[1:])
+        selection = " ".join(args.project)
+        if selection:
+            # One project needs no root: its own owner can answer for it. That
+            # matters beyond tidiness -- crossing accounts then uses the same
+            # policy as every other project command, which is what lets the
+            # recorded human reach it over the control bridge without a
+            # password. The unscoped listing still reads every tenant, so it
+            # still takes the root path (SYRD-50 rollout review).
+            entry = _resolve_switchyard_project(selection)
+            _load_switchyard_project_config_for_command(entry, argv)
+            return switchyard_status_command(json_output=args.json, project=entry.slug)
         if os.geteuid() != 0:
             _switchyard_exec_with_root(argv)
         return switchyard_status_command(json_output=args.json)

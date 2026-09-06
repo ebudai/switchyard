@@ -9383,6 +9383,40 @@ def switchyard_agy_credential_command(
     raise SystemExit(f"switchyard: unknown agy-credential action {action!r}")
 
 
+def _owner_can_traverse(info: os.stat_result, owner_user: str, owner_uid: int) -> bool:
+    """Whether owner_user has execute permission on a directory, by the POSIX rule."""
+    if info.st_uid == owner_uid:
+        return bool(info.st_mode & stat.S_IXUSR)
+    if info.st_gid in _group_ids_for_user(owner_user):
+        return bool(info.st_mode & stat.S_IXGRP)
+    return bool(info.st_mode & stat.S_IXOTH)
+
+
+def _require_owner_home_traversable(dir_fd: int, owner_user: str, home: Path) -> None:
+    """Refuse an owner home the owner cannot enter.
+
+    Only reachability is required here, not ownership: a home is not switchyard's to
+    dictate, and one owned by root but world-executable is genuinely fine. A
+    Director-approved pre-existing owner may have a home this function did not create, so
+    it is proven rather than assumed -- a credential under a home the owner cannot
+    traverse is exactly the unreadable-token failure this ticket exists to remove.
+    """
+    owner_uid = _uid_for_user(owner_user)
+    if owner_uid is None:
+        raise SystemExit(
+            f"switchyard: {owner_user!r} is not a user on this machine, so {home} cannot "
+            "be shown to be reachable by it"
+        )
+    info = os.fstat(dir_fd)
+    if not _owner_can_traverse(info, owner_user, owner_uid):
+        raise SystemExit(
+            f"switchyard: home {home} is owned by uid {info.st_uid} with mode "
+            f"{stat.S_IMODE(info.st_mode):04o}, so {owner_user} (uid {owner_uid}) could "
+            "not enter it and agy could not read a credential below it; fix the home's "
+            "ownership or permissions and rerun"
+        )
+
+
 def _require_owner_traversable(dir_fd: int, owner_user: str, component: str, target_dir: Path) -> None:
     """Refuse a pre-existing component the pane owner cannot enter.
 
@@ -9428,9 +9462,11 @@ def _open_owner_credential_dir(
     target_dir = home_base / owner_user / AGY_CREDENTIAL_DIR_NAME
     fd = os.open(home_base, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        # The owner's home is created by useradd as root; everything below it is
-        # owner-controlled.
+        # The home is usually created by useradd, but a Director-approved pre-existing
+        # owner may bring one switchyard never made, so its reachability is proven here
+        # rather than assumed. Everything below it is owner-controlled.
         fd = _openat_no_follow(fd, owner_user, target_dir)
+        _require_owner_home_traversable(fd, owner_user, home_base / owner_user)
         for component in Path(AGY_CREDENTIAL_DIR_NAME).parts:
             created = False
             try:

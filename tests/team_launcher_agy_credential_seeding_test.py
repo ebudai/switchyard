@@ -60,7 +60,11 @@ class _SeedingRunner(FakeRunner):
         if args[:1] == ["useradd"]:
             # useradd -m creates the home; switchyard no longer creates it as a side
             # effect of a full-path install(1), so the fake has to be faithful here.
-            (self.sandbox_root / "home" / self.owner_user).mkdir(parents=True, exist_ok=True)
+            # 0755 explicitly: the harness cannot make it owner-owned, and the real
+            # requirement is that the owner can traverse it, which world-execute gives.
+            home = self.sandbox_root / "home" / self.owner_user
+            home.mkdir(parents=True, exist_ok=True)
+            os.chmod(home, 0o755)
             return subprocess.CompletedProcess(args, 0)
         if args[:1] == ["chown"]:
             # Ownership is assigned through /proc/<pid>/fd/N and these tests share that
@@ -159,6 +163,8 @@ def _provision(
     allow_existing_owner_user: bool = True,
     no_agy_credential: bool = False,
     yes: bool = True,
+    project_path: Path | None = None,
+    owner_home_mode: int = 0o755,
     answers: dict[str, str] | None = None,
 ) -> tuple[object, _SeedingRunner, str, Path, Path]:
     """Run a provision; returns (result_or_exit, runner, stdout, home_base, project_dir).
@@ -167,6 +173,12 @@ def _provision(
     write this machine's real /etc/switchyard/agy-credential.json.
     """
     home_base = tmp_path / "home"
+    if owner_exists:
+        # A real existing owner has a home; the harness cannot own it as OWNER_USER, so
+        # it is made world-traversable, which is what reachability actually requires.
+        owner_home = home_base / OWNER_USER
+        owner_home.mkdir(parents=True, exist_ok=True)
+        os.chmod(owner_home, owner_home_mode)
     source_repo = tmp_path / "source-repo"
     source_repo.mkdir(exist_ok=True)
     _write_source_onboarding_docs(source_repo)
@@ -185,6 +197,7 @@ def _provision(
         with redirect_stdout(stdout):
             outcome = switchyard_new_command(
                 desktop_policy=Path("headless"),
+                project_path=project_path,
                 slug="porter",
                 agent_name="otto-agent",
                 project_name="Porter System",
@@ -986,6 +999,71 @@ def test_provisioning_refuses_an_unreachable_existing_credential_directory() -> 
 
         outcome, runner, _output, home_base, _project_dir = _provision(
             tmp_path, agy_credential_source=SEED_SOURCE_USER, owner_exists=True
+        )
+        seeded_exists = _seeded_token_path(home_base).exists()
+
+    assert isinstance(outcome, SystemExit)
+    assert "could not enter it" in str(outcome)
+    assert not seeded_exists
+
+
+def test_owner_home_the_owner_cannot_enter_is_refused_at_helper_level() -> None:
+    """Audit's reproduction: a pre-existing owner home this function never created."""
+    assert pwd.getpwnam(OWNER_USER).pw_uid != os.getuid(), "fixture needs a real uid mismatch"
+
+    with tempfile.TemporaryDirectory(prefix="pgu-agy-home.") as tmp:
+        home_base = Path(tmp) / "home"
+        owner_home = home_base / OWNER_USER
+        owner_home.mkdir(parents=True)
+        os.chmod(owner_home, 0o700)  # owned by the runner, private to it
+
+        try:
+            team_launcher._open_owner_credential_dir(
+                OWNER_USER, home_base, runner=_DirRunner()
+            )
+            raise AssertionError("expected refusal for an unreachable owner home")
+        except SystemExit as exc:
+            message = str(exc)
+        created_anything = (owner_home / ".gemini").exists()
+
+    assert "could not enter it" in message
+    assert "fix the home's ownership or permissions" in message
+    assert not created_anything, "descendants were created below an unreachable home"
+
+
+def test_owner_home_owned_by_another_user_but_traversable_is_accepted() -> None:
+    """Reachability is the requirement, not ownership: a 0755 home is genuinely fine."""
+    with tempfile.TemporaryDirectory(prefix="pgu-agy-home.") as tmp:
+        home_base = Path(tmp) / "home"
+        owner_home = home_base / OWNER_USER
+        owner_home.mkdir(parents=True)
+        os.chmod(owner_home, 0o755)
+
+        fd = team_launcher._open_owner_credential_dir(
+            OWNER_USER, home_base, runner=_DirRunner()
+        )
+        os.close(fd)
+        made = (owner_home / ".gemini" / "antigravity-cli").is_dir()
+
+    assert made
+
+
+def test_provisioning_refuses_an_unreachable_owner_home() -> None:
+    """End to end, with the project path outside the home so its precheck cannot mask this."""
+    with tempfile.TemporaryDirectory(prefix="pgu-agy-seed.") as tmp:
+        tmp_path = Path(tmp)
+        home_base = tmp_path / "home"
+        _seed_source_token(home_base)
+        # Left for switchyard to create: pre-creating it fails the project-path
+        # ownership precheck before the home is ever examined.
+        external_project = tmp_path / "elsewhere" / "porter_system"
+
+        outcome, runner, _output, home_base, _project_dir = _provision(
+            tmp_path,
+            agy_credential_source=SEED_SOURCE_USER,
+            owner_exists=True,
+            project_path=external_project,
+            owner_home_mode=0o700,
         )
         seeded_exists = _seeded_token_path(home_base).exists()
 

@@ -24,6 +24,36 @@ naming a CLI.
 Authentication cannot be automated and is not attempted at install time. It
 happens once per detected CLI at project creation.
 
+For `agy` there is one exception, because its sign-in cannot be completed by a
+headless owner user: switchyard can copy an existing agy OAuth token into a new
+project's owner home so the project's panes start already signed in. Nothing is
+authenticated on your behalf — an existing token is reused.
+
+Name the account once per machine:
+
+```
+sudo switchyard agy-credential set USER     # record it
+sudo switchyard agy-credential show         # see what is recorded
+sudo switchyard agy-credential clear        # stop seeding new projects
+```
+
+New projects then seed from that account with no extra flags. Per project,
+`switchyard new --agy-credential-source USER` overrides the recorded account and
+`--no-agy-credential` skips seeding entirely. If nothing is recorded, an
+interactive `switchyard new` offers the account you are running as and stores it
+only if you confirm; a `--yes` run never infers one, so it seeds nothing unless
+you pass the flag.
+
+Understand what this shares before recording it: every role pane of a seeded
+project can act as the one Google account that user signed in to agy with, and
+the refresh token it copies does not expire. The effective source and how it was
+chosen — host default, per-project override, or opt-out — are recorded in the
+project artifact under `capability_grants`.
+
+Seeding only ever fills in a missing credential. A token already in place and
+owned by the project owner is left untouched; anything else at that path is a
+hard error rather than something switchyard overwrites.
+
 ## System Packages
 
 ### apt
@@ -37,7 +67,7 @@ sudo apt-get install python3 postgresql postgresql-client tmux git curl python3-
 
 ```bash
 sudo pacman -Syu
-sudo pacman -S python postgresql tmux git curl python-pip python-pillow acl
+sudo pacman -S python postgresql tmux git curl python-pillow python-psycopg acl
 ```
 
 The installer runs `apt-get update` before apt installs and prints that refresh.
@@ -80,10 +110,19 @@ imports it. The explicit import check proves both Psycopg and Pillow resolve;
 the entry-point help check exercises the board's module-scope imports, including
 `PIL`.
 
-On Arch-family systems, the current system-user pip path remains:
+Arch-family systems need no venv and no pip. The distribution packages a Psycopg
+that satisfies the pin, so `python-psycopg` is installed with the other host
+packages above and the system Python imports it directly. Arch's Python is
+externally managed under PEP 668 as well, so `pip install --user` is refused
+there, not merely discouraged; `--break-system-packages` is not an answer to
+that on any supported distro.
+
+Verify with the interpreter the generated services actually use -- the shared
+venv when it exists, `/usr/bin/python3` otherwise:
 
 ```bash
-python3 -m pip install --user 'psycopg>=3.3,<4'
+/usr/bin/python3 -c 'import psycopg, PIL; print(psycopg.__version__, PIL.__version__)'
+/usr/bin/python3 scripts/ticket-board.py --help
 ```
 
 ## Agent CLI

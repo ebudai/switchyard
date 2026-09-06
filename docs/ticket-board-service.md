@@ -55,14 +55,18 @@ Runtime dependency:
   the `psycopg>=3.3,<4` runtime pin, so `scripts/install-switchyard-prereqs`
   creates `/opt/switchyard/venv` with system site packages visible and installs
   Psycopg there instead of using `pip install --user`
-- on Arch/CachyOS, install it for the system Python with:
+- on Arch/CachyOS the packaged `python-psycopg` already satisfies the pin, so
+  `scripts/install-switchyard-prereqs` installs it with the other pacman
+  packages and the system Python imports it directly; no venv and no pip are
+  involved. To add it by hand:
 
 ```bash
 sudo pacman -S python-psycopg
 ```
 
-Debian/Ubuntu system Python is PEP-668 externally managed, so avoid plain
-`pip install --user psycopg` and do not use `--break-system-packages`. Verify
+Debian/Ubuntu and Arch-family system Python are both PEP-668 externally
+managed, so no supported path uses `pip install --user psycopg`, and
+`--break-system-packages` is not used anywhere. Verify
 the deployed board interpreter in two parts: import the runtime dependencies,
 then run the entry point so the board module graph loads:
 

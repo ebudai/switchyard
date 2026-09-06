@@ -633,6 +633,160 @@ def test_switchyard_upgrade_refreshes_only_unedited_onboarding_docs() -> None:
         for name in team_launcher.SWITCHYARD_ONBOARDING_DOC_NAMES:
             assert sum(f"onboarding doc {name}:" in line for line in output) == 1
 
+def test_switchyard_upgrade_uses_selected_history_for_immutable_release_onboarding_docs() -> None:
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-switchyard-onboarding-release-history.") as tmp:
+        tmp_path = Path(tmp)
+        history = tmp_path / "history"
+        history.mkdir()
+        old_commit = _write_source_onboarding_docs(history, initialize_git=True)
+        docs_dir = history / "docs" / "onboarding"
+
+        for name in team_launcher.SWITCHYARD_ONBOARDING_DOC_NAMES:
+            docs_dir.joinpath(name).write_text(f"# {name}\n\nReleased current copy for {name}.\n", encoding="utf-8")
+        _run_git(["git", "add", "docs/onboarding"], cwd=history)
+        _run_git(
+            ["git", "-c", "user.name=Switchyard Test", "-c", "user.email=switchyard-test@example.invalid",
+             "commit", "-m", "Current immutable release docs"],
+            cwd=history,
+        )
+        release_commit = _run_git(["git", "rev-parse", "HEAD"], cwd=history).stdout.strip()
+
+        missing_history_cache = tmp_path / "missing-history.git"
+        _run_git(
+            ["git", "clone", "--bare", "--depth", "1", "--branch", "main", history.as_uri(), str(missing_history_cache)]
+        )
+        missing_old = subprocess.run(
+            ["git", f"--git-dir={missing_history_cache}", "cat-file", "-e", f"{old_commit}^{{commit}}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert missing_old.returncode != 0
+
+        for name in team_launcher.SWITCHYARD_ONBOARDING_DOC_NAMES:
+            docs_dir.joinpath(name).write_text(f"# {name}\n\nFuture floating copy for {name}.\n", encoding="utf-8")
+        _run_git(["git", "add", "docs/onboarding"], cwd=history)
+        _run_git(
+            ["git", "-c", "user.name=Switchyard Test", "-c", "user.email=switchyard-test@example.invalid",
+             "commit", "-m", "Future docs outside selected release"],
+            cwd=history,
+        )
+        future_commit = _run_git(["git", "rev-parse", "HEAD"], cwd=history).stdout.strip()
+        selected_cache = tmp_path / "selected-cache.git"
+        _run_git(["git", "clone", "--bare", str(history), str(selected_cache)])
+
+        immutable_release = tmp_path / "immutable-release"
+        immutable_release.mkdir()
+        archive = tmp_path / "release.tar"
+        _run_git(["git", "archive", "--format=tar", "-o", str(archive), release_commit], cwd=history)
+        subprocess.run(["tar", "-xf", str(archive), "-C", str(immutable_release)], check=True)
+        immutable_release.joinpath(team_launcher.SWITCHYARD_RELEASE_MARKER_NAME).write_text(
+            json.dumps({"commit": release_commit}) + "\n",
+            encoding="utf-8",
+        )
+        assert not (immutable_release / ".git").exists()
+
+        def body_at(commit: str, name: str) -> str:
+            return _run_git(["git", "show", f"{commit}:docs/onboarding/{name}"], cwd=history).stdout
+
+        project_dir = tmp_path / "project"
+        provision_dir = project_dir / ".switchyard" / "provision"
+        provision_dir.mkdir(parents=True)
+        layout_path = provision_dir / "otto-konsole-layout.json"
+        layout_path.write_text(
+            json.dumps(team_launcher._new_project_layout_payload(6), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        config_path = _write_launcher_config(provision_dir)
+        provision_dir.joinpath("plan.json").write_text(
+            json.dumps({"commit_git_dir": f"{missing_history_cache}{os.pathsep}{selected_cache}"}) + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("otto", config_path)
+        target_dir = project_dir / "docs" / "onboarding"
+        target_dir.mkdir(parents=True)
+        names = team_launcher.SWITCHYARD_ONBOARDING_DOC_NAMES
+        for name in names:
+            target_dir.joinpath(name).write_text(
+                team_launcher._stamp_onboarding_doc(
+                    source_name=name,
+                    source_commit=old_commit,
+                    body=body_at(old_commit, name),
+                ),
+                encoding="utf-8",
+            )
+        edited_name = names[1]
+        edited_bytes = target_dir.joinpath(edited_name).read_bytes() + b"\nTenant edit.\n"
+        target_dir.joinpath(edited_name).write_bytes(edited_bytes)
+        newer_name = names[2]
+        newer_snapshot = team_launcher._stamp_onboarding_doc(
+            source_name=newer_name,
+            source_commit=future_commit,
+            body=body_at(future_commit, newer_name),
+        )
+        target_dir.joinpath(newer_name).write_text(newer_snapshot, encoding="utf-8")
+        output: list[str] = []
+        git_calls: list[list[str]] = []
+
+        def recording_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            git_calls.append(list(args))
+            return _owner_file_install_runner(args, **kwargs)
+
+        assert team_launcher.upgrade_project_command(
+            config,
+            config_path=config_path,
+            source_repo=immutable_release,
+            runner=recording_runner,
+            print_func=output.append,
+        ) == 0
+
+        for name in (names[0], names[3]):
+            refreshed = target_dir.joinpath(name).read_text(encoding="utf-8")
+            assert f"source commit {release_commit}" in refreshed
+            assert f"Released current copy for {name}." in refreshed
+            assert "Future floating copy" not in refreshed
+            assert any(f"onboarding doc {name}: refreshed" in line for line in output)
+        assert target_dir.joinpath(edited_name).read_bytes() == edited_bytes
+        assert any(f"onboarding doc {edited_name}: skipped, edited since source commit {old_commit}" in line for line in output)
+        assert target_dir.joinpath(newer_name).read_text(encoding="utf-8") == newer_snapshot
+        assert any(f"onboarding doc {newer_name}: skipped, installed copy is newer than this checkout" in line for line in output)
+        assert any(
+            call[:2] == ["git", f"--git-dir={missing_history_cache}"] and "cat-file" in call
+            for call in git_calls
+        )
+        assert any(call[:2] == ["git", f"--git-dir={selected_cache}"] and "show" in call for call in git_calls)
+        assert not any(call[:3] == ["git", "-C", str(immutable_release)] and "show" in call for call in git_calls)
+
+        missing_project = tmp_path / "missing-project"
+        missing_target = missing_project / "docs" / "onboarding"
+        missing_target.mkdir(parents=True)
+        installed_before: dict[str, str] = {}
+        for name in names:
+            snapshot = team_launcher._stamp_onboarding_doc(
+                source_name=name,
+                source_commit=old_commit,
+                body=body_at(old_commit, name),
+            )
+            missing_target.joinpath(name).write_text(snapshot, encoding="utf-8")
+            installed_before[name] = snapshot
+        missing_output: list[str] = []
+        team_launcher.upgrade_switchyard_onboarding_docs(
+            source_repo=immutable_release,
+            project_dir=missing_project,
+            owner_user=current_user,
+            commit_git_dir=str(missing_history_cache),
+            dry_run=False,
+            runner=_owner_file_install_runner,
+            print_func=missing_output.append,
+        )
+        for name in names:
+            assert missing_target.joinpath(name).read_text(encoding="utf-8") == installed_before[name]
+            assert any(
+                f"onboarding doc {name}: skipped, cannot verify source commit {old_commit}" in line
+                for line in missing_output
+            )
+
 def test_switchyard_upgrade_refuses_to_downgrade_onboarding_docs_from_stale_checkout() -> None:
     current_user = team_launcher.current_user_name()
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-onboarding-stale.") as tmp:

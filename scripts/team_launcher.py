@@ -5551,10 +5551,19 @@ def refresh_generated_project_runtime_artifacts(
             False,
             f"switchyard: {config.project} runtime plan is incomplete and cannot be refreshed automatically: {exc}",
         )
+    # The staged unit always carries the real table. Withholding it is not a
+    # compatibility authority: the current server resolves every local peer
+    # through that table, so an empty one grants no role to anybody. Safety
+    # comes from WHEN the unit is installed and the release deployed -- the
+    # identities transaction installs and restarts them only once the processes
+    # serving the roles are the accounts it names (SYRD-45).
+    def _for_current_identities(plan: ProjectBoardProvision) -> ProjectBoardProvision:
+        return plan
+
     # The tenant's own view of its generated files, rendered from the tenant's
     # own plan. Nothing root installs comes from here.
     tenant_rendered = render_privileged_artifacts(
-        replace(tenant_plan, **replacements), enable_owner_linger=False
+        _for_current_identities(replace(tenant_plan, **replacements)), enable_owner_linger=False
     )
     for name in sorted(tenant_rendered):
         if _tenant_copy_is_current(provision_dir / name, tenant_rendered[name]):
@@ -5596,7 +5605,7 @@ def refresh_generated_project_runtime_artifacts(
         )
     if replacements:
         plan = replace(plan, **replacements)
-    rendered = render_privileged_artifacts(plan)
+    rendered = render_privileged_artifacts(_for_current_identities(plan))
     privileged_changed = sorted(
         name
         for name, body in rendered.items()
@@ -12799,12 +12808,21 @@ def render_role_account_migration(config: ProjectConfig) -> str:
         "# The accounts now exist, but the running workers still hold the shared"
     )
     lines.append(
-        "# uid: they have to be stopped, restarted under their own accounts and"
+        "# uid. Moving them is the next phase, and it must not happen before the"
     )
     lines.append(
-        "# verified before anything authorizes those accounts (SYRD-45)."
+        "# director has made its own board write: restarting the director under a"
     )
-    lines.append(f"sudo switchyard cutover-roles {config.project}")
+    lines.append(
+        "# new uid while the board still authorizes the shared account leaves it"
+    )
+    lines.append(
+        "# unable to make that write at all. Rerun the upgrade, which runs"
+    )
+    lines.append(
+        "# whichever phase is next in order (SYRD-45)."
+    )
+    lines.append(f"sudo switchyard upgrade {config.project}")
     lines.append(f"sudo systemctl restart {config.project}-ticket-board.service")
     return "\n".join(lines) + "\n"
 UPGRADE_JOURNAL_SCHEMA = "switchyard.upgrade-journal.v1"
@@ -12814,13 +12832,20 @@ UPGRADE_JOURNAL_SCHEMA = "switchyard.upgrade-journal.v1"
 # Director-authority board write was attempted from the root upgrade process.
 # Each phase is recorded, so an interrupted upgrade resumes rather than repeats
 # and a partial state is visible instead of inferred (SYRD-45).
+# The order is forced by what each phase leaves true. The identities phase is a
+# single transaction over the workers, their trees, the configuration, the
+# installed units and the services, and it ends with every role proved able to
+# write as its own account -- against the board that is running at the time,
+# which still authorizes by claim. Only then is it safe to deploy the release
+# whose board enforces the per-role table, because by then the table and the
+# processes already agree. The director's write comes last, under its own
+# account, on a board that recognises it (SYRD-45).
 UPGRADE_PHASES: tuple[tuple[str, str, str], ...] = (
     ("artifacts", "root", "regenerate generated artifacts that are safe while the current roles run"),
-    ("compatibility", "operator", "deploy the release the running board needs before it can accept the director migration"),
+    ("accounts", "operator", "create the per-role Unix accounts, homes, tooling and credentials"),
+    ("identities", "root", "one transaction: stop the roles, move their trees, install and restart the board authority, restart each role under its own account and prove it can write"),
+    ("release", "operator", "deploy the board release that enforces the per-role table"),
     ("director", "director", "migrate the declarative director onboarding through the director's own board authority"),
-    ("accounts", "operator", "create the per-role Unix accounts, ownership and credentials"),
-    ("identities", "root", "stop, restart and verify every role under its own account, then cut authority over"),
-    ("activate", "operator", "install the per-role authority table and deploy the matching release"),
 )
 UPGRADE_PHASE_OWNERS = {name: owner for name, owner, _detail in UPGRADE_PHASES}
 
@@ -12961,6 +12986,41 @@ def process_uid(pid: int, *, proc_root: Path | None = None) -> int | None:
     if pid <= 0:
         return None
     return _proc_effective_uid(proc_root or PROC_ROOT, str(pid))
+
+
+def running_role_identities(
+    config: ProjectConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> dict[str, str]:
+    """Which account is actually serving each role right now.
+
+    A role is probed through the account its configuration names AND through
+    the project account, because a tenant part-way onto per-role identities
+    names accounts that do not exist: every probe through them fails and the
+    project looks stopped while six sessions are running. That misreading is
+    what makes a live tenant look fresh (SYRD-45).
+    """
+    owner = config.run_as_user or current_user_name()
+    serving: dict[str, str] = {}
+    for role in config.roles:
+        candidates: list[str] = []
+        configured = role.run_as_user
+        if configured and configured != owner:
+            candidates.append(configured)
+        candidates.append(owner)
+        for account in candidates:
+            probe = role_process_runner_for(
+                config, replace(role, run_as_user="" if account == owner else account), runner=runner
+            )
+            if probe(
+                tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            ).returncode != 0:
+                continue
+            if live_command_matches_role(role, runner=probe):
+                serving[role.role] = account
+                break
+    return serving
 
 
 def role_process_identity_gaps(
@@ -13416,7 +13476,11 @@ def upgrade_project_command(
     # Detect the partial state before doing anything else, so every later phase
     # reads a configuration that matches the host.
     cutover = role_account_cutover(config, runner=runner)
-    live_roles = [role.role for role in _running_project_roles(config, runner=runner)]
+    # Probed under both identities: a configuration naming accounts that do not
+    # exist makes every probe through them fail, and the live tenant then looks
+    # like a fresh one (SYRD-45).
+    serving = running_role_identities(config, runner=runner)
+    live_roles = sorted(serving)
     if cutover.is_partial:
         print_func(
             f"switchyard: {config.project} is part-way onto per-role accounts and the two do not "
@@ -13498,54 +13562,9 @@ def upgrade_project_command(
         write_pending_identities(config)
     record_upgrade_phase(config, config_path=config_path, phase="artifacts", state="done", dry_run=dry_run)
 
-    accounts_ready = _role_accounts_ready(config)
-    if not accounts_ready:
-        migration_path = config_path.with_name(f"{config.project}-role-accounts.sh")
-        if not dry_run:
-            migration_path.write_text(render_role_account_migration(config), encoding="utf-8")
-            migration_path.chmod(0o755)
-        print_func(
-            f"switchyard: {config.project}'s roles still share the project account. An operator must "
-            f"run {migration_path} (safe to re-run), then rerun `switchyard upgrade {config.project}` "
-            "to cut the configuration and board authority over."
-        )
-        record_upgrade_phase(
-            config, config_path=config_path, phase="accounts", state="pending", dry_run=dry_run
-        )
-    else:
-        record_upgrade_phase(
-            config, config_path=config_path, phase="accounts", state="done", dry_run=dry_run
-        )
-        if not cutover.is_complete:
-            # Not just a configuration edit: the running workers still hold the
-            # shared uid, so they are stopped, restarted under their own
-            # accounts and checked, and put back if that does not hold.
-            cutover_result = cutover_role_identities_command(
-                config,
-                config_path=config_path,
-                dry_run=dry_run,
-                runner=runner,
-                print_func=print_func,
-            )
-            if not dry_run:
-                config = load_project_config(config.project, config_path)
-                release_report_config = config
-                if cutover_result == 0:
-                    followup = refresh_generated_project_runtime_artifacts(
-                        config,
-                        config_path=config_path,
-                        dry_run=dry_run,
-                        source_repo=effective_source_repo if source_repo is not None else None,
-                        commit_git_dir=commit_git_dir,
-                        runner=runner,
-                    )
-                    print_func(followup.message)
-                cutover = role_account_cutover(config, runner=runner)
-        else:
-            record_upgrade_phase(
-                config, config_path=config_path, phase="identities", state="done", dry_run=dry_run
-            )
-
+    # The declared order is also the executed order. The director's board write
+    # happens while the board still authorizes the account the director is
+    # using; moving the roles first leaves that write impossible (SYRD-45).
     director_state, director_reason = director_onboarding_state(config, config_path=config_path)
     record_upgrade_phase(
         config, config_path=config_path, phase="director",
@@ -13579,6 +13598,64 @@ def upgrade_project_command(
                 f"({director_reason}). The director must run `switchyard finish-upgrade "
                 f"{config.project}` from their own session; root cannot make that write and will "
                 "not pretend to."
+            )
+
+    accounts_ready = _role_accounts_ready(config)
+    if not accounts_ready:
+        migration_path = config_path.with_name(f"{config.project}-role-accounts.sh")
+        if not dry_run:
+            migration_path.write_text(render_role_account_migration(config), encoding="utf-8")
+            migration_path.chmod(0o755)
+        print_func(
+            f"switchyard: {config.project}'s roles still share the project account. An operator must "
+            f"run {migration_path} (safe to re-run), then rerun `switchyard upgrade {config.project}`, "
+            "which runs whichever phase is next in order."
+        )
+        record_upgrade_phase(
+            config, config_path=config_path, phase="accounts", state="pending", dry_run=dry_run
+        )
+    else:
+        record_upgrade_phase(
+            config, config_path=config_path, phase="accounts", state="done", dry_run=dry_run
+        )
+        if not cutover.is_complete and director_state not in {"done", "not required"}:
+            print_func(
+                f"switchyard: {config.project}'s accounts are ready, but the roles stay on the "
+                "project account until the director phase completes: the board still authorizes "
+                "that account, and it is the identity the director makes its write with."
+            )
+            record_upgrade_phase(
+                config, config_path=config_path, phase="identities", state="waiting on director",
+                detail=director_reason, dry_run=dry_run,
+            )
+        elif not cutover.is_complete:
+            # Not just a configuration edit: the running workers still hold the
+            # shared uid, so they are stopped, restarted under their own
+            # accounts and checked, and put back if that does not hold.
+            cutover_result = cutover_role_identities_command(
+                config,
+                config_path=config_path,
+                dry_run=dry_run,
+                runner=runner,
+                print_func=print_func,
+            )
+            if not dry_run:
+                config = load_project_config(config.project, config_path)
+                release_report_config = config
+                if cutover_result == 0:
+                    followup = refresh_generated_project_runtime_artifacts(
+                        config,
+                        config_path=config_path,
+                        dry_run=dry_run,
+                        source_repo=effective_source_repo if source_repo is not None else None,
+                        commit_git_dir=commit_git_dir,
+                        runner=runner,
+                    )
+                    print_func(followup.message)
+                cutover = role_account_cutover(config, runner=runner)
+        else:
+            record_upgrade_phase(
+                config, config_path=config_path, phase="identities", state="done", dry_run=dry_run
             )
 
     final_cutover = role_account_cutover(config, runner=runner)
@@ -13662,6 +13739,148 @@ def _chown_tree(
     return runner(["chown", "-R", spec, path], stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode == 0
 
 
+# Where systemd reads units from. A module attribute so the transaction can be
+# exercised against a real directory in a test rather than against a stub of the
+# install itself (SYRD-45).
+SYSTEMD_UNIT_DIR = Path("/etc/systemd/system")
+
+
+def _installed_unit_path(unit: str) -> Path:
+    return SYSTEMD_UNIT_DIR / unit
+
+
+def _project_service_units(config: ProjectConfig) -> tuple[str, str]:
+    return (
+        f"{config.project}-ticket-board.service",
+        f"{config.project}-ticket-board-notify-listener.service",
+    )
+
+
+def capture_installed_units(config: ProjectConfig) -> dict[str, bytes | None]:
+    """What is installed now, so the transaction can put it back exactly."""
+    captured: dict[str, bytes | None] = {}
+    for unit in _project_service_units(config):
+        path = _installed_unit_path(unit)
+        try:
+            captured[unit] = path.read_bytes()
+        except OSError:
+            captured[unit] = None
+    return captured
+
+
+def install_board_authority(
+    config: ProjectConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    print_func: Callable[[str], None] = print,
+) -> list[str]:
+    """Install the staged units, reload, restart and health-check the board.
+
+    Regenerating a unit under the privileged provision root changes nothing
+    about what the board is serving. The transaction has to install it, reload
+    systemd and restart the services, or the workers move and the authority does
+    not (SYRD-45). Returns what went wrong, empty when the board is serving the
+    installed authority.
+    """
+    problems: list[str] = []
+    staged_dir = privileged_provision_dir(config.project, root=switchyard_privileged_provision_root())
+    for unit in _project_service_units(config):
+        staged = staged_dir / unit
+        if not staged.is_file():
+            problems.append(f"{unit} has not been generated under {staged_dir}")
+            continue
+        result = runner(
+            ["install", "-m", "0644", "-o", "root", "-g", "root", str(staged), str(_installed_unit_path(unit))],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if result.returncode != 0:
+            problems.append(f"could not install {unit} (exit {result.returncode})")
+    if problems:
+        return problems
+    if runner(["systemctl", "daemon-reload"], stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode != 0:
+        problems.append("systemctl daemon-reload failed")
+        return problems
+    for unit in _project_service_units(config):
+        result = runner(["systemctl", "restart", unit], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if result.returncode != 0:
+            problems.append(f"could not restart {unit} (exit {result.returncode})")
+    if problems:
+        return problems
+    health = runner(
+        ["systemctl", "is-active", _project_service_units(config)[0]],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if health.returncode != 0 or str(health.stdout).strip() not in {"active", ""}:
+        problems.append(
+            f"{_project_service_units(config)[0]} is not active after the restart "
+            f"({str(health.stdout).strip() or health.returncode})"
+        )
+    return problems
+
+
+def restore_installed_units(
+    config: ProjectConfig,
+    captured: Mapping[str, bytes | None],
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> list[str]:
+    """Put the previously installed units back and restart onto them."""
+    problems: list[str] = []
+    for unit, body in captured.items():
+        path = _installed_unit_path(unit)
+        try:
+            if body is None:
+                if path.exists():
+                    path.unlink()
+            else:
+                path.write_bytes(body)
+        except OSError as exc:
+            problems.append(f"could not restore {unit}: {exc}")
+    runner(["systemctl", "daemon-reload"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    for unit in captured:
+        if runner(["systemctl", "restart", unit], stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode != 0:
+            problems.append(f"could not restart {unit} after restoring it")
+    return problems
+
+
+def verify_role_board_writes(
+    config: ProjectConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> list[str]:
+    """Prove each relaunched role can actually write, as itself, to this board.
+
+    The uid being right and the board authorizing it are two different facts,
+    and only the second is the one that matters to a role trying to work
+    (SYRD-45).
+    """
+    failures: list[str] = []
+    socket_path = f"/run/{config.project}-ticket-board/ticket-board.sock"
+    for role in config.roles:
+        account = role.run_as_user
+        if not account or account == (config.run_as_user or current_user_name()):
+            continue
+        result = runner(
+            [
+                "sudo", "-u", account, "-H",
+                "ticket-board-write", "--socket", socket_path, "--caller-role", role.role,
+                "dismiss-notification", "--probe",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if result.returncode != 0:
+            failures.append(
+                f"{role.role} cannot write to the board as {account} "
+                f"({(str(result.stderr).strip() or result.returncode)})"
+            )
+    return failures
+
+
 def cutover_role_identities_command(
     config: ProjectConfig,
     *,
@@ -13702,7 +13921,9 @@ def cutover_role_identities_command(
             "role-account artifact first."
         )
         return 1
-    before = [role.role for role in _running_project_roles(config, runner=runner)]
+
+    serving_before = running_role_identities(config, runner=runner)
+    before = sorted(serving_before)
     if dry_run:
         print_func(
             f"switchyard: would stop {', '.join(before) or 'no running roles'}, transfer each "
@@ -13714,13 +13935,32 @@ def cutover_role_identities_command(
 
     previous_config = config_path.read_bytes()
     previous_ownership = _worktree_ownership(config)
+    previous_units = capture_installed_units(config)
     print_func(
         f"switchyard: stopping {', '.join(before) or 'no running roles'} to move {config.project} "
         "onto per-role accounts"
     )
-    stop(config)
+    stop_result = stop(config)
+    still_running = sorted(running_role_identities(config, runner=runner))
+    if stop_result != 0 or still_running:
+        print_func(
+            f"switchyard: refusing to move {config.project}: "
+            + (f"the stop exited {stop_result}. " if stop_result else "")
+            + (
+                f"{', '.join(still_running)} are still running. "
+                if still_running
+                else ""
+            )
+            + "Nothing was changed; a worktree that changes hands under a live worker takes its "
+            "write access away mid-task."
+        )
+        record_upgrade_phase(
+            config, config_path=config_path, phase="identities", state="blocked",
+            detail=f"stop exited {stop_result}; still running: {', '.join(still_running) or 'none'}",
+        )
+        return 1
 
-    # Only now, with nothing running in them, do the trees change hands.
+    # Only now, with quiescence proven, do the trees change hands.
     ownership_failures: list[str] = []
     for role in config.roles:
         identity = identities.get(role.role)
@@ -13733,20 +13973,37 @@ def cutover_role_identities_command(
     print_func(message)
     if changed:
         config = load_project_config(config.project, config_path)
-    start_result = 0 if ownership_failures else start(config)
+    authority_problems: list[str] = []
+    if not ownership_failures:
+        # The projection follows the configuration, and the installed units and
+        # the running services follow the projection, all before the workers
+        # come back -- so nothing is ever serving an authority that disagrees
+        # with the identities about to arrive.
+        refresh_generated_project_runtime_artifacts(
+            config, config_path=config_path, runner=runner, print_func=print_func
+        )
+        authority_problems = install_board_authority(config, runner=runner, print_func=print_func)
+    start_result = 0 if ownership_failures or authority_problems else start(config)
     identity_gaps = (
         role_process_identity_gaps(config, runner=runner, proc_root=proc_root)
-        if not ownership_failures
+        if not (ownership_failures or authority_problems)
         else []
     )
-    restarted = [role.role for role in _running_project_roles(config, runner=runner)]
+    restarted = sorted(running_role_identities(config, runner=runner))
     missing_workers = [role for role in before if role not in restarted]
-    if ownership_failures or start_result != 0 or identity_gaps or missing_workers:
+    write_failures = (
+        verify_role_board_writes(config, runner=runner)
+        if not (ownership_failures or authority_problems or start_result or identity_gaps or missing_workers)
+        else []
+    )
+    if ownership_failures or authority_problems or start_result != 0 or identity_gaps or missing_workers or write_failures:
         reasons = (
             ownership_failures
+            + authority_problems
             + ([f"launch exited {start_result}"] if start_result else [])
             + identity_gaps
             + [f"{role} did not come back" for role in missing_workers]
+            + write_failures
         )
         print_func(f"switchyard: rolling {config.project} back: " + "; ".join(reasons))
         stop(config)
@@ -13761,6 +14018,7 @@ def cutover_role_identities_command(
         refresh_generated_project_runtime_artifacts(
             config, config_path=config_path, runner=runner, print_func=print_func
         )
+        restored.extend(restore_installed_units(config, previous_units, runner=runner))
         rollback_result = start(config)
         record_upgrade_phase(
             config, config_path=config_path, phase="identities", state="rolled back",
@@ -13785,7 +14043,10 @@ def cutover_role_identities_command(
     )
     record_upgrade_phase(
         config, config_path=config_path, phase="identities", state="done",
-        detail=f"verified {len(restarted)} role process uid(s) and {len(previous_ownership)} worktree(s)",
+        detail=(
+            f"verified {len(restarted)} role process uid(s), {len(previous_ownership)} worktree(s) "
+            "and a board write from each role"
+        ),
     )
     return 0
 

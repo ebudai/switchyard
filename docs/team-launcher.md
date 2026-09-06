@@ -208,11 +208,19 @@ not own. The order exists because the failure modes do.
 | phase | owner | what it does |
 | --- | --- | --- |
 | `artifacts` | root | regenerate what is safe while the current roles keep running |
-| `compatibility` | operator | deploy the release the running board needs before it can accept the director migration |
+| `accounts` | operator | run `<project>-role-accounts.sh` to create the per-role accounts, homes, tooling and credentials |
+| `identities` | root | `switchyard cutover-roles <project>`: one transaction over workers, trees, configuration, installed units and services |
+| `release` | operator | deploy the board release that enforces the per-role table |
 | `director` | director | `switchyard finish-upgrade <project>`, the one board write only the director may make |
-| `accounts` | operator | run `<project>-role-accounts.sh` to create the per-role accounts, ownership and credentials |
-| `identities` | root | `switchyard cutover-roles <project>`: stop, restart and verify every role under its own account |
-| `activate` | operator | install the per-role authority table and deploy the matching release |
+
+The order is forced by what each phase leaves true. The identities transaction
+ends with every role proved able to write **as its own account**, against the
+board that is running at that moment. Only then is it safe to deploy the release
+whose board enforces the per-role table, because by then the table and the
+processes already agree. The director's write comes last, from its own account,
+on a board that recognises it. Moving the director phase earlier does not help:
+it would run before its own identity exists, or the cutover would restart it
+under an identity the running board does not yet authorize.
 
 Each phase is recorded in `<project>-upgrade.json` beside the configuration, so
 an interrupted upgrade resumes rather than repeats and a partial state is
@@ -249,12 +257,30 @@ role from the shared account -- and installing the authority table then rejects
 exactly the processes doing the work. `cutover-roles` therefore stops the roles,
 moves the configuration, restarts them under their own accounts, reconnects the
 presentation and reads back the uid each role's process is *actually* running as
-from the kernel. If any of that does not hold it puts the worktrees back to the uid
-and gid they had, restores the configuration, re-renders the generated authority
-projection and restarts the roles as they were, then records the rollback --
-restoring the file alone would leave the old workers running without write
-access to their own repositories. Account existence is
+from the kernel. The transaction is: prove the workers are quiescent, transfer the
+worktrees, write the configuration, re-render the projection, **install** the
+generated units, reload systemd, restart the board and listener, health-check
+them, restart every role under its own account, read each role process's uid
+back from the kernel, and finally have each role make a real write to the board
+as itself. If any of that does not hold, the worktrees go back to the uid and
+gid they had, the configuration is restored, the projection is re-rendered, the
+previously installed units are put back and the services restarted onto them,
+and the roles are started as they were. Restoring the file alone would leave the
+old workers running without write access to their own repositories; regenerating
+a unit without installing it would leave the workers moved and the authority
+not. Account existence is
 never taken as evidence of process identity.
+
+**Sessions are found under either identity.** A tenant part-way onto per-role
+accounts names accounts that do not exist, so every probe through them fails and
+the project looks stopped while its sessions are running under the project
+account. Liveness is therefore asked of both identities before anything concludes
+that there is nothing to preserve.
+
+**Withholding the authority table is not a compatibility mode.** The board
+resolves every local peer through that table, so an empty one grants no role to
+anyone. Safety comes from *when* the unit is installed and the release deployed,
+not from what the staged unit omits.
 
 **A board that cannot accept the migration is not the director having nothing to
 do.** A board predating the phase-one schema returns "not migrated" for the same

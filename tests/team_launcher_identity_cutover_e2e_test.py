@@ -57,9 +57,43 @@ class _RealRunner:
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
 
+    # Socket PATHS, not names: /tmp/tmux-<uid> belongs to the host and tmux
+    # refuses it inside the namespace, and using it would also reach the real
+    # server of the account this test borrows.
+    SOCKET_DIR = Path("/tmp")
+    OWNER_SOCKET = "syrd45-owner"
+
+    board_socket: Path | None = None
+    mapping: dict[str, str] | None = None
+
+    @classmethod
+    def socket_for(cls, name: str) -> str:
+        return str(cls.SOCKET_DIR / f"{name}.sock")
+
+    @staticmethod
+    def _isolated(argv: list[str]) -> list[str]:
+        """Never touch a real tmux server: this test runs on its own sockets."""
+        if argv[:1] == ["tmux"] and "-S" not in argv:
+            return ["tmux", "-S", _RealRunner.socket_for(_RealRunner.OWNER_SOCKET), *argv[1:]]
+        return argv
+
     def __call__(self, args, **kwargs):
         argv = list(args)
         self.calls.append(argv)
+        if argv[:1] == ["install"] and len(argv) >= 3:
+            shutil.copyfile(argv[-2], argv[-1])
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[:2] == ["systemctl", "is-active"]:
+            # No systemd in a user namespace; the board this case verifies
+            # against is the one it started itself.
+            return subprocess.CompletedProcess(argv, 0, "active\n", "")
+        if argv[:1] == ["systemctl"]:
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if "ticket-board-write" in argv and self.board_socket is not None:
+            account = argv[2]
+            role = next((name for name, acct in (self.mapping or {}).items() if acct == account), "")
+            status, body = _board_write_accepted(self.board_socket, account, role)
+            return subprocess.CompletedProcess(argv, 0 if status == 200 else 1, body, "")
         if argv[:2] == ["sudo", "-u"]:
             account = argv[2]
             rest = argv[4:] if len(argv) > 3 and argv[3] == "-H" else argv[3:]
@@ -69,8 +103,10 @@ class _RealRunner:
                 f"--reuid={entry.pw_uid}",
                 f"--regid={entry.pw_gid}",
                 "--clear-groups",
-                *rest,
+                *self._isolated(rest),
             ]
+        else:
+            argv = self._isolated(argv)
         kwargs.setdefault("stdout", subprocess.PIPE)
         kwargs.setdefault("stderr", subprocess.PIPE)
         kwargs.setdefault("text", True)
@@ -90,6 +126,10 @@ def _tenant(tmp: Path, accounts: list[str], owner: str) -> tuple[Path, dict[str,
     payload = {
         "desktop_access": {"mode": "headless"},
         "project": "porter",
+        # The director phase is complete for this tenant: the cutover refuses to
+        # run before it, because the board still authorizes the account the
+        # director makes that write with.
+        "workflow": {"roles": [], "migrations": {"director_onboarding": True}},
         "layout": str(layout),
         "repository": str(tmp / "repo"),
         "session_dir": str(tmp / "sessions"),
@@ -159,9 +199,9 @@ def _session_launcher(mapping: dict[str, str], runner: _RealRunner, *, wrong_uid
     def launch(config, **_kwargs) -> int:
         for role in config.roles:
             account = mapping.get(role.role, "")
-            socket = f"syrd45-{role.role}"
-            runner(["tmux", "-L", socket, "kill-server"], check=False)
-            command = ["tmux", "-L", socket, "new-session", "-d", "-s", role.tmux_session, "sleep 300"]
+            socket = _RealRunner.socket_for(f"syrd45-{role.role}")
+            runner(["tmux", "-S", socket, "kill-server"], check=False)
+            command = ["tmux", "-S", socket, "new-session", "-d", "-s", role.tmux_session, "sleep 120"]
             if account and role.role != wrong_uid_for:
                 command = ["sudo", "-u", account, "-H", *command]
             if runner(command).returncode != 0:
@@ -175,7 +215,7 @@ def _stopper(mapping: dict[str, str], runner: _RealRunner):
     def stop(config, **_kwargs) -> int:
         for role in config.roles:
             account = mapping.get(role.role, "")
-            command = ["tmux", "-L", f"syrd45-{role.role}", "kill-server"]
+            command = ["tmux", "-S", _RealRunner.socket_for(f"syrd45-{role.role}"), "kill-server"]
             if account:
                 command = ["sudo", "-u", account, "-H", *command]
             runner(command, check=False)
@@ -187,8 +227,8 @@ def _stopper(mapping: dict[str, str], runner: _RealRunner):
 def _pane_uid(role: str, mapping: dict[str, str], runner: _RealRunner) -> int | None:
     account = mapping[role]
     proc = runner(
-        ["sudo", "-u", account, "-H", "tmux", "-L", f"syrd45-{role}", "display-message", "-p",
-         "-t", f"porter-{role}:0.0", "#{pane_pid}"]
+        ["sudo", "-u", account, "-H", "tmux", "-S", _RealRunner.socket_for(f"syrd45-{role}"),
+         "display-message", "-p", "-t", f"porter-{role}:0.0", "#{pane_pid}"]
     )
     if proc.returncode != 0:
         return None
@@ -205,7 +245,7 @@ def _identity_runner(mapping: dict[str, str], runner: _RealRunner):
             rest = argv[4:] if len(argv) > 3 and argv[3] == "-H" else argv[3:]
             role = next((name for name, acct in mapping.items() if acct == account), "")
             if role and rest[:1] == ["tmux"]:
-                rest = ["tmux", "-L", f"syrd45-{role}", *rest[1:]]
+                rest = ["tmux", "-S", _RealRunner.socket_for(f"syrd45-{role}"), *rest[1:]]
                 argv = [*argv[:4], *rest] if argv[3] == "-H" else [*argv[:3], *rest]
         return runner(argv, **kwargs)
 
@@ -252,12 +292,33 @@ def end_to_end(owner: str) -> None:
         tmp_path = Path(tmp)
         tmp_path.chmod(0o755)
         os.environ["SWITCHYARD_PRIVILEGED_PROVISION_ROOT"] = str(tmp_path / "etc-switchyard")
+        sockets = tmp_path / "sockets"
+        sockets.mkdir()
+        sockets.chmod(0o777)
+        _RealRunner.SOCKET_DIR = sockets
         homes = tmp_path / "homes"
         homes.mkdir()
         owner_home = homes / owner
         owner_home.mkdir(parents=True)
         _owner_credentials(owner_home, owner)
         config_path, mapping = _tenant(tmp_path, accounts, owner)
+        # What the artifacts phase leaves staged for the transaction to install,
+        # and the directory systemd reads from.
+        staged = tmp_path / "etc-switchyard" / "porter"
+        staged.mkdir(parents=True)
+        units = tmp_path / "systemd"
+        units.mkdir()
+        team_launcher.SYSTEMD_UNIT_DIR = units
+        for unit in (
+            "porter-ticket-board.service",
+            "porter-ticket-board-notify-listener.service",
+        ):
+            (staged / unit).write_text(
+                f"[Service]\n# generated {unit}\nEnvironment=TICKET_BOARD_ROLE_ACCOUNTS="
+                + ",".join(f"{role}={account}" for role, account in mapping.items())
+                + "\n",
+                encoding="utf-8",
+            )
         # What the preparation artifact creates before any credential is seeded:
         # each role's own home, owned by that account, 0700.
         for account in accounts:
@@ -270,7 +331,26 @@ def end_to_end(owner: str) -> None:
         _write_pending(config, mapping, homes, config_path)
 
         original_account_name = team_launcher.role_account_name
+        original_opener = team_launcher._open_board_url
         team_launcher.role_account_name = lambda project, role: mapping.get(role, f"{project}-{role}")
+
+        class _Board:
+            def __call__(self, url):
+                document = {"roles": [], "migrations": {"director_onboarding": True}}
+
+                class _Response:
+                    def __enter__(self_inner):
+                        return self_inner
+
+                    def __exit__(self_inner, *_exc):
+                        return False
+
+                    def read(self_inner, *_args):
+                        return json.dumps({"revision": 8, "document": document})
+
+                return _Response()
+
+        team_launcher._open_board_url = _Board()
         runner = _RealRunner()
         try:
             ownership_before = {
@@ -282,7 +362,9 @@ def end_to_end(owner: str) -> None:
             artifact = team_launcher.render_role_account_migration(config)
             for role in config.roles:
                 assert f"chown -R" not in artifact or role.workdir not in artifact, artifact
-            assert "switchyard cutover-roles porter" in artifact, artifact
+            # It hands back to the ordered driver rather than jumping straight
+            # to the cutover, which must not run before the director phase.
+            assert "switchyard upgrade porter" in artifact, artifact
 
             # PREPARATION, while the configuration still names no accounts.
             assert all(not role.run_as_user for role in config.roles)
@@ -305,36 +387,8 @@ def end_to_end(owner: str) -> None:
                 role.workdir: os.stat(role.workdir).st_uid for role in config.roles
             } == ownership_before
 
-            # THE CUTOVER, for real: stop, transfer, restart under the new
-            # accounts, and read every uid back from the kernel.
-            identity_runner = _identity_runner(mapping, runner)
-            result = team_launcher.cutover_role_identities_command(
-                config,
-                config_path=config_path,
-                runner=identity_runner,
-                launcher=_session_launcher(mapping, runner),
-                stopper=_stopper(mapping, runner),
-                print_func=printed.append,
-            )
-            assert result == 0, "\n".join(printed[-12:])
-            after = json.loads(config_path.read_text(encoding="utf-8"))
-            assert {role["role"]: role["run_as_user"] for role in after["roles"]} == mapping, after
-            for role, account in mapping.items():
-                expected = pwd.getpwnam(account).pw_uid
-                workdir = next(r["workdir"] for r in after["roles"] if r["role"] == role)
-                assert os.stat(workdir).st_uid == expected, (role, os.stat(workdir).st_uid)
-                assert _pane_uid(role, mapping, runner) == expected, role
-                # Exactly one session per role: the old server was replaced, not
-                # duplicated.
-                listed = runner(
-                    ["sudo", "-u", account, "-H", "tmux", "-L", f"syrd45-{role}", "list-sessions", "-F", "#{session_name}"]
-                )
-                assert listed.stdout.split() == [f"porter-{role}"], listed.stdout
-
-            # THE BOARD: the authority table names those accounts, and the
-            # processes now serving the roles are running as them, so their
-            # writes are accepted -- and the project account, which is what the
-            # old workers had, is not a role at all.
+            # The board the transaction verifies against, with the per-role
+            # authority table the cutover installs.
             sys.path.insert(0, str(ROOT / "tests"))
             from ticket_board_pid_identity_test import MemoryBoardApp, QuietNotifier, ticket_payload
 
@@ -347,13 +401,12 @@ def end_to_end(owner: str) -> None:
                 board_dir / "frames",
                 board_dir / "assets",
             )
-            authority = LocalRoleAuthority(dict(mapping))
             server = TicketBoardUnixServer(
                 socket_path,
                 app,
                 events=TicketBoardEventHub(app),
                 director_notifier=QuietNotifier(),
-                role_authority=authority,
+                role_authority=LocalRoleAuthority(dict(mapping)),
             )
             os.chmod(board_dir, 0o755)
             os.chmod(socket_path, 0o666)
@@ -361,13 +414,107 @@ def end_to_end(owner: str) -> None:
 
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
+            runner.board_socket = socket_path
+            runner.mapping = dict(mapping)
+
+            # THE CUTOVER, for real: stop, transfer, restart under the new
+            # accounts, read every uid back from the kernel, and prove each role
+            # can actually write to that board as itself.
+            identity_runner = _identity_runner(mapping, runner)
+            result = team_launcher.cutover_role_identities_command(
+                config,
+                config_path=config_path,
+                runner=identity_runner,
+                launcher=_session_launcher(mapping, runner),
+                stopper=_stopper(mapping, runner),
+                print_func=printed.append,
+            )
+            assert result == 0, "\n".join(printed[-25:])
+            after = json.loads(config_path.read_text(encoding="utf-8"))
+            assert {role["role"]: role["run_as_user"] for role in after["roles"]} == mapping, after
+            # The board authority the transaction installed is the one systemd
+            # would read, and it names the accounts now serving the roles.
+            installed = (tmp_path / "systemd" / "porter-ticket-board.service").read_text()
+            for role, account in mapping.items():
+                assert f"{role}={account}" in installed, installed
+            for role, account in mapping.items():
+                expected = pwd.getpwnam(account).pw_uid
+                workdir = next(r["workdir"] for r in after["roles"] if r["role"] == role)
+                assert os.stat(workdir).st_uid == expected, (role, os.stat(workdir).st_uid)
+                assert _pane_uid(role, mapping, runner) == expected, role
+                # Exactly one session per role: the old server was replaced, not
+                # duplicated.
+                listed = runner(
+                    ["sudo", "-u", account, "-H", "tmux", "-S", _RealRunner.socket_for(f"syrd45-{role}"),
+                     "list-sessions", "-F", "#{session_name}"]
+                )
+                assert listed.stdout.split() == [f"porter-{role}"], listed.stdout
+
+            # THE PRESENTATION: the display slots are real tmux sessions in the
+            # owner's own server, and they reconnect to the relaunched roles
+            # without a second window being opened.
+            from scripts import presentation_controller
+
+            os.environ["TEAM_LAUNCHER_GUI_USER"] = owner
+            os.environ["HOST_WAYLAND_DISPLAY"] = f"/run/user/{pwd.getpwnam(owner).pw_uid}/wayland-0"
+            windows: list[list[str]] = []
+
+            def _record_window(args, **_kwargs):
+                windows.append(list(args))
+
+                class _Proc:
+                    pid = 4242
+
+                    def poll(self_inner):
+                        return None
+
+                return _Proc()
+
             try:
-                for role, account in mapping.items():
-                    status, body = _board_write_accepted(socket_path, account, role)
-                    assert status == 200, (role, status, body)
-                    assert f'"role": "{role}"' in body, body
-                # The identity the old workers had is not a role on this board:
-                # refused at the socket, or answered 403 if it gets that far.
+                presentation_controller.launch_presentation(
+                    config,
+                    config_path=config_path,
+                    layout="separate",
+                    state_path=tmp_path / "presentation.json",
+                    runner=identity_runner,
+                    process_launcher=_record_window,
+                )
+            except Exception:
+                for call in runner.calls[-6:]:
+                    print("CALL:", call)
+                    print("  ->", runner(call).stderr if call[:1] != ["ticket-board-write"] else "")
+                raise
+            assert len(windows) == 1, windows
+            slots = runner(
+                ["sudo", "-u", owner, "-H", "tmux", "list-sessions", "-F", "#{session_name}"]
+            ).stdout.split()
+            display_sessions = sorted(name for name in slots if name.startswith("porter-display-"))
+            assert display_sessions, slots
+            layout_payload = json.loads(
+                (tmp_path / "porter-presentation-layout.json").read_text(encoding="utf-8")
+            )
+            attachments = json.dumps(layout_payload)
+            for slot in range(len(display_sessions)):
+                assert f"porter-display-{slot}" in attachments, attachments
+
+            # Reconnecting is not opening another one.
+            presentation_controller.launch_presentation(
+                config,
+                config_path=config_path,
+                layout="separate",
+                state_path=tmp_path / "presentation.json",
+                runner=identity_runner,
+                process_launcher=_record_window,
+            )
+            assert len(windows) == 2, windows
+            again = runner(
+                ["sudo", "-u", owner, "-H", "tmux", "list-sessions", "-F", "#{session_name}"]
+            ).stdout.split()
+            assert sorted(name for name in again if name.startswith("porter-display-")) == display_sessions, again
+
+            # The identity the old workers had is not a role on this board:
+            # refused at the socket, or answered 403 if it gets that far.
+            try:
                 status, body = _board_write_accepted(socket_path, owner, "main")
                 assert status in (0, 403), (status, body)
                 assert '"role": "main"' not in body, body
@@ -375,6 +522,7 @@ def end_to_end(owner: str) -> None:
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=2)
+                runner.board_socket = None
 
             # THE ROLLBACK: one role comes back under the wrong identity.
             _stopper(mapping, runner)(config)
@@ -405,9 +553,31 @@ def end_to_end(owner: str) -> None:
             } == ownership_before, "the worktrees were not put back"
         finally:
             team_launcher.role_account_name = original_account_name
-            for role in ("main", "app"):
-                subprocess.run(["tmux", "-L", f"syrd45-{role}", "kill-server"],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            team_launcher._open_board_url = original_opener
+            # Those servers run as the role accounts, so they have to be stopped
+            # as those accounts: killing them from here reaches nothing and
+            # leaves subordinate-uid processes behind.
+            _stopper(mapping, runner)(config)
+            # A server the rollback case started as root is not the account's to
+            # stop, so both identities are asked before the leak check.
+            for role in mapping:
+                runner(
+                    ["tmux", "-S", _RealRunner.socket_for(f"syrd45-{role}"), "kill-server"],
+                    check=False,
+                )
+            runner(["tmux", "-S", _RealRunner.socket_for(_RealRunner.OWNER_SOCKET), "kill-server"], check=False)
+            time.sleep(0.3)
+            leaked = [
+                line
+                for line in subprocess.run(
+                    ["ps", "-eo", "args"], capture_output=True, text=True
+                ).stdout.splitlines()
+                # Scoped to THIS run's sockets: a stale process from an earlier
+                # run is not what this assertion is about, and cannot be
+                # signalled from here anyway.
+                if str(_RealRunner.SOCKET_DIR) in line
+            ]
+            assert not leaked, leaked
 
 
 def main() -> int:

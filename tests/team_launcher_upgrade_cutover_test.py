@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -31,18 +32,41 @@ class _RunningTenant:
         payload = json.loads(config_path.read_text(encoding="utf-8"))
         self.targets = [role["target"] for role in payload["roles"]]
         self.sessions = {role["tmux_session"] for role in payload["roles"]}
-        self.commands = {role["target"]: role["cli"][0] for role in payload["roles"]}
+        self.commands = {role["target"]: role["live_commands"][0] for role in payload["roles"]}
         self.account_uid = account_uid
         self.pane_pid = os.getpid()
         self.launches: list[str] = []
         self.stops: list[str] = []
+        self.live = True
+        self.board_writes: list[list[str]] = []
 
-    def runner(self) -> FakeRunner:
-        return _AnyRoleSudoRunner(
+    def runner(self):
+        """A runner whose answers follow the stop and start, as a host's would."""
+        inner = _AnyRoleSudoRunner(
             existing_sessions=set(self.sessions),
             current_commands=dict(self.commands),
             pane_pids={target: self.pane_pid for target in self.targets},
         )
+        tenant = self
+
+        def call(args, **kwargs):
+            argv = list(args)
+            bare = argv[4:] if argv[:2] == ["sudo", "-u"] and len(argv) > 4 else argv
+            if not tenant.live and bare[:2] == ["tmux", "has-session"]:
+                return subprocess.CompletedProcess(argv, 1, "", "")
+            if argv[:1] == ["install"] and len(argv) >= 3:
+                shutil.copyfile(argv[-2], argv[-1])
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            if argv[:2] == ["systemctl", "is-active"]:
+                return subprocess.CompletedProcess(argv, 0, "active\n", "")
+            if argv[:1] == ["systemctl"]:
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            if bare[:1] == ["ticket-board-write"]:
+                tenant.board_writes.append(argv)
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            return inner(argv, **kwargs)
+
+        return call
 
     def __enter__(self):
         self._uid = team_launcher.uid_for_user
@@ -53,10 +77,18 @@ class _RunningTenant:
         team_launcher.uid_for_user = lambda name: (
             self.account_uid if name.startswith("porter-") else self._uid(name)
         )
-        team_launcher.launch_project = lambda config, **kwargs: (
-            self.launches.append(config.project) or 0
-        )
-        team_launcher.stop_project = lambda config, **kwargs: (self.stops.append(config.project) or 0)
+        def _launch(config, **_kwargs):
+            self.launches.append(config.project)
+            self.live = True
+            return 0
+
+        def _stop(config, **_kwargs):
+            self.stops.append(config.project)
+            self.live = False
+            return 0
+
+        team_launcher.launch_project = _launch
+        team_launcher.stop_project = _stop
         return self
 
     def __exit__(self, *_exc):
@@ -104,20 +136,42 @@ def _mark_projection_migrated(config_path: Path) -> None:
 
 
 def _privileged_root(tmp: Path) -> Path:
-    """Point root's own phase record at a sandbox instead of /etc."""
+    """Point root's own records and unit directory at a sandbox instead of /etc."""
     root = tmp / "etc-switchyard"
     os.environ["SWITCHYARD_PRIVILEGED_PROVISION_ROOT"] = str(root)
+    units = tmp / "systemd"
+    units.mkdir(exist_ok=True)
+    team_launcher.SYSTEMD_UNIT_DIR = units
     return root
+
+
+def _stage_units(project: str) -> None:
+    """The generated units the transaction installs, as the artifacts phase leaves them."""
+    staged = team_launcher.privileged_provision_dir(
+        project, root=team_launcher.switchyard_privileged_provision_root()
+    )
+    staged.mkdir(parents=True, exist_ok=True)
+    for unit in (
+        f"{project}-ticket-board.service",
+        f"{project}-ticket-board-notify-listener.service",
+    ):
+        (staged / unit).write_text(f"[Service]\n# generated {unit}\n", encoding="utf-8")
 
 
 def _declarative_tenant(tmp: Path, *, project: str = "porter", accounts: bool = False) -> tuple[Path, Path]:
     _privileged_root(tmp)
+    _stage_units(project)
     config_path = _write_six_visible_role_config(tmp, project=project)
     payload = json.loads(config_path.read_text(encoding="utf-8"))
     # A real account: the privileged paths chown generated files to the project
     # owner, and this suite runs the root branch.
     payload["run_as_user"] = team_launcher.current_user_name()
     payload["workflow"] = {"roles": [{"name": role["role"], "active": True} for role in payload["roles"]]}
+    # Liveness is a real probe: it reads the pane's pid and looks for the role's
+    # command in that process's actual tree. Naming this interpreter makes the
+    # test's own pid a genuinely live role rather than a claimed one.
+    for role in payload["roles"]:
+        role["live_commands"] = ["python3"]
     if accounts:
         for role in payload["roles"]:
             role["run_as_user"] = f"{project}-{role['role']}"
@@ -144,7 +198,7 @@ class _AnyRoleSudoRunner(FakeRunner):
 def _live_runner(config_path: Path) -> FakeRunner:
     payload = json.loads(config_path.read_text(encoding="utf-8"))
     sessions = {role["tmux_session"] for role in payload["roles"]}
-    commands = {role["target"]: role["cli"][0] for role in payload["roles"]}
+    commands = {role["target"]: role["live_commands"][0] for role in payload["roles"]}
     return _AnyRoleSudoRunner(existing_sessions=sessions, current_commands=commands)
 
 
@@ -302,6 +356,58 @@ def test_a_root_upgrade_names_the_compatibility_release_before_the_director_phas
         assert "withholding" in output, output
 
 
+class _OwnerOnlyRunner(FakeRunner):
+    """The live tenant exactly: sessions exist, but only under the project account.
+
+    Probes wrapped in `sudo -u <role account>` fail, because those accounts do
+    not exist; the same probe as the project account answers. A runner that
+    answers both hides the misdetection this covers.
+    """
+
+    def __init__(self, owner: str, **kwargs):
+        super().__init__(**kwargs)
+        self.owner = owner
+
+    def __call__(self, args, **kwargs):
+        argv = list(args)
+        if argv[:2] == ["sudo", "-u"]:
+            if argv[2] != self.owner:
+                return subprocess.CompletedProcess(argv, 1, "", "")
+            argv = argv[4:] if len(argv) > 3 and argv[3] == "-H" else argv[3:]
+        return super().__call__(argv, **kwargs)
+
+
+def _owner_only_runner(config_path: Path) -> FakeRunner:
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    return _OwnerOnlyRunner(
+        payload["run_as_user"],
+        existing_sessions={role["tmux_session"] for role in payload["roles"]},
+        current_commands={role["target"]: role["live_commands"][0] for role in payload["roles"]},
+    )
+
+
+def test_the_live_partial_tenant_is_not_mistaken_for_a_fresh_one() -> None:
+    """Six sessions under the project account, six accounts that do not exist."""
+    with tempfile.TemporaryDirectory(prefix="live-partial.") as tmp:
+        config_path, _ = _declarative_tenant(Path(tmp), accounts=True)
+        config = team_launcher.load_project_config("porter", config_path)
+        runner = _owner_only_runner(config_path)
+
+        # Probing only through the configured accounts sees nothing at all.
+        assert [role.role for role in team_launcher._running_project_roles(config, runner=runner)] == []
+        # Probing both identities sees every role, served by the project account.
+        serving = team_launcher.running_role_identities(config, runner=runner)
+        assert set(serving) == {role.role for role in config.roles}, serving
+        assert set(serving.values()) == {config.run_as_user}, serving
+
+        result, output, _m = _upgrade(config_path, as_root=True, exists=set(), runner=runner)
+        assert result == 0, output
+        assert "left as provisioned" not in output, output
+        assert "do not agree" in output, output
+        after = json.loads(config_path.read_text(encoding="utf-8"))
+        assert not any(role.get("run_as_user") for role in after["roles"]), after
+
+
 def test_the_observed_partial_state_is_detected_and_reverted() -> None:
     """Config names per-role accounts, none exist, sessions still share the owner."""
     with tempfile.TemporaryDirectory(prefix="upgrade-partial.") as tmp:
@@ -354,14 +460,34 @@ def test_the_cutover_happens_only_once_every_account_exists() -> None:
         # configuration, restarts them and checks the uid each role's process is
         # actually running as before anything authorizes it.
         accounts = {f"porter-{role}" for role in roles}
+        # The director phase comes first: until the board carries the marker the
+        # roles stay on the project account.
+        with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
+            _result, blocked, _m = _upgrade(
+                config_path, as_root=True, exists=accounts, runner=tenant.runner(),
+                board=_board_with_marker(False),
+            )
+        assert "until the director phase completes" in blocked, blocked
+        assert not any(
+            role.get("run_as_user")
+            for role in json.loads(config_path.read_text(encoding="utf-8"))["roles"]
+        )
+
+        _mark_projection_migrated(config_path)
         with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
             _result, output, _m = _upgrade(
-                config_path, as_root=True, exists=accounts, runner=tenant.runner()
+                config_path, as_root=True, exists=accounts, runner=tenant.runner(),
+                board=_board_with_marker(True),
             )
         after = json.loads(config_path.read_text(encoding="utf-8"))
         assert all(role.get("run_as_user") == f"porter-{role['role']}" for role in after["roles"]), after
         assert tenant.stops and tenant.launches, (tenant.stops, tenant.launches)
         assert "running under per-role identities" in output, output
+        # The units the board serves were installed and restarted inside the
+        # same transaction, and every role was proved able to write as itself.
+        installed = team_launcher.SYSTEMD_UNIT_DIR / "porter-ticket-board.service"
+        assert installed.is_file() and "generated" in installed.read_text(), installed
+        assert {argv[2] for argv in tenant.board_writes} == set(accounts), tenant.board_writes
 
 
 def test_a_cutover_whose_processes_keep_the_old_uid_is_rolled_back() -> None:
@@ -370,10 +496,14 @@ def test_a_cutover_whose_processes_keep_the_old_uid_is_rolled_back() -> None:
         config_path, _ = _declarative_tenant(Path(tmp))
         roles = [role["role"] for role in json.loads(config_path.read_text(encoding="utf-8"))["roles"]]
         accounts = {f"porter-{role}" for role in roles}
+        # The director phase is complete, so the cutover is allowed to run.
+        _mark_projection_migrated(config_path)
         before = config_path.read_bytes()
         # The accounts resolve to a uid nothing is running as: the panes kept
         # the shared identity, which is exactly the state that would have made
         # the board reject every live role.
+        original_opener = team_launcher._open_board_url
+        team_launcher._open_board_url = _board_with_marker(True)
         with _RunningTenant(config_path, account_uid=os.getuid() + 4242) as tenant:
             result = team_launcher.cutover_role_identities_command(
                 team_launcher.load_project_config("porter", config_path),
@@ -381,12 +511,56 @@ def test_a_cutover_whose_processes_keep_the_old_uid_is_rolled_back() -> None:
                 runner=tenant.runner(),
                 print_func=lambda _text: None,
             )
+        team_launcher._open_board_url = original_opener
         assert result == 1
         assert config_path.read_bytes() == before, "the configuration was not put back"
         assert len(tenant.stops) == 2 and len(tenant.launches) == 2, (tenant.stops, tenant.launches)
+        # The installed unit went back with everything else: there was none
+        # before, so there is none after.
+        assert not (team_launcher.SYSTEMD_UNIT_DIR / "porter-ticket-board.service").exists()
         config = team_launcher.load_project_config("porter", config_path)
         journal = team_launcher.read_upgrade_journal(config, config_path=config_path)
         assert team_launcher.upgrade_phase_state(journal, "identities") == "rolled back", journal
+
+
+def test_a_stop_that_leaves_workers_running_changes_nothing() -> None:
+    """A tree that changes hands under a live worker takes its write access away."""
+    with tempfile.TemporaryDirectory(prefix="stop-failure.") as tmp:
+        config_path, _ = _declarative_tenant(Path(tmp))
+        _mark_projection_migrated(config_path)
+        roles = [role["role"] for role in json.loads(config_path.read_text(encoding="utf-8"))["roles"]]
+        before = config_path.read_bytes()
+        printed: list[str] = []
+        original_opener = team_launcher._open_board_url
+        try:
+            team_launcher._open_board_url = _board_with_marker(True)
+            with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
+                chowns: list[list[str]] = []
+                runner = tenant.runner()
+
+                def watching(args, **kwargs):
+                    if args[:2] == ["chown", "-R"]:
+                        chowns.append(list(args))
+                    return runner(args, **kwargs)
+
+                result = team_launcher.cutover_role_identities_command(
+                    team_launcher.load_project_config("porter", config_path),
+                    config_path=config_path,
+                    runner=watching,
+                    # The stop reports success and leaves everything running,
+                    # which is the case that matters: the sessions stay live.
+                    stopper=lambda config, **kwargs: 0,
+                    launcher=lambda config, **kwargs: 0,
+                    print_func=printed.append,
+                )
+        finally:
+            team_launcher._open_board_url = original_opener
+        output = "\n".join(printed)
+        assert result == 1, output
+        assert "still running" in output, output
+        assert "Nothing was changed" in output, output
+        assert chowns == [], chowns
+        assert config_path.read_bytes() == before
 
 
 def test_the_deploy_instruction_is_withheld_until_every_phase_is_ready() -> None:
@@ -436,16 +610,19 @@ def test_an_interrupted_upgrade_resumes_and_is_safe_to_retry() -> None:
         _result, _output, _m = _upgrade(config_path, as_root=True, exists=set())
         assert config_path.read_bytes() == first
 
+        _mark_projection_migrated(config_path)
         with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
             _result, _output, _m = _upgrade(
-                config_path, as_root=True, exists=accounts, runner=tenant.runner()
+                config_path, as_root=True, exists=accounts, runner=tenant.runner(),
+                board=_board_with_marker(True),
             )
             cut = config_path.read_bytes()
             # Interrupted after the cutover: rerunning neither repeats the stop
             # and restart nor rewrites anything.
             stops_after_cutover = len(tenant.stops)
             _result, output, _m = _upgrade(
-                config_path, as_root=True, exists=accounts, runner=tenant.runner()
+                config_path, as_root=True, exists=accounts, runner=tenant.runner(),
+                board=_board_with_marker(True),
             )
             assert config_path.read_bytes() == cut, output
             assert len(tenant.stops) == stops_after_cutover, tenant.stops

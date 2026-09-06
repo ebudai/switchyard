@@ -910,7 +910,7 @@ def test_upgrade_gives_an_existing_shared_uid_tenant_per_role_accounts() -> None
             assert f"if ! getent passwd '{account}'" in migration, role.role
             assert f"sudo install -d -m 0700 -o '{account}'" in migration, role.role
             assert role.workdir not in migration, role.role
-        assert "switchyard cutover-roles porter" in migration
+        assert "switchyard upgrade porter" in migration
         assert "visudo -c" in migration
         assert "systemctl restart porter-ticket-board.service" in migration
 
@@ -1653,7 +1653,7 @@ def test_fresh_provisioning_emits_one_complete_handoff() -> None:
     assert "getent passwd 'porter-director'" in body
     assert "install -d -m 0700 -o 'porter-director'" in body
     assert "chown -R 'porter-director':" not in body
-    assert "switchyard cutover-roles porter" in body
+    assert "switchyard upgrade porter" in body
     assert "ticket-board-install-pane-hooks' install --home '/home/porter-director'" in body
     assert "switchyard seed-role-credentials porter" in body
     assert "systemctl restart porter-ticket-board.service" in body

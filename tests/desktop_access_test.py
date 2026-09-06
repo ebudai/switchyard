@@ -251,6 +251,11 @@ def test_exported_new_project_before_first_role():
             events.append('first-role')
             return 0
         with ExitStack() as stack:
+            real_getpwnam = mod.pwd.getpwnam
+            fixture_owner = SimpleNamespace(pw_name='cerulean-worker', pw_uid=os.getuid(),
+                pw_gid=os.getgid(), pw_dir='/home/cerulean-worker', pw_shell='/bin/bash')
+            stack.enter_context(patch.object(mod.pwd, 'getpwnam',
+                side_effect=lambda name: fixture_owner if name == 'cerulean-worker' else real_getpwnam(name)))
             stack.enter_context(patch.object(mod.os,'geteuid',return_value=0))
             for name in ['_precheck_project_path_before_mutating','precheck_new_project','_chown_switchyard_project_files',
                          '_install_switchyard_onboarding_docs','_require_existing_project_git_repository',

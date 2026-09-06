@@ -290,6 +290,44 @@ def test_seeding_tolerates_a_project_with_no_workflow_document() -> None:
     assert team_launcher.seed_director_onboarding(None, Path("/srv/porter")) is None
 
 
+class _Plan:
+    project = "porter"
+    board_current = "/opt/switchyard/current"
+
+
+def test_a_project_with_no_workflow_document_still_seeds_the_director() -> None:
+    """The regression this must not reintroduce.
+
+    A project generated without a declarative workflow has no document to carry the
+    prompt, and the hook no longer has a director-only branch to fall back to. The
+    launcher therefore seeds the generic field directly into the director's pane
+    environment, so removing the special case cannot strip an existing director's remit.
+    """
+    env = team_launcher._new_project_role_env(
+        "director",
+        _Plan(),
+        design_document=Path("/srv/porter/PROJECT_DESIGN.md"),
+        director_onboarding=Path("/srv/porter/.switchyard/DIRECTOR_ONBOARDING.md"),
+    )
+    assert "docs/onboarding" in env["TICKET_BOARD_ROLE_ONBOARDING_PROMPT"]
+
+
+def test_the_director_seed_survives_a_missing_design_document() -> None:
+    env = team_launcher._new_project_role_env(
+        "director",
+        _Plan(),
+        director_onboarding=Path("/srv/porter/.switchyard/DIRECTOR_ONBOARDING.md"),
+    )
+    assert "/srv/porter/docs/onboarding" in env["TICKET_BOARD_ROLE_ONBOARDING_PROMPT"]
+
+
+def test_other_roles_get_no_seeded_prompt_from_the_launcher() -> None:
+    env = team_launcher._new_project_role_env(
+        "ops", _Plan(), design_document=Path("/srv/porter/PROJECT_DESIGN.md")
+    )
+    assert "TICKET_BOARD_ROLE_ONBOARDING_PROMPT" not in env
+
+
 # --- the mutation the command performs ---------------------------------------
 
 

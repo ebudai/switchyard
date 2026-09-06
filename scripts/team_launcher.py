@@ -6360,7 +6360,31 @@ def _new_project_role_env(
                 "SWITCHYARD_PROJECT_DESIGN": str(design_document),
             }
         )
+    if role == "director":
+        # Generic role data, read by the hook exactly as any other role's prompt is.
+        # Seeded here because a project with no declarative workflow document has no
+        # document to carry it, and the director's remit must not depend on one: the
+        # hook no longer has a director-only branch to fall back to. A declarative
+        # project carries the same field in its document, and the projection governs it
+        # there, so this value is replaced rather than layered on top.
+        seed_root = _director_seed_project_dir(design_document, director_onboarding)
+        if seed_root is not None:
+            env.setdefault(
+                "TICKET_BOARD_ROLE_ONBOARDING_PROMPT",
+                director_onboarding_seed_text(seed_root),
+            )
     return env
+
+
+def _director_seed_project_dir(
+    design_document: Path | None, director_onboarding: Path | None
+) -> Path | None:
+    if design_document is not None:
+        return design_document.parent
+    if director_onboarding is not None:
+        parent = director_onboarding.parent
+        return parent.parent if parent.name == SWITCHYARD_PROJECT_DIR_NAME else parent
+    return None
 
 
 def write_new_project_launcher_artifacts(

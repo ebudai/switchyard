@@ -92,6 +92,8 @@ SWITCHYARD_ONBOARDING_DOC_NAMES = (
 DEFAULT_PANE_BASE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 DEFAULT_SWITCHYARD_SHARED_INSTALL_ROOT = Path("/opt/switchyard")
 SWITCHYARD_RELEASE_MARKER_NAME = ".switchyard-release.json"
+BOARD_SKILL_NAME = "switchyard-board"
+BOARD_SKILL_INSTALLER_NAME = "switchyard-board-skill"
 
 
 def _env_first(*names: str) -> str:
@@ -4679,6 +4681,79 @@ def ensure_generated_project_pane_hooks(
         raise SystemExit(f"team-launcher: failed to install pane hooks for {config.project}: {reason}")
 
 
+def install_generated_project_board_skill_args(
+    config: ProjectConfig,
+    *,
+    installer: Path,
+    source_commit: str = "",
+    dry_run: bool = False,
+) -> list[str]:
+    if not config.run_as_user:
+        raise ValueError("board skill install requires run_as_user")
+    owner_home = home_dir_for_user(config.run_as_user) or Path("/home") / config.run_as_user
+    args = [str(installer), "install", "--home", str(owner_home)]
+    if source_commit and source_commit != "unknown":
+        args.extend(["--source-commit", source_commit])
+    if dry_run:
+        args.append("--dry-run")
+    if current_user_name() == config.run_as_user:
+        return args
+    return ["sudo", "-u", config.run_as_user, "-H", *args]
+
+
+def board_skill_installer_path(
+    config: ProjectConfig,
+    *,
+    script_path: Path,
+    source_repo: Path | None = None,
+) -> Path:
+    """The installer that ships beside the launcher this project actually runs."""
+    if source_repo is not None:
+        return source_repo / "scripts" / BOARD_SKILL_INSTALLER_NAME
+    launcher_path = (config.pane_launcher or script_path).expanduser()
+    return launcher_path.with_name(BOARD_SKILL_INSTALLER_NAME)
+
+
+def ensure_generated_project_board_skill(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    script_path: Path,
+    source_repo: Path | None = None,
+    dry_run: bool = False,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    print_func: Callable[[str], None] = print,
+) -> None:
+    """Project the board skill into the owner's CLI skill trees.
+
+    On launch this runs before any role session starts, so a Hermes role home
+    created later in the same launch finds a shared skills directory to link.
+    """
+    if not config.run_as_user or not _is_generated_project_layout_template(config, config_path=config_path):
+        return
+    installer = board_skill_installer_path(config, script_path=script_path, source_repo=source_repo)
+    source_commit = _switchyard_source_commit(installer.parent.parent, runner=runner)
+    args = install_generated_project_board_skill_args(
+        config,
+        installer=installer,
+        source_commit=source_commit,
+        dry_run=dry_run,
+    )
+    result = runner(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if result.returncode != 0:
+        # A missing or unwritable skill tree must not stop the team from
+        # working; the pane still runs, it just starts without the skill.
+        reason = _proc_failure_reason(result, f"installer failed with exit {result.returncode}")
+        print_func(
+            f"warning: switchyard: could not install the {BOARD_SKILL_NAME} skill for {config.project}: {reason}"
+        )
+        return
+    for line in str(getattr(result, "stdout", "") or "").splitlines():
+        # An unchanged copy is the normal case; only report what moved.
+        if line.strip() and ": current " not in line:
+            print_func(f"switchyard: board skill {line.strip()}")
+
+
 def _legacy_new_project_stacked_layout_payload(role_count: int) -> dict[str, Any]:
     leaves = [
         {
@@ -5514,6 +5589,13 @@ def launch_project(
             script_path=pane_script_path,
             pane_state_dir=effective_pane_state_dir,
             runner=runner,
+        )
+        ensure_generated_project_board_skill(
+            config,
+            config_path=config_path,
+            script_path=pane_script_path,
+            runner=runner,
+            print_func=print_func,
         )
         seed_default_session_dir_from_legacy_sources(config.session_dir)
         if mode == "attach-or-start":
@@ -10146,6 +10228,15 @@ def upgrade_project_command(
             runner=runner,
             print_func=print_func,
         )
+    ensure_generated_project_board_skill(
+        config,
+        config_path=config_path,
+        script_path=effective_source_repo / "scripts" / "team-launcher",
+        source_repo=effective_source_repo,
+        dry_run=dry_run,
+        runner=runner,
+        print_func=print_func,
+    )
     report_tenant_release_upgrade(
         release_report_config,
         config_path=config_path,

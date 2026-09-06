@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""Install and verify the portable Switchyard board skill for every agent CLI."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from ticket_board.board_skill import (  # noqa: E402
+    CANONICAL_RELATIVE_SOURCE,
+    SKILL_NAME,
+    failed_runtimes,
+    install_board_skill,
+    resolve_source_commit,
+    verify_board_skill,
+)
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _default_source() -> Path:
+    return _repo_root() / CANONICAL_RELATIVE_SOURCE
+
+
+def install(args: argparse.Namespace) -> int:
+    source = Path(args.source).expanduser()
+    if not source.is_file():
+        print(f"switchyard-board-skill: canonical skill {source} is missing", file=sys.stderr)
+        return 1
+    results = install_board_skill(
+        home=Path(args.home).expanduser(),
+        source=source,
+        source_commit=args.source_commit,
+        force=args.force,
+        dry_run=args.dry_run,
+    )
+    for result in results:
+        print(result.describe())
+    failures = [result for result in results if result.action == "failed"]
+    if failures:
+        print(
+            "switchyard-board-skill: could not install "
+            + ", ".join(result.runtime for result in failures),
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+def verify(args: argparse.Namespace) -> int:
+    results = verify_board_skill(
+        home=Path(args.home).expanduser(),
+        expected_commit=args.source_commit,
+    )
+    for result in results:
+        print(result.describe())
+    unusable = failed_runtimes(results)
+    if unusable:
+        print(
+            f"switchyard-board-skill: {SKILL_NAME} is not usable for "
+            + ", ".join(unusable)
+            + "; re-run `switchyard-board-skill install`",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    install_parser = subparsers.add_parser("install", help="project the canonical skill into every CLI skill tree")
+    install_parser.add_argument(
+        "--home",
+        default=os.environ.get("HOME") or str(Path.home()),
+        help="home directory whose CLI skill trees are written",
+    )
+    install_parser.add_argument(
+        "--source",
+        default=str(_default_source()),
+        help="canonical SKILL.md to project",
+    )
+    install_parser.add_argument(
+        "--source-commit",
+        default="",
+        help="release commit recorded as provenance (default: the source tree's release marker or HEAD)",
+    )
+    install_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="also overwrite a copy that carries no Switchyard provenance footer",
+    )
+    install_parser.add_argument("--dry-run", action="store_true", help="report what would change")
+    install_parser.set_defaults(func=install)
+
+    verify_parser = subparsers.add_parser("verify", help="report whether each CLI can discover the skill")
+    verify_parser.add_argument(
+        "--home",
+        default=os.environ.get("HOME") or str(Path.home()),
+        help="home directory to check",
+    )
+    verify_parser.add_argument(
+        "--source-commit",
+        default="",
+        help="require the installed copies to carry this provenance commit",
+    )
+    verify_parser.set_defaults(func=verify)
+
+    source_parser = subparsers.add_parser("source-commit", help="print the provenance commit for the canonical source")
+    source_parser.add_argument("--source", default=str(_default_source()))
+    source_parser.set_defaults(
+        func=lambda args: (print(resolve_source_commit(Path(args.source).expanduser())), 0)[1]
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

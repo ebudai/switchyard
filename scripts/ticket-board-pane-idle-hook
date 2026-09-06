@@ -46,6 +46,13 @@ SESSION_START_HOOK_SOURCES = {"hermes.on_session_start"}
 SESSION_START_FRESH_SOURCE = "startup"
 ONBOARDING_PACKET_DIR = Path("docs") / "onboarding"
 DIRECTOR_ONBOARDING_GUIDE = ONBOARDING_PACKET_DIR / "switchyard-director-guide.md"
+BOARD_SKILL_NAME = "switchyard-board"
+# A pointer, not the skill: every runtime already has the body installed in its
+# own skills directory, and pasting it into each session would crowd out the
+# thing the session was started to do.
+BOARD_SKILL_INSTRUCTION = (
+    f"Load the {BOARD_SKILL_NAME} skill before reading from or writing to the ticket board."
+)
 SWITCHYARD_PROJECT_DIR_NAME = ".switchyard"
 
 
@@ -517,6 +524,23 @@ def _director_startup_onboarding_context(root: Path, *, cwd: Path) -> str:
     return f"Your director session just started fresh. Read the onboarding packet first: {packet_display}"
 
 
+def _with_board_skill_instruction(context: str) -> str:
+    if BOARD_SKILL_INSTRUCTION in context:
+        return context
+    if not context.strip():
+        return BOARD_SKILL_INSTRUCTION
+    return f"{BOARD_SKILL_INSTRUCTION}\n\n{context}"
+
+
+def _session_start_context(context: str) -> dict[str, object]:
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": _with_board_skill_instruction(context),
+        }
+    }
+
+
 def _session_start_additional_context_output(
     *,
     target: str,
@@ -528,39 +552,35 @@ def _session_start_additional_context_output(
     role = _role_for_target(target, environ)
     if not role:
         return None
+    # A fresh start is the one that knows nothing yet, so it is the one that
+    # always hears about the skill. A resumed or continued session keeps what
+    # it already had; re-injecting there would only crowd its context.
+    fresh_start = session_start_source == SESSION_START_FRESH_SOURCE and not resume_session_id.strip()
     onboarding = environ.get("TICKET_BOARD_ROLE_ONBOARDING", "").strip()
-    if onboarding and session_start_source == SESSION_START_FRESH_SOURCE and not resume_session_id.strip():
+    if onboarding and fresh_start:
         path = Path(onboarding)
         if not path.is_absolute() or not path.is_file():
             raise ValueError(f"configured role onboarding is unavailable: {path}")
-        return {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": f"Your {role} session started. Read your role remit at {path}.\n\n" + path.read_text()}}
-    if (
-        role == "director"
-        and session_start_source == SESSION_START_FRESH_SOURCE
-        and not resume_session_id.strip()
-    ):
+        return _session_start_context(
+            f"Your {role} session started. Read your role remit at {path}.\n\n" + path.read_text()
+        )
+    if role == "director" and fresh_start:
         cwd = Path.cwd()
         onboarding_root = _onboarding_project_root(environ, cwd)
         if onboarding_root is None:
-            return None
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": "SessionStart",
-                "additionalContext": _director_startup_onboarding_context(onboarding_root, cwd=cwd),
-            }
-        }
+            return _session_start_context("")
+        return _session_start_context(_director_startup_onboarding_context(onboarding_root, cwd=cwd))
     if session_start_source not in SESSION_START_ACTIVE_WORK_SOURCES:
-        return None
+        # A fresh role session with nothing else to say is exactly the one that
+        # would otherwise reach for the board unaided.
+        return _session_start_context("") if fresh_start else None
     board_url = _default_board_url(environ)
     ticket = _active_in_progress_ticket_for_role(role, board_url=board_url)
     if ticket is None:
         return None
-    return {
-        "hookSpecificOutput": {
-            "hookEventName": "SessionStart",
-            "additionalContext": _resume_context_for_ticket(ticket, board_url=board_url, source=session_start_source),
-        }
-    }
+    return _session_start_context(
+        _resume_context_for_ticket(ticket, board_url=board_url, source=session_start_source)
+    )
 
 
 def _hermes_pre_llm_context_output(

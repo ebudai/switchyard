@@ -429,6 +429,11 @@ def hook_gate(tmp_path: Path) -> tuple[PaneHookStateStore, PaneActivityGate]:
     )
 
 
+def _handed_off(message: str) -> str:
+    """What a pane actually receives for a hand-off: the wording plus the pointer."""
+    return notify_listener.with_board_skill_instruction(message, kind="transition")
+
+
 def test_hook_state_writer_and_gate_idle_before_arrival_delivers_immediately() -> None:
     sent: list[tuple[str, str]] = []
     with TemporaryStateDir() as tmp_path:
@@ -2872,7 +2877,7 @@ def test_long_idle_live_pane_still_delivers() -> None:
 
         assert listener.listen_once(max_notifications=1) == 1
 
-    assert sent == [("pgu-research:0.0", "New ticket for you: PGU-778 -- Queue")]
+    assert sent == [("pgu-research:0.0", _handed_off("New ticket for you: PGU-778 -- Queue"))]
     assert conn.requeued == []
     assert conn.dead_lettered == []
     assert conn.acked == [51]
@@ -2900,7 +2905,7 @@ def test_busy_existing_pane_holds_then_delivers_when_idle() -> None:
     gate_busy[0] = False
     conn.queue_rows.append(queue_row(50, "PGU-776", attempts=2, assignee="ops", target_role="ops"))
     assert listener.listen_once(max_notifications=1) == 1
-    assert sent == [("pgu-ops:0.0", "New ticket for you: PGU-776 -- Queue")]
+    assert sent == [("pgu-ops:0.0", _handed_off("New ticket for you: PGU-776 -- Queue"))]
     assert conn.acked == [50]
     assert conn.dead_lettered == []
 
@@ -2952,7 +2957,7 @@ def test_final_review_handoff_survives_busy_retry_and_manual_control() -> None:
     gate_busy[0] = False
 
     assert listener.listen_once(max_notifications=1) == 1
-    assert sent == [("pgu-director:0.0", message)]
+    assert sent == [("pgu-director:0.0", _handed_off(message))]
     assert conn.acked == [52]
 
 
@@ -2986,7 +2991,7 @@ def test_final_review_handoff_ignores_only_scheduling_flags() -> None:
         )
 
         assert listener.listen_once(max_notifications=1) == 1
-        assert sent == [("pgu-director:0.0", f"New ticket for you: {ticket_id} -- Queue")]
+        assert sent == [("pgu-director:0.0", _handed_off(f"New ticket for you: {ticket_id} -- Queue"))]
         assert conn.acked == [notification_id]
 
 

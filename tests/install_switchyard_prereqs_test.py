@@ -15,7 +15,7 @@ SCRIPT = ROOT / "scripts" / "install-switchyard-prereqs"
 APT_BEFORE = "python3 postgresql postgresql-client tmux konsole git curl python3-pip acl"
 APT_AFTER = "python3 postgresql postgresql-client tmux git curl python3-venv python3-pil acl"
 PACMAN_BEFORE = "python postgresql tmux konsole git curl python-pip acl"
-PACMAN_AFTER = "python postgresql tmux git curl python-pip python-pillow acl"
+PACMAN_AFTER = "python postgresql tmux git curl python-pillow python-psycopg acl"
 AGENT_CLI_PACKAGE_NAMES = {
     "claude",
     "claude-code",
@@ -27,13 +27,21 @@ AGENT_CLI_PACKAGE_NAMES = {
 }
 
 
-def run_dry(manager: str) -> str:
+def executed_commands(output: str) -> list[str]:
+    """Only the lines the installer would actually run, not its explanatory prose."""
+    return [line for line in output.splitlines() if line.startswith("+ ")]
+
+
+def run_dry(manager: str, *, python_venv: str = "/nonexistent/switchyard-venv") -> str:
     env = {
         **os.environ,
         "SWITCHYARD_PREREQS_ASSUME_MANAGER": manager,
         "SWITCHYARD_SUDO_BIN": "sudo",
         "SWITCHYARD_PREREQS_FORCE_SUDO_PREFIX": "1",
         "SWITCHYARD_PYTHON_BIN": "python3",
+        # Pinned so these assertions describe the installer, not whether this
+        # particular host happens to have a shared venv already.
+        "SWITCHYARD_PYTHON_VENV": python_venv,
     }
     proc = subprocess.run(
         [str(SCRIPT), "--dry-run"],
@@ -106,7 +114,7 @@ def test_prereqs_script_source_names_no_agent_cli() -> None:
 
 
 def test_apt_commands() -> None:
-    output = run_dry("apt")
+    output = run_dry("apt", python_venv="/opt/switchyard/venv")
     assert "Refreshing apt package index with apt-get update before installing packages." in output
     assert "+ sudo apt-get update" in output
     assert f"+ sudo apt-get install -y {APT_AFTER}" in output
@@ -139,22 +147,66 @@ def test_pacman_commands() -> None:
     assert f"+ sudo pacman -S --needed {PACMAN_AFTER}" in output
     pacman_install_line = next(line for line in output.splitlines() if line.startswith("+ sudo pacman -S --needed "))
     pacman_packages = set(pacman_install_line.removeprefix("+ sudo pacman -S --needed ").split())
+    assert "python-psycopg" in pacman_packages
     assert pacman_packages.isdisjoint(AGENT_CLI_PACKAGE_NAMES)
     assert PACMAN_BEFORE not in output
     assert "KDE/separate layout users also need Konsole: sudo pacman -S --needed konsole" in output
-    assert "Installing psycopg for the invoking user with pip on Arch-family systems." in output
-    assert "+ python3 -m pip install --user psycopg\\>=3.3\\,\\<4" in output
+    assert "Installing psycopg from the distribution package python-psycopg" in output
+    # Verification runs under the interpreter generated services select, which with no
+    # shared venv present is /usr/bin/python3 -- see ticket-board-service.sh.
+    assert "Verifying ticket board runtime dependencies with /usr/bin/python3, the interpreter generated services use." in output
+    assert "+ /usr/bin/python3 -c import\\ psycopg\\,\\ PIL\\;\\ print" in output
+    assert "Verifying the ticket board entry point loads with /usr/bin/python3." in output
+    assert f"+ /usr/bin/python3 {ROOT / 'scripts' / 'ticket-board.py'} --help" in output
+    # The Arch path builds no venv and runs no pip at all.
     assert "/opt/switchyard/venv" not in output
+    assert not any("pip" in c for c in executed_commands(output)), executed_commands(output)
     assert_no_agent_cli_output(output)
     assert "Next step: run scripts/install-switchyard" not in output
 
 
-def test_pacman_pip_deescalates_to_invoking_user_when_run_as_root() -> None:
+def test_pacman_verification_follows_the_shared_venv_when_one_exists() -> None:
+    """The rule is the service's rule, not a hardcoded interpreter."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        venv = Path(tmpdir) / "venv"
+        (venv / "bin").mkdir(parents=True)
+        python = venv / "bin" / "python"
+        python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        python.chmod(0o755)
+        output = run_dry("pacman", python_venv=str(venv))
+
+    assert f"Verifying ticket board runtime dependencies with {python}, the interpreter generated services use." in output
+    assert f"+ {python} -c" in output
+    assert "/usr/bin/python3 -c" not in output
+
+
+def test_no_supported_path_uses_user_pip_or_break_system_packages() -> None:
+    """The failure this ticket exists to remove, pinned against the script itself.
+
+    Checked against the source rather than one dry run, so it covers the branch this
+    host does not take.
+    """
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert "--user" not in source, "install-switchyard-prereqs still has a user pip path"
+    assert "--break-system-packages" not in source
+    for manager in ("apt", "pacman"):
+        output = run_dry(manager, python_venv="/opt/switchyard/venv" if manager == "apt" else "/nonexistent/switchyard-venv")
+        assert not any("--user" in c for c in executed_commands(output)), manager
+        assert "--break-system-packages" not in output, manager
+
+
+def test_pacman_path_installs_nothing_as_the_invoking_user_when_run_as_root() -> None:
+    """Nothing de-escalates to the original user any more, because nothing pips.
+
+    The root wrapper still passes SWITCHYARD_INSTALL_ORIGINAL_USER; this pins that the
+    prereq script no longer acts on it, rather than leaving that silently untested.
+    """
     env = {
         **os.environ,
         "SWITCHYARD_PREREQS_ASSUME_MANAGER": "pacman",
         "SWITCHYARD_SUDO_BIN": "sudo",
         "SWITCHYARD_PYTHON_BIN": "python3",
+        "SWITCHYARD_PYTHON_VENV": "/nonexistent/switchyard-venv",
         "SWITCHYARD_INSTALL_ORIGINAL_USER": "alice",
         "SWITCHYARD_PREREQS_TEST_ASSUME_ROOT": "1",
     }
@@ -168,19 +220,54 @@ def test_pacman_pip_deescalates_to_invoking_user_when_run_as_root() -> None:
     )
     output = proc.stdout
 
-    assert "Installing psycopg for the invoking user with pip on Arch-family systems." in output
-    assert "+ sudo -u alice -H sh -lc python3\\ -m\\ pip\\ install\\ --user\\ " in output
-    assert "psycopg" in output
-    assert "+ python3 -m pip install --user" not in output
+    assert "sudo -u alice" not in output
+    assert not any("pip" in c for c in executed_commands(output)), executed_commands(output)
+    assert "+ sudo pacman -S --needed" in output
+    assert "+ /usr/bin/python3 -c" in output
+
+
+def test_pacman_still_refuses_to_refresh_databases_itself() -> None:
+    """The no-pacman-Sy policy survives this change."""
+    output = run_dry("pacman")
+    assert "run sudo pacman -Syu first" in output
+    for call in ("pacman -Sy", "pacman -Syu", "pacman -Syyu"):
+        assert f"+ sudo {call}" not in output
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert "pacman -Sy" not in source.replace("pacman -Syu first", "")
+
+
+def test_arch_system_python_satisfies_the_pin_it_replaces_pip_with() -> None:
+    """The premise: the packaged Psycopg really does satisfy psycopg>=3.3,<4.
+
+    Skipped where the interpreter has no psycopg, so this does not fail on a host that
+    has not run the installer.
+    """
+    probe = subprocess.run(
+        ["/usr/bin/python3", "-c", "import psycopg; print(psycopg.__version__)"],
+        text=True,
+        capture_output=True,
+    )
+    if probe.returncode != 0:
+        return
+    major, minor = (int(part) for part in probe.stdout.strip().split(".")[:2])
+    assert (3, 3) <= (major, minor) < (4, 0), probe.stdout
 
 
 def test_fresh_machine_docs_match_manual_agent_cli_policy() -> None:
     docs = (ROOT / "docs" / "fresh-machine-install.md").read_text(encoding="utf-8")
     normalized_docs = " ".join(docs.split())
-    apt_python_section = docs.split("On Arch-family systems, the current system-user pip path remains:")[0]
+    apt_python_section = docs.split("Arch-family systems need no venv and no pip.")[0]
     assert "sudo apt-get install python3 postgresql postgresql-client tmux git curl python3-venv python3-pil acl" in docs
-    assert "sudo pacman -S python postgresql tmux git curl python-pip python-pillow acl" in docs
-    assert "python3 -m pip install --user 'psycopg>=3.3,<4'" not in apt_python_section
+    assert "sudo pacman -S python postgresql tmux git curl python-pillow python-psycopg acl" in docs
+    # Prose explaining that PEP 668 refuses `pip install --user` is correct and stays;
+    # what must be gone is any runnable command form of it.
+    assert "-m pip install --user" not in docs, "fresh-machine docs still prescribe a user pip command"
+    for line in docs.splitlines():
+        stripped = line.strip().removeprefix("sudo ")
+        assert not stripped.startswith("pip install --user"), line
+    assert "python-psycopg" in apt_python_section or "python-psycopg" in docs
+    assert "Arch-family systems need no venv and no pip." in normalized_docs
+    assert "/usr/bin/python3 scripts/ticket-board.py --help" in docs
     assert "sudo python3 -m venv --system-site-packages /opt/switchyard/venv" in docs
     assert "sudo /opt/switchyard/venv/bin/python -m pip install 'psycopg>=3.3,<4'" in docs
     assert "sudo /opt/switchyard/venv/bin/python -c 'import psycopg, PIL; print(psycopg.__version__, PIL.__version__)'" in docs
@@ -273,14 +360,15 @@ def test_package_sets_match_the_platform_python_strategy() -> None:
         "tmux",
         "git",
         "curl",
-        "python-pip",
         "python-pillow",
+        "python-psycopg",
         "acl",
     ]
     assert set(APT_BEFORE.split()) - set(APT_AFTER.split()) == {"konsole", "python3-pip"}
     assert set(APT_AFTER.split()) - set(APT_BEFORE.split()) == {"python3-venv", "python3-pil"}
-    assert set(PACMAN_BEFORE.split()) - set(PACMAN_AFTER.split()) == {"konsole"}
-    assert set(PACMAN_AFTER.split()) - set(PACMAN_BEFORE.split()) == {"python-pillow"}
+    # python-pip goes with the pip call it existed for, mirroring python3-pip on apt.
+    assert set(PACMAN_BEFORE.split()) - set(PACMAN_AFTER.split()) == {"konsole", "python-pip"}
+    assert set(PACMAN_AFTER.split()) - set(PACMAN_BEFORE.split()) == {"python-pillow", "python-psycopg"}
 
 
 def test_system_site_venv_runs_ticket_board_entrypoint() -> None:
@@ -322,7 +410,11 @@ if __name__ == "__main__":
     test_prereqs_script_source_names_no_agent_cli()
     test_apt_commands()
     test_pacman_commands()
-    test_pacman_pip_deescalates_to_invoking_user_when_run_as_root()
+    test_pacman_verification_follows_the_shared_venv_when_one_exists()
+    test_no_supported_path_uses_user_pip_or_break_system_packages()
+    test_pacman_path_installs_nothing_as_the_invoking_user_when_run_as_root()
+    test_pacman_still_refuses_to_refresh_databases_itself()
+    test_arch_system_python_satisfies_the_pin_it_replaces_pip_with()
     test_fresh_machine_docs_match_manual_agent_cli_policy()
     test_readme_states_the_user_owns_agent_cli_installation()
     test_prereqs_rejects_the_removed_cli_flags()

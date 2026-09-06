@@ -14,6 +14,9 @@ from team_launcher_test_helpers import *
 # check failing open for an unknown name.
 SEED_SOURCE_USER = team_launcher.current_user_name()
 ABSENT_SOURCE_USER = "syrd-no-such-source"
+# The provisioned owner throughout this module. Real on this host, and deliberately not
+# the test runner, so owner-uid checks are exercised rather than trivially satisfied.
+OWNER_USER = "otto-agent"
 SEED_TOKEN_TEXT = '{"auth_method":"consumer","token":{"refresh_token":"test-refresh-secret"}}\n'
 TOKEN_NAME = "antigravity-oauth-token"
 
@@ -408,44 +411,101 @@ def test_existing_owner_without_reuse_consent_never_reaches_seeding() -> None:
     assert _mutated(runner) == []
 
 
-def test_already_installed_credential_is_left_in_place() -> None:
+def _write_target(home_base: Path, *, text: str = "existing\n", mode: int = 0o600) -> Path:
+    target = _seeded_token_path(home_base)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+    target.chmod(mode)
+    return target
+
+
+def test_target_owned_by_another_user_is_refused_not_reported_installed() -> None:
+    """A 0600 token the pane owner cannot read must never count as installed.
+
+    Otherwise provisioning completes and records a credential source while agy login
+    still cannot succeed, which is this ticket's own bug. The owner user here is real and
+    its uid differs from the test runner's, so the mismatch is genuine rather than staged.
+    """
+    assert pwd.getpwnam(OWNER_USER).pw_uid != os.getuid(), "fixture needs a real uid mismatch"
+
     with tempfile.TemporaryDirectory(prefix="pgu-agy-seed.") as tmp:
         tmp_path = Path(tmp)
         home_base = tmp_path / "home"
         _seed_source_token(home_base)
-        existing = _seeded_token_path(home_base)
-        existing.parent.mkdir(parents=True, exist_ok=True)
-        existing.write_text("already-installed\n", encoding="utf-8")
-        existing.chmod(0o600)
+        _write_target(home_base, text="owned-by-someone-else\n", mode=0o600)
 
-        outcome, runner, output, home_base, _project_dir = _provision(
+        outcome, runner, _output, home_base, _project_dir = _provision(
             tmp_path, agy_credential_source=SEED_SOURCE_USER, owner_exists=True
         )
         preserved = _seeded_token_path(home_base).read_text(encoding="utf-8")
 
-    assert outcome == 0
-    assert preserved == "already-installed\n"
+    assert isinstance(outcome, SystemExit)
+    message = str(outcome)
+    assert f"is not a 0600 regular file owned by {OWNER_USER}" in message
+    assert "agy could not read it" in message
     assert not _token_chown_calls(runner)
-    assert "already present for otto-agent" in output
+    # Refused, not silently repaired or overwritten.
+    assert preserved == "owned-by-someone-else\n"
 
 
-def test_unusable_existing_target_is_refused() -> None:
+def test_world_readable_existing_target_is_refused() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-agy-seed.") as tmp:
         tmp_path = Path(tmp)
         home_base = tmp_path / "home"
         _seed_source_token(home_base)
-        existing = _seeded_token_path(home_base)
-        existing.parent.mkdir(parents=True, exist_ok=True)
-        existing.write_text("world-readable\n", encoding="utf-8")
-        existing.chmod(0o644)
+        _write_target(home_base, mode=0o644)
 
         outcome, runner, _output, _home_base, _project_dir = _provision(
             tmp_path, agy_credential_source=SEED_SOURCE_USER, owner_exists=True
         )
 
     assert isinstance(outcome, SystemExit)
-    assert "is not a private regular file" in str(outcome)
+    assert "is not a 0600 regular file owned by" in str(outcome)
     assert not _token_chown_calls(runner)
+
+
+def test_credential_state_requires_a_private_file_owned_by_the_owner() -> None:
+    """Unit coverage for the installed/absent/unusable classification.
+
+    The 'installed' verdict is asserted here rather than through a full provision: it
+    needs a target owned by the project owner, and the harness can only create files
+    owned by the test runner, so the owner has to be the runner itself -- which cannot
+    also be the credential source, since seeding from the owner is refused.
+    """
+    state = team_launcher._agy_credential_state
+    runner_user = team_launcher.current_user_name()
+
+    with tempfile.TemporaryDirectory(prefix="pgu-agy-state.") as tmp:
+        home_base = Path(tmp) / "home"
+        target = home_base / runner_user / ".gemini" / "antigravity-cli" / TOKEN_NAME
+
+        assert state(runner_user, home_base) == team_launcher.AGY_CREDENTIAL_ABSENT
+
+        target.parent.mkdir(parents=True)
+        target.write_text("token\n", encoding="utf-8")
+        target.chmod(0o600)
+        assert state(runner_user, home_base) == team_launcher.AGY_CREDENTIAL_INSTALLED
+
+        # Same file, a different real owner: audit's reproduction.
+        assert state(OWNER_USER, home_base.parent / "home") == team_launcher.AGY_CREDENTIAL_ABSENT
+        other_base = Path(tmp) / "other"
+        other_target = other_base / OWNER_USER / ".gemini" / "antigravity-cli" / TOKEN_NAME
+        other_target.parent.mkdir(parents=True)
+        other_target.write_text("token\n", encoding="utf-8")
+        other_target.chmod(0o600)
+        assert state(OWNER_USER, other_base) == team_launcher.AGY_CREDENTIAL_UNUSABLE
+
+        target.chmod(0o644)
+        assert state(runner_user, home_base) == team_launcher.AGY_CREDENTIAL_UNUSABLE
+        target.chmod(0o600)
+
+        # An owner with no passwd entry gives nothing to compare against, so it fails closed.
+        absent_base = Path(tmp) / "absent"
+        absent_target = absent_base / ABSENT_SOURCE_USER / ".gemini" / "antigravity-cli" / TOKEN_NAME
+        absent_target.parent.mkdir(parents=True)
+        absent_target.write_text("token\n", encoding="utf-8")
+        absent_target.chmod(0o600)
+        assert state(ABSENT_SOURCE_USER, absent_base) == team_launcher.AGY_CREDENTIAL_UNUSABLE
 
 
 def test_failed_private_directory_creation_aborts_before_copying() -> None:

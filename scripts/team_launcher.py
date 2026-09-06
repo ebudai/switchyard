@@ -9189,6 +9189,13 @@ def _agy_credential_state(owner_user: str, home_base: Path) -> str:
         os.close(fd)
     if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
         return AGY_CREDENTIAL_UNUSABLE
+    # Ownership is the point of the check, not a refinement of it: a 0600 token owned by
+    # root or by any other account is unreadable to the pane owner, so treating it as
+    # installed would complete provisioning and record a credential agy still cannot use.
+    # Unresolvable owner means no uid to compare, which is not a pass.
+    owner_uid = _uid_for_user(owner_user)
+    if owner_uid is None or info.st_uid != owner_uid:
+        return AGY_CREDENTIAL_UNUSABLE
     return AGY_CREDENTIAL_INSTALLED
 
 
@@ -10118,8 +10125,8 @@ def switchyard_new_command(
         elif credential_state == AGY_CREDENTIAL_UNUSABLE:
             raise SystemExit(
                 f"switchyard: {home_base / owner_user / AGY_CREDENTIAL_DIR_NAME / AGY_CREDENTIAL_TOKEN_NAME} "
-                "exists but is not a private regular file; remove it and rerun, or clear "
-                "capability_grants.agy_credential_source"
+                f"exists but is not a 0600 regular file owned by {owner_user}, so agy could not "
+                "read it; remove it and rerun, or clear capability_grants.agy_credential_source"
             )
         else:
             # Not gated on owner_result.created. Reaching here with a pre-existing owner

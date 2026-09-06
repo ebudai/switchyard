@@ -181,7 +181,21 @@ def _stage_units(project: str) -> None:
         (staged / unit).write_text(f"[Service]\n# generated {unit}\n", encoding="utf-8")
 
 
-def _declarative_tenant(tmp: Path, *, project: str = "porter", accounts: bool = False) -> tuple[Path, Path]:
+def _deployed_release(tmp: Path, project: str, sha: str) -> Path:
+    """A board root whose `current` release is ``sha``, as a deploy leaves it."""
+    board_root = tmp / f"{project}-ticketboard-live"
+    release = board_root / "releases" / sha
+    release.mkdir(parents=True, exist_ok=True)
+    (release / ".pgu-deploy-sha").write_text(sha + "\n", encoding="utf-8")
+    current = board_root / "current"
+    if not current.exists() and not current.is_symlink():
+        current.symlink_to(release)
+    return board_root
+
+
+def _declarative_tenant(
+    tmp: Path, *, project: str = "porter", accounts: bool = False, board_root: Path | None = None
+) -> tuple[Path, Path]:
     _privileged_root(tmp)
     _stage_units(project)
     config_path = _write_six_visible_role_config(tmp, project=project)
@@ -204,10 +218,12 @@ def _declarative_tenant(tmp: Path, *, project: str = "porter", accounts: bool = 
     # a test must not install anything there.
     owner_home = tmp / "home"
     owner_home.mkdir(exist_ok=True)
-    (tmp / "plan.json").write_text(
-        json.dumps({"project": project, "owner_user": payload["run_as_user"], "owner_home": str(owner_home)}),
-        encoding="utf-8",
-    )
+    plan = {"project": project, "owner_user": payload["run_as_user"], "owner_home": str(owner_home)}
+    if board_root is not None:
+        # Without a board root there is no release to read at all, and the release
+        # phase has nothing to derive from (SYRD-48).
+        plan["board_root"] = str(board_root)
+    (tmp / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
     return config_path, tmp
 
 
@@ -242,6 +258,8 @@ def _upgrade(
     dry_run: bool = False,
     runner: FakeRunner | None = None,
     board=None,
+    source_repo: Path | None = None,
+    deploy_ref: str = team_launcher.DEFAULT_TENANT_RELEASE_DEPLOY_REF,
 ):
     """Run the privileged upgrade with the host facts stated explicitly."""
     printed: list[str] = []
@@ -265,6 +283,8 @@ def _upgrade(
             config,
             config_path=config_path,
             dry_run=dry_run,
+            source_repo=source_repo,
+            deploy_ref=deploy_ref,
             runner=runner or FakeRunner(),
             print_func=printed.append,
         )
@@ -871,6 +891,260 @@ def test_a_forged_tenant_journal_cannot_release_the_activation() -> None:
         assert root_record.is_file(), root_record
         assert root_record != team_launcher.upgrade_journal_path(config, config_path=config_path)
         assert json.loads(root_record.read_text())["phases"]["director"]["detail"] != "forged"
+
+
+
+# --- SYRD-48: the release phase is derived from what is actually deployed -----
+
+
+def _origin_backed_source(tmp: Path) -> tuple[Path, str]:
+    """A real source checkout, and the sha its `origin/main` resolves to."""
+    _origin, repo = _make_origin_backed_repo(tmp)
+    return repo, _run_git(["git", "rev-parse", "origin/main"], cwd=repo).stdout.strip()
+
+
+def _advance_origin(repo: Path) -> str:
+    """Publish a newer release on the pinned ref, as a later Switchyard would."""
+    (repo / "tracked.txt").write_text("newer\n", encoding="utf-8")
+    _run_git(["git", "add", "tracked.txt"], cwd=repo)
+    _run_git(["git", "commit", "-m", "newer release"], cwd=repo)
+    _run_git(["git", "push", "origin", "HEAD:main"], cwd=repo)
+    _run_git(["git", "fetch", "origin"], cwd=repo)
+    return _run_git(["git", "rev-parse", "origin/main"], cwd=repo).stdout.strip()
+
+
+def _deploying_runner(inner, *, board_root: Path, deploys: list[str], deploy: bool = True):
+    """The fake host, with the two things a release actually depends on made real.
+
+    Resolving the pinned ref is a read of a real repository, and the deploy moves
+    `current`. A fake that answers both from nowhere would let this suite pass
+    while reporting a release nothing deployed (SYRD-48).
+    """
+
+    def call(args, **kwargs):
+        argv = [str(part) for part in args]
+        # Root's own git reads are de-escalated to the owning account, so the
+        # read to answer arrives wrapped in sudo (SYRD-48).
+        bare = argv
+        if bare[:2] == ["sudo", "-u"] and len(bare) > 3:
+            bare = bare[4:] if bare[3] == "-H" else bare[3:]
+        if bare[:1] == ["git"] and ("ls-remote" in bare or "rev-parse" in bare):
+            passthrough = dict(kwargs)
+            passthrough.setdefault("text", True)
+            passthrough.setdefault("stdout", subprocess.PIPE)
+            passthrough.setdefault("stderr", subprocess.PIPE)
+            return subprocess.run(bare, **passthrough)
+        if "deploy-restart" in " ".join(argv):
+            deploys.append(" ".join(argv))
+            if deploy:
+                sha = _run_git(
+                    ["git", "rev-parse", "origin/main"], cwd=_deploying_runner.source
+                ).stdout.strip()
+                release = board_root / "releases" / sha
+                release.mkdir(parents=True, exist_ok=True)
+                (release / ".pgu-deploy-sha").write_text(sha + "\n", encoding="utf-8")
+                current = board_root / "current"
+                if current.is_symlink() or current.exists():
+                    current.unlink()
+                current.symlink_to(release)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        return inner(argv, **kwargs)
+
+    return call
+
+
+def _tenant_before_cutover(tmp: Path) -> tuple[Path, Path, Path, set[str]]:
+    """A legacy tenant, its source checkout, its board root, and its role accounts."""
+    source_repo, _target = _origin_backed_source(tmp)
+    _deploying_runner.source = source_repo
+    board_root = _deployed_release(tmp, "porter", "1" * 40)
+    config_path, _ = _declarative_tenant(tmp, board_root=board_root)
+    roles = [role["role"] for role in json.loads(config_path.read_text(encoding="utf-8"))["roles"]]
+    return config_path, source_repo, board_root, {f"porter-{role}" for role in roles}
+
+
+def _cut_over(config_path, source_repo, board_root, accounts, *, deploy: bool = True):
+    """Run the invocation that performs the transaction. Returns its output."""
+    deploys: list[str] = []
+    with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
+        _result, output, _m = _upgrade(
+            config_path,
+            as_root=True,
+            exists=accounts,
+            runner=_deploying_runner(
+                tenant.runner(), board_root=board_root, deploys=deploys, deploy=deploy
+            ),
+            board=_board_with_marker(False),
+            source_repo=source_repo,
+        )
+    return output, deploys
+
+
+def test_the_release_the_transaction_deployed_is_reported_done_not_owed() -> None:
+    """The transaction switches the release, so no operator deploy is left."""
+    with tempfile.TemporaryDirectory(prefix="release-phase-done.") as tmp:
+        config_path, source_repo, board_root, accounts = _tenant_before_cutover(Path(tmp))
+        target = _run_git(["git", "rev-parse", "origin/main"], cwd=source_repo).stdout.strip()
+
+        output, deploys = _cut_over(config_path, source_repo, board_root, accounts)
+
+        assert "running under per-role identities" in output, output
+        # The deploy happened once, inside the transaction, and moved the pointer.
+        assert len(deploys) == 1, deploys
+        assert (board_root / "current").resolve().name == target
+        assert "release unchanged; no release deploy needed" in output, output
+        assert "board release is deployed and no further deploy is needed" in output, output
+        # The sentence that sent an operator looking for a deploy that must not happen.
+        assert "after that deploy" not in output, output
+        assert "deployment sequence" not in output, output
+        # The phase says so too, in root's own record.
+        config = team_launcher.load_project_config("porter", config_path)
+        trusted = team_launcher.read_upgrade_journal(config, config_path=config_path, trusted=True)
+        assert team_launcher.upgrade_phase_state(trusted, "release") == "done", trusted
+        assert "identities transaction switched it" in trusted["phases"]["release"]["detail"]
+        assert any(
+            line.split()[:3] == ["release", "operator", "done"] for line in output.splitlines()
+        ), output
+        # The director's step is still named, and is still the director's.
+        assert "The remaining step is the director's" in output, output
+        assert "finish-upgrade porter" in output, output
+        assert "root cannot make that write" in output, output
+
+
+def test_a_release_that_really_moved_on_is_still_owed_and_still_printed() -> None:
+    """Deriving the phase must not stop a genuine later release being offered."""
+    with tempfile.TemporaryDirectory(prefix="release-phase-ready.") as tmp:
+        config_path, source_repo, board_root, accounts = _tenant_before_cutover(Path(tmp))
+        _cut_over(config_path, source_repo, board_root, accounts)
+        deployed = (board_root / "current").resolve().name
+        # A later release is published. The tenant is already cut over, so no
+        # transaction runs and the deploy is genuinely an operator's to make.
+        newer = _advance_origin(source_repo)
+        assert newer != deployed
+
+        deploys: list[str] = []
+        with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
+            _result, output, _m = _upgrade(
+                config_path, as_root=True, exists=accounts,
+                runner=_deploying_runner(
+                    tenant.runner(), board_root=board_root, deploys=deploys, deploy=False
+                ),
+                board=_board_with_marker(False), source_repo=source_repo,
+            )
+
+        assert deploys == [], deploys
+        assert f"old: {deployed}" in output, output
+        assert f"new: {newer}" in output, output
+        assert "no release deploy needed" not in output, output
+        assert "no further deploy is needed" not in output, output
+        assert "after that deploy" in output, output
+        config = team_launcher.load_project_config("porter", config_path)
+        trusted = team_launcher.read_upgrade_journal(config, config_path=config_path, trusted=True)
+        assert team_launcher.upgrade_phase_state(trusted, "release") == "ready", trusted
+
+
+def test_a_dry_run_reports_the_deployed_release_and_records_nothing() -> None:
+    with tempfile.TemporaryDirectory(prefix="release-phase-dry.") as tmp:
+        config_path, source_repo, board_root, accounts = _tenant_before_cutover(Path(tmp))
+        _cut_over(config_path, source_repo, board_root, accounts)
+        config = team_launcher.load_project_config("porter", config_path)
+        journal_path = team_launcher.privileged_upgrade_journal_path(config)
+        before_journal = journal_path.read_bytes()
+        before_config = config_path.read_bytes()
+
+        deploys: list[str] = []
+        with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
+            _result, output, _m = _upgrade(
+                config_path, as_root=True, exists=accounts, dry_run=True,
+                runner=_deploying_runner(
+                    tenant.runner(), board_root=board_root, deploys=deploys, deploy=False
+                ),
+                board=_board_with_marker(False), source_repo=source_repo,
+            )
+
+        assert deploys == [], deploys
+        assert "board release is deployed and no further deploy is needed" in output, output
+        assert config_path.read_bytes() == before_config
+        assert journal_path.read_bytes() == before_journal
+
+
+def test_the_legacy_to_cutover_to_director_sequence_names_one_remaining_step() -> None:
+    """Legacy tenant, operator accounts, transaction, director -- and no second deploy."""
+    with tempfile.TemporaryDirectory(prefix="release-phase-sequence.") as tmp:
+        config_path, source_repo, board_root, accounts = _tenant_before_cutover(Path(tmp))
+
+        # 1. Legacy: the accounts do not exist, so nothing is deployed and no
+        #    deploy is offered.
+        deploys: list[str] = []
+        with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
+            _result, first, _m = _upgrade(
+                config_path, as_root=True, exists=set(),
+                runner=_deploying_runner(tenant.runner(), board_root=board_root, deploys=deploys),
+                board=_board_with_marker(False), source_repo=source_repo,
+            )
+        assert "still share the project account" in first, first
+        assert "withholding" in first, first
+        assert deploys == [], deploys
+        assert "no further deploy is needed" not in first, first
+
+        # 2. The operator creates the accounts; the transaction switches the
+        #    release itself, and the output names only the director's step.
+        second, deploys = _cut_over(config_path, source_repo, board_root, accounts)
+        assert "running under per-role identities" in second, second
+        assert len(deploys) == 1, deploys
+        assert "no further deploy is needed" in second, second
+        assert "deployment sequence" not in second, second
+
+        # 3. The director's own write, from the director's own account, and the
+        #    release it reports is the one already running.
+        config = team_launcher.load_project_config("porter", config_path)
+        printed: list[str] = []
+        original_migrate = team_launcher.migrate_declarative_director_onboarding
+        original_opener = team_launcher._open_board_url
+        original_exists = team_launcher.local_account_exists
+        try:
+            team_launcher.migrate_declarative_director_onboarding = (
+                lambda config, **kwargs: _mark_projection_migrated(config_path) or True
+            )
+            team_launcher._open_board_url = _board_with_marker(True)
+            team_launcher.local_account_exists = lambda account: account in accounts
+            with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
+                assert team_launcher.finish_upgrade_command(
+                    config, config_path=config_path, source_repo=source_repo,
+                    runner=_deploying_runner(
+                        tenant.runner(), board_root=board_root, deploys=[], deploy=False
+                    ),
+                    print_func=printed.append,
+                ) == 0, printed
+        finally:
+            team_launcher.migrate_declarative_director_onboarding = original_migrate
+            team_launcher._open_board_url = original_opener
+            team_launcher.local_account_exists = original_exists
+        finished = "\n".join(printed)
+        assert "no release deploy needed" in finished, finished
+        assert "deployment sequence" not in finished, finished
+        journal = team_launcher.read_upgrade_journal(config, config_path=config_path)
+        assert team_launcher.upgrade_phase_state(journal, "director") == "done", journal
+        assert team_launcher.upgrade_phase_state(journal, "release") == "done", journal
+
+
+def test_the_upgrade_documentation_describes_the_flow_that_exists() -> None:
+    """The docs carry this to operators and to the director, and had outlived it."""
+    launcher_doc = (ROOT / "docs" / "team-launcher.md").read_text(encoding="utf-8")
+    guide = (ROOT / "docs" / "onboarding" / "switchyard-director-guide.md").read_text(encoding="utf-8")
+
+    # There is no compatibility phase, and no deploy is printed ahead of the director.
+    assert {phase for phase, _owner, _detail in team_launcher.UPGRADE_PHASES} == {
+        "artifacts", "accounts", "identities", "release", "director",
+    }
+    assert "`compatibility` phase" not in launcher_doc
+    assert "no separate compatibility deploy" in launcher_doc
+    assert "The release phase is derived, not assumed." in launcher_doc
+    # The duplicated release-pointer phrase.
+    assert launcher_doc.count("the release pointer and") == 1, launcher_doc
+    # The director is told, in the onboarding packet, what is actually left.
+    assert "there is no second deploy for an operator to run" in guide
+    assert "as the only\nremaining step" in guide
 
 
 def main() -> int:

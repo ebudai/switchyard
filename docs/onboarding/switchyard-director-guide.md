@@ -198,6 +198,15 @@ for any other role: no role-specific onboarding at all. If your board still runs
 the previous release, `switchyard upgrade` will say so and print the deployment to
 run first rather than attempting a change that board would reject.
 
+**Who deploys, and what is left for you.** On a tenant that has been through the
+per-role identities cutover, the release was switched inside that transaction, so
+there is no second deploy for an operator to run. `switchyard upgrade` says the
+release is deployed and names `switchyard finish-upgrade <project>` as the only
+remaining step. That step is yours: it is a board write authorized from your uid,
+and root refuses to counterfeit it. If the output prints a deployment sequence
+instead, the deployed release genuinely differs from the pinned one and an
+operator runs that first.
+
 The change itself is applied atomically against the board's current workflow
 revision: if the configuration moved since you read it, your write is rejected
 rather than silently overwriting someone else's. A rollback journal is written

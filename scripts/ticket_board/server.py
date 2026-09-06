@@ -566,6 +566,19 @@ class DirectorNotifier:
 
 
 class TicketBoardEventHub:
+    #: Consecutive failed scans before an open board is told its live updates
+    #: are unreliable. One transient error is not worth a banner; a reconciler
+    #: that keeps failing is, because the alternative is a board that looks
+    #: current and is not.
+    DEGRADED_AFTER_FAILURES = 3
+
+    #: What a browser is told. A database error's text routinely carries the
+    #: connection string, host, user and database name, and this frame is sent
+    #: to every open client. The raw exception is logged server-side, where the
+    #: operator who may already see the conninfo is; what crosses the wire is
+    #: this fixed string and nothing derived from the failure.
+    DEGRADED_REASON = "the board service cannot read its own state"
+
     def __init__(self, app: TicketBoardApp, scan_interval_seconds: float = 1.0) -> None:
         self.app = app
         self.scan_interval_seconds = scan_interval_seconds
@@ -573,7 +586,14 @@ class TicketBoardEventHub:
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._version = 0
-        self._signature = self.app.store_signature()
+        self._consecutive_failures = 0
+        self.degraded_reason = ""
+        try:
+            self._signature = self.app.store_signature()
+        except Exception:  # noqa: BLE001 - a board that cannot read must still serve
+            LOGGER.warning("board reconciliation could not read its initial state", exc_info=True)
+            self._signature = ()
+            self.degraded_reason = self.DEGRADED_REASON
         self._thread = threading.Thread(target=self._watch_loop, name="ticket-board-events", daemon=True)
         self._thread.start()
 
@@ -613,10 +633,41 @@ class TicketBoardEventHub:
 
     def _watch_loop(self) -> None:
         while not self._stop_event.wait(self.scan_interval_seconds):
-            signature = self.app.store_signature()
+            try:
+                signature = self.app.store_signature()
+            except Exception as exc:  # noqa: BLE001 - one bad scan must not end the loop
+                # Before this, a single raised scan killed the thread for the
+                # life of the process: pushes kept working, reconciliation
+                # silently did not, and nothing said so.
+                self._record_scan_failure(exc)
+                continue
+            self._record_scan_success()
             if signature != self._signature:
                 self._signature = signature
                 self.notify_change()
+
+    def _record_scan_failure(self, exc: BaseException) -> None:
+        with self._lock:
+            self._consecutive_failures += 1
+            crossed = (
+                self._consecutive_failures >= self.DEGRADED_AFTER_FAILURES
+                and not self.degraded_reason
+            )
+            if crossed:
+                self.degraded_reason = self.DEGRADED_REASON
+        # Raw here, where the operator is; never in the frame the browser gets.
+        LOGGER.warning("board reconciliation scan failed: %s", exc)
+        if crossed:
+            # Wake every open client so it learns the board may be stale.
+            self.notify_change()
+
+    def _record_scan_success(self) -> None:
+        with self._lock:
+            recovered = bool(self.degraded_reason)
+            self._consecutive_failures = 0
+            self.degraded_reason = ""
+        if recovered:
+            self.notify_change()
 
 
 class TicketBoardHandler(BaseHTTPRequestHandler):
@@ -1046,7 +1097,13 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             payload = dict(payload)
             if "state" in payload:
                 payload["target"] = payload.pop("state")
-            self.send_json({"ticket": self.app.perform_workflow_action(ticket_id, operation, payload, caller_role=caller)})
+            ticket = self.app.perform_workflow_action(ticket_id, operation, payload, caller_role=caller)
+            # Every declared transition is a committed mutation, so it pushes
+            # like the per-operation handlers below. Without this an open board
+            # sat on the previous stage until someone reloaded it, and the
+            # reconciler could not cover for it either (see store_signature).
+            self.events.notify_change(self.app.store_signature())
+            self.send_json({"ticket": ticket})
             return
 
         if operation == "create_ticket":
@@ -1394,6 +1451,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(f"event: version\ndata: {json.dumps({'build_id': self.server.build_id})}\n\n".encode("utf-8"))
             self.wfile.write(f"event: board\ndata: {json.dumps({'version': version})}\n\n".encode("utf-8"))
+            announced = self._write_sync_health(None)
             self.wfile.flush()
             while True:
                 try:
@@ -1401,11 +1459,26 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                     self.wfile.write(f"event: board\ndata: {json.dumps({'version': next_version})}\n\n".encode("utf-8"))
                 except queue.Empty:
                     self.wfile.write(b": keepalive\n\n")
+                announced = self._write_sync_health(announced)
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
             return
         finally:
             self.events.unregister(listener)
+
+    def _write_sync_health(self, announced: str | None) -> str:
+        """Tell an open board when its live updates stop being trustworthy.
+
+        Sent on connect and whenever it changes, so a client that has been open
+        for hours learns about a reconciler that started failing after it
+        connected -- the case where the board looks current and is not.
+        """
+        reason = self.events.degraded_reason
+        if reason == announced:
+            return reason
+        payload = json.dumps({"degraded": bool(reason), "reason": reason})
+        self.wfile.write(f"event: sync\ndata: {payload}\n\n".encode("utf-8"))
+        return reason
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)

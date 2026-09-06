@@ -18,9 +18,48 @@ from scripts.ticket_board.server import TicketBoardEventHub
 class SignatureApp:
     def __init__(self) -> None:
         self.signature = (("PGU-1", "trace-1"),)
+        self.failure: Exception | None = None
 
     def store_signature(self) -> tuple[tuple[str, str], ...]:
+        if self.failure is not None:
+            raise self.failure
         return self.signature
+
+
+def reconciler_survives_and_reports_a_failing_scan() -> None:
+    """A reconciler that dies quietly leaves a board that looks current.
+
+    Before this, one raised scan ended the watch thread for the life of the
+    process: pushes still worked, reconciliation silently did not, and an open
+    board showed no sign of it.
+    """
+    app = SignatureApp()
+    hub = TicketBoardEventHub(app, scan_interval_seconds=0.02)
+    try:
+        listener, _version = hub.register()
+        secret = "postgresql://board_user:hunter2@/tenant_db?host=/run/postgresql"
+        app.failure = RuntimeError(f"connection failed: {secret}")
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and not hub.degraded_reason:
+            time.sleep(0.02)
+        assert hub._thread.is_alive(), "a failing scan killed the reconciler"
+        # A database error's text routinely carries the conninfo, and this
+        # reason is sent to every open browser.
+        assert hub.degraded_reason == TicketBoardEventHub.DEGRADED_REASON, hub.degraded_reason
+        for leaked in (secret, "hunter2", "board_user", "tenant_db", "connection failed"):
+            assert leaked not in hub.degraded_reason, leaked
+        # Open clients are woken so they can say the board may be stale.
+        assert listener.get(timeout=1.0)
+
+        app.failure = None
+        app.signature = (("PGU-1", "trace-3"),)
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and hub.degraded_reason:
+            time.sleep(0.02)
+        assert not hub.degraded_reason, "recovery was never reported"
+        assert listener.get(timeout=1.0), "a change after recovery must still notify"
+    finally:
+        hub.close()
 
 
 def main() -> int:
@@ -41,6 +80,7 @@ def main() -> int:
         assert next_version > initial_version
     finally:
         hub.close()
+    reconciler_survives_and_reports_a_failing_scan()
     print("ticket_board_event_hub_signature_test: ok")
     return 0
 

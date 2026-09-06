@@ -31,7 +31,6 @@ from PIL import Image
 from .app import CALLER_ROLES as APP_CALLER_ROLES
 from .app import TicketBoardApp, iso_now, project_slug
 from .frontend import render_html
-from .peer_identity import SessionIdentity, session_identity, session_is_live
 from .runtime_paths import directorctl_path
 
 LOGGER = logging.getLogger(__name__)
@@ -245,200 +244,159 @@ class PeerCredentials:
     gid: int
 
 
-@dataclass
-class CallerRegistration:
+@dataclass(frozen=True)
+class RoleAccount:
+    """A configured role and the Unix account that runs it."""
+
     role: str
+    account: str
     uid: int
-    gid: int
-    session: "SessionIdentity"
-    connection_count: int = 0
 
 
 class CallerIdentityError(PermissionError):
-    """The peer may not act as the role it asked for."""
+    """The peer's Unix identity does not entitle it to the role it used."""
 
 
-class CallerRegistry:
-    """Holds a caller role for the life of a role session rather than one command.
+class LocalRoleAuthority:
+    """Maps a local peer's Unix uid to its board role.
 
-    Before SYRD-39 this keyed on the pid that opened the connection. Every
-    ticket-board-write invocation is its own short-lived process, so the binding
-    was created and released around a single action and the role was unheld in
-    between. Keying on the pane process a role's commands descend from keeps the
-    role held while the role is running.
+    The uid comes from SO_PEERCRED. The kernel sets it and an unprivileged
+    process cannot change it, so unlike a role name on the wire, a process
+    label, an environment variable or an argv string, it is not something the
+    caller can choose. The uid-to-role table comes from this board's own unit
+    configuration, which the role accounts do not own and cannot write.
 
-    This is NOT an authorization boundary, and must not be described as one.
-    The role attached to a session is still the role string the peer supplied
-    while that session and role were vacant, nothing trusted maps a session to
-    its configured role, and every board restart drops all bindings while panes
-    keep running. The session key itself is forgeable with prctl(PR_SET_NAME)
-    plus fork. See docs/ticket-board-service.md; role separation needs per-role
-    Unix identities.
+    That combination is what makes the mapping authoritative, and it is why
+    there is no registration step here at all. Nothing is remembered between
+    requests, so nothing is lost when the board restarts: every request is
+    resolved from the kernel-supplied uid and the configured table (SYRD-39).
+
+    It is only as strong as the deployment giving each role its own account. A
+    project whose roles share one account cannot be told apart here, and the
+    board says so at startup rather than implying a separation it cannot make.
     """
 
     def __init__(
         self,
+        role_accounts: Mapping[str, str] | None = None,
         *,
-        pid_alive: Callable[[int], bool] | None = None,
-        resolve_session: Callable[[int], SessionIdentity | None] | None = None,
-        session_alive: Callable[[SessionIdentity], bool] | None = None,
+        resolve_uid: Callable[[str], int | None] | None = None,
     ) -> None:
-        self._pid_alive = pid_alive or self._default_pid_alive
-        self._resolve_session = resolve_session or session_identity
-        self._session_alive = session_alive or session_is_live
-        self._lock = threading.Lock()
-        self._by_session: dict[tuple[int, int], CallerRegistration] = {}
-        self._role_to_session: dict[str, tuple[int, int]] = {}
+        self._resolve_uid = resolve_uid or self._default_resolve_uid
+        self._by_uid: dict[int, RoleAccount] = {}
+        self._by_role: dict[str, RoleAccount] = {}
+        self._unresolved: dict[str, str] = {}
+        self._shared_accounts: dict[str, list[str]] = {}
+        self._ambiguous_uids: set[int] = set()
+        for role, account in (role_accounts or {}).items():
+            self._add(role.strip().lower(), str(account).strip())
 
     @staticmethod
-    def _default_pid_alive(pid: int) -> bool:
-        if pid <= 0:
-            return False
+    def _default_resolve_uid(account: str) -> int | None:
         try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
-        return True
+            return pwd.getpwnam(account).pw_uid
+        except KeyError:
+            return None
 
-    def session_for_pid(self, pid: int) -> SessionIdentity:
-        """The role session a connecting pid appears to belong to.
-
-        A peer under no pane is refused rather than defaulted to something. Note
-        the limit: a peer can manufacture a pane-looking ancestor, so this
-        refuses accidents, not attacks.
-        """
-        identity = self._resolve_session(pid)
-        if identity is None:
+    def _add(self, role: str, account: str) -> None:
+        if not role or not account:
+            return
+        uid = self._resolve_uid(account)
+        if uid is None:
+            # Fails closed: an unresolved account grants nothing, and the peer
+            # running as it will simply have no role.
+            self._unresolved[role] = account
             LOGGER.warning(
-                "Rejected local board caller pid=%s: not part of any role session process tree",
-                pid,
+                "Role %s is configured to run as %s, which is not a local account; "
+                "that role cannot be identified on the local socket",
+                role,
+                account,
+            )
+            return
+        if uid in self._ambiguous_uids:
+            self._shared_accounts.setdefault(account, []).append(role)
+            self._by_role.pop(role, None)
+            return
+        existing = self._by_uid.get(uid)
+        if existing is not None and existing.role != role:
+            # Two roles on one account cannot be told apart by uid. Refuse both
+            # rather than resolving to whichever was configured first: a
+            # half-migrated tenant must fail closed, not silently hand one role
+            # the other's authority.
+            self._ambiguous_uids.add(uid)
+            self._by_uid.pop(uid, None)
+            self._by_role.pop(existing.role, None)
+            self._by_role.pop(role, None)
+            self._shared_accounts.setdefault(account, [existing.role]).append(role)
+            LOGGER.error(
+                "Roles %s and %s both run as account %s; neither can be authorized on the "
+                "local socket until each role has its own Unix account",
+                existing.role,
+                role,
+                account,
+            )
+            return
+        entry = RoleAccount(role=role, account=account, uid=uid)
+        self._by_uid[uid] = entry
+        self._by_role[role] = entry
+
+    @classmethod
+    def from_environ(
+        cls,
+        environ: Mapping[str, str] | None = None,
+        *,
+        resolve_uid: Callable[[str], int | None] | None = None,
+    ) -> "LocalRoleAuthority":
+        """Build from TICKET_BOARD_ROLE_ACCOUNTS, e.g. "director=syrd-director,main=syrd-main".
+
+        Role names are data, never hardcoded here: whatever the project declares
+        is what the board honours.
+        """
+        source = os.environ if environ is None else environ
+        raw = str(source.get("TICKET_BOARD_ROLE_ACCOUNTS") or "").strip()
+        mapping: dict[str, str] = {}
+        for chunk in raw.replace(",", " ").split():
+            role, sep, account = chunk.partition("=")
+            if not sep:
+                LOGGER.warning("Ignoring malformed TICKET_BOARD_ROLE_ACCOUNTS entry %r", chunk)
+                continue
+            mapping[role.strip().lower()] = account.strip()
+        authority = cls(mapping, resolve_uid=resolve_uid)
+        if not mapping:
+            LOGGER.error(
+                "TICKET_BOARD_ROLE_ACCOUNTS is not configured; local socket writes cannot "
+                "identify a role and will be refused"
+            )
+        return authority
+
+    def role_for_uid(self, uid: int) -> str:
+        entry = self._by_uid.get(uid)
+        if entry is None:
+            LOGGER.warning(
+                "Refused local board caller uid=%s: not a configured role account", uid
             )
             raise CallerIdentityError(
-                "local board writes must come from a role session started by the launcher"
+                "this Unix account is not a configured role for this project"
             )
-        return identity
+        return entry.role
 
-    def register(
-        self,
-        credentials: PeerCredentials,
-        role: str,
-        *,
-        allowed_roles: set[str] | None = None,
-        session: SessionIdentity | None = None,
-    ) -> SessionIdentity:
-        normalized_role = role.strip().lower()
-        if normalized_role not in (allowed_roles if allowed_roles is not None else CALLER_ROLES) - {"user", "unassigned"}:
-            raise ValueError(f"invalid local caller role: {role}")
-        identity = session or self.session_for_pid(credentials.pid)
-        key = identity.key()
-        with self._lock:
-            self._drop_stale_locked()
-            existing = self._by_session.get(key)
-            if existing is not None and existing.role != normalized_role:
-                LOGGER.warning(
-                    "Rejected caller registration as %s from peer pid=%s uid=%s session pid=%s: "
-                    "session already holds role %s",
-                    normalized_role,
-                    credentials.pid,
-                    credentials.uid,
-                    identity.pid,
-                    existing.role,
-                )
-                raise CallerIdentityError(
-                    f"role session {identity.pid} is already registered as {existing.role}"
-                )
-            holder = self._role_to_session.get(normalized_role)
-            if holder is not None and holder != key:
-                LOGGER.warning(
-                    "Rejected caller registration as %s from peer pid=%s uid=%s session pid=%s: "
-                    "role is held by live session pid=%s",
-                    normalized_role,
-                    credentials.pid,
-                    credentials.uid,
-                    identity.pid,
-                    holder[0],
-                )
-                raise CallerIdentityError(
-                    f"role {normalized_role} is held by live role session {holder[0]}"
-                )
-            if existing is None:
-                self._by_session[key] = CallerRegistration(
-                    role=normalized_role,
-                    uid=credentials.uid,
-                    gid=credentials.gid,
-                    session=identity,
-                    connection_count=1,
-                )
-                self._role_to_session[normalized_role] = key
-                LOGGER.info(
-                    "Registered caller role %s for role session pid=%s (peer pid=%s uid=%s gid=%s)",
-                    normalized_role,
-                    identity.pid,
-                    credentials.pid,
-                    credentials.uid,
-                    credentials.gid,
-                )
-            else:
-                existing.connection_count += 1
-        return identity
+    def uid_for_role(self, role: str) -> int | None:
+        entry = self._by_role.get(role.strip().lower())
+        return entry.uid if entry is not None else None
 
-    def release(self, session: SessionIdentity | None) -> None:
-        """Drop one connection's hold.
+    def account_for_role(self, role: str) -> str | None:
+        entry = self._by_role.get(role.strip().lower())
+        return entry.account if entry is not None else None
 
-        The registration itself survives: it belongs to the pane, not to the
-        command that happened to open this connection. It is reclaimed when the
-        pane exits, which is what lets a restarted role take its role back.
-        """
-        if session is None:
-            return
-        with self._lock:
-            registration = self._by_session.get(session.key())
-            if registration is None:
-                return
-            if registration.connection_count > 0:
-                registration.connection_count -= 1
-            self._drop_stale_locked()
+    def roles(self) -> list[str]:
+        return sorted(self._by_role)
 
-    def role_for_pid(self, pid: int) -> str:
-        identity = self.session_for_pid(pid)
-        with self._lock:
-            registration = self._by_session.get(identity.key())
-            if registration is None:
-                raise ValueError(
-                    f"role session {identity.pid} has not registered a caller role"
-                )
-            if not self._session_alive(registration.session):
-                self._release_locked(identity.key())
-                raise ValueError(f"role session {identity.pid} registration is stale")
-            return registration.role
+    def shared_accounts(self) -> dict[str, list[str]]:
+        """Accounts backing more than one role; those roles are unauthorizable."""
+        return {account: sorted(roles) for account, roles in self._shared_accounts.items()}
 
-    def registered_role_for_session(self, session: SessionIdentity) -> str | None:
-        with self._lock:
-            registration = self._by_session.get(session.key())
-            return registration.role if registration is not None else None
-
-    def pid_for_role(self, role: str) -> int | None:
-        with self._lock:
-            self._drop_stale_locked()
-            key = self._role_to_session.get(role)
-            return key[0] if key is not None else None
-
-    def _release_locked(self, key: tuple[int, int]) -> None:
-        registration = self._by_session.pop(key, None)
-        if registration is not None and self._role_to_session.get(registration.role) == key:
-            self._role_to_session.pop(registration.role, None)
-
-    def _drop_stale_locked(self) -> None:
-        for key, registration in list(self._by_session.items()):
-            if not self._session_alive(registration.session):
-                LOGGER.info(
-                    "Released caller role %s: role session pid=%s is gone",
-                    registration.role,
-                    registration.session.pid,
-                )
-                self._release_locked(key)
+    def unresolved_roles(self) -> dict[str, str]:
+        return dict(self._unresolved)
 
 
 def peer_credentials(connection: socket.socket) -> PeerCredentials:
@@ -650,16 +608,13 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
     def setup(self) -> None:
         super().setup()
         self._local_peer_credentials: PeerCredentials | None = None
-        self._registered_session: SessionIdentity | None = None
-        if self.caller_registry is not None:
+        if self.role_authority is not None:
             self._local_peer_credentials = peer_credentials(self.connection)  # type: ignore[arg-type]
 
     def finish(self) -> None:
-        try:
-            super().finish()
-        finally:
-            if self._registered_session is not None and self.caller_registry is not None:
-                self.caller_registry.release(self._registered_session)
+        # Nothing to release: role authority is resolved per request from the
+        # peer's uid, so no state is held across connections or restarts.
+        super().finish()
 
     def require_allowed_peer(self) -> PeerCredentials:
         """Refuse local peers that are not this tenant.
@@ -696,8 +651,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         return self.server.director_notifier  # type: ignore[attr-defined]
 
     @property
-    def caller_registry(self) -> CallerRegistry | None:
-        return getattr(self.server, "caller_registry", None)
+    def role_authority(self) -> LocalRoleAuthority | None:
+        return getattr(self.server, "role_authority", None)
 
     @property
     def write_token(self) -> str:
@@ -804,12 +759,12 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         return self.app.verify_created_ticket_persisted(created, before_signature)
 
     def caller_role(self) -> str:
-        if self.caller_registry is not None:
+        if self.role_authority is not None:
             credentials = self.require_allowed_peer()
-            # The session comes from the peer's process tree rather than the
-            # header, but the role bound to that session was supplied by
-            # whichever peer claimed it first. Not an authorization boundary.
-            return self.caller_registry.role_for_pid(credentials.pid)
+            # The kernel supplied this uid; the caller could not choose it, and
+            # the uid-to-role table belongs to the board, not to the roles. The
+            # header below is never consulted on this path.
+            return self.role_authority.role_for_uid(credentials.uid)
         # Keep the legacy name while clients transition. A server-side alias only
         # protects old clients on a new board; clients must dual-send to support
         # new tooling talking to an older deployed board.
@@ -822,14 +777,14 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         return role
 
     def require_http_write_token(self) -> None:
-        if self.caller_registry is not None:
+        if self.role_authority is not None:
             return
         raw = self.headers.get(WRITE_TOKEN_HEADER, "") or self.headers.get(LEGACY_WRITE_TOKEN_HEADER, "")
         if not raw or not secrets.compare_digest(raw, self.write_token):
             raise PermissionError(f"missing or invalid {WRITE_TOKEN_HEADER}")
 
     def require_http_report_token(self) -> None:
-        if self.caller_registry is not None:
+        if self.role_authority is not None:
             raise PermissionError("tenant report filing is only available over HTTP")
         if not self.report_token:
             raise PermissionError(f"{REPORT_TOKEN_HEADER} is not configured")
@@ -838,42 +793,31 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             raise PermissionError(f"missing or invalid {REPORT_TOKEN_HEADER}")
 
     def handle_register_caller(self, payload: dict[str, object]) -> None:
-        """Claim, or confirm, this role session's caller role.
+        """Report the role this peer's Unix account holds.
 
-        The claim is checked against what this session already holds and what
-        already holds the role, and a conflict is refused and logged with the
-        real peer pid. It is NOT authenticated: a vacant role goes to whoever
-        asks first, and a restart makes every role vacant again while the panes
-        keep running (SYRD-39).
+        Kept for clients that still announce a role, but it no longer grants
+        anything: the role is resolved from the peer's uid either way. A
+        supplied role that disagrees with the account's role is refused and
+        logged with the real peer uid and pid, so a forged claim is visible
+        rather than merely ineffective (SYRD-39).
         """
-        if self.caller_registry is None:
+        if self.role_authority is None:
             raise ValueError("caller registration is only available on the local Unix socket")
         credentials = self.require_allowed_peer()
-        role = str(payload.get("role", "")).strip().lower()
-        session = self.caller_registry.session_for_pid(credentials.pid)
-        established = self.caller_registry.registered_role_for_session(session)
-        if established is not None:
-            if role and role != established:
-                LOGGER.warning(
-                    "Rejected role claim %r from peer pid=%s uid=%s: role session pid=%s is %s",
-                    role,
-                    credentials.pid,
-                    credentials.uid,
-                    session.pid,
-                    established,
-                )
-                raise CallerIdentityError(
-                    f"this role session is registered as {established}, not {role}"
-                )
-            self._registered_session = session
-            self.send_json({"role": established, "pid": session.pid})
-            return
-        allowed = set(getattr(self.app, "workflow_roles", lambda: list(CALLER_ROLES))())
-        if role not in allowed or role == "user":
-            raise ValueError(f"invalid local caller role: {role}")
-        self.caller_registry.register(credentials, role, allowed_roles=allowed, session=session)
-        self._registered_session = session
-        self.send_json({"role": role, "pid": session.pid})
+        derived = self.role_authority.role_for_uid(credentials.uid)
+        claimed = str(payload.get("role", "")).strip().lower()
+        if claimed and claimed != derived:
+            LOGGER.warning(
+                "Refused role claim %r from peer pid=%s uid=%s: that account is %s",
+                claimed,
+                credentials.pid,
+                credentials.uid,
+                derived,
+            )
+            raise CallerIdentityError(
+                f"this account is registered as {derived}, not {claimed}"
+            )
+        self.send_json({"role": derived, "uid": credentials.uid, "pid": credentials.pid})
 
     def require_operation_allowed(self, operation: str, caller_role: str, ticket_id: str | None = None) -> None:
         cfg = getattr(self.app, "workflow_configuration", lambda: None)()
@@ -996,7 +940,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         )
 
     def notification_source_role(self, operation: str, caller_role: str | None) -> str | None:
-        if operation == "create_ticket" and caller_role == "director" and self.caller_registry is None:
+        if operation == "create_ticket" and caller_role == "director" and self.role_authority is None:
             return "user"
         return None
 
@@ -1500,7 +1444,7 @@ class TicketBoardServer(ThreadingHTTPServer):
         app: TicketBoardApp,
         director_notifier: DirectorNotifier | None = None,
         events: TicketBoardEventHub | None = None,
-        caller_registry: CallerRegistry | None = None,
+        role_authority: LocalRoleAuthority | None = None,
         write_token: str | None = None,
         report_token: str | None = None,
     ) -> None:
@@ -1509,7 +1453,7 @@ class TicketBoardServer(ThreadingHTTPServer):
         self._owns_events = events is None
         self.director_notifier = director_notifier or DirectorNotifier(project=getattr(app, "project", None))
         self._owns_director_notifier = director_notifier is None
-        self.caller_registry = caller_registry
+        self.role_authority = role_authority
         self.build_id = board_build_id()
         self.write_token = write_token or secrets.token_urlsafe(32)
         self.report_token = (report_token or "").strip()
@@ -1536,13 +1480,13 @@ class TicketBoardUnixServer(ThreadingUnixHTTPServer):
         *,
         events: TicketBoardEventHub,
         director_notifier: DirectorNotifier,
-        caller_registry: CallerRegistry | None = None,
+        role_authority: LocalRoleAuthority | None = None,
     ) -> None:
         self.socket_path = socket_path
         self.app = app
         self.events = events
         self.director_notifier = director_notifier
-        self.caller_registry = caller_registry or CallerRegistry()
+        self.role_authority = role_authority or LocalRoleAuthority.from_environ()
         self.build_id = board_build_id()
         self.write_token = ""
         socket_path.parent.mkdir(parents=True, exist_ok=True)

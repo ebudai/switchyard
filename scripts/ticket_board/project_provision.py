@@ -56,6 +56,7 @@ class ProjectBoardProvision:
     listener_unit: str
     tmpfiles_name: str
     polkit_name: str
+    role_control_sudoers_name: str
     runtime_directory: str
     socket_path: str
     port: int
@@ -81,6 +82,10 @@ class ProjectBoardProvision:
     caller_roles: tuple[str, ...]
     operation_allowed_roles: tuple[tuple[str, tuple[str, ...]], ...]
     board_service_traversal: bool
+    # SYRD-39: one Unix account per configured role, and the group that
+    # lets exactly those accounts reach this project's board socket.
+    role_accounts: tuple[tuple[str, str], ...] = ()
+    roles_group: str = ""
     workflow: dict | None = None
 
 
@@ -319,6 +324,7 @@ def build_plan(
         listener_unit=f"{unit_prefix}-notify-listener.service",
         tmpfiles_name=f"{unit_prefix}.conf",
         polkit_name=f"49-{unit_prefix}-deploy.rules",
+        role_control_sudoers_name=f"49-{project}-role-control",
         runtime_directory=runtime_directory,
         socket_path=f"/run/{runtime_directory}/ticket-board.sock",
         port=resolved_port,
@@ -349,7 +355,45 @@ def build_plan(
         caller_roles=caller_roles,
         operation_allowed_roles=operation_allowed_roles,
         board_service_traversal=board_service_traversal,
+        role_accounts=role_account_table(project, caller_roles),
+        roles_group=roles_group_name(project),
     )
+
+
+# Roles that never run a local process: the human uses the browser or the
+# authenticated HTTP path, so no Unix account is created for them.
+NON_PROCESS_ROLES = frozenset({"user", "unassigned"})
+
+
+def role_account_name(project: str, role: str) -> str:
+    """The Unix account that runs one role of one project."""
+    return f"{project}-{role}"
+
+
+def roles_group_name(project: str) -> str:
+    """The group whose members may reach this project's board socket."""
+    return f"{project}-roles"
+
+
+def role_account_table(project: str, caller_roles: Sequence[str]) -> tuple[tuple[str, str], ...]:
+    """(role, account) for every role that runs as a local process.
+
+    Derived from the project's declared caller roles, so adding or renaming a
+    role in configuration is enough; nothing here knows what a director is.
+    """
+    seen: list[tuple[str, str]] = []
+    for role in caller_roles:
+        name = str(role).strip().lower()
+        if not name or name in NON_PROCESS_ROLES:
+            continue
+        if any(existing == name for existing, _ in seen):
+            continue
+        seen.append((name, role_account_name(project, name)))
+    return tuple(seen)
+
+
+def role_accounts_env(plan: "ProjectBoardProvision") -> str:
+    return ",".join(f"{role}={account}" for role, account in plan.role_accounts)
 
 
 def shell_quote(value: str) -> str:
@@ -386,6 +430,83 @@ def service_user_command(service_user: str) -> str:
     fi
     sudo useradd -r -M -d /nonexistent -s "$service_shell" {q_service_user}
 fi"""
+
+
+def role_accounts_command(plan: ProjectBoardProvision) -> str:
+    """Create one Unix account per role, plus the group that reaches the socket.
+
+    This is the boundary the board relies on: SO_PEERCRED reports a uid the
+    caller cannot choose, so giving each role its own account is what makes the
+    role mapping authoritative rather than advisory (SYRD-39).
+
+    Idempotent, and safe to re-run on an existing tenant: accounts and group
+    memberships that already exist are left alone, which is what makes this
+    double as the migration for a tenant that previously ran every role under
+    one account.
+    """
+    if not plan.role_accounts or not plan.roles_group:
+        return ""
+    q_group = shell_quote(plan.roles_group)
+    q_owner = shell_quote(plan.owner_user)
+    q_service = shell_quote(plan.service_user)
+    lines = [
+        f"if ! getent group {q_group} >/dev/null 2>&1; then",
+        f"    sudo groupadd -r {q_group}",
+        "fi",
+        # The board service must be able to hand the socket to the group, and
+        # the tenant owner keeps its existing operational access.
+        f"sudo gpasswd -a {q_service} {q_group} >/dev/null",
+        f"sudo gpasswd -a {q_owner} {q_group} >/dev/null",
+    ]
+    for role, account in plan.role_accounts:
+        q_account = shell_quote(account)
+        q_home = shell_quote(role_account_home(plan, role))
+        lines.extend(
+            [
+                f"if ! getent passwd {q_account} >/dev/null 2>&1; then",
+                f"    sudo useradd -m -d {q_home} -s /bin/bash {q_account}",
+                "fi",
+                f"sudo gpasswd -a {q_account} {q_group} >/dev/null",
+                # Roles read the shared board install and write only their own
+                # home; the tenant owner keeps group access for operations.
+                f"sudo install -d -m 0750 -o {q_account} -g {q_group} {q_home}",
+                f"sudo loginctl enable-linger {q_account} >/dev/null 2>&1 || true",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def role_account_home(plan: ProjectBoardProvision, role: str) -> str:
+    """Where one role account lives. Its worktree, config and credentials sit
+    under here, owned by that account, so one role cannot read another's."""
+    return f"/home/{role_account_name(plan.project, role)}"
+
+
+def role_control_sudoers(plan: ProjectBoardProvision) -> str:
+    """Let the director account drive other roles' tmux servers explicitly.
+
+    With one account per role there is no shared tmux server any more, so
+    presentation and control need a named privileged interface instead of
+    ambient access. This grants exactly `tmux` as each role account to the
+    director account, and nothing else (SYRD-39).
+    """
+    director_account = next(
+        (account for role, account in plan.role_accounts if role == "director"),
+        "",
+    )
+    if not director_account or not plan.role_accounts:
+        return ""
+    targets = ",".join(
+        account for role, account in plan.role_accounts if account != director_account
+    )
+    if not targets:
+        return ""
+    return (
+        f"# {plan.project}: role control interface. The director account may run tmux as\n"
+        f"# another role account to present and drive that role's session. It grants no\n"
+        f"# other command and no root.\n"
+        f"{director_account} ALL=({targets}) NOPASSWD: /usr/bin/tmux\n"
+    )
 
 
 def peer_auth_command(plan: ProjectBoardProvision) -> str:
@@ -786,10 +907,17 @@ def render_board_unit(plan: ProjectBoardProvision) -> str:
     # The tenant reaches the board socket through its own group rather than the
     # socket being world-writable, so the service joins that group and the
     # server chgrps the socket to it at bind (SYRD-39).
-    tenant_group = tenant_primary_group(plan.owner_user)
-    tenant_group_line = f"SupplementaryGroups={tenant_group}\n" if tenant_group else ""
+    # The board joins the project's roles group so it can hand the socket to
+    # that group, and carries the authoritative role->account table. Role
+    # authority is the peer's uid resolved through this table (SYRD-39).
+    tenant_group_line = f"SupplementaryGroups={plan.roles_group}\n" if plan.roles_group else ""
     socket_group_env_line = (
-        f"Environment=TICKET_BOARD_SOCKET_GROUP={tenant_group}\n" if tenant_group else ""
+        f"Environment=TICKET_BOARD_SOCKET_GROUP={plan.roles_group}\n" if plan.roles_group else ""
+    )
+    role_accounts_line = (
+        f"Environment=TICKET_BOARD_ROLE_ACCOUNTS={role_accounts_env(plan)}\n"
+        if plan.role_accounts
+        else ""
     )
     return f"""[Unit]
 Description={plan.project} Ticket Board
@@ -818,7 +946,7 @@ Environment=PGDATABASE={plan.database}
 Environment=PGUSER={plan.service_role}
 Environment=TICKET_BOARD_SOCKET={plan.socket_path}
 Environment=TICKET_BOARD_TENANT_USER={plan.owner_user}
-{socket_group_env_line}Environment=TICKET_BOARD_DATABASE_URL={plan.board_database_url}
+{socket_group_env_line}{role_accounts_line}Environment=TICKET_BOARD_DATABASE_URL={plan.board_database_url}
 Environment=TICKET_BOARD_DRAFT_ROLES={env_list(plan.draft_roles)}
 Environment=TICKET_BOARD_IMPLEMENTER_ROLES={env_list(plan.implementer_roles)}
 Environment=TICKET_BOARD_ASSIGNEES={env_list(plan.assignee_roles)}
@@ -1378,6 +1506,20 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
     q_canary_unit = shell_quote(f"/etc/systemd/system/{plan.canary_unit}")
     q_tmpfiles = shell_quote(f"/etc/tmpfiles.d/{plan.tmpfiles_name}")
     q_polkit = shell_quote(f"/etc/polkit-1/rules.d/{plan.polkit_name}")
+    q_role_control_sudoers = shell_quote(f"/etc/sudoers.d/{plan.role_control_sudoers_name}")
+    if role_control_sudoers(plan).strip():
+        # visudo -c first: a malformed sudoers file can lock the host out of
+        # sudo entirely, so it is validated before it is installed.
+        install_role_control_sudoers = (
+            f"sudo install -m 0440 -o root -g root {shell_quote(plan.role_control_sudoers_name)} "
+            f"{q_role_control_sudoers}.staged\n"
+            f"sudo visudo -c -f {q_role_control_sudoers}.staged\n"
+            f"sudo mv {q_role_control_sudoers}.staged {q_role_control_sudoers}"
+        )
+    else:
+        install_role_control_sudoers = (
+            "# no role control interface: this project declares no director role"
+        )
     q_listener_unit = shell_quote(
         f"{plan.owner_home}/.config/systemd/user/{plan.listener_unit}"
     )
@@ -1493,6 +1635,7 @@ provision_dir="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 system_unit_candidate="$provision_dir/{plan.board_unit}"
 canary_unit_candidate="$provision_dir/{plan.canary_unit}"
 {service_user_command(plan.service_user)}
+{role_accounts_command(plan)}
 {peer_auth_command(plan)}
 {install_board_root}
 sudo -u {q_owner_user} -H env HOME={q_owner_home} TICKET_BOARD_OWNER_HOME={q_owner_home} TICKET_BOARD_PROJECT={shell_quote(plan.project)} TICKET_BOARD_COMMIT_GIT_DIR={q_commit_git_dir} TICKET_BOARD_PROVISIONED_SYSTEM_UNIT="$system_unit_candidate" SOURCE_REPO={q_source_repo} BOARD_ROOT={q_board_root} DEPLOY_REF=origin/main TICKET_BOARD_SKIP_MIGRATIONS=1 {q_deploy_script} deploy
@@ -1510,6 +1653,7 @@ sudo install -m 0644 "$system_unit_candidate" {q_board_unit}
 sudo install -m 0644 "$canary_unit_candidate" {q_canary_unit}
 sudo install -m 0644 {shell_quote(plan.tmpfiles_name)} {q_tmpfiles}
 sudo install -m 0644 {shell_quote(plan.polkit_name)} {q_polkit}
+{install_role_control_sudoers}
 sudo systemd-tmpfiles --create {q_tmpfiles}
 {postgres_sql_file_command(plan.project + '-database.sql')}
 {postgres_sql_file_command(plan.board_current + '/scripts/ticket_board/schema.sql', database_url=plan.admin_database_url)}
@@ -1549,6 +1693,7 @@ def write_artifacts(plan: ProjectBoardProvision, output_dir: Path, *, enable_own
         plan.listener_unit: render_listener_unit(plan),
         plan.tmpfiles_name: render_tmpfiles(plan),
         plan.polkit_name: render_polkit_rule(plan),
+        plan.role_control_sudoers_name: role_control_sudoers(plan),
         f"{plan.project}-database.sql": render_database_sql(plan),
         f"{plan.project}-workflow.sql": render_workflow_sql(plan),
         "operator-commands.sh": render_operator_commands(plan, enable_owner_linger=enable_owner_linger),
@@ -1619,7 +1764,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", help="print plan JSON")
     parser.add_argument(
         "--render",
-        choices=["board-unit", "listener-unit", "tmpfiles", "polkit", "database-sql", "workflow-sql", "commands"],
+        choices=["board-unit", "listener-unit", "tmpfiles", "polkit", "role-control-sudoers", "database-sql", "workflow-sql", "commands"],
         help="print one rendered artifact",
     )
     return parser
@@ -1662,6 +1807,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "listener-unit": render_listener_unit,
             "tmpfiles": render_tmpfiles,
             "polkit": render_polkit_rule,
+            "role-control-sudoers": role_control_sudoers,
             "database-sql": render_database_sql,
             "workflow-sql": render_workflow_sql,
             "commands": render_operator_commands,

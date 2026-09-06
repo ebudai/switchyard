@@ -424,86 +424,79 @@ agent/tool output is delivered to the director, and a still-busy composer waits
 only for the bounded retry count before delivering with a warning so
 pane-to-director escalations cannot starve forever.
 
-## Local write authority: what is enforced, and what is not
+## Local write authority
 
-Read this before relying on a caller role for anything security-relevant. An
-earlier revision of this section claimed more than the code delivers; the
-claims below are the ones that survived adversarial review (SYRD-39).
+A board write over the tenant Unix socket carries a caller role. That role is
+**the peer's Unix account**, resolved by the board; it is never the role name a
+caller supplies.
 
-### Enforced: which Unix account may reach this board
+### Why the uid, and nothing else
 
-- The socket is mode `0660` inside a `0750` runtime directory, both group-owned
-  by the tenant's group, which the unit grants the board service as a
-  supplementary group. It was previously `0666` in a world-traversable
-  directory, so any local account -- including another tenant's -- could
-  connect.
-- With `TICKET_BOARD_TENANT_USER` configured the board additionally refuses peer
-  uids that are neither the tenant owner nor its own account.
-- A board restart repairs an already-deployed socket's ownership and mode, so
-  provisioning and `switchyard upgrade` both carry the repair before roles
-  launch. When the group is unset or unknown the board logs a warning and leaves
-  the socket alone, so a half-configured deployment is visible rather than
-  quietly unprotected.
-- HTTP writes keep their own separate token authentication.
+`SO_PEERCRED` reports the connecting process's uid. The kernel sets it and an
+unprivileged process cannot change it. Everything else a peer could offer --
+a role name in the payload, the `X-Ticket-Board-Caller-Role` header, an
+environment variable, its own argv, its `/proc` `comm`, or a file it can write
+-- is chosen by the caller, and none of them are consulted for authorization.
 
-This is a real boundary because it rests on Unix uids, which the kernel
-enforces.
+Each configured role therefore runs as **its own Unix account**:
 
-### NOT enforced: which role a local caller is
+- `TICKET_BOARD_ROLE_ACCOUNTS` in the board unit carries the authoritative
+  `role=account` table, generated from the project's declared roles. Role names
+  are data; nothing in the board hardcodes them.
+- `LocalRoleAuthority` resolves a peer's uid through that table on **every
+  request**. There is no registration and nothing is remembered, so a board
+  restart cannot leave a role vacant and a role cannot be claimed by whoever
+  asks first.
+- A uid that is not a configured role account gets no role at all, whatever it
+  asks for. A `register-caller` payload or header naming a different role is
+  refused and logged with the real peer uid and pid.
+- If two roles are configured onto one account -- a half-finished migration --
+  **both** are refused rather than one silently receiving the other's
+  authority, and the board logs the conflict.
+- Roles that never run a local process, such as the human `user` role, get no
+  account; they reach the board over its separately authenticated HTTP path.
 
-**Role separation between the roles of one project is not enforced, and cannot
-be while every role runs as the same Unix uid.** Do not design anything on the
-assumption that a caller role proves who is calling.
+### Socket reach
 
-The board binds a caller role to a *role session* -- the pane process a role's
-commands descend from -- so that a role's authority survives its one-shot
-`ticket-board-write` helpers instead of evaporating between commands. That is a
-**durability and stability mechanism, not an authorization boundary.** Two
-independent weaknesses, both reproduced, keep it from being one:
+The socket is `0660` inside a `0750` runtime directory, both group-owned by the
+project's roles group. The board service joins that group, so it can hand the
+socket to it without privilege at runtime. Only that project's role accounts,
+the board service and the tenant owner are in the group, so another tenant's
+Unix account cannot connect at all. A board restart repairs an already-deployed
+socket's ownership and mode, so provisioning and `switchyard upgrade` both carry
+the repair before roles launch.
 
-1. **The first binding is still the caller's word.** The board derives the
-   session key from the process tree, but the role attached to that key is
-   whatever the peer supplied while the session and role were both vacant.
-   Nothing trusted maps a session to its configured role.
-   `ticket-board-claim-role` narrows the window at pane start but uses the same
-   unauthenticated endpoint, and every board restart drops all bindings while
-   the panes keep running, which reopens the window for every live pane. A
-   normal deploy is enough to recreate it.
+### Role sessions and control
 
-2. **The session key itself is forgeable from inside any pane.** The pane root
-   is found by looking for an ancestor whose parent's `/proc/<pid>/stat` `comm`
-   begins with `tmux`. A process sets its own `comm` with
-   `prctl(PR_SET_NAME)`, so one `prctl` plus one `fork` manufactures a fresh,
-   unused "pane" identity without entering another pane, without driving tmux
-   and without `ptrace`.
+Because each role is a different account, each role gets its **own tmux server**
+by construction; there is no shared server for a role to reach into. Director
+presentation and control therefore go through an explicit, narrow privileged
+interface rather than ambient access: the generated
+`/etc/sudoers.d/<project>-role-control` lets the director account run `tmux`,
+and only `tmux`, as the other role accounts. It grants no root and no other
+command, and it is validated with `visudo -c` before installation.
 
-The board cannot close either one on its own: `/proc/<pid>/fd` is unreadable
-across uids, so it cannot authenticate the real tmux server, and every other
-input it can read is writable by any process of the tenant uid. Under one shared
-uid, every role is the tenant.
+### Provisioning, migration and ownership
 
-The regressions in `tests/ticket_board_pid_identity_test.py` pin both
-weaknesses deliberately, so neither can be quietly reintroduced or quietly
-described as fixed.
+`role_accounts_command` in the provisioning artifacts creates the roles group
+and one account per role, adds each to the group, and gives each role a home it
+owns at `0750`, so one role cannot read another's worktree, config or
+credentials. Every step is guarded by an existence check, which is what makes
+the same artifact the **migration** for a tenant that previously ran every role
+under one account: re-running it creates only what is missing.
 
-### The minimum isolation change
+Until a tenant has been migrated its roles still share one account. The board
+does not pretend otherwise -- it refuses roles that share a uid and says so in
+the log, rather than resolving to whichever was configured first.
 
-Give each role its own Unix identity: a separate account per role, each with its
-own tmux server and its own membership of the socket group. Then `SO_PEERCRED`'s
-uid alone separates roles, the kernel enforces it, and both `comm` forgery and
-cross-pane tmux driving stop mattering.
+### What this does and does not cover
 
-A cgroup-based variant reaches the same place without new accounts, but only if
-each role's tmux server runs under a **root-owned** cgroup -- a system unit per
-role rather than a user-delegated scope -- because systemd delegates the user
-slice to the user, who may then move processes between their own cgroups.
-`/proc/<pid>/cgroup` is world-readable, so a root-owned per-role cgroup would be
-authoritative to the board.
+It covers: another tenant's Unix account reaching this board, any local process
+asserting a role it does not run as, and both of those across board restarts and
+role restarts, because authority is re-derived from the kernel every request.
 
-Either option is an infrastructure change: new accounts or units, per-role tmux
-servers and sockets, and a migration for existing tenants. Neither is a code
-change inside the board.
-
-Environment variables, prompt text, tokens readable by the same uid, and the
-no-impersonation rule in the role skill are **not** enforcement and must never
-be presented as isolation.
+It does not remove the need for the host to be sound. A user who can become
+another role's account, or root, is that role; per-role accounts move the
+boundary onto standard Unix privilege separation, they do not replace it.
+Environment variables, prompt text, and the no-impersonation rule in the role
+skill remain **not** enforcement and must never be presented as isolation.

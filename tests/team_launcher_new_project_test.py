@@ -689,6 +689,64 @@ def test_add_role_can_recover_half_added_role_without_reappending_config() -> No
     assert "role ops already exists in mefp; reapplied board registration" in output
     assert "started tmux session for the existing role" in output
 
+
+def test_generated_roles_each_run_as_their_own_unix_account() -> None:
+    """SYRD-39: per-role accounts are what make the board's uid mapping real.
+
+    They also give each role its own tmux server, because a tmux server is
+    per-user, which removes the shared server a role could otherwise reach into.
+    """
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="switchyard-role-accounts.") as tmp:
+        tmp_path = Path(tmp)
+        output_dir = tmp_path / "out"
+        source_repo = tmp_path / "source-repo"
+        project_repo = tmp_path / "project-repo"
+        source_repo.mkdir()
+        project_repo.mkdir()
+
+        with redirect_stdout(StringIO()):
+            assert (
+                new_project_command(
+                    "porter",
+                    owner_user=current_user,
+                    source_repo=source_repo,
+                    commit_git_dir="/srv/git/review-cache.git",
+                    repository=project_repo,
+                    output_dir=output_dir,
+                    runner=FakeRunner(),
+                    port_in_use=lambda _port: False,
+                    socket_exists=lambda _path: False,
+                )
+                == 0
+            )
+
+        config = json.loads((output_dir / "porter.json").read_text(encoding="utf-8"))
+        board_unit = (output_dir / "porter-ticket-board.service").read_text(encoding="utf-8")
+        commands = (output_dir / "operator-commands.sh").read_text(encoding="utf-8")
+        loaded = load_project_config("porter", output_dir / "porter.json")
+
+    accounts = {role["role"]: role.get("run_as_user", "") for role in config["roles"]}
+    assert accounts, config
+    for role_name, account in accounts.items():
+        assert account == f"porter-{role_name}", (role_name, account)
+    # No two roles share an account: a shared uid cannot be told apart.
+    assert len(set(accounts.values())) == len(accounts), accounts
+    # Each role also has its own tmux session, under its own account, so there
+    # is no shared tmux server between roles.
+    sessions = {role["tmux_session"] for role in config["roles"]}
+    assert len(sessions) == len(config["roles"]), sessions
+
+    # The board is told the same table it will resolve peer uids against, and
+    # the operator artifact creates exactly those accounts.
+    for role_name, account in accounts.items():
+        assert f"{role_name}={account}" in board_unit, role_name
+        assert f"if ! getent passwd '{account}'" in commands, role_name
+
+    for role in loaded.roles:
+        assert team_launcher.role_run_as_user(loaded, role) == f"porter-{role.role}", role.role
+
+
 def main() -> int:
     run_team_launcher_tests(globals(), first=())
     print("team_launcher_new_project_test: ok")

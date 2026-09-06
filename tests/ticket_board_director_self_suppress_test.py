@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -24,7 +25,7 @@ except ModuleNotFoundError:
     )
 
 from scripts.ticket_board.app import TicketBoardApp
-from scripts.ticket_board.server import CallerRegistry, TicketBoardEventHub, TicketBoardUnixServer
+from scripts.ticket_board.server import LocalRoleAuthority, TicketBoardEventHub, TicketBoardUnixServer
 from scripts.ticket_board.write_client import TicketBoardWriteClient
 
 
@@ -196,7 +197,7 @@ def assert_director_write_client_self_suppresses_notifications() -> None:
                 app,
                 events=events,
                 director_notifier=notifier,
-                caller_registry=CallerRegistry(),
+                role_authority=local_role_authority_as("director"),
             )
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -303,6 +304,14 @@ def assert_director_write_client_self_suppresses_notifications() -> None:
                 check=False,
             )
 
+
+def local_role_authority_as(role: str) -> LocalRoleAuthority:
+    """Run the local socket as though this test process were `role`'s account.
+
+    Role authority is the peer's Unix uid, so a test that drives the write
+    client has to say which role account it is standing in for.
+    """
+    return LocalRoleAuthority({role: f"test-{role}"}, resolve_uid=lambda _account: os.getuid())
 
 def main() -> int:
     assert_director_write_client_self_suppresses_notifications()

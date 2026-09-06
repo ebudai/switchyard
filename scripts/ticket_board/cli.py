@@ -17,7 +17,7 @@ from .app import (
     TicketBoardApp,
 )
 from .commit_repos import commit_git_dir_env_for_project
-from .server import CallerRegistry, DirectorNotifier, TicketBoardEventHub, TicketBoardServer, TicketBoardUnixServer
+from .server import DirectorNotifier, LocalRoleAuthority, TicketBoardEventHub, TicketBoardServer, TicketBoardUnixServer
 
 DEFAULT_UNIX_SOCKET = (
     os.environ.get("TICKET_BOARD_SOCKET", "").strip()
@@ -66,7 +66,7 @@ def run_server(args: argparse.Namespace) -> int:
     )
     event_hub = TicketBoardEventHub(app)
     director_notifier = DirectorNotifier()
-    caller_registry = CallerRegistry()
+    role_authority = LocalRoleAuthority.from_environ()
     server = TicketBoardServer(
         (args.host, args.port),
         app,
@@ -83,7 +83,7 @@ def run_server(args: argparse.Namespace) -> int:
                 app,
                 events=event_hub,
                 director_notifier=director_notifier,
-                caller_registry=caller_registry,
+                role_authority=role_authority,
             )
         except OSError as exc:
             print(f"[ticket-board] WARNING: local write socket disabled at {args.unix_socket}: {exc}", file=sys.stderr)

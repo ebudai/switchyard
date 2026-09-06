@@ -315,6 +315,11 @@ class RoleConfig:
     fresh_session_per_ticket: bool
     live_commands: list[str]
     env: dict[str, str]
+    # SYRD-39: the Unix account this role runs as. One account per role is
+    # what makes SO_PEERCRED's uid an authoritative role identity on the
+    # board socket. Empty falls back to the project account, which is the
+    # pre-migration arrangement and cannot separate roles.
+    run_as_user: str = ""
     unset_env: tuple[str, ...] = ()
 
 
@@ -1589,7 +1594,26 @@ def _role_from_json(project: str, raw: dict[str, Any], *, base: Path, default_wo
         ),
         live_commands=_string_list(raw.get("live_commands"), field="live_commands", role=role),
         env={str(key): str(value) for key, value in env_raw.items()},
+        run_as_user=str(raw.get("run_as_user") or "").strip(),
     )
+
+
+def role_account_name(project: str, role: str) -> str:
+    """The Unix account a role runs as. Defined once, in provisioning."""
+    from scripts.ticket_board.project_provision import role_account_name as _name
+
+    return _name(project, role)
+
+
+def role_run_as_user(config: ProjectConfig, role: RoleConfig) -> str:
+    """The account a role's session runs as.
+
+    Per-role accounts are what give each role its own tmux server and make the
+    board's uid-to-role mapping authoritative. A role without one falls back to
+    the project account, which still works but cannot be told apart from the
+    other roles on the board socket (SYRD-39).
+    """
+    return role.run_as_user or config.run_as_user
 
 
 def _role_board_env(config: ProjectConfig, role: RoleConfig, session_role_map: dict[str, str]) -> dict[str, str]:
@@ -2523,11 +2547,6 @@ def _resume_preflight_allows_attempt(role: RoleConfig, session_id: str, *, sessi
     )
 
 
-def claim_role_script_path() -> Path:
-    """The pane-side helper that claims a role before the CLI starts."""
-    return Path(__file__).resolve().parent / "ticket-board-claim-role"
-
-
 def cli_command_for_role(
     role: RoleConfig,
     *,
@@ -2535,7 +2554,6 @@ def cli_command_for_role(
     pane_state_dir: Path | None = None,
     resume: bool = False,
     bin_user: str = "",
-    claim_role: bool = False,
 ) -> list[str]:
     session_id = session_id_for_role(role, session_dir) if resume else ""
     if session_id and _uses_fresh_session_per_ticket(role):
@@ -2575,12 +2593,6 @@ def cli_command_for_role(
             )
         pane_path_dirs.insert(0, str(directorctl_path.parent))
     env["PATH"] = _prepend_paths(env.get("PATH") or default_pane_base_path(bin_user), pane_path_dirs)
-    if claim_role:
-        # The pane claims its board role before the CLI takes over, so the
-        # board binds authority to this pane rather than learning the role from
-        # whichever command happens to write first (SYRD-39). exec keeps the pid,
-        # so the claimed session is the pane process itself.
-        command = [str(claim_role_script_path()), role.role, *command]
     return ["env", *_env_unset_prefix((*PANE_TARGET_ENV_KEYS, *role.unset_env)), *_env_prefix(env), *command]
 
 
@@ -2593,14 +2605,7 @@ def tmux_new_session_args(
     bin_user: str = "",
 ) -> list[str]:
     shell_command = _quote_command(
-        cli_command_for_role(
-            role,
-            session_dir=session_dir,
-            pane_state_dir=pane_state_dir,
-            resume=resume,
-            bin_user=bin_user,
-            claim_role=True,
-        )
+        cli_command_for_role(role, session_dir=session_dir, pane_state_dir=pane_state_dir, resume=resume, bin_user=bin_user)
     )
     return ["tmux", "new-session", "-d", "-s", role.tmux_session, "-c", role.workdir, "-n", role.role, shell_command]
 
@@ -4544,7 +4549,7 @@ def materialize_layout(
                 pane_state_dir=pane_state_dir,
                 force_reload=force_reload,
                 skip_launcher_check=True,
-                run_as_user=config.run_as_user,
+                run_as_user=role_run_as_user(config, role),
             )
             leaf["WorkingDirectory"] = role.workdir
         leaf["Title"] = project_window_title(config)
@@ -6286,6 +6291,9 @@ def _new_project_launcher_config_payload(
             ),
             "live_commands": [cli],
             "role": role,
+            # One Unix account per role: this is what the board resolves a
+            # peer's uid against, and it gives each role its own tmux server.
+            "run_as_user": role_account_name(plan.project, role),
             "target": f"{plan.project}-{role}:0.0",
             "tmux_session": f"{plan.project}-{role}",
             "workdir": str(worktree_base / role),
@@ -11110,6 +11118,7 @@ def _add_role_payload(
         "cli": [cli],
         "live_commands": [cli],
         "role": role_name,
+        "run_as_user": role_account_name(config.project, role_name),
         "target": f"{config.project}-{role_name}:0.0",
         "tmux_session": f"{config.project}-{role_name}",
         "yolo": True,

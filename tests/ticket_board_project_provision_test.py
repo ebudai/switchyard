@@ -25,6 +25,9 @@ from scripts.ticket_board.project_provision import (
     render_listener_unit,
     render_operator_commands,
     render_polkit_rule,
+    role_account_table,
+    role_accounts_command,
+    role_control_sudoers,
     render_tmpfiles,
     render_vcs_close_role_sql,
     render_workflow_sql,
@@ -842,6 +845,73 @@ assert server.OPERATION_ALLOWED_ROLES != server.DEFAULT_OPERATION_ALLOWED_ROLES
         "TICKET_BOARD_OPERATION_ALLOWED_ROLES": "mark_done=ops",
     }
     subprocess.run([sys.executable, "-c", script], check=True, env=env)
+
+
+def test_role_accounts_are_derived_from_declared_roles_not_hardcoded() -> None:
+    """SYRD-39: one Unix account per role, named from configuration.
+
+    Role names are data. A project that declares different roles gets accounts
+    for those, and roles that never run a local process get none.
+    """
+    accounts = role_account_table("demo", ["director", "reviewer", "scribe", "user", "unassigned"])
+    assert accounts == (
+        ("director", "demo-director"),
+        ("reviewer", "demo-reviewer"),
+        ("scribe", "demo-scribe"),
+    ), accounts
+    # The human role reaches the board over authenticated HTTP, not a local
+    # process, so it must not get an account.
+    assert all(role != "user" for role, _account in accounts)
+
+
+def test_board_unit_carries_the_authoritative_role_account_table() -> None:
+    plan = build_plan(project="otto", owner_user="otto-agent")
+    board_unit = render_board_unit(plan)
+
+    assert f"Environment=TICKET_BOARD_ROLE_ACCOUNTS={','.join(f'{r}={a}' for r, a in plan.role_accounts)}" in board_unit
+    # The board joins the roles group so it can hand the socket to exactly
+    # those accounts, and nothing wider.
+    assert f"SupplementaryGroups={plan.roles_group}" in board_unit
+    assert f"Environment=TICKET_BOARD_SOCKET_GROUP={plan.roles_group}" in board_unit
+    assert "RuntimeDirectoryMode=0750" in board_unit
+    assert plan.roles_group == "otto-roles", plan.roles_group
+
+
+def test_role_accounts_rollout_is_idempotent_and_doubles_as_migration() -> None:
+    plan = build_plan(project="otto", owner_user="otto-agent")
+    commands = role_accounts_command(plan)
+
+    # Every creating step is guarded, so re-running it on a tenant that already
+    # has the accounts changes nothing. That is what makes this the migration
+    # path for a tenant that used to run every role as one account.
+    assert "if ! getent group 'otto-roles'" in commands
+    for role, account in plan.role_accounts:
+        assert f"if ! getent passwd '{account}'" in commands, role
+        assert f"sudo gpasswd -a '{account}' 'otto-roles'" in commands, role
+        # Each role's home is its own: one role cannot read another's worktree,
+        # config or credentials.
+        assert f"sudo install -d -m 0750 -o '{account}' -g 'otto-roles' '/home/{account}'" in commands, role
+    # The board service and the tenant owner reach the socket through the group.
+    assert "sudo gpasswd -a 'boardsvc' 'otto-roles'" in commands
+    assert "sudo gpasswd -a 'otto-agent' 'otto-roles'" in commands
+
+
+def test_role_control_interface_is_explicit_and_narrow() -> None:
+    """Director control without a shared tmux server, and without root."""
+    plan = build_plan(project="otto", owner_user="otto-agent")
+    sudoers = role_control_sudoers(plan)
+
+    director_account = dict((role, account) for role, account in plan.role_accounts)["director"]
+    assert sudoers.startswith("#"), sudoers
+    assert f"{director_account} ALL=(" in sudoers, sudoers
+    assert "NOPASSWD: /usr/bin/tmux\n" in sudoers, sudoers
+    # Exactly tmux, as the other role accounts, and nothing else.
+    assert "ALL:ALL" not in sudoers
+    assert director_account not in sudoers.split("ALL=(")[1].split(")")[0], sudoers
+    for role, account in plan.role_accounts:
+        if role == "director":
+            continue
+        assert account in sudoers, role
 
 
 def test_cli_writes_reviewable_artifacts() -> None:

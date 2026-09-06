@@ -637,11 +637,51 @@ def main():
                 caller_role="director",
             )
             assert "backlog" not in [c["key"] for c in app.workflow_columns()]
+            # SYRD-31: routing PGU-4 at a reserved implementer is redirected to
+            # the configured queue, which here is the analysis/director slot the
+            # ticket already occupied. Before this was surfaced the action
+            # returned success with a wholly unchanged ticket, so the director
+            # could not tell a queued route from a completed one.
+            unreserved_before = t.psql(
+                admin,
+                "SELECT count(*) FROM ticket_board.ticket_notification_queue "
+                "WHERE ticket_id='PGU-4' AND message LIKE '%queued for%'",
+            )
+            assert unreserved_before == "0", unreserved_before
             queued = act("PGU-4", "route", "director", assignee="app")
             assert (queued["state"], queued["assignee"]) == (
                 "analysis",
                 "director",
             ), queued
+            assert queued["queued_for_assignee"] == "app", queued
+            reserving_ticket = queued["queued_behind_ticket"]
+            assert reserving_ticket and reserving_ticket != "PGU-4", queued
+            assert any(
+                "queued for app" in comment["text"] and reserving_ticket in comment["text"]
+                for comment in queued["comments"]
+            ), queued["comments"]
+            # Durable and addressed to the director, not just a comment nobody reads.
+            assert (
+                t.psql(
+                    admin,
+                    "SELECT count(*) FROM ticket_board.ticket_notification_queue "
+                    "WHERE ticket_id='PGU-4' AND target_role='director' "
+                    "AND message LIKE '%queued for app%'",
+                )
+                == "1"
+            )
+            # Repeating the same blocked route must not queue a second copy.
+            requeued = act("PGU-4", "route", "director", assignee="app")
+            assert requeued["queued_for_assignee"] == "app", requeued
+            assert (
+                t.psql(
+                    admin,
+                    "SELECT count(*) FROM ticket_board.ticket_notification_queue "
+                    "WHERE ticket_id='PGU-4' AND target_role='director' "
+                    "AND message LIKE '%queued for app%'",
+                )
+                == "1"
+            )
             t.seed_postgres_ticket(
                 admin,
                 "PGU-5",
@@ -688,9 +728,21 @@ def main():
                 dry_run=False,
                 caller_role="director",
             )
+            # SYRD-31 unreserved route: main is free, so this must land in the
+            # implementation stage normally, clear the queued marker PGU-4 still
+            # carried from the earlier blocked route, and add no second notice.
+            unreserved = act("PGU-4", "route", "director", assignee="main")
+            assert unreserved["state"] == "building", unreserved
+            assert unreserved["queued_for_assignee"] == "", unreserved
+            assert unreserved["queued_behind_ticket"] == "", unreserved
             assert (
-                act("PGU-4", "route", "director", assignee="main")["state"]
-                == "building"
+                t.psql(
+                    admin,
+                    "SELECT count(*) FROM ticket_board.ticket_notification_queue "
+                    "WHERE ticket_id='PGU-4' AND target_role='director' "
+                    "AND message LIKE '%queued for%'",
+                )
+                == "1"
             )
             assert (
                 t.psql(

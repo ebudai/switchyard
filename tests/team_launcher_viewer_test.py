@@ -10,6 +10,136 @@ def test_viewer_session_argument_is_required_and_has_no_global_default() -> None
     assert signature.parameters["viewer_session"].default is inspect.Parameter.empty
     assert "DEFAULT_VIEWER_SESSION" not in (ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8")
 
+
+class OwnerScopedTmuxRunner(FakeRunner):
+    def __init__(self, owner_user: str) -> None:
+        super().__init__()
+        self.owner_user = owner_user
+        self.sessions_by_user: dict[str, set[str]] = {"root": set(), owner_user: set()}
+        self.socket_by_user = {
+            "root": "/tmp/tmux-0/default",
+            owner_user: "/tmp/tmux-4242/default",
+        }
+        self.used_sockets: list[str] = []
+        self.tmux_calls: list[tuple[str, list[str]]] = []
+        self.nested_attach_targets: list[str] = []
+
+    @staticmethod
+    def _target_session(args: list[str]) -> str:
+        if "-t" not in args:
+            return ""
+        target = args[args.index("-t") + 1]
+        return target.split(":", 1)[0].split(".", 1)[0]
+
+    def __call__(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        user = "root"
+        inner = args
+        if args[:4] == ["sudo", "-u", self.owner_user, "-H"]:
+            user = self.owner_user
+            inner = args[4:]
+
+        if len(inner) >= 5 and Path(inner[0]).name == "team-launcher" and inner[2] == "pane":
+            self.calls.append(args)
+            role = inner[4]
+            self.sessions_by_user[user].add(f"{inner[1]}-{role}")
+            return subprocess.CompletedProcess(args, 0)
+
+        if inner[:1] != ["tmux"]:
+            return super().__call__(args, **kwargs)
+
+        self.calls.append(args)
+        self.used_sockets.append(self.socket_by_user[user])
+        self.tmux_calls.append((user, inner))
+        sessions = self.sessions_by_user[user]
+        command = inner[1] if len(inner) > 1 else ""
+        target_session = self._target_session(inner)
+
+        if command == "has-session":
+            return subprocess.CompletedProcess(args, 0 if target_session in sessions else 1)
+        if command == "display-message":
+            role = target_session.rsplit("-", 1)[-1]
+            live_command = "claude" if role in {"designer", "director", "audit"} else "codex"
+            return subprocess.CompletedProcess(args, 0, stdout=f"{live_command}\n")
+        if command == "kill-session":
+            if target_session not in sessions:
+                return subprocess.CompletedProcess(args, 1)
+            sessions.remove(target_session)
+            return subprocess.CompletedProcess(args, 0)
+        if command == "new-session":
+            nested = shlex.split(str(inner[-1]))
+            nested_target = nested[nested.index("-t") + 1]
+            self.nested_attach_targets.append(nested_target)
+            if nested_target not in sessions:
+                return subprocess.CompletedProcess(args, 1)
+            sessions.add(inner[inner.index("-s") + 1])
+            return subprocess.CompletedProcess(args, 0)
+        if command == "split-window":
+            nested = shlex.split(str(inner[-1]))
+            nested_target = nested[nested.index("-t") + 1]
+            self.nested_attach_targets.append(nested_target)
+            if target_session not in sessions or nested_target not in sessions:
+                return subprocess.CompletedProcess(args, 1)
+            return subprocess.CompletedProcess(args, 0)
+        if target_session and target_session not in sessions:
+            return subprocess.CompletedProcess(args, 1)
+        return subprocess.CompletedProcess(args, 0)
+
+
+def test_cross_owner_viewer_uses_owner_tmux_for_fresh_and_existing_sessions() -> None:
+    owner_user = "porter-agent"
+    role_sessions = [
+        "porter-designer",
+        "porter-director",
+        "porter-audit",
+        "porter-ops",
+        "porter-app",
+        "porter-main",
+    ]
+    with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-viewer-owner.") as tmp:
+        tmp_path = Path(tmp)
+        config_path = _write_six_visible_role_config(tmp_path)
+        raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+        raw_config["run_as_user"] = owner_user
+        config_path.write_text(json.dumps(raw_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        config = load_project_config("porter", config_path)
+        runner = OwnerScopedTmuxRunner(owner_user)
+        original_current_user_name = team_launcher.current_user_name
+        try:
+            team_launcher.current_user_name = lambda: "root"
+            # The first launch starts a fresh project's role and viewer sessions.
+            # The second replaces its viewer while the registered role sessions remain live.
+            for _ in range(2):
+                assert (
+                    launch_project(
+                        config,
+                        config_path=config_path,
+                        mode="start",
+                        script_path=ROOT / "scripts" / "team-launcher",
+                        runner=runner,
+                        layout_output=tmp_path / "layout-output.json",
+                        pane_state_dir=tmp_path / "pane-state",
+                        layout_mode="viewer",
+                        layout_environ={"XDG_CURRENT_DESKTOP": "GNOME"},
+                    )
+                    == 0
+                )
+        finally:
+            team_launcher.current_user_name = original_current_user_name
+
+    assert runner.sessions_by_user[owner_user] == {*role_sessions, "porter-viewer"}
+    assert runner.sessions_by_user["root"] == set()
+    assert runner.tmux_calls
+    assert {user for user, _args in runner.tmux_calls} == {owner_user}
+    assert set(runner.used_sockets) == {"/tmp/tmux-4242/default"}
+    assert "/tmp/tmux-0/default" not in runner.used_sockets
+    assert all(
+        call[:5] == ["sudo", "-u", owner_user, "-H", "tmux"]
+        for call in runner.calls
+        if call[:1] == ["tmux"] or (len(call) > 4 and call[4] == "tmux")
+    )
+    assert runner.nested_attach_targets == [*role_sessions, *role_sessions]
+
+
 def test_viewer_layout_starts_role_sessions_and_additive_viewer() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-viewer.") as tmp:
         tmp_path = Path(tmp)

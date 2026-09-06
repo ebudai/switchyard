@@ -14,6 +14,8 @@ accounts, the live path shape, and a 0710 owner home.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import pwd
@@ -71,7 +73,7 @@ def _apply(commands: list[str]) -> None:
 
 def role_and_director_access(owner: str) -> None:
     assert os.geteuid() == 0
-    role_account, director_account = _accounts(2)
+    role_account, director_account, impostor_account = _accounts(3)
     with tempfile.TemporaryDirectory(prefix="syrd49-") as tmp:
         tmp_path = Path(tmp)
         tmp_path.chmod(0o755)
@@ -109,6 +111,30 @@ def role_and_director_access(owner: str) -> None:
                     "repository": str(project_dir),
                     "worktree_base": str(worktree_base),
                     "run_as_user": owner,
+                    # A declarative tenant whose control role is NOT called
+                    # "director": what makes it the control role is what the
+                    # workflow lets it do. The role that IS called director here
+                    # has no control capabilities and must not be mistaken for
+                    # it (SYRD-49).
+                    "workflow": {
+                        "roles": [
+                            {
+                                "name": "conductor",
+                                "active": True,
+                                "capabilities": [
+                                    "add_comment",
+                                    "merge",
+                                    "set_manually_controlled",
+                                ],
+                            },
+                            {
+                                "name": "director",
+                                "active": True,
+                                "capabilities": ["add_comment", "edit_fields"],
+                            },
+                            {"name": "main", "active": True, "capabilities": ["add_comment"]},
+                        ]
+                    },
                     "roles": [
                         {
                             "role": "main",
@@ -120,13 +146,22 @@ def role_and_director_access(owner: str) -> None:
                             "run_as_user": role_account,
                         },
                         {
-                            "role": "director",
+                            "role": "conductor",
                             "slot": 1,
+                            "cli": ["claude"],
+                            "target": "porter-conductor:0.0",
+                            "tmux_session": "porter-conductor",
+                            "workdir": str(worktree_base / "conductor"),
+                            "run_as_user": director_account,
+                        },
+                        {
+                            "role": "director",
+                            "slot": 2,
                             "cli": ["claude"],
                             "target": "porter-director:0.0",
                             "tmux_session": "porter-director",
                             "workdir": str(worktree_base / "director"),
-                            "run_as_user": director_account,
+                            "run_as_user": impostor_account,
                         },
                     ],
                 },
@@ -136,6 +171,7 @@ def role_and_director_access(owner: str) -> None:
             + "\n",
             encoding="utf-8",
         )
+        (worktree_base / "conductor").mkdir()
         (worktree_base / "director").mkdir()
         registry = tmp_path / "registry"
         registry.mkdir()
@@ -161,7 +197,8 @@ def role_and_director_access(owner: str) -> None:
         for path in control.rglob("*"):
             os.chown(path, owner_entry.pw_uid, owner_entry.pw_gid)
         subprocess.run(["chown", "-R", f"{role_account}:", str(worktree)], check=True)
-        subprocess.run(["chown", "-R", f"{director_account}:", str(worktree_base / "director")], check=True)
+        subprocess.run(["chown", "-R", f"{director_account}:", str(worktree_base / "conductor")], check=True)
+        subprocess.run(["chown", "-R", f"{impostor_account}:", str(worktree_base / "director")], check=True)
         home.chmod(0o710)
         config_path.chmod(0o600)
 
@@ -239,7 +276,7 @@ def role_and_director_access(owner: str) -> None:
             [
                 "env",
                 f"PATH={sudo_stub}:/usr/local/sbin:/usr/local/bin:/usr/bin",
-                f"HOME={worktree_base / 'director'}",
+                f"HOME={worktree_base / 'conductor'}",
                 f"SWITCHYARD_PROJECT_REGISTRY_DIR={registry}",
                 sys.executable,
                 str(release / "switchyard"),
@@ -251,6 +288,24 @@ def role_and_director_access(owner: str) -> None:
         assert not escalations.exists(), escalations.read_text()
         assert result.returncode == 0, (result.stdout, result.stderr)
         assert "would migrate" in result.stdout, result.stdout
+
+        # The role literally named "director", which has no control
+        # capabilities, is not the control role: its account is refused.
+        impostor = _as(
+            impostor_account,
+            [
+                "env",
+                f"PATH={sudo_stub}:/usr/local/sbin:/usr/local/bin:/usr/bin",
+                f"HOME={worktree_base / 'director'}",
+                f"SWITCHYARD_PROJECT_REGISTRY_DIR={registry}",
+                sys.executable,
+                str(release / "switchyard"),
+                "finish-upgrade",
+                "porter",
+            ],
+        )
+        assert impostor.returncode != 0, (impostor.stdout, impostor.stderr)
+        assert not escalations.exists(), escalations.read_text()
 
         # A different role account is told so, rather than having its write
         # rejected by the board later.
@@ -281,7 +336,88 @@ def role_and_director_access(owner: str) -> None:
         assert _as(owner, ["sh", "-c", f"echo back > {probe}"]).returncode == 0
 
 
+def test_containment_is_by_component_not_by_prefix() -> None:
+    """/home/foobar starts with /home/foo, and is somebody else's home."""
+    from scripts.ticket_board.project_provision import (
+        PathContainmentError,
+        director_control_access_commands,
+        role_worktree_access_commands,
+    )
+
+    inside = role_worktree_access_commands(
+        owner_home="/home/foo",
+        roles_group="porter-roles",
+        worktree_base="/home/foo/porter-worktrees",
+        control_repository="/home/foo/.local/state/switchyard/projects/porter/control.git",
+    )
+    assert any("/home/foo/.local/state'" in command for command in inside), inside
+
+    for builder in (
+        lambda: role_worktree_access_commands(
+            owner_home="/home/foo",
+            roles_group="porter-roles",
+            worktree_base="/home/foo/porter-worktrees",
+            control_repository="/home/foobar/.local/state/porter/control.git",
+        ),
+        lambda: director_control_access_commands(
+            owner_home="/home/foo",
+            director_account="porter-conductor",
+            provision_dir="/home/foobar/Projects/porter/.switchyard/provision",
+            project_dir="/home/foobar/Projects/porter",
+        ),
+    ):
+        try:
+            builder()
+        except PathContainmentError as exc:
+            assert "/home/foobar" in str(exc), exc
+            continue
+        raise AssertionError("a path outside the owner home was granted access")
+
+    # The sibling home is never named in a grant computed for the other.
+    assert not any("foobar" in command for command in inside), inside
+
+    # A path kept genuinely elsewhere is an ordinary configuration, not a
+    # coincidence: it needs no grant on the owner's home at all.
+    elsewhere = director_control_access_commands(
+        owner_home="/home/foo",
+        director_account="porter-conductor",
+        provision_dir="/srv/porter/.switchyard/provision",
+        project_dir="/srv/porter",
+    )
+    assert not any("/home/foo'" in command for command in elsewhere), elsewhere
+    assert any("/srv/porter/.switchyard/provision'" in command for command in elsewhere), elsewhere
+
+
+def test_a_refused_path_is_reported_rather_than_rendered() -> None:
+    """The artifact runs as root, so a refusal must not arrive as a traceback."""
+    import types
+
+    from scripts import team_launcher
+
+    config = types.SimpleNamespace(
+        project="porter",
+        run_as_user="foo",
+        worktree_base=Path("/home/foo/porter-worktrees"),
+        roles=[types.SimpleNamespace(role="main", workdir="/home/foo/porter-worktrees/main")],
+        # The sibling home, not this owner's.
+        control_repository=Path("/home/foobar/.local/state/switchyard/projects/porter/control.git"),
+    )
+    original = team_launcher.home_dir_for_user
+    errors = io.StringIO()
+    try:
+        team_launcher.home_dir_for_user = lambda user: Path("/home/foo")
+        with contextlib.redirect_stderr(errors):
+            commands = team_launcher.role_path_access_commands(config)
+    finally:
+        team_launcher.home_dir_for_user = original
+    assert commands == [], commands
+    assert "no role path access granted for porter" in errors.getvalue(), errors.getvalue()
+    assert "/home/foobar" in errors.getvalue(), errors.getvalue()
+
+
 def main() -> int:
+    test_containment_is_by_component_not_by_prefix()
+    test_a_refused_path_is_reported_rather_than_rendered()
     owner = pwd.getpwuid(os.geteuid()).pw_name
     command = [sys.executable, str(Path(__file__).resolve()), "--namespace-child", owner]
     if os.geteuid() != 0:

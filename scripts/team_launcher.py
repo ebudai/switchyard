@@ -12752,25 +12752,65 @@ def upgrade_role_accounts_in_config(config_path: Path, *, dry_run: bool = False)
     return True, "team-launcher: gave " + ", ".join(sorted(added)) + " their own Unix accounts"
 
 
-def director_role_name(config: ProjectConfig, *, config_path: Path | None = None) -> str:
-    """Which configured role is the director, from configuration and not a claim."""
+# What makes a role the tenant's control role is what the workflow lets it do,
+# not what it is called. These are the capabilities that take a ticket out of
+# the ordinary flow, and no implementer or reviewer role carries them (SYRD-49).
+CONTROL_ROLE_CAPABILITIES = frozenset({"set_manually_controlled", "merge"})
+
+
+def control_role_name(
+    config: ProjectConfig, *, config_path: Path | None = None
+) -> tuple[str, str]:
+    """The configured role that controls this tenant, and why not when it is not.
+
+    A declarative tenant says which role that is by giving it the control
+    capabilities, so the name is the tenant's to choose. Zero matches and more
+    than one both fail closed: a privileged grant is not something to guess at.
+    Only a tenant with no workflow document falls back to the historical name
+    (SYRD-49).
+    """
     document = None
     if config_path is not None:
         try:
             document = (_load_json(config_path) or {}).get("workflow")
         except SystemExit:
             document = None
-    names = {role.role for role in config.roles}
-    if isinstance(document, Mapping):
-        for role in document.get("roles") or []:
-            if isinstance(role, Mapping) and str(role.get("name") or "") == "director":
-                return "director" if "director" in names else ""
-    return "director" if "director" in names else ""
+    configured = {role.role for role in config.roles}
+    if isinstance(document, Mapping) and document.get("roles"):
+        matches = [
+            str(role.get("name") or "")
+            for role in document.get("roles") or []
+            if isinstance(role, Mapping)
+            and role.get("active", True)
+            and CONTROL_ROLE_CAPABILITIES <= set(role.get("capabilities") or [])
+        ]
+        present = [name for name in matches if name in configured]
+        if not present:
+            return "", (
+                "this project's workflow declares no active role with the control capabilities "
+                f"({', '.join(sorted(CONTROL_ROLE_CAPABILITIES))})"
+            )
+        if len(present) > 1:
+            return "", (
+                "this project's workflow gives the control capabilities to more than one role: "
+                + ", ".join(sorted(present))
+            )
+        return present[0], ""
+    if "director" in configured:
+        return "director", ""
+    return "", "this project configures no director role"
+
+
+def director_role_name(config: ProjectConfig, *, config_path: Path | None = None) -> str:
+    """The control role's name, or empty when it cannot be established."""
+    name, _reason = control_role_name(config, config_path=config_path)
+    return name
 
 
 def role_path_access_commands(config: ProjectConfig) -> list[str]:
     """ACL grants that make each role's own worktree and git metadata reachable."""
     from scripts.ticket_board.project_provision import (
+        PathContainmentError,
         role_worktree_access_commands,
         roles_group_name,
     )
@@ -12784,27 +12824,53 @@ def role_path_access_commands(config: ProjectConfig) -> list[str]:
     control = config.control_repository
     if control is None:
         return []
-    return role_worktree_access_commands(
-        owner_home=owner_home,
-        roles_group=roles_group_name(config.project),
-        worktree_base=worktree_base,
-        control_repository=str(control.expanduser()),
-    )
+    try:
+        return role_worktree_access_commands(
+            owner_home=owner_home,
+            roles_group=roles_group_name(config.project),
+            worktree_base=worktree_base,
+            control_repository=str(control.expanduser()),
+        )
+    except PathContainmentError as exc:
+        # A refusal, not a crash: the artifact goes to an operator who runs it
+        # as root, so a grant computed from a path that is not where it was
+        # said to be must not be written at all (SYRD-49).
+        print(
+            f"switchyard: no role path access granted for {config.project}: {exc}",
+            file=sys.stderr,
+        )
+        return []
 
 
 def director_control_access_commands_for(
     config: ProjectConfig, *, config_path: Path | None = None
 ) -> list[str]:
     """ACL grants that let the configured director run its own commands."""
-    from scripts.ticket_board.project_provision import director_control_access_commands
+    from scripts.ticket_board.project_provision import (
+        PathContainmentError,
+        director_control_access_commands,
+    )
 
-    director = director_role_name(config, config_path=config_path)
+    director, reason = control_role_name(config, config_path=config_path)
     if not director:
+        print(f"switchyard: no control-role access granted for {config.project}: {reason}", file=sys.stderr)
         return []
     role = _role_by_name(config, director)
     account = (role.run_as_user if role is not None else "") or role_account_name(
         config.project, director
     )
+    accounts = {
+        candidate.run_as_user
+        for candidate in config.roles
+        if candidate.role == director and candidate.run_as_user
+    }
+    if len(accounts) > 1:
+        print(
+            f"switchyard: no control-role access granted for {config.project}: {director} resolves "
+            f"to more than one account ({', '.join(sorted(accounts))})",
+            file=sys.stderr,
+        )
+        return []
     owner = config.run_as_user or current_user_name()
     owner_home = str(home_dir_for_user(owner) or Path("/home") / owner)
     project_dir = _project_dir_from_generated_config_path(config_path) if config_path else None
@@ -12815,12 +12881,19 @@ def director_control_access_commands_for(
         if config_path is not None
         else str((project_dir or Path(owner_home)) / ".switchyard" / "provision")
     )
-    return director_control_access_commands(
-        owner_home=owner_home,
-        director_account=account,
-        provision_dir=provision_dir,
-        project_dir=str(project_dir or ""),
-    )
+    try:
+        return director_control_access_commands(
+            owner_home=owner_home,
+            director_account=account,
+            provision_dir=provision_dir,
+            project_dir=str(project_dir or ""),
+        )
+    except PathContainmentError as exc:
+        print(
+            f"switchyard: no control-role access granted for {config.project}: {exc}",
+            file=sys.stderr,
+        )
+        return []
 
 
 def render_role_account_migration(config: ProjectConfig) -> str:
@@ -14519,9 +14592,15 @@ def finish_upgrade_command(
     # Bound to the configured account, not to anything the caller says about
     # itself. The board decides the same question from the peer uid; this is so
     # the wrong account gets an answer instead of a rejected write (SYRD-49).
-    director = director_role_name(config, config_path=config_path)
+    director, control_reason = control_role_name(config, config_path=config_path)
     caller = current_user_name()
     owner = (config.run_as_user or "").strip()
+    if not director:
+        print_func(
+            f"switchyard: cannot establish which role controls {config.project}: {control_reason}. "
+            "Refusing rather than guessing which account may make this write."
+        )
+        return 1
     if director:
         role = _role_by_name(config, director)
         account = (role.run_as_user if role is not None else "") or ""

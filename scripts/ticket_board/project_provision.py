@@ -559,6 +559,59 @@ def role_tooling_staging_commands(project: str, release_root: str) -> list[str]:
     return commands
 
 
+class PathContainmentError(ValueError):
+    """A path that is not where a privileged grant was told it would be."""
+
+
+def _is_within(root: str, candidate: str) -> bool:
+    """Containment by path components, not by string prefix.
+
+    `/home/foobar` starts with `/home/foo`, and a grant computed from that
+    coincidence would be written against somebody else's home (SYRD-49).
+    """
+    try:
+        return PurePosixPath(candidate).is_relative_to(PurePosixPath(root))
+    except ValueError:
+        return False
+
+
+def _refuse_prefix_coincidence(root: str, candidate: str) -> None:
+    """Refuse a path that only looks contained because of a shared prefix.
+
+    A path outside the owner home is an ordinary configuration -- a project
+    repository kept elsewhere needs no grant on that home. A path that shares
+    the home's string prefix without sharing its components is not: it is
+    `/home/foobar` read as if it were inside `/home/foo`, and a privileged
+    grant computed from that coincidence would be written against somebody
+    else's home. Refuse before emitting the command (SYRD-49).
+    """
+    if not root or not candidate or _is_within(root, candidate):
+        return
+    if str(candidate).startswith(str(root)):
+        raise PathContainmentError(
+            f"{candidate} is not inside {root}; refusing to grant access to a "
+            "path that only shares its prefix"
+        )
+
+
+def _interior_directories(root: str, leaf: str) -> list[str]:
+    """Directories strictly between a root and a leaf inside it.
+
+    A leaf that is not inside the root has no interior, and refuses outright
+    when it is inside only by string prefix.
+    """
+    _refuse_prefix_coincidence(root, leaf)
+    if not _is_within(root, leaf):
+        return []
+    relative = PurePosixPath(leaf).relative_to(PurePosixPath(root))
+    directories: list[str] = []
+    current = PurePosixPath(root)
+    for part in relative.parts[:-1]:
+        current = current / part
+        directories.append(str(current))
+    return directories
+
+
 def owner_home_traversal_commands(owner_home: str, principal: str) -> list[str]:
     """Let one principal walk THROUGH the owner's home without reading it.
 
@@ -586,18 +639,20 @@ def role_worktree_access_commands(
     0700 and are not named here (SYRD-49).
     """
     group = f"g:{roles_group}"
-    commands = owner_home_traversal_commands(owner_home, group)
-    commands.append(f"sudo setfacl -m {group}:--x {shell_quote(worktree_base)}")
+    interior = _interior_directories(owner_home, worktree_base)
     # Every component between the home and the control repository, so the
     # gitdir a linked worktree points at can be opened at all.
-    seen: list[str] = []
-    parts = PurePosixPath(control_repository).parts
-    for index in range(1, len(parts)):
-        candidate = str(PurePosixPath(*parts[:index + 1]))
-        if candidate.startswith(owner_home) and candidate != owner_home:
-            seen.append(candidate)
-    for directory in seen[:-1]:
-        commands.append(f"sudo setfacl -m {group}:--x {shell_quote(directory)}")
+    interior += _interior_directories(owner_home, control_repository)
+    commands: list[str] = []
+    # The home is granted only when something a role must reach is actually
+    # beneath it; a worktree base or control repository kept elsewhere needs no
+    # access to the owner's home at all.
+    if _is_within(owner_home, worktree_base) or _is_within(owner_home, control_repository):
+        commands.extend(owner_home_traversal_commands(owner_home, group))
+    for directory in interior + [worktree_base]:
+        command = f"sudo setfacl -m {group}:--x {shell_quote(directory)}"
+        if command not in commands:
+            commands.append(command)
     # The repository itself is shared: a commit made in any role's worktree
     # writes objects, refs and logs here. Default entries so the objects git
     # creates later inherit the same access.
@@ -624,21 +679,18 @@ def director_control_access_commands(
     account and reaches only the provisioning directory (SYRD-49).
     """
     principal = f"u:{director_account}"
-    commands = owner_home_traversal_commands(owner_home, principal)
-    seen: list[str] = []
-    parts = PurePosixPath(provision_dir).parts
-    for index in range(1, len(parts)):
-        candidate = str(PurePosixPath(*parts[:index + 1]))
-        if candidate.startswith(owner_home) and candidate != owner_home:
-            seen.append(candidate)
-    for directory in seen[:-1]:
-        commands.append(f"sudo setfacl -m {principal}:--x {shell_quote(directory)}")
-    if (
-        project_dir
-        and project_dir.startswith(owner_home)
-        and f"sudo setfacl -m {principal}:--x {shell_quote(project_dir)}" not in commands
-    ):
-        commands.append(f"sudo setfacl -m {principal}:--x {shell_quote(project_dir)}")
+    interior = _interior_directories(owner_home, provision_dir)
+    commands: list[str] = []
+    if _is_within(owner_home, provision_dir):
+        commands.extend(owner_home_traversal_commands(owner_home, principal))
+    for directory in interior:
+        command = f"sudo setfacl -m {principal}:--x {shell_quote(directory)}"
+        if command not in commands:
+            commands.append(command)
+    _refuse_prefix_coincidence(owner_home, project_dir)
+    project_grant = f"sudo setfacl -m {principal}:--x {shell_quote(project_dir)}"
+    if project_dir and _is_within(owner_home, project_dir) and project_grant not in commands:
+        commands.append(project_grant)
     commands.append(f"sudo setfacl -R -m {principal}:rwX {shell_quote(provision_dir)}")
     # Default entries so an atomically written replacement keeps the contract:
     # every projection writes a new file and renames it into place.

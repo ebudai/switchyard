@@ -2905,6 +2905,124 @@ def test_busy_existing_pane_holds_then_delivers_when_idle() -> None:
     assert conn.dead_lettered == []
 
 
+def test_final_review_handoff_survives_busy_retry_and_manual_control() -> None:
+    sent: list[tuple[str, str]] = []
+    gate_busy = [True]
+    ticket_id = "PGU-779"
+    message = f"{ticket_id} -- Final review ready for your review"
+    conn = FakeConnection(
+        [
+            queue_row(
+                52,
+                ticket_id,
+                state="director_review",
+                assignee="director",
+                target_role="director",
+                message=message,
+                attempts=1,
+            )
+        ],
+        ticket_rows={ticket_id: ("director_review", "director", False, False, False)},
+    )
+    listener = TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=lambda target, text: sent.append((target, text)),
+        activity_gate=lambda _target: gate_busy[0],
+        connector=lambda *args, **kwargs: conn,
+        poll_seconds=0,
+        target_exists=lambda _target: True,
+    )
+
+    assert listener.listen_once(max_notifications=1) == 0
+    assert sent == []
+    assert conn.requeued == [(52, (52, f"{DEFAULT_REQUEUE_BASE_SECONDS:g} seconds", "pane busy"))]
+
+    conn.ticket_rows[ticket_id] = ("director_review", "director", True, False, False)
+    conn.queue_rows.append(
+        queue_row(
+            52,
+            ticket_id,
+            state="director_review",
+            assignee="director",
+            target_role="director",
+            message=message,
+            attempts=2,
+        )
+    )
+    gate_busy[0] = False
+
+    assert listener.listen_once(max_notifications=1) == 1
+    assert sent == [("pgu-director:0.0", message)]
+    assert conn.acked == [52]
+
+
+def test_final_review_handoff_ignores_only_scheduling_flags() -> None:
+    ticket_id = "PGU-780"
+    for notification_id, ticket_row in (
+        (53, ("director_review", "director", True, False, False)),
+        (54, ("director_review", "director", False, True, False)),
+        (55, ("director_review", "director", False, False, True)),
+    ):
+        sent: list[tuple[str, str]] = []
+        conn = FakeConnection(
+            [
+                queue_row(
+                    notification_id,
+                    ticket_id,
+                    state="director_review",
+                    assignee="director",
+                    target_role="director",
+                )
+            ],
+            ticket_rows={ticket_id: ticket_row},
+        )
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, text: sent.append((target, text)),
+            activity_gate=lambda _target: False,
+            connector=lambda *args, conn=conn, **kwargs: conn,
+            poll_seconds=0,
+            target_exists=lambda _target: True,
+        )
+
+        assert listener.listen_once(max_notifications=1) == 1
+        assert sent == [("pgu-director:0.0", f"New ticket for you: {ticket_id} -- Queue")]
+        assert conn.acked == [notification_id]
+
+
+def test_final_review_handoff_drops_after_review_identity_changes() -> None:
+    for notification_id, target_role, ticket_row in (
+        (56, "director", ("done", "director", True, False, False)),
+        (57, "audit", ("director_review", "director", True, False, False)),
+        (58, "director", ("director_review", "app", True, False, False)),
+    ):
+        sent: list[tuple[str, str]] = []
+        conn = FakeConnection(
+            [
+                queue_row(
+                    notification_id,
+                    f"PGU-{notification_id}",
+                    state="director_review",
+                    assignee="director",
+                    target_role=target_role,
+                )
+            ],
+            ticket_rows={f"PGU-{notification_id}": ticket_row},
+        )
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, text: sent.append((target, text)),
+            activity_gate=lambda _target: False,
+            connector=lambda *args, conn=conn, **kwargs: conn,
+            poll_seconds=0,
+        )
+
+        assert listener.listen_once(max_notifications=1) == 0
+        assert sent == []
+        assert conn.acked == [notification_id]
+        assert trace_events(conn) == ["listener_claim", "drop", "listener_ack"]
+
+
 def test_stale_notification_for_cancelled_ticket_is_acked_not_delivered() -> None:
     sent: list[tuple[str, str]] = []
     conn = FakeConnection(

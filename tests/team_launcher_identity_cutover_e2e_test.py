@@ -56,6 +56,8 @@ class _RealRunner:
 
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
+        self.deploys: list[str] = []
+        self.listener_calls: list[str] = []
 
     # Socket PATHS, not names: /tmp/tmux-<uid> belongs to the host and tmux
     # refuses it inside the namespace, and using it would also reach the real
@@ -65,6 +67,11 @@ class _RealRunner:
 
     board_socket: Path | None = None
     mapping: dict[str, str] | None = None
+    release_pointer: Path | None = None
+    release_target: Path | None = None
+    # The owner's user listener: a real unit file on disk, and a state this
+    # models because a user manager is not available in a namespace.
+    listener_active = True
 
     @classmethod
     def socket_for(cls, name: str) -> str:
@@ -81,7 +88,32 @@ class _RealRunner:
         argv = list(args)
         self.calls.append(argv)
         if argv[:1] == ["install"] and len(argv) >= 3:
+            # `install -D` creates the destination directory.
+            Path(argv[-1]).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(argv[-2], argv[-1])
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        joined = " ".join(argv)
+        if "notify-listener" in joined and "systemctl --user" in joined:
+            self.listener_calls.append(joined)
+            if "is-active" in joined:
+                return subprocess.CompletedProcess(
+                    argv, 0 if self.listener_active else 3,
+                    "active\n" if self.listener_active else "inactive\n", "",
+                )
+            if "stop" in joined:
+                self.listener_active = False
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            self.listener_active = True
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if "deploy-restart" in joined and self.release_pointer is not None:
+            # What deploy-restart does to the release pointer, done for real so
+            # the transaction's capture and restore are exercised.
+            staged = self.release_pointer.with_name(".current.new")
+            if staged.exists() or os.path.islink(staged):
+                staged.unlink()
+            os.symlink(self.release_target, staged)
+            os.replace(staged, self.release_pointer)
+            self.deploys.append(str(self.release_target))
             return subprocess.CompletedProcess(argv, 0, "", "")
         if argv[:2] == ["systemctl", "is-active"]:
             # No systemd in a user namespace; the board this case verifies
@@ -89,11 +121,6 @@ class _RealRunner:
             return subprocess.CompletedProcess(argv, 0, "active\n", "")
         if argv[:1] == ["systemctl"]:
             return subprocess.CompletedProcess(argv, 0, "", "")
-        if "ticket-board-write" in argv and self.board_socket is not None:
-            account = argv[2]
-            role = next((name for name, acct in (self.mapping or {}).items() if acct == account), "")
-            status, body = _board_write_accepted(self.board_socket, account, role)
-            return subprocess.CompletedProcess(argv, 0 if status == 200 else 1, body, "")
         if argv[:2] == ["sudo", "-u"]:
             account = argv[2]
             rest = argv[4:] if len(argv) > 3 and argv[3] == "-H" else argv[3:]
@@ -149,6 +176,22 @@ def _tenant(tmp: Path, accounts: list[str], owner: str) -> tuple[Path, dict[str,
     }
     (tmp / "repo").mkdir()
     (tmp / "sessions").mkdir()
+    board_root = tmp / "ticketboard-live"
+    (board_root / "releases" / "old" / "scripts").mkdir(parents=True)
+    (board_root / "releases" / "new" / "scripts").mkdir(parents=True)
+    os.symlink(board_root / "releases" / "old", board_root / "current")
+    (tmp / "plan.json").write_text(
+        json.dumps(
+            {
+                "project": "porter",
+                "socket_path": str(tmp / "board" / "board.sock"),
+                "board_root": str(board_root),
+                "owner_user": owner,
+                "owner_home": str(tmp / "homes" / owner),
+            }
+        ),
+        encoding="utf-8",
+    )
     config_path = tmp / "porter.json"
     config_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return config_path, mapping
@@ -301,6 +344,21 @@ def end_to_end(owner: str) -> None:
         owner_home = homes / owner
         owner_home.mkdir(parents=True)
         _owner_credentials(owner_home, owner)
+        # The public per-project tooling directory the preparation artifact
+        # creates: the clients plus the package they import, root-owned and
+        # readable by accounts that cannot traverse the owner's home.
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        for name in ("ticket-board-write", "ticket-board-read", "directorctl"):
+            shutil.copy2(ROOT / "scripts" / name, staging / name)
+            (staging / name).chmod(0o755)
+        shutil.copytree(ROOT / "scripts" / "ticket_board", staging / "ticket_board")
+        for path in staging.rglob("*"):
+            path.chmod(0o755 if path.is_dir() else 0o644)
+        for name in ("ticket-board-write", "ticket-board-read", "directorctl"):
+            (staging / name).chmod(0o755)
+        staging.chmod(0o755)
+
         config_path, mapping = _tenant(tmp_path, accounts, owner)
         # What the artifacts phase leaves staged for the transaction to install,
         # and the directory systemd reads from.
@@ -416,22 +474,86 @@ def end_to_end(owner: str) -> None:
             thread.start()
             runner.board_socket = socket_path
             runner.mapping = dict(mapping)
+            board_root = tmp_path / "ticketboard-live"
+            runner.release_pointer = board_root / "current"
+            runner.release_target = board_root / "releases" / "new"
+            assert os.path.basename(os.readlink(runner.release_pointer)) == "old"
+
+            # The presentation as it exists before the cutover: one window, one
+            # display session per slot.
+            from scripts import presentation_controller
+
+            presentation_state = tmp_path / "presentation" / "presentation.json"
+            presentation_state.parent.mkdir()
+            os.environ["TEAM_LAUNCHER_GUI_USER"] = owner
+            os.environ["HOST_WAYLAND_DISPLAY"] = f"/run/user/{pwd.getpwnam(owner).pw_uid}/wayland-0"
+            windows: list[list[str]] = []
+
+            def _record_window(args, **_kwargs):
+                windows.append(list(args))
+
+                class _Proc:
+                    pid = 4242
+
+                    def poll(self_inner):
+                        return None
+
+                return _Proc()
+
+            identity_runner = _identity_runner(mapping, runner)
+            presentation_controller.launch_presentation(
+                config,
+                config_path=config_path,
+                layout="separate",
+                state_path=presentation_state,
+                runner=identity_runner,
+                process_launcher=_record_window,
+            )
+            assert len(windows) == 1, windows
+            before_slots = sorted(
+                name
+                for name in runner(
+                    ["sudo", "-u", owner, "-H", "tmux", "list-sessions", "-F", "#{session_name}"]
+                ).stdout.split()
+                if name.startswith("porter-display-")
+            )
+            assert before_slots, "no display slots were created"
+            windows.clear()
 
             # THE CUTOVER, for real: stop, transfer, restart under the new
             # accounts, read every uid back from the kernel, and prove each role
             # can actually write to that board as itself.
-            identity_runner = _identity_runner(mapping, runner)
             result = team_launcher.cutover_role_identities_command(
                 config,
                 config_path=config_path,
                 runner=identity_runner,
                 launcher=_session_launcher(mapping, runner),
                 stopper=_stopper(mapping, runner),
+                tooling_dir=staging,
+                source_repo=ROOT,
+                deploy_ref="HEAD",
                 print_func=printed.append,
             )
             assert result == 0, "\n".join(printed[-25:])
             after = json.loads(config_path.read_text(encoding="utf-8"))
             assert {role["role"]: role["run_as_user"] for role in after["roles"]} == mapping, after
+            # The release pointer moved as part of the transaction, and the
+            # listener came down before it and back afterwards.
+            assert os.path.basename(os.readlink(runner.release_pointer)) == "new", runner.deploys
+            stops = [i for i, call in enumerate(runner.listener_calls) if "stop" in call]
+            restarts = [i for i, call in enumerate(runner.listener_calls) if "restart" in call]
+            assert stops and restarts, runner.listener_calls
+            # Down before the release, up only after everything else verified.
+            assert stops[0] < restarts[-1], runner.listener_calls
+            assert runner.listener_active is True, runner.listener_calls
+            # And the unit it installed is the owner's user unit, in the home
+            # this tenant records -- not a system unit.
+            installed_listener = (
+                tmp_path / "homes" / owner / ".config" / "systemd" / "user"
+                / "porter-ticket-board-notify-listener.service"
+            )
+            assert installed_listener.is_file(), installed_listener
+
             # The board authority the transaction installed is the one systemd
             # would read, and it names the accounts now serving the roles.
             installed = (tmp_path / "systemd" / "porter-ticket-board.service").read_text()
@@ -450,67 +572,48 @@ def end_to_end(owner: str) -> None:
                 )
                 assert listed.stdout.split() == [f"porter-{role}"], listed.stdout
 
-            # THE PRESENTATION: the display slots are real tmux sessions in the
-            # owner's own server, and they reconnect to the relaunched roles
-            # without a second window being opened.
-            from scripts import presentation_controller
+            # THE PRESENTATION: the slots are real tmux sessions in the owner's
+            # own server. The cutover re-points them at the relaunched workers
+            # in place; it must not open a second window, which is how a tenant
+            # ends up with two six-pane windows and two status bars.
+            def _display_sessions() -> list[str]:
+                listed = runner(
+                    ["sudo", "-u", owner, "-H", "tmux", "list-sessions", "-F", "#{session_name}"]
+                ).stdout.split()
+                return sorted(name for name in listed if name.startswith("porter-display-"))
 
-            os.environ["TEAM_LAUNCHER_GUI_USER"] = owner
-            os.environ["HOST_WAYLAND_DISPLAY"] = f"/run/user/{pwd.getpwnam(owner).pw_uid}/wayland-0"
-            windows: list[list[str]] = []
+            after_cutover_slots = _display_sessions()
+            assert after_cutover_slots == before_slots, (before_slots, after_cutover_slots)
+            # The cutover opened no window of its own: the slots it reconnected
+            # were the ones already there.
+            assert windows == [], windows
 
-            def _record_window(args, **_kwargs):
-                windows.append(list(args))
+            # A clean role process -- nothing inherited but the staged tooling
+            # directory and its own home -- can run the board clients the skill
+            # documents. Before this they were unreachable: they live under the
+            # owner's 0710 home, which no role account may traverse.
+            for role, account in mapping.items():
+                entry = pwd.getpwnam(account)
+                for client in ("ticket-board-write", "ticket-board-read"):
+                    probe = subprocess.run(
+                        [
+                            "setpriv", f"--reuid={entry.pw_uid}", f"--regid={entry.pw_gid}",
+                            "--clear-groups", "env", "-i",
+                            # The role's own PATH: the staged tooling plus the
+                            # system directories every pane already has.
+                            f"PATH={staging}:/usr/local/sbin:/usr/local/bin:/usr/bin",
+                            f"HOME={homes / account}", client, "--help",
+                        ],
+                        capture_output=True,
+                        text=True,
+                    )
+                    assert probe.returncode == 0, (role, client, probe.stderr)
+            # And the artifact that creates that directory stages exactly those.
+            from scripts.ticket_board.project_provision import role_tooling_staging_commands
 
-                class _Proc:
-                    pid = 4242
-
-                    def poll(self_inner):
-                        return None
-
-                return _Proc()
-
-            try:
-                presentation_controller.launch_presentation(
-                    config,
-                    config_path=config_path,
-                    layout="separate",
-                    state_path=tmp_path / "presentation.json",
-                    runner=identity_runner,
-                    process_launcher=_record_window,
-                )
-            except Exception:
-                for call in runner.calls[-6:]:
-                    print("CALL:", call)
-                    print("  ->", runner(call).stderr if call[:1] != ["ticket-board-write"] else "")
-                raise
-            assert len(windows) == 1, windows
-            slots = runner(
-                ["sudo", "-u", owner, "-H", "tmux", "list-sessions", "-F", "#{session_name}"]
-            ).stdout.split()
-            display_sessions = sorted(name for name in slots if name.startswith("porter-display-"))
-            assert display_sessions, slots
-            layout_payload = json.loads(
-                (tmp_path / "porter-presentation-layout.json").read_text(encoding="utf-8")
-            )
-            attachments = json.dumps(layout_payload)
-            for slot in range(len(display_sessions)):
-                assert f"porter-display-{slot}" in attachments, attachments
-
-            # Reconnecting is not opening another one.
-            presentation_controller.launch_presentation(
-                config,
-                config_path=config_path,
-                layout="separate",
-                state_path=tmp_path / "presentation.json",
-                runner=identity_runner,
-                process_launcher=_record_window,
-            )
-            assert len(windows) == 2, windows
-            again = runner(
-                ["sudo", "-u", owner, "-H", "tmux", "list-sessions", "-F", "#{session_name}"]
-            ).stdout.split()
-            assert sorted(name for name in again if name.startswith("porter-display-")) == display_sessions, again
+            staged_commands = "\n".join(role_tooling_staging_commands("porter", "/board/current"))
+            for name in ("ticket-board-write", "ticket-board-read", "directorctl", "ticket_board"):
+                assert name in staged_commands, (name, staged_commands)
 
             # The identity the old workers had is not a role on this board:
             # refused at the socket, or answered 403 if it gets that far.
@@ -538,16 +641,30 @@ def end_to_end(owner: str) -> None:
                 subprocess.run(["chown", "-R", str(uid), path], check=True)
             config = team_launcher.load_project_config("porter", config_path)
             before_bytes = config_path.read_bytes()
+            release_before_rollback = os.readlink(runner.release_pointer)
+            # The failing transaction is asked to move it somewhere else, so a
+            # restore is a real change back rather than a no-op.
+            runner.release_target = board_root / "releases" / "old"
             result = team_launcher.cutover_role_identities_command(
                 config,
                 config_path=config_path,
                 runner=identity_runner,
                 launcher=_session_launcher(mapping, runner, wrong_uid_for="app"),
                 stopper=_stopper(mapping, runner),
+                tooling_dir=staging,
+                source_repo=ROOT,
+                deploy_ref="HEAD",
                 print_func=printed.append,
             )
             assert result == 1, "\n".join(printed[-12:])
             assert config_path.read_bytes() == before_bytes, "the configuration was not put back"
+            # The slots survived the rollback too, and no window was opened by
+            # either half of the transaction.
+            assert _display_sessions() == before_slots, _display_sessions()
+            assert windows == [], windows
+            # And the release pointer went back to what it was when this
+            # transaction started, with everything else.
+            assert os.readlink(runner.release_pointer) == release_before_rollback
             assert {
                 role.workdir: os.stat(role.workdir).st_uid for role in config.roles
             } == ownership_before, "the worktrees were not put back"

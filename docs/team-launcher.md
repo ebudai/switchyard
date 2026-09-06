@@ -258,18 +258,32 @@ exactly the processes doing the work. `cutover-roles` therefore stops the roles,
 moves the configuration, restarts them under their own accounts, reconnects the
 presentation and reads back the uid each role's process is *actually* running as
 from the kernel. The transaction is: prove the workers are quiescent, transfer the
-worktrees, write the configuration, re-render the projection, **install** the
-generated units, reload systemd, restart the board and listener, health-check
-them, restart every role under its own account, read each role process's uid
-back from the kernel, and finally have each role make a real write to the board
-as itself. If any of that does not hold, the worktrees go back to the uid and
-gid they had, the configuration is restored, the projection is re-rendered, the
-previously installed units are put back and the services restarted onto them,
-and the roles are started as they were. Restoring the file alone would leave the
+worktrees, write the configuration, re-render the projection, **stop the owner's
+notify listener and prove it stopped**, **switch the board release**, **install**
+the generated units -- the board's as a system unit, the listener's as the
+owner's user unit in the owner's own home -- reload, restart and health-check the
+board, restart every role under its own account without opening a window, read
+each role process's uid back from the kernel, have each role make a real write to
+the board as itself, reconnect the display slots in place, and only then start the
+listener again if it was running before. The release switch is inside it because an old board does not group-own
+its runtime directory for the roles group, so strict units in front of an old
+binary can leave the role accounts unable to reach the socket at all. If any of that does not hold -- including the display slots
+failing to reconnect -- the worktrees go back to the uid and gid they had, the
+configuration is restored, the projection is re-rendered, the release pointer and
+the release pointer and the previously installed units are put back, the board is
+restarted onto them, the listener is returned to exactly the active or inactive
+state it was in, and the roles are started as they were. Restoring the file alone would leave the
 old workers running without write access to their own repositories; regenerating
 a unit without installing it would leave the workers moved and the authority
 not. Account existence is
 never taken as evidence of process identity.
+
+**Role accounts can reach the board clients.** They cannot traverse the owner's
+0710 home, so `ticket-board-write`, `ticket-board-read`, `directorctl` and the
+`ticket_board` package they import are staged root-owned under
+`/usr/local/lib/switchyard/<project>`, from the pinned shared release rather
+than from the board being replaced, and each role's PATH points there. Without
+that a role has no board access at all, however correct the authority is.
 
 **Sessions are found under either identity.** A tenant part-way onto per-role
 accounts names accounts that do not exist, so every probe through them fails and

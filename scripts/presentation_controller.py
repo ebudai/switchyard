@@ -956,6 +956,29 @@ def _launch_separate(
         raise SystemExit(f"switchyard: could not launch separate presentation window (exit {result})")
 
 
+def reconnect_display_slots(
+    config: team_launcher.ProjectConfig,
+    *,
+    config_path: Path,
+    state_path: Path | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> None:
+    """Re-point the existing display slots at the current worker sessions.
+
+    The slots survive a worker being replaced; what has to change is which
+    session each one proxies. This is deliberately not launch_presentation:
+    that opens a window, and opening a second one is how a tenant ends up with
+    two six-pane windows and two status bars (SYRD-45).
+    """
+    _validate_role_namespace(config)
+    state_path = state_path or presentation_state_path(config, config_path=config_path)
+    owner_runner = _tmux_runner(config, runner)
+    with _locked_state(state_path, config=config, runner=runner):
+        state = _read_state(state_path, config=config, config_path=config_path)
+        _apply_mapping(config, state["slots"], runner=owner_runner)
+        _write_state(config, state_path, state, runner=runner)
+
+
 def launch_presentation(
     config: team_launcher.ProjectConfig,
     *,

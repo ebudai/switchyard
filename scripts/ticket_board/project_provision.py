@@ -493,7 +493,7 @@ def role_runtime_command(plan: ProjectBoardProvision) -> str:
     if not plan.role_accounts or not plan.roles_group:
         return ""
     worktrees = dict(plan.role_worktrees)
-    lines: list[str] = list(role_tooling_staging_commands(plan.project, plan.board_current))
+    lines: list[str] = list(role_tooling_staging_commands(plan.project, SHARED_RELEASE_CURRENT))
     for role, account in plan.role_accounts:
         lines.extend(
             role_runtime_commands(
@@ -509,13 +509,18 @@ def role_runtime_command(plan: ProjectBoardProvision) -> str:
     return "\n".join(lines)
 
 
-def role_tooling_staging_commands(project: str, board_current: str) -> list[str]:
+def role_tooling_staging_commands(project: str, release_root: str) -> list[str]:
     """Copy the executables roles need out of the owner's home.
 
     Roles are not in the owner's group and the owner's home is not traversable
     by them, which is correct -- it holds the owner's credentials. These few
     scripts are not secret, so root stages them at a shared path that role
     accounts can execute without being given any access to the owner (SYRD-39).
+
+    They come from the pinned shared release, not from the tenant's deployed
+    board: the deployed one is the release being replaced, and staging its
+    clients would give the roles the version that predates the repair
+    (SYRD-45).
     """
     staging = f"/usr/local/lib/switchyard/{project}"
     commands = [f"sudo install -d -m 0755 -o root -g root {shell_quote(staging)}"]
@@ -524,11 +529,33 @@ def role_tooling_staging_commands(project: str, board_current: str) -> list[str]
         "ticket-board-install-pane-hooks",
         "switchyard-board-skill",
         "switchyard-publish-ref",
+        # The board clients themselves. A role that cannot run these has no
+        # normal board access at all: they live under the owner's home, which
+        # is 0710 and which no role account may traverse (SYRD-45).
+        "ticket-board-write",
+        "ticket-board-read",
+        "directorctl",
     ):
         commands.append(
             f"sudo install -m 0755 -o root -g root "
-            f"{shell_quote(f'{board_current}/scripts/{name}')} {shell_quote(f'{staging}/{name}')}"
+            f"{shell_quote(f'{release_root}/scripts/{name}')} {shell_quote(f'{staging}/{name}')}"
         )
+    # The clients import the ticket_board package from their own directory, so
+    # the package is staged beside them. Public code, root-owned, world
+    # readable: nothing here is the owner's (SYRD-45).
+    commands.append(
+        f"sudo rm -rf {shell_quote(f'{staging}/ticket_board')}"
+    )
+    commands.append(
+        f"sudo cp -a {shell_quote(f'{release_root}/scripts/ticket_board')} "
+        f"{shell_quote(f'{staging}/ticket_board')}"
+    )
+    commands.append(
+        f"sudo chown -R root:root {shell_quote(f'{staging}/ticket_board')}"
+    )
+    commands.append(
+        f"sudo chmod -R a+rX {shell_quote(f'{staging}/ticket_board')}"
+    )
     return commands
 
 
@@ -638,7 +665,7 @@ def role_account_commands(
         f"sudo gpasswd -a {shell_quote(service_user)} {shell_quote(group)} >/dev/null",
         f"sudo gpasswd -a {shell_quote(owner_user)} {shell_quote(group)} >/dev/null",
     ]
-    lines.extend(role_tooling_staging_commands(project, resolved_board_current))
+    lines.extend(role_tooling_staging_commands(project, SHARED_RELEASE_CURRENT))
     lines.extend(
         role_runtime_commands(
             project=project,
@@ -1899,6 +1926,8 @@ curl -fsS http://127.0.0.1:{plan.port}/api/board >/dev/null
 TENANT_ARTIFACT_NAMES: tuple[str, ...] = ("plan.json",)
 
 DEFAULT_PRIVILEGED_PROVISION_ROOT = Path("/etc/switchyard/provision")
+# The pinned shared install every tenant's tooling is staged from.
+SHARED_RELEASE_CURRENT = "/opt/switchyard/current"
 
 
 def privileged_artifact_names(plan: ProjectBoardProvision) -> tuple[str, ...]:

@@ -39,6 +39,8 @@ class _RunningTenant:
         self.stops: list[str] = []
         self.live = True
         self.board_writes: list[list[str]] = []
+        self.listener_calls: list[str] = []
+        self.listener_active = True
 
     def runner(self):
         """A runner whose answers follow the stop and start, as a host's would."""
@@ -55,13 +57,28 @@ class _RunningTenant:
             if not tenant.live and bare[:2] == ["tmux", "has-session"]:
                 return subprocess.CompletedProcess(argv, 1, "", "")
             if argv[:1] == ["install"] and len(argv) >= 3:
+                Path(argv[-1]).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(argv[-2], argv[-1])
                 return subprocess.CompletedProcess(argv, 0, "", "")
+            joined = " ".join(argv)
+            if "notify-listener" in joined:
+                tenant.listener_calls.append(joined)
+                if "is-active" in joined:
+                    return subprocess.CompletedProcess(
+                        argv, 0 if tenant.listener_active else 3,
+                        "active\n" if tenant.listener_active else "inactive\n", "",
+                    )
+                if "stop" in joined:
+                    tenant.listener_active = False
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                if "restart" in joined or "start" in joined:
+                    tenant.listener_active = True
+                    return subprocess.CompletedProcess(argv, 0, "", "")
             if argv[:2] == ["systemctl", "is-active"]:
                 return subprocess.CompletedProcess(argv, 0, "active\n", "")
             if argv[:1] == ["systemctl"]:
                 return subprocess.CompletedProcess(argv, 0, "", "")
-            if bare[:1] == ["ticket-board-write"]:
+            if bare and Path(bare[0]).name == "ticket-board-write":
                 tenant.board_writes.append(argv)
                 return subprocess.CompletedProcess(argv, 0, "", "")
             return inner(argv, **kwargs)
@@ -82,6 +99,11 @@ class _RunningTenant:
             self.live = True
             return 0
 
+        # The production start path no longer opens a window; it starts each
+        # role's session under its own account.
+        self._start_sessions = team_launcher._start_role_sessions_without_a_window
+        team_launcher._start_role_sessions_without_a_window = _launch
+
         def _stop(config, **_kwargs):
             self.stops.append(config.project)
             self.live = False
@@ -96,6 +118,7 @@ class _RunningTenant:
         team_launcher.launch_project = self._launch
         team_launcher.stop_project = self._stop
         team_launcher.local_account_exists = self._exists
+        team_launcher._start_role_sessions_without_a_window = self._start_sessions
         return False
 
 
@@ -176,6 +199,15 @@ def _declarative_tenant(tmp: Path, *, project: str = "porter", accounts: bool = 
         for role in payload["roles"]:
             role["run_as_user"] = f"{project}-{role['role']}"
     config_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    # The recorded owner home. Without it the transaction resolves the owner's
+    # user-unit directory from passwd, which is the real home on this host --
+    # a test must not install anything there.
+    owner_home = tmp / "home"
+    owner_home.mkdir(exist_ok=True)
+    (tmp / "plan.json").write_text(
+        json.dumps({"project": project, "owner_user": payload["run_as_user"], "owner_home": str(owner_home)}),
+        encoding="utf-8",
+    )
     return config_path, tmp
 
 
@@ -218,11 +250,9 @@ def _upgrade(
     original_exists = team_launcher.local_account_exists
     original_migrate = team_launcher.migrate_declarative_director_onboarding
     original_opener = team_launcher._open_board_url
-    original_compat = team_launcher._board_needs_compatibility_release
     migrations: list[str] = []
     try:
         team_launcher._open_board_url = board or _unreachable_board
-        team_launcher._board_needs_compatibility_release = lambda config, **kwargs: False
         team_launcher.os.geteuid = (lambda: 0) if as_root else original_euid
         team_launcher.local_account_exists = lambda account: account in known
         team_launcher.migrate_declarative_director_onboarding = (
@@ -243,7 +273,6 @@ def _upgrade(
         team_launcher.local_account_exists = original_exists
         team_launcher.migrate_declarative_director_onboarding = original_migrate
         team_launcher._open_board_url = original_opener
-        team_launcher._board_needs_compatibility_release = original_compat
     return result, "\n".join(printed), migrations
 
 
@@ -328,32 +357,60 @@ def test_a_board_that_cannot_accept_the_migration_is_not_recorded_as_done() -> N
         assert team_launcher.upgrade_phase_state(journal, "director") == "pending", journal
 
 
-def test_a_root_upgrade_names_the_compatibility_release_before_the_director_phase() -> None:
-    with tempfile.TemporaryDirectory(prefix="compatibility-phase.") as tmp:
+def test_one_complete_legacy_sequence_across_successive_invocations() -> None:
+    """The whole ordered path a legacy tenant actually takes, run end to end."""
+    with tempfile.TemporaryDirectory(prefix="legacy-sequence.") as tmp:
         config_path, _ = _declarative_tenant(Path(tmp))
+        roles = [role["role"] for role in json.loads(config_path.read_text(encoding="utf-8"))["roles"]]
+        accounts = {f"porter-{role}" for role in roles}
+        board_without_marker = _board_with_marker(False)
+
+        # 1. Accounts do not exist: artifacts refresh, the operator artifact is
+        #    written, nothing else happens, and no deploy is suggested.
+        with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
+            _result, first, _m = _upgrade(
+                config_path, as_root=True, exists=set(), runner=tenant.runner(),
+                board=board_without_marker,
+            )
+        assert "still share the project account" in first, first
+        assert "deploy-restart" not in first, first
+        assert not any(
+            role.get("run_as_user")
+            for role in json.loads(config_path.read_text(encoding="utf-8"))["roles"]
+        )
+
+        # 2. The operator creates them. The next invocation cuts over -- with the
+        #    director phase still outstanding, which must not block it.
+        with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
+            _result, second, _m = _upgrade(
+                config_path, as_root=True, exists=accounts, runner=tenant.runner(),
+                board=board_without_marker,
+            )
+        assert "running under per-role identities" in second, second
+        after = json.loads(config_path.read_text(encoding="utf-8"))
+        assert all(role.get("run_as_user") == f"porter-{role['role']}" for role in after["roles"]), after
+        # Only now is the release deploy offered, and the director is named next.
+        assert "withholding" not in second, second
+        assert "finish-upgrade porter" in second, second
+
+        # 3. The director makes its own write, from its own account.
+        config = team_launcher.load_project_config("porter", config_path)
         printed: list[str] = []
-        original_euid = team_launcher.os.geteuid
+        original_migrate = team_launcher.migrate_declarative_director_onboarding
         original_opener = team_launcher._open_board_url
-        original_compat = team_launcher._board_needs_compatibility_release
-        original_exists = team_launcher.local_account_exists
         try:
-            team_launcher.os.geteuid = lambda: 0
-            team_launcher._open_board_url = _board_with_marker(False)
-            team_launcher._board_needs_compatibility_release = lambda config, **kwargs: True
-            team_launcher.local_account_exists = lambda account: False
-            config = team_launcher.load_project_config("porter", config_path)
-            assert team_launcher.upgrade_project_command(
+            team_launcher.migrate_declarative_director_onboarding = (
+                lambda config, **kwargs: _mark_projection_migrated(config_path) or True
+            )
+            team_launcher._open_board_url = _board_with_marker(True)
+            assert team_launcher.finish_upgrade_command(
                 config, config_path=config_path, runner=FakeRunner(), print_func=printed.append
-            ) == 0
+            ) == 0, printed
         finally:
-            team_launcher.os.geteuid = original_euid
+            team_launcher.migrate_declarative_director_onboarding = original_migrate
             team_launcher._open_board_url = original_opener
-            team_launcher._board_needs_compatibility_release = original_compat
-            team_launcher.local_account_exists = original_exists
-        output = "\n".join(printed)
-        assert "cannot accept the director migration yet" in output, output
-        assert "compatibility" in output, output
-        assert "withholding" in output, output
+        journal = team_launcher.read_upgrade_journal(config, config_path=config_path)
+        assert team_launcher.upgrade_phase_state(journal, "director") == "done", journal
 
 
 class _OwnerOnlyRunner(FakeRunner):
@@ -460,24 +517,12 @@ def test_the_cutover_happens_only_once_every_account_exists() -> None:
         # configuration, restarts them and checks the uid each role's process is
         # actually running as before anything authorizes it.
         accounts = {f"porter-{role}" for role in roles}
-        # The director phase comes first: until the board carries the marker the
-        # roles stay on the project account.
-        with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
-            _result, blocked, _m = _upgrade(
-                config_path, as_root=True, exists=accounts, runner=tenant.runner(),
-                board=_board_with_marker(False),
-            )
-        assert "until the director phase completes" in blocked, blocked
-        assert not any(
-            role.get("run_as_user")
-            for role in json.loads(config_path.read_text(encoding="utf-8"))["roles"]
-        )
-
-        _mark_projection_migrated(config_path)
+        # The cutover does not wait on the director: the director's own write
+        # is made from the identity this creates, so it comes after.
         with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
             _result, output, _m = _upgrade(
                 config_path, as_root=True, exists=accounts, runner=tenant.runner(),
-                board=_board_with_marker(True),
+                board=_board_with_marker(False),
             )
         after = json.loads(config_path.read_text(encoding="utf-8"))
         assert all(role.get("run_as_user") == f"porter-{role['role']}" for role in after["roles"]), after
@@ -521,6 +566,130 @@ def test_a_cutover_whose_processes_keep_the_old_uid_is_rolled_back() -> None:
         config = team_launcher.load_project_config("porter", config_path)
         journal = team_launcher.read_upgrade_journal(config, config_path=config_path)
         assert team_launcher.upgrade_phase_state(journal, "identities") == "rolled back", journal
+
+
+def test_the_listener_is_stopped_before_the_release_and_its_state_restored() -> None:
+    """It is the owner's user unit, it reads the schema the release changes."""
+    for started_active in (True, False):
+        with tempfile.TemporaryDirectory(prefix=f"listener-{started_active}.") as tmp:
+            config_path, _ = _declarative_tenant(Path(tmp))
+            roles = [role["role"] for role in json.loads(config_path.read_text(encoding="utf-8"))["roles"]]
+            accounts = {f"porter-{role}" for role in roles}
+            printed: list[str] = []
+            with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
+                tenant.listener_active = started_active
+                # A cutover that fails after the listener came down.
+                result = team_launcher.cutover_role_identities_command(
+                    team_launcher.load_project_config("porter", config_path),
+                    config_path=config_path,
+                    runner=tenant.runner(),
+                    launcher=lambda config, **kwargs: 1,
+                    stopper=lambda config, **kwargs: (tenant.stops.append("x") or setattr(tenant, "live", False) or 0),
+                    print_func=printed.append,
+                )
+            assert result == 1, printed
+            assert any("stop" in call for call in tenant.listener_calls), tenant.listener_calls
+            # Whatever it was before, that is what it is after.
+            assert tenant.listener_active is started_active, (
+                started_active, tenant.listener_calls
+            )
+
+
+def test_a_presentation_that_will_not_reconnect_rolls_back_in_place() -> None:
+    """Blank slots are a failed cutover, and the rollback must not open a window."""
+    with tempfile.TemporaryDirectory(prefix="presentation-failure.") as tmp:
+        config_path, _ = _declarative_tenant(Path(tmp))
+        before = config_path.read_bytes()
+        printed: list[str] = []
+        original_reconnect = team_launcher.reconnect_presentation
+        attempts: list[str] = []
+        windows: list[str] = []
+        try:
+            def _failing(config, **kwargs):
+                attempts.append(config.project)
+                # Fails the forward pass, and again during the rollback, which
+                # must be recorded rather than swallowed.
+                return ["display slot 0 could not be re-pointed"]
+
+            team_launcher.reconnect_presentation = _failing
+            with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
+                original_launch = team_launcher.launch_project
+                team_launcher.launch_project = lambda *a, **k: windows.append("window") or 0
+                try:
+                    result = team_launcher.cutover_role_identities_command(
+                        team_launcher.load_project_config("porter", config_path),
+                        config_path=config_path,
+                        runner=tenant.runner(),
+                        print_func=printed.append,
+                    )
+                finally:
+                    team_launcher.launch_project = original_launch
+        finally:
+            team_launcher.reconnect_presentation = original_reconnect
+        output = "\n".join(printed)
+        assert result == 1, output
+        assert "the presentation did not reconnect" in output, output
+        assert "during the rollback" in output, output
+        assert config_path.read_bytes() == before
+        # The workers came back through the session path, not by relaunching the
+        # project: no GUI window was opened by either pass.
+        assert windows == [], windows
+        assert len(attempts) == 2, attempts
+
+
+def test_a_listener_that_will_not_start_rolls_the_whole_thing_back() -> None:
+    with tempfile.TemporaryDirectory(prefix="listener-start-failure.") as tmp:
+        config_path, _ = _declarative_tenant(Path(tmp))
+        before = config_path.read_bytes()
+        printed: list[str] = []
+        with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
+            tenant.listener_active = True
+            inner = tenant.runner()
+
+            def refuses_to_start(args, **kwargs):
+                joined = " ".join(args)
+                if "notify-listener" in joined and ("restart" in joined or " start " in joined):
+                    return subprocess.CompletedProcess(list(args), 1, "", "unit failed")
+                return inner(args, **kwargs)
+
+            result = team_launcher.cutover_role_identities_command(
+                team_launcher.load_project_config("porter", config_path),
+                config_path=config_path,
+                runner=refuses_to_start,
+                print_func=printed.append,
+            )
+        output = "\n".join(printed)
+        assert result == 1, output
+        assert "could not start" in output, output
+        assert config_path.read_bytes() == before
+
+
+def test_a_listener_that_will_not_stop_blocks_the_release() -> None:
+    with tempfile.TemporaryDirectory(prefix="listener-stuck.") as tmp:
+        config_path, _ = _declarative_tenant(Path(tmp))
+        roles = [role["role"] for role in json.loads(config_path.read_text(encoding="utf-8"))["roles"]]
+        accounts = {f"porter-{role}" for role in roles}
+        before = config_path.read_bytes()
+        printed: list[str] = []
+        with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
+            inner = tenant.runner()
+
+            def stuck(args, **kwargs):
+                joined = " ".join(args)
+                if "notify-listener" in joined and "stop" in joined:
+                    return subprocess.CompletedProcess(list(args), 1, "", "still running")
+                return inner(args, **kwargs)
+
+            result = team_launcher.cutover_role_identities_command(
+                team_launcher.load_project_config("porter", config_path),
+                config_path=config_path,
+                runner=stuck,
+                print_func=printed.append,
+            )
+        output = "\n".join(printed)
+        assert result == 1, output
+        assert "could not stop" in output, output
+        assert config_path.read_bytes() == before
 
 
 def test_a_stop_that_leaves_workers_running_changes_nothing() -> None:
@@ -567,21 +736,21 @@ def test_the_deploy_instruction_is_withheld_until_every_phase_is_ready() -> None
     with tempfile.TemporaryDirectory(prefix="upgrade-deploy-gate.") as tmp:
         (Path(tmp) / "partial").mkdir()
         config_path, _ = _declarative_tenant(Path(tmp))
-        # A tenant that never opted into per-role accounts is consistent as it
-        # stands, so only the outstanding director phase withholds the deploy.
+        # The release enforces the per-role table, so it is withheld until the
+        # roles are actually running under those accounts.
         _result, output, _m = _upgrade(config_path, as_root=True, exists=set())
         assert "withholding" in output, output
-        assert "director phase has not completed" in output, output
+        assert "running under their own accounts" in output, output
         assert "deploy-restart" not in output, output
+        # And the director is still named as the phase that follows it.
+        assert "finish-upgrade porter" in output, output
 
-        # A tenant part-way onto per-role accounts withholds it for that too:
-        # installing the generated unit then would authorize accounts nothing
-        # runs as.
+        # A tenant part-way onto per-role accounts withholds it too.
         partial_path, _ = _declarative_tenant(Path(tmp) / "partial", accounts=True)
         _result, output, _m = _upgrade(
             partial_path, as_root=True, exists={"porter-designer"}, runner=_live_runner(partial_path)
         )
-        assert "do not all exist" in output or "do not agree" in output, output
+        assert "do not agree" in output or "withholding" in output, output
         assert "deploy-restart" not in output, output
 
 

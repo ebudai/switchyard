@@ -478,10 +478,27 @@ def test_switchyard_upgrade_reports_tenant_release_update_command() -> None:
                 == 0
             )
 
-        rendered = stdout.getvalue()
+        upgraded_output = stdout.getvalue()
         updated_plan = json.loads((provision_dir / "plan.json").read_text(encoding="utf-8"))
         updated_unit = (provision_dir / "otto-ticket-board.service").read_text(encoding="utf-8")
         updated_commands = (provision_dir / "operator-commands.sh").read_text(encoding="utf-8")
+
+        # SYRD-45: the release enforces the per-role authority table, so the
+        # upgrade withholds its deploy sequence until this tenant's roles are
+        # actually running under those accounts. The sequence itself is what
+        # this case is about, so it is rendered directly.
+        assert "withholding" in upgraded_output, upgraded_output
+        assert "deploy-restart" not in upgraded_output, upgraded_output
+        report = StringIO()
+        with redirect_stdout(report):
+            team_launcher.report_tenant_release_upgrade(
+                config,
+                config_path=config_path,
+                source_repo=source_repo,
+                commit_git_dir="/srv/git/review-cache.git",
+                deploy_ref="origin/main",
+            )
+        rendered = report.getvalue()
 
     assert f"old: {old_sha} at {old_release}" in rendered
     assert f"new: {target_sha} from origin/main" in rendered
@@ -574,7 +591,19 @@ def test_switchyard_upgrade_from_shared_release_prints_exact_cache_export_deploy
                     == 0
                 )
 
-            rendered = stdout.getvalue()
+            upgraded_output = stdout.getvalue()
+            # SYRD-45: the deploy sequence is withheld until this tenant's roles
+            # run under their own accounts; the sequence is rendered directly.
+            assert "withholding" in upgraded_output, upgraded_output
+            report = StringIO()
+            with redirect_stdout(report):
+                team_launcher.report_tenant_release_upgrade(
+                    config,
+                    config_path=config_path,
+                    source_repo=release,
+                    deploy_ref="origin/main",
+                )
+            rendered = upgraded_output + report.getvalue()
 
         assert f"artifact source is shared release {release} at {target_sha}" in rendered
         assert "cannot determine artifact source checkout freshness" not in rendered
@@ -722,7 +751,19 @@ def test_switchyard_upgrade_reports_unchanged_tenant_release() -> None:
                 == 0
             )
 
-        rendered = stdout.getvalue()
+        upgraded_output = stdout.getvalue()
+        # SYRD-45: withheld until the roles run under their own accounts, so the
+        # report this case is about is rendered directly.
+        assert "withholding" in upgraded_output, upgraded_output
+        report = StringIO()
+        with redirect_stdout(report):
+            team_launcher.report_tenant_release_upgrade(
+                config,
+                config_path=config_path,
+                source_repo=source_repo,
+                deploy_ref="origin/main",
+            )
+        rendered = report.getvalue()
 
     assert f"old: {target_sha} at {release}" in rendered
     assert f"new: {target_sha} from origin/main" in rendered

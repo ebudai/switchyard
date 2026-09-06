@@ -129,6 +129,30 @@ def _hand_projection_to_tenant(config_path: Path, *extra: Path) -> None:
             launcher.ensure_owner_file(config, path, runner=subprocess.run)
 
 
+def _reconcile_projection(config_path: Path, document: dict) -> bool:
+    """Rewrite the projection when it does not match the board's document.
+
+    configure_workflow commits before the projection is written, so a failure between
+    the two leaves the board ahead of the files. The migration is idempotent on the
+    board, which would otherwise mean a retry reported success while the stale
+    projection stayed on disk.
+    """
+    try:
+        files = projection_files(config_path, document)
+    except Exception:
+        return False
+    stale = {
+        path: content
+        for path, content in files.items()
+        if not path.exists() or path.read_text() != content
+    }
+    if not stale:
+        return False
+    apply_files(stale)
+    _hand_projection_to_tenant(config_path)
+    return True
+
+
 def _migrate_director_onboarding(config_path: Path, cfg: dict) -> dict:
     """Fill a configured director's missing onboarding before the document is written.
 
@@ -284,7 +308,19 @@ def main(argv=None):
             return 0
         candidate, outcome = launcher.seed_director_onboarding(candidate, project_dir)
         if not outcome.changed:
-            print(json.dumps({"migrated": False, "reason": "already migrated"}))
+            # The board is migrated, but a previous run may have committed the board
+            # change and then failed to write the projection. Retrying must repair that
+            # rather than report success over a stale projection.
+            reconciled = _reconcile_projection(args.config, current["document"])
+            print(
+                json.dumps(
+                    {
+                        "migrated": False,
+                        "reason": "already migrated",
+                        "projection_reconciled": reconciled,
+                    }
+                )
+            )
             return 0
         # A tenant whose director already had its own onboarding still needs the marker
         # persisted. Short-circuiting on "nothing seeded" would drop it, and a later
@@ -375,6 +411,10 @@ def main(argv=None):
             )
             + "\n",
         )
+    # Before the board write and before the fallible projection: on a
+    # board-success/projection-failure the journal is the tenant's recovery evidence, and
+    # handing it over afterwards would leave it root-owned exactly when it is needed.
+    _hand_projection_to_tenant(args.config, journal)
     result = client.configure_workflow(cfg, expected_revision=expected)
     try:
         apply_files(files)

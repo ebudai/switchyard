@@ -254,6 +254,53 @@ def main() -> int:
                 )
                 assert seeded_roles == ["director", "ops"], seeded_roles
 
+                # --- board committed, projection failed, then retried ---------
+                # configure_workflow commits before the projection is written, so a
+                # failure between them leaves the board ahead of the files. The retry
+                # must repair the projection rather than report success over a stale one.
+                original_apply = wm.apply_files
+                wm.apply_files = lambda _files: (_ for _ in ()).throw(OSError("disk full"))
+                try:
+                    wm.main(
+                        [
+                            "set-role-prompt", "--role", "audit", "--prompt", "audit remit",
+                            *base_args, "--journal", str(launcher_dir / "journal-partial.json"),
+                        ]
+                    )
+                    raise AssertionError("expected the projection failure to surface")
+                except RuntimeError as exc:
+                    assert "local projection pending" in str(exc), exc
+                finally:
+                    wm.apply_files = original_apply
+
+                # The board took the change; the projection did not.
+                audit_role = next(
+                    r for r in _board_document(base)["document"]["roles"] if r["name"] == "audit"
+                )
+                assert audit_role["onboarding_prompt"] == "audit remit"
+                on_disk = json.loads(workflow_json.read_text())
+                assert not next(
+                    r for r in on_disk["roles"] if r["name"] == "audit"
+                ).get("onboarding_prompt"), "projection should still be stale here"
+
+                # The journal is the recovery evidence and must already be the tenant's,
+                # not left behind by the step that failed.
+                partial_journal = launcher_dir / "journal-partial.json"
+                assert partial_journal.exists()
+                assert partial_journal.stat().st_uid == os.getuid()
+
+                # Retrying the migration repairs the projection.
+                repaired = _run(wm, ["migrate-director-onboarding", *base_args])
+                assert repaired["projection_reconciled"] is True, repaired
+                on_disk = json.loads(workflow_json.read_text())
+                assert next(
+                    r for r in on_disk["roles"] if r["name"] == "audit"
+                )["onboarding_prompt"] == "audit remit"
+
+                # And a second retry has nothing left to repair.
+                settled = _run(wm, ["migrate-director-onboarding", *base_args])
+                assert settled["projection_reconciled"] is False, settled
+
                 # --- the public command --------------------------------------
                 # Everything above drives the entry point the command forwards to; this
                 # drives `switchyard role-prompt` itself, including project resolution

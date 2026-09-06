@@ -159,6 +159,7 @@ SWITCHYARD_COMMANDS = (
     "agy-credential",
     "seed-role-credentials",
     "role-prompt",
+    "onboarding-readiness",
     "stop",
     "teardown",
     "status",
@@ -13944,6 +13945,8 @@ Commands:
   set-role-runtime change an existing role's agent runtime and reconnect its panes
   agy-credential   show, set, or clear this host's agy credential source
   role-prompt      show, set, or clear a role's onboarding prompt
+  onboarding-readiness
+                   report whether every registered tenant has migrated director onboarding
   stop             stop a project's configured tmux pane sessions
   teardown         remove project board provisioning artifacts after a dry-run review
   status           list registered projects and pane liveness
@@ -14139,6 +14142,10 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         from scripts import board_skill_cli
 
         return board_skill_cli.main(argv[1:], prog="switchyard board-skill")
+    if argv[0].casefold() == "onboarding-readiness":
+        from scripts import onboarding_readiness
+
+        return onboarding_readiness.main(argv[1:])
     if argv[0].casefold() == "role-prompt":
         parser = argparse.ArgumentParser(
             prog="switchyard role-prompt",

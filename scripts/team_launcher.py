@@ -5540,6 +5540,19 @@ def _tenant_copy_is_current(path: Path, body: bytes) -> bool:
         return False
 
 
+def installed_controller(project: str, owner_user: str) -> str:
+    """The controller root has actually granted, and nobody else.
+
+    `invoking_user` is deliberately not passed. An upgrade must reinstall the
+    human root already recorded in the root-owned grant, never record whoever
+    happened to run the upgrade -- that is the difference between repairing a
+    bridge and handing one out. With no installed grant this is empty, which is
+    the state a first pass leaves behind and the state that renders no
+    tenant-control artifacts at all (SYRD-52).
+    """
+    return resolve_control_user(project, owner_user=owner_user)
+
+
 def refresh_generated_project_runtime_artifacts(
     config: ProjectConfig,
     *,
@@ -5592,6 +5605,22 @@ def refresh_generated_project_runtime_artifacts(
     def _for_current_identities(plan: ProjectBoardProvision) -> ProjectBoardProvision:
         return plan
 
+    # What the tenant's document said when this upgrade started, captured before
+    # anything below republishes it. Root judges the document it found: a value
+    # rewritten by the tenant-copy refresh below would otherwise be laundered
+    # past the divergence refusal (SYRD-52).
+    try:
+        tenant_data = _load_json(tenant_plan_path)
+    except SystemExit as exc:
+        return LauncherUpgradeResult(False, f"switchyard: {config.project} runtime plan cannot be read: {exc}")
+    # The controller is regenerated from the installed root-owned grant rather
+    # than read back from either document, so a bridge installed by the
+    # operator's first pass is recorded on the second and its files are
+    # reinstalled by an ordinary upgrade (SYRD-52).
+    tenant_plan = replace(
+        tenant_plan,
+        control_user=installed_controller(config.project, tenant_plan.owner_user),
+    )
     # The tenant's own view of its generated files, rendered from the tenant's
     # own plan. Nothing root installs comes from here.
     tenant_rendered = render_privileged_artifacts(
@@ -5631,13 +5660,17 @@ def refresh_generated_project_runtime_artifacts(
     baseline, reason = _privileged_baseline_plan(
         config,
         provision_dir,
-        tenant_plan_path,
+        tenant_data,
         source_repo=source_repo,
         operator_commit_git_dir=commit_git_dir is not None,
     )
     if baseline is None:
         return LauncherUpgradeResult(bool(changed), reason)
-    plan, added_roles, refused = authoritative_refresh_plan(baseline, _load_json(tenant_plan_path))
+    plan, added_roles, refused = authoritative_refresh_plan(baseline, tenant_data)
+    # The stored baseline was written before the operator installed the bridge,
+    # so the controller is re-derived here too. From the grant only: the tenant
+    # document has no say, and neither does whoever is running the upgrade.
+    plan = replace(plan, control_user=installed_controller(plan.project, plan.owner_user))
     for entry in refused:
         print_func(
             f"switchyard: ignoring {config.project} plan entry {entry}: an unprivileged workflow "
@@ -5902,22 +5935,24 @@ def reconstruct_privileged_baseline(
 def _privileged_baseline_plan(
     config: ProjectConfig,
     provision_dir: Path,
-    tenant_plan_path: Path,
+    tenant_data: dict[str, Any],
     *,
     source_repo: Path | None = None,
     operator_commit_git_dir: bool = False,
 ) -> tuple[ProjectBoardProvision | None, str]:
-    """Root's baseline: its own stored copy, or one it reconstructs for a legacy tenant."""
+    """Root's baseline: its own stored copy, or one it reconstructs for a legacy tenant.
+
+    The tenant document is passed in as it was read at the start of the
+    refresh, not re-read here: by this point the tenant's own copies have been
+    republished, and judging the rewritten file would let a value the refresh
+    corrected slip past the divergence refusal (SYRD-52).
+    """
     baseline_path = privileged_baseline_plan_path(config.project)
     if baseline_path.is_file():
         try:
             return _project_board_provision_from_json(baseline_path), ""
         except SystemExit as exc:
             return None, f"switchyard: {config.project} root-owned runtime baseline {baseline_path} is unusable: {exc}"
-    try:
-        tenant_data = _load_json(tenant_plan_path)
-    except SystemExit as exc:
-        return None, f"switchyard: {config.project} runtime plan cannot be read: {exc}"
     return reconstruct_privileged_baseline(
         config.project,
         provision_dir,

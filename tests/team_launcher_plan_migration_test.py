@@ -33,6 +33,9 @@ from scripts import team_launcher as launcher
 from scripts.ticket_board.project_provision import (
     PLAN_BASELINE_FIELDS,
     build_plan,
+    tenant_control_grant_document,
+    tenant_control_grant_name,
+    tenant_control_grant_path,
     plan_field_defaults,
     plan_field_names,
     write_artifacts,
@@ -383,24 +386,193 @@ def privileged_migration(owner: str) -> None:
             assert account == f"{project}-{role}", pair
 
 
+def install_root_owned_grant(project: str, owner: str, controller: str) -> Path:
+    """The bridge the operator's first pass installs, at the real pinned path.
+
+    Written as this namespace's root onto a tmpfs mounted over /usr/local/lib,
+    so it is genuinely uid 0 and not group- or world-writable -- which is the
+    only thing `resolve_control_user` accepts as an authority.
+    """
+    grant = Path(tenant_control_grant_path(project))
+    grant.parent.mkdir(parents=True, exist_ok=True)
+    grant.write_text(
+        tenant_control_grant_document(
+            project=project, owner_user=owner, control_user=controller
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    os.chown(grant, 0, 0)
+    grant.chmod(0o644)
+    return grant
+
+
+def two_pass_controller(owner: str) -> None:
+    """The SYRD-19/SYRD-50 lifecycle: reconstruct, install the bridge, upgrade again.
+
+    Pass one has no grant, so the reconstructed baseline records no controller
+    and stages no tenant-control artifacts. The operator then installs the
+    root-owned grant for a human. Pass two must pick that controller up from the
+    grant -- not from the tenant's document, and not from whoever is running the
+    upgrade -- and stage the bridge's files so an ordinary upgrade can repair
+    them.
+    """
+    project = "porter"
+    identity = pwd.getpwnam(owner)
+    assert os.geteuid() == 0 and identity.pw_uid != 0
+    controller = "nobody"
+    assert pwd.getpwnam(controller).pw_uid != identity.pw_uid
+    # A real root-run upgrade arrives through sudo, so the human at the keyboard
+    # is resolvable throughout. Deliberately somebody other than the granted
+    # controller: running the upgrade must not be what decides who may drive the
+    # tenant, and with the operator invisible that could not be observed.
+    operator = "daemon"
+    assert operator not in (controller, owner)
+    os.environ["SUDO_UID"] = str(pwd.getpwnam(operator).pw_uid)
+    with tempfile.TemporaryDirectory(prefix="plan-migration-two-pass.") as tmp:
+        root = Path(tmp)
+        root.chmod(0o755)
+        provision, config_path, plan = _fixture_tenant(root, owner, project=project)
+        privileged_root = root / "etc-switchyard"
+        os.environ["SWITCHYARD_PRIVILEGED_PROVISION_ROOT"] = str(privileged_root)
+        subprocess.run(["chown", "-R", f"{owner}:{owner}", str(provision)], check=True)
+        config = launcher.load_project_config(project, config_path)
+        plan_path = provision / "plan.json"
+        mirror = privileged_root / project
+        write_legacy_plan(plan_path)
+
+        def runner(args, **kwargs):
+            if args[0] == "chown":
+                return subprocess.run(args, **kwargs)
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        def refresh():
+            return launcher.refresh_generated_project_runtime_artifacts(
+                config, config_path=config_path, runner=runner, print_func=lambda _t: None
+            )
+
+        grant_artifact = tenant_control_grant_name(project)
+        sudoers_artifact = plan.tenant_control_sudoers_name
+
+        # Pass one: no grant anywhere, so no controller and no bridge files --
+        # and running the upgrade does not make the operator the controller,
+        # even though sudo can name them.
+        from scripts.ticket_board.project_provision import invoking_human
+
+        assert invoking_human() == operator, invoking_human()
+        assert not Path(tenant_control_grant_path(project)).exists()
+        outcome = refresh()
+        assert outcome.changed, outcome.message
+        baseline = json.loads((mirror / "plan.json").read_text(encoding="utf-8"))
+        assert baseline["control_user"] == "", baseline["control_user"]
+        assert baseline["control_user"] != operator, baseline["control_user"]
+        assert not (mirror / grant_artifact).exists(), sorted(p.name for p in mirror.iterdir())
+        assert not (mirror / sudoers_artifact).exists(), sorted(p.name for p in mirror.iterdir())
+        tenant = json.loads(plan_path.read_text(encoding="utf-8"))
+        assert tenant["control_user"] == "", tenant["control_user"]
+
+        # The operator's generated script installs the bridge for a human.
+        install_root_owned_grant(project, owner, controller)
+
+        # Pass two: the same ordinary upgrade, and the durable plan learns it.
+        outcome = refresh()
+        assert outcome.changed, outcome.message
+        baseline = json.loads((mirror / "plan.json").read_text(encoding="utf-8"))
+        assert baseline["control_user"] == controller, baseline["control_user"]
+        tenant = json.loads(plan_path.read_text(encoding="utf-8"))
+        assert tenant["control_user"] == controller, tenant["control_user"]
+        # And the bridge's own files are staged, so upgrade can repair them.
+        for name in (grant_artifact, sudoers_artifact):
+            assert (mirror / name).is_file(), sorted(p.name for p in mirror.iterdir())
+            assert (mirror / name).stat().st_uid == 0, name
+            assert controller in (mirror / name).read_text(encoding="utf-8"), name
+            assert (provision / name).is_file(), name
+
+        # Idempotent: a third pass reinstalls the same human and changes nothing.
+        assert not refresh().changed
+
+        # Only a root-owned, root-writable grant is an authority. In each case
+        # below the durable record must go back to recording no controller, and
+        # nothing root stages may be rewritten to name the attempted one. (The
+        # files staged by the legitimate pass above stay where they are: this
+        # branch does not prune a privileged artifact it no longer renders, and
+        # that is not what these cases are about.)
+        def records_no_controller(what: str) -> None:
+            refresh()
+            recorded = json.loads((mirror / "plan.json").read_text(encoding="utf-8"))
+            assert recorded["control_user"] == "", (what, recorded["control_user"])
+            assert recorded["control_user"] != operator, what
+            tenant_copy = json.loads(plan_path.read_text(encoding="utf-8"))
+            assert tenant_copy["control_user"] == "", (what, tenant_copy["control_user"])
+            staged_grant = mirror / grant_artifact
+            if staged_grant.exists():
+                # Still the legitimate controller's, untouched -- never rewritten
+                # to the one the unusable grant or the tenant document names.
+                authorized = json.loads(staged_grant.read_text(encoding="utf-8"))["authorized_user"]
+                assert authorized == controller, (what, authorized)
+            staged_sudoers = mirror / sudoers_artifact
+            if staged_sudoers.exists():
+                rule = staged_sudoers.read_text(encoding="utf-8")
+                assert f"{owner} ALL=(root)" not in rule, (what, rule)
+                assert f"{controller} ALL=(root)" in rule, (what, rule)
+
+        # A grant the tenant could have written is not an authority, and the
+        # operator is not made the controller by having run the upgrade.
+        grant = Path(tenant_control_grant_path(project))
+        grant.write_text(
+            tenant_control_grant_document(
+                project=project, owner_user=owner, control_user=owner
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        os.chown(grant, identity.pw_uid, identity.pw_gid)
+        records_no_controller("a grant owned by the tenant")
+
+        # A grant root owns but anyone may write is no better.
+        os.chown(grant, 0, 0)
+        grant.chmod(0o646)
+        records_no_controller("a world-writable grant")
+
+        # And the tenant naming its own controller in plan.json changes nothing:
+        # with the grant gone there is no controller, whatever the document says.
+        grant.unlink()
+        stored = json.loads(plan_path.read_text(encoding="utf-8"))
+        stored["control_user"] = owner
+        plan_path.write_text(json.dumps(stored, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        records_no_controller("the tenant naming its own controller")
+
+
 def main() -> int:
     test_the_shape_that_failed_is_the_shape_under_test()
     test_the_migration_is_derived_rather_than_hardcoded()
     test_a_document_that_is_not_a_plan_is_still_refused()
     unprivileged_migration()
     owner = pwd.getpwuid(os.geteuid()).pw_name
-    command = [sys.executable, str(Path(__file__).resolve()), "--root-child", owner]
-    if os.geteuid() != 0:
-        command = ["unshare", "--user", "--map-auto", "--map-root-user", *command]
-    else:
-        command[-1] = "www-data"
-    subprocess.run(command, check=True)
+    for entry in ("--root-child", "--two-pass-child"):
+        command = [sys.executable, str(Path(__file__).resolve()), entry, owner]
+        if os.geteuid() != 0:
+            # --mount so the grant can be installed at its real pinned path on a
+            # tmpfs of this namespace's own, leaving the host's untouched.
+            command = ["unshare", "--user", "--map-auto", "--map-root-user", "--mount", *command]
+        else:
+            command[-1] = "www-data"
+        subprocess.run(command, check=True)
     print("team_launcher_plan_migration_test: ok")
     return 0
+
+
+def _private_tenant_control_root() -> None:
+    """A writable /usr/local/lib for this namespace, and for nothing else."""
+    Path("/usr/local/lib").mkdir(parents=True, exist_ok=True)
+    subprocess.run(["mount", "-t", "tmpfs", "tmpfs", "/usr/local/lib"], check=True)
 
 
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "--root-child":
         privileged_migration(sys.argv[2])
+    elif len(sys.argv) == 3 and sys.argv[1] == "--two-pass-child":
+        _private_tenant_control_root()
+        two_pass_controller(sys.argv[2])
     else:
         raise SystemExit(main())

@@ -440,8 +440,22 @@ one has no list to update.
 Nothing here decides what root installs. Root still renders from its own
 root-owned baseline, still regenerates the role table, and still refuses rather
 than silently replacing any generated name a tenant document records
-differently. `switchyard upgrade --dry-run` reports which fields it would
-migrate and writes nothing, at root and as the tenant alike.
+differently. Root judges the document as it found it: the tenant's copy is read
+once, before the refresh republishes it, so a value the refresh corrects cannot
+be laundered past that refusal. `switchyard upgrade --dry-run` reports which
+fields it would migrate and writes nothing, at root and as the tenant alike.
+
+**The controller comes from the installed grant, on every pass.** A legacy
+tenant reaches its bridge in two passes: the first reconstructs a baseline with
+no controller, and the operator's generated script then installs the root-owned
+grant for a human. The durable plan has to learn that on the second pass, or the
+bridge works until its files need repair and an ordinary upgrade cannot recreate
+them. So `control_user` is re-derived on every refresh from the installed grant
+alone -- root-owned, not group- or world-writable, or it is not an authority.
+Not from the tenant's document, which would let the tenant name its own
+controller, and not from whoever ran the upgrade: repairing a bridge and handing
+one out are different things, and only the first is what an upgrade does. With
+no grant the value is empty, which renders no tenant-control artifacts at all.
 
 **Withholding the authority table is not a compatibility mode.** The board
 resolves every local peer through that table, so an empty one grants no role to

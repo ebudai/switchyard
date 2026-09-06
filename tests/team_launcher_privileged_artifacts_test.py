@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import pwd
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -98,26 +99,70 @@ def privileged_refresh(owner: str) -> None:
             )
             return outcome, said
 
-        # A tenant plan that would run the board as root is not adopted as
-        # root's baseline at all: there is nothing to sanitise afterwards,
-        # because a plan root did not write is not evidence of anything.
-        edit_tenant_plan(plan_path, service_user="root", board_current="/tmp/tenant-controlled-release")
-        outcome, _said = refresh()
-        assert "refusing to adopt" in outcome.message and "service_user" in outcome.message, outcome.message
-        # The tenant's own copies may be regenerated from the tenant's own plan
-        # -- they are its view of its project -- but nothing root installs was
-        # produced from it.
+        pristine = plan_path.read_text()
+        real_home = Path(pwd.getpwnam(owner).pw_dir)
+
+        def rebuild_baseline(**tamper: object):
+            """Establish root's baseline from scratch with one field tampered with."""
+            if mirror.exists():
+                shutil.rmtree(mirror)
+            plan_path.write_text(pristine)
+            if tamper:
+                edit_tenant_plan(plan_path, **tamper)
+            return refresh()
+
+        # Root does not adopt the tenant's document at all, so a field in it
+        # that would decide what root runs decides nothing. Each is tampered
+        # with on its own, so each is shown to be independently ineffective.
+        outcome, _said = rebuild_baseline(service_user="root")
+        assert outcome.changed, outcome.message
+        unit = mirrored_unit.read_text()
+        assert f"User={plan.service_user}" in unit and "User=root" not in unit
+
+        outcome, _said = rebuild_baseline(board_current="/tmp/tenant-controlled-release")
+        assert outcome.changed, outcome.message
+        unit = mirrored_unit.read_text()
+        assert "/tmp/tenant-controlled-release" not in unit
+        assert f"WorkingDirectory={real_home}/porter-ticketboard-live/current" in unit, unit
+
+        # owner_home anchored every path check that would have been made
+        # against it, so it is taken from the passwd database and not from the
+        # document. "/" makes any containment test vacuously true.
+        outcome, _said = rebuild_baseline(owner_home="/", board_current="/tmp/tenant-controlled-release")
+        assert outcome.changed, outcome.message
+        unit = mirrored_unit.read_text()
+        assert "/tmp/tenant-controlled-release" not in unit
+        assert f"WorkingDirectory={real_home}/porter-ticketboard-live/current" in unit, unit
+
+        # role_accounts renders both the board's authoritative uid table and a
+        # passwordless sudoers grant root installs. The whole table is
+        # regenerated; nothing in the document reaches it.
+        outcome, _said = rebuild_baseline(
+            role_accounts=[["director", "root"], ["ops", "porter-ops"]]
+        )
+        assert outcome.changed, outcome.message
+        unit = mirrored_unit.read_text()
+        sudoers = (mirror / plan.role_control_sudoers_name).read_text()
+        declared = [line for line in unit.splitlines() if "TICKET_BOARD_ROLE_ACCOUNTS" in line]
+        assert declared and "director=root" not in declared[0], declared
+        for pair in declared[0].split("=", 2)[2].split(","):
+            role, account = pair.split("=")
+            assert account == f"porter-{role}", pair
+        assert "root)" not in sudoers and " root " not in sudoers, sudoers
+
+        # What cannot be regenerated and cannot be trusted is refused, with the
+        # reason, rather than guessed at: root will not run a project's SQL
+        # against a database it did not choose.
+        outcome, _said = rebuild_baseline(database="postgres")
+        assert "cannot establish a root-owned baseline" in outcome.message, outcome.message
+        assert "database" in outcome.message, outcome.message
         assert not mirror.exists(), sorted(f.name for f in mirror.iterdir()) if mirror.exists() else ()
 
-        # Restored to what provisioning produced, root adopts it once and keeps
-        # its own copy of it from then on.
-        edit_tenant_plan(plan_path, service_user=plan.service_user, board_current=plan.board_current)
-        outcome, _said = refresh()
+        outcome, _said = rebuild_baseline()
         assert outcome.changed, outcome.message
         assert (mirror / "plan.json").stat().st_uid == 0
         baseline_unit = mirrored_unit.read_text()
         assert f"User={plan.service_user}" in baseline_unit
-        assert "/tmp/tenant-controlled-release" not in baseline_unit
 
         # The one thing the unprivileged projection may say: a role it added,
         # under that role's own canonical account.

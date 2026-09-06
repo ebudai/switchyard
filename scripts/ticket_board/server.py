@@ -438,7 +438,21 @@ def restrict_socket_to_tenant(socket_path: Path, *, environ: Mapping[str, str] |
             socket_path,
         )
         return
-    for target, mode in ((socket_path.parent, 0o750), (socket_path, PANE_SOCKET_MODE)):
+    # Roles write pane activity here and the owner's notify listener reads it.
+    # Per-role /run/user directories are writable by the role and unreadable by
+    # the listener, so state written there is never seen (SYRD-39).
+    pane_state_dir = socket_path.parent / "pane-state"
+    try:
+        pane_state_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        LOGGER.warning("Could not create shared pane state directory %s: %s", pane_state_dir, exc)
+    for target, mode in (
+        (socket_path.parent, 0o750),
+        (socket_path, PANE_SOCKET_MODE),
+        (pane_state_dir, 0o770),
+    ):
+        if not target.exists():
+            continue
         try:
             os.chown(target, -1, gid)
             target.chmod(mode)

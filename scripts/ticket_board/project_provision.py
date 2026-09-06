@@ -490,7 +490,7 @@ def role_runtime_command(plan: ProjectBoardProvision) -> str:
     if not plan.role_accounts or not plan.roles_group:
         return ""
     worktrees = dict(plan.role_worktrees)
-    lines: list[str] = []
+    lines: list[str] = list(role_tooling_staging_commands(plan.project, plan.board_current))
     for role, account in plan.role_accounts:
         lines.extend(
             role_runtime_commands(
@@ -504,6 +504,28 @@ def role_runtime_command(plan: ProjectBoardProvision) -> str:
             )
         )
     return "\n".join(lines)
+
+
+def role_tooling_staging_commands(project: str, board_current: str) -> list[str]:
+    """Copy the executables roles need out of the owner's home.
+
+    Roles are not in the owner's group and the owner's home is not traversable
+    by them, which is correct -- it holds the owner's credentials. These few
+    scripts are not secret, so root stages them at a shared path that role
+    accounts can execute without being given any access to the owner (SYRD-39).
+    """
+    staging = f"/usr/local/lib/switchyard/{project}"
+    commands = [f"sudo install -d -m 0755 -o root -g root {shell_quote(staging)}"]
+    for name in (
+        "ticket-board-pane-idle-hook",
+        "ticket-board-install-pane-hooks",
+        "switchyard-board-skill",
+    ):
+        commands.append(
+            f"sudo install -m 0755 -o root -g root "
+            f"{shell_quote(f'{board_current}/scripts/{name}')} {shell_quote(f'{staging}/{name}')}"
+        )
+    return commands
 
 
 def role_runtime_commands(
@@ -550,7 +572,14 @@ def role_runtime_commands(
         commands.append(
             f"sudo install -d -m 0700 -o {q_account} -g {q_account} {shell_quote(directory)}"
         )
-    hook_source = shell_quote(f"{board_current}/scripts/ticket-board-pane-idle-hook")
+    # Staged by root at a shared, world-readable path. A role account is only a
+    # member of the roles group; the owner's home stays 0700/0710 and holds the
+    # owner's credentials, so a role cannot -- and must not -- traverse it to
+    # reach these executables (SYRD-39).
+    staging = f"/usr/local/lib/switchyard/{project}"
+    hook_source = shell_quote(f"{staging}/ticket-board-pane-idle-hook")
+    hook_installer = shell_quote(f"{staging}/ticket-board-install-pane-hooks")
+    skill_installer = shell_quote(f"{staging}/switchyard-board-skill")
     hook_bin = shell_quote(f"{home}/.local/bin/ticket-board-pane-idle-hook")
     session_dir = shell_quote(f"{home}/.local/state/{runtime_directory}/pane-sessions")
     commands.extend(
@@ -561,10 +590,9 @@ def role_runtime_commands(
             # owner's.
             f"sudo -u {q_account} -H env TICKET_BOARD_PROJECT={shell_quote(project)} "
             f"TICKET_BOARD_PANE_SESSION_DIR={session_dir} "
-            f"{shell_quote(board_current + '/scripts/ticket-board-install-pane-hooks')} install "
+            f"{hook_installer} install "
             f"--home {q_home} --hook-source {hook_source} --bin-path {hook_bin}",
-            f"sudo -u {q_account} -H {shell_quote(board_current + '/scripts/switchyard-board-skill')}"
-            f" install --home {q_home}",
+            f"sudo -u {q_account} -H {skill_installer} install --home {q_home}",
         ]
     )
     return commands
@@ -605,6 +633,7 @@ def role_account_commands(
         f"sudo gpasswd -a {shell_quote(service_user)} {shell_quote(group)} >/dev/null",
         f"sudo gpasswd -a {shell_quote(owner_user)} {shell_quote(group)} >/dev/null",
     ]
+    lines.extend(role_tooling_staging_commands(project, resolved_board_current))
     lines.extend(
         role_runtime_commands(
             project=project,
@@ -1161,7 +1190,7 @@ Environment=PGDATABASE={plan.database}
 Environment=PGUSER={plan.listener_role}
 Environment=TICKET_BOARD_DATABASE_URL={plan.listener_database_url}
 Environment=TICKET_BOARD_NOTIFY_DATABASE_URL={plan.listener_database_url}
-Environment=TICKET_BOARD_PANE_STATE_DIR=%t/{plan.runtime_directory}/pane-state
+Environment=TICKET_BOARD_PANE_STATE_DIR=/run/{plan.runtime_directory}/pane-state
 EnvironmentFile=-%h/.config/{plan.project}/ticket-board-notify-listener.env
 StandardOutput=append:{plan.listener_log}
 StandardError=append:{plan.listener_log}

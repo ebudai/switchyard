@@ -601,6 +601,34 @@ def default_pane_state_dir_for_user(user_name: str, *, project: str) -> Path:
     return runtime_dir_for_uid(uid) / f"{project}-ticket-board" / "pane-state"
 
 
+def account_session_dir(account: str, *, project: str) -> Path:
+    """Session records for one account of one project.
+
+    Deliberately ignores the ambient TICKET_BOARD_PANE_SESSION_DIR: that names
+    the CURRENT pane's project and user, so honouring it when computing another
+    role's or another project's path hands a role a directory belonging to
+    something else. It is also project-scoped, which the owner-facing helper is
+    not -- that one still hardcodes the legacy pgu state directory (SYRD-39).
+    """
+    home = home_dir_for_user(account)
+    if home is None:
+        return DEFAULT_SESSION_DIR
+    return home / ".local" / "state" / f"{project}-ticket-board" / "pane-sessions"
+
+
+def shared_pane_state_dir(project: str) -> Path:
+    """Where every role of a project records pane activity.
+
+    Role accounts cannot write the owner's XDG runtime directory, and the notify
+    listener cannot read theirs, so per-role state under each role's own
+    /run/user is written where nobody reads it. This is the deliberate
+    aggregation path: the board's runtime directory, group-owned by the
+    project's roles group so every role writes it and the listener reads it
+    (SYRD-39).
+    """
+    return Path("/run") / f"{project}-ticket-board" / "pane-state"
+
+
 def loginctl_enable_linger_args(user_name: str) -> list[str]:
     return ["loginctl", "enable-linger", user_name]
 
@@ -1663,7 +1691,7 @@ def role_session_dir(config: ProjectConfig, role: RoleConfig) -> Path:
     """
     account = role_run_as_user(config, role)
     if account and account != config.run_as_user:
-        return default_session_dir_for_user(account)
+        return account_session_dir(account, project=config.project)
     return config.session_dir
 
 
@@ -1671,7 +1699,7 @@ def role_pane_state_dir(config: ProjectConfig, role: RoleConfig) -> Path:
     """Where this role's pane hooks record busy/idle state."""
     account = role_run_as_user(config, role)
     if account and account != config.run_as_user:
-        return default_pane_state_dir_for_user(account, project=config.project)
+        return shared_pane_state_dir(config.project)
     return default_pane_state_dir_for_user(config.run_as_user, project=config.project)
 
 
@@ -2083,15 +2111,18 @@ def launch_session_record_statuses(
             LaunchSessionRecordStatus(
                 role=role.role,
                 target=role.target,
-                session_id=session_id_for_role(role, config.session_dir),
+                # A role records its session under its own account, so reading
+                # the project-wide directory reports every isolated role as
+                # having no session (SYRD-39).
+                session_id=session_id_for_role(role, role_session_dir(config, role)),
                 superseded_session_id=superseded_session_id_for_role(
                     role,
-                    config.session_dir,
+                    role_session_dir(config, role),
                     changed_since_ns=fallback_changed_since_ns,
                 ),
                 unverified_resume_session_id=unverified_resume_session_id_for_role(
                     role,
-                    config.session_dir,
+                    role_session_dir(config, role),
                     changed_since_ns=fallback_changed_since_ns,
                 ),
                 pane_state_source=pane_launch_outcome_source_for_role(
@@ -5551,14 +5582,18 @@ def sync_reload_config_to_live_sessions(
         role = role_by_name.get(role_name)
         if role is None:
             continue
-        if runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+        # A role's live session is in that role's own tmux server, so reload has
+        # to inspect it there or it sees nothing and rewrites the config from a
+        # blank reading (SYRD-39).
+        role_runner = role_process_runner_for(config, role, runner=runner)
+        if role_runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
             updated_roles.append(role)
             continue
-        live_model = live_model_for_role(role, session_dir=role_session_dir(config, role), runner=runner)
+        live_model = live_model_for_role(role, session_dir=role_session_dir(config, role), runner=role_runner)
         if not live_model:
             updated_roles.append(role)
             continue
-        live_cli = live_cli_for_role(role, runner=runner)
+        live_cli = live_cli_for_role(role, runner=role_runner)
         next_role = role
         if live_cli and live_cli != role.cli:
             raw_role["cli"] = live_cli
@@ -5679,6 +5714,10 @@ def launch_project(
     if mode not in {"attach", "attach-or-start", "reload"}:
         raise SystemExit(f"unknown launch mode: {mode}")
     worktree_runner = runner
+    # Owner-scoped work (worktrees, the viewer session, layout) uses this.
+    # Anything that starts, probes or stops a ROLE selects that role's own
+    # account instead, because bin_user only sets PATH and the uid the board
+    # sees comes from the runner (SYRD-39).
     role_process_runner = runner
     owner_runner_anchor = config.repository or config.pane_launcher
     delegate_role_sessions_to_owner = bool(config.run_as_user and current_user_name() != config.run_as_user)
@@ -5718,7 +5757,7 @@ def launch_project(
             allow_stale=allow_stale_launcher,
         )
         if mode == "attach-or-start":
-            running_roles = _running_project_roles(config, runner=role_process_runner)
+            running_roles = _running_project_roles(config, runner=runner)
         ensure_configured_runtime_user(config, runner=runner)
         ensure_owner_state_dirs(config, pane_state_dir=effective_pane_state_dir, runner=runner)
         ensure_generated_project_pane_hooks(
@@ -5755,6 +5794,23 @@ def launch_project(
             fetch_project_worktree_ref(config, runner=worktree_runner)
             config = sync_reload_config_to_live_sessions(config, config_path=config_path, runner=runner)
             config = prepare_project_desktop(config, runner=runner)
+        # Worktrees are created here, after the operator artifact has already
+        # run, so a fresh project reaches this point with trees still owned by
+        # the project owner. Say so every launch until the handoff is done,
+        # rather than starting roles that cannot write their own trees.
+        isolation_gaps = role_isolation_gaps(config)
+        if isolation_gaps:
+            handoff_path = config_path.with_name(f"{config.project}-role-accounts.sh")
+            try:
+                handoff_path.write_text(render_role_account_migration(config), encoding="utf-8")
+                handoff_path.chmod(0o755)
+            except OSError:
+                pass
+            print_func(
+                "team-launcher: roles are not isolated yet, so the board cannot tell them "
+                "apart:\n  " + "\n  ".join(isolation_gaps)
+                + f"\nAn operator must run {handoff_path} (safe to re-run) and then relaunch."
+            )
     materialize_layout(
         config,
         config_path=config_path,
@@ -5852,7 +5908,7 @@ def launch_project(
                     config_path=config_path,
                     mode=mode,
                     script_path=pane_script_path,
-                    pane_state_dir=effective_pane_state_dir,
+                    pane_state_dir=role_pane_state_dir(config, role),
                     force_reload=force_reload,
                     skip_launcher_check=True,
                     allow_stale_launcher=allow_stale_launcher,
@@ -5864,10 +5920,10 @@ def launch_project(
                 role,
                 mode=mode,
                 session_dir=role_session_dir(config, role),
-                pane_state_dir=effective_pane_state_dir,
+                pane_state_dir=role_pane_state_dir(config, role),
                 force_reload=force_reload,
                 bin_user=role_run_as_user(config, role),
-                runner=role_process_runner,
+                runner=role_process_runner_for(config, role, runner=runner),
             )
         if result != 0:
             if not use_runtime_presentation:
@@ -5888,7 +5944,7 @@ def launch_project(
                         config_path=config_path,
                         mode=mode,
                         script_path=pane_script_path,
-                        pane_state_dir=effective_pane_state_dir,
+                        pane_state_dir=role_pane_state_dir(config, role),
                         force_reload=force_reload,
                         skip_launcher_check=True,
                         allow_stale_launcher=allow_stale_launcher,
@@ -5901,10 +5957,10 @@ def launch_project(
                     role,
                     mode=mode,
                     session_dir=role_session_dir(config, role),
-                    pane_state_dir=effective_pane_state_dir,
+                    pane_state_dir=role_pane_state_dir(config, role),
                     force_reload=force_reload,
                     bin_user=role_run_as_user(config, role),
-                    runner=role_process_runner,
+                    runner=role_process_runner_for(config, role, runner=runner),
                 )
             if result != 0:
                 if not use_runtime_presentation:
@@ -5945,7 +6001,7 @@ def launch_project(
                             config_path=config_path,
                             mode=mode,
                             script_path=pane_script_path,
-                            pane_state_dir=effective_pane_state_dir,
+                            pane_state_dir=role_pane_state_dir(config, role),
                             force_reload=force_reload,
                             skip_launcher_check=True,
                             allow_stale_launcher=allow_stale_launcher,
@@ -5958,10 +6014,10 @@ def launch_project(
                         role,
                         mode=mode,
                         session_dir=role_session_dir(config, role),
-                        pane_state_dir=effective_pane_state_dir,
+                        pane_state_dir=role_pane_state_dir(config, role),
                         force_reload=force_reload,
                         bin_user=role_run_as_user(config, role),
-                        runner=role_process_runner,
+                        runner=role_process_runner_for(config, role, runner=runner),
                     )
                 if result != 0:
                     record_worker_start_failure(role, result)
@@ -10907,6 +10963,37 @@ def provision_runtime_command(user_name: str | None, config: ProjectConfig | Non
     return 0
 
 
+def role_isolation_gaps(config: ProjectConfig) -> list[str]:
+    """What still stops each role running under its own Unix identity.
+
+    Checks the things that actually have to be true, not just whether the
+    accounts exist: a tenant that applied an account-only rollout still has
+    owner-owned worktrees, so it must keep being repaired until every gap is
+    closed. Fresh projects hit this too, because their worktrees are created
+    after the operator artifact has already run (SYRD-39).
+    """
+    gaps: list[str] = []
+    for role in config.roles:
+        account = role_run_as_user(config, role)
+        if not account or account == config.run_as_user:
+            gaps.append(f"{role.role}: no Unix account of its own")
+            continue
+        if not local_account_exists(account):
+            gaps.append(f"{role.role}: account {account} does not exist")
+            continue
+        workdir = Path(role.workdir)
+        if not workdir.exists():
+            continue
+        try:
+            owner_uid = workdir.stat().st_uid
+            account_uid = pwd.getpwnam(account).pw_uid
+        except (OSError, KeyError):
+            continue
+        if owner_uid != account_uid:
+            gaps.append(f"{role.role}: worktree {workdir} is not owned by {account}")
+    return gaps
+
+
 def upgrade_role_accounts_in_config(config_path: Path, *, dry_run: bool = False) -> tuple[bool, str]:
     """Give every role in an existing config its own Unix account.
 
@@ -10951,6 +11038,7 @@ def render_role_account_migration(config: ProjectConfig) -> str:
     from scripts.ticket_board.project_provision import (
         DEFAULT_SERVICE_USER,
         role_runtime_commands,
+        role_tooling_staging_commands,
         roles_group_name,
         shell_quote,
     )
@@ -10968,6 +11056,11 @@ def render_role_account_migration(config: ProjectConfig) -> str:
         f"sudo gpasswd -a {shell_quote(DEFAULT_SERVICE_USER)} {shell_quote(group)} >/dev/null",
         f"sudo gpasswd -a {shell_quote(owner)} {shell_quote(group)} >/dev/null",
     ]
+    lines.extend(
+        role_tooling_staging_commands(
+            config.project, f"/home/{owner}/{config.project}-ticketboard-live/current"
+        )
+    )
     for role in config.roles:
         account = role_run_as_user(config, role)
         if not account or account == owner:
@@ -11031,16 +11124,19 @@ def upgrade_project_command(
     print_func(accounts_message)
     if accounts_changed and not dry_run:
         config = load_project_config(config.project, config_path)
-    if any(role_run_as_user(config, role) and not local_account_exists(role_run_as_user(config, role))
-           for role in config.roles):
+    gaps = role_isolation_gaps(config)
+    if gaps:
+        # Re-emitted while ANY gap remains, not only while an account is
+        # missing, so a tenant that applied an account-only rollout is repaired
+        # rather than silently left half-migrated.
         migration_path = config_path.with_name(f"{config.project}-role-accounts.sh")
         if not dry_run:
             migration_path.write_text(render_role_account_migration(config), encoding="utf-8")
             migration_path.chmod(0o755)
         print_func(
-            "team-launcher: roles do not yet have their own Unix accounts, so the board cannot "
-            f"tell them apart. An operator must run {migration_path} before those roles are "
-            "restarted."
+            "team-launcher: roles are not yet isolated, so the board cannot tell them apart:\n  "
+            + "\n  ".join(gaps)
+            + f"\nAn operator must run {migration_path} (safe to re-run) before those roles restart."
         )
     runtime_artifacts = refresh_generated_project_runtime_artifacts(
         config,

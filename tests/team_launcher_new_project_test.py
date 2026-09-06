@@ -946,11 +946,20 @@ def test_each_role_gets_its_own_runtime_paths_and_prepared_tooling() -> None:
         account = f"porter-{role.role}"
         # The CLI is handed a session directory the role account owns, not the
         # project owner's.
+        # Project-scoped and ambient-free: the path must name THIS project and
+        # this role's account, not whatever project the calling pane belongs to.
         session_dir = str(team_launcher.role_session_dir(config, role))
-        assert account in session_dir, (role.role, session_dir)
+        assert session_dir == f"/home/{account}/.local/state/porter-ticket-board/pane-sessions", (
+            role.role,
+            session_dir,
+        )
         assert str(config.session_dir) != session_dir, (role.role, session_dir)
+        # Pane activity goes to the deliberate aggregation path: every role can
+        # write it and the owner's notify listener can read it. Per-role
+        # /run/user directories are writable by the role and unreadable by the
+        # listener, which is where the state used to go unread (SYRD-39).
         state_dir = str(team_launcher.role_pane_state_dir(config, role))
-        assert account in state_dir or state_dir.startswith("/run/user/"), (role.role, state_dir)
+        assert state_dir == "/run/porter-ticket-board/pane-state", (role.role, state_dir)
 
         # And the rollout actually prepares that role: its worktree, its runtime
         # paths, its pane hooks and its board skill.

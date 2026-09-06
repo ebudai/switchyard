@@ -615,6 +615,89 @@ def test_presentation_reaches_each_role_through_its_own_account() -> None:
     assert calls[2][0] == "tmux", calls[2]
 
 
+
+def test_role_runner_isolates_even_when_the_project_owner_invokes_switchyard() -> None:
+    """SYRD-39: the normal case is the owner running switchyard.
+
+    The old shared runner was the plain runner exactly then, so detached,
+    viewer, presentation, reload and recovery all started the role's tmux server
+    and CLI as the owner. bin_user only sets PATH; the uid comes from the runner,
+    so the board granted those processes no role at all.
+    """
+    import subprocess as _subprocess
+
+    calls: list[list[str]] = []
+
+    def record(args, **_kwargs):
+        calls.append(list(args))
+        return _subprocess.CompletedProcess(list(args), 0, stdout="")
+
+    with tempfile.TemporaryDirectory(prefix="switchyard-owner-invoked.") as tmp:
+        tmp_path = Path(tmp)
+        config_path = tmp_path / "porter.json"
+        roles = []
+        for index, name in enumerate(("director", "ops")):
+            workdir = tmp_path / name
+            workdir.mkdir()
+            roles.append(
+                {
+                    "role": name,
+                    "slot": index,
+                    "tmux_session": f"porter-{name}",
+                    "target": f"porter-{name}:0.0",
+                    "cli": ["codex"],
+                    "workdir": str(workdir),
+                    "run_as_user": f"porter-{name}",
+                }
+            )
+        config_path.write_text(
+            json.dumps({"project": "porter", "run_as_user": "porter-agent", "roles": roles}, indent=2, sort_keys=True)
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+
+        original_current_user_name = team_launcher.current_user_name
+        # The project owner is the one invoking switchyard.
+        team_launcher.current_user_name = lambda: "porter-agent"
+        try:
+            for role in config.roles:
+                runner = team_launcher.role_process_runner_for(config, role, runner=record)
+                runner(["tmux", "has-session", "-t", role.tmux_session])
+            # The owner's own viewer session is not a role and stays direct.
+            owner_role = team_launcher.RoleConfig(
+                role="viewer-stub",
+                slot=None,
+                detached=True,
+                tmux_session="porter-viewer",
+                target="porter-viewer:0.0",
+                workdir=str(tmp_path),
+                cli=["codex"],
+                model="",
+                model_arg="--model",
+                effort="",
+                yolo=False,
+                extra_args=[],
+                resume_mode="flag",
+                resume_flag="--resume",
+                resume_subcommand="resume",
+                fresh_session_per_ticket=False,
+                live_commands=["codex"],
+                env={},
+            )
+            team_launcher.role_process_runner_for(config, owner_role, runner=record)(
+                ["tmux", "has-session", "-t", "porter-viewer"]
+            )
+        finally:
+            team_launcher.current_user_name = original_current_user_name
+
+    assert calls[0][:3] == ["sudo", "-u", "porter-director"], calls[0]
+    assert calls[1][:3] == ["sudo", "-u", "porter-ops"], calls[1]
+    # A role without its own account falls back to the owner, who is already
+    # the caller, so no privileged hop is inserted.
+    assert calls[2][0] == "tmux", calls[2]
+
+
 def main() -> int:
     run_team_launcher_tests(globals(), first=())
     print("team_launcher_tmux_panes_test: ok")

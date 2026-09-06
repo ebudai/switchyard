@@ -87,7 +87,10 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "if ! sudo -u 'stellaris-agent' test -s '/home/stellaris-agent/.config/stellaris/ticket-board.env'; then" in combined
     assert "TICKET_BOARD_TENANT_REPORT_TOKEN=%s" in combined
     assert "sudo -u 'stellaris-agent' chmod 0600 '/home/stellaris-agent/.config/stellaris/ticket-board.env'" in combined
-    assert "TICKET_BOARD_PANE_STATE_DIR=%t/stellaris-ticket-board/pane-state" in combined
+    # SYRD-39: the listener reads the shared aggregation path so it can see an
+    # isolated role's activity. Each role writes there; per-role /run/user
+    # directories are unreadable by the listener.
+    assert "TICKET_BOARD_PANE_STATE_DIR=/run/stellaris-ticket-board/pane-state" in combined
     assert (
         "sudo -u 'stellaris-agent' -H env XDG_RUNTIME_DIR=\"$owner_runtime_dir\" "
         "TICKET_BOARD_PROJECT='stellaris' "
@@ -905,6 +908,40 @@ def test_role_accounts_rollout_is_idempotent_and_doubles_as_migration() -> None:
         assert "ticket-board-install-pane-hooks' install" in runtime
         assert f"switchyard-board-skill' install --home '/home/{account}'" in runtime, account
         assert f"/home/{account}/.local/state/otto-ticket-board/pane-sessions" in runtime, account
+
+
+def test_role_commands_never_reach_into_the_owner_home() -> None:
+    """SYRD-39: a role account cannot traverse the owner's home, and must not.
+
+    The owner home is 0700/0710 and holds the owner's credentials. Roles are
+    only in the project's roles group, so any `sudo -u <role> ...` that names a
+    path under the owner's home fails, and because operator-commands.sh is
+    `set -e` that aborts the whole rollout. The executables roles need are not
+    secret, so root stages them at a shared path instead.
+    """
+    plan = build_plan(project="otto", owner_user="otto-agent")
+    accounts = {account for _role, account in plan.role_accounts}
+    combined = role_accounts_command(plan) + "\n" + role_runtime_command(plan)
+
+    staged = f"/usr/local/lib/switchyard/{plan.project}"
+    for line in combined.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("sudo -u "):
+            continue
+        who = stripped.split()[2].strip("'")
+        if who not in accounts:
+            continue
+        assert plan.owner_home not in stripped, (
+            "a role command reaches into the owner home, which it cannot traverse: " + stripped
+        )
+        assert staged in stripped, ("role command does not use the staged tooling: " + stripped)
+
+    # Root stages those executables, readable by everyone and owned by nobody
+    # in particular, so no owner access is granted to make them reachable.
+    for name in ("ticket-board-pane-idle-hook", "ticket-board-install-pane-hooks", "switchyard-board-skill"):
+        assert f"sudo install -m 0755 -o root -g root " in combined
+        assert f"{staged}/{name}" in combined, name
+    assert f"sudo install -d -m 0755 -o root -g root '{staged}'" in combined
 
 
 def test_role_control_interface_covers_every_control_path_narrowly() -> None:

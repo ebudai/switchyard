@@ -238,13 +238,55 @@ def _require_director(config: team_launcher.ProjectConfig, environ: Mapping[str,
     return actor
 
 
+def _session_owner_map(config: team_launcher.ProjectConfig) -> dict[str, str]:
+    """tmux session name -> the account whose tmux server holds it.
+
+    Role sessions live in their own role account's server; display and viewer
+    sessions belong to the project owner (SYRD-39).
+    """
+    owners: dict[str, str] = {}
+    for role in config.roles:
+        account = team_launcher.role_run_as_user(config, role)
+        if account:
+            owners[role.tmux_session] = account
+    return owners
+
+
+def _tmux_target_session(args: list[str]) -> str:
+    """The session a tmux invocation addresses, if any."""
+    for flag in ("-t", "-s"):
+        if flag in args:
+            index = args.index(flag) + 1
+            if index < len(args):
+                target = str(args[index]).lstrip("=")
+                return target.split(":", 1)[0]
+    return ""
+
+
 def _tmux_runner(
     config: team_launcher.ProjectConfig,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
 ) -> Callable[..., subprocess.CompletedProcess[Any]]:
-    if config.run_as_user and team_launcher.current_user_name() != config.run_as_user:
-        return team_launcher._owner_process_runner(owner_user=config.run_as_user, runner=runner)
-    return runner
+    """Route each tmux call to the account that owns the session it addresses.
+
+    With one account per role there is no shared tmux server, so presentation
+    reaches a role's session through the generated role-control interface
+    (sudo -u <role account> tmux) rather than assuming ambient access. Display
+    and viewer sessions stay with the project owner (SYRD-39).
+    """
+    owners = _session_owner_map(config)
+    current_user = team_launcher.current_user_name()
+
+    def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        account = config.run_as_user
+        if args and args[0] == "tmux":
+            session = _tmux_target_session(args)
+            account = owners.get(session, config.run_as_user)
+        if account and current_user != account:
+            return team_launcher._owner_process_runner(owner_user=account, runner=runner)(args, **kwargs)
+        return runner(args, **kwargs)
+
+    return run
 
 
 def _read_state(path: Path, *, config: team_launcher.ProjectConfig, config_path: Path) -> dict[str, Any]:

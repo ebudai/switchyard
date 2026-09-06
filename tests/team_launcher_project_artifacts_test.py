@@ -23,8 +23,14 @@ def test_switchyard_new_reports_project_specific_pane_state_dir_without_override
     captured_pane_state_dirs: list[Path | None] = []
     original_uid_for_user = team_launcher.uid_for_user
     original_report_launch_session_records = team_launcher.report_launch_session_records
+    original_role_isolation_gaps = team_launcher.role_isolation_gaps
     try:
         team_launcher.uid_for_user = lambda user_name: 1005 if user_name == "otto-agent" else original_uid_for_user(user_name)
+        # SYRD-39: session records are only reported for a launch that actually
+        # happened, and a fresh project defers its launch until an operator has
+        # created the role accounts. The pane state directory this test is about
+        # is reported by that launch, so the precondition is stated here.
+        team_launcher.role_isolation_gaps = lambda _config: []
 
         def fake_report_launch_session_records(
             _config: team_launcher.ProjectConfig,
@@ -67,6 +73,7 @@ def test_switchyard_new_reports_project_specific_pane_state_dir_without_override
     finally:
         team_launcher.uid_for_user = original_uid_for_user
         team_launcher.report_launch_session_records = original_report_launch_session_records
+        team_launcher.role_isolation_gaps = original_role_isolation_gaps
 
     assert captured_pane_state_dirs == [Path("/run/user/1005/porter-ticket-board/pane-state")]
 

@@ -37,7 +37,7 @@ from scripts.ticket_board.server import (
     OPERATION_ALLOWED_ROLES,
     REPORT_TOKEN_HEADER,
     WRITE_TOKEN_HEADER,
-    CallerRegistry,
+    LocalRoleAuthority,
     TicketBoardEventHub,
     TicketBoardServer,
     TicketBoardUnixServer,
@@ -2049,6 +2049,15 @@ LIMIT 1;
     assert "regression" in merged_source, merged_source
 
 
+def local_role_authority_as(role: str) -> LocalRoleAuthority:
+    """Run the local socket as though this test process were `role`'s account.
+
+    Role authority is the peer's Unix uid, so a test that drives the write
+    client has to say which role account it is standing in for.
+    """
+    return LocalRoleAuthority({role: f"test-{role}"}, resolve_uid=lambda _account: os.getuid())
+
+
 def exercise_real_write_client_file_bug_payload(app: TicketBoardApp, socket_path: Path) -> None:
     events = TicketBoardEventHub(app)
     server = TicketBoardUnixServer(
@@ -2056,7 +2065,7 @@ def exercise_real_write_client_file_bug_payload(app: TicketBoardApp, socket_path
         app,
         events=events,
         director_notifier=QuietNotifier(),
-        caller_registry=CallerRegistry(),
+        role_authority=local_role_authority_as("ops"),
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

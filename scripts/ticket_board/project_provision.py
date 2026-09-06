@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import grp
 import os
+import pwd
 import re
 import sys
 from dataclasses import asdict, dataclass
@@ -30,6 +32,8 @@ DEFAULT_PGU_ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "i
 DEFAULT_PGU_CALLER_ROLES = ("director", "main", "app", "ops", "perf", "audit", "inspector", "research", "user")
 SCHEMA_SQL_PATH = Path(__file__).with_name("schema.sql")
 DEFAULT_SHARED_PYTHON = "/opt/switchyard/venv/bin/python"
+# The account the board service itself runs as.
+DEFAULT_SERVICE_USER = "boardsvc"
 DEFAULT_PG_IDENT_MAP = "pgu_ticket_board_service"
 
 # Tenant boards intentionally expose a smaller workflow surface than the pgu
@@ -54,6 +58,7 @@ class ProjectBoardProvision:
     listener_unit: str
     tmpfiles_name: str
     polkit_name: str
+    role_control_sudoers_name: str
     runtime_directory: str
     socket_path: str
     port: int
@@ -79,6 +84,13 @@ class ProjectBoardProvision:
     caller_roles: tuple[str, ...]
     operation_allowed_roles: tuple[tuple[str, tuple[str, ...]], ...]
     board_service_traversal: bool
+    # SYRD-39: one Unix account per configured role, and the group that
+    # lets exactly those accounts reach this project's board socket.
+    role_accounts: tuple[tuple[str, str], ...] = ()
+    roles_group: str = ""
+    # (role, worktree path) so the rollout can transfer ownership of the
+    # tree each role actually works in.
+    role_worktrees: tuple[tuple[str, str], ...] = ()
     workflow: dict | None = None
 
 
@@ -174,7 +186,7 @@ def build_plan(
     owner_home: Path | None = None,
     port: int | None = None,
     database: str | None = None,
-    service_user: str = "boardsvc",
+    service_user: str = DEFAULT_SERVICE_USER,
     service_role: str = "ticket_board_service",
     listener_role: str = "ticket_board_listener",
     board_root: Path | None = None,
@@ -317,6 +329,7 @@ def build_plan(
         listener_unit=f"{unit_prefix}-notify-listener.service",
         tmpfiles_name=f"{unit_prefix}.conf",
         polkit_name=f"49-{unit_prefix}-deploy.rules",
+        role_control_sudoers_name=f"49-{project}-role-control",
         runtime_directory=runtime_directory,
         socket_path=f"/run/{runtime_directory}/ticket-board.sock",
         port=resolved_port,
@@ -347,7 +360,45 @@ def build_plan(
         caller_roles=caller_roles,
         operation_allowed_roles=operation_allowed_roles,
         board_service_traversal=board_service_traversal,
+        role_accounts=role_account_table(project, caller_roles),
+        roles_group=roles_group_name(project),
     )
+
+
+# Roles that never run a local process: the human uses the browser or the
+# authenticated HTTP path, so no Unix account is created for them.
+NON_PROCESS_ROLES = frozenset({"user", "unassigned"})
+
+
+def role_account_name(project: str, role: str) -> str:
+    """The Unix account that runs one role of one project."""
+    return f"{project}-{role}"
+
+
+def roles_group_name(project: str) -> str:
+    """The group whose members may reach this project's board socket."""
+    return f"{project}-roles"
+
+
+def role_account_table(project: str, caller_roles: Sequence[str]) -> tuple[tuple[str, str], ...]:
+    """(role, account) for every role that runs as a local process.
+
+    Derived from the project's declared caller roles, so adding or renaming a
+    role in configuration is enough; nothing here knows what a director is.
+    """
+    seen: list[tuple[str, str]] = []
+    for role in caller_roles:
+        name = str(role).strip().lower()
+        if not name or name in NON_PROCESS_ROLES:
+            continue
+        if any(existing == name for existing, _ in seen):
+            continue
+        seen.append((name, role_account_name(project, name)))
+    return tuple(seen)
+
+
+def role_accounts_env(plan: "ProjectBoardProvision") -> str:
+    return ",".join(f"{role}={account}" for role, account in plan.role_accounts)
 
 
 def shell_quote(value: str) -> str:
@@ -384,6 +435,278 @@ def service_user_command(service_user: str) -> str:
     fi
     sudo useradd -r -M -d /nonexistent -s "$service_shell" {q_service_user}
 fi"""
+
+
+def role_accounts_command(plan: ProjectBoardProvision) -> str:
+    """Create one Unix account per role, plus the group that reaches the socket.
+
+    This is the boundary the board relies on: SO_PEERCRED reports a uid the
+    caller cannot choose, so giving each role its own account is what makes the
+    role mapping authoritative rather than advisory (SYRD-39).
+
+    Idempotent, and safe to re-run on an existing tenant: accounts and group
+    memberships that already exist are left alone, which is what makes this
+    double as the migration for a tenant that previously ran every role under
+    one account.
+    """
+    if not plan.role_accounts or not plan.roles_group:
+        return ""
+    q_group = shell_quote(plan.roles_group)
+    q_owner = shell_quote(plan.owner_user)
+    q_service = shell_quote(plan.service_user)
+    worktrees = dict(plan.role_worktrees)
+    lines = [
+        f"if ! getent group {q_group} >/dev/null 2>&1; then",
+        f"    sudo groupadd -r {q_group}",
+        "fi",
+        # The board service must be able to hand the socket to the group, and
+        # the tenant owner keeps its existing operational access.
+        f"sudo gpasswd -a {q_service} {q_group} >/dev/null",
+        f"sudo gpasswd -a {q_owner} {q_group} >/dev/null",
+    ]
+    for role, account in plan.role_accounts:
+        q_account = shell_quote(account)
+        q_home = shell_quote(role_account_home(plan, role))
+        lines.extend(
+            [
+                f"if ! getent passwd {q_account} >/dev/null 2>&1; then",
+                f"    sudo useradd -m -d {q_home} -s /bin/bash {q_account}",
+                "fi",
+                f"sudo gpasswd -a {q_account} {q_group} >/dev/null",
+                # 0700 and the role's own group: the roles group exists for
+                # the board socket, and must not make one role's home readable
+                # to another (SYRD-39).
+                f"sudo install -d -m 0700 -o {q_account} -g {q_account} {q_home}",
+                f"sudo loginctl enable-linger {q_account} >/dev/null 2>&1 || true",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def role_runtime_command(plan: ProjectBoardProvision) -> str:
+    """Prepare each role's runtime AFTER the board and worktrees exist.
+
+    The pane hooks and board skill are installed from the deployed release, and
+    the worktrees are created by the launcher, so none of this can run at the
+    same time as account creation (SYRD-39).
+    """
+    if not plan.role_accounts or not plan.roles_group:
+        return ""
+    worktrees = dict(plan.role_worktrees)
+    lines: list[str] = list(role_tooling_staging_commands(plan.project, plan.board_current))
+    for role, account in plan.role_accounts:
+        lines.extend(
+            role_runtime_commands(
+                project=plan.project,
+                runtime_directory=plan.runtime_directory,
+                board_current=plan.board_current,
+                roles_group=plan.roles_group,
+                account=account,
+                home=role_account_home(plan, role),
+                worktree=worktrees.get(role, ""),
+            )
+        )
+    return "\n".join(lines)
+
+
+def role_tooling_staging_commands(project: str, board_current: str) -> list[str]:
+    """Copy the executables roles need out of the owner's home.
+
+    Roles are not in the owner's group and the owner's home is not traversable
+    by them, which is correct -- it holds the owner's credentials. These few
+    scripts are not secret, so root stages them at a shared path that role
+    accounts can execute without being given any access to the owner (SYRD-39).
+    """
+    staging = f"/usr/local/lib/switchyard/{project}"
+    commands = [f"sudo install -d -m 0755 -o root -g root {shell_quote(staging)}"]
+    for name in (
+        "ticket-board-pane-idle-hook",
+        "ticket-board-install-pane-hooks",
+        "switchyard-board-skill",
+        "switchyard-publish-ref",
+    ):
+        commands.append(
+            f"sudo install -m 0755 -o root -g root "
+            f"{shell_quote(f'{board_current}/scripts/{name}')} {shell_quote(f'{staging}/{name}')}"
+        )
+    return commands
+
+
+def role_runtime_commands(
+    *,
+    project: str,
+    runtime_directory: str,
+    board_current: str,
+    roles_group: str,
+    account: str,
+    home: str,
+    worktree: str,
+) -> list[str]:
+    """Everything one role needs to run as its own account.
+
+    Creating the account is not enough. A role also has to own the tree it works
+    in and the runtime paths the launcher hands it, and it needs its own copy of
+    the pane hooks and the board skill in its own home -- otherwise it starts
+    under the right uid and cannot write, record state, or use the board
+    (SYRD-39).
+    """
+    q_account, q_group = shell_quote(account), shell_quote(roles_group)
+    q_home = shell_quote(home)
+    commands = [
+        f"if ! getent passwd {q_account} >/dev/null 2>&1; then",
+        f"    sudo useradd -m -d {q_home} -s /bin/bash {q_account}",
+        "fi",
+        f"sudo gpasswd -a {q_account} {q_group} >/dev/null",
+        # 0700 and the role's own group. Membership of the roles group is for
+        # reaching the board socket; it must never make one role's home
+        # readable to another (SYRD-39).
+        f"sudo install -d -m 0700 -o {q_account} -g {q_account} {q_home}",
+        f"sudo loginctl enable-linger {q_account} >/dev/null 2>&1 || true",
+    ]
+    if worktree:
+        # Guarded: on a fresh project the launcher has not created it yet, and
+        # the rerun after first launch completes the handover.
+        q_worktree = shell_quote(worktree)
+        commands.append(f"if [ -d {q_worktree} ]; then sudo chown -R {q_account}: {q_worktree}; fi")
+    runtime_dirs = [
+        f"{home}/.local/bin",
+        f"{home}/.local/state/{runtime_directory}/pane-sessions",
+        f"{home}/.config",
+    ]
+    for directory in runtime_dirs:
+        commands.append(
+            f"sudo install -d -m 0700 -o {q_account} -g {q_account} {shell_quote(directory)}"
+        )
+    # Staged by root at a shared, world-readable path. A role account is only a
+    # member of the roles group; the owner's home stays 0700/0710 and holds the
+    # owner's credentials, so a role cannot -- and must not -- traverse it to
+    # reach these executables (SYRD-39).
+    staging = f"/usr/local/lib/switchyard/{project}"
+    hook_source = shell_quote(f"{staging}/ticket-board-pane-idle-hook")
+    hook_installer = shell_quote(f"{staging}/ticket-board-install-pane-hooks")
+    skill_installer = shell_quote(f"{staging}/switchyard-board-skill")
+    hook_bin = shell_quote(f"{home}/.local/bin/ticket-board-pane-idle-hook")
+    session_dir = shell_quote(f"{home}/.local/state/{runtime_directory}/pane-sessions")
+    commands.extend(
+        [
+            f"sudo install -m 0755 -o {q_account} -g {q_account} {hook_source} {hook_bin}",
+            # Run as the role account so the hook configuration lands in that
+            # role's own CLI config and points at that role's own state, not the
+            # owner's.
+            f"sudo -u {q_account} -H env TICKET_BOARD_PROJECT={shell_quote(project)} "
+            f"TICKET_BOARD_PANE_SESSION_DIR={session_dir} "
+            f"{hook_installer} install "
+            f"--home {q_home} --hook-source {hook_source} --bin-path {hook_bin}",
+            f"sudo -u {q_account} -H {skill_installer} install --home {q_home}",
+        ]
+    )
+    return commands
+
+
+def role_account_home(plan: ProjectBoardProvision, role: str) -> str:
+    """Where one role account lives. Its worktree, config and credentials sit
+    under here, owned by that account, so one role cannot read another's."""
+    return f"/home/{role_account_name(plan.project, role)}"
+
+
+def role_account_commands(
+    project: str,
+    role: str,
+    owner_user: str,
+    service_user: str,
+    *,
+    runtime_directory: str = "",
+    board_current: str = "",
+    worktree: str = "",
+) -> str:
+    """Operator commands to add ONE role's Unix account to an existing project.
+
+    Adding a role after provisioning needs a new account, and the launcher does
+    not hold root. This emits the same preparation fresh provisioning does --
+    account, group, runtime paths, pane hooks, board skill and ownership of the
+    role's worktree -- so a rerun of add-role finds a role that can actually
+    write and use the board, not just an account that exists (SYRD-39).
+    """
+    group = roles_group_name(project)
+    account = role_account_name(project, role)
+    resolved_runtime = runtime_directory or f"{project}-ticket-board"
+    resolved_board_current = board_current or f"/home/{owner_user}/{project}-ticketboard-live/current"
+    lines = [
+        f"if ! getent group {shell_quote(group)} >/dev/null 2>&1; then",
+        f"    sudo groupadd -r {shell_quote(group)}",
+        "fi",
+        f"sudo gpasswd -a {shell_quote(service_user)} {shell_quote(group)} >/dev/null",
+        f"sudo gpasswd -a {shell_quote(owner_user)} {shell_quote(group)} >/dev/null",
+    ]
+    lines.extend(role_tooling_staging_commands(project, resolved_board_current))
+    lines.extend(
+        role_runtime_commands(
+            project=project,
+            runtime_directory=resolved_runtime,
+            board_current=resolved_board_current,
+            roles_group=group,
+            account=account,
+            home=f"/home/{account}",
+            worktree=worktree,
+        )
+    )
+    lines.extend(
+        [
+            "# Refresh the director control interface so it can drive the new role:",
+            f"switchyard provision {project} --render role-control-sudoers > /tmp/{project}-role-control",
+            f"sudo install -m 0440 -o root -g root /tmp/{project}-role-control /etc/sudoers.d/49-{project}-role-control.staged",
+            f"sudo visudo -c -f /etc/sudoers.d/49-{project}-role-control.staged",
+            f"sudo mv /etc/sudoers.d/49-{project}-role-control.staged /etc/sudoers.d/49-{project}-role-control",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def role_control_sudoers(plan: ProjectBoardProvision) -> str:
+    """Least-privilege control paths once each role has its own tmux server.
+
+    Three grants, each `tmux` only, no root and no other command (SYRD-39):
+
+    * the project owner may run tmux as any role account -- the notify listener
+      is the owner's user service and delivers board notifications into role
+      panes through directorctl, so without this ordinary notifications cannot
+      reach a role at all;
+    * the director account may run tmux as any other role account, for
+      presentation and control of those sessions;
+    * the director account may run tmux as the project owner, because the
+      display and viewer sessions stay in the owner's server and the isolated
+      director account would otherwise be unable to reach them.
+    """
+    if not plan.role_accounts:
+        return ""
+    owner = plan.owner_user
+    director_account = next(
+        (account for role, account in plan.role_accounts if role == "director"),
+        "",
+    )
+    role_targets = ",".join(account for _role, account in plan.role_accounts)
+    publish_helper = f"/usr/local/lib/switchyard/{plan.project}/switchyard-publish-ref"
+    lines = [
+        f"# {plan.project}: role control interface. Each entry grants one command and",
+        "# nothing else, so a holder can drive another account's tmux server or publish a",
+        "# feature ref, and gains no other command and no root.",
+        f"{owner} ALL=({role_targets}) NOPASSWD: /usr/bin/tmux",
+    ]
+    # Roles publish their own feature refs through the owner's git identity. The
+    # helper validates the ref and refuses integration branches, so the grant
+    # cannot be used to write main, and the owner's SSH key files stay
+    # unreadable by every role (SYRD-39).
+    for _role, account in plan.role_accounts:
+        lines.append(f"{account} ALL=({owner}) NOPASSWD: {publish_helper}")
+    if director_account:
+        director_targets = ",".join(
+            account for _role, account in plan.role_accounts if account != director_account
+        )
+        if director_targets:
+            lines.append(f"{director_account} ALL=({director_targets}) NOPASSWD: /usr/bin/tmux")
+        # Display and viewer sessions remain the owner's.
+        lines.append(f"{director_account} ALL=({owner}) NOPASSWD: /usr/bin/tmux")
+    return "\n".join(lines) + "\n"
 
 
 def peer_auth_command(plan: ProjectBoardProvision) -> str:
@@ -781,6 +1104,21 @@ def render_board_unit(plan: ProjectBoardProvision) -> str:
         if operation_allowed_roles
         else ""
     )
+    # The tenant reaches the board socket through its own group rather than the
+    # socket being world-writable, so the service joins that group and the
+    # server chgrps the socket to it at bind (SYRD-39).
+    # The board joins the project's roles group so it can hand the socket to
+    # that group, and carries the authoritative role->account table. Role
+    # authority is the peer's uid resolved through this table (SYRD-39).
+    tenant_group_line = f"SupplementaryGroups={plan.roles_group}\n" if plan.roles_group else ""
+    socket_group_env_line = (
+        f"Environment=TICKET_BOARD_SOCKET_GROUP={plan.roles_group}\n" if plan.roles_group else ""
+    )
+    role_accounts_line = (
+        f"Environment=TICKET_BOARD_ROLE_ACCOUNTS={role_accounts_env(plan)}\n"
+        if plan.role_accounts
+        else ""
+    )
     return f"""[Unit]
 Description={plan.project} Ticket Board
 After=network.target postgresql.service
@@ -789,8 +1127,9 @@ Wants=postgresql.service
 [Service]
 Type=simple
 User={plan.service_user}
-WorkingDirectory={plan.board_current}
+{tenant_group_line}WorkingDirectory={plan.board_current}
 RuntimeDirectory={plan.runtime_directory}
+RuntimeDirectoryMode=0750
 ExecStart={default_ticket_board_python()} {plan.board_current}/scripts/ticket-board.py --host 127.0.0.1 --port {plan.port} --unix-socket {plan.socket_path} --frames {plan.frame_dir} --assets {plan.asset_dir}
 Restart=on-failure
 RestartSec=2
@@ -806,7 +1145,8 @@ Environment=PGHOST=/var/run/postgresql
 Environment=PGDATABASE={plan.database}
 Environment=PGUSER={plan.service_role}
 Environment=TICKET_BOARD_SOCKET={plan.socket_path}
-Environment=TICKET_BOARD_DATABASE_URL={plan.board_database_url}
+Environment=TICKET_BOARD_TENANT_USER={plan.owner_user}
+{socket_group_env_line}{role_accounts_line}Environment=TICKET_BOARD_DATABASE_URL={plan.board_database_url}
 Environment=TICKET_BOARD_DRAFT_ROLES={env_list(plan.draft_roles)}
 Environment=TICKET_BOARD_IMPLEMENTER_ROLES={env_list(plan.implementer_roles)}
 Environment=TICKET_BOARD_ASSIGNEES={env_list(plan.assignee_roles)}
@@ -821,6 +1161,26 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 """
+
+
+def tenant_primary_group(owner_user: str) -> str:
+    """The group the board socket is shared with, or '' when it is unknown.
+
+    Returning empty rather than guessing keeps a provisioning run on a host
+    where the account does not exist yet from baking a wrong group into the
+    unit; the server logs loudly when the group is unset (SYRD-39).
+    """
+    name = (owner_user or "").strip()
+    if not name:
+        return ""
+    try:
+        gid = pwd.getpwnam(name).pw_gid
+    except KeyError:
+        return ""
+    try:
+        return grp.getgrgid(gid).gr_name
+    except KeyError:
+        return ""
 
 
 def render_listener_unit(plan: ProjectBoardProvision) -> str:
@@ -842,7 +1202,7 @@ Environment=PGDATABASE={plan.database}
 Environment=PGUSER={plan.listener_role}
 Environment=TICKET_BOARD_DATABASE_URL={plan.listener_database_url}
 Environment=TICKET_BOARD_NOTIFY_DATABASE_URL={plan.listener_database_url}
-Environment=TICKET_BOARD_PANE_STATE_DIR=%t/{plan.runtime_directory}/pane-state
+Environment=TICKET_BOARD_PANE_STATE_DIR=/run/{plan.runtime_directory}/pane-state
 EnvironmentFile=-%h/.config/{plan.project}/ticket-board-notify-listener.env
 StandardOutput=append:{plan.listener_log}
 StandardError=append:{plan.listener_log}
@@ -1346,6 +1706,20 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
     q_canary_unit = shell_quote(f"/etc/systemd/system/{plan.canary_unit}")
     q_tmpfiles = shell_quote(f"/etc/tmpfiles.d/{plan.tmpfiles_name}")
     q_polkit = shell_quote(f"/etc/polkit-1/rules.d/{plan.polkit_name}")
+    q_role_control_sudoers = shell_quote(f"/etc/sudoers.d/{plan.role_control_sudoers_name}")
+    if role_control_sudoers(plan).strip():
+        # visudo -c first: a malformed sudoers file can lock the host out of
+        # sudo entirely, so it is validated before it is installed.
+        install_role_control_sudoers = (
+            f"sudo install -m 0440 -o root -g root {shell_quote(plan.role_control_sudoers_name)} "
+            f"{q_role_control_sudoers}.staged\n"
+            f"sudo visudo -c -f {q_role_control_sudoers}.staged\n"
+            f"sudo mv {q_role_control_sudoers}.staged {q_role_control_sudoers}"
+        )
+    else:
+        install_role_control_sudoers = (
+            "# no role control interface: this project declares no director role"
+        )
     q_listener_unit = shell_quote(
         f"{plan.owner_home}/.config/systemd/user/{plan.listener_unit}"
     )
@@ -1354,6 +1728,11 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
     q_hook_source = shell_quote(f"{plan.board_current}/scripts/ticket-board-pane-idle-hook")
     q_hook_bin = shell_quote(f"{plan.owner_home}/.local/bin/ticket-board-pane-idle-hook")
     q_board_skill_installer = shell_quote(f"{plan.board_current}/scripts/switchyard-board-skill")
+    # Roles get the same preparation as the owner, from the deployed release,
+    # once the board exists (SYRD-39).
+    role_runtime_step = role_runtime_command(plan) or (
+        "# no per-role runtime preparation: this project declares no role accounts"
+    )
     q_pane_session_dir = shell_quote(
         f"{plan.owner_home}/.local/state/{plan.runtime_directory}/pane-sessions"
     )
@@ -1461,6 +1840,7 @@ provision_dir="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 system_unit_candidate="$provision_dir/{plan.board_unit}"
 canary_unit_candidate="$provision_dir/{plan.canary_unit}"
 {service_user_command(plan.service_user)}
+{role_accounts_command(plan)}
 {peer_auth_command(plan)}
 {install_board_root}
 sudo -u {q_owner_user} -H env HOME={q_owner_home} TICKET_BOARD_OWNER_HOME={q_owner_home} TICKET_BOARD_PROJECT={shell_quote(plan.project)} TICKET_BOARD_COMMIT_GIT_DIR={q_commit_git_dir} TICKET_BOARD_PROVISIONED_SYSTEM_UNIT="$system_unit_candidate" SOURCE_REPO={q_source_repo} BOARD_ROOT={q_board_root} DEPLOY_REF=origin/main TICKET_BOARD_SKIP_MIGRATIONS=1 {q_deploy_script} deploy
@@ -1478,6 +1858,7 @@ sudo install -m 0644 "$system_unit_candidate" {q_board_unit}
 sudo install -m 0644 "$canary_unit_candidate" {q_canary_unit}
 sudo install -m 0644 {shell_quote(plan.tmpfiles_name)} {q_tmpfiles}
 sudo install -m 0644 {shell_quote(plan.polkit_name)} {q_polkit}
+{install_role_control_sudoers}
 sudo systemd-tmpfiles --create {q_tmpfiles}
 {postgres_sql_file_command(plan.project + '-database.sql')}
 {postgres_sql_file_command(plan.board_current + '/scripts/ticket_board/schema.sql', database_url=plan.admin_database_url)}
@@ -1503,9 +1884,47 @@ fi
 sudo -u {q_owner_user} env XDG_RUNTIME_DIR="$owner_runtime_dir" DBUS_SESSION_BUS_ADDRESS="unix:path=$owner_bus" systemctl --user daemon-reload
 sudo -u {q_owner_user} -H env XDG_RUNTIME_DIR="$owner_runtime_dir" TICKET_BOARD_PROJECT={shell_quote(plan.project)} TICKET_BOARD_PANE_STATE_DIR="$owner_runtime_dir/{plan.runtime_directory}/pane-state" TICKET_BOARD_PANE_SESSION_DIR={q_pane_session_dir} {q_hook_installer} install --home {q_owner_home} --hook-source {q_hook_source} --bin-path {q_hook_bin} --seed-codex-hook-trust-if-new
 sudo -u {q_owner_user} -H {q_board_skill_installer} install --home {q_owner_home}
+{role_runtime_step}
 sudo -u {q_owner_user} env XDG_RUNTIME_DIR="$owner_runtime_dir" DBUS_SESSION_BUS_ADDRESS="unix:path=$owner_bus" systemctl --user enable --now {plan.listener_unit}
 curl -fsS http://127.0.0.1:{plan.port}/api/board >/dev/null
 """
+
+
+# SYRD-39: which generated artifacts the tenant owns, and which root consumes.
+# Everything root reads back -- units it installs, the tmpfiles and polkit
+# fragments, the sudoers grant, the SQL it runs as postgres, the operator
+# script -- must stay root-owned wherever it lives, because a tenant that can
+# rewrite one of those chooses what root runs. The plan is the tenant's: the
+# unprivileged workflow projection writes it.
+TENANT_ARTIFACT_NAMES: tuple[str, ...] = ("plan.json",)
+
+DEFAULT_PRIVILEGED_PROVISION_ROOT = Path("/etc/switchyard/provision")
+
+
+def privileged_artifact_names(plan: ProjectBoardProvision) -> tuple[str, ...]:
+    """Generated files root installs or executes, in the order write_artifacts emits them."""
+    return (
+        plan.board_unit,
+        plan.canary_unit,
+        plan.listener_unit,
+        plan.tmpfiles_name,
+        plan.polkit_name,
+        plan.role_control_sudoers_name,
+        f"{plan.project}-database.sql",
+        f"{plan.project}-workflow.sql",
+        "operator-commands.sh",
+    )
+
+
+def privileged_provision_dir(project: str, *, root: Path | None = None) -> Path:
+    """Root-owned mirror of the privileged artifacts, outside the tenant's tree.
+
+    The provision directory itself is handed to the tenant, so a root-owned file
+    inside it can still be unlinked and replaced by its owner. The copy root
+    actually installs from therefore lives beside the project registry under
+    /etc/switchyard, which no tenant can reach.
+    """
+    return (root or DEFAULT_PRIVILEGED_PROVISION_ROOT) / project
 
 
 def write_artifacts(plan: ProjectBoardProvision, output_dir: Path, *, enable_owner_linger: bool = True) -> None:
@@ -1517,6 +1936,7 @@ def write_artifacts(plan: ProjectBoardProvision, output_dir: Path, *, enable_own
         plan.listener_unit: render_listener_unit(plan),
         plan.tmpfiles_name: render_tmpfiles(plan),
         plan.polkit_name: render_polkit_rule(plan),
+        plan.role_control_sudoers_name: role_control_sudoers(plan),
         f"{plan.project}-database.sql": render_database_sql(plan),
         f"{plan.project}-workflow.sql": render_workflow_sql(plan),
         "operator-commands.sh": render_operator_commands(plan, enable_owner_linger=enable_owner_linger),
@@ -1587,7 +2007,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", help="print plan JSON")
     parser.add_argument(
         "--render",
-        choices=["board-unit", "listener-unit", "tmpfiles", "polkit", "database-sql", "workflow-sql", "commands"],
+        choices=["board-unit", "listener-unit", "tmpfiles", "polkit", "role-control-sudoers", "database-sql", "workflow-sql", "commands"],
         help="print one rendered artifact",
     )
     return parser
@@ -1630,6 +2050,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "listener-unit": render_listener_unit,
             "tmpfiles": render_tmpfiles,
             "polkit": render_polkit_rule,
+            "role-control-sudoers": role_control_sudoers,
             "database-sql": render_database_sql,
             "workflow-sql": render_workflow_sql,
             "commands": render_operator_commands,

@@ -423,3 +423,263 @@ guard only for a positively detected non-empty human composer: markerless
 agent/tool output is delivered to the director, and a still-busy composer waits
 only for the bounded retry count before delivering with a warning so
 pane-to-director escalations cannot starve forever.
+
+## Local write authority
+
+A board write over the tenant Unix socket carries a caller role. That role is
+**the peer's Unix account**, resolved by the board; it is never the role name a
+caller supplies.
+
+### Why the uid, and nothing else
+
+`SO_PEERCRED` reports the connecting process's uid. The kernel sets it and an
+unprivileged process cannot change it. Everything else a peer could offer --
+a role name in the payload, the `X-Ticket-Board-Caller-Role` header, an
+environment variable, its own argv, its `/proc` `comm`, or a file it can write
+-- is chosen by the caller, and none of them are consulted for authorization.
+
+Each configured role therefore runs as **its own Unix account**:
+
+- `TICKET_BOARD_ROLE_ACCOUNTS` in the board unit carries the authoritative
+  `role=account` table, generated from the project's declared roles. Role names
+  are data; nothing in the board hardcodes them.
+- `LocalRoleAuthority` resolves a peer's uid through that table on **every
+  request**. There is no registration and nothing is remembered, so a board
+  restart cannot leave a role vacant and a role cannot be claimed by whoever
+  asks first.
+- A uid that is not a configured role account gets no role at all, whatever it
+  asks for. A `register-caller` payload or header naming a different role is
+  refused and logged with the real peer uid and pid.
+- If two roles are configured onto one account -- a half-finished migration --
+  **both** are refused rather than one silently receiving the other's
+  authority, and the board logs the conflict.
+- Roles that never run a local process, such as the human `user` role, get no
+  account; they reach the board over its separately authenticated HTTP path.
+
+### Socket reach
+
+The socket is `0660` inside a `0750` runtime directory, both group-owned by the
+project's roles group. The board service joins that group, so it can hand the
+socket to it without privilege at runtime. Only that project's role accounts,
+the board service and the tenant owner are in the group, so another tenant's
+Unix account cannot connect at all. A board restart repairs an already-deployed
+socket's ownership and mode, so provisioning and `switchyard upgrade` both carry
+the repair before roles launch.
+
+### Role sessions and control
+
+Because each role is a different account, each role gets its **own tmux server**
+by construction; there is no shared server for a role to reach into. Director
+presentation and control therefore go through an explicit, narrow privileged
+interface rather than ambient access: the generated
+`/etc/sudoers.d/<project>-role-control` lets the director account run `tmux`,
+and only `tmux`, as the other role accounts. It grants no root and no other
+command, and it is validated with `visudo -c` before installation.
+
+### Provisioning, migration and ownership
+
+`role_accounts_command` in the provisioning artifacts creates the roles group
+and one account per role, adds each to the group, and gives each role a home it
+owns at `0700`, so one role cannot read another's worktree, config or
+credentials. Every step is guarded by an existence check, which is what makes
+the same artifact the **migration** for a tenant that previously ran every role
+under one account: re-running it creates only what is missing.
+
+Until a tenant has been migrated its roles still share one account. The board
+does not pretend otherwise -- it refuses roles that share a uid and says so in
+the log, rather than resolving to whichever was configured first.
+
+A role can also arrive later, from the workflow document rather than from
+provisioning. On a tenant that has opted into per-role identities such a role is
+projected with its own `<project>-<role>` account, from the same naming function
+provisioning uses, and the generated plan's role-account and worktree tables are
+refreshed with it. It is deliberately never given the account of the role it was
+templated from: the board resolves authority from the uid, so an inherited
+account would make the new role answer as the role it was copied from and unable
+to act as itself. On a tenant that has not opted in, nothing is assigned --
+projection does not opt a project into isolation it never asked for.
+
+The generated systemd unit is **not** rewritten by that projection. Applying a
+workflow document, setting a role prompt and every other projection path runs
+unprivileged as the tenant, while the unit is installed by root -- a tenant that
+could edit it could choose what root runs. It is therefore left out of the
+projection entirely, and out of the ownership handoff, so an unprivileged apply
+neither needs to write it nor is refused for not being able to. `switchyard
+upgrade <project>` renders it from the refreshed plan and installs it. Until an
+operator does that, the new role is configured on the board but its account is
+not in the unit's table, so the board cannot resolve it: apply names exactly
+those roles, both on stderr and as `role_account_refresh_required` in its JSON
+result.
+
+### Role credentials, and the boundary they do and do not draw
+
+Each role runs as its own Unix account with its own home, so its CLI starts with
+no credentials. Switchyard seeds them, and what it seeds is deliberately narrow.
+
+**What is copied.** Only the specific artifacts each supported CLI needs to
+start authenticated, from the already-authenticated owner:
+
+| CLI | Seeded artifact |
+|---|---|
+| `claude` | `.claude/.credentials.json` |
+| `codex` | `.codex/auth.json` |
+| `agy` | `.gemini/antigravity-cli/antigravity-oauth-token` |
+| `hermes` | a **newly constructed** `.env` in the role's own `HERMES_HOME`, holding only inference-provider keys selected from the owner's `.hermes/.env`. The source is never copied |
+
+**Hermes needs more than a copy.** It keeps model-provider keys in the *same*
+`.env` as `SUDO_PASSWORD` -- which its own terminal tool consumes -- along with
+messaging bot tokens, GitHub and tool credentials, terminal SSH key paths and
+general settings. Handing that file to every role would give each one the
+owner's login password and external identities, which is the opposite of what
+per-role accounts are for. So the file is **parsed against an explicit
+inference-provider allowlist and a new file is written** containing only those
+keys; everything else is dropped and named in the output so the omission is
+visible. Plain `KEY=value` grammar prevents shell execution but constrains
+nothing about *which* secrets cross, so grammar alone is not the check.
+`.hermes/auth.json` is deliberately **not** seeded: its schema is not something
+this code can verify is provider-only, and an artifact whose contents cannot be
+constrained must not cross the boundary. A `.env` with no provider credentials
+at all fails closed rather than producing an empty credential.
+
+**What is never copied:** an entire CLI home, conversations, histories, caches,
+hooks, or general settings. Credentials are never symlinked and never placed in
+a directory readable by the roles group. Each role gets a **private copy**: owned
+by that role, mode `0600`, under a `0700` directory it owns, inside a role home
+that is itself `0700`, and **every path component** from the home downwards is
+opened with `O_NOFOLLOW`, so a symlinked ancestor is refused rather than followed -- the roles group exists to reach the board socket and
+never makes one role's home readable to another. Copying reuses the
+anchored `openat`/`O_NOFOLLOW` model from SYRD-28, so no privileged step is
+handed a whole path a symlink could redirect, and ownership is assigned to the
+open file description rather than to a path.
+
+Presence is not enough to count as ready: a credential that is a symlink,
+owned by the wrong account, or readable beyond its owner is reported as unsafe
+and refused, on the owner's side as well as the role's, so an unsafe credential
+is never propagated.
+
+`switchyard seed-role-credentials <project>` performs it and is idempotent: a
+role that already has a credential is left alone, and `--reseed` is the
+deliberate repair and re-sync path. Token refresh afterwards rotates the role's
+own copy. If the owner has not authenticated a CLI, seeding **fails closed** and
+the role is not launched: `role_isolation_gaps` reports a precise per-role,
+per-artifact manifest at launch and at upgrade.
+
+**The boundary this draws, plainly.** All roles of a project act as **the same
+model-provider identity** and share that account's quota. That is deliberate:
+repeated interactive login per role is not the default, especially for ephemeral
+workers. A tenant wanting provider-level separation can give each role its own
+provider login later.
+
+**What it does not share.** Roles share no filesystem access: each copy is
+private, and one role cannot read another's home, worktree, session records or
+credentials. It has **no influence on board authority**, which remains derived
+from `SO_PEERCRED`'s uid; seeding a credential grants no board permission.
+
+### Publishing from an isolated role
+
+A role publishes its own feature ref through `switchyard-publish-ref`, run via
+`sudo` as the project owner. The sudoers grant allows any arguments, so nothing
+about *where* is caller-supplied: the calling role comes from `SUDO_USER`, and
+its worktree and the remote come from the project's own configuration, found
+relative to the effective uid. The project identifier is validated as a slug
+before any path is built and the resolved path must stay inside the directory it
+was built from, and the configuration must itself claim to be that project --
+otherwise `--project ../../tmp/forged` loads a role-written document, and with it
+a role-chosen role mapping and remote. The configured remote is a NAME, resolved
+to a URL from the **owner's** checkout and set on the staging repository before
+the push.
+
+Refs are namespaced to the calling role -- `ops` publishes under `ops/` -- so a
+role cannot write, move or delete another role's refs, and the integration
+branches (`main`, `master`, `trunk`, `release`) are refused outright.
+
+The owner never runs git inside the role's checkout. A role controls its own
+repository configuration, and `core.sshCommand`, `uploadpack.packObjectsHook` or
+an `ext::` remote would turn "run git there" into "run the role's command as the
+owner". Instead the role creates a **bundle** as itself and the owner fetches
+from that bundle into an owner-owned staging repository whose configuration the
+role cannot touch, then pushes from there.
+
+No polkit is involved in ordinary role work: it is a plain `sudo -u` grant
+between two unprivileged accounts.
+
+### Where what root installs comes from
+
+The provisioning directory is the tenant's. It holds `plan.json`, which the
+unprivileged workflow projection writes, and a copy of each generated file for
+the tenant's own tooling. None of it decides anything root does.
+
+What root installs is rendered from a **root-owned baseline plan** kept at
+`/etc/switchyard/provision/<project>/plan.json`, into that same root-owned
+directory. Provisioning writes the baseline from the plan it just computed.
+
+A tenant that predates the baseline still needs one, and root does not adopt the
+tenant's document to get it -- not even a checked version of it. Checking a
+document field by field is a list of the attacks someone happened to think of,
+and the fields are load-bearing in ways that are easy to miss: `role_accounts`
+renders a passwordless sudoers grant as well as the board's uid table, and
+`owner_home` anchors any containment check made against it, so setting it to `/`
+makes every such check vacuously true.
+
+Instead root **reconstructs** the baseline from facts it holds. The tenant's
+identity is the owner of the provision directory, which only root can set; the
+home comes from the passwd database. Everything root installs -- the account the
+service runs as, every generated file name, every path, and the whole
+role-to-account table -- is regenerated by the same `build_plan` provisioning
+uses. The document contributes only typed, individually validated values that
+decide nothing root runs: the display name, the port, the ticket prefix, whether
+a designer or auditor exists, and role *names*.
+
+Regenerating is not the same as silently replacing. A project provisioned with
+any of the regenerated values set differently -- `--board-root`,
+`--service-user`, `--asset-dir`, `--frame-dir`, `--commit-git-dir`, `--database`
+are all exposed by the shipped tooling -- was not built the way root would
+rebuild it, and installing the regenerated artifacts would change what runs: a
+board that will not start, or, for `commit_git_dir`, one that resolves ticket
+commit provenance against a different repository without saying so. Every such
+field is compared and the refusal names it, telling the operator to
+re-provision. It is never reconciled toward the document; the document is not an
+authority. The one exception is the role-to-account table, which is regenerated
+from validated role names and completed by the delta path, and which is also the
+channel a tenant would use to smuggle an account into the sudoers grant -- what
+the document says about that is ignored rather than reported.
+
+Exactly one thing crosses from the tenant's plan into the baseline: a role the
+workflow projection added, and only under `<project>-<role>`, that role's own
+canonical account. An account for a role root already knows, a non-canonical
+account, and every other field are ignored and reported.
+
+The bytes are never routed through a tenant path. They are rendered into a
+root-only temporary directory, compared against the root-owned copy, and written
+into it with `O_NOFOLLOW` and a rename, so an operator never reads a
+half-written unit. The tenant's copies are published the same way -- replaced by
+rename with `O_NOFOLLOW`, so a symlink left at one of those names is replaced
+rather than followed to whatever it points at -- and root never reads them back.
+
+The printed install commands name root's copy. If it has not been staged (the
+refresh has only ever run unprivileged), they fall back to the provision
+directory and say plainly that the source is tenant-owned and what to run to fix
+it.
+
+### What a deploy checks
+
+The post-restart smoke claims `director` over the socket from an account that is
+not a role, and expects the board to refuse it. That assertion only holds once
+the tenant has a role-account table to resolve a uid through, so the probe reads
+the installed unit's `TICKET_BOARD_ROLE_ACCOUNTS` first. A tenant that has not
+run the rollout is reported plainly -- role binding is not enforced yet, the
+board still honours the role a caller claims -- and the deploy continues. That
+is the open state this work closes, not a deploy regression, and failing the
+release would not have closed it.
+
+### What this does and does not cover
+
+It covers: another tenant's Unix account reaching this board, any local process
+asserting a role it does not run as, and both of those across board restarts and
+role restarts, because authority is re-derived from the kernel every request.
+
+It does not remove the need for the host to be sound. A user who can become
+another role's account, or root, is that role; per-role accounts move the
+boundary onto standard Unix privilege separation, they do not replace it.
+Environment variables, prompt text, and the no-impersonation rule in the role
+skill remain **not** enforcement and must never be presented as isolation.

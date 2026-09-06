@@ -21,16 +21,21 @@ import tempfile
 import time
 import tomllib
 import unicodedata
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from scripts.ticket_board.project_provision import (
+    DEFAULT_PRIVILEGED_PROVISION_ROOT,
     DEFAULT_PROJECT_IMPLEMENTER_ROLES,
     DEFAULT_PG_IDENT_MAP,
     ProjectBoardProvision,
     ROLE_RE,
+    NON_PROCESS_ROLES,
+    TENANT_ARTIFACT_NAMES,
     build_plan,
+    privileged_artifact_names,
+    privileged_provision_dir,
     render_add_role_sql,
     render_board_unit,
     render_canary_unit,
@@ -151,6 +156,7 @@ SWITCHYARD_COMMANDS = (
     "present",
     "set-vcs-close-role",
     "agy-credential",
+    "seed-role-credentials",
     "role-prompt",
     "stop",
     "teardown",
@@ -319,6 +325,11 @@ class RoleConfig:
     fresh_session_per_ticket: bool
     live_commands: list[str]
     env: dict[str, str]
+    # SYRD-39: the Unix account this role runs as. One account per role is
+    # what makes SO_PEERCRED's uid an authoritative role identity on the
+    # board socket. Empty falls back to the project account, which is the
+    # pre-migration arrangement and cannot separate roles.
+    run_as_user: str = ""
     unset_env: tuple[str, ...] = ()
 
 
@@ -598,6 +609,34 @@ def default_pane_state_dir_for_user(user_name: str, *, project: str) -> Path:
     if uid is None:
         return DEFAULT_PANE_STATE_DIR
     return runtime_dir_for_uid(uid) / f"{project}-ticket-board" / "pane-state"
+
+
+def account_session_dir(account: str, *, project: str) -> Path:
+    """Session records for one account of one project.
+
+    Deliberately ignores the ambient TICKET_BOARD_PANE_SESSION_DIR: that names
+    the CURRENT pane's project and user, so honouring it when computing another
+    role's or another project's path hands a role a directory belonging to
+    something else. It is also project-scoped, which the owner-facing helper is
+    not -- that one still hardcodes the legacy pgu state directory (SYRD-39).
+    """
+    home = home_dir_for_user(account)
+    if home is None:
+        return DEFAULT_SESSION_DIR
+    return home / ".local" / "state" / f"{project}-ticket-board" / "pane-sessions"
+
+
+def shared_pane_state_dir(project: str) -> Path:
+    """Where every role of a project records pane activity.
+
+    Role accounts cannot write the owner's XDG runtime directory, and the notify
+    listener cannot read theirs, so per-role state under each role's own
+    /run/user is written where nobody reads it. This is the deliberate
+    aggregation path: the board's runtime directory, group-owned by the
+    project's roles group so every role writes it and the listener reads it
+    (SYRD-39).
+    """
+    return Path("/run") / f"{project}-ticket-board" / "pane-state"
 
 
 def loginctl_enable_linger_args(user_name: str) -> list[str]:
@@ -1593,7 +1632,95 @@ def _role_from_json(project: str, raw: dict[str, Any], *, base: Path, default_wo
         ),
         live_commands=_string_list(raw.get("live_commands"), field="live_commands", role=role),
         env={str(key): str(value) for key, value in env_raw.items()},
+        run_as_user=str(raw.get("run_as_user") or "").strip(),
     )
+
+
+def local_account_exists(account: str) -> bool:
+    """Whether a Unix account exists on this host."""
+    name = (account or "").strip()
+    if not name:
+        return False
+    try:
+        pwd.getpwnam(name)
+    except KeyError:
+        return False
+    return True
+
+
+def board_service_user(config: ProjectConfig) -> str:
+    """The account the board service runs as, for operator command rendering."""
+    from scripts.ticket_board.project_provision import DEFAULT_SERVICE_USER
+
+    return DEFAULT_SERVICE_USER
+
+
+def role_account_name(project: str, role: str) -> str:
+    """The Unix account a role runs as. Defined once, in provisioning."""
+    from scripts.ticket_board.project_provision import role_account_name as _name
+
+    return _name(project, role)
+
+
+def role_run_as_user(config: ProjectConfig, role: RoleConfig) -> str:
+    """The account a role's session runs as.
+
+    Per-role accounts are what give each role its own tmux server and make the
+    board's uid-to-role mapping authoritative. A role without one falls back to
+    the project account, which still works but cannot be told apart from the
+    other roles on the board socket (SYRD-39).
+    """
+    return role.run_as_user or config.run_as_user
+
+
+def role_process_runner_for(
+    config: ProjectConfig,
+    role: RoleConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> Callable[..., subprocess.CompletedProcess[Any]]:
+    """A runner that acts as the account owning this role's tmux server.
+
+    With one Unix account per role there is no shared tmux server, so probing,
+    stopping, reloading or recovering a role has to address that role's own
+    server. Using the project owner's runner for this reports roles stopped
+    while their sessions are still alive (SYRD-39).
+    """
+    account = role_run_as_user(config, role)
+    if account and current_user_name() != account:
+        return _owner_process_runner(owner_user=account, runner=runner)
+    return runner
+
+
+def role_session_dir(config: ProjectConfig, role: RoleConfig) -> Path:
+    """Where this role's CLI keeps its resumable session records.
+
+    A role account cannot write the project owner's state directory, so a role
+    with its own account gets its own path. Roles still sharing the project
+    account keep the project-wide directory (SYRD-39).
+    """
+    account = role_run_as_user(config, role)
+    if account and account != config.run_as_user:
+        return account_session_dir(account, project=config.project)
+    return config.session_dir
+
+
+def role_pane_state_dir(
+    config: ProjectConfig, role: RoleConfig, default: Path | None = None
+) -> Path:
+    """Where this role's pane hooks record busy/idle state.
+
+    An isolated role writes the shared aggregation path, which it can write and
+    the owner's listener can read. A role still running as the project account
+    keeps whatever the caller chose, so an explicitly supplied directory is not
+    silently replaced.
+    """
+    account = role_run_as_user(config, role)
+    if account and account != config.run_as_user:
+        return shared_pane_state_dir(config.project)
+    if default is not None:
+        return default
+    return default_pane_state_dir_for_user(config.run_as_user, project=config.project)
 
 
 def _role_board_env(config: ProjectConfig, role: RoleConfig, session_role_map: dict[str, str]) -> dict[str, str]:
@@ -1606,6 +1733,10 @@ def _role_board_env(config: ProjectConfig, role: RoleConfig, session_role_map: d
         "TICKET_BOARD_CALLER_ROLE": role.role,
         "TICKET_BOARD_CALLER_ROLE_MAP": json.dumps(session_role_map, sort_keys=True, separators=(",", ":")),
     }
+    if config.run_as_user:
+        # directorctl needs the owner's name to reach the display and viewer
+        # sessions, which stay in the owner's tmux server (SYRD-39).
+        env["SWITCHYARD_PROJECT_OWNER"] = config.run_as_user
     if config.upstream_report_url:
         env["TICKET_BOARD_REPORT_URL"] = config.upstream_report_url
         env["TICKET_BOARD_REPORT_ORIGIN_PROJECT"] = config.project
@@ -2000,15 +2131,18 @@ def launch_session_record_statuses(
             LaunchSessionRecordStatus(
                 role=role.role,
                 target=role.target,
-                session_id=session_id_for_role(role, config.session_dir),
+                # A role records its session under its own account, so reading
+                # the project-wide directory reports every isolated role as
+                # having no session (SYRD-39).
+                session_id=session_id_for_role(role, role_session_dir(config, role)),
                 superseded_session_id=superseded_session_id_for_role(
                     role,
-                    config.session_dir,
+                    role_session_dir(config, role),
                     changed_since_ns=fallback_changed_since_ns,
                 ),
                 unverified_resume_session_id=unverified_resume_session_id_for_role(
                     role,
-                    config.session_dir,
+                    role_session_dir(config, role),
                     changed_since_ns=fallback_changed_since_ns,
                 ),
                 pane_state_source=pane_launch_outcome_source_for_role(
@@ -4453,10 +4587,16 @@ def _running_project_roles(
     *,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
 ) -> list[RoleConfig]:
+    """Which roles have a live session, asked of each role's own tmux server.
+
+    Probing them all through the project owner's server cannot see a role that
+    runs as its own account, so restart and liveness both misreport (SYRD-39).
+    """
     running_roles: list[RoleConfig] = []
     for role in config.roles:
-        result = runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if result.returncode == 0 and live_command_matches_role(role, runner=runner):
+        role_runner = role_process_runner_for(config, role, runner=runner)
+        result = role_runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if result.returncode == 0 and live_command_matches_role(role, runner=role_runner):
             running_roles.append(role)
     return running_roles
 
@@ -4529,7 +4669,7 @@ def materialize_layout(
                 pane_state_dir=pane_state_dir,
                 force_reload=force_reload,
                 skip_launcher_check=True,
-                run_as_user=config.run_as_user,
+                run_as_user=role_run_as_user(config, role),
             )
             leaf["WorkingDirectory"] = role.workdir
         leaf["Title"] = project_window_title(config)
@@ -5040,6 +5180,71 @@ def upgrade_generated_project_layout(
     return upgrade_generated_project_config(config, config_path=config_path, dry_run=dry_run, runner=runner)
 
 
+def _plan_replacements(source_repo: Path | None, commit_git_dir: str | None) -> dict[str, str]:
+    """Values the operator supplied on the command line, which the plan does not choose."""
+    replacements: dict[str, str] = {}
+    if source_repo is not None:
+        replacements["source_repo"] = str(source_repo.expanduser().resolve(strict=False))
+    if commit_git_dir is not None:
+        selected = commit_git_dir.strip()
+        if not selected:
+            raise SystemExit("switchyard: --commit-git-dir must not be empty")
+        replacements["commit_git_dir"] = selected
+    return replacements
+
+
+def publish_tenant_artifact(
+    config: ProjectConfig, provision_dir: Path, name: str, body: bytes
+) -> tuple[bool, str]:
+    """Write the tenant's copy of a generated file without following anything.
+
+    These are untrusted output: root produces them for the tenant's own tooling
+    and never reads them back to decide what root installs. The write still runs
+    as root, so every path component is opened with O_NOFOLLOW and the file is
+    replaced by rename rather than truncated in place -- a symlink left at the
+    destination is replaced, never followed to its referent (SYRD-39).
+    """
+    destination = provision_dir / name
+    relative = Path(str(provision_dir).lstrip("/")) / name
+    dir_fd, problem = _walk_no_follow(Path(provision_dir.anchor or "/"), relative)
+    if dir_fd < 0:
+        return False, f"switchyard: refusing to write {destination}: {problem}"
+    mode = 0o755 if name.endswith(".sh") else 0o644
+    staged = f".{name}.new"
+    try:
+        descriptor = os.open(
+            staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, mode, dir_fd=dir_fd
+        )
+        try:
+            os.write(descriptor, body)
+            os.fchmod(descriptor, mode)
+            if os.geteuid() == 0 and config.run_as_user:
+                try:
+                    owner = pwd.getpwnam(config.run_as_user)
+                except KeyError:
+                    owner = None
+                if owner is not None:
+                    os.fchown(descriptor, owner.pw_uid, owner.pw_gid)
+        finally:
+            os.close(descriptor)
+        os.rename(staged, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except OSError as exc:
+        return False, f"switchyard: could not write {destination}: {exc}"
+    finally:
+        os.close(dir_fd)
+    return True, ""
+
+
+def _tenant_copy_is_current(path: Path, body: bytes) -> bool:
+    """A symlink is never current: it is an entry to replace, not a file to read."""
+    if os.path.islink(path) or not path.is_file():
+        return False
+    try:
+        return path.read_bytes() == body
+    except OSError:
+        return False
+
+
 def refresh_generated_project_runtime_artifacts(
     config: ProjectConfig,
     *,
@@ -5048,53 +5253,443 @@ def refresh_generated_project_runtime_artifacts(
     source_repo: Path | None = None,
     commit_git_dir: str | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
 ) -> LauncherUpgradeResult:
+    """Refresh the tenant's plan, and the artifacts root installs, separately.
+
+    The two have different provenance and must not be confused. The tenant's
+    plan.json is the tenant's: root rewrites it for the tenant's tooling and
+    never reads it back to decide what to install. Everything root installs is
+    rendered from a root-owned baseline into a root-owned directory, and the
+    only thing the tenant's plan is allowed to contribute is a role the workflow
+    projection added, under that role's own canonical account (SYRD-39).
+    """
     provision_dir = config_path.expanduser().resolve(strict=False).parent
-    plan_path = provision_dir / "plan.json"
-    if not plan_path.is_file():
+    tenant_plan_path = provision_dir / "plan.json"
+    if not tenant_plan_path.is_file():
         return LauncherUpgradeResult(False, f"switchyard: {config.project} has no generated runtime plan; leaving artifacts unchanged")
+    replacements = _plan_replacements(source_repo, commit_git_dir)
+    changed: list[str] = []
+
     try:
-        plan = _project_board_provision_from_json(plan_path)
+        tenant_plan = _project_board_provision_from_json(tenant_plan_path)
     except SystemExit as exc:
         return LauncherUpgradeResult(
             False,
             f"switchyard: {config.project} runtime plan is incomplete and cannot be refreshed automatically: {exc}",
         )
-    replacements: dict[str, str] = {}
-    if source_repo is not None:
-        replacements["source_repo"] = str(source_repo.expanduser().resolve(strict=False))
-    if commit_git_dir is not None:
-        selected_commit_git_dir = commit_git_dir.strip()
-        if not selected_commit_git_dir:
-            raise SystemExit("switchyard: --commit-git-dir must not be empty")
-        replacements["commit_git_dir"] = selected_commit_git_dir
+    # The tenant's own view of its generated files, rendered from the tenant's
+    # own plan. Nothing root installs comes from here.
+    tenant_rendered = render_privileged_artifacts(
+        replace(tenant_plan, **replacements), enable_owner_linger=False
+    )
+    for name in sorted(tenant_rendered):
+        if _tenant_copy_is_current(provision_dir / name, tenant_rendered[name]):
+            continue
+        if not dry_run:
+            published, problem = publish_tenant_artifact(config, provision_dir, name, tenant_rendered[name])
+            if not published:
+                return LauncherUpgradeResult(False, problem)
+        changed.append(name)
+
+    target = privileged_provision_dir(config.project, root=switchyard_privileged_provision_root())
+    if os.geteuid() != 0:
+        message = (
+            f"switchyard: refreshed {config.project} generated runtime artifacts: {', '.join(changed)}"
+            if changed
+            else f"switchyard: {config.project} generated runtime artifacts are already current"
+        )
+        if not target.is_dir():
+            message += (
+                f"; run `switchyard upgrade {config.project}` as root to stage the units, grants "
+                "and SQL root installs"
+            )
+        return LauncherUpgradeResult(bool(changed), message)
+
+    baseline, reason = _privileged_baseline_plan(
+        config,
+        provision_dir,
+        tenant_plan_path,
+        source_repo=source_repo,
+        operator_commit_git_dir=commit_git_dir is not None,
+    )
+    if baseline is None:
+        return LauncherUpgradeResult(bool(changed), reason)
+    plan, added_roles, refused = authoritative_refresh_plan(baseline, _load_json(tenant_plan_path))
+    for entry in refused:
+        print_func(
+            f"switchyard: ignoring {config.project} plan entry {entry}: an unprivileged workflow "
+            "projection may only add a role under that role's own canonical account"
+        )
     if replacements:
         plan = replace(plan, **replacements)
-    with tempfile.TemporaryDirectory(prefix=f"switchyard-{config.project}-runtime-artifacts.") as tmp:
-        staged = Path(tmp)
-        write_artifacts(plan, staged, enable_owner_linger=False)
-        changed_names = sorted(
-            path.name
-            for path in staged.iterdir()
-            if not (provision_dir / path.name).is_file()
-            or (provision_dir / path.name).read_bytes() != path.read_bytes()
-        )
-        if not changed_names:
-            return LauncherUpgradeResult(False, f"switchyard: {config.project} generated runtime artifacts are already current")
-        if dry_run:
-            return LauncherUpgradeResult(
-                False,
-                f"switchyard: {config.project} generated runtime artifacts can be refreshed: {', '.join(changed_names)}",
-            )
-        for name in changed_names:
-            target = provision_dir / name
-            shutil.copyfile(staged / name, target)
-            target.chmod((staged / name).stat().st_mode & 0o777)
-            ensure_owner_file(config, target, runner=runner)
-    return LauncherUpgradeResult(
-        True,
-        f"switchyard: refreshed {config.project} generated runtime artifacts: {', '.join(changed_names)}",
+    rendered = render_privileged_artifacts(plan)
+    privileged_changed = sorted(
+        name
+        for name, body in rendered.items()
+        if not (target / name).is_file() or (target / name).read_bytes() != body
     )
+    if not changed and not privileged_changed:
+        return LauncherUpgradeResult(False, f"switchyard: {config.project} generated runtime artifacts are already current")
+    if dry_run:
+        return LauncherUpgradeResult(
+            False,
+            f"switchyard: {config.project} generated runtime artifacts can be refreshed: "
+            + ", ".join(sorted({*changed, *privileged_changed})),
+        )
+    if privileged_changed:
+        try:
+            install_privileged_artifacts(plan, rendered)
+        except OSError as exc:
+            return LauncherUpgradeResult(
+                bool(changed),
+                f"switchyard: could not stage {config.project} privileged artifacts under {target}: {exc}. "
+                "Nothing privileged was installed; the previous root-owned copy is unchanged.",
+            )
+    parts: list[str] = []
+    if changed:
+        parts.append(f"tenant copies: {', '.join(changed)}")
+    if privileged_changed:
+        parts.append(f"root installs {', '.join(privileged_changed)} from {target}")
+    message = f"switchyard: refreshed {config.project} generated runtime artifacts; " + "; ".join(parts)
+    if added_roles:
+        message += f"; role accounts added from the workflow projection: {', '.join(added_roles)}"
+    return LauncherUpgradeResult(True, message)
+
+
+PRIVILEGED_PROVISION_ROOT_ENV = "SWITCHYARD_PRIVILEGED_PROVISION_ROOT"
+
+
+def switchyard_privileged_provision_root() -> Path:
+    """Where root keeps the copies of generated artifacts it installs from.
+
+    Overridable so tests can exercise the real root branch without writing to
+    the host's /etc (SYRD-39).
+    """
+    configured = os.environ.get(PRIVILEGED_PROVISION_ROOT_ENV, "").strip()
+    return Path(configured).expanduser() if configured else DEFAULT_PRIVILEGED_PROVISION_ROOT
+
+
+def privileged_baseline_plan_path(project: str) -> Path:
+    """Root's own copy of the plan, the only one it renders privileged artifacts from."""
+    return privileged_provision_dir(project, root=switchyard_privileged_provision_root()) / "plan.json"
+
+
+def _provision_owner(provision_dir: Path) -> tuple[str, str]:
+    """The tenant's identity, taken from the filesystem rather than from its own document.
+
+    Only root can change a file's owner, so the account that owns the provision
+    directory is a fact about the host, not a claim the tenant can make. Every
+    other tenant-derived value below is anchored on this (SYRD-39).
+    """
+    try:
+        info = os.stat(provision_dir, follow_symlinks=False)
+    except OSError as exc:
+        return "", f"cannot inspect {provision_dir} ({exc.strerror})"
+    if info.st_uid == 0:
+        return "", f"{provision_dir} is owned by root and so does not identify a tenant"
+    try:
+        return pwd.getpwuid(info.st_uid).pw_name, ""
+    except KeyError:
+        return "", f"{provision_dir} is owned by uid {info.st_uid}, which is not a local account"
+
+
+def _validated_role_names(value: Any, field: str, objections: list[str]) -> tuple[str, ...]:
+    if value in (None, ""):
+        return ()
+    if not isinstance(value, list):
+        objections.append(f"{field} is not a list")
+        return ()
+    names: list[str] = []
+    for entry in value:
+        name = str(entry).strip().lower()
+        if not ROLE_RE.fullmatch(name) or name in NON_PROCESS_ROLES:
+            objections.append(f"{field} entry {entry!r} is not a role name")
+            continue
+        names.append(name)
+    return tuple(names)
+
+
+# Fields root regenerates rather than reads. A project provisioned with any of
+# them set differently was not built the way root would rebuild it, so
+# installing the regenerated artifacts would change what runs -- a board that
+# will not start, or, for commit_git_dir, one that resolves commit provenance
+# against a different repository without saying so. Divergence is refused, never
+# reconciled toward the document: the document is not an authority.
+#
+# The role tables are deliberately absent. Those are regenerated from validated
+# role names and completed by the delta path, and that is also the channel a
+# tenant would use to smuggle an account, so ignoring what the document says
+# about them is the intended behaviour rather than a divergence to report.
+REGENERATED_PLAN_FIELDS: tuple[str, ...] = (
+    "owner_user",
+    "owner_home",
+    "service_user",
+    "service_role",
+    "listener_role",
+    "database",
+    "commit_git_dir",
+    "board_root",
+    "board_current",
+    "asset_dir",
+    "frame_dir",
+    "board_log",
+    "listener_log",
+    "socket_path",
+    "runtime_directory",
+    "board_unit",
+    "canary_unit",
+    "listener_unit",
+    "tmpfiles_name",
+    "polkit_name",
+    "role_control_sudoers_name",
+)
+
+
+def _regenerated_field_divergence(
+    plan: ProjectBoardProvision, tenant_data: dict[str, Any], *, skip: Sequence[str] = ()
+) -> list[str]:
+    """Which recorded values the regenerated plan would silently replace."""
+    diverged: list[str] = []
+    for field in REGENERATED_PLAN_FIELDS:
+        if field in skip:
+            continue
+        recorded = str(tenant_data.get(field) or "").strip()
+        regenerated = str(getattr(plan, field, "") or "")
+        if recorded and recorded != regenerated:
+            diverged.append(f"{field}: provisioned {recorded!r}, regenerated {regenerated!r}")
+    return diverged
+
+
+def reconstruct_privileged_baseline(
+    project: str,
+    provision_dir: Path,
+    tenant_data: dict[str, Any],
+    *,
+    source_repo: Path | None = None,
+    operator_commit_git_dir: bool = False,
+) -> tuple[ProjectBoardProvision | None, str]:
+    """Build root's baseline from facts root holds, not from the tenant's document.
+
+    A tenant that predates the root-owned baseline still has to get one, but
+    adopting its plan.json would mean root installing a file the tenant wrote.
+    Checking that document field by field is a list of the attacks one happened
+    to think of -- role_accounts renders a sudoers grant, owner_home anchors
+    every path check that would be made against it. So nothing is adopted.
+
+    The identity comes from the owner of the provision directory, the home from
+    the passwd database, and everything root installs -- the account the service
+    runs as, every generated name, every path, and the whole role-to-account
+    table -- is regenerated by the same build_plan provisioning uses. The
+    document contributes only typed, individually validated values that decide
+    nothing root runs: the display name, the port, the ticket prefix, whether a
+    designer or auditor exists, and role NAMES (SYRD-39).
+    """
+    owner_user, problem = _provision_owner(provision_dir)
+    if not owner_user:
+        return None, problem
+    try:
+        owner_home = Path(pwd.getpwnam(owner_user).pw_dir)
+    except KeyError:
+        return None, f"{owner_user} has no passwd entry, so its home cannot be established"
+    if not owner_home.is_absolute():
+        return None, f"the passwd entry for {owner_user} has no absolute home"
+    objections: list[str] = []
+    resolved_source_repo = (source_repo or _repo_root()).expanduser().resolve(strict=False)
+    reference = build_plan(
+        project=project,
+        owner_user=owner_user,
+        owner_home=owner_home,
+        source_repo=resolved_source_repo,
+    )
+    port = tenant_data.get("port")
+    if not isinstance(port, int) or isinstance(port, bool) or not 1024 <= port <= 65535:
+        objections.append(f"port {port!r} is not a usable unprivileged port")
+        port = None
+    traversal = tenant_data.get("board_service_traversal", True)
+    if not isinstance(traversal, bool):
+        objections.append(f"board_service_traversal {traversal!r} is not a boolean")
+        traversal = True
+    implementer_roles = _validated_role_names(tenant_data.get("implementer_roles"), "implementer_roles", objections)
+    audit_roles = _validated_role_names(tenant_data.get("audit_roles"), "audit_roles", objections)
+    draft_roles = _validated_role_names(tenant_data.get("draft_roles"), "draft_roles", objections)
+    vcs_close_role = str(tenant_data.get("vcs_close_role") or "").strip().lower()
+    if vcs_close_role and not ROLE_RE.fullmatch(vcs_close_role):
+        objections.append(f"vcs_close_role {vcs_close_role!r} is not a role name")
+        vcs_close_role = ""
+    project_name = str(tenant_data.get("project_name") or "").strip() or None
+    ticket_prefix = str(tenant_data.get("ticket_prefix") or "").strip() or None
+    if objections:
+        return None, (
+            f"switchyard: cannot establish a root-owned baseline for {project} from "
+            f"{provision_dir / 'plan.json'}: " + "; ".join(objections)
+            + ". Re-provision the project so root generates its own."
+        )
+    try:
+        plan = build_plan(
+            project=project,
+            project_name=project_name,
+            owner_user=owner_user,
+            owner_home=owner_home,
+            port=port,
+            source_repo=resolved_source_repo,
+            ticket_prefix=ticket_prefix,
+            implementer_roles=implementer_roles or None,
+            include_designer=bool(draft_roles),
+            include_audit=bool(audit_roles),
+            audit_roles=audit_roles or None,
+            board_service_traversal=traversal,
+            vcs_close_role=vcs_close_role or None,
+        )
+    except SystemExit as exc:
+        return None, (
+            f"switchyard: cannot establish a root-owned baseline for {project}: {exc}. "
+            "Re-provision the project so root generates its own."
+        )
+    diverged = _regenerated_field_divergence(
+        plan, tenant_data, skip=("commit_git_dir",) if operator_commit_git_dir else ()
+    )
+    if diverged:
+        return None, (
+            f"switchyard: cannot establish a root-owned baseline for {project}: it was provisioned "
+            "with values root regenerates rather than trusts, and installing the regenerated ones "
+            "would change what runs:\n  "
+            + "\n  ".join(diverged)
+            + "\nRe-provision the project so root generates its own baseline."
+        )
+    worktree_base = _new_project_worktree_base(project, owner_user)
+    plan = replace(
+        plan,
+        role_worktrees=tuple((role, str(worktree_base / role)) for role, _account in plan.role_accounts),
+    )
+    return plan, ""
+
+
+def _privileged_baseline_plan(
+    config: ProjectConfig,
+    provision_dir: Path,
+    tenant_plan_path: Path,
+    *,
+    source_repo: Path | None = None,
+    operator_commit_git_dir: bool = False,
+) -> tuple[ProjectBoardProvision | None, str]:
+    """Root's baseline: its own stored copy, or one it reconstructs for a legacy tenant."""
+    baseline_path = privileged_baseline_plan_path(config.project)
+    if baseline_path.is_file():
+        try:
+            return _project_board_provision_from_json(baseline_path), ""
+        except SystemExit as exc:
+            return None, f"switchyard: {config.project} root-owned runtime baseline {baseline_path} is unusable: {exc}"
+    try:
+        tenant_data = _load_json(tenant_plan_path)
+    except SystemExit as exc:
+        return None, f"switchyard: {config.project} runtime plan cannot be read: {exc}"
+    return reconstruct_privileged_baseline(
+        config.project,
+        provision_dir,
+        tenant_data,
+        source_repo=source_repo,
+        operator_commit_git_dir=operator_commit_git_dir,
+    )
+
+
+def authoritative_refresh_plan(
+    baseline: ProjectBoardProvision, tenant_data: dict[str, Any]
+) -> tuple[ProjectBoardProvision, list[str], list[str]]:
+    """Apply the one thing an unprivileged projection is allowed to say.
+
+    A workflow document can introduce a role, and that role needs its account in
+    the table the board resolves uids through. Nothing else crosses: not the
+    account for a role root already knows, not a non-canonical account, and not
+    any other field of the plan (SYRD-39).
+    """
+    known = {role: account for role, account in baseline.role_accounts}
+    accepted: list[tuple[str, str]] = []
+    refused: list[str] = []
+    entries = tenant_data.get("role_accounts")
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+            refused.append(repr(entry))
+            continue
+        role, account = str(entry[0]).strip(), str(entry[1]).strip()
+        if role in known:
+            if account != known[role]:
+                refused.append(f"{role}={account}")
+            continue
+        canonical = role_account_name(baseline.project, role)
+        if not ROLE_RE.fullmatch(role) or role in NON_PROCESS_ROLES or account != canonical:
+            refused.append(f"{role}={account}")
+            continue
+        accepted.append((role, canonical))
+    if not accepted:
+        return baseline, [], refused
+    worktree_base = _new_project_worktree_base(baseline.project, baseline.owner_user)
+    worktrees = list(baseline.role_worktrees)
+    if worktrees:
+        worktrees.extend((role, str(worktree_base / role)) for role, _account in accepted)
+    return (
+        replace(
+            baseline,
+            role_accounts=(*baseline.role_accounts, *accepted),
+            role_worktrees=tuple(worktrees),
+        ),
+        [role for role, _account in accepted],
+        refused,
+    )
+
+
+def render_privileged_artifacts(
+    plan: ProjectBoardProvision, *, enable_owner_linger: bool = False
+) -> dict[str, bytes]:
+    """Render everything root installs, in a directory only root can reach.
+
+    Rendering into root's own temporary directory rather than reading the
+    tenant's copies back means the bytes root publishes are the bytes root
+    generated, with no window in which they could be replaced (SYRD-39).
+    """
+    with tempfile.TemporaryDirectory(prefix=f"switchyard-{plan.project}-privileged.") as tmp:
+        staged = Path(tmp)
+        os.chmod(staged, 0o700)
+        write_artifacts(plan, staged, enable_owner_linger=enable_owner_linger)
+        return {
+            name: (staged / name).read_bytes()
+            for name in (*privileged_artifact_names(plan), "plan.json")
+            if (staged / name).is_file()
+        }
+
+
+def install_privileged_artifacts(
+    plan: ProjectBoardProvision,
+    rendered: dict[str, bytes],
+    *,
+    privileged_root: Path | None = None,
+) -> Path:
+    """Publish rendered bytes into a directory only root can reach.
+
+    The provision directory belongs to the tenant, and a directory's owner can
+    replace what is inside it, so root neither writes there nor reads back from
+    there: these bytes come straight from the render above. Each file is written
+    beside its target and renamed, so an operator never reads a half-written
+    unit (SYRD-39).
+    """
+    target = privileged_provision_dir(plan.project, root=privileged_root or switchyard_privileged_provision_root())
+    for directory in (*reversed(target.parents), target):
+        if not directory.exists():
+            directory.mkdir(mode=0o755)
+        if directory.is_relative_to(privileged_root or switchyard_privileged_provision_root()) or directory == target:
+            os.chown(directory, 0, 0)
+            directory.chmod(0o755)
+    for name, body in rendered.items():
+        staged = target / f".{name}.new"
+        descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        try:
+            os.write(descriptor, body)
+            os.fchown(descriptor, 0, 0)
+            os.fchmod(descriptor, 0o755 if name.endswith(".sh") else 0o644)
+        finally:
+            os.close(descriptor)
+        staged.replace(target / name)
+    return target
 
 
 def _tenant_board_root_from_config(config: ProjectConfig) -> Path | None:
@@ -5247,14 +5842,24 @@ def tenant_release_status(
         raise SystemExit(f"switchyard: tenant owner_home must be absolute: {owner_home}")
     provisioned_system_unit = None
     if config_path is not None:
-        candidate = (config_path.parent / f"{config.project}-ticket-board.service").resolve(strict=False)
-        required_units = (
-            candidate,
-            candidate.parent / f"{config.project}-ticket-board-canary.service",
-            candidate.parent / f"{config.project}-ticket-board-notify-listener.service",
-        )
-        if all(path.is_file() for path in required_units):
-            provisioned_system_unit = candidate
+        # Prefer root's own copy. The provision directory belongs to the tenant,
+        # so installing from it would let the tenant choose what root runs; the
+        # mirror under /etc/switchyard is written and owned by root and is the
+        # source the printed install commands must name (SYRD-39).
+        candidates = [
+            privileged_provision_dir(config.project, root=switchyard_privileged_provision_root())
+            / f"{config.project}-ticket-board.service",
+            (config_path.parent / f"{config.project}-ticket-board.service").resolve(strict=False),
+        ]
+        for candidate in candidates:
+            required_units = (
+                candidate,
+                candidate.parent / f"{config.project}-ticket-board-canary.service",
+                candidate.parent / f"{config.project}-ticket-board-notify-listener.service",
+            )
+            if all(path.is_file() for path in required_units):
+                provisioned_system_unit = candidate
+                break
     selected_commit_git_dir = (
         commit_git_dir.strip()
         if commit_git_dir is not None
@@ -5433,6 +6038,17 @@ def report_tenant_release_upgrade(
         print_func(f"  {tenant_release_listener_command(status, config.project, 'stop')}")
         unit_install = tenant_release_unit_install_command(status, config.project)
         if unit_install:
+            privileged_root = switchyard_privileged_provision_root()
+            if not status.provisioned_system_unit.is_relative_to(privileged_root):
+                # Say it rather than let it pass: the source being installed is
+                # in a directory the tenant owns, so it is only as trustworthy
+                # as the tenant. Running `switchyard upgrade` as root stages a
+                # copy root owns and this line goes away (SYRD-39).
+                print_func(
+                    f"switchyard: warning: {config.project} units are being installed from "
+                    f"{status.provisioned_system_unit.parent}, which the tenant owns. Run "
+                    f"`switchyard upgrade {config.project}` as root to stage a root-owned copy first."
+                )
             print_func(f"  {unit_install}")
         print_func(f"  {tenant_release_deploy_command(status, config.project)}")
         print_func(f"  {tenant_release_listener_command(status, config.project, 'start')}")
@@ -5462,14 +6078,18 @@ def sync_reload_config_to_live_sessions(
         role = role_by_name.get(role_name)
         if role is None:
             continue
-        if runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+        # A role's live session is in that role's own tmux server, so reload has
+        # to inspect it there or it sees nothing and rewrites the config from a
+        # blank reading (SYRD-39).
+        role_runner = role_process_runner_for(config, role, runner=runner)
+        if role_runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
             updated_roles.append(role)
             continue
-        live_model = live_model_for_role(role, session_dir=config.session_dir, runner=runner)
+        live_model = live_model_for_role(role, session_dir=role_session_dir(config, role), runner=role_runner)
         if not live_model:
             updated_roles.append(role)
             continue
-        live_cli = live_cli_for_role(role, runner=runner)
+        live_cli = live_cli_for_role(role, runner=role_runner)
         next_role = role
         if live_cli and live_cli != role.cli:
             raw_role["cli"] = live_cli
@@ -5602,6 +6222,10 @@ def launch_project(
             # without the prompt that was just projected.
             config = load_project_config(config.project, config_path)
     worktree_runner = runner
+    # Owner-scoped work (worktrees, the viewer session, layout) uses this.
+    # Anything that starts, probes or stops a ROLE selects that role's own
+    # account instead, because bin_user only sets PATH and the uid the board
+    # sees comes from the runner (SYRD-39).
     role_process_runner = runner
     owner_runner_anchor = config.repository or config.pane_launcher
     delegate_role_sessions_to_owner = bool(config.run_as_user and current_user_name() != config.run_as_user)
@@ -5641,7 +6265,7 @@ def launch_project(
             allow_stale=allow_stale_launcher,
         )
         if mode == "attach-or-start":
-            running_roles = _running_project_roles(config, runner=role_process_runner)
+            running_roles = _running_project_roles(config, runner=runner)
         ensure_configured_runtime_user(config, runner=runner)
         ensure_owner_state_dirs(config, pane_state_dir=effective_pane_state_dir, runner=runner)
         ensure_generated_project_pane_hooks(
@@ -5678,6 +6302,29 @@ def launch_project(
             fetch_project_worktree_ref(config, runner=worktree_runner)
             config = sync_reload_config_to_live_sessions(config, config_path=config_path, runner=runner)
             config = prepare_project_desktop(config, runner=runner)
+        # Worktrees are created here, after the operator artifact has already
+        # run, so a fresh project reaches this point with trees still owned by
+        # the project owner. Say so every launch until the handoff is done,
+        # rather than starting roles that cannot write their own trees.
+        isolation_gaps = role_isolation_gaps(config)
+        if isolation_gaps:
+            handoff_path = config_path.with_name(f"{config.project}-role-accounts.sh")
+            try:
+                handoff_path.write_text(render_role_account_migration(config), encoding="utf-8")
+                handoff_path.chmod(0o755)
+            except OSError:
+                pass
+            # Refuse rather than warn. A partially migrated project that starts
+            # anyway runs roles under the wrong uid or without credentials, and
+            # the board then either denies them or -- worse, before this was
+            # closed -- cannot tell them apart at all (SYRD-39).
+            print_func(
+                "team-launcher: refusing to launch " + config.project
+                + "; its roles are not isolated yet, so they cannot be told apart:\n  "
+                + "\n  ".join(isolation_gaps)
+                + f"\nAn operator must run {handoff_path} (safe to re-run) and then relaunch."
+            )
+            return 1
     materialize_layout(
         config,
         config_path=config_path,
@@ -5716,7 +6363,7 @@ def launch_project(
                         pane_state_dir=pane_state_dir,
                         force_reload=force_reload,
                         skip_launcher_check=True,
-                        run_as_user=config.run_as_user,
+                        run_as_user=role_run_as_user(config, role),
                     )
                 ),
                 "worktree_error": failed_roles.get(role.role, ""),
@@ -5775,22 +6422,22 @@ def launch_project(
                     config_path=config_path,
                     mode=mode,
                     script_path=pane_script_path,
-                    pane_state_dir=effective_pane_state_dir,
+                    pane_state_dir=role_pane_state_dir(config, role, effective_pane_state_dir),
                     force_reload=force_reload,
                     skip_launcher_check=True,
                     allow_stale_launcher=allow_stale_launcher,
-                    run_as_user=config.run_as_user,
+                    run_as_user=role_run_as_user(config, role),
                 )
             ).returncode
         else:
             result = run_detached_role(
                 role,
                 mode=mode,
-                session_dir=config.session_dir,
-                pane_state_dir=effective_pane_state_dir,
+                session_dir=role_session_dir(config, role),
+                pane_state_dir=role_pane_state_dir(config, role, effective_pane_state_dir),
                 force_reload=force_reload,
-                bin_user=config.run_as_user,
-                runner=role_process_runner,
+                bin_user=role_run_as_user(config, role),
+                runner=role_process_runner_for(config, role, runner=runner),
             )
         if result != 0:
             if not use_runtime_presentation:
@@ -5811,23 +6458,23 @@ def launch_project(
                         config_path=config_path,
                         mode=mode,
                         script_path=pane_script_path,
-                        pane_state_dir=effective_pane_state_dir,
+                        pane_state_dir=role_pane_state_dir(config, role, effective_pane_state_dir),
                         force_reload=force_reload,
                         skip_launcher_check=True,
                         allow_stale_launcher=allow_stale_launcher,
                         no_attach=True,
-                        run_as_user=config.run_as_user,
+                        run_as_user=role_run_as_user(config, role),
                     )
                 ).returncode
             else:
                 result = ensure_visible_role_session_for_viewer(
                     role,
                     mode=mode,
-                    session_dir=config.session_dir,
-                    pane_state_dir=effective_pane_state_dir,
+                    session_dir=role_session_dir(config, role),
+                    pane_state_dir=role_pane_state_dir(config, role, effective_pane_state_dir),
                     force_reload=force_reload,
-                    bin_user=config.run_as_user,
-                    runner=role_process_runner,
+                    bin_user=role_run_as_user(config, role),
+                    runner=role_process_runner_for(config, role, runner=runner),
                 )
             if result != 0:
                 if not use_runtime_presentation:
@@ -5868,23 +6515,23 @@ def launch_project(
                             config_path=config_path,
                             mode=mode,
                             script_path=pane_script_path,
-                            pane_state_dir=effective_pane_state_dir,
+                            pane_state_dir=role_pane_state_dir(config, role, effective_pane_state_dir),
                             force_reload=force_reload,
                             skip_launcher_check=True,
                             allow_stale_launcher=allow_stale_launcher,
                             no_attach=True,
-                            run_as_user=config.run_as_user,
+                            run_as_user=role_run_as_user(config, role),
                         )
                     ).returncode
                 else:
                     result = ensure_visible_role_session_for_viewer(
                         role,
                         mode=mode,
-                        session_dir=config.session_dir,
-                        pane_state_dir=effective_pane_state_dir,
+                        session_dir=role_session_dir(config, role),
+                        pane_state_dir=role_pane_state_dir(config, role, effective_pane_state_dir),
                         force_reload=force_reload,
-                        bin_user=config.run_as_user,
-                        runner=role_process_runner,
+                        bin_user=role_run_as_user(config, role),
+                        runner=role_process_runner_for(config, role, runner=runner),
                     )
                 if result != 0:
                     record_worker_start_failure(role, result)
@@ -6283,6 +6930,9 @@ def _new_project_launcher_config_payload(
             ),
             "live_commands": [cli],
             "role": role,
+            # One Unix account per role: this is what the board resolves a
+            # peer's uid against, and it gives each role its own tmux server.
+            "run_as_user": role_account_name(plan.project, role),
             "target": f"{plan.project}-{role}:0.0",
             "tmux_session": f"{plan.project}-{role}",
             "workdir": str(worktree_base / role),
@@ -7248,7 +7898,34 @@ def new_project_command(
         selected = validate_policy(selected, project=plan.project, tenant=plan.owner_user)
         artifact_dir.mkdir(parents=True, exist_ok=True)
         _write_json_atomic(artifact_dir / "desktop-policy.json", selected)
+    # The rollout must hand each role the tree it works in, so record those
+    # paths on the plan before the operator artifact is rendered (SYRD-39).
+    _role_worktree_base = _new_project_worktree_base(plan.project, plan.owner_user)
+    plan = replace(
+        plan,
+        role_worktrees=tuple(
+            (role, str(_role_worktree_base / role)) for role, _account in plan.role_accounts
+        ),
+    )
     write_artifacts(plan, artifact_dir, enable_owner_linger=enable_owner_linger)
+    if execute and os.geteuid() == 0:
+        # The provision directory is handed to the tenant, so root publishes its
+        # own copy of everything it later installs or executes -- rendered here
+        # from the plan root just computed, never copied back out of the tenant's
+        # directory -- and installs from that instead (SYRD-39).
+        rendered_privileged = render_privileged_artifacts(plan, enable_owner_linger=enable_owner_linger)
+        try:
+            mirrored_privileged = install_privileged_artifacts(plan, rendered_privileged)
+        except OSError as exc:
+            mirrored_privileged = None
+            print_func(
+                f"switchyard: could not stage {plan.project} privileged artifacts for root: {exc}. "
+                f"Run `switchyard upgrade {plan.project}` as root before installing its units."
+            )
+        if mirrored_privileged is not None:
+            print_func(
+                f"switchyard: root installs {plan.project} units, grants and SQL from {mirrored_privileged}"
+            )
     config_path = write_new_project_launcher_artifacts(
         plan,
         artifact_dir,
@@ -7270,6 +7947,26 @@ def new_project_command(
         print_func=print_func,
     )
     commands_path = artifact_dir / "operator-commands.sh"
+    # The complete role-isolation handoff -- accounts, ownership, runtime,
+    # tooling AND credential seeding -- is written beside the other artifacts, so
+    # an operator who follows the printed instruction once has everything. It
+    # used to be produced only by a later failed start, which meant doing exactly
+    # what provisioning said still left the credential gaps open (SYRD-39).
+    try:
+        handoff_config = load_project_config(plan.project, config_path)
+    except SystemExit:
+        handoff_config = None
+    if handoff_config is not None and role_isolation_gaps(handoff_config):
+        handoff_path = config_path.with_name(f"{plan.project}-role-accounts.sh")
+        try:
+            handoff_path.write_text(render_role_account_migration(handoff_config), encoding="utf-8")
+            handoff_path.chmod(0o755)
+            print_func(
+                f"team-launcher: roles are not isolated yet; run {handoff_path} as an operator "
+                "(safe to re-run) before starting them"
+            )
+        except OSError as exc:
+            print_func(f"team-launcher: could not write {handoff_path}: {exc}")
     if not execute:
         print_func(f"team-launcher: dry-run for {plan.project}; artifacts in {artifact_dir}")
         print_func(f"team-launcher: launcher config {config_path}")
@@ -9546,6 +10243,81 @@ def write_host_agy_credential_source(
     return path
 
 
+def switchyard_seed_role_credentials_command(
+    config: ProjectConfig,
+    *,
+    role_name: str = "",
+    reseed: bool = False,
+    home_base: Path = Path("/home"),
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    """Give each role its own private copy of the credentials its CLI needs.
+
+    Idempotent: a role that already has a credential is left alone unless
+    --reseed is passed, which is the deliberate repair/sync path. Nothing here
+    changes how the board derives a role -- that stays SO_PEERCRED uid -- and
+    nothing is shared between roles: each copy is owned by that role, 0600,
+    under a 0700 directory (SYRD-39).
+    """
+    owner_user = config.run_as_user or current_user_name()
+    roles = [role for role in config.roles if not role_name or role.role == role_name]
+    if role_name and not roles:
+        raise SystemExit(f"switchyard: {config.project} has no role {role_name}")
+    seeded = 0
+    for role in roles:
+        account = role_run_as_user(config, role)
+        if not account or account == owner_user:
+            print_func(f"switchyard: {role.role} has no Unix account of its own; nothing to seed")
+            continue
+        cli_name = _command_name(role.cli[0]) if role.cli else ""
+        artifacts = role_credential_artifacts(role)
+        if not artifacts:
+            raise SystemExit(
+                f"switchyard: no credential allowlist for {cli_name or 'unknown cli'} used by "
+                f"{role.role}; refusing to guess what to copy"
+            )
+        seeded_for_role = 0
+        for artifact in artifacts:
+            if seed_role_credential(
+                account=account,
+                owner_user=owner_user,
+                artifact=artifact,
+                target=_role_credential_target(config, role, artifact, home_base=home_base),
+                home_base=home_base,
+                reseed=reseed,
+                runner=runner,
+                print_func=print_func,
+            ):
+                seeded += 1
+                seeded_for_role += 1
+        if not seeded_for_role and all(not artifact.required for artifact in artifacts):
+            # Nothing was copied. That is fine when the role already holds one
+            # of the alternatives -- this command is idempotent -- and a failure
+            # when it holds none, because the owner is then not authenticated
+            # for this CLI and the role must not start.
+            already_held = any(
+                not _credential_state(
+                    *_role_credential_target(config, role, artifact, home_base=home_base),
+                    account,
+                    private=True,
+                )
+                for artifact in artifacts
+            )
+            if not already_held:
+                raise SystemExit(
+                    f"switchyard: {owner_user} has none of "
+                    + ", ".join(artifact.relative_path for artifact in artifacts)
+                    + f"; authenticate {cli_name} as {owner_user} first"
+                )
+    print_func(
+        f"switchyard: seeded {seeded} credential file(s); every role now acts as the same "
+        "model-provider account as the owner, and shares that account's quota, while keeping "
+        "its own filesystem and its own board role"
+    )
+    return 0
+
+
 def switchyard_agy_credential_command(
     action: str,
     *,
@@ -9645,6 +10417,619 @@ def _require_owner_traversable(dir_fd: int, owner_user: str, component: str, tar
             f"(uid {owner_uid}) could not enter it and agy could not read a credential "
             "below it; remove or fix that directory and rerun"
         )
+
+
+# Hermes reads provider keys from its own home. The owner's authenticated state
+# lives in ~/.hermes; a role reads the same two files from the per-role
+# HERMES_HOME the launcher already gives it, so nothing has to be injected into
+# the environment and no shell file is ever sourced (SYRD-39).
+HERMES_OWNER_CREDENTIAL_DIR = ".hermes"
+# Hermes keeps model-provider keys in the SAME .env as SUDO_PASSWORD, messaging
+# bot tokens, GitHub tokens, tool credentials and terminal SSH keys -- its own
+# terminal tool consumes SUDO_PASSWORD. Copying that file into every role would
+# hand each one the owner's login password and external identities, which is the
+# opposite of what per-role accounts are for. Only these keys cross, and a new
+# file is constructed rather than the source copied (SYRD-39).
+HERMES_PROVIDER_ENV_KEYS = frozenset(
+    {
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_TOKEN",
+        "ARCEEAI_API_KEY",
+        "ARCEE_BASE_URL",
+        "AZURE_FOUNDRY_API_KEY",
+        "AZURE_FOUNDRY_BASE_URL",
+        "DASHSCOPE_API_KEY",
+        "DASHSCOPE_BASE_URL",
+        "DEEPSEEK_API_KEY",
+        "DEEPSEEK_BASE_URL",
+        "GEMINI_API_KEY",
+        "GEMINI_BASE_URL",
+        "GLM_API_KEY",
+        "GLM_BASE_URL",
+        "GMI_API_KEY",
+        "GMI_BASE_URL",
+        "GOOGLE_API_KEY",
+        "HERMES_GEMINI_CLIENT_ID",
+        "HERMES_GEMINI_CLIENT_SECRET",
+        "HERMES_GEMINI_PROJECT_ID",
+        "HERMES_QWEN_BASE_URL",
+        "HF_BASE_URL",
+        "HF_TOKEN",
+        "KIMI_API_KEY",
+        "KIMI_BASE_URL",
+        "KIMI_CN_API_KEY",
+        "LM_API_KEY",
+        "LM_BASE_URL",
+        "MINIMAX_API_KEY",
+        "MINIMAX_BASE_URL",
+        "MINIMAX_CN_API_KEY",
+        "MINIMAX_CN_BASE_URL",
+        "MISTRAL_API_KEY",
+        "NOUS_BASE_URL",
+        "NVIDIA_API_KEY",
+        "NVIDIA_BASE_URL",
+        "OLLAMA_API_KEY",
+        "OLLAMA_BASE_URL",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "OPENCODE_GO_API_KEY",
+        "OPENCODE_GO_BASE_URL",
+        "OPENCODE_ZEN_API_KEY",
+        "OPENCODE_ZEN_BASE_URL",
+        "OPENROUTER_API_KEY",
+        "STEPFUN_API_KEY",
+        "STEPFUN_BASE_URL",
+        "XAI_API_KEY",
+        "XAI_BASE_URL",
+        "XIAOMI_API_KEY",
+        "XIAOMI_BASE_URL",
+        "ZAI_API_KEY",
+        "Z_AI_API_KEY",
+    }
+)
+
+
+@dataclass(frozen=True)
+class RoleCredentialArtifact:
+    """One file a CLI needs in a role's own home to start authenticated.
+
+    An allowlist, deliberately narrow. Whole CLI homes are never copied: they
+    carry conversations, histories, caches, hooks and general settings, and
+    sharing those between roles would hand every role the others' work as well
+    as their tokens (SYRD-39).
+    """
+
+    cli: str
+    relative_path: str
+    required: bool = True
+
+
+# What each supported CLI needs, and nothing else. Anything not listed here is
+# never copied into a role home.
+ROLE_CREDENTIAL_ARTIFACTS: dict[str, tuple[RoleCredentialArtifact, ...]] = {
+    "claude": (RoleCredentialArtifact("claude", ".claude/.credentials.json"),),
+    "codex": (RoleCredentialArtifact("codex", ".codex/auth.json"),),
+    "agy": (
+        RoleCredentialArtifact(
+            "agy", f"{AGY_CREDENTIAL_DIR_NAME}/{AGY_CREDENTIAL_TOKEN_NAME}"
+        ),
+    ),
+    # Hermes resolves provider keys from the environment, not a token file, and
+    # an ambient environment does not survive sudo -u into a separate account.
+    # The owner therefore keeps its key in one private file, which is seeded
+    # like any other credential and sourced by the role's own shell at start.
+    # Targets are inside the role's own HERMES_HOME rather than its home root,
+    # so they are resolved per role rather than listed here.
+    # Only the filtered .env. auth.json is deliberately NOT seeded: its schema
+    # is not something this code can verify is provider-only, and an artifact
+    # whose contents cannot be constrained must not cross the boundary.
+    "hermes": (RoleCredentialArtifact("hermes", f"{HERMES_OWNER_CREDENTIAL_DIR}/.env"),),
+}
+
+
+def hermes_credential_target(config: ProjectConfig, role: RoleConfig, artifact: RoleCredentialArtifact) -> Path:
+    """Where a hermes role reads one credential from.
+
+    Its own HERMES_HOME, which the launcher already points it at, so the file is
+    read by hermes itself out of a directory the role owns. Nothing is injected
+    into the environment and no shell file is sourced.
+    """
+    base, relative = _role_credential_target(config, role, artifact)
+    return base / relative
+
+
+def select_hermes_provider_env(text: str) -> tuple[str, list[str], str]:
+    """Build a role .env holding only inference-provider authentication.
+
+    Returns (content, omitted_keys, problem). The source is parsed, not copied:
+    plain KEY=value grammar stops shell execution but says nothing about WHICH
+    secrets cross, and hermes stores SUDO_PASSWORD, messaging tokens, GitHub and
+    tool credentials in the same file. Everything outside the provider allowlist
+    is dropped, and the caller reports what was left behind so the omission is
+    visible rather than silent (SYRD-39).
+    """
+    kept: list[str] = []
+    omitted: list[str] = []
+    for number, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        name, separator, value = line.partition("=")
+        name = name.strip()
+        if not separator:
+            return "", [], f"line {number} is not KEY=value"
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            return "", [], f"line {number} does not name a valid environment variable"
+        if name in HERMES_PROVIDER_ENV_KEYS:
+            kept.append(f"{name}={value.strip()}")
+        else:
+            omitted.append(name)
+    if not kept:
+        return "", omitted, "it holds no inference-provider credentials"
+    header = (
+        "# Generated by switchyard: inference-provider authentication only.\n"
+        "# Other entries in the owner's .env are deliberately not shared with roles.\n"
+    )
+    return header + "\n".join(kept) + "\n", omitted, ""
+
+
+def role_credential_artifacts(role: RoleConfig) -> tuple[RoleCredentialArtifact, ...]:
+    cli_name = _command_name(role.cli[0]) if role.cli else ""
+    return ROLE_CREDENTIAL_ARTIFACTS.get(cli_name, ())
+
+
+def _walk_no_follow(base: Path, relative: Path) -> tuple[int, str]:
+    """Open `base/relative`'s parent by walking components with O_NOFOLLOW.
+
+    Returns (dir_fd, problem). lstat on the leaf and its immediate parent was
+    not enough: an ancestor several levels up can be a symlink, and the whole
+    subtree then belongs to wherever it points (SYRD-39).
+    """
+    try:
+        fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return -1, "missing"
+    except OSError as exc:
+        return -1, f"cannot open {base} ({exc.strerror})"
+    for component in relative.parent.parts:
+        parent_fd_for_report = fd
+        try:
+            child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.EMLINK, errno.ENOTDIR):
+                # O_DIRECTORY|O_NOFOLLOW reports ENOTDIR for a symlinked
+                # directory on Linux and ELOOP elsewhere. Either way it is
+                # refused; name it accurately so the manifest is actionable.
+                # This is the ancestor case lstat on the leaf could not see.
+                try:
+                    kind = os.lstat(component, dir_fd=parent_fd_for_report)
+                    if stat.S_ISLNK(kind.st_mode):
+                        os.close(fd)
+                        return -1, f"ancestor {component} is a symlink"
+                except OSError:
+                    pass
+                os.close(fd)
+                return -1, f"ancestor {component} is not a directory"
+            os.close(fd)
+            if exc.errno == errno.ENOENT:
+                # Nothing there yet: absent, not unsafe.
+                return -1, "missing"
+            return -1, f"ancestor {component} is unusable ({exc.strerror})"
+        os.close(fd)
+        fd = child
+    return fd, ""
+
+
+def _credential_state(
+    base: Path,
+    relative: Path | str,
+    expected_user: str,
+    *,
+    private: bool,
+) -> str:
+    """Empty when the credential is safe to rely on, otherwise why it is not.
+
+    Every component from the home downwards is opened with O_NOFOLLOW, so a
+    symlinked ancestor is refused rather than silently followed, and the leaf is
+    inspected through that anchored descriptor rather than by path.
+    """
+    relative_path = Path(relative)
+    expected_uid = uid_for_user(expected_user)
+    if expected_uid is None:
+        return f"cannot be checked: {expected_user} is not a local account"
+    dir_fd, problem = _walk_no_follow(base, relative_path)
+    if problem:
+        return problem
+    try:
+        try:
+            info = os.stat(relative_path.name, dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return "missing"
+        except OSError as exc:
+            return f"unreadable ({exc.strerror})"
+        if stat.S_ISLNK(info.st_mode):
+            return "is a symlink; credentials must be private regular files"
+        if not stat.S_ISREG(info.st_mode):
+            return "is not a regular file"
+        if info.st_uid != expected_uid:
+            return f"is owned by uid {info.st_uid}, not {expected_user}"
+        if info.st_mode & 0o077:
+            return f"is readable beyond its owner (mode {oct(stat.S_IMODE(info.st_mode))})"
+        if private:
+            parent = os.fstat(dir_fd)
+            if parent.st_uid != expected_uid:
+                return (
+                    f"its directory is owned by uid {parent.st_uid}, not {expected_user}"
+                )
+            if parent.st_mode & 0o077:
+                return (
+                    "its directory is reachable beyond its owner "
+                    f"(mode {oct(stat.S_IMODE(parent.st_mode))})"
+                )
+    finally:
+        os.close(dir_fd)
+    return ""
+
+
+def _artifact_present(home: Path, artifact: RoleCredentialArtifact) -> bool:
+    candidate = home / artifact.relative_path
+    try:
+        return candidate.is_file()
+    except OSError:
+        return False
+
+
+def _role_credential_target(
+    config: ProjectConfig,
+    role: RoleConfig,
+    artifact: RoleCredentialArtifact,
+    *,
+    home_base: Path | None = None,
+) -> tuple[Path, Path]:
+    """(base, relative) for where a role reads one credential.
+
+    Most CLIs read from a fixed place under the role's home. Hermes reads from
+    the per-role HERMES_HOME the launcher already points it at, so its target is
+    resolved per role rather than assumed to mirror the owner's layout.
+    """
+    account = role_run_as_user(config, role)
+    role_home = (
+        home_base / account if home_base is not None else home_dir_for_user(account) or Path("/home") / account
+    )
+    if artifact.cli == "hermes":
+        # Always expressed relative to the role's home so every component is
+        # created and anchored under it, whatever base is in use.
+        session_relative = Path(".local/state") / f"{config.project}-ticket-board"
+        home_name = session_file_name(role.target).removesuffix(".json")
+        return role_home, (
+            session_relative
+            / "hermes-homes"
+            / home_name
+            / Path(artifact.relative_path).name
+        )
+    return role_home, Path(artifact.relative_path)
+
+
+def role_credential_manifest(config: ProjectConfig) -> list[str]:
+    """What still has to be true before each role can start authenticated.
+
+    Fails closed by being explicit: every line names the role, the CLI, and the
+    exact artifact that is missing from the role's own home or absent from the
+    owner's, rather than letting a role launch and fail at the provider.
+    """
+    owner_user = config.run_as_user or current_user_name()
+    owner_home = home_dir_for_user(owner_user)
+    lines: list[str] = []
+    for role in config.roles:
+        account = role_run_as_user(config, role)
+        cli_name = _command_name(role.cli[0]) if role.cli else ""
+        if not account or account == config.run_as_user:
+            continue
+        role_home = home_dir_for_user(account)
+        artifacts = role_credential_artifacts(role)
+        if not artifacts:
+            lines.append(f"{role.role} ({cli_name or 'unknown cli'}): no known credential artifact")
+            continue
+        optional_group = all(not artifact.required for artifact in artifacts)
+        satisfied = False
+        pending: list[str] = []
+        for artifact in artifacts:
+            if role_home is not None:
+                target_base, target_relative = _role_credential_target(config, role, artifact)
+                target_problem = _credential_state(
+                    target_base, target_relative, account, private=True
+                )
+                if not target_problem:
+                    satisfied = True
+                    continue
+                if target_problem != "missing":
+                    # Present but unsafe is worse than absent: say so instead of
+                    # treating it as ready.
+                    # Present but unsafe is worse than absent, for an
+                    # alternative as much as a required artifact.
+                    lines.append(
+                        f"{role.role} ({cli_name}): {artifact.relative_path} in /home/{account} "
+                        f"{target_problem}; reseed it with "
+                        f"`switchyard seed-role-credentials {config.project} --role {role.role} --reseed`"
+                    )
+                    satisfied = True
+                    continue
+            owner_problem = (
+                "missing"
+                if owner_home is None
+                else _credential_state(owner_home, artifact.relative_path, owner_user, private=False)
+            )
+            if owner_problem:
+                if owner_problem == "missing" and optional_group:
+                    # One of several alternatives; only report if none exist.
+                    continue
+                pending.append(
+                    f"{role.role} ({cli_name}): the owner's {artifact.relative_path} "
+                    f"{owner_problem}, so it cannot be seeded; authenticate {cli_name} as "
+                    f"{owner_user} first"
+                )
+                continue
+            pending.append(
+                f"{role.role} ({cli_name}): {artifact.relative_path} not yet seeded into "
+                f"/home/{account}"
+            )
+        if optional_group and satisfied:
+            continue
+        if optional_group and not pending:
+            lines.append(
+                f"{role.role} ({cli_name}): the owner has none of "
+                + ", ".join(artifact.relative_path for artifact in artifacts)
+                + f"; authenticate {cli_name} as {owner_user} first"
+            )
+            continue
+        lines.extend(pending)
+    return lines
+
+
+def _open_role_credential_parent(
+    account: str,
+    base: Path,
+    relative_path: Path | str,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> int:
+    """Open the role-owned directory that will hold one credential.
+
+    Extends the SYRD-28 model: every component is created with mkdirat 0700 and
+    opened with openat/O_NOFOLLOW relative to the descriptor above it, so no
+    privileged step is ever handed a whole path that a symlink could redirect,
+    and a component that already existed is proven to belong to the role rather
+    than assumed to (SYRD-39).
+    """
+    relative = Path(relative_path)
+    target_dir = base / relative.parent
+    fd = os.open(base.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fd = _openat_no_follow(fd, base.name, target_dir)
+        _require_owner_home_traversable(fd, account, base)
+        for component in relative.parent.parts:
+            created = False
+            try:
+                os.mkdir(component, 0o700, dir_fd=fd)
+                created = True
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                raise SystemExit(
+                    f"switchyard: failed to create {target_dir} for {account} ({exc.strerror})"
+                ) from exc
+            parent_fd = fd
+            child_fd = _openat_no_follow_keep_parent(parent_fd, component, target_dir)
+            try:
+                if created:
+                    os.fchmod(child_fd, 0o700)
+                    own = runner(["chown", f"{account}:{account}", f"/proc/{os.getpid()}/fd/{child_fd}"])
+                    if own.returncode != 0:
+                        raise SystemExit(f"switchyard: failed to assign {target_dir} to {account}")
+                else:
+                    _require_owner_traversable(child_fd, account, component, target_dir)
+            except BaseException:
+                os.close(child_fd)
+                if created:
+                    try:
+                        os.rmdir(component, dir_fd=parent_fd)
+                    except OSError:
+                        pass
+                raise
+            os.close(parent_fd)
+            fd = child_fd
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _try_open_credential_source(base: Path, relative: Path | str) -> tuple[int, str]:
+    """Open a credential for reading with every component anchored.
+
+    Returns (fd, problem); fd is -1 when problem is set. Unlike the raising
+    variant this lets an optional artifact be absent without aborting.
+    """
+    relative_path = Path(relative)
+    dir_fd, problem = _walk_no_follow(base, relative_path)
+    if problem:
+        return -1, problem
+    try:
+        try:
+            return os.open(relative_path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd), ""
+        except FileNotFoundError:
+            return -1, "missing"
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.EMLINK):
+                return -1, "is a symlink; credentials must be private regular files"
+            return -1, f"cannot be opened ({exc.strerror})"
+    finally:
+        os.close(dir_fd)
+
+
+def _fd_credential_state(fd: int, expected_user: str) -> str:
+    """Validate the OPEN FILE, not a path that may have changed since.
+
+    Validating by path and then reading by path leaves a window in which the
+    name can be repointed at another file, and the privileged seeding command
+    would read outside the approved artifact. Everything here is decided on the
+    descriptor the bytes are actually read from (SYRD-39).
+    """
+    expected_uid = uid_for_user(expected_user)
+    if expected_uid is None:
+        return f"cannot be checked: {expected_user} is not a local account"
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+        return "is not a regular file"
+    if info.st_uid != expected_uid:
+        return f"is owned by uid {info.st_uid}, not {expected_user}"
+    if info.st_mode & 0o077:
+        return f"is readable beyond its owner (mode {oct(stat.S_IMODE(info.st_mode))})"
+    return ""
+
+
+def _read_fd_bytes(fd: int) -> bytes:
+    """Read a whole file from an already-open descriptor."""
+    os.lseek(fd, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _write_all(fd: int, payload: bytes) -> None:
+    """Write every byte; os.write may write fewer than requested."""
+    written = 0
+    while written < len(payload):
+        written += os.write(fd, payload[written:])
+
+
+def seed_role_credential(
+    *,
+    account: str,
+    owner_user: str,
+    artifact: RoleCredentialArtifact,
+    target: tuple[Path, Path] | None = None,
+    home_base: Path = Path("/home"),
+    reseed: bool = False,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> bool:
+    """Give one role its own private copy of one credential.
+
+    A copy, never a symlink and never a shared directory: the role owns the
+    file, refreshes rotate its own copy, and revoking one role's filesystem
+    access does not touch another's. Returns False when the role already has it
+    and reseed was not requested, which is what makes repair idempotent.
+    """
+    role_home = home_base / account
+    owner_home = home_base / owner_user
+    target_base, target_relative = target or (role_home, Path(artifact.relative_path))
+    target_name = target_relative.name
+    # Open the source ONCE, through anchored components, and decide everything
+    # from that descriptor. Validating a path and then reading the same path
+    # leaves a window in which the name can be repointed at another file
+    # (SYRD-39).
+    source_fd, source_problem = _try_open_credential_source(owner_home, artifact.relative_path)
+    if source_problem == "missing" and not artifact.required:
+        return False
+    if source_problem == "missing":
+        raise SystemExit(
+            f"switchyard: {owner_user} has no {artifact.relative_path} to seed for {account}; "
+            f"authenticate {artifact.cli} as {owner_user} first"
+        )
+    if source_problem:
+        raise SystemExit(
+            f"switchyard: {owner_user}'s {artifact.relative_path} {source_problem}; refusing to "
+            "seed it"
+        )
+    constructed: bytes | None = None
+    try:
+        state_problem = _fd_credential_state(source_fd, owner_user)
+        if state_problem:
+            # Refuse to propagate a credential that is already unsafe, rather
+            # than copying it into every role home.
+            raise SystemExit(
+                f"switchyard: {owner_user}'s {artifact.relative_path} {state_problem}; refusing "
+                "to seed it"
+            )
+        if artifact.cli == "hermes" and target_relative.name == ".env":
+            # Filtered from the bytes of the descriptor that was just validated,
+            # never from a fresh read of the name.
+            content, omitted, problem = select_hermes_provider_env(
+                _read_fd_bytes(source_fd).decode("utf-8", errors="replace")
+            )
+            if problem:
+                raise SystemExit(
+                    f"switchyard: {owner_user}'s {artifact.relative_path} cannot be seeded "
+                    f"({problem})"
+                )
+            constructed = content.encode("utf-8")
+            if omitted:
+                # Named, so the omission is visible rather than silent: these are
+                # the owner's other secrets and settings, which roles must not
+                # receive.
+                print_func(
+                    f"switchyard: not sharing {len(omitted)} non-provider entr"
+                    + ("y" if len(omitted) == 1 else "ies")
+                    + f" from {owner_user}'s {artifact.relative_path} with {account}: "
+                    + ", ".join(sorted(omitted))
+                )
+    except BaseException:
+        os.close(source_fd)
+        raise
+    dir_fd = _open_role_credential_parent(
+        account, target_base, target_relative, runner=runner
+    )
+    created_target = False
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | (os.O_TRUNC if reseed else os.O_EXCL)
+        try:
+            target_fd = os.open(target_name, flags, 0o600, dir_fd=dir_fd)
+        except FileExistsError:
+            print_func(
+                f"switchyard: {account} already has {artifact.relative_path}; leaving it alone "
+                "(pass --reseed to replace it)"
+            )
+            return False
+        except OSError as exc:
+            raise SystemExit(
+                f"switchyard: failed to seed {artifact.relative_path} for {account} "
+                f"({exc.strerror})"
+            ) from exc
+        created_target = not reseed
+        try:
+            os.fchmod(target_fd, 0o600)
+            if constructed is None:
+                os.lseek(source_fd, 0, os.SEEK_SET)
+                _copy_fd_contents(source_fd, target_fd)
+            else:
+                # A newly built file, never the source bytes, written in full.
+                _write_all(target_fd, constructed)
+            # Ownership is assigned to the open description rather than the
+            # path, so nothing can be substituted between copy and chown.
+            own = runner(["chown", f"{account}:{account}", f"/proc/{os.getpid()}/fd/{target_fd}"])
+            if own.returncode != 0:
+                raise SystemExit(
+                    f"switchyard: failed to assign {artifact.relative_path} to {account}"
+                )
+        finally:
+            os.close(target_fd)
+    except BaseException:
+        if created_target:
+            try:
+                os.unlink(target_name, dir_fd=dir_fd)
+            except OSError:
+                pass
+        raise
+    finally:
+        os.close(source_fd)
+        os.close(dir_fd)
+    print_func(f"switchyard: seeded {artifact.relative_path} for {account} from {owner_user}")
+    return True
 
 
 def _open_owner_credential_dir(
@@ -10867,9 +12252,32 @@ def switchyard_new_command(
         owned_roots=_control_repository_owned_roots(config),
         runner=runner,
     )
+    # A newly provisioned project declares per-role accounts that the operator
+    # has not created yet, so its roles cannot start with their own identities.
+    # Provisioning itself succeeded; the launch is deferred rather than failed,
+    # and the artifacts say what to run next (SYRD-39).
+    pending_isolation = role_isolation_gaps(config)
+    launch_deferred = bool(pending_isolation)
+    if launch_deferred:
+        # The complete handoff -- accounts, ownership, runtime, tooling AND
+        # credential seeding -- is written here, not left to a later failed
+        # start, so following the printed instruction once is enough to make the
+        # next start operable (SYRD-39).
+        handoff_path = config_path.with_name(f"{resolved_slug}-role-accounts.sh")
+        try:
+            handoff_path.write_text(render_role_account_migration(config), encoding="utf-8")
+            handoff_path.chmod(0o755)
+        except OSError as exc:
+            print_func(f"switchyard: could not write {handoff_path}: {exc}")
+        print_func(
+            f"switchyard: provisioned {resolved_slug}. Its roles are not isolated yet, so they "
+            "were not started:\n  " + "\n  ".join(pending_isolation)
+            + f"\nRun {handoff_path} as an operator (safe to re-run), then start it with "
+            f"`switchyard {resolved_slug}`."
+        )
     launch_started_at = time.time()
     launch_started_ns = time.time_ns()
-    launch_result = launch_project(
+    launch_result = 0 if launch_deferred else launch_project(
         config,
         config_path=config_path,
         mode="start",
@@ -10884,17 +12292,22 @@ def switchyard_new_command(
     )
     if launch_result != 0:
         return launch_result
-    print_func(f"switchyard: full pane window started for {resolved_slug}")
+    # Only a launch that actually happened may be reported as one, and only
+    # then are there session records to wait for. Polling a deferred launch
+    # would burn the full timeout on panes that were never started (SYRD-39).
+    if not launch_deferred:
+        print_func(f"switchyard: full pane window started for {resolved_slug}")
     report_first_run_auth_warnings(first_run_auth_report, print_func=print_func)
-    report_launch_session_records(
-        config,
-        timeout_seconds=session_record_timeout,
-        poll_seconds=session_record_poll,
-        fallback_changed_since_ns=launch_started_ns,
-        pane_state_dir=pane_state_dir or default_pane_state_dir_for_user(config.run_as_user, project=config.project),
-        pane_state_updated_since=launch_started_at,
-        print_func=print_func,
-    )
+    if not launch_deferred:
+        report_launch_session_records(
+            config,
+            timeout_seconds=session_record_timeout,
+            poll_seconds=session_record_poll,
+            fallback_changed_since_ns=launch_started_ns,
+            pane_state_dir=pane_state_dir or default_pane_state_dir_for_user(config.run_as_user, project=config.project),
+            pane_state_updated_since=launch_started_at,
+            print_func=print_func,
+        )
     resolved_layout_mode = resolve_layout_mode(layout_mode, environ=layout_environ, runner=runner)
     if resolved_layout_mode == LAYOUT_MODE_VIEWER:
         if include_designer:
@@ -10920,6 +12333,153 @@ def provision_runtime_command(user_name: str | None, config: ProjectConfig | Non
     return 0
 
 
+def role_isolation_gaps(config: ProjectConfig) -> list[str]:
+    """What still stops each role running under its own Unix identity.
+
+    Checks the things that actually have to be true, not just whether the
+    accounts exist: a tenant that applied an account-only rollout still has
+    owner-owned worktrees, so it must keep being repaired until every gap is
+    closed. Fresh projects hit this too, because their worktrees are created
+    after the operator artifact has already run (SYRD-39).
+    """
+    # Isolation is opt-in per project: a config where no role declares its own
+    # account is an unmigrated tenant, which keeps working as before. Once ANY
+    # role opts in, the whole project must be complete, because a partial
+    # migration is the dangerous state -- some roles isolated, some sharing.
+    if not any(
+        role_run_as_user(config, role) not in ("", config.run_as_user) for role in config.roles
+    ):
+        return []
+    gaps: list[str] = []
+    for role in config.roles:
+        account = role_run_as_user(config, role)
+        if not account or account == config.run_as_user:
+            gaps.append(f"{role.role}: no Unix account of its own")
+            continue
+        if not local_account_exists(account):
+            gaps.append(f"{role.role}: account {account} does not exist")
+            continue
+        workdir = Path(role.workdir)
+        if not workdir.exists():
+            continue
+        try:
+            owner_uid = workdir.stat().st_uid
+            account_uid = pwd.getpwnam(account).pw_uid
+        except (OSError, KeyError):
+            continue
+        if owner_uid != account_uid:
+            gaps.append(f"{role.role}: worktree {workdir} is not owned by {account}")
+    # A role that starts without its CLI credentials fails at the provider
+    # instead of at launch, so the manifest is part of the gate rather than a
+    # separate check nobody runs (SYRD-39).
+    gaps.extend(role_credential_manifest(config))
+    return gaps
+
+
+def upgrade_role_accounts_in_config(config_path: Path, *, dry_run: bool = False) -> tuple[bool, str]:
+    """Give every role in an existing config its own Unix account.
+
+    A tenant provisioned before per-role identities has no run_as_user on its
+    roles, so every role would keep launching as the shared project owner and
+    the board could not tell them apart. Upgrade fills it in from the same
+    naming provisioning uses (SYRD-39).
+    """
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return False, f"team-launcher: cannot read {config_path} to add role accounts: {exc}"
+    project = str(payload.get("project") or "").strip()
+    roles = payload.get("roles")
+    if not project or not isinstance(roles, list):
+        return False, "team-launcher: config has no project roles to give Unix accounts"
+    added: list[str] = []
+    for role in roles:
+        if not isinstance(role, dict):
+            continue
+        name = str(role.get("role") or "").strip()
+        if not name or str(role.get("run_as_user") or "").strip():
+            continue
+        role["run_as_user"] = role_account_name(project, name)
+        added.append(name)
+    if not added:
+        return False, "team-launcher: every role already has its own Unix account"
+    if dry_run:
+        return True, "team-launcher: would give " + ", ".join(sorted(added)) + " their own Unix accounts"
+    config_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return True, "team-launcher: gave " + ", ".join(sorted(added)) + " their own Unix accounts"
+
+
+def render_role_account_migration(config: ProjectConfig) -> str:
+    """Operator commands that move an existing tenant onto per-role accounts.
+
+    Creating the accounts is not enough on its own: a role also has to own the
+    working tree and runtime state it uses, or it cannot write them once it
+    stops running as the project owner. Every step is guarded or idempotent so
+    the artifact is safe to re-run.
+    """
+    from scripts.ticket_board.project_provision import (
+        DEFAULT_SERVICE_USER,
+        role_runtime_commands,
+        role_tooling_staging_commands,
+        roles_group_name,
+        shell_quote,
+    )
+
+    owner = config.run_as_user or current_user_name()
+    group = roles_group_name(config.project)
+    lines = [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        f"# Migrate {config.project} onto one Unix account per role (SYRD-39).",
+        "# Safe to re-run: every creating step is guarded.",
+        f"if ! getent group {shell_quote(group)} >/dev/null 2>&1; then",
+        f"    sudo groupadd -r {shell_quote(group)}",
+        "fi",
+        f"sudo gpasswd -a {shell_quote(DEFAULT_SERVICE_USER)} {shell_quote(group)} >/dev/null",
+        f"sudo gpasswd -a {shell_quote(owner)} {shell_quote(group)} >/dev/null",
+    ]
+    lines.extend(
+        role_tooling_staging_commands(
+            config.project, f"/home/{owner}/{config.project}-ticketboard-live/current"
+        )
+    )
+    for role in config.roles:
+        account = role_run_as_user(config, role)
+        if not account or account == owner:
+            continue
+        lines.extend(
+            role_runtime_commands(
+                project=config.project,
+                runtime_directory=f"{config.project}-ticket-board",
+                board_current=f"/home/{owner}/{config.project}-ticketboard-live/current",
+                roles_group=group,
+                account=account,
+                home=f"/home/{account}",
+                worktree=role.workdir,
+            )
+        )
+    lines.append(
+        "# Refresh the director control interface for the current role set:"
+    )
+    lines.append(
+        f"switchyard provision {config.project} --render role-control-sudoers "
+        f"| sudo install -m 0440 -o root -g root /dev/stdin "
+        f"/etc/sudoers.d/49-{config.project}-role-control.staged"
+    )
+    lines.append(f"sudo visudo -c -f /etc/sudoers.d/49-{config.project}-role-control.staged")
+    lines.append(
+        f"sudo mv /etc/sudoers.d/49-{config.project}-role-control.staged "
+        f"/etc/sudoers.d/49-{config.project}-role-control"
+    )
+    lines.append(
+        "# Give each role its own private copy of the credentials its CLI needs."
+    )
+    lines.append(
+        "# Idempotent: a role that already has one is left alone; --reseed replaces it."
+    )
+    lines.append(f"sudo switchyard seed-role-credentials {config.project}")
+    lines.append(f"sudo systemctl restart {config.project}-ticket-board.service")
+    return "\n".join(lines) + "\n"
 def migrate_declarative_director_onboarding(
     config: "ProjectConfig",
     *,
@@ -11046,6 +12606,24 @@ def upgrade_project_command(
     print_func(result.message)
     if result.changed:
         config = load_project_config(config.project, config_path)
+    accounts_changed, accounts_message = upgrade_role_accounts_in_config(config_path, dry_run=dry_run)
+    print_func(accounts_message)
+    if accounts_changed and not dry_run:
+        config = load_project_config(config.project, config_path)
+    gaps = role_isolation_gaps(config)
+    if gaps:
+        # Re-emitted while ANY gap remains, not only while an account is
+        # missing, so a tenant that applied an account-only rollout is repaired
+        # rather than silently left half-migrated.
+        migration_path = config_path.with_name(f"{config.project}-role-accounts.sh")
+        if not dry_run:
+            migration_path.write_text(render_role_account_migration(config), encoding="utf-8")
+            migration_path.chmod(0o755)
+        print_func(
+            "team-launcher: roles are not yet isolated, so the board cannot tell them apart:\n  "
+            + "\n  ".join(gaps)
+            + f"\nAn operator must run {migration_path} (safe to re-run) before those roles restart."
+        )
     runtime_artifacts = refresh_generated_project_runtime_artifacts(
         config,
         config_path=config_path,
@@ -11322,6 +12900,7 @@ def _add_role_payload(
         "cli": [cli],
         "live_commands": [cli],
         "role": role_name,
+        "run_as_user": role_account_name(config.project, role_name),
         "target": f"{config.project}-{role_name}:0.0",
         "tmux_session": f"{config.project}-{role_name}",
         "yolo": True,
@@ -11611,6 +13190,9 @@ def add_project_role_command(
     pane_state_dir: Path | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     print_func: Callable[[str], None] = print,
+    # A new role can only be started once the Unix account it must run as
+    # exists; injectable so tests can state that precondition explicitly.
+    account_exists: Callable[[str], bool] = local_account_exists,
 ) -> int:
     role = (
         _validate_new_project_audit_role(role_name, context="audit role")
@@ -11673,28 +13255,51 @@ def add_project_role_command(
     if not worktree_result.ok:
         reason = next(iter(worktree_result.failed_roles.values()), "unknown error")
         raise SystemExit(f"team-launcher: failed to prepare worktree for {role}: {reason}")
+    pending_account_commands = ""
     if start:
         pane_role = _role_by_name(updated_config, role)
-        pane_script_path = updated_config.pane_launcher or script_path or Path(__file__).resolve().with_name(TEAM_LAUNCHER_NAME)
-        pane_args = pane_command_args(
-            updated_config.project,
-            pane_role,
-            config_path=config_path,
-            mode="attach-or-start",
-            script_path=pane_script_path,
-            pane_state_dir=pane_state_dir or default_pane_state_dir_for_user(updated_config.run_as_user, project=updated_config.project),
-            skip_launcher_check=True,
-            no_attach=True,
-            run_as_user=updated_config.run_as_user,
-        )
-        pane_proc = runner(pane_args)
-        if pane_proc.returncode != 0:
-            raise SystemExit(f"team-launcher: added {role}, but failed to start its pane with exit {pane_proc.returncode}")
+        pane_user = role_run_as_user(updated_config, pane_role)
+        # A role started under the wrong account has the wrong uid, and the
+        # board would give it either no authority or another role's. Refuse to
+        # start it and hand the operator the commands that create the account,
+        # rather than starting something that looks fine and is not (SYRD-39).
+        if pane_user and not account_exists(pane_user):
+            from scripts.ticket_board.project_provision import role_account_commands
+
+            pending_account_commands = role_account_commands(
+                updated_config.project,
+                role,
+                updated_config.run_as_user or current_user_name(),
+                board_service_user(updated_config),
+                worktree=pane_role.workdir,
+            )
+        else:
+            pane_script_path = updated_config.pane_launcher or script_path or Path(__file__).resolve().with_name(TEAM_LAUNCHER_NAME)
+            pane_args = pane_command_args(
+                updated_config.project,
+                pane_role,
+                config_path=config_path,
+                mode="attach-or-start",
+                script_path=pane_script_path,
+                pane_state_dir=pane_state_dir or default_pane_state_dir_for_user(pane_user, project=updated_config.project),
+                skip_launcher_check=True,
+                no_attach=True,
+                run_as_user=pane_user,
+            )
+            pane_proc = runner(pane_args)
+            if pane_proc.returncode != 0:
+                raise SystemExit(f"team-launcher: added {role}, but failed to start its pane with exit {pane_proc.returncode}")
     if recovering_existing_role:
         message = f"team-launcher: role {role} already exists in {updated_config.project}; reapplied board registration"
     else:
         role_label = "auditor role" if audit_role else "role"
         message = f"team-launcher: added {role_label} {role} to {updated_config.project}"
+    if pending_account_commands:
+        message += (
+            f"; its Unix account {role_run_as_user(updated_config, _role_by_name(updated_config, role))} "
+            "does not exist yet, so the role was not started. Run these as an operator, then start it:\n"
+            + pending_account_commands
+        )
     if not detached:
         visible_count = sum(1 for candidate in updated_config.roles if not candidate.detached)
         if regenerated_layout:
@@ -11715,18 +13320,22 @@ def stop_project(
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     print_func: Callable[[str], None] = print,
 ) -> int:
-    role_runner = runner
+    # The viewer and display sessions belong to the project owner; each role's
+    # session lives in that role's own tmux server, so it has to be probed and
+    # killed there or stop reports success while the session is still alive
+    # (SYRD-39).
+    owner_runner = runner
     if config.run_as_user and current_user_name() != config.run_as_user:
-        role_runner = _owner_process_runner(owner_user=config.run_as_user, runner=runner)
+        owner_runner = _owner_process_runner(owner_user=config.run_as_user, runner=runner)
     exit_code = 0
     viewer_session = viewer_session_for_project(config.project)
-    viewer_exists = role_runner(
+    viewer_exists = owner_runner(
         tmux_has_session_by_name_args(viewer_session),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     ).returncode == 0
     if viewer_exists:
-        result = role_runner(
+        result = owner_runner(
             tmux_kill_session_by_name_args(viewer_session),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
@@ -11749,6 +13358,7 @@ def stop_project(
     )
     exit_code = exit_code or presentation_stop
     for role in config.roles:
+        role_runner = role_process_runner_for(config, role, runner=runner)
         exists = role_runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
         if not exists:
             print_func(f"already stopped {role.role}: {role.tmux_session}")
@@ -12412,6 +14022,21 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         if args.action == "set" and not args.user:
             raise SystemExit("switchyard: agy-credential set requires a user name")
         return switchyard_agy_credential_command(args.action, source_user=args.user)
+    if argv[0].casefold() == "seed-role-credentials":
+        parser = argparse.ArgumentParser(prog="switchyard seed-role-credentials")
+        parser.add_argument("project", help="registered project name or slug")
+        parser.add_argument("--role", default="", help="seed only this role")
+        parser.add_argument(
+            "--reseed",
+            action="store_true",
+            help="replace credentials a role already has; the deliberate repair path",
+        )
+        args = parser.parse_args(argv[1:])
+        entry = _resolve_switchyard_project(args.project)
+        config = _load_switchyard_project_config_for_command(entry, argv)
+        return switchyard_seed_role_credentials_command(
+            config, role_name=args.role, reseed=args.reseed
+        )
     if argv[0].casefold() == "register":
         args = _build_switchyard_register_parser().parse_args(argv[1:])
         return switchyard_register_command(args.config_path)
@@ -12696,8 +14321,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.pane_mode not in {"attach", "detach-role"}:
             config = prepare_project_desktop(config)
         role = _role_by_name(config, args.role)
-        pane_state_dir = args.pane_state_dir or default_pane_state_dir_for_user(config.run_as_user, project=config.project)
-        if config.run_as_user and current_user_name() != config.run_as_user:
+        # Every lifecycle path for this role runs as the role's own account, so
+        # its tmux server, pane processes and board writes all carry that uid.
+        # Re-execing as the shared project owner here is what previously undid
+        # the per-role accounts the layout had already selected (SYRD-39).
+        pane_user = role_run_as_user(config, role)
+        pane_state_dir = args.pane_state_dir or default_pane_state_dir_for_user(pane_user, project=config.project)
+        if pane_user and current_user_name() != pane_user:
             return subprocess.run(
                 pane_command_args(
                     config.project,
@@ -12711,7 +14341,7 @@ def main(argv: list[str] | None = None) -> int:
                     skip_launcher_check=args.skip_launcher_check,
                     allow_stale_launcher=args.allow_stale_launcher,
                     no_attach=args.no_attach,
-                    run_as_user=config.run_as_user,
+                    run_as_user=pane_user,
                 )
             ).returncode
         if not args.skip_launcher_check:
@@ -12731,7 +14361,7 @@ def main(argv: list[str] | None = None) -> int:
                 config_path=config_path,
                 role_name=role.role,
                 slot=args.slot,
-                session_dir=config.session_dir,
+                session_dir=role_session_dir(config, role),
                 pane_state_dir=pane_state_dir,
             )
         if args.pane_mode == "detach-role":
@@ -12744,27 +14374,27 @@ def main(argv: list[str] | None = None) -> int:
             return ensure_visible_role_session_for_viewer(
                 role,
                 mode=args.pane_mode,
-                session_dir=config.session_dir,
+                session_dir=role_session_dir(config, role),
                 pane_state_dir=pane_state_dir,
                 force_reload=args.force,
-                bin_user=config.run_as_user,
+                bin_user=pane_user,
             )
         if role.detached:
             return run_detached_role(
                 role,
                 mode=args.pane_mode,
-                session_dir=config.session_dir,
+                session_dir=role_session_dir(config, role),
                 pane_state_dir=pane_state_dir,
                 force_reload=args.force,
-                bin_user=config.run_as_user,
+                bin_user=pane_user,
             )
         return run_role_pane(
             role,
             mode=args.pane_mode,
-            session_dir=config.session_dir,
+            session_dir=role_session_dir(config, role),
             pane_state_dir=pane_state_dir,
             force_reload=args.force,
-            bin_user=config.run_as_user,
+            bin_user=pane_user,
         )
     return launch_project(
         config,

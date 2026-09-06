@@ -25,6 +25,10 @@ from scripts.ticket_board.project_provision import (
     render_listener_unit,
     render_operator_commands,
     render_polkit_rule,
+    role_account_table,
+    role_accounts_command,
+    role_control_sudoers,
+    role_runtime_command,
     render_tmpfiles,
     render_vcs_close_role_sql,
     render_workflow_sql,
@@ -83,7 +87,10 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "if ! sudo -u 'stellaris-agent' test -s '/home/stellaris-agent/.config/stellaris/ticket-board.env'; then" in combined
     assert "TICKET_BOARD_TENANT_REPORT_TOKEN=%s" in combined
     assert "sudo -u 'stellaris-agent' chmod 0600 '/home/stellaris-agent/.config/stellaris/ticket-board.env'" in combined
-    assert "TICKET_BOARD_PANE_STATE_DIR=%t/stellaris-ticket-board/pane-state" in combined
+    # SYRD-39: the listener reads the shared aggregation path so it can see an
+    # isolated role's activity. Each role writes there; per-role /run/user
+    # directories are unreadable by the listener.
+    assert "TICKET_BOARD_PANE_STATE_DIR=/run/stellaris-ticket-board/pane-state" in combined
     assert (
         "sudo -u 'stellaris-agent' -H env XDG_RUNTIME_DIR=\"$owner_runtime_dir\" "
         "TICKET_BOARD_PROJECT='stellaris' "
@@ -842,6 +849,141 @@ assert server.OPERATION_ALLOWED_ROLES != server.DEFAULT_OPERATION_ALLOWED_ROLES
         "TICKET_BOARD_OPERATION_ALLOWED_ROLES": "mark_done=ops",
     }
     subprocess.run([sys.executable, "-c", script], check=True, env=env)
+
+
+def test_role_accounts_are_derived_from_declared_roles_not_hardcoded() -> None:
+    """SYRD-39: one Unix account per role, named from configuration.
+
+    Role names are data. A project that declares different roles gets accounts
+    for those, and roles that never run a local process get none.
+    """
+    accounts = role_account_table("demo", ["director", "reviewer", "scribe", "user", "unassigned"])
+    assert accounts == (
+        ("director", "demo-director"),
+        ("reviewer", "demo-reviewer"),
+        ("scribe", "demo-scribe"),
+    ), accounts
+    # The human role reaches the board over authenticated HTTP, not a local
+    # process, so it must not get an account.
+    assert all(role != "user" for role, _account in accounts)
+
+
+def test_board_unit_carries_the_authoritative_role_account_table() -> None:
+    plan = build_plan(project="otto", owner_user="otto-agent")
+    board_unit = render_board_unit(plan)
+
+    assert f"Environment=TICKET_BOARD_ROLE_ACCOUNTS={','.join(f'{r}={a}' for r, a in plan.role_accounts)}" in board_unit
+    # The board joins the roles group so it can hand the socket to exactly
+    # those accounts, and nothing wider.
+    assert f"SupplementaryGroups={plan.roles_group}" in board_unit
+    assert f"Environment=TICKET_BOARD_SOCKET_GROUP={plan.roles_group}" in board_unit
+    assert "RuntimeDirectoryMode=0750" in board_unit
+    assert plan.roles_group == "otto-roles", plan.roles_group
+
+
+def test_role_accounts_rollout_is_idempotent_and_doubles_as_migration() -> None:
+    plan = build_plan(project="otto", owner_user="otto-agent")
+    commands = role_accounts_command(plan)
+
+    # Every creating step is guarded, so re-running it on a tenant that already
+    # has the accounts changes nothing. That is what makes this the migration
+    # path for a tenant that used to run every role as one account.
+    assert "if ! getent group 'otto-roles'" in commands
+    for role, account in plan.role_accounts:
+        assert f"if ! getent passwd '{account}'" in commands, role
+        assert f"sudo gpasswd -a '{account}' 'otto-roles'" in commands, role
+        # Each role's home is PRIVATE: 0700 and its own group. Membership of the
+        # roles group is for reaching the board socket, and must not make one
+        # role's home readable to another (SYRD-39).
+        assert f"sudo install -d -m 0700 -o '{account}' -g '{account}' '/home/{account}'" in commands, role
+        assert f"-m 0750 -o '{account}'" not in commands, role
+    # The board service and the tenant owner reach the socket through the group.
+    assert "sudo gpasswd -a 'boardsvc' 'otto-roles'" in commands
+    assert "sudo gpasswd -a 'otto-agent' 'otto-roles'" in commands
+
+    # Account creation is a prerequisite; the runtime preparation needs the
+    # deployed release and the created worktrees, so it is a separate step.
+    runtime = role_runtime_command(plan)
+    for _role, account in plan.role_accounts:
+        assert f"/home/{account}/.local/bin/ticket-board-pane-idle-hook" in runtime, account
+        assert f"sudo -u '{account}' -H env TICKET_BOARD_PROJECT='otto'" in runtime, account
+        assert "ticket-board-install-pane-hooks' install" in runtime
+        assert f"switchyard-board-skill' install --home '/home/{account}'" in runtime, account
+        assert f"/home/{account}/.local/state/otto-ticket-board/pane-sessions" in runtime, account
+
+
+def test_role_commands_never_reach_into_the_owner_home() -> None:
+    """SYRD-39: a role account cannot traverse the owner's home, and must not.
+
+    The owner home is 0700/0710 and holds the owner's credentials. Roles are
+    only in the project's roles group, so any `sudo -u <role> ...` that names a
+    path under the owner's home fails, and because operator-commands.sh is
+    `set -e` that aborts the whole rollout. The executables roles need are not
+    secret, so root stages them at a shared path instead.
+    """
+    plan = build_plan(project="otto", owner_user="otto-agent")
+    accounts = {account for _role, account in plan.role_accounts}
+    combined = role_accounts_command(plan) + "\n" + role_runtime_command(plan)
+
+    staged = f"/usr/local/lib/switchyard/{plan.project}"
+    for line in combined.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("sudo -u "):
+            continue
+        who = stripped.split()[2].strip("'")
+        if who not in accounts:
+            continue
+        assert plan.owner_home not in stripped, (
+            "a role command reaches into the owner home, which it cannot traverse: " + stripped
+        )
+        assert staged in stripped, ("role command does not use the staged tooling: " + stripped)
+
+    # Root stages those executables, readable by everyone and owned by nobody
+    # in particular, so no owner access is granted to make them reachable.
+    for name in ("ticket-board-pane-idle-hook", "ticket-board-install-pane-hooks", "switchyard-board-skill"):
+        assert f"sudo install -m 0755 -o root -g root " in combined
+        assert f"{staged}/{name}" in combined, name
+    assert f"sudo install -d -m 0755 -o root -g root '{staged}'" in combined
+
+
+def test_role_control_interface_covers_every_control_path_narrowly() -> None:
+    """Director control and board notifications without a shared tmux server.
+
+    Three grants are needed and no more: the owner runs the notify listener and
+    must reach role panes; the director drives the other roles; and the display
+    and viewer sessions stay in the owner's server, so the isolated director
+    account needs tmux as the owner too (SYRD-39).
+    """
+    plan = build_plan(project="otto", owner_user="otto-agent")
+    sudoers = role_control_sudoers(plan)
+    accounts = dict(plan.role_accounts)
+    director_account = accounts["director"]
+
+    tmux_grants: dict[str, set[str]] = {}
+    publish_grants: dict[str, set[str]] = {}
+    for line in sudoers.splitlines():
+        if "ALL=(" not in line:
+            continue
+        who = line.split()[0]
+        targets = set(line.split("ALL=(")[1].split(")")[0].split(","))
+        command = line.split("NOPASSWD:")[1].strip()
+        if command == "/usr/bin/tmux":
+            tmux_grants.setdefault(who, set()).update(targets)
+        else:
+            publish_grants.setdefault(who, set()).update(targets)
+        # Never a blanket grant, never root, always exactly one command.
+        assert "ALL=(ALL" not in line, line
+        assert command in {"/usr/bin/tmux", f"/usr/local/lib/switchyard/{plan.project}/switchyard-publish-ref"}, line
+
+    # The listener runs as the owner and must reach every role pane.
+    assert tmux_grants["otto-agent"] == set(accounts.values()), tmux_grants["otto-agent"]
+    # The director drives the other roles, and the owner's display/viewer server.
+    assert tmux_grants[director_account] == (set(accounts.values()) - {director_account}) | {"otto-agent"}, tmux_grants[director_account]
+    # Every role may publish its own feature ref as the owner, and that is the
+    # only thing it may do as the owner: the SSH key files stay unreadable.
+    assert set(publish_grants) == set(accounts.values()), publish_grants
+    assert all(targets == {"otto-agent"} for targets in publish_grants.values()), publish_grants
+    assert sudoers.startswith("#"), sudoers
 
 
 def test_cli_writes_reviewable_artifacts() -> None:

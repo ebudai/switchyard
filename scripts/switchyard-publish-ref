@@ -1,0 +1,256 @@
+#!/usr/bin/env python3
+"""Publish one role's feature ref as the project owner, safely.
+
+A role account runs this through sudo as the project owner so the owner's git
+identity performs the push and the role never gains read access to the owner's
+SSH key files. Three things make the grant genuinely narrow (SYRD-39):
+
+* Nothing about WHERE is caller-supplied. The calling role comes from SUDO_USER,
+  and its worktree and the remote come from the project's own configuration, so
+  a role cannot aim the owner's credentials at another repository or remote.
+* The ref is namespaced to the calling role and integration branches are
+  refused, so a role publishes its own feature refs and cannot write the branch
+  the Director integrates.
+* The owner never runs git inside the role's checkout. A role controls its own
+  repository configuration, and knobs such as core.sshCommand,
+  uploadpack.packObjectsHook and ext:: remote URLs turn "run git there" into
+  "run the role's command as the owner". The role hands over a bundle instead --
+  which it creates as itself -- and the owner fetches from that bundle into an
+  owner-owned staging repository whose config the role cannot touch.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+PROTECTED_REFS = frozenset({"main", "master", "trunk", "release", "head"})
+# The sudoers grant allows any arguments, so the project identifier is validated
+# before it is used to build any path. Without this, --project ../../tmp/forged
+# loaded a role-written document and with it a role-chosen role mapping and
+# remote (SYRD-39).
+PROJECT_SLUG = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+REF_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# The owner's staging repository. Owner-owned, so its configuration -- including
+# the remote and any transport settings -- is never role-controlled.
+STAGING_DIR_NAME = ".local/state/switchyard/publish-staging"
+
+
+def fail(message: str) -> "NoReturn":  # type: ignore[valid-type]
+    raise SystemExit(f"switchyard-publish-ref: {message}")
+
+
+def calling_role_account() -> str:
+    account = (os.environ.get("SUDO_USER") or "").strip()
+    if not account:
+        fail("must be run through sudo by a role account")
+    return account
+
+
+def validate_project(project: str) -> str:
+    name = project.strip()
+    if not PROJECT_SLUG.fullmatch(name):
+        fail(f"{project!r} is not a valid project name")
+    return name
+
+
+def _contained(path: Path, root: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(root.resolve(strict=False))
+    except ValueError:
+        return False
+    return True
+
+
+def load_project(project: str) -> dict:
+    """Find the project configuration without trusting the caller.
+
+    The location is derived from the effective uid -- the owner this is running
+    as -- rather than from an argument, because the sudoers grant allows any
+    arguments and a caller-supplied path would let a role aim the owner's
+    credentials at a configuration of its own making.
+
+    SWITCHYARD_PUBLISH_CONFIG is a test seam only. sudo runs with env_reset, so
+    a role invoking this through the grant cannot set it.
+    """
+    import pwd as _pwd
+
+    override = os.environ.get("SWITCHYARD_PUBLISH_CONFIG", "").strip()
+    owner_home = Path(_pwd.getpwuid(os.geteuid()).pw_dir)
+    projects_root = owner_home / "Projects"
+    etc_root = Path("/etc/switchyard")
+    candidates: list[tuple[Path, Path | None]] = []
+    if override:
+        candidates.append((Path(override), None))
+    candidates.append(
+        (projects_root / project / ".switchyard" / "provision" / f"{project}.json", projects_root)
+    )
+    candidates.append((etc_root / f"{project}.json", etc_root))
+    for candidate, root in candidates:
+        # Anchored: even with a validated slug the resolved path must stay inside
+        # the directory it was built from.
+        if root is not None and not _contained(candidate, root):
+            continue
+        if not candidate.is_file():
+            continue
+        try:
+            document = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            fail(f"cannot read {candidate}: {exc}")
+        if not isinstance(document, dict):
+            fail(f"{candidate} is not a project configuration")
+        # The document must agree it is the project that was asked for.
+        if str(document.get("project") or "") != project:
+            fail(f"{candidate} is not the configuration for project {project}")
+        return document
+    fail(f"no configuration found for project {project}")
+
+
+def role_for_account(config: dict, account: str) -> dict:
+    for role in config.get("roles", []):
+        if isinstance(role, dict) and str(role.get("run_as_user") or "") == account:
+            return role
+    fail(f"{account} is not a configured role account of this project")
+
+
+def validate_ref(ref: str, role_name: str) -> str:
+    name = ref.strip()
+    if not name:
+        fail("a ref name is required")
+    if name.startswith("refs/"):
+        fail("pass a branch name, not a full ref path")
+    segments = name.split("/")
+    if any(not REF_SEGMENT.fullmatch(segment) or segment.endswith(".lock") for segment in segments):
+        fail(f"{name!r} is not a valid branch name")
+    if segments[0].casefold() in PROTECTED_REFS or name.casefold() in PROTECTED_REFS:
+        fail(
+            f"{name} is an integration branch; roles publish their own feature refs and the "
+            "Director integrates them"
+        )
+    # Bound to the caller: a role publishes under its own namespace and cannot
+    # write, move or delete another role's refs.
+    if segments[0] != role_name:
+        fail(f"{role_name} may only publish refs under {role_name}/, not {name}")
+    if len(segments) < 2:
+        fail(f"{role_name} must publish a ref below its namespace, such as {role_name}/my-work")
+    return name
+
+
+def require_role_owned_file(path: Path, account: str) -> None:
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        fail(f"cannot read bundle {path}: {exc.strerror}")
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        fail(f"bundle {path} must be a regular file, not a link")
+    import pwd
+
+    try:
+        expected = pwd.getpwnam(account).pw_uid
+    except KeyError:
+        fail(f"{account} is not a local account")
+    if info.st_uid != expected:
+        fail(f"bundle {path} is not owned by {account}")
+
+
+def resolve_remote_url(config: dict, remote_name: str) -> str:
+    """Turn the configured remote NAME into a URL from an owner-owned checkout.
+
+    Generated configuration stores a name such as "origin". A freshly created
+    staging repository has no remotes, so pushing by name fails; and the URL must
+    not come from the role's checkout, whose configuration the role controls.
+    """
+    if "://" in remote_name or remote_name.startswith("/") or ":" in remote_name:
+        # Already a URL or an scp-style location.
+        return remote_name
+    repository = str(config.get("repository") or "").strip()
+    if not repository:
+        fail(f"project configuration names remote {remote_name} but no owner repository")
+    resolved = git(["-C", repository, "remote", "get-url", remote_name])
+    if resolved.returncode != 0 or not resolved.stdout.strip():
+        fail(f"{repository} has no remote named {remote_name}")
+    return resolved.stdout.strip()
+
+
+def git(args: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+    # System and global git configuration are ignored so the push cannot be
+    # redirected by anything outside this program's control.
+    env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    return subprocess.run(["git", *args], text=True, capture_output=True, env=env, **kwargs)
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="switchyard-publish-ref")
+    parser.add_argument("--project", required=True)
+    parser.add_argument("--ref", required=True, help="branch to publish, under <role>/")
+    parser.add_argument(
+        "--bundle",
+        required=True,
+        help="git bundle the role created, containing the commits to publish",
+    )
+    args = parser.parse_args(argv[1:])
+
+    account = calling_role_account()
+    project = validate_project(args.project)
+    config = load_project(project)
+    role = role_for_account(config, account)
+    role_name = str(role.get("role") or "")
+    ref = validate_ref(args.ref, role_name)
+    bundle = Path(args.bundle).expanduser()
+    require_role_owned_file(bundle, account)
+
+    verify = git(["bundle", "verify", str(bundle)])
+    if verify.returncode != 0:
+        sys.stderr.write(verify.stderr)
+        fail("bundle did not verify")
+
+    # worktree_remote is a remote NAME in generated configuration, so it is
+    # resolved to a URL from the owner's own project checkout. A fresh staging
+    # repository has no remotes at all, which is why pushing by name failed.
+    remote_name = str(config.get("worktree_remote") or "origin")
+    remote_url = resolve_remote_url(config, remote_name)
+    staging = Path.home() / STAGING_DIR_NAME / project
+    if not (staging / "HEAD").exists():
+        staging.mkdir(parents=True, exist_ok=True)
+        staging.chmod(0o700)
+        init = git(["init", "--bare", "-q", str(staging)])
+        if init.returncode != 0:
+            sys.stderr.write(init.stderr)
+            fail("could not create the owner staging repository")
+
+    fetch = git(["-C", str(staging), "fetch", str(bundle), f"refs/heads/{ref}:refs/heads/{ref}", "--force"])
+    if fetch.returncode != 0:
+        sys.stderr.write(fetch.stderr)
+        fail(f"bundle does not contain refs/heads/{ref}")
+
+    configure = git(["-C", str(staging), "remote", "set-url", "publish", remote_url])
+    if configure.returncode != 0:
+        added = git(["-C", str(staging), "remote", "add", "publish", remote_url])
+        if added.returncode != 0:
+            sys.stderr.write(added.stderr)
+            fail("could not configure the staging remote")
+    verify_remote = git(["-C", str(staging), "remote", "get-url", "publish"])
+    if verify_remote.returncode != 0 or verify_remote.stdout.strip() != remote_url:
+        fail("staging remote did not resolve to the configured URL")
+    push = git(["-C", str(staging), "push", "publish", f"refs/heads/{ref}:refs/heads/{ref}"])
+    sys.stdout.write(push.stdout)
+    sys.stderr.write(push.stderr)
+    if push.returncode != 0:
+        return push.returncode
+    print(f"switchyard-publish-ref: published {ref} for {role_name}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

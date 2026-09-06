@@ -552,41 +552,101 @@ verify_local_socket_available() {
         log "post-deploy socket verification failed: missing Unix socket $BOARD_UNIX_SOCKET"
         return 1
     fi
-    if ! "$PYTHON_BIN" - "$BOARD_UNIX_SOCKET" "$SMOKE_TIMEOUT_SECONDS" <<'PY'
+    local configured_role_accounts=""
+    # SYRD-39: the board can only derive a role from the peer uid once this
+    # tenant has per-role accounts. Before the rollout it still honours the role
+    # a caller claims, so the probe below must not treat that as a regression
+    # and fail every unmigrated tenant's deploy.
+    configured_role_accounts="$(systemctl show "$SERVICE_NAME" -p Environment --value 2>/dev/null | tr ' ' '\n' | sed -n 's/^TICKET_BOARD_ROLE_ACCOUNTS=//p' | head -n 1 || true)"
+    if ! "$PYTHON_BIN" - "$BOARD_UNIX_SOCKET" "$SMOKE_TIMEOUT_SECONDS" "$BOARD_CURRENT_LINK" "$configured_role_accounts" <<'SMOKEPY'
 import json
+import os
 import socket
 import sys
 import time
+from pathlib import Path
 
 socket_path = sys.argv[1]
 deadline = time.monotonic() + float(sys.argv[2])
-body = json.dumps({"role": "ops"}).encode("utf-8")
-request = (
-    b"POST /api/register-caller HTTP/1.1\r\n"
+sys.path.insert(0, str(Path(sys.argv[3]) / "scripts"))
+
+
+def send(request):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(1.0)
+        sock.connect(socket_path)
+        sock.sendall(request)
+        return sock.recv(4096)
+
+
+def status_of(response):
+    return response.split(b"\r\n", 1)[0].decode("utf-8", errors="replace")
+
+
+# Reachability: a read needs no caller role, so this proves the socket is
+# serving without depending on the authorization path.
+read_request = (
+    b"GET /api/board HTTP/1.1\r\n"
     b"Host: localhost\r\n"
-    b"Content-Type: application/json\r\n"
-    + f"Content-Length: {len(body)}\r\n".encode("ascii")
-    + b"Connection: close\r\n\r\n"
-    + body
+    b"Connection: close\r\n\r\n"
 )
 last_error = "not attempted"
+serving = False
 while time.monotonic() < deadline:
     try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-            sock.settimeout(1.0)
-            sock.connect(socket_path)
-            sock.sendall(request)
-            response = sock.recv(4096)
-        status_line = response.split(b"\r\n", 1)[0]
-        if b" 200 " in status_line:
-            sys.exit(0)
-        last_error = status_line.decode("utf-8", errors="replace")
+        line = status_of(send(read_request))
+        if " 200 " in line:
+            serving = True
+            break
+        last_error = line
     except OSError as exc:
         last_error = str(exc)
     time.sleep(0.25)
-print(f"ticket-board Unix socket verification failed for {socket_path}: {last_error}", file=sys.stderr)
-sys.exit(1)
-PY
+if not serving:
+    print("ticket-board Unix socket verification failed for %s: %s" % (socket_path, last_error), file=sys.stderr)
+    sys.exit(1)
+
+# SYRD-39: role authority is the peer's Unix account. This deploy probe does
+# not run as one of the project's role accounts, so the board must refuse to
+# give it a role. A 200 here means the board is handing out roles to accounts
+# that do not hold them, which is the outage this check exists to catch.
+#
+# A tenant that has not run the role-account rollout has no table to resolve a
+# uid through, and the board still honours the claimed role for it. That is the
+# open state this ticket exists to close, not a deploy regression, so say so
+# plainly and let the deploy finish rather than blocking every unmigrated
+# tenant's release.
+role_accounts = sys.argv[4].strip() if len(sys.argv) > 4 else ""
+if not role_accounts:
+    print(
+        "ticket-board role binding is NOT enforced yet: this tenant has no per-role "
+        "Unix accounts configured, so the board still accepts the role a caller "
+        "claims. Run the role-account rollout to close it."
+    )
+    sys.exit(0)
+body = json.dumps({"role": "director"}).encode("utf-8")
+claim = (
+    b"POST /api/register-caller HTTP/1.1\r\n"
+    b"Host: localhost\r\n"
+    b"Content-Type: application/json\r\n"
+    + ("Content-Length: %d\r\n" % len(body)).encode("ascii")
+    + b"Connection: close\r\n\r\n"
+    + body
+)
+try:
+    line = status_of(send(claim))
+except OSError as exc:
+    print("ticket-board socket role-binding check failed: %s" % exc, file=sys.stderr)
+    sys.exit(1)
+if " 200 " in line:
+    print(
+        "ticket-board socket role-binding check FAILED: an account that is not a configured "
+        "role was granted director (%s)" % line,
+        file=sys.stderr,
+    )
+    sys.exit(1)
+print("ticket-board role binding refused a non-role account as expected (%s)" % line)
+SMOKEPY
     then
         return 1
     fi

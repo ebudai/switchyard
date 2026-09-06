@@ -80,20 +80,68 @@ compute_settle_delay_ms() {
     printf '%d' $((base_ms + extra_ms))
 }
 
+# SYRD-39: each role runs as its own Unix account, so each role's tmux session
+# lives in that account's own tmux server. Reaching another role's pane goes
+# through the generated role-control interface -- sudo -u <role account> tmux,
+# installed as /etc/sudoers.d/49-<project>-role-control -- rather than assuming
+# a shared server. Targets naming this account's own session, and any target
+# whose account cannot be resolved, run tmux directly as before.
+tmux_account_for_target() {
+    # Which account's tmux server holds this target's session. Role sessions
+    # live in that role's account; display and viewer sessions stay in the
+    # project owner's server (SYRD-39). Prints nothing when it cannot tell, and
+    # the caller then runs tmux directly as itself.
+    local target="$1"
+    local session="${target%%:*}"
+    local project="${TICKET_BOARD_PROJECT:-}"
+    local owner="${SWITCHYARD_PROJECT_OWNER:-}"
+    local role
+
+    [ -n "$project" ] || return 1
+    case "$session" in
+        "$project"-*) role="${session#"$project"-}" ;;
+        *) return 1 ;;
+    esac
+    case "$role" in
+        display-*|viewer)
+            # The isolated director account reaches these through the same
+            # role-control interface, granted tmux as the owner.
+            [ -n "$owner" ] || return 1
+            printf '%s' "$owner"
+            return 0
+            ;;
+    esac
+    printf '%s-%s' "$project" "$role"
+}
+
+role_tmux() {
+    local target="$1"
+    shift
+    local account
+    if account="$(tmux_account_for_target "$target")" \
+        && [ -n "$account" ] \
+        && [ "$account" != "$(id -un)" ] \
+        && id -u "$account" >/dev/null 2>&1; then
+        sudo -n -u "$account" tmux "$@"
+        return $?
+    fi
+    tmux "$@"
+}
+
 capture_raw_pane() {
     local target="$1"
-    tmux capture-pane -p -J -t "$target"
+    role_tmux "$target" capture-pane -p -J -t "$target"
 }
 
 exit_copy_mode_if_needed() {
     local target="$1"
     local in_mode
-    if ! in_mode="$(tmux display-message -p -t "$target" "#{pane_in_mode}" 2>/dev/null)"; then
+    if ! in_mode="$(role_tmux "$target" display-message -p -t "$target" "#{pane_in_mode}" 2>/dev/null)"; then
         return 0
     fi
     in_mode="${in_mode//$'\n'/}"
     if [ -n "$in_mode" ] && [ "$in_mode" != "0" ]; then
-        tmux send-keys -t "$target" -X cancel
+        role_tmux "$target" send-keys -t "$target" -X cancel
     fi
 }
 
@@ -127,7 +175,7 @@ verify_submission() {
         fi
         if [ "$attempt" -lt "$SUBMIT_VERIFY_ATTEMPTS" ]; then
             exit_copy_mode_if_needed "$target"
-            tmux send-keys -t "$target" Enter
+            role_tmux "$target" send-keys -t "$target" Enter
         fi
     done
 
@@ -185,11 +233,11 @@ submit_short_line() {
 
     settle_delay_ms="$(compute_settle_delay_ms "${#payload}")"
     exit_copy_mode_if_needed "$target"
-    tmux send-keys -t "$target" -l "$payload"
+    role_tmux "$target" send-keys -t "$target" -l "$payload"
     sleep_milliseconds "$settle_delay_ms"
     before_capture="$(capture_raw_pane "$target")"
     exit_copy_mode_if_needed "$target"
-    tmux send-keys -t "$target" Enter
+    role_tmux "$target" send-keys -t "$target" Enter
     verify_submission "$target" "$before_capture"
 }
 
@@ -699,7 +747,7 @@ cmd_status() {
             continue
         fi
         seen[$session]=1
-        if tmux has-session -t "$session" 2>/dev/null; then
+        if role_tmux "$session" has-session -t "$session" 2>/dev/null; then
             echo "  $session: active"
             found=$((found + 1))
         else

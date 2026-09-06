@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from team_launcher_test_helpers import *
+from unittest.mock import patch
 
 def test_switchyard_new_unit_without_database_precheck_runs_before_user_and_project_creation() -> None:
     class UnitWithoutDatabaseRunner(FakeRunner):
@@ -410,7 +411,14 @@ def test_switchyard_new_writes_initial_artifact_and_starts_full_pane_window() ->
         process_launcher = RecordingProcessLauncher()
         stdout = StringIO()
 
-        with redirect_stdout(stdout):
+        # SYRD-39: `switchyard new` provisions and then stops before starting
+        # roles whose Unix accounts the operator has not created yet, so on this
+        # host it would defer the launch and never render a window. This test is
+        # about what a STARTED project window contains, so it states the
+        # precondition the deferral checks rather than asserting past it.
+        with redirect_stdout(stdout), patch.object(
+            team_launcher, "role_isolation_gaps", lambda _config: []
+        ):
             assert (
                 switchyard_new_command(
                     desktop_policy=Path("headless"),

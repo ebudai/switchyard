@@ -11,6 +11,8 @@ import re
 import secrets
 import socket
 import socketserver
+import grp
+import pwd
 import struct
 import subprocess
 import threading
@@ -41,7 +43,10 @@ REPORT_TOKEN_HEADER = "X-Ticket-Board-Report-Token"
 LEGACY_CALLER_ROLE_HEADER = "X-PGU-Caller-Role"
 LEGACY_WRITE_TOKEN_HEADER = "X-PGU-Write-Token"
 SO_PEERCRED_FORMAT = "3i"
-PANE_SOCKET_MODE = 0o666
+# 0666 let every local user, including other tenants' Unix accounts, connect to
+# this tenant's board. Group access is granted by the runtime directory instead,
+# which the unit chgrps to the tenant group (SYRD-39).
+PANE_SOCKET_MODE = 0o660
 IMAGE_CACHE_CONTROL = "public, max-age=31536000, immutable"
 THUMBNAIL_MAX_SIZE = 512
 THUMBNAIL_QUALITY = 80
@@ -239,120 +244,260 @@ class PeerCredentials:
     gid: int
 
 
-@dataclass
-class CallerRegistration:
+@dataclass(frozen=True)
+class RoleAccount:
+    """A configured role and the Unix account that runs it."""
+
     role: str
+    account: str
     uid: int
-    gid: int
-    connection_count: int = 0
 
 
-class CallerRegistry:
-    def __init__(self, *, pid_alive: Callable[[int], bool] | None = None) -> None:
-        self._pid_alive = pid_alive or self._default_pid_alive
-        self._lock = threading.Lock()
-        self._by_pid: dict[int, CallerRegistration] = {}
-        self._role_to_pid: dict[str, int] = {}
+class CallerIdentityError(PermissionError):
+    """The peer's Unix identity does not entitle it to the role it used."""
+
+
+class LocalRoleAuthority:
+    """Maps a local peer's Unix uid to its board role.
+
+    The uid comes from SO_PEERCRED. The kernel sets it and an unprivileged
+    process cannot change it, so unlike a role name on the wire, a process
+    label, an environment variable or an argv string, it is not something the
+    caller can choose. The uid-to-role table comes from this board's own unit
+    configuration, which the role accounts do not own and cannot write.
+
+    That combination is what makes the mapping authoritative, and it is why
+    there is no registration step here at all. Nothing is remembered between
+    requests, so nothing is lost when the board restarts: every request is
+    resolved from the kernel-supplied uid and the configured table (SYRD-39).
+
+    It is only as strong as the deployment giving each role its own account. A
+    project whose roles share one account cannot be told apart here, and the
+    board says so at startup rather than implying a separation it cannot make.
+    """
+
+    def __init__(
+        self,
+        role_accounts: Mapping[str, str] | None = None,
+        *,
+        resolve_uid: Callable[[str], int | None] | None = None,
+    ) -> None:
+        self._resolve_uid = resolve_uid or self._default_resolve_uid
+        self._by_uid: dict[int, RoleAccount] = {}
+        self._by_role: dict[str, RoleAccount] = {}
+        self._unresolved: dict[str, str] = {}
+        self._shared_accounts: dict[str, list[str]] = {}
+        self._ambiguous_uids: set[int] = set()
+        for role, account in (role_accounts or {}).items():
+            self._add(role.strip().lower(), str(account).strip())
 
     @staticmethod
-    def _default_pid_alive(pid: int) -> bool:
-        if pid <= 0:
-            return False
+    def _default_resolve_uid(account: str) -> int | None:
         try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
-        return True
+            return pwd.getpwnam(account).pw_uid
+        except KeyError:
+            return None
 
-    def register(self, credentials: PeerCredentials, role: str, *, allowed_roles: set[str] | None = None) -> None:
-        normalized_role = role.strip().lower()
-        if normalized_role not in (allowed_roles if allowed_roles is not None else CALLER_ROLES) - {"user", "unassigned"}:
-            raise ValueError(f"invalid local caller role: {role}")
-        with self._lock:
-            self._drop_stale_locked()
-            existing_pid = self._role_to_pid.get(normalized_role)
-            if existing_pid is not None and existing_pid != credentials.pid:
-                LOGGER.warning(
-                    "Rejected caller registration for role %s from pid=%s uid=%s gid=%s; already held by live pid=%s",
-                    normalized_role,
-                    credentials.pid,
-                    credentials.uid,
-                    credentials.gid,
-                    existing_pid,
-                )
-                raise PermissionError(f"role {normalized_role} is already registered by live pid {existing_pid}")
-            existing = self._by_pid.get(credentials.pid)
-            if existing is not None and existing.role != normalized_role:
-                LOGGER.warning(
-                    "Rejected caller registration for pid=%s as %s; pid already registered as %s",
-                    credentials.pid,
-                    normalized_role,
-                    existing.role,
-                )
-                raise PermissionError(f"pid {credentials.pid} is already registered as {existing.role}")
-            if existing is None:
-                self._by_pid[credentials.pid] = CallerRegistration(
-                    role=normalized_role,
-                    uid=credentials.uid,
-                    gid=credentials.gid,
-                    connection_count=1,
-                )
-                self._role_to_pid[normalized_role] = credentials.pid
-            else:
-                existing.connection_count += 1
-            LOGGER.info(
-                "Registered local caller role %s for pid=%s uid=%s gid=%s",
-                normalized_role,
-                credentials.pid,
-                credentials.uid,
-                credentials.gid,
+    def _add(self, role: str, account: str) -> None:
+        if not role or not account:
+            return
+        uid = self._resolve_uid(account)
+        if uid is None:
+            # Fails closed: an unresolved account grants nothing, and the peer
+            # running as it will simply have no role.
+            self._unresolved[role] = account
+            LOGGER.warning(
+                "Role %s is configured to run as %s, which is not a local account; "
+                "that role cannot be identified on the local socket",
+                role,
+                account,
             )
+            return
+        if uid in self._ambiguous_uids:
+            self._shared_accounts.setdefault(account, []).append(role)
+            self._by_role.pop(role, None)
+            return
+        existing = self._by_uid.get(uid)
+        if existing is not None and existing.role != role:
+            # Two roles on one account cannot be told apart by uid. Refuse both
+            # rather than resolving to whichever was configured first: a
+            # half-migrated tenant must fail closed, not silently hand one role
+            # the other's authority.
+            self._ambiguous_uids.add(uid)
+            self._by_uid.pop(uid, None)
+            self._by_role.pop(existing.role, None)
+            self._by_role.pop(role, None)
+            self._shared_accounts.setdefault(account, [existing.role]).append(role)
+            LOGGER.error(
+                "Roles %s and %s both run as account %s; neither can be authorized on the "
+                "local socket until each role has its own Unix account",
+                existing.role,
+                role,
+                account,
+            )
+            return
+        entry = RoleAccount(role=role, account=account, uid=uid)
+        self._by_uid[uid] = entry
+        self._by_role[role] = entry
 
-    def release(self, pid: int) -> None:
-        with self._lock:
-            registration = self._by_pid.get(pid)
-            if registration is None:
-                return
-            registration.connection_count -= 1
-            if registration.connection_count > 0:
-                return
-            self._by_pid.pop(pid, None)
-            if self._role_to_pid.get(registration.role) == pid:
-                self._role_to_pid.pop(registration.role, None)
-            LOGGER.info("Released local caller role %s for pid=%s", registration.role, pid)
+    @classmethod
+    def from_environ(
+        cls,
+        environ: Mapping[str, str] | None = None,
+        *,
+        resolve_uid: Callable[[str], int | None] | None = None,
+    ) -> "LocalRoleAuthority":
+        """Build from TICKET_BOARD_ROLE_ACCOUNTS, e.g. "director=syrd-director,main=syrd-main".
 
-    def role_for_pid(self, pid: int) -> str:
-        with self._lock:
-            registration = self._by_pid.get(pid)
-            if registration is None:
-                raise ValueError(f"pid {pid} has not registered a caller role")
-            if not self._pid_alive(pid):
-                self._release_locked(pid)
-                raise ValueError(f"pid {pid} registration is stale")
-            return registration.role
+        Role names are data, never hardcoded here: whatever the project declares
+        is what the board honours.
+        """
+        source = os.environ if environ is None else environ
+        raw = str(source.get("TICKET_BOARD_ROLE_ACCOUNTS") or "").strip()
+        mapping: dict[str, str] = {}
+        for chunk in raw.replace(",", " ").split():
+            role, sep, account = chunk.partition("=")
+            if not sep:
+                LOGGER.warning("Ignoring malformed TICKET_BOARD_ROLE_ACCOUNTS entry %r", chunk)
+                continue
+            mapping[role.strip().lower()] = account.strip()
+        authority = cls(mapping, resolve_uid=resolve_uid)
+        if not mapping:
+            LOGGER.error(
+                "TICKET_BOARD_ROLE_ACCOUNTS is not configured; local socket writes cannot "
+                "identify a role and will be refused"
+            )
+        return authority
 
-    def pid_for_role(self, role: str) -> int | None:
-        with self._lock:
-            self._drop_stale_locked()
-            return self._role_to_pid.get(role)
+    def role_for_uid(self, uid: int) -> str:
+        entry = self._by_uid.get(uid)
+        if entry is None:
+            LOGGER.warning(
+                "Refused local board caller uid=%s: not a configured role account", uid
+            )
+            raise CallerIdentityError(
+                "this Unix account is not a configured role for this project"
+            )
+        return entry.role
 
-    def _release_locked(self, pid: int) -> None:
-        registration = self._by_pid.pop(pid, None)
-        if registration is not None and self._role_to_pid.get(registration.role) == pid:
-            self._role_to_pid.pop(registration.role, None)
+    def uid_for_role(self, role: str) -> int | None:
+        entry = self._by_role.get(role.strip().lower())
+        return entry.uid if entry is not None else None
 
-    def _drop_stale_locked(self) -> None:
-        for pid in list(self._by_pid):
-            if not self._pid_alive(pid):
-                self._release_locked(pid)
+    def account_for_role(self, role: str) -> str | None:
+        entry = self._by_role.get(role.strip().lower())
+        return entry.account if entry is not None else None
+
+    def roles(self) -> list[str]:
+        return sorted(self._by_role)
+
+    def uids(self) -> set[int]:
+        """Every uid this table resolves to a role."""
+        return set(self._by_uid)
+
+    def shared_accounts(self) -> dict[str, list[str]]:
+        """Accounts backing more than one role; those roles are unauthorizable."""
+        return {account: sorted(roles) for account, roles in self._shared_accounts.items()}
+
+    def unresolved_roles(self) -> dict[str, str]:
+        return dict(self._unresolved)
 
 
 def peer_credentials(connection: socket.socket) -> PeerCredentials:
     raw = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize(SO_PEERCRED_FORMAT))
     pid, uid, gid = struct.unpack(SO_PEERCRED_FORMAT, raw)
     return PeerCredentials(pid=pid, uid=uid, gid=gid)
+
+
+def restrict_socket_to_tenant(socket_path: Path, *, environ: Mapping[str, str] | None = None) -> None:
+    """Hand socket access to the tenant group and no one else.
+
+    The socket used to be 0666 inside a world-traversable directory, so any
+    local account -- including another tenant's -- could connect and claim a
+    role. Ownership stays with the board service; the tenant reaches it through
+    a group the unit grants as a supplementary group, which is why this needs no
+    privilege at runtime. Left permissive and logged, never silently, when the
+    group is unset or unknown, so a half-configured deployment is visible rather
+    than quietly unprotected (SYRD-39).
+    """
+    source = os.environ if environ is None else environ
+    group_name = str(source.get("TICKET_BOARD_SOCKET_GROUP") or "").strip()
+    if not group_name:
+        LOGGER.warning(
+            "TICKET_BOARD_SOCKET_GROUP is not set for %s; the socket is reachable by any "
+            "local account that can traverse its directory",
+            socket_path,
+        )
+        return
+    try:
+        gid = grp.getgrnam(group_name).gr_gid
+    except KeyError:
+        LOGGER.warning(
+            "TICKET_BOARD_SOCKET_GROUP=%s does not resolve to a local group; leaving %s as is",
+            group_name,
+            socket_path,
+        )
+        return
+    # Roles write pane activity here and the owner's notify listener reads it.
+    # Per-role /run/user directories are writable by the role and unreadable by
+    # the listener, so state written there is never seen (SYRD-39).
+    pane_state_dir = socket_path.parent / "pane-state"
+    try:
+        pane_state_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        LOGGER.warning("Could not create shared pane state directory %s: %s", pane_state_dir, exc)
+    for target, mode in (
+        (socket_path.parent, 0o750),
+        (socket_path, PANE_SOCKET_MODE),
+        (pane_state_dir, 0o770),
+    ):
+        if not target.exists():
+            continue
+        try:
+            os.chown(target, -1, gid)
+            target.chmod(mode)
+        except OSError as exc:
+            LOGGER.warning(
+                "Could not restrict %s to group %s (%s); the board service must be a member "
+                "of that group",
+                target,
+                group_name,
+                exc,
+            )
+
+
+def allowed_peer_uids(environ: Mapping[str, str] | None = None) -> set[int]:
+    """Unix uids permitted on this tenant's local socket.
+
+    Empty means unrestricted, which is what an older deployment that has not
+    been through the socket repair still gets; the caller logs that state rather
+    than pretending the check is active. Configured deployments name the tenant
+    owner, so another tenant's Unix account is refused even if socket
+    permissions were loosened by hand (SYRD-39).
+    """
+    source = os.environ if environ is None else environ
+    uids: set[int] = set()
+    raw_uids = str(source.get("TICKET_BOARD_ALLOWED_PEER_UIDS") or "").strip()
+    for chunk in raw_uids.replace(",", " ").split():
+        try:
+            uids.add(int(chunk))
+        except ValueError:
+            LOGGER.warning("Ignoring non-numeric TICKET_BOARD_ALLOWED_PEER_UIDS entry %r", chunk)
+    tenant_user = str(source.get("TICKET_BOARD_TENANT_USER") or "").strip()
+    if tenant_user:
+        try:
+            uids.add(pwd.getpwnam(tenant_user).pw_uid)
+        except KeyError:
+            LOGGER.warning(
+                "TICKET_BOARD_TENANT_USER=%s does not resolve to a local account; "
+                "peer uid enforcement will not admit it",
+                tenant_user,
+            )
+    if uids:
+        # The board's own account always reaches its socket, so health checks and
+        # in-process helpers do not depend on the tenant list being complete.
+        uids.add(os.getuid())
+    return uids
 
 
 def director_target(project: str | None = None) -> str:
@@ -481,16 +626,42 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
     def setup(self) -> None:
         super().setup()
         self._local_peer_credentials: PeerCredentials | None = None
-        self._registered_local_pid: int | None = None
-        if self.caller_registry is not None:
+        if self.role_authority is not None:
             self._local_peer_credentials = peer_credentials(self.connection)  # type: ignore[arg-type]
 
     def finish(self) -> None:
-        try:
-            super().finish()
-        finally:
-            if self._registered_local_pid is not None and self.caller_registry is not None:
-                self.caller_registry.release(self._registered_local_pid)
+        # Nothing to release: role authority is resolved per request from the
+        # peer's uid, so no state is held across connections or restarts.
+        super().finish()
+
+    def require_allowed_peer(self) -> PeerCredentials:
+        """Refuse local peers from outside this tenant.
+
+        Socket group membership is the enforcing boundary; this is the second
+        check that makes a misconfigured socket fail closed and leaves a log
+        line naming the uid that tried.
+
+        The project's own role accounts are admitted here by construction: they
+        come from the same authoritative table the role is then resolved
+        against, so this check can never refuse a role the board would go on to
+        authorize. Deriving them separately is what made a rendered unit admit
+        only the legacy owner and lock every role out (SYRD-39).
+        """
+        if self._local_peer_credentials is None:
+            raise ValueError("local socket request missing peer credentials")
+        allowed = allowed_peer_uids()
+        authority = self.role_authority
+        if authority is not None:
+            allowed = allowed | authority.uids()
+        if allowed and self._local_peer_credentials.uid not in allowed:
+            LOGGER.warning(
+                "Rejected local board connection from uid=%s pid=%s: not this tenant's account "
+                "or one of its role accounts",
+                self._local_peer_credentials.uid,
+                self._local_peer_credentials.pid,
+            )
+            raise PermissionError("this board socket does not serve that local user")
+        return self._local_peer_credentials
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A003
         return
@@ -508,8 +679,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         return self.server.director_notifier  # type: ignore[attr-defined]
 
     @property
-    def caller_registry(self) -> CallerRegistry | None:
-        return getattr(self.server, "caller_registry", None)
+    def role_authority(self) -> LocalRoleAuthority | None:
+        return getattr(self.server, "role_authority", None)
 
     @property
     def write_token(self) -> str:
@@ -616,10 +787,12 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         return self.app.verify_created_ticket_persisted(created, before_signature)
 
     def caller_role(self) -> str:
-        if self.caller_registry is not None:
-            if self._local_peer_credentials is None:
-                raise ValueError("local socket request missing peer credentials")
-            return self.caller_registry.role_for_pid(self._local_peer_credentials.pid)
+        if self.role_authority is not None:
+            credentials = self.require_allowed_peer()
+            # The kernel supplied this uid; the caller could not choose it, and
+            # the uid-to-role table belongs to the board, not to the roles. The
+            # header below is never consulted on this path.
+            return self.role_authority.role_for_uid(credentials.uid)
         # Keep the legacy name while clients transition. A server-side alias only
         # protects old clients on a new board; clients must dual-send to support
         # new tooling talking to an older deployed board.
@@ -632,14 +805,14 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         return role
 
     def require_http_write_token(self) -> None:
-        if self.caller_registry is not None:
+        if self.role_authority is not None:
             return
         raw = self.headers.get(WRITE_TOKEN_HEADER, "") or self.headers.get(LEGACY_WRITE_TOKEN_HEADER, "")
         if not raw or not secrets.compare_digest(raw, self.write_token):
             raise PermissionError(f"missing or invalid {WRITE_TOKEN_HEADER}")
 
     def require_http_report_token(self) -> None:
-        if self.caller_registry is not None:
+        if self.role_authority is not None:
             raise PermissionError("tenant report filing is only available over HTTP")
         if not self.report_token:
             raise PermissionError(f"{REPORT_TOKEN_HEADER} is not configured")
@@ -648,20 +821,31 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             raise PermissionError(f"missing or invalid {REPORT_TOKEN_HEADER}")
 
     def handle_register_caller(self, payload: dict[str, object]) -> None:
-        if self.caller_registry is None or self._local_peer_credentials is None:
+        """Report the role this peer's Unix account holds.
+
+        Kept for clients that still announce a role, but it no longer grants
+        anything: the role is resolved from the peer's uid either way. A
+        supplied role that disagrees with the account's role is refused and
+        logged with the real peer uid and pid, so a forged claim is visible
+        rather than merely ineffective (SYRD-39).
+        """
+        if self.role_authority is None:
             raise ValueError("caller registration is only available on the local Unix socket")
-        role = str(payload.get("role", "")).strip().lower()
-        if self._registered_local_pid is not None:
-            current_role = self.caller_registry.role_for_pid(self._registered_local_pid)
-            if role != current_role:
-                raise PermissionError(f"connection is already registered as {current_role}")
-            self.send_json({"role": current_role, "pid": self._registered_local_pid})
-            return
-        if role not in getattr(self.app, "workflow_roles", lambda: list(CALLER_ROLES))() or role == "user":
-            raise ValueError(f"invalid local caller role: {role}")
-        self.caller_registry.register(self._local_peer_credentials, role, allowed_roles=set(getattr(self.app, "workflow_roles", lambda: list(CALLER_ROLES))()))
-        self._registered_local_pid = self._local_peer_credentials.pid
-        self.send_json({"role": role, "pid": self._local_peer_credentials.pid})
+        credentials = self.require_allowed_peer()
+        derived = self.role_authority.role_for_uid(credentials.uid)
+        claimed = str(payload.get("role", "")).strip().lower()
+        if claimed and claimed != derived:
+            LOGGER.warning(
+                "Refused role claim %r from peer pid=%s uid=%s: that account is %s",
+                claimed,
+                credentials.pid,
+                credentials.uid,
+                derived,
+            )
+            raise CallerIdentityError(
+                f"this account is registered as {derived}, not {claimed}"
+            )
+        self.send_json({"role": derived, "uid": credentials.uid, "pid": credentials.pid})
 
     def require_operation_allowed(self, operation: str, caller_role: str, ticket_id: str | None = None) -> None:
         cfg = getattr(self.app, "workflow_configuration", lambda: None)()
@@ -784,7 +968,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         )
 
     def notification_source_role(self, operation: str, caller_role: str | None) -> str | None:
-        if operation == "create_ticket" and caller_role == "director" and self.caller_registry is None:
+        if operation == "create_ticket" and caller_role == "director" and self.role_authority is None:
             return "user"
         return None
 
@@ -1288,7 +1472,7 @@ class TicketBoardServer(ThreadingHTTPServer):
         app: TicketBoardApp,
         director_notifier: DirectorNotifier | None = None,
         events: TicketBoardEventHub | None = None,
-        caller_registry: CallerRegistry | None = None,
+        role_authority: LocalRoleAuthority | None = None,
         write_token: str | None = None,
         report_token: str | None = None,
     ) -> None:
@@ -1297,7 +1481,7 @@ class TicketBoardServer(ThreadingHTTPServer):
         self._owns_events = events is None
         self.director_notifier = director_notifier or DirectorNotifier(project=getattr(app, "project", None))
         self._owns_director_notifier = director_notifier is None
-        self.caller_registry = caller_registry
+        self.role_authority = role_authority
         self.build_id = board_build_id()
         self.write_token = write_token or secrets.token_urlsafe(32)
         self.report_token = (report_token or "").strip()
@@ -1324,13 +1508,13 @@ class TicketBoardUnixServer(ThreadingUnixHTTPServer):
         *,
         events: TicketBoardEventHub,
         director_notifier: DirectorNotifier,
-        caller_registry: CallerRegistry | None = None,
+        role_authority: LocalRoleAuthority | None = None,
     ) -> None:
         self.socket_path = socket_path
         self.app = app
         self.events = events
         self.director_notifier = director_notifier
-        self.caller_registry = caller_registry or CallerRegistry()
+        self.role_authority = role_authority or LocalRoleAuthority.from_environ()
         self.build_id = board_build_id()
         self.write_token = ""
         socket_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1340,6 +1524,7 @@ class TicketBoardUnixServer(ThreadingUnixHTTPServer):
             pass
         super().__init__(str(socket_path), TicketBoardHandler)
         socket_path.chmod(PANE_SOCKET_MODE)
+        restrict_socket_to_tenant(socket_path)
 
     def server_close(self) -> None:
         super().server_close()

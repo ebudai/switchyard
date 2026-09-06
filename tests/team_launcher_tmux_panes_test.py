@@ -539,6 +539,289 @@ def test_pane_start_without_recorded_session_ignores_ambient_session_and_starts_
     assert "-u TICKET_BOARD_PANE_SESSION_ID" in new_session[-1]
     assert "no recorded session id for ops; starting fresh session" in stderr.getvalue()
 
+
+def test_presentation_reaches_each_role_through_its_own_account() -> None:
+    """SYRD-39: with one account per role there is no shared tmux server.
+
+    Director presentation must reach a role's session through the generated
+    role-control interface (sudo -u <role account> tmux) and must not assume
+    ambient access. Display and viewer sessions stay with the project owner.
+    """
+    import subprocess as _subprocess
+
+    from scripts import presentation_controller
+
+    calls: list[list[str]] = []
+
+    def record(args, **_kwargs):
+        calls.append(list(args))
+        return _subprocess.CompletedProcess(list(args), 0, stdout="")
+
+    with tempfile.TemporaryDirectory(prefix="switchyard-present-routing.") as tmp:
+        tmp_path = Path(tmp)
+        (tmp_path / "director").mkdir()
+        (tmp_path / "app").mkdir()
+        config_path = tmp_path / "porter.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "run_as_user": "porter-agent",
+                    "roles": [
+                        {
+                            "role": "director",
+                            "cli": ["codex"],
+                            "slot": 0,
+                            "tmux_session": "porter-director",
+                            "target": "porter-director:0.0",
+                            "workdir": str(tmp_path / "director"),
+                            "run_as_user": "porter-director",
+                        },
+                        {
+                            "role": "app",
+                            "cli": ["codex"],
+                            "slot": 1,
+                            "tmux_session": "porter-app",
+                            "target": "porter-app:0.0",
+                            "workdir": str(tmp_path / "app"),
+                            "run_as_user": "porter-app",
+                        },
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+
+        original_current_user_name = team_launcher.current_user_name
+        team_launcher.current_user_name = lambda: "porter-director"
+        try:
+            runner = presentation_controller._tmux_runner(config, record)
+            runner(["tmux", "has-session", "-t", "porter-app"])
+            runner(["tmux", "has-session", "-t", "=porter-display-0"])
+            runner(["tmux", "has-session", "-t", "porter-director"])
+        finally:
+            team_launcher.current_user_name = original_current_user_name
+
+    # Another role's session is reached as that role's account.
+    assert calls[0][:3] == ["sudo", "-u", "porter-app"], calls[0]
+    assert "tmux" in calls[0]
+    # A display slot belongs to the project owner, not to any role.
+    assert calls[1][:3] == ["sudo", "-u", "porter-agent"], calls[1]
+    # The director's own session needs no privileged hop.
+    assert calls[2][0] == "tmux", calls[2]
+
+
+
+def test_role_runner_isolates_even_when_the_project_owner_invokes_switchyard() -> None:
+    """SYRD-39: the normal case is the owner running switchyard.
+
+    The old shared runner was the plain runner exactly then, so detached,
+    viewer, presentation, reload and recovery all started the role's tmux server
+    and CLI as the owner. bin_user only sets PATH; the uid comes from the runner,
+    so the board granted those processes no role at all.
+    """
+    import subprocess as _subprocess
+
+    calls: list[list[str]] = []
+
+    def record(args, **_kwargs):
+        calls.append(list(args))
+        return _subprocess.CompletedProcess(list(args), 0, stdout="")
+
+    with tempfile.TemporaryDirectory(prefix="switchyard-owner-invoked.") as tmp:
+        tmp_path = Path(tmp)
+        config_path = tmp_path / "porter.json"
+        roles = []
+        for index, name in enumerate(("director", "ops")):
+            workdir = tmp_path / name
+            workdir.mkdir()
+            roles.append(
+                {
+                    "role": name,
+                    "slot": index,
+                    "tmux_session": f"porter-{name}",
+                    "target": f"porter-{name}:0.0",
+                    "cli": ["codex"],
+                    "workdir": str(workdir),
+                    "run_as_user": f"porter-{name}",
+                }
+            )
+        config_path.write_text(
+            json.dumps({"project": "porter", "run_as_user": "porter-agent", "roles": roles}, indent=2, sort_keys=True)
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("porter", config_path)
+
+        original_current_user_name = team_launcher.current_user_name
+        # The project owner is the one invoking switchyard.
+        team_launcher.current_user_name = lambda: "porter-agent"
+        try:
+            for role in config.roles:
+                runner = team_launcher.role_process_runner_for(config, role, runner=record)
+                runner(["tmux", "has-session", "-t", role.tmux_session])
+            # The owner's own viewer session is not a role and stays direct.
+            owner_role = team_launcher.RoleConfig(
+                role="viewer-stub",
+                slot=None,
+                detached=True,
+                tmux_session="porter-viewer",
+                target="porter-viewer:0.0",
+                workdir=str(tmp_path),
+                cli=["codex"],
+                model="",
+                model_arg="--model",
+                effort="",
+                yolo=False,
+                extra_args=[],
+                resume_mode="flag",
+                resume_flag="--resume",
+                resume_subcommand="resume",
+                fresh_session_per_ticket=False,
+                live_commands=["codex"],
+                env={},
+            )
+            team_launcher.role_process_runner_for(config, owner_role, runner=record)(
+                ["tmux", "has-session", "-t", "porter-viewer"]
+            )
+        finally:
+            team_launcher.current_user_name = original_current_user_name
+
+    assert calls[0][:3] == ["sudo", "-u", "porter-director"], calls[0]
+    assert calls[1][:3] == ["sudo", "-u", "porter-ops"], calls[1]
+    # A role without its own account falls back to the owner, who is already
+    # the caller, so no privileged hop is inserted.
+    assert calls[2][0] == "tmux", calls[2]
+
+
+
+def test_launch_refuses_when_isolation_or_credentials_are_incomplete() -> None:
+    """SYRD-39: the gate must refuse, not warn.
+
+    It previously computed the gaps, printed them, and then materialized the
+    layout and started every worker anyway, so a fresh or partly migrated
+    project launched roles that could not be told apart.
+
+    A project where no role declares an account is an unmigrated tenant and
+    still launches; opting in is per project, and a PARTIAL opt-in is the
+    dangerous state that must fail closed.
+    """
+    def unmigrated_and_migrating(tmp_path: Path) -> tuple[object, object]:
+        configs = []
+        for name, accounts in (("legacy", False), ("migrating", True)):
+            root = tmp_path / name
+            root.mkdir()
+            roles = []
+            for index, role_name in enumerate(("director", "ops")):
+                workdir = root / role_name
+                workdir.mkdir()
+                role = {
+                    "role": role_name,
+                    "slot": index,
+                    "tmux_session": f"porter-{role_name}",
+                    "target": f"porter-{role_name}:0.0",
+                    "cli": ["codex"],
+                    "workdir": str(workdir),
+                }
+                if accounts:
+                    # Declared but never created on this host, which is exactly
+                    # the state after provisioning and before the rollout.
+                    role["run_as_user"] = f"porter-{role_name}"
+                roles.append(role)
+            config_path = root / "porter.json"
+            config_path.write_text(
+                json.dumps({"project": "porter", "run_as_user": "porter-agent", "roles": roles}, indent=2, sort_keys=True)
+                + "\n",
+                encoding="utf-8",
+            )
+            configs.append(load_project_config("porter", config_path))
+        return configs[0], configs[1]
+
+    with tempfile.TemporaryDirectory(prefix="switchyard-launch-gate.") as tmp:
+        legacy, migrating = unmigrated_and_migrating(Path(tmp))
+
+        # An unmigrated tenant is untouched: nothing has opted in.
+        assert team_launcher.role_isolation_gaps(legacy) == []
+
+        # A project that has opted in but is not finished refuses, and names
+        # every reason.
+        gaps = team_launcher.role_isolation_gaps(migrating)
+        assert gaps, gaps
+        assert any("does not exist" in gap for gap in gaps), gaps
+
+
+
+def test_onboarding_projection_preserves_and_extends_role_accounts() -> None:
+    """SYRD-36 x SYRD-39: the two migrations compose.
+
+    Projecting the workflow document rewrites the launcher config's roles. An
+    existing role must keep the Unix account isolation gave it, and a role the
+    document INTRODUCES must be given one -- otherwise it would be projected
+    without an account, launch as the project owner, and be indistinguishable
+    from every other role on the board socket.
+    """
+    from scripts import workflow_launcher
+
+    raw = {
+        "project": "porter",
+        "run_as_user": "porter-agent",
+        "worktree_base": "/home/porter-agent/porter-worktrees",
+        "roles": [
+            {
+                "role": "director",
+                "cli": ["codex"],
+                "target": "porter-director:0.0",
+                "tmux_session": "porter-director",
+                "slot": 0,
+                "run_as_user": "porter-director",
+            }
+        ],
+    }
+    document = {
+        "roles": [
+            {"name": "director", "active": True, "runtime": "codex", "target": "porter-director:0.0", "slot": 0},
+            {"name": "perf", "active": True, "runtime": "codex", "target": "porter-perf:0.0", "slot": 1},
+        ]
+    }
+    original_validate = workflow_launcher.validate
+    workflow_launcher.validate = lambda doc, project=None: doc
+    try:
+        projected = workflow_launcher.project_roles(raw, document)
+    finally:
+        workflow_launcher.validate = original_validate
+
+    accounts = {role["role"]: role.get("run_as_user") for role in projected["roles"]}
+    assert accounts["director"] == "porter-director", accounts
+    assert accounts["perf"] == "porter-perf", accounts
+    assert len(set(accounts.values())) == len(accounts), accounts
+
+    # An unmigrated tenant is left alone: projection must not opt a project into
+    # isolation it never asked for.
+    legacy_raw = {
+        "project": "porter",
+        "run_as_user": "porter-agent",
+        "roles": [
+            {
+                "role": "director",
+                "cli": ["codex"],
+                "target": "porter-director:0.0",
+                "tmux_session": "porter-director",
+                "slot": 0,
+            }
+        ],
+    }
+    workflow_launcher.validate = lambda doc, project=None: doc
+    try:
+        legacy = workflow_launcher.project_roles(legacy_raw, document)
+    finally:
+        workflow_launcher.validate = original_validate
+    assert all(not role.get("run_as_user") for role in legacy["roles"]), legacy["roles"]
+
+
 def main() -> int:
     run_team_launcher_tests(globals(), first=())
     print("team_launcher_tmux_panes_test: ok")

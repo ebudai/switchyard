@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
-"""Resolve a local socket peer to the durable role session that owns it.
+"""Group a local socket peer's commands under the role session they belong to.
 
-SO_PEERCRED proves which process connected. It does not prove which role that
-process belongs to, and `ticket-board-write` opens a fresh short-lived
-connection per command, so binding authority to the connecting pid means the
-binding evaporates the moment that helper exits (SYRD-39).
+This is a DURABILITY mechanism, not an authorization boundary. Read
+docs/ticket-board-service.md before relying on it for anything else.
 
-The durable identity is the pane process the role launcher started: every
-command a role runs, however deeply nested, descends from it. Parentage is
-maintained by the kernel and a process cannot rewrite its own ancestry, so the
-pane root is derived here from /proc rather than taken from anything the caller
-supplies -- environment, argv and headers are all writable by the caller.
+The problem it solves: `ticket-board-write` opens a fresh short-lived connection
+per command, so binding a caller role to the connecting pid binds it to a
+process that exits immediately, and the role is unheld between commands. Walking
+up to the pane process a role's commands descend from gives the board something
+that lasts as long as the role does.
 
-Read the threat boundary in docs/ticket-board-service.md before relying on this
-for isolation: it distinguishes role *panes*, which is strictly stronger than
-trusting a role name off the wire, but every role in a project currently shares
-one Unix uid and one tmux server, so it is not a substitute for uid separation.
+The problem it does NOT solve: the pane root is identified by looking for an
+ancestor whose parent's comm begins with "tmux", and a process sets its own comm
+with prctl(PR_SET_NAME). One prctl plus one fork manufactures a fresh unused
+"pane" identity from inside any pane, with no tmux and no ptrace (SYRD-39).
+Authenticating the real tmux server is not possible from here either:
+/proc/<pid>/fd is unreadable across uids, and every input this module can read is
+writable by any process sharing the tenant uid.
+
+So this distinguishes roles that are not trying to lie. It does not withstand a
+role that is. Role separation needs per-role Unix identities; see the minimum
+isolation change in the service doc.
 """
 
 from __future__ import annotations
@@ -28,7 +33,8 @@ from pathlib import Path
 MAX_ANCESTRY_DEPTH = 128
 PROC_ROOT = Path("/proc")
 # The tmux server's comm is "tmux: server"; the 15-character /proc limit can
-# truncate it, so match on the prefix rather than the whole string.
+# truncate it, so match on the prefix rather than the whole string. comm is set
+# by the process itself via prctl(PR_SET_NAME), so this is a label, not proof.
 TMUX_SERVER_COMM_PREFIX = "tmux"
 
 
@@ -105,13 +111,13 @@ def process_ancestry(pid: int, *, proc_root: Path = PROC_ROOT) -> list[ProcessIn
 
 
 def session_identity(pid: int, *, proc_root: Path = PROC_ROOT) -> SessionIdentity | None:
-    """Resolve a peer pid to the pane process that owns it.
+    """Resolve a peer pid to the pane process it descends from.
 
-    The pane root is the ancestor whose parent is the tmux server: the launcher
-    starts one such process per role, and everything the role runs descends from
-    it. A peer that is not under a tmux server -- a service, a cron job, a
-    developer shell -- has no pane identity and gets None; callers decide
-    whether that is allowed rather than being silently granted a role here.
+    The pane root is taken to be the ancestor whose parent looks like the tmux
+    server. "Looks like" is the whole caveat: the test is the parent's comm,
+    which that parent controls, so this identifies an honest pane and is
+    trivially forged by a dishonest one. A peer under no such ancestor gets
+    None, and callers refuse it rather than defaulting it to a role.
     """
     chain = process_ancestry(pid, proc_root=proc_root)
     for info in chain:

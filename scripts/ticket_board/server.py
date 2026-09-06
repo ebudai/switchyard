@@ -259,15 +259,21 @@ class CallerIdentityError(PermissionError):
 
 
 class CallerRegistry:
-    """Binds a caller role to the durable role session, not to one command.
+    """Holds a caller role for the life of a role session rather than one command.
 
     Before SYRD-39 this keyed on the pid that opened the connection. Every
     ticket-board-write invocation is its own short-lived process, so the binding
-    was created and released around a single action and any local process could
-    claim any role in the gap -- including director. Registrations are now keyed
-    on the pane process the role launcher started, which every command a role
-    runs descends from, so a role is held for the life of its session and a
-    different session cannot take it.
+    was created and released around a single action and the role was unheld in
+    between. Keying on the pane process a role's commands descend from keeps the
+    role held while the role is running.
+
+    This is NOT an authorization boundary, and must not be described as one.
+    The role attached to a session is still the role string the peer supplied
+    while that session and role were vacant, nothing trusted maps a session to
+    its configured role, and every board restart drops all bindings while panes
+    keep running. The session key itself is forgeable with prctl(PR_SET_NAME)
+    plus fork. See docs/ticket-board-service.md; role separation needs per-role
+    Unix identities.
     """
 
     def __init__(
@@ -297,11 +303,11 @@ class CallerRegistry:
         return True
 
     def session_for_pid(self, pid: int) -> SessionIdentity:
-        """The role session a connecting pid belongs to.
+        """The role session a connecting pid appears to belong to.
 
-        A peer with no role session is refused rather than defaulted: the whole
-        point is that authority comes from the launcher-started pane, so a
-        process outside every pane has no role to inherit.
+        A peer under no pane is refused rather than defaulted to something. Note
+        the limit: a peer can manufacture a pane-looking ancestor, so this
+        refuses accidents, not attacks.
         """
         identity = self._resolve_session(pid)
         if identity is None:
@@ -800,8 +806,9 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
     def caller_role(self) -> str:
         if self.caller_registry is not None:
             credentials = self.require_allowed_peer()
-            # Derived from the peer's process tree, never from the header or
-            # payload the caller supplies.
+            # The session comes from the peer's process tree rather than the
+            # header, but the role bound to that session was supplied by
+            # whichever peer claimed it first. Not an authorization boundary.
             return self.caller_registry.role_for_pid(credentials.pid)
         # Keep the legacy name while clients transition. A server-side alias only
         # protects old clients on a new board; clients must dual-send to support
@@ -833,11 +840,11 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
     def handle_register_caller(self, payload: dict[str, object]) -> None:
         """Claim, or confirm, this role session's caller role.
 
-        The supplied role is a claim to be checked, not an assertion to be
-        believed. It is accepted only when this peer's role session either
-        already holds it or holds nothing and nothing else holds it; a session
-        that already answers to another role, or a role held by a different live
-        session, is refused and logged with the real peer pid (SYRD-39).
+        The claim is checked against what this session already holds and what
+        already holds the role, and a conflict is refused and logged with the
+        real peer pid. It is NOT authenticated: a vacant role goes to whoever
+        asks first, and a restart makes every role vacant again while the panes
+        keep running (SYRD-39).
         """
         if self.caller_registry is None:
             raise ValueError("caller registration is only available on the local Unix socket")

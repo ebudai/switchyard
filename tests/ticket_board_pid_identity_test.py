@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import logging
 import os
@@ -331,6 +332,105 @@ def assert_live_session_resolution_matches_the_process_tree() -> None:
     assert session_identity(os.getpid()) == identity
 
 
+def assert_comm_forged_pane_identity_is_accepted_documenting_the_limit() -> None:
+    """Adversarial: the session key is forgeable from inside any pane.
+
+    The pane root is found by testing a parent's /proc comm against "tmux", and
+    a process sets its own comm with prctl(PR_SET_NAME). One prctl and one fork
+    manufacture a fresh unused pane identity -- no tmux command, no target-pane
+    execution, no ptrace.
+
+    This test asserts the forgery SUCCEEDS. It exists so the limitation cannot
+    be quietly reintroduced after a partial fix, and so that anyone who does
+    make the boundary authoritative is forced to come here, see the claim, and
+    update docs/ticket-board-service.md with it (SYRD-39).
+    """
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+    except OSError:
+        return
+
+    honest = session_identity(os.getpid())
+    read_fd, write_fd = os.pipe()
+    libc.prctl(15, b"tmux: server\x00", 0, 0, 0)  # PR_SET_NAME
+    child = os.fork()
+    if child == 0:  # pragma: no cover - child process
+        try:
+            os.close(read_fd)
+            os.write(write_fd, str(os.getpid()).encode())
+            os.close(write_fd)
+            time.sleep(5)
+        finally:
+            os._exit(0)
+    os.close(write_fd)
+    try:
+        forged_pid = int(os.read(read_fd, 32).decode())
+        os.close(read_fd)
+        deadline = time.monotonic() + 2.0
+        forged = None
+        while time.monotonic() < deadline:
+            forged = session_identity(forged_pid)
+            if forged is not None and forged.pid == forged_pid:
+                break
+            time.sleep(0.02)
+        assert forged is not None, "the forged child resolved to no session at all"
+        assert forged.pid == forged_pid, (forged, forged_pid)
+        assert forged.comm.startswith("tmux"), forged
+        if honest is not None:
+            assert forged.key() != honest.key(), (forged, honest)
+
+        # A fresh board hands the forged identity any vacant role.
+        registry = CallerRegistry()
+        registry.register(creds(forged_pid), "director")
+        assert registry.role_for_pid(forged_pid) == "director"
+        assert registry.pid_for_role("director") == forged_pid
+    finally:
+        try:
+            os.kill(child, 9)
+            os.waitpid(child, 0)
+        except (ProcessLookupError, ChildProcessError):
+            pass
+
+
+def assert_board_restart_drops_bindings_documenting_the_limit() -> None:
+    """Adversarial: bindings do not survive a board restart.
+
+    Registrations live only in the board process. When the service restarts --
+    an ordinary deploy -- every pane keeps running while every role becomes
+    vacant, so any live session can then claim any role. The startup race is
+    not a one-off at boot; a restart recreates it for every pane.
+
+    Like the test above, this asserts the CURRENT behaviour so it cannot be
+    silently reintroduced or silently described as fixed (SYRD-39).
+    """
+    mapping = {7001: DIRECTOR_PANE, 7002: OPS_PANE}
+
+    def fresh_board() -> CallerRegistry:
+        return CallerRegistry(
+            resolve_session=lambda pid: mapping.get(pid),
+            session_alive=lambda session: True,
+        )
+
+    before = fresh_board()
+    before.register(creds(7001), "director")
+    before.register(creds(7002), "ops")
+    assert before.role_for_pid(7002) == "ops"
+    try:
+        before.register(creds(7002), "director")
+    except CallerIdentityError:
+        pass
+    else:
+        raise AssertionError("while the board is up, ops must not take a held director")
+
+    # Service restarts; the panes are untouched.
+    after = fresh_board()
+    after.register(creds(7002), "director")
+    assert after.role_for_pid(7002) == "director"
+    assert after.pid_for_role("director") == OPS_PANE.pid
+
+
 def assert_real_tmux_panes_resolve_to_distinct_role_sessions() -> None:
     """End-to-end over real processes: the /proc derivation matches tmux.
 
@@ -617,6 +717,8 @@ def main() -> int:
     assert_peer_uid_allowlist_admits_only_the_tenant()
     assert_live_session_resolution_matches_the_process_tree()
     assert_real_tmux_panes_resolve_to_distinct_role_sessions()
+    assert_comm_forged_pane_identity_is_accepted_documenting_the_limit()
+    assert_board_restart_drops_bindings_documenting_the_limit()
     assert_unix_socket_derives_role_and_ignores_supplied_role()
     assert_unix_socket_replaces_stale_socket_file()
     assert_all_pane_roles_write_through_socket()

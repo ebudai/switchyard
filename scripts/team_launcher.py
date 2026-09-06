@@ -9400,31 +9400,62 @@ def _open_owner_credential_dir(
     which is theirs to arrange, so the escape this guards against is the symlink one.
     """
     target_dir = home_base / owner_user / AGY_CREDENTIAL_DIR_NAME
-    dir_result = runner(
-        ["install", "-d", "-m", "0700", "-o", owner_user, "-g", owner_user, str(target_dir)]
-    )
-    if dir_result.returncode != 0:
-        raise SystemExit(f"switchyard: failed to create {target_dir} for {owner_user}")
     fd = os.open(home_base, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        for component in (owner_user, *Path(AGY_CREDENTIAL_DIR_NAME).parts):
-            nested = os.open(
-                component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd
-            )
-            os.close(fd)
-            fd = nested
-    except OSError as exc:
+        # The owner's home is created by useradd as root; from there every component is
+        # owner-controlled, so it is created and opened relative to the descriptor above
+        # it. No privileged command is ever handed the whole path: install(1) follows a
+        # symlink that names a directory and would apply mode and ownership to whatever
+        # it points at, mutating an out-of-home directory before any check could run.
+        fd = _openat_no_follow(fd, owner_user, target_dir)
+        for component in Path(AGY_CREDENTIAL_DIR_NAME).parts:
+            created = False
+            try:
+                os.mkdir(component, 0o700, dir_fd=fd)
+                created = True
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                raise SystemExit(
+                    f"switchyard: failed to create {target_dir} for {owner_user} "
+                    f"({exc.strerror})"
+                ) from exc
+            fd = _openat_no_follow(fd, component, target_dir)
+            if created:
+                # Only directories switchyard just made are given mode and ownership.
+                # One the owner already had is theirs, and is left as it is.
+                os.fchmod(fd, 0o700)
+                own = runner(
+                    ["chown", f"{owner_user}:{owner_user}", f"/proc/{os.getpid()}/fd/{fd}"]
+                )
+                if own.returncode != 0:
+                    raise SystemExit(
+                        f"switchyard: failed to assign {target_dir} to {owner_user}"
+                    )
+    except BaseException:
         os.close(fd)
+        raise
+    return fd
+
+
+def _openat_no_follow(parent_fd: int, component: str, target_dir: Path) -> int:
+    """Open one path component relative to parent_fd, refusing to traverse a symlink."""
+    try:
+        nested = os.open(
+            component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd
+        )
+    except OSError as exc:
         if exc.errno in (errno.ELOOP, errno.ENOTDIR):
             raise SystemExit(
-                f"switchyard: a path component of {target_dir} is a symlink or not a "
-                f"directory; refusing to write {owner_user}'s credential through a "
-                "replaced path component"
+                f"switchyard: path component {component!r} of {target_dir} is a symlink "
+                "or not a directory; refusing to write a credential through a replaced "
+                "path component"
             ) from exc
         raise SystemExit(
-            f"switchyard: failed to open {target_dir} for {owner_user} ({exc.strerror})"
+            f"switchyard: failed to open {component!r} of {target_dir} ({exc.strerror})"
         ) from exc
-    return fd
+    os.close(parent_fd)
+    return nested
 
 
 def _copy_fd_contents(source_fd: int, target_fd: int) -> None:

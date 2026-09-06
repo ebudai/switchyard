@@ -32,8 +32,7 @@ class _SeedingRunner(FakeRunner):
         sandbox_root: Path,
         owner_exists: bool = False,
         failing_install_fragment: str = "",
-        failing_chown_fragment: str = "",
-        swap_credential_dir_to: Path | None = None,
+        failing_chown_kind: str = "",
     ) -> None:
         super().__init__()
         self.owner_user = owner_user
@@ -41,8 +40,7 @@ class _SeedingRunner(FakeRunner):
         self.sandbox_root = sandbox_root
         self.owner_exists = owner_exists
         self.failing_install_fragment = failing_install_fragment
-        self.failing_chown_fragment = failing_chown_fragment
-        self.swap_credential_dir_to = swap_credential_dir_to
+        self.failing_chown_kind = failing_chown_kind
 
     def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         self.calls.append(args)
@@ -60,14 +58,27 @@ class _SeedingRunner(FakeRunner):
         if args[:2] == ["loginctl", "show-user"]:
             return subprocess.CompletedProcess(args, 0, stdout="yes\n")
         if args[:1] == ["useradd"]:
+            # useradd -m creates the home; switchyard no longer creates it as a side
+            # effect of a full-path install(1), so the fake has to be faithful here.
+            (self.sandbox_root / "home" / self.owner_user).mkdir(parents=True, exist_ok=True)
             return subprocess.CompletedProcess(args, 0)
         if args[:1] == ["chown"]:
-            if self.failing_chown_fragment and self.failing_chown_fragment in " ".join(args):
+            # Ownership is assigned through /proc/<pid>/fd/N and these tests share that
+            # process, so the descriptor can be inspected to fail exactly the directory
+            # chown or exactly the token chown.
+            if self.failing_chown_kind and self._chown_kind(args[-1]) == self.failing_chown_kind:
                 return subprocess.CompletedProcess(args, 1)
             return subprocess.CompletedProcess(args, 0)
         if args[:1] == ["install"]:
             return self._run_install(args)
         return super().__call__(args, **kwargs)
+
+    @staticmethod
+    def _chown_kind(target: str) -> str:
+        try:
+            return "dir" if stat_module.S_ISDIR(os.stat(target).st_mode) else "file"
+        except OSError:
+            return ""
 
     def _in_sandbox(self, path: Path) -> bool:
         return path == self.sandbox_root or self.sandbox_root in path.parents
@@ -80,11 +91,6 @@ class _SeedingRunner(FakeRunner):
         target = Path(args[-1])
         if "-d" in args and self._in_sandbox(target):
             target.mkdir(parents=True, exist_ok=True)
-            # Simulate the owner winning the race: they control this directory, so they
-            # can replace it with a symlink the instant install(1) returns.
-            if self.swap_credential_dir_to is not None and target.name == "antigravity-cli":
-                target.rmdir()
-                target.symlink_to(self.swap_credential_dir_to, target_is_directory=True)
         return subprocess.CompletedProcess(args, 0)
 
     def _run_project_git(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -149,9 +155,8 @@ def _provision(
     agy_credential_source: str | None,
     owner_exists: bool = False,
     failing_install_fragment: str = "",
-    failing_chown_fragment: str = "",
+    failing_chown_kind: str = "",
     allow_existing_owner_user: bool = True,
-    swap_credential_dir_to: Path | None = None,
     no_agy_credential: bool = False,
     yes: bool = True,
     answers: dict[str, str] | None = None,
@@ -172,8 +177,7 @@ def _provision(
         sandbox_root=tmp_path,
         owner_exists=owner_exists,
         failing_install_fragment=failing_install_fragment,
-        failing_chown_fragment=failing_chown_fragment,
-        swap_credential_dir_to=swap_credential_dir_to,
+        failing_chown_kind=failing_chown_kind,
     )
     stdout = StringIO()
     outcome: object
@@ -209,8 +213,12 @@ def _provision(
     return outcome, runner, stdout.getvalue(), home_base, project_dir
 
 
-def _token_chown_calls(runner: _SeedingRunner) -> list[list[str]]:
-    """Ownership is assigned through the open descriptor, so the path is /proc/<pid>/fd/N."""
+def _fd_chown_calls(runner: _SeedingRunner) -> list[list[str]]:
+    """Ownership is assigned through open descriptors, so paths are /proc/<pid>/fd/N.
+
+    Both the created directories and the token are assigned this way, and all of them
+    happen only inside seeding, so any such call means seeding ran.
+    """
     return [call for call in runner.calls if call[:1] == ["chown"] and "/fd/" in call[-1]]
 
 
@@ -236,18 +244,18 @@ def test_fresh_provision_seeds_agy_token_into_created_owner_home() -> None:
         artifact = json.loads(
             (project_dir / ".switchyard" / "porter.project.json").read_text(encoding="utf-8")
         )
-        chown_calls = _token_chown_calls(runner)
+        chown_calls = _fd_chown_calls(runner)
 
     assert outcome == 0
     assert seeded_text == SEED_TOKEN_TEXT
     assert seeded_mode == 0o600
-    assert len(chown_calls) == 1
-    assert chown_calls[0][:2] == ["chown", f"{OWNER_USER}:{OWNER_USER}"]
-    assert re.fullmatch(r"/proc/\d+/fd/\d+", chown_calls[0][2]), chown_calls[0][2]
-    # The private directory is created owner-only before the token lands in it.
-    assert any(
-        c[:1] == ["install"] and "-d" in c and "0700" in c and c[-1].endswith(".gemini/antigravity-cli")
-        for c in runner.calls
+    assert chown_calls, "nothing was assigned to the owner"
+    for call in chown_calls:
+        assert call[:2] == ["chown", f"{OWNER_USER}:{OWNER_USER}"]
+        assert re.fullmatch(r"/proc/\d+/fd/\d+", call[2]), call[2]
+    # No privileged command is handed the whole owner-controlled path.
+    assert not any(
+        c[:1] == ["install"] and "antigravity-cli" in " ".join(c) for c in runner.calls
     )
     assert artifact["project"]["capability_grants"]["agy_credential_source"] == SEED_SOURCE_USER
     assert f"seeded agy credential for otto-agent from {SEED_SOURCE_USER}" in output
@@ -269,7 +277,7 @@ def test_provision_without_opt_in_does_not_seed_or_record_a_source() -> None:
 
     assert outcome == 0
     assert not seeded_exists
-    assert not _token_chown_calls(runner)
+    assert not _fd_chown_calls(runner)
     assert artifact["project"]["capability_grants"]["agy_credential_source"] == ""
     assert "seeded agy credential" not in output
 
@@ -391,7 +399,7 @@ def test_failed_ownership_assignment_rolls_back_the_partial_token() -> None:
         outcome, _runner, _output, home_base, _project_dir = _provision(
             tmp_path,
             agy_credential_source=SEED_SOURCE_USER,
-            failing_chown_fragment="/fd/",
+            failing_chown_kind="file",
         )
         leftover = _seeded_token_path(home_base).exists()
 
@@ -416,7 +424,7 @@ def test_failed_seed_leaves_the_credential_absent_for_the_retry() -> None:
         outcome, _runner, _output, home_base, _project_dir = _provision(
             tmp_path,
             agy_credential_source=SEED_SOURCE_USER,
-            failing_chown_fragment="/fd/",
+            failing_chown_kind="file",
         )
         state = team_launcher._agy_credential_state("otto-agent", home_base)
 
@@ -437,7 +445,7 @@ def test_existing_owner_with_absent_credential_is_seeded() -> None:
         artifact = json.loads(
             (project_dir / ".switchyard" / "porter.project.json").read_text(encoding="utf-8")
         )
-        chown_calls = _token_chown_calls(runner)
+        chown_calls = _fd_chown_calls(runner)
 
     assert outcome == 0
     assert seeded_text == SEED_TOKEN_TEXT
@@ -497,36 +505,75 @@ def test_target_owned_by_another_user_is_refused_not_reported_installed() -> Non
     message = str(outcome)
     assert f"is not a 0600 regular file owned by {OWNER_USER}" in message
     assert "agy could not read it" in message
-    assert not _token_chown_calls(runner)
+    assert not _fd_chown_calls(runner)
     # Refused, not silently repaired or overwritten.
     assert preserved == "owned-by-someone-else\n"
 
 
-def test_credential_directory_swapped_for_a_symlink_is_refused() -> None:
-    """The owner controls this directory and can replace it after install(1) returns.
+def _planted_symlink_leaves_target_untouched(component: str) -> None:
+    """A planted directory symlink must not have its target mutated, metadata included.
 
-    Naming the path again would let a root-run write land outside the owner's home, so
-    the directory is walked with O_NOFOLLOW and every later step uses that descriptor.
+    install(1) follows a symlink that names a directory and applies the requested mode
+    and ownership to whatever it points at, so a privileged full-path create would change
+    an out-of-home directory before any check could run. Creation is therefore anchored:
+    every component is made and opened relative to the descriptor above it.
     """
     with tempfile.TemporaryDirectory(prefix="pgu-agy-seed.") as tmp:
         tmp_path = Path(tmp)
         escape = tmp_path / "outside-the-home"
-        escape.mkdir()
-        _seed_source_token(tmp_path / "home")
+        escape.mkdir(mode=0o755)
+        os.chmod(escape, 0o755)
+        before = escape.stat()
+
+        home_base = tmp_path / "home"
+        _seed_source_token(home_base)
+        owner_home = home_base / OWNER_USER
+        planted = owner_home / ".gemini" / component if component != ".gemini" else owner_home / ".gemini"
+        planted.parent.mkdir(parents=True, exist_ok=True)
+        planted.symlink_to(escape, target_is_directory=True)
 
         outcome, runner, _output, home_base, _project_dir = _provision(
-            tmp_path,
-            agy_credential_source=SEED_SOURCE_USER,
-            swap_credential_dir_to=escape,
+            tmp_path, agy_credential_source=SEED_SOURCE_USER, owner_exists=True
         )
-        escaped_files = sorted(p.name for p in escape.iterdir())
-        swap_happened = (home_base / OWNER_USER / ".gemini" / "antigravity-cli").is_symlink()
+        after = escape.stat()
+        escaped = sorted(p.name for p in escape.iterdir())
+        still_symlink = planted.is_symlink()
 
-    assert isinstance(outcome, SystemExit)
+    assert isinstance(outcome, SystemExit), f"expected refusal for planted {component}"
     assert "replaced path component" in str(outcome)
-    assert escaped_files == [], f"credential written outside the owner home: {escaped_files}"
-    assert swap_happened, "fixture did not actually perform the swap"
-    assert not _token_chown_calls(runner)
+    assert escaped == [], f"credential written outside the owner home: {escaped}"
+    assert stat_module.S_IMODE(after.st_mode) == stat_module.S_IMODE(before.st_mode), (
+        f"external directory mode changed {oct(before.st_mode)} -> {oct(after.st_mode)}"
+    )
+    assert (after.st_uid, after.st_gid) == (before.st_uid, before.st_gid)
+    assert still_symlink, "fixture did not actually plant the symlink"
+    assert not _fd_chown_calls(runner)
+
+
+def test_planted_final_directory_symlink_leaves_target_untouched() -> None:
+    _planted_symlink_leaves_target_untouched("antigravity-cli")
+
+
+def test_planted_intermediate_directory_symlink_leaves_target_untouched() -> None:
+    _planted_symlink_leaves_target_untouched(".gemini")
+
+
+def test_no_privileged_command_is_given_the_whole_credential_path() -> None:
+    """The primitive audit reproduced: install -d on a symlinked path mutates its target."""
+    with tempfile.TemporaryDirectory(prefix="pgu-agy-seed.") as tmp:
+        tmp_path = Path(tmp)
+        _seed_source_token(tmp_path / "home")
+        outcome, runner, _output, _home_base, _project_dir = _provision(
+            tmp_path, agy_credential_source=SEED_SOURCE_USER
+        )
+        offending = [
+            call
+            for call in runner.calls
+            if call[:1] == ["install"] and ".gemini" in " ".join(call)
+        ]
+
+    assert outcome == 0
+    assert offending == [], f"a privileged command was handed the owner-controlled path: {offending}"
 
 
 def test_world_readable_existing_target_is_refused() -> None:
@@ -542,7 +589,7 @@ def test_world_readable_existing_target_is_refused() -> None:
 
     assert isinstance(outcome, SystemExit)
     assert "is not a 0600 regular file owned by" in str(outcome)
-    assert not _token_chown_calls(runner)
+    assert not _fd_chown_calls(runner)
 
 
 def test_credential_state_requires_a_private_file_owned_by_the_owner() -> None:
@@ -589,19 +636,19 @@ def test_credential_state_requires_a_private_file_owned_by_the_owner() -> None:
         assert state(ABSENT_SOURCE_USER, absent_base) == team_launcher.AGY_CREDENTIAL_UNUSABLE
 
 
-def test_failed_private_directory_creation_aborts_before_copying() -> None:
+def test_failed_directory_ownership_aborts_before_copying() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-agy-seed.") as tmp:
         tmp_path = Path(tmp)
         _seed_source_token(tmp_path / "home")
         outcome, _runner, _output, home_base, _project_dir = _provision(
             tmp_path,
             agy_credential_source=SEED_SOURCE_USER,
-            failing_install_fragment="0700",
+            failing_chown_kind="dir",
         )
         seeded_exists = _seeded_token_path(home_base).exists()
 
     assert isinstance(outcome, SystemExit)
-    assert "failed to create" in str(outcome)
+    assert "failed to assign" in str(outcome)
     assert not seeded_exists
 
 
@@ -669,7 +716,7 @@ def test_recorded_host_source_is_used_without_a_per_project_flag() -> None:
 
     assert outcome == 0
     assert seeded_text == SEED_TOKEN_TEXT
-    assert _token_chown_calls(runner)
+    assert _fd_chown_calls(runner)
     assert grants["agy_credential_source"] == SEED_SOURCE_USER
     assert grants["agy_credential_source_origin"] == "host_default"
     assert f"seeded agy credential for {OWNER_USER} from {SEED_SOURCE_USER}" in output
@@ -709,7 +756,7 @@ def test_opt_out_ignores_the_host_source_and_seeds_nothing() -> None:
 
     assert outcome == 0
     assert not seeded_exists
-    assert not _token_chown_calls(runner)
+    assert not _fd_chown_calls(runner)
     assert grants["agy_credential_source"] == ""
     assert grants["agy_credential_source_origin"] == "opt_out"
     assert "seeded agy credential" not in output
@@ -731,7 +778,7 @@ def test_noninteractive_never_infers_an_account_when_nothing_is_recorded() -> No
 
     assert outcome == 0
     assert not seeded_exists, "a source was inferred without being configured"
-    assert not _token_chown_calls(runner)
+    assert not _fd_chown_calls(runner)
     assert grants["agy_credential_source"] == ""
     assert grants["agy_credential_source_origin"] == "unset"
     assert not recorded_anything

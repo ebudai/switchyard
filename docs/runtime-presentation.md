@@ -46,6 +46,10 @@ controller also requires every role session and target to use the exact
 another tenant's tmux session. The ordinary commands run against the configured
 project owner's tmux server.
 
+All presentation worker, display-slot, and viewer targets use tmux exact-name
+selection. A missing session therefore cannot prefix-match, attach to, relabel,
+respawn, or stop a longer session name owned by another role.
+
 `list` distinguishes missing or dead workers from disconnected display
 clients, reports whether a resume record exists, and lists configured roles
 that are hidden. `recover` is the only presentation operation that may make one

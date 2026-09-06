@@ -205,10 +205,10 @@ class FakeRunner:
         if args[:2] == ["sudo", "-u"] and len(args) >= 4:
             inner = args[4:] if len(args) >= 5 and args[3] == "-H" else args[3:]
             if inner[:2] == ["tmux", "has-session"]:
-                session = inner[-1]
+                session = inner[-1].removeprefix("=")
                 return subprocess.CompletedProcess(args, 0 if session in self.existing_sessions else 1)
             if inner[:3] == ["tmux", "display-message", "-p"]:
-                target = inner[inner.index("-t") + 1]
+                target = inner[inner.index("-t") + 1].removeprefix("=")
                 if inner[-1] == "#{pane_pid}":
                     pane_pid = int(self._value_for(self.pane_pids, target, 0) or 0)
                     return subprocess.CompletedProcess(args, 0 if pane_pid else 1, stdout=f"{pane_pid}\n" if pane_pid else "")
@@ -222,14 +222,14 @@ class FakeRunner:
                     self.current_commands[target] = command
                 return subprocess.CompletedProcess(args, 0)
             if inner[:2] == ["tmux", "kill-session"]:
-                session = inner[-1]
+                session = inner[-1].removeprefix("=")
                 self.existing_sessions.discard(session)
                 return subprocess.CompletedProcess(args, 0)
         if args[:2] == ["tmux", "has-session"]:
-            session = args[-1]
+            session = args[-1].removeprefix("=")
             return subprocess.CompletedProcess(args, 0 if session in self.existing_sessions else 1)
         if args[:3] == ["tmux", "display-message", "-p"]:
-            target = args[args.index("-t") + 1]
+            target = args[args.index("-t") + 1].removeprefix("=")
             if args[-1] == "#{pane_pid}":
                 pane_pid = int(self._value_for(self.pane_pids, target, 0) or 0)
                 return subprocess.CompletedProcess(args, 0 if pane_pid else 1, stdout=f"{pane_pid}\n" if pane_pid else "")
@@ -242,7 +242,7 @@ class FakeRunner:
             if target and command and target not in self.current_commands:
                 self.current_commands[target] = command
         if args[:2] == ["tmux", "kill-session"]:
-            session = args[-1]
+            session = args[-1].removeprefix("=")
             self.existing_sessions.discard(session)
         if len(args) >= 4 and args[:4] == ["git", "-C", args[2], "fetch"]:
             return subprocess.CompletedProcess(args, 0)

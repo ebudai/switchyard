@@ -30,6 +30,33 @@ def display_session_name(project: str, slot: int) -> str:
     return f"{project}-display-{slot}"
 
 
+def _exact_tmux_target(target: str) -> str:
+    """Disable tmux prefix matching for a named session, window, or pane."""
+    return target if target.startswith("=") else f"={target}"
+
+
+def _exact_tmux_runner(
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> Callable[..., subprocess.CompletedProcess[Any]]:
+    """Keep presentation recovery exact while it reuses legacy launch helpers."""
+    def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        exact_args = list(args)
+        if exact_args and exact_args[0] == "tmux":
+            for index, arg in enumerate(exact_args[:-1]):
+                if arg == "-t":
+                    target = exact_args[index + 1]
+                    if (
+                        exact_args[1] in {"set-option", "show-options"}
+                        and "-p" not in exact_args
+                        and ":" not in target
+                    ):
+                        target = f"{target}:"
+                    exact_args[index + 1] = _exact_tmux_target(target)
+        return runner(exact_args, **kwargs)
+
+    return run
+
+
 def presentation_state_path(config: team_launcher.ProjectConfig, *, config_path: Path) -> Path:
     return team_launcher.default_layout_output_path(config, config_path=config_path).parent / "presentation.json"
 
@@ -273,7 +300,7 @@ def _session_exists(
     runner: Callable[..., subprocess.CompletedProcess[Any]],
 ) -> bool:
     return runner(
-        ["tmux", "has-session", "-t", session],
+        ["tmux", "has-session", "-t", _exact_tmux_target(session)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     ).returncode == 0
@@ -292,7 +319,7 @@ def _role_status(
     pane_dead = False
     if live:
         proc = runner(
-            ["tmux", "display-message", "-p", "-t", role.target, "#{pane_dead}"],
+            ["tmux", "display-message", "-p", "-t", _exact_tmux_target(role.target), "#{pane_dead}"],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
@@ -312,7 +339,10 @@ def _proxy_command(config: team_launcher.ProjectConfig, role_name: str | None, r
         recovery = f"switchyard present {config.project} recover {role_name}"
         message = f"{config.project}: {role_name} disconnected; use `{recovery}`"
         attach = shlex.join(
-            ["env", "TMUX=", "tmux", "attach", "-f", "!no-detach-on-destroy", "-t", role.tmux_session]
+            [
+                "env", "TMUX=", "tmux", "attach", "-f", "!no-detach-on-destroy",
+                "-t", _exact_tmux_target(role.tmux_session),
+            ]
         )
         script = f"{attach}; printf '%s\\n' {shlex.quote(message)}; exec sleep 2147483647"
         return role.workdir, shlex.join(["sh", "-lc", script])
@@ -352,7 +382,8 @@ def _configure_recovery_hook(
         )
         respawn = shlex.join(
             [
-                "respawn-pane", "-k", "-t", f"{display_session_name(config.project, slot)}:0.0",
+                "respawn-pane", "-k", "-t",
+                _exact_tmux_target(f"{display_session_name(config.project, slot)}:0.0"),
                 "-c", role.workdir, _status_command(message),
             ]
         )
@@ -374,12 +405,19 @@ def _configure_display_session(
     status = _role_status(config, role_name, runner=runner) if role_name else {"state": "hidden", "live": False}
     role = _role_by_name(config, role_name or "")
     if role is not None and status.get("live"):
-        detach_proc = runner(["tmux", "set-option", "-t", role.tmux_session, "detach-on-destroy", "on"])
+        detach_proc = runner(
+            [
+                "tmux", "set-option", "-t", _exact_tmux_target(f"{role.tmux_session}:"),
+                "detach-on-destroy", "on",
+            ]
+        )
         if detach_proc.returncode != 0:
             raise RuntimeError(f"tmux could not configure recovery for {role_name} (exit {detach_proc.returncode})")
     workdir, command = _proxy_command(config, role_name, status)
     if _session_exists(session, runner=runner):
-        proc = runner(["tmux", "respawn-pane", "-k", "-t", f"{session}:0.0", "-c", workdir, command])
+        proc = runner(
+            ["tmux", "respawn-pane", "-k", "-t", _exact_tmux_target(f"{session}:0.0"), "-c", workdir, command]
+        )
     else:
         proc = runner(
             [
@@ -391,14 +429,29 @@ def _configure_display_session(
         raise RuntimeError(f"tmux could not update display slot {slot} (exit {proc.returncode})")
     label = role_name or "hidden"
     commands = (
-        ["tmux", "set-window-option", "-t", f"{session}:0", "remain-on-exit", "on"],
-        ["tmux", "set-option", "-t", session, "status", "on"],
-        ["tmux", "set-option", "-t", session, "status-left", f" slot {slot}: {label} "],
-        ["tmux", "set-option", "-t", session, "set-titles", "on"],
-        ["tmux", "set-option", "-t", session, "set-titles-string", f"{config.project} slot {slot}: {label}"],
-        ["tmux", "set-option", "-p", "-t", f"{session}:0.0", "@switchyard_project", config.project],
-        ["tmux", "set-option", "-p", "-t", f"{session}:0.0", "@switchyard_slot", str(slot)],
-        ["tmux", "set-option", "-p", "-t", f"{session}:0.0", "@switchyard_role", label],
+        ["tmux", "set-window-option", "-t", _exact_tmux_target(f"{session}:0"), "remain-on-exit", "on"],
+        ["tmux", "set-option", "-t", _exact_tmux_target(f"{session}:"), "status", "on"],
+        [
+            "tmux", "set-option", "-t", _exact_tmux_target(f"{session}:"),
+            "status-left", f" slot {slot}: {label} ",
+        ],
+        ["tmux", "set-option", "-t", _exact_tmux_target(f"{session}:"), "set-titles", "on"],
+        [
+            "tmux", "set-option", "-t", _exact_tmux_target(f"{session}:"),
+            "set-titles-string", f"{config.project} slot {slot}: {label}",
+        ],
+        [
+            "tmux", "set-option", "-p", "-t", _exact_tmux_target(f"{session}:0.0"),
+            "@switchyard_project", config.project,
+        ],
+        [
+            "tmux", "set-option", "-p", "-t", _exact_tmux_target(f"{session}:0.0"),
+            "@switchyard_slot", str(slot),
+        ],
+        [
+            "tmux", "set-option", "-p", "-t", _exact_tmux_target(f"{session}:0.0"),
+            "@switchyard_role", label,
+        ],
     )
     for args in commands:
         option_proc = runner(args)
@@ -420,7 +473,9 @@ def _apply_mapping(
         for slot in range(len(mapping)):
             label = mapping[str(slot)] or "hidden"
             for option, value in (("@switchyard_slot", str(slot)), ("@switchyard_role", label)):
-                proc = runner(["tmux", "set-option", "-p", "-t", f"{viewer}:0.{slot}", option, value])
+                proc = runner(
+                    ["tmux", "set-option", "-p", "-t", _exact_tmux_target(f"{viewer}:0.{slot}"), option, value]
+                )
                 if proc.returncode != 0:
                     raise RuntimeError(f"tmux could not label viewer slot {slot} (exit {proc.returncode})")
 
@@ -488,7 +543,10 @@ def _actual_proxy_role(
     if not _session_exists(session, runner=runner):
         return None, "disconnected"
     proc = runner(
-        ["tmux", "display-message", "-p", "-t", f"{session}:0.0", "#{@switchyard_role}"],
+        [
+            "tmux", "display-message", "-p", "-t", _exact_tmux_target(f"{session}:0.0"),
+            "#{@switchyard_role}",
+        ],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=True,
@@ -560,12 +618,12 @@ def _launch_viewer(
 ) -> None:
     viewer = team_launcher.viewer_session_for_project(config.project)
     if _session_exists(viewer, runner=runner):
-        proc = runner(["tmux", "kill-session", "-t", viewer])
+        proc = runner(["tmux", "kill-session", "-t", _exact_tmux_target(viewer)])
         if proc.returncode != 0:
             raise SystemExit(f"switchyard: could not replace viewer {viewer}")
     sessions = [display_session_name(config.project, slot) for slot in range(state["slot_count"])]
     first, *rest = sessions
-    attach = shlex.join(["env", "TMUX=", "tmux", "attach", "-t", first])
+    attach = shlex.join(["env", "TMUX=", "tmux", "attach", "-t", _exact_tmux_target(first)])
     proc = runner([
         "tmux", "new-session", "-d", "-x", str(team_launcher.DEFAULT_VIEWER_COLUMNS),
         "-y", str(team_launcher.DEFAULT_VIEWER_ROWS), "-s", viewer, attach,
@@ -573,14 +631,23 @@ def _launch_viewer(
     if proc.returncode != 0:
         raise SystemExit(f"switchyard: could not create viewer {viewer}")
     for session in rest:
-        proc = runner(["tmux", "split-window", "-t", f"{viewer}:0", shlex.join(["env", "TMUX=", "tmux", "attach", "-t", session])])
+        proc = runner([
+            "tmux", "split-window", "-t", _exact_tmux_target(f"{viewer}:0"),
+            shlex.join(["env", "TMUX=", "tmux", "attach", "-t", _exact_tmux_target(session)]),
+        ])
         if proc.returncode != 0:
             raise SystemExit(f"switchyard: could not populate viewer {viewer}")
     commands = (
-        ["tmux", "select-layout", "-t", f"{viewer}:0", "tiled"],
-        ["tmux", "set-option", "-t", viewer, "status", "on"],
-        ["tmux", "set-window-option", "-t", f"{viewer}:0", "pane-border-status", "top"],
-        ["tmux", "set-window-option", "-t", f"{viewer}:0", "pane-border-format", " slot #{@switchyard_slot}: #{@switchyard_role} "],
+        ["tmux", "select-layout", "-t", _exact_tmux_target(f"{viewer}:0"), "tiled"],
+        ["tmux", "set-option", "-t", _exact_tmux_target(f"{viewer}:"), "status", "on"],
+        [
+            "tmux", "set-window-option", "-t", _exact_tmux_target(f"{viewer}:0"),
+            "pane-border-status", "top",
+        ],
+        [
+            "tmux", "set-window-option", "-t", _exact_tmux_target(f"{viewer}:0"),
+            "pane-border-format", " slot #{@switchyard_slot}: #{@switchyard_role} ",
+        ],
     )
     for args in commands:
         proc = runner(args)
@@ -589,7 +656,9 @@ def _launch_viewer(
     for slot in range(state["slot_count"]):
         role = state["slots"][str(slot)] or "hidden"
         for option, value in (("@switchyard_slot", str(slot)), ("@switchyard_role", role)):
-            proc = runner(["tmux", "set-option", "-p", "-t", f"{viewer}:0.{slot}", option, value])
+            proc = runner(
+                ["tmux", "set-option", "-p", "-t", _exact_tmux_target(f"{viewer}:0.{slot}"), option, value]
+            )
             if proc.returncode != 0:
                 raise SystemExit(f"switchyard: could not label viewer slot {slot}")
 
@@ -607,7 +676,7 @@ def _launch_separate(
     leaves = team_launcher._layout_leaves(layout)
     for slot, leaf in enumerate(leaves):
         session = display_session_name(config.project, slot)
-        args = ["env", "TMUX=", "tmux", "attach", "-t", session]
+        args = ["env", "TMUX=", "tmux", "attach", "-t", _exact_tmux_target(session)]
         if config.run_as_user and team_launcher.current_user_name() != config.run_as_user:
             args = ["sudo", "-u", config.run_as_user, "-H", *args]
         leaf["Command"] = shlex.join(args)
@@ -677,7 +746,10 @@ def stop_presentation(
         if not _session_exists(session, runner=owner_runner):
             continue
         identity = owner_runner(
-            ["tmux", "display-message", "-p", "-t", f"{session}:0.0", "#{@switchyard_project}"],
+            [
+                "tmux", "display-message", "-p", "-t", _exact_tmux_target(f"{session}:0.0"),
+                "#{@switchyard_project}",
+            ],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
@@ -689,7 +761,7 @@ def stop_presentation(
         if hook_proc.returncode != 0:
             exit_code = exit_code or int(hook_proc.returncode)
         proc = owner_runner(
-            ["tmux", "kill-session", "-t", session],
+            ["tmux", "kill-session", "-t", _exact_tmux_target(session)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
@@ -778,7 +850,9 @@ def presentation_action(
             viewer = team_launcher.viewer_session_for_project(config.project)
             viewer_exists = _session_exists(viewer, runner=owner_runner)
             if viewer_exists:
-                proc = owner_runner(["tmux", "select-pane", "-t", f"{viewer}:0.{selected}"])
+                proc = owner_runner(
+                    ["tmux", "select-pane", "-t", _exact_tmux_target(f"{viewer}:0.{selected}")]
+                )
                 if proc.returncode != 0:
                     raise SystemExit(f"switchyard: viewer focus failed; prior focus preserved (exit {proc.returncode})")
             state["focused_slot"] = selected
@@ -791,7 +865,9 @@ def presentation_action(
                 _write_state(config, state_path, state, runner=runner)
             except Exception as exc:
                 if viewer_exists:
-                    owner_runner(["tmux", "select-pane", "-t", f"{viewer}:0.{prior}"])
+                    owner_runner(
+                        ["tmux", "select-pane", "-t", _exact_tmux_target(f"{viewer}:0.{prior}")]
+                    )
                 raise SystemExit(f"switchyard: focus state write failed; prior focus restored: {exc}") from exc
             return state
     if action == "bootstrap":
@@ -817,6 +893,7 @@ def presentation_action(
         if role is None:
             raise SystemExit(f"switchyard: unknown role {role_name!r}")
         prepared_owner_runner = _tmux_runner(prepared_config, runner)
+        recovery_runner = _exact_tmux_runner(prepared_owner_runner)
         result = team_launcher.ensure_visible_role_session_for_viewer(
             role,
             mode="attach-or-start",
@@ -825,7 +902,7 @@ def presentation_action(
                 prepared_config.run_as_user, project=prepared_config.project
             ),
             bin_user=prepared_config.run_as_user,
-            runner=prepared_owner_runner,
+            runner=recovery_runner,
         )
         if result != 0:
             raise SystemExit(f"switchyard: recovery failed for {role.role} (exit {result})")

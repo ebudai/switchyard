@@ -5589,6 +5589,13 @@ def launch_project(
         mode = "attach-or-start"
     if mode not in {"attach", "attach-or-start", "reload"}:
         raise SystemExit(f"unknown launch mode: {mode}")
+    if mode == "reload" and not dry_run:
+        # Reload re-projects the stored document, so an unmigrated tenant would reload
+        # into the same missing director onboarding forever. Run the one-time backfill
+        # first; it is idempotent and marked, so a migrated tenant pays nothing.
+        migrate_declarative_director_onboarding(
+            config, config_path=config_path, print_func=print_func
+        )
     worktree_runner = runner
     role_process_runner = runner
     owner_runner_anchor = config.repository or config.pane_launcher
@@ -7638,7 +7645,10 @@ def _switchyard_dir(project_dir: Path) -> Path:
     return project_dir / SWITCHYARD_PROJECT_DIR_NAME
 
 
-from scripts.ticket_board.workflow_config import DIRECTOR_ROLE  # noqa: E402
+from scripts.ticket_board.workflow_config import (  # noqa: E402
+    DIRECTOR_ONBOARDING_MIGRATION,
+    DIRECTOR_ROLE,
+)
 
 
 def director_onboarding_seed_text(project_dir: Path) -> str:
@@ -7673,6 +7683,12 @@ def seed_director_onboarding(document, project_dir: Path):
     """
     if not document:
         return document, False
+    migrations = document.setdefault("migrations", {})
+    if migrations.get(DIRECTOR_ONBOARDING_MIGRATION):
+        # Already considered once. A director with nothing stored now means the operator
+        # cleared it, not that this tenant predates the feature, so refilling here would
+        # make `role-prompt clear director` impossible to persist.
+        return document, False
     seeded = False
     for role in document.get("roles", []):
         if role.get("name") != DIRECTOR_ROLE:
@@ -7680,6 +7696,9 @@ def seed_director_onboarding(document, project_dir: Path):
         if not role.get("onboarding_prompt") and not role.get("onboarding"):
             role["onboarding_prompt"] = director_onboarding_seed_text(project_dir)
             seeded = True
+    # Marked whether or not anything was filled: a director that already had its own
+    # onboarding is equally "considered", and must not be revisited later either.
+    migrations[DIRECTOR_ONBOARDING_MIGRATION] = True
     return document, seeded
 
 
@@ -10912,9 +10931,16 @@ def migrate_declarative_director_onboarding(
                 str(config_path),
             ]
         )
-    except Exception as exc:  # a migration failure must not fail the whole upgrade
-        print_func(f"warning: switchyard: director onboarding migration skipped: {exc}")
-        return False
+    except Exception as exc:
+        # Deliberately fatal. The hook no longer carries a legacy director source, so
+        # deploying it over an unmigrated document would leave that director with no
+        # onboarding at all. Failing here stops before the release is deployed, which is
+        # recoverable; succeeding and deploying anyway is not.
+        raise SystemExit(
+            f"switchyard: director onboarding migration failed for {config_path}: {exc}. "
+            "Resolve it before deploying, or clear the director's onboarding deliberately "
+            "with `switchyard role-prompt clear director`."
+        ) from exc
     return True
 
 
@@ -10979,6 +11005,12 @@ def upgrade_project_command(
         runner=runner,
         print_func=print_func,
     )
+    # Before the release is reported/deployed, not after: the deployed hook has no
+    # legacy director source, so the document must already carry the director's
+    # onboarding by the time anyone acts on that report.
+    migrate_declarative_director_onboarding(
+        config, config_path=config_path, dry_run=dry_run, print_func=print_func
+    )
     report_tenant_release_upgrade(
         release_report_config,
         config_path=config_path,
@@ -10987,11 +11019,6 @@ def upgrade_project_command(
         deploy_ref=deploy_ref,
         runner=runner,
         print_func=print_func,
-    )
-    # Migrates an existing declarative tenant whose director predates stored onboarding.
-    # Idempotent and silent once done, so ordinary upgrades carry it without a manual step.
-    migrate_declarative_director_onboarding(
-        config, config_path=config_path, dry_run=dry_run, print_func=print_func
     )
     return 0
 

@@ -322,6 +322,25 @@ def main() -> int:
                 # fallback, not a wipe.
                 assert ops["onboarding"] == "/srv/cerulean/docs/onboarding/ops.md"
                 assert "onboarding_prompt" not in _ops_role(json.loads(workflow_json.read_text()))
+
+                # --- clearing the director must persist -----------------------
+                # The migration runs on every write, so without durable state it would
+                # treat a deliberately cleared director as unmigrated and refill it on
+                # the very next operation. Reproduced exactly: clear, then perform an
+                # unrelated write, then look again.
+                with _contextlib.redirect_stdout(io.StringIO()):
+                    wm.main(["clear-role-prompt", "--role", "director", *base_args])
+                assert not _director().get("onboarding_prompt"), _director()
+
+                _run(wm, ["set-role-prompt", "--role", "ops", "--prompt", "unrelated", *base_args])
+                assert not _director().get("onboarding_prompt"), (
+                    "a cleared director prompt was restored by the shared write tail"
+                )
+
+                # And it stays cleared across the explicit migration too.
+                repeat_after_clear = _run(wm, ["migrate-director-onboarding", *base_args])
+                assert repeat_after_clear["migrated"] is False, repeat_after_clear
+                assert not _director().get("onboarding_prompt"), _director()
             finally:
                 server.shutdown()
                 server.server_close()

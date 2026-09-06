@@ -335,6 +335,159 @@ def test_other_roles_get_no_seeded_prompt_from_the_launcher() -> None:
     assert "TICKET_BOARD_ROLE_ONBOARDING_PROMPT" not in env
 
 
+# --- lifecycle wiring --------------------------------------------------------
+
+
+class _Sentinel(Exception):
+    """Raised from a stubbed migration to prove the call site was reached."""
+
+
+def _declarative_config(tmp: str) -> tuple[Any, Path]:
+    launcher_dir = Path(tmp) / "launcher"
+    launcher_dir.mkdir()
+    config_path = launcher_dir / "porter.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "project": "porter",
+                "layout": "layout.json",
+                "roles": [
+                    {
+                        "role": "ops",
+                        "cli": ["claude"],
+                        "target": "porter-ops:0.0",
+                        "tmux_session": "porter-ops",
+                        "detached": True,
+                    }
+                ],
+                "workflow": {
+                    "schema": "switchyard.workflow.v1",
+                    "roles": [],
+                    "stages": [],
+                    "transitions": [],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return team_launcher.load_project_config("porter", config_path), config_path
+
+
+def test_reload_runs_the_migration_and_attach_does_not() -> None:
+    """Reload re-projects the stored document, so an unmigrated tenant needs the backfill.
+
+    Proved by making the migration raise: reaching it aborts the launch, which is a
+    stronger signal than asserting on state the rest of launch_project would touch.
+    """
+    import tempfile
+
+    original = team_launcher.migrate_declarative_director_onboarding
+
+    def _boom(*_args, **_kwargs):
+        raise _Sentinel()
+
+    team_launcher.migrate_declarative_director_onboarding = _boom
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            config, config_path = _declarative_config(tmp)
+            reached = False
+            try:
+                team_launcher.launch_project(
+                    config,
+                    config_path=config_path,
+                    mode="reload",
+                    script_path=Path("/nonexistent/team-launcher"),
+                    runner=lambda *a, **k: None,
+                )
+            except _Sentinel:
+                reached = True
+            except Exception:
+                reached = False
+            assert reached, "reload must run the director onboarding migration"
+
+            # An attach is not a re-projection, so it must not migrate.
+            attached_without_migration = False
+            try:
+                team_launcher.launch_project(
+                    config,
+                    config_path=config_path,
+                    mode="attach",
+                    script_path=Path("/nonexistent/team-launcher"),
+                    runner=lambda *a, **k: None,
+                )
+                attached_without_migration = True
+            except _Sentinel:
+                attached_without_migration = False
+            except Exception:
+                attached_without_migration = True
+            assert attached_without_migration, "attach must not run the migration"
+    finally:
+        team_launcher.migrate_declarative_director_onboarding = original
+
+
+def test_a_failed_migration_stops_the_upgrade_rather_than_warning() -> None:
+    """Fail-safe, not fail-open.
+
+    The deployed hook carries no legacy director source, so an upgrade that proceeds
+    over an unmigrated document would strip that director's onboarding. Failing before
+    the release is reported is recoverable; succeeding is not.
+    """
+    import tempfile
+
+    from scripts import workflow_manage as wm
+
+    original = wm.main
+    wm.main = lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("board rejected the document"))
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            config, config_path = _declarative_config(tmp)
+            try:
+                team_launcher.migrate_declarative_director_onboarding(
+                    config, config_path=config_path, print_func=lambda _m: None
+                )
+                raise AssertionError("expected a failed migration to stop the upgrade")
+            except SystemExit as exc:
+                message = str(exc)
+    finally:
+        wm.main = original
+
+    assert "director onboarding migration failed" in message
+    assert "board rejected the document" in message
+    assert "role-prompt clear director" in message, "the message should name the deliberate way out"
+
+
+def test_the_write_path_hands_the_projection_to_the_tenant_when_privileged() -> None:
+    """upgrade re-executes as root, so the projection must not be left root-owned."""
+    import os
+    import tempfile
+
+    from scripts import workflow_launcher, workflow_manage as wm
+
+    handed: list[Path] = []
+    original_euid = os.geteuid
+    original_assign = workflow_launcher.assign_projection_owner
+    original_load = team_launcher.load_project_config
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            _config, config_path = _declarative_config(tmp)
+
+            # Unprivileged: nothing to hand over, the files are already the tenant's.
+            wm._hand_projection_to_tenant(config_path)
+            assert handed == []
+
+            os.geteuid = lambda: 0
+            workflow_launcher.assign_projection_owner = (
+                lambda config, path, *, runner: handed.append(Path(path))
+            )
+            team_launcher.load_project_config = lambda project, path: _OwnerConfig()
+            wm._hand_projection_to_tenant(config_path)
+            assert handed == [config_path], handed
+    finally:
+        os.geteuid = original_euid
+        workflow_launcher.assign_projection_owner = original_assign
+        team_launcher.load_project_config = original_load
+
+
 # --- add-role leaves the document alone --------------------------------------
 
 

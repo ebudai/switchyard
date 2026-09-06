@@ -3,6 +3,7 @@ import argparse
 import copy
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 import tempfile
@@ -98,6 +99,27 @@ def _project_dir_for(config_path: Path, document: dict) -> Path | None:
     except (OSError, json.JSONDecodeError, KeyError, TypeError):
         return None
     return Path(repository)
+
+
+def _hand_projection_to_tenant(config_path: Path) -> None:
+    """Give the projection back to the tenant when this write ran privileged.
+
+    `switchyard upgrade` re-executes as root, so a migration applied from there would
+    otherwise leave root-owned controls the tenant cannot rewrite. Provisioning already
+    has the handover; this reuses it rather than inventing a second one. It is a no-op
+    for an ordinary unprivileged write, where the files are already the tenant's.
+    """
+    if os.geteuid() != 0:
+        return
+    from scripts import team_launcher as launcher
+    from scripts.workflow_launcher import assign_projection_owner
+
+    raw = json.loads(config_path.read_text())
+    project = raw.get("project")
+    if not project:
+        return
+    config = launcher.load_project_config(project, config_path)
+    assign_projection_owner(config, config_path, runner=subprocess.run)
 
 
 def _migrate_director_onboarding(config_path: Path, cfg: dict) -> dict:
@@ -343,6 +365,7 @@ def main(argv=None):
     result = client.configure_workflow(cfg, expected_revision=expected)
     try:
         apply_files(files)
+        _hand_projection_to_tenant(args.config)
     except Exception as exc:
         raise RuntimeError(
             f'board revision {result["revision"]} applied; local projection pending. Preserve {journal} and rerun apply with the same document: {exc}'

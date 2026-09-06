@@ -17,6 +17,10 @@ RUNTIMES = {"claude", "codex", "agy", "hermes"}
 # document without it is rejected below. Anything needing to find the director role
 # derives it from here rather than repeating the literal.
 DIRECTOR_ROLE = "director"
+# Marker for the one-time director onboarding backfill. Once set, a director with
+# no stored prompt means the operator cleared it, not that the tenant predates the
+# feature -- which is what keeps `role-prompt clear director` durable.
+DIRECTOR_ONBOARDING_MIGRATION = "director_onboarding"
 # A role remit, not a document. Bounded so a stored prompt cannot grow the tenant
 # configuration without limit, and so it stays small enough to prepend to a session.
 ONBOARDING_PROMPT_MAX_CHARS = 16384
@@ -91,6 +95,7 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
             "queue",
             "project",
             "remove_stages",
+            "migrations",
         },
         "unknown workflow configuration field",
     )
@@ -111,6 +116,19 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
         need(
             isinstance(cfg.get(key), list) and bool(cfg[key]),
             f"{key} must be a nonempty list",
+        )
+    migrations = cfg.get("migrations")
+    if migrations is not None:
+        # Durable one-time markers. They record that a backfill has already been
+        # considered for this document, so a value an operator deliberately removed is
+        # not treated as missing and refilled on the next write.
+        need(
+            isinstance(migrations, dict)
+            and all(
+                isinstance(k, str) and bool(NAME.fullmatch(k)) and isinstance(v, bool)
+                for k, v in migrations.items()
+            ),
+            "migrations must map migration names to booleans",
         )
     flags = cfg.setdefault("flags", {})
     need(isinstance(flags, dict), "flags must be an object")

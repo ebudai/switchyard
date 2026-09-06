@@ -9797,7 +9797,69 @@ def _require_owner_traversable(dir_fd: int, owner_user: str, component: str, tar
 # HERMES_HOME the launcher already gives it, so nothing has to be injected into
 # the environment and no shell file is ever sourced (SYRD-39).
 HERMES_OWNER_CREDENTIAL_DIR = ".hermes"
-HERMES_CREDENTIAL_FILES = (".env", "auth.json")
+# Hermes keeps model-provider keys in the SAME .env as SUDO_PASSWORD, messaging
+# bot tokens, GitHub tokens, tool credentials and terminal SSH keys -- its own
+# terminal tool consumes SUDO_PASSWORD. Copying that file into every role would
+# hand each one the owner's login password and external identities, which is the
+# opposite of what per-role accounts are for. Only these keys cross, and a new
+# file is constructed rather than the source copied (SYRD-39).
+HERMES_PROVIDER_ENV_KEYS = frozenset(
+    {
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_TOKEN",
+        "ARCEEAI_API_KEY",
+        "ARCEE_BASE_URL",
+        "AZURE_FOUNDRY_API_KEY",
+        "AZURE_FOUNDRY_BASE_URL",
+        "DASHSCOPE_API_KEY",
+        "DASHSCOPE_BASE_URL",
+        "DEEPSEEK_API_KEY",
+        "DEEPSEEK_BASE_URL",
+        "GEMINI_API_KEY",
+        "GEMINI_BASE_URL",
+        "GLM_API_KEY",
+        "GLM_BASE_URL",
+        "GMI_API_KEY",
+        "GMI_BASE_URL",
+        "GOOGLE_API_KEY",
+        "HERMES_GEMINI_CLIENT_ID",
+        "HERMES_GEMINI_CLIENT_SECRET",
+        "HERMES_GEMINI_PROJECT_ID",
+        "HERMES_QWEN_BASE_URL",
+        "HF_BASE_URL",
+        "HF_TOKEN",
+        "KIMI_API_KEY",
+        "KIMI_BASE_URL",
+        "KIMI_CN_API_KEY",
+        "LM_API_KEY",
+        "LM_BASE_URL",
+        "MINIMAX_API_KEY",
+        "MINIMAX_BASE_URL",
+        "MINIMAX_CN_API_KEY",
+        "MINIMAX_CN_BASE_URL",
+        "MISTRAL_API_KEY",
+        "NOUS_BASE_URL",
+        "NVIDIA_API_KEY",
+        "NVIDIA_BASE_URL",
+        "OLLAMA_API_KEY",
+        "OLLAMA_BASE_URL",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "OPENCODE_GO_API_KEY",
+        "OPENCODE_GO_BASE_URL",
+        "OPENCODE_ZEN_API_KEY",
+        "OPENCODE_ZEN_BASE_URL",
+        "OPENROUTER_API_KEY",
+        "STEPFUN_API_KEY",
+        "STEPFUN_BASE_URL",
+        "XAI_API_KEY",
+        "XAI_BASE_URL",
+        "XIAOMI_API_KEY",
+        "XIAOMI_BASE_URL",
+        "ZAI_API_KEY",
+        "Z_AI_API_KEY",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -9831,10 +9893,10 @@ ROLE_CREDENTIAL_ARTIFACTS: dict[str, tuple[RoleCredentialArtifact, ...]] = {
     # like any other credential and sourced by the role's own shell at start.
     # Targets are inside the role's own HERMES_HOME rather than its home root,
     # so they are resolved per role rather than listed here.
-    "hermes": (
-        RoleCredentialArtifact("hermes", f"{HERMES_OWNER_CREDENTIAL_DIR}/.env", required=False),
-        RoleCredentialArtifact("hermes", f"{HERMES_OWNER_CREDENTIAL_DIR}/auth.json", required=False),
-    ),
+    # Only the filtered .env. auth.json is deliberately NOT seeded: its schema
+    # is not something this code can verify is provider-only, and an artifact
+    # whose contents cannot be constrained must not cross the boundary.
+    "hermes": (RoleCredentialArtifact("hermes", f"{HERMES_OWNER_CREDENTIAL_DIR}/.env"),),
 }
 
 
@@ -9849,22 +9911,39 @@ def hermes_credential_target(config: ProjectConfig, role: RoleConfig, artifact: 
     return base / relative
 
 
-def validate_hermes_env_contents(text: str) -> str:
-    """Empty when the file is a plain KEY=value environment file.
+def select_hermes_provider_env(text: str) -> tuple[str, list[str], str]:
+    """Build a role .env holding only inference-provider authentication.
 
-    Validated rather than trusted: this content ends up as provider credentials,
-    and accepting arbitrary shell would make seeding a way to run code.
+    Returns (content, omitted_keys, problem). The source is parsed, not copied:
+    plain KEY=value grammar stops shell execution but says nothing about WHICH
+    secrets cross, and hermes stores SUDO_PASSWORD, messaging tokens, GitHub and
+    tool credentials in the same file. Everything outside the provider allowlist
+    is dropped, and the caller reports what was left behind so the omission is
+    visible rather than silent (SYRD-39).
     """
+    kept: list[str] = []
+    omitted: list[str] = []
     for number, raw in enumerate(text.splitlines(), start=1):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        name, separator, _value = line.partition("=")
+        name, separator, value = line.partition("=")
+        name = name.strip()
         if not separator:
-            return f"line {number} is not KEY=value"
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name.strip()):
-            return f"line {number} does not name a valid environment variable"
-    return ""
+            return "", [], f"line {number} is not KEY=value"
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            return "", [], f"line {number} does not name a valid environment variable"
+        if name in HERMES_PROVIDER_ENV_KEYS:
+            kept.append(f"{name}={value.strip()}")
+        else:
+            omitted.append(name)
+    if not kept:
+        return "", omitted, "it holds no inference-provider credentials"
+    header = (
+        "# Generated by switchyard: inference-provider authentication only.\n"
+        "# Other entries in the owner's .env are deliberately not shared with roles.\n"
+    )
+    return header + "\n".join(kept) + "\n", omitted, ""
 
 
 def role_credential_artifacts(role: RoleConfig) -> tuple[RoleCredentialArtifact, ...]:
@@ -10188,16 +10267,25 @@ def seed_role_credential(
             f"switchyard: {owner_user}'s {artifact.relative_path} {source_problem}; refusing to "
             "seed it"
         )
+    constructed: bytes | None = None
     if artifact.cli == "hermes" and target_relative.name == ".env":
-        problem = validate_hermes_env_contents(
+        content, omitted, problem = select_hermes_provider_env(
             source_path.read_text(encoding="utf-8", errors="replace")
         )
         if problem:
-            # Validated, not sourced: this content becomes provider credentials,
-            # and accepting arbitrary shell would make seeding a way to run code.
             raise SystemExit(
-                f"switchyard: {owner_user}'s {artifact.relative_path} is not a plain "
-                f"KEY=value environment file ({problem}); refusing to seed it"
+                f"switchyard: {owner_user}'s {artifact.relative_path} cannot be seeded "
+                f"({problem})"
+            )
+        constructed = content.encode("utf-8")
+        if omitted:
+            # Named, so the omission is visible rather than silent: these are the
+            # owner's other secrets and settings, which roles must not receive.
+            print_func(
+                f"switchyard: not sharing {len(omitted)} non-provider entr"
+                + ("y" if len(omitted) == 1 else "ies")
+                + f" from {owner_user}'s {artifact.relative_path} with {account}: "
+                + ", ".join(sorted(omitted))
             )
     dir_fd = _open_role_credential_parent(
         account, target_base, target_relative, runner=runner
@@ -10222,7 +10310,11 @@ def seed_role_credential(
         created_target = not reseed
         try:
             os.fchmod(target_fd, 0o600)
-            _copy_fd_contents(source_fd, target_fd)
+            if constructed is None:
+                _copy_fd_contents(source_fd, target_fd)
+            else:
+                # A newly built file, never the source bytes.
+                os.write(target_fd, constructed)
             # Ownership is assigned to the open description rather than the
             # path, so nothing can be substituted between copy and chown.
             own = runner(["chown", f"{account}:{account}", f"/proc/{os.getpid()}/fd/{target_fd}"])

@@ -502,7 +502,22 @@ start authenticated, from the already-authenticated owner:
 | `claude` | `.claude/.credentials.json` |
 | `codex` | `.codex/auth.json` |
 | `agy` | `.gemini/antigravity-cli/antigravity-oauth-token` |
-| `hermes` | `.hermes/.env` and/or `.hermes/auth.json` -- whichever the owner has. They are seeded into the role's own `HERMES_HOME`, which the launcher already points it at, so hermes reads them itself: nothing is injected into the environment and no shell file is sourced. A `.env` is validated as plain `KEY=value` before it is copied |
+| `hermes` | a **newly constructed** `.env` in the role's own `HERMES_HOME`, holding only inference-provider keys selected from the owner's `.hermes/.env`. The source is never copied |
+
+**Hermes needs more than a copy.** It keeps model-provider keys in the *same*
+`.env` as `SUDO_PASSWORD` -- which its own terminal tool consumes -- along with
+messaging bot tokens, GitHub and tool credentials, terminal SSH key paths and
+general settings. Handing that file to every role would give each one the
+owner's login password and external identities, which is the opposite of what
+per-role accounts are for. So the file is **parsed against an explicit
+inference-provider allowlist and a new file is written** containing only those
+keys; everything else is dropped and named in the output so the omission is
+visible. Plain `KEY=value` grammar prevents shell execution but constrains
+nothing about *which* secrets cross, so grammar alone is not the check.
+`.hermes/auth.json` is deliberately **not** seeded: its schema is not something
+this code can verify is provider-only, and an artifact whose contents cannot be
+constrained must not cross the boundary. A `.env` with no provider credentials
+at all fails closed rather than producing an empty credential.
 
 **What is never copied:** an entire CLI home, conversations, histories, caches,
 hooks, or general settings. Credentials are never symlinked and never placed in

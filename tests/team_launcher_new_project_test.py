@@ -1009,6 +1009,74 @@ def test_add_role_prepares_the_new_role_before_it_can_be_started() -> None:
 
 
 
+
+# The owner's real hermes .env mixes inference-provider keys with the owner's
+# login password, messaging identities, GitHub and tool credentials, and general
+# settings -- hermes' own terminal tool consumes SUDO_PASSWORD. None of that may
+# reach a role (SYRD-39).
+HERMES_ENV_BAIT_KEYS = (
+    "SUDO_PASSWORD",
+    "DISCORD_BOT_TOKEN",
+    "TELEGRAM_BOT_TOKEN",
+    "SLACK_BOT_TOKEN",
+    "GITHUB_TOKEN",
+    "MATRIX_PASSWORD",
+    "TERMINAL_SSH_KEY",
+    "NOTION_API_KEY",
+    "BRAVE_SEARCH_API_KEY",
+    "BROWSER_CDP_URL",
+    "LLM_MODEL",
+)
+HERMES_ENV_WITH_BAIT = "\n".join(
+    [
+        "# owner environment",
+        "OPENROUTER_API_KEY=or-secret",
+        "OPENAI_BASE_URL=https://api.openai.com",
+        "SUDO_PASSWORD=hunter2",
+        "DISCORD_BOT_TOKEN=discord-secret",
+        "TELEGRAM_BOT_TOKEN=telegram-secret",
+        "SLACK_BOT_TOKEN=slack-secret",
+        "GITHUB_TOKEN=github-secret",
+        "MATRIX_PASSWORD=matrix-secret",
+        "TERMINAL_SSH_KEY=/home/owner/.ssh/id_ed25519",
+        "NOTION_API_KEY=notion-secret",
+        "BRAVE_SEARCH_API_KEY=brave-secret",
+        "BROWSER_CDP_URL=http://127.0.0.1:9222",
+        "LLM_MODEL=some-model",
+    ]
+) + "\n"
+
+
+def test_hermes_seeding_shares_only_inference_provider_credentials() -> None:
+    """SYRD-39: KEY=value grammar stops shell, not over-sharing.
+
+    Hermes keeps provider keys in the same file as the owner's sudo password and
+    external identities, so the file is parsed against a provider allowlist and a
+    NEW file is constructed; the source is never copied.
+    """
+    content, omitted, problem = team_launcher.select_hermes_provider_env(HERMES_ENV_WITH_BAIT)
+    assert problem == "", problem
+    assert "OPENROUTER_API_KEY=or-secret" in content
+    assert "OPENAI_BASE_URL=https://api.openai.com" in content
+    for bait in HERMES_ENV_BAIT_KEYS:
+        assert bait not in content, bait
+        assert bait in omitted, bait
+    # No value from an omitted entry survives either.
+    for secret in ("hunter2", "discord-secret", "github-secret", "matrix-secret", "notion-secret"):
+        assert secret not in content, secret
+
+    # A file with no provider credentials at all fails closed rather than
+    # producing an empty, useless credential.
+    _content, _omitted, only_bait = team_launcher.select_hermes_provider_env(
+        "SUDO_PASSWORD=hunter2\nGITHUB_TOKEN=gh\n"
+    )
+    assert "no inference-provider credentials" in only_bait, only_bait
+
+    # Grammar is still enforced, so nothing shell-shaped is accepted.
+    _content, _omitted, malformed = team_launcher.select_hermes_provider_env("rm -rf /\n")
+    assert "not KEY=value" in malformed, malformed
+
+
 def _isolated_project_config(tmp_path: Path, clis: dict[str, str]) -> "team_launcher.ProjectConfig":
     """A migrated project: every role has its own account and its own worktree."""
     roles = []
@@ -1072,7 +1140,7 @@ def test_role_credentials_are_private_copies_of_an_allowlist_only() -> None:
             # Hermes reads a plain KEY=value environment file; the others are
             # opaque token blobs.
             body = (
-                "OPENROUTER_API_KEY=secret\n"
+                HERMES_ENV_WITH_BAIT
                 if relative.endswith(".hermes/.env")
                 else f"secret for {relative}"
             )
@@ -1131,12 +1199,16 @@ def test_role_credentials_are_private_copies_of_an_allowlist_only() -> None:
                 assert not seeded.is_symlink(), role_name
                 assert stat.S_IMODE(seeded.stat().st_mode) == 0o600, (role_name, oct(seeded.stat().st_mode))
                 assert stat.S_IMODE(seeded.parent.stat().st_mode) == 0o700, (role_name, oct(seeded.parent.stat().st_mode))
-                expected_body = (
-                    "OPENROUTER_API_KEY=secret\n"
-                    if relative.endswith(".hermes/.env")
-                    else f"secret for {relative}"
-                )
-                assert seeded.read_text(encoding="utf-8") == expected_body, role_name
+                if relative.endswith(".hermes/.env"):
+                    # A newly constructed file: the provider key crosses and
+                    # nothing else does.
+                    seeded_env = seeded.read_text(encoding="utf-8")
+                    assert "OPENROUTER_API_KEY=or-secret" in seeded_env, seeded_env
+                    for bait in HERMES_ENV_BAIT_KEYS:
+                        assert bait not in seeded_env, (bait, seeded_env)
+                    assert "hunter2" not in seeded_env, seeded_env
+                else:
+                    assert seeded.read_text(encoding="utf-8") == f"secret for {relative}", role_name
 
             # Nothing outside the allowlist crossed over.
             for role_name in expected:
